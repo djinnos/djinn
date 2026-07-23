@@ -8,6 +8,7 @@
 //!
 //! `std::process::Command` avoids this by not touching the reactor at all.
 
+use std::future::Future;
 use std::io;
 use std::process::{Command, Output};
 use std::sync::Arc;
@@ -155,21 +156,14 @@ impl LeaseInvocationRunner {
         let stderr = spawn_stderr_drain(child.stderr.take());
         let mut deadline = self.clock.now_instant() + config.timeout;
         let (mut queued, mut fence, mut credit_used, mut lease_error) = (false, None, false, None);
-        let (observed, termination) = loop {
-            if cancel.is_cancelled() {
-                break (
-                    child.try_wait().map_err(started_lease_error)?,
-                    ProcessTermination::Cancelled,
-                );
-            }
-            if self.clock.now_instant() >= deadline {
-                break (
-                    child.try_wait().map_err(started_lease_error)?,
-                    ProcessTermination::TimedOut,
-                );
-            }
-            if let Some(status) = child.try_wait().map_err(started_lease_error)? {
-                break (Some(status), ProcessTermination::Exited);
+        // This variable is assigned only by `terminal_now` or by a service
+        // wait that observed terminal intent. Consequently no later response
+        // can authorize a cgroup lift.
+        let (observed, termination) = 'invocation: loop {
+            if let Some(terminal) =
+                terminal_now(&mut child, &cancel, self.clock.as_ref(), deadline)?
+            {
+                break terminal;
             }
             let cpu = self
                 .launcher
@@ -177,75 +171,94 @@ impl LeaseInvocationRunner {
                 .map_err(LeaseInvocationError::Launcher)?;
             let result = if !queued && cpu.usage_usec >= config.cpu_usage_threshold_usec {
                 queued = true;
-                self.services
-                    .queue_lease(LeaseQueueRequest {
+                match await_lease_or_terminal(
+                    self.services.queue_lease(LeaseQueueRequest {
                         identity: lease.clone(),
                         deadlines: LeaseDeadlines {
                             queue_deadline_ms: config.queue_deadline_ms,
                             launch_deadline_ms: config.launch_deadline_ms,
                         },
-                    })
-                    .await
+                    }),
+                    &mut child,
+                    &cancel,
+                    self.clock.as_ref(),
+                    deadline,
+                )
+                .await?
+                {
+                    LeaseWait::Response(value) => value,
+                    LeaseWait::Terminal(terminal) => break 'invocation terminal,
+                }
             } else if queued {
-                self.services
-                    .lease_status(LeaseStatusRequest {
+                match await_lease_or_terminal(
+                    self.services.lease_status(LeaseStatusRequest {
                         identity: lease.clone(),
-                    })
-                    .await
+                    }),
+                    &mut child,
+                    &cancel,
+                    self.clock.as_ref(),
+                    deadline,
+                )
+                .await?
+                {
+                    LeaseWait::Response(value) => value,
+                    LeaseWait::Terminal(terminal) => break 'invocation terminal,
+                }
             } else {
-                tokio::time::sleep(Duration::from_millis(25)).await;
+                // Do not use Tokio wall-clock timers here: tests advance the
+                // injected Clock while a fake launcher/service is paused.
+                tokio::task::yield_now().await;
                 continue;
             };
-            match result {
-                LeaseResult::Granted(grant) => match self
-                    .services
-                    .grant_lease(LeaseGrantRequest {
+            let grant = match result {
+                LeaseResult::Granted(grant) => Some(grant.fencing_token),
+                LeaseResult::Status(status) if status.state == LeaseState::Granted => {
+                    status.fencing_token
+                }
+                other => {
+                    lease_failure(other, &mut deadline, &mut credit_used, &mut lease_error);
+                    None
+                }
+            };
+            if let Some(token) = grant {
+                let durable = match await_lease_or_terminal(
+                    self.services.grant_lease(LeaseGrantRequest {
                         identity: lease.clone(),
-                        fencing_token: grant.fencing_token.clone(),
-                    })
-                    .await
+                        fencing_token: token.clone(),
+                    }),
+                    &mut child,
+                    &cancel,
+                    self.clock.as_ref(),
+                    deadline,
+                )
+                .await?
                 {
-                    LeaseResult::Status(s)
+                    LeaseWait::Response(value) => value,
+                    LeaseWait::Terminal(terminal) => break 'invocation terminal,
+                };
+                // A grant response is an acknowledgement, not authorization:
+                // only a matching still-live durable state permits lift.
+                match durable {
+                    LeaseResult::Status(status)
                         if matches!(
-                            s.state,
+                            status.state,
                             LeaseState::Launching | LeaseState::Bound | LeaseState::Active
-                        ) =>
+                        ) && status.fencing_token.as_ref() == Some(&token) =>
                     {
+                        if let Some(terminal) =
+                            terminal_now(&mut child, &cancel, self.clock.as_ref(), deadline)?
+                        {
+                            break 'invocation terminal;
+                        }
                         self.launcher
-                            .fenced_lift(&identity, &grant.fencing_token)
+                            .fenced_lift(&identity, &token)
                             .map_err(LeaseInvocationError::Launcher)?;
-                        fence = Some(grant.fencing_token);
+                        fence = Some(token);
                     }
                     other => {
                         lease_failure(other, &mut deadline, &mut credit_used, &mut lease_error)
                     }
-                },
-                LeaseResult::Status(s) if s.state == LeaseState::Granted => {
-                    if let Some(token) = s.fencing_token {
-                        match self
-                            .services
-                            .grant_lease(LeaseGrantRequest {
-                                identity: lease.clone(),
-                                fencing_token: token.clone(),
-                            })
-                            .await
-                        {
-                            LeaseResult::Status(_) => {
-                                self.launcher
-                                    .fenced_lift(&identity, &token)
-                                    .map_err(LeaseInvocationError::Launcher)?;
-                                fence = Some(token);
-                            }
-                            other => lease_failure(
-                                other,
-                                &mut deadline,
-                                &mut credit_used,
-                                &mut lease_error,
-                            ),
-                        }
-                    }
                 }
-                other => lease_failure(other, &mut deadline, &mut credit_used, &mut lease_error),
             }
             if lease_error.is_some() {
                 break (
@@ -253,7 +266,7 @@ impl LeaseInvocationRunner {
                     ProcessTermination::Cancelled,
                 );
             }
-            tokio::time::sleep(Duration::from_millis(25)).await;
+            tokio::task::yield_now().await;
         };
         self.launcher
             .kill(&identity)
@@ -271,44 +284,7 @@ impl LeaseInvocationRunner {
             termination,
         };
         if queued {
-            let durable = self
-                .services
-                .lease_status(LeaseStatusRequest {
-                    identity: lease.clone(),
-                })
-                .await;
-            let token = fence.or(match durable {
-                LeaseResult::Status(s)
-                    if matches!(
-                        s.state,
-                        LeaseState::Granted
-                            | LeaseState::Launching
-                            | LeaseState::Bound
-                            | LeaseState::Active
-                    ) =>
-                {
-                    s.fencing_token
-                }
-                _ => None,
-            });
-            if let Some(token) = token {
-                let _ = self
-                    .services
-                    .release_lease(LeaseReleaseRequest {
-                        identity: lease,
-                        fencing_token: token,
-                        candidate_cleanup: false,
-                    })
-                    .await;
-            } else {
-                let _ = self
-                    .services
-                    .abandon_lease(LeaseAbandonRequest {
-                        identity: lease,
-                        candidate_cleanup: false,
-                    })
-                    .await;
-            }
+            reconcile_terminal_lease(self.services.as_ref(), lease, fence).await;
         }
         if let Some(error) = lease_error {
             Err(error)
@@ -317,6 +293,126 @@ impl LeaseInvocationRunner {
         }
     }
 }
+/// Result of waiting for a supervisor response. A terminal observation wins
+/// over a delayed response and permanently closes the lift path.
+enum LeaseWait {
+    Response(LeaseResult),
+    Terminal((Option<std::process::ExitStatus>, ProcessTermination)),
+}
+
+async fn await_lease_or_terminal<F>(
+    request: F,
+    child: &mut std::process::Child,
+    cancel: &CancellationToken,
+    clock: &dyn Clock,
+    deadline: std::time::Instant,
+) -> Result<LeaseWait, LeaseInvocationError>
+where
+    F: Future<Output = LeaseResult>,
+{
+    tokio::pin!(request);
+    loop {
+        if let Some(terminal) = terminal_now(child, cancel, clock, deadline)? {
+            return Ok(LeaseWait::Terminal(terminal));
+        }
+        tokio::select! {
+            result = &mut request => return Ok(LeaseWait::Response(result)),
+            _ = cancel.cancelled() => return Ok(LeaseWait::Terminal((child.try_wait().map_err(started_lease_error)?, ProcessTermination::Cancelled))),
+            _ = tokio::task::yield_now() => {}
+        }
+    }
+}
+
+fn terminal_now(
+    child: &mut std::process::Child,
+    cancel: &CancellationToken,
+    clock: &dyn Clock,
+    deadline: std::time::Instant,
+) -> Result<Option<(Option<std::process::ExitStatus>, ProcessTermination)>, LeaseInvocationError> {
+    if cancel.is_cancelled() {
+        return Ok(Some((
+            child.try_wait().map_err(started_lease_error)?,
+            ProcessTermination::Cancelled,
+        )));
+    }
+    if clock.now_instant() >= deadline {
+        return Ok(Some((
+            child.try_wait().map_err(started_lease_error)?,
+            ProcessTermination::TimedOut,
+        )));
+    }
+    Ok(child
+        .try_wait()
+        .map_err(started_lease_error)?
+        .map(|status| (Some(status), ProcessTermination::Exited)))
+}
+
+/// Re-read durable state after every uncertain cleanup response. Operations
+/// are idempotent and reuse the same fence, so a lost request cannot cause a
+/// second capacity return or leave a known grant unreleased.
+async fn reconcile_terminal_lease(
+    services: &dyn SupervisorServices,
+    lease: LeaseIdentity,
+    observed_fence: Option<LeaseFencingToken>,
+) {
+    const RECONCILIATION_ATTEMPTS: usize = 3;
+    let mut fence = observed_fence;
+    for _ in 0..RECONCILIATION_ATTEMPTS {
+        match services
+            .lease_status(LeaseStatusRequest {
+                identity: lease.clone(),
+            })
+            .await
+        {
+            LeaseResult::Status(status)
+                if matches!(status.state, LeaseState::Cancelled | LeaseState::Released) =>
+            {
+                return;
+            }
+            LeaseResult::Status(status)
+                if matches!(
+                    status.state,
+                    LeaseState::Granted
+                        | LeaseState::Launching
+                        | LeaseState::Bound
+                        | LeaseState::Active
+                ) =>
+            {
+                fence = status.fencing_token.or(fence)
+            }
+            LeaseResult::Cancelled { .. }
+            | LeaseResult::Released { .. }
+            | LeaseResult::Abandoned { .. } => return,
+            _ => {}
+        }
+        let result = if let Some(token) = fence.clone() {
+            services
+                .release_lease(LeaseReleaseRequest {
+                    identity: lease.clone(),
+                    fencing_token: token,
+                    candidate_cleanup: false,
+                })
+                .await
+        } else {
+            services
+                .abandon_lease(LeaseAbandonRequest {
+                    identity: lease.clone(),
+                    candidate_cleanup: false,
+                })
+                .await
+        };
+        if matches!(
+            result,
+            LeaseResult::Released { .. }
+                | LeaseResult::Cancelled { .. }
+                | LeaseResult::Abandoned { .. }
+        ) {
+            return;
+        }
+        tokio::task::yield_now().await;
+    }
+}
+
 fn started_lease_error(error: io::Error) -> LeaseInvocationError {
     LeaseInvocationError::Process(ProcessRunError::Started(error))
 }
