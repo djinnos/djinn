@@ -106,16 +106,16 @@ impl CoordinatorActor {
         &mut self,
         run_id: &str,
         session: &RefinementSession,
-    ) {
+    ) -> bool {
         let state = match self.active_refinements.get(run_id).cloned() {
             Some(s) => s,
-            None => return,
+            None => return false,
         };
         // Sessions are disposable projections. Reject stale or uncorrelated
         // observations before any proposal/debate/evidence read can mutate a
         // projection or create a synthetic stop row.
         if !self.fence_durable_outcome(run_id, session, &state).await {
-            return;
+            return false;
         }
         // The projection is keyed by the durable run. The proposal identity is
         // payload data used only for proposal/lifecycle repository operations.
@@ -138,6 +138,17 @@ impl CoordinatorActor {
             | RefinementPhase::AwaitingEvidence
             | RefinementPhase::Complete => {}
         }
+
+        self.active_refinements
+            .get(run_id)
+            .is_some_and(|candidate| {
+                candidate.phase != state.phase
+                    || candidate.current_round != state.current_round
+                    || candidate.current_revision_seq != state.current_revision_seq
+                    || candidate.stop_reason != state.stop_reason
+                    || candidate.pending_advocate_lint_violations.len()
+                        != state.pending_advocate_lint_violations.len()
+            })
     }
 
     /// Fence a completed task against the exact, currently eligible source

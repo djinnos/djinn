@@ -557,10 +557,11 @@ impl CoordinatorActor {
             if let Some(state) = self.active_refinements.get_mut(run_id) {
                 state.dispatch_failures = 0;
             }
-            self.process_refinement_outcome(run_id, &session).await;
-            self.close_refinement_task(&session.task_id, "refinement phase complete")
-                .await;
-            self.refinement_sessions.remove(run_id);
+            if self.process_refinement_outcome(run_id, &session).await {
+                self.close_refinement_task(&session.task_id, "refinement phase complete")
+                    .await;
+                self.refinement_sessions.remove(run_id);
+            }
             return;
         }
 
