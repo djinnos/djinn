@@ -1,6 +1,6 @@
 //! Bounded Unix socket transport for authenticated broker controls.
 use crate::{
-    CgroupFs, CloneIntoCgroup, CpuStat, Error, Invocation,
+    CgroupFs, CloneIntoCgroup, CommandSpec, CpuStat, Error, Invocation,
     broker::{Broker, ConnectionId, ControlNonce, NonceSource, SocketPeer},
     child::WorkerReadinessAssertion,
 };
@@ -27,6 +27,8 @@ const LIFT: u8 = 6;
 const KILL: u8 = 7;
 const WAIT: u8 = 8;
 const CLEAN: u8 = 9;
+const STDOUT: u8 = 10;
+const STDERR: u8 = 11;
 pub struct UnixBrokerServer<F, S, N = crate::broker::OsNonceSource> {
     broker: Broker<F, S, N>,
     listener: Option<UnixListener>,
@@ -111,7 +113,35 @@ impl<F: CgroupFs, S: CloneIntoCgroup, N: NonceSource> UnixBrokerServer<F, S, N> 
             }
             CREATE => {
                 let (i, n, x) = control(b)?;
-                Ok(self.broker.create(c, &i, n, &strv(x)?)?.as_bytes().to_vec())
+                let (leaf, command) = command_in(x)?;
+                Ok(self
+                    .broker
+                    .create(c, &i, n, &leaf, &command)?
+                    .as_bytes()
+                    .to_vec())
+            }
+            STDOUT | STDERR => {
+                let (i, n, x) = control(b)?;
+                if !x.is_empty() {
+                    return Err(Error::InvalidTransportFrame);
+                }
+                let (bytes, eof, status, nonce) = self.broker.output(c, &i, n, t == STDERR)?;
+                let mut out = vec![
+                    u8::from(eof),
+                    match status {
+                        crate::broker::ChildStatus::Running => 0,
+                        crate::broker::ChildStatus::Exited(_) => 1,
+                        crate::broker::ChildStatus::Signaled(_) => 2,
+                    },
+                    match status {
+                        crate::broker::ChildStatus::Running => 0,
+                        crate::broker::ChildStatus::Exited(v)
+                        | crate::broker::ChildStatus::Signaled(v) => v,
+                    },
+                ];
+                out.extend(enc_bytes(&bytes)?);
+                out.extend(nonce.as_bytes());
+                Ok(out)
             }
             SAMPLE => {
                 let (i, n, x) = control(b)?;
@@ -188,11 +218,44 @@ impl UnixBrokerClient {
         self.nonces.insert(i.id, n);
         Ok(())
     }
-    pub fn create(&mut self, i: &str, l: &str) -> Result<(), Error> {
+    pub fn create(&mut self, i: &str, leaf: &str, command: &CommandSpec) -> Result<(), Error> {
         let mut x = self.control(i)?;
-        x.extend(enc(l)?);
+        x.extend(command_out(leaf, command)?);
         let r = self.call(CREATE, &x)?;
         self.rotate(i, &r)
+    }
+    pub fn stdout(
+        &mut self,
+        i: &str,
+    ) -> Result<(Vec<u8>, bool, crate::broker::ChildStatus), Error> {
+        self.output(STDOUT, i)
+    }
+    pub fn stderr(
+        &mut self,
+        i: &str,
+    ) -> Result<(Vec<u8>, bool, crate::broker::ChildStatus), Error> {
+        self.output(STDERR, i)
+    }
+    fn output(
+        &mut self,
+        kind: u8,
+        i: &str,
+    ) -> Result<(Vec<u8>, bool, crate::broker::ChildStatus), Error> {
+        let x = self.control(i)?;
+        let response = self.call(kind, &x)?;
+        if response.len() < 35 {
+            return Err(Error::InvalidTransportFrame);
+        }
+        let eof = response[0] != 0;
+        let status = match response[1] {
+            0 => crate::broker::ChildStatus::Running,
+            1 => crate::broker::ChildStatus::Exited(response[2]),
+            2 => crate::broker::ChildStatus::Signaled(response[2]),
+            _ => return Err(Error::InvalidTransportFrame),
+        };
+        let bytes = bytes_in(&response[3..response.len() - 32])?;
+        self.rotate(i, &response[response.len() - 32..])?;
+        Ok((bytes, eof, status))
     }
     pub fn sample(&mut self, i: &str) -> Result<CpuStat, Error> {
         let x = self.control(i)?;
@@ -247,6 +310,86 @@ impl UnixBrokerClient {
         Ok(())
     }
 }
+fn enc_bytes(bytes: &[u8]) -> Result<Vec<u8>, Error> {
+    let n = u16::try_from(bytes.len()).map_err(|_| Error::InvalidTransportFrame)?;
+    let mut out = n.to_be_bytes().to_vec();
+    out.extend(bytes);
+    Ok(out)
+}
+fn bytes_in(input: &[u8]) -> Result<Vec<u8>, Error> {
+    if input.len() < 2 {
+        return Err(Error::InvalidTransportFrame);
+    }
+    let n = u16::from_be_bytes([input[0], input[1]]) as usize;
+    if input.len() != n + 2 {
+        return Err(Error::InvalidTransportFrame);
+    }
+    Ok(input[2..].to_vec())
+}
+fn command_out(leaf: &str, command: &CommandSpec) -> Result<Vec<u8>, Error> {
+    command.validate()?;
+    let mut out = enc(leaf)?;
+    for item in [&command.program, &command.cwd] {
+        out.extend(enc(item)?);
+    }
+    out.push(u8::try_from(command.argv.len()).map_err(|_| Error::InvalidTransportFrame)?);
+    for arg in &command.argv {
+        out.extend(enc(arg)?);
+    }
+    out.push(u8::try_from(command.environment.len()).map_err(|_| Error::InvalidTransportFrame)?);
+    for (key, value) in &command.environment {
+        out.extend(enc(key)?);
+        out.extend(enc(value)?);
+    }
+    Ok(out)
+}
+fn command_in(input: &[u8]) -> Result<(String, CommandSpec), Error> {
+    let (leaf, mut rest) = take_string(input)?;
+    let (program, next) = take_string(rest)?;
+    rest = next;
+    let (cwd, next) = take_string(rest)?;
+    rest = next;
+    let (&argc, mut rest) = rest.split_first().ok_or(Error::InvalidTransportFrame)?;
+    let mut argv = Vec::with_capacity(argc as usize);
+    for _ in 0..argc {
+        let (value, next) = take_string(rest)?;
+        argv.push(value);
+        rest = next;
+    }
+    let (&envc, mut rest) = rest.split_first().ok_or(Error::InvalidTransportFrame)?;
+    let mut environment = Vec::with_capacity(envc as usize);
+    for _ in 0..envc {
+        let (key, next) = take_string(rest)?;
+        let (value, next) = take_string(next)?;
+        environment.push((key, value));
+        rest = next;
+    }
+    if !rest.is_empty() {
+        return Err(Error::InvalidTransportFrame);
+    }
+    let command = CommandSpec {
+        program,
+        argv,
+        cwd,
+        environment,
+    };
+    command.validate()?;
+    Ok((leaf, command))
+}
+fn take_string(input: &[u8]) -> Result<(String, &[u8]), Error> {
+    if input.len() < 2 {
+        return Err(Error::InvalidTransportFrame);
+    }
+    let n = u16::from_be_bytes([input[0], input[1]]) as usize;
+    if input.len() < n + 2 {
+        return Err(Error::InvalidTransportFrame);
+    }
+    let value = std::str::from_utf8(&input[2..n + 2])
+        .map_err(|_| Error::InvalidTransportFrame)?
+        .to_owned();
+    Ok((value, &input[n + 2..]))
+}
+
 fn read(s: &mut UnixStream) -> Result<Vec<u8>, Error> {
     let mut n = [0; 4];
     s.read_exact(&mut n)?;
@@ -289,18 +432,6 @@ fn enc(s: &str) -> Result<Vec<u8>, Error> {
     let mut x = n.to_be_bytes().to_vec();
     x.extend(s.as_bytes());
     Ok(x)
-}
-fn strv(x: &[u8]) -> Result<String, Error> {
-    if x.len() < 2 {
-        return Err(Error::InvalidTransportFrame);
-    }
-    let n = u16::from_be_bytes([x[0], x[1]]) as usize;
-    if x.len() != n + 2 {
-        return Err(Error::InvalidTransportFrame);
-    }
-    std::str::from_utf8(&x[2..])
-        .map(str::to_owned)
-        .map_err(|_| Error::InvalidTransportFrame)
 }
 fn begin(x: &[u8]) -> Result<(String, u64), Error> {
     if x.len() < 10 {
@@ -395,7 +526,6 @@ mod tests {
     fn malformed_control_payloads_and_responses_fail_closed() {
         assert!(begin(&[0, 1, b'x']).is_err());
         assert!(control(&[0, 1, b'x']).is_err());
-        assert!(strv(&[0, 2, b'x']).is_err());
         let (mut writer, mut reader) = UnixStream::pair().unwrap();
         write(&mut writer, &[2]).unwrap();
         assert!(matches!(
