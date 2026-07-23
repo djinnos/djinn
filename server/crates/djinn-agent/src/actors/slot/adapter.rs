@@ -17,11 +17,14 @@ use djinn_core::clock::SystemClock;
 use djinn_core::models::VerifySource;
 use djinn_db::TaskRunRepository;
 use djinn_db::advisory_lock;
-use djinn_git::verification_input::{ResolvedExternalInputV1, VerificationInputFingerprintConfig};
+use djinn_git::verification_input::{
+    ResolvedExternalInputV1, VerificationInputFingerprintConfig, collect_verification_changed_paths,
+};
 use djinn_sandbox::final_verification_execution::{
     EnvironmentIdentityResolver, FinalVerificationExecutionRequest,
 };
 use djinn_supervisor::SupervisorServices;
+use globset::{Glob, GlobSetBuilder};
 
 use crate::context::AgentContext;
 
@@ -132,6 +135,62 @@ fn canonical_tool_runtime() -> Vec<PathBuf> {
         .filter(|path| Path::new(path).is_dir())
         .map(PathBuf::from)
         .collect()
+}
+
+fn canonical_command(
+    c: &djinn_stack::environment::FinalVerificationCommand,
+) -> CanonicalCommandDescriptorV1 {
+    CanonicalCommandDescriptorV1 {
+        check_id: c.check_id.clone(),
+        executable: c.executable.clone(),
+        argv: c.argv.clone(),
+        working_directory: c.working_directory.clone(),
+        environment_names: c.environment_names.clone(),
+        timeout_seconds: c.timeout_seconds,
+        descriptor_revision: c.descriptor_revision,
+    }
+}
+fn resolve_selected_final_verification(
+    plan: &djinn_stack::environment::FinalVerificationPlan,
+    paths: &[String],
+) -> Result<(Vec<CanonicalCommandDescriptorV1>, Vec<String>), String> {
+    if plan.command_groups.is_empty() {
+        return Ok((
+            plan.commands.iter().map(canonical_command).collect(),
+            vec![],
+        ));
+    }
+    let mut selected = std::collections::BTreeSet::new();
+    for rule in &plan.selection_rules {
+        let mut b = GlobSetBuilder::new();
+        for g in &rule.match_globs {
+            b.add(Glob::new(g).map_err(|e| e.to_string())?);
+        }
+        let m = b.build().map_err(|e| e.to_string())?;
+        if paths.iter().any(|p| m.is_match(p)) {
+            selected.extend(rule.command_groups.iter().cloned());
+        }
+    }
+    if paths.is_empty() || selected.is_empty() {
+        selected.extend(plan.command_groups.iter().map(|g| g.name.clone()));
+    }
+    let names = plan
+        .command_groups
+        .iter()
+        .filter(|g| selected.contains(&g.name))
+        .map(|g| g.name.clone())
+        .collect();
+    let commands: Vec<_> = plan
+        .command_groups
+        .iter()
+        .filter(|g| selected.contains(&g.name))
+        .flat_map(|g| g.commands.iter().map(canonical_command))
+        .collect();
+    if commands.is_empty() {
+        Err("final-verification plan resolved to no commands".into())
+    } else {
+        Ok((commands, names))
+    }
 }
 
 pub(crate) fn build_slot_context(
@@ -294,26 +353,13 @@ pub async fn resolve_final_verification_for_task_run(
     // to enforce, so submission must not depend on a resolvable
     // worktree. A configured plan keeps the fail-closed worktree
     // requirement below.
-    if plan.commands.is_empty() {
+    if plan.normalized_commands().is_empty() {
         return Ok(None);
     }
     let worktree = run
         .workspace_path
         .map(PathBuf::from)
         .ok_or("task run has no worktree")?;
-    let commands: Vec<_> = plan
-        .commands
-        .iter()
-        .map(|c| CanonicalCommandDescriptorV1 {
-            check_id: c.check_id.clone(),
-            executable: c.executable.clone(),
-            argv: c.argv.clone(),
-            working_directory: c.working_directory.clone(),
-            environment_names: c.environment_names.clone(),
-            timeout_seconds: c.timeout_seconds,
-            descriptor_revision: c.descriptor_revision,
-        })
-        .collect();
     let manifest = VerificationInputManifestV1 {
         version: plan.input_manifest.version,
         repo_paths: plan.input_manifest.repo_paths.clone(),
@@ -338,6 +384,19 @@ pub async fn resolve_final_verification_for_task_run(
             })
         })
         .collect::<Result<_, String>>()?;
+    let fingerprint_config = VerificationInputFingerprintConfig {
+        base_ref: "main".into(),
+        manifest: manifest.clone(),
+        external_inputs: external_inputs.clone(),
+    };
+    let changed_paths = collect_verification_changed_paths(&worktree, &fingerprint_config)
+        .await
+        .map_err(|e| e.to_string())?;
+    let (commands, selected_groups) = resolve_selected_final_verification(&plan, &changed_paths)?;
+    let required_checks = commands
+        .iter()
+        .map(|c| c.check_id.clone())
+        .collect::<Vec<_>>();
     let identity = ResolvedEnvironmentIdentityInputV1 {
         schema_version: 1,
         canonicalization_version: 1,
@@ -346,15 +405,30 @@ pub async fn resolve_final_verification_for_task_run(
             profile_id: plan.profile_id.clone(),
             profile_revision: plan.profile_revision,
             commands: commands.clone(),
-            required_checks: plan.required_checks.clone(),
+            required_checks: required_checks.clone(),
             hermeticity: CanonicalHermeticityV1 {
                 hermetic: plan.hermeticity.hermetic,
                 reusable: plan.hermeticity.reusable,
                 network_access: plan.hermeticity.network_access,
             },
         },
-        selection: djinn_core::canonical_verify::ResolvedVerificationSelectionV1::legacy_flat_plan(
-        ),
+        selection: if plan.command_groups.is_empty() {
+            djinn_core::canonical_verify::ResolvedVerificationSelectionV1::legacy_flat_plan()
+        } else {
+            djinn_core::canonical_verify::ResolvedVerificationSelectionV1::SelectedGroups {
+                selection_rules: plan
+                    .selection_rules
+                    .iter()
+                    .map(
+                        |r| djinn_core::canonical_verify::ResolvedVerificationSelectionRuleV1 {
+                            matches: r.match_globs.clone(),
+                            command_groups: r.command_groups.clone(),
+                        },
+                    )
+                    .collect(),
+                selected_command_groups: selected_groups,
+            }
+        },
         input_manifest: manifest.clone(),
         image: ImmutableImageV1 {
             reference: "host".into(),
@@ -382,17 +456,13 @@ pub async fn resolve_final_verification_for_task_run(
             execution_request: FinalVerificationExecutionRequest {
                 worktree,
                 resolve_environment_identity: resolver,
-                fingerprint_config: VerificationInputFingerprintConfig {
-                    base_ref: "main".into(),
-                    manifest,
-                    external_inputs: external_inputs.clone(),
-                },
+                fingerprint_config,
                 tool_runtime: canonical_tool_runtime(),
                 read_only_external_mounts: external_inputs.into_iter().map(|i| i.path).collect(),
                 output_directories,
             },
             verify_source: VerifySource::Worker,
-            required_checks: plan.required_checks,
+            required_checks,
             diff_fingerprint: String::new(),
         },
     ))
