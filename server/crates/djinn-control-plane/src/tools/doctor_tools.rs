@@ -497,7 +497,10 @@ impl DjinnMcpServer {
         let ordinary_names = p.check_names.as_ref().map(|names| {
             names
                 .iter()
-                .filter(|name| name.as_str() != EXTENSION_DIAGNOSTICS_PROBE_NAME)
+                .filter(|name| {
+                    name.as_str() != EXTENSION_DIAGNOSTICS_PROBE_NAME
+                        && !retrieval_names.contains(&name.as_str())
+                })
                 .cloned()
                 .collect::<Vec<_>>()
         });
@@ -513,27 +516,119 @@ impl DjinnMcpServer {
                 });
             }
         };
-        // Refresh exactly once through the coordinator-owned source. The
-        // registered checks consume that same shared publication.
-        if retrieval_selected {
-            if let Some(coordinator) = self.state.coordinator().await {
-                let _ = coordinator
-                    .run_retrieval_health_checks(
-                        retrieval_names
-                            .iter()
-                            .map(|name| (*name).to_owned())
-                            .collect(),
-                        uuid::Uuid::now_v7().to_string(),
-                    )
-                    .await;
-            }
-        }
-
         let repo = DoctorFindingRepository::new(self.state.db().clone());
         let run_id = uuid::Uuid::now_v7().to_string();
+        let selected_retrieval_names: Vec<String> = p
+            .check_names
+            .as_ref()
+            .filter(|names| !names.is_empty())
+            .map(|names| {
+                names
+                    .iter()
+                    .filter(|name| retrieval_names.contains(&name.as_str()))
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_else(|| {
+                retrieval_names
+                    .iter()
+                    .map(|name| (*name).to_owned())
+                    .collect()
+            });
 
-        let mut results = Vec::with_capacity(checks.len());
+        // Retrieval rows are executed and reconciled only by the coordinator.
+        // Exclude them from the legacy per-check loop even for an all-check
+        // request; that loop is only for non-retrieval registered checks.
+        let checks: Vec<_> = checks
+            .into_iter()
+            .filter(|check| !retrieval_names.contains(&check.name()))
+            .collect();
+        // Do not rerun or insert them below: reconciliation also resolves
+        // healthy absence and preserves indeterminate/malformed groups.
+        let retrieval_runs = if retrieval_selected {
+            match self.state.coordinator().await {
+                Some(coordinator) => match coordinator
+                    .run_retrieval_health_checks(selected_retrieval_names.clone(), run_id.clone())
+                    .await
+                {
+                    Ok(runs) => Some(runs),
+                    Err(error) => {
+                        return Json(DoctorRunResponse {
+                            ok: false,
+                            registered_checks,
+                            results: Vec::new(),
+                            total_findings: 0,
+                            error: Some(error.to_string()),
+                        });
+                    }
+                },
+                None => {
+                    return Json(DoctorRunResponse {
+                        ok: false,
+                        registered_checks,
+                        results: Vec::new(),
+                        total_findings: 0,
+                        error: Some(
+                            "coordinator retrieval health source is not initialized".to_owned(),
+                        ),
+                    });
+                }
+            }
+        } else {
+            None
+        };
+
+        let mut results = Vec::with_capacity(checks.len() + selected_retrieval_names.len());
         let mut total_findings: i64 = 0;
+        if let Some(runs) = retrieval_runs {
+            let persisted = match repo
+                .list_recent(RecentDoctorFindings {
+                    run_id: Some(run_id.clone()),
+                    ..Default::default()
+                })
+                .await
+            {
+                Ok(rows) => rows,
+                Err(error) => {
+                    return Json(DoctorRunResponse {
+                        ok: false,
+                        registered_checks,
+                        results: Vec::new(),
+                        total_findings: 0,
+                        error: Some(error.to_string()),
+                    });
+                }
+            };
+            for run in runs {
+                let entries: Vec<_> = persisted
+                    .iter()
+                    .filter(|row| row.check_name == run.check_name && row.status == "active")
+                    .map(|row| DoctorRunFindingEntry {
+                        finding_id: row.id.clone(),
+                        check_name: row.check_name.clone(),
+                        severity: row.severity.clone(),
+                        detail: row.detail.clone().unwrap_or_default(),
+                        recommended_action: recommended_action_from_evidence(&row.evidence),
+                        recommended_reason: recommended_reason_from_evidence(&row.evidence),
+                    })
+                    .collect();
+                total_findings += entries.len() as i64;
+                let description = reg
+                    .get(run.check_name)
+                    .map(|check| check.description().to_owned())
+                    .unwrap_or_default();
+                results.push(DoctorRunCheckResult {
+                    check: DoctorRunCheckMeta {
+                        name: run.check_name.to_owned(),
+                        description,
+                    },
+                    ran: true,
+                    error: None,
+                    findings: entries,
+                    extension_diagnostics: Vec::new(),
+                });
+            }
+        }
 
         for check in &checks {
             let meta = DoctorRunCheckMeta {

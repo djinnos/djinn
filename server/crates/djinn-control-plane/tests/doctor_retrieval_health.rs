@@ -108,7 +108,7 @@ async fn doctor_run_retrieval_check_persists_only_strictly_above_threshold() {
         Some(above.id.as_str())
     );
 
-    // The persisted evidence is the complete, immutable prefetched snapshot.
+    // The persisted evidence is the complete, immutable shared-source snapshot.
     let evidence = &persisted.evidence;
     assert_eq!(evidence["project_id"].as_str(), Some(above.id.as_str()));
     assert!(evidence["window"]["start"].as_str().is_some());
