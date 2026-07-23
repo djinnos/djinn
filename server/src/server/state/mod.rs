@@ -1174,7 +1174,23 @@ impl AppState {
                         Some(admission) => warmer.with_warm_admission(admission),
                         None => warmer,
                     };
-                    Arc::new(warmer) as Arc<dyn GraphWarmerService>
+                    let warmer = Arc::new(warmer);
+                    // Startup recovery inventories retained identities only; it
+                    // cannot manufacture a fresh Kubernetes create request.
+                    warmer.reconcile_durable_warm_leases().await;
+                    // Reconciliation is deliberately periodic: API outages and
+                    // UID-preconditioned deletion acknowledgements are not
+                    // terminal evidence and must be revisited after startup.
+                    let recovery_warmer = warmer.clone();
+                    tokio::spawn(async move {
+                        let mut tick = tokio::time::interval(Duration::from_secs(30));
+                        tick.tick().await;
+                        loop {
+                            tick.tick().await;
+                            recovery_warmer.reconcile_durable_warm_leases().await;
+                        }
+                    });
+                    warmer as Arc<dyn GraphWarmerService>
                 }
                 Err(e) => {
                     tracing::info!(

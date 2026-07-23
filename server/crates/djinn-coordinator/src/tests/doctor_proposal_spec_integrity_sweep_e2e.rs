@@ -241,6 +241,34 @@ async fn proposal_integrity_sweep_proves_disabled_paging_resume_and_payload_inva
             .expect("count"),
         3
     );
+    let partial_rows = findings
+        .list_recent(RecentDoctorFindings {
+            check_name: Some(PROPOSAL_SPEC_INTEGRITY_CHECK_NAME.to_owned()),
+            limit: Some(10),
+            ..Default::default()
+        })
+        .await
+        .expect("partial findings");
+    let mut partial_ids: Vec<_> = partial_rows
+        .iter()
+        .map(|row| {
+            row.entity_ids[0]
+                .as_str()
+                .expect("partial proposal entity")
+                .to_owned()
+        })
+        .collect();
+    partial_ids.sort();
+    let mut expected_partial = active
+        .iter()
+        .filter(|id| *id != &active[2])
+        .cloned()
+        .collect::<Vec<_>>();
+    expected_partial.sort();
+    assert_eq!(
+        partial_ids, expected_partial,
+        "the interrupted proposal is absent while earlier successes remain durable"
+    );
     run_proposal_spec_integrity_sweep_with_source(true, &source, Some("resume")).await;
     assert_eq!(
         findings
@@ -299,6 +327,28 @@ async fn proposal_integrity_sweep_proves_disabled_paging_resume_and_payload_inva
             serde_json::to_value(expected.errors).expect("ordered violations")
         );
     }
+
+    let immutable_rows = findings
+        .list_recent(RecentDoctorFindings {
+            check_name: Some(PROPOSAL_SPEC_INTEGRITY_CHECK_NAME.to_owned()),
+            limit: Some(10),
+            ..Default::default()
+        })
+        .await
+        .expect("immutable finding history");
+    run_proposal_spec_integrity_sweep_with_source(true, &source, Some("rerun")).await;
+    assert_eq!(
+        findings
+            .list_recent(RecentDoctorFindings {
+                check_name: Some(PROPOSAL_SPEC_INTEGRITY_CHECK_NAME.to_owned()),
+                limit: Some(10),
+                ..Default::default()
+            })
+            .await
+            .expect("rerun finding history"),
+        immutable_rows,
+        "a rerun preserves the original immutable finding rows and evidence"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

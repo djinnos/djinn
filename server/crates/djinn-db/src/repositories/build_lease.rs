@@ -284,6 +284,9 @@ impl BuildLeaseRepository {
                 BuildLeaseState::Launching,
                 BuildLeaseState::Bound,
                 BuildLeaseState::Active,
+                // A complete retry may clear an uncertain Kubernetes
+                // observation after the immutable binding is re-confirmed.
+                BuildLeaseState::Suspect,
             ][..],
             BuildLeaseState::Suspect => &[
                 BuildLeaseState::Granted,
@@ -497,7 +500,10 @@ impl BuildLeaseRepository {
             tx.commit().await?;
             return Ok(row);
         }
-        if row.state == state && (pod_uid.is_none() || row.bound_pod_uid.as_deref() == pod_uid) {
+        if row.state == state
+            && cleanup.is_none()
+            && (pod_uid.is_none() || row.bound_pod_uid.as_deref() == pod_uid)
+        {
             tx.commit().await?;
             return Ok(row);
         }

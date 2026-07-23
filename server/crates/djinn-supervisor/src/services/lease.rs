@@ -73,6 +73,8 @@ pub enum LeaseState {
     Launching,
     Bound,
     Active,
+    /// Kubernetes reconciliation could not prove this counted lease safe.
+    Suspect,
     Cancelled,
     Released,
 }
