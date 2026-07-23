@@ -10,11 +10,72 @@ use djinn_db::{
     ProposalRepository, RefinementAdmissionOutcome, RefinementAdmissionSource,
     ReleaseRefinementIntentClaimRequest, TaskRepository, TerminalRefinementRunRequest,
 };
+use djinn_provider::repos::CredentialRepository;
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 use super::refinement_cap_tests;
+
+const DURABLE_PROVIDER: &str = "durableobserver";
+const DURABLE_MODEL: &str = "durableobserver/configured-model";
+
+fn spawn_model_observing_pool(
+    db: &djinn_db::Database,
+) -> (
+    djinn_slot::SlotPoolHandle,
+    tokio::sync::mpsc::UnboundedReceiver<(String, String)>,
+) {
+    let cancel = CancellationToken::new();
+    let (observed_tx, observed_rx) = tokio::sync::mpsc::unbounded_channel();
+    let pool = djinn_slot::SlotPoolHandle::spawn_with_factory(
+        crate::test_helpers::agent_context_from_db(db.clone(), cancel.clone()),
+        cancel,
+        djinn_slot::SlotPoolConfig {
+            models: vec![djinn_slot::ModelSlotConfig {
+                model_id: DURABLE_MODEL.to_owned(),
+                max_slots: 1,
+                roles: ["advocate", "adversary", "judge", "worker"]
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect(),
+            }],
+            role_priorities: HashMap::new(),
+        },
+        Arc::new(move |slot_id, model_id, event_tx, app_state, cancel| {
+            let observed_tx = observed_tx.clone();
+            let runner: djinn_slot::TestLifecycleRunner =
+                Arc::new(move |task_id, _, model_id, _, _, _, _| {
+                    let observed_tx = observed_tx.clone();
+                    Box::pin(async move {
+                        observed_tx
+                            .send((task_id, model_id))
+                            .expect("record durable dispatch model");
+                        Ok(())
+                    })
+                });
+            djinn_slot::SlotHandle::spawn_with_test_runner(
+                slot_id, model_id, event_tx, app_state, cancel, runner,
+            )
+        }),
+    );
+    (pool, observed_rx)
+}
+
+async fn wait_until_pool_releases(pool: &djinn_slot::SlotPoolHandle, task_id: &str) {
+    for _ in 0..50 {
+        if !pool
+            .has_session(task_id)
+            .await
+            .expect("query observing pool session")
+        {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("observing pool did not release {task_id}");
+}
 
 async fn admit_run(repo: &ProposalRepository, proposal_id: &str, key: &str) -> (String, i32) {
     match repo
@@ -66,11 +127,28 @@ async fn durable_driver_replays_claim_before_task_and_cache_loss_once_without_po
     let db = crate::test_helpers::create_test_db();
     let fixture = refinement_cap_tests::seed_refinement_fixture(&db).await;
     let (events_tx, _events_rx) = tokio::sync::broadcast::channel::<DjinnEventEnvelope>(256);
-    let mut actor = refinement_cap_tests::build_refinement_actor(
-        &db,
-        &events_tx,
-        refinement_cap_tests::spawn_test_pool(&db, 1),
+    CredentialRepository::new(db.clone(), EventBus::noop())
+        .set_with_owner(
+            DURABLE_PROVIDER,
+            "DURABLEOBSERVER_API_KEY",
+            "durable-observer-secret",
+            Some(&fixture.user_id),
+        )
+        .await
+        .expect("seed durable dispatch credential");
+    let (pool, mut observed_dispatches) = spawn_model_observing_pool(&db);
+    let mut actor = refinement_cap_tests::build_refinement_actor(&db, &events_tx, pool);
+    actor.test_use_live_credential_resolution = true;
+    actor.catalog.add_custom_provider(
+        refinement_cap_tests::test_provider(DURABLE_PROVIDER),
+        vec![refinement_cap_tests::test_model(
+            "configured-model",
+            DURABLE_PROVIDER,
+        )],
     );
+    actor
+        .model_priorities
+        .insert("planner".to_owned(), vec![DURABLE_MODEL.to_owned()]);
     let repo = ProposalRepository::new(db.clone(), EventBus::noop());
     let (run_id, generation) = admit_run(&repo, &fixture.proposal_id, "durable-claim-replay").await;
     let intent_id = only_intent(&repo, &run_id, generation).await;
@@ -144,6 +222,14 @@ async fn durable_driver_replays_claim_before_task_and_cache_loss_once_without_po
         "populated run cache must not invoke the legacy map-driven role spawner"
     );
     assert_eq!(refinement_tasks[0].id, first_task.id);
+    let (initial_task_id, initial_model_id) =
+        tokio::time::timeout(Duration::from_secs(1), observed_dispatches.recv())
+            .await
+            .expect("initial durable enqueue reaches observing runner")
+            .expect("initial durable enqueue observation");
+    assert_eq!(initial_task_id, first_task.id);
+    assert_eq!(initial_model_id, DURABLE_MODEL);
+    assert_ne!(initial_model_id, refinement_cap_tests::TEST_MODEL);
     assert_eq!(
         repo.load_dispatchable_refinement_intents(&run_id, generation)
             .await
@@ -157,6 +243,7 @@ async fn durable_driver_replays_claim_before_task_and_cache_loss_once_without_po
     actor.active_refinements.clear();
     actor.refinement_sessions.clear();
     let heartbeat_after_materialization = heartbeat(&repo, &run_id).await;
+    wait_until_pool_releases(&actor.pool, &first_task.id).await;
     actor.drive_active_refinements().await;
     assert_eq!(
         task_repo
@@ -171,6 +258,14 @@ async fn durable_driver_replays_claim_before_task_and_cache_loss_once_without_po
         heartbeat_after_materialization,
         heartbeat(&repo, &run_id).await
     );
+    let (retry_task_id, retry_model_id) =
+        tokio::time::timeout(Duration::from_secs(1), observed_dispatches.recv())
+            .await
+            .expect("materialized retry reaches observing runner")
+            .expect("materialized retry observation");
+    assert_eq!(retry_task_id, first_task.id);
+    assert_eq!(retry_model_id, DURABLE_MODEL);
+    assert_ne!(retry_model_id, refinement_cap_tests::TEST_MODEL);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

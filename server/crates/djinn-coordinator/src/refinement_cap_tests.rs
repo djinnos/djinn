@@ -1490,7 +1490,7 @@ async fn evidence_lifecycle_terminal_skips_dispatch() {
     );
 }
 
-fn test_provider(id: &str) -> Provider {
+pub(crate) fn test_provider(id: &str) -> Provider {
     Provider {
         id: id.to_owned(),
         name: format!("{id} provider"),
@@ -1502,7 +1502,7 @@ fn test_provider(id: &str) -> Provider {
     }
 }
 
-fn test_model(id: &str, provider_id: &str) -> Model {
+pub(crate) fn test_model(id: &str, provider_id: &str) -> Model {
     Model {
         id: id.to_owned(),
         provider_id: provider_id.to_owned(),
