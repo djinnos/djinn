@@ -41,6 +41,14 @@ pub struct GraphWarmLeaseGrant {
     pub grant: LeaseGrant,
 }
 
+/// One durable occupied warm lease reconstructed after coordinator restart.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GraphWarmLeaseRecovery {
+    pub identity: GraphWarmLeaseIdentity,
+    pub fencing_token: LeaseFencingToken,
+    pub bound_pod_uid: Option<String>,
+}
+
 /// Typed v1 lease outcomes that must be handled before Kubernetes create.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum GraphWarmLeaseError {
@@ -72,6 +80,12 @@ pub trait GraphWarmLease: Send + Sync {
         fencing_token: LeaseFencingToken,
         pod_uid: String,
     ) -> Result<(), GraphWarmLeaseError>;
+
+    /// Enumerate retained warm leases for restart reconciliation. Non-durable
+    /// test adapters intentionally have no recovery view.
+    async fn recoverable(&self) -> Result<Vec<GraphWarmLeaseRecovery>, GraphWarmLeaseError> {
+        Ok(Vec::new())
+    }
 }
 
 mod warm_admission;
@@ -1150,6 +1164,65 @@ impl K8sGraphWarmer {
     /// semantics.
     pub fn warm_job_lister(&self) -> Option<Arc<dyn WarmJobLister>> {
         self.dispatch.lister.clone()
+    }
+
+    /// Inventory retained leases without creating a new Job. Only a uniquely
+    /// matching immutable Pod can be bound or authorized; incomplete inventory,
+    /// API errors, duplicates, and name reuse all leave the init gate closed.
+    pub async fn reconcile_durable_warm_leases(&self) {
+        let Some(lease) = self.dispatch.lease.as_ref() else {
+            return;
+        };
+        let recoveries = match lease.recoverable().await {
+            Ok(rows) => rows,
+            Err(error) => {
+                warn!(error = %error, "K8sGraphWarmer: durable lease recovery unavailable");
+                return;
+            }
+        };
+        let Some(control) = self.dispatch.candidates.as_ref() else {
+            warn!("K8sGraphWarmer: no candidate control for durable lease recovery");
+            return;
+        };
+        for recovery in recoveries {
+            let job_identity = LeasedWarmJobIdentity::new(
+                &recovery.identity.project_id,
+                recovery.identity.warm_request_id.clone(),
+                recovery.identity.graph_revision.clone(),
+                recovery.fencing_token.0,
+            );
+            let inventory = control.inventory(&job_identity).await;
+            let Some(candidate) = inventory.selected_pod() else {
+                warn!(request_id = %recovery.identity.warm_request_id, inventory = ?inventory.observation, pods = ?inventory.pods.state, "K8sGraphWarmer: recovered lease remains suspect with gate closed");
+                continue;
+            };
+            let Some(uid) = candidate.uid.clone() else {
+                continue;
+            };
+            if recovery
+                .bound_pod_uid
+                .as_deref()
+                .is_some_and(|bound| bound != uid)
+            {
+                warn!(request_id = %recovery.identity.warm_request_id, bound_uid = ?recovery.bound_pod_uid, observed_uid = %uid, "K8sGraphWarmer: recovered UID mismatch; gate remains closed");
+                continue;
+            }
+            if let Err(error) = lease
+                .bind(&recovery.identity, recovery.fencing_token.clone(), uid)
+                .await
+            {
+                warn!(request_id = %recovery.identity.warm_request_id, error = %error, "K8sGraphWarmer: recovered bind not confirmed; gate remains closed");
+                continue;
+            }
+            if !matches!(
+                control
+                    .open_selected_pod_gate(&job_identity, &inventory)
+                    .await,
+                GateObservation::Opened
+            ) {
+                warn!(request_id = %recovery.identity.warm_request_id, "K8sGraphWarmer: recovered gate remains closed");
+            }
+        }
     }
 
     /// Arm (or re-arm) the debounce window for `project_id` in response to an

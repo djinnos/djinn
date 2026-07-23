@@ -6,7 +6,8 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use djinn_k8s::{GraphWarmLease, GraphWarmLeaseError, GraphWarmLeaseGrant};
+use djinn_db::BuildLeaseConsumerKind;
+use djinn_k8s::{GraphWarmLease, GraphWarmLeaseError, GraphWarmLeaseGrant, GraphWarmLeaseRecovery};
 use djinn_supervisor::services::{
     GraphWarmLeaseIdentity, LeaseBindRequest, LeaseDeadlines, LeaseFencingToken, LeaseGrantRequest,
     LeaseIdentity, LeaseQueueRequest, LeaseResult, LeaseState, LeaseStatusRequest,
@@ -25,6 +26,32 @@ impl BuildLeaseGraphWarmAdapter {
     #[must_use]
     pub fn new(service: Arc<BuildLeaseService>) -> Self {
         Self { service }
+    }
+
+    async fn recoverable(&self) -> Result<Vec<GraphWarmLeaseRecovery>, GraphWarmLeaseError> {
+        let snapshot = self
+            .service
+            .recovery_snapshot()
+            .await
+            .map_err(|_| GraphWarmLeaseError::Unavailable)?;
+        Ok(snapshot
+            .rows
+            .into_iter()
+            .filter(|row| row.key.consumer_kind == BuildLeaseConsumerKind::GraphWarm)
+            .filter_map(|row| {
+                let mut fields = row.immutable_identity.splitn(4, ':');
+                (fields.next() == Some("warm")).then_some(())?;
+                Some(GraphWarmLeaseRecovery {
+                    identity: GraphWarmLeaseIdentity {
+                        project_id: fields.next()?.to_string(),
+                        warm_request_id: fields.next()?.to_string(),
+                        graph_revision: fields.next()?.to_string(),
+                    },
+                    fencing_token: LeaseFencingToken(row.fencing_token? as u64),
+                    bound_pod_uid: row.bound_pod_uid,
+                })
+            })
+            .collect())
     }
 }
 
@@ -116,5 +143,9 @@ impl GraphWarmLease for BuildLeaseGraphWarmAdapter {
             }
             other => Err(unavailable(other)),
         }
+    }
+
+    async fn recoverable(&self) -> Result<Vec<GraphWarmLeaseRecovery>, GraphWarmLeaseError> {
+        BuildLeaseGraphWarmAdapter::recoverable(self).await
     }
 }

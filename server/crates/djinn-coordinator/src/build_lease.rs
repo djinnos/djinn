@@ -246,6 +246,14 @@ impl BuildLeaseService {
         }
     }
 
+    /// Return the durable non-terminal recovery view without mutating it.
+    pub async fn recovery_snapshot(&self) -> Result<djinn_db::BuildLeaseSnapshot, ()> {
+        if !self.is_ready() {
+            return Err(());
+        }
+        self.repository.snapshot().await.map_err(|_| ())
+    }
+
     /// Capacity changes never revoke occupied rows. Positive changes drain FIFO.
     pub async fn set_cap(&self, cap: i64) -> LeaseResult {
         let _guard = self.operation.lock().await;

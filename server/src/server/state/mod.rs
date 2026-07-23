@@ -1170,6 +1170,9 @@ impl AppState {
                         .with_graph_warm_lease(Arc::new(BuildLeaseGraphWarmAdapter::new(
                             self.inner.build_lease.clone(),
                         )));
+                    // Startup recovery inventories retained identities only; it
+                    // cannot manufacture a fresh Kubernetes create request.
+                    warmer.reconcile_durable_warm_leases().await;
                     let warmer = match self.inner.build_admission.clone() {
                         Some(admission) => warmer.with_warm_admission(admission),
                         None => warmer,
