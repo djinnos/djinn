@@ -6,8 +6,8 @@
 use std::{collections::HashMap, fs::File, io::Read, os::fd::RawFd};
 
 use crate::{
-    CgroupFs, CloneIntoCgroup, CpuStat, Error, Invocation, Launcher, Leaf,
-    child::WorkerReadinessAssertion,
+    child::WorkerReadinessAssertion, CgroupFs, CloneIntoCgroup, CpuStat, Error, Invocation,
+    Launcher, Leaf,
 };
 
 pub const WORKER_UID: u32 = 1000;
@@ -65,6 +65,9 @@ pub struct ControlNonce([u8; 32]);
 impl ControlNonce {
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0
+    }
+    pub(crate) fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
     }
 }
 
@@ -217,7 +220,18 @@ impl<F: CgroupFs, S: CloneIntoCgroup, N: NonceSource> Broker<F, S, N> {
         nonce: ControlNonce,
         leaf_name: &str,
     ) -> Result<ControlNonce, Error> {
-        self.validate_and_rotate(connection, id, nonce)?;
+        self.validate(connection, id, nonce)?;
+        // Reject a duplicate before it can create a second cgroup or clone a
+        // second child into it.
+        if self
+            .active
+            .get(id)
+            .ok_or(Error::InvalidInvocationBinding)?
+            .leaf
+            .is_some()
+        {
+            return Err(Error::InvalidControl);
+        }
         let invocation = self
             .active
             .get(id)
@@ -229,10 +243,8 @@ impl<F: CgroupFs, S: CloneIntoCgroup, N: NonceSource> Broker<F, S, N> {
             .active
             .get_mut(id)
             .ok_or(Error::InvalidInvocationBinding)?;
-        if active.leaf.replace(leaf).is_some() {
-            return Err(Error::InvalidControl);
-        }
-        Ok(active.nonce)
+        active.leaf = Some(leaf);
+        self.rotate(id)
     }
 
     pub fn sample(
@@ -241,7 +253,7 @@ impl<F: CgroupFs, S: CloneIntoCgroup, N: NonceSource> Broker<F, S, N> {
         id: &str,
         nonce: ControlNonce,
     ) -> Result<(CpuStat, ControlNonce), Error> {
-        self.validate_and_rotate(connection, id, nonce)?;
+        self.validate(connection, id, nonce)?;
         let (launcher, active) = (
             &mut self.launcher,
             self.active
@@ -249,7 +261,8 @@ impl<F: CgroupFs, S: CloneIntoCgroup, N: NonceSource> Broker<F, S, N> {
                 .ok_or(Error::InvalidInvocationBinding)?,
         );
         let sample = launcher.sample(active.leaf.as_ref().ok_or(Error::InvalidControl)?)?;
-        Ok((sample, active.nonce))
+        let nonce = self.rotate(id)?;
+        Ok((sample, nonce))
     }
 
     pub fn lift(
@@ -259,7 +272,7 @@ impl<F: CgroupFs, S: CloneIntoCgroup, N: NonceSource> Broker<F, S, N> {
         nonce: ControlNonce,
         fence: u64,
     ) -> Result<ControlNonce, Error> {
-        self.validate_and_rotate(connection, id, nonce)?;
+        self.validate(connection, id, nonce)?;
         let (launcher, active) = (
             &mut self.launcher,
             self.active
@@ -267,7 +280,7 @@ impl<F: CgroupFs, S: CloneIntoCgroup, N: NonceSource> Broker<F, S, N> {
                 .ok_or(Error::InvalidInvocationBinding)?,
         );
         launcher.fenced_lift(active.leaf.as_mut().ok_or(Error::InvalidControl)?, fence)?;
-        Ok(active.nonce)
+        self.rotate(id)
     }
 
     pub fn kill(
@@ -276,7 +289,7 @@ impl<F: CgroupFs, S: CloneIntoCgroup, N: NonceSource> Broker<F, S, N> {
         id: &str,
         nonce: ControlNonce,
     ) -> Result<ControlNonce, Error> {
-        self.validate_and_rotate(connection, id, nonce)?;
+        self.validate(connection, id, nonce)?;
         let (launcher, active) = (
             &mut self.launcher,
             self.active
@@ -284,7 +297,7 @@ impl<F: CgroupFs, S: CloneIntoCgroup, N: NonceSource> Broker<F, S, N> {
                 .ok_or(Error::InvalidInvocationBinding)?,
         );
         launcher.kill(active.leaf.as_mut().ok_or(Error::InvalidControl)?)?;
-        Ok(active.nonce)
+        self.rotate(id)
     }
 
     pub fn cleanup(
@@ -293,13 +306,30 @@ impl<F: CgroupFs, S: CloneIntoCgroup, N: NonceSource> Broker<F, S, N> {
         id: &str,
         nonce: ControlNonce,
     ) -> Result<(), Error> {
-        self.validate_and_rotate(connection, id, nonce)?;
-        let active = self
-            .active
-            .remove(id)
-            .ok_or(Error::InvalidInvocationBinding)?;
+        self.validate(connection, id, nonce)?;
+        let active = self.active.get(id).ok_or(Error::InvalidInvocationBinding)?;
         self.launcher
-            .remove(active.leaf.as_ref().ok_or(Error::InvalidControl)?)
+            .remove(active.leaf.as_ref().ok_or(Error::InvalidControl)?)?;
+        // A failed removal is retryable with the same nonce and binding.
+        self.active.remove(id);
+        Ok(())
+    }
+
+    pub fn wait_empty(
+        &mut self,
+        connection: ConnectionId,
+        id: &str,
+        nonce: ControlNonce,
+    ) -> Result<ControlNonce, Error> {
+        self.validate(connection, id, nonce)?;
+        let (launcher, active) = (
+            &mut self.launcher,
+            self.active
+                .get_mut(id)
+                .ok_or(Error::InvalidInvocationBinding)?,
+        );
+        launcher.wait_empty(active.leaf.as_ref().ok_or(Error::InvalidControl)?)?;
+        self.rotate(id)
     }
 
     fn require_ready_connection(&self, connection: ConnectionId) -> Result<(), Error> {
@@ -310,7 +340,8 @@ impl<F: CgroupFs, S: CloneIntoCgroup, N: NonceSource> Broker<F, S, N> {
             .then_some(())
             .ok_or(Error::InvalidWorker)
     }
-    fn validate_and_rotate(
+    /// Expected operation failures do not consume a nonce.
+    fn validate(
         &mut self,
         connection: ConnectionId,
         id: &str,
@@ -324,29 +355,40 @@ impl<F: CgroupFs, S: CloneIntoCgroup, N: NonceSource> Broker<F, S, N> {
         if active.nonce != supplied {
             return Err(Error::InvalidNonce);
         }
+        Ok(())
+    }
+    fn rotate(&mut self, id: &str) -> Result<ControlNonce, Error> {
         let replacement = self.nonces.nonce()?;
         self.active
             .get_mut(id)
             .ok_or(Error::InvalidInvocationBinding)?
             .nonce = replacement;
-        Ok(())
+        Ok(replacement)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::child::{WorkerDumpability, prepare_worker_readiness};
-    use std::collections::{BTreeSet, HashMap};
+    use crate::child::{prepare_worker_readiness, WorkerDumpability};
+    use std::{
+        cell::Cell,
+        collections::{BTreeSet, HashMap},
+        rc::Rc,
+    };
     struct Fs {
         files: HashMap<(RawFd, String), String>,
         next: RawFd,
+        events: Rc<std::cell::RefCell<String>>,
+        creates: Rc<Cell<usize>>,
     }
     impl Fs {
         fn ready() -> Self {
             Self {
                 files: HashMap::new(),
                 next: 10,
+                events: Rc::new(std::cell::RefCell::new("populated 0".into())),
+                creates: Rc::new(Cell::new(0)),
             }
         }
     }
@@ -361,6 +403,7 @@ mod tests {
         }
         fn create_direct_child(&mut self, _: &str) -> Result<RawFd, Error> {
             self.next += 1;
+            self.creates.set(self.creates.get() + 1);
             Ok(self.next)
         }
         fn write_leaf(&mut self, fd: RawFd, file: &str, value: &str) -> Result<(), Error> {
@@ -368,6 +411,9 @@ mod tests {
             Ok(())
         }
         fn read_leaf(&mut self, fd: RawFd, file: &str) -> Result<String, Error> {
+            if file == "cgroup.events" {
+                return Ok(self.events.borrow().clone());
+            }
             Ok(self
                 .files
                 .get(&(fd, file.into()))
@@ -494,6 +540,8 @@ mod tests {
             broker.lift(connection, "one", nonce, 8),
             Err(Error::FenceMismatch)
         ));
+        // A rejected fence leaves the authenticated nonce usable for a retry.
+        assert!(broker.lift(connection, "one", nonce, 9).is_ok());
     }
 
     #[test]
@@ -518,16 +566,95 @@ mod tests {
         broker
             .accept_worker_readiness(connection, readiness())
             .unwrap();
-        assert!(
-            broker
-                .begin_invocation(
-                    connection,
-                    Invocation {
-                        id: "one".into(),
-                        fence: 9
-                    }
-                )
-                .is_ok()
-        );
+        assert!(broker
+            .begin_invocation(
+                connection,
+                Invocation {
+                    id: "one".into(),
+                    fence: 9
+                }
+            )
+            .is_ok());
+    }
+
+    #[test]
+    fn duplicate_create_does_not_clone_or_replace_the_active_leaf() {
+        let fs = Fs::ready();
+        let creates = Rc::clone(&fs.creates);
+        let launcher =
+            Launcher::new(fs, Clone, crate::LauncherConfig::new(None, 0).unwrap()).unwrap();
+        let mut broker = Broker::new(
+            launcher,
+            BrokerConfig::worker(42, b"private".to_vec()).unwrap(),
+            Nonces(0),
+        )
+        .unwrap();
+        let peer = FakePeer(UnixPeer {
+            pid: 42,
+            uid: 1000,
+            gid: 1000,
+        });
+        let connection = broker.authenticate(&peer, b"private").unwrap();
+        broker
+            .accept_worker_readiness(connection, readiness())
+            .unwrap();
+        let nonce = broker
+            .begin_invocation(
+                connection,
+                Invocation {
+                    id: "one".into(),
+                    fence: 9,
+                },
+            )
+            .unwrap();
+        let nonce = broker.create(connection, "one", nonce, "first").unwrap();
+        assert_eq!(creates.get(), 1);
+        assert!(matches!(
+            broker.create(connection, "one", nonce, "second"),
+            Err(Error::InvalidControl)
+        ));
+        assert_eq!(creates.get(), 1);
+        // The rejected operation leaves both the nonce and leaf binding intact.
+        assert!(broker.sample(connection, "one", nonce).is_ok());
+    }
+
+    #[test]
+    fn failed_cleanup_retains_binding_for_retry() {
+        let fs = Fs::ready();
+        let events = Rc::clone(&fs.events);
+        *events.borrow_mut() = "populated 1".into();
+        let launcher =
+            Launcher::new(fs, Clone, crate::LauncherConfig::new(None, 0).unwrap()).unwrap();
+        let mut broker = Broker::new(
+            launcher,
+            BrokerConfig::worker(42, b"private".to_vec()).unwrap(),
+            Nonces(0),
+        )
+        .unwrap();
+        let peer = FakePeer(UnixPeer {
+            pid: 42,
+            uid: 1000,
+            gid: 1000,
+        });
+        let connection = broker.authenticate(&peer, b"private").unwrap();
+        broker
+            .accept_worker_readiness(connection, readiness())
+            .unwrap();
+        let nonce = broker
+            .begin_invocation(
+                connection,
+                Invocation {
+                    id: "one".into(),
+                    fence: 9,
+                },
+            )
+            .unwrap();
+        let nonce = broker.create(connection, "one", nonce, "leaf").unwrap();
+        assert!(matches!(
+            broker.cleanup(connection, "one", nonce),
+            Err(Error::StillPopulated)
+        ));
+        *events.borrow_mut() = "populated 0".into();
+        assert!(broker.cleanup(connection, "one", nonce).is_ok());
     }
 }
