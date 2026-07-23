@@ -1089,10 +1089,10 @@ impl CoordinatorActor {
             source.refresh().await;
         }
         #[cfg(not(test))]
-        if let Some(source) = self.retrieval_health_source.as_ref() {
-            if let Err(error) = source.refresh().await {
-                tracing::warn!(error = %error, "retrieval health refresh failed; stale resolvers suppressed");
-            }
+        if let Some(source) = self.retrieval_health_source.as_ref()
+            && let Err(error) = source.refresh().await
+        {
+            tracing::warn!(error = %error, "retrieval health refresh failed; stale resolvers suppressed");
         }
         let doctor_run_id = format!("leader-tick-{}", self.prune_tick_counter.wrapping_add(1));
         crate::doctor::leader_tick::run_cheap_doctor_checks(
