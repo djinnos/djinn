@@ -10,8 +10,14 @@ use djinn_control_plane::tools::proposal_readiness::{
 use djinn_core::models::{
     Proposal, ProposalDebateTrail, TaskRefinementCorrelation, TransitionAction,
 };
+use djinn_core::refinement_liveness::{
+    RefinementParkKind, RefinementPhase as DurableRefinementPhase, RefinementRole,
+    RefinementStopReason,
+};
 use djinn_db::{
-    EffectiveCreatorProvenance, ProposalRepository, TaskRepository, UserSettingsRepository,
+    CompleteRefinementIntentRequest, EffectiveCreatorProvenance, LoadRefinementRunSnapshotRequest,
+    ParkRefinementRunRequest, ProposalRepository, TaskRepository, TerminalRefinementRunRequest,
+    UserSettingsRepository,
 };
 
 use super::refinement::{
@@ -47,6 +53,49 @@ pub(super) fn entry_in_current_run(entry: &ProposalDebateTrail, run_start: Optio
     match run_start {
         Some(start) => entry.created_at.as_str() > start,
         None => true,
+    }
+}
+
+fn durable_phase(phase: RefinementPhase) -> Option<DurableRefinementPhase> {
+    match phase {
+        RefinementPhase::AdversaryAttack => Some(DurableRefinementPhase::AdversaryAttack),
+        RefinementPhase::AdvocateRevision => Some(DurableRefinementPhase::AdvocateRevision),
+        RefinementPhase::JudgeAdjudication => Some(DurableRefinementPhase::JudgeAdjudication),
+        RefinementPhase::AwaitingHumanReview
+        | RefinementPhase::AwaitingEvidence
+        | RefinementPhase::Complete => None,
+    }
+}
+
+fn durable_role(role: &str) -> Option<RefinementRole> {
+    match role {
+        "adversary" => Some(RefinementRole::Adversary),
+        "advocate" => Some(RefinementRole::Advocate),
+        "judge" => Some(RefinementRole::Judge),
+        _ => None,
+    }
+}
+
+fn typed_stop_reason(reason: &StopReason) -> RefinementStopReason {
+    match reason {
+        StopReason::AdversaryDry => RefinementStopReason::AdversaryDry,
+        StopReason::RoundCap => RefinementStopReason::RoundCap,
+        StopReason::SpawnCap => RefinementStopReason::SpawnCap,
+        StopReason::RepeatedObjection {
+            signature,
+            occurrences,
+        } => RefinementStopReason::RepeatedObjection {
+            signature: signature.clone(),
+            occurrences: *occurrences as u64,
+        },
+        StopReason::AgentFailure { role, error } => RefinementStopReason::AgentFailure {
+            role: durable_role(role).unwrap_or(RefinementRole::Advocate),
+            error_code: "coordinator_agent_failure".into(),
+            message: error.clone(),
+        },
+        StopReason::HumanAccepted => RefinementStopReason::HumanAccepted,
+        StopReason::HumanRejected => RefinementStopReason::HumanRejected,
+        StopReason::Interrupted => RefinementStopReason::Interrupted { detail: None },
     }
 }
 
@@ -110,6 +159,14 @@ impl CoordinatorActor {
         // The projection is keyed by the durable run. The proposal identity is
         // payload data used only for proposal/lifecycle repository operations.
         let proposal_id = state.proposal_id.clone();
+        // A durable task is authoritative only when its exact task correlation
+        // still names this run/generation/phase.  Reload before reading or
+        // appending outcome evidence so a delayed predecessor cannot keep a
+        // newer generation alive.
+        let durable_intent = match self.fence_durable_outcome(&state, session).await {
+            Ok(intent) => intent,
+            Err(()) => return,
+        };
 
         match session.phase {
             RefinementPhase::AdvocateRevision => {
@@ -127,6 +184,172 @@ impl CoordinatorActor {
             RefinementPhase::AwaitingHumanReview
             | RefinementPhase::AwaitingEvidence
             | RefinementPhase::Complete => {}
+        }
+
+        if let Some(intent_id) = durable_intent {
+            self.complete_durable_outcome(run_id, &state, &intent_id)
+                .await;
+        }
+    }
+
+    async fn fence_durable_outcome(
+        &self,
+        state: &RefinementLoopState,
+        session: &RefinementSession,
+    ) -> Result<Option<String>, ()> {
+        if state.run_id.is_empty()
+            || session.run_id != state.run_id
+            || session.generation != state.generation
+        {
+            return Ok(None);
+        }
+        let task = match TaskRepository::new(
+            self.db.clone(),
+            crate::events::event_bus_for(&self.events_tx),
+        )
+        .get(&session.task_id)
+        .await
+        {
+            Ok(Some(task)) => task,
+            // Compatibility sessions predate intent correlation and cannot use
+            // the durable mutators.
+            Ok(None) => return Ok(None),
+            Err(error) => {
+                tracing::warn!(task_id = %session.task_id, %error, "failed to reload refinement task");
+                return Err(());
+            }
+        };
+        let Some(intent_id) = task.refinement_intent_id else {
+            return Ok(None);
+        };
+        let expected_phase = match durable_phase(session.phase) {
+            Some(DurableRefinementPhase::AdversaryAttack) => Some("adversary_attack"),
+            Some(DurableRefinementPhase::AdvocateRevision) => Some("advocate_revision"),
+            Some(DurableRefinementPhase::JudgeAdjudication) => Some("judge_adjudication"),
+            None => None,
+        };
+        let expected_role = match session.phase {
+            RefinementPhase::AdversaryAttack => Some("adversary"),
+            RefinementPhase::AdvocateRevision => Some("advocate"),
+            RefinementPhase::JudgeAdjudication => Some("judge"),
+            _ => None,
+        };
+        let valid_task = task.refinement_run_id.as_deref() == Some(state.run_id.as_str())
+            && task.refinement_generation == Some(i64::from(state.generation))
+            && task.refinement_round == Some(i64::from(state.current_round))
+            && task.refinement_phase.as_deref() == expected_phase.as_deref()
+            && task.refinement_role.as_deref() == expected_role;
+        if !valid_task {
+            tracing::debug!(run_id = %state.run_id, task_id = %session.task_id,
+                "ignored stale or malformed correlated refinement outcome");
+            return Err(());
+        }
+        let repo = ProposalRepository::new(
+            self.db.clone(),
+            crate::events::event_bus_for(&self.events_tx),
+        );
+        match repo
+            .load_refinement_run_snapshot(LoadRefinementRunSnapshotRequest {
+                run_id: state.run_id.clone(),
+                heartbeat_grace_millis: 60_000,
+            })
+            .await
+        {
+            Ok(Some(snapshot)) if snapshot.generation == state.generation => Ok(Some(intent_id)),
+            Ok(_) => Err(()),
+            Err(error) => {
+                tracing::warn!(run_id = %state.run_id, %error, "failed to fence refinement outcome generation");
+                Err(())
+            }
+        }
+    }
+
+    async fn complete_durable_outcome(
+        &mut self,
+        run_id: &str,
+        source: &RefinementLoopState,
+        intent_id: &str,
+    ) {
+        let Some(next) = self.active_refinements.get(run_id).cloned() else {
+            return;
+        };
+        let repo = ProposalRepository::new(
+            self.db.clone(),
+            crate::events::event_bus_for(&self.events_tx),
+        );
+        let progress = match source.phase {
+            RefinementPhase::AdversaryAttack => djinn_db::RefinementDurableProgress::DebateAppend,
+            RefinementPhase::JudgeAdjudication => {
+                djinn_db::RefinementDurableProgress::VerdictAppend
+            }
+            _ => djinn_db::RefinementDurableProgress::TaskStarted,
+        };
+        if repo
+            .record_refinement_durable_progress(run_id, source.generation, progress)
+            .await
+            .is_err()
+        {
+            return;
+        }
+        if let Some(next_phase) = durable_phase(next.phase) {
+            let next_role = match next_phase {
+                DurableRefinementPhase::AdversaryAttack => RefinementRole::Adversary,
+                DurableRefinementPhase::AdvocateRevision => RefinementRole::Advocate,
+                DurableRefinementPhase::JudgeAdjudication => RefinementRole::Judge,
+            };
+            let next_round = next.current_round;
+            let result = repo
+                .complete_refinement_intent(CompleteRefinementIntentRequest {
+                    run_id: run_id.into(),
+                    intent_id: intent_id.into(),
+                    generation: source.generation,
+                    owner: format!("coordinator:{}", self.coordinator_incarnation_id),
+                    next_round,
+                    next_phase,
+                    next_role,
+                    next_idempotency_key: format!(
+                        "{run_id}/{next_round}/{next_phase:?}/{next_role:?}"
+                    ),
+                })
+                .await;
+            if let Err(error) = result {
+                tracing::warn!(run_id, %error, "durable refinement completion rejected outcome");
+            }
+            return;
+        }
+        let result = match next.phase {
+            RefinementPhase::AwaitingHumanReview => repo
+                .park_refinement_run(ParkRefinementRunRequest {
+                    run_id: run_id.into(),
+                    generation: source.generation,
+                    kind: RefinementParkKind::AwaitingReview,
+                })
+                .await
+                .map(|_| ()),
+            RefinementPhase::AwaitingEvidence => repo
+                .park_refinement_run(ParkRefinementRunRequest {
+                    run_id: run_id.into(),
+                    generation: source.generation,
+                    kind: RefinementParkKind::AwaitingEvidence,
+                })
+                .await
+                .map(|_| ()),
+            RefinementPhase::Complete => repo
+                .terminal_refinement_run(TerminalRefinementRunRequest {
+                    run_id: run_id.into(),
+                    generation: source.generation,
+                    reason: typed_stop_reason(
+                        next.stop_reason
+                            .as_ref()
+                            .unwrap_or(&StopReason::Interrupted),
+                    ),
+                })
+                .await
+                .map(|_| ()),
+            _ => Ok(()),
+        };
+        if let Err(error) = result {
+            tracing::warn!(run_id, %error, "durable refinement terminal transition rejected outcome");
         }
     }
 
@@ -585,17 +808,29 @@ impl CoordinatorActor {
     /// Terminate a refinement loop keyed by its exact durable run. Lifecycle
     /// persistence retains the proposal ID carried in the projection.
     pub(super) async fn terminate_refinement(&mut self, run_id: &str, reason: StopReason) {
-        let Some(proposal_id) = self
-            .active_refinements
-            .get(run_id)
-            .map(|state| state.proposal_id.clone())
-        else {
+        let Some(state) = self.active_refinements.get(run_id).cloned() else {
             return;
         };
         if let Some(state) = self.active_refinements.get_mut(run_id) {
             state.terminate(reason.clone());
         }
-        self.persist_refinement_stop(&proposal_id, &reason).await;
+        if !state.run_id.is_empty() {
+            let repo = ProposalRepository::new(
+                self.db.clone(),
+                crate::events::event_bus_for(&self.events_tx),
+            );
+            if let Err(error) = repo
+                .terminal_refinement_run(TerminalRefinementRunRequest {
+                    run_id: state.run_id.clone(),
+                    generation: state.generation,
+                    reason: typed_stop_reason(&reason),
+                })
+                .await
+            {
+                tracing::warn!(run_id = %state.run_id, %error,
+                    "durable refinement terminal transition rejected stop");
+            }
+        }
         self.refinement_sessions.remove(run_id);
     }
 
@@ -761,26 +996,14 @@ impl CoordinatorActor {
 
     /// Persist refinement-stop lifecycle metadata.
     pub(super) async fn persist_refinement_stop(&self, proposal_id: &str, reason: &StopReason) {
-        let event_bus = crate::events::event_bus_for(&self.events_tx);
-        let proposal_repo = ProposalRepository::new(self.db.clone(), event_bus);
-
-        let stop_meta = serde_json::json!({
-            "source": "refinement_loop",
-            "event": "refinement_stop",
-            "reason_tag": reason.tag(),
-            "reason_detail": format!("{reason:?}"),
-        });
-
-        if let Err(e) = proposal_repo
-            .record_refinement_lifecycle(proposal_id, "refinement_stop", Some(&stop_meta))
-            .await
-        {
-            tracing::warn!(
-                proposal_id = %proposal_id,
-                error = %e,
-                "Failed to persist refinement_stop lifecycle metadata"
-            );
-        }
+        // Legacy callers do not carry an exact run/generation and therefore
+        // cannot safely mutate durable lifecycle state.  In particular, do not
+        // create a proposal-scoped stop row: it could overwrite a newer run.
+        tracing::debug!(
+            proposal_id,
+            ?reason,
+            "ignored uncorrelated refinement stop; exact-run terminal transition is required"
+        );
     }
 
     /// Read the `diverse_refinement` user setting for the proposal's owner.

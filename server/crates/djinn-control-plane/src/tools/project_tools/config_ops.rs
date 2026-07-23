@@ -727,8 +727,8 @@ mod tests {
             ),
             (
                 |config| {
-                    config["lifecycle"]["final_verification"]["selection_rules"][0]
-                        ["command_groups"] = json!(["missing"]);
+                    config["lifecycle"]["final_verification"]["selection_rules"][0]["command_groups"] =
+                        json!(["missing"]);
                 },
                 "validate: lifecycle.final_verification.selection_rules[0].command_groups: value \"missing\" contains disallowed characters (allowed: [A-Za-z0-9._-])",
             ),
@@ -757,7 +757,8 @@ mod tests {
         let project_id = seed_project(&db).await;
         let server = test_server(db).await;
 
-        let set = set_environment_config(&server, &project_id, grouped_final_verification_config()).await;
+        let set =
+            set_environment_config(&server, &project_id, grouped_final_verification_config()).await;
         assert_eq!(set["status"], "ok", "set failed: {set}");
         let get = server
             .dispatch_tool(
@@ -771,7 +772,10 @@ mod tests {
         assert_eq!(plan["command_groups"][0]["name"], "rust");
         assert_eq!(plan["command_groups"][1]["name"], "web");
         assert_eq!(plan["selection_rules"][0]["match"], json!(["server/**"]));
-        assert_eq!(plan["selection_rules"][1]["command_groups"], json!(["rust", "web"]));
+        assert_eq!(
+            plan["selection_rules"][1]["command_groups"],
+            json!(["rust", "web"])
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
