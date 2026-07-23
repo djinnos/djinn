@@ -74,10 +74,7 @@ impl RetrievalHealthPublication {
 
     fn refresh_failure_evidence(&self) -> Option<serde_json::Value> {
         let error = self.refresh_error()?;
-        let attempted_at = (*self
-            .last_attempt
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()))?;
+        let attempted_at = (*self.last_attempt.lock().unwrap_or_else(|e| e.into_inner()))?;
         let last_success = *self.last_success.lock().unwrap_or_else(|e| e.into_inner());
         Some(
             serde_json::json!({"error_class":"retrieval_health_refresh_failed","attempted_at":attempted_at.format(&Iso8601::DEFAULT).ok(),"last_success_at":last_success.and_then(|at| at.format(&Iso8601::DEFAULT).ok()),"last_success_age_seconds":last_success.map(|at| (attempted_at-at).whole_seconds()),"detail":error.chars().take(512).collect::<String>()}),

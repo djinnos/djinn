@@ -728,10 +728,7 @@ mod tests {
         let initial = repo
             .reconcile_retrieval_findings(
                 vec![
-                    keyed_retrieval_finding(
-                        "memory.retrieval_zero_result",
-                        "project-a:dispatch",
-                    ),
+                    keyed_retrieval_finding("memory.retrieval_zero_result", "project-a:dispatch"),
                     keyed_retrieval_finding(
                         "memory.injection_starvation",
                         "project-a:load_knowledge_context",
@@ -805,5 +802,4 @@ mod tests {
             );
         }
     }
-
 }

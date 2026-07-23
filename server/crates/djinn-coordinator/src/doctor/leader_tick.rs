@@ -473,17 +473,19 @@ mod tests {
                         "last_success_age_seconds": 120,
                         "detail": "injected repository refresh failure",
                     });
-                    Ok(vec![Finding::new(
-                        FindingSeverity::Error,
-                        self.name,
-                        ResolverSnapshot::new(
-                            "retrieval_health_refresh",
-                            evidence.clone(),
-                            json!({"healthy": false}),
-                        ),
-                        "injected repository refresh failure",
-                    )
-                    .with_evidence(evidence)])
+                    Ok(vec![
+                        Finding::new(
+                            FindingSeverity::Error,
+                            self.name,
+                            ResolverSnapshot::new(
+                                "retrieval_health_refresh",
+                                evidence.clone(),
+                                json!({"healthy": false}),
+                            ),
+                            "injected repository refresh failure",
+                        )
+                        .with_evidence(evidence),
+                    ])
                 } else {
                     Ok(Vec::new())
                 };
@@ -503,23 +505,25 @@ mod tests {
             } else {
                 ("project-a:load_knowledge_context", "load_knowledge_context")
             };
-            Ok(vec![Finding::new(
-                FindingSeverity::Error,
-                self.name,
-                ResolverSnapshot::new(
-                    "retrieval_alarm",
-                    json!({"refresh_timestamp": "2026-01-01T01:00:00Z"}),
-                    json!({"alarming": true}),
-                ),
-                format!("{entry_point} retrieval alarm"),
-            )
-            .with_entity_id("finding_key", finding_key)
-            .with_entity_id("project_id", "project-a")
-            .with_entity_id("entry_point", entry_point)
-            .with_evidence(json!({
-                "refresh_timestamp": "2026-01-01T01:00:00Z",
-                "entry_point": entry_point,
-            }))])
+            Ok(vec![
+                Finding::new(
+                    FindingSeverity::Error,
+                    self.name,
+                    ResolverSnapshot::new(
+                        "retrieval_alarm",
+                        json!({"refresh_timestamp": "2026-01-01T01:00:00Z"}),
+                        json!({"alarming": true}),
+                    ),
+                    format!("{entry_point} retrieval alarm"),
+                )
+                .with_entity_id("finding_key", finding_key)
+                .with_entity_id("project_id", "project-a")
+                .with_entity_id("entry_point", entry_point)
+                .with_evidence(json!({
+                    "refresh_timestamp": "2026-01-01T01:00:00Z",
+                    "entry_point": entry_point,
+                })),
+            ])
         }
     }
 
@@ -1164,5 +1168,4 @@ mod tests {
             "resolved"
         );
     }
-
 }
