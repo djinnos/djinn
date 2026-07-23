@@ -2,6 +2,7 @@
 
 use std::sync::{Arc, Mutex};
 
+use djinn_core::clock::{Clock, SystemClock};
 use djinn_core::doctor::checks::retrieval::{
     InjectionStarvationCheck, RETRIEVAL_TAXONOMY_V1, TaxonomyV1DispositionHistogram,
     TaxonomyV1InvalidGroupSnapshot, TaxonomyV1QueryCounters, TaxonomyV1RetrievalSnapshot,
@@ -130,6 +131,7 @@ impl RetrievalHealthSource {
     }
 
     pub async fn refresh(&self) -> Result<(), String> {
+        let started = SystemClock::new().now_instant();
         *self
             .publication
             .last_attempt
@@ -151,7 +153,29 @@ impl RetrievalHealthSource {
             (Err(error), _, _) | (_, Err(error), _) => Err(error),
             (_, _, None) => Err("test retrieval-health initial refresh failure".to_owned()),
         };
-        self.publication.finish(groups.and_then(map_groups))
+        let result = self.publication.finish(groups.and_then(map_groups));
+        let now = OffsetDateTime::now_utc();
+        let last_success_age_seconds = (*self
+            .publication
+            .last_success
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()))
+        .map_or(0.0, |success| (now - success).as_seconds_f64().max(0.0));
+        djinn_telemetry::doctor::record_retrieval_refresh(
+            if result.is_ok() { "success" } else { "failure" },
+            started.elapsed(),
+            last_success_age_seconds,
+        );
+        result
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_attempted_refresh(&self) -> bool {
+        self.publication
+            .last_attempt
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some()
     }
 
     fn refresh_error(&self) -> Option<String> {
