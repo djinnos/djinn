@@ -62,6 +62,8 @@ pub mod environment;
 pub mod events;
 pub mod file_time;
 pub mod github_error_render;
+/// Adapter that gives graph warming the same v1 FIFO service as task consumers.
+pub mod graph_warm_lease;
 pub mod output_stash;
 
 /// Terminalize the worker's in-flight attempt (and record a durable `reopened`

@@ -10,6 +10,9 @@ use djinn_core::clock::{Clock, SystemClock};
 use async_trait::async_trait;
 use djinn_db::{Database, ProjectRepository, RepoGraphCacheRepository};
 use djinn_runtime::{GraphWarmerService, TaskrunJobRef, WarmerError};
+use djinn_supervisor::services::{
+    GraphWarmLeaseIdentity, LeaseDeadlines, LeaseFencingToken, LeaseGrant,
+};
 use k8s_openapi::api::batch::v1::Job;
 use kube::api::{Api, ListParams, PostParams};
 use tokio::sync::{Mutex, Notify};
@@ -17,9 +20,9 @@ use tracing::{debug, info, warn};
 
 use crate::config::KubernetesConfig;
 use crate::graph_warmer_identity::{
-    deterministic_warm_job_name, stamp_admission_identity, warm_work_id,
+    LeasedWarmJobIdentity, deterministic_warm_job_name, stamp_admission_identity, warm_work_id,
 };
-use crate::warm_job::{LABEL_PROJECT_ID, LABEL_WARM, build_warm_job};
+use crate::warm_job::{LABEL_PROJECT_ID, LABEL_WARM, build_leased_warm_job, build_warm_job};
 
 /// Warm Job manifest accepted by [`WarmJobDispatcher`].
 ///
@@ -27,6 +30,48 @@ use crate::warm_job::{LABEL_PROJECT_ID, LABEL_WARM, build_warm_job};
 /// on Kubernetes crates; ownership of those capability dependencies remains in
 /// `djinn-k8s`.
 pub type WarmJobManifest = Job;
+
+/// A fencing grant acquired from the coordinator-owned v1 build FIFO.
+/// The warmer receives this capability rather than a local counter so graph
+/// warming and task invocation use the same durable authority.
+#[derive(Clone, Debug)]
+pub struct GraphWarmLeaseGrant {
+    pub identity: GraphWarmLeaseIdentity,
+    pub grant: LeaseGrant,
+}
+
+/// Typed v1 lease outcomes that must be handled before Kubernetes create.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum GraphWarmLeaseError {
+    #[error("graph warm lease is queued")]
+    Queued,
+    #[error("graph warm lease timed out")]
+    Timeout,
+    #[error("graph warm lease service unavailable")]
+    Unavailable,
+    #[error("graph warm lease rejected: {0}")]
+    Rejected(String),
+}
+
+/// Data-only bridge to the coordinator's durable graph-warm protocol.
+/// `acquire` persists and queues the stable identity, then acknowledges the
+/// fencing grant into Launching before it returns. `bind` is idempotent and
+/// recovers a lost bind response through durable status.
+#[async_trait]
+pub trait GraphWarmLease: Send + Sync {
+    async fn acquire(
+        &self,
+        identity: GraphWarmLeaseIdentity,
+        deadlines: LeaseDeadlines,
+    ) -> Result<GraphWarmLeaseGrant, GraphWarmLeaseError>;
+
+    async fn bind(
+        &self,
+        identity: &GraphWarmLeaseIdentity,
+        fencing_token: LeaseFencingToken,
+        pod_uid: String,
+    ) -> Result<(), GraphWarmLeaseError>;
+}
 
 mod warm_admission;
 pub use warm_admission::{
@@ -379,6 +424,9 @@ struct WarmDispatch {
     /// Coordinator-owned admission boundary. Its absence means build admission
     /// is Off, so warm Jobs bypass admission while retaining normal dispatch.
     admission: Option<Arc<dyn WarmAdmission>>,
+    /// v1 durable FIFO bridge. When configured it fences create with a shared
+    /// graph-warm/task-invocation lease instead of the legacy v0 controller.
+    lease: Option<Arc<dyn GraphWarmLease>>,
     /// Cluster-side dedupe: lists non-terminal warm Jobs for a project so
     /// triggers from any process can coalesce against in-flight Jobs created
     /// by any other process (rolling update overlap, server restart mid-warm,
@@ -617,16 +665,66 @@ impl WarmDispatch {
         };
 
         let admission_request = self.admission_request(project_id).await;
-        let mut job = build_warm_job(
-            &self.config,
-            project_id,
-            &image_tag,
-            cargo_cache_policy.as_ref(),
-        );
+        let lease_grant = if let Some(lease) = self.lease.as_ref() {
+            let revision = discover_mirror_main_tip(project_id)
+                .await
+                .unwrap_or_else(|| "unknown".to_string());
+            let now_ms =
+                (time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000) as i64;
+            let deadline_ms =
+                now_ms.saturating_add(self.config.warm_job_timeout_seconds.saturating_mul(1_000));
+            let identity = GraphWarmLeaseIdentity {
+                project_id: project_id.to_string(),
+                // The request id is deterministic from the immutable revision
+                // work key, so a lost create response queues/reuses one row.
+                warm_request_id: admission_request.work_id.clone(),
+                graph_revision: revision,
+            };
+            match lease
+                .acquire(
+                    identity,
+                    LeaseDeadlines {
+                        queue_deadline_ms: deadline_ms,
+                        launch_deadline_ms: deadline_ms,
+                    },
+                )
+                .await
+            {
+                Ok(grant) => Some(grant),
+                Err(error) => {
+                    warn!(project_id, error = %error, "K8sGraphWarmer: v1 lease did not authorize Job POST");
+                    self.schedule_admission_retry(project_id, notify.clone());
+                    return;
+                }
+            }
+        } else {
+            None
+        };
+        let mut job = match lease_grant.as_ref() {
+            Some(grant) => build_leased_warm_job(
+                &self.config,
+                project_id,
+                &image_tag,
+                cargo_cache_policy.as_ref(),
+                &LeasedWarmJobIdentity::new(
+                    project_id,
+                    grant.identity.warm_request_id.clone(),
+                    grant.identity.graph_revision.clone(),
+                    grant.grant.fencing_token.0,
+                ),
+            ),
+            None => build_warm_job(
+                &self.config,
+                project_id,
+                &image_tag,
+                cargo_cache_policy.as_ref(),
+            ),
+        };
         stamp_admission_identity(&mut job, &admission_request);
         let namespace = self.config.namespace.clone();
-        let permit = match self.admission.as_ref() {
-            Some(admission) => match admission.admit(admission_request).await {
+        let permit = match (lease_grant.as_ref(), self.admission.as_ref()) {
+            (Some(_), _) => None,
+            (None, Some(admission)) => match admission.admit(admission_request).await {
                 Ok(permit) => {
                     if let Err(error) = admission
                         .transition(&permit, WarmAdmissionTransition::CreateStarted)
@@ -644,7 +742,7 @@ impl WarmDispatch {
                     return;
                 }
             },
-            None => None,
+            (None, None) => None,
         };
         let job_name = match self.dispatcher.dispatch(&namespace, job).await {
             Ok(name) => name,
@@ -858,6 +956,7 @@ impl K8sGraphWarmer {
                 dispatcher,
                 watcher,
                 admission: mock_warm_admission(),
+                lease: None,
                 lister,
                 completion_sink: None,
                 in_flight: Arc::new(Mutex::new(HashMap::new())),
@@ -889,6 +988,14 @@ impl K8sGraphWarmer {
     #[must_use]
     pub fn with_warm_admission(mut self, admission: Arc<dyn WarmAdmission>) -> Self {
         self.dispatch.admission = Some(admission);
+        self
+    }
+
+    /// Attach the coordinator v1 durable FIFO. This takes precedence over the
+    /// legacy v0 admission seam without deleting that seam for the cutover epic.
+    #[must_use]
+    pub fn with_graph_warm_lease(mut self, lease: Arc<dyn GraphWarmLease>) -> Self {
+        self.dispatch.lease = Some(lease);
         self
     }
 
