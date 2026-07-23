@@ -258,3 +258,132 @@ async fn whole_refresh_failure_preserves_keyed_alarms_and_recovers() {
         payload["evidence"].is_object() && payload["resolver_snapshot"].is_object()
     }));
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn named_manual_failure_preserves_alarms_and_reconciles_hidden_refresh_check() {
+    let _ = djinn_telemetry::init();
+    let db = fresh_db();
+    let (events_tx, _events_rx) = broadcast::channel(16);
+    let phase = Arc::new(AtomicUsize::new(0));
+    let zero_invocations = Arc::new(AtomicUsize::new(0));
+    let starvation_invocations = Arc::new(AtomicUsize::new(0));
+    let registry = DoctorRegistry::new();
+    for (name, invocations) in [
+        (
+            "memory.retrieval_zero_result",
+            Arc::clone(&zero_invocations),
+        ),
+        (
+            "memory.injection_starvation",
+            Arc::clone(&starvation_invocations),
+        ),
+        (
+            "memory.retrieval_health_refresh",
+            Arc::new(AtomicUsize::new(0)),
+        ),
+    ] {
+        djinn_core::doctor::register(
+            &registry,
+            LifecycleRetrievalCheck::new(name, Arc::clone(&phase), invocations),
+        );
+    }
+
+    run_cheap_doctor_checks(&registry, &db, &events_tx, Some("initial-alarms")).await;
+    let repo = DoctorFindingRepository::new(db.clone());
+    let zero_before = repo
+        .latest_for_check("memory.retrieval_zero_result")
+        .await
+        .expect("load zero alarm")
+        .expect("zero alarm exists");
+    let starvation_before = repo
+        .latest_for_check("memory.injection_starvation")
+        .await
+        .expect("load starvation alarm")
+        .expect("starvation alarm exists");
+    let selected = vec!["memory.retrieval_zero_result".to_owned()];
+
+    // The public result is selected-only, while the failed outcome makes the
+    // unselected refresh check participate in reconciliation internally.
+    phase.store(1, Ordering::SeqCst);
+    let failed_runs = run_cheap_doctor_checks_with_preserved_retrieval_keys_inner(
+        &registry,
+        &db,
+        &events_tx,
+        Some("named-failure"),
+        &[],
+        Some(&selected),
+        Some(RetrievalRefreshOutcome::Failed),
+    )
+    .await;
+    assert_eq!(
+        failed_runs
+            .iter()
+            .map(|run| run.check_name)
+            .collect::<Vec<_>>(),
+        vec!["memory.retrieval_zero_result"],
+        "the internal refresh diagnostic must not leak into the named response",
+    );
+    assert_eq!(
+        repo.get(&zero_before.id).await.expect("reload zero"),
+        Some(zero_before.clone()),
+        "a failed refresh must preserve the selected alarm byte-for-byte",
+    );
+    assert_eq!(
+        repo.get(&starvation_before.id)
+            .await
+            .expect("reload starvation"),
+        Some(starvation_before.clone()),
+        "unselected retrieval alarms must remain preserved",
+    );
+    let refresh = repo
+        .latest_for_check("memory.retrieval_health_refresh")
+        .await
+        .expect("load refresh error")
+        .expect("refresh error created");
+    assert_eq!(refresh.severity, "error");
+    assert_eq!(zero_invocations.load(Ordering::SeqCst), 1);
+    assert_eq!(starvation_invocations.load(Ordering::SeqCst), 1);
+
+    // A later successful request owns and resolves the refresh diagnostic, but
+    // continues to preserve the unselected starvation row.
+    phase.store(2, Ordering::SeqCst);
+    let healthy_runs = run_cheap_doctor_checks_with_preserved_retrieval_keys_inner(
+        &registry,
+        &db,
+        &events_tx,
+        Some("named-recovery"),
+        &[],
+        Some(&selected),
+        Some(RetrievalRefreshOutcome::Healthy),
+    )
+    .await;
+    assert_eq!(
+        healthy_runs
+            .iter()
+            .map(|run| run.check_name)
+            .collect::<Vec<_>>(),
+        vec!["memory.retrieval_zero_result"],
+    );
+    assert_eq!(
+        repo.get(&zero_before.id)
+            .await
+            .expect("reload resolved zero")
+            .expect("zero row retained")
+            .status,
+        "resolved",
+    );
+    assert_eq!(
+        repo.get(&refresh.id)
+            .await
+            .expect("reload resolved refresh")
+            .expect("refresh row retained")
+            .status,
+        "resolved",
+    );
+    assert_eq!(
+        repo.get(&starvation_before.id)
+            .await
+            .expect("reload preserved starvation"),
+        Some(starvation_before),
+    );
+}

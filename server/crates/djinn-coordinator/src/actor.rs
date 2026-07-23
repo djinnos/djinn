@@ -1390,6 +1390,8 @@ impl CoordinatorActor {
                 run_id,
                 reply,
             } => {
+                #[cfg(test)]
+                let _ = (&check_names, &run_id);
                 #[cfg(not(test))]
                 let result = crate::doctor::leader_tick::run_manual_retrieval_refresh_and_checks(
                     self.retrieval_health_source.as_ref(),

@@ -419,11 +419,22 @@ pub async fn run_manual_retrieval_refresh_and_checks(
     let Some(source) = source else {
         return Err("coordinator retrieval health source is not initialized".to_owned());
     };
-    if let Err(error) = source.refresh().await {
-        warn!(error = %error, "retrieval health refresh failed; stale resolvers suppressed");
-    }
-    let malformed_retrieval_keys =
-        crate::doctor::retrieval_health::malformed_retrieval_alarm_keys(&source.snapshot());
+    let refresh_outcome = match source.refresh().await {
+        Ok(()) => RetrievalRefreshOutcome::Healthy,
+        Err(error) => {
+            warn!(error = %error, "retrieval health refresh failed; stale resolvers suppressed");
+            RetrievalRefreshOutcome::Failed
+        }
+    };
+    let malformed_retrieval_keys = match refresh_outcome {
+        RetrievalRefreshOutcome::Healthy => {
+            crate::doctor::retrieval_health::malformed_retrieval_alarm_keys(&source.snapshot())
+        }
+        // A failed refresh leaves the prior snapshot intact. Its malformed
+        // groups are stale too, so whole-refresh preservation below owns the
+        // reconciliation contract instead of deriving keys from that snapshot.
+        RetrievalRefreshOutcome::Failed => Vec::new(),
+    };
     Ok(run_cheap_doctor_checks_with_preserved_retrieval_keys_inner(
         registry,
         db,
@@ -431,6 +442,7 @@ pub async fn run_manual_retrieval_refresh_and_checks(
         run_id,
         &malformed_retrieval_keys,
         Some(check_names),
+        Some(refresh_outcome),
     )
     .await)
 }
@@ -452,8 +464,20 @@ pub async fn run_cheap_doctor_checks_with_preserved_retrieval_keys(
         run_id,
         malformed_retrieval_keys,
         None,
+        None,
     )
     .await
+}
+
+/// The result of the one source refresh owned by a manual invocation.
+///
+/// This is deliberately separate from the selected check runs: a named
+/// request may omit the refresh-health check, but a failed source refresh is
+/// still indeterminate for every retrieval alarm and must reconcile its error.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RetrievalRefreshOutcome {
+    Healthy,
+    Failed,
 }
 
 async fn run_cheap_doctor_checks_with_preserved_retrieval_keys_inner(
@@ -463,6 +487,7 @@ async fn run_cheap_doctor_checks_with_preserved_retrieval_keys_inner(
     run_id: Option<&str>,
     malformed_retrieval_keys: &[String],
     named_subset: Option<&[String]>,
+    refresh_outcome: Option<RetrievalRefreshOutcome>,
 ) -> Vec<DoctorCheckRun> {
     let started = SystemClock::new().now_instant();
     let selected_runs = match named_subset {
@@ -492,11 +517,36 @@ async fn run_cheap_doctor_checks_with_preserved_retrieval_keys_inner(
         return Vec::new();
     }
 
+    // A failed manual source refresh must surface its error even when the
+    // caller selected only an alarm check. Execute the registered refresh
+    // check for reconciliation only; `runs` remains the exact public subset.
+    let mut reconciliation_runs = runs.clone();
+    if refresh_outcome == Some(RetrievalRefreshOutcome::Failed)
+        && !runs
+            .iter()
+            .any(|run| run.check_name == "memory.retrieval_health_refresh")
+    {
+        let Some(check) = registry.get("memory.retrieval_health_refresh") else {
+            warn!("CoordinatorActor: refresh failed but refresh-health check is not registered");
+            return runs;
+        };
+        match check.run() {
+            Ok(findings) => reconciliation_runs.push(DoctorCheckRun {
+                check_name: check.name(),
+                findings,
+            }),
+            Err(error) => {
+                warn!(error = %error, "CoordinatorActor: refresh failed but refresh-health check could not run");
+                return runs;
+            }
+        }
+    }
+
     let finding_repo = DoctorFindingRepository::new(db.clone());
     let task_repo =
         djinn_db::TaskRepository::new(db.clone(), crate::events::event_bus_for(events_tx));
 
-    let retrieval: Vec<KeyedDoctorFinding> = runs
+    let retrieval: Vec<KeyedDoctorFinding> = reconciliation_runs
         .iter()
         .flat_map(|run| run.findings.iter())
         .filter(|finding| is_retrieval_check(&finding.check_name))
@@ -505,12 +555,14 @@ async fn run_cheap_doctor_checks_with_preserved_retrieval_keys_inner(
             finding: finding_to_new_row(finding, run_id),
         })
         .collect();
-    if runs.iter().any(|run| is_retrieval_check(run.check_name)) {
-        // A refresh failure is indeterminate, not healthy absence: preserve all
-        // previously active alarms while reconciling the refresh-error key.
-        let preserve_all_alarms = runs.iter().any(|run| {
-            run.check_name == "memory.retrieval_health_refresh" && !run.findings.is_empty()
-        });
+    if reconciliation_runs
+        .iter()
+        .any(|run| is_retrieval_check(run.check_name))
+    {
+        // Source refresh status, not the caller-selected check set, decides
+        // whether alarm absence is healthy. This prevents an empty selected
+        // resolver result after a failed refresh from resolving stale alarms.
+        let preserve_all_alarms = refresh_outcome == Some(RetrievalRefreshOutcome::Failed);
         let mut preserve_keys = if preserve_all_alarms {
             match finding_repo.active_retrieval_alarm_keys().await {
                 Ok(keys) => keys,
@@ -530,7 +582,12 @@ async fn run_cheap_doctor_checks_with_preserved_retrieval_keys_inner(
                 "memory.injection_starvation",
                 "memory.retrieval_health_refresh",
             ] {
-                if selected.iter().any(|name| name == check_name) {
+                if selected.iter().any(|name| name == check_name)
+                    // A manual refresh attempt owns the refresh row even when
+                    // the public named subset omitted its diagnostic check.
+                    || (check_name == "memory.retrieval_health_refresh"
+                        && refresh_outcome.is_some())
+                {
                     continue;
                 }
                 match finding_repo

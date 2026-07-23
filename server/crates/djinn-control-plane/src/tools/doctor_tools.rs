@@ -33,7 +33,6 @@
 //! — see the module docs in `djinn-core::doctor` for the Gas Town invariant.
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
 
 use djinn_core::extension_diagnostics::ExtensionLoadDiagnosticV1;
 use rmcp::{
