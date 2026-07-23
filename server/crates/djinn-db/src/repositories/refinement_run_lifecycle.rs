@@ -189,6 +189,236 @@ fn role_name(value: RefinementRole) -> &'static str {
 }
 
 impl ProposalRepository {
+    pub async fn park_refinement_run_from_intent(
+        &self,
+        request: ParkRefinementRunFromIntentRequest,
+    ) -> IntentMutationResult<bool> {
+        self.source_intent_transition(request.source, Some(request.kind), None)
+            .await
+    }
+    pub async fn terminal_refinement_run_from_intent(
+        &self,
+        request: TerminalRefinementRunFromIntentRequest,
+    ) -> IntentMutationResult<bool> {
+        self.source_intent_transition(request.source, None, Some(request.reason))
+            .await
+    }
+
+    /// Resolve one exact generation parked for the human review boundary.
+    /// Rejection writes the captured spec snapshot and terminal state in one
+    /// transaction, so neither side can become visible independently.
+    pub async fn resolve_refinement_human_review(
+        &self,
+        request: ResolveRefinementHumanReviewRequest,
+    ) -> IntentMutationResult<bool> {
+        if request.run_id.trim().is_empty()
+            || request.generation <= 0
+            || request.snapshot_revision_seq <= 0
+        {
+            return Err(RefinementIntentMutationError::InvalidRequest(
+                "exact run, positive generation, and captured snapshot revision are required"
+                    .into(),
+            ));
+        }
+        self.db().ensure_initialized().await?;
+        let mut tx = self.db().pool().begin().await?;
+        let run = sqlx::query(
+            "SELECT r.proposal_id, r.state, r.park_kind, start.seq AS captured_seq \
+             FROM refinement_runs r JOIN proposal_revisions start ON start.id = r.source_start_revision_id \
+             WHERE r.id = $1 AND r.generation = $2 FOR UPDATE",
+        )
+        .bind(&request.run_id)
+        .bind(request.generation)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(run) = run else {
+            return Err(RefinementIntentMutationError::GenerationConflict {
+                run_id: request.run_id,
+                generation: request.generation,
+            });
+        };
+        let run_state: String = run.get("state");
+        if run_state == "terminal" {
+            tx.commit().await?;
+            return Ok(false);
+        }
+        if run_state != "parked"
+            || run.get::<Option<String>, _>("park_kind").as_deref() != Some("awaiting_review")
+        {
+            return Err(RefinementIntentMutationError::InvalidRequest(
+                "human review resolution requires an exact awaiting-review park".into(),
+            ));
+        }
+        if run.get::<i32, _>("captured_seq") != request.snapshot_revision_seq {
+            return Err(RefinementIntentMutationError::InvalidRequest(
+                "human review snapshot does not match the captured run snapshot".into(),
+            ));
+        }
+        let proposal_id: String = run.get("proposal_id");
+        let reason = if request.accept {
+            djinn_core::refinement_liveness::RefinementStopReason::HumanAccepted
+        } else {
+            djinn_core::refinement_liveness::RefinementStopReason::HumanRejected
+        };
+        if !request.accept {
+            let head =
+                sqlx::query("SELECT latest_revision_seq FROM proposals WHERE id = $1 FOR UPDATE")
+                    .bind(&proposal_id)
+                    .fetch_optional(&mut *tx)
+                    .await?
+                    .ok_or_else(|| {
+                        RefinementIntentMutationError::InvalidRequest(
+                            "run proposal no longer exists".into(),
+                        )
+                    })?;
+            let snapshot = sqlx::query(
+                "SELECT title, body, body_format, acceptance_criteria FROM proposal_revisions \
+                 WHERE proposal_id = $1 AND seq = $2 AND event_kind = 'spec_revision' \
+                 ORDER BY created_at DESC, id DESC LIMIT 1",
+            )
+            .bind(&proposal_id)
+            .bind(request.snapshot_revision_seq)
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or_else(|| {
+                RefinementIntentMutationError::InvalidRequest(
+                    "captured proposal snapshot is missing".into(),
+                )
+            })?;
+            let next_seq = head
+                .get::<i32, _>("latest_revision_seq")
+                .checked_add(1)
+                .ok_or_else(|| {
+                    RefinementIntentMutationError::InvalidRequest(
+                        "proposal revision sequence overflow".into(),
+                    )
+                })?;
+            let title: String = snapshot.get("title");
+            let body: String = snapshot.get("body");
+            let body_format: String = snapshot.get("body_format");
+            let acceptance_criteria: serde_json::Value = snapshot.get("acceptance_criteria");
+            sqlx::query(
+                "UPDATE proposals SET title = $2, body = $3, body_format = $4, acceptance_criteria = $5, \
+                 status = 'draft', latest_revision_seq = $6, closed_at = NULL, \
+                 updated_at = to_char(transaction_timestamp() AT TIME ZONE 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') WHERE id = $1",
+            )
+            .bind(&proposal_id)
+            .bind(&title)
+            .bind(&body)
+            .bind(&body_format)
+            .bind(&acceptance_criteria)
+            .bind(next_seq)
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query(
+                "INSERT INTO proposal_revisions (id, proposal_id, seq, title, body, body_format, acceptance_criteria, edited_by_user_id, event_kind, event_metadata) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, NULL, 'spec_revision', $8)",
+            )
+            .bind(uuid::Uuid::now_v7().to_string())
+            .bind(&proposal_id)
+            .bind(next_seq)
+            .bind(&title)
+            .bind(&body)
+            .bind(&body_format)
+            .bind(&acceptance_criteria)
+            .bind(serde_json::json!({"source":"human_review_rejection","snapshot_revision_seq":request.snapshot_revision_seq}))
+            .execute(&mut *tx)
+            .await?;
+        }
+        let context = serde_json::to_value(&reason)
+            .map_err(|error| RefinementIntentMutationError::InvalidRequest(error.to_string()))?
+            .get("context")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        let terminalized = sqlx::query(
+            "UPDATE refinement_runs SET state = 'terminal', park_kind = NULL, parked_at = NULL, \
+             terminal_at = to_char(transaction_timestamp() AT TIME ZONE 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'), \
+             stop_tag = $3, stop_context = $4 WHERE id = $1 AND generation = $2 \
+             AND state = 'parked' AND park_kind = 'awaiting_review'",
+        )
+        .bind(&request.run_id)
+        .bind(request.generation)
+        .bind(reason.tag())
+        .bind(context)
+        .execute(&mut *tx)
+        .await?;
+        if terminalized.rows_affected() != 1 {
+            return Err(RefinementIntentMutationError::GenerationConflict {
+                run_id: request.run_id,
+                generation: request.generation,
+            });
+        }
+        tx.commit().await?;
+        Ok(true)
+    }
+    async fn source_intent_transition(
+        &self,
+        source: SourceIntentTransitionRequest,
+        park: Option<RefinementParkKind>,
+        stop: Option<djinn_core::refinement_liveness::RefinementStopReason>,
+    ) -> IntentMutationResult<bool> {
+        if source.run_id.trim().is_empty()
+            || source.intent_id.trim().is_empty()
+            || source.generation <= 0
+            || source.expected_round <= 0
+        {
+            return Err(RefinementIntentMutationError::InvalidRequest(
+                "exact run, intent, generation, and round are required".into(),
+            ));
+        }
+        self.db().ensure_initialized().await?;
+        let mut tx = self.db().pool().begin().await?;
+        let row=sqlx::query("SELECT r.state AS run_state,i.state AS intent_state,i.round,i.phase,i.role FROM refinement_runs r JOIN refinement_dispatch_intents i ON i.run_id=r.id WHERE r.id=$1 AND r.generation=$2 AND i.id=$3 FOR UPDATE").bind(&source.run_id).bind(source.generation).bind(&source.intent_id).fetch_optional(&mut *tx).await?;
+        let Some(row) = row else {
+            return Err(RefinementIntentMutationError::GenerationConflict {
+                run_id: source.run_id,
+                generation: source.generation,
+            });
+        };
+        if row.get::<i32, _>("round") != source.expected_round
+            || row.get::<String, _>("phase") != phase_name(source.expected_phase)
+            || row.get::<String, _>("role") != role_name(source.expected_role)
+        {
+            return Err(RefinementIntentMutationError::SourceIntentMismatch {
+                intent_id: source.intent_id,
+            });
+        }
+        if row.get::<String, _>("run_state") != "running" {
+            tx.commit().await?;
+            return Ok(false);
+        }
+        if !matches!(
+            row.get::<String, _>("intent_state").as_str(),
+            "claimed" | "materialized"
+        ) {
+            return Err(RefinementIntentMutationError::SourceIntentMismatch {
+                intent_id: source.intent_id,
+            });
+        }
+        sqlx::query("UPDATE refinement_dispatch_intents SET state='completed',claimed_by=NULL,claimed_at=NULL,claim_expires_at=NULL,terminal_at=to_char(transaction_timestamp() AT TIME ZONE 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') WHERE id=$1 AND state IN ('claimed','materialized')").bind(&source.intent_id).execute(&mut *tx).await?;
+        let changed = if let Some(kind) = park {
+            sqlx::query("UPDATE refinement_runs SET state='parked',park_kind=$3,parked_at=to_char(transaction_timestamp() AT TIME ZONE 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') WHERE id=$1 AND generation=$2 AND state='running'").bind(&source.run_id).bind(source.generation).bind(match kind {RefinementParkKind::AwaitingReview=>"awaiting_review",RefinementParkKind::AwaitingEvidence=>"awaiting_evidence"}).execute(&mut *tx).await?.rows_affected()==1
+        } else {
+            let reason = stop.expect("terminal reason");
+            let context = serde_json::to_value(&reason)
+                .map_err(|e| RefinementIntentMutationError::InvalidRequest(e.to_string()))?
+                .get("context")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            sqlx::query("UPDATE refinement_runs SET state='terminal',terminal_at=to_char(transaction_timestamp() AT TIME ZONE 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'),stop_tag=$3,stop_context=$4 WHERE id=$1 AND generation=$2 AND state='running'").bind(&source.run_id).bind(source.generation).bind(reason.tag()).bind(context).execute(&mut *tx).await?.rows_affected()==1
+        };
+        if !changed {
+            return Err(RefinementIntentMutationError::GenerationConflict {
+                run_id: source.run_id,
+                generation: source.generation,
+            });
+        }
+        tx.commit().await?;
+        Ok(true)
+    }
+}
+
+impl ProposalRepository {
     pub async fn park_refinement_run(
         &self,
         request: ParkRefinementRunRequest,
