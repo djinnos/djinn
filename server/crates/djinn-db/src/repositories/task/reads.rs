@@ -5,6 +5,21 @@ use super::*;
 use tracing::warn;
 
 impl TaskRepository {
+    /// Return the task already materialized for a durable refinement intent.
+    pub async fn find_by_refinement_intent_id(&self, intent_id: &str) -> Result<Option<Task>> {
+        self.db.ensure_initialized().await?;
+        let id = sqlx::query_scalar::<_, String>(
+            "SELECT id FROM tasks WHERE refinement_intent_id = $1 ORDER BY created_at LIMIT 1",
+        )
+        .bind(intent_id)
+        .fetch_optional(self.db.pool())
+        .await?;
+        match id {
+            Some(id) => self.get(&id).await,
+            None => Ok(None),
+        }
+    }
+
     /// List all tasks in a project (for peer reconciliation - SYNC-14).
     pub async fn list_by_project(&self, project_id: &str) -> Result<Vec<Task>> {
         self.db.ensure_initialized().await?;
