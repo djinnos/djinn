@@ -1,6 +1,4 @@
-use super::{
-    run_cheap_doctor_checks, run_cheap_doctor_checks_with_preserved_retrieval_keys,
-};
+use super::{run_cheap_doctor_checks, run_cheap_doctor_checks_with_preserved_retrieval_keys};
 use djinn_core::doctor::{
     DoctorCheck, DoctorCheckCadence, DoctorRegistry, DoctorResult, Finding, FindingSeverity,
     ResolverSnapshot,
@@ -205,8 +203,7 @@ async fn malformed_group_preservation_is_selective_and_recovers_on_healthy_refre
     let healthy_created = after_mixed
         .iter()
         .find(|row| {
-            row.entity_ids["finding_key"]
-                == "memory.retrieval_zero_result:healthy-create:dispatch"
+            row.entity_ids["finding_key"] == "memory.retrieval_zero_result:healthy-create:dispatch"
         })
         .cloned()
         .expect("healthy sibling created");

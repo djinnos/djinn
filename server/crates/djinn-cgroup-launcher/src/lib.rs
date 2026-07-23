@@ -139,7 +139,10 @@ impl CommandSpec {
             bytes = bytes.saturating_add(value.len());
         }
         for (key, value) in &self.environment {
-            if !allowed_environment(key) || value.contains('\0') {
+            // `execve` receives each entry as `key=value`; accepting either
+            // separator or NUL in the key would make that representation
+            // malformed or change the key observed by the child.
+            if !allowed_environment(key) || key.contains(['\0', '=']) || value.contains('\0') {
                 return Err(Error::InvalidCommand);
             }
             bytes = bytes.saturating_add(key.len() + value.len());
@@ -1036,6 +1039,15 @@ mod tests {
         assert!(fs.created.is_empty());
         assert!(clone.attempts.is_empty());
         assert!(clone.exec_calls.is_empty());
+    }
+
+    #[test]
+    fn command_validation_rejects_environment_keys_unrepresentable_by_execve() {
+        for key in ["LC_\0X", "DJINN_KEY=override"] {
+            let mut malformed = command();
+            malformed.environment = vec![(key.into(), "value".into())];
+            assert!(matches!(malformed.validate(), Err(Error::InvalidCommand)));
+        }
     }
 
     #[derive(Default)]
