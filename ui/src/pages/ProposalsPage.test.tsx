@@ -2,7 +2,12 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { Route, Routes } from "react-router-dom";
 import { callMcpTool } from "@/api/mcpClient";
 import { fetchUsers, type OrgUser } from "@/api/users";
-import type { Proposal, ProposalEpic, ProposalListRow } from "@/api/types";
+import type {
+  Proposal,
+  ProposalEpic,
+  ProposalLintResult,
+  ProposalListRow,
+} from "@/api/types";
 import { render, screen, userEvent, waitFor, within } from "@/test/test-utils";
 import { ProposalsPage } from "./ProposalsPage";
 
@@ -91,6 +96,19 @@ function makeProposal(
   };
 }
 
+function makeLint(overrides: Partial<ProposalLintResult> = {}): ProposalLintResult {
+  return {
+    body_format: "markdown",
+    body_sha256: "lint-fixture-sha",
+    checked_at: "2026-06-02T00:00:00Z",
+    errors: [],
+    linter_version: "v1",
+    skipped_tiers: [],
+    warnings: [],
+    ...overrides,
+  };
+}
+
 /**
  * Build a lean `ProposalListRow` fixture — the bounded summary shape returned
  * by `proposal_list` (no body, criteria, or detail bookkeeping). List test
@@ -116,7 +134,7 @@ function makeListRow(
 
 function makeProposalShowResponse(
   proposal: Proposal,
-  overrides: { epics?: ProposalEpic[] } = {},
+  overrides: { epics?: ProposalEpic[]; latest_lint?: ProposalLintResult | null } = {},
 ) {
   return {
     proposal,
@@ -1063,6 +1081,66 @@ describe("ProposalsPage", () => {
     ).toBeInTheDocument();
     expect(screen.queryByText("needs reconcile")).not.toBeInTheDocument();
     expect(screen.queryByText(/reconciled at rev/)).not.toBeInTheDocument();
+  });
+
+  it("shows amber latest-head integrity diagnostics for warnings", async () => {
+    const proposal = makeProposal({ id: "lint-warning", short_id: "lwrn", title: "Warning head", status: "draft" });
+    vi.mocked(callMcpTool).mockImplementation(async (toolName) =>
+      toolName === "proposal_show"
+        ? (makeProposalShowResponse(proposal, { latest_lint: makeLint({ warnings: [{ severity: "warning", code: "SPEC_STYLE_FUTURE", message: "Server warning", span: { start: 4, end: 12 } }] }) }) as never)
+        : ({} as never),
+    );
+    renderProposalsRoute("/proposals/lint-warning");
+    const banner = await screen.findByRole("alert", { name: "Latest proposal integrity" });
+    expect(banner).toHaveTextContent("Proposal integrity warnings");
+    expect(banner).toHaveTextContent("warning · SPEC_STYLE_FUTURE · Server warning bytes [4, 12)");
+    expect(banner).toHaveClass("border-amber-200");
+  });
+
+  it("shows destructive legacy errors and gives them precedence over warnings", async () => {
+    const proposal = makeProposal({ id: "lint-mixed", short_id: "lmix", title: "Legacy error head", status: "draft" });
+    vi.mocked(callMcpTool).mockImplementation(async (toolName) =>
+      toolName === "proposal_show"
+        ? (makeProposalShowResponse(proposal, { latest_lint: makeLint({
+            errors: [{ severity: "error", code: "SPEC_LEGACY_CORRUPT", message: "Legacy body is corrupt", span: { start: 0, end: 7 } }],
+            warnings: [{ severity: "warning", code: "SPEC_WARNING", message: "Warning detail", span: { start: 8, end: 11 } }],
+          }) }) as never)
+        : ({} as never),
+    );
+    renderProposalsRoute("/proposals/lint-mixed");
+    const banner = await screen.findByRole("alert", { name: "Latest proposal integrity" });
+    expect(banner).toHaveTextContent("Proposal integrity errors");
+    expect(banner).not.toHaveTextContent("Proposal integrity warnings");
+    expect(banner).toHaveTextContent("error · SPEC_LEGACY_CORRUPT · Legacy body is corrupt bytes [0, 7)");
+    expect(banner).toHaveTextContent("Warning detail");
+    expect(banner).toHaveClass("border-destructive/40");
+  });
+
+  it("renders unknown server codes generically", async () => {
+    const proposal = makeProposal({ id: "lint-unknown", short_id: "lunk", title: "Unknown lint head", status: "draft" });
+    vi.mocked(callMcpTool).mockImplementation(async (toolName) =>
+      toolName === "proposal_show"
+        ? (makeProposalShowResponse(proposal, { latest_lint: makeLint({ warnings: [{ severity: "warning", code: "FUTURE_OPAQUE_42", message: "Future server diagnostic", span: { start: 101, end: 144 } }] }) }) as never)
+        : ({} as never),
+    );
+    renderProposalsRoute("/proposals/lint-unknown");
+    expect(await screen.findByText("FUTURE_OPAQUE_42")).toBeInTheDocument();
+    expect(screen.getByText("bytes [101, 144)")).toBeInTheDocument();
+  });
+
+  it("omits integrity banners for clean, null, and absent lint data", async () => {
+    for (const [kind, latest_lint] of [["clean", makeLint()], ["null", null], ["absent", undefined]] as const) {
+      const proposal = makeProposal({ id: `lint-${kind}`, short_id: kind, title: `${kind} lint head`, status: "draft" });
+      vi.mocked(callMcpTool).mockImplementation(async (toolName) =>
+        toolName === "proposal_show"
+          ? (makeProposalShowResponse(proposal, latest_lint === undefined ? {} : { latest_lint }) as never)
+          : ({} as never),
+      );
+      const view = renderProposalsRoute(`/proposals/lint-${kind}`);
+      await screen.findByRole("heading", { name: `${kind} lint head` });
+      expect(screen.queryByRole("alert", { name: "Latest proposal integrity" })).not.toBeInTheDocument();
+      view.unmount();
+    }
   });
 
   it("shows an inline error when proposal_list fails", async () => {
