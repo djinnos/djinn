@@ -169,6 +169,16 @@ pub struct AdvocateRevisionResult {
     pub event_metadata: Option<serde_json::Value>,
 }
 
+/// One stable diagnostic returned when an Advocate's proposed write is
+/// atomically rejected before it becomes a proposal revision.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdvocateLintViolation {
+    pub code: String,
+    pub message: String,
+    pub start_byte: u64,
+    pub end_byte: u64,
+}
+
 /// Result of a judge adjudication pass.
 #[derive(Debug, Clone)]
 pub struct JudgeVerdictResult {
@@ -246,6 +256,10 @@ pub struct RefinementLoopState {
     /// adversary ran and was dry" from "the adversary never started", so a
     /// dispatch outage isn't silently treated as a dry round.
     pub dispatch_failures: i32,
+    /// Diagnostics from the most recent rejected Advocate candidate. This is
+    /// separate from proposal revisions: a rejected candidate did not change
+    /// the head and must be corrected in the same refinement round.
+    pub pending_advocate_lint_violations: Vec<AdvocateLintViolation>,
     /// Set when the loop terminates.
     pub stop_reason: Option<StopReason>,
 }
@@ -281,6 +295,7 @@ impl RefinementLoopState {
             objection_signatures: HashMap::new(),
             round_blocking_objections: Vec::new(),
             dispatch_failures: 0,
+            pending_advocate_lint_violations: Vec::new(),
             stop_reason: None,
         }
     }
@@ -352,7 +367,16 @@ impl RefinementLoopState {
     pub fn record_spawn(&mut self) -> Result<(), StopReason> {
         self.total_spawns += 1;
         if self.total_spawns > self.config.max_total_spawns {
-            let reason = StopReason::SpawnCap;
+            let reason = if self.phase == RefinementPhase::AdvocateRevision
+                && !self.pending_advocate_lint_violations.is_empty()
+            {
+                StopReason::AgentFailure {
+                    role: "advocate".into(),
+                    error: "SPEC_LINT_REJECTED persisted until the established session/spawn cap".into(),
+                }
+            } else {
+                StopReason::SpawnCap
+            };
             self.terminate(reason.clone());
             Err(reason)
         } else {
@@ -364,7 +388,15 @@ impl RefinementLoopState {
     /// hands the round to the Judge to rule.
     pub fn record_advocate_revision(&mut self, new_revision_seq: i32) {
         self.current_revision_seq = new_revision_seq;
+        self.pending_advocate_lint_violations.clear();
         self.phase = RefinementPhase::JudgeAdjudication;
+    }
+
+    /// Preserve the same round and revision sequence after a rejected candidate
+    /// so the normal bounded session/spawn accounting dispatches a correction.
+    pub fn record_advocate_lint_rejection(&mut self, violations: Vec<AdvocateLintViolation>) {
+        self.pending_advocate_lint_violations = violations;
+        self.phase = RefinementPhase::AdvocateRevision;
     }
 
     /// Process an adversary attack pass — the round opener. Records objections

@@ -17,8 +17,9 @@ use djinn_db::{
 };
 
 use super::refinement::{
-    AdversaryPassOutcome, AdversaryPassResult, JudgeVerdictResult, RefinementLoopState,
-    RefinementPhase, StopReason, build_revision_event_metadata, select_refinement_model,
+    AdversaryPassOutcome, AdversaryPassResult, AdvocateLintViolation, JudgeVerdictResult,
+    RefinementLoopState, RefinementPhase, StopReason, build_revision_event_metadata,
+    select_refinement_model,
 };
 
 use super::actor::CoordinatorActor;
@@ -109,7 +110,7 @@ impl CoordinatorActor {
 
         match session.phase {
             RefinementPhase::AdvocateRevision => {
-                self.process_advocate_outcome(run_id, &proposal_id, &state)
+                self.process_advocate_outcome(run_id, &proposal_id, &session.task_id, &state)
                     .await;
             }
             RefinementPhase::AdversaryAttack => {
@@ -132,8 +133,32 @@ impl CoordinatorActor {
         &mut self,
         run_id: &str,
         proposal_id: &str,
+        task_id: &str,
         state: &RefinementLoopState,
     ) {
+        // Authoring mutations return a structured rejection rather than making a
+        // revision. Inspect this completed Advocate task's durable activity before
+        // interpreting an unchanged head as an ordinary no-change completion.
+        let task_repo = TaskRepository::new(self.db.clone(), crate::events::event_bus_for(&self.events_tx));
+        if let Ok(entries) = task_repo.list_activity(task_id).await
+            && let Some(violations) = entries
+                .iter()
+                .rev()
+                .find_map(|entry| parse_spec_lint_rejection(&entry.payload))
+        {
+            if let Some(active) = self.active_refinements.get_mut(run_id) {
+                active.record_advocate_lint_rejection(violations);
+                tracing::warn!(
+                    proposal_id = %proposal_id,
+                    task_id = %task_id,
+                    round = active.current_round,
+                    revision_seq = active.current_revision_seq,
+                    "Advocate candidate rejected by spec lint; retrying correction in same round"
+                );
+            }
+            return;
+        }
+
         let event_bus = crate::events::event_bus_for(&self.events_tx);
         let proposal_repo = ProposalRepository::new(self.db.clone(), event_bus);
 
@@ -1216,6 +1241,59 @@ fn handle_close_refinement_task_result(task_id: &str, result: Result<(), djinn_d
             "Failed to close completed refinement task"
         );
     }
+}
+
+/// Decode the structured authoring rejection emitted by proposal mutations.
+/// The activity payload can wrap a tool response, so walk object/array values
+/// but only accept the stable code together with a fully structured violation.
+fn parse_spec_lint_rejection(payload: &str) -> Option<Vec<AdvocateLintViolation>> {
+    let value: serde_json::Value = serde_json::from_str(payload).ok()?;
+    find_spec_lint_rejection(&value)
+}
+
+fn find_spec_lint_rejection(value: &serde_json::Value) -> Option<Vec<AdvocateLintViolation>> {
+    if let Some(object) = value.as_object() {
+        if object.get("code").and_then(serde_json::Value::as_str) == Some("SPEC_LINT_REJECTED") {
+            let violations = object.get("violations")?.as_array()?;
+            let parsed: Option<Vec<_>> = violations
+                .iter()
+                .map(|violation| {
+                    let span = violation.get("span")?.as_object()?;
+                    Some(AdvocateLintViolation {
+                        code: violation.get("code")?.as_str()?.to_owned(),
+                        message: violation.get("message")?.as_str()?.to_owned(),
+                        start_byte: span.get("start_byte")?.as_u64()?,
+                        end_byte: span.get("end_byte")?.as_u64()?,
+                    })
+                })
+                .collect();
+            if let Some(violations) = parsed.filter(|violations| !violations.is_empty()) {
+                return Some(violations);
+            }
+        }
+        return object.values().find_map(find_spec_lint_rejection);
+    }
+    value.as_array()?.iter().find_map(find_spec_lint_rejection)
+}
+
+/// Render persisted rejection diagnostics in their already-established stable
+/// order. Do not sort here: authoring owns ordering (span, then code).
+pub(super) fn format_advocate_lint_correction_context(
+    violations: &[AdvocateLintViolation],
+) -> Option<String> {
+    if violations.is_empty() {
+        return None;
+    }
+    let mut context = String::from(
+        "Your previous proposal mutation was rejected with SPEC_LINT_REJECTED. Correct every violation below and submit a clean material write; the proposal head was not changed.\n",
+    );
+    for violation in violations {
+        context.push_str(&format!(
+            "- {}: {} at bytes {}..{}\n",
+            violation.code, violation.message, violation.start_byte, violation.end_byte
+        ));
+    }
+    Some(context)
 }
 
 /// Returns `true` when the repository error indicates the task was already closed
