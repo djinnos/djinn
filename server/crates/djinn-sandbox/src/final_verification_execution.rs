@@ -557,6 +557,7 @@ mod tests {
             target: "test-target".into(),
             features: Vec::new(),
             allowlisted_environment: BTreeMap::new(),
+            services: Vec::new(),
         }
     }
 

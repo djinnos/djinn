@@ -1,3 +1,4 @@
+// djinn:allow-oversize — leader-tick and manual retrieval reconciliation share the keyed persistence boundary.
 //! Leader-tick integration for the cheap doctor subset (epic 4q1t).
 //!
 //! The leader tick runs cheap doctor checks and persists their findings without
@@ -8,6 +9,7 @@ use async_trait::async_trait;
 use djinn_core::clock::{Clock, SystemClock};
 use djinn_core::doctor::{
     DoctorCheckRun, DoctorRegistry, Finding, FindingSeverity, run_cheap_subset,
+    run_named_cheap_subset,
 };
 use djinn_db::repositories::doctor_finding::{KeyedDoctorFinding, severity};
 use djinn_db::{
@@ -470,22 +472,71 @@ pub async fn run_elected_retrieval_refresh_and_cheap_checks(
         return Vec::new();
     }
 
-    let malformed_retrieval_keys = if let Some(source) = source {
-        if let Err(error) = source.refresh().await {
-            warn!(error = %error, "retrieval health refresh failed; stale resolvers suppressed");
+    let (malformed_retrieval_keys, refresh_outcome) = if let Some(source) = source {
+        match source.refresh().await {
+            Ok(()) => (
+                crate::doctor::retrieval_health::malformed_retrieval_alarm_keys(&source.snapshot()),
+                Some(RetrievalRefreshOutcome::Healthy),
+            ),
+            Err(error) => {
+                warn!(error = %error, "retrieval health refresh failed; stale resolvers suppressed");
+                (Vec::new(), Some(RetrievalRefreshOutcome::Failed))
+            }
         }
-        crate::doctor::retrieval_health::malformed_retrieval_alarm_keys(&source.snapshot())
     } else {
-        Vec::new()
+        (Vec::new(), None)
     };
-    run_cheap_doctor_checks_with_preserved_retrieval_keys(
+    run_cheap_doctor_checks_with_preserved_retrieval_keys_inner(
         registry,
         db,
         events_tx,
         run_id,
         &malformed_retrieval_keys,
+        None,
+        refresh_outcome,
     )
     .await
+}
+
+/// Execute an on-demand retrieval run through the same refresh and
+/// preservation-aware reconciliation path as the elected leader tick.
+pub async fn run_manual_retrieval_refresh_and_checks(
+    source: Option<&std::sync::Arc<crate::doctor::retrieval_health::RetrievalHealthSource>>,
+    registry: &DoctorRegistry,
+    db: &djinn_db::Database,
+    events_tx: &tokio::sync::broadcast::Sender<djinn_core::events::DjinnEventEnvelope>,
+    run_id: Option<&str>,
+    check_names: &[String],
+) -> Result<Vec<DoctorCheckRun>, String> {
+    let Some(source) = source else {
+        return Err("coordinator retrieval health source is not initialized".to_owned());
+    };
+    let refresh_outcome = match source.refresh().await {
+        Ok(()) => RetrievalRefreshOutcome::Healthy,
+        Err(error) => {
+            warn!(error = %error, "retrieval health refresh failed; stale resolvers suppressed");
+            RetrievalRefreshOutcome::Failed
+        }
+    };
+    let malformed_retrieval_keys = match refresh_outcome {
+        RetrievalRefreshOutcome::Healthy => {
+            crate::doctor::retrieval_health::malformed_retrieval_alarm_keys(&source.snapshot())
+        }
+        // A failed refresh leaves the prior snapshot intact. Its malformed
+        // groups are stale too, so whole-refresh preservation below owns the
+        // reconciliation contract instead of deriving keys from that snapshot.
+        RetrievalRefreshOutcome::Failed => Vec::new(),
+    };
+    Ok(run_cheap_doctor_checks_with_preserved_retrieval_keys_inner(
+        registry,
+        db,
+        events_tx,
+        run_id,
+        &malformed_retrieval_keys,
+        Some(check_names),
+        Some(refresh_outcome),
+    )
+    .await)
 }
 
 /// Run the cheap subset while retaining prior rows for malformed groups from
@@ -498,8 +549,44 @@ pub async fn run_cheap_doctor_checks_with_preserved_retrieval_keys(
     run_id: Option<&str>,
     malformed_retrieval_keys: &[String],
 ) -> Vec<DoctorCheckRun> {
+    run_cheap_doctor_checks_with_preserved_retrieval_keys_inner(
+        registry,
+        db,
+        events_tx,
+        run_id,
+        malformed_retrieval_keys,
+        None,
+        None,
+    )
+    .await
+}
+
+/// The result of the one source refresh owned by a manual invocation.
+///
+/// This is deliberately separate from the selected check runs: a named
+/// request may omit the refresh-health check, but a failed source refresh is
+/// still indeterminate for every retrieval alarm and must reconcile its error.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RetrievalRefreshOutcome {
+    Healthy,
+    Failed,
+}
+
+async fn run_cheap_doctor_checks_with_preserved_retrieval_keys_inner(
+    registry: &DoctorRegistry,
+    db: &djinn_db::Database,
+    events_tx: &tokio::sync::broadcast::Sender<djinn_core::events::DjinnEventEnvelope>,
+    run_id: Option<&str>,
+    malformed_retrieval_keys: &[String],
+    named_subset: Option<&[String]>,
+    refresh_outcome: Option<RetrievalRefreshOutcome>,
+) -> Vec<DoctorCheckRun> {
     let started = SystemClock::new().now_instant();
-    let runs = match run_cheap_subset(registry) {
+    let selected_runs = match named_subset {
+        Some(names) => run_named_cheap_subset(registry, names),
+        None => run_cheap_subset(registry),
+    };
+    let runs = match selected_runs {
         Ok(runs) => runs,
         Err(error) => {
             // A registry-level error means every check failed to run; log
@@ -522,11 +609,36 @@ pub async fn run_cheap_doctor_checks_with_preserved_retrieval_keys(
         return Vec::new();
     }
 
+    // A failed manual source refresh must surface its error even when the
+    // caller selected only an alarm check. Execute the registered refresh
+    // check for reconciliation only; `runs` remains the exact public subset.
+    let mut reconciliation_runs = runs.clone();
+    if refresh_outcome == Some(RetrievalRefreshOutcome::Failed)
+        && !runs
+            .iter()
+            .any(|run| run.check_name == "memory.retrieval_health_refresh")
+    {
+        let Some(check) = registry.get("memory.retrieval_health_refresh") else {
+            warn!("CoordinatorActor: refresh failed but refresh-health check is not registered");
+            return runs;
+        };
+        match check.run() {
+            Ok(findings) => reconciliation_runs.push(DoctorCheckRun {
+                check_name: check.name(),
+                findings,
+            }),
+            Err(error) => {
+                warn!(error = %error, "CoordinatorActor: refresh failed but refresh-health check could not run");
+                return runs;
+            }
+        }
+    }
+
     let finding_repo = DoctorFindingRepository::new(db.clone());
     let task_repo =
         djinn_db::TaskRepository::new(db.clone(), crate::events::event_bus_for(events_tx));
 
-    let retrieval: Vec<KeyedDoctorFinding> = runs
+    let retrieval: Vec<KeyedDoctorFinding> = reconciliation_runs
         .iter()
         .flat_map(|run| run.findings.iter())
         .filter(|finding| is_retrieval_check(&finding.check_name))
@@ -535,13 +647,15 @@ pub async fn run_cheap_doctor_checks_with_preserved_retrieval_keys(
             finding: finding_to_new_row(finding, run_id),
         })
         .collect();
-    if runs.iter().any(|run| is_retrieval_check(run.check_name)) {
-        // A refresh failure is indeterminate, not healthy absence: preserve all
-        // previously active alarms while reconciling the refresh-error key.
-        let preserve_all_alarms = runs.iter().any(|run| {
-            run.check_name == "memory.retrieval_health_refresh" && !run.findings.is_empty()
-        });
-        let preserve_keys = if preserve_all_alarms {
+    if reconciliation_runs
+        .iter()
+        .any(|run| is_retrieval_check(run.check_name))
+    {
+        // Source refresh status, not the caller-selected check set, decides
+        // whether alarm absence is healthy. This prevents an empty selected
+        // resolver result after a failed refresh from resolving stale alarms.
+        let preserve_all_alarms = refresh_outcome == Some(RetrievalRefreshOutcome::Failed);
+        let mut preserve_keys = if preserve_all_alarms {
             match finding_repo.active_retrieval_alarm_keys().await {
                 Ok(keys) => keys,
                 Err(error) => {
@@ -552,6 +666,50 @@ pub async fn run_cheap_doctor_checks_with_preserved_retrieval_keys(
         } else {
             malformed_retrieval_keys.to_vec()
         };
+        // Reconciliation is global. Named manual requests preserve active rows
+        // owned by retrieval checks that were not selected for this invocation.
+        if let Some(selected) = named_subset {
+            for check_name in [
+                "memory.retrieval_zero_result",
+                "memory.injection_starvation",
+                "memory.retrieval_health_refresh",
+            ] {
+                if selected.iter().any(|name| name == check_name)
+                    // A manual refresh attempt owns the refresh row even when
+                    // the public named subset omitted its diagnostic check.
+                    || (check_name == "memory.retrieval_health_refresh"
+                        && refresh_outcome.is_some())
+                {
+                    continue;
+                }
+                match finding_repo
+                    .list_recent(djinn_db::RecentDoctorFindings {
+                        check_name: Some(check_name.to_owned()),
+                        ..Default::default()
+                    })
+                    .await
+                {
+                    Ok(rows) => preserve_keys.extend(
+                        rows.into_iter()
+                            .filter(|row| row.status == "active")
+                            .filter_map(|row| {
+                                if check_name == "memory.retrieval_health_refresh" {
+                                    Some("refresh".to_owned())
+                                } else {
+                                    row.entity_ids
+                                        .get("finding_key")
+                                        .and_then(serde_json::Value::as_str)
+                                        .map(str::to_owned)
+                                }
+                            }),
+                    ),
+                    Err(error) => {
+                        warn!(error = %error, "CoordinatorActor: failed to load named-subset preserve keys");
+                        return runs;
+                    }
+                }
+            }
+        }
         match finding_repo
             .reconcile_retrieval_findings(retrieval, &preserve_keys)
             .await

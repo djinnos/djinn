@@ -25,6 +25,13 @@ pub(super) enum CoordinatorMessage {
     TriggerStuckScan,
     // Queue the persisted board-health mismatch scan on the shared coalescer.
     TriggerBoardHealthMismatchScan,
+    /// Run selected retrieval checks through the actor-owned source for MCP.
+    RefreshRetrievalHealth {
+        check_names: Vec<String>,
+        run_id: String,
+        reply:
+            tokio::sync::oneshot::Sender<Result<Vec<djinn_core::doctor::DoctorCheckRun>, String>>,
+    },
     /// Lead requests Planner escalation for a task.
     /// Creates a review task and dispatches Planner to it.
     /// Per ADR-051 §8 the Planner is the escalation ceiling above Lead.

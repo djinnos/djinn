@@ -5,6 +5,7 @@ import { within, userEvent } from "storybook/test";
 
 import { SettingsPage } from "@/pages/SettingsPage";
 import { AuthGate } from "@/components/AuthGate";
+import { installAuthFetchStub, setStoryIsAdmin } from "@/storybook-mocks/authFetchStub";
 import { userConfigKeys } from "@/components/userConfig/userConfigKeys";
 import {
   type CatalogProvider,
@@ -34,68 +35,8 @@ import type { OrgPolicy } from "@/api/orgPolicy";
 /*  uses) to the real fetch, which fails into a graceful inline-error state.   */
 /* -------------------------------------------------------------------------- */
 
-// Whether the seeded caller is an admin. Set from each story's render below,
-// BEFORE AuthGate mounts and fires `/auth/me`, so the shim reports the right
-// flag and the AI Policy tab is shown/hidden accordingly.
-let mockIsAdmin = true;
-
-function json(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { "Content-Type": "application/json" },
-  });
-}
-
-// Patch once per Storybook session; unknown URLs fall through to real fetch.
-if (!(window as unknown as { __djinnSettingsFetchStub?: boolean }).__djinnSettingsFetchStub) {
-  (window as unknown as { __djinnSettingsFetchStub?: boolean }).__djinnSettingsFetchStub = true;
-  const realFetch = window.fetch.bind(window);
-  const stub: typeof window.fetch = (input, init) => {
-    const url =
-      typeof input === "string"
-        ? input
-        : input instanceof URL
-          ? input.href
-          : input.url;
-    if (url.endsWith("/health")) {
-      return Promise.resolve(json({ status: "ok", version: "0.6.94" }));
-    }
-    if (url.includes("/auth/me")) {
-      return Promise.resolve(
-        json({
-          id: "u-fernando",
-          login: "fernando",
-          name: "Fernando Bandeira",
-          avatar_url: null,
-          is_admin: mockIsAdmin,
-          role: "engineer",
-        }),
-      );
-    }
-    if (url.includes("/setup/status")) {
-      return Promise.resolve(
-        json({
-          needs_app_install: false,
-          app_credentials_configured: true,
-          org_login: "djinnos",
-          setup_state: "valid",
-        }),
-      );
-    }
-    if (url.includes("/auth/config")) {
-      return Promise.resolve(
-        json({
-          configured: true,
-          missing: [],
-          setup_doc_url: "https://www.djinnai.io/docs/setup",
-          self_setup_available: false,
-        }),
-      );
-    }
-    return realFetch(input, init);
-  };
-  window.fetch = stub;
-}
+// Auth endpoints are served by the shared Storybook auth stub.
+installAuthFetchStub();
 
 /* -------------------------------- fixtures -------------------------------- */
 
@@ -245,9 +186,12 @@ const meta = {
   parameters: { layout: "fullscreen" },
   decorators: [
     (Story, ctx) => {
-      mockIsAdmin = (ctx.parameters?.isAdmin as boolean | undefined) ?? true;
+      setStoryIsAdmin((ctx.parameters?.isAdmin as boolean | undefined) ?? true);
       return (
-        <QueryClientProvider client={seededClient()}>
+        // Key by story id so switching stories fully remounts the tree —
+        // otherwise AuthGate's cached /auth/me (staleTime) survives the
+        // switch and the admin flag flip never takes effect.
+        <QueryClientProvider key={ctx.id} client={seededClient()}>
           <MemoryRouter initialEntries={["/settings"]}>
             <AuthGate>
               <div className="h-screen">

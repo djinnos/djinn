@@ -14,6 +14,8 @@ pub const FINAL_VERIFICATION_PLAN_VERSION_V1: u32 = 1;
 pub const VERIFICATION_INPUT_MANIFEST_VERSION_V1: u32 = 1;
 pub const ENVIRONMENT_IDENTITY_SCHEMA_VERSION_V1: u32 = 1;
 pub const ENVIRONMENT_IDENTITY_CANONICALIZATION_VERSION_V1: u32 = 1;
+pub const ENVIRONMENT_IDENTITY_SCHEMA_VERSION_V2: u32 = 2;
+pub const ENVIRONMENT_IDENTITY_CANONICALIZATION_VERSION_V2: u32 = 2;
 
 /// A command is an ordered part of a final-verification plan. Its position is
 /// significant and is therefore never sorted during canonicalization.
@@ -140,6 +142,19 @@ pub struct LockfileDigestV1 {
     pub digest: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResolvedCatalogServiceIdentityV1 {
+    pub preset_id: String,
+    pub service_type: String,
+    pub image_reference: String,
+    pub image_digest: String,
+    pub port: i32,
+    pub exported_environment_names: Vec<String>,
+    pub verification_protocol_revision: u32,
+    pub effective_configuration_digest: String,
+}
+
 /// Fully resolved material for identity derivation. All maps are BTreeMaps so
 /// callers cannot accidentally provide non-deterministic iteration order.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -158,6 +173,8 @@ pub struct ResolvedEnvironmentIdentityInputV1 {
     pub target: String,
     pub features: Vec<String>,
     pub allowlisted_environment: BTreeMap<String, String>,
+    #[serde(default)]
+    pub services: Vec<ResolvedCatalogServiceIdentityV1>,
 }
 
 /// Persistable canonical identity. JSON is canonical bytes decoded as UTF-8,
@@ -202,8 +219,21 @@ impl EnvironmentIdentityV1 {
         input: ResolvedEnvironmentIdentityInputV1,
     ) -> Result<Self, EnvironmentIdentityError> {
         let normalized = input.canonicalized()?;
-        let canonical_json = serde_json::to_string(&normalized)
-            .expect("canonical identity types are always serializable");
+        // V1 rows predate catalog services. Serialize the legacy shape exactly
+        // (without an empty `services` member) so persisted V1 digests retain
+        // their meaning; V2 is the additive service-aware contract.
+        let canonical_json = if normalized.schema_version == 1 {
+            let mut value = serde_json::to_value(&normalized)
+                .expect("canonical identity types are always serializable");
+            value
+                .as_object_mut()
+                .expect("identity is an object")
+                .remove("services");
+            serde_json::to_string(&value).expect("canonical identity JSON")
+        } else {
+            serde_json::to_string(&normalized)
+                .expect("canonical identity types are always serializable")
+        };
         let digest = sha256_hex(canonical_json.as_bytes());
         Ok(Self {
             schema_version: normalized.schema_version,
@@ -216,16 +246,35 @@ impl EnvironmentIdentityV1 {
 
 impl ResolvedEnvironmentIdentityInputV1 {
     pub fn canonicalized(mut self) -> Result<Self, EnvironmentIdentityError> {
-        supported(
-            "environment identity schema",
-            self.schema_version,
-            ENVIRONMENT_IDENTITY_SCHEMA_VERSION_V1,
-        )?;
-        supported(
-            "environment identity canonicalization",
-            self.canonicalization_version,
-            ENVIRONMENT_IDENTITY_CANONICALIZATION_VERSION_V1,
-        )?;
+        if !matches!(self.schema_version, 1 | 2) {
+            return Err(EnvironmentIdentityError::UnsupportedVersion {
+                kind: "environment identity schema",
+                version: self.schema_version,
+            });
+        }
+        if !matches!(self.canonicalization_version, 1 | 2) {
+            return Err(EnvironmentIdentityError::UnsupportedVersion {
+                kind: "environment identity canonicalization",
+                version: self.canonicalization_version,
+            });
+        }
+        if self.schema_version != self.canonicalization_version {
+            let (kind, version) = if self.schema_version > self.canonicalization_version {
+                ("environment identity schema", self.schema_version)
+            } else {
+                (
+                    "environment identity canonicalization",
+                    self.canonicalization_version,
+                )
+            };
+            return Err(EnvironmentIdentityError::UnsupportedVersion { kind, version });
+        }
+        if self.schema_version == 1 && !self.services.is_empty() {
+            return Err(EnvironmentIdentityError::UnsupportedVersion {
+                kind: "environment identity schema",
+                version: self.schema_version,
+            });
+        }
         supported(
             "final verification plan",
             self.plan.version,
@@ -348,6 +397,52 @@ impl ResolvedEnvironmentIdentityInputV1 {
         for (name, value) in &self.allowlisted_environment {
             nonempty("allowlisted environment name", name)?;
             nonempty("allowlisted environment value", value)?;
+        }
+        sort_unique_by(
+            &mut self.services,
+            |service| service.preset_id.clone(),
+            "service preset ID",
+        )?;
+        let (mut types, mut ports, mut env_names) =
+            (BTreeSet::new(), BTreeSet::new(), BTreeSet::new());
+        for service in &mut self.services {
+            nonempty("service preset ID", &service.preset_id)?;
+            nonempty("service type", &service.service_type)?;
+            nonempty("service image reference", &service.image_reference)?;
+            validate_digest("service image", &service.image_digest)?;
+            validate_digest(
+                "effective service configuration",
+                &service.effective_configuration_digest,
+            )?;
+            if service.port <= 0 || service.verification_protocol_revision == 0 {
+                return Err(EnvironmentIdentityError::MissingResolved {
+                    field: "service port or protocol revision",
+                });
+            }
+            normalize_strings(
+                &mut service.exported_environment_names,
+                "service exported environment name",
+            )?;
+            if !types.insert(service.service_type.clone()) {
+                return Err(EnvironmentIdentityError::Duplicate {
+                    kind: "service type",
+                    value: service.service_type.clone(),
+                });
+            }
+            if !ports.insert(service.port) {
+                return Err(EnvironmentIdentityError::Duplicate {
+                    kind: "service port",
+                    value: service.port.to_string(),
+                });
+            }
+            for name in &service.exported_environment_names {
+                if !env_names.insert(name.clone()) {
+                    return Err(EnvironmentIdentityError::Duplicate {
+                        kind: "service exported environment name",
+                        value: name.clone(),
+                    });
+                }
+            }
         }
         Ok(self)
     }
@@ -537,7 +632,89 @@ mod tests {
             target: "x86_64-unknown-linux-gnu".into(),
             features: vec!["serde".into(), "sqlx".into()],
             allowlisted_environment: BTreeMap::from([("CI".into(), "true".into())]),
+            services: Vec::new(),
         }
+    }
+
+    #[test]
+    fn v1_omits_additive_services_field_from_persisted_json() {
+        let identity = EnvironmentIdentityV1::derive(input()).unwrap();
+        assert!(!identity.canonical_json.contains("\"services\""));
+    }
+
+    #[test]
+    fn v2_service_identity_is_sorted_and_secret_free() {
+        let mut v2 = input();
+        v2.schema_version = 2;
+        v2.canonicalization_version = 2;
+        v2.services = vec![ResolvedCatalogServiceIdentityV1 {
+            preset_id: "postgres".into(),
+            service_type: "postgres".into(),
+            image_reference: "registry.example/postgres:18".into(),
+            image_digest: DIGEST.into(),
+            port: 5432,
+            exported_environment_names: vec!["DATABASE_URL".into()],
+            verification_protocol_revision: 1,
+            effective_configuration_digest: DIGEST.into(),
+        }];
+        let identity = EnvironmentIdentityV1::derive(v2).unwrap();
+        assert!(identity.canonical_json.contains("\"services\""));
+        assert!(!identity.canonical_json.contains("POSTGRES_PASSWORD"));
+    }
+
+    fn catalog_service() -> ResolvedCatalogServiceIdentityV1 {
+        ResolvedCatalogServiceIdentityV1 {
+            preset_id: "postgres".into(),
+            service_type: "postgres".into(),
+            image_reference: "registry.example/postgres:18".into(),
+            image_digest: DIGEST.into(),
+            port: 5432,
+            exported_environment_names: vec!["TEST_POSTGRES_URL".into(), "DATABASE_URL".into()],
+            verification_protocol_revision: 1,
+            effective_configuration_digest: DIGEST.into(),
+        }
+    }
+
+    #[test]
+    fn v2_catalog_service_changes_cause_identity_misses_without_secret_values() {
+        let mut base = input();
+        base.schema_version = 2;
+        base.canonicalization_version = 2;
+        base.services = vec![catalog_service()];
+        let baseline = EnvironmentIdentityV1::derive(base.clone()).unwrap();
+        assert!(!baseline.canonical_json.contains("postgres-password"));
+
+        let mut changed_digest = base.clone();
+        changed_digest.services[0].image_digest = alternate_digest('4');
+        assert_ne!(
+            baseline.digest,
+            EnvironmentIdentityV1::derive(changed_digest)
+                .unwrap()
+                .digest
+        );
+
+        let mut changed_configuration = base.clone();
+        changed_configuration.services[0].effective_configuration_digest = alternate_digest('5');
+        assert_ne!(
+            baseline.digest,
+            EnvironmentIdentityV1::derive(changed_configuration)
+                .unwrap()
+                .digest
+        );
+
+        let mut changed_catalog = base;
+        let mut redis = catalog_service();
+        redis.preset_id = "redis".into();
+        redis.service_type = "redis".into();
+        redis.port = 6379;
+        redis.exported_environment_names = vec!["REDIS_URL".into()];
+        changed_catalog.services.push(redis);
+        assert_ne!(
+            baseline.digest,
+            EnvironmentIdentityV1::derive(changed_catalog)
+                .unwrap()
+                .digest
+        );
     }
 
     #[test]

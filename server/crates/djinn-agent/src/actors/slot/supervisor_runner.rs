@@ -292,37 +292,99 @@ async fn persist_infra_death_on_attempt(
     }
 }
 
-/// Best-effort: advance this dispatch's still-`pending` attempt row to
-/// `crashed` when the run's terminal report is `Failed`. Without this the row
-/// keeps its `pending` outcome and the respawn guard defers every subsequent
-/// (task, role) dispatch until the periodic orphaned-attempt reaper catches it
-/// (5-minute threshold on a 15-minute sweep — up to ~20 minutes of dead board
-/// time per provider failure; incident 8lb0, 2026-07-16). A `submitted` row is
-/// deliberately left alone: submitted work is owned by the review/PR lifecycle
-/// and must keep its submitted signal.
-async fn terminalize_failed_run_attempt(
+/// Stable snake_case name of a terminal run outcome for attempt evidence.
+fn run_outcome_name(outcome: &TaskRunOutcome) -> &'static str {
+    match outcome {
+        TaskRunOutcome::PrOpened { .. } => "pr_opened",
+        TaskRunOutcome::Closed { .. } => "closed",
+        TaskRunOutcome::Escalated { .. } => "escalated",
+        TaskRunOutcome::Failed { .. } => "failed",
+        TaskRunOutcome::Interrupted => "interrupted",
+        TaskRunOutcome::WorkerSubmitted => "worker_submitted",
+        TaskRunOutcome::LoopGuardTripped { .. } => "loop_guard_tripped",
+        TaskRunOutcome::Parked { .. } => "parked",
+        TaskRunOutcome::EnvironmentalNonAttempt { .. } => "environmental_non_attempt",
+    }
+}
+
+/// Map a terminal run report to the outcome used to terminalize any attempt
+/// row of the run's dispatch group that is STILL `pending` when the report
+/// arrives.
+fn attempt_outcome_for_terminal_report(
+    outcome: &TaskRunOutcome,
+) -> djinn_core::models::task_attempt::TaskAttemptOutcome {
+    use djinn_core::models::task_attempt::TaskAttemptOutcome as AttemptOutcome;
+    match outcome {
+        TaskRunOutcome::Failed { .. } => AttemptOutcome::Crashed,
+        TaskRunOutcome::LoopGuardTripped { .. } => AttemptOutcome::LoopGuardTripped,
+        // Operator/host cancellation before resolution.
+        TaskRunOutcome::Interrupted => AttemptOutcome::Cancelled,
+        // Environmental non-attempt: terminalize so nothing wedges, but with
+        // the strike-exempt environmental outcome (no quality/park penalty).
+        TaskRunOutcome::EnvironmentalNonAttempt { .. } => AttemptOutcome::Interrupted,
+        // The run genuinely completed. Any row of its dispatch group that is
+        // still `pending` (the bookkeeping sibling that `submit_work`'s
+        // latest-row advancement did not touch) is completed with the run.
+        TaskRunOutcome::PrOpened { .. }
+        | TaskRunOutcome::Closed { .. }
+        | TaskRunOutcome::Escalated { .. }
+        | TaskRunOutcome::WorkerSubmitted
+        | TaskRunOutcome::Parked { .. } => AttemptOutcome::Completed,
+    }
+}
+
+/// Best-effort: terminalize this dispatch's still-`pending` attempt rows when
+/// the run's terminal report arrives — for EVERY terminal outcome, not just
+/// `Failed`. Without this a leftover `pending` row (each dispatch group holds
+/// both the coordinator's `<task>:<role>:<uuid>` dispatch-start row and the
+/// supervisor's exact `task-run:<id>` row, and `submit_work` advances only the
+/// newest one to `submitted`) survives a successful run, so the respawn guard
+/// defers every subsequent (task, role) dispatch — e.g. the rework worker
+/// after a PR reopen — until the periodic orphaned-attempt reaper catches it
+/// and mislabels the successfully submitted run `crashed` (task pl4n,
+/// 2026-07-23; failed-run flavor was incident 8lb0, 2026-07-16). A `submitted`
+/// row is deliberately left alone: submitted work is owned by the review/PR
+/// lifecycle and must keep its submitted signal (both the group and single-row
+/// paths below only ever touch `pending` rows).
+async fn terminalize_run_attempt(
     app_state: &AgentContext,
     task_attempt_id: Option<&str>,
     dispatch_group_id: Option<&str>,
     task: &Task,
     report: &TaskRunReport,
 ) {
-    let TaskRunOutcome::Failed { stage, reason, .. } = &report.outcome else {
-        return;
-    };
+    let attempt_outcome = attempt_outcome_for_terminal_report(&report.outcome);
+    let outcome_name = run_outcome_name(&report.outcome);
     let attempt_repo = TaskAttemptRepository::new(app_state.db.clone());
-    let truncated_reason: String = reason.chars().take(500).collect();
-    let summary = format!("run failed at stage {stage}: {truncated_reason}");
-    let summary_json = serde_json::json!({
-        "recovery_classifier": "failed_run_report",
-        "stage": stage,
-    })
-    .to_string();
+    let (summary, summary_json) = match &report.outcome {
+        TaskRunOutcome::Failed { stage, reason, .. } => {
+            let truncated_reason: String = reason.chars().take(500).collect();
+            (
+                format!("run failed at stage {stage}: {truncated_reason}"),
+                serde_json::json!({
+                    "recovery_classifier": "failed_run_report",
+                    "stage": stage,
+                })
+                .to_string(),
+            )
+        }
+        _ => (
+            format!(
+                "run reached terminal outcome {outcome_name}; terminalizing leftover pending \
+                 attempt rows"
+            ),
+            serde_json::json!({
+                "recovery_classifier": "terminal_run_report",
+                "run_outcome": outcome_name,
+            })
+            .to_string(),
+        ),
+    };
     if let Some(group_id) = dispatch_group_id {
         match attempt_repo
             .terminalize_dispatch_group(
                 group_id,
-                djinn_core::models::task_attempt::TaskAttemptOutcome::Crashed,
+                attempt_outcome,
                 djinn_db::DispatchGroupTerminalEvidence {
                     summary: Some(&summary),
                     summary_json: Some(&summary_json),
@@ -333,14 +395,17 @@ async fn terminalize_failed_run_attempt(
             Ok(result) => tracing::info!(
                 task_id = %task.short_id,
                 dispatch_group_id = %group_id,
+                run_outcome = outcome_name,
+                attempt_outcome = %attempt_outcome.as_str(),
                 terminalized_attempts = result.updated_attempt_ids.len(),
-                "supervisor dispatch: terminalized failed run's pending dispatch group"
+                "supervisor dispatch: terminalized run's pending dispatch group"
             ),
             Err(e) => tracing::warn!(
                 task_id = %task.short_id,
                 dispatch_group_id = %group_id,
+                run_outcome = outcome_name,
                 error = %e,
-                "supervisor dispatch: failed to terminalize failed run's pending dispatch group"
+                "supervisor dispatch: failed to terminalize run's pending dispatch group"
             ),
         }
         return;
@@ -348,7 +413,7 @@ async fn terminalize_failed_run_attempt(
     // Mixed-version dispatches have no group to correlate. Preserve the
     // conservative single-row cleanup rather than widening by task or role.
     let Some(attempt_id) = task_attempt_id else {
-        tracing::debug!(task_id = %task.short_id, "supervisor dispatch: failed run has no dispatch group or exact attempt ID; leaving legacy attempts untouched");
+        tracing::debug!(task_id = %task.short_id, "supervisor dispatch: terminal run has no dispatch group or exact attempt ID; leaving legacy attempts untouched");
         return;
     };
     let attempt = match attempt_repo.get(attempt_id).await {
@@ -359,7 +424,7 @@ async fn terminalize_failed_run_attempt(
                 task_id = %task.short_id,
                 attempt_id,
                 error = %e,
-                "supervisor dispatch: failed to load attempt for failed-run terminalization"
+                "supervisor dispatch: failed to load attempt for terminal-run terminalization"
             );
             return;
         }
@@ -370,7 +435,7 @@ async fn terminalize_failed_run_attempt(
     match attempt_repo
         .advance_to_terminal(djinn_db::TerminalTaskAttemptParams {
             id: &attempt.id,
-            outcome: djinn_core::models::task_attempt::TaskAttemptOutcome::Crashed,
+            outcome: attempt_outcome,
             pr_url: None,
             submit_ref: None,
             checkpoint_ref: None,
@@ -385,14 +450,16 @@ async fn terminalize_failed_run_attempt(
         Ok(updated) => tracing::info!(
             task_id = %task.short_id,
             attempt_id = %updated.id,
+            run_outcome = outcome_name,
             outcome = %updated.outcome,
-            "supervisor dispatch: terminalized failed run's pending attempt"
+            "supervisor dispatch: terminalized run's pending attempt"
         ),
         Err(e) => tracing::warn!(
             task_id = %task.short_id,
             attempt_id,
+            run_outcome = outcome_name,
             error = %e,
-            "supervisor dispatch: failed to terminalize failed run's pending attempt"
+            "supervisor dispatch: failed to terminalize run's pending attempt"
         ),
     }
 }
@@ -694,7 +761,7 @@ pub(super) async fn dispatch_task_runtime(
                 "supervisor dispatch: task-run complete"
             );
             persist_loop_guard_activity(&task_repo, &task.id, &report).await;
-            terminalize_failed_run_attempt(
+            terminalize_run_attempt(
                 &app_state,
                 spec.task_attempt_id.as_deref(),
                 dispatch_group_id.as_deref(),
@@ -2503,7 +2570,7 @@ mod tests {
                 body_excerpt: None,
             },
         );
-        terminalize_failed_run_attempt(&app_state, Some(&attempt.id), None, &task, &failed).await;
+        terminalize_run_attempt(&app_state, Some(&attempt.id), None, &task, &failed).await;
 
         let after = attempt_repo
             .get(&attempt.id)
@@ -2544,7 +2611,7 @@ mod tests {
             })
             .await
             .expect("advance to submitted");
-        terminalize_failed_run_attempt(&app_state, Some(&submitted.id), None, &task, &failed).await;
+        terminalize_run_attempt(&app_state, Some(&submitted.id), None, &task, &failed).await;
         let after_submitted = attempt_repo
             .get(&submitted.id)
             .await
@@ -2556,7 +2623,9 @@ mod tests {
             "a submitted attempt must keep its submitted signal"
         );
 
-        // A non-Failed outcome must not touch the attempt.
+        // A successful outcome must ALSO terminalize a leftover pending
+        // attempt (as `completed`) — leaving it pending wedges the respawn
+        // guard for the task's next dispatch (task pl4n, 2026-07-23).
         let pending = attempt_repo
             .create_or_get_pending(djinn_db::CreateTaskAttemptParams {
                 id: &uuid::Uuid::now_v7().to_string(),
@@ -2571,7 +2640,7 @@ mod tests {
             .await
             .expect("create third attempt");
         let submitted_outcome = report("ok-run", vec![], TaskRunOutcome::WorkerSubmitted);
-        terminalize_failed_run_attempt(
+        terminalize_run_attempt(
             &app_state,
             Some(&pending.id),
             None,
@@ -2586,8 +2655,116 @@ mod tests {
             .expect("attempt exists");
         assert_eq!(
             after_pending.outcome,
-            TaskAttemptOutcome::Pending.as_str(),
-            "non-Failed outcomes must not touch the attempt"
+            TaskAttemptOutcome::Completed.as_str(),
+            "a successful terminal report must terminalize its leftover pending attempt"
+        );
+    }
+
+    /// Regression for task pl4n (2026-07-23): a dispatch group holds the
+    /// coordinator's `<task>:worker:<uuid>` dispatch-start row AND the
+    /// supervisor's exact `task-run:<id>` row. `submit_work` advances only the
+    /// newest pending row to `submitted`; on a successful `WorkerSubmitted`
+    /// report the sibling `task-run:`-keyed row stayed `pending` forever, so
+    /// the respawn guard deferred the later rework dispatch on every tick
+    /// until the periodic reaper mislabeled the run `crashed`. A completed
+    /// task-run must leave NO pending attempt in its dispatch group, while the
+    /// `submitted` row keeps its signal for the PR lifecycle.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn worker_submitted_report_terminalizes_leftover_pending_group_row() {
+        use crate::test_helpers;
+        use djinn_core::models::task_attempt::TaskAttemptOutcome;
+        use tokio_util::sync::CancellationToken;
+
+        let db = test_helpers::create_test_db();
+        let project = test_helpers::create_test_project(&db).await;
+        let epic = test_helpers::create_test_epic(&db, &project.id).await;
+        let task = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
+        let app_state = test_helpers::agent_context_from_db(db.clone(), CancellationToken::new());
+
+        let attempt_repo = TaskAttemptRepository::new(db.clone());
+        let group = uuid::Uuid::now_v7().to_string();
+        // Supervisor exact-attempt row (`task-run:`-keyed) — the production
+        // row that was left pending.
+        let task_run_row = attempt_repo
+            .create_or_get_pending(djinn_db::CreateTaskAttemptParams {
+                id: &uuid::Uuid::now_v7().to_string(),
+                task_id: &task.id,
+                role: "worker",
+                dispatch_key: "task-run:019f9040-9baa-7582-af72-aa8354f114d7",
+                session_id: None,
+                attempt_seq: None,
+                dispatch_owner_incarnation_id: None,
+                dispatch_group_id: Some(&group),
+            })
+            .await
+            .expect("create task-run exact attempt row");
+        // Coordinator dispatch-start row of the same group; `submit_work`
+        // advanced it (the newest pending row) to `submitted`.
+        let coordinator_row = attempt_repo
+            .create_or_get_pending(djinn_db::CreateTaskAttemptParams {
+                id: &uuid::Uuid::now_v7().to_string(),
+                task_id: &task.id,
+                role: "worker",
+                dispatch_key: &format!("{}:worker:{}", task.id, uuid::Uuid::now_v7()),
+                session_id: None,
+                attempt_seq: None,
+                dispatch_owner_incarnation_id: None,
+                dispatch_group_id: Some(&group),
+            })
+            .await
+            .expect("create coordinator dispatch-start row");
+        attempt_repo
+            .advance_to_submitted(djinn_db::SubmitTaskAttemptParams {
+                id: &coordinator_row.id,
+                submit_ref: None,
+                checkpoint_ref: None,
+                mirror_head_sha: None,
+                github_head_sha: None,
+                summary: Some("did the work"),
+                summary_json: None,
+                log_tail: None,
+            })
+            .await
+            .expect("advance coordinator row to submitted");
+
+        let ok = report(
+            "run-ok",
+            vec![RoleKind::Worker],
+            TaskRunOutcome::WorkerSubmitted,
+        );
+        terminalize_run_attempt(&app_state, Some(&task_run_row.id), Some(&group), &task, &ok).await;
+
+        let after_task_run = attempt_repo
+            .get(&task_run_row.id)
+            .await
+            .expect("read task-run row")
+            .expect("task-run row exists");
+        assert_eq!(
+            after_task_run.outcome,
+            TaskAttemptOutcome::Completed.as_str(),
+            "the task-run:-keyed row must be terminalized with the run"
+        );
+        let after_coordinator = attempt_repo
+            .get(&coordinator_row.id)
+            .await
+            .expect("read coordinator row")
+            .expect("coordinator row exists");
+        assert_eq!(
+            after_coordinator.outcome,
+            TaskAttemptOutcome::Submitted.as_str(),
+            "the submitted row is owned by the review/PR lifecycle and must keep its signal"
+        );
+        // The wedge condition itself: no pending/submitted... a `pending` row
+        // must be gone so the respawn guard's non-terminal check cannot see a
+        // phantom pending attempt after the PR reopens for rework.
+        let live = attempt_repo
+            .latest_pending_or_submitted(&task.id, Some("worker"))
+            .await
+            .expect("lookup live attempt");
+        assert!(
+            live.as_ref()
+                .is_some_and(|a| a.outcome == TaskAttemptOutcome::Submitted.as_str()),
+            "only the submitted row may remain non-terminal after run completion, got {live:?}"
         );
     }
 

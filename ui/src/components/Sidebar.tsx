@@ -14,7 +14,6 @@ import {
   Idea01Icon,
   ConnectIcon,
   GithubIcon,
-  CubeIcon,
   UserGroupIcon,
   Analytics01Icon,
 } from '@hugeicons/core-free-icons';
@@ -140,10 +139,13 @@ export function Sidebar() {
       setActiveSection('code-graph');
     } else if (location.pathname.includes('/proposals')) {
       setActiveSection('proposals');
-    } else if (location.pathname.startsWith('/repositories')) {
+    } else if (
+      location.pathname.startsWith('/repositories') ||
+      location.pathname.startsWith('/images')
+    ) {
+      // Repositories + Images are one section ("hub"); both routes highlight the
+      // single Repositories nav item.
       setActiveSection('repositories');
-    } else if (location.pathname.startsWith('/images')) {
-      setActiveSection('images');
     } else if (location.pathname.startsWith('/users')) {
       setActiveSection('users');
     } else if (location.pathname.startsWith('/admin/usage')) {
@@ -215,12 +217,6 @@ export function Sidebar() {
           warningLabel="need devcontainer setup"
           isActive={activeSection === 'repositories'}
           onClick={() => navigate('/repositories')}
-        />
-        <NavItem
-          icon={<HugeiconsIcon icon={CubeIcon} className="h-4 w-4" />}
-          label="Images"
-          isActive={activeSection === 'images'}
-          onClick={() => navigate('/images')}
         />
       </nav>
 

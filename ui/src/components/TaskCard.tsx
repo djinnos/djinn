@@ -267,7 +267,7 @@ export function TaskCard({ task, epic, moving = false, onClick }: TaskCardProps)
       )}
       onClick={onClick}
     >
-      <CardContent className="flex min-h-[3.5rem] flex-col gap-1.5">
+      <CardContent className="flex min-h-[3rem] flex-col gap-1">
         {/* Row 1: ID, priority, badges, pipeline */}
         <div className="flex items-center gap-2 overflow-hidden text-[11px] text-muted-foreground">
           <TaskIdLabel taskId={task.id} shortId={task.short_id} />
@@ -391,7 +391,9 @@ export function TaskCard({ task, epic, moving = false, onClick }: TaskCardProps)
             title={epic.title}
             data-testid="taskcard-epic-chip"
           >
-            <span className="shrink-0 leading-none">{epic.emoji}</span>
+            {epic.emoji && (
+              <span className="shrink-0 leading-none">{epic.emoji}</span>
+            )}
             <span className="truncate">{epic.title}</span>
           </div>
         )}

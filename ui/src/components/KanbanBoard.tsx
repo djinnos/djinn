@@ -6,6 +6,7 @@ import { useProjects } from "@/stores/useProjectStore";
 import { taskStore } from "@/stores/taskStore";
 import type { Epic, Task } from "@/api/types";
 import { TaskCard, DoneTaskRow } from "@/components/TaskCard";
+import { TaskIdLabel } from "@/components/TaskIdLabel";
 import { TaskDetailPanel } from "@/components/TaskDetailPanel";
 import { BoardHealthBanner } from "@/components/BoardHealthBanner";
 import { GitHubAppBanner } from "@/components/GitHubAppBanner";
@@ -75,7 +76,7 @@ const STATUS_COLUMNS: Array<{
 // Shared column grid: the sticky status header and every swimlane use the same
 // template so cards stay aligned under their column while scrolling lanes.
 const COLUMN_GRID_CLASS =
-  "grid grid-cols-[repeat(4,minmax(280px,1fr))] gap-x-5";
+  "grid grid-cols-[repeat(4,minmax(280px,1fr))] gap-x-8";
 
 function taskToColumnKey(task: Task): ColumnKey | null {
   if (task.status === "closed") {
@@ -119,6 +120,7 @@ type Lane = {
   kind: "proposal" | "other";
   title: string;
   proposalId?: string;
+  proposalShortId?: string | null;
   buildOwnerUserId?: string | null;
   columns: Map<ColumnKey, Task[]>;
   total: number;
@@ -284,6 +286,7 @@ export function KanbanBoard({
               ? `Proposal ${epic.proposal_short_id}`
               : "Proposal"),
           proposalId: epic.proposal_id!,
+          proposalShortId: epic.proposal_short_id,
           buildOwnerUserId: epic.proposal_build_owner_user_id,
           columns: new Map(),
           total: 0,
@@ -443,7 +446,7 @@ export function KanbanBoard({
                 const isClickableName = lane.kind === "proposal";
 
                 return (
-                  <section key={lane.key} className="pb-2">
+                  <section key={lane.key} className="pb-4">
                     {/* Swimlane header: full-width row spanning all columns. */}
                     <div
                       className="flex cursor-pointer items-center gap-2 rounded-md bg-zinc-900 px-2.5 py-2 ring-1 ring-white/[0.04] transition-colors hover:bg-zinc-800/80"
@@ -460,10 +463,17 @@ export function KanbanBoard({
                           className="size-4"
                         />
                       )}
+                      {lane.proposalShortId && (
+                        <TaskIdLabel
+                          taskId={lane.proposalId ?? lane.proposalShortId}
+                          shortId={lane.proposalShortId}
+                          className="shrink-0"
+                        />
+                      )}
                       {isClickableName ? (
                         <button
                           type="button"
-                          className="truncate text-sm font-medium hover:underline"
+                          className="cursor-pointer truncate text-sm font-medium hover:underline"
                           onClick={(e) => {
                             e.stopPropagation();
                             handleLaneNameClick(lane);
@@ -495,7 +505,30 @@ export function KanbanBoard({
                           No tasks yet
                         </p>
                       ) : (
-                        <div className={cn(COLUMN_GRID_CLASS, "px-1 pt-3 pb-2")}>
+                        <div className="relative">
+                          {/* Column separators, scoped to this lane's card
+                              area so they never cross the lane header rows.
+                              Same grid template as the cards, one hairline
+                              centered in each column gap. */}
+                          <div
+                            aria-hidden
+                            className={cn(
+                              COLUMN_GRID_CLASS,
+                              "pointer-events-none absolute inset-x-0 top-3 bottom-1 px-1",
+                            )}
+                          >
+                            {STATUS_COLUMNS.map((column, index) => (
+                              <div
+                                key={column.key}
+                                className={
+                                  index === 0
+                                    ? undefined
+                                    : "-ml-4 w-px bg-border/70"
+                                }
+                              />
+                            ))}
+                          </div>
+                          <div className={cn(COLUMN_GRID_CLASS, "px-1 pt-4 pb-3")}>
                           {STATUS_COLUMNS.map((column) => {
                             const columnTasks =
                               lane.columns.get(column.key) ?? [];
@@ -540,6 +573,7 @@ export function KanbanBoard({
                               </ul>
                             );
                           })}
+                          </div>
                         </div>
                       ))}
                   </section>

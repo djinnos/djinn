@@ -116,6 +116,7 @@ fn reviewer_reuse_material(worktree: std::path::PathBuf) -> FinalVerificationRes
         target: "test-target".into(),
         features: vec![],
         allowlisted_environment: Default::default(),
+        services: vec![],
     };
     FinalVerificationResolvedMaterial {
         execution_request: FinalVerificationExecutionRequest {
