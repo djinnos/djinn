@@ -15,6 +15,7 @@ import type {
   ProposalEpic,
   ProposalFeedback,
   ProposalGateStatus,
+  ProposalLintResult,
   ProposalRefinementStatus,
   ProposalRevision,
   ProposalSignoff,
@@ -57,6 +58,8 @@ export function proposalListQueryOptions(filters: ProposalListFilters = {}) {
 
 export interface ProposalDetail {
   proposal: Proposal | null;
+  /** Repository-backed lint result for the exact current head revision. */
+  latest_lint?: ProposalLintResult | null;
   targets: ProposalTarget[];
   feedback: ProposalFeedback[];
   /**
@@ -82,6 +85,7 @@ export function proposalDetailQueryOptions(id: string | null) {
       const res = await callMcpTool("proposal_show", { id: id as string });
       return {
         proposal: (res.proposal ?? null) as Proposal | null,
+        latest_lint: res.latest_lint as ProposalLintResult | null | undefined,
         targets: (res.targets ?? []) as ProposalTarget[],
         feedback: (res.feedback ?? []) as ProposalFeedback[],
         revisions: (res.revisions ?? []) as ProposalHistoryEntry[],
