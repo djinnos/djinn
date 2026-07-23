@@ -1,27 +1,8 @@
 //! Leader-tick integration for the cheap doctor subset (epic 4q1t).
 //!
-//! The Doctor framework ([`djinn_core::doctor`]) exposes a pluggable registry of
-//! [`DoctorCheck`]s and a [`DoctorCheckCadence`] tag that separates "safe to run
-//! every coordinator tick" from "explicit on-demand". This module wires the
-//! cheap subset into the coordinator's existing 30s tick without going through
-//! the MCP `doctor_run` tool: it uses the framework's
-//! [`run_cheap_subset`] helper, persists every returned [`Finding`] through
-//! [`djinn_db::DoctorFindingRepository`], emits bounded-cardinality
-//! `djinn_doctor_findings{check}` and `djinn_doctor_run_duration_seconds{check}`
-//! metrics via [`djinn_telemetry::doctor`], and writes a board-visible activity
-//! entry for each `Critical` finding via [`djinn_db::TaskRepository::log_activity`].
-//!
-//! All failures (one bad check, one bad DB write, one bad activity entry) are
-//! logged and surfaced as tracing; they MUST NOT take the rest of the
-//! coordinator tick down — see the per-step `match`/`if let Err` blocks below.
-//!
-//! ## Tick placement
-//!
-//! The cheap-doctor tick is called from [`super::super::coordinator::actor`]
-//! immediately after the existing cheap reapers/backstops and before dispatch
-//! so a board-visible critical finding can race the dispatch decision for the
-//! same 30s window. It is intentionally a non-blocking observation: no
-//! dispatch, no fix, no state mutation outside of inserts.
+//! The leader tick runs cheap doctor checks and persists their findings without
+//! blocking coordinator dispatch. Individual check, database, and activity-log
+//! failures are logged without taking down the remainder of the tick.
 
 use djinn_core::clock::{Clock, SystemClock};
 use djinn_core::doctor::{
