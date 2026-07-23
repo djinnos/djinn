@@ -10,7 +10,8 @@ use djinn_db::{BuildLeaseConsumerKind, BuildLeaseState};
 use djinn_k8s::{GraphWarmLease, GraphWarmLeaseError, GraphWarmLeaseGrant, GraphWarmLeaseRecovery};
 use djinn_supervisor::services::{
     GraphWarmLeaseIdentity, LeaseBindRequest, LeaseDeadlines, LeaseFencingToken, LeaseGrantRequest,
-    LeaseIdentity, LeaseQueueRequest, LeaseReleaseRequest, LeaseResult, LeaseState, LeaseStatusRequest,
+    LeaseIdentity, LeaseQueueRequest, LeaseReleaseRequest, LeaseResult, LeaseState,
+    LeaseStatusRequest,
 };
 
 use crate::build_lease::BuildLeaseService;
@@ -37,7 +38,10 @@ impl BuildLeaseGraphWarmAdapter {
         Ok(snapshot
             .rows
             .into_iter()
-            .filter(|row| row.key.consumer_kind == BuildLeaseConsumerKind::GraphWarm && row.state != BuildLeaseState::Terminal)
+            .filter(|row| {
+                row.key.consumer_kind == BuildLeaseConsumerKind::GraphWarm
+                    && row.state != BuildLeaseState::Terminal
+            })
             .filter_map(|row| {
                 let mut fields = row.immutable_identity.splitn(4, ':');
                 (fields.next() == Some("warm")).then_some(())?;
@@ -49,8 +53,27 @@ impl BuildLeaseGraphWarmAdapter {
                     },
                     fencing_token: LeaseFencingToken(row.fencing_token? as u64),
                     bound_pod_uid: row.bound_pod_uid,
-                    state: match row.state { BuildLeaseState::Launching => LeaseState::Launching, BuildLeaseState::Bound => LeaseState::Bound, BuildLeaseState::Active => LeaseState::Active, BuildLeaseState::Suspect => LeaseState::Suspect, _ => return None },
-                    deadlines: LeaseDeadlines { queue_deadline_ms: 0, launch_deadline_ms: row.launch_deadline.as_deref().and_then(|v| time::OffsetDateTime::parse(v, &time::format_description::well_known::Rfc3339).ok()).map_or(0, |v| v.unix_timestamp_nanos() as i64 / 1_000_000) },
+                    state: match row.state {
+                        BuildLeaseState::Launching => LeaseState::Launching,
+                        BuildLeaseState::Bound => LeaseState::Bound,
+                        BuildLeaseState::Active => LeaseState::Active,
+                        BuildLeaseState::Suspect => LeaseState::Suspect,
+                        _ => return None,
+                    },
+                    deadlines: LeaseDeadlines {
+                        queue_deadline_ms: 0,
+                        launch_deadline_ms: row
+                            .launch_deadline
+                            .as_deref()
+                            .and_then(|v| {
+                                time::OffsetDateTime::parse(
+                                    v,
+                                    &time::format_description::well_known::Rfc3339,
+                                )
+                                .ok()
+                            })
+                            .map_or(0, |v| v.unix_timestamp_nanos() as i64 / 1_000_000),
+                    },
                 })
             })
             .collect())
@@ -147,7 +170,44 @@ impl GraphWarmLease for BuildLeaseGraphWarmAdapter {
         }
     }
 
-    async fn recoverable(&self) -> Result<Vec<GraphWarmLeaseRecovery>, GraphWarmLeaseError> { BuildLeaseGraphWarmAdapter::recoverable(self).await }
-    async fn report(&self, identity: &GraphWarmLeaseIdentity, fencing_token: LeaseFencingToken, state: LeaseState) -> Result<(), GraphWarmLeaseError> { match self.service.report(LeaseIdentity::GraphWarm(identity.clone()), fencing_token, state).await { LeaseResult::Status(_) => Ok(()), other => Err(unavailable(other)) } }
-    async fn release(&self, identity: &GraphWarmLeaseIdentity, fencing_token: LeaseFencingToken) -> Result<(), GraphWarmLeaseError> { match self.service.release(LeaseReleaseRequest { identity: LeaseIdentity::GraphWarm(identity.clone()), fencing_token, candidate_cleanup: false }).await { LeaseResult::Released { .. } => Ok(()), other => Err(unavailable(other)) } }
+    async fn recoverable(&self) -> Result<Vec<GraphWarmLeaseRecovery>, GraphWarmLeaseError> {
+        BuildLeaseGraphWarmAdapter::recoverable(self).await
+    }
+    async fn report(
+        &self,
+        identity: &GraphWarmLeaseIdentity,
+        fencing_token: LeaseFencingToken,
+        state: LeaseState,
+    ) -> Result<(), GraphWarmLeaseError> {
+        match self
+            .service
+            .report(
+                LeaseIdentity::GraphWarm(identity.clone()),
+                fencing_token,
+                state,
+            )
+            .await
+        {
+            LeaseResult::Status(_) => Ok(()),
+            other => Err(unavailable(other)),
+        }
+    }
+    async fn release(
+        &self,
+        identity: &GraphWarmLeaseIdentity,
+        fencing_token: LeaseFencingToken,
+    ) -> Result<(), GraphWarmLeaseError> {
+        match self
+            .service
+            .release(LeaseReleaseRequest {
+                identity: LeaseIdentity::GraphWarm(identity.clone()),
+                fencing_token,
+                candidate_cleanup: false,
+            })
+            .await
+        {
+            LeaseResult::Released { .. } => Ok(()),
+            other => Err(unavailable(other)),
+        }
+    }
 }

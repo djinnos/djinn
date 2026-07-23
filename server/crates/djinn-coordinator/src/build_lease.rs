@@ -411,7 +411,8 @@ impl BuildLeaseService {
             LeaseState::Suspect => BuildLeaseState::Suspect,
             _ => return self.unavailable(),
         };
-        self.transition(identity, token, state, LeaseOperation::Status).await
+        self.transition(identity, token, state, LeaseOperation::Status)
+            .await
     }
     pub async fn expire_deadlines(&self) -> LeaseResult {
         let _guard = self.operation.lock().await;

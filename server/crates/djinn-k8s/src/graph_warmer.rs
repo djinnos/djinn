@@ -83,8 +83,21 @@ pub trait GraphWarmLease: Send + Sync {
         pod_uid: String,
     ) -> Result<(), GraphWarmLeaseError>;
 
-    async fn report(&self, _identity: &GraphWarmLeaseIdentity, _fencing_token: LeaseFencingToken, _state: LeaseState) -> Result<(), GraphWarmLeaseError> { Err(GraphWarmLeaseError::Unavailable) }
-    async fn release(&self, _identity: &GraphWarmLeaseIdentity, _fencing_token: LeaseFencingToken) -> Result<(), GraphWarmLeaseError> { Err(GraphWarmLeaseError::Unavailable) }
+    async fn report(
+        &self,
+        _identity: &GraphWarmLeaseIdentity,
+        _fencing_token: LeaseFencingToken,
+        _state: LeaseState,
+    ) -> Result<(), GraphWarmLeaseError> {
+        Err(GraphWarmLeaseError::Unavailable)
+    }
+    async fn release(
+        &self,
+        _identity: &GraphWarmLeaseIdentity,
+        _fencing_token: LeaseFencingToken,
+    ) -> Result<(), GraphWarmLeaseError> {
+        Err(GraphWarmLeaseError::Unavailable)
+    }
 
     /// Enumerate retained warm leases for restart reconciliation. Non-durable
     /// test adapters intentionally have no recovery view.
@@ -455,7 +468,7 @@ struct WarmDispatch {
     lease: Option<Arc<dyn GraphWarmLease>>,
     /// Live Kubernetes inventory/gate seam for leased Jobs. Test constructors
     /// leave this absent and therefore cannot authorize a candidate.
-    candidates: Option<Arc<WarmCandidateControl<KubeWarmCandidateClient>>>,
+    candidates: Option<Arc<dyn WarmCandidateReconciler>>,
     /// Cluster-side dedupe: lists non-terminal warm Jobs for a project so
     /// triggers from any process can coalesce against in-flight Jobs created
     /// by any other process (rolling update overlap, server restart mid-warm,
@@ -470,6 +483,38 @@ struct WarmDispatch {
     /// wiring; production sets it via [`K8sGraphWarmer::with_completion_sink`].
     completion_sink: Option<Arc<dyn WarmCompletionSink>>,
     in_flight: Arc<Mutex<HashMap<String, Arc<Notify>>>>,
+}
+
+/// Object-safe candidate-control boundary used by dispatch and restart
+/// reconciliation. It keeps fault-matrix tests independent of an apiserver.
+#[async_trait]
+trait WarmCandidateReconciler: Send + Sync {
+    async fn inventory(&self, identity: &LeasedWarmJobIdentity) -> WarmCandidateInventory;
+    async fn open_selected_pod_gate(
+        &self,
+        identity: &LeasedWarmJobIdentity,
+        inventory: &WarmCandidateInventory,
+    ) -> GateObservation;
+    async fn delete_candidate(&self, candidate: &WarmCandidate) -> CleanupObservation;
+}
+
+#[async_trait]
+impl<C: WarmCandidateClient> WarmCandidateReconciler for WarmCandidateControl<C> {
+    async fn inventory(&self, identity: &LeasedWarmJobIdentity) -> WarmCandidateInventory {
+        WarmCandidateControl::inventory(self, identity).await
+    }
+
+    async fn open_selected_pod_gate(
+        &self,
+        identity: &LeasedWarmJobIdentity,
+        inventory: &WarmCandidateInventory,
+    ) -> GateObservation {
+        WarmCandidateControl::open_selected_pod_gate(self, identity, inventory).await
+    }
+
+    async fn delete_candidate(&self, candidate: &WarmCandidate) -> CleanupObservation {
+        WarmCandidateControl::delete_candidate(self, candidate).await
+    }
 }
 
 impl WarmDispatch {
@@ -1197,12 +1242,61 @@ impl K8sGraphWarmer {
                 recovery.fencing_token.0,
             );
             let inventory = control.inventory(&job_identity).await;
-            let expired = recovery.deadlines.launch_deadline_ms > 0 && time::OffsetDateTime::now_utc().unix_timestamp_nanos() as i64 / 1_000_000 >= recovery.deadlines.launch_deadline_ms;
-            if inventory.observation != WarmInventoryObservation::Observed { let _ = lease.report(&recovery.identity, recovery.fencing_token.clone(), LeaseState::Suspect).await; continue; }
-            if expired { let mut pending = false; for candidate in inventory.jobs.candidates.iter().chain(inventory.pods.candidates.iter()) { pending |= candidate.uid.is_none() || !matches!(control.delete_candidate(candidate).await, CleanupObservation::ConfirmedDelete); } if pending || !inventory.jobs.candidates.is_empty() || !inventory.pods.candidates.is_empty() { let _ = lease.report(&recovery.identity, recovery.fencing_token.clone(), LeaseState::Suspect).await; continue; } }
-            if inventory.jobs.candidates.is_empty() && inventory.pods.candidates.is_empty() { let _ = lease.release(&recovery.identity, recovery.fencing_token.clone()).await; continue; }
+            let expired = recovery.deadlines.launch_deadline_ms > 0
+                && time::OffsetDateTime::now_utc().unix_timestamp_nanos() as i64 / 1_000_000
+                    >= recovery.deadlines.launch_deadline_ms;
+            if inventory.observation != WarmInventoryObservation::Observed {
+                let _ = lease
+                    .report(
+                        &recovery.identity,
+                        recovery.fencing_token.clone(),
+                        LeaseState::Suspect,
+                    )
+                    .await;
+                continue;
+            }
+            if expired {
+                let mut pending = false;
+                for candidate in inventory
+                    .jobs
+                    .candidates
+                    .iter()
+                    .chain(inventory.pods.candidates.iter())
+                {
+                    pending |= candidate.uid.is_none()
+                        || !matches!(
+                            control.delete_candidate(candidate).await,
+                            CleanupObservation::ConfirmedDelete
+                        );
+                }
+                if pending
+                    || !inventory.jobs.candidates.is_empty()
+                    || !inventory.pods.candidates.is_empty()
+                {
+                    let _ = lease
+                        .report(
+                            &recovery.identity,
+                            recovery.fencing_token.clone(),
+                            LeaseState::Suspect,
+                        )
+                        .await;
+                    continue;
+                }
+            }
+            if inventory.jobs.candidates.is_empty() && inventory.pods.candidates.is_empty() {
+                let _ = lease
+                    .release(&recovery.identity, recovery.fencing_token.clone())
+                    .await;
+                continue;
+            }
             let Some(candidate) = inventory.selected_pod() else {
-                let _ = lease.report(&recovery.identity, recovery.fencing_token.clone(), LeaseState::Suspect).await;
+                let _ = lease
+                    .report(
+                        &recovery.identity,
+                        recovery.fencing_token.clone(),
+                        LeaseState::Suspect,
+                    )
+                    .await;
                 warn!(request_id = %recovery.identity.warm_request_id, inventory = ?inventory.observation, pods = ?inventory.pods.state, "K8sGraphWarmer: recovered lease remains suspect with gate closed");
                 continue;
             };
@@ -1230,9 +1324,23 @@ impl K8sGraphWarmer {
                     .await,
                 GateObservation::Opened
             ) {
-                let _ = lease.report(&recovery.identity, recovery.fencing_token.clone(), LeaseState::Suspect).await;
+                let _ = lease
+                    .report(
+                        &recovery.identity,
+                        recovery.fencing_token.clone(),
+                        LeaseState::Suspect,
+                    )
+                    .await;
                 warn!(request_id = %recovery.identity.warm_request_id, "K8sGraphWarmer: recovered gate remains closed");
-            } else { let _ = lease.report(&recovery.identity, recovery.fencing_token.clone(), LeaseState::Active).await; }
+            } else {
+                let _ = lease
+                    .report(
+                        &recovery.identity,
+                        recovery.fencing_token.clone(),
+                        LeaseState::Active,
+                    )
+                    .await;
+            }
         }
     }
 
@@ -1456,6 +1564,9 @@ impl GraphWarmerService for K8sGraphWarmer {
 #[cfg(test)]
 #[path = "graph_warmer_admission_tests.rs"]
 mod admission_tests;
+#[cfg(test)]
+#[path = "graph_warmer_recovery_tests.rs"]
+mod recovery_tests;
 #[cfg(test)]
 #[path = "graph_warmer_tests.rs"]
 mod tests;
