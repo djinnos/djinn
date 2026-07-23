@@ -5,9 +5,7 @@
 //! branch (stored, ineligible, error) is testable deterministically without
 //! requiring the production hermetic launcher.
 //!
-//! Repository-backed reuse consultation is covered separately; this module
-//! verifies that both stored and reused success evidence survive the reply-loop
-//! completion-intent boundary unchanged.
+//! Repository-backed reuse consultation is covered separately.
 
 use std::collections::VecDeque;
 use std::future::Future;
@@ -29,7 +27,7 @@ use djinn_core::{
     canonical_verify::{
         CanonicalCommandDescriptorV1, CanonicalFinalVerificationPlanV1, CanonicalHermeticityV1,
         EnvironmentIdentityV1, ImmutableImageV1, ResolvedEnvironmentIdentityInputV1,
-        ToolProbeStatus, ToolProbeV1,
+        ResolvedVerificationSelectionV1, ToolProbeStatus, ToolProbeV1,
     },
     models::{Task, VerifySource},
 };
@@ -478,6 +476,7 @@ pub(crate) fn reuse_material_with_fingerprint_config(
                 network_access: false,
             },
         },
+        selection: ResolvedVerificationSelectionV1::legacy_flat_plan(),
         input_manifest: manifest.clone(),
         image: ImmutableImageV1 {
             reference: "test-image".into(),
