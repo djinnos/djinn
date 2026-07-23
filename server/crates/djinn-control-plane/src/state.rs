@@ -1055,4 +1055,29 @@ pub mod stubs {
             "clones of McpState must share the same process-owned metrics Arc"
         );
     }
+
+    #[tokio::test]
+    async fn direct_tool_stub_returns_only_selected_retrieval_checks() {
+        let coordinator = StubRefinementAcceptingCoordinator;
+        let runs = coordinator
+            .run_retrieval_health_checks(
+                vec![
+                    "memory.injection_starvation".to_owned(),
+                    "not.a.retrieval.check".to_owned(),
+                    "memory.retrieval_health_refresh".to_owned(),
+                ],
+                "test-run".to_owned(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            runs.iter().map(|run| run.check_name).collect::<Vec<_>>(),
+            vec![
+                "memory.injection_starvation",
+                "memory.retrieval_health_refresh"
+            ]
+        );
+        assert!(runs.iter().all(|run| run.findings.is_empty()));
+    }
 }
