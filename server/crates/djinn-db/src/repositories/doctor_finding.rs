@@ -703,4 +703,107 @@ mod tests {
         assert_eq!(inserted.entity_ids, serde_json::json!([]));
         assert_eq!(inserted.evidence, serde_json::json!({}));
     }
+
+    fn keyed_retrieval_finding(check_name: &str, active_key: &str) -> KeyedDoctorFinding {
+        let mut finding = new_finding(check_name, severity::ERROR);
+        finding.entity_ids = serde_json::json!({"finding_key": active_key});
+        finding.evidence = serde_json::json!({
+            "refresh_timestamp": "2026-01-01T01:00:00Z",
+            "payload": ["must", "remain", "unchanged"],
+        });
+        finding.resolver_snapshot = Some(serde_json::json!({
+            "resolver": "retrieval_alarm",
+            "inputs": {"refresh_timestamp": "2026-01-01T01:00:00Z"},
+            "outputs": {"alarming": true},
+        }));
+        KeyedDoctorFinding {
+            active_key: active_key.to_owned(),
+            finding,
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn retrieval_reconciliation_preserves_alarm_rows_on_refresh_failure() {
+        let repo = DoctorFindingRepository::new(fresh_db());
+        let initial = repo
+            .reconcile_retrieval_findings(
+                vec![
+                    keyed_retrieval_finding(
+                        "memory.retrieval_zero_result",
+                        "project-a:dispatch",
+                    ),
+                    keyed_retrieval_finding(
+                        "memory.injection_starvation",
+                        "project-a:load_knowledge_context",
+                    ),
+                ],
+                &[],
+            )
+            .await
+            .expect("seed active retrieval alarms");
+        assert_eq!(initial.len(), 2);
+        let zero_before = initial[0].clone();
+        let starvation_before = initial[1].clone();
+
+        // A whole refresh failure only reconciles the refresh-error key and
+        // explicitly preserves every active retrieval alarm key.
+        let refresh = repo
+            .reconcile_retrieval_findings(
+                vec![KeyedDoctorFinding {
+                    active_key: "refresh".to_owned(),
+                    finding: NewDoctorFinding {
+                        run_id: Some("failed-refresh".to_owned()),
+                        check_name: "memory.retrieval_health_refresh".to_owned(),
+                        severity: severity::ERROR.to_owned(),
+                        entity_ids: serde_json::json!([]),
+                        evidence: serde_json::json!({
+                            "error_class": "retrieval_health_refresh_failed",
+                            "attempted_at": "2026-01-01T01:02:00Z",
+                            "last_success_at": "2026-01-01T01:00:00Z",
+                            "last_success_age_seconds": 120,
+                            "detail": "injected repository refresh failure",
+                        }),
+                        resolver_snapshot: Some(serde_json::json!({
+                            "resolver": "retrieval_health_refresh",
+                            "outputs": {"healthy": false},
+                        })),
+                        detail: Some("injected repository refresh failure".to_owned()),
+                    },
+                }],
+                &repo
+                    .active_retrieval_alarm_keys()
+                    .await
+                    .expect("active preserve keys"),
+            )
+            .await
+            .expect("persist refresh failure");
+        assert_eq!(refresh.len(), 1);
+        assert_eq!(refresh[0].severity, severity::ERROR);
+        assert_eq!(
+            refresh[0].evidence["error_class"],
+            "retrieval_health_refresh_failed"
+        );
+        assert_eq!(repo.get(&zero_before.id).await.unwrap(), Some(zero_before));
+        assert_eq!(
+            repo.get(&starvation_before.id).await.unwrap(),
+            Some(starvation_before)
+        );
+
+        // A later healthy refresh emits no retrieval findings, resolving both
+        // prior alarms and the refresh error through the same keyed path.
+        repo.reconcile_retrieval_findings(Vec::new(), &[])
+            .await
+            .expect("resolve healthy absences");
+        for row in initial.iter().chain(refresh.iter()) {
+            assert_eq!(
+                repo.get(&row.id)
+                    .await
+                    .expect("reloaded row")
+                    .expect("row retained for history")
+                    .status,
+                "resolved"
+            );
+        }
+    }
+
 }
