@@ -42,11 +42,18 @@ pub mod severity {
     pub const INFO: &str = "info";
     pub const WARN: &str = "warn";
     pub const CRITICAL: &str = "critical";
+    pub const ERROR: &str = "error";
 
     /// True when `value` is one of the canonical severity labels.
     pub fn is_known(value: &str) -> bool {
-        matches!(value, INFO | WARN | CRITICAL)
+        matches!(value, INFO | WARN | CRITICAL | ERROR)
     }
+}
+
+#[derive(Clone, Debug)]
+pub struct KeyedDoctorFinding {
+    pub active_key: String,
+    pub finding: NewDoctorFinding,
 }
 
 /// A persisted doctor finding — one row of `doctor_findings`.
@@ -65,6 +72,8 @@ pub struct DoctorFinding {
     pub run_id: Option<String>,
     /// Wall-clock UTC ISO-8601 timestamp the finding was recorded.
     pub created_at: String,
+    pub status: String,
+    pub observed_at: String,
     pub check_name: String,
     /// One of `severity::INFO`, `severity::WARN`, `severity::CRITICAL`.
     pub severity: String,
@@ -179,6 +188,33 @@ impl DoctorFindingRepository {
         Ok(out)
     }
 
+    /// Reconcile retrieval-health findings; preserved keys are not mutated.
+    pub async fn reconcile_retrieval_findings(
+        &self,
+        findings: Vec<KeyedDoctorFinding>,
+        preserve_keys: &[String],
+    ) -> Result<Vec<DoctorFinding>> {
+        self.db.ensure_initialized().await?;
+        let mut emitted = Vec::new();
+        let mut rows = Vec::new();
+        for keyed in findings {
+            emitted.push(keyed.active_key.clone());
+            let n = keyed.finding;
+            let row = sqlx::query(&format!(r#"INSERT INTO doctor_findings (id,run_id,check_name,severity,entity_ids,evidence,resolver_snapshot,detail,active_key,status) VALUES ($1,$2,$3,$4,$5::jsonb,$6::jsonb,$7::jsonb,$8,$9,'active') ON CONFLICT (check_name,active_key) WHERE active_key IS NOT NULL DO UPDATE SET run_id=EXCLUDED.run_id,severity=EXCLUDED.severity,entity_ids=EXCLUDED.entity_ids,evidence=EXCLUDED.evidence,resolver_snapshot=EXCLUDED.resolver_snapshot,detail=EXCLUDED.detail,status='active',observed_at=to_char(now() AT TIME ZONE 'utc','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') RETURNING {SELECT_COLS}"#))
+                .bind(Uuid::now_v7().to_string()).bind(n.run_id.as_deref()).bind(&n.check_name).bind(&n.severity).bind(&n.entity_ids).bind(&n.evidence).bind(n.resolver_snapshot.as_ref()).bind(n.detail.as_deref()).bind(&keyed.active_key).fetch_one(self.db.pool()).await?;
+            rows.push(row_to_finding(&row));
+        }
+        sqlx::query(r#"UPDATE doctor_findings SET status='resolved',observed_at=to_char(now() AT TIME ZONE 'utc','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') WHERE status='active' AND check_name IN ('memory.retrieval_zero_result','memory.injection_starvation','memory.retrieval_health_refresh') AND NOT (active_key=ANY($1)) AND NOT (active_key=ANY($2))"#).bind(&emitted).bind(preserve_keys).execute(self.db.pool()).await?;
+        Ok(rows)
+    }
+
+    pub async fn active_retrieval_alarm_keys(&self) -> Result<Vec<String>> {
+        self.db.ensure_initialized().await?;
+        let rows = sqlx::query("SELECT active_key FROM doctor_findings WHERE status = 'active' AND check_name IN ('memory.retrieval_zero_result', 'memory.injection_starvation') AND active_key IS NOT NULL")
+            .fetch_all(self.db.pool()).await?;
+        Ok(rows.iter().map(|row| row.get("active_key")).collect())
+    }
+
     /// Fetch a finding by its primary key. `None` if not found.
     pub async fn get(&self, id: &str) -> Result<Option<DoctorFinding>> {
         self.db.ensure_initialized().await?;
@@ -288,7 +324,7 @@ impl DoctorFindingRepository {
 /// Column list shared by every read path. Cast JSONB columns to `text` so
 /// the runtime query path can deserialize them through `serde_json::from_str`
 /// uniformly — this avoids the macro vs runtime split on JSONB types.
-const SELECT_COLS: &str = "id, run_id, created_at, check_name, severity, \
+const SELECT_COLS: &str = "id, run_id, created_at, status, observed_at, check_name, severity, \
      entity_ids::text AS entity_ids_text, \
      evidence::text AS evidence_text, \
      resolver_snapshot::text AS resolver_snapshot_text, \
@@ -308,6 +344,12 @@ fn row_to_finding(row: &sqlx::postgres::PgRow) -> DoctorFinding {
         id: row.get("id"),
         run_id: row.get("run_id"),
         created_at: row.get("created_at"),
+        status: row
+            .try_get("status")
+            .unwrap_or_else(|_| "active".to_owned()),
+        observed_at: row
+            .try_get("observed_at")
+            .unwrap_or_else(|_| row.get("created_at")),
         check_name: row.get("check_name"),
         severity: row.get("severity"),
         entity_ids: serde_json::from_str(&entity_ids_text)
@@ -660,5 +702,104 @@ mod tests {
         assert!(inserted.detail.is_none());
         assert_eq!(inserted.entity_ids, serde_json::json!([]));
         assert_eq!(inserted.evidence, serde_json::json!({}));
+    }
+
+    fn keyed_retrieval_finding(check_name: &str, active_key: &str) -> KeyedDoctorFinding {
+        let mut finding = new_finding(check_name, severity::ERROR);
+        finding.entity_ids = serde_json::json!({"finding_key": active_key});
+        finding.evidence = serde_json::json!({
+            "refresh_timestamp": "2026-01-01T01:00:00Z",
+            "payload": ["must", "remain", "unchanged"],
+        });
+        finding.resolver_snapshot = Some(serde_json::json!({
+            "resolver": "retrieval_alarm",
+            "inputs": {"refresh_timestamp": "2026-01-01T01:00:00Z"},
+            "outputs": {"alarming": true},
+        }));
+        KeyedDoctorFinding {
+            active_key: active_key.to_owned(),
+            finding,
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn retrieval_reconciliation_preserves_alarm_rows_on_refresh_failure() {
+        let repo = DoctorFindingRepository::new(fresh_db());
+        let initial = repo
+            .reconcile_retrieval_findings(
+                vec![
+                    keyed_retrieval_finding("memory.retrieval_zero_result", "project-a:dispatch"),
+                    keyed_retrieval_finding(
+                        "memory.injection_starvation",
+                        "project-a:load_knowledge_context",
+                    ),
+                ],
+                &[],
+            )
+            .await
+            .expect("seed active retrieval alarms");
+        assert_eq!(initial.len(), 2);
+        let zero_before = initial[0].clone();
+        let starvation_before = initial[1].clone();
+
+        // A whole refresh failure only reconciles the refresh-error key and
+        // explicitly preserves every active retrieval alarm key.
+        let refresh = repo
+            .reconcile_retrieval_findings(
+                vec![KeyedDoctorFinding {
+                    active_key: "refresh".to_owned(),
+                    finding: NewDoctorFinding {
+                        run_id: Some("failed-refresh".to_owned()),
+                        check_name: "memory.retrieval_health_refresh".to_owned(),
+                        severity: severity::ERROR.to_owned(),
+                        entity_ids: serde_json::json!([]),
+                        evidence: serde_json::json!({
+                            "error_class": "retrieval_health_refresh_failed",
+                            "attempted_at": "2026-01-01T01:02:00Z",
+                            "last_success_at": "2026-01-01T01:00:00Z",
+                            "last_success_age_seconds": 120,
+                            "detail": "injected repository refresh failure",
+                        }),
+                        resolver_snapshot: Some(serde_json::json!({
+                            "resolver": "retrieval_health_refresh",
+                            "outputs": {"healthy": false},
+                        })),
+                        detail: Some("injected repository refresh failure".to_owned()),
+                    },
+                }],
+                &repo
+                    .active_retrieval_alarm_keys()
+                    .await
+                    .expect("active preserve keys"),
+            )
+            .await
+            .expect("persist refresh failure");
+        assert_eq!(refresh.len(), 1);
+        assert_eq!(refresh[0].severity, severity::ERROR);
+        assert_eq!(
+            refresh[0].evidence["error_class"],
+            "retrieval_health_refresh_failed"
+        );
+        assert_eq!(repo.get(&zero_before.id).await.unwrap(), Some(zero_before));
+        assert_eq!(
+            repo.get(&starvation_before.id).await.unwrap(),
+            Some(starvation_before)
+        );
+
+        // A later healthy refresh emits no retrieval findings, resolving both
+        // prior alarms and the refresh error through the same keyed path.
+        repo.reconcile_retrieval_findings(Vec::new(), &[])
+            .await
+            .expect("resolve healthy absences");
+        for row in initial.iter().chain(refresh.iter()) {
+            assert_eq!(
+                repo.get(&row.id)
+                    .await
+                    .expect("reloaded row")
+                    .expect("row retained for history")
+                    .status,
+                "resolved"
+            );
+        }
     }
 }
