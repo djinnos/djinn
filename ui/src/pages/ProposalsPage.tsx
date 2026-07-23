@@ -7,8 +7,10 @@ import {
   Alert02Icon,
   ArrowLeft01Icon,
   Comment01Icon,
-  JusticeScale01Icon,
+  Legal01Icon,
   Robot01Icon,
+  SecurityBlockIcon,
+  Shield01Icon,
   TestTube01Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
@@ -22,8 +24,22 @@ import {
 } from "@/components/proposals/blocks";
 import { AcceptanceProgressBadge } from "@/components/AcceptanceProgressBadge";
 import { UserAvatar } from "@/components/UserAvatar";
+import { TaskIdLabel } from "@/components/TaskIdLabel";
 import { CopyButton } from "@/components/CopyButton";
 import { InlineError } from "@/components/InlineError";
+import {
+  Combobox,
+  ComboboxContent,
+  ComboboxEmpty,
+  ComboboxInput,
+  ComboboxItem,
+  ComboboxList,
+} from "@/components/ui/combobox";
+import { OwnerAvatar } from "@/components/board/boardFilterControls";
+import {
+  makeOwnerLabel,
+  UNASSIGNED_OWNER,
+} from "@/components/board/boardFilters";
 import { relativeTime } from "@/components/memory/memoryUtils";
 import {
   PROPOSAL_STATUS_META,
@@ -92,54 +108,54 @@ function tribunalEngaged(summary: ProposalListSummary): boolean {
 }
 
 /**
- * One unified tribunal chip for a list row, resolved as a single state machine
- * (priority order, first match wins):
+ * Tribunal state as a bare icon — shown only while something is in flight or
+ * needs a human; a quiet tribunal renders nothing. Resolved as a single state
+ * machine (priority order, first match wins):
  *
- *  1. awaiting_review → accent `⚖ Review` — the actionable, human-bottleneck
- *     state; the most prominent thing on the row.
- *  2. needs_evidence → muted `🧪 evidence` — parked on a needs-evidence spike.
- *  3. refinement_active → pulsing `⚖ R{n} running` — a round is in flight.
+ *  1. awaiting_review → amber scale — the actionable, human-bottleneck state.
+ *  2. needs_evidence → muted test tube — parked on a needs-evidence spike.
+ *  3. refinement_active → muted pulsing scale — a round is in flight.
  *  4. tribunal ran (round > 0), idle, and left blocking objections →
- *     red `⚖ R{n} · {count} open`.
- *  5. otherwise → nothing (the slot stays empty but keeps its width).
+ *     red scale + open-objection count.
+ *  5. otherwise → nothing.
+ *
+ * The full explanation lives in the tooltip; the icon only signals which
+ * bucket the row is in.
  */
-function TribunalChip({ summary }: { summary: ProposalListSummary }) {
+function TribunalIcon({ summary }: { summary: ProposalListSummary }) {
   const round = summary.current_round || 1;
 
   if (summary.awaiting_review) {
     return (
       <span
-        className="flex items-center gap-0.5 text-xs font-semibold text-amber-500"
+        className="flex items-center text-amber-500"
         title="Tribunal converged — awaiting your review"
       >
-        <HugeiconsIcon icon={JusticeScale01Icon} size={13} />
-        Review
+        <HugeiconsIcon icon={Legal01Icon} size={14} />
       </span>
     );
   }
   if (summary.needs_evidence) {
     return (
       <span
-        className="flex items-center gap-0.5 text-xs text-muted-foreground"
+        className="flex items-center text-muted-foreground"
         title="Parked on a needs-evidence spike"
       >
-        <HugeiconsIcon icon={TestTube01Icon} size={13} />
-        evidence
+        <HugeiconsIcon icon={TestTube01Icon} size={14} />
       </span>
     );
   }
   if (summary.refinement_active) {
     return (
       <span
-        className="flex items-center gap-0.5 text-xs text-muted-foreground"
+        className="flex items-center text-muted-foreground"
         title={`Tribunal refinement running (round ${round})`}
       >
         <HugeiconsIcon
-          icon={JusticeScale01Icon}
-          size={13}
+          icon={Legal01Icon}
+          size={14}
           className="animate-pulse"
         />
-        R{round} running
       </span>
     );
   }
@@ -152,8 +168,8 @@ function TribunalChip({ summary }: { summary: ProposalListSummary }) {
           n === 1 ? "" : "s"
         }`}
       >
-        <HugeiconsIcon icon={JusticeScale01Icon} size={13} />
-        R{summary.current_round} · {n} open
+        <HugeiconsIcon icon={Legal01Icon} size={14} />
+        {n}
       </span>
     );
   }
@@ -161,24 +177,23 @@ function TribunalChip({ summary }: { summary: ProposalListSummary }) {
 }
 
 /**
- * Gate readiness as a single dot. Red is RESERVED for "a tribunal engaged and
- * the gate is actually stuck" — the only time an operator needs to act:
+ * Gate readiness as a shield icon, shown ONLY while the gate is failing — a
+ * ready gate renders nothing (quiet rows stay quiet). Red is RESERVED for "a
+ * tribunal engaged and the gate is actually stuck" — the only time an
+ * operator needs to act:
  *
- *  - gate_ready → subtle, quiet green dot.
- *  - blocked AND a tribunal has engaged → red dot, the reason in the tooltip.
+ *  - gate_ready → nothing.
+ *  - blocked AND a tribunal has engaged → red blocked-shield, the reason in
+ *    the tooltip.
  *  - blocked but no tribunal ever engaged (a fresh draft naturally failing
- *    Definition of Ready) → neutral hollow dot; the tooltip still explains it,
- *    but there is no red and no "DoR ✗" shouting on the row.
+ *    Definition of Ready) → faint plain shield; the tooltip still explains
+ *    it, but there is no red shouting on the row.
  */
-function GateDot({ summary }: { summary: ProposalListSummary }) {
-  let dotClass: string;
-  let title: string;
+function GateIcon({ summary }: { summary: ProposalListSummary }) {
+  if (summary.gate_ready) return null;
 
-  if (summary.gate_ready) {
-    dotClass = "bg-emerald-500/50";
-    title = "Gate ready";
-  } else if (tribunalEngaged(summary)) {
-    dotClass = "bg-red-500";
+  if (tribunalEngaged(summary)) {
+    let title: string;
     if (summary.unresolved_blocking_count > 0) {
       const n = summary.unresolved_blocking_count;
       title = `Gate blocked — ${n} unresolved blocking objection${
@@ -191,17 +206,19 @@ function GateDot({ summary }: { summary: ProposalListSummary }) {
     } else {
       title = "Gate blocked — judge verdict: needs work";
     }
-  } else {
-    dotClass = "border border-muted-foreground/40 bg-transparent";
-    title = "Definition of Ready not yet met";
+    return (
+      <span className="flex items-center text-red-500" title={title}>
+        <HugeiconsIcon icon={SecurityBlockIcon} size={14} />
+      </span>
+    );
   }
 
   return (
-    <span className="flex items-center" title={title}>
-      <span
-        className={cn("inline-block size-2 rounded-full", dotClass)}
-        aria-hidden="true"
-      />
+    <span
+      className="flex items-center text-muted-foreground/50"
+      title="Definition of Ready not yet met"
+    >
+      <HugeiconsIcon icon={Shield01Icon} size={14} />
     </span>
   );
 }
@@ -358,6 +375,7 @@ function ProposalsListView() {
   const navigate = useNavigate();
   const [search, setSearch] = useState("");
   const [showArchived, setShowArchived] = useState(false);
+  const [ownerFilters, setOwnerFilters] = useState<string[]>([]);
   const [collapsedGroups, setCollapsedGroups] = useState<
     Partial<Record<ProposalStatus, boolean>>
   >({});
@@ -365,13 +383,38 @@ function ProposalsListView() {
   const listQuery = useQuery(
     proposalListQueryOptions({ text: search.trim() || undefined })
   );
-  const usersQuery = useQuery(usersQueryOptions());
+  const { data: users = [] } = useQuery(usersQueryOptions());
   const userFor = (id?: string | null) =>
-    id ? (usersQuery.data ?? []).find((u: OrgUser) => u.id === id) : undefined;
+    id ? users.find((u: OrgUser) => u.id === id) : undefined;
+
+  // Owner filter — the same Combobox + avatar UX the Tasks board uses, mirrored
+  // to local state (the list has no URL-filter contract like the board). Owners
+  // resolve against `author_user_id`, the proposal's creator.
+  const userById = useMemo(() => {
+    const map = new Map<string, OrgUser>();
+    for (const user of users) map.set(user.id, user);
+    return map;
+  }, [users]);
+  const ownerLabel = useMemo(() => {
+    const labels = new Map<string, string>();
+    for (const user of users) labels.set(user.id, userDisplayName(user));
+    return makeOwnerLabel(labels);
+  }, [users]);
+  const ownerOptions = useMemo(() => {
+    const owners = new Set<string>();
+    for (const p of listQuery.data ?? [])
+      owners.add(p.author_user_id ?? UNASSIGNED_OWNER);
+    return Array.from(owners).sort((a, b) =>
+      ownerLabel(a).localeCompare(ownerLabel(b)),
+    );
+  }, [listQuery.data, ownerLabel]);
 
   const groups = useMemo(() => {
     const visible = (listQuery.data ?? []).filter(
-      (p) => showArchived || !isArchivedLike(p.status)
+      (p) =>
+        (showArchived || !isArchivedLike(p.status)) &&
+        (ownerFilters.length === 0 ||
+          ownerFilters.includes(p.author_user_id ?? UNASSIGNED_OWNER))
     );
     return PROPOSAL_STATUS_KEYS.map((status) => ({
       status,
@@ -386,13 +429,46 @@ function ProposalsListView() {
           return a.updated_at < b.updated_at ? 1 : -1;
         }),
     })).filter((g) => g.items.length > 0);
-  }, [listQuery.data, showArchived]);
+  }, [listQuery.data, showArchived, ownerFilters]);
 
   return (
     <div className="flex h-full min-h-0 flex-col">
       <div className="flex items-center justify-between gap-4 border-b p-4">
         <h1 className="text-lg font-semibold">Proposals</h1>
         <div className="flex items-center gap-3">
+          <Combobox
+            multiple
+            value={ownerFilters}
+            onValueChange={(v) => setOwnerFilters(v ?? [])}
+            itemToStringLabel={ownerLabel}
+          >
+            <ComboboxInput
+              aria-label="Filter by owner"
+              placeholder={
+                ownerFilters.length > 0
+                  ? `${ownerFilters.length} owner${ownerFilters.length > 1 ? "s" : ""}`
+                  : "All owners"
+              }
+              className="w-40"
+            />
+            <ComboboxContent className="min-w-60">
+              <ComboboxList>
+                <ComboboxEmpty>No owners found</ComboboxEmpty>
+                {ownerOptions.map((owner) => (
+                  <ComboboxItem key={owner} value={owner}>
+                    <OwnerAvatar
+                      user={
+                        owner === UNASSIGNED_OWNER
+                          ? undefined
+                          : userById.get(owner)
+                      }
+                    />
+                    <span className="truncate">{ownerLabel(owner)}</span>
+                  </ComboboxItem>
+                ))}
+              </ComboboxList>
+            </ComboboxContent>
+          </Combobox>
           <Input
             placeholder="Search proposals…"
             value={search}
@@ -477,27 +553,22 @@ function ProposalsListView() {
                             onClick={() => navigate(`/proposals/${p.id}`)}
                             className="flex w-full items-center gap-3 border-b border-border/40 px-4 py-2.5 text-left hover:bg-muted/40"
                           >
+                            {/* Lead — status glyph, then a copyable short id,
+                                then the title with the unresolved-comment
+                                count kept close to it. */}
                             <StatusIcon status={p.status} />
-                            <span className="min-w-0 flex-1 truncate text-sm">
-                              {p.title}
-                            </span>
-                            {/* Right rail — fixed-width slots so every row's
-                                columns line up down the list. Empty slots keep
-                                their width so nothing shifts. */}
-                            <span className="flex w-28 shrink-0 items-center justify-start">
-                              {p.list_summary && (
-                                <TribunalChip summary={p.list_summary} />
-                              )}
-                            </span>
-                            <span className="flex w-4 shrink-0 justify-center">
-                              {p.list_summary && (
-                                <GateDot summary={p.list_summary} />
-                              )}
-                            </span>
-                            <span className="flex w-9 shrink-0 justify-end">
+                            <TaskIdLabel
+                              taskId={p.id}
+                              shortId={p.short_id}
+                              className="shrink-0"
+                            />
+                            <span className="flex min-w-0 flex-1 items-center gap-2">
+                              <span className="min-w-0 truncate text-sm">
+                                {p.title}
+                              </span>
                               {(p.unresolved_feedback_count ?? 0) > 0 && (
                                 <span
-                                  className="flex items-center gap-1 text-xs text-muted-foreground"
+                                  className="flex shrink-0 items-center gap-1 text-xs text-muted-foreground"
                                   title={`${p.unresolved_feedback_count} unresolved comment${
                                     p.unresolved_feedback_count === 1 ? "" : "s"
                                   }`}
@@ -507,19 +578,25 @@ function ProposalsListView() {
                                 </span>
                               )}
                             </span>
-                            <span className="flex w-11 shrink-0 justify-end">
+                            {/* Right rail — tribunal status, readiness, ACs,
+                                updated-ago, owner. Natural widths, matching
+                                the left side's flow. */}
+                            <span className="flex shrink-0 items-center gap-3">
+                              {p.list_summary && (
+                                <TribunalIcon summary={p.list_summary} />
+                              )}
+                              {p.list_summary && (
+                                <GateIcon summary={p.list_summary} />
+                              )}
                               <AcceptanceProgressBadge met={p.ac_met ?? 0} total={p.ac_total ?? 0} />
+                              <span className="whitespace-nowrap text-xs text-muted-foreground">
+                                {relativeTime(p.updated_at)}
+                              </span>
+                              <UserAvatar
+                                user={userFor(p.author_user_id)}
+                                className="size-5 shrink-0"
+                              />
                             </span>
-                            <span className="hidden w-10 shrink-0 text-right font-mono text-xs text-muted-foreground sm:inline-block">
-                              {p.short_id}
-                            </span>
-                            <span className="w-16 shrink-0 whitespace-nowrap text-right text-xs text-muted-foreground">
-                              {relativeTime(p.updated_at)}
-                            </span>
-                            <UserAvatar
-                              user={userFor(p.author_user_id)}
-                              className="size-5 shrink-0"
-                            />
                           </button>
                         </li>
                       ))}
