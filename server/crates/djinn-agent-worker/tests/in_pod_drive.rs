@@ -51,7 +51,7 @@ use std::time::Duration;
 use djinn_core::events::EventBus;
 use djinn_core::models::{SessionRecord, Task, TaskRunStatus, TaskRunTrigger};
 use djinn_db::repositories::task_run::{CreateTaskRunParams, TaskRunRepository};
-use djinn_db::{ProjectRepository, TaskRepository};
+use djinn_db::{ImageRepository, ProjectRepository, TaskRepository};
 use djinn_runtime::{
     ResolvedCredentials, RoleKind, SerializableCredential, SupervisorFlow, TaskRunSpec, WorkerEvent,
 };
@@ -543,6 +543,28 @@ async fn worker_drives_real_supervisor_in_pod() {
         .create_with_id(project_id, project_id, "test", project_id)
         .await
         .expect("seed pod-drive project");
+    // Dispatch binds the project's selected catalog image into the task-run
+    // row. Seed that selection through the production repository seam before
+    // creating the K8s-shaped run below so configured completion exercises the
+    // same immutable binding contract as a real dispatch.
+    let catalog_image_id = "image-pod-drive";
+    let images = ImageRepository::new(worker_db.clone());
+    images
+        .create(catalog_image_id, "pod-drive", None, "{}")
+        .await
+        .expect("seed pod-drive catalog image");
+    images
+        .mark_ready(
+            catalog_image_id,
+            "registry.test/djinn/pod-drive:fixture",
+            Some("sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"),
+        )
+        .await
+        .expect("mark pod-drive catalog image ready");
+    images
+        .set_project_image(project_id, Some(catalog_image_id))
+        .await
+        .expect("select pod-drive catalog image");
     let task = TaskRepository::new(worker_db.clone(), events)
         .create_fixture_in_project(
             project_id,
@@ -655,6 +677,15 @@ async fn worker_drives_real_supervisor_in_pod() {
         })
         .await
         .expect("insert K8s-shaped task-run row");
+    assert_eq!(
+        task_runs
+            .catalog_image_id(task_run_id)
+            .await
+            .expect("read dispatch-bound catalog image")
+            .as_deref(),
+        Some(catalog_image_id),
+        "task-run creation must bind the selected catalog image"
+    );
     assert!(
         task_runs
             .get(task_run_id)
