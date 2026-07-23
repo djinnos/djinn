@@ -254,6 +254,29 @@ fn ordinary_no_change_payload_is_not_a_lint_rejection() {
     assert!(parse_spec_lint_rejection(r#"{"code":"SPEC_LINT_REJECTED"}"#).is_none());
 }
 
+/// A completed pass may retain an earlier rejected ToolResult even after a
+/// later clean write. The coordinator must consult that evidence only when the
+/// material head did not advance; otherwise the clean revision proceeds to the
+/// Judge rather than causing a redundant same-round retry.
+#[test]
+fn clean_revision_takes_precedence_over_earlier_lint_rejection_evidence() {
+    let source = include_str!("refinement_outcome.rs");
+    let revision_check = source
+        .find("let advanced = new_revision_seq > state.current_revision_seq;")
+        .expect("advocate outcome must determine whether the head advanced");
+    let lint_check = source
+        .find("if !advanced {")
+        .expect("lint evidence must be conditional on an unchanged head");
+    assert!(
+        revision_check < lint_check,
+        "a clean revision must take precedence over historical rejection evidence"
+    );
+    assert!(
+        source.contains(".load_raw_conversation(&session.id)"),
+        "lint classification must inspect uncompacted persisted ToolResult evidence"
+    );
+}
+
 #[test]
 fn lint_rejection_keeps_advocate_in_same_round_and_revision() {
     let mut state = RefinementLoopState::with_config("p1", 7, test_config());

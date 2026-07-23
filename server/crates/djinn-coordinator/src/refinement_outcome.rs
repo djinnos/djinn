@@ -171,8 +171,11 @@ impl CoordinatorActor {
             .into_iter()
             .find(|session| session.status == "completed")
             .ok_or_else(|| "no completed session exists for refinement task".to_string())?;
+        // This is audit/classification evidence, not model context. The normal
+        // conversation accessor applies compaction and can replace the rejecting
+        // ToolResult with a summary. Read the immutable raw timeline instead.
         let conversation = SessionMessageRepository::new(self.db.clone(), event_bus)
-            .load_conversation(&session.id)
+            .load_raw_conversation(&session.id)
             .await
             .map_err(|error| error.to_string())?;
         Ok(parse_spec_lint_rejection_from_conversation(&conversation))
@@ -187,43 +190,6 @@ impl CoordinatorActor {
         task_id: &str,
         state: &RefinementLoopState,
     ) {
-        // Authoring mutations return their structured rejection in the reply
-        // loop's persisted ToolResult message, not task activity. Inspect this
-        // completed Advocate session before interpreting an unchanged head as
-        // ordinary no-change completion. Failing to read evidence is unsafe: it
-        // must not silently hand a possibly rejected head to the Judge.
-        let violations = match self.advocate_lint_rejection_from_session(task_id).await {
-            Ok(violations) => violations,
-            Err(error) => {
-                tracing::warn!(proposal_id = %proposal_id, task_id = %task_id, %error,
-                    "Unable to inspect completed Advocate ToolResult evidence");
-                self.terminate_refinement(
-                    run_id,
-                    StopReason::AgentFailure {
-                        role: "advocate".into(),
-                        error: format!(
-                            "unable to inspect completed session ToolResult evidence: {error}"
-                        ),
-                    },
-                )
-                .await;
-                return;
-            }
-        };
-        if let Some(violations) = violations {
-            if let Some(active) = self.active_refinements.get_mut(run_id) {
-                active.record_advocate_lint_rejection(violations);
-                tracing::warn!(
-                    proposal_id = %proposal_id,
-                    task_id = %task_id,
-                    round = active.current_round,
-                    revision_seq = active.current_revision_seq,
-                    "Advocate candidate rejected by spec lint; retrying correction in same round"
-                );
-            }
-            return;
-        }
-
         let event_bus = crate::events::event_bus_for(&self.events_tx);
         let proposal_repo = ProposalRepository::new(self.db.clone(), event_bus);
 
@@ -257,6 +223,45 @@ impl CoordinatorActor {
 
         let new_revision_seq = proposal.latest_revision_seq;
         let advanced = new_revision_seq > state.current_revision_seq;
+
+        // A pass can reject one candidate and then successfully write a clean
+        // revision in the same session. Therefore classify ToolResult evidence
+        // only after proving this pass did not advance the material head.
+        // Evidence-read failure on an unchanged head is terminal rather than an
+        // ordinary no-change completion, avoiding a silent handoff to the Judge.
+        if !advanced {
+            let violations = match self.advocate_lint_rejection_from_session(task_id).await {
+                Ok(violations) => violations,
+                Err(error) => {
+                    tracing::warn!(proposal_id = %proposal_id, task_id = %task_id, %error,
+                        "Unable to inspect completed Advocate ToolResult evidence");
+                    self.terminate_refinement(
+                        run_id,
+                        StopReason::AgentFailure {
+                            role: "advocate".into(),
+                            error: format!(
+                                "unable to inspect completed session ToolResult evidence: {error}"
+                            ),
+                        },
+                    )
+                    .await;
+                    return;
+                }
+            };
+            if let Some(violations) = violations {
+                if let Some(active) = self.active_refinements.get_mut(run_id) {
+                    active.record_advocate_lint_rejection(violations);
+                    tracing::warn!(
+                        proposal_id = %proposal_id,
+                        task_id = %task_id,
+                        round = active.current_round,
+                        revision_seq = active.current_revision_seq,
+                        "Advocate candidate rejected by spec lint; retrying correction in same round"
+                    );
+                }
+                return;
+            }
+        }
 
         if advanced {
             let model_id = self
