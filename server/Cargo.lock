@@ -1735,6 +1735,7 @@ dependencies = [
  "djinn-agent",
  "djinn-compaction",
  "djinn-control-plane",
+ "djinn-coordinator",
  "djinn-core",
  "djinn-db",
  "djinn-git",

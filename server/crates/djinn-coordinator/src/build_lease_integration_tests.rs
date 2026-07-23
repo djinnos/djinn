@@ -10,7 +10,7 @@ use djinn_db::{BuildLeaseRepository, BuildLeaseState, Database};
 use djinn_supervisor::services::{
     GraphWarmLeaseIdentity, LeaseAbandonRequest, LeaseBindRequest, LeaseCancelRequest,
     LeaseDeadlines, LeaseGrantRequest, LeaseIdentity, LeaseQueueRequest, LeaseReleaseRequest,
-    LeaseResult, LeaseStatusRequest,
+    LeaseResult, LeaseStatusRequest, TaskInvocationLeaseIdentity,
 };
 use tokio::sync::{Semaphore, mpsc};
 
@@ -471,4 +471,62 @@ async fn queued_restart_and_warm_status_are_idempotent() {
     assert!(
         matches!(recovered.status(LeaseStatusRequest { identity: warm("queued-after-restart") }).await, LeaseResult::Status(status) if status.state == djinn_supervisor::services::LeaseState::Queued)
     );
+}
+
+#[tokio::test]
+async fn graph_warm_and_task_invocation_share_one_fifo_cap() {
+    let (service, _, _) = service(1).await;
+    let warm_identity = warm("fifo-warm");
+    let task_identity = LeaseIdentity::TaskInvocation(TaskInvocationLeaseIdentity {
+        task_id: "task".into(),
+        task_run_id: "run".into(),
+        invocation_id: "invocation".into(),
+    });
+    let warm_token = match service
+        .queue(LeaseQueueRequest {
+            identity: warm_identity.clone(),
+            deadlines: LeaseDeadlines {
+                queue_deadline_ms: 0,
+                launch_deadline_ms: 0,
+            },
+        })
+        .await
+    {
+        LeaseResult::Granted(grant) => grant.fencing_token,
+        other => panic!("expected warm grant, got {other:?}"),
+    };
+    assert!(matches!(
+        service
+            .queue(LeaseQueueRequest {
+                identity: task_identity.clone(),
+                deadlines: LeaseDeadlines {
+                    queue_deadline_ms: 0,
+                    launch_deadline_ms: 0
+                },
+            })
+            .await,
+        LeaseResult::Queued(_)
+    ));
+    assert!(matches!(
+        service
+            .release(LeaseReleaseRequest {
+                identity: warm_identity,
+                fencing_token: warm_token,
+                candidate_cleanup: true
+            })
+            .await,
+        LeaseResult::Released { .. }
+    ));
+    assert!(matches!(
+        service
+            .queue(LeaseQueueRequest {
+                identity: task_identity,
+                deadlines: LeaseDeadlines {
+                    queue_deadline_ms: 0,
+                    launch_deadline_ms: 0
+                },
+            })
+            .await,
+        LeaseResult::Granted(_)
+    ));
 }

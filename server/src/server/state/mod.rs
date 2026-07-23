@@ -24,6 +24,8 @@ use djinn_agent::file_time::FileTime;
 use djinn_agent::lsp::LspManager;
 use djinn_agent::roles::RoleRegistry;
 use djinn_agent::runtime_bridge::{K8sTokenReviewValidator, RuntimeKind, runtime_kind};
+use djinn_coordinator::build_lease::BuildLeaseService;
+use djinn_coordinator::graph_warm_lease::BuildLeaseGraphWarmAdapter;
 use djinn_core::clock::{Clock, SystemClock as SystemClockTrait};
 use djinn_core::models::KnowledgeInjectionConfig;
 use djinn_db::{
@@ -494,6 +496,8 @@ struct Inner {
     pub graph_warmer: tokio::sync::RwLock<Option<Arc<dyn GraphWarmerService>>>,
     /// The admission controller for this server process when admission is enabled.
     pub build_admission: Option<Arc<BuildAdmissionController>>,
+    /// Durable v1 authority injected into the production graph warmer.
+    pub build_lease: Arc<BuildLeaseService>,
 }
 
 /// Result of a boot token exchange attempt.
@@ -584,6 +588,10 @@ impl AppState {
                 server_epoch,
             )),
         });
+        let build_lease = Arc::new(BuildLeaseService::new(
+            Arc::new(djinn_db::BuildLeaseRepository::new(db.clone())),
+            0,
+        ));
         Self {
             inner: Arc::new(Inner {
                 db,
@@ -627,6 +635,7 @@ impl AppState {
                 image_build_watcher: tokio::sync::Mutex::new(None),
                 graph_warmer: tokio::sync::RwLock::new(None),
                 build_admission,
+                build_lease,
             }),
         }
     }
@@ -1152,8 +1161,15 @@ impl AppState {
                         namespace = %config.namespace,
                         "graph_warmer: wiring K8sGraphWarmer"
                     );
+                    // Recover before the adapter can grant a Kubernetes POST;
+                    // unavailable recovery is surfaced as a typed, fail-closed
+                    // lease result by the adapter.
+                    let _ = self.inner.build_lease.recover().await;
                     let warmer = K8sGraphWarmer::new(client, config, self.db().clone())
-                        .with_completion_sink(Arc::new(CanonicalGraphInvalidationSink));
+                        .with_completion_sink(Arc::new(CanonicalGraphInvalidationSink))
+                        .with_graph_warm_lease(Arc::new(BuildLeaseGraphWarmAdapter::new(
+                            self.inner.build_lease.clone(),
+                        )));
                     let warmer = match self.inner.build_admission.clone() {
                         Some(admission) => warmer.with_warm_admission(admission),
                         None => warmer,

@@ -433,6 +433,9 @@ struct WarmDispatch {
     /// v1 durable FIFO bridge. When configured it fences create with a shared
     /// graph-warm/task-invocation lease instead of the legacy v0 controller.
     lease: Option<Arc<dyn GraphWarmLease>>,
+    /// Live Kubernetes inventory/gate seam for leased Jobs. Test constructors
+    /// leave this absent and therefore cannot authorize a candidate.
+    candidates: Option<Arc<WarmCandidateControl<KubeWarmCandidateClient>>>,
     /// Cluster-side dedupe: lists non-terminal warm Jobs for a project so
     /// triggers from any process can coalesce against in-flight Jobs created
     /// by any other process (rolling update overlap, server restart mid-warm,
@@ -706,18 +709,21 @@ impl WarmDispatch {
         } else {
             None
         };
+        let leased_identity = lease_grant.as_ref().map(|grant| {
+            LeasedWarmJobIdentity::new(
+                project_id,
+                grant.identity.warm_request_id.clone(),
+                grant.identity.graph_revision.clone(),
+                grant.grant.fencing_token.0,
+            )
+        });
         let mut job = match lease_grant.as_ref() {
-            Some(grant) => build_leased_warm_job(
+            Some(_) => build_leased_warm_job(
                 &self.config,
                 project_id,
                 &image_tag,
                 cargo_cache_policy.as_ref(),
-                &LeasedWarmJobIdentity::new(
-                    project_id,
-                    grant.identity.warm_request_id.clone(),
-                    grant.identity.graph_revision.clone(),
-                    grant.grant.fencing_token.0,
-                ),
+                leased_identity.as_ref().expect("leased grant has identity"),
             ),
             None => build_warm_job(
                 &self.config,
@@ -773,10 +779,37 @@ impl WarmDispatch {
                         warn!(project_id, error = %error, "K8sGraphWarmer: failed to record dispatcher outcome");
                     }
                 }
+                // A lost response is not proof that Kubernetes did not create
+                // the deterministic object. Inventory it before giving up;
+                // binding and authorization remain UID-fenced.
+                if !dispatcher_error_is_definitive(&e) {
+                    let _ = self
+                        .bind_and_open_leased_candidate(
+                            project_id,
+                            leased_identity.as_ref(),
+                            lease_grant.as_ref(),
+                        )
+                        .await;
+                }
                 self.release_in_flight(project_id).await;
                 return;
             }
         };
+
+        // POST success proves neither a unique Pod nor its immutable UID.
+        // Inventory, durably bind, then and only then open the selected gate.
+        if lease_grant.is_some()
+            && !self
+                .bind_and_open_leased_candidate(
+                    project_id,
+                    leased_identity.as_ref(),
+                    lease_grant.as_ref(),
+                )
+                .await
+        {
+            self.schedule_admission_retry(project_id, notify.clone());
+            return;
+        }
 
         let uid = self.watcher.job_uid(&namespace, &job_name).await;
         if let (Some(admission), Some(permit)) = (self.admission.as_ref(), permit.as_ref()) {
@@ -848,6 +881,48 @@ impl WarmDispatch {
         let mut guard = self.in_flight.lock().await;
         if let Some(notify) = guard.remove(project_id) {
             notify.notify_waiters();
+        }
+    }
+
+    async fn bind_and_open_leased_candidate(
+        &self,
+        project_id: &str,
+        identity: Option<&LeasedWarmJobIdentity>,
+        grant: Option<&GraphWarmLeaseGrant>,
+    ) -> bool {
+        let (Some(control), Some(identity), Some(grant), Some(lease)) = (
+            self.candidates.as_ref(),
+            identity,
+            grant,
+            self.lease.as_ref(),
+        ) else {
+            warn!(
+                project_id,
+                "K8sGraphWarmer: lease candidate control unavailable; gate remains closed"
+            );
+            return false;
+        };
+        let inventory = control.inventory(identity).await;
+        let Some(candidate) = inventory.selected_pod() else {
+            warn!(project_id, inventory = ?inventory.observation, pods = ?inventory.pods.state, "K8sGraphWarmer: no unique Pod candidate; gate remains closed");
+            return false;
+        };
+        let Some(pod_uid) = candidate.uid.clone() else {
+            return false;
+        };
+        if let Err(error) = lease
+            .bind(&grant.identity, grant.grant.fencing_token.clone(), pod_uid)
+            .await
+        {
+            warn!(project_id, error = %error, "K8sGraphWarmer: bind not durably confirmed; gate remains closed");
+            return false;
+        }
+        match control.open_selected_pod_gate(identity, &inventory).await {
+            GateObservation::Opened => true,
+            outcome => {
+                warn!(project_id, ?outcome, "K8sGraphWarmer: gate was not opened");
+                false
+            }
         }
     }
 
@@ -923,6 +998,9 @@ impl K8sGraphWarmer {
         ));
         let lister: Arc<dyn WarmJobLister> = Arc::new(KubeClientWarmJobLister::new(client.clone()));
         let mut w = Self::with_dispatcher_and_lister(config, db, dispatcher, watcher, Some(lister));
+        w.dispatch.candidates = Some(Arc::new(WarmCandidateControl::new(
+            KubeWarmCandidateClient::new(client.clone(), w.dispatch.config.namespace.clone()),
+        )));
         w.client = Some(client);
         w.debounce = WarmDebounceConfig::from_env();
         w
@@ -963,6 +1041,7 @@ impl K8sGraphWarmer {
                 watcher,
                 admission: mock_warm_admission(),
                 lease: None,
+                candidates: None,
                 lister,
                 completion_sink: None,
                 in_flight: Arc::new(Mutex::new(HashMap::new())),
