@@ -79,6 +79,25 @@ impl TaskRunRepository {
         Ok(row.and_then(|row| row.try_get("catalog_image_id").ok().flatten()))
     }
 
+    /// Override the dispatch-bound catalog image.
+    ///
+    /// This is primarily useful for repository-backed fixtures that exercise
+    /// image-drift rejection without bypassing the database boundary.
+    pub async fn set_catalog_image_id(&self, id: &str, image_id: &str) -> Result<()> {
+        self.db.ensure_initialized().await?;
+        let result = sqlx::query("UPDATE task_runs SET catalog_image_id = $2 WHERE id = $1")
+            .bind(id)
+            .bind(image_id)
+            .execute(self.db.pool())
+            .await?;
+        if result.rows_affected() != 1 {
+            return Err(crate::Error::Internal(format!(
+                "task run {id} does not exist while binding catalog image"
+            )));
+        }
+        Ok(())
+    }
+
     pub async fn get(&self, id: &str) -> Result<Option<TaskRunRecord>> {
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_as!(

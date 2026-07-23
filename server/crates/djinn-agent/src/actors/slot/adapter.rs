@@ -1094,10 +1094,8 @@ mod resolve_final_verification_tests {
             .create("catalog-image-now", "current", None, "{}")
             .await
             .unwrap();
-        sqlx::query("UPDATE task_runs SET catalog_image_id = $2 WHERE id = $1")
-            .bind(&fx.task_run_id)
-            .bind("catalog-image-at-dispatch")
-            .execute(fx.agent.db.pool())
+        TaskRunRepository::new(fx.agent.db.clone())
+            .set_catalog_image_id(&fx.task_run_id, "catalog-image-at-dispatch")
             .await
             .unwrap();
         images
