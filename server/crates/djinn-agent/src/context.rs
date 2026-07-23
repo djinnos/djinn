@@ -83,6 +83,24 @@ impl ShellLaunchContext {
     pub(crate) fn runner(&self) -> &LeaseInvocationRunner {
         &self.runner
     }
+
+    /// Compose a shell context around a remote-child runner double in tests.
+    /// Production construction remains restricted to [`Self::broker_backed`],
+    /// which owns the authenticated Unix broker adapter.
+    #[cfg(test)]
+    pub(crate) fn for_test(
+        runner: Arc<LeaseInvocationRunner>,
+        task_id: String,
+        task_run_id: String,
+        pod_uid: String,
+    ) -> Self {
+        Self {
+            runner,
+            task_id,
+            task_run_id,
+            pod_uid,
+        }
+    }
 }
 
 /// Configuration injected into the optional session-start memory intent planner.

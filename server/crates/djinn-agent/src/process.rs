@@ -76,8 +76,7 @@ pub fn isolate_process_group(cmd: &mut Command) {
 #[path = "process_broker.rs"]
 mod broker;
 #[allow(unused_imports)] // constructed by the pending workspace broker composition
-pub(crate) use broker::UnixBrokerLauncher;
-use broker::{CgroupLauncherClient, ProcessHandle};
+pub(crate) use broker::{CgroupLauncherClient, ProcessHandle, UnixBrokerLauncher};
 
 #[derive(Clone, Debug)]
 #[cfg_attr(not(test), allow(dead_code))] // consumed by the workspace lease wiring task
