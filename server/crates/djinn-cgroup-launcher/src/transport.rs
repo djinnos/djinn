@@ -526,12 +526,16 @@ mod tests {
     struct Counts {
         leaves: Arc<AtomicUsize>,
         clones: Arc<AtomicUsize>,
+        pipe_capacity: Arc<AtomicUsize>,
+        output_bytes: Arc<AtomicUsize>,
     }
     impl Counts {
         fn new() -> Self {
             Self {
                 leaves: Arc::new(AtomicUsize::new(0)),
                 clones: Arc::new(AtomicUsize::new(0)),
+                pipe_capacity: Arc::new(AtomicUsize::new(0)),
+                output_bytes: Arc::new(AtomicUsize::new(0)),
             }
         }
     }
@@ -584,18 +588,54 @@ mod tests {
             let mut err = [0; 2];
             assert_eq!(unsafe { libc::pipe(out.as_mut_ptr()) }, 0);
             assert_eq!(unsafe { libc::pipe(err.as_mut_ptr()) }, 0);
+            // Do not assume a host's default pipe size: the test writes one
+            // byte more than the actual kernel-reported capacity.
+            let pipe_capacity = unsafe { libc::fcntl(out[1], libc::F_GETPIPE_SZ) };
+            assert!(pipe_capacity > 0);
+            let output_bytes = pipe_capacity as usize + 1;
+            self.counts
+                .pipe_capacity
+                .store(pipe_capacity as usize, Ordering::SeqCst);
+            self.counts
+                .output_bytes
+                .store(output_bytes, Ordering::SeqCst);
+            let mut progress = [0; 2];
+            assert_eq!(unsafe { libc::pipe(progress.as_mut_ptr()) }, 0);
             let pid = unsafe { libc::fork() };
             assert!(pid >= 0);
             if pid == 0 {
                 unsafe {
                     libc::close(out[0]);
                     libc::close(err[0]);
-                    // The pipe-sized write cannot finish until the broker drains
-                    // bounded frames, rather than retaining unbounded output.
-                    let bytes = vec![b'o'; 40 * 1024];
+                    libc::close(progress[0]);
+                    // Fill the pipe completely, prove that a further write is
+                    // backpressured before the broker can serve CREATE, then
+                    // make that write blocking until bounded frames drain it.
+                    let bytes = vec![b'o'; output_bytes];
+                    let flags = libc::fcntl(out[1], libc::F_GETFL);
+                    assert!(flags >= 0);
                     assert_eq!(
-                        libc::write(out[1], bytes.as_ptr().cast(), bytes.len()),
-                        bytes.len() as isize
+                        libc::fcntl(out[1], libc::F_SETFL, flags | libc::O_NONBLOCK),
+                        0
+                    );
+                    assert_eq!(
+                        libc::write(out[1], bytes.as_ptr().cast(), pipe_capacity as usize),
+                        pipe_capacity as isize
+                    );
+                    assert_eq!(
+                        libc::write(out[1], bytes[pipe_capacity as usize..].as_ptr().cast(), 1),
+                        -1
+                    );
+                    assert_eq!(
+                        std::io::Error::last_os_error().raw_os_error(),
+                        Some(libc::EAGAIN)
+                    );
+                    assert_eq!(libc::write(progress[1], b"B".as_ptr().cast(), 1), 1);
+                    libc::close(progress[1]);
+                    assert_eq!(libc::fcntl(out[1], libc::F_SETFL, flags), 0);
+                    assert_eq!(
+                        libc::write(out[1], bytes[pipe_capacity as usize..].as_ptr().cast(), 1),
+                        1
                     );
                     assert_eq!(
                         libc::write(err[1], b"separate-stderr".as_ptr().cast(), 15),
@@ -615,6 +655,14 @@ mod tests {
             unsafe {
                 libc::close(out[1]);
                 libc::close(err[1]);
+                libc::close(progress[1]);
+                let mut backpressured = 0;
+                assert_eq!(
+                    libc::read(progress[0], (&mut backpressured as *mut u8).cast(), 1),
+                    1
+                );
+                assert_eq!(backpressured, b'B');
+                libc::close(progress[0]);
                 for fd in [out[0], err[0]] {
                     let flags = libc::fcntl(fd, libc::F_GETFL);
                     assert!(flags >= 0);
@@ -853,25 +901,51 @@ mod tests {
                     .unwrap();
                 client.create("child", "leaf", &command()).unwrap();
                 let mut stdout = Vec::new();
-                let terminal = loop {
+                let mut stdout_eof = false;
+                while !stdout_eof {
                     let (frame, eof, status) = client.stdout("child").unwrap();
                     assert!(frame.len() <= 4096);
                     stdout.extend(frame);
-                    if eof {
-                        break status;
-                    }
-                };
+                    stdout_eof = eof;
+                    assert!(matches!(
+                        status,
+                        crate::broker::ChildStatus::Running
+                            | crate::broker::ChildStatus::Exited(_)
+                            | crate::broker::ChildStatus::Signaled(_)
+                    ));
+                }
                 let mut stderr = Vec::new();
-                loop {
+                let mut stderr_eof = false;
+                while !stderr_eof {
                     let (frame, eof, status) = client.stderr("child").unwrap();
                     assert!(frame.len() <= 4096);
                     stderr.extend(frame);
-                    if eof {
-                        assert_eq!(status, terminal);
-                        break;
-                    }
+                    stderr_eof = eof;
+                    assert!(matches!(
+                        status,
+                        crate::broker::ChildStatus::Running
+                            | crate::broker::ChildStatus::Exited(_)
+                            | crate::broker::ChildStatus::Signaled(_)
+                    ));
                 }
-                assert_eq!(stdout, vec![b'o'; 40 * 1024]);
+                // EOF only says that a stream has closed. Keep polling after
+                // both explicit EOFs until waitpid reports a terminal status;
+                // closing descriptors before _exit/raise is not terminal.
+                let terminal = loop {
+                    let (frame, eof, status) = client.stdout("child").unwrap();
+                    assert!(frame.is_empty());
+                    assert!(eof, "stdout EOF must remain observable while polling");
+                    if status != crate::broker::ChildStatus::Running {
+                        break status;
+                    }
+                    thread::yield_now();
+                };
+                assert!(stdout_eof);
+                assert!(stderr_eof);
+                let pipe_capacity = counts.pipe_capacity.load(Ordering::SeqCst);
+                let output_bytes = counts.output_bytes.load(Ordering::SeqCst);
+                assert!(output_bytes > pipe_capacity);
+                assert_eq!(stdout, vec![b'o'; output_bytes]);
                 assert_eq!(stderr, b"separate-stderr");
                 match outcome {
                     Outcome::Exit(code) => {
