@@ -10,8 +10,12 @@ use djinn_control_plane::tools::proposal_readiness::{
 use djinn_core::models::{
     Proposal, ProposalDebateTrail, TaskRefinementCorrelation, TransitionAction,
 };
+use djinn_core::refinement_liveness::{
+    RefinementIntentState as DurableIntentState, RefinementRunState,
+};
 use djinn_db::{
-    EffectiveCreatorProvenance, ProposalRepository, TaskRepository, UserSettingsRepository,
+    EffectiveCreatorProvenance, LoadRefinementRunSnapshotRequest, ProposalRepository,
+    TaskRepository, UserSettingsRepository,
 };
 
 use super::refinement::{
@@ -107,6 +111,12 @@ impl CoordinatorActor {
             Some(s) => s,
             None => return,
         };
+        // Sessions are disposable projections. Reject stale or uncorrelated
+        // observations before any proposal/debate/evidence read can mutate a
+        // projection or create a synthetic stop row.
+        if !self.fence_durable_outcome(run_id, session, &state).await {
+            return;
+        }
         // The projection is keyed by the durable run. The proposal identity is
         // payload data used only for proposal/lifecycle repository operations.
         let proposal_id = state.proposal_id.clone();
@@ -128,6 +138,95 @@ impl CoordinatorActor {
             | RefinementPhase::AwaitingEvidence
             | RefinementPhase::Complete => {}
         }
+    }
+
+    /// Fence a completed task against the exact, currently eligible source
+    /// intent. Repository errors are retryable coordinator failures, not agent
+    /// failures: leave both the source and in-memory projection untouched.
+    async fn fence_durable_outcome(
+        &self,
+        run_id: &str,
+        session: &RefinementSession,
+        state: &RefinementLoopState,
+    ) -> bool {
+        if state.run_id.is_empty() {
+            return true;
+        }
+        if state.run_id != run_id
+            || session.run_id != run_id
+            || state.generation != session.generation
+            || state.phase != session.phase
+        {
+            return false;
+        }
+        let event_bus = crate::events::event_bus_for(&self.events_tx);
+        let task = match TaskRepository::new(self.db.clone(), event_bus.clone())
+            .get(&session.task_id)
+            .await
+        {
+            Ok(Some(task)) => task,
+            Ok(None) => return false,
+            Err(error) => {
+                tracing::warn!(task_id = %session.task_id, %error, "unable to fence refinement outcome task; retrying");
+                return false;
+            }
+        };
+        let correlation = match task.refinement_correlation() {
+            Ok(Some(correlation)) => correlation,
+            Ok(None) | Err(_) => return false,
+        };
+        let (expected_phase, expected_role) = match session.phase {
+            RefinementPhase::AdversaryAttack => (
+                djinn_core::refinement_liveness::RefinementPhase::AdversaryAttack,
+                djinn_core::refinement_liveness::RefinementRole::Adversary,
+            ),
+            RefinementPhase::AdvocateRevision => (
+                djinn_core::refinement_liveness::RefinementPhase::AdvocateRevision,
+                djinn_core::refinement_liveness::RefinementRole::Advocate,
+            ),
+            RefinementPhase::JudgeAdjudication => (
+                djinn_core::refinement_liveness::RefinementPhase::JudgeAdjudication,
+                djinn_core::refinement_liveness::RefinementRole::Judge,
+            ),
+            RefinementPhase::AwaitingHumanReview
+            | RefinementPhase::AwaitingEvidence
+            | RefinementPhase::Complete => return false,
+        };
+        if correlation.run_id() != run_id
+            || correlation.generation() != i64::from(state.generation)
+            || correlation.round() != i64::from(state.current_round)
+            || correlation.phase() != expected_phase
+            || correlation.role() != expected_role
+        {
+            return false;
+        }
+        let snapshot = match ProposalRepository::new(self.db.clone(), event_bus)
+            .load_refinement_run_snapshot(LoadRefinementRunSnapshotRequest {
+                run_id: run_id.to_owned(),
+                heartbeat_grace_millis: 60_000,
+            })
+            .await
+        {
+            Ok(Some(snapshot)) => snapshot,
+            Ok(None) => return false,
+            Err(error) => {
+                tracing::warn!(run_id, %error, "unable to fence refinement outcome snapshot; retrying");
+                return false;
+            }
+        };
+        snapshot.proposal_id == state.proposal_id
+            && snapshot.generation == state.generation
+            && snapshot.snapshot.run.state == RefinementRunState::Active
+            && snapshot.snapshot.intents.iter().any(|intent| {
+                intent.intent_id == correlation.intent_id()
+                    && intent.run_id == run_id
+                    && intent.phase == expected_phase
+                    && intent.role == expected_role
+                    && matches!(
+                        intent.state,
+                        DurableIntentState::Claimed | DurableIntentState::Materialized
+                    )
+            })
     }
 
     /// Process an advocate session outcome: read the latest revision,
