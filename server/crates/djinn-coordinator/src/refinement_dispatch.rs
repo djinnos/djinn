@@ -1,4 +1,4 @@
-// djinn:allow-oversize — shared refinement dispatch and durable-intent orchestration preserve one authority boundary.
+// djinn:allow-oversize — legacy phase driving and the durable-intent authority remain co-located to prevent duplicate dispatch.
 // Proposal-refinement tribunal dispatch orchestration.
 //
 // Drives the Advocate → Adversary → Judge refinement loop by dispatching

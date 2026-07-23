@@ -1,4 +1,4 @@
-// djinn:allow-oversize — legacy refinement outcome processing and task-context handling share one boundary.
+// djinn:allow-oversize — legacy outcome transitions and correlated task creation remain co-located at one transaction boundary.
 // Outcome processing and lifecycle management for the refinement tribunal.
 
 use djinn_control_plane::tools::epic_ops::{
