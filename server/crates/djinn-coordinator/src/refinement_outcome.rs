@@ -168,27 +168,29 @@ impl CoordinatorActor {
             Err(()) => return,
         };
 
-        match session.phase {
+        let processed = match session.phase {
             RefinementPhase::AdvocateRevision => {
                 self.process_advocate_outcome(run_id, &proposal_id, &session.task_id, &state)
-                    .await;
+                    .await
             }
             RefinementPhase::AdversaryAttack => {
                 self.process_adversary_outcome(run_id, &proposal_id, &state)
-                    .await;
+                    .await
             }
             RefinementPhase::JudgeAdjudication => {
                 self.process_judge_outcome(run_id, &proposal_id, &state)
-                    .await;
+                    .await
             }
             RefinementPhase::AwaitingHumanReview
             | RefinementPhase::AwaitingEvidence
-            | RefinementPhase::Complete => {}
-        }
+            | RefinementPhase::Complete => false,
+        };
 
-        if let Some(intent_id) = durable_intent {
-            self.complete_durable_outcome(run_id, &state, &intent_id)
-                .await;
+        if processed {
+            if let Some(intent_id) = durable_intent {
+                self.complete_durable_outcome(run_id, &state, &intent_id)
+                    .await;
+            }
         }
     }
 
@@ -200,8 +202,12 @@ impl CoordinatorActor {
         if state.run_id.is_empty()
             || session.run_id != state.run_id
             || session.generation != state.generation
+            || session.phase != state.phase
         {
-            return Ok(None);
+            // A delayed role completion is not a compatibility session. In
+            // particular, never route it through the legacy path: that would
+            // mutate the current projection after its phase has advanced.
+            return Err(());
         }
         let task = match TaskRepository::new(
             self.db.clone(),
@@ -361,7 +367,7 @@ impl CoordinatorActor {
         proposal_id: &str,
         task_id: &str,
         state: &RefinementLoopState,
-    ) {
+    ) -> bool {
         let event_bus = crate::events::event_bus_for(&self.events_tx);
         let proposal_repo = ProposalRepository::new(self.db.clone(), event_bus);
 
@@ -377,19 +383,14 @@ impl CoordinatorActor {
                     },
                 )
                 .await;
-                return;
+                return false;
             }
             Err(e) => {
+                // Repository failures are coordinator errors, not agent
+                // outcomes. Preserve the durable run for retry and do not
+                // manufacture an agent-failure terminal row.
                 tracing::warn!(proposal_id = %proposal_id, error = %e, "DB error reading proposal");
-                self.terminate_refinement(
-                    run_id,
-                    StopReason::AgentFailure {
-                        role: "advocate".into(),
-                        error: format!("DB error: {e}"),
-                    },
-                )
-                .await;
-                return;
+                return false;
             }
         };
 
@@ -413,17 +414,7 @@ impl CoordinatorActor {
                 Err(error) => {
                     tracing::warn!(proposal_id = %proposal_id, task_id = %task_id, %error,
                         "Unable to inspect completed Advocate ToolResult evidence");
-                    self.terminate_refinement(
-                        run_id,
-                        StopReason::AgentFailure {
-                            role: "advocate".into(),
-                            error: format!(
-                                "unable to inspect completed session ToolResult evidence: {error}"
-                            ),
-                        },
-                    )
-                    .await;
-                    return;
+                    return false;
                 }
             };
             if let Some(violations) = violations {
@@ -437,7 +428,7 @@ impl CoordinatorActor {
                         "Advocate candidate rejected by spec lint; retrying correction in same round"
                     );
                 }
-                return;
+                return false;
             }
         }
 
@@ -487,6 +478,7 @@ impl CoordinatorActor {
                 );
             }
         }
+        true
     }
 
     /// Process an adversary session outcome: read debate-trail objections
@@ -496,7 +488,7 @@ impl CoordinatorActor {
         run_id: &str,
         proposal_id: &str,
         state: &RefinementLoopState,
-    ) {
+    ) -> bool {
         let event_bus = crate::events::event_bus_for(&self.events_tx);
         let proposal_repo = ProposalRepository::new(self.db.clone(), event_bus);
 
@@ -508,15 +500,7 @@ impl CoordinatorActor {
                     error = %e,
                     "DB error reading debate trail"
                 );
-                self.terminate_refinement(
-                    run_id,
-                    StopReason::AgentFailure {
-                        role: "adversary".into(),
-                        error: format!("DB error: {e}"),
-                    },
-                )
-                .await;
-                return;
+                return false;
             }
         };
 
@@ -555,7 +539,7 @@ impl CoordinatorActor {
                 proposal_id = %proposal_id,
                 "adversary outcome arrived for missing refinement state"
             );
-            return;
+            return false;
         };
         let outcome = state.process_adversary_pass(&adversary_result);
 
@@ -588,36 +572,18 @@ impl CoordinatorActor {
                 }
             }
         }
+        true
     }
 
     /// Persist that the tribunal has parked for human accept/reject review.
     pub(super) async fn persist_awaiting_review(
         &self,
         proposal_id: &str,
-        judge_summary: &str,
-        state: &RefinementLoopState,
+        _judge_summary: &str,
+        _state: &RefinementLoopState,
     ) {
         let event_bus = crate::events::event_bus_for(&self.events_tx);
         let proposal_repo = ProposalRepository::new(self.db.clone(), event_bus);
-        let meta = serde_json::json!({
-            "source": "refinement_loop",
-            "event": "refinement_awaiting_review",
-            "judge_summary": judge_summary,
-            "snapshot_revision_seq": state.snapshot_revision_seq,
-            "refined_revision_seq": state.current_revision_seq,
-            "stop_reason": state.stop_reason.as_ref().map(|r| r.tag()),
-        });
-        if let Err(e) = proposal_repo
-            .record_refinement_lifecycle(proposal_id, "refinement_awaiting_review", Some(&meta))
-            .await
-        {
-            tracing::warn!(
-                proposal_id = %proposal_id,
-                error = %e,
-                "Failed to persist refinement_awaiting_review lifecycle metadata"
-            );
-        }
-
         // Surface converged-awaiting-review proposals in the standard status
         // grouping: a `draft` proposal that the tribunal parks for human review
         // advances to `in_review`. Idempotent and status-scoped (draft-only);
@@ -647,7 +613,7 @@ impl CoordinatorActor {
         run_id: &str,
         proposal_id: &str,
         state: &RefinementLoopState,
-    ) {
+    ) -> bool {
         let event_bus = crate::events::event_bus_for(&self.events_tx);
         let proposal_repo = ProposalRepository::new(self.db.clone(), event_bus);
 
@@ -659,15 +625,7 @@ impl CoordinatorActor {
                     error = %e,
                     "DB error reading debate trail"
                 );
-                self.terminate_refinement(
-                    run_id,
-                    StopReason::AgentFailure {
-                        role: "judge".into(),
-                        error: format!("DB error: {e}"),
-                    },
-                )
-                .await;
-                return;
+                return false;
             }
         };
 
@@ -705,7 +663,7 @@ impl CoordinatorActor {
                 round,
                 "Judge demanded evidence — refinement parked (AwaitingEvidence)"
             );
-            return;
+            return true;
         }
 
         // ── Normal verdict path ─────────────────────────────────────────
@@ -780,6 +738,7 @@ impl CoordinatorActor {
                 "Judge ruled not-ready — running another round"
             );
         }
+        true
     }
 
     /// Fetch the current refinement run's start boundary: the `created_at` of
@@ -881,46 +840,39 @@ impl CoordinatorActor {
             }
         }
 
-        if !accept
-            && let Err(e) = self
-                .reset_live_spec_to_revision(proposal_id, state.snapshot_revision_seq)
+        if !accept {
+            self.reset_live_spec_to_revision(proposal_id, state.snapshot_revision_seq)
                 .await
-        {
-            tracing::warn!(
-                proposal_id = %proposal_id,
-                error = %e,
-                "Failed to revert spec to snapshot on reject"
-            );
+                .map_err(|error| format!("failed to revert spec to snapshot on reject: {error}"))?;
+        }
+
+        let reason = if accept {
+            RefinementStopReason::HumanAccepted
+        } else {
+            RefinementStopReason::HumanRejected
+        };
+        let repo = ProposalRepository::new(
+            self.db.clone(),
+            crate::events::event_bus_for(&self.events_tx),
+        );
+        let transitioned = repo
+            .terminal_refinement_run(TerminalRefinementRunRequest {
+                run_id: state.run_id.clone(),
+                generation: state.generation,
+                reason,
+            })
+            .await
+            .map_err(|error| format!("failed to terminalize human review: {error}"))?;
+        if !transitioned {
+            return Err("refinement review was superseded by a newer generation".into());
         }
 
         if let Some(s) = self.active_refinements.get_mut(&run_id) {
             s.resolve_human_review(accept, false);
         }
-
-        let reason_tag = if accept {
-            "human_accepted"
-        } else {
-            "human_rejected"
-        };
-        let meta = serde_json::json!({
-            "source": "human_review",
-            "event": "refinement_stop",
-            "reason_tag": reason_tag,
-            "feedback": feedback,
-        });
-        let event_bus = crate::events::event_bus_for(&self.events_tx);
-        let proposal_repo = ProposalRepository::new(self.db.clone(), event_bus);
-        if let Err(e) = proposal_repo
-            .record_refinement_lifecycle(proposal_id, "refinement_stop", Some(&meta))
-            .await
-        {
-            tracing::warn!(
-                proposal_id = %proposal_id,
-                error = %e,
-                "Failed to persist human-review resolution"
-            );
-        }
-
+        // Feedback is retained by the request surface for compatibility; the
+        // durable terminal reason/context is the canonical audit record.
+        let _ = feedback;
         self.refinement_sessions.remove(&run_id);
         self.active_refinements.retain(|_, s| !s.is_complete());
         tracing::info!(
@@ -992,18 +944,6 @@ impl CoordinatorActor {
             .map_err(|e| format!("failed to revert proposal body: {e}"))?;
 
         Ok(())
-    }
-
-    /// Persist refinement-stop lifecycle metadata.
-    pub(super) async fn persist_refinement_stop(&self, proposal_id: &str, reason: &StopReason) {
-        // Legacy callers do not carry an exact run/generation and therefore
-        // cannot safely mutate durable lifecycle state.  In particular, do not
-        // create a proposal-scoped stop row: it could overwrite a newer run.
-        tracing::debug!(
-            proposal_id,
-            ?reason,
-            "ignored uncorrelated refinement stop; exact-run terminal transition is required"
-        );
     }
 
     /// Read the `diverse_refinement` user setting for the proposal's owner.

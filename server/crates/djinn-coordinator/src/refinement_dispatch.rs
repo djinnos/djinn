@@ -1104,8 +1104,9 @@ impl CoordinatorActor {
                     "refinement spawn cap reached — task will not be dispatched",
                 )
                 .await;
-                self.persist_refinement_stop(&proposal_id, &reason).await;
-                self.refinement_sessions.remove(run_id);
+                // The cap is an agent-independent deterministic outcome, but
+                // it is still fenced by this exact run/generation projection.
+                self.terminate_refinement(run_id, reason).await;
                 return;
             }
         }

@@ -6,7 +6,7 @@
 // size-guard line threshold; shares its fixture helpers.
 
 use super::refinement_cap_tests::{
-    TEST_MODEL, build_refinement_actor, seed_refinement_fixture, spawn_test_pool,
+    build_refinement_actor, seed_refinement_fixture, spawn_test_pool, TEST_MODEL,
 };
 use crate::refinement::{RefinementPhase, StopReason};
 use djinn_core::events::{DjinnEventEnvelope, EventBus};
@@ -369,8 +369,8 @@ async fn recover_stamps_interrupted_for_ready_verdict_without_park() {
     );
     assert_eq!(
         interrupted_stop_count(&db, &fixture.proposal_id).await,
-        1,
-        "ambiguous reconstruction falls back to the interrupted stamp"
+        0,
+        "legacy reconstruction without an exact run must not write an uncorrelated stop"
     );
 }
 

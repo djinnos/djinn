@@ -13,8 +13,11 @@
 //      round/phase can be derived) fall back to the historical behavior:
 //      stamped `refinement_stop`/`Interrupted` and left restartable.
 
-use djinn_core::models::ProposalDebateTrail;
-use djinn_db::{ProposalRepository, TaskRepository};
+use djinn_core::{
+    models::ProposalDebateTrail,
+    refinement_liveness::RefinementStopReason,
+};
+use djinn_db::{ProposalRepository, TaskRepository, TerminalRefinementRunRequest};
 
 use super::actor::CoordinatorActor;
 use super::refinement::{RefinementConfig, RefinementLoopState, RefinementPhase, StopReason};
@@ -216,14 +219,31 @@ impl CoordinatorActor {
             if self.try_resume_mid_flight(&proposal_id).await {
                 continue;
             }
-            // Only genuinely ambiguous/contradictory runs are stamped
-            // interrupted (restartable) — never guess into a corrupt tribunal.
-            self.persist_refinement_stop(&proposal_id, &StopReason::Interrupted)
-                .await;
+            // Only an exact active run may be terminalized. Legacy dangling
+            // lifecycle rows deliberately receive no proposal-scoped stop write:
+            // they cannot identify the generation that is safe to mutate.
+            match proposal_repo.load_active_refinement_runs().await {
+                Ok(runs) => {
+                    if let Some(run) = runs.into_iter().find(|run| run.proposal_id == proposal_id) {
+                        if let Err(error) = proposal_repo
+                            .terminal_refinement_run(TerminalRefinementRunRequest {
+                                run_id: run.run_id,
+                                generation: run.generation,
+                                reason: RefinementStopReason::Interrupted { detail: None },
+                            })
+                            .await
+                        {
+                            tracing::warn!(proposal_id = %proposal_id, %error,
+                                "failed to terminalize ambiguous exact refinement run");
+                        }
+                    }
+                }
+                Err(error) => tracing::warn!(proposal_id = %proposal_id, %error,
+                    "failed to load exact refinement run for recovery terminalization"),
+            }
             tracing::info!(
                 proposal_id = %proposal_id,
-                "Stopped interrupted refinement (could not reconstruct a coherent \
-                 round/phase across restart); proposal is restartable"
+                "Stopped interrupted exact refinement run when reconstruction was ambiguous"
             );
         }
     }
