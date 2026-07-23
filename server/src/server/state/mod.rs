@@ -2332,9 +2332,10 @@ impl AppState {
         // supervisor-wide cancel — cancelling the server tears down any
         // in-flight RPC cleanly without reaching into individual task-runs.
         let agent_context = self.agent_context();
-        let services = djinn_agent::supervisor::services_for_agent_context(
+        let services = djinn_agent::supervisor::services_for_agent_context_with_build_lease(
             agent_context,
             self.cancel().clone(),
+            self.inner.build_lease.clone(),
         );
 
         // Validator: prefer the real TokenReview path via djinn-k8s owner-crate

@@ -253,6 +253,17 @@ impl DirectServices {
         Self::with_provider_override(agent_context, cancel, None)
     }
 
+    /// Construct the production direct surface with an existing coordinator
+    /// lease authority. Server composition uses this to ensure task invocation
+    /// and graph warming traverse the exact same in-memory service and cap.
+    pub fn with_build_lease(
+        agent_context: AgentContext,
+        cancel: CancellationToken,
+        build_lease: Arc<BuildLeaseService>,
+    ) -> Self {
+        Self::with_provider_override_and_build_lease(agent_context, cancel, None, build_lease)
+    }
+
     /// Same as [`DirectServices::new`] but installs a test-only
     /// [`LlmProvider`] override on the stage executor, bypassing the catalog
     /// / vault credential lookup inside `execute_stage`.  Used by
@@ -262,7 +273,6 @@ impl DirectServices {
         cancel: CancellationToken,
         provider_override: Option<Arc<dyn LlmProvider>>,
     ) -> Self {
-        let task_runs = Arc::new(TaskRunRepository::new(agent_context.db.clone()));
         // The durable cap is recovered from the existing database before the
         // first operation. The constructor's zero is intentionally not a
         // launcher quota lift.
@@ -270,6 +280,21 @@ impl DirectServices {
             Arc::new(BuildLeaseRepository::new(agent_context.db.clone())),
             0,
         ));
+        Self::with_provider_override_and_build_lease(
+            agent_context,
+            cancel,
+            provider_override,
+            build_lease,
+        )
+    }
+
+    fn with_provider_override_and_build_lease(
+        agent_context: AgentContext,
+        cancel: CancellationToken,
+        provider_override: Option<Arc<dyn LlmProvider>>,
+        build_lease: Arc<BuildLeaseService>,
+    ) -> Self {
+        let task_runs = Arc::new(TaskRunRepository::new(agent_context.db.clone()));
         Self {
             callbacks: SupervisorCallbackContext {
                 agent_context,

@@ -736,7 +736,7 @@ impl WarmDispatch {
         let namespace = self.config.namespace.clone();
         let permit = match (lease_grant.as_ref(), self.admission.as_ref()) {
             (Some(_), _) => None,
-            (None, Some(admission)) => match admission.admit(admission_request).await {
+            (None, Some(admission)) => match admission.admit(admission_request.clone()).await {
                 Ok(permit) => {
                     if let Err(error) = admission
                         .transition(&permit, WarmAdmissionTransition::CreateStarted)
@@ -779,28 +779,26 @@ impl WarmDispatch {
                         warn!(project_id, error = %error, "K8sGraphWarmer: failed to record dispatcher outcome");
                     }
                 }
-                // A lost response is not proof that Kubernetes did not create
-                // the deterministic object. Inventory it before giving up;
-                // binding and authorization remain UID-fenced.
-                if !dispatcher_error_is_definitive(&e) {
-                    let _ = self
-                        .bind_and_open_leased_candidate(
-                            project_id,
-                            leased_identity.as_ref(),
-                            lease_grant.as_ref(),
-                        )
-                        .await;
+                if dispatcher_error_is_definitive(&e) || lease_grant.is_none() {
+                    self.release_in_flight(project_id).await;
+                    return;
                 }
-                self.release_in_flight(project_id).await;
-                return;
+
+                // A lost response is not proof that Kubernetes did not create
+                // the deterministic object. Continue with its deterministic
+                // name and the same launching grant; the inventory loop below
+                // also covers delayed Job-controller Pod materialisation.
+                admission_request.object_name.clone()
             }
         };
 
         // POST success proves neither a unique Pod nor its immutable UID.
-        // Inventory, durably bind, then and only then open the selected gate.
+        // Inventory repeatedly because the Job controller normally creates the
+        // Pod after POST returns. Keep this launching grant and in-flight slot
+        // intact so legacy Job dedupe cannot short-circuit recovery.
         if lease_grant.is_some()
             && !self
-                .bind_and_open_leased_candidate(
+                .wait_for_bind_and_open_leased_candidate(
                     project_id,
                     leased_identity.as_ref(),
                     lease_grant.as_ref(),
@@ -923,6 +921,36 @@ impl WarmDispatch {
                 warn!(project_id, ?outcome, "K8sGraphWarmer: gate was not opened");
                 false
             }
+        }
+    }
+
+    /// Retry inventory/bind/gate activation without returning through the
+    /// create path. This covers both normal delayed Pod appearance and an
+    /// accepted POST whose response was lost.
+    async fn wait_for_bind_and_open_leased_candidate(
+        &self,
+        project_id: &str,
+        identity: Option<&LeasedWarmJobIdentity>,
+        grant: Option<&GraphWarmLeaseGrant>,
+    ) -> bool {
+        let timeout = Duration::from_secs(self.config.warm_job_timeout_seconds.max(1) as u64);
+        let clock = SystemClock::new();
+        let deadline = clock.now_instant() + timeout;
+        loop {
+            if self
+                .bind_and_open_leased_candidate(project_id, identity, grant)
+                .await
+            {
+                return true;
+            }
+            if clock.now_instant() >= deadline {
+                warn!(
+                    project_id,
+                    "K8sGraphWarmer: candidate inventory/bind deadline elapsed; gate remains closed"
+                );
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
         }
     }
 
