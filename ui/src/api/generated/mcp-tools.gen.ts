@@ -2756,6 +2756,15 @@ export namespace ImageCreateInputSchema {
    * Authoritative post-authoring plan, distinct from setup-time hooks.
    */
   export interface FinalVerificationPlan {
+  /**
+   * Ordered command groups used by path selection in new declarations.
+   */
+  command_groups?: FinalVerificationCommandGroup[]
+  /**
+   * Legacy flat declaration. New configurations must use `command_groups`
+   * and `selection_rules`; this remains readable so persisted rows can be
+   * migrated without a flag day.
+   */
   commands?: FinalVerificationCommand[]
   hermeticity?: HermeticityDeclaration
   input_manifest?: VerificationInputManifest
@@ -2764,7 +2773,18 @@ export namespace ImageCreateInputSchema {
   profile_revision?: number
   read_only_external_inputs?: ExternalInputDeclaration[]
   required_checks?: string[]
+  /**
+   * Ordered path rules. A matching rule selects its named command groups.
+   */
+  selection_rules?: FinalVerificationSelectionRule[]
   version?: number
+  }
+  /**
+   * A named, ordered subset of a final-verification plan.
+   */
+  export interface FinalVerificationCommandGroup {
+  commands?: FinalVerificationCommand[]
+  name: string
   }
   export interface FinalVerificationCommand {
   argv?: string[]
@@ -2788,6 +2808,19 @@ export namespace ImageCreateInputSchema {
   export interface ExternalInputDeclaration {
   id: string
   locator: string
+  }
+  /**
+   * Ordered path selection for one or more command groups.
+   */
+  export interface FinalVerificationSelectionRule {
+  /**
+   * Names of command groups selected by this rule.
+   */
+  command_groups?: string[]
+  /**
+   * Repository-relative globs. `**` is the explicit fail-safe catch-all.
+   */
+  match?: string[]
   }
   /**
    * A named pre-task command declared in the project environment config.
@@ -3102,6 +3135,15 @@ export namespace ImageListOutputSchema {
    * Authoritative post-authoring plan, distinct from setup-time hooks.
    */
   export interface FinalVerificationPlan {
+  /**
+   * Ordered command groups used by path selection in new declarations.
+   */
+  command_groups?: FinalVerificationCommandGroup[]
+  /**
+   * Legacy flat declaration. New configurations must use `command_groups`
+   * and `selection_rules`; this remains readable so persisted rows can be
+   * migrated without a flag day.
+   */
   commands?: FinalVerificationCommand[]
   hermeticity?: HermeticityDeclaration
   input_manifest?: VerificationInputManifest
@@ -3110,7 +3152,18 @@ export namespace ImageListOutputSchema {
   profile_revision?: number
   read_only_external_inputs?: ExternalInputDeclaration[]
   required_checks?: string[]
+  /**
+   * Ordered path rules. A matching rule selects its named command groups.
+   */
+  selection_rules?: FinalVerificationSelectionRule[]
   version?: number
+  }
+  /**
+   * A named, ordered subset of a final-verification plan.
+   */
+  export interface FinalVerificationCommandGroup {
+  commands?: FinalVerificationCommand[]
+  name: string
   }
   export interface FinalVerificationCommand {
   argv?: string[]
@@ -3134,6 +3187,19 @@ export namespace ImageListOutputSchema {
   export interface ExternalInputDeclaration {
   id: string
   locator: string
+  }
+  /**
+   * Ordered path selection for one or more command groups.
+   */
+  export interface FinalVerificationSelectionRule {
+  /**
+   * Names of command groups selected by this rule.
+   */
+  command_groups?: string[]
+  /**
+   * Repository-relative globs. `**` is the explicit fail-safe catch-all.
+   */
+  match?: string[]
   }
   /**
    * A named pre-task command declared in the project environment config.
@@ -3424,6 +3490,15 @@ export namespace ImageUpdateInputSchema {
    * Authoritative post-authoring plan, distinct from setup-time hooks.
    */
   export interface FinalVerificationPlan {
+  /**
+   * Ordered command groups used by path selection in new declarations.
+   */
+  command_groups?: FinalVerificationCommandGroup[]
+  /**
+   * Legacy flat declaration. New configurations must use `command_groups`
+   * and `selection_rules`; this remains readable so persisted rows can be
+   * migrated without a flag day.
+   */
   commands?: FinalVerificationCommand[]
   hermeticity?: HermeticityDeclaration
   input_manifest?: VerificationInputManifest
@@ -3432,7 +3507,18 @@ export namespace ImageUpdateInputSchema {
   profile_revision?: number
   read_only_external_inputs?: ExternalInputDeclaration[]
   required_checks?: string[]
+  /**
+   * Ordered path rules. A matching rule selects its named command groups.
+   */
+  selection_rules?: FinalVerificationSelectionRule[]
   version?: number
+  }
+  /**
+   * A named, ordered subset of a final-verification plan.
+   */
+  export interface FinalVerificationCommandGroup {
+  commands?: FinalVerificationCommand[]
+  name: string
   }
   export interface FinalVerificationCommand {
   argv?: string[]
@@ -3456,6 +3542,19 @@ export namespace ImageUpdateInputSchema {
   export interface ExternalInputDeclaration {
   id: string
   locator: string
+  }
+  /**
+   * Ordered path selection for one or more command groups.
+   */
+  export interface FinalVerificationSelectionRule {
+  /**
+   * Names of command groups selected by this rule.
+   */
+  command_groups?: string[]
+  /**
+   * Repository-relative globs. `**` is the explicit fail-safe catch-all.
+   */
+  match?: string[]
   }
   /**
    * A named pre-task command declared in the project environment config.
@@ -6002,6 +6101,15 @@ export namespace ProjectEnvironmentConfigGetOutputSchema {
    * Authoritative post-authoring plan, distinct from setup-time hooks.
    */
   export interface FinalVerificationPlan {
+  /**
+   * Ordered command groups used by path selection in new declarations.
+   */
+  command_groups?: FinalVerificationCommandGroup[]
+  /**
+   * Legacy flat declaration. New configurations must use `command_groups`
+   * and `selection_rules`; this remains readable so persisted rows can be
+   * migrated without a flag day.
+   */
   commands?: FinalVerificationCommand[]
   hermeticity?: HermeticityDeclaration
   input_manifest?: VerificationInputManifest
@@ -6010,7 +6118,18 @@ export namespace ProjectEnvironmentConfigGetOutputSchema {
   profile_revision?: number
   read_only_external_inputs?: ExternalInputDeclaration[]
   required_checks?: string[]
+  /**
+   * Ordered path rules. A matching rule selects its named command groups.
+   */
+  selection_rules?: FinalVerificationSelectionRule[]
   version?: number
+  }
+  /**
+   * A named, ordered subset of a final-verification plan.
+   */
+  export interface FinalVerificationCommandGroup {
+  commands?: FinalVerificationCommand[]
+  name: string
   }
   export interface FinalVerificationCommand {
   argv?: string[]
@@ -6034,6 +6153,19 @@ export namespace ProjectEnvironmentConfigGetOutputSchema {
   export interface ExternalInputDeclaration {
   id: string
   locator: string
+  }
+  /**
+   * Ordered path selection for one or more command groups.
+   */
+  export interface FinalVerificationSelectionRule {
+  /**
+   * Names of command groups selected by this rule.
+   */
+  command_groups?: string[]
+  /**
+   * Repository-relative globs. `**` is the explicit fail-safe catch-all.
+   */
+  match?: string[]
   }
   /**
    * A named pre-task command declared in the project environment config.
@@ -6308,6 +6440,15 @@ export namespace ProjectEnvironmentConfigResetOutputSchema {
    * Authoritative post-authoring plan, distinct from setup-time hooks.
    */
   export interface FinalVerificationPlan {
+  /**
+   * Ordered command groups used by path selection in new declarations.
+   */
+  command_groups?: FinalVerificationCommandGroup[]
+  /**
+   * Legacy flat declaration. New configurations must use `command_groups`
+   * and `selection_rules`; this remains readable so persisted rows can be
+   * migrated without a flag day.
+   */
   commands?: FinalVerificationCommand[]
   hermeticity?: HermeticityDeclaration
   input_manifest?: VerificationInputManifest
@@ -6316,7 +6457,18 @@ export namespace ProjectEnvironmentConfigResetOutputSchema {
   profile_revision?: number
   read_only_external_inputs?: ExternalInputDeclaration[]
   required_checks?: string[]
+  /**
+   * Ordered path rules. A matching rule selects its named command groups.
+   */
+  selection_rules?: FinalVerificationSelectionRule[]
   version?: number
+  }
+  /**
+   * A named, ordered subset of a final-verification plan.
+   */
+  export interface FinalVerificationCommandGroup {
+  commands?: FinalVerificationCommand[]
+  name: string
   }
   export interface FinalVerificationCommand {
   argv?: string[]
@@ -6340,6 +6492,19 @@ export namespace ProjectEnvironmentConfigResetOutputSchema {
   export interface ExternalInputDeclaration {
   id: string
   locator: string
+  }
+  /**
+   * Ordered path selection for one or more command groups.
+   */
+  export interface FinalVerificationSelectionRule {
+  /**
+   * Names of command groups selected by this rule.
+   */
+  command_groups?: string[]
+  /**
+   * Repository-relative globs. `**` is the explicit fail-safe catch-all.
+   */
+  match?: string[]
   }
   /**
    * A named pre-task command declared in the project environment config.
@@ -6607,6 +6772,15 @@ export namespace ProjectEnvironmentConfigSetInputSchema {
    * Authoritative post-authoring plan, distinct from setup-time hooks.
    */
   export interface FinalVerificationPlan {
+  /**
+   * Ordered command groups used by path selection in new declarations.
+   */
+  command_groups?: FinalVerificationCommandGroup[]
+  /**
+   * Legacy flat declaration. New configurations must use `command_groups`
+   * and `selection_rules`; this remains readable so persisted rows can be
+   * migrated without a flag day.
+   */
   commands?: FinalVerificationCommand[]
   hermeticity?: HermeticityDeclaration
   input_manifest?: VerificationInputManifest
@@ -6615,7 +6789,18 @@ export namespace ProjectEnvironmentConfigSetInputSchema {
   profile_revision?: number
   read_only_external_inputs?: ExternalInputDeclaration[]
   required_checks?: string[]
+  /**
+   * Ordered path rules. A matching rule selects its named command groups.
+   */
+  selection_rules?: FinalVerificationSelectionRule[]
   version?: number
+  }
+  /**
+   * A named, ordered subset of a final-verification plan.
+   */
+  export interface FinalVerificationCommandGroup {
+  commands?: FinalVerificationCommand[]
+  name: string
   }
   export interface FinalVerificationCommand {
   argv?: string[]
@@ -6639,6 +6824,19 @@ export namespace ProjectEnvironmentConfigSetInputSchema {
   export interface ExternalInputDeclaration {
   id: string
   locator: string
+  }
+  /**
+   * Ordered path selection for one or more command groups.
+   */
+  export interface FinalVerificationSelectionRule {
+  /**
+   * Names of command groups selected by this rule.
+   */
+  command_groups?: string[]
+  /**
+   * Repository-relative globs. `**` is the explicit fail-safe catch-all.
+   */
+  match?: string[]
   }
   /**
    * A named pre-task command declared in the project environment config.

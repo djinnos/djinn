@@ -50,6 +50,8 @@ const PRE_TASK_TIMEOUT_MIN: u64 = 1;
 const PRE_TASK_TIMEOUT_MAX: u64 = 1800;
 const FINAL_VERIFICATION_VERSION: u32 = 1;
 const MAX_FINAL_VERIFICATION_COMMANDS: usize = 64;
+const MAX_FINAL_VERIFICATION_COMMAND_GROUPS: usize = 64;
+const MAX_FINAL_VERIFICATION_SELECTION_RULES: usize = 128;
 const MAX_FINAL_VERIFICATION_INPUTS: usize = 128;
 const MAX_FINAL_VERIFICATION_OUTPUTS: usize = 128;
 const FINAL_VERIFICATION_TIMEOUT_MIN: u64 = 1;
@@ -1005,8 +1007,17 @@ pub struct FinalVerificationPlan {
     #[serde(default)]
     #[schemars(with = "i64")]
     pub profile_revision: u32,
-    #[serde(default)]
+    /// Legacy flat declaration. New configurations must use `command_groups`
+    /// and `selection_rules`; this remains readable so persisted rows can be
+    /// migrated without a flag day.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub commands: Vec<FinalVerificationCommand>,
+    /// Ordered command groups used by path selection in new declarations.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub command_groups: Vec<FinalVerificationCommandGroup>,
+    /// Ordered path rules. A matching rule selects its named command groups.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub selection_rules: Vec<FinalVerificationSelectionRule>,
     #[serde(default)]
     pub required_checks: Vec<String>,
     #[serde(default)]
@@ -1029,6 +1040,8 @@ impl Default for FinalVerificationPlan {
             profile_id: String::new(),
             profile_revision: 0,
             commands: Vec::new(),
+            command_groups: Vec::new(),
+            selection_rules: Vec::new(),
             required_checks: Vec::new(),
             input_manifest: VerificationInputManifest::default(),
             read_only_external_inputs: Vec::new(),
@@ -1057,6 +1070,27 @@ pub struct FinalVerificationCommand {
     #[serde(default = "final_verification_version")]
     #[schemars(with = "i64")]
     pub descriptor_revision: u32,
+}
+
+/// A named, ordered subset of a final-verification plan.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FinalVerificationCommandGroup {
+    pub name: String,
+    #[serde(default)]
+    pub commands: Vec<FinalVerificationCommand>,
+}
+
+/// Ordered path selection for one or more command groups.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FinalVerificationSelectionRule {
+    /// Repository-relative globs. `**` is the explicit fail-safe catch-all.
+    #[serde(default, rename = "match")]
+    pub match_globs: Vec<String>,
+    /// Names of command groups selected by this rule.
+    #[serde(default)]
+    pub command_groups: Vec<String>,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -1097,6 +1131,22 @@ pub struct HermeticityDeclaration {
     pub network_access: bool,
 }
 impl FinalVerificationPlan {
+    /// Normalize both persisted plan representations into ordered commands.
+    ///
+    /// `commands` is retained exclusively for legacy persisted rows. Valid new
+    /// plans use ordered command groups, so consumers can use this method and
+    /// never need to execute two different plan representations.
+    pub fn normalized_commands(&self) -> Vec<FinalVerificationCommand> {
+        if self.command_groups.is_empty() {
+            self.commands.clone()
+        } else {
+            self.command_groups
+                .iter()
+                .flat_map(|group| group.commands.iter().cloned())
+                .collect()
+        }
+    }
+
     fn validate(&self) -> EnvResult<()> {
         if self.version != 1 {
             return Err(EnvironmentConfigError::OutOfRange {
@@ -1119,82 +1169,66 @@ impl FinalVerificationPlan {
                 field: "lifecycle.final_verification.profile_revision".into(),
             });
         }
-        if self.commands.is_empty() {
+        if !self.commands.is_empty()
+            && (!self.command_groups.is_empty() || !self.selection_rules.is_empty())
+        {
+            return Err(EnvironmentConfigError::UnsafeIdentifier {
+                field: "lifecycle.final_verification.commands".into(),
+                value: "legacy commands cannot be combined with command_groups or selection_rules"
+                    .into(),
+            });
+        }
+        let mut ids = HashSet::new();
+        if self.command_groups.is_empty() {
+            validate_final_verification_commands(
+                &self.commands,
+                "lifecycle.final_verification.commands",
+                &mut ids,
+            )?;
+        } else {
+            if self.command_groups.len() > MAX_FINAL_VERIFICATION_COMMAND_GROUPS {
+                return Err(EnvironmentConfigError::ListTooLong {
+                    field: "lifecycle.final_verification.command_groups".into(),
+                    len: self.command_groups.len(),
+                    max: MAX_FINAL_VERIFICATION_COMMAND_GROUPS,
+                });
+            }
+            let mut group_names = HashSet::new();
+            let mut command_count = 0;
+            for (index, group) in self.command_groups.iter().enumerate() {
+                let group_field = format!("lifecycle.final_verification.command_groups[{index}]");
+                validate_identifier(&format!("{group_field}.name"), &group.name)?;
+                if !group_names.insert(group.name.as_str()) {
+                    return Err(EnvironmentConfigError::DuplicateName {
+                        field: "lifecycle.final_verification.command_groups".into(),
+                        name: group.name.clone(),
+                    });
+                }
+                if group.commands.is_empty() {
+                    return Err(EnvironmentConfigError::EmptyValue {
+                        field: format!("{group_field}.commands"),
+                    });
+                }
+                command_count += group.commands.len();
+                validate_final_verification_commands(
+                    &group.commands,
+                    &format!("{group_field}.commands"),
+                    &mut ids,
+                )?;
+            }
+            if command_count > MAX_FINAL_VERIFICATION_COMMANDS {
+                return Err(EnvironmentConfigError::ListTooLong {
+                    field: "lifecycle.final_verification.command_groups".into(),
+                    len: command_count,
+                    max: MAX_FINAL_VERIFICATION_COMMANDS,
+                });
+            }
+            validate_selection_rules(&self.selection_rules, &group_names)?;
+        }
+        if ids.is_empty() {
             return Err(EnvironmentConfigError::EmptyValue {
                 field: "lifecycle.final_verification.commands".into(),
             });
-        }
-        // Bounded commands list.
-        if self.commands.len() > MAX_FINAL_VERIFICATION_COMMANDS {
-            return Err(EnvironmentConfigError::ListTooLong {
-                field: "lifecycle.final_verification.commands".into(),
-                len: self.commands.len(),
-                max: MAX_FINAL_VERIFICATION_COMMANDS,
-            });
-        };
-        let mut ids = HashSet::new();
-        for c in &self.commands {
-            validate_identifier(
-                "lifecycle.final_verification.commands.check_id",
-                &c.check_id,
-            )?;
-            if !ids.insert(c.check_id.as_str()) {
-                return Err(EnvironmentConfigError::DuplicateName {
-                    field: "lifecycle.final_verification.commands".into(),
-                    name: c.check_id.clone(),
-                });
-            };
-            validate_plain_string(
-                "lifecycle.final_verification.commands.executable",
-                &c.executable,
-                MAX_STRING_LEN,
-            )?;
-            if c.argv.len() > MAX_STRING_LEN {
-                return Err(EnvironmentConfigError::ListTooLong {
-                    field: "lifecycle.final_verification.commands.argv".into(),
-                    len: c.argv.len(),
-                    max: MAX_STRING_LEN,
-                });
-            };
-            for arg in &c.argv {
-                validate_plain_string(
-                    "lifecycle.final_verification.commands.argv",
-                    arg,
-                    MAX_STRING_LEN,
-                )?;
-            }
-            validate_path(
-                "lifecycle.final_verification.commands.working_directory",
-                &c.working_directory,
-            )?;
-            if c.environment_names.len() > MAX_ENV_ENTRIES {
-                return Err(EnvironmentConfigError::ListTooLong {
-                    field: "lifecycle.final_verification.commands.environment_names".into(),
-                    len: c.environment_names.len(),
-                    max: MAX_ENV_ENTRIES,
-                });
-            };
-            for env_name in &c.environment_names {
-                validate_identifier(
-                    "lifecycle.final_verification.commands.environment_names",
-                    env_name,
-                )?;
-            }
-            if c.timeout_seconds < FINAL_VERIFICATION_TIMEOUT_MIN
-                || c.timeout_seconds > FINAL_VERIFICATION_TIMEOUT_MAX
-            {
-                return Err(EnvironmentConfigError::OutOfRange {
-                    field: "lifecycle.final_verification.commands.timeout_seconds".into(),
-                    value: c.timeout_seconds,
-                    min: FINAL_VERIFICATION_TIMEOUT_MIN,
-                    max: FINAL_VERIFICATION_TIMEOUT_MAX,
-                });
-            };
-            if c.descriptor_revision == 0 {
-                return Err(EnvironmentConfigError::EmptyValue {
-                    field: "lifecycle.final_verification.commands.descriptor_revision".into(),
-                });
-            };
         }
         if self.required_checks.len() > MAX_FINAL_VERIFICATION_COMMANDS {
             return Err(EnvironmentConfigError::ListTooLong {
@@ -1218,6 +1252,13 @@ impl FinalVerificationPlan {
                     value: x.clone(),
                 });
             }
+        }
+        if !self.command_groups.is_empty() {
+            validate_selected_required_checks(
+                &self.command_groups,
+                &self.selection_rules,
+                &self.required_checks,
+            )?;
         }
         if self.input_manifest.version != 1 {
             return Err(EnvironmentConfigError::OutOfRange {
@@ -1300,6 +1341,183 @@ impl FinalVerificationPlan {
         Ok(())
     }
 }
+fn validate_final_verification_commands(
+    commands: &[FinalVerificationCommand],
+    field: &str,
+    ids: &mut HashSet<String>,
+) -> EnvResult<()> {
+    if commands.len() > MAX_FINAL_VERIFICATION_COMMANDS {
+        return Err(EnvironmentConfigError::ListTooLong {
+            field: field.into(),
+            len: commands.len(),
+            max: MAX_FINAL_VERIFICATION_COMMANDS,
+        });
+    }
+    for command in commands {
+        validate_identifier(&format!("{field}.check_id"), &command.check_id)?;
+        if !ids.insert(command.check_id.clone()) {
+            return Err(EnvironmentConfigError::DuplicateName {
+                field: field.into(),
+                name: command.check_id.clone(),
+            });
+        }
+        validate_plain_string(
+            &format!("{field}.executable"),
+            &command.executable,
+            MAX_STRING_LEN,
+        )?;
+        if command.argv.len() > MAX_STRING_LEN {
+            return Err(EnvironmentConfigError::ListTooLong {
+                field: format!("{field}.argv"),
+                len: command.argv.len(),
+                max: MAX_STRING_LEN,
+            });
+        }
+        for arg in &command.argv {
+            validate_plain_string(&format!("{field}.argv"), arg, MAX_STRING_LEN)?;
+        }
+        validate_path(
+            &format!("{field}.working_directory"),
+            &command.working_directory,
+        )?;
+        if command.environment_names.len() > MAX_ENV_ENTRIES {
+            return Err(EnvironmentConfigError::ListTooLong {
+                field: format!("{field}.environment_names"),
+                len: command.environment_names.len(),
+                max: MAX_ENV_ENTRIES,
+            });
+        }
+        for env_name in &command.environment_names {
+            validate_identifier(&format!("{field}.environment_names"), env_name)?;
+        }
+        if command.timeout_seconds < FINAL_VERIFICATION_TIMEOUT_MIN
+            || command.timeout_seconds > FINAL_VERIFICATION_TIMEOUT_MAX
+        {
+            return Err(EnvironmentConfigError::OutOfRange {
+                field: format!("{field}.timeout_seconds"),
+                value: command.timeout_seconds,
+                min: FINAL_VERIFICATION_TIMEOUT_MIN,
+                max: FINAL_VERIFICATION_TIMEOUT_MAX,
+            });
+        }
+        if command.descriptor_revision == 0 {
+            return Err(EnvironmentConfigError::EmptyValue {
+                field: format!("{field}.descriptor_revision"),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_selection_rules(
+    rules: &[FinalVerificationSelectionRule],
+    group_names: &HashSet<&str>,
+) -> EnvResult<()> {
+    if rules.is_empty() {
+        return Err(EnvironmentConfigError::EmptyValue {
+            field: "lifecycle.final_verification.selection_rules".into(),
+        });
+    }
+    if rules.len() > MAX_FINAL_VERIFICATION_SELECTION_RULES {
+        return Err(EnvironmentConfigError::ListTooLong {
+            field: "lifecycle.final_verification.selection_rules".into(),
+            len: rules.len(),
+            max: MAX_FINAL_VERIFICATION_SELECTION_RULES,
+        });
+    }
+    let mut has_fail_safe = false;
+    for (index, rule) in rules.iter().enumerate() {
+        let field = format!("lifecycle.final_verification.selection_rules[{index}]");
+        if rule.match_globs.is_empty() {
+            return Err(EnvironmentConfigError::EmptyValue {
+                field: format!("{field}.match"),
+            });
+        }
+        if rule.match_globs.len() > MAX_FINAL_VERIFICATION_INPUTS {
+            return Err(EnvironmentConfigError::ListTooLong {
+                field: format!("{field}.match"),
+                len: rule.match_globs.len(),
+                max: MAX_FINAL_VERIFICATION_INPUTS,
+            });
+        }
+        for glob in &rule.match_globs {
+            validate_glob(&format!("{field}.match"), glob)?;
+        }
+        if rule.command_groups.is_empty() {
+            return Err(EnvironmentConfigError::EmptyValue {
+                field: format!("{field}.command_groups"),
+            });
+        }
+        let mut referenced = HashSet::new();
+        for name in &rule.command_groups {
+            validate_identifier(&format!("{field}.command_groups"), name)?;
+            if !referenced.insert(name.as_str()) {
+                return Err(EnvironmentConfigError::DuplicateName {
+                    field: format!("{field}.command_groups"),
+                    name: name.clone(),
+                });
+            }
+            if !group_names.contains(name.as_str()) {
+                return Err(EnvironmentConfigError::UnsafeIdentifier {
+                    field: format!("{field}.command_groups"),
+                    value: name.clone(),
+                });
+            }
+        }
+        if rule.match_globs.iter().any(|glob| glob == "**") {
+            if referenced.len() != group_names.len() {
+                return Err(EnvironmentConfigError::UnsafeIdentifier {
+                    field: format!("{field}.command_groups"),
+                    value: "catch-all rule must reference every command group".into(),
+                });
+            }
+            has_fail_safe = true;
+        }
+    }
+    if !has_fail_safe {
+        return Err(EnvironmentConfigError::EmptyValue {
+            field: "lifecycle.final_verification.selection_rules".into(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_selected_required_checks(
+    groups: &[FinalVerificationCommandGroup],
+    rules: &[FinalVerificationSelectionRule],
+    required_checks: &[String],
+) -> EnvResult<()> {
+    for (index, rule) in rules.iter().enumerate() {
+        let selected: HashSet<&str> = rule
+            .command_groups
+            .iter()
+            .flat_map(|name| {
+                groups
+                    .iter()
+                    .find(|group| group.name == *name)
+                    .into_iter()
+                    .flat_map(|group| {
+                        group
+                            .commands
+                            .iter()
+                            .map(|command| command.check_id.as_str())
+                    })
+            })
+            .collect();
+        for required in required_checks {
+            if !selected.contains(required.as_str()) {
+                return Err(EnvironmentConfigError::UnsafeIdentifier {
+                    field: format!(
+                        "lifecycle.final_verification.selection_rules[{index}].command_groups"
+                    ),
+                    value: required.clone(),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Validate one lifecycle phase: cap the list length, then validate each hook
 /// with its indexed field path.  Preserves exact field strings and early-return
 /// order.
@@ -2975,6 +3193,8 @@ mod tests {
                 timeout_seconds: 300,
                 descriptor_revision: 1,
             }],
+            command_groups: vec![],
+            selection_rules: vec![],
             required_checks: vec!["cargo-test".into()],
             input_manifest: VerificationInputManifest {
                 version: 1,
@@ -2992,6 +3212,144 @@ mod tests {
                 network_access: false,
             },
         }
+    }
+
+    fn valid_grouped_final_verification_plan() -> FinalVerificationPlan {
+        let mut plan = valid_final_verification_plan();
+        let cargo = plan.commands.remove(0);
+        plan.command_groups = vec![
+            FinalVerificationCommandGroup {
+                name: "rust".into(),
+                commands: vec![cargo],
+            },
+            FinalVerificationCommandGroup {
+                name: "web".into(),
+                commands: vec![FinalVerificationCommand {
+                    check_id: "web-test".into(),
+                    executable: "pnpm".into(),
+                    argv: vec!["test".into()],
+                    working_directory: "ui".into(),
+                    environment_names: vec![],
+                    timeout_seconds: 300,
+                    descriptor_revision: 1,
+                }],
+            },
+        ];
+        plan.selection_rules = vec![
+            FinalVerificationSelectionRule {
+                match_globs: vec!["server/**".into()],
+                command_groups: vec!["rust".into()],
+            },
+            FinalVerificationSelectionRule {
+                match_globs: vec!["**".into()],
+                command_groups: vec!["rust".into(), "web".into()],
+            },
+        ];
+        plan
+    }
+
+    #[test]
+    fn final_verification_grouped_plan_round_trips_and_normalizes_in_order() {
+        let plan = valid_grouped_final_verification_plan();
+        plan.validate().unwrap();
+        let serialized = serde_json::to_string(&plan).unwrap();
+        assert!(serialized.contains("command_groups"));
+        assert!(serialized.contains("selection_rules"));
+        let value: serde_json::Value = serde_json::from_str(&serialized).unwrap();
+        assert!(value.get("commands").is_none());
+        let back: FinalVerificationPlan = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(back, plan);
+        assert_eq!(
+            back.normalized_commands()
+                .iter()
+                .map(|command| command.check_id.as_str())
+                .collect::<Vec<_>>(),
+            ["cargo-test", "web-test"]
+        );
+    }
+
+    #[test]
+    fn final_verification_legacy_plan_normalizes_without_empty_commands() {
+        let plan = valid_final_verification_plan();
+        plan.validate().unwrap();
+        assert_eq!(plan.normalized_commands(), plan.commands);
+        assert!(!plan.normalized_commands().is_empty());
+    }
+
+    #[test]
+    fn final_verification_grouped_validation_rejects_invalid_shapes() {
+        let mut plan = valid_grouped_final_verification_plan();
+        plan.selection_rules[0].match_globs.clear();
+        let error = plan.validate().unwrap_err();
+        assert!(
+            matches!(error, EnvironmentConfigError::EmptyValue { ref field }
+            if field == "lifecycle.final_verification.selection_rules[0].match")
+        );
+
+        let mut plan = valid_grouped_final_verification_plan();
+        plan.selection_rules[0].command_groups = vec!["missing".into()];
+        let error = plan.validate().unwrap_err();
+        assert!(
+            matches!(error, EnvironmentConfigError::UnsafeIdentifier { ref field, ref value }
+            if field == "lifecycle.final_verification.selection_rules[0].command_groups" && value == "missing")
+        );
+
+        let mut plan = valid_grouped_final_verification_plan();
+        plan.command_groups[1].commands[0].check_id = "cargo-test".into();
+        let error = plan.validate().unwrap_err();
+        assert!(
+            matches!(error, EnvironmentConfigError::DuplicateName { ref field, ref name }
+            if field == "lifecycle.final_verification.command_groups[1].commands" && name == "cargo-test")
+        );
+
+        let mut plan = valid_grouped_final_verification_plan();
+        plan.selection_rules.pop();
+        let error = plan.validate().unwrap_err();
+        assert!(
+            matches!(error, EnvironmentConfigError::EmptyValue { ref field }
+            if field == "lifecycle.final_verification.selection_rules")
+        );
+
+        let mut plan = valid_grouped_final_verification_plan();
+        plan.selection_rules[1].match_globs = vec!["ui/**".into()];
+        let error = plan.validate().unwrap_err();
+        assert!(
+            matches!(error, EnvironmentConfigError::EmptyValue { ref field }
+            if field == "lifecycle.final_verification.selection_rules")
+        );
+
+        let mut plan = valid_grouped_final_verification_plan();
+        plan.command_groups.push(plan.command_groups[0].clone());
+        let error = plan.validate().unwrap_err();
+        assert!(
+            matches!(error, EnvironmentConfigError::DuplicateName { ref field, ref name }
+            if field == "lifecycle.final_verification.command_groups" && name == "rust")
+        );
+
+        let mut plan = valid_grouped_final_verification_plan();
+        plan.selection_rules[0].command_groups.push("rust".into());
+        let error = plan.validate().unwrap_err();
+        assert!(
+            matches!(error, EnvironmentConfigError::DuplicateName { ref field, ref name }
+            if field == "lifecycle.final_verification.selection_rules[0].command_groups" && name == "rust")
+        );
+
+        let mut plan = valid_grouped_final_verification_plan();
+        plan.commands
+            .push(plan.command_groups[0].commands[0].clone());
+        let error = plan.validate().unwrap_err();
+        assert!(
+            matches!(error, EnvironmentConfigError::UnsafeIdentifier { ref field, .. }
+            if field == "lifecycle.final_verification.commands")
+        );
+
+        let mut plan = valid_grouped_final_verification_plan();
+        plan.required_checks.push("web-test".into());
+        let error = plan.validate().unwrap_err();
+        assert!(
+            matches!(error, EnvironmentConfigError::UnsafeIdentifier { ref field, ref value }
+            if field == "lifecycle.final_verification.selection_rules[0].command_groups" && value == "web-test")
+        );
     }
 
     #[test]
@@ -3422,6 +3780,14 @@ mod tests {
         assert!(
             schema_str.contains("FinalVerificationCommand"),
             "schema should contain FinalVerificationCommand definition"
+        );
+        assert!(
+            schema_str.contains("FinalVerificationCommandGroup"),
+            "schema should contain FinalVerificationCommandGroup definition"
+        );
+        assert!(
+            schema_str.contains("FinalVerificationSelectionRule"),
+            "schema should contain FinalVerificationSelectionRule definition"
         );
         assert!(
             schema_str.contains("HermeticityDeclaration"),
