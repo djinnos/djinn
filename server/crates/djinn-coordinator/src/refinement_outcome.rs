@@ -237,7 +237,7 @@ impl CoordinatorActor {
         let valid_task = task.refinement_run_id.as_deref() == Some(state.run_id.as_str())
             && task.refinement_generation == Some(i64::from(state.generation))
             && task.refinement_round == Some(i64::from(state.current_round))
-            && task.refinement_phase.as_deref() == expected_phase.as_deref()
+            && task.refinement_phase.as_deref() == expected_phase
             && task.refinement_role.as_deref() == expected_role;
         if !valid_task {
             tracing::debug!(run_id = %state.run_id, task_id = %session.task_id,
