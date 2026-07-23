@@ -758,6 +758,181 @@ pub async fn output_with_kill(mut cmd: Command, _timeout: Duration) -> io::Resul
 #[allow(clippy::disallowed_methods)] // tests use real time for timeout/duration assertions
 mod tests {
     use super::*;
+    use djinn_core::clock::TestClock;
+    use std::future::pending;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Small launcher double used by the lease-state-machine tests. It keeps
+    /// the cgroup boundary observable without consulting command strings.
+    #[derive(Default)]
+    struct FakeLauncher {
+        samples: Mutex<Vec<CpuStat>>,
+        lifts: AtomicUsize,
+        kills: AtomicUsize,
+        empties: AtomicUsize,
+    }
+
+    impl CgroupLauncherClient for FakeLauncher {
+        fn launch(
+            &self,
+            command: &mut Command,
+            _: &TaskInvocationLeaseIdentity,
+        ) -> io::Result<std::process::Child> {
+            command.spawn()
+        }
+        fn sample_cpu(&self, _: &TaskInvocationLeaseIdentity) -> io::Result<CpuStat> {
+            Ok(self.samples.lock().unwrap().pop().unwrap_or_default())
+        }
+        fn fenced_lift(
+            &self,
+            _: &TaskInvocationLeaseIdentity,
+            _: &LeaseFencingToken,
+        ) -> io::Result<()> {
+            self.lifts.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+        fn kill(&self, _: &TaskInvocationLeaseIdentity) -> io::Result<()> {
+            self.kills.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+        fn wait_empty(&self, _: &TaskInvocationLeaseIdentity) -> io::Result<()> {
+            self.empties.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    fn test_identity() -> TaskInvocationLeaseIdentity {
+        TaskInvocationLeaseIdentity {
+            task_id: "task".into(),
+            task_run_id: "run".into(),
+            invocation_id: "invocation".into(),
+        }
+    }
+
+    /// A paused service future must lose to irreversible cancellation, so its
+    /// grant cannot reach the lift path (terminal-before-grant ordering).
+    #[tokio::test]
+    async fn paused_grant_loses_to_terminal_intent() {
+        let mut child = Command::new("sh").arg("-c").arg("sleep 1").spawn().unwrap();
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let clock = TestClock::new(std::time::SystemTime::UNIX_EPOCH, std::time::Instant::now());
+        let result = await_lease_or_terminal(
+            pending::<LeaseResult>(),
+            &mut child,
+            &cancel,
+            &clock,
+            clock.now_instant() + Duration::from_secs(60),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            result,
+            LeaseWait::Terminal((_, ProcessTermination::Cancelled))
+        ));
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    /// The injected fake clock controls timeout while a service response is paused.
+    #[tokio::test]
+    async fn fake_clock_times_out_paused_service() {
+        let mut child = Command::new("sh").arg("-c").arg("sleep 1").spawn().unwrap();
+        let cancel = CancellationToken::new();
+        let base = std::time::Instant::now();
+        let clock = TestClock::new(std::time::SystemTime::UNIX_EPOCH, base);
+        clock.advance_mono(Duration::from_secs(2));
+        let result =
+            await_lease_or_terminal(pending::<LeaseResult>(), &mut child, &cancel, &clock, base)
+                .await
+                .unwrap();
+        assert!(matches!(
+            result,
+            LeaseWait::Terminal((_, ProcessTermination::TimedOut))
+        ));
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    #[test]
+    fn typed_lease_failures_remain_distinct() {
+        let mut deadline = std::time::Instant::now();
+        let mut used = false;
+        let mut error = None;
+        lease_failure(
+            LeaseResult::LeaseIdentityConflict {
+                identity: LeaseIdentity::TaskInvocation(test_identity()),
+            },
+            &mut deadline,
+            &mut used,
+            &mut error,
+        );
+        assert!(matches!(
+            error,
+            Some(LeaseInvocationError::LeaseIdentityConflict)
+        ));
+        error = None;
+        lease_failure(
+            LeaseResult::LeaseUnavailable,
+            &mut deadline,
+            &mut used,
+            &mut error,
+        );
+        assert!(matches!(
+            error,
+            Some(LeaseInvocationError::LeaseUnavailable)
+        ));
+        error = None;
+        lease_failure(
+            LeaseResult::LeaseWaitTimeout {
+                timeout_credit: None,
+            },
+            &mut deadline,
+            &mut used,
+            &mut error,
+        );
+        assert!(matches!(
+            error,
+            Some(LeaseInvocationError::LeaseWaitTimeout)
+        ));
+    }
+
+    #[test]
+    fn timeout_credit_extends_deadline_once() {
+        let mut deadline = std::time::Instant::now();
+        let original = deadline;
+        let mut used = false;
+        let mut error = None;
+        let credit = LeaseResult::LeaseWaitTimeout {
+            timeout_credit: Some(djinn_supervisor::services::TimeoutCredit {
+                units: 1,
+                retry_after_ms: 25,
+            }),
+        };
+        lease_failure(credit.clone(), &mut deadline, &mut used, &mut error);
+        assert_eq!(deadline, original + Duration::from_millis(25));
+        lease_failure(credit, &mut deadline, &mut used, &mut error);
+        assert_eq!(deadline, original + Duration::from_millis(25));
+        assert!(matches!(
+            error,
+            Some(LeaseInvocationError::LeaseWaitTimeout)
+        ));
+    }
+
+    #[test]
+    fn fake_launcher_records_cgroup_lifecycle() {
+        let launcher = FakeLauncher::default();
+        let identity = test_identity();
+        launcher
+            .fenced_lift(&identity, &LeaseFencingToken(7))
+            .unwrap();
+        launcher.kill(&identity).unwrap();
+        launcher.wait_empty(&identity).unwrap();
+        assert_eq!(launcher.lifts.load(Ordering::SeqCst), 1);
+        assert_eq!(launcher.kills.load(Ordering::SeqCst), 1);
+        assert_eq!(launcher.empties.load(Ordering::SeqCst), 1);
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn spawned_process_uses_different_pgid() {
