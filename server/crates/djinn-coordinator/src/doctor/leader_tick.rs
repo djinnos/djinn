@@ -27,8 +27,11 @@ use djinn_core::clock::{Clock, SystemClock};
 use djinn_core::doctor::{
     DoctorCheckRun, DoctorRegistry, Finding, FindingSeverity, run_cheap_subset,
 };
-use djinn_db::repositories::doctor_finding::KeyedDoctorFinding;
-use djinn_db::{DoctorFindingRepository, NewDoctorFinding};
+use djinn_db::repositories::doctor_finding::{KeyedDoctorFinding, severity};
+use djinn_db::{
+    DoctorFindingRepository, LintMaterializationOutcome, NewDoctorFinding,
+    ProposalIntegrityHeadPage, ProposalIntegrityRepository, ProposalRepository,
+};
 use serde_json::json;
 use tracing::{error, info, warn};
 
@@ -44,6 +47,92 @@ pub const DOCTOR_CRITICAL_FINDING_ACTIVITY: &str = "doctor_critical_finding";
 /// wants to make a divergence visible without bumping the Critical-flagged
 /// lane. Written with the same payload shape as the critical variant.
 pub const DOCTOR_FINDING_ACTIVITY: &str = "doctor_finding";
+
+/// Stable name for the retroactive immutable proposal lint finding.
+pub const PROPOSAL_SPEC_INTEGRITY_CHECK_NAME: &str = "proposal_spec_integrity_v1";
+
+/// Number of ascending-id pages a single leader tick may consume.
+const PROPOSAL_SPEC_INTEGRITY_MAX_PAGES_PER_TICK: usize = 10;
+
+/// Run the bounded, conflict-safe retroactive proposal lint materialization.
+///
+/// The early return precedes construction of every proposal source: disabled
+/// operation performs neither a proposal scan nor a retained-body load.
+pub async fn run_proposal_spec_integrity_sweep(
+    enabled: bool,
+    db: &djinn_db::Database,
+    run_id: Option<&str>,
+) {
+    if !enabled {
+        return;
+    }
+    let heads = ProposalIntegrityRepository::new(db.clone());
+    let proposals = ProposalRepository::new(db.clone(), djinn_core::events::EventBus::noop());
+    let findings = DoctorFindingRepository::new(db.clone());
+    let mut after_proposal_id = None;
+    for _ in 0..PROPOSAL_SPEC_INTEGRITY_MAX_PAGES_PER_TICK {
+        let page = match heads
+            .list_current_heads(ProposalIntegrityHeadPage {
+                after_proposal_id: after_proposal_id.clone(),
+                limit: djinn_db::MAX_PROPOSAL_INTEGRITY_PAGE_SIZE,
+            })
+            .await
+        {
+            Ok(page) => page,
+            Err(error) => {
+                warn!(error = %error, "proposal spec integrity sweep: head scan failed");
+                return;
+            }
+        };
+        if page.is_empty() {
+            return;
+        }
+        let page_len = page.len();
+        after_proposal_id = page.last().map(|head| head.proposal_id.clone());
+        for head in page {
+            let result = match proposals.lint_for_revision(&head.revision).await {
+                Ok(result) => result,
+                Err(error) => {
+                    warn!(proposal_id = %head.proposal_id, revision_seq = head.revision.seq, error = %error, "proposal spec integrity sweep: lint failed; continuing");
+                    continue;
+                }
+            };
+            match heads.materialize_if_current(&head, &result).await {
+                Ok(LintMaterializationOutcome::Stale) => continue,
+                Ok(
+                    LintMaterializationOutcome::Materialized
+                    | LintMaterializationOutcome::AlreadyPresent,
+                ) => {}
+                Err(error) => {
+                    warn!(proposal_id = %head.proposal_id, revision_seq = head.revision.seq, error = %error, "proposal spec integrity sweep: guarded materialization failed; continuing");
+                    continue;
+                }
+            }
+            if result.errors.is_empty() {
+                continue;
+            }
+            let key = format!(
+                "{PROPOSAL_SPEC_INTEGRITY_CHECK_NAME}:{}:{}:{}",
+                head.proposal_id, head.revision.seq, result.linter_version
+            );
+            let finding = NewDoctorFinding {
+                run_id: run_id.map(str::to_owned),
+                check_name: PROPOSAL_SPEC_INTEGRITY_CHECK_NAME.to_owned(),
+                severity: severity::ERROR.to_owned(),
+                entity_ids: json!([head.proposal_id]),
+                evidence: json!({ "revision_seq": head.revision.seq, "body_sha256": head.body_sha256, "linter_version": result.linter_version, "violations": result.errors }),
+                resolver_snapshot: None,
+                detail: Some("proposal specification integrity lint errors".to_owned()),
+            };
+            if let Err(error) = findings.insert_ignore_duplicate(finding, &key).await {
+                warn!(proposal_id = %head.proposal_id, revision_seq = head.revision.seq, error = %error, "proposal spec integrity sweep: finding insert failed; continuing");
+            }
+        }
+        if page_len < djinn_db::MAX_PROPOSAL_INTEGRITY_PAGE_SIZE as usize {
+            return;
+        }
+    }
+}
 
 /// Convert a single [`Finding`] into the repository insert DTO.
 ///
