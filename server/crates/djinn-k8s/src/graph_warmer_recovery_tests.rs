@@ -230,6 +230,112 @@ async fn restart_after_ambiguous_create_before_after_bind_and_gate_open() {
 }
 
 #[tokio::test]
+async fn restart_from_each_durable_state_only_opens_one_confirmed_uid() {
+    // Recovery uses one inventory/bind/gate sequence for every persisted state;
+    // the fake dispatcher panics, so this also proves no restart creates work.
+    for state in [
+        LeaseState::Launching,
+        LeaseState::Bound,
+        LeaseState::Active,
+        LeaseState::Suspect,
+    ] {
+        let lease = Arc::new(LeaseFake {
+            rows: StdMutex::new(vec![recovery(state, Some("uid-a"), false)]),
+            binds: StdMutex::new(Vec::new()),
+            reports: StdMutex::new(Vec::new()),
+            releases: StdMutex::new(0),
+        });
+        let candidates = Arc::new(CandidatesFake {
+            inventories: StdMutex::new(VecDeque::from([pod_inventory("uid-a")])),
+            deletes: StdMutex::new(Vec::new()),
+            gates: StdMutex::new(Vec::new()),
+            delete_outcome: CleanupObservation::ConfirmedDelete,
+        });
+
+        warmer(lease.clone(), candidates.clone())
+            .reconcile_durable_warm_leases()
+            .await;
+
+        assert_eq!(lease.binds.lock().unwrap().as_slice(), ["uid-a"]);
+        assert_eq!(candidates.gates.lock().unwrap().as_slice(), ["uid-a"]);
+        assert_eq!(lease.reports.lock().unwrap().as_slice(), [LeaseState::Active]);
+        assert_eq!(*lease.releases.lock().unwrap(), 0);
+    }
+}
+
+#[tokio::test]
+async fn unsafe_recovery_inventory_never_binds_or_opens_graph_work_gate() {
+    let duplicate = {
+        let mut first = pod_inventory("uid-a");
+        let mut second = pod_inventory("uid-b");
+        WarmCandidateInventory {
+            observation: WarmInventoryObservation::Observed,
+            jobs_observation: crate::graph_warmer_candidates::WarmCandidateListObservation::Observed,
+            jobs: WarmCandidateSet::default(),
+            pods_observation: crate::graph_warmer_candidates::WarmCandidateListObservation::Observed,
+            pods: WarmCandidateSet {
+                state: WarmCandidateSetState::Duplicate,
+                candidates: vec![
+                    first.pods.candidates.remove(0),
+                    second.pods.candidates.remove(0),
+                ],
+            },
+        }
+    };
+    let mismatch = WarmCandidateInventory {
+        observation: WarmInventoryObservation::Observed,
+        jobs_observation: crate::graph_warmer_candidates::WarmCandidateListObservation::Observed,
+        jobs: WarmCandidateSet::default(),
+        pods_observation: crate::graph_warmer_candidates::WarmCandidateListObservation::Observed,
+        pods: WarmCandidateSet {
+            state: WarmCandidateSetState::Unresolved,
+            candidates: vec![WarmCandidate {
+                kind: WarmCandidateKind::Pod,
+                name: "mismatched-pod".into(),
+                uid: Some("uid-a".into()),
+                annotation_validation: WarmAnnotationValidation::Mismatch {
+                    key: "djinn.app/graph-revision",
+                    expected: "revision".into(),
+                    found: Some("other".into()),
+                },
+            }],
+        },
+    };
+    let api_unavailable = WarmCandidateInventory {
+        observation: WarmInventoryObservation::ApiError("apiserver unavailable".into()),
+        jobs_observation: crate::graph_warmer_candidates::WarmCandidateListObservation::ApiError(
+            "apiserver unavailable".into(),
+        ),
+        jobs: WarmCandidateSet::default(),
+        pods_observation: crate::graph_warmer_candidates::WarmCandidateListObservation::Observed,
+        pods: WarmCandidateSet::default(),
+    };
+
+    for inventory in [duplicate, mismatch, api_unavailable] {
+        let lease = Arc::new(LeaseFake {
+            rows: StdMutex::new(vec![recovery(LeaseState::Launching, None, false)]),
+            binds: StdMutex::new(Vec::new()),
+            reports: StdMutex::new(Vec::new()),
+            releases: StdMutex::new(0),
+        });
+        let candidates = Arc::new(CandidatesFake {
+            inventories: StdMutex::new(VecDeque::from([inventory])),
+            deletes: StdMutex::new(Vec::new()),
+            gates: StdMutex::new(Vec::new()),
+            delete_outcome: CleanupObservation::ConfirmedDelete,
+        });
+        warmer(lease.clone(), candidates.clone())
+            .reconcile_durable_warm_leases()
+            .await;
+
+        assert!(lease.binds.lock().unwrap().is_empty());
+        assert!(candidates.gates.lock().unwrap().is_empty());
+        assert_eq!(*lease.releases.lock().unwrap(), 0);
+        assert_eq!(lease.reports.lock().unwrap().as_slice(), [LeaseState::Suspect]);
+    }
+}
+
+#[tokio::test]
 async fn restart_during_expired_deletion_keeps_suspect_until_absence_then_releases() {
     let lease = Arc::new(LeaseFake {
         rows: StdMutex::new(vec![recovery(LeaseState::Suspect, Some("uid-a"), true)]),

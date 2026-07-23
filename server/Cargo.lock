@@ -1298,6 +1298,7 @@ dependencies = [
  "djinn-roles",
  "djinn-runtime",
  "djinn-slot",
+ "djinn-spec-lint",
  "djinn-stack",
  "djinn-supervisor",
  "djinn-telemetry",

@@ -601,6 +601,118 @@ async fn graph_warm_and_task_invocation_share_one_fifo_cap() {
     ));
 }
 
+
+#[tokio::test]
+async fn adapter_recovers_lost_bind_response_from_durable_status_and_rejects_other_uid() {
+    let (service, _, _) = service(1).await;
+    let identity = GraphWarmLeaseIdentity {
+        project_id: "project-id".into(),
+        warm_request_id: "lost-bind-response".into(),
+        graph_revision: "graph-revision".into(),
+    };
+    let adapter = BuildLeaseGraphWarmAdapter::new(service.clone());
+    let token = adapter
+        .acquire(identity.clone(), LeaseDeadlines { queue_deadline_ms: 0, launch_deadline_ms: 0 })
+        .await
+        .unwrap()
+        .grant
+        .fencing_token;
+
+    // Simulate a committed bind whose response was lost, followed by normal
+    // activation before the retry arrives. The adapter's bind call cannot get a
+    // fresh Bound result, so it must confirm the durable same-UID status.
+    assert!(matches!(
+        service
+            .bind(LeaseBindRequest {
+                identity: LeaseIdentity::GraphWarm(identity.clone()),
+                fencing_token: token.clone(),
+                pod_uid: "immutable-uid".into(),
+            })
+            .await,
+        LeaseResult::Bound(_)
+    ));
+    assert!(matches!(
+        service
+            .report(
+                LeaseIdentity::GraphWarm(identity.clone()),
+                token.clone(),
+                LeaseState::Active,
+            )
+            .await,
+        LeaseResult::Status(_)
+    ));
+    assert!(adapter
+        .bind(&identity, token.clone(), "immutable-uid".into())
+        .await
+        .is_ok());
+    assert!(adapter
+        .bind(&identity, token, "different-uid".into())
+        .await
+        .is_err());
+}
+
+#[tokio::test]
+async fn task_then_warm_fifo_and_zero_cap_do_not_bypass_the_shared_ledger() {
+    let (lease_service, repository, _) = service(1).await;
+    let task = LeaseIdentity::TaskInvocation(TaskInvocationLeaseIdentity {
+        task_id: "task".into(),
+        task_run_id: "run".into(),
+        invocation_id: "first".into(),
+    });
+    let task_token = match lease_service
+        .queue(LeaseQueueRequest {
+            identity: task.clone(),
+            deadlines: LeaseDeadlines { queue_deadline_ms: 0, launch_deadline_ms: 0 },
+        })
+        .await
+    {
+        LeaseResult::Granted(grant) => grant.fencing_token,
+        other => panic!("expected task grant, got {other:?}"),
+    };
+    assert!(matches!(
+        lease_service.queue(request("warm-after-task", 0, 0)).await,
+        LeaseResult::Queued(_)
+    ));
+    assert!(matches!(
+        lease_service
+            .release(LeaseReleaseRequest {
+                identity: task,
+                fencing_token: task_token,
+                candidate_cleanup: true,
+            })
+            .await,
+        LeaseResult::Released { .. }
+    ));
+    assert!(matches!(
+        lease_service.queue(request("warm-after-task", 0, 0)).await,
+        LeaseResult::Granted(_)
+    ));
+    assert_eq!(repository.snapshot().await.unwrap().occupied, 1);
+
+    let (zero_cap, zero_repository, _) = service(0).await;
+    assert!(matches!(
+        zero_cap.queue(request("warm-cap-zero", 0, 0)).await,
+        LeaseResult::Queued(_)
+    ));
+    assert!(matches!(
+        zero_cap
+            .queue(LeaseQueueRequest {
+                identity: LeaseIdentity::TaskInvocation(TaskInvocationLeaseIdentity {
+                    task_id: "task".into(),
+                    task_run_id: "run".into(),
+                    invocation_id: "cap-zero".into(),
+                }),
+                deadlines: LeaseDeadlines { queue_deadline_ms: 0, launch_deadline_ms: 0 },
+            })
+            .await,
+        LeaseResult::Queued(_)
+    ));
+    let snapshot = zero_repository.snapshot().await.unwrap();
+    assert_eq!(snapshot.occupied, 0);
+    assert_eq!(snapshot.rows.len(), 2);
+    assert!(snapshot.rows.iter().all(|row| row.state == BuildLeaseState::Queued));
+}
+
 #[derive(Clone)]
 struct RecoveryCandidateClient {
     pods: Arc<std::sync::Mutex<Vec<djinn_k8s::WarmCandidateObject>>>,
