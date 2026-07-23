@@ -58,7 +58,7 @@
     },
     {
       "path": "server/crates/djinn-coordinator/src/refinement_outcome.rs",
-      "enclosing_symbol": "create_refinement_task_with_context",
+      "enclosing_symbol": "create_refinement_task_with_context_and_correlation",
       "boundary_method": "create_in_project_with_provenance",
       "provenance_kind": "explicit_proposal_owner"
     },
