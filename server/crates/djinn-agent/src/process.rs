@@ -156,6 +156,7 @@ impl LeaseInvocationRunner {
         let stderr = spawn_stderr_drain(child.stderr.take());
         let mut deadline = self.clock.now_instant() + config.timeout;
         let (mut queued, mut fence, mut credit_used, mut lease_error) = (false, None, false, None);
+        let mut unavailable_responses = 0_u8;
         // This variable is assigned only by `terminal_now` or by a service
         // wait that observed terminal intent. Consequently no later response
         // can authorize a cgroup lift.
@@ -210,15 +211,50 @@ impl LeaseInvocationRunner {
                 tokio::task::yield_now().await;
                 continue;
             };
-            let grant = match result {
-                LeaseResult::Granted(grant) => Some(grant.fencing_token),
-                LeaseResult::Status(status) if status.state == LeaseState::Granted => {
-                    status.fencing_token
+            // An unavailable response is transport-ambiguous: the idempotent
+            // request may have reached the coordinator. Re-read status before
+            // turning repeated unavailability into the typed terminal result.
+            if matches!(result, LeaseResult::LeaseUnavailable) {
+                unavailable_responses += 1;
+                if unavailable_responses >= 3 {
+                    lease_failure(
+                        LeaseResult::LeaseUnavailable,
+                        &mut deadline,
+                        &mut credit_used,
+                        &mut lease_error,
+                    );
+                    break (
+                        child.try_wait().map_err(started_lease_error)?,
+                        ProcessTermination::Cancelled,
+                    );
                 }
-                other => {
-                    lease_failure(other, &mut deadline, &mut credit_used, &mut lease_error);
-                    None
+                tokio::task::yield_now().await;
+                continue;
+            }
+            unavailable_responses = 0;
+            // Once a fence has been recorded, status polling remains useful
+            // for terminal reconciliation but can never re-enter grant/lift.
+            let grant = if fence.is_none() {
+                match result {
+                    LeaseResult::Granted(grant) => Some(grant.fencing_token),
+                    LeaseResult::Status(status)
+                        if matches!(
+                            status.state,
+                            LeaseState::Granted
+                                | LeaseState::Launching
+                                | LeaseState::Bound
+                                | LeaseState::Active
+                        ) =>
+                    {
+                        status.fencing_token
+                    }
+                    other => {
+                        lease_failure(other, &mut deadline, &mut credit_used, &mut lease_error);
+                        None
+                    }
                 }
+            } else {
+                None
             };
             if let Some(token) = grant {
                 let durable = match await_lease_or_terminal(
@@ -254,6 +290,17 @@ impl LeaseInvocationRunner {
                             .fenced_lift(&identity, &token)
                             .map_err(LeaseInvocationError::Launcher)?;
                         fence = Some(token);
+                    }
+                    LeaseResult::LeaseUnavailable => {
+                        unavailable_responses += 1;
+                        if unavailable_responses >= 3 {
+                            lease_failure(
+                                LeaseResult::LeaseUnavailable,
+                                &mut deadline,
+                                &mut credit_used,
+                                &mut lease_error,
+                            );
+                        }
                     }
                     other => {
                         lease_failure(other, &mut deadline, &mut credit_used, &mut lease_error)
@@ -763,12 +810,15 @@ mod tests {
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    #[path = "process_lease_tests.rs"]
+    mod lease_runner_tests;
+
     /// Small launcher double used by the lease-state-machine tests. It keeps
     /// the cgroup boundary observable without consulting command strings.
     #[derive(Default)]
     struct FakeLauncher {
-        samples: Mutex<Vec<CpuStat>>,
-        lifts: AtomicUsize,
+        child_pid: Mutex<Option<u32>>,
+        lifts: Mutex<Vec<LeaseFencingToken>>,
         kills: AtomicUsize,
         empties: AtomicUsize,
     }
@@ -779,21 +829,31 @@ mod tests {
             command: &mut Command,
             _: &TaskInvocationLeaseIdentity,
         ) -> io::Result<std::process::Child> {
-            command.spawn()
+            let child = command.spawn()?;
+            *self.child_pid.lock().unwrap() = Some(child.id());
+            Ok(child)
         }
         fn sample_cpu(&self, _: &TaskInvocationLeaseIdentity) -> io::Result<CpuStat> {
-            Ok(self.samples.lock().unwrap().pop().unwrap_or_default())
+            Ok(CpuStat {
+                usage_usec: 10,
+                ..CpuStat::default()
+            })
         }
         fn fenced_lift(
             &self,
             _: &TaskInvocationLeaseIdentity,
-            _: &LeaseFencingToken,
+            token: &LeaseFencingToken,
         ) -> io::Result<()> {
-            self.lifts.fetch_add(1, Ordering::SeqCst);
+            self.lifts.lock().unwrap().push(token.clone());
             Ok(())
         }
         fn kill(&self, _: &TaskInvocationLeaseIdentity) -> io::Result<()> {
             self.kills.fetch_add(1, Ordering::SeqCst);
+            if let Some(pid) = *self.child_pid.lock().unwrap() {
+                unsafe {
+                    libc::kill(pid as i32, libc::SIGKILL);
+                }
+            }
             Ok(())
         }
         fn wait_empty(&self, _: &TaskInvocationLeaseIdentity) -> io::Result<()> {
@@ -929,7 +989,7 @@ mod tests {
             .unwrap();
         launcher.kill(&identity).unwrap();
         launcher.wait_empty(&identity).unwrap();
-        assert_eq!(launcher.lifts.load(Ordering::SeqCst), 1);
+        assert_eq!(*launcher.lifts.lock().unwrap(), vec![LeaseFencingToken(7)]);
         assert_eq!(launcher.kills.load(Ordering::SeqCst), 1);
         assert_eq!(launcher.empties.load(Ordering::SeqCst), 1);
     }
