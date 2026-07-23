@@ -17,6 +17,26 @@ use time::{Duration, OffsetDateTime, format_description::well_known::Iso8601};
 
 pub const RETRIEVAL_HEALTH_REFRESH_NAME: &str = "memory.retrieval_health_refresh";
 
+/// Return the two stable alarm identities for every malformed snapshot group.
+///
+/// Malformed groups are excluded from both pure resolvers. Reconciliation uses
+/// these identities to retain prior rows without parsing display text or
+/// requiring a currently-active row for each possible alarm.
+pub fn malformed_retrieval_alarm_keys(snapshot: &TaxonomyV1RetrievalSnapshot) -> Vec<String> {
+    let mut keys: Vec<_> = snapshot
+        .invalid_groups()
+        .flat_map(|group| {
+            [
+                group
+                    .finding_key(djinn_core::doctor::checks::retrieval::RETRIEVAL_ZERO_RESULT_NAME),
+                group.finding_key(djinn_core::doctor::checks::retrieval::INJECTION_STARVATION_NAME),
+            ]
+        })
+        .collect();
+    keys.sort();
+    keys
+}
+
 /// One shared source; successful refreshes replace the complete immutable snapshot.
 pub struct RetrievalHealthSource {
     // `None` is only constructed by the isolated registration test seam below;
@@ -395,6 +415,13 @@ mod tests {
         let invalid: Vec<_> = snapshot.invalid_groups().collect();
         assert_eq!(invalid.len(), 1);
         assert_eq!(invalid[0].invalid_reason, "a:first; b:second");
+        assert_eq!(
+            malformed_retrieval_alarm_keys(&snapshot),
+            vec![
+                "memory.injection_starvation:project:dispatch",
+                "memory.retrieval_zero_result:project:dispatch",
+            ],
+        );
     }
 
     #[test]
