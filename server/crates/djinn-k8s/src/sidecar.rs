@@ -91,27 +91,39 @@ pub async fn resolve_image_services_strict(
         .map_err(|_| CatalogServiceResolutionError::LookupFailed)?;
     preset_ids.sort();
     let presets = ServicePresetRepository::new(db.clone());
-    let (mut ids, mut types, mut ports, mut env_names) = (
-        BTreeSet::new(),
-        BTreeSet::new(),
-        BTreeSet::new(),
-        BTreeSet::new(),
-    );
-    let mut result = Vec::with_capacity(preset_ids.len());
+    let mut rows = Vec::with_capacity(preset_ids.len());
     for preset_id in preset_ids {
-        if !ids.insert(preset_id.clone()) {
-            return Err(CatalogServiceResolutionError::Duplicate {
-                kind: "preset ID",
-                value: preset_id,
-            });
-        }
-        let p = presets
+        let preset = presets
             .get(&preset_id)
             .await
             .map_err(|_| CatalogServiceResolutionError::LookupFailed)?
             .ok_or_else(|| CatalogServiceResolutionError::MissingPreset {
                 preset_id: preset_id.clone(),
             })?;
+        rows.push((preset_id, preset));
+    }
+    strict_catalog_from_presets(rows)
+}
+
+/// Strictly validate already-loaded catalog rows. Kept separate from database
+/// lookup so every fail-closed catalog invariant has a deterministic unit test.
+fn strict_catalog_from_presets(
+    rows: Vec<(String, ServicePreset)>,
+) -> Result<Vec<ResolvedCatalogService>, CatalogServiceResolutionError> {
+    let (mut ids, mut types, mut ports, mut env_names) = (
+        BTreeSet::new(),
+        BTreeSet::new(),
+        BTreeSet::new(),
+        BTreeSet::new(),
+    );
+    let mut result = Vec::with_capacity(rows.len());
+    for (preset_id, p) in rows {
+        if !ids.insert(preset_id.clone()) {
+            return Err(CatalogServiceResolutionError::Duplicate {
+                kind: "preset ID",
+                value: preset_id,
+            });
+        }
         let digest = p
             .image_digest
             .clone()
@@ -418,7 +430,11 @@ fn append_preset_resolution(
                 service_type: p.service_type,
                 // Keep ordinary dispatch compatible with legacy rows, while
                 // rendering every catalog-owned valid digest immutably.
-                image: p.image_digest.as_deref().filter(|d| valid_digest(d)).map_or(p.image.clone(), |digest| format!("{}@{digest}", p.image)),
+                image: p
+                    .image_digest
+                    .as_deref()
+                    .filter(|d| valid_digest(d))
+                    .map_or(p.image.clone(), |digest| format!("{}@{digest}", p.image)),
                 port: p.port,
                 env: parse_env(&p.env),
                 cpu_request,
@@ -636,8 +652,64 @@ mod tests {
     #[test]
     fn catalog_digest_pins_dispatch_sidecar_image() {
         let mut services = Vec::new();
-        append_preset_resolution("project", "preset-postgres-18", Ok(Some(preset())), &mut services, &mut Vec::new(), &mut Vec::new());
-        assert_eq!(services[0].image, "postgres:18-alpine@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
+        append_preset_resolution(
+            "project",
+            "preset-postgres-18",
+            Ok(Some(preset())),
+            &mut services,
+            &mut Vec::new(),
+            &mut Vec::new(),
+        );
+        assert_eq!(
+            services[0].image,
+            "postgres:18-alpine@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        );
+    }
+
+    #[test]
+    fn strict_catalog_rejects_duplicate_and_malformed_material() {
+        let valid = preset();
+        assert!(matches!(
+            strict_catalog_from_presets(vec![
+                ("postgres-a".into(), valid.clone()),
+                ("postgres-a".into(), valid.clone())
+            ]),
+            Err(CatalogServiceResolutionError::Duplicate {
+                kind: "preset ID",
+                ..
+            })
+        ));
+
+        let mut duplicate_export = valid.clone();
+        duplicate_export.conn_env_var = "DATABASE_URL,DATABASE_URL".into();
+        assert!(matches!(
+            strict_catalog_from_presets(vec![("postgres-a".into(), duplicate_export)]),
+            Err(CatalogServiceResolutionError::Duplicate {
+                kind: "exported environment",
+                ..
+            })
+        ));
+
+        let mut malformed_digest = valid.clone();
+        malformed_digest.image_digest = Some("postgres:latest".into());
+        assert!(matches!(
+            strict_catalog_from_presets(vec![("postgres-a".into(), malformed_digest)]),
+            Err(CatalogServiceResolutionError::MalformedServiceDigest { .. })
+        ));
+
+        let mut unsupported_protocol = valid.clone();
+        unsupported_protocol.verification_protocol_revision = Some(2);
+        assert!(matches!(
+            strict_catalog_from_presets(vec![("postgres-a".into(), unsupported_protocol)]),
+            Err(CatalogServiceResolutionError::UnsupportedProtocol { revision: 2, .. })
+        ));
+
+        let mut malformed_configuration = valid;
+        malformed_configuration.resources = "[]".into();
+        assert!(matches!(
+            strict_catalog_from_presets(vec![("postgres-a".into(), malformed_configuration)]),
+            Err(CatalogServiceResolutionError::MalformedConfiguration { .. })
+        ));
     }
 
     #[test]

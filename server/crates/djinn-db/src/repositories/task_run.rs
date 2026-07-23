@@ -73,7 +73,9 @@ impl TaskRunRepository {
     pub async fn catalog_image_id(&self, id: &str) -> Result<Option<String>> {
         self.db.ensure_initialized().await?;
         let row = sqlx::query("SELECT catalog_image_id FROM task_runs WHERE id = $1")
-            .bind(id).fetch_optional(self.db.pool()).await?;
+            .bind(id)
+            .fetch_optional(self.db.pool())
+            .await?;
         Ok(row.and_then(|row| row.try_get("catalog_image_id").ok().flatten()))
     }
 

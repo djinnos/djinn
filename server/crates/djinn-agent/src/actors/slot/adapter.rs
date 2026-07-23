@@ -15,12 +15,12 @@ use djinn_core::canonical_verify::{
 };
 use djinn_core::clock::SystemClock;
 use djinn_core::models::VerifySource;
-use djinn_db::{ImageRepository, TaskRunRepository};
-use djinn_k8s::sidecar::resolve_image_services_strict;
 use djinn_db::advisory_lock;
+use djinn_db::{ImageRepository, TaskRunRepository};
 use djinn_git::verification_input::{
     ResolvedExternalInputV1, VerificationInputFingerprintConfig, collect_verification_changed_paths,
 };
+use djinn_k8s::sidecar::resolve_image_services_strict;
 use djinn_sandbox::final_verification_execution::{
     EnvironmentIdentityResolver, FinalVerificationExecutionRequest,
 };
@@ -463,8 +463,14 @@ pub async fn resolve_final_verification_for_task_run(
         },
         input_manifest: manifest.clone(),
         image: ImmutableImageV1 {
-            reference: catalog_image.tag.clone().ok_or("task-run catalog image has no reference")?,
-            digest: catalog_image.registry_digest.clone().ok_or("task-run catalog image has no digest")?,
+            reference: catalog_image
+                .tag
+                .clone()
+                .ok_or("task-run catalog image has no reference")?,
+            digest: catalog_image
+                .registry_digest
+                .clone()
+                .ok_or("task-run catalog image has no digest")?,
         },
         tool_probes: commands
             .iter()
@@ -480,16 +486,21 @@ pub async fn resolve_final_verification_for_task_run(
         target: std::env::consts::ARCH.into(),
         features: Vec::new(),
         allowlisted_environment: BTreeMap::new(),
-        services: services.into_iter().map(|service| djinn_core::canonical_verify::ResolvedCatalogServiceIdentityV1 {
-            preset_id: service.preset_id,
-            service_type: service.service_type,
-            image_reference: service.image_reference,
-            image_digest: service.image_digest,
-            port: service.port,
-            exported_environment_names: service.exported_environment_names,
-            verification_protocol_revision: service.verification_protocol_revision,
-            effective_configuration_digest: service.effective_configuration_digest,
-        }).collect(),
+        services: services
+            .into_iter()
+            .map(
+                |service| djinn_core::canonical_verify::ResolvedCatalogServiceIdentityV1 {
+                    preset_id: service.preset_id,
+                    service_type: service.service_type,
+                    image_reference: service.image_reference,
+                    image_digest: service.image_digest,
+                    port: service.port,
+                    exported_environment_names: service.exported_environment_names,
+                    verification_protocol_revision: service.verification_protocol_revision,
+                    effective_configuration_digest: service.effective_configuration_digest,
+                },
+            )
+            .collect(),
     };
     let resolver: EnvironmentIdentityResolver = Arc::new(move || Ok(identity.clone()));
     let output_directories = output_directories(&manifest.output_only_globs)?;
@@ -1062,6 +1073,36 @@ mod resolve_final_verification_tests {
                 material.map(|_| "material")
             ),
         }
+    }
+
+    #[tokio::test]
+    async fn task_run_catalog_image_drift_fails_before_plan_or_catalog_resolution() {
+        let fx = fixture(None).await;
+        let images = ImageRepository::new(fx.agent.db.clone());
+        images
+            .create("catalog-image-at-dispatch", "dispatch", None, "{}")
+            .await
+            .unwrap();
+        images
+            .create("catalog-image-now", "current", None, "{}")
+            .await
+            .unwrap();
+        sqlx::query("UPDATE task_runs SET catalog_image_id = $2 WHERE id = $1")
+            .bind(&fx.task_run_id)
+            .bind("catalog-image-at-dispatch")
+            .execute(fx.agent.db.pool())
+            .await
+            .unwrap();
+        images
+            .set_project_image(&fx.project_id, Some("catalog-image-now"))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            resolve(&fx).await,
+            Err("task-run/current-image mismatch".into()),
+            "verification must never substitute a project image selected after dispatch"
+        );
     }
 
     /// A configured plan reads the path persisted onto a pod-shaped NULL row.

@@ -225,10 +225,14 @@ impl EnvironmentIdentityV1 {
         let canonical_json = if normalized.schema_version == 1 {
             let mut value = serde_json::to_value(&normalized)
                 .expect("canonical identity types are always serializable");
-            value.as_object_mut().expect("identity is an object").remove("services");
+            value
+                .as_object_mut()
+                .expect("identity is an object")
+                .remove("services");
             serde_json::to_string(&value).expect("canonical identity JSON")
         } else {
-            serde_json::to_string(&normalized).expect("canonical identity types are always serializable")
+            serde_json::to_string(&normalized)
+                .expect("canonical identity types are always serializable")
         };
         let digest = sha256_hex(canonical_json.as_bytes());
         Ok(Self {
@@ -242,12 +246,18 @@ impl EnvironmentIdentityV1 {
 
 impl ResolvedEnvironmentIdentityInputV1 {
     pub fn canonicalized(mut self) -> Result<Self, EnvironmentIdentityError> {
-        if !matches!(self.schema_version, 1 | 2)
-            || self.schema_version != self.canonicalization_version
-        {
+        if !matches!(self.schema_version, 1 | 2) {
             return Err(EnvironmentIdentityError::UnsupportedVersion {
                 kind: "environment identity schema",
                 version: self.schema_version,
+            });
+        }
+        if !matches!(self.canonicalization_version, 1 | 2)
+            || self.schema_version != self.canonicalization_version
+        {
+            return Err(EnvironmentIdentityError::UnsupportedVersion {
+                kind: "environment identity canonicalization",
+                version: self.canonicalization_version,
             });
         }
         if self.schema_version == 1 && !self.services.is_empty() {
@@ -641,6 +651,61 @@ mod tests {
         let identity = EnvironmentIdentityV1::derive(v2).unwrap();
         assert!(identity.canonical_json.contains("\"services\""));
         assert!(!identity.canonical_json.contains("POSTGRES_PASSWORD"));
+    }
+
+    fn catalog_service() -> ResolvedCatalogServiceIdentityV1 {
+        ResolvedCatalogServiceIdentityV1 {
+            preset_id: "postgres".into(),
+            service_type: "postgres".into(),
+            image_reference: "registry.example/postgres:18".into(),
+            image_digest: DIGEST.into(),
+            port: 5432,
+            exported_environment_names: vec!["TEST_POSTGRES_URL".into(), "DATABASE_URL".into()],
+            verification_protocol_revision: 1,
+            effective_configuration_digest: DIGEST.into(),
+        }
+    }
+
+    #[test]
+    fn v2_catalog_service_changes_cause_identity_misses_without_secret_values() {
+        let mut base = input();
+        base.schema_version = 2;
+        base.canonicalization_version = 2;
+        base.services = vec![catalog_service()];
+        let baseline = EnvironmentIdentityV1::derive(base.clone()).unwrap();
+        assert!(!baseline.canonical_json.contains("postgres-password"));
+
+        let mut changed_digest = base.clone();
+        changed_digest.services[0].image_digest = alternate_digest('4');
+        assert_ne!(
+            baseline.digest,
+            EnvironmentIdentityV1::derive(changed_digest)
+                .unwrap()
+                .digest
+        );
+
+        let mut changed_configuration = base.clone();
+        changed_configuration.services[0].effective_configuration_digest = alternate_digest('5');
+        assert_ne!(
+            baseline.digest,
+            EnvironmentIdentityV1::derive(changed_configuration)
+                .unwrap()
+                .digest
+        );
+
+        let mut changed_catalog = base;
+        let mut redis = catalog_service();
+        redis.preset_id = "redis".into();
+        redis.service_type = "redis".into();
+        redis.port = 6379;
+        redis.exported_environment_names = vec!["REDIS_URL".into()];
+        changed_catalog.services.push(redis);
+        assert_ne!(
+            baseline.digest,
+            EnvironmentIdentityV1::derive(changed_catalog)
+                .unwrap()
+                .digest
+        );
     }
 
     #[test]

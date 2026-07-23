@@ -6,8 +6,13 @@
 use std::{collections::HashMap, fs::File, io::Read, os::fd::RawFd};
 
 use crate::{
+<<<<<<< HEAD
     CgroupFs, CloneIntoCgroup, CpuStat, Error, Invocation, Launcher, Leaf,
     child::WorkerReadinessAssertion,
+=======
+    CgroupFs, ChildProcess, CloneIntoCgroup, CommandSpec, CpuStat, Error, Invocation, Launcher,
+    Leaf, child::WorkerReadinessAssertion,
+>>>>>>> origin/main
 };
 
 pub const WORKER_UID: u32 = 1000;
@@ -115,7 +120,18 @@ struct ActiveInvocation {
     invocation: Invocation,
     nonce: ControlNonce,
     leaf: Option<Leaf>,
+    child: Option<ChildProcess>,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    status: Option<ChildStatus>,
 }
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ChildStatus {
+    Running,
+    Exited(u8),
+    Signaled(u8),
+}
+const OUTPUT_LIMIT: usize = 32 * 1024;
 
 struct WorkerConnection {
     _peer: UnixPeer,
@@ -208,6 +224,10 @@ impl<F: CgroupFs, S: CloneIntoCgroup, N: NonceSource> Broker<F, S, N> {
                 invocation,
                 nonce,
                 leaf: None,
+                child: None,
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+                status: None,
             },
         );
         Ok(nonce)
@@ -219,6 +239,7 @@ impl<F: CgroupFs, S: CloneIntoCgroup, N: NonceSource> Broker<F, S, N> {
         id: &str,
         nonce: ControlNonce,
         leaf_name: &str,
+        command: &CommandSpec,
     ) -> Result<ControlNonce, Error> {
         self.validate(connection, id, nonce)?;
         // Reject a duplicate before it can create a second cgroup or clone a
@@ -238,13 +259,78 @@ impl<F: CgroupFs, S: CloneIntoCgroup, N: NonceSource> Broker<F, S, N> {
             .ok_or(Error::InvalidInvocationBinding)?
             .invocation
             .clone();
-        let leaf = self.launcher.create(leaf_name, invocation)?;
+        command.validate()?;
+        let (leaf, child) = self
+            .launcher
+            .create_command(leaf_name, invocation, command)?;
         let active = self
             .active
             .get_mut(id)
             .ok_or(Error::InvalidInvocationBinding)?;
         active.leaf = Some(leaf);
+        active.child = Some(child);
         self.rotate(id)
+    }
+
+    pub fn output(
+        &mut self,
+        connection: ConnectionId,
+        id: &str,
+        nonce: ControlNonce,
+        stderr: bool,
+    ) -> Result<(Vec<u8>, bool, ChildStatus, ControlNonce), Error> {
+        self.validate(connection, id, nonce)?;
+        let active = self
+            .active
+            .get_mut(id)
+            .ok_or(Error::InvalidInvocationBinding)?;
+        let child = active.child.ok_or(Error::InvalidControl)?;
+        let (fd, target) = if stderr {
+            (child.stderr, &mut active.stderr)
+        } else {
+            (child.stdout, &mut active.stdout)
+        };
+        let mut buf = [0_u8; 4096];
+        let count = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
+        let eof = if count == 0 {
+            true
+        } else if count < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::WouldBlock {
+                false
+            } else {
+                return Err(Error::Io(error));
+            }
+        } else {
+            if target.len().saturating_add(count as usize) > OUTPUT_LIMIT {
+                return Err(Error::InvalidControl);
+            }
+            target.extend_from_slice(&buf[..count as usize]);
+            false
+        };
+        let status = match active.status {
+            Some(value) => value,
+            None => {
+                let mut raw = 0;
+                let waited = unsafe { libc::waitpid(child.pid, &mut raw, libc::WNOHANG) };
+                let value = if waited == 0 {
+                    ChildStatus::Running
+                } else if waited < 0 {
+                    return Err(Error::InvalidChild);
+                } else if libc::WIFEXITED(raw) {
+                    ChildStatus::Exited(libc::WEXITSTATUS(raw) as u8)
+                } else {
+                    ChildStatus::Signaled(libc::WTERMSIG(raw) as u8)
+                };
+                if value != ChildStatus::Running {
+                    active.status = Some(value);
+                }
+                value
+            }
+        };
+        let data = std::mem::take(target);
+        let nonce = self.rotate(id)?;
+        Ok((data, eof, status, nonce))
     }
 
     pub fn sample(
@@ -311,7 +397,17 @@ impl<F: CgroupFs, S: CloneIntoCgroup, N: NonceSource> Broker<F, S, N> {
         self.launcher
             .remove(active.leaf.as_ref().ok_or(Error::InvalidControl)?)?;
         // A failed removal is retryable with the same nonce and binding.
-        self.active.remove(id);
+        let active = self
+            .active
+            .remove(id)
+            .ok_or(Error::InvalidInvocationBinding)?;
+        if let Some(child) = active.child {
+            for fd in [child.stdout, child.stderr] {
+                if fd >= 0 {
+                    unsafe { libc::close(fd) };
+                }
+            }
+        }
         Ok(())
     }
 
@@ -426,8 +522,17 @@ mod tests {
     }
     struct Clone;
     impl CloneIntoCgroup for Clone {
-        fn clone_into_cgroup(&mut self, _: RawFd, _: &Invocation) -> Result<(), Error> {
-            Ok(())
+        fn clone_into_cgroup(
+            &mut self,
+            _: RawFd,
+            _: &Invocation,
+            _: &crate::CommandSpec,
+        ) -> Result<crate::ChildProcess, Error> {
+            Ok(crate::ChildProcess {
+                pid: 1,
+                stdout: -1,
+                stderr: -1,
+            })
         }
     }
     fn broker() -> Broker<Fs, Clone, Nonces> {
@@ -455,6 +560,14 @@ mod tests {
     }
     fn readiness() -> WorkerReadinessAssertion {
         prepare_worker_readiness(&mut ReadyDumpability).unwrap()
+    }
+    fn command() -> CommandSpec {
+        CommandSpec {
+            program: "/bin/true".into(),
+            argv: vec![],
+            cwd: "/workspace".into(),
+            environment: vec![],
+        }
     }
     #[derive(Clone, Copy)]
     struct FakePeer(UnixPeer);
@@ -526,11 +639,13 @@ mod tests {
             )
             .unwrap();
         assert!(matches!(
-            broker.create(connection, "other", nonce, "leaf"),
+            broker.create(connection, "other", nonce, "leaf", &command()),
             Err(Error::InvalidInvocationBinding)
         ));
         let stale = nonce;
-        let nonce = broker.create(connection, "one", nonce, "leaf").unwrap();
+        let nonce = broker
+            .create(connection, "one", nonce, "leaf", &command())
+            .unwrap();
         // The old create nonce is now irreversibly stale and cannot replay a control.
         assert!(matches!(
             broker.lift(connection, "one", stale, 9),
@@ -609,10 +724,12 @@ mod tests {
                 },
             )
             .unwrap();
-        let nonce = broker.create(connection, "one", nonce, "first").unwrap();
+        let nonce = broker
+            .create(connection, "one", nonce, "first", &command())
+            .unwrap();
         assert_eq!(creates.get(), 1);
         assert!(matches!(
-            broker.create(connection, "one", nonce, "second"),
+            broker.create(connection, "one", nonce, "second", &command()),
             Err(Error::InvalidControl)
         ));
         assert_eq!(creates.get(), 1);
@@ -651,7 +768,9 @@ mod tests {
                 },
             )
             .unwrap();
-        let nonce = broker.create(connection, "one", nonce, "leaf").unwrap();
+        let nonce = broker
+            .create(connection, "one", nonce, "leaf", &command())
+            .unwrap();
         assert!(matches!(
             broker.cleanup(connection, "one", nonce),
             Err(Error::StillPopulated)

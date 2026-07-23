@@ -109,6 +109,75 @@ pub struct Invocation {
     pub fence: u64,
 }
 
+/// Data-only request accepted by the privileged broker. It is deliberately
+/// bounded and has no file-descriptor inheritance surface.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CommandSpec {
+    pub program: String,
+    pub argv: Vec<String>,
+    pub cwd: String,
+    pub environment: Vec<(String, String)>,
+}
+
+impl CommandSpec {
+    pub const MAX_ARGUMENTS: usize = 128;
+    pub const MAX_BYTES: usize = 16 * 1024;
+
+    pub fn validate(&self) -> Result<(), Error> {
+        if !safe_command_path(&self.program, false)
+            || !safe_command_path(&self.cwd, true)
+            || self.argv.len() > Self::MAX_ARGUMENTS
+            || self.environment.len() > 32
+        {
+            return Err(Error::InvalidCommand);
+        }
+        let mut bytes = self.program.len() + self.cwd.len();
+        for value in &self.argv {
+            if value.contains('\0') {
+                return Err(Error::InvalidCommand);
+            }
+            bytes = bytes.saturating_add(value.len());
+        }
+        for (key, value) in &self.environment {
+            // `execve` receives each entry as `key=value`; accepting either
+            // separator or NUL in the key would make that representation
+            // malformed or change the key observed by the child.
+            if !allowed_environment(key) || key.contains(['\0', '=']) || value.contains('\0') {
+                return Err(Error::InvalidCommand);
+            }
+            bytes = bytes.saturating_add(key.len() + value.len());
+        }
+        (bytes <= Self::MAX_BYTES)
+            .then_some(())
+            .ok_or(Error::InvalidCommand)
+    }
+}
+
+fn safe_command_path(path: &str, cwd: bool) -> bool {
+    !path.contains('\0')
+        && !path.contains("//")
+        && !path.split('/').any(|part| part == "..")
+        && if cwd {
+            path == "/workspace" || path.starts_with("/workspace/")
+        } else {
+            path.starts_with("/bin/")
+                || path.starts_with("/usr/bin/")
+                || path.starts_with("/workspace/")
+        }
+}
+fn allowed_environment(key: &str) -> bool {
+    matches!(key, "HOME" | "PATH" | "TERM" | "LANG" | "TZ" | "CI")
+        || key.starts_with("LC_")
+        || key.starts_with("DJINN_")
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ChildProcess {
+    pub pid: i32,
+    pub stdout: RawFd,
+    pub stderr: RawFd,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Leaf {
     name: String,
@@ -154,7 +223,8 @@ pub trait CloneIntoCgroup {
         &mut self,
         target_cgroup_fd: RawFd,
         invocation: &Invocation,
-    ) -> Result<(), Error>;
+        command: &CommandSpec,
+    ) -> Result<ChildProcess, Error>;
 }
 
 pub struct Launcher<F, S> {
@@ -173,26 +243,38 @@ impl<F: CgroupFs, S: CloneIntoCgroup> Launcher<F, S> {
         })
     }
 
-    pub fn create(&mut self, name: &str, invocation: Invocation) -> Result<Leaf, Error> {
+    pub fn create_command(
+        &mut self,
+        name: &str,
+        invocation: Invocation,
+        command: &CommandSpec,
+    ) -> Result<(Leaf, ChildProcess), Error> {
         validate_leaf_name(name)?;
+        command.validate()?;
         let fd = self.fs.create_direct_child(name)?;
         self.fs
             .write_leaf(fd, "cpu.max", &self.config.unleased_quota.cpu_max())?;
         // Clone is deliberately last: all readiness and leaf setup failures
         // occur before the child can execute.
-        if let Err(error) = self.syscall.clone_into_cgroup(fd, &invocation) {
-            // clone3 failed before a child existed, so this direct child is
-            // necessarily empty. Do not leak a delegated cgroup on refusal.
-            let _ = self.fs.remove_leaf(fd, name);
-            return Err(error);
-        }
-        Ok(Leaf {
-            name: name.to_owned(),
-            fd,
-            invocation,
-            lifted: false,
-            terminal: false,
-        })
+        let child = match self.syscall.clone_into_cgroup(fd, &invocation, command) {
+            Ok(child) => child,
+            Err(error) => {
+                // clone3 failed before a child existed, so this direct child is
+                // necessarily empty. Do not leak a delegated cgroup on refusal.
+                let _ = self.fs.remove_leaf(fd, name);
+                return Err(error);
+            }
+        };
+        Ok((
+            Leaf {
+                name: name.to_owned(),
+                fd,
+                invocation,
+                lifted: false,
+                terminal: false,
+            },
+            child,
+        ))
     }
 
     pub fn sample(&mut self, leaf: &Leaf) -> Result<CpuStat, Error> {
@@ -303,6 +385,10 @@ pub enum Error {
     UnsafeLeafName,
     #[error("clone3(CLONE_INTO_CGROUP) was denied or unsupported")]
     CloneDenied,
+    #[error("command request is malformed, over-budget, or outside the broker allow-list")]
+    InvalidCommand,
+    #[error("child process operation failed")]
+    InvalidChild,
     #[error("fencing value does not match this invocation")]
     FenceMismatch,
     #[error("lift was already applied")]
@@ -520,8 +606,172 @@ fn inspect_cgroup_mode() -> Result<CgroupMode, Error> {
 /// default makes unsupported/denied kernels fail before any child exec.
 pub struct DenyClone3;
 impl CloneIntoCgroup for DenyClone3 {
-    fn clone_into_cgroup(&mut self, _: RawFd, _: &Invocation) -> Result<(), Error> {
+    fn clone_into_cgroup(
+        &mut self,
+        _: RawFd,
+        _: &Invocation,
+        _: &CommandSpec,
+    ) -> Result<ChildProcess, Error> {
         Err(Error::CloneDenied)
+    }
+}
+
+/// Linux production clone/exec implementation. The child is born in the
+/// target cgroup and crosses the credential/isolation boundary before exec.
+pub struct NativeClone3;
+
+/// Close every non-stdio descriptor with one kernel operation. In particular,
+/// do not enumerate `/proc/self/fd`: `read_dir` owns a descriptor which is
+/// reported by that directory and then closed when the iterator is dropped,
+/// leaving a stale fd for `prepare_child` to fail on.
+fn close_inherited_descriptors(
+    close_range: impl FnOnce(u32, u32) -> Result<(), Error>,
+) -> Result<(), Error> {
+    close_range(3, u32::MAX)
+}
+
+fn native_close_inherited_descriptors(first: u32, last: u32) -> Result<(), Error> {
+    let result = unsafe { libc::syscall(libc::SYS_close_range, first, last, 0_u32) };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(Error::Io(io::Error::last_os_error()))
+    }
+}
+
+impl CloneIntoCgroup for NativeClone3 {
+    fn clone_into_cgroup(
+        &mut self,
+        cgroup: RawFd,
+        _: &Invocation,
+        command: &CommandSpec,
+    ) -> Result<ChildProcess, Error> {
+        command.validate()?;
+        let mut out = [0; 2];
+        let mut err = [0; 2];
+        // Child writes remain blocking; pipe capacity provides backpressure.
+        if unsafe { libc::pipe2(out.as_mut_ptr(), libc::O_CLOEXEC) } != 0
+            || unsafe { libc::pipe2(err.as_mut_ptr(), libc::O_CLOEXEC) } != 0
+        {
+            return Err(Error::Io(io::Error::last_os_error()));
+        }
+        #[repr(C)]
+        struct Args {
+            flags: u64,
+            pidfd: u64,
+            child_tid: u64,
+            parent_tid: u64,
+            exit_signal: u64,
+            stack: u64,
+            stack_size: u64,
+            tls: u64,
+            set_tid: u64,
+            set_tid_size: u64,
+            cgroup: u64,
+        }
+        let args = Args {
+            flags: libc::CLONE_INTO_CGROUP as u64,
+            pidfd: 0,
+            child_tid: 0,
+            parent_tid: 0,
+            exit_signal: libc::SIGCHLD as u64,
+            stack: 0,
+            stack_size: 0,
+            tls: 0,
+            set_tid: 0,
+            set_tid_size: 0,
+            cgroup: cgroup as u64,
+        };
+        let pid = unsafe {
+            libc::syscall(
+                libc::SYS_clone3,
+                &raw const args,
+                std::mem::size_of::<Args>(),
+            )
+        } as i32;
+        if pid < 0 {
+            unsafe {
+                libc::close(out[0]);
+                libc::close(out[1]);
+                libc::close(err[0]);
+                libc::close(err[1]);
+            }
+            return Err(Error::CloneDenied);
+        }
+        if pid == 0 {
+            unsafe {
+                libc::close(out[0]);
+                libc::close(err[0]);
+                let null = CString::new("/dev/null").unwrap();
+                let stdin = libc::open(null.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC);
+                if stdin < 0 || libc::dup2(stdin, 0) < 0 {
+                    libc::_exit(127);
+                }
+                libc::close(stdin);
+                libc::dup2(out[1], 1);
+                libc::dup2(err[1], 2);
+                libc::close(out[1]);
+                libc::close(err[1]);
+            }
+            let mut child = child::NativeChildSyscalls;
+            // A close-range operation is race-safe and leaves no procfs
+            // directory iterator descriptor that could become stale before
+            // the credential boundary. Stdio remains the only child surface.
+            if close_inherited_descriptors(native_close_inherited_descriptors)
+                .and_then(|_| {
+                    child::prepare_child(&mut child, &[], &child::ChildMounts::isolated())
+                })
+                .is_err()
+            {
+                unsafe { libc::_exit(127) };
+            }
+            let cwd = CString::new(command.cwd.as_str()).unwrap();
+            if unsafe { libc::chdir(cwd.as_ptr()) } != 0 {
+                unsafe { libc::_exit(127) };
+            }
+            let program = CString::new(command.program.as_str()).unwrap();
+            let args: Vec<CString> = command
+                .argv
+                .iter()
+                .map(|v| CString::new(v.as_str()).unwrap())
+                .collect();
+            let mut argv = Vec::with_capacity(args.len() + 2);
+            argv.push(program.as_ptr().cast_mut());
+            argv.extend(args.iter().map(|v| v.as_ptr().cast_mut()));
+            argv.push(std::ptr::null_mut());
+            // Pass exactly the validated environment, never the broker's.
+            let environment: Vec<CString> = command
+                .environment
+                .iter()
+                .map(|(key, value)| CString::new(format!("{key}={value}")).unwrap())
+                .collect();
+            let mut envp: Vec<*mut libc::c_char> = environment
+                .iter()
+                .map(|value| value.as_ptr().cast_mut())
+                .collect();
+            envp.push(std::ptr::null_mut());
+            unsafe {
+                libc::execve(program.as_ptr(), argv.as_ptr().cast(), envp.as_ptr().cast());
+                libc::_exit(127)
+            }
+        }
+        unsafe {
+            libc::close(out[1]);
+            libc::close(err[1]);
+            for fd in [out[0], err[0]] {
+                let flags = libc::fcntl(fd, libc::F_GETFL);
+                if flags < 0 || libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) < 0 {
+                    libc::close(out[0]);
+                    libc::close(err[0]);
+                    return Err(Error::Io(io::Error::last_os_error()));
+                }
+            }
+        }
+        Ok(ChildProcess {
+            pid,
+            stdout: out[0],
+            stderr: err[0],
+        })
     }
 }
 
@@ -584,13 +834,22 @@ mod tests {
         deny: bool,
     }
     impl CloneIntoCgroup for FakeClone {
-        fn clone_into_cgroup(&mut self, fd: RawFd, inv: &Invocation) -> Result<(), Error> {
+        fn clone_into_cgroup(
+            &mut self,
+            fd: RawFd,
+            inv: &Invocation,
+            _: &CommandSpec,
+        ) -> Result<ChildProcess, Error> {
             self.attempts.push((fd, inv.clone()));
             if self.deny {
                 return Err(Error::CloneDenied);
             }
             self.exec_calls.push((fd, inv.clone()));
-            Ok(())
+            Ok(ChildProcess {
+                pid: 1,
+                stdout: -1,
+                stderr: -1,
+            })
         }
     }
     fn launcher() -> Launcher<FakeFs, FakeClone> {
@@ -606,6 +865,17 @@ mod tests {
             id: "run-1".into(),
             fence: 99,
         }
+    }
+    fn command() -> CommandSpec {
+        CommandSpec {
+            program: "/bin/true".into(),
+            argv: vec![],
+            cwd: "/workspace".into(),
+            environment: vec![],
+        }
+    }
+    fn create(l: &mut Launcher<FakeFs, FakeClone>, name: &str) -> Leaf {
+        l.create_command(name, invocation(), &command()).unwrap().0
     }
 
     #[test]
@@ -633,14 +903,14 @@ mod tests {
     #[test]
     fn fresh_invocation_is_passed_with_leaf_fd() {
         let mut l = launcher();
-        let leaf = l.create("invocation-1", invocation()).unwrap();
+        let leaf = create(&mut l, "invocation-1");
         let (_, clone) = l.into_parts();
         assert_eq!(clone.exec_calls, vec![(leaf.fd, invocation())]);
     }
     #[test]
     fn lift_is_one_way_and_fenced() {
         let mut l = launcher();
-        let mut leaf = l.create("one", invocation()).unwrap();
+        let mut leaf = create(&mut l, "one");
         assert!(matches!(
             l.fenced_lift(&mut leaf, 98),
             Err(Error::FenceMismatch)
@@ -654,7 +924,7 @@ mod tests {
     #[test]
     fn remove_requires_descendant_emptiness() {
         let mut l = launcher();
-        let leaf = l.create("one", invocation()).unwrap();
+        let leaf = create(&mut l, "one");
         assert!(matches!(l.remove(&leaf), Err(Error::InvalidEvents)));
         let fd = leaf.fd;
         l.fs.files
@@ -757,6 +1027,87 @@ mod tests {
     }
 
     #[test]
+    fn malformed_command_is_rejected_before_leaf_or_clone() {
+        let mut l = launcher();
+        let mut malformed = command();
+        malformed.program = "/bin/../sh".into();
+        assert!(matches!(
+            l.create_command("one", invocation(), &malformed),
+            Err(Error::InvalidCommand)
+        ));
+        let (fs, clone) = l.into_parts();
+        assert!(fs.created.is_empty());
+        assert!(clone.attempts.is_empty());
+        assert!(clone.exec_calls.is_empty());
+    }
+
+    #[test]
+    fn command_validation_rejects_environment_keys_unrepresentable_by_execve() {
+        for key in ["LC_\0X", "DJINN_KEY=override"] {
+            let mut malformed = command();
+            malformed.environment = vec![(key.into(), "value".into())];
+            assert!(matches!(malformed.validate(), Err(Error::InvalidCommand)));
+        }
+    }
+
+    #[derive(Default)]
+    struct CloseRangePreparedChild {
+        calls: Vec<&'static str>,
+    }
+
+    impl child::ChildSyscalls for CloseRangePreparedChild {
+        fn close(&mut self, _: RawFd) -> Result<(), Error> {
+            Err(Error::ChildPreparation("stale descriptor"))
+        }
+        fn set_groups_empty(&mut self) -> Result<(), Error> {
+            self.calls.push("groups");
+            Ok(())
+        }
+        fn clear_capabilities(&mut self) -> Result<(), Error> {
+            self.calls.push("caps");
+            Ok(())
+        }
+        fn set_gid(&mut self, _: u32) -> Result<(), Error> {
+            self.calls.push("gid");
+            Ok(())
+        }
+        fn set_uid(&mut self, _: u32) -> Result<(), Error> {
+            self.calls.push("uid");
+            Ok(())
+        }
+        fn set_umask(&mut self, _: u32) -> Result<(), Error> {
+            self.calls.push("umask");
+            Ok(())
+        }
+        fn set_no_new_privs(&mut self) -> Result<(), Error> {
+            self.calls.push("nnp");
+            Ok(())
+        }
+        fn install_restricted_seccomp(&mut self) -> Result<(), Error> {
+            self.calls.push("seccomp");
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn close_range_seam_prepares_child_without_a_stale_procfs_descriptor() {
+        let mut bounds = None;
+        let mut child = CloseRangePreparedChild::default();
+        close_inherited_descriptors(|first, last| {
+            bounds = Some((first, last));
+            Ok(())
+        })
+        .and_then(|_| child::prepare_child(&mut child, &[], &child::ChildMounts::isolated()))
+        .unwrap();
+
+        assert_eq!(bounds, Some((3, u32::MAX)));
+        assert_eq!(
+            child.calls,
+            ["groups", "gid", "uid", "caps", "umask", "nnp", "seccomp"]
+        );
+    }
+
+    #[test]
     fn denied_clone_never_executes_a_child() {
         let mut l = Launcher::new(
             FakeFs::ready(),
@@ -768,7 +1119,8 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(
-            l.create("one", invocation()),
+            l.create_command("one", invocation(), &command())
+                .map(|v| v.0),
             Err(Error::CloneDenied)
         ));
         let (fs, clone) = l.into_parts();
