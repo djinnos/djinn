@@ -1095,11 +1095,22 @@ impl CoordinatorActor {
             tracing::warn!(error = %error, "retrieval health refresh failed; stale resolvers suppressed");
         }
         let doctor_run_id = format!("leader-tick-{}", self.prune_tick_counter.wrapping_add(1));
-        crate::doctor::leader_tick::run_cheap_doctor_checks(
+        #[cfg(not(test))]
+        let malformed_retrieval_keys = self
+            .retrieval_health_source
+            .as_ref()
+            .map(|source| {
+                crate::doctor::retrieval_health::malformed_retrieval_alarm_keys(&source.snapshot())
+            })
+            .unwrap_or_default();
+        #[cfg(test)]
+        let malformed_retrieval_keys = Vec::new();
+        crate::doctor::leader_tick::run_cheap_doctor_checks_with_preserved_retrieval_keys(
             djinn_core::doctor::registry(),
             &self.db,
             &self.events_tx,
             Some(&doctor_run_id),
+            &malformed_retrieval_keys,
         )
         .await;
 
