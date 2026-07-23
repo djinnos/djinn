@@ -532,3 +532,7 @@ mod tests;
 #[cfg(test)]
 #[path = "respawn_guard_mergequeue_tests.rs"]
 mod mergequeue_tests;
+
+#[cfg(test)]
+#[path = "respawn_guard_completion_tests.rs"]
+mod completion_tests;

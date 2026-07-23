@@ -2,15 +2,24 @@
  * Repositories/RepositoriesPage — the routed `/repositories` table.
  *
  * The page reads its rows from the real `projectStore` (seeded here) and each
- * row drives two independent MCP-backed sub-widgets:
+ * row drives several MCP-backed sub-widgets:
  *   - `BranchPicker` fetches `['project', id, 'branches']` via
- *     `fetchProjectBranches` → `callMcpTool("project_branches")`.
+ *     `fetchProjectBranches` → `callMcpTool("project_branches")` (admins only).
+ *   - the Image column reads `['project', id, 'environment-config']` via
+ *     `fetchEnvironmentConfig` → `callMcpTool("project_environment_config_get")`;
+ *     for admins the compact `ProjectImagePicker` also lists the catalog through
+ *     `callMcpTool("image_list")`.
  *   - `ImageStatusBadge` polls `callMcpTool("get_project_devcontainer_status")`.
- * Neither goes through a cache seam we can seed by key alone (the branch query
- * is created inside the row with a live `queryFn`), so we install a per-tool
- * responder on the aliased `@/api/mcpClient` mock and branch on the requested
- * `project` id to give each row a distinct status (ready / building / needs
- * image). A per-story `QueryClient` (retry:false) wraps the page.
+ * None of these go through a cache seam we can seed by key alone, so we install
+ * a per-tool responder on the aliased `@/api/mcpClient` mock and branch on the
+ * requested `project` id to give each row a distinct branch / image / status.
+ *
+ * Admin gating (target branch + image assignment are admin-only, org-blast-
+ * radius settings) resolves through `useAuthUser()`, which only works inside a
+ * real `AuthGate`. Exactly like `Navigation/Sidebar`, we install a one-time
+ * `window.fetch` shim (under its OWN guard flag) that answers `/auth/me`,
+ * `/setup/status` and `/auth/config`, and flip `repoStoryIsAdmin` per-story
+ * BEFORE `AuthGate` mounts. A per-story `QueryClient` (retry:false) wraps it.
  */
 
 import { useEffect } from "react";
@@ -19,9 +28,14 @@ import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 import { RepositoriesPage } from "./RepositoriesPage";
+import { AuthGate } from "@/components/AuthGate";
 import { setMcpToolResponder } from "@/storybook-mocks/mcpClient";
+import { installAuthFetchStub, setStoryIsAdmin } from "@/storybook-mocks/authFetchStub";
 import { projectStore } from "@/stores/projectStore";
 import type { Project } from "@/api/types";
+
+// ── Auth fetch shim — shared installer (see storybook-mocks/authFetchStub) ──
+installAuthFetchStub();
 
 // ── Fixtures ─────────────────────────────────────────────────────────────────
 
@@ -41,6 +55,13 @@ const projects: Project[] = [
     branch: "release/2026.07",
   },
   {
+    id: "project-worker",
+    name: "djinnos/worker",
+    github_owner: "djinnos",
+    github_repo: "worker",
+    branch: "main",
+  },
+  {
     id: "project-web",
     name: "djinnos/pink-web",
     github_owner: "djinnos",
@@ -52,15 +73,46 @@ const projects: Project[] = [
 const branchesByProject: Record<string, string[]> = {
   "project-djinn": ["main", "develop", "feat/graph-warm", "hotfix/oom"],
   "project-catalog": ["main", "release/2026.07", "release/2026.06"],
+  "project-worker": ["main", "feat/cancel-path"],
   "project-web": ["main", "redesign", "wip/pricing"],
 };
 
+// Catalog for the admin image picker (config blobs are normalized by listImages).
+const catalogImages = [
+  {
+    id: "img-rust-node",
+    name: "Rust + Node",
+    description: "Primary monorepo image.",
+    status: "ready",
+    config: { schema_version: 1, source: "user-edited", languages: {}, workspaces: [], system_packages: [], env: {}, lifecycle: {} },
+    service_presets: ["postgres-16"],
+  },
+  {
+    id: "img-python",
+    name: "Python 3.13",
+    description: "Scripting image.",
+    status: "ready",
+    config: { schema_version: 1, source: "user-edited", languages: {}, workspaces: [], system_packages: [], env: {}, lifecycle: {} },
+    service_presets: [],
+  },
+];
+
+// Per-project assigned catalog image (null → no image, "—" / None in the cell).
+const imageByProject: Record<string, { id: string; name: string } | null> = {
+  "project-djinn": { id: "img-rust-node", name: "Rust + Node" },
+  "project-catalog": { id: "img-rust-node", name: "Rust + Node" },
+  "project-worker": { id: "img-python", name: "Python 3.13" },
+  "project-web": null,
+};
+
 // A distinct image/warm status per project so the row badges read differently:
-// djinn is healthy (no badge), catalog is mid-build, pink-web needs an image.
+// djinn ready (no badge), catalog mid-build, worker warming, pink-web needs an image.
 function devcontainerStatusFor(projectId: string): unknown {
   switch (projectId) {
     case "project-catalog":
       return { image_status: "building", graph_warm_status: "pending", needs_image: false };
+    case "project-worker":
+      return { image_status: "ready", graph_warm_status: "warming", needs_image: false };
     case "project-web":
       return { image_status: "none", graph_warm_status: "pending", needs_image: true };
     default:
@@ -77,6 +129,18 @@ function repositoriesResponder(
       const id = String(args?.project_id ?? "");
       return { status: "ok", branches: branchesByProject[id] ?? ["main"], current: null };
     }
+    case "project_environment_config_get": {
+      const id = String(args?.project ?? "");
+      const image = imageByProject[id] ?? null;
+      return {
+        status: "ok",
+        config: { schema_version: 1, source: "user-edited", languages: {}, workspaces: [], system_packages: [], env: {}, lifecycle: {} },
+        selected_image_id: image?.id ?? null,
+        selected_image_name: image?.name ?? null,
+      };
+    }
+    case "image_list":
+      return { status: "ok", images: catalogImages };
     case "get_project_devcontainer_status":
       return devcontainerStatusFor(String(args?.project ?? ""));
     default:
@@ -117,16 +181,19 @@ function RepositoriesStory({ seeded }: RepositoriesStoryArgs) {
   return (
     <QueryClientProvider client={queryClient}>
       <MemoryRouter initialEntries={["/repositories"]}>
-        <ProjectSeeder seeded={seeded}>
-          <div className="h-screen bg-background text-foreground">
-            <Routes>
-              <Route path="/repositories" element={<RepositoriesPage />} />
-              {/* Sinks for row / action navigation. */}
-              <Route path="/tasks" element={<div />} />
-              <Route path="/projects/:id/environment" element={<div />} />
-            </Routes>
-          </div>
-        </ProjectSeeder>
+        <AuthGate>
+          <ProjectSeeder seeded={seeded}>
+            <div className="h-screen bg-background text-foreground">
+              <Routes>
+                <Route path="/repositories" element={<RepositoriesPage />} />
+                {/* Sinks for tab / row / action navigation. */}
+                <Route path="/images" element={<div />} />
+                <Route path="/tasks" element={<div />} />
+                <Route path="/projects/:id/environment" element={<div />} />
+              </Routes>
+            </div>
+          </ProjectSeeder>
+        </AuthGate>
       </MemoryRouter>
     </QueryClientProvider>
   );
@@ -136,24 +203,44 @@ const meta = {
   title: "Repositories/RepositoriesPage",
   component: RepositoriesStory,
   parameters: { layout: "fullscreen" },
+  args: { seeded: projects },
   beforeEach: () => {
     setMcpToolResponder(repositoriesResponder);
   },
+  decorators: [
+    (Story, ctx) => {
+      setStoryIsAdmin((ctx.parameters?.isAdmin as boolean | undefined) ?? false);
+      // Key by story id so switching stories fully remounts the tree —
+      // otherwise AuthGate's cached /auth/me (staleTime) survives the
+      // switch and the admin flag flip never takes effect.
+      return <Story key={ctx.id} />;
+    },
+  ],
 } satisfies Meta<typeof RepositoriesStory>;
 
 export default meta;
 type Story = StoryObj<typeof meta>;
 
 /**
- * Three repositories, each with a populated branch picker and a distinct image
- * state: djinn healthy (no status badge), catalog mid-build ("Building"),
- * pink-web unassigned ("Needs image").
+ * Admin caller: the target-branch and image columns are interactive (branch
+ * Select + compact `ProjectImagePicker`). Four repositories span the badge
+ * states — djinn ready (no badge), catalog building, worker warming, pink-web
+ * needs an image (and shows "—" in the Image column).
  */
-export const Populated: Story = {
-  args: { seeded: projects },
+export const Admin: Story = {
+  parameters: { isAdmin: true },
+};
+
+/**
+ * Member caller: target branch and image render as read-only plain text. Same
+ * four repositories and image-status badges as Admin.
+ */
+export const Member: Story = {
+  parameters: { isAdmin: false },
 };
 
 /** No repositories registered → the EmptyState with the "Add repository" CTA. */
 export const Empty: Story = {
   args: { seeded: [] },
+  parameters: { isAdmin: true },
 };

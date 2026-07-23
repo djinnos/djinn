@@ -112,7 +112,7 @@ function ImageEditorStory({ initialPath }: EditorStoryArgs) {
 }
 
 const meta = {
-  title: "Images/ImageEditorPage",
+  title: "Repositories/ImageEditorPage",
   component: ImageEditorStory,
   parameters: { layout: "fullscreen" },
   beforeEach: () => setMcpToolResponder(responder),

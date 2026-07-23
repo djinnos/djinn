@@ -32,10 +32,14 @@ import {
 } from '@/components/ui/alert-dialog';
 import { AddProjectFromGithubDialog } from '@/components/AddProjectFromGithubDialog';
 import { ImageStatusBadge } from '@/components/ImageStatusBadge';
+import { ProjectImagePicker } from '@/components/images/ProjectImagePicker';
+import { RepositoriesSectionTabs } from '@/components/RepositoriesSectionTabs';
 import { EmptyState } from '@/components/EmptyState';
+import { useAuthUser } from '@/components/AuthGate';
 import { useProjects, useSelectedProjectId } from '@/stores/useProjectStore';
 import { projectStore } from '@/stores/projectStore';
 import { useProjectRoute } from '@/hooks/useProjectRoute';
+import { useProjectEnvironmentConfig } from '@/hooks/useProjectEnvironmentConfig';
 import {
   fetchProjectBranches,
   fetchProjects,
@@ -120,7 +124,7 @@ function RemoveButton({
   );
 }
 
-function BranchPicker({ project }: { project: Project }) {
+function BranchPicker({ project, readOnly = false }: { project: Project; readOnly?: boolean }) {
   const queryClient = useQueryClient();
   const current = project.branch ?? 'main';
   const [saving, setSaving] = useState(false);
@@ -129,6 +133,9 @@ function BranchPicker({ project }: { project: Project }) {
     queryKey: ['project', project.id, 'branches'],
     queryFn: () => fetchProjectBranches(project.id),
     staleTime: 30_000,
+    // Target branch is an org-blast-radius setting; non-admins only view it, so
+    // don't spend a branch-list fetch on their behalf.
+    enabled: !readOnly,
   });
 
   const branches = branchesQuery.data?.branches ?? [];
@@ -152,6 +159,10 @@ function BranchPicker({ project }: { project: Project }) {
       setSaving(false);
     }
   };
+
+  if (readOnly) {
+    return <span className="text-sm">{current}</span>;
+  }
 
   return (
     <Select
@@ -189,11 +200,13 @@ function BranchPicker({ project }: { project: Project }) {
 function RepositoryRow({
   project,
   isSelected,
+  isAdmin,
   onSelect,
   onRemoved,
 }: {
   project: Project;
   isSelected: boolean;
+  isAdmin: boolean;
   onSelect: () => void;
   onRemoved: () => Promise<void> | void;
 }) {
@@ -202,6 +215,11 @@ function RepositoryRow({
       ? `https://github.com/${project.github_owner}/${project.github_repo}`
       : null;
   const navigate = useNavigate();
+
+  // Shared per-project config (deduped across the table) supplies the assigned
+  // catalog image — its id pre-selects the admin picker, its name is the plain
+  // text members see.
+  const envConfig = useProjectEnvironmentConfig(project.id);
 
   return (
     <tr
@@ -225,7 +243,16 @@ function RepositoryRow({
         </div>
       </td>
       <td className="px-4 py-3" onClick={(e) => e.stopPropagation()}>
-        <BranchPicker project={project} />
+        <BranchPicker project={project} readOnly={!isAdmin} />
+      </td>
+      <td className="px-4 py-3" onClick={(e) => e.stopPropagation()}>
+        <ProjectImagePicker
+          projectId={project.id}
+          initialImageId={envConfig.data?.selectedImageId ?? null}
+          initialImageName={envConfig.data?.selectedImageName ?? null}
+          compact
+          readOnly={!isAdmin}
+        />
       </td>
       <td className="px-4 py-3">
         <ImageStatusBadge
@@ -268,6 +295,9 @@ export function RepositoriesPage() {
   const projects = useProjects();
   const selectedProjectId = useSelectedProjectId();
   const { navigateToProject } = useProjectRoute();
+  // Org-blast-radius settings (target branch, image assignment) are admin-only;
+  // a null user (unresolved / signed-out) is treated as a non-admin member.
+  const isAdmin = useAuthUser()?.isAdmin ?? false;
   const [dialogOpen, setDialogOpen] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
 
@@ -303,6 +333,10 @@ export function RepositoriesPage() {
         </Button>
       </header>
 
+      <div className="border-b px-6 py-2">
+        <RepositoriesSectionTabs active="repositories" />
+      </div>
+
       <div className="flex-1 overflow-y-auto px-6 py-6">
         <div className="mx-auto max-w-5xl">
           {projects.length === 0 ? (
@@ -320,7 +354,8 @@ export function RepositoriesPage() {
                   <thead className="bg-white/[0.02]">
                     <tr className="border-b text-xs uppercase tracking-wide text-muted-foreground">
                       <th className="px-4 py-2.5 font-medium">Repository</th>
-                      <th className="px-4 py-2.5 font-medium">Branch</th>
+                      <th className="px-4 py-2.5 font-medium">Target branch</th>
+                      <th className="px-4 py-2.5 font-medium">Image</th>
                       <th className="px-4 py-2.5 font-medium">Status</th>
                       <th className="px-4 py-2.5 text-right font-medium">Actions</th>
                     </tr>
@@ -331,6 +366,7 @@ export function RepositoriesPage() {
                         key={project.id}
                         project={project}
                         isSelected={selectedProjectId === project.id}
+                        isAdmin={isAdmin}
                         onSelect={() => navigateToProject(project.id)}
                         onRemoved={refreshProjects}
                       />
