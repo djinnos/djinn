@@ -784,6 +784,10 @@ mod leader_tick_mixed_snapshot_tests;
 mod leader_tick_retrieval_activity_tests;
 
 #[cfg(test)]
+#[path = "leader_tick_seeded_retrieval_tests.rs"]
+mod leader_tick_seeded_retrieval_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::doctor::stranded_ready::{MemoryStrandedReadySource, StrandedReadyCheck};

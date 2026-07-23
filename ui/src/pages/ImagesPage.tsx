@@ -30,6 +30,7 @@ import {
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
 import { EmptyState } from "@/components/EmptyState";
+import { RepositoriesSectionTabs } from "@/components/RepositoriesSectionTabs";
 import {
   deleteImage,
   listImages,
@@ -173,6 +174,10 @@ export function ImagesPage() {
           New image
         </Button>
       </header>
+
+      <div className="border-b px-6 py-2">
+        <RepositoriesSectionTabs active="images" />
+      </div>
 
       <div className="flex-1 overflow-y-auto px-6 py-6">
         <div className="mx-auto max-w-5xl">
