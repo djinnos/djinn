@@ -531,6 +531,53 @@ mod tests {
             .expect("seed stack");
     }
 
+    /// A complete grouped declaration accepted by the environment-config set
+    /// path. Keeping this JSON-shaped intentionally exercises the same serde
+    /// boundary as the environment page rather than constructing Rust types.
+    fn grouped_final_verification_config() -> serde_json::Value {
+        json!({
+            "schema_version": 1,
+            "lifecycle": {
+                "final_verification": {
+                    "version": 1,
+                    "profile_id": "ci-default",
+                    "profile_revision": 1,
+                    "command_groups": [
+                        { "name": "rust", "commands": [{
+                            "check_id": "cargo-test", "executable": "cargo", "argv": ["test"],
+                            "working_directory": "server", "timeout_seconds": 300,
+                            "descriptor_revision": 1
+                        }] },
+                        { "name": "web", "commands": [{
+                            "check_id": "web-test", "executable": "pnpm", "argv": ["test"],
+                            "working_directory": "ui", "timeout_seconds": 300,
+                            "descriptor_revision": 1
+                        }] }
+                    ],
+                    "selection_rules": [
+                        { "match": ["server/**"], "command_groups": ["rust"] },
+                        { "match": ["**"], "command_groups": ["rust", "web"] }
+                    ],
+                    "required_checks": [], "input_manifest": { "version": 1 }, "hermeticity": {}
+                }
+            }
+        })
+    }
+
+    async fn set_environment_config(
+        server: &DjinnMcpServer,
+        project_id: &str,
+        config: serde_json::Value,
+    ) -> serde_json::Value {
+        server
+            .dispatch_tool(
+                "project_environment_config_set",
+                json!({ "project": project_id, "config": config }),
+            )
+            .await
+            .expect("set dispatch")
+    }
+
     // ── AC1: valid set then get round-trip ───────────────────────────────
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -660,6 +707,112 @@ mod tests {
             error.contains("validate"),
             "expected validate error, got: {error}"
         );
+    }
+
+    // Assert MCP-visible validation strings so the environment-page save path
+    // retains the field-specific grouped-plan errors from EnvironmentConfig.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn set_rejects_grouped_final_verification_with_precise_errors() {
+        let db = Database::open_in_memory().expect("open db");
+        db.ensure_initialized().await.unwrap();
+        let project_id = seed_project(&db).await;
+        let server = test_server(db).await;
+        let cases: [(fn(&mut serde_json::Value), &str); 3] = [
+            (
+                |config| {
+                    config["lifecycle"]["final_verification"]["selection_rules"][0]["match"] =
+                        json!([]);
+                },
+                "validate: lifecycle.final_verification.selection_rules[0].match: value is empty",
+            ),
+            (
+                |config| {
+                    config["lifecycle"]["final_verification"]["selection_rules"][0]
+                        ["command_groups"] = json!(["missing"]);
+                },
+                "validate: lifecycle.final_verification.selection_rules[0].command_groups: value \"missing\" contains disallowed characters (allowed: [A-Za-z0-9._-])",
+            ),
+            (
+                |config| {
+                    config["lifecycle"]["final_verification"]["selection_rules"][1]["match"] =
+                        json!(["ui/**"]);
+                },
+                "validate: lifecycle.final_verification.selection_rules: value is empty",
+            ),
+        ];
+
+        for (mutate, expected_error) in cases {
+            let mut config = grouped_final_verification_config();
+            mutate(&mut config);
+            let result = set_environment_config(&server, &project_id, config).await;
+            assert_eq!(result["status"], "error");
+            assert_eq!(result["error"], expected_error);
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn set_get_round_trip_preserves_grouped_final_verification_order() {
+        let db = Database::open_in_memory().expect("open db");
+        db.ensure_initialized().await.unwrap();
+        let project_id = seed_project(&db).await;
+        let server = test_server(db).await;
+
+        let set = set_environment_config(&server, &project_id, grouped_final_verification_config()).await;
+        assert_eq!(set["status"], "ok", "set failed: {set}");
+        let get = server
+            .dispatch_tool(
+                "project_environment_config_get",
+                json!({ "project": project_id }),
+            )
+            .await
+            .expect("get dispatch");
+
+        let plan = &get["config"]["lifecycle"]["final_verification"];
+        assert_eq!(plan["command_groups"][0]["name"], "rust");
+        assert_eq!(plan["command_groups"][1]["name"], "web");
+        assert_eq!(plan["selection_rules"][0]["match"], json!(["server/**"]));
+        assert_eq!(plan["selection_rules"][1]["command_groups"], json!(["rust", "web"]));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn set_get_round_trip_preserves_legacy_final_verification_plan() {
+        let db = Database::open_in_memory().expect("open db");
+        db.ensure_initialized().await.unwrap();
+        let project_id = seed_project(&db).await;
+        let server = test_server(db).await;
+        let config = json!({
+            "schema_version": 1,
+            "lifecycle": {
+                "final_verification": {
+                    "version": 1,
+                    "profile_id": "ci-default",
+                    "profile_revision": 1,
+                    "commands": [{
+                        "check_id": "cargo-test", "executable": "cargo", "argv": ["test"],
+                        "working_directory": "server", "timeout_seconds": 300,
+                        "descriptor_revision": 1
+                    }],
+                    "required_checks": ["cargo-test"],
+                    "input_manifest": { "version": 1 },
+                    "hermeticity": {}
+                }
+            }
+        });
+
+        let set = set_environment_config(&server, &project_id, config).await;
+        assert_eq!(set["status"], "ok", "set failed: {set}");
+        let get = server
+            .dispatch_tool(
+                "project_environment_config_get",
+                json!({ "project": project_id }),
+            )
+            .await
+            .expect("get dispatch");
+
+        let plan = &get["config"]["lifecycle"]["final_verification"];
+        assert_eq!(plan["commands"][0]["check_id"], "cargo-test");
+        assert!(plan.get("command_groups").is_none());
+        assert!(plan.get("selection_rules").is_none());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
