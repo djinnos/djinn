@@ -37,6 +37,10 @@ const PR_POLLER_TRACKED: &str = "djinn_pr_poller_tracked";
 const MERGE_FAILURES_TOTAL: &str = "djinn_merge_failures_total";
 const DOCTOR_FINDINGS: &str = "djinn_doctor_findings";
 const DOCTOR_RUN_DURATION_SECONDS: &str = "djinn_doctor_run_duration_seconds";
+const RETRIEVAL_HEALTH_REFRESH_DURATION_SECONDS: &str =
+    "djinn_retrieval_health_refresh_duration_seconds";
+const RETRIEVAL_HEALTH_LAST_SUCCESS_AGE_SECONDS: &str =
+    "djinn_retrieval_health_last_success_age_seconds";
 const BOARD_HEALTH_MISMATCH_ROWS: &str = "djinn_board_health_mismatch_rows";
 const BOARD_HEALTH_MISMATCH_PAGES: &str = "djinn_board_health_mismatch_pages";
 const BOARD_HEALTH_MISMATCH_DURATION_SECONDS: &str = "djinn_board_health_mismatch_duration_seconds";
@@ -544,6 +548,19 @@ pub mod doctor {
     /// Convenience wrapper for callers measuring with `std::time::Duration`.
     pub fn record_run_duration(check: &str, duration: std::time::Duration) {
         set_run_duration_seconds(check, duration.as_secs_f64());
+    }
+
+    /// Record one retrieval snapshot publication attempt. `outcome` is a fixed
+    /// success/failure value, preventing repository errors from becoming labels.
+    pub fn record_retrieval_refresh(
+        outcome: &'static str,
+        duration: std::time::Duration,
+        last_success_age_seconds: f64,
+    ) {
+        metrics::gauge!(super::RETRIEVAL_HEALTH_REFRESH_DURATION_SECONDS, "outcome" => outcome)
+            .set(duration.as_secs_f64());
+        metrics::gauge!(super::RETRIEVAL_HEALTH_LAST_SUCCESS_AGE_SECONDS, "outcome" => outcome)
+            .set(last_success_age_seconds.max(0.0));
     }
 }
 
@@ -1149,6 +1166,14 @@ fn register_metrics() {
     metrics::describe_gauge!(
         DOCTOR_RUN_DURATION_SECONDS,
         "Doctor check run duration in seconds for the most recent recorded run. The only label is the stable DoctorCheck::name() value as check."
+    );
+    metrics::describe_gauge!(
+        RETRIEVAL_HEALTH_REFRESH_DURATION_SECONDS,
+        "Retrieval-health snapshot refresh duration in seconds, partitioned only by success or failure."
+    );
+    metrics::describe_gauge!(
+        RETRIEVAL_HEALTH_LAST_SUCCESS_AGE_SECONDS,
+        "Age in seconds of the last successful retrieval-health snapshot, partitioned only by refresh success or failure."
     );
     metrics::describe_counter!(
         CARGO_TARGET_SEED_TOTAL,
