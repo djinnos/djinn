@@ -89,6 +89,24 @@ describe("normalizeConfig preserves form-untouched fields", () => {
     expect(cfg.agent_mcp_defaults).toEqual({ worker: ["github"] });
     expect(cfg.global_skills).toEqual(["verify"]);
   });
+
+  it("keeps ordered grouped final verification plans when saving another form field", () => {
+    const plan = {
+      version: 1,
+      profile_id: "ci-default",
+      profile_revision: 1,
+      command_groups: [
+        { name: "rust", commands: [{ check_id: "test", executable: "cargo", timeout_seconds: 300 }] },
+        { name: "web", commands: [{ check_id: "web-test", executable: "pnpm", timeout_seconds: 300 }] },
+      ],
+      selection_rules: [
+        { match: ["server/**"], command_groups: ["rust"] },
+        { match: ["**"], command_groups: ["rust", "web"] },
+      ],
+    };
+    const cfg = normalizeConfig({ schema_version: 1, lifecycle: { final_verification: plan } });
+    expect(cfg.lifecycle.final_verification).toEqual(plan);
+  });
 });
 
 describe("cargo features CSV helpers", () => {

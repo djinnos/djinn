@@ -108,10 +108,54 @@ export interface PreTaskCommand {
   failure_policy?: PreTaskFailurePolicy;
 }
 
+/** A command in the canonical final-verification declaration. */
+export interface FinalVerificationCommand {
+  check_id: string;
+  executable: string;
+  argv?: string[];
+  working_directory?: string;
+  environment_names?: string[];
+  timeout_seconds: number;
+  descriptor_revision?: number;
+}
+
+/** Ordered named command subset for path-selected final verification. */
+export interface FinalVerificationCommandGroup {
+  name: string;
+  commands: FinalVerificationCommand[];
+}
+
+/** Ordered path matcher selecting named final-verification command groups. */
+export interface FinalVerificationSelectionRule {
+  match: string[];
+  command_groups: string[];
+}
+
+/**
+ * Mirrors `djinn_stack::environment::FinalVerificationPlan`. The structured
+ * form does not edit this plan, but it must retain legacy and grouped plans
+ * when another form field is saved.
+ */
+export interface FinalVerificationPlan {
+  version?: number;
+  profile_id?: string;
+  profile_revision?: number;
+  commands?: FinalVerificationCommand[];
+  command_groups?: FinalVerificationCommandGroup[];
+  selection_rules?: FinalVerificationSelectionRule[];
+  required_checks?: string[];
+  input_manifest?: Record<string, unknown>;
+  read_only_external_inputs?: Array<Record<string, string>>;
+  output_only_globs?: string[];
+  hermeticity?: Record<string, boolean>;
+}
+
 export interface LifecycleHooks {
   post_build: HookCommand[];
   pre_anything: HookCommand[];
   pre_task: PreTaskCommand[];
+  /** Preserved verbatim because selection rules are edited through Raw JSON. */
+  final_verification?: FinalVerificationPlan;
 }
 
 /**
@@ -247,6 +291,10 @@ export function normalizeConfig(
         : [],
       pre_anything: preAnything,
       pre_task: normalizePreTaskCommands(lifecycle.pre_task),
+      final_verification:
+        lifecycle.final_verification && typeof lifecycle.final_verification === "object"
+          ? (lifecycle.final_verification as FinalVerificationPlan)
+          : undefined,
     },
   };
 
