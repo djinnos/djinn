@@ -2,8 +2,9 @@
 
 use djinn_core::events::EventBus;
 use djinn_core::refinement_liveness::{
-    RefinementLivenessEvidence, RefinementLivenessResult, RefinementParkKind, RefinementPhase,
-    RefinementRole, RefinementStaleReason, RefinementStopReason, RefinementTaskState,
+    RefinementIntentState, RefinementLivenessEvidence, RefinementLivenessResult,
+    RefinementParkKind, RefinementPhase, RefinementRole, RefinementStaleReason,
+    RefinementStopReason, RefinementTaskState,
 };
 use djinn_db::repositories::refinement_run::LoadRefinementRunSnapshotRequest;
 use djinn_db::test_support::{
@@ -818,6 +819,27 @@ async fn materialization_and_completion_are_idempotent_durable_boundaries() {
             .await
             .unwrap();
     assert_eq!(after_first, after_retry);
+
+    // Pool enqueue can fail after durable materialization. The next pure poll
+    // must rediscover this exact task without moving the heartbeat or creating
+    // a replacement role task.
+    let dispatchable = repo
+        .load_dispatchable_refinement_intents(&run_id, 1)
+        .await
+        .unwrap();
+    assert_eq!(dispatchable.len(), 1);
+    assert_eq!(dispatchable[0].intent_id, intent_id);
+    assert_eq!(dispatchable[0].state, RefinementIntentState::Materialized);
+    let after_poll: String =
+        sqlx::query_scalar("SELECT heartbeat_at FROM refinement_runs WHERE id = $1")
+            .bind(&run_id)
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+    assert_eq!(
+        after_first, after_poll,
+        "enqueue retry polling must not keep a run alive"
+    );
 
     let completion = CompleteRefinementIntentRequest {
         run_id: run_id.clone(),
