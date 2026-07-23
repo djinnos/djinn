@@ -1,3 +1,4 @@
+// djinn:allow-oversize — legacy phase driving and the durable-intent authority remain co-located to prevent duplicate dispatch.
 // Proposal-refinement tribunal dispatch orchestration.
 //
 // Drives the Advocate → Adversary → Judge refinement loop by dispatching
@@ -31,6 +32,12 @@ use super::refinement::{RefinementPhase, StopReason};
 use super::actor::CoordinatorActor;
 use super::types::InflightDispatch;
 use djinn_core::clock::{Clock, SystemClock};
+use djinn_core::models::TaskRefinementCorrelation;
+use djinn_core::refinement_liveness::RefinementRole;
+use djinn_db::{
+    AcknowledgeRefinementTaskMaterializationRequest, ClaimRefinementIntentRequest,
+    ProposalRepository, TaskRepository,
+};
 
 /// How long a refinement agent session may run (measured from **session
 /// start**, not dispatch) before treating it as stalled (conservative —
@@ -84,9 +91,21 @@ pub(super) struct RefinementSession {
 
 // ─── Main dispatch loop ─────────────────────────────────────────────────────
 
+fn durable_role_name(role: RefinementRole) -> &'static str {
+    match role {
+        RefinementRole::Adversary => "adversary",
+        RefinementRole::Advocate => "advocate",
+        RefinementRole::Judge => "judge",
+    }
+}
+
 impl CoordinatorActor {
     /// Drive all active refinement loops. Called from `run_tick()`.
     pub(super) async fn drive_active_refinements(&mut self) {
+        // The durable intent ledger is the dispatch authority. This pass happens
+        // even when the recoverable projection has been dropped.
+        self.drive_durable_refinement_intents().await;
+
         let run_ids: Vec<String> = self.active_refinements.keys().cloned().collect();
         if run_ids.is_empty() {
             return;
@@ -135,6 +154,241 @@ impl CoordinatorActor {
         // Clean up completed refinements.
         self.active_refinements
             .retain(|_, state| !state.is_complete());
+    }
+
+    /// Lease and materialize exact-run intents. A task is acknowledged only
+    /// after its correlation is durably readable. Pool failure intentionally
+    /// leaves the materialized task open for a later tick.
+    async fn drive_durable_refinement_intents(&mut self) {
+        let event_bus = crate::events::event_bus_for(&self.events_tx);
+        let proposal_repo = ProposalRepository::new(self.db.clone(), event_bus.clone());
+        let task_repo = TaskRepository::new(self.db.clone(), event_bus);
+        let runs = match proposal_repo.load_active_refinement_runs().await {
+            Ok(runs) => runs,
+            Err(error) => {
+                tracing::warn!(%error, "failed to load durable refinement runs");
+                return;
+            }
+        };
+        for run in runs {
+            let intents = match proposal_repo
+                .load_dispatchable_refinement_intents(&run.run_id, run.generation)
+                .await
+            {
+                Ok(intents) => intents,
+                Err(error) => {
+                    tracing::warn!(run_id = %run.run_id, %error, "failed to load refinement intents");
+                    continue;
+                }
+            };
+            for intent in intents {
+                if matches!(
+                    intent.state,
+                    djinn_core::refinement_liveness::RefinementIntentState::Materialized
+                ) {
+                    match task_repo
+                        .find_by_refinement_intent_id(&intent.intent_id)
+                        .await
+                    {
+                        Ok(Some(task)) => {
+                            let proposal = match proposal_repo.get(&run.proposal_id).await {
+                                Ok(Some(proposal)) => proposal,
+                                Ok(None) | Err(_) => continue,
+                            };
+                            let Some(owner) = proposal.refinement_owner_user_id.as_deref() else {
+                                tracing::debug!(intent_id = %intent.intent_id, "awaiting durable refinement attribution");
+                                continue;
+                            };
+                            let Some((_agent_type, model_id)) = self
+                                .resolve_durable_refinement_dispatch_params(
+                                    &run.proposal_id,
+                                    intent.phase,
+                                    owner,
+                                )
+                                .await
+                            else {
+                                continue;
+                            };
+                            let project_path =
+                                self.resolve_refinement_project_path(&run.proposal_id).await;
+                            if let Err(error) =
+                                self.pool.dispatch(&task.id, &project_path, &model_id).await
+                            {
+                                tracing::warn!(task_id = %task.id, %error, "materialized refinement enqueue failed; retrying on next durable poll");
+                            }
+                        }
+                        Ok(None) => {
+                            tracing::warn!(intent_id = %intent.intent_id, "materialized intent has no correlated task")
+                        }
+                        Err(error) => {
+                            tracing::warn!(intent_id = %intent.intent_id, %error, "failed to load materialized refinement task")
+                        }
+                    }
+                    continue;
+                }
+                let owner = format!("coordinator:{}", self.coordinator_incarnation_id);
+                let Some(lease) = (match proposal_repo
+                    .claim_refinement_intent(ClaimRefinementIntentRequest {
+                        run_id: run.run_id.clone(),
+                        intent_id: intent.intent_id.clone(),
+                        generation: run.generation,
+                        owner: owner.clone(),
+                        lease_millis: 60_000,
+                    })
+                    .await
+                {
+                    Ok(lease) => lease,
+                    Err(error) => {
+                        tracing::warn!(intent_id = %intent.intent_id, %error, "failed to claim refinement intent");
+                        continue;
+                    }
+                }) else {
+                    continue;
+                };
+
+                // Resolve owner/model/admission before task creation. A denied
+                // attempt keeps the lease/intention retryable without creating
+                // an un-dispatchable board task.
+                let proposal = match proposal_repo.get(&run.proposal_id).await {
+                    Ok(Some(proposal)) => proposal,
+                    Ok(None) | Err(_) => continue,
+                };
+                let Some(attributed_user) = proposal.refinement_owner_user_id.clone() else {
+                    tracing::debug!(intent_id = %lease.intent_id, "awaiting durable refinement attribution");
+                    continue;
+                };
+                let Some((_agent_type, model_id)) = self
+                    .resolve_durable_refinement_dispatch_params(
+                        &run.proposal_id,
+                        lease.phase,
+                        &attributed_user,
+                    )
+                    .await
+                else {
+                    continue;
+                };
+
+                let task_id = match task_repo
+                    .find_by_refinement_intent_id(&lease.intent_id)
+                    .await
+                {
+                    Ok(Some(task)) => task.id,
+                    Ok(None) => {
+                        let correlation = match TaskRefinementCorrelation::new(
+                            lease.run_id.clone(),
+                            lease.intent_id.clone(),
+                            i64::from(lease.generation),
+                            i64::from(lease.round),
+                            lease.phase,
+                            lease.role,
+                        ) {
+                            Ok(correlation) => correlation,
+                            Err(error) => {
+                                tracing::warn!(intent_id = %lease.intent_id, %error, "invalid durable refinement correlation");
+                                continue;
+                            }
+                        };
+                        let role = durable_role_name(lease.role);
+                        let Some(task_id) = self
+                            .create_refinement_task_with_context_and_correlation(
+                                &run.proposal_id,
+                                role,
+                                lease.round,
+                                proposal.latest_revision_seq,
+                                "Durable refinement intent dispatch.",
+                                None,
+                                Some(&attributed_user),
+                                Some(&correlation),
+                            )
+                            .await
+                        else {
+                            continue;
+                        };
+                        task_id
+                    }
+                    Err(error) => {
+                        tracing::warn!(intent_id = %lease.intent_id, %error, "failed to find materialized refinement task");
+                        continue;
+                    }
+                };
+                if proposal_repo
+                    .acknowledge_refinement_task_materialization(
+                        AcknowledgeRefinementTaskMaterializationRequest {
+                            run_id: lease.run_id.clone(),
+                            intent_id: lease.intent_id.clone(),
+                            generation: lease.generation,
+                            task_id: task_id.clone(),
+                            owner: owner.clone(),
+                        },
+                    )
+                    .await
+                    .is_err()
+                {
+                    continue;
+                }
+                let project_path = self.resolve_refinement_project_path(&run.proposal_id).await;
+                if let Err(error) = self.pool.dispatch(&task_id, &project_path, &model_id).await {
+                    tracing::warn!(task_id = %task_id, %error, "durable refinement enqueue failed; task remains retryable");
+                }
+            }
+        }
+    }
+
+    /// Resolve the exact phase through the established owner-scoped model
+    /// selection and admission path. A denial leaves the durable intent
+    /// retryable and never authorizes a second task.
+    async fn resolve_durable_refinement_dispatch_params(
+        &mut self,
+        proposal_id: &str,
+        phase: djinn_core::refinement_liveness::RefinementPhase,
+        attributed_user: &str,
+    ) -> Option<(String, String)> {
+        let owner = self
+            .resolve_refinement_attributed_user(proposal_id, Some(attributed_user.to_owned()))
+            .await?;
+        if owner.trim().is_empty()
+            || !matches!(
+                djinn_db::UserRepository::new(self.db.clone())
+                    .get_by_id(&owner)
+                    .await,
+                Ok(Some(_))
+            )
+        {
+            return None;
+        }
+
+        let phase = match phase {
+            djinn_core::refinement_liveness::RefinementPhase::AdversaryAttack => {
+                RefinementPhase::AdversaryAttack
+            }
+            djinn_core::refinement_liveness::RefinementPhase::AdvocateRevision => {
+                RefinementPhase::AdvocateRevision
+            }
+            djinn_core::refinement_liveness::RefinementPhase::JudgeAdjudication => {
+                RefinementPhase::JudgeAdjudication
+            }
+        };
+        let diverse_refinement = self.read_diverse_refinement_setting(proposal_id).await;
+        let (agent_type, model_id) = self
+            .resolve_refinement_dispatch_params(phase, diverse_refinement, Some(owner.as_str()))
+            .await?;
+        let settings = djinn_db::UserSettingsRepository::new(self.db.clone())
+            .get(&owner)
+            .await
+            .ok()
+            .flatten();
+        let model_cap = settings
+            .as_ref()
+            .and_then(|settings| settings.max_sessions.as_ref())
+            .and_then(|caps| caps.get(&model_id))
+            .copied()
+            .unwrap_or(1);
+        let lane_cap = settings
+            .and_then(|settings| settings.lane_max_sessions)
+            .map(|limits| limits.for_role(&agent_type));
+        self.check_user_model_admission(&owner, &model_id, model_cap, &agent_type, lane_cap)
+            .await
+            .then_some((agent_type, model_id))
     }
 
     /// Drive a single refinement loop. `running_tasks` is the pool's running
@@ -310,7 +564,14 @@ impl CoordinatorActor {
             return;
         }
 
-        // No in-flight session — dispatch the next phase.
+        // Durable runs are dispatched exclusively by the leased intent ledger.
+        // This run-keyed map is a recoverable projection used only to monitor a
+        // correlated session/outcome; it must never create a second role task.
+        if !state.run_id.is_empty() {
+            return;
+        }
+
+        // Legacy non-durable compatibility path only.
         self.dispatch_next_refinement_phase(run_id).await;
     }
 
@@ -987,3 +1248,7 @@ mod refinement_recovery_tests;
 #[cfg(test)]
 #[path = "refinement_wake_tests.rs"]
 mod refinement_wake_tests;
+
+#[cfg(test)]
+#[path = "refinement_durable_dispatch_tests.rs"]
+mod refinement_durable_dispatch_tests;

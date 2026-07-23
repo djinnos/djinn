@@ -54,6 +54,13 @@ pub struct RefinementPendingIntent {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActiveRefinementRun {
+    pub run_id: String,
+    pub proposal_id: String,
+    pub generation: i32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClaimRefinementIntentRequest {
     pub run_id: String,
     pub intent_id: String,
@@ -724,7 +731,8 @@ pub(super) fn intent_state(value: String) -> SnapshotResult<RefinementIntentStat
     match value.as_str() {
         "pending" => Ok(RefinementIntentState::Pending),
         "claimed" => Ok(RefinementIntentState::Claimed),
-        "completed" | "materialized" => Ok(RefinementIntentState::Completed),
+        "materialized" => Ok(RefinementIntentState::Materialized),
+        "completed" => Ok(RefinementIntentState::Completed),
         "cancelled" => Ok(RefinementIntentState::Cancelled),
         _ => Err(invalid("intent state", &value)),
     }

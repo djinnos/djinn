@@ -270,6 +270,76 @@ impl TaskRepository {
         acceptance_criteria: Option<&str>,
         blocker_ids: &[String],
     ) -> Result<Task> {
+        self.create_in_project_with_blockers_and_refinement_correlation(
+            project_id,
+            epic_id,
+            provenance,
+            title,
+            description,
+            design,
+            issue_type,
+            priority,
+            owner,
+            status,
+            acceptance_criteria,
+            blocker_ids,
+            None,
+        )
+        .await
+    }
+
+    /// Create a task with its refinement identity in the same durable insert.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_in_project_with_refinement_correlation(
+        &self,
+        project_id: &str,
+        epic_id: Option<&str>,
+        provenance: EffectiveCreatorProvenance<'_>,
+        title: &str,
+        description: &str,
+        design: &str,
+        issue_type: &str,
+        priority: i64,
+        owner: &str,
+        status: Option<&str>,
+        acceptance_criteria: Option<&str>,
+        correlation: &djinn_core::models::TaskRefinementCorrelation,
+    ) -> Result<Task> {
+        self.create_in_project_with_blockers_and_refinement_correlation(
+            project_id,
+            epic_id,
+            provenance,
+            title,
+            description,
+            design,
+            issue_type,
+            priority,
+            owner,
+            status,
+            acceptance_criteria,
+            &[],
+            Some(correlation),
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn create_in_project_with_blockers_and_refinement_correlation(
+        &self,
+        project_id: &str,
+        epic_id: Option<&str>,
+        provenance: EffectiveCreatorProvenance<'_>,
+        title: &str,
+        description: &str,
+        design: &str,
+        issue_type: &str,
+        priority: i64,
+        owner: &str,
+        status: Option<&str>,
+        acceptance_criteria: Option<&str>,
+        blocker_ids: &[String],
+        correlation: Option<&djinn_core::models::TaskRefinementCorrelation>,
+    ) -> Result<Task> {
         self.db.ensure_initialized().await?;
         let id = uuid::Uuid::now_v7().to_string();
         let short_id = self.generate_short_id(&id).await?;
@@ -292,6 +362,7 @@ impl TaskRepository {
         let issue_type_owned = issue_type.to_owned();
         let owner_owned = owner.to_owned();
         let status_owned = status.map(|s| s.to_owned());
+        let correlation = correlation.cloned();
 
         // Retry on Dolt 1213: the INSERT hits the hot `tasks` table; concurrent
         // writers routinely trip serialization failures. Task + blocker rows go
@@ -320,6 +391,7 @@ impl TaskRepository {
                 let source_task_id = source_task_id.clone();
                 let proposal_id = proposal_id.clone();
                 let blocker_ids = blocker_ids_owned.clone();
+                let correlation = correlation.clone();
                 async move {
                     let mut tx = self.db.pool().begin().await?;
                     let created_by_user_id = resolve_effective_creator(
@@ -332,26 +404,48 @@ impl TaskRepository {
                         epic_id.as_deref(),
                     )
                     .await?;
-                    sqlx::query!(
+                    let (refinement_run_id, refinement_intent_id, refinement_generation, refinement_round, refinement_phase, refinement_role) = match correlation {
+                        Some(value) => {
+                            let phase = match value.phase() {
+                                djinn_core::refinement_liveness::RefinementPhase::AdversaryAttack => "adversary_attack",
+                                djinn_core::refinement_liveness::RefinementPhase::AdvocateRevision => "advocate_revision",
+                                djinn_core::refinement_liveness::RefinementPhase::JudgeAdjudication => "judge_adjudication",
+                            };
+                            let role = match value.role() {
+                                djinn_core::refinement_liveness::RefinementRole::Adversary => "adversary",
+                                djinn_core::refinement_liveness::RefinementRole::Advocate => "advocate",
+                                djinn_core::refinement_liveness::RefinementRole::Judge => "judge",
+                            };
+                            (Some(value.run_id().to_owned()), Some(value.intent_id().to_owned()), Some(value.generation()), Some(value.round()), Some(phase), Some(role))
+                        }
+                        None => (None, None, None, None, None, None),
+                    };
+                    sqlx::query(
                         "INSERT INTO tasks
                             (id, project_id, short_id, epic_id, title, description, design,
-                             issue_type, priority, owner, status, acceptance_criteria,
-                             created_by_user_id)
-                         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, COALESCE($11, 'open'), $12, $13)",
-                        id,
-                        project_id,
-                        short_id,
-                        epic_id,
-                        title,
-                        description,
-                        design,
-                        issue_type,
-                        priority,
-                        owner,
-                        status,
-                        ac,
-                        created_by_user_id
+                             issue_type, priority, owner, status, acceptance_criteria, created_by_user_id,
+                             refinement_run_id, refinement_intent_id, refinement_generation, refinement_round, refinement_phase, refinement_role)
+                         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, COALESCE($11, 'open'), $12, $13, $14, $15, $16, $17, $18, $19)",
                     )
+                    .bind(&id)
+                    .bind(project_id)
+                    .bind(short_id)
+                    .bind(epic_id)
+                    .bind(title)
+                    .bind(description)
+                    .bind(design)
+                    .bind(issue_type)
+                    .bind(priority)
+                    .bind(owner)
+                    .bind(status)
+                    .bind(ac)
+                    .bind(created_by_user_id)
+                    .bind(refinement_run_id)
+                    .bind(refinement_intent_id)
+                    .bind(refinement_generation)
+                    .bind(refinement_round)
+                    .bind(refinement_phase)
+                    .bind(refinement_role)
                     .execute(&mut *tx)
                     .await?;
                     // Outgoing blocker edges, in the same tx. `ON CONFLICT DO
