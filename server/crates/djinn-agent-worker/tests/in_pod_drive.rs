@@ -736,6 +736,32 @@ async fn worker_drives_real_supervisor_in_pod() {
     .await
     .expect("first-stage persistence must expose its live ephemeral clone");
 
+    // Exercise completion resolution while the production worker still owns
+    // the ephemeral clone. Worker shutdown deliberately removes that clone.
+    let mut config = EnvironmentConfig::empty();
+    config.lifecycle.final_verification.commands = vec![FinalVerificationCommand {
+        check_id: "pod-workspace".into(),
+        executable: "true".into(),
+        ..Default::default()
+    }];
+    config.lifecycle.final_verification.required_checks = vec!["pod-workspace".into()];
+    ProjectRepository::new(worker_db.clone(), EventBus::noop())
+        .set_environment_config(
+            project_id,
+            &serde_json::to_string(&config).expect("encode plan"),
+        )
+        .await
+        .expect("configure final-verification plan");
+    let material =
+        djinn_agent::actors::slot::resolve_final_verification_for_task_run(&worker_db, task_run_id)
+            .await
+            .expect("configured completion boundary must resolve live persisted workspace")
+            .expect("configured completion boundary must not take legacy skip");
+    assert_eq!(
+        material.execution_request.worktree, expected_workspace,
+        "completion resolution must consume the first-stage persisted workspace"
+    );
+
     // 5. Wait for the worker to exit. The OAuth credential's `base_url`
     //    points at `127.0.0.1:1` (no listener), so the provider stream
     //    fails fast with "connection refused", surfaces as
@@ -831,33 +857,6 @@ async fn worker_drives_real_supervisor_in_pod() {
     }
 
     drop(log);
-
-    // Configure a non-empty plan after the production first-stage boundary.
-    // The completion resolver must consume the path it persisted, not a
-    // session path or a test-injected task-run workspace.
-    let mut config = EnvironmentConfig::empty();
-    config.lifecycle.final_verification.commands = vec![FinalVerificationCommand {
-        check_id: "pod-workspace".into(),
-        executable: "true".into(),
-        ..Default::default()
-    }];
-    config.lifecycle.final_verification.required_checks = vec!["pod-workspace".into()];
-    ProjectRepository::new(worker_db.clone(), EventBus::noop())
-        .set_environment_config(
-            project_id,
-            &serde_json::to_string(&config).expect("encode plan"),
-        )
-        .await
-        .expect("configure final-verification plan");
-    let material =
-        djinn_agent::actors::slot::resolve_final_verification_for_task_run(&worker_db, task_run_id)
-            .await
-            .expect("configured completion boundary must resolve persisted workspace")
-            .expect("configured completion boundary must not take legacy skip");
-    assert_eq!(
-        material.execution_request.worktree, expected_workspace,
-        "completion resolution must consume the first-stage persisted workspace"
-    );
 }
 
 // ── Object-safety smoke test ────────────────────────────────────────────────
