@@ -208,7 +208,7 @@ fn structured_lint_rejection_preserves_order_for_correction_prompt() {
 
 #[test]
 fn persisted_tool_result_evidence_drives_lint_retry_not_assistant_prose() {
-    use djinn_core::message::{Message, Role};
+    use djinn_core::message::{ContentBlock, Conversation, Message, Role};
 
     let payload = r#"{"code":"SPEC_LINT_REJECTED","violations":[{"code":"SECOND","message":"second message","span":{"start_byte":20,"end_byte":24}},{"code":"FIRST","message":"first message","span":{"start_byte":4,"end_byte":9}}]}"#;
     let mut conversation = Conversation::default();
@@ -271,8 +271,9 @@ fn clean_revision_takes_precedence_over_earlier_lint_rejection_evidence() {
         revision_check < lint_check,
         "a clean revision must take precedence over historical rejection evidence"
     );
+    let evidence_source = include_str!("refinement_lint_evidence.rs");
     assert!(
-        source.contains(".load_raw_conversation(&session.id)"),
+        evidence_source.contains(".load_raw_conversation(&session.id)"),
         "lint classification must inspect uncompacted persisted ToolResult evidence"
     );
 }
