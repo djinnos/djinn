@@ -190,12 +190,28 @@ impl CoordinatorActor {
                         .await
                     {
                         Ok(Some(task)) => {
+                            let proposal = match proposal_repo.get(&run.proposal_id).await {
+                                Ok(Some(proposal)) => proposal,
+                                Ok(None) | Err(_) => continue,
+                            };
+                            let Some(owner) = proposal.refinement_owner_user_id.as_deref() else {
+                                tracing::debug!(intent_id = %intent.intent_id, "awaiting durable refinement attribution");
+                                continue;
+                            };
+                            let Some((_agent_type, model_id)) = self
+                                .resolve_durable_refinement_dispatch_params(
+                                    &run.proposal_id,
+                                    intent.phase,
+                                    owner,
+                                )
+                                .await
+                            else {
+                                continue;
+                            };
                             let project_path =
                                 self.resolve_refinement_project_path(&run.proposal_id).await;
-                            if let Err(error) = self
-                                .pool
-                                .dispatch(&task.id, &project_path, "test/mock")
-                                .await
+                            if let Err(error) =
+                                self.pool.dispatch(&task.id, &project_path, &model_id).await
                             {
                                 tracing::warn!(task_id = %task.id, %error, "materialized refinement enqueue failed; retrying on next durable poll");
                             }
@@ -229,28 +245,34 @@ impl CoordinatorActor {
                     continue;
                 };
 
+                // Resolve owner/model/admission before task creation. A denied
+                // attempt keeps the lease/intention retryable without creating
+                // an un-dispatchable board task.
+                let proposal = match proposal_repo.get(&run.proposal_id).await {
+                    Ok(Some(proposal)) => proposal,
+                    Ok(None) | Err(_) => continue,
+                };
+                let Some(attributed_user) = proposal.refinement_owner_user_id.clone() else {
+                    tracing::debug!(intent_id = %lease.intent_id, "awaiting durable refinement attribution");
+                    continue;
+                };
+                let Some((_agent_type, model_id)) = self
+                    .resolve_durable_refinement_dispatch_params(
+                        &run.proposal_id,
+                        lease.phase,
+                        &attributed_user,
+                    )
+                    .await
+                else {
+                    continue;
+                };
+
                 let task_id = match task_repo
                     .find_by_refinement_intent_id(&lease.intent_id)
                     .await
                 {
                     Ok(Some(task)) => task.id,
                     Ok(None) => {
-                        // Cache state is only a projection: fall back to the
-                        // durable proposal attribution and revision when it was
-                        // deleted or has not yet been hydrated.
-                        let proposal = match proposal_repo.get(&run.proposal_id).await {
-                            Ok(Some(proposal)) => proposal,
-                            Ok(None) | Err(_) => continue,
-                        };
-                        let attributed_user = self
-                            .active_refinements
-                            .get(&run.run_id)
-                            .and_then(|state| state.attributed_user_id.clone())
-                            .or(proposal.author_user_id.clone());
-                        let Some(attributed_user) = attributed_user else {
-                            tracing::debug!(intent_id = %lease.intent_id, "awaiting durable refinement attribution");
-                            continue;
-                        };
                         let correlation = match TaskRefinementCorrelation::new(
                             lease.run_id.clone(),
                             lease.intent_id.clone(),
@@ -304,15 +326,68 @@ impl CoordinatorActor {
                     continue;
                 }
                 let project_path = self.resolve_refinement_project_path(&run.proposal_id).await;
-                if let Err(error) = self
-                    .pool
-                    .dispatch(&task_id, &project_path, "test/mock")
-                    .await
-                {
+                if let Err(error) = self.pool.dispatch(&task_id, &project_path, &model_id).await {
                     tracing::warn!(task_id = %task_id, %error, "durable refinement enqueue failed; task remains retryable");
                 }
             }
         }
+    }
+
+    /// Resolve the exact phase through the established owner-scoped model
+    /// selection and admission path. A denial leaves the durable intent
+    /// retryable and never authorizes a second task.
+    async fn resolve_durable_refinement_dispatch_params(
+        &mut self,
+        proposal_id: &str,
+        phase: djinn_core::refinement_liveness::RefinementPhase,
+        attributed_user: &str,
+    ) -> Option<(String, String)> {
+        let owner = self
+            .resolve_refinement_attributed_user(proposal_id, Some(attributed_user.to_owned()))
+            .await?;
+        if owner.trim().is_empty()
+            || !matches!(
+                djinn_db::UserRepository::new(self.db.clone())
+                    .get_by_id(&owner)
+                    .await,
+                Ok(Some(_))
+            )
+        {
+            return None;
+        }
+
+        let phase = match phase {
+            djinn_core::refinement_liveness::RefinementPhase::AdversaryAttack => {
+                RefinementPhase::AdversaryAttack
+            }
+            djinn_core::refinement_liveness::RefinementPhase::AdvocateRevision => {
+                RefinementPhase::AdvocateRevision
+            }
+            djinn_core::refinement_liveness::RefinementPhase::JudgeAdjudication => {
+                RefinementPhase::JudgeAdjudication
+            }
+        };
+        let diverse_refinement = self.read_diverse_refinement_setting(proposal_id).await;
+        let (agent_type, model_id) = self
+            .resolve_refinement_dispatch_params(phase, diverse_refinement, Some(owner.as_str()))
+            .await?;
+        let settings = djinn_db::UserSettingsRepository::new(self.db.clone())
+            .get(&owner)
+            .await
+            .ok()
+            .flatten();
+        let model_cap = settings
+            .as_ref()
+            .and_then(|settings| settings.max_sessions.as_ref())
+            .and_then(|caps| caps.get(&model_id))
+            .copied()
+            .unwrap_or(1);
+        let lane_cap = settings
+            .and_then(|settings| settings.lane_max_sessions)
+            .map(|limits| limits.for_role(&agent_type));
+        self.check_user_model_admission(&owner, &model_id, model_cap, &agent_type, lane_cap)
+            .await
+            .then_some((agent_type, model_id))
     }
 
     /// Drive a single refinement loop. `running_tasks` is the pool's running
@@ -488,7 +563,14 @@ impl CoordinatorActor {
             return;
         }
 
-        // No in-flight session — dispatch the next phase.
+        // Durable runs are dispatched exclusively by the leased intent ledger.
+        // This run-keyed map is a recoverable projection used only to monitor a
+        // correlated session/outcome; it must never create a second role task.
+        if !state.run_id.is_empty() {
+            return;
+        }
+
+        // Legacy non-durable compatibility path only.
         self.dispatch_next_refinement_phase(run_id).await;
     }
 
