@@ -1,3 +1,4 @@
+// djinn:allow-oversize — legacy warmer plus lease orchestration; split in the recovery follow-up.
 //! Kubernetes Job-backed canonical-graph warmer.
 
 use std::collections::HashMap;
