@@ -112,7 +112,7 @@ function ImagesStory() {
 }
 
 const meta = {
-  title: "Images/ImagesPage",
+  title: "Repositories/ImagesPage",
   component: ImagesStory,
   parameters: { layout: "fullscreen" },
 } satisfies Meta<typeof ImagesStory>;
