@@ -114,7 +114,7 @@ function EnvironmentStory() {
 }
 
 const meta = {
-  title: "Environment/ProjectEnvironmentPage",
+  title: "Repositories/ProjectEnvironmentPage",
   component: EnvironmentStory,
   parameters: { layout: "fullscreen" },
 } satisfies Meta<typeof EnvironmentStory>;
