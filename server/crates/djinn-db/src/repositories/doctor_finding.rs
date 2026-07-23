@@ -275,6 +275,18 @@ impl DoctorFindingRepository {
         Ok(row.as_ref().map(row_to_finding))
     }
 
+    /// Return the immutable deduplication key for one persisted finding.
+    /// It is separate from [`DoctorFinding`] because it is an idempotency
+    /// contract rather than board-facing finding data.
+    pub async fn deduplication_key(&self, id: &str) -> Result<Option<String>> {
+        self.db.ensure_initialized().await?;
+        let row = sqlx::query("SELECT deduplication_key FROM doctor_findings WHERE id = $1")
+            .bind(id)
+            .fetch_optional(self.db.pool())
+            .await?;
+        Ok(row.map(|row| row.get("deduplication_key")))
+    }
+
     /// Fetch the most recent finding for `check_name`, or `None`.
     /// Used by the fix path to load the snapshot for the latest run.
     pub async fn latest_for_check(&self, check_name: &str) -> Result<Option<DoctorFinding>> {

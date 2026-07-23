@@ -13,6 +13,7 @@ default = []
 [dependencies]
 djinn-core = { path = "../djinn-core" }
 djinn-db = { path = "../djinn-db" }
+djinn-spec-lint = { path = "../djinn-spec-lint" }
 djinn-memory = { path = "../djinn-memory" }
 djinn-git = { path = "../djinn-git" }
 djinn-provider = { path = "../djinn-provider" }
