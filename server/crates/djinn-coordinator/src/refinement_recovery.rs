@@ -13,10 +13,7 @@
 //      round/phase can be derived) fall back to the historical behavior:
 //      stamped `refinement_stop`/`Interrupted` and left restartable.
 
-use djinn_core::{
-    models::ProposalDebateTrail,
-    refinement_liveness::RefinementStopReason,
-};
+use djinn_core::{models::ProposalDebateTrail, refinement_liveness::RefinementStopReason};
 use djinn_db::{ProposalRepository, TaskRepository, TerminalRefinementRunRequest};
 
 use super::actor::CoordinatorActor;
@@ -224,18 +221,17 @@ impl CoordinatorActor {
             // they cannot identify the generation that is safe to mutate.
             match proposal_repo.load_active_refinement_runs().await {
                 Ok(runs) => {
-                    if let Some(run) = runs.into_iter().find(|run| run.proposal_id == proposal_id) {
-                        if let Err(error) = proposal_repo
+                    if let Some(run) = runs.into_iter().find(|run| run.proposal_id == proposal_id)
+                        && let Err(error) = proposal_repo
                             .terminal_refinement_run(TerminalRefinementRunRequest {
                                 run_id: run.run_id,
                                 generation: run.generation,
                                 reason: RefinementStopReason::Interrupted { detail: None },
                             })
                             .await
-                        {
-                            tracing::warn!(proposal_id = %proposal_id, %error,
-                                "failed to terminalize ambiguous exact refinement run");
-                        }
+                    {
+                        tracing::warn!(proposal_id = %proposal_id, %error,
+                            "failed to terminalize ambiguous exact refinement run");
                     }
                 }
                 Err(error) => tracing::warn!(proposal_id = %proposal_id, %error,

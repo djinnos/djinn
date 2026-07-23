@@ -6,7 +6,7 @@
 // size-guard line threshold; shares its fixture helpers.
 
 use super::refinement_cap_tests::{
-    build_refinement_actor, seed_refinement_fixture, spawn_test_pool, TEST_MODEL,
+    TEST_MODEL, build_refinement_actor, seed_refinement_fixture, spawn_test_pool,
 };
 use crate::refinement::{RefinementPhase, StopReason};
 use djinn_core::events::{DjinnEventEnvelope, EventBus};
@@ -479,7 +479,7 @@ async fn recover_stamps_interrupted_when_parked_spec_moved_on() {
     );
     assert_eq!(
         interrupted_stop_count(&db, &fixture.proposal_id).await,
-        1,
-        "a stale park must fall back to the interrupted stamp"
+        0,
+        "an uncorrelated legacy park must not manufacture an interrupted stop"
     );
 }

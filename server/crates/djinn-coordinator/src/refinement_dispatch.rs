@@ -60,6 +60,17 @@ const REFINEMENT_PENDING_START_TIMEOUT: Duration = Duration::from_secs(1200);
 /// before the loop terminates instead of re-dispatching.
 const REFINEMENT_DISPATCH_RETRY_CAP: i32 = 3;
 
+fn refinement_role_name(phase: RefinementPhase) -> &'static str {
+    match phase {
+        RefinementPhase::AdversaryAttack => "adversary",
+        RefinementPhase::AdvocateRevision => "advocate",
+        RefinementPhase::JudgeAdjudication => "judge",
+        RefinementPhase::AwaitingHumanReview
+        | RefinementPhase::AwaitingEvidence
+        | RefinementPhase::Complete => "coordinator",
+    }
+}
+
 /// The in-flight session tracking for one active refinement loop.
 #[derive(Debug, Clone)]
 pub(super) struct RefinementSession {
@@ -477,7 +488,7 @@ impl CoordinatorActor {
                             self.terminate_refinement(
                                 run_id,
                                 StopReason::AgentFailure {
-                                    role: format!("{:?}", session.phase),
+                                    role: refinement_role_name(session.phase).into(),
                                     error: "session timeout".into(),
                                 },
                             )
@@ -557,7 +568,11 @@ impl CoordinatorActor {
             if let Some(state) = self.active_refinements.get_mut(run_id) {
                 state.dispatch_failures = 0;
             }
-            self.process_refinement_outcome(run_id, &session).await;
+            if !self.process_refinement_outcome(run_id, &session).await {
+                // Keep the exact source task/session retryable until its durable
+                // transition commits.
+                return;
+            }
             self.close_refinement_task(&session.task_id, "refinement phase complete")
                 .await;
             self.refinement_sessions.remove(run_id);
@@ -651,7 +666,7 @@ impl CoordinatorActor {
             self.terminate_refinement(
                 run_id,
                 StopReason::AgentFailure {
-                    role: format!("{:?}", session.phase),
+                    role: refinement_role_name(session.phase).into(),
                     error: over_cap_error,
                 },
             )
@@ -807,7 +822,7 @@ impl CoordinatorActor {
             self.terminate_refinement(
                 run_id,
                 StopReason::AgentFailure {
-                    role: format!("{:?}", phase),
+                    role: refinement_role_name(phase).into(),
                     error: "attribution unresolvable: no user identity for refinement dispatch"
                         .into(),
                 },
@@ -827,7 +842,7 @@ impl CoordinatorActor {
             self.terminate_refinement(
                 run_id,
                 StopReason::AgentFailure {
-                    role: format!("{:?}", phase),
+                    role: refinement_role_name(phase).into(),
                     error: "attributed user is empty".into(),
                 },
             )
@@ -851,7 +866,7 @@ impl CoordinatorActor {
                 self.terminate_refinement(
                     run_id,
                     StopReason::AgentFailure {
-                        role: format!("{:?}", phase),
+                        role: refinement_role_name(phase).into(),
                         error: format!("attributed user {user_id} not found in users table"),
                     },
                 )
@@ -869,7 +884,7 @@ impl CoordinatorActor {
                 self.terminate_refinement(
                     run_id,
                     StopReason::AgentFailure {
-                        role: format!("{:?}", phase),
+                        role: refinement_role_name(phase).into(),
                         error: format!("failed to resolve attributed user: {e}"),
                     },
                 )
@@ -907,7 +922,7 @@ impl CoordinatorActor {
             self.terminate_refinement(
                 run_id,
                 StopReason::AgentFailure {
-                    role: format!("{:?}", phase),
+                    role: refinement_role_name(phase).into(),
                     error: "no eligible credential-backed model for refinement owner".into(),
                 },
             )
@@ -1042,7 +1057,7 @@ impl CoordinatorActor {
                 self.terminate_refinement(
                     run_id,
                     StopReason::AgentFailure {
-                        role: format!("{:?}", phase),
+                        role: refinement_role_name(phase).into(),
                         error: "task creation failed".into(),
                     },
                 )
@@ -1155,14 +1170,9 @@ impl CoordinatorActor {
                     error = %e,
                     "Failed to dispatch refinement session"
                 );
-                self.terminate_refinement(
-                    run_id,
-                    StopReason::AgentFailure {
-                        role: format!("{:?}", phase),
-                        error: format!("dispatch failed: {e}"),
-                    },
-                )
-                .await;
+                // Pool/enqueue errors are coordinator failures, not role
+                // outcomes. The durable intent remains retryable and no stop
+                // row is manufactured.
             }
         }
     }

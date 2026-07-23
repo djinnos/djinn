@@ -151,10 +151,10 @@ impl CoordinatorActor {
         &mut self,
         run_id: &str,
         session: &RefinementSession,
-    ) {
+    ) -> bool {
         let state = match self.active_refinements.get(run_id).cloned() {
             Some(s) => s,
-            None => return,
+            None => return false,
         };
         // The projection is keyed by the durable run. The proposal identity is
         // payload data used only for proposal/lifecycle repository operations.
@@ -165,7 +165,7 @@ impl CoordinatorActor {
         // newer generation alive.
         let durable_intent = match self.fence_durable_outcome(&state, session).await {
             Ok(intent) => intent,
-            Err(()) => return,
+            Err(()) => return false,
         };
 
         let processed = match session.phase {
@@ -186,19 +186,31 @@ impl CoordinatorActor {
             | RefinementPhase::Complete => false,
         };
 
-        if processed {
-            if let Some(intent_id) = durable_intent {
-                self.complete_durable_outcome(run_id, &state, &intent_id)
+        if processed
+            && self
+                .complete_durable_outcome(run_id, &state, &durable_intent)
+                .await
+        {
+            if let Some(committed) = self.active_refinements.get(run_id)
+                && committed.is_awaiting_human_review()
+            {
+                self.persist_awaiting_review(&proposal_id, "tribunal awaiting review", committed)
                     .await;
             }
+            return true;
         }
+        // Publish a role transition only after its exact durable mutation commits.
+        // Any read/progress/completion/park/terminal failure leaves the source
+        // projection and exact intent retryable.
+        self.active_refinements.insert(run_id.to_owned(), state);
+        false
     }
 
     async fn fence_durable_outcome(
         &self,
         state: &RefinementLoopState,
         session: &RefinementSession,
-    ) -> Result<Option<String>, ()> {
+    ) -> Result<String, ()> {
         if state.run_id.is_empty()
             || session.run_id != state.run_id
             || session.generation != state.generation
@@ -217,16 +229,14 @@ impl CoordinatorActor {
         .await
         {
             Ok(Some(task)) => task,
-            // Compatibility sessions predate intent correlation and cannot use
-            // the durable mutators.
-            Ok(None) => return Ok(None),
+            Ok(None) => return Err(()),
             Err(error) => {
                 tracing::warn!(task_id = %session.task_id, %error, "failed to reload refinement task");
                 return Err(());
             }
         };
         let Some(intent_id) = task.refinement_intent_id else {
-            return Ok(None);
+            return Err(());
         };
         let expected_phase = match durable_phase(session.phase) {
             Some(DurableRefinementPhase::AdversaryAttack) => Some("adversary_attack"),
@@ -239,6 +249,12 @@ impl CoordinatorActor {
             RefinementPhase::AdvocateRevision => Some("advocate"),
             RefinementPhase::JudgeAdjudication => Some("judge"),
             _ => None,
+        };
+        let (Some(expected_durable_phase), Some(expected_durable_role)) = (
+            durable_phase(session.phase),
+            expected_role.and_then(durable_role),
+        ) else {
+            return Err(());
         };
         let valid_task = task.refinement_run_id.as_deref() == Some(state.run_id.as_str())
             && task.refinement_generation == Some(i64::from(state.generation))
@@ -261,7 +277,19 @@ impl CoordinatorActor {
             })
             .await
         {
-            Ok(Some(snapshot)) if snapshot.generation == state.generation => Ok(Some(intent_id)),
+            Ok(Some(snapshot))
+                if snapshot.generation == state.generation
+                    && snapshot.snapshot.intents.iter().any(|intent| {
+                        intent.intent_id == intent_id
+                            && intent.run_id == state.run_id
+                            && intent.phase == expected_durable_phase
+                            && intent.role == expected_durable_role
+                            && matches!(
+                                intent.state,
+                                djinn_core::refinement_liveness::RefinementIntentState::Claimed
+                                    | djinn_core::refinement_liveness::RefinementIntentState::Materialized
+                            )
+                    }) => Ok(intent_id),
             Ok(_) => Err(()),
             Err(error) => {
                 tracing::warn!(run_id = %state.run_id, %error, "failed to fence refinement outcome generation");
@@ -275,9 +303,9 @@ impl CoordinatorActor {
         run_id: &str,
         source: &RefinementLoopState,
         intent_id: &str,
-    ) {
+    ) -> bool {
         let Some(next) = self.active_refinements.get(run_id).cloned() else {
-            return;
+            return false;
         };
         let repo = ProposalRepository::new(
             self.db.clone(),
@@ -295,7 +323,7 @@ impl CoordinatorActor {
             .await
             .is_err()
         {
-            return;
+            return false;
         }
         if let Some(next_phase) = durable_phase(next.phase) {
             let next_role = match next_phase {
@@ -320,8 +348,9 @@ impl CoordinatorActor {
                 .await;
             if let Err(error) = result {
                 tracing::warn!(run_id, %error, "durable refinement completion rejected outcome");
+                return false;
             }
-            return;
+            return true;
         }
         let result = match next.phase {
             RefinementPhase::AwaitingHumanReview => repo
@@ -331,7 +360,14 @@ impl CoordinatorActor {
                     kind: RefinementParkKind::AwaitingReview,
                 })
                 .await
-                .map(|_| ()),
+                .and_then(|changed| {
+                    changed.then_some(()).ok_or_else(|| {
+                        djinn_db::RefinementIntentMutationError::GenerationConflict {
+                            run_id: run_id.into(),
+                            generation: source.generation,
+                        }
+                    })
+                }),
             RefinementPhase::AwaitingEvidence => repo
                 .park_refinement_run(ParkRefinementRunRequest {
                     run_id: run_id.into(),
@@ -339,7 +375,14 @@ impl CoordinatorActor {
                     kind: RefinementParkKind::AwaitingEvidence,
                 })
                 .await
-                .map(|_| ()),
+                .and_then(|changed| {
+                    changed.then_some(()).ok_or_else(|| {
+                        djinn_db::RefinementIntentMutationError::GenerationConflict {
+                            run_id: run_id.into(),
+                            generation: source.generation,
+                        }
+                    })
+                }),
             RefinementPhase::Complete => repo
                 .terminal_refinement_run(TerminalRefinementRunRequest {
                     run_id: run_id.into(),
@@ -351,12 +394,21 @@ impl CoordinatorActor {
                     ),
                 })
                 .await
-                .map(|_| ()),
-            _ => Ok(()),
+                .and_then(|changed| {
+                    changed.then_some(()).ok_or_else(|| {
+                        djinn_db::RefinementIntentMutationError::GenerationConflict {
+                            run_id: run_id.into(),
+                            generation: source.generation,
+                        }
+                    })
+                }),
+            _ => return false,
         };
         if let Err(error) = result {
             tracing::warn!(run_id, %error, "durable refinement terminal transition rejected outcome");
+            return false;
         }
+        true
     }
 
     /// Process an advocate session outcome: read the latest revision,
@@ -565,11 +617,6 @@ impl CoordinatorActor {
                     ?reason,
                     "Refinement escalated — parking for human review"
                 );
-                if let Some(state) = self.active_refinements.get(run_id).cloned() {
-                    let summary = format!("Escalated to human review: {reason:?}");
-                    self.persist_awaiting_review(proposal_id, &summary, &state)
-                        .await;
-                }
             }
         }
         true
@@ -722,10 +769,6 @@ impl CoordinatorActor {
         };
 
         if now_awaiting {
-            if let Some(state) = self.active_refinements.get(run_id).cloned() {
-                self.persist_awaiting_review(proposal_id, &verdict.body, &state)
-                    .await;
-            }
             tracing::info!(
                 proposal_id = %proposal_id,
                 round,
@@ -770,15 +813,12 @@ impl CoordinatorActor {
         let Some(state) = self.active_refinements.get(run_id).cloned() else {
             return;
         };
-        if let Some(state) = self.active_refinements.get_mut(run_id) {
-            state.terminate(reason.clone());
-        }
         if !state.run_id.is_empty() {
             let repo = ProposalRepository::new(
                 self.db.clone(),
                 crate::events::event_bus_for(&self.events_tx),
             );
-            if let Err(error) = repo
+            match repo
                 .terminal_refinement_run(TerminalRefinementRunRequest {
                     run_id: state.run_id.clone(),
                     generation: state.generation,
@@ -786,9 +826,17 @@ impl CoordinatorActor {
                 })
                 .await
             {
-                tracing::warn!(run_id = %state.run_id, %error,
-                    "durable refinement terminal transition rejected stop");
+                Ok(true) => {}
+                Ok(false) => return,
+                Err(error) => {
+                    tracing::warn!(run_id = %state.run_id, %error,
+                        "durable refinement terminal transition rejected stop");
+                    return;
+                }
             }
+        }
+        if let Some(state) = self.active_refinements.get_mut(run_id) {
+            state.terminate(reason);
         }
         self.refinement_sessions.remove(run_id);
     }
@@ -840,12 +888,6 @@ impl CoordinatorActor {
             }
         }
 
-        if !accept {
-            self.reset_live_spec_to_revision(proposal_id, state.snapshot_revision_seq)
-                .await
-                .map_err(|error| format!("failed to revert spec to snapshot on reject: {error}"))?;
-        }
-
         let reason = if accept {
             RefinementStopReason::HumanAccepted
         } else {
@@ -865,6 +907,12 @@ impl CoordinatorActor {
             .map_err(|error| format!("failed to terminalize human review: {error}"))?;
         if !transitioned {
             return Err("refinement review was superseded by a newer generation".into());
+        }
+
+        if !accept {
+            self.reset_live_spec_to_revision(proposal_id, state.snapshot_revision_seq)
+                .await
+                .map_err(|error| format!("failed to revert spec to snapshot on reject: {error}"))?;
         }
 
         if let Some(s) = self.active_refinements.get_mut(&run_id) {
