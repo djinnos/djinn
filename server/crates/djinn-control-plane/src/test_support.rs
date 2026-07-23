@@ -30,7 +30,12 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
-use djinn_core::doctor::checks::retrieval::RetrievalHealthConfig;
+use djinn_core::doctor::{
+    DoctorCheckRun, INJECTION_STARVATION_NAME, RETRIEVAL_ZERO_RESULT_NAME,
+    checks::retrieval::RetrievalHealthConfig,
+};
+
+const RETRIEVAL_HEALTH_REFRESH_NAME: &str = "memory.retrieval_health_refresh";
 use djinn_core::events::EventBus;
 use djinn_core::extension_diagnostics::ExtensionLoadDiagnosticV1;
 use djinn_core::models::DjinnSettings;
@@ -132,6 +137,28 @@ impl CoordinatorOps for StubCoordinator {
         _project_id: &str,
     ) -> std::result::Result<(), String> {
         Err("stub: CoordinatorOps::trigger_dispatch_for_project not implemented".into())
+    }
+    async fn run_retrieval_health_checks(
+        &self,
+        check_names: Vec<String>,
+        _run_id: String,
+    ) -> std::result::Result<Vec<DoctorCheckRun>, String> {
+        // The MCP harness has no actor-owned retrieval source. Model the
+        // coordinator boundary, including selected-only reporting, rather than
+        // reviving the removed control-plane prefetch implementation.
+        Ok(check_names
+            .into_iter()
+            .filter_map(|check_name| match check_name.as_str() {
+                RETRIEVAL_ZERO_RESULT_NAME => Some(RETRIEVAL_ZERO_RESULT_NAME),
+                INJECTION_STARVATION_NAME => Some(INJECTION_STARVATION_NAME),
+                RETRIEVAL_HEALTH_REFRESH_NAME => Some(RETRIEVAL_HEALTH_REFRESH_NAME),
+                _ => None,
+            })
+            .map(|check_name| DoctorCheckRun {
+                check_name,
+                findings: Vec::new(),
+            })
+            .collect())
     }
     async fn start_proposal_refinement(
         &self,
