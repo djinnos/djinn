@@ -968,13 +968,27 @@ impl CoordinatorActor {
 
         // Build a readiness-enriched task description so the agent sees
         // current DoR findings.
-        let readiness_context = readiness
+        let lint_correction_context = if phase == RefinementPhase::AdvocateRevision {
+            self.active_refinements.get(run_id).and_then(|state| {
+                super::refinement_outcome::format_advocate_lint_correction_context(
+                    &state.pending_advocate_lint_violations,
+                )
+            })
+        } else {
+            None
+        };
+
+        let mut readiness_context = readiness
             .as_ref()
             .map(CoordinatorActor::format_readiness_context)
             .unwrap_or_else(|| {
                 "Current proposal head could not be resolved for shared DoR/lint readiness."
                     .to_string()
             });
+        if let Some(correction_context) = lint_correction_context {
+            readiness_context.push_str("\n\nSpec-lint correction required for this same round:\n");
+            readiness_context.push_str(&correction_context);
+        }
 
         // Retrieve the latest current-revision human reviewer feedback recorded
         // by a demand round. The helper filters to the proposal's current
