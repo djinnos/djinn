@@ -761,12 +761,13 @@ mod resolve_final_verification_tests {
         EnvironmentConfig, FinalVerificationCommand, FinalVerificationCommandGroup,
         FinalVerificationPlan, FinalVerificationSelectionRule,
     };
+    use tokio::process::Command;
     use tokio_util::sync::CancellationToken;
 
     use super::*;
     use crate::test_helpers::{
         agent_context_from_db, create_test_db, create_test_epic, create_test_project,
-        create_test_task,
+        create_test_task, test_tempdir,
     };
 
     struct Fixture {
@@ -803,6 +804,44 @@ mod resolve_final_verification_tests {
             task_id: task.id,
             task_run_id,
         }
+    }
+
+    async fn run_git(worktree: &std::path::Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(worktree)
+            .output()
+            .await
+            .expect("git command starts");
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    /// The production resolver derives selection paths from the persisted
+    /// worktree, so tests that exercise a configured worktree need a minimal
+    /// repository with a `main` merge-base rather than a placeholder path.
+    async fn initialized_worktree() -> tempfile::TempDir {
+        let worktree = test_tempdir("final-verification-worktree-");
+        run_git(worktree.path(), &["init", "-b", "main"]).await;
+        run_git(
+            worktree.path(),
+            &["config", "user.email", "test@example.com"],
+        )
+        .await;
+        run_git(
+            worktree.path(),
+            &["config", "user.name", "Final Verification Test"],
+        )
+        .await;
+        std::fs::write(worktree.path().join("README.md"), "base\n")
+            .expect("write initial worktree file");
+        run_git(worktree.path(), &["add", "README.md"]).await;
+        run_git(worktree.path(), &["commit", "-m", "initial commit"]).await;
+        worktree
     }
 
     async fn configure_final_verification_plan(fx: &Fixture) {
@@ -960,8 +999,12 @@ mod resolve_final_verification_tests {
     #[tokio::test]
     async fn configured_plan_reads_persisted_pod_workspace_path() {
         let fx = fixture(None).await;
+        let worktree = initialized_worktree().await;
         TaskRunRepository::new(fx.agent.db.clone())
-            .set_workspace_path(&fx.task_run_id, "/workspace/pod-clone")
+            .set_workspace_path(
+                &fx.task_run_id,
+                worktree.path().to_str().expect("worktree path is UTF-8"),
+            )
             .await
             .expect("first in-pod stage persists workspace path");
         configure_final_verification_plan(&fx).await;
@@ -969,25 +1012,23 @@ mod resolve_final_verification_tests {
             .await
             .expect("configured plan with persisted worktree must resolve")
             .expect("configured plan must not be a typed skip");
-        assert_eq!(
-            material.execution_request.worktree,
-            PathBuf::from("/workspace/pod-clone")
-        );
+        assert_eq!(material.execution_request.worktree, worktree.path());
     }
 
     /// A configured plan with a recorded worktree resolves full material.
     #[tokio::test]
     async fn configured_plan_with_worktree_resolves_material() {
-        let fx = fixture(Some("/workspace/run-clone")).await;
+        let worktree = initialized_worktree().await;
+        let fx = fixture(Some(
+            worktree.path().to_str().expect("worktree path is UTF-8"),
+        ))
+        .await;
         configure_final_verification_plan(&fx).await;
         let material = resolve(&fx)
             .await
             .expect("configured plan with worktree must resolve")
             .expect("configured plan must not be a typed skip");
-        assert_eq!(
-            material.execution_request.worktree,
-            PathBuf::from("/workspace/run-clone")
-        );
+        assert_eq!(material.execution_request.worktree, worktree.path());
         assert_eq!(material.required_checks, vec!["lint"]);
     }
 
