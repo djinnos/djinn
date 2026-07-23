@@ -1151,3 +1151,7 @@ mod refinement_recovery_tests;
 #[cfg(test)]
 #[path = "refinement_wake_tests.rs"]
 mod refinement_wake_tests;
+
+#[cfg(test)]
+#[path = "refinement_durable_dispatch_tests.rs"]
+mod refinement_durable_dispatch_tests;
