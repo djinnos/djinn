@@ -1,3 +1,4 @@
+// djinn:allow-oversize — legacy outcome transitions and correlated task creation remain co-located at one transaction boundary.
 // Outcome processing and lifecycle management for the refinement tribunal.
 
 use djinn_control_plane::tools::epic_ops::{
@@ -6,7 +7,9 @@ use djinn_control_plane::tools::epic_ops::{
 use djinn_control_plane::tools::proposal_readiness::{
     LatestHeadReadinessResult, evaluate_latest_head_readiness,
 };
-use djinn_core::models::{Proposal, ProposalDebateTrail, TransitionAction};
+use djinn_core::models::{
+    Proposal, ProposalDebateTrail, TaskRefinementCorrelation, TransitionAction,
+};
 use djinn_db::{
     EffectiveCreatorProvenance, ProposalRepository, TaskRepository, UserSettingsRepository,
 };
@@ -962,8 +965,7 @@ impl CoordinatorActor {
             .unwrap_or(false)
     }
 
-    /// Create a refinement task in the DB, enriched with DoR context and any
-    /// current-revision human reviewer feedback from the latest demand round.
+    /// Create a refinement task without durable intent correlation (legacy projection path).
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn create_refinement_task_with_context(
         &self,
@@ -974,6 +976,32 @@ impl CoordinatorActor {
         readiness_context: &str,
         reviewer_feedback: Option<&str>,
         attributed_user_id: Option<&str>,
+    ) -> Option<String> {
+        self.create_refinement_task_with_context_and_correlation(
+            proposal_id,
+            agent_type,
+            round,
+            against_revision_seq,
+            readiness_context,
+            reviewer_feedback,
+            attributed_user_id,
+            None,
+        )
+        .await
+    }
+
+    /// Create a refinement task and atomically attach a durable intent identity.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn create_refinement_task_with_context_and_correlation(
+        &self,
+        proposal_id: &str,
+        agent_type: &str,
+        round: i32,
+        against_revision_seq: i32,
+        readiness_context: &str,
+        reviewer_feedback: Option<&str>,
+        attributed_user_id: Option<&str>,
+        correlation: Option<&TaskRefinementCorrelation>,
     ) -> Option<String> {
         let event_bus = crate::events::event_bus_for(&self.events_tx);
         let task_repo = TaskRepository::new(self.db.clone(), event_bus.clone());
@@ -1085,26 +1113,49 @@ impl CoordinatorActor {
             }
         };
 
-        match task_repo
-            .create_in_project_with_provenance(
-                &project_id,
-                None,
-                EffectiveCreatorProvenance {
-                    explicit_user_id: Some(attributed_user_id),
-                    source_task_id: None,
-                    proposal_id: Some(proposal_id),
-                },
-                &title,
-                &description,
-                "",
-                "refinement",
-                0,
-                &owner,
-                None,
-                None,
-            )
-            .await
-        {
+        let provenance = EffectiveCreatorProvenance {
+            explicit_user_id: Some(attributed_user_id),
+            source_task_id: None,
+            proposal_id: Some(proposal_id),
+        };
+        let created = match correlation {
+            Some(correlation) => {
+                task_repo
+                    .create_in_project_with_refinement_correlation(
+                        &project_id,
+                        None,
+                        provenance,
+                        &title,
+                        &description,
+                        "",
+                        "refinement",
+                        0,
+                        &owner,
+                        None,
+                        None,
+                        correlation,
+                    )
+                    .await
+            }
+            None => {
+                task_repo
+                    .create_in_project_with_provenance(
+                        &project_id,
+                        None,
+                        provenance,
+                        &title,
+                        &description,
+                        "",
+                        "refinement",
+                        0,
+                        &owner,
+                        None,
+                        None,
+                    )
+                    .await
+            }
+        };
+        match created {
             Ok(task) => {
                 let event_bus2 = crate::events::event_bus_for(&self.events_tx);
                 let task_repo2 = TaskRepository::new(self.db.clone(), event_bus2);
