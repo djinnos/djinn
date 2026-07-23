@@ -508,6 +508,234 @@ fn cpu_in(x: &[u8]) -> Result<CpuStat, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        CgroupMode, ChildProcess, CloneIntoCgroup, Invocation, Launcher, LauncherConfig, Readiness,
+        broker::{BrokerConfig, NonceSource},
+    };
+    use std::{
+        collections::BTreeSet,
+        os::fd::RawFd,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+        thread,
+    };
+
+    #[derive(Clone)]
+    struct Counts {
+        leaves: Arc<AtomicUsize>,
+        clones: Arc<AtomicUsize>,
+        pipe_capacity: Arc<AtomicUsize>,
+        output_bytes: Arc<AtomicUsize>,
+    }
+    impl Counts {
+        fn new() -> Self {
+            Self {
+                leaves: Arc::new(AtomicUsize::new(0)),
+                clones: Arc::new(AtomicUsize::new(0)),
+                pipe_capacity: Arc::new(AtomicUsize::new(0)),
+                output_bytes: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+    }
+    struct FakeFs(Counts);
+    impl CgroupFs for FakeFs {
+        fn readiness(&self) -> Result<Readiness, Error> {
+            Ok(Readiness {
+                mode: CgroupMode::V2,
+                root_writable: true,
+                owner_uid: unsafe { libc::geteuid() },
+                delegated_controllers: BTreeSet::from(["cpu".into()]),
+            })
+        }
+        fn create_direct_child(&mut self, _: &str) -> Result<RawFd, Error> {
+            self.0.leaves.fetch_add(1, Ordering::SeqCst);
+            Ok(42)
+        }
+        fn write_leaf(&mut self, _: RawFd, _: &str, _: &str) -> Result<(), Error> {
+            Ok(())
+        }
+        fn read_leaf(&mut self, _: RawFd, file: &str) -> Result<String, Error> {
+            Ok(if file == "cgroup.events" {
+                "populated 0".into()
+            } else {
+                "usage_usec 0".into()
+            })
+        }
+        fn remove_leaf(&mut self, _: RawFd, _: &str) -> Result<(), Error> {
+            Ok(())
+        }
+    }
+    #[derive(Clone, Copy)]
+    enum Outcome {
+        Exit(u8),
+        Signal,
+    }
+    struct ForkClone {
+        counts: Counts,
+        outcome: Outcome,
+    }
+    impl CloneIntoCgroup for ForkClone {
+        fn clone_into_cgroup(
+            &mut self,
+            _: RawFd,
+            _: &Invocation,
+            _: &CommandSpec,
+        ) -> Result<ChildProcess, Error> {
+            self.counts.clones.fetch_add(1, Ordering::SeqCst);
+            let mut out = [0; 2];
+            let mut err = [0; 2];
+            assert_eq!(unsafe { libc::pipe(out.as_mut_ptr()) }, 0);
+            assert_eq!(unsafe { libc::pipe(err.as_mut_ptr()) }, 0);
+            // Do not assume a host's default pipe size: the test writes one
+            // byte more than the actual kernel-reported capacity.
+            let pipe_capacity = unsafe { libc::fcntl(out[1], libc::F_GETPIPE_SZ) };
+            assert!(pipe_capacity > 0);
+            let output_bytes = pipe_capacity as usize + 1;
+            self.counts
+                .pipe_capacity
+                .store(pipe_capacity as usize, Ordering::SeqCst);
+            self.counts
+                .output_bytes
+                .store(output_bytes, Ordering::SeqCst);
+            let mut progress = [0; 2];
+            assert_eq!(unsafe { libc::pipe(progress.as_mut_ptr()) }, 0);
+            let pid = unsafe { libc::fork() };
+            assert!(pid >= 0);
+            if pid == 0 {
+                unsafe {
+                    libc::close(out[0]);
+                    libc::close(err[0]);
+                    libc::close(progress[0]);
+                    // Fill the pipe completely, prove that a further write is
+                    // backpressured before the broker can serve CREATE, then
+                    // make that write blocking until bounded frames drain it.
+                    let bytes = vec![b'o'; output_bytes];
+                    let flags = libc::fcntl(out[1], libc::F_GETFL);
+                    assert!(flags >= 0);
+                    assert_eq!(
+                        libc::fcntl(out[1], libc::F_SETFL, flags | libc::O_NONBLOCK),
+                        0
+                    );
+                    assert_eq!(
+                        libc::write(out[1], bytes.as_ptr().cast(), pipe_capacity as usize),
+                        pipe_capacity as isize
+                    );
+                    assert_eq!(
+                        libc::write(out[1], bytes[pipe_capacity as usize..].as_ptr().cast(), 1),
+                        -1
+                    );
+                    assert_eq!(
+                        std::io::Error::last_os_error().raw_os_error(),
+                        Some(libc::EAGAIN)
+                    );
+                    assert_eq!(libc::write(progress[1], b"B".as_ptr().cast(), 1), 1);
+                    libc::close(progress[1]);
+                    assert_eq!(libc::fcntl(out[1], libc::F_SETFL, flags), 0);
+                    assert_eq!(
+                        libc::write(out[1], bytes[pipe_capacity as usize..].as_ptr().cast(), 1),
+                        1
+                    );
+                    assert_eq!(
+                        libc::write(err[1], b"separate-stderr".as_ptr().cast(), 15),
+                        15
+                    );
+                    libc::close(out[1]);
+                    libc::close(err[1]);
+                    match self.outcome {
+                        Outcome::Exit(code) => libc::_exit(code.into()),
+                        Outcome::Signal => {
+                            libc::raise(libc::SIGTERM);
+                            libc::_exit(127)
+                        }
+                    }
+                }
+            }
+            unsafe {
+                libc::close(out[1]);
+                libc::close(err[1]);
+                libc::close(progress[1]);
+                let mut backpressured = 0;
+                assert_eq!(
+                    libc::read(progress[0], (&mut backpressured as *mut u8).cast(), 1),
+                    1
+                );
+                assert_eq!(backpressured, b'B');
+                libc::close(progress[0]);
+                for fd in [out[0], err[0]] {
+                    let flags = libc::fcntl(fd, libc::F_GETFL);
+                    assert!(flags >= 0);
+                    assert_eq!(libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK), 0);
+                }
+            }
+            Ok(ChildProcess {
+                pid,
+                stdout: out[0],
+                stderr: err[0],
+            })
+        }
+    }
+    struct NoClone(Counts);
+    impl CloneIntoCgroup for NoClone {
+        fn clone_into_cgroup(
+            &mut self,
+            _: RawFd,
+            _: &Invocation,
+            _: &CommandSpec,
+        ) -> Result<ChildProcess, Error> {
+            self.0.clones.fetch_add(1, Ordering::SeqCst);
+            Err(Error::CloneDenied)
+        }
+    }
+    struct TestNonces(u8);
+    impl NonceSource for TestNonces {
+        fn nonce(&mut self) -> Result<crate::broker::ControlNonce, Error> {
+            self.0 = self.0.wrapping_add(1);
+            Ok(crate::broker::ControlNonce::from_bytes([self.0; 32]))
+        }
+    }
+    fn broker<S: CloneIntoCgroup>(counts: Counts, clone: S) -> Broker<FakeFs, S, TestNonces> {
+        let launcher = Launcher::new(
+            FakeFs(counts),
+            clone,
+            LauncherConfig::new(None, unsafe { libc::geteuid() }).unwrap(),
+        )
+        .unwrap();
+        Broker::new(
+            launcher,
+            BrokerConfig {
+                worker_pid: unsafe { libc::getpid() as u32 },
+                worker_uid: unsafe { libc::geteuid() },
+                worker_gid: unsafe { libc::getegid() },
+                pod_credential: b"test-credential".to_vec(),
+            },
+            TestNonces(0),
+        )
+        .unwrap()
+    }
+    fn command() -> CommandSpec {
+        CommandSpec {
+            program: "/bin/true".into(),
+            argv: vec![],
+            cwd: "/workspace".into(),
+            environment: vec![],
+        }
+    }
+    struct ReadyDumpability;
+    impl crate::child::WorkerDumpability for ReadyDumpability {
+        fn set_non_dumpable(&mut self) -> Result<(), Error> {
+            Ok(())
+        }
+        fn get_dumpable(&mut self) -> Result<i32, Error> {
+            Ok(0)
+        }
+    }
+    fn ready(client: &mut UnixBrokerClient) {
+        client
+            .ready(crate::child::prepare_worker_readiness(&mut ReadyDumpability).unwrap())
+            .unwrap();
+    }
 
     #[test]
     fn bounded_frame_reader_rejects_zero_oversized_and_truncated_frames() {
@@ -532,5 +760,220 @@ mod tests {
             response(&mut reader),
             Err(Error::InvalidTransportFrame)
         ));
+    }
+
+    #[test]
+    fn unix_rejections_never_create_a_leaf_or_call_the_clone_seam() {
+        let cases: Vec<(&str, Vec<u8>)> = vec![
+            ("malformed", vec![0]),
+            (
+                "unsafe-program",
+                create_wire("/bin/../sh", "/workspace", &[]),
+            ),
+            (
+                "unsafe-cwd",
+                create_wire("/bin/true", "/workspace/../escape", &[]),
+            ),
+            (
+                "forbidden-env",
+                create_wire("/bin/true", "/workspace", &[("LD_PRELOAD", "x")]),
+            ),
+            (
+                "over-budget",
+                create_wire(
+                    "/bin/true",
+                    "/workspace",
+                    &[("DJINN_VALUE", &"x".repeat(CommandSpec::MAX_BYTES))],
+                ),
+            ),
+            ("descriptor-shape", {
+                let mut x = create_wire("/bin/true", "/workspace", &[]);
+                x.extend([0, 1, 2]);
+                x
+            }),
+        ];
+        for (name, wire) in cases {
+            let counts = Counts::new();
+            let (client_stream, server_stream) = UnixStream::pair().unwrap();
+            thread::scope(|scope| {
+                let mut server =
+                    UnixBrokerServer::new(broker(counts.clone(), NoClone(counts.clone())));
+                let task = scope.spawn(move || server.serve_connection(server_stream));
+                let mut client =
+                    UnixBrokerClient::connect(client_stream, b"test-credential").unwrap();
+                ready(&mut client);
+                client
+                    .begin(Invocation {
+                        id: name.into(),
+                        fence: 7,
+                    })
+                    .unwrap();
+                let mut payload = client.control(name).unwrap();
+                payload.extend(wire);
+                assert!(matches!(
+                    client.call(CREATE, &payload),
+                    Err(Error::InvalidControl)
+                ));
+                drop(client);
+                task.join().unwrap().unwrap();
+            });
+            assert_eq!(counts.leaves.load(Ordering::SeqCst), 0, "{name}");
+            assert_eq!(counts.clones.load(Ordering::SeqCst), 0, "{name}");
+        }
+    }
+
+    #[test]
+    fn unix_wrong_binding_nonce_stdio_shape_and_unready_profile_reject_pre_exec() {
+        let counts = Counts::new();
+        let (client_stream, server_stream) = UnixStream::pair().unwrap();
+        thread::scope(|scope| {
+            let mut server = UnixBrokerServer::new(broker(counts.clone(), NoClone(counts.clone())));
+            let task = scope.spawn(move || server.serve_connection(server_stream));
+            let mut client = UnixBrokerClient::connect(client_stream, b"test-credential").unwrap();
+            assert!(matches!(
+                client.call(READY, &[0; 16]),
+                Err(Error::InvalidControl)
+            ));
+            assert!(matches!(
+                client.begin(Invocation {
+                    id: "unready".into(),
+                    fence: 1
+                }),
+                Err(Error::InvalidControl)
+            ));
+            ready(&mut client);
+            client
+                .begin(Invocation {
+                    id: "bound".into(),
+                    fence: 1,
+                })
+                .unwrap();
+            let nonce = *client.nonces.get("bound").unwrap();
+            let mut wrong_id = enc("other").unwrap();
+            wrong_id.extend(nonce.as_bytes());
+            wrong_id.extend(create_wire("/bin/true", "/workspace", &[]));
+            assert!(matches!(
+                client.call(CREATE, &wrong_id),
+                Err(Error::InvalidControl)
+            ));
+            let mut stale = client.control("bound").unwrap();
+            stale[2 + "bound".len()] ^= 1;
+            stale.extend(create_wire("/bin/true", "/workspace", &[]));
+            assert!(matches!(
+                client.call(CREATE, &stale),
+                Err(Error::InvalidControl)
+            ));
+            let mut descriptor = client.control("bound").unwrap();
+            descriptor.push(9);
+            assert!(matches!(
+                client.call(STDOUT, &descriptor),
+                Err(Error::InvalidControl)
+            ));
+            drop(client);
+            task.join().unwrap().unwrap();
+        });
+        assert_eq!(counts.leaves.load(Ordering::SeqCst), 0);
+        assert_eq!(counts.clones.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn unix_output_is_independent_bounded_and_reports_exit_or_signal() {
+        for outcome in [Outcome::Exit(23), Outcome::Signal] {
+            let counts = Counts::new();
+            let (client_stream, server_stream) = UnixStream::pair().unwrap();
+            thread::scope(|scope| {
+                let mut server = UnixBrokerServer::new(broker(
+                    counts.clone(),
+                    ForkClone {
+                        counts: counts.clone(),
+                        outcome,
+                    },
+                ));
+                let task = scope.spawn(move || server.serve_connection(server_stream));
+                let mut client =
+                    UnixBrokerClient::connect(client_stream, b"test-credential").unwrap();
+                ready(&mut client);
+                client
+                    .begin(Invocation {
+                        id: "child".into(),
+                        fence: 1,
+                    })
+                    .unwrap();
+                client.create("child", "leaf", &command()).unwrap();
+                let mut stdout = Vec::new();
+                let mut stdout_eof = false;
+                while !stdout_eof {
+                    let (frame, eof, status) = client.stdout("child").unwrap();
+                    assert!(frame.len() <= 4096);
+                    stdout.extend(frame);
+                    stdout_eof = eof;
+                    assert!(matches!(
+                        status,
+                        crate::broker::ChildStatus::Running
+                            | crate::broker::ChildStatus::Exited(_)
+                            | crate::broker::ChildStatus::Signaled(_)
+                    ));
+                }
+                let mut stderr = Vec::new();
+                let mut stderr_eof = false;
+                while !stderr_eof {
+                    let (frame, eof, status) = client.stderr("child").unwrap();
+                    assert!(frame.len() <= 4096);
+                    stderr.extend(frame);
+                    stderr_eof = eof;
+                    assert!(matches!(
+                        status,
+                        crate::broker::ChildStatus::Running
+                            | crate::broker::ChildStatus::Exited(_)
+                            | crate::broker::ChildStatus::Signaled(_)
+                    ));
+                }
+                // EOF only says that a stream has closed. Keep polling after
+                // both explicit EOFs until waitpid reports a terminal status;
+                // closing descriptors before _exit/raise is not terminal.
+                let terminal = loop {
+                    let (frame, eof, status) = client.stdout("child").unwrap();
+                    assert!(frame.is_empty());
+                    assert!(eof, "stdout EOF must remain observable while polling");
+                    if status != crate::broker::ChildStatus::Running {
+                        break status;
+                    }
+                    thread::yield_now();
+                };
+                assert!(stdout_eof);
+                assert!(stderr_eof);
+                let pipe_capacity = counts.pipe_capacity.load(Ordering::SeqCst);
+                let output_bytes = counts.output_bytes.load(Ordering::SeqCst);
+                assert!(output_bytes > pipe_capacity);
+                assert_eq!(stdout, vec![b'o'; output_bytes]);
+                assert_eq!(stderr, b"separate-stderr");
+                match outcome {
+                    Outcome::Exit(code) => {
+                        assert_eq!(terminal, crate::broker::ChildStatus::Exited(code))
+                    }
+                    Outcome::Signal => assert_eq!(
+                        terminal,
+                        crate::broker::ChildStatus::Signaled(libc::SIGTERM as u8)
+                    ),
+                }
+                drop(client);
+                task.join().unwrap().unwrap();
+            });
+            assert_eq!(counts.leaves.load(Ordering::SeqCst), 1);
+            assert_eq!(counts.clones.load(Ordering::SeqCst), 1);
+        }
+    }
+
+    fn create_wire(program: &str, cwd: &str, environment: &[(&str, &str)]) -> Vec<u8> {
+        let mut wire = enc("leaf").unwrap();
+        wire.extend(enc(program).unwrap());
+        wire.extend(enc(cwd).unwrap());
+        wire.push(0);
+        wire.push(environment.len() as u8);
+        for (key, value) in environment {
+            wire.extend(enc(key).unwrap());
+            wire.extend(enc(value).unwrap());
+        }
+        wire
     }
 }
