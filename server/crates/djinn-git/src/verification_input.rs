@@ -215,6 +215,63 @@ impl std::fmt::Display for VerificationInputUnavailable {
 pub enum VerificationInputError {
     #[error("git command failed: {0}")]
     Git(#[from] GitError),
+    #[error("verification changed paths could not resolve base ref {base_ref}")]
+    UnresolvedSelectionBaseRef { base_ref: String },
+    #[error("verification changed paths have an invalid output-only glob")]
+    InvalidSelectionOutputGlob,
+}
+
+/// Collect paths for command selection with the fingerprint's base/worktree
+/// interpretation, including tracked, untracked, and ignored inputs.
+pub async fn collect_verification_changed_paths(
+    worktree: impl AsRef<Path>,
+    config: &VerificationInputFingerprintConfig,
+) -> Result<Vec<String>, VerificationInputError> {
+    let worktree = worktree.as_ref();
+    let base_ref = match config.base_ref.trim() {
+        "" => DEFAULT_VERIFICATION_BASE_REF,
+        base_ref => base_ref,
+    };
+    let resolved_base_ref = resolve_base_ref(worktree, base_ref).await?.ok_or_else(|| {
+        VerificationInputError::UnresolvedSelectionBaseRef {
+            base_ref: base_ref.to_owned(),
+        }
+    })?;
+    let merge_base = try_merge_base(worktree, &resolved_base_ref)
+        .await?
+        .ok_or_else(|| VerificationInputError::UnresolvedSelectionBaseRef {
+            base_ref: resolved_base_ref,
+        })?;
+    let tracked = git_binary_stdout(
+        worktree,
+        vec![
+            "diff".into(),
+            "--name-only".into(),
+            "-z".into(),
+            merge_base,
+            "--".into(),
+        ],
+    )
+    .await?;
+    let mut output_builder = GlobSetBuilder::new();
+    for glob in &config.manifest.output_only_globs {
+        output_builder
+            .add(Glob::new(glob).map_err(|_| VerificationInputError::InvalidSelectionOutputGlob)?);
+    }
+    let output_only = output_builder
+        .build()
+        .map_err(|_| VerificationInputError::InvalidSelectionOutputGlob)?;
+    let mut paths = std::collections::BTreeSet::new();
+    for path in split_nul_paths_bytes(&tracked)
+        .into_iter()
+        .chain(collect_extra_paths(worktree).await?)
+    {
+        let path = lossy_path(&path);
+        if !output_only.is_match(&path) {
+            paths.insert(path);
+        }
+    }
+    Ok(paths.into_iter().collect())
 }
 pub async fn compute_verification_input_fingerprint(
     worktree: impl AsRef<Path>,

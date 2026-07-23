@@ -102,7 +102,7 @@ impl ProposalIntegritySweepSource for SweepSource {
                     &id,
                     ProposalUpdateInput {
                         title: "race fixture",
-                        body: INVALID_BODY,
+                        body: CLEAN_BODY,
                         acceptance_criteria: "[\"works\"]",
                         status: "draft",
                         superseded_by: None,
@@ -111,6 +111,16 @@ impl ProposalIntegritySweepSource for SweepSource {
                     },
                 )
                 .await?;
+            // A legacy head may predate the write-time lint gate. Replace the
+            // newly-created clean revision with invalid retained text so the
+            // next sweep must process a current, lint-failing revision.
+            djinn_db::test_support::replace_legacy_proposal_head_for_test(
+                &self.db,
+                &id,
+                INVALID_BODY,
+                "mdx",
+            )
+            .await;
             djinn_db::test_support::delete_proposal_lint_results_for_test(&self.db, &id).await;
         }
         Ok(())
@@ -132,18 +142,39 @@ impl ProposalIntegritySweepSource for SweepSource {
     }
 }
 
-async fn create(proposals: &ProposalRepository, title: &str, status: &str, body: &str) -> String {
-    proposals
+async fn create(
+    db: &djinn_db::Database,
+    proposals: &ProposalRepository,
+    title: &str,
+    status: &str,
+    body: &str,
+) -> String {
+    let proposal = proposals
         .create(ProposalCreateInput {
             title,
-            body,
+            // Repository writes reject malformed specifications. Seed a
+            // valid revision first, then use the established legacy-data test
+            // seam below when this fixture needs an invalid historical head.
+            body: CLEAN_BODY,
             acceptance_criteria: Some("[\"works\"]"),
             status: Some(status),
             body_format: Some("mdx"),
         })
         .await
-        .expect("create fixture")
-        .id
+        .expect("create fixture");
+    if body == INVALID_BODY {
+        // The production sweep is retroactive and must support heads written
+        // before lint enforcement, so use real Postgres legacy fixture data.
+        djinn_db::test_support::replace_legacy_proposal_head_for_test(
+            db,
+            &proposal.id,
+            body,
+            "mdx",
+        )
+        .await;
+        djinn_db::test_support::delete_proposal_lint_results_for_test(db, &proposal.id).await;
+    }
+    proposal.id
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -152,12 +183,12 @@ async fn proposal_integrity_sweep_proves_disabled_paging_resume_and_payload_inva
     let proposals = ProposalRepository::new(db.clone(), EventBus::noop());
     let mut active = Vec::new();
     for status in ["draft", "in_review", "approved", "building"] {
-        active.push(create(&proposals, status, status, INVALID_BODY).await);
+        active.push(create(&db, &proposals, status, status, INVALID_BODY).await);
     }
     active.sort();
     let mut terminal = Vec::new();
     for status in ["triage", "done", "rejected", "archived", "superseded"] {
-        terminal.push(create(&proposals, status, status, INVALID_BODY).await);
+        terminal.push(create(&db, &proposals, status, status, INVALID_BODY).await);
     }
 
     let heads = ProposalIntegrityRepository::new(db.clone());
@@ -274,7 +305,7 @@ async fn proposal_integrity_sweep_proves_disabled_paging_resume_and_payload_inva
 async fn proposal_integrity_sweep_discards_stale_snapshot_then_keeps_historical_finding() {
     let db = test_helpers::create_test_db();
     let proposals = ProposalRepository::new(db.clone(), EventBus::noop());
-    let id = create(&proposals, "race fixture", "draft", INVALID_BODY).await;
+    let id = create(&db, &proposals, "race fixture", "draft", INVALID_BODY).await;
     djinn_db::test_support::delete_proposal_lint_results_for_test(&db, &id).await;
     let source = source(db.clone());
     *source

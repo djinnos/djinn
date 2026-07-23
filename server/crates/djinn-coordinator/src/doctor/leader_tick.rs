@@ -11,8 +11,9 @@ use djinn_core::doctor::{
 };
 use djinn_db::repositories::doctor_finding::{KeyedDoctorFinding, severity};
 use djinn_db::{
-    DoctorFindingRepository, LintMaterializationOutcome, NewDoctorFinding, ProposalIntegrityHead,
-    ProposalIntegrityHeadPage, ProposalIntegrityRepository, ProposalRepository,
+    DoctorFinding, DoctorFindingRepository, LintMaterializationOutcome, NewDoctorFinding,
+    ProposalIntegrityHead, ProposalIntegrityHeadPage, ProposalIntegrityRepository,
+    ProposalRepository,
 };
 use serde_json::json;
 use tracing::{error, info, warn};
@@ -311,51 +312,118 @@ async fn persist_findings(
     }
 }
 
-/// Write one board-visible activity entry for a [`Finding`].
+/// Context persisted with one board-visible Doctor activity entry.
+struct DoctorActivityContext<'a> {
+    task_id: Option<String>,
+    check_name: &'a str,
+    severity: &'a str,
+    detail: Option<&'a str>,
+    entity_ids: &'a serde_json::Value,
+    evidence: &'a serde_json::Value,
+    resolver_snapshot: Option<&'a serde_json::Value>,
+    lifecycle: Option<&'a str>,
+}
+
+/// Write one board-visible activity entry for a Doctor finding.
 ///
 /// The actor on the activity entry is fixed to `coordinator` / `system` (same
-/// convention as the existing stall-timeout entries) so operators can filter
-/// the activity log by actor. The `task_id` is `None` when the finding has no
-/// entity context — this is the documented "board-wide observation" case and
-/// matches `activity_log.task_id` being nullable.
-///
-/// A failure to write the activity entry is logged but never propagated; the
-/// tick must keep moving.
-async fn record_activity_for_finding(repo: &djinn_db::TaskRepository, finding: &Finding) {
-    let task_id = finding_task_id(finding);
-    let (event_type, kind_label) = if finding.severity == FindingSeverity::Critical {
+/// convention as the existing stall-timeout entries). Failures are logged but
+/// never propagated so the tick can keep moving.
+async fn record_doctor_activity(
+    repo: &djinn_db::TaskRepository,
+    context: DoctorActivityContext<'_>,
+) {
+    let (event_type, kind_label) = if context.severity == FindingSeverity::Critical.as_str() {
         (DOCTOR_CRITICAL_FINDING_ACTIVITY, "critical")
     } else {
-        (DOCTOR_FINDING_ACTIVITY, finding.severity.as_str())
+        (DOCTOR_FINDING_ACTIVITY, context.severity)
     };
-
-    let payload = json!({
-        "check": finding.check_name,
-        "check_name": finding.check_name,
-        "severity": finding.severity.as_str(),
+    let mut payload = json!({
+        "check": context.check_name,
+        "check_name": context.check_name,
+        "severity": context.severity,
         "kind": kind_label,
-        "detail": finding.detail,
-        "entity_ids": finding.entity_ids,
-    })
-    .to_string();
+        "detail": context.detail,
+        "entity_ids": context.entity_ids,
+        "evidence": context.evidence,
+        "resolver_snapshot": context.resolver_snapshot,
+    });
+    if let Some(lifecycle) = context.lifecycle {
+        payload["lifecycle"] = json!(lifecycle);
+    }
 
     if let Err(error) = repo
         .log_activity(
-            task_id.as_deref(),
+            context.task_id.as_deref(),
             "coordinator",
             "system",
             event_type,
-            &payload,
+            &payload.to_string(),
         )
         .await
     {
         warn!(
-            check = %finding.check_name,
-            severity = %finding.severity.as_str(),
+            check = %context.check_name,
+            severity = %context.severity,
             error = %error,
             "CoordinatorActor: failed to write doctor finding activity entry; continuing"
         );
     }
+}
+
+/// Write activity for an in-memory non-retrieval finding.
+async fn record_activity_for_finding(repo: &djinn_db::TaskRepository, finding: &Finding) {
+    let entity_ids = serde_json::to_value(&finding.entity_ids).unwrap_or_else(|_| json!([]));
+    let resolver_snapshot = serde_json::to_value(&finding.resolver_snapshot).ok();
+    record_doctor_activity(
+        repo,
+        DoctorActivityContext {
+            task_id: finding_task_id(finding),
+            check_name: &finding.check_name,
+            severity: finding.severity.as_str(),
+            detail: Some(&finding.detail),
+            entity_ids: &entity_ids,
+            evidence: &finding.evidence,
+            resolver_snapshot: resolver_snapshot.as_ref(),
+            lifecycle: None,
+        },
+    )
+    .await;
+}
+
+/// Write activity for a persisted retrieval lifecycle transition. This uses the
+/// row returned by reconciliation so healthy-absence resolutions retain their
+/// original resolver evidence instead of requiring a current resolver output.
+async fn record_activity_for_persisted_finding(
+    repo: &djinn_db::TaskRepository,
+    finding: &DoctorFinding,
+    lifecycle: &str,
+) {
+    let task_id = finding
+        .entity_ids
+        .get("task_id")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| {
+            finding
+                .entity_ids
+                .get("task")
+                .and_then(serde_json::Value::as_str)
+        })
+        .map(str::to_owned);
+    record_doctor_activity(
+        repo,
+        DoctorActivityContext {
+            task_id,
+            check_name: &finding.check_name,
+            severity: &finding.severity,
+            detail: finding.detail.as_deref(),
+            entity_ids: &finding.entity_ids,
+            evidence: &finding.evidence,
+            resolver_snapshot: finding.resolver_snapshot.as_ref(),
+            lifecycle: Some(lifecycle),
+        },
+    )
+    .await;
 }
 
 /// Run the cheap doctor subset once, persisting findings and emitting metrics.
@@ -383,6 +451,41 @@ pub async fn run_cheap_doctor_checks(
 ) -> Vec<DoctorCheckRun> {
     run_cheap_doctor_checks_with_preserved_retrieval_keys(registry, db, events_tx, run_id, &[])
         .await
+}
+
+/// Execute the retrieval-refresh portion of an elected leader's cheap Doctor
+/// tick. Election is explicit so this production control flow is executable in
+/// tests rather than being compiled away under `cfg(test)`.
+///
+/// A non-leader returns before touching the source or the finding repository.
+pub async fn run_elected_retrieval_refresh_and_cheap_checks(
+    is_elected_leader: bool,
+    source: Option<&std::sync::Arc<crate::doctor::retrieval_health::RetrievalHealthSource>>,
+    registry: &DoctorRegistry,
+    db: &djinn_db::Database,
+    events_tx: &tokio::sync::broadcast::Sender<djinn_core::events::DjinnEventEnvelope>,
+    run_id: Option<&str>,
+) -> Vec<DoctorCheckRun> {
+    if !is_elected_leader {
+        return Vec::new();
+    }
+
+    let malformed_retrieval_keys = if let Some(source) = source {
+        if let Err(error) = source.refresh().await {
+            warn!(error = %error, "retrieval health refresh failed; stale resolvers suppressed");
+        }
+        crate::doctor::retrieval_health::malformed_retrieval_alarm_keys(&source.snapshot())
+    } else {
+        Vec::new()
+    };
+    run_cheap_doctor_checks_with_preserved_retrieval_keys(
+        registry,
+        db,
+        events_tx,
+        run_id,
+        &malformed_retrieval_keys,
+    )
+    .await
 }
 
 /// Run the cheap subset while retaining prior rows for malformed groups from
@@ -449,11 +552,24 @@ pub async fn run_cheap_doctor_checks_with_preserved_retrieval_keys(
         } else {
             malformed_retrieval_keys.to_vec()
         };
-        if let Err(error) = finding_repo
+        match finding_repo
             .reconcile_retrieval_findings(retrieval, &preserve_keys)
             .await
         {
-            warn!(error = %error, "CoordinatorActor: failed to reconcile retrieval doctor findings");
+            Ok(changes) => {
+                for finding in changes.created {
+                    record_activity_for_persisted_finding(&task_repo, &finding, "created").await;
+                }
+                for finding in changes.updated {
+                    record_activity_for_persisted_finding(&task_repo, &finding, "updated").await;
+                }
+                for finding in changes.resolved {
+                    record_activity_for_persisted_finding(&task_repo, &finding, "resolved").await;
+                }
+            }
+            Err(error) => {
+                warn!(error = %error, "CoordinatorActor: failed to reconcile retrieval doctor findings");
+            }
         }
     }
     for run in &runs {
@@ -465,16 +581,18 @@ pub async fn run_cheap_doctor_checks_with_preserved_retrieval_keys(
             persist_findings(&finding_repo, run_id, &run.findings).await;
         }
 
-        for finding in &run.findings {
-            // This check is a dry-run: durable doctor evidence is allowed, but
-            // observing an orphan must not create task activity.
-            if finding.check_name == crate::doctor::CLOSED_PARENT_OPEN_CHILDREN_CHECK_NAME {
-                continue;
+        if !is_retrieval_check(check_name) {
+            for finding in &run.findings {
+                // This check is a dry-run: durable doctor evidence is allowed, but
+                // observing an orphan must not create task activity.
+                if finding.check_name == crate::doctor::CLOSED_PARENT_OPEN_CHILDREN_CHECK_NAME {
+                    continue;
+                }
+                // Every finding gets a board activity entry — Critical surfaces
+                // in the dedicated lane; Warn/Info still surface in the
+                // generic doctor-finding lane for observability.
+                record_activity_for_finding(&task_repo, finding).await;
             }
-            // Every finding gets a board activity entry — Critical surfaces
-            // in the dedicated lane; Warn/Info still surface in the
-            // generic doctor-finding lane for observability.
-            record_activity_for_finding(&task_repo, finding).await;
         }
 
         let elapsed = run_started.elapsed();
@@ -502,6 +620,10 @@ pub async fn run_cheap_doctor_checks_with_preserved_retrieval_keys(
 #[cfg(test)]
 #[path = "leader_tick_mixed_snapshot_tests.rs"]
 mod leader_tick_mixed_snapshot_tests;
+
+#[cfg(test)]
+#[path = "leader_tick_retrieval_activity_tests.rs"]
+mod leader_tick_retrieval_activity_tests;
 
 #[cfg(test)]
 mod tests {
@@ -592,107 +714,6 @@ mod tests {
                     "board-wide critical divergence",
                 )
                 .with_evidence(json!({"sample": 1})),
-            ])
-        }
-    }
-
-    /// Deterministic source/repository seam for the retrieval lifecycle
-    /// regression. Phase 0 alarms, phase 1 is a whole-source failure, and
-    /// phase 2 is a healthy non-alarming refresh.
-    struct LifecycleRetrievalCheck {
-        name: &'static str,
-        phase: Arc<AtomicUsize>,
-        resolver_invocations: Arc<AtomicUsize>,
-    }
-
-    impl LifecycleRetrievalCheck {
-        fn new(
-            name: &'static str,
-            phase: Arc<AtomicUsize>,
-            resolver_invocations: Arc<AtomicUsize>,
-        ) -> Self {
-            Self {
-                name,
-                phase,
-                resolver_invocations,
-            }
-        }
-    }
-
-    impl DoctorCheck for LifecycleRetrievalCheck {
-        fn name(&self) -> &'static str {
-            self.name
-        }
-
-        fn description(&self) -> &'static str {
-            "Injected retrieval source lifecycle test check"
-        }
-
-        fn cadence(&self) -> DoctorCheckCadence {
-            DoctorCheckCadence::Cheap
-        }
-
-        fn run(&self) -> DoctorResult<Vec<Finding>> {
-            let phase = self.phase.load(Ordering::SeqCst);
-            if self.name == "memory.retrieval_health_refresh" {
-                return if phase == 1 {
-                    let evidence = json!({
-                        "error_class": "retrieval_health_refresh_failed",
-                        "attempted_at": "2026-01-01T01:02:00Z",
-                        "last_success_at": "2026-01-01T01:00:00Z",
-                        "last_success_age_seconds": 120,
-                        "detail": "injected repository refresh failure",
-                    });
-                    Ok(vec![
-                        Finding::new(
-                            FindingSeverity::Error,
-                            self.name,
-                            ResolverSnapshot::new(
-                                "retrieval_health_refresh",
-                                evidence.clone(),
-                                json!({"healthy": false}),
-                            ),
-                            "injected repository refresh failure",
-                        )
-                        .with_evidence(evidence),
-                    ])
-                } else {
-                    Ok(Vec::new())
-                };
-            }
-
-            // A whole-source failure skips both retrieval resolvers.
-            if phase == 1 {
-                return Ok(Vec::new());
-            }
-            self.resolver_invocations.fetch_add(1, Ordering::SeqCst);
-            if phase == 2 {
-                return Ok(Vec::new());
-            }
-
-            let (finding_key, entry_point) = if self.name == "memory.retrieval_zero_result" {
-                ("project-a:dispatch", "dispatch")
-            } else {
-                ("project-a:load_knowledge_context", "load_knowledge_context")
-            };
-            Ok(vec![
-                Finding::new(
-                    FindingSeverity::Error,
-                    self.name,
-                    ResolverSnapshot::new(
-                        "retrieval_alarm",
-                        json!({"refresh_timestamp": "2026-01-01T01:00:00Z"}),
-                        json!({"alarming": true}),
-                    ),
-                    format!("{entry_point} retrieval alarm"),
-                )
-                .with_entity_id("finding_key", finding_key)
-                .with_entity_id("project_id", "project-a")
-                .with_entity_id("entry_point", entry_point)
-                .with_evidence(json!({
-                    "refresh_timestamp": "2026-01-01T01:00:00Z",
-                    "entry_point": entry_point,
-                })),
             ])
         }
     }
@@ -1216,126 +1237,42 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn whole_refresh_failure_preserves_keyed_alarms_and_recovers() {
-        let _ = djinn_telemetry::init();
+    async fn non_leader_retrieval_tick_neither_refreshes_nor_persists_checks() {
         let db = fresh_db();
         let (events_tx, _events_rx) = broadcast::channel(16);
-        let phase = Arc::new(AtomicUsize::new(0));
-        let zero_resolver_invocations = Arc::new(AtomicUsize::new(0));
-        let starvation_resolver_invocations = Arc::new(AtomicUsize::new(0));
+        let source = Arc::new(
+            crate::doctor::retrieval_health::RetrievalHealthSource::failing_initial_refresh_for_test(
+                djinn_core::models::KnowledgeInjectionConfig::default(),
+            ),
+        );
         let registry = DoctorRegistry::new();
-        djinn_core::doctor::register(
-            &registry,
-            LifecycleRetrievalCheck::new(
-                "memory.retrieval_zero_result",
-                Arc::clone(&phase),
-                Arc::clone(&zero_resolver_invocations),
-            ),
-        );
-        djinn_core::doctor::register(
-            &registry,
-            LifecycleRetrievalCheck::new(
-                "memory.injection_starvation",
-                Arc::clone(&phase),
-                Arc::clone(&starvation_resolver_invocations),
-            ),
-        );
-        djinn_core::doctor::register(
-            &registry,
-            LifecycleRetrievalCheck::new(
-                "memory.retrieval_health_refresh",
-                Arc::clone(&phase),
-                Arc::new(AtomicUsize::new(0)),
-            ),
-        );
+        crate::doctor::register_retrieval_health_checks(&registry, Arc::clone(&source));
 
-        // A healthy snapshot automatically creates one keyed alarm per
-        // resolver. Keep their complete persisted forms for byte-for-byte
-        // comparison after the injected whole-refresh failure.
-        run_cheap_doctor_checks(&registry, &db, &events_tx, Some("healthy-alarming")).await;
-        let repo = DoctorFindingRepository::new(db.clone());
-        let zero_before = repo
-            .latest_for_check("memory.retrieval_zero_result")
-            .await
-            .expect("zero-result row")
-            .expect("zero-result created");
-        let starvation_before = repo
-            .latest_for_check("memory.injection_starvation")
-            .await
-            .expect("starvation row")
-            .expect("starvation created");
-        assert_eq!(zero_before.status, "active");
-        assert_eq!(starvation_before.status, "active");
-        assert_eq!(zero_resolver_invocations.load(Ordering::SeqCst), 1);
-        assert_eq!(starvation_resolver_invocations.load(Ordering::SeqCst), 1);
+        let runs = run_elected_retrieval_refresh_and_cheap_checks(
+            false,
+            Some(&source),
+            &registry,
+            &db,
+            &events_tx,
+            Some("non-leader"),
+        )
+        .await;
 
-        // The injected repository/source failure emits exactly the structured
-        // refresh error, without invoking either resolver or mutating either
-        // existing active alarm (including observed_at and refresh evidence).
-        phase.store(1, Ordering::SeqCst);
-        run_cheap_doctor_checks(&registry, &db, &events_tx, Some("refresh-failure")).await;
-        assert_eq!(zero_resolver_invocations.load(Ordering::SeqCst), 1);
-        assert_eq!(starvation_resolver_invocations.load(Ordering::SeqCst), 1);
-        assert_eq!(
-            repo.get(&zero_before.id).await.expect("reload zero"),
-            Some(zero_before.clone()),
-            "whole refresh failure must preserve zero-result finding byte-for-byte",
+        assert!(
+            runs.is_empty(),
+            "a non-leader must not evaluate Cheap checks"
         );
-        assert_eq!(
-            repo.get(&starvation_before.id)
+        assert!(
+            !source.has_attempted_refresh(),
+            "a non-leader must not touch the retrieval source"
+        );
+        assert!(
+            DoctorFindingRepository::new(db)
+                .list_recent(Default::default())
                 .await
-                .expect("reload starvation"),
-            Some(starvation_before.clone()),
-            "whole refresh failure must preserve starvation finding byte-for-byte",
-        );
-        let refresh_rows = repo
-            .list_recent(djinn_db::RecentDoctorFindings {
-                check_name: Some("memory.retrieval_health_refresh".to_owned()),
-                ..Default::default()
-            })
-            .await
-            .expect("refresh rows");
-        assert_eq!(refresh_rows.len(), 1);
-        assert_eq!(refresh_rows[0].status, "active");
-        assert_eq!(refresh_rows[0].severity, "error");
-        assert_eq!(
-            refresh_rows[0].evidence["error_class"],
-            "retrieval_health_refresh_failed"
-        );
-        assert_eq!(
-            refresh_rows[0].evidence["detail"],
-            "injected repository refresh failure"
-        );
-
-        // A healthy non-alarming refresh evaluates both resolvers again and
-        // reconciles all three active keys to resolved, including refresh.
-        phase.store(2, Ordering::SeqCst);
-        run_cheap_doctor_checks(&registry, &db, &events_tx, Some("healthy-recovery")).await;
-        assert_eq!(zero_resolver_invocations.load(Ordering::SeqCst), 2);
-        assert_eq!(starvation_resolver_invocations.load(Ordering::SeqCst), 2);
-        assert_eq!(
-            repo.get(&zero_before.id)
-                .await
-                .expect("reloaded resolved zero")
-                .expect("zero row remains")
-                .status,
-            "resolved"
-        );
-        assert_eq!(
-            repo.get(&starvation_before.id)
-                .await
-                .expect("reloaded resolved starvation")
-                .expect("starvation row remains")
-                .status,
-            "resolved"
-        );
-        assert_eq!(
-            repo.get(&refresh_rows[0].id)
-                .await
-                .expect("reloaded resolved refresh")
-                .expect("refresh row remains")
-                .status,
-            "resolved"
+                .expect("list findings")
+                .is_empty(),
+            "a non-leader must not persist retrieval findings"
         );
     }
 }

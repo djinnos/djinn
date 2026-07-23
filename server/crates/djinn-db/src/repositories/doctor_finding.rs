@@ -56,6 +56,18 @@ pub struct KeyedDoctorFinding {
     pub finding: NewDoctorFinding,
 }
 
+/// Lifecycle changes made by one retrieval-health reconciliation.
+///
+/// Retrieval findings have stable active keys, so callers need the complete
+/// rows for both upserts and healthy-absence resolutions to emit an accurate
+/// audit/activity trail.
+#[derive(Clone, Debug, Default)]
+pub struct RetrievalFindingReconciliation {
+    pub created: Vec<DoctorFinding>,
+    pub updated: Vec<DoctorFinding>,
+    pub resolved: Vec<DoctorFinding>,
+}
+
 /// A persisted doctor finding — one row of `doctor_findings`.
 ///
 /// This is the durable shape, not the in-memory `Finding` from
@@ -237,23 +249,35 @@ impl DoctorFindingRepository {
     }
 
     /// Reconcile retrieval-health findings; preserved keys are not mutated.
+    /// Returns every lifecycle transition so callers can record an activity
+    /// entry for creates, updates, and healthy-absence resolutions.
     pub async fn reconcile_retrieval_findings(
         &self,
         findings: Vec<KeyedDoctorFinding>,
         preserve_keys: &[String],
-    ) -> Result<Vec<DoctorFinding>> {
+    ) -> Result<RetrievalFindingReconciliation> {
         self.db.ensure_initialized().await?;
         let mut emitted = Vec::new();
-        let mut rows = Vec::new();
+        let mut reconciliation = RetrievalFindingReconciliation::default();
         for keyed in findings {
             emitted.push(keyed.active_key.clone());
             let n = keyed.finding;
-            let row = sqlx::query(&format!(r#"INSERT INTO doctor_findings (id,run_id,check_name,severity,entity_ids,evidence,resolver_snapshot,detail,active_key,status) VALUES ($1,$2,$3,$4,$5::jsonb,$6::jsonb,$7::jsonb,$8,$9,'active') ON CONFLICT (check_name,active_key) WHERE active_key IS NOT NULL DO UPDATE SET run_id=EXCLUDED.run_id,severity=EXCLUDED.severity,entity_ids=EXCLUDED.entity_ids,evidence=EXCLUDED.evidence,resolver_snapshot=EXCLUDED.resolver_snapshot,detail=EXCLUDED.detail,status='active',observed_at=to_char(now() AT TIME ZONE 'utc','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') RETURNING {SELECT_COLS}"#))
+            let row = sqlx::query(&format!(r#"INSERT INTO doctor_findings (id,run_id,check_name,severity,entity_ids,evidence,resolver_snapshot,detail,active_key,status) VALUES ($1,$2,$3,$4,$5::jsonb,$6::jsonb,$7::jsonb,$8,$9,'active') ON CONFLICT (check_name,active_key) WHERE active_key IS NOT NULL DO UPDATE SET run_id=EXCLUDED.run_id,severity=EXCLUDED.severity,entity_ids=EXCLUDED.entity_ids,evidence=EXCLUDED.evidence,resolver_snapshot=EXCLUDED.resolver_snapshot,detail=EXCLUDED.detail,status='active',observed_at=to_char(now() AT TIME ZONE 'utc','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') RETURNING {SELECT_COLS}, (xmax = 0) AS created"#))
                 .bind(Uuid::now_v7().to_string()).bind(n.run_id.as_deref()).bind(&n.check_name).bind(&n.severity).bind(&n.entity_ids).bind(&n.evidence).bind(n.resolver_snapshot.as_ref()).bind(n.detail.as_deref()).bind(&keyed.active_key).fetch_one(self.db.pool()).await?;
-            rows.push(row_to_finding(&row));
+            let finding = row_to_finding(&row);
+            if row.get::<bool, _>("created") {
+                reconciliation.created.push(finding);
+            } else {
+                reconciliation.updated.push(finding);
+            }
         }
-        sqlx::query(r#"UPDATE doctor_findings SET status='resolved',observed_at=to_char(now() AT TIME ZONE 'utc','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') WHERE status='active' AND check_name IN ('memory.retrieval_zero_result','memory.injection_starvation','memory.retrieval_health_refresh') AND NOT (active_key=ANY($1)) AND NOT (active_key=ANY($2))"#).bind(&emitted).bind(preserve_keys).execute(self.db.pool()).await?;
-        Ok(rows)
+        let resolved = sqlx::query(&format!(r#"UPDATE doctor_findings SET status='resolved',observed_at=to_char(now() AT TIME ZONE 'utc','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') WHERE status='active' AND check_name IN ('memory.retrieval_zero_result','memory.injection_starvation','memory.retrieval_health_refresh') AND NOT (active_key=ANY($1)) AND NOT (active_key=ANY($2)) RETURNING {SELECT_COLS}"#))
+            .bind(&emitted)
+            .bind(preserve_keys)
+            .fetch_all(self.db.pool())
+            .await?;
+        reconciliation.resolved = resolved.iter().map(row_to_finding).collect();
+        Ok(reconciliation)
     }
 
     pub async fn active_retrieval_alarm_keys(&self) -> Result<Vec<String>> {
@@ -798,9 +822,11 @@ mod tests {
             )
             .await
             .expect("seed active retrieval alarms");
-        assert_eq!(initial.len(), 2);
-        let zero_before = initial[0].clone();
-        let starvation_before = initial[1].clone();
+        assert_eq!(initial.created.len(), 2);
+        assert!(initial.updated.is_empty());
+        assert!(initial.resolved.is_empty());
+        let zero_before = initial.created[0].clone();
+        let starvation_before = initial.created[1].clone();
 
         // A whole refresh failure only reconciles the refresh-error key and
         // explicitly preserves every active retrieval alarm key.
@@ -834,10 +860,12 @@ mod tests {
             )
             .await
             .expect("persist refresh failure");
-        assert_eq!(refresh.len(), 1);
-        assert_eq!(refresh[0].severity, severity::ERROR);
+        assert_eq!(refresh.created.len(), 1);
+        assert!(refresh.updated.is_empty());
+        assert!(refresh.resolved.is_empty());
+        assert_eq!(refresh.created[0].severity, severity::ERROR);
         assert_eq!(
-            refresh[0].evidence["error_class"],
+            refresh.created[0].evidence["error_class"],
             "retrieval_health_refresh_failed"
         );
         assert_eq!(repo.get(&zero_before.id).await.unwrap(), Some(zero_before));
@@ -848,10 +876,12 @@ mod tests {
 
         // A later healthy refresh emits no retrieval findings, resolving both
         // prior alarms and the refresh error through the same keyed path.
-        repo.reconcile_retrieval_findings(Vec::new(), &[])
+        let resolved = repo
+            .reconcile_retrieval_findings(Vec::new(), &[])
             .await
             .expect("resolve healthy absences");
-        for row in initial.iter().chain(refresh.iter()) {
+        assert_eq!(resolved.resolved.len(), 3);
+        for row in initial.created.iter().chain(refresh.created.iter()) {
             assert_eq!(
                 repo.get(&row.id)
                     .await
