@@ -141,6 +141,7 @@ pub(crate) mod refinement;
 pub(crate) mod refinement_dispatch;
 #[cfg(test)]
 mod refinement_e2e_evidence_regression_tests;
+mod refinement_lint_evidence;
 mod refinement_objections;
 mod refinement_outcome;
 mod refinement_recovery;
