@@ -214,12 +214,12 @@ pub(super) async fn protocol_violations_section(pool: &sqlx::PgPool) -> serde_js
     })
 }
 
-/// Nullable-era creation attribution that cannot safely be dispatched.
+/// Creation provenance that cannot safely be dispatched.
 ///
-/// This is independent of stranded-ready age: updating a legacy task must not
-/// hide its missing creator until it crosses an age threshold. The task creator
-/// is the durable creation-provenance pointer; NULL is a legacy row, while a
-/// dangling pointer is unresolvable provenance from an import or restore.
+/// This is independent of stranded-ready age: updating a task with invalid
+/// provenance must not hide it until it crosses an age threshold. The task
+/// creator is a required durable creation-provenance pointer; a dangling
+/// pointer is unresolvable provenance from an import or restore.
 pub(super) async fn attribution_findings_section(pool: &sqlx::PgPool) -> serde_json::Value {
     let rows = sqlx::query(
         r#"SELECT t.id, t.short_id, t.title, t.status, t.created_at, t.updated_at,
@@ -227,7 +227,7 @@ pub(super) async fn attribution_findings_section(pool: &sqlx::PgPool) -> serde_j
            FROM tasks t
            LEFT JOIN users u ON u.id = t.created_by_user_id
            WHERE t.status NOT IN ('closed', 'approved')
-             AND (t.created_by_user_id IS NULL OR u.id IS NULL)
+             AND u.id IS NULL
            ORDER BY t.updated_at DESC
            LIMIT $1"#,
     )
@@ -239,17 +239,12 @@ pub(super) async fn attribution_findings_section(pool: &sqlx::PgPool) -> serde_j
     let findings: Vec<serde_json::Value> = rows
         .into_iter()
         .map(|row| {
-            let creator_user_id: Option<String> = row.try_get("created_by_user_id").ok().flatten();
+            let creator_user_id: String = row.get("created_by_user_id");
             let creator_resolved = row
                 .try_get::<Option<String>, _>("resolved_creator_user_id")
                 .ok()
                 .flatten()
                 .is_some();
-            let reason = if creator_user_id.is_none() {
-                "legacy_null_creator"
-            } else {
-                "unresolvable_creation_provenance"
-            };
             serde_json::json!({
                 "id": row.get::<String, _>("id"),
                 "short_id": row.get::<String, _>("short_id"),
@@ -257,7 +252,7 @@ pub(super) async fn attribution_findings_section(pool: &sqlx::PgPool) -> serde_j
                 "status": row.get::<String, _>("status"),
                 "created_at": row.get::<String, _>("created_at"),
                 "updated_at": row.get::<String, _>("updated_at"),
-                "reason": reason,
+                "reason": "unresolvable_creation_provenance",
                 "gate_verdict": "blocked",
                 "dispatchable": false,
                 "creation_provenance": {
@@ -411,14 +406,15 @@ pub(super) async fn stranded_ready_section(pool: &sqlx::PgPool) -> serde_json::V
             }
 
             // Owner-credential-blocked: the creator's credentials are all
-            // revoked and no org-shared fallback is available. A missing
-            // creator is never an implicit credential-capable identity.
-            let created_by: Option<String> = row.try_get("created_by_user_id").ok().flatten();
+            // revoked and no org-shared fallback is available. Task creators
+            // are required by the catalog contract.
+            let _created_by: String = row.get("created_by_user_id");
             let has_active_credential: bool = row.try_get("has_active_credential").unwrap_or(false);
             let has_owner_credential: bool = row.try_get("has_owner_credential").unwrap_or(false);
-            let credential_available = created_by.is_some() && has_active_credential;
-            let credential_blocked =
-                created_by.is_some() && !has_active_credential && has_owner_credential;
+            // An active credential is either the creator's private credential
+            // or an active org-shared credential (owner_user_id IS NULL).
+            let credential_available = has_active_credential;
+            let credential_blocked = !has_active_credential && has_owner_credential;
             if credential_blocked {
                 return None;
             }
@@ -459,9 +455,6 @@ pub(super) async fn stranded_ready_section(pool: &sqlx::PgPool) -> serde_json::V
             // ── Model / image readiness evidence ───────────────────────────
             let inflight_model_id: Option<String> = row.try_get("inflight_model_id").ok().flatten();
             let mut reasons: Vec<&str> = Vec::new();
-            if created_by.is_none() {
-                reasons.push("legacy_null_creator");
-            }
             let image_ready = match inflight_model_id.as_deref() {
                 // No model chosen yet — nothing model-specific to block on.
                 None => true,
