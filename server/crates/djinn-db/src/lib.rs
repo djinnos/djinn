@@ -100,8 +100,8 @@ pub use repositories::{
     dispatch_pause::{DispatchPauseMutation, DispatchPauseRepository, DispatchPauseTarget},
     dispatch_state::{DispatchStateRecord, DispatchStateRepository, DispatchStateUpsert},
     doctor_finding::{
-        DoctorFinding, DoctorFindingRepository, MAX_RECENT_FINDINGS, NewDoctorFinding,
-        RecentDoctorFindings, severity as doctor_severity,
+        DeduplicatedDoctorFindingInsert, DoctorFinding, DoctorFindingRepository,
+        MAX_RECENT_FINDINGS, NewDoctorFinding, RecentDoctorFindings, severity as doctor_severity,
     },
     epic::{
         EpicBlockerRef, EpicCountQuery, EpicCreateInput, EpicListQuery, EpicListResult,
@@ -187,6 +187,10 @@ pub use repositories::{
         ProposalDebateTrailCreateInput, ProposalFeedbackCreateInput, ProposalListQuery,
         ProposalListResult, ProposalListSummaryRow, ProposalMemoryRef, ProposalRef,
         ProposalRepository, ProposalUpdateInput,
+    },
+    proposal_integrity::{
+        LintMaterializationOutcome, MAX_PROPOSAL_INTEGRITY_PAGE_SIZE, ProposalIntegrityHead,
+        ProposalIntegrityHeadPage, ProposalIntegrityRepository,
     },
     refinement_run::{
         AcknowledgeRefinementTaskMaterializationRequest, AdmitRefinementRunRequest,

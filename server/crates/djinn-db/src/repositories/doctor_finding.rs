@@ -102,6 +102,16 @@ pub struct DoctorFinding {
     pub detail: Option<String>,
 }
 
+/// Result of an immutable, deduplication-keyed finding insert.
+///
+/// Unlike retrieval reconciliation, this operation never updates an existing
+/// row: a repeat key preserves the original evidence exactly.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DeduplicatedDoctorFindingInsert {
+    Inserted(Box<DoctorFinding>),
+    AlreadyPresent,
+}
+
 /// Input for inserting a single finding. `id` and `created_at` are stamped
 /// by the repository so callers do not need to generate them. `run_id` is
 /// optional and may be `None` for ad-hoc inserts.
@@ -184,6 +194,44 @@ impl DoctorFindingRepository {
         // without requiring the caller to pass a timestamp.
         self.get(&id).await?.ok_or_else(|| {
             crate::Error::Internal("doctor finding vanished after insert".to_owned())
+        })
+    }
+
+    /// Insert a finding once for a non-null immutable deduplication key.
+    ///
+    /// Migration 137 supplies the nullable unique index used here. `DO NOTHING`
+    /// is intentional: proposal-integrity findings are historical evidence, so
+    /// a rerun must not replace the first observation's evidence or timestamp.
+    pub async fn insert_ignore_duplicate(
+        &self,
+        new: NewDoctorFinding,
+        deduplication_key: &str,
+    ) -> Result<DeduplicatedDoctorFindingInsert> {
+        self.db.ensure_initialized().await?;
+        let row = sqlx::query(&format!(
+            r#"INSERT INTO doctor_findings
+                 (id, run_id, check_name, severity, entity_ids, evidence,
+                  resolver_snapshot, detail, deduplication_key)
+               VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8, $9)
+               ON CONFLICT (deduplication_key) WHERE deduplication_key IS NOT NULL
+               DO NOTHING
+               RETURNING {SELECT_COLS}"#
+        ))
+        .bind(Uuid::now_v7().to_string())
+        .bind(new.run_id.as_deref())
+        .bind(&new.check_name)
+        .bind(&new.severity)
+        .bind(&new.entity_ids)
+        .bind(&new.evidence)
+        .bind(new.resolver_snapshot.as_ref())
+        .bind(new.detail.as_deref())
+        .bind(deduplication_key)
+        .fetch_optional(self.db.pool())
+        .await?;
+
+        Ok(match row {
+            Some(row) => DeduplicatedDoctorFindingInsert::Inserted(Box::new(row_to_finding(&row))),
+            None => DeduplicatedDoctorFindingInsert::AlreadyPresent,
         })
     }
 
@@ -831,5 +879,64 @@ mod tests {
                 "resolved"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod deduplication_tests {
+    use super::*;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn immutable_deduplication_key_keeps_original_evidence() {
+        let repo = DoctorFindingRepository::new(Database::open_in_memory().unwrap());
+        let first = repo
+            .insert_ignore_duplicate(
+                NewDoctorFinding {
+                    run_id: Some("first".into()),
+                    check_name: "proposal_spec_integrity_v1".into(),
+                    severity: severity::ERROR.into(),
+                    entity_ids: serde_json::json!(["proposal-1"]),
+                    evidence: serde_json::json!({"body_sha256": "first"}),
+                    resolver_snapshot: None,
+                    detail: Some("first evidence".into()),
+                },
+                "proposal_spec_integrity_v1:proposal-1:1:v1",
+            )
+            .await
+            .unwrap();
+        let DeduplicatedDoctorFindingInsert::Inserted(first) = first else {
+            panic!("first insert must create a row");
+        };
+        let repeated = repo
+            .insert_ignore_duplicate(
+                NewDoctorFinding {
+                    run_id: Some("second".into()),
+                    check_name: "proposal_spec_integrity_v1".into(),
+                    severity: severity::WARN.into(),
+                    entity_ids: serde_json::json!(["proposal-2"]),
+                    evidence: serde_json::json!({"body_sha256": "second"}),
+                    resolver_snapshot: None,
+                    detail: Some("replacement evidence".into()),
+                },
+                "proposal_spec_integrity_v1:proposal-1:1:v1",
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            repeated,
+            DeduplicatedDoctorFindingInsert::AlreadyPresent
+        ));
+        assert_eq!(
+            repo.count_for_check("proposal_spec_integrity_v1")
+                .await
+                .unwrap(),
+            1
+        );
+        let original = repo.get(&first.id).await.unwrap().unwrap();
+        assert_eq!(
+            original.evidence,
+            serde_json::json!({"body_sha256": "first"})
+        );
+        assert_eq!(original.detail.as_deref(), Some("first evidence"));
     }
 }
