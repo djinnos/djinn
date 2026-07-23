@@ -17,8 +17,8 @@ use std::time::Duration;
 use djinn_core::clock::{Clock, SystemClock};
 use djinn_supervisor::services::{
     LeaseAbandonRequest, LeaseBindRequest, LeaseDeadlines, LeaseFencingToken, LeaseGrantRequest,
-    LeaseIdentity, LeaseQueueRequest, LeaseReleaseRequest, LeaseResult, LeaseState, LeaseStatusRequest,
-    SupervisorServices, TaskInvocationLeaseIdentity,
+    LeaseIdentity, LeaseQueueRequest, LeaseReleaseRequest, LeaseResult, LeaseState,
+    LeaseStatusRequest, SupervisorServices, TaskInvocationLeaseIdentity,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -276,18 +276,31 @@ impl LeaseInvocationRunner {
                         {
                             break 'invocation terminal;
                         }
-                        match self.services.bind_lease_pod(LeaseBindRequest {
-                            identity: lease.clone(),
-                            fencing_token: token.clone(),
-                            pod_uid: config.pod_uid.clone(),
-                        }).await {
+                        match self
+                            .services
+                            .bind_lease_pod(LeaseBindRequest {
+                                identity: lease.clone(),
+                                fencing_token: token.clone(),
+                                pod_uid: config.pod_uid.clone(),
+                            })
+                            .await
+                        {
                             LeaseResult::Bound(status)
                                 if status.fencing_token.as_ref() == Some(&token)
-                                    && status.pod_uid.as_deref() == Some(config.pod_uid.as_str()) => {
-                                child.fenced_lift(&token).map_err(LeaseInvocationError::Launcher)?;
+                                    && status.pod_uid.as_deref()
+                                        == Some(config.pod_uid.as_str()) =>
+                            {
+                                child
+                                    .fenced_lift(&token)
+                                    .map_err(LeaseInvocationError::Launcher)?;
                                 fence = Some(token);
                             }
-                            other => lease_failure(other, &mut deadline, &mut credit_used, &mut lease_error),
+                            other => lease_failure(
+                                other,
+                                &mut deadline,
+                                &mut credit_used,
+                                &mut lease_error,
+                            ),
                         }
                     }
                     LeaseResult::LeaseUnavailable => {

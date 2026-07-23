@@ -227,10 +227,12 @@ impl ImageRepository {
     /// this image.
     pub async fn list_service_presets(&self, image_id: &str) -> Result<Vec<String>> {
         self.db.ensure_initialized().await?;
-        let rows = sqlx::query("SELECT preset_id FROM image_service_presets WHERE image_id = $1")
-            .bind(image_id)
-            .fetch_all(self.db.pool())
-            .await?;
+        let rows = sqlx::query(
+            "SELECT preset_id FROM image_service_presets WHERE image_id = $1 ORDER BY preset_id",
+        )
+        .bind(image_id)
+        .fetch_all(self.db.pool())
+        .await?;
         Ok(rows
             .iter()
             .map(|r| r.get::<String, _>("preset_id"))

@@ -500,6 +500,7 @@ pub(crate) fn reuse_material_with_fingerprint_config(
         target: "test-target".into(),
         features: vec![],
         allowlisted_environment: Default::default(),
+        services: vec![],
     };
     FinalVerificationResolvedMaterial {
         execution_request: FinalVerificationExecutionRequest {

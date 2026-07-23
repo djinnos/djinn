@@ -85,6 +85,126 @@ impl ProcessHandle for ScriptedHandle {
     }
 }
 
+/// Remote-child-shaped launcher double: unlike `ScriptedLauncher`, it never
+/// calls `Command::spawn`; output and lifecycle arrive through broker handles.
+#[derive(Clone)]
+struct BrokerBackedLauncher {
+    state: Arc<Mutex<BrokerBackedState>>,
+    cpu_usage_usec: u64,
+}
+
+struct BrokerBackedState {
+    identities: Vec<TaskInvocationLeaseIdentity>,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    status: Option<std::process::ExitStatus>,
+    kills: usize,
+    empties: usize,
+    cleanups: usize,
+    samples: usize,
+}
+
+impl BrokerBackedLauncher {
+    fn exited(stdout: &[u8], stderr: &[u8], code: i32) -> Self {
+        use std::os::unix::process::ExitStatusExt;
+        Self {
+            state: Arc::new(Mutex::new(BrokerBackedState {
+                identities: Vec::new(),
+                stdout: stdout.to_vec(),
+                stderr: stderr.to_vec(),
+                status: Some(std::process::ExitStatus::from_raw(code << 8)),
+                kills: 0,
+                empties: 0,
+                cleanups: 0,
+                samples: 0,
+            })),
+            cpu_usage_usec: 0,
+        }
+    }
+
+    fn running(cpu_usage_usec: u64) -> Self {
+        Self {
+            state: Arc::new(Mutex::new(BrokerBackedState {
+                identities: Vec::new(),
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+                status: None,
+                kills: 0,
+                empties: 0,
+                cleanups: 0,
+                samples: 0,
+            })),
+            cpu_usage_usec,
+        }
+    }
+}
+
+impl CgroupLauncherClient for BrokerBackedLauncher {
+    fn launch(
+        &self,
+        _: Command,
+        identity: &TaskInvocationLeaseIdentity,
+    ) -> io::Result<Box<dyn ProcessHandle>> {
+        self.state.lock().unwrap().identities.push(identity.clone());
+        Ok(Box::new(BrokerBackedHandle {
+            state: self.state.clone(),
+            cpu_usage_usec: self.cpu_usage_usec,
+        }))
+    }
+}
+
+struct BrokerBackedHandle {
+    state: Arc<Mutex<BrokerBackedState>>,
+    cpu_usage_usec: u64,
+}
+
+impl ProcessHandle for BrokerBackedHandle {
+    fn drain_stdout(&mut self) -> io::Result<Vec<u8>> {
+        Ok(std::mem::take(&mut self.state.lock().unwrap().stdout))
+    }
+    fn drain_stderr(&mut self) -> io::Result<Vec<u8>> {
+        Ok(std::mem::take(&mut self.state.lock().unwrap().stderr))
+    }
+    fn try_wait(&mut self) -> io::Result<Option<std::process::ExitStatus>> {
+        Ok(self.state.lock().unwrap().status)
+    }
+    fn wait(&mut self) -> io::Result<std::process::ExitStatus> {
+        self.state
+            .lock()
+            .unwrap()
+            .status
+            .ok_or_else(|| io::Error::other("remote child is still running"))
+    }
+    fn sample_cpu(&mut self) -> io::Result<CpuStat> {
+        self.state.lock().unwrap().samples += 1;
+        Ok(CpuStat {
+            usage_usec: self.cpu_usage_usec,
+            ..CpuStat::default()
+        })
+    }
+    fn fenced_lift(&mut self, _: &LeaseFencingToken) -> io::Result<()> {
+        Ok(())
+    }
+    fn kill(&mut self) -> io::Result<()> {
+        use std::os::unix::process::ExitStatusExt;
+
+        let mut state = self.state.lock().unwrap();
+        state.kills += 1;
+        state
+            .status
+            .get_or_insert_with(|| std::process::ExitStatus::from_raw(9));
+        Ok(())
+    }
+    fn wait_empty(&mut self) -> io::Result<()> {
+        self.state.lock().unwrap().empties += 1;
+        Ok(())
+    }
+    fn cleanup(&mut self) -> io::Result<()> {
+        self.state.lock().unwrap().cleanups += 1;
+        Ok(())
+    }
+}
+
 struct ScriptedServices {
     cancel: CancellationToken,
     queue: Mutex<VecDeque<LeaseResult>>,
@@ -163,7 +283,10 @@ impl SupervisorServices for ScriptedServices {
         self.abandon_calls.fetch_add(1, Ordering::SeqCst);
         Self::pop(&self.abandon)
     }
-    async fn bind_lease_pod(&self, request: djinn_supervisor::services::LeaseBindRequest) -> LeaseResult {
+    async fn bind_lease_pod(
+        &self,
+        request: djinn_supervisor::services::LeaseBindRequest,
+    ) -> LeaseResult {
         LeaseResult::Bound(LeaseStatus {
             state: LeaseState::Bound,
             fencing_token: Some(request.fencing_token),
@@ -491,4 +614,81 @@ async fn transient_status_and_abandon_are_reconciled_without_capacity_double_ret
     assert_eq!(services.release_calls.load(Ordering::SeqCst), 0);
     assert_eq!(launcher.kills.load(Ordering::SeqCst), 1);
     assert_eq!(launcher.empties.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn broker_backed_shell_preserves_streams_exit_and_immutable_identity() {
+    let services = Arc::new(ScriptedServices::new(vec![], vec![], vec![]));
+    let launcher = Arc::new(BrokerBackedLauncher::exited(
+        b"broker stdout\n",
+        b"broker stderr\n",
+        17,
+    ));
+    let runner = LeaseInvocationRunner::new(services.clone(), launcher.clone(), clock());
+    let output = runner
+        .output(command(), config(), CancellationToken::new())
+        .await
+        .expect("broker-backed remote child completes");
+
+    assert_eq!(output.process.output.stdout, b"broker stdout\n");
+    assert_eq!(output.process.output.stderr, b"broker stderr\n");
+    assert_eq!(output.process.output.status.code(), Some(17));
+    assert_eq!(output.process.termination, ProcessTermination::Exited);
+    assert_eq!(services.queue_calls.load(Ordering::SeqCst), 0);
+    let state = launcher.state.lock().unwrap();
+    assert_eq!(state.identities.len(), 1);
+    assert_eq!(state.identities[0].task_id, "task");
+    assert_eq!(state.identities[0].task_run_id, "run");
+    assert!(!state.identities[0].invocation_id.is_empty());
+    assert_eq!((state.kills, state.empties, state.cleanups), (1, 1, 1));
+}
+
+#[tokio::test]
+async fn broker_backed_shell_cancellation_kills_waits_empty_and_cleans_up() {
+    let services = Arc::new(ScriptedServices::new(vec![], vec![], vec![]));
+    let launcher = Arc::new(BrokerBackedLauncher::running(0));
+    let runner = LeaseInvocationRunner::new(services.clone(), launcher.clone(), clock());
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+    let output = runner
+        .output(command(), config(), cancel)
+        .await
+        .expect("cancelled remote child is cleaned up");
+
+    assert_eq!(output.process.termination, ProcessTermination::Cancelled);
+    assert_eq!(services.queue_calls.load(Ordering::SeqCst), 0);
+    let state = launcher.state.lock().unwrap();
+    assert_eq!((state.kills, state.empties, state.cleanups), (1, 1, 1));
+}
+
+#[tokio::test]
+async fn below_threshold_broker_backed_shell_never_contacts_supervisor() {
+    let services = Arc::new(ScriptedServices::new(vec![], vec![], vec![]));
+    let launcher = Arc::new(BrokerBackedLauncher::running(0));
+    let runner = Arc::new(LeaseInvocationRunner::new(
+        services.clone(),
+        launcher.clone(),
+        clock(),
+    ));
+    let cancel = CancellationToken::new();
+    let run_cancel = cancel.clone();
+    let run = tokio::spawn(async move { runner.output(command(), config(), run_cancel).await });
+    for _ in 0..10_000 {
+        if launcher.state.lock().unwrap().samples > 0 {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        launcher.state.lock().unwrap().samples > 0,
+        "broker-backed child was never sampled"
+    );
+    cancel.cancel();
+    run.await
+        .expect("runner task joins")
+        .expect("light remote child is cleaned up");
+
+    assert_eq!(services.queue_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(services.grant_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(services.status_calls.load(Ordering::SeqCst), 0);
 }

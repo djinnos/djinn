@@ -252,11 +252,19 @@ struct WorkerDefaultArgs {
     task_run_pod_uid: String,
 
     /// Authenticated launcher broker socket mounted by the task-run runtime.
-    #[arg(long, env = "DJINN_CGROUP_BROKER_SOCKET", default_value = "/var/run/djinn-cgroup-launcher/broker.sock")]
+    #[arg(
+        long,
+        env = "DJINN_CGROUP_BROKER_SOCKET",
+        default_value = "/var/run/djinn-cgroup-launcher/broker.sock"
+    )]
     cgroup_broker_socket: PathBuf,
 
     /// Per-task-run broker credential mounted read-only by the runtime.
-    #[arg(long, env = "DJINN_CGROUP_BROKER_CREDENTIAL_PATH", default_value = "/var/run/djinn-cgroup-launcher/credential")]
+    #[arg(
+        long,
+        env = "DJINN_CGROUP_BROKER_CREDENTIAL_PATH",
+        default_value = "/var/run/djinn-cgroup-launcher/credential"
+    )]
     cgroup_broker_credential_path: PathBuf,
 
     /// Path the launcher bind-mounted `/workspace` at.  Defaults to the
@@ -1906,17 +1914,31 @@ async fn run_task_run(args: WorkerDefaultArgs) -> Result<()> {
     // The broker connection and readiness proof are established before any
     // stage can expose shell tools. These paths are runtime mounts, not child
     // controlled shell environment values.
-    let broker_credential = tokio::fs::read(&args.cgroup_broker_credential_path).await
-        .with_context(|| format!("read broker credential from {}", args.cgroup_broker_credential_path.display()))?;
+    let broker_credential = tokio::fs::read(&args.cgroup_broker_credential_path)
+        .await
+        .with_context(|| {
+            format!(
+                "read broker credential from {}",
+                args.cgroup_broker_credential_path.display()
+            )
+        })?;
     let mut broker_client = djinn_cgroup_launcher::transport::UnixBrokerClient::connect_path(
-        &args.cgroup_broker_socket, &broker_credential,
-    ).context("connect authenticated cgroup launcher broker")?;
+        &args.cgroup_broker_socket,
+        &broker_credential,
+    )
+    .context("connect authenticated cgroup launcher broker")?;
     let mut dumpability = djinn_cgroup_launcher::child::NativeWorkerDumpability;
     let readiness = djinn_cgroup_launcher::child::prepare_worker_readiness(&mut dumpability)
         .context("prepare non-dumpable worker broker readiness")?;
-    broker_client.ready(readiness).context("submit broker readiness")?;
+    broker_client
+        .ready(readiness)
+        .context("submit broker readiness")?;
     let shell_launch = ShellLaunchContext::broker_backed(
-        spec.task_id.clone(), spec.task_run_id.clone(), args.task_run_pod_uid.clone(), rpc.clone(), broker_client,
+        spec.task_id.clone(),
+        spec.task_run_id.clone(),
+        args.task_run_pod_uid.clone(),
+        rpc.clone(),
+        broker_client,
     );
 
     // 4. Attach to the host-materialised workspace.

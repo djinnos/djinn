@@ -49,9 +49,19 @@ pub struct ShellLaunchContext {
 }
 
 impl ShellLaunchContext {
-    pub fn broker_backed(task_id: String, task_run_id: String, pod_uid: String, services: Arc<dyn SupervisorServices>, client: UnixBrokerClient) -> Self {
+    pub fn broker_backed(
+        task_id: String,
+        task_run_id: String,
+        pod_uid: String,
+        services: Arc<dyn SupervisorServices>,
+        client: UnixBrokerClient,
+    ) -> Self {
         Self {
-            runner: Arc::new(LeaseInvocationRunner::new(services, Arc::new(UnixBrokerLauncher::new(client, 0)), Arc::new(SystemClock::new()))),
+            runner: Arc::new(LeaseInvocationRunner::new(
+                services,
+                Arc::new(UnixBrokerLauncher::new(client, 0)),
+                Arc::new(SystemClock::new()),
+            )),
             task_id,
             task_run_id,
             pod_uid,
@@ -59,10 +69,20 @@ impl ShellLaunchContext {
     }
 
     pub(crate) fn invocation(&self, timeout: Duration) -> LeaseInvocationConfig {
-        LeaseInvocationConfig { task_id: self.task_id.clone(), task_run_id: self.task_run_id.clone(), pod_uid: self.pod_uid.clone(), cpu_usage_threshold_usec: 250_000, queue_deadline_ms: 30_000, launch_deadline_ms: 60_000, timeout }
+        LeaseInvocationConfig {
+            task_id: self.task_id.clone(),
+            task_run_id: self.task_run_id.clone(),
+            pod_uid: self.pod_uid.clone(),
+            cpu_usage_threshold_usec: 250_000,
+            queue_deadline_ms: 30_000,
+            launch_deadline_ms: 60_000,
+            timeout,
+        }
     }
 
-    pub(crate) fn runner(&self) -> &LeaseInvocationRunner { &self.runner }
+    pub(crate) fn runner(&self) -> &LeaseInvocationRunner {
+        &self.runner
+    }
 }
 
 /// Configuration injected into the optional session-start memory intent planner.
