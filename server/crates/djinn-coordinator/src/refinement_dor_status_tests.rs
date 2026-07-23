@@ -180,11 +180,11 @@ async fn refinement_task_owner_is_attributed_user_login_not_system() {
     );
 }
 
-/// Mandatory creator provenance fails closed when the attributed user cannot
-/// be resolved. No tribunal task may be inserted with a fabricated `system`
-/// owner or an invalid `created_by_user_id`.
+/// Mandatory creator provenance fails closed when it is absent or disagrees
+/// with the proposal's durable owner. No tribunal task may be inserted without
+/// a concrete, persisted owner identity.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn refinement_task_creation_fails_closed_when_user_unresolvable() {
+async fn refinement_task_creation_fails_closed_when_provenance_is_missing_or_invalid() {
     let db = crate::test_helpers::create_test_db();
     let fixture = seed_refinement_fixture(&db).await;
     let (events_tx, _events_rx) = tokio::sync::broadcast::channel::<DjinnEventEnvelope>(256);
@@ -197,8 +197,7 @@ async fn refinement_task_creation_fails_closed_when_user_unresolvable() {
         .await
         .expect("list tasks before failed creation")
         .len();
-    let missing_user_id = "00000000-0000-0000-0000-000000000000";
-    let task_id = actor
+    let missing_provenance_task_id = actor
         .create_refinement_task_with_context(
             &fixture.proposal_id,
             "judge",
@@ -206,13 +205,30 @@ async fn refinement_task_creation_fails_closed_when_user_unresolvable() {
             1,
             "Proposal currently meets all DoR checks.",
             None,
-            Some(missing_user_id),
+            None,
         )
         .await;
 
     assert!(
-        task_id.is_none(),
-        "unresolvable mandatory creator provenance must fail closed"
+        missing_provenance_task_id.is_none(),
+        "missing mandatory creator provenance must fail closed"
+    );
+
+    let invalid_provenance_task_id = actor
+        .create_refinement_task_with_context(
+            &fixture.proposal_id,
+            "judge",
+            1,
+            1,
+            "Proposal currently meets all DoR checks.",
+            None,
+            Some("00000000-0000-0000-0000-000000000000"),
+        )
+        .await;
+
+    assert!(
+        invalid_provenance_task_id.is_none(),
+        "invalid mandatory creator provenance must fail closed"
     );
     let tasks_after = task_repo
         .list_by_project(&fixture.project_id)
@@ -221,7 +237,7 @@ async fn refinement_task_creation_fails_closed_when_user_unresolvable() {
         .len();
     assert_eq!(
         tasks_after, tasks_before,
-        "unresolvable ownership must not insert a tribunal task"
+        "missing or invalid ownership must not insert a tribunal task"
     );
 }
 
@@ -488,29 +504,32 @@ async fn approve_verdict_blocked_when_corrupt_head_recomputed() {
 
     // Park the state machine in JudgeAdjudication so process_refinement_outcome
     // routes to process_judge_outcome.
+    let run_id = "dor-corrupt-head-run".to_string();
+    let generation = 1;
     actor.active_refinements.insert(
-        proposal_id.clone(),
+        run_id.clone(),
         crate::refinement::RefinementLoopState::new(&proposal_id, head_seq)
+            .with_run_identity(run_id.clone(), generation)
             .with_attributed_user(None),
     );
 
     // Drive the judge outcome through the real coordinator path.
     let session = RefinementSession {
+        run_id: run_id.clone(),
+        generation,
         task_id: "test-judge-task".to_string(),
         phase: RefinementPhase::JudgeAdjudication,
         dispatched_at: Instant::now(),
         session_started_at: Some(Instant::now()),
         model_id: "test/mock".to_string(),
     };
-    actor
-        .process_refinement_outcome(&proposal_id, &session)
-        .await;
+    actor.process_refinement_outcome(&run_id, &session).await;
 
     // The tribunal must NOT have parked for human review — the approve verdict
     // was converted to blocking by the readiness re-evaluation.
     let state = actor
         .active_refinements
-        .get(&proposal_id)
+        .get(&run_id)
         .expect("refinement state still active");
     assert_ne!(
         state.phase,
@@ -672,26 +691,29 @@ async fn clean_material_revision_restores_semantic_adjudication() {
     // human review — ordinary semantic adjudication is restored.
     add_judge_verdict(&db, &proposal_id, 1, false, new_head_seq).await;
 
+    let run_id = "dor-clean-head-run".to_string();
+    let generation = 1;
     actor.active_refinements.insert(
-        proposal_id.clone(),
+        run_id.clone(),
         crate::refinement::RefinementLoopState::new(&proposal_id, new_head_seq)
+            .with_run_identity(run_id.clone(), generation)
             .with_attributed_user(None),
     );
 
     let session = RefinementSession {
+        run_id: run_id.clone(),
+        generation,
         task_id: "test-judge-task-clean".to_string(),
         phase: RefinementPhase::JudgeAdjudication,
         dispatched_at: Instant::now(),
         session_started_at: Some(Instant::now()),
         model_id: "test/mock".to_string(),
     };
-    actor
-        .process_refinement_outcome(&proposal_id, &session)
-        .await;
+    actor.process_refinement_outcome(&run_id, &session).await;
 
     let state = actor
         .active_refinements
-        .get(&proposal_id)
+        .get(&run_id)
         .expect("refinement state still active");
     assert_eq!(
         state.phase,

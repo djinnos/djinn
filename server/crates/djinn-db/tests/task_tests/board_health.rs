@@ -567,9 +567,9 @@ async fn board_health_stranded_ready_gate_evidence_fields() {
     let epic = create_test_epic(&db, &project.id).await;
     let repo = TaskRepository::new(db.clone(), event_bus_for(&tx));
 
-    // This fixture isolates an unhealthy inflight model, so give the task a
-    // real creator and that creator's active private credential. A legacy NULL
-    // creator correctly fails the credential gate and exercises another blocker.
+    // This fixture isolates an unhealthy inflight model. Its attributed creator
+    // has no private credential, so credential availability must come from the
+    // active org-shared credential below.
     let user_id = uuid::Uuid::now_v7().to_string();
     sqlx::query("INSERT INTO users (id, github_id, github_login) VALUES ($1, $2, $3)")
         .bind(&user_id)
@@ -601,11 +601,10 @@ async fn board_health_stranded_ready_gate_evidence_fields() {
     sqlx::query(
         "INSERT INTO credentials \
          (id, provider_id, key_name, encrypted_value, owner_user_id) \
-         VALUES ($1, 'anthropic', $2, '\\x00'::bytea, $3)",
+         VALUES ($1, 'anthropic', $2, '\\x00'::bytea, NULL)",
     )
     .bind(&cred_id)
     .bind(format!("key-{cred_id}"))
-    .bind(&user_id)
     .execute(db.pool())
     .await
     .unwrap();
@@ -634,7 +633,10 @@ async fn board_health_stranded_ready_gate_evidence_fields() {
     assert_eq!(gate["breaker_open"], false);
     assert_eq!(gate["manually_paused"], false);
     assert_eq!(gate["rate_limited"], false);
-    assert_eq!(gate["credential_available"], true);
+    assert_eq!(
+        gate["credential_available"], true,
+        "an attributed creator without a private credential must use the active org-shared fallback"
+    );
     assert_eq!(gate["gate_verdict"], "blocked");
     let reasons = gate["reasons"].as_array().unwrap();
     assert!(

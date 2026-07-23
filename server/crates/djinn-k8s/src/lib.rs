@@ -8,6 +8,7 @@
 pub mod config;
 pub mod env_config;
 pub mod graph_warmer;
+pub mod graph_warmer_candidates;
 pub mod graph_warmer_identity;
 pub mod infra_death_log_tail;
 pub mod job;
@@ -31,6 +32,12 @@ pub use graph_warmer::{
     WarmAdmission, WarmAdmissionError, WarmAdmissionPermit, WarmAdmissionRequest,
     WarmAdmissionTransition, WarmCompletionSink, WarmJobDispatcher, WarmJobLister, WarmJobManifest,
     WarmJobWatcher, WarmTerminalOutcome,
+};
+pub use graph_warmer_candidates::{
+    CleanupObservation, GateObservation, KubeWarmCandidateClient, WarmAnnotationValidation,
+    WarmCandidate, WarmCandidateClient, WarmCandidateControl, WarmCandidateInventory,
+    WarmCandidateKind, WarmCandidateObject, WarmCandidateSet, WarmCandidateSetState,
+    WarmInventoryObservation,
 };
 pub use graph_warmer_identity::{LeasedWarmJobIdentity, warm_work_id};
 pub use runtime::KubernetesRuntime;

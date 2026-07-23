@@ -56,6 +56,10 @@ const REFINEMENT_DISPATCH_RETRY_CAP: i32 = 3;
 /// The in-flight session tracking for one active refinement loop.
 #[derive(Debug, Clone)]
 pub(super) struct RefinementSession {
+    /// Exact durable run and generation observed when this disposable session
+    /// projection was created. These fence late task observations.
+    pub run_id: String,
+    pub generation: i32,
     /// The task id of the refinement task currently dispatched.
     pub task_id: String,
     /// Which phase this session is executing.
@@ -83,8 +87,8 @@ pub(super) struct RefinementSession {
 impl CoordinatorActor {
     /// Drive all active refinement loops. Called from `run_tick()`.
     pub(super) async fn drive_active_refinements(&mut self) {
-        let proposal_ids: Vec<String> = self.active_refinements.keys().cloned().collect();
-        if proposal_ids.is_empty() {
+        let run_ids: Vec<String> = self.active_refinements.keys().cloned().collect();
+        if run_ids.is_empty() {
             return;
         }
 
@@ -123,8 +127,8 @@ impl CoordinatorActor {
             }
         };
 
-        for proposal_id in proposal_ids {
-            self.drive_one_refinement(&proposal_id, running_tasks.as_ref())
+        for run_id in run_ids {
+            self.drive_one_refinement(&run_id, running_tasks.as_ref())
                 .await;
         }
 
@@ -141,18 +145,33 @@ impl CoordinatorActor {
     /// in-flight session is still driven to dispatch.
     async fn drive_one_refinement(
         &mut self,
-        proposal_id: &str,
+        run_id: &str,
         running_tasks: Option<&HashSet<String>>,
     ) {
-        let Some(state) = self.active_refinements.get(proposal_id).cloned() else {
+        let Some(state) = self.active_refinements.get(run_id).cloned() else {
             return;
         };
+        let proposal_id = state.proposal_id.clone();
         if state.is_complete() {
             return;
         }
 
+        if !state.run_id.is_empty()
+            && !self
+                .refinement_projection_is_current(run_id, state.generation, &proposal_id)
+                .await
+        {
+            self.active_refinements.remove(run_id);
+            self.refinement_sessions.remove(run_id);
+            return;
+        }
+
         // Check if there's an in-flight session for this refinement.
-        if let Some(session) = self.refinement_sessions.get(proposal_id).cloned() {
+        if let Some(session) = self.refinement_sessions.get(run_id).cloned() {
+            if session.run_id != state.run_id || session.generation != state.generation {
+                self.refinement_sessions.remove(run_id);
+                return;
+            }
             let Some(running_tasks) = running_tasks else {
                 // Pool liveness unknown this tick (get_status errored). Do NOT
                 // treat a possibly-running session as finished — defer to the
@@ -175,7 +194,7 @@ impl CoordinatorActor {
                     None => {
                         if self.refinement_session_has_started(&session.task_id).await {
                             let observed = SystemClock::new().now_instant();
-                            if let Some(s) = self.refinement_sessions.get_mut(proposal_id) {
+                            if let Some(s) = self.refinement_sessions.get_mut(run_id) {
                                 s.session_started_at = Some(observed);
                             }
                             Some(observed)
@@ -202,7 +221,7 @@ impl CoordinatorActor {
                             )
                             .await;
                             self.terminate_refinement(
-                                proposal_id,
+                                run_id,
                                 StopReason::AgentFailure {
                                     role: format!("{:?}", session.phase),
                                     error: "session timeout".into(),
@@ -233,7 +252,7 @@ impl CoordinatorActor {
                                  (task-run pod stuck Pending in scheduler queue)"
                             );
                             self.retry_or_terminate_unstarted_refinement(
-                                proposal_id,
+                                run_id,
                                 &session,
                                 "refinement role session never started (task-run pod stuck Pending)",
                                 over_cap_error,
@@ -268,7 +287,7 @@ impl CoordinatorActor {
                      (runtime/devcontainer setup failure)"
                 );
                 self.retry_or_terminate_unstarted_refinement(
-                    proposal_id,
+                    run_id,
                     &session,
                     "refinement role session never started (dispatch/setup failure)",
                     over_cap_error,
@@ -281,18 +300,18 @@ impl CoordinatorActor {
             // Session actually ran — clear the dispatch-failure counter and
             // process the outcome, then close the task so finished phase/round
             // tasks don't linger `open` on the board.
-            if let Some(state) = self.active_refinements.get_mut(proposal_id) {
+            if let Some(state) = self.active_refinements.get_mut(run_id) {
                 state.dispatch_failures = 0;
             }
-            self.process_refinement_outcome(proposal_id, &session).await;
+            self.process_refinement_outcome(run_id, &session).await;
             self.close_refinement_task(&session.task_id, "refinement phase complete")
                 .await;
-            self.refinement_sessions.remove(proposal_id);
+            self.refinement_sessions.remove(run_id);
             return;
         }
 
         // No in-flight session — dispatch the next phase.
-        self.dispatch_next_refinement_phase(proposal_id).await;
+        self.dispatch_next_refinement_phase(run_id).await;
     }
 
     /// Whether an agent session row exists yet for a dispatched refinement
@@ -332,7 +351,7 @@ impl CoordinatorActor {
     /// reconciler, which never fired because no session started).
     async fn retry_or_terminate_unstarted_refinement(
         &mut self,
-        proposal_id: &str,
+        run_id: &str,
         session: &RefinementSession,
         close_reason: &str,
         over_cap_error: String,
@@ -345,7 +364,7 @@ impl CoordinatorActor {
             // block the retry.
             if let Err(e) = self.pool.kill_session(&session.task_id).await {
                 tracing::warn!(
-                    proposal_id = %proposal_id,
+                    run_id = %run_id,
                     task_id = %session.task_id,
                     error = %e,
                     "Failed to tear down Pending refinement task-run; proceeding with retry"
@@ -355,8 +374,8 @@ impl CoordinatorActor {
         }
         self.close_refinement_task(&session.task_id, close_reason)
             .await;
-        self.refinement_sessions.remove(proposal_id);
-        let over_cap = if let Some(state) = self.active_refinements.get_mut(proposal_id) {
+        self.refinement_sessions.remove(run_id);
+        let over_cap = if let Some(state) = self.active_refinements.get_mut(run_id) {
             state.dispatch_failures += 1;
             state.dispatch_failures >= REFINEMENT_DISPATCH_RETRY_CAP
         } else {
@@ -364,12 +383,12 @@ impl CoordinatorActor {
         };
         if over_cap {
             tracing::warn!(
-                proposal_id = %proposal_id,
+                run_id = %run_id,
                 phase = ?session.phase,
                 "Refinement role session repeatedly failed to start — terminating"
             );
             self.terminate_refinement(
-                proposal_id,
+                run_id,
                 StopReason::AgentFailure {
                     role: format!("{:?}", session.phase),
                     error: over_cap_error,
@@ -378,7 +397,7 @@ impl CoordinatorActor {
             .await;
         } else {
             tracing::warn!(
-                proposal_id = %proposal_id,
+                run_id = %run_id,
                 phase = ?session.phase,
                 "Refinement role session never started; will re-dispatch (not counted as dry)"
             );
@@ -397,10 +416,11 @@ impl CoordinatorActor {
     /// consumption, or `pool.dispatch()`. At-cap phases defer non-terminally
     /// so the state machine retries on the next tick. Failed paths clear the
     /// reservation so no slot leaks.
-    pub(crate) async fn dispatch_next_refinement_phase(&mut self, proposal_id: &str) {
-        let Some(state) = self.active_refinements.get(proposal_id).cloned() else {
+    pub(crate) async fn dispatch_next_refinement_phase(&mut self, run_id: &str) {
+        let Some(state) = self.active_refinements.get(run_id).cloned() else {
             return;
         };
+        let proposal_id = state.proposal_id.clone();
 
         let phase = state.phase;
         let round = state.current_round;
@@ -428,7 +448,7 @@ impl CoordinatorActor {
         }
 
         // Administrative dispatch-pause gate.
-        if self.refinement_dispatch_paused(proposal_id).await {
+        if self.refinement_dispatch_paused(&proposal_id).await {
             tracing::info!(
                 proposal_id = %proposal_id,
                 phase = ?phase,
@@ -450,7 +470,7 @@ impl CoordinatorActor {
         // The in-memory `AwaitingEvidence` and admin-dispause checks above
         // serve as fast-path early returns that avoid DB reads when the
         // in-memory state is already parked.
-        let lifecycle_proposal = self.load_proposal_for_lifecycle(proposal_id).await;
+        let lifecycle_proposal = self.load_proposal_for_lifecycle(&proposal_id).await;
         if let Some(ref proposal) = lifecycle_proposal {
             let lifecycle_state = self.derive_proposal_evidence_lifecycle(proposal).await;
             match lifecycle_state {
@@ -512,7 +532,7 @@ impl CoordinatorActor {
         // reason, and NO refinement task row, spawn-budget consumption, or
         // pool dispatch occurs.
         let attributed_user_id = self
-            .resolve_refinement_attributed_user(proposal_id, state.attributed_user_id.clone())
+            .resolve_refinement_attributed_user(&proposal_id, state.attributed_user_id.clone())
             .await;
 
         let Some(ref user_id) = attributed_user_id else {
@@ -524,7 +544,7 @@ impl CoordinatorActor {
                  Refusing to dispatch without a real user identity."
             );
             self.terminate_refinement(
-                proposal_id,
+                run_id,
                 StopReason::AgentFailure {
                     role: format!("{:?}", phase),
                     error: "attribution unresolvable: no user identity for refinement dispatch"
@@ -544,7 +564,7 @@ impl CoordinatorActor {
                 "Refinement dispatch: attributed user is empty — failing closed"
             );
             self.terminate_refinement(
-                proposal_id,
+                run_id,
                 StopReason::AgentFailure {
                     role: format!("{:?}", phase),
                     error: "attributed user is empty".into(),
@@ -568,7 +588,7 @@ impl CoordinatorActor {
                     "Refinement dispatch: attributed user does not resolve to a row — failing closed"
                 );
                 self.terminate_refinement(
-                    proposal_id,
+                    run_id,
                     StopReason::AgentFailure {
                         role: format!("{:?}", phase),
                         error: format!("attributed user {user_id} not found in users table"),
@@ -586,7 +606,7 @@ impl CoordinatorActor {
                     "Refinement dispatch: failed to resolve attributed user row — failing closed"
                 );
                 self.terminate_refinement(
-                    proposal_id,
+                    run_id,
                     StopReason::AgentFailure {
                         role: format!("{:?}", phase),
                         error: format!("failed to resolve attributed user: {e}"),
@@ -598,9 +618,9 @@ impl CoordinatorActor {
         }
 
         // Read diverse_refinement setting at the round boundary.
-        let diverse_refinement = self.read_diverse_refinement_setting(proposal_id).await;
+        let diverse_refinement = self.read_diverse_refinement_setting(&proposal_id).await;
 
-        let readiness = self.evaluate_proposal_readiness(proposal_id).await;
+        let readiness = self.evaluate_proposal_readiness(&proposal_id).await;
 
         if let Some(ref readiness) = readiness
             && !readiness.ready
@@ -624,7 +644,7 @@ impl CoordinatorActor {
                 "Refinement dispatch FAIL-CLOSED: durable owner has no eligible credential-backed model; no task or spawn will be created"
             );
             self.terminate_refinement(
-                proposal_id,
+                run_id,
                 StopReason::AgentFailure {
                     role: format!("{:?}", phase),
                     error: "no eligible credential-backed model for refinement owner".into(),
@@ -704,7 +724,7 @@ impl CoordinatorActor {
             let event_bus = crate::events::event_bus_for(&self.events_tx);
             let proposal_repo = djinn_db::ProposalRepository::new(self.db.clone(), event_bus);
             match proposal_repo
-                .latest_current_revision_reviewer_feedback(proposal_id)
+                .latest_current_revision_reviewer_feedback(&proposal_id)
                 .await
             {
                 Ok(fb) => fb,
@@ -726,7 +746,7 @@ impl CoordinatorActor {
         // failure, the provisional reservation is cleared immediately.
         let task_id = match self
             .create_refinement_task_with_context(
-                proposal_id,
+                &proposal_id,
                 &agent_type,
                 round,
                 revision_seq,
@@ -745,7 +765,7 @@ impl CoordinatorActor {
                     "Failed to create refinement task"
                 );
                 self.terminate_refinement(
-                    proposal_id,
+                    run_id,
                     StopReason::AgentFailure {
                         role: format!("{:?}", phase),
                         error: "task creation failed".into(),
@@ -793,7 +813,7 @@ impl CoordinatorActor {
         // task id) before terminating so the slot is immediately available.
         {
             #[allow(clippy::unwrap_used)]
-            let state = self.active_refinements.get_mut(proposal_id).unwrap();
+            let state = self.active_refinements.get_mut(run_id).unwrap();
             if let Err(reason) = state.record_spawn() {
                 tracing::warn!(
                     proposal_id = %proposal_id,
@@ -809,13 +829,13 @@ impl CoordinatorActor {
                     "refinement spawn cap reached — task will not be dispatched",
                 )
                 .await;
-                self.persist_refinement_stop(proposal_id, &reason).await;
-                self.refinement_sessions.remove(proposal_id);
+                self.persist_refinement_stop(&proposal_id, &reason).await;
+                self.refinement_sessions.remove(run_id);
                 return;
             }
         }
 
-        let project_path = self.resolve_refinement_project_path(proposal_id).await;
+        let project_path = self.resolve_refinement_project_path(&proposal_id).await;
 
         // ── Step 5: Dispatch through the slot pool (last side effect) ───────
         //
@@ -834,8 +854,10 @@ impl CoordinatorActor {
                     "Dispatched refinement session"
                 );
                 self.refinement_sessions.insert(
-                    proposal_id.to_string(),
+                    run_id.to_string(),
                     RefinementSession {
+                        run_id: run_id.to_string(),
+                        generation: state.generation,
                         task_id,
                         phase,
                         dispatched_at: SystemClock::new().now_instant(),
@@ -858,7 +880,7 @@ impl CoordinatorActor {
                     "Failed to dispatch refinement session"
                 );
                 self.terminate_refinement(
-                    proposal_id,
+                    run_id,
                     StopReason::AgentFailure {
                         role: format!("{:?}", phase),
                         error: format!("dispatch failed: {e}"),
@@ -889,15 +911,18 @@ impl CoordinatorActor {
                     "Cleared linked evidence spike after valid findings receipt"
                 );
 
-                if let Some(state) = self.active_refinements.get_mut(proposal_id) {
-                    state.resume_after_evidence_received();
-                } else {
+                let Some(run_id) = self.active_refinements.iter().find_map(|(run_id, state)| {
+                    (state.proposal_id == proposal_id).then(|| run_id.clone())
+                }) else {
                     tracing::debug!(
                         proposal_id = %proposal_id,
                         spike_task_id = %spike_task_id,
                         "Evidence received for proposal without in-memory refinement loop; startup re-drive owns recovery"
                     );
                     return;
+                };
+                if let Some(state) = self.active_refinements.get_mut(&run_id) {
+                    state.resume_after_evidence_received();
                 }
 
                 let lifecycle_state = self.derive_proposal_evidence_lifecycle(&proposal).await;
@@ -911,7 +936,7 @@ impl CoordinatorActor {
                     return;
                 }
 
-                self.dispatch_next_refinement_phase(proposal_id).await;
+                self.dispatch_next_refinement_phase(&run_id).await;
             }
             Err(e) => {
                 tracing::warn!(
@@ -944,3 +969,7 @@ mod refinement_evidence_resume_tests;
 #[cfg(test)]
 #[path = "refinement_recovery_tests.rs"]
 mod refinement_recovery_tests;
+
+#[cfg(test)]
+#[path = "refinement_wake_tests.rs"]
+mod refinement_wake_tests;
