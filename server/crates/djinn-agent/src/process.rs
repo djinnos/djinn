@@ -76,6 +76,7 @@ pub fn isolate_process_group(cmd: &mut Command) {
 
 /// The launcher is deliberately separate from the supervisor: it controls one
 /// cgroup leaf and samples `cpu.stat`; it never owns a second lease ledger.
+#[cfg_attr(not(test), allow(dead_code))] // consumed by the workspace lease wiring task
 pub(crate) trait CgroupLauncherClient: Send + Sync + 'static {
     fn launch(
         &self,
@@ -93,6 +94,7 @@ pub(crate) trait CgroupLauncherClient: Send + Sync + 'static {
 }
 
 #[derive(Clone, Debug)]
+#[cfg_attr(not(test), allow(dead_code))] // consumed by the workspace lease wiring task
 pub(crate) struct LeaseInvocationConfig {
     pub task_id: String,
     pub task_run_id: String,
@@ -103,6 +105,7 @@ pub(crate) struct LeaseInvocationConfig {
 }
 
 #[derive(Debug)]
+#[allow(dead_code)] // consumed by this runner now and workspace lease wiring next
 pub(crate) enum LeaseInvocationError {
     Process(ProcessRunError),
     Launcher(io::Error),
@@ -112,6 +115,7 @@ pub(crate) enum LeaseInvocationError {
 }
 
 #[derive(Debug)]
+#[allow(dead_code)] // consumed by this runner now and workspace lease wiring next
 pub(crate) struct LeaseInvocationOutput {
     pub(crate) process: ProcessOutput,
     pub(crate) identity: TaskInvocationLeaseIdentity,
@@ -119,11 +123,13 @@ pub(crate) struct LeaseInvocationOutput {
 
 /// Launcher-backed invocation state machine. A queue is issued only after a
 /// measured CPU threshold; terminal intent is set before cgroup kill/reconcile.
+#[cfg_attr(not(test), allow(dead_code))] // consumed by the workspace lease wiring task
 pub(crate) struct LeaseInvocationRunner {
     services: Arc<dyn SupervisorServices>,
     launcher: Arc<dyn CgroupLauncherClient>,
     clock: Arc<dyn Clock>,
 }
+#[cfg_attr(not(test), allow(dead_code))] // consumed by the workspace lease wiring task
 impl LeaseInvocationRunner {
     pub(crate) fn new(
         services: Arc<dyn SupervisorServices>,
@@ -342,11 +348,13 @@ impl LeaseInvocationRunner {
 }
 /// Result of waiting for a supervisor response. A terminal observation wins
 /// over a delayed response and permanently closes the lift path.
+#[cfg_attr(not(test), allow(dead_code))] // consumed by the workspace lease wiring task
 enum LeaseWait {
     Response(LeaseResult),
     Terminal((Option<std::process::ExitStatus>, ProcessTermination)),
 }
 
+#[cfg_attr(not(test), allow(dead_code))] // consumed by the workspace lease wiring task
 async fn await_lease_or_terminal<F>(
     request: F,
     child: &mut std::process::Child,
@@ -370,6 +378,7 @@ where
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))] // consumed by the workspace lease wiring task
 fn terminal_now(
     child: &mut std::process::Child,
     cancel: &CancellationToken,
@@ -397,6 +406,7 @@ fn terminal_now(
 /// Re-read durable state after every uncertain cleanup response. Operations
 /// are idempotent and reuse the same fence, so a lost request cannot cause a
 /// second capacity return or leave a known grant unreleased.
+#[cfg_attr(not(test), allow(dead_code))] // consumed by the workspace lease wiring task
 async fn reconcile_terminal_lease(
     services: &dyn SupervisorServices,
     lease: LeaseIdentity,
@@ -460,9 +470,11 @@ async fn reconcile_terminal_lease(
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))] // consumed by the workspace lease wiring task
 fn started_lease_error(error: io::Error) -> LeaseInvocationError {
     LeaseInvocationError::Process(ProcessRunError::Started(error))
 }
+#[cfg_attr(not(test), allow(dead_code))] // consumed by the workspace lease wiring task
 fn lease_failure(
     result: LeaseResult,
     deadline: &mut std::time::Instant,
