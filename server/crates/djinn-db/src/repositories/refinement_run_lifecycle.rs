@@ -189,6 +189,88 @@ fn role_name(value: RefinementRole) -> &'static str {
 }
 
 impl ProposalRepository {
+    pub async fn park_refinement_run_from_intent(
+        &self,
+        request: ParkRefinementRunFromIntentRequest,
+    ) -> IntentMutationResult<bool> {
+        self.source_intent_transition(request.source, Some(request.kind), None)
+            .await
+    }
+    pub async fn terminal_refinement_run_from_intent(
+        &self,
+        request: TerminalRefinementRunFromIntentRequest,
+    ) -> IntentMutationResult<bool> {
+        self.source_intent_transition(request.source, None, Some(request.reason))
+            .await
+    }
+    async fn source_intent_transition(
+        &self,
+        source: SourceIntentTransitionRequest,
+        park: Option<RefinementParkKind>,
+        stop: Option<djinn_core::refinement_liveness::RefinementStopReason>,
+    ) -> IntentMutationResult<bool> {
+        if source.run_id.trim().is_empty()
+            || source.intent_id.trim().is_empty()
+            || source.generation <= 0
+            || source.expected_round <= 0
+        {
+            return Err(RefinementIntentMutationError::InvalidRequest(
+                "exact run, intent, generation, and round are required".into(),
+            ));
+        }
+        self.db().ensure_initialized().await?;
+        let mut tx = self.db().pool().begin().await?;
+        let row=sqlx::query("SELECT r.state AS run_state,i.state AS intent_state,i.round,i.phase,i.role FROM refinement_runs r JOIN refinement_dispatch_intents i ON i.run_id=r.id WHERE r.id=$1 AND r.generation=$2 AND i.id=$3 FOR UPDATE").bind(&source.run_id).bind(source.generation).bind(&source.intent_id).fetch_optional(&mut *tx).await?;
+        let Some(row) = row else {
+            return Err(RefinementIntentMutationError::GenerationConflict {
+                run_id: source.run_id,
+                generation: source.generation,
+            });
+        };
+        if row.get::<i32, _>("round") != source.expected_round
+            || row.get::<String, _>("phase") != phase_name(source.expected_phase)
+            || row.get::<String, _>("role") != role_name(source.expected_role)
+        {
+            return Err(RefinementIntentMutationError::SourceIntentMismatch {
+                intent_id: source.intent_id,
+            });
+        }
+        if row.get::<String, _>("run_state") != "running" {
+            tx.commit().await?;
+            return Ok(false);
+        }
+        if !matches!(
+            row.get::<String, _>("intent_state").as_str(),
+            "claimed" | "materialized"
+        ) {
+            return Err(RefinementIntentMutationError::SourceIntentMismatch {
+                intent_id: source.intent_id,
+            });
+        }
+        sqlx::query("UPDATE refinement_dispatch_intents SET state='completed',claimed_by=NULL,claimed_at=NULL,claim_expires_at=NULL,terminal_at=to_char(transaction_timestamp() AT TIME ZONE 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') WHERE id=$1 AND state IN ('claimed','materialized')").bind(&source.intent_id).execute(&mut *tx).await?;
+        let changed = if let Some(kind) = park {
+            sqlx::query("UPDATE refinement_runs SET state='parked',park_kind=$3,parked_at=to_char(transaction_timestamp() AT TIME ZONE 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') WHERE id=$1 AND generation=$2 AND state='running'").bind(&source.run_id).bind(source.generation).bind(match kind {RefinementParkKind::AwaitingReview=>"awaiting_review",RefinementParkKind::AwaitingEvidence=>"awaiting_evidence"}).execute(&mut *tx).await?.rows_affected()==1
+        } else {
+            let reason = stop.expect("terminal reason");
+            let context = serde_json::to_value(&reason)
+                .map_err(|e| RefinementIntentMutationError::InvalidRequest(e.to_string()))?
+                .get("context")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            sqlx::query("UPDATE refinement_runs SET state='terminal',terminal_at=to_char(transaction_timestamp() AT TIME ZONE 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'),stop_tag=$3,stop_context=$4 WHERE id=$1 AND generation=$2 AND state='running'").bind(&source.run_id).bind(source.generation).bind(reason.tag()).bind(context).execute(&mut *tx).await?.rows_affected()==1
+        };
+        if !changed {
+            return Err(RefinementIntentMutationError::GenerationConflict {
+                run_id: source.run_id,
+                generation: source.generation,
+            });
+        }
+        tx.commit().await?;
+        Ok(true)
+    }
+}
+
+impl ProposalRepository {
     pub async fn park_refinement_run(
         &self,
         request: ParkRefinementRunRequest,

@@ -113,6 +113,35 @@ pub struct TerminalRefinementRunRequest {
     pub generation: i32,
     pub reason: RefinementStopReason,
 }
+/// Fenced role outcome that must consume this exact source intent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceIntentTransitionRequest {
+    pub run_id: String,
+    pub intent_id: String,
+    pub generation: i32,
+    pub expected_round: i32,
+    pub expected_phase: RefinementPhase,
+    pub expected_role: RefinementRole,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ParkRefinementRunFromIntentRequest {
+    #[serde(flatten)]
+    pub source: SourceIntentTransitionRequest,
+    pub kind: RefinementParkKind,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalRefinementRunFromIntentRequest {
+    #[serde(flatten)]
+    pub source: SourceIntentTransitionRequest,
+    pub reason: RefinementStopReason,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolveRefinementHumanReviewRequest {
+    pub run_id: String,
+    pub generation: i32,
+    pub snapshot_revision_seq: i32,
+    pub accept: bool,
+}
 /// A named durable append boundary that is permitted to move the heartbeat.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -139,6 +168,8 @@ pub enum RefinementIntentMutationError {
     ClaimConflict { intent_id: String, owner: String },
     #[error("task {task_id} does not have the required refinement correlation")]
     TaskCorrelationMismatch { task_id: String },
+    #[error("source intent {intent_id} does not match the current role outcome")]
+    SourceIntentMismatch { intent_id: String },
 }
 impl From<sqlx::Error> for RefinementIntentMutationError {
     fn from(error: sqlx::Error) -> Self {
