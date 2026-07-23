@@ -2,12 +2,12 @@
 
 use std::sync::{Arc, Mutex};
 
+use djinn_core::clock::{Clock, SystemClock};
 use djinn_core::doctor::checks::retrieval::{
     InjectionStarvationCheck, RETRIEVAL_TAXONOMY_V1, TaxonomyV1DispositionHistogram,
     TaxonomyV1InvalidGroupSnapshot, TaxonomyV1QueryCounters, TaxonomyV1RetrievalSnapshot,
     TaxonomyV1RetrievalZeroResultCheck, TaxonomyV1ValidGroupSnapshot,
 };
-use djinn_core::clock::{Clock, SystemClock};
 use djinn_core::doctor::{DoctorCheck, DoctorCheckCadence, DoctorResult, Finding};
 use djinn_core::models::KnowledgeInjectionConfig;
 use djinn_db::Database;

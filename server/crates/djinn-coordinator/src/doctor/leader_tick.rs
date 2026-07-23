@@ -28,7 +28,7 @@ use djinn_core::doctor::{
     DoctorCheckRun, DoctorRegistry, Finding, FindingSeverity, run_cheap_subset,
 };
 use djinn_db::repositories::doctor_finding::KeyedDoctorFinding;
-use djinn_db::{DoctorFindingRepository, NewDoctorFinding};
+use djinn_db::{DoctorFinding, DoctorFindingRepository, NewDoctorFinding};
 use serde_json::json;
 use tracing::{error, info, warn};
 
@@ -159,33 +159,40 @@ async fn persist_findings(
     }
 }
 
-/// Write one board-visible activity entry for a [`Finding`].
+/// Write one board-visible activity entry for a Doctor finding.
 ///
 /// The actor on the activity entry is fixed to `coordinator` / `system` (same
-/// convention as the existing stall-timeout entries) so operators can filter
-/// the activity log by actor. The `task_id` is `None` when the finding has no
-/// entity context — this is the documented "board-wide observation" case and
-/// matches `activity_log.task_id` being nullable.
-///
-/// A failure to write the activity entry is logged but never propagated; the
-/// tick must keep moving.
-async fn record_activity_for_finding(repo: &djinn_db::TaskRepository, finding: &Finding) {
-    let task_id = finding_task_id(finding);
-    let (event_type, kind_label) = if finding.severity == FindingSeverity::Critical {
+/// convention as the existing stall-timeout entries). Failures are logged but
+/// never propagated so the tick can keep moving.
+async fn record_doctor_activity(
+    repo: &djinn_db::TaskRepository,
+    task_id: Option<String>,
+    check_name: &str,
+    severity: &str,
+    detail: Option<&str>,
+    entity_ids: &serde_json::Value,
+    evidence: &serde_json::Value,
+    resolver_snapshot: Option<&serde_json::Value>,
+    lifecycle: Option<&str>,
+) {
+    let (event_type, kind_label) = if severity == FindingSeverity::Critical.as_str() {
         (DOCTOR_CRITICAL_FINDING_ACTIVITY, "critical")
     } else {
-        (DOCTOR_FINDING_ACTIVITY, finding.severity.as_str())
+        (DOCTOR_FINDING_ACTIVITY, severity)
     };
-
-    let payload = json!({
-        "check": finding.check_name,
-        "check_name": finding.check_name,
-        "severity": finding.severity.as_str(),
+    let mut payload = json!({
+        "check": check_name,
+        "check_name": check_name,
+        "severity": severity,
         "kind": kind_label,
-        "detail": finding.detail,
-        "entity_ids": finding.entity_ids,
-    })
-    .to_string();
+        "detail": detail,
+        "entity_ids": entity_ids,
+        "evidence": evidence,
+        "resolver_snapshot": resolver_snapshot,
+    });
+    if let Some(lifecycle) = lifecycle {
+        payload["lifecycle"] = json!(lifecycle);
+    }
 
     if let Err(error) = repo
         .log_activity(
@@ -193,17 +200,68 @@ async fn record_activity_for_finding(repo: &djinn_db::TaskRepository, finding: &
             "coordinator",
             "system",
             event_type,
-            &payload,
+            &payload.to_string(),
         )
         .await
     {
         warn!(
-            check = %finding.check_name,
-            severity = %finding.severity.as_str(),
+            check = %check_name,
+            severity = %severity,
             error = %error,
             "CoordinatorActor: failed to write doctor finding activity entry; continuing"
         );
     }
+}
+
+/// Write activity for an in-memory non-retrieval finding.
+async fn record_activity_for_finding(repo: &djinn_db::TaskRepository, finding: &Finding) {
+    let entity_ids = serde_json::to_value(&finding.entity_ids).unwrap_or_else(|_| json!([]));
+    let resolver_snapshot = serde_json::to_value(&finding.resolver_snapshot).ok();
+    record_doctor_activity(
+        repo,
+        finding_task_id(finding),
+        &finding.check_name,
+        finding.severity.as_str(),
+        Some(&finding.detail),
+        &entity_ids,
+        &finding.evidence,
+        resolver_snapshot.as_ref(),
+        None,
+    )
+    .await;
+}
+
+/// Write activity for a persisted retrieval lifecycle transition. This uses the
+/// row returned by reconciliation so healthy-absence resolutions retain their
+/// original resolver evidence instead of requiring a current resolver output.
+async fn record_activity_for_persisted_finding(
+    repo: &djinn_db::TaskRepository,
+    finding: &DoctorFinding,
+    lifecycle: &str,
+) {
+    let task_id = finding
+        .entity_ids
+        .get("task_id")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| {
+            finding
+                .entity_ids
+                .get("task")
+                .and_then(serde_json::Value::as_str)
+        })
+        .map(str::to_owned);
+    record_doctor_activity(
+        repo,
+        task_id,
+        &finding.check_name,
+        &finding.severity,
+        finding.detail.as_deref(),
+        &finding.entity_ids,
+        &finding.evidence,
+        finding.resolver_snapshot.as_ref(),
+        Some(lifecycle),
+    )
+    .await;
 }
 
 /// Run the cheap doctor subset once, persisting findings and emitting metrics.
@@ -332,11 +390,24 @@ pub async fn run_cheap_doctor_checks_with_preserved_retrieval_keys(
         } else {
             malformed_retrieval_keys.to_vec()
         };
-        if let Err(error) = finding_repo
+        match finding_repo
             .reconcile_retrieval_findings(retrieval, &preserve_keys)
             .await
         {
-            warn!(error = %error, "CoordinatorActor: failed to reconcile retrieval doctor findings");
+            Ok(changes) => {
+                for finding in changes.created {
+                    record_activity_for_persisted_finding(&task_repo, &finding, "created").await;
+                }
+                for finding in changes.updated {
+                    record_activity_for_persisted_finding(&task_repo, &finding, "updated").await;
+                }
+                for finding in changes.resolved {
+                    record_activity_for_persisted_finding(&task_repo, &finding, "resolved").await;
+                }
+            }
+            Err(error) => {
+                warn!(error = %error, "CoordinatorActor: failed to reconcile retrieval doctor findings");
+            }
         }
     }
     for run in &runs {
@@ -348,16 +419,18 @@ pub async fn run_cheap_doctor_checks_with_preserved_retrieval_keys(
             persist_findings(&finding_repo, run_id, &run.findings).await;
         }
 
-        for finding in &run.findings {
-            // This check is a dry-run: durable doctor evidence is allowed, but
-            // observing an orphan must not create task activity.
-            if finding.check_name == crate::doctor::CLOSED_PARENT_OPEN_CHILDREN_CHECK_NAME {
-                continue;
+        if !is_retrieval_check(check_name) {
+            for finding in &run.findings {
+                // This check is a dry-run: durable doctor evidence is allowed, but
+                // observing an orphan must not create task activity.
+                if finding.check_name == crate::doctor::CLOSED_PARENT_OPEN_CHILDREN_CHECK_NAME {
+                    continue;
+                }
+                // Every finding gets a board activity entry — Critical surfaces
+                // in the dedicated lane; Warn/Info still surface in the
+                // generic doctor-finding lane for observability.
+                record_activity_for_finding(&task_repo, finding).await;
             }
-            // Every finding gets a board activity entry — Critical surfaces
-            // in the dedicated lane; Warn/Info still surface in the
-            // generic doctor-finding lane for observability.
-            record_activity_for_finding(&task_repo, finding).await;
         }
 
         let elapsed = run_started.elapsed();
@@ -1136,7 +1209,45 @@ mod tests {
         // resolver. Keep their complete persisted forms for byte-for-byte
         // comparison after the injected whole-refresh failure.
         run_cheap_doctor_checks(&registry, &db, &events_tx, Some("healthy-alarming")).await;
+        // Repeating an active snapshot is an update, not another create.
+        run_cheap_doctor_checks(&registry, &db, &events_tx, Some("healthy-update")).await;
         let repo = DoctorFindingRepository::new(db.clone());
+        let task_repo =
+            djinn_db::TaskRepository::new(db.clone(), crate::events::event_bus_for(&events_tx));
+        let retrieval_activity = task_repo
+            .query_activity(djinn_db::ActivityQuery {
+                event_type: Some(DOCTOR_FINDING_ACTIVITY.to_owned()),
+                ..Default::default()
+            })
+            .await
+            .expect("query retrieval activity");
+        let lifecycle_payloads: Vec<serde_json::Value> = retrieval_activity
+            .iter()
+            .filter_map(|entry| serde_json::from_str::<serde_json::Value>(&entry.payload).ok())
+            .filter(|payload| payload["check"].as_str().is_some_and(is_retrieval_check))
+            .collect();
+        assert_eq!(
+            lifecycle_payloads
+                .iter()
+                .filter(|payload| payload["lifecycle"] == "created")
+                .count(),
+            2,
+            "initial keyed retrieval alarms must emit create activity",
+        );
+        assert_eq!(
+            lifecycle_payloads
+                .iter()
+                .filter(|payload| payload["lifecycle"] == "updated")
+                .count(),
+            2,
+            "repeated keyed retrieval alarms must emit update activity",
+        );
+        let created = lifecycle_payloads
+            .iter()
+            .find(|payload| payload["lifecycle"] == "created")
+            .expect("created retrieval activity");
+        assert!(created["evidence"].is_object());
+        assert!(created["resolver_snapshot"].is_object());
         let zero_before = repo
             .latest_for_check("memory.retrieval_zero_result")
             .await
@@ -1149,16 +1260,16 @@ mod tests {
             .expect("starvation created");
         assert_eq!(zero_before.status, "active");
         assert_eq!(starvation_before.status, "active");
-        assert_eq!(zero_resolver_invocations.load(Ordering::SeqCst), 1);
-        assert_eq!(starvation_resolver_invocations.load(Ordering::SeqCst), 1);
+        assert_eq!(zero_resolver_invocations.load(Ordering::SeqCst), 2);
+        assert_eq!(starvation_resolver_invocations.load(Ordering::SeqCst), 2);
 
         // The injected repository/source failure emits exactly the structured
         // refresh error, without invoking either resolver or mutating either
         // existing active alarm (including observed_at and refresh evidence).
         phase.store(1, Ordering::SeqCst);
         run_cheap_doctor_checks(&registry, &db, &events_tx, Some("refresh-failure")).await;
-        assert_eq!(zero_resolver_invocations.load(Ordering::SeqCst), 1);
-        assert_eq!(starvation_resolver_invocations.load(Ordering::SeqCst), 1);
+        assert_eq!(zero_resolver_invocations.load(Ordering::SeqCst), 2);
+        assert_eq!(starvation_resolver_invocations.load(Ordering::SeqCst), 2);
         assert_eq!(
             repo.get(&zero_before.id).await.expect("reload zero"),
             Some(zero_before.clone()),
@@ -1194,8 +1305,8 @@ mod tests {
         // reconciles all three active keys to resolved, including refresh.
         phase.store(2, Ordering::SeqCst);
         run_cheap_doctor_checks(&registry, &db, &events_tx, Some("healthy-recovery")).await;
-        assert_eq!(zero_resolver_invocations.load(Ordering::SeqCst), 2);
-        assert_eq!(starvation_resolver_invocations.load(Ordering::SeqCst), 2);
+        assert_eq!(zero_resolver_invocations.load(Ordering::SeqCst), 3);
+        assert_eq!(starvation_resolver_invocations.load(Ordering::SeqCst), 3);
         assert_eq!(
             repo.get(&zero_before.id)
                 .await
@@ -1220,6 +1331,22 @@ mod tests {
                 .status,
             "resolved"
         );
+        let resolved_activity = task_repo
+            .query_activity(djinn_db::ActivityQuery {
+                event_type: Some(DOCTOR_FINDING_ACTIVITY.to_owned()),
+                ..Default::default()
+            })
+            .await
+            .expect("query resolved retrieval activity");
+        let resolved_payloads: Vec<serde_json::Value> = resolved_activity
+            .iter()
+            .filter_map(|entry| serde_json::from_str::<serde_json::Value>(&entry.payload).ok())
+            .filter(|payload| payload["lifecycle"] == "resolved")
+            .collect();
+        assert_eq!(resolved_payloads.len(), 3);
+        assert!(resolved_payloads.iter().all(|payload| {
+            payload["evidence"].is_object() && payload["resolver_snapshot"].is_object()
+        }));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1244,7 +1371,10 @@ mod tests {
         )
         .await;
 
-        assert!(runs.is_empty(), "a non-leader must not evaluate Cheap checks");
+        assert!(
+            runs.is_empty(),
+            "a non-leader must not evaluate Cheap checks"
+        );
         assert!(
             !source.has_attempted_refresh(),
             "a non-leader must not touch the retrieval source"
