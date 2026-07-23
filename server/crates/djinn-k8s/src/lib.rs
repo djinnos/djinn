@@ -27,11 +27,11 @@ pub use env_config::{
     env_config_volume_mount,
 };
 pub use graph_warmer::{
-    GraphWarmLease, GraphWarmLeaseError, GraphWarmLeaseGrant, K8sGraphWarmer, KubeClientDispatcher,
-    KubeClientJobWatcher, KubeClientWarmJobLister, NoopJobWatcher, NoopWarmJobLister,
-    WarmAdmission, WarmAdmissionError, WarmAdmissionPermit, WarmAdmissionRequest,
-    WarmAdmissionTransition, WarmCompletionSink, WarmJobDispatcher, WarmJobLister, WarmJobManifest,
-    WarmJobWatcher, WarmTerminalOutcome,
+    GraphWarmLease, GraphWarmLeaseError, GraphWarmLeaseGrant, GraphWarmLeaseRecovery,
+    K8sGraphWarmer, KubeClientDispatcher, KubeClientJobWatcher, KubeClientWarmJobLister,
+    NoopJobWatcher, NoopWarmJobLister, WarmAdmission, WarmAdmissionError, WarmAdmissionPermit,
+    WarmAdmissionRequest, WarmAdmissionTransition, WarmCompletionSink, WarmJobDispatcher,
+    WarmJobLister, WarmJobManifest, WarmJobWatcher, WarmTerminalOutcome,
 };
 pub use graph_warmer_candidates::{
     CleanupObservation, GateObservation, KubeWarmCandidateClient, WarmAnnotationValidation,
