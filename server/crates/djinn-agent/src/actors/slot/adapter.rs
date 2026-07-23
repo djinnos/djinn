@@ -351,8 +351,26 @@ pub async fn resolve_final_verification_for_task_run(
         .await
         .map_err(|e| e.to_string())?
         .ok_or("task run missing")?;
+    let plan = crate::environment::environment_config_for_project_id(db, &run.project_id)
+        .await
+        .lifecycle
+        .final_verification;
+    // Typed skip, checked BEFORE the worktree requirement: a project
+    // with zero final-verification commands has no completion boundary
+    // to enforce, so submission must not depend on a resolvable
+    // worktree. A configured plan keeps the fail-closed worktree
+    // requirement below.
+    if plan.normalized_commands().is_empty() {
+        return Ok(None);
+    }
+    let worktree = run
+        .workspace_path
+        .map(PathBuf::from)
+        .ok_or("task run has no worktree")?;
     // Catalog authorization is bound at dispatch, never re-selected from a
     // mutable project. A changed project selection makes verification ineligible.
+    // Resolve it only for a configured plan with a usable worktree: an empty
+    // plan is a typed skip and cannot consume catalog identity material.
     let runs = TaskRunRepository::new(db.clone());
     let bound_image_id = runs
         .catalog_image_id(task_run_id)
@@ -376,22 +394,6 @@ pub async fn resolve_final_verification_for_task_run(
     let services = resolve_image_services_strict(db, &bound_image_id)
         .await
         .map_err(|e| format!("strict catalog resolution failed: {e}"))?;
-    let plan = crate::environment::environment_config_for_project_id(db, &run.project_id)
-        .await
-        .lifecycle
-        .final_verification;
-    // Typed skip, checked BEFORE the worktree requirement: a project
-    // with zero final-verification commands has no completion boundary
-    // to enforce, so submission must not depend on a resolvable
-    // worktree. A configured plan keeps the fail-closed worktree
-    // requirement below.
-    if plan.normalized_commands().is_empty() {
-        return Ok(None);
-    }
-    let worktree = run
-        .workspace_path
-        .map(PathBuf::from)
-        .ok_or("task run has no worktree")?;
     let manifest = VerificationInputManifestV1 {
         version: plan.input_manifest.version,
         repo_paths: plan.input_manifest.repo_paths.clone(),
@@ -1076,8 +1078,13 @@ mod resolve_final_verification_tests {
     }
 
     #[tokio::test]
-    async fn task_run_catalog_image_drift_fails_before_plan_or_catalog_resolution() {
-        let fx = fixture(None).await;
+    async fn task_run_catalog_image_drift_fails_before_catalog_resolution() {
+        let worktree = initialized_worktree().await;
+        let fx = fixture(Some(
+            worktree.path().to_str().expect("worktree path is UTF-8"),
+        ))
+        .await;
+        configure_final_verification_plan(&fx).await;
         let images = ImageRepository::new(fx.agent.db.clone());
         images
             .create("catalog-image-at-dispatch", "dispatch", None, "{}")
@@ -1098,11 +1105,12 @@ mod resolve_final_verification_tests {
             .await
             .unwrap();
 
-        assert_eq!(
-            resolve(&fx).await,
-            Err("task-run/current-image mismatch".into()),
-            "verification must never substitute a project image selected after dispatch"
-        );
+        match resolve(&fx).await {
+            Err(detail) => assert_eq!(detail, "task-run/current-image mismatch"),
+            Ok(_) => {
+                panic!("verification must never substitute a project image selected after dispatch")
+            }
+        }
     }
 
     /// A configured plan reads the path persisted onto a pod-shaped NULL row.

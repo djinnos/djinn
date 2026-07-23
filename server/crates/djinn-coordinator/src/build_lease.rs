@@ -417,9 +417,13 @@ impl BuildLeaseService {
         if !self.is_ready() {
             return self.unavailable();
         }
-        self.telemetry
-            .operation(LeaseOperation::Status, telemetry_consumer(&identity));
-        self.pause.before_transaction(LeaseOperation::Status).await;
+        self.telemetry.operation(
+            LeaseOperation::Status,
+            telemetry_consumer(&identity),
+        );
+        self.pause
+            .before_transaction(LeaseOperation::Status)
+            .await;
         let (key, _) = crate::build_lease::identity(&identity);
         match self
             .repository

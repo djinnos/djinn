@@ -108,8 +108,12 @@ pub async fn resolve_image_services_strict(
 /// Strictly validate already-loaded catalog rows. Kept separate from database
 /// lookup so every fail-closed catalog invariant has a deterministic unit test.
 fn strict_catalog_from_presets(
-    rows: Vec<(String, ServicePreset)>,
+    mut rows: Vec<(String, ServicePreset)>,
 ) -> Result<Vec<ResolvedCatalogService>, CatalogServiceResolutionError> {
+    // Database ordering is not part of the catalog contract. Canonicalize at
+    // this validation boundary so every caller receives the same identity
+    // material even when rows were loaded in a different order.
+    rows.sort_by(|left, right| left.0.cmp(&right.0));
     let (mut ids, mut types, mut ports, mut env_names) = (
         BTreeSet::new(),
         BTreeSet::new(),
@@ -710,6 +714,31 @@ mod tests {
             strict_catalog_from_presets(vec![("postgres-a".into(), malformed_configuration)]),
             Err(CatalogServiceResolutionError::MalformedConfiguration { .. })
         ));
+    }
+
+    #[test]
+    fn strict_catalog_orders_reversed_rows_by_preset_id() {
+        let mut redis = preset();
+        redis.id = "preset-redis-7".into();
+        redis.service_type = "redis".into();
+        redis.port = 6379;
+        redis.conn_env_var = "REDIS_URL".into();
+
+        let postgres_row = ("preset-postgres-18".into(), preset());
+        let redis_row = ("preset-redis-7".into(), redis);
+        let ordered = strict_catalog_from_presets(vec![postgres_row.clone(), redis_row.clone()])
+            .expect("valid catalog rows");
+        let reversed = strict_catalog_from_presets(vec![redis_row, postgres_row])
+            .expect("reversed valid catalog rows");
+
+        assert_eq!(reversed, ordered);
+        assert_eq!(
+            reversed
+                .iter()
+                .map(|service| service.preset_id.as_str())
+                .collect::<Vec<_>>(),
+            ["preset-postgres-18", "preset-redis-7"]
+        );
     }
 
     #[test]

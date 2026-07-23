@@ -75,7 +75,8 @@ impl BuildLeaseGraphWarmAdapter {
                             .map_or(0, |v| v.unix_timestamp_nanos() as i64 / 1_000_000),
                     },
                     cleanup_required: row.candidate_cleanup.as_ref().is_some_and(|value| {
-                        value.get("close_requested").and_then(|v| v.as_str()) == Some("cancelled")
+                        value.get("close_requested").and_then(|v| v.as_str())
+                            == Some("cancelled")
                     }),
                 })
             })

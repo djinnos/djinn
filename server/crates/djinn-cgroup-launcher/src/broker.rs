@@ -6,13 +6,8 @@
 use std::{collections::HashMap, fs::File, io::Read, os::fd::RawFd};
 
 use crate::{
-<<<<<<< HEAD
-    CgroupFs, CloneIntoCgroup, CpuStat, Error, Invocation, Launcher, Leaf,
-    child::WorkerReadinessAssertion,
-=======
     CgroupFs, ChildProcess, CloneIntoCgroup, CommandSpec, CpuStat, Error, Invocation, Launcher,
     Leaf, child::WorkerReadinessAssertion,
->>>>>>> origin/main
 };
 
 pub const WORKER_UID: u32 = 1000;

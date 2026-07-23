@@ -252,13 +252,22 @@ impl ResolvedEnvironmentIdentityInputV1 {
                 version: self.schema_version,
             });
         }
-        if !matches!(self.canonicalization_version, 1 | 2)
-            || self.schema_version != self.canonicalization_version
-        {
+        if !matches!(self.canonicalization_version, 1 | 2) {
             return Err(EnvironmentIdentityError::UnsupportedVersion {
                 kind: "environment identity canonicalization",
                 version: self.canonicalization_version,
             });
+        }
+        if self.schema_version != self.canonicalization_version {
+            let (kind, version) = if self.schema_version > self.canonicalization_version {
+                ("environment identity schema", self.schema_version)
+            } else {
+                (
+                    "environment identity canonicalization",
+                    self.canonicalization_version,
+                )
+            };
+            return Err(EnvironmentIdentityError::UnsupportedVersion { kind, version });
         }
         if self.schema_version == 1 && !self.services.is_empty() {
             return Err(EnvironmentIdentityError::UnsupportedVersion {
