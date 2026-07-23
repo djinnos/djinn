@@ -29,6 +29,12 @@ use crate::warm_job::{LABEL_PROJECT_ID, LABEL_WARM, build_warm_job};
 pub type WarmJobManifest = Job;
 
 mod warm_admission;
+pub use crate::graph_warmer_candidates::{
+    CleanupObservation, GateObservation, KubeWarmCandidateClient, WarmAnnotationValidation,
+    WarmCandidate, WarmCandidateClient, WarmCandidateControl, WarmCandidateInventory,
+    WarmCandidateKind, WarmCandidateObject, WarmCandidateSet, WarmCandidateSetState,
+    WarmInventoryObservation,
+};
 pub use warm_admission::{
     WarmAdmission, WarmAdmissionError, WarmAdmissionPermit, WarmAdmissionRequest,
     WarmAdmissionTransition,
