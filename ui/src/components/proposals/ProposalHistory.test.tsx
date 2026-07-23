@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@/test/test-utils";
 import { fetchUsers, type OrgUser } from "@/api/users";
-import type { Proposal, ProposalRevision } from "@/api/types";
+import type { Proposal, ProposalLintResult, ProposalRevision } from "@/api/types";
 import type { ProposalDetail } from "@/lib/proposalQueries";
 import { ProposalHistory } from "./ProposalHistory";
 
@@ -44,6 +44,19 @@ function proposal(overrides: Partial<Proposal> = {}): Proposal {
     pending_reconcile: false,
     created_at: "2026-06-01T00:00:00Z",
     updated_at: "2026-06-02T00:00:00Z",
+    ...overrides,
+  };
+}
+
+function lint(overrides: Partial<ProposalLintResult> = {}): ProposalLintResult {
+  return {
+    body_format: "markdown",
+    body_sha256: "abc123",
+    checked_at: "2026-06-02T00:00:00Z",
+    errors: [],
+    linter_version: "v1",
+    skipped_tiers: [],
+    warnings: [],
     ...overrides,
   };
 }
@@ -380,5 +393,53 @@ describe("ProposalHistory", () => {
     expect(screen.getByText("rev 2–3")).toBeInTheDocument();
     // The intermediate per-round revisions are NOT shown as separate rows.
     expect(screen.queryByText("rev 2")).not.toBeInTheDocument();
+  });
+
+  it("keeps an older warning on its own row after a later clean revision", () => {
+    render(<ProposalHistory detail={detail([
+      revision(1),
+      revision(2, { created_at: "2026-06-02T00:00:00Z", lint: lint({ warnings: [{ severity: "warning", code: "SPEC_FUTURE_WARNING", message: "Server supplied warning", span: { start: 3, end: 12 } }] }) }),
+      revision(3, { created_at: "2026-06-03T00:00:00Z", lint: lint() }),
+    ])} />);
+
+    expect(screen.getByText("1 warning")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /rev 3/ })).not.toHaveTextContent("warning");
+    fireEvent.click(screen.getByRole("button", { name: /rev 2/ }));
+    expect(screen.getByText("SPEC_FUTURE_WARNING")).toBeInTheDocument();
+    expect(screen.getByText("Server supplied warning")).toBeInTheDocument();
+    expect(screen.getByText("bytes [3, 12)")).toBeInTheDocument();
+  });
+
+  it("renders legacy errors, unknown codes, and skipped-tier detail verbatim", () => {
+    render(<ProposalHistory detail={detail([
+      revision(1),
+      revision(2, { created_at: "2026-06-02T00:00:00Z", lint: lint({
+        errors: [{ severity: "error", code: "LEGACY_CORRUPT_SPEC", message: "Legacy body is corrupt", span: { start: 0, end: 7 } }],
+        skipped_tiers: [{ tier: "mdx", reason: "UNSUPPORTED_LEGACY_FORMAT", message: "MDX parser was not available" }],
+      } as ProposalLintResult) }),
+    ])} />);
+
+    expect(screen.getByText("1 error")).toBeInTheDocument();
+    expect(screen.getByText("1 skipped")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /rev 2/ }));
+    expect(screen.getByText("LEGACY_CORRUPT_SPEC")).toBeInTheDocument();
+    expect(screen.getByText("Legacy body is corrupt")).toBeInTheDocument();
+    expect(screen.getByText("mdx")).toBeInTheDocument();
+    expect(screen.getByText("UNSUPPORTED_LEGACY_FORMAT")).toBeInTheDocument();
+    expect(screen.getByText("MDX parser was not available")).toBeInTheDocument();
+  });
+
+  it("uses only the displayed tribunal head diagnostics", () => {
+    render(<ProposalHistory detail={detail([
+      revision(1),
+      revision(2, { created_at: "2026-06-02T00:00:00Z", event_metadata: JSON.stringify({ source: "refinement_loop", round: 1 }), lint: lint({ errors: [{ severity: "error", code: "HIDDEN_INTERMEDIATE_ERROR", message: "Must not be reattached", span: { start: 0, end: 1 } }] }) }),
+      revision(3, { created_at: "2026-06-03T00:00:00Z", event_metadata: JSON.stringify({ source: "refinement_loop", round: 2 }), lint: lint({ warnings: [{ severity: "warning", code: "HEAD_WARNING", message: "Displayed head diagnostic", span: { start: 4, end: 9 } }] }) }),
+    ])} />);
+
+    expect(screen.getByText("1 warning")).toBeInTheDocument();
+    expect(screen.queryByText("1 error")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /rev 2–3/ }));
+    expect(screen.getByText("HEAD_WARNING")).toBeInTheDocument();
+    expect(screen.queryByText("HIDDEN_INTERMEDIATE_ERROR")).not.toBeInTheDocument();
   });
 });
