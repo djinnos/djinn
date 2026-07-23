@@ -757,7 +757,10 @@ mod resolve_final_verification_tests {
     use djinn_db::ProjectRepository;
     use djinn_db::repositories::task_run::CreateTaskRunParams;
     use djinn_slot::host::SlotHostCallbacks;
-    use djinn_stack::environment::{EnvironmentConfig, FinalVerificationCommand};
+    use djinn_stack::environment::{
+        EnvironmentConfig, FinalVerificationCommand, FinalVerificationCommandGroup,
+        FinalVerificationPlan, FinalVerificationSelectionRule,
+    };
     use tokio_util::sync::CancellationToken;
 
     use super::*;
@@ -825,6 +828,99 @@ mod resolve_final_verification_tests {
         callbacks
             .resolve_final_verification(&fx.task_id, &fx.task_run_id, "attempt", "run", &ctx)
             .await
+    }
+
+    fn grouped_plan() -> FinalVerificationPlan {
+        FinalVerificationPlan {
+            command_groups: vec![
+                FinalVerificationCommandGroup {
+                    name: "server".into(),
+                    commands: vec![FinalVerificationCommand {
+                        check_id: "server-check".into(),
+                        executable: "server-test".into(),
+                        ..Default::default()
+                    }],
+                },
+                FinalVerificationCommandGroup {
+                    name: "ui".into(),
+                    commands: vec![FinalVerificationCommand {
+                        check_id: "ui-check".into(),
+                        executable: "ui-test".into(),
+                        ..Default::default()
+                    }],
+                },
+            ],
+            // Keep the rule order deliberately opposite the group order: a
+            // union of both rules must still emit server before ui.
+            selection_rules: vec![
+                FinalVerificationSelectionRule {
+                    match_globs: vec!["ui/**".into()],
+                    command_groups: vec!["ui".into()],
+                },
+                FinalVerificationSelectionRule {
+                    match_globs: vec!["server/**".into()],
+                    command_groups: vec!["server".into()],
+                },
+            ],
+            ..Default::default()
+        }
+    }
+
+    fn assert_selection(paths: &[&str], expected_checks: &[&str], expected_groups: &[&str]) {
+        let paths = paths.iter().map(ToString::to_string).collect::<Vec<_>>();
+        let (commands, groups) = resolve_selected_final_verification(&grouped_plan(), &paths)
+            .expect("grouped plan must resolve selected commands");
+        assert_eq!(
+            commands
+                .iter()
+                .map(|command| command.check_id.as_str())
+                .collect::<Vec<_>>(),
+            expected_checks
+        );
+        assert_eq!(groups, expected_groups);
+    }
+
+    #[test]
+    fn path_rules_select_groups_with_configuration_ordered_commands() {
+        // A single matching path selects only that rule's group.
+        assert_selection(&["server/src/lib.rs"], &["server-check"], &["server"]);
+        assert_selection(&["ui/src/app.tsx"], &["ui-check"], &["ui"]);
+
+        // No matching path, or no changed paths, is the fail-safe all-groups
+        // selection. Commands follow command_groups configuration order rather
+        // than the reverse selection-rule order above.
+        assert_selection(
+            &["README.md"],
+            &["server-check", "ui-check"],
+            &["server", "ui"],
+        );
+        assert_selection(&[], &["server-check", "ui-check"], &["server", "ui"]);
+        assert_selection(
+            &["ui/src/app.tsx", "server/src/lib.rs"],
+            &["server-check", "ui-check"],
+            &["server", "ui"],
+        );
+    }
+
+    #[test]
+    fn grouped_plan_that_selects_no_commands_fails_closed() {
+        let plan = FinalVerificationPlan {
+            command_groups: vec![FinalVerificationCommandGroup {
+                name: "empty".into(),
+                commands: vec![],
+            }],
+            selection_rules: vec![FinalVerificationSelectionRule {
+                match_globs: vec!["server/**".into()],
+                command_groups: vec!["empty".into()],
+            }],
+            ..Default::default()
+        };
+
+        assert_eq!(
+            resolve_selected_final_verification(&plan, &["server/src/lib.rs".into()])
+                .expect_err("a selected group without commands must fail closed"),
+            "final-verification plan resolved to no commands"
+        );
     }
 
     /// Defect 2 regression: a project with no final-verification plan resolves
