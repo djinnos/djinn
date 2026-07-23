@@ -437,28 +437,51 @@ async fn production_adapter_persists_reports_and_replays_forward_bind() {
         let token = adapter
             .acquire(
                 identity.clone(),
-                LeaseDeadlines { queue_deadline_ms: 0, launch_deadline_ms: 0 },
+                LeaseDeadlines {
+                    queue_deadline_ms: 0,
+                    launch_deadline_ms: 0,
+                },
             )
             .await
             .unwrap()
             .grant
             .fencing_token;
-        adapter.report(&identity, token.clone(), LeaseState::Launching).await.unwrap();
-        adapter.bind(&identity, token.clone(), "uid-a".into()).await.unwrap();
-        adapter.report(&identity, token.clone(), LeaseState::Bound).await.unwrap();
+        adapter
+            .report(&identity, token.clone(), LeaseState::Launching)
+            .await
+            .unwrap();
+        adapter
+            .bind(&identity, token.clone(), "uid-a".into())
+            .await
+            .unwrap();
+        adapter
+            .report(&identity, token.clone(), LeaseState::Bound)
+            .await
+            .unwrap();
         if matches!(replay_state, LeaseState::Active | LeaseState::Suspect) {
-            adapter.report(&identity, token.clone(), LeaseState::Active).await.unwrap();
+            adapter
+                .report(&identity, token.clone(), LeaseState::Active)
+                .await
+                .unwrap();
         }
         if replay_state == LeaseState::Suspect {
-            adapter.report(&identity, token.clone(), LeaseState::Suspect).await.unwrap();
+            adapter
+                .report(&identity, token.clone(), LeaseState::Suspect)
+                .await
+                .unwrap();
         }
-        adapter.bind(&identity, token.clone(), "uid-a".into()).await.unwrap();
+        adapter
+            .bind(&identity, token.clone(), "uid-a".into())
+            .await
+            .unwrap();
         let row = repository
             .get(&djinn_db::BuildLeaseKey {
                 consumer_kind: djinn_db::BuildLeaseConsumerKind::GraphWarm,
                 consumer_id: identity.warm_request_id.clone(),
             })
-            .await.unwrap().unwrap();
+            .await
+            .unwrap()
+            .unwrap();
         let expected = match replay_state {
             LeaseState::Bound => BuildLeaseState::Bound,
             LeaseState::Active => BuildLeaseState::Active,
@@ -467,15 +490,22 @@ async fn production_adapter_persists_reports_and_replays_forward_bind() {
         };
         assert_eq!(row.state, expected);
         assert_eq!(row.bound_pod_uid.as_deref(), Some("uid-a"));
-        assert!(adapter
-            .report(
-                &identity,
-                djinn_supervisor::services::LeaseFencingToken(token.0 + 1),
-                replay_state,
-            )
-            .await
-            .is_err());
-        assert!(adapter.report(&identity, token, LeaseState::Launching).await.is_err());
+        assert!(
+            adapter
+                .report(
+                    &identity,
+                    djinn_supervisor::services::LeaseFencingToken(token.0 + 1),
+                    replay_state,
+                )
+                .await
+                .is_err()
+        );
+        assert!(
+            adapter
+                .report(&identity, token, LeaseState::Launching)
+                .await
+                .is_err()
+        );
     }
 }
 
@@ -601,7 +631,6 @@ async fn graph_warm_and_task_invocation_share_one_fifo_cap() {
     ));
 }
 
-
 #[tokio::test]
 async fn adapter_recovers_lost_bind_response_from_durable_status_and_rejects_other_uid() {
     let (service, _, _) = service(1).await;
@@ -612,7 +641,13 @@ async fn adapter_recovers_lost_bind_response_from_durable_status_and_rejects_oth
     };
     let adapter = BuildLeaseGraphWarmAdapter::new(service.clone());
     let token = adapter
-        .acquire(identity.clone(), LeaseDeadlines { queue_deadline_ms: 0, launch_deadline_ms: 0 })
+        .acquire(
+            identity.clone(),
+            LeaseDeadlines {
+                queue_deadline_ms: 0,
+                launch_deadline_ms: 0,
+            },
+        )
         .await
         .unwrap()
         .grant
@@ -641,14 +676,18 @@ async fn adapter_recovers_lost_bind_response_from_durable_status_and_rejects_oth
             .await,
         LeaseResult::Status(_)
     ));
-    assert!(adapter
-        .bind(&identity, token.clone(), "immutable-uid".into())
-        .await
-        .is_ok());
-    assert!(adapter
-        .bind(&identity, token, "different-uid".into())
-        .await
-        .is_err());
+    assert!(
+        adapter
+            .bind(&identity, token.clone(), "immutable-uid".into())
+            .await
+            .is_ok()
+    );
+    assert!(
+        adapter
+            .bind(&identity, token, "different-uid".into())
+            .await
+            .is_err()
+    );
 }
 
 #[tokio::test]
@@ -662,7 +701,10 @@ async fn task_then_warm_fifo_and_zero_cap_do_not_bypass_the_shared_ledger() {
     let task_token = match lease_service
         .queue(LeaseQueueRequest {
             identity: task.clone(),
-            deadlines: LeaseDeadlines { queue_deadline_ms: 0, launch_deadline_ms: 0 },
+            deadlines: LeaseDeadlines {
+                queue_deadline_ms: 0,
+                launch_deadline_ms: 0,
+            },
         })
         .await
     {
@@ -702,7 +744,10 @@ async fn task_then_warm_fifo_and_zero_cap_do_not_bypass_the_shared_ledger() {
                     task_run_id: "run".into(),
                     invocation_id: "cap-zero".into(),
                 }),
-                deadlines: LeaseDeadlines { queue_deadline_ms: 0, launch_deadline_ms: 0 },
+                deadlines: LeaseDeadlines {
+                    queue_deadline_ms: 0,
+                    launch_deadline_ms: 0
+                },
             })
             .await,
         LeaseResult::Queued(_)
@@ -710,7 +755,12 @@ async fn task_then_warm_fifo_and_zero_cap_do_not_bypass_the_shared_ledger() {
     let snapshot = zero_repository.snapshot().await.unwrap();
     assert_eq!(snapshot.occupied, 0);
     assert_eq!(snapshot.rows.len(), 2);
-    assert!(snapshot.rows.iter().all(|row| row.state == BuildLeaseState::Queued));
+    assert!(
+        snapshot
+            .rows
+            .iter()
+            .all(|row| row.state == BuildLeaseState::Queued)
+    );
 }
 
 #[derive(Clone)]
@@ -763,11 +813,7 @@ impl djinn_k8s::WarmCandidateClient for RecoveryCandidateClient {
 struct RecoveryDispatcher;
 #[async_trait]
 impl djinn_k8s::WarmJobDispatcher for RecoveryDispatcher {
-    async fn dispatch(
-        &self,
-        _: &str,
-        _: djinn_k8s::WarmJobManifest,
-    ) -> Result<String, String> {
+    async fn dispatch(&self, _: &str, _: djinn_k8s::WarmJobManifest) -> Result<String, String> {
         panic!("restart reconciliation must not create a Job")
     }
 }
@@ -815,16 +861,24 @@ async fn production_adapter_cancellation_reconciles_uid_before_capacity_release(
         LeaseResult::Cancelled { .. }
     ));
 
-    let pods = Arc::new(std::sync::Mutex::new(vec![djinn_k8s::WarmCandidateObject {
-        kind: djinn_k8s::WarmCandidateKind::Pod,
-        name: "pod-a".into(),
-        uid: Some("pod-uid".into()),
-        annotations: BTreeMap::from([
-            ("djinn.app/warm-request-id".into(), identity.warm_request_id.clone()),
-            ("djinn.app/graph-revision".into(), identity.graph_revision.clone()),
-            ("djinn.app/fencing-token".into(), token.0.to_string()),
-        ]),
-    }]));
+    let pods = Arc::new(std::sync::Mutex::new(vec![
+        djinn_k8s::WarmCandidateObject {
+            kind: djinn_k8s::WarmCandidateKind::Pod,
+            name: "pod-a".into(),
+            uid: Some("pod-uid".into()),
+            annotations: BTreeMap::from([
+                (
+                    "djinn.app/warm-request-id".into(),
+                    identity.warm_request_id.clone(),
+                ),
+                (
+                    "djinn.app/graph-revision".into(),
+                    identity.graph_revision.clone(),
+                ),
+                ("djinn.app/fencing-token".into(), token.0.to_string()),
+            ]),
+        },
+    ]));
     let deleted = Arc::new(std::sync::Mutex::new(Vec::new()));
     let gates = Arc::new(AtomicUsize::new(0));
     let client = RecoveryCandidateClient {

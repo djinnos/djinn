@@ -258,7 +258,10 @@ async fn restart_from_each_durable_state_only_opens_one_confirmed_uid() {
 
         assert_eq!(lease.binds.lock().unwrap().as_slice(), ["uid-a"]);
         assert_eq!(candidates.gates.lock().unwrap().as_slice(), ["uid-a"]);
-        assert_eq!(lease.reports.lock().unwrap().as_slice(), [LeaseState::Active]);
+        assert_eq!(
+            lease.reports.lock().unwrap().as_slice(),
+            [LeaseState::Active]
+        );
         assert_eq!(*lease.releases.lock().unwrap(), 0);
     }
 }
@@ -270,9 +273,11 @@ async fn unsafe_recovery_inventory_never_binds_or_opens_graph_work_gate() {
         let mut second = pod_inventory("uid-b");
         WarmCandidateInventory {
             observation: WarmInventoryObservation::Observed,
-            jobs_observation: crate::graph_warmer_candidates::WarmCandidateListObservation::Observed,
+            jobs_observation:
+                crate::graph_warmer_candidates::WarmCandidateListObservation::Observed,
             jobs: WarmCandidateSet::default(),
-            pods_observation: crate::graph_warmer_candidates::WarmCandidateListObservation::Observed,
+            pods_observation:
+                crate::graph_warmer_candidates::WarmCandidateListObservation::Observed,
             pods: WarmCandidateSet {
                 state: WarmCandidateSetState::Duplicate,
                 candidates: vec![
@@ -331,7 +336,10 @@ async fn unsafe_recovery_inventory_never_binds_or_opens_graph_work_gate() {
         assert!(lease.binds.lock().unwrap().is_empty());
         assert!(candidates.gates.lock().unwrap().is_empty());
         assert_eq!(*lease.releases.lock().unwrap(), 0);
-        assert_eq!(lease.reports.lock().unwrap().as_slice(), [LeaseState::Suspect]);
+        assert_eq!(
+            lease.reports.lock().unwrap().as_slice(),
+            [LeaseState::Suspect]
+        );
     }
 }
 
