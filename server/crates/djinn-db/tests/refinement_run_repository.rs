@@ -41,6 +41,169 @@ async fn fixture() -> (Database, ProposalRepository, String) {
     (db, repo, proposal_id)
 }
 
+#[tokio::test]
+async fn human_review_acceptance_and_rejection_failures_are_atomic_and_retryable() {
+    let (db, repo, proposal_id) = fixture().await;
+    sqlx::query("INSERT INTO proposal_revisions (id, proposal_id, seq, title, body, body_format, acceptance_criteria, event_kind) VALUES ($1, $2, 1, 'captured', 'captured body', 'markdown', '[]', 'spec_revision')").bind(uuid::Uuid::now_v7().to_string()).bind(&proposal_id).execute(db.pool()).await.unwrap();
+    let admitted = repo
+        .admit_refinement_run(demand(proposal_id.clone(), "human-accept"))
+        .await
+        .unwrap();
+    let (run_id, generation) = match admitted {
+        RefinementAdmissionOutcome::Admitted {
+            run_id, generation, ..
+        } => (run_id, generation),
+        _ => unreachable!(),
+    };
+    sqlx::query(
+        "UPDATE refinement_runs SET state='parked', park_kind='awaiting_review', parked_at=to_char(transaction_timestamp() AT TIME ZONE 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') WHERE id=$1",
+    )
+    .bind(&run_id)
+    .execute(db.pool())
+    .await
+    .unwrap();
+    let proposal_before: Value =
+        sqlx::query_scalar("SELECT to_jsonb(p) FROM proposals p WHERE id=$1")
+            .bind(&proposal_id)
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+    assert!(
+        repo.resolve_refinement_human_review(ResolveRefinementHumanReviewRequest {
+            run_id: run_id.clone(),
+            generation,
+            snapshot_revision_seq: 1,
+            accept: true
+        })
+        .await
+        .unwrap()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT stop_tag FROM refinement_runs WHERE id=$1")
+            .bind(&run_id)
+            .fetch_one(db.pool())
+            .await
+            .unwrap(),
+        "human_accepted"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, Value>("SELECT to_jsonb(p) FROM proposals p WHERE id=$1")
+            .bind(&proposal_id)
+            .fetch_one(db.pool())
+            .await
+            .unwrap(),
+        proposal_before
+    );
+
+    for boundary in ["proposal_update", "spec_revision", "reap_update"] {
+        let (db, repo, proposal_id) = fixture().await;
+        sqlx::query("INSERT INTO proposal_revisions (id, proposal_id, seq, title, body, body_format, acceptance_criteria, event_kind) VALUES ($1, $2, 1, 'captured', 'captured body', 'markdown', '[]', 'spec_revision')").bind(uuid::Uuid::now_v7().to_string()).bind(&proposal_id).execute(db.pool()).await.unwrap();
+        let admitted = repo
+            .admit_refinement_run(demand(
+                proposal_id.clone(),
+                format!("human-failure-{boundary}"),
+            ))
+            .await
+            .unwrap();
+        let (run_id, generation) = match admitted {
+            RefinementAdmissionOutcome::Admitted {
+                run_id, generation, ..
+            } => (run_id, generation),
+            _ => unreachable!(),
+        };
+        sqlx::query("UPDATE proposals SET title='changed', latest_revision_seq=2 WHERE id=$1")
+            .bind(&proposal_id)
+            .execute(db.pool())
+            .await
+            .unwrap();
+        sqlx::query(
+            "UPDATE refinement_runs SET state='parked', park_kind='awaiting_review', parked_at=to_char(transaction_timestamp() AT TIME ZONE 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') WHERE id=$1",
+        )
+        .bind(&run_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+        let before = durable_shape(&db, &proposal_id).await;
+        install_failure(&db, boundary).await;
+        assert!(
+            repo.resolve_refinement_human_review(ResolveRefinementHumanReviewRequest {
+                run_id: run_id.clone(),
+                generation,
+                snapshot_revision_seq: 1,
+                accept: false
+            })
+            .await
+            .is_err(),
+            "{boundary} must abort rejection"
+        );
+        assert_eq!(durable_shape(&db, &proposal_id).await, before);
+        remove_failure(
+            &db,
+            match boundary {
+                "proposal_update" => "proposals",
+                "spec_revision" => "proposal_revisions",
+                _ => "refinement_runs",
+            },
+        )
+        .await;
+        assert!(
+            repo.resolve_refinement_human_review(ResolveRefinementHumanReviewRequest {
+                run_id,
+                generation,
+                snapshot_revision_seq: 1,
+                accept: false
+            })
+            .await
+            .unwrap()
+        );
+    }
+
+    let (db, repo, proposal_id) = fixture().await;
+    sqlx::query("INSERT INTO proposal_revisions (id, proposal_id, seq, title, body, body_format, acceptance_criteria, event_kind) VALUES ($1, $2, 1, 'captured', 'captured body', 'markdown', '[]', 'spec_revision')").bind(uuid::Uuid::now_v7().to_string()).bind(&proposal_id).execute(db.pool()).await.unwrap();
+    let admitted = repo
+        .admit_refinement_run(demand(proposal_id.clone(), "human-fences"))
+        .await
+        .unwrap();
+    let (run_id, generation) = match admitted {
+        RefinementAdmissionOutcome::Admitted {
+            run_id, generation, ..
+        } => (run_id, generation),
+        _ => unreachable!(),
+    };
+    sqlx::query(
+        "UPDATE refinement_runs SET state='parked', park_kind='awaiting_review', parked_at=to_char(transaction_timestamp() AT TIME ZONE 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') WHERE id=$1",
+    )
+    .bind(&run_id)
+    .execute(db.pool())
+    .await
+    .unwrap();
+    let before = durable_shape(&db, &proposal_id).await;
+    assert!(
+        repo.resolve_refinement_human_review(ResolveRefinementHumanReviewRequest {
+            run_id: run_id.clone(),
+            generation: generation + 1,
+            snapshot_revision_seq: 1,
+            accept: false
+        })
+        .await
+        .is_err()
+    );
+    assert_eq!(durable_shape(&db, &proposal_id).await, before);
+    sqlx::query("UPDATE proposal_revisions SET event_kind='refinement_start' WHERE proposal_id=$1 AND seq=1 AND event_kind='spec_revision'").bind(&proposal_id).execute(db.pool()).await.unwrap();
+    let before = durable_shape(&db, &proposal_id).await;
+    assert!(
+        repo.resolve_refinement_human_review(ResolveRefinementHumanReviewRequest {
+            run_id,
+            generation,
+            snapshot_revision_seq: 1,
+            accept: false
+        })
+        .await
+        .is_err()
+    );
+    assert_eq!(durable_shape(&db, &proposal_id).await, before);
+}
+
 fn demand(proposal_id: String, key: impl Into<String>) -> AdmitRefinementRunRequest {
     AdmitRefinementRunRequest {
         proposal_id,
@@ -91,6 +254,12 @@ async fn install_failure(db: &Database, boundary: &str) {
         "reap_update" => {
             "CREATE TRIGGER refinement_admission_failure BEFORE UPDATE ON refinement_runs FOR EACH ROW EXECUTE FUNCTION refinement_admission_failure_for_test()"
         }
+        "proposal_update" => {
+            "CREATE TRIGGER refinement_admission_failure BEFORE UPDATE ON proposals FOR EACH ROW EXECUTE FUNCTION refinement_admission_failure_for_test()"
+        }
+        "spec_revision" => {
+            "CREATE TRIGGER refinement_admission_failure BEFORE INSERT ON proposal_revisions FOR EACH ROW WHEN (NEW.event_kind = 'spec_revision') EXECUTE FUNCTION refinement_admission_failure_for_test()"
+        }
         "run_insert" => {
             "CREATE TRIGGER refinement_admission_failure BEFORE INSERT ON refinement_runs FOR EACH ROW EXECUTE FUNCTION refinement_admission_failure_for_test()"
         }
@@ -108,6 +277,13 @@ async fn install_failure(db: &Database, boundary: &str) {
         _ => panic!("unknown injection boundary {boundary}"),
     };
     sqlx::query(statement).execute(db.pool()).await.unwrap();
+}
+
+async fn remove_failure(db: &Database, table: &str) {
+    sqlx::query(format!("DROP TRIGGER refinement_admission_failure ON {table}").as_str())
+        .execute(db.pool())
+        .await
+        .unwrap();
 }
 
 async fn assert_reap_rolled_back(db: &Database, proposal_id: &str, old_run_id: &str) {
@@ -458,19 +634,42 @@ async fn exact_source_intent_transitions_fence_and_rollback_together() {
         .execute(db.pool())
         .await
         .unwrap();
-    let bad = TerminalRefinementRunFromIntentRequest {
-        source: SourceIntentTransitionRequest {
+    for bad_source in [
+        SourceIntentTransitionRequest {
+            generation: generation + 1,
+            ..source(run_id.clone(), intent_id.clone(), generation)
+        },
+        SourceIntentTransitionRequest {
+            expected_round: 2,
+            ..source(run_id.clone(), intent_id.clone(), generation)
+        },
+        SourceIntentTransitionRequest {
+            expected_phase: RefinementPhase::AdvocateRevision,
+            ..source(run_id.clone(), intent_id.clone(), generation)
+        },
+        SourceIntentTransitionRequest {
             expected_role: RefinementRole::Judge,
             ..source(run_id.clone(), intent_id.clone(), generation)
         },
-        reason: RefinementStopReason::OperatorStop {
-            actor: "test".into(),
-            reason: None,
+        SourceIntentTransitionRequest {
+            intent_id: uuid::Uuid::now_v7().to_string(),
+            ..source(run_id.clone(), intent_id.clone(), generation)
         },
-    };
-    let before = durable_shape(&db, &proposal_id).await;
-    assert!(repo.terminal_refinement_run_from_intent(bad).await.is_err());
-    assert_eq!(durable_shape(&db, &proposal_id).await, before);
+    ] {
+        let before = durable_shape(&db, &proposal_id).await;
+        assert!(
+            repo.terminal_refinement_run_from_intent(TerminalRefinementRunFromIntentRequest {
+                source: bad_source,
+                reason: RefinementStopReason::OperatorStop {
+                    actor: "test".into(),
+                    reason: None
+                },
+            })
+            .await
+            .is_err()
+        );
+        assert_eq!(durable_shape(&db, &proposal_id).await, before);
+    }
     assert!(
         repo.terminal_refinement_run_from_intent(TerminalRefinementRunFromIntentRequest {
             source: source(run_id.clone(), intent_id.clone(), generation),
@@ -523,12 +722,58 @@ async fn exact_source_intent_transitions_fence_and_rollback_together() {
         .execute(db.pool())
         .await
         .unwrap();
+    assert!(
+        repo.park_refinement_run_from_intent(ParkRefinementRunFromIntentRequest {
+            source: source(run_id.clone(), intent_id.clone(), generation),
+            kind: RefinementParkKind::AwaitingReview,
+        })
+        .await
+        .unwrap()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT state FROM refinement_dispatch_intents WHERE id=$1"
+        )
+        .bind(&intent_id)
+        .fetch_one(db.pool())
+        .await
+        .unwrap(),
+        "completed"
+    );
+    assert!(
+        !repo
+            .park_refinement_run_from_intent(ParkRefinementRunFromIntentRequest {
+                source: source(run_id, intent_id, generation),
+                kind: RefinementParkKind::AwaitingReview,
+            })
+            .await
+            .unwrap()
+    );
+
+    let (db, repo, proposal_id) = fixture().await;
+    let admitted = repo
+        .admit_refinement_run(demand(proposal_id.clone(), "terminal-rollback"))
+        .await
+        .unwrap();
+    let (run_id, intent_id, generation) = match admitted {
+        RefinementAdmissionOutcome::Admitted {
+            run_id,
+            intent_id,
+            generation,
+        } => (run_id, intent_id, generation),
+        _ => unreachable!(),
+    };
+    sqlx::query("UPDATE refinement_dispatch_intents SET state = 'claimed', claimed_by = 'worker', claimed_at = $2, claim_expires_at = '2999-01-01T00:00:00.000Z' WHERE id = $1")
+        .bind(&intent_id).bind(OLD).execute(db.pool()).await.unwrap();
     install_failure(&db, "reap_update").await;
     let before = durable_shape(&db, &proposal_id).await;
     assert!(
-        repo.park_refinement_run_from_intent(ParkRefinementRunFromIntentRequest {
+        repo.terminal_refinement_run_from_intent(TerminalRefinementRunFromIntentRequest {
             source: source(run_id, intent_id, generation),
-            kind: RefinementParkKind::AwaitingReview,
+            reason: RefinementStopReason::OperatorStop {
+                actor: "test".into(),
+                reason: None
+            },
         })
         .await
         .is_err()
