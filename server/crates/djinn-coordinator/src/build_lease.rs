@@ -399,6 +399,20 @@ impl BuildLeaseService {
         )
         .await
     }
+    /// Persist an occupied reconciliation observation without releasing capacity.
+    pub async fn report(
+        &self,
+        identity: LeaseIdentity,
+        token: LeaseFencingToken,
+        state: LeaseState,
+    ) -> LeaseResult {
+        let state = match state {
+            LeaseState::Active => BuildLeaseState::Active,
+            LeaseState::Suspect => BuildLeaseState::Suspect,
+            _ => return self.unavailable(),
+        };
+        self.transition(identity, token, state, LeaseOperation::Status).await
+    }
     pub async fn expire_deadlines(&self) -> LeaseResult {
         let _guard = self.operation.lock().await;
         if !self.is_ready() {
@@ -685,7 +699,8 @@ fn status(row: &BuildLeaseRow) -> LeaseStatus {
             BuildLeaseState::Granted => LeaseState::Granted,
             BuildLeaseState::Launching => LeaseState::Launching,
             BuildLeaseState::Bound => LeaseState::Bound,
-            BuildLeaseState::Active | BuildLeaseState::Suspect => LeaseState::Active,
+            BuildLeaseState::Active => LeaseState::Active,
+            BuildLeaseState::Suspect => LeaseState::Suspect,
             BuildLeaseState::Terminal => {
                 if row.terminal_reason.as_deref() == Some("released") {
                     LeaseState::Released
