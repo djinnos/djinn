@@ -66,6 +66,9 @@ impl ControlNonce {
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
+    pub(crate) fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
 }
 
 pub trait NonceSource {
@@ -217,7 +220,7 @@ impl<F: CgroupFs, S: CloneIntoCgroup, N: NonceSource> Broker<F, S, N> {
         nonce: ControlNonce,
         leaf_name: &str,
     ) -> Result<ControlNonce, Error> {
-        self.validate_and_rotate(connection, id, nonce)?;
+        self.validate(connection, id, nonce)?;
         let invocation = self
             .active
             .get(id)
@@ -232,7 +235,7 @@ impl<F: CgroupFs, S: CloneIntoCgroup, N: NonceSource> Broker<F, S, N> {
         if active.leaf.replace(leaf).is_some() {
             return Err(Error::InvalidControl);
         }
-        Ok(active.nonce)
+        self.rotate(id)
     }
 
     pub fn sample(
@@ -241,7 +244,7 @@ impl<F: CgroupFs, S: CloneIntoCgroup, N: NonceSource> Broker<F, S, N> {
         id: &str,
         nonce: ControlNonce,
     ) -> Result<(CpuStat, ControlNonce), Error> {
-        self.validate_and_rotate(connection, id, nonce)?;
+        self.validate(connection, id, nonce)?;
         let (launcher, active) = (
             &mut self.launcher,
             self.active
@@ -249,7 +252,8 @@ impl<F: CgroupFs, S: CloneIntoCgroup, N: NonceSource> Broker<F, S, N> {
                 .ok_or(Error::InvalidInvocationBinding)?,
         );
         let sample = launcher.sample(active.leaf.as_ref().ok_or(Error::InvalidControl)?)?;
-        Ok((sample, active.nonce))
+        let nonce = self.rotate(id)?;
+        Ok((sample, nonce))
     }
 
     pub fn lift(
@@ -259,7 +263,7 @@ impl<F: CgroupFs, S: CloneIntoCgroup, N: NonceSource> Broker<F, S, N> {
         nonce: ControlNonce,
         fence: u64,
     ) -> Result<ControlNonce, Error> {
-        self.validate_and_rotate(connection, id, nonce)?;
+        self.validate(connection, id, nonce)?;
         let (launcher, active) = (
             &mut self.launcher,
             self.active
@@ -267,7 +271,7 @@ impl<F: CgroupFs, S: CloneIntoCgroup, N: NonceSource> Broker<F, S, N> {
                 .ok_or(Error::InvalidInvocationBinding)?,
         );
         launcher.fenced_lift(active.leaf.as_mut().ok_or(Error::InvalidControl)?, fence)?;
-        Ok(active.nonce)
+        self.rotate(id)
     }
 
     pub fn kill(
@@ -276,7 +280,7 @@ impl<F: CgroupFs, S: CloneIntoCgroup, N: NonceSource> Broker<F, S, N> {
         id: &str,
         nonce: ControlNonce,
     ) -> Result<ControlNonce, Error> {
-        self.validate_and_rotate(connection, id, nonce)?;
+        self.validate(connection, id, nonce)?;
         let (launcher, active) = (
             &mut self.launcher,
             self.active
@@ -284,7 +288,7 @@ impl<F: CgroupFs, S: CloneIntoCgroup, N: NonceSource> Broker<F, S, N> {
                 .ok_or(Error::InvalidInvocationBinding)?,
         );
         launcher.kill(active.leaf.as_mut().ok_or(Error::InvalidControl)?)?;
-        Ok(active.nonce)
+        self.rotate(id)
     }
 
     pub fn cleanup(
@@ -293,13 +297,30 @@ impl<F: CgroupFs, S: CloneIntoCgroup, N: NonceSource> Broker<F, S, N> {
         id: &str,
         nonce: ControlNonce,
     ) -> Result<(), Error> {
-        self.validate_and_rotate(connection, id, nonce)?;
+        self.validate(connection, id, nonce)?;
         let active = self
             .active
             .remove(id)
             .ok_or(Error::InvalidInvocationBinding)?;
         self.launcher
             .remove(active.leaf.as_ref().ok_or(Error::InvalidControl)?)
+    }
+
+    pub fn wait_empty(
+        &mut self,
+        connection: ConnectionId,
+        id: &str,
+        nonce: ControlNonce,
+    ) -> Result<ControlNonce, Error> {
+        self.validate(connection, id, nonce)?;
+        let (launcher, active) = (
+            &mut self.launcher,
+            self.active
+                .get_mut(id)
+                .ok_or(Error::InvalidInvocationBinding)?,
+        );
+        launcher.wait_empty(active.leaf.as_ref().ok_or(Error::InvalidControl)?)?;
+        self.rotate(id)
     }
 
     fn require_ready_connection(&self, connection: ConnectionId) -> Result<(), Error> {
@@ -310,7 +331,8 @@ impl<F: CgroupFs, S: CloneIntoCgroup, N: NonceSource> Broker<F, S, N> {
             .then_some(())
             .ok_or(Error::InvalidWorker)
     }
-    fn validate_and_rotate(
+    /// Expected operation failures do not consume a nonce.
+    fn validate(
         &mut self,
         connection: ConnectionId,
         id: &str,
@@ -324,12 +346,15 @@ impl<F: CgroupFs, S: CloneIntoCgroup, N: NonceSource> Broker<F, S, N> {
         if active.nonce != supplied {
             return Err(Error::InvalidNonce);
         }
+        Ok(())
+    }
+    fn rotate(&mut self, id: &str) -> Result<ControlNonce, Error> {
         let replacement = self.nonces.nonce()?;
         self.active
             .get_mut(id)
             .ok_or(Error::InvalidInvocationBinding)?
             .nonce = replacement;
-        Ok(())
+        Ok(replacement)
     }
 }
 
@@ -494,6 +519,8 @@ mod tests {
             broker.lift(connection, "one", nonce, 8),
             Err(Error::FenceMismatch)
         ));
+        // A rejected fence leaves the authenticated nonce usable for a retry.
+        assert!(broker.lift(connection, "one", nonce, 9).is_ok());
     }
 
     #[test]

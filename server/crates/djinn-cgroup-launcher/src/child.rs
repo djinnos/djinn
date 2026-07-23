@@ -11,7 +11,19 @@ pub const ARTIFACT_GID: u32 = 1000;
 /// authenticated worker connection.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct WorkerReadinessAssertion {
-    _private: (),
+    proof: [u8; 16],
+}
+impl WorkerReadinessAssertion {
+    pub(crate) fn wire_bytes(self) -> [u8; 16] {
+        self.proof
+    }
+    pub(crate) fn from_wire(bytes: &[u8]) -> Result<Self, Error> {
+        let proof: [u8; 16] = bytes.try_into().map_err(|_| Error::InvalidWorker)?;
+        if proof.iter().all(|byte| *byte == 0) {
+            return Err(Error::InvalidWorker);
+        }
+        Ok(Self { proof })
+    }
 }
 
 /// Injectable worker-local `prctl` seam. Procfs and ptrace access are not
@@ -49,7 +61,13 @@ pub fn prepare_worker_readiness(
     if syscalls.get_dumpable()? != 0 {
         return Err(Error::InvalidWorker);
     }
-    Ok(WorkerReadinessAssertion { _private: () })
+    // The proof is carried by the authenticated socket; it prevents the
+    // privileged server from manufacturing readiness from an empty frame.
+    let mut proof = [0_u8; 16];
+    let mut entropy = std::fs::File::open("/dev/urandom").map_err(Error::Io)?;
+    use std::io::Read;
+    entropy.read_exact(&mut proof).map_err(Error::Io)?;
+    Ok(WorkerReadinessAssertion { proof })
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
