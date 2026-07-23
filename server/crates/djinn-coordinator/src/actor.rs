@@ -1385,14 +1385,24 @@ impl CoordinatorActor {
             CoordinatorMessage::RouteSettledNoopWithoutLiveMover { task_id } => {
                 self.route_settled_noop_without_live_mover(&task_id).await;
             }
-            CoordinatorMessage::RefreshRetrievalHealth { reply } => {
+            CoordinatorMessage::RefreshRetrievalHealth {
+                check_names,
+                run_id,
+                reply,
+            } => {
                 #[cfg(not(test))]
-                let result = match self.retrieval_health_source.as_ref() {
-                    Some(source) => source.refresh().await,
-                    None => Err("coordinator retrieval health source is not initialized".to_owned()),
-                };
+                let result = crate::doctor::leader_tick::run_manual_retrieval_refresh_and_checks(
+                    self.retrieval_health_source.as_ref(),
+                    djinn_core::doctor::registry(),
+                    &self.db,
+                    &self.events_tx,
+                    Some(&run_id),
+                    &check_names,
+                )
+                .await;
                 #[cfg(test)]
-                let result = Err("coordinator retrieval health source is not initialized".to_owned());
+                let result =
+                    Err("coordinator retrieval health source is not initialized".to_owned());
                 let _ = reply.send(result);
             }
             CoordinatorMessage::RecordLiveMetrics { reply } => {

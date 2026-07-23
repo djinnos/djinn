@@ -33,9 +33,13 @@ pub struct CoordinatorStatus {
 pub trait CoordinatorOps: Send + Sync {
     fn get_status(&self) -> Result<CoordinatorStatus, String>;
     async fn trigger_dispatch_for_project(&self, project_id: &str) -> Result<(), String>;
-    /// Refresh the coordinator-owned retrieval-health source before an
-    /// on-demand Doctor run. MCP cannot construct a competing source.
-    async fn refresh_retrieval_health(&self) -> Result<(), String> {
+    /// Run retrieval checks through the coordinator-owned source and its
+    /// production reconciliation contract. MCP cannot reconcile independently.
+    async fn run_retrieval_health_checks(
+        &self,
+        _check_names: Vec<String>,
+        _run_id: String,
+    ) -> Result<Vec<djinn_core::doctor::DoctorCheckRun>, String> {
         Err("coordinator retrieval health source is not initialized".to_owned())
     }
     /// Request the shared, coalescing persisted board-health mismatch scan.

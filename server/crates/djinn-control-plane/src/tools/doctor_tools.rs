@@ -44,7 +44,9 @@ use rmcp::{
 };
 use serde::{Deserialize, Serialize};
 
-use djinn_core::doctor::{DoctorCheck, DoctorRegistry, Finding, FindingSeverity, ResolverSnapshot, registry};
+use djinn_core::doctor::{
+    DoctorCheck, DoctorRegistry, Finding, FindingSeverity, ResolverSnapshot, registry,
+};
 use djinn_db::{DoctorFindingRepository, ProjectRepository, RecentDoctorFindings};
 
 use crate::server::DjinnMcpServer;
@@ -477,7 +479,9 @@ impl DjinnMcpServer {
             }))
             .collect();
         let extension_probe_selected = p.check_names.as_ref().is_some_and(|names| {
-            names.iter().any(|name| name == EXTENSION_DIAGNOSTICS_PROBE_NAME)
+            names
+                .iter()
+                .any(|name| name == EXTENSION_DIAGNOSTICS_PROBE_NAME)
         });
         let retrieval_names = [
             "memory.retrieval_zero_result",
@@ -485,22 +489,43 @@ impl DjinnMcpServer {
             "memory.retrieval_health_refresh",
         ];
         let retrieval_selected = p.check_names.as_ref().is_none_or(|names| {
-            names.is_empty() || names.iter().any(|name| retrieval_names.contains(&name.as_str()))
+            names.is_empty()
+                || names
+                    .iter()
+                    .any(|name| retrieval_names.contains(&name.as_str()))
         });
-        let ordinary_names = p.check_names.as_ref().map(|names| names.iter()
-            .filter(|name| name.as_str() != EXTENSION_DIAGNOSTICS_PROBE_NAME)
-            .cloned().collect::<Vec<_>>());
+        let ordinary_names = p.check_names.as_ref().map(|names| {
+            names
+                .iter()
+                .filter(|name| name.as_str() != EXTENSION_DIAGNOSTICS_PROBE_NAME)
+                .cloned()
+                .collect::<Vec<_>>()
+        });
         let checks = match resolve_checks(reg, &ordinary_names) {
             Ok(checks) => checks,
-            Err(error) => return Json(DoctorRunResponse {
-                ok: false, registered_checks, results: Vec::new(), total_findings: 0, error: Some(error),
-            }),
+            Err(error) => {
+                return Json(DoctorRunResponse {
+                    ok: false,
+                    registered_checks,
+                    results: Vec::new(),
+                    total_findings: 0,
+                    error: Some(error),
+                });
+            }
         };
         // Refresh exactly once through the coordinator-owned source. The
         // registered checks consume that same shared publication.
         if retrieval_selected {
             if let Some(coordinator) = self.state.coordinator().await {
-                let _ = coordinator.refresh_retrieval_health().await;
+                let _ = coordinator
+                    .run_retrieval_health_checks(
+                        retrieval_names
+                            .iter()
+                            .map(|name| (*name).to_owned())
+                            .collect(),
+                        uuid::Uuid::now_v7().to_string(),
+                    )
+                    .await;
             }
         }
 

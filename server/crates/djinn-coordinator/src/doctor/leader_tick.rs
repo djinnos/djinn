@@ -405,6 +405,37 @@ pub async fn run_elected_retrieval_refresh_and_cheap_checks(
     .await
 }
 
+/// Execute an on-demand retrieval run through the same refresh and
+/// preservation-aware reconciliation path as the elected leader tick.
+pub async fn run_manual_retrieval_refresh_and_checks(
+    source: Option<&std::sync::Arc<crate::doctor::retrieval_health::RetrievalHealthSource>>,
+    registry: &DoctorRegistry,
+    db: &djinn_db::Database,
+    events_tx: &tokio::sync::broadcast::Sender<djinn_core::events::DjinnEventEnvelope>,
+    run_id: Option<&str>,
+    check_names: &[String],
+) -> Result<Vec<DoctorCheckRun>, String> {
+    let Some(source) = source else {
+        return Err("coordinator retrieval health source is not initialized".to_owned());
+    };
+    let runs = run_elected_retrieval_refresh_and_cheap_checks(
+        true,
+        Some(source),
+        registry,
+        db,
+        events_tx,
+        run_id,
+    )
+    .await;
+    Ok(runs
+        .into_iter()
+        .filter(|run| {
+            is_retrieval_check(run.check_name)
+                && (check_names.is_empty() || check_names.iter().any(|name| name == run.check_name))
+        })
+        .collect())
+}
+
 /// Run the cheap subset while retaining prior rows for malformed groups from
 /// an otherwise successful retrieval snapshot. The supplied keys must be
 /// derived from taxonomy-v1 group helpers and include both potential alarms.

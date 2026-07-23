@@ -119,11 +119,20 @@ impl CoordinatorHandle {
             .await
     }
 
-    /// Refresh the single retrieval-health source registered by the actor.
-    pub async fn refresh_retrieval_health(&self) -> Result<(), CoordinatorError> {
+    /// Run retrieval checks through the actor-owned refresh and reconciliation
+    /// path used by the elected leader tick.
+    pub async fn run_retrieval_health_checks(
+        &self,
+        check_names: Vec<String>,
+        run_id: String,
+    ) -> Result<Vec<djinn_core::doctor::DoctorCheckRun>, CoordinatorError> {
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-        self.send(CoordinatorMessage::RefreshRetrievalHealth { reply: reply_tx })
-            .await?;
+        self.send(CoordinatorMessage::RefreshRetrievalHealth {
+            check_names,
+            run_id,
+            reply: reply_tx,
+        })
+        .await?;
         reply_rx
             .await
             .map_err(|_| CoordinatorError::ActorDead)?

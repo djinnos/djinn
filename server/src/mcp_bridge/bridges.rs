@@ -40,9 +40,13 @@ impl CoordinatorOps for CoordinatorBridge {
             .map_err(|e| e.to_string())
     }
 
-    async fn refresh_retrieval_health(&self) -> Result<(), String> {
+    async fn run_retrieval_health_checks(
+        &self,
+        check_names: Vec<String>,
+        run_id: String,
+    ) -> Result<Vec<djinn_core::doctor::DoctorCheckRun>, String> {
         self.handle
-            .refresh_retrieval_health()
+            .run_retrieval_health_checks(check_names, run_id)
             .await
             .map_err(|e| e.to_string())
     }
