@@ -25,10 +25,9 @@ pub use environment::{
     CargoCachePolicy, CargoCachePolicyOverride, CargoWarmCommand, ClangLanguage, ConfigSource,
     DotnetLanguage, EnvironmentConfig, EnvironmentConfigError, ExternalInputDeclaration,
     FinalVerificationCommand, FinalVerificationCommandGroup, FinalVerificationPlan,
-    FinalVerificationSelectionRule, GoLanguage, HermeticityDeclaration,
-    HookCommand, JavaLanguage, Languages, LifecycleHooks, NodeLanguage, PreTaskCommand,
-    PreTaskFailurePolicy, PythonLanguage, RubyLanguage, RustLanguage, SCHEMA_VERSION,
-    VerificationInputManifest, Workspace,
+    FinalVerificationSelectionRule, GoLanguage, HermeticityDeclaration, HookCommand, JavaLanguage,
+    Languages, LifecycleHooks, NodeLanguage, PreTaskCommand, PreTaskFailurePolicy, PythonLanguage,
+    RubyLanguage, RustLanguage, SCHEMA_VERSION, VerificationInputManifest, Workspace,
 };
 pub use schema::{LanguageStat, ManifestSignals, Runtimes, Stack};
 pub use slug::workspace_slug;

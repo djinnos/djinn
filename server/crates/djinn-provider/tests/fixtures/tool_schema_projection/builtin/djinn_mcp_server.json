@@ -4956,7 +4956,6 @@
                   "version": 1,
                   "profile_id": "",
                   "profile_revision": 0,
-                  "commands": [],
                   "required_checks": [],
                   "input_manifest": {
                     "version": 1,
@@ -5305,7 +5304,6 @@
                 "version": 1,
                 "profile_id": "",
                 "profile_revision": 0,
-                "commands": [],
                 "required_checks": [],
                 "input_manifest": {
                   "version": 1,
@@ -5400,11 +5398,25 @@
               "default": 0
             },
             "commands": {
+              "description": "Legacy flat declaration. New configurations must use `command_groups`\nand `selection_rules`; this remains readable so persisted rows can be\nmigrated without a flag day.",
               "type": "array",
               "items": {
                 "$ref": "#/$defs/FinalVerificationCommand"
-              },
-              "default": []
+              }
+            },
+            "command_groups": {
+              "description": "Ordered command groups used by path selection in new declarations.",
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/FinalVerificationCommandGroup"
+              }
+            },
+            "selection_rules": {
+              "description": "Ordered path rules. A matching rule selects its named command groups.",
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/FinalVerificationSelectionRule"
+              }
             },
             "required_checks": {
               "type": "array",
@@ -5489,6 +5501,49 @@
             "executable",
             "timeout_seconds"
           ]
+        },
+        "FinalVerificationCommandGroup": {
+          "description": "A named, ordered subset of a final-verification plan.",
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "commands": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/FinalVerificationCommand"
+              },
+              "default": []
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "name"
+          ]
+        },
+        "FinalVerificationSelectionRule": {
+          "description": "Ordered path selection for one or more command groups.",
+          "type": "object",
+          "properties": {
+            "match": {
+              "description": "Repository-relative globs. `**` is the explicit fail-safe catch-all.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": []
+            },
+            "command_groups": {
+              "description": "Names of command groups selected by this rule.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": []
+            }
+          },
+          "additionalProperties": false
         },
         "VerificationInputManifest": {
           "type": "object",
@@ -5845,7 +5900,6 @@
                   "version": 1,
                   "profile_id": "",
                   "profile_revision": 0,
-                  "commands": [],
                   "required_checks": [],
                   "input_manifest": {
                     "version": 1,
@@ -6194,7 +6248,6 @@
                 "version": 1,
                 "profile_id": "",
                 "profile_revision": 0,
-                "commands": [],
                 "required_checks": [],
                 "input_manifest": {
                   "version": 1,
@@ -6289,11 +6342,25 @@
               "default": 0
             },
             "commands": {
+              "description": "Legacy flat declaration. New configurations must use `command_groups`\nand `selection_rules`; this remains readable so persisted rows can be\nmigrated without a flag day.",
               "type": "array",
               "items": {
                 "$ref": "#/$defs/FinalVerificationCommand"
-              },
-              "default": []
+              }
+            },
+            "command_groups": {
+              "description": "Ordered command groups used by path selection in new declarations.",
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/FinalVerificationCommandGroup"
+              }
+            },
+            "selection_rules": {
+              "description": "Ordered path rules. A matching rule selects its named command groups.",
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/FinalVerificationSelectionRule"
+              }
             },
             "required_checks": {
               "type": "array",
@@ -6378,6 +6445,49 @@
             "executable",
             "timeout_seconds"
           ]
+        },
+        "FinalVerificationCommandGroup": {
+          "description": "A named, ordered subset of a final-verification plan.",
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "commands": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/FinalVerificationCommand"
+              },
+              "default": []
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "name"
+          ]
+        },
+        "FinalVerificationSelectionRule": {
+          "description": "Ordered path selection for one or more command groups.",
+          "type": "object",
+          "properties": {
+            "match": {
+              "description": "Repository-relative globs. `**` is the explicit fail-safe catch-all.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": []
+            },
+            "command_groups": {
+              "description": "Names of command groups selected by this rule.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": []
+            }
+          },
+          "additionalProperties": false
         },
         "VerificationInputManifest": {
           "type": "object",
@@ -6676,7 +6786,6 @@
                   "version": 1,
                   "profile_id": "",
                   "profile_revision": 0,
-                  "commands": [],
                   "required_checks": [],
                   "input_manifest": {
                     "version": 1,
@@ -7025,7 +7134,6 @@
                 "version": 1,
                 "profile_id": "",
                 "profile_revision": 0,
-                "commands": [],
                 "required_checks": [],
                 "input_manifest": {
                   "version": 1,
@@ -7120,11 +7228,25 @@
               "default": 0
             },
             "commands": {
+              "description": "Legacy flat declaration. New configurations must use `command_groups`\nand `selection_rules`; this remains readable so persisted rows can be\nmigrated without a flag day.",
               "type": "array",
               "items": {
                 "$ref": "#/$defs/FinalVerificationCommand"
-              },
-              "default": []
+              }
+            },
+            "command_groups": {
+              "description": "Ordered command groups used by path selection in new declarations.",
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/FinalVerificationCommandGroup"
+              }
+            },
+            "selection_rules": {
+              "description": "Ordered path rules. A matching rule selects its named command groups.",
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/FinalVerificationSelectionRule"
+              }
             },
             "required_checks": {
               "type": "array",
@@ -7209,6 +7331,49 @@
             "executable",
             "timeout_seconds"
           ]
+        },
+        "FinalVerificationCommandGroup": {
+          "description": "A named, ordered subset of a final-verification plan.",
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "commands": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/FinalVerificationCommand"
+              },
+              "default": []
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "name"
+          ]
+        },
+        "FinalVerificationSelectionRule": {
+          "description": "Ordered path selection for one or more command groups.",
+          "type": "object",
+          "properties": {
+            "match": {
+              "description": "Repository-relative globs. `**` is the explicit fail-safe catch-all.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": []
+            },
+            "command_groups": {
+              "description": "Names of command groups selected by this rule.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": []
+            }
+          },
+          "additionalProperties": false
         },
         "VerificationInputManifest": {
           "type": "object",
@@ -13036,7 +13201,6 @@
                   "version": 1,
                   "profile_id": "",
                   "profile_revision": 0,
-                  "commands": [],
                   "required_checks": [],
                   "input_manifest": {
                     "version": 1,
@@ -13385,7 +13549,6 @@
                 "version": 1,
                 "profile_id": "",
                 "profile_revision": 0,
-                "commands": [],
                 "required_checks": [],
                 "input_manifest": {
                   "version": 1,
@@ -13480,11 +13643,25 @@
               "default": 0
             },
             "commands": {
+              "description": "Legacy flat declaration. New configurations must use `command_groups`\nand `selection_rules`; this remains readable so persisted rows can be\nmigrated without a flag day.",
               "type": "array",
               "items": {
                 "$ref": "#/$defs/FinalVerificationCommand"
-              },
-              "default": []
+              }
+            },
+            "command_groups": {
+              "description": "Ordered command groups used by path selection in new declarations.",
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/FinalVerificationCommandGroup"
+              }
+            },
+            "selection_rules": {
+              "description": "Ordered path rules. A matching rule selects its named command groups.",
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/FinalVerificationSelectionRule"
+              }
             },
             "required_checks": {
               "type": "array",
@@ -13569,6 +13746,49 @@
             "executable",
             "timeout_seconds"
           ]
+        },
+        "FinalVerificationCommandGroup": {
+          "description": "A named, ordered subset of a final-verification plan.",
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "commands": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/FinalVerificationCommand"
+              },
+              "default": []
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "name"
+          ]
+        },
+        "FinalVerificationSelectionRule": {
+          "description": "Ordered path selection for one or more command groups.",
+          "type": "object",
+          "properties": {
+            "match": {
+              "description": "Repository-relative globs. `**` is the explicit fail-safe catch-all.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": []
+            },
+            "command_groups": {
+              "description": "Names of command groups selected by this rule.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": []
+            }
+          },
+          "additionalProperties": false
         },
         "VerificationInputManifest": {
           "type": "object",
@@ -13843,7 +14063,6 @@
                   "version": 1,
                   "profile_id": "",
                   "profile_revision": 0,
-                  "commands": [],
                   "required_checks": [],
                   "input_manifest": {
                     "version": 1,
@@ -14192,7 +14411,6 @@
                 "version": 1,
                 "profile_id": "",
                 "profile_revision": 0,
-                "commands": [],
                 "required_checks": [],
                 "input_manifest": {
                   "version": 1,
@@ -14287,11 +14505,25 @@
               "default": 0
             },
             "commands": {
+              "description": "Legacy flat declaration. New configurations must use `command_groups`\nand `selection_rules`; this remains readable so persisted rows can be\nmigrated without a flag day.",
               "type": "array",
               "items": {
                 "$ref": "#/$defs/FinalVerificationCommand"
-              },
-              "default": []
+              }
+            },
+            "command_groups": {
+              "description": "Ordered command groups used by path selection in new declarations.",
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/FinalVerificationCommandGroup"
+              }
+            },
+            "selection_rules": {
+              "description": "Ordered path rules. A matching rule selects its named command groups.",
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/FinalVerificationSelectionRule"
+              }
             },
             "required_checks": {
               "type": "array",
@@ -14376,6 +14608,49 @@
             "executable",
             "timeout_seconds"
           ]
+        },
+        "FinalVerificationCommandGroup": {
+          "description": "A named, ordered subset of a final-verification plan.",
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "commands": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/FinalVerificationCommand"
+              },
+              "default": []
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "name"
+          ]
+        },
+        "FinalVerificationSelectionRule": {
+          "description": "Ordered path selection for one or more command groups.",
+          "type": "object",
+          "properties": {
+            "match": {
+              "description": "Repository-relative globs. `**` is the explicit fail-safe catch-all.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": []
+            },
+            "command_groups": {
+              "description": "Names of command groups selected by this rule.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": []
+            }
+          },
+          "additionalProperties": false
         },
         "VerificationInputManifest": {
           "type": "object",
@@ -14624,7 +14899,6 @@
                   "version": 1,
                   "profile_id": "",
                   "profile_revision": 0,
-                  "commands": [],
                   "required_checks": [],
                   "input_manifest": {
                     "version": 1,
@@ -14973,7 +15247,6 @@
                 "version": 1,
                 "profile_id": "",
                 "profile_revision": 0,
-                "commands": [],
                 "required_checks": [],
                 "input_manifest": {
                   "version": 1,
@@ -15068,11 +15341,25 @@
               "default": 0
             },
             "commands": {
+              "description": "Legacy flat declaration. New configurations must use `command_groups`\nand `selection_rules`; this remains readable so persisted rows can be\nmigrated without a flag day.",
               "type": "array",
               "items": {
                 "$ref": "#/$defs/FinalVerificationCommand"
-              },
-              "default": []
+              }
+            },
+            "command_groups": {
+              "description": "Ordered command groups used by path selection in new declarations.",
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/FinalVerificationCommandGroup"
+              }
+            },
+            "selection_rules": {
+              "description": "Ordered path rules. A matching rule selects its named command groups.",
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/FinalVerificationSelectionRule"
+              }
             },
             "required_checks": {
               "type": "array",
@@ -15157,6 +15444,49 @@
             "executable",
             "timeout_seconds"
           ]
+        },
+        "FinalVerificationCommandGroup": {
+          "description": "A named, ordered subset of a final-verification plan.",
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "commands": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/FinalVerificationCommand"
+              },
+              "default": []
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "name"
+          ]
+        },
+        "FinalVerificationSelectionRule": {
+          "description": "Ordered path selection for one or more command groups.",
+          "type": "object",
+          "properties": {
+            "match": {
+              "description": "Repository-relative globs. `**` is the explicit fail-safe catch-all.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": []
+            },
+            "command_groups": {
+              "description": "Names of command groups selected by this rule.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": []
+            }
+          },
+          "additionalProperties": false
         },
         "VerificationInputManifest": {
           "type": "object",

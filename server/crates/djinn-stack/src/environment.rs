@@ -1361,7 +1361,11 @@ fn validate_final_verification_commands(
                 name: command.check_id.clone(),
             });
         }
-        validate_plain_string(&format!("{field}.executable"), &command.executable, MAX_STRING_LEN)?;
+        validate_plain_string(
+            &format!("{field}.executable"),
+            &command.executable,
+            MAX_STRING_LEN,
+        )?;
         if command.argv.len() > MAX_STRING_LEN {
             return Err(EnvironmentConfigError::ListTooLong {
                 field: format!("{field}.argv"),
@@ -1372,7 +1376,10 @@ fn validate_final_verification_commands(
         for arg in &command.argv {
             validate_plain_string(&format!("{field}.argv"), arg, MAX_STRING_LEN)?;
         }
-        validate_path(&format!("{field}.working_directory"), &command.working_directory)?;
+        validate_path(
+            &format!("{field}.working_directory"),
+            &command.working_directory,
+        )?;
         if command.environment_names.len() > MAX_ENV_ENTRIES {
             return Err(EnvironmentConfigError::ListTooLong {
                 field: format!("{field}.environment_names"),
@@ -1489,7 +1496,12 @@ fn validate_selected_required_checks(
                     .iter()
                     .find(|group| group.name == *name)
                     .into_iter()
-                    .flat_map(|group| group.commands.iter().map(|command| command.check_id.as_str()))
+                    .flat_map(|group| {
+                        group
+                            .commands
+                            .iter()
+                            .map(|command| command.check_id.as_str())
+                    })
             })
             .collect();
         for required in required_checks {
@@ -3269,56 +3281,75 @@ mod tests {
         let mut plan = valid_grouped_final_verification_plan();
         plan.selection_rules[0].match_globs.clear();
         let error = plan.validate().unwrap_err();
-        assert!(matches!(error, EnvironmentConfigError::EmptyValue { ref field }
-            if field == "lifecycle.final_verification.selection_rules[0].match"));
+        assert!(
+            matches!(error, EnvironmentConfigError::EmptyValue { ref field }
+            if field == "lifecycle.final_verification.selection_rules[0].match")
+        );
 
         let mut plan = valid_grouped_final_verification_plan();
         plan.selection_rules[0].command_groups = vec!["missing".into()];
         let error = plan.validate().unwrap_err();
-        assert!(matches!(error, EnvironmentConfigError::UnsafeIdentifier { ref field, ref value }
-            if field == "lifecycle.final_verification.selection_rules[0].command_groups" && value == "missing"));
+        assert!(
+            matches!(error, EnvironmentConfigError::UnsafeIdentifier { ref field, ref value }
+            if field == "lifecycle.final_verification.selection_rules[0].command_groups" && value == "missing")
+        );
 
         let mut plan = valid_grouped_final_verification_plan();
         plan.command_groups[1].commands[0].check_id = "cargo-test".into();
         let error = plan.validate().unwrap_err();
-        assert!(matches!(error, EnvironmentConfigError::DuplicateName { ref field, ref name }
-            if field == "lifecycle.final_verification.command_groups[1].commands" && name == "cargo-test"));
+        assert!(
+            matches!(error, EnvironmentConfigError::DuplicateName { ref field, ref name }
+            if field == "lifecycle.final_verification.command_groups[1].commands" && name == "cargo-test")
+        );
 
         let mut plan = valid_grouped_final_verification_plan();
         plan.selection_rules.pop();
         let error = plan.validate().unwrap_err();
-        assert!(matches!(error, EnvironmentConfigError::EmptyValue { ref field }
-            if field == "lifecycle.final_verification.selection_rules"));
+        assert!(
+            matches!(error, EnvironmentConfigError::EmptyValue { ref field }
+            if field == "lifecycle.final_verification.selection_rules")
+        );
 
         let mut plan = valid_grouped_final_verification_plan();
         plan.selection_rules[1].match_globs = vec!["ui/**".into()];
         let error = plan.validate().unwrap_err();
-        assert!(matches!(error, EnvironmentConfigError::EmptyValue { ref field }
-            if field == "lifecycle.final_verification.selection_rules"));
+        assert!(
+            matches!(error, EnvironmentConfigError::EmptyValue { ref field }
+            if field == "lifecycle.final_verification.selection_rules")
+        );
 
         let mut plan = valid_grouped_final_verification_plan();
         plan.command_groups.push(plan.command_groups[0].clone());
         let error = plan.validate().unwrap_err();
-        assert!(matches!(error, EnvironmentConfigError::DuplicateName { ref field, ref name }
-            if field == "lifecycle.final_verification.command_groups" && name == "rust"));
+        assert!(
+            matches!(error, EnvironmentConfigError::DuplicateName { ref field, ref name }
+            if field == "lifecycle.final_verification.command_groups" && name == "rust")
+        );
 
         let mut plan = valid_grouped_final_verification_plan();
         plan.selection_rules[0].command_groups.push("rust".into());
         let error = plan.validate().unwrap_err();
-        assert!(matches!(error, EnvironmentConfigError::DuplicateName { ref field, ref name }
-            if field == "lifecycle.final_verification.selection_rules[0].command_groups" && name == "rust"));
+        assert!(
+            matches!(error, EnvironmentConfigError::DuplicateName { ref field, ref name }
+            if field == "lifecycle.final_verification.selection_rules[0].command_groups" && name == "rust")
+        );
 
         let mut plan = valid_grouped_final_verification_plan();
-        plan.commands.push(plan.command_groups[0].commands[0].clone());
+        plan.commands
+            .push(plan.command_groups[0].commands[0].clone());
         let error = plan.validate().unwrap_err();
-        assert!(matches!(error, EnvironmentConfigError::UnsafeIdentifier { ref field, .. }
-            if field == "lifecycle.final_verification.commands"));
+        assert!(
+            matches!(error, EnvironmentConfigError::UnsafeIdentifier { ref field, .. }
+            if field == "lifecycle.final_verification.commands")
+        );
 
         let mut plan = valid_grouped_final_verification_plan();
         plan.required_checks.push("web-test".into());
         let error = plan.validate().unwrap_err();
-        assert!(matches!(error, EnvironmentConfigError::UnsafeIdentifier { ref field, ref value }
-            if field == "lifecycle.final_verification.selection_rules[0].command_groups" && value == "web-test"));
+        assert!(
+            matches!(error, EnvironmentConfigError::UnsafeIdentifier { ref field, ref value }
+            if field == "lifecycle.final_verification.selection_rules[0].command_groups" && value == "web-test")
+        );
     }
 
     #[test]
