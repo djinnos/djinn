@@ -432,7 +432,7 @@ async fn ceiling_pr_handoff_is_invariant_across_pr_snapshot_observations() {
             case.snapshot_head,
             case.baseline,
             0,
-            case.status.clone(),
+            case.status,
         )
         .await;
         seed_attempt_head_observation(
