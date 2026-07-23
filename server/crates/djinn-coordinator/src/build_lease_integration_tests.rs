@@ -7,16 +7,18 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use djinn_db::{BuildLeaseRepository, BuildLeaseState, Database};
+use djinn_k8s::GraphWarmLease;
 use djinn_supervisor::services::{
     GraphWarmLeaseIdentity, LeaseAbandonRequest, LeaseBindRequest, LeaseCancelRequest,
     LeaseDeadlines, LeaseGrantRequest, LeaseIdentity, LeaseQueueRequest, LeaseReleaseRequest,
-    LeaseResult, LeaseStatusRequest, TaskInvocationLeaseIdentity,
+    LeaseResult, LeaseState, LeaseStatusRequest, TaskInvocationLeaseIdentity,
 };
 use tokio::sync::{Semaphore, mpsc};
 
 use crate::build_lease::{
     BuildLeaseService, LeaseOperation, LeaseTransactionPause, ManualLeaseClock,
 };
+use crate::graph_warm_lease::BuildLeaseGraphWarmAdapter;
 
 /// A test-only gate that selects transaction serialization without wall time.
 struct TransactionGate {
@@ -406,7 +408,75 @@ async fn lost_terminal_responses_cleanup_and_suspect_occupancy_retry() {
             candidate_cleanup: true
         }
     ));
-    assert_eq!(repository.snapshot().await.unwrap().occupied, 0);
+    let snapshot = repository.snapshot().await.unwrap();
+    assert_eq!(snapshot.occupied, 1);
+    assert_eq!(snapshot.rows[0].state, BuildLeaseState::Suspect);
+    assert_eq!(
+        snapshot.rows[0]
+            .candidate_cleanup
+            .as_ref()
+            .and_then(|value| value.get("close_requested"))
+            .and_then(|value| value.as_str()),
+        Some("cancelled")
+    );
+}
+
+#[tokio::test]
+async fn production_adapter_persists_reports_and_replays_forward_bind() {
+    let (service, repository, _) = service(4).await;
+    for (index, replay_state) in [LeaseState::Bound, LeaseState::Active, LeaseState::Suspect]
+        .into_iter()
+        .enumerate()
+    {
+        let identity = GraphWarmLeaseIdentity {
+            project_id: "project-id".into(),
+            warm_request_id: format!("adapter-{index}"),
+            graph_revision: "graph-revision".into(),
+        };
+        let adapter = BuildLeaseGraphWarmAdapter::new(service.clone());
+        let token = adapter
+            .acquire(
+                identity.clone(),
+                LeaseDeadlines { queue_deadline_ms: 0, launch_deadline_ms: 0 },
+            )
+            .await
+            .unwrap()
+            .grant
+            .fencing_token;
+        adapter.report(&identity, token.clone(), LeaseState::Launching).await.unwrap();
+        adapter.bind(&identity, token.clone(), "uid-a".into()).await.unwrap();
+        adapter.report(&identity, token.clone(), LeaseState::Bound).await.unwrap();
+        if matches!(replay_state, LeaseState::Active | LeaseState::Suspect) {
+            adapter.report(&identity, token.clone(), LeaseState::Active).await.unwrap();
+        }
+        if replay_state == LeaseState::Suspect {
+            adapter.report(&identity, token.clone(), LeaseState::Suspect).await.unwrap();
+        }
+        adapter.bind(&identity, token.clone(), "uid-a".into()).await.unwrap();
+        let row = repository
+            .get(&djinn_db::BuildLeaseKey {
+                consumer_kind: djinn_db::BuildLeaseConsumerKind::GraphWarm,
+                consumer_id: identity.warm_request_id.clone(),
+            })
+            .await.unwrap().unwrap();
+        let expected = match replay_state {
+            LeaseState::Bound => BuildLeaseState::Bound,
+            LeaseState::Active => BuildLeaseState::Active,
+            LeaseState::Suspect => BuildLeaseState::Suspect,
+            _ => unreachable!(),
+        };
+        assert_eq!(row.state, expected);
+        assert_eq!(row.bound_pod_uid.as_deref(), Some("uid-a"));
+        assert!(adapter
+            .report(
+                &identity,
+                djinn_supervisor::services::LeaseFencingToken(token.0 + 1),
+                replay_state,
+            )
+            .await
+            .is_err());
+        assert!(adapter.report(&identity, token, LeaseState::Launching).await.is_err());
+    }
 }
 
 #[tokio::test]
@@ -529,4 +599,147 @@ async fn graph_warm_and_task_invocation_share_one_fifo_cap() {
             .await,
         LeaseResult::Granted(_)
     ));
+}
+
+#[derive(Clone)]
+struct RecoveryCandidateClient {
+    pods: Arc<std::sync::Mutex<Vec<djinn_k8s::WarmCandidateObject>>>,
+    deleted: Arc<std::sync::Mutex<Vec<(String, String)>>>,
+    gates: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[async_trait]
+impl djinn_k8s::WarmCandidateClient for RecoveryCandidateClient {
+    async fn list_warm_jobs(&self) -> Result<Vec<djinn_k8s::WarmCandidateObject>, String> {
+        Ok(Vec::new())
+    }
+
+    async fn list_warm_pods(&self) -> Result<Vec<djinn_k8s::WarmCandidateObject>, String> {
+        Ok(self.pods.lock().unwrap().clone())
+    }
+
+    async fn open_gate(
+        &self,
+        _: &str,
+        _: &str,
+        _: &str,
+        _: &djinn_k8s::LeasedWarmJobIdentity,
+    ) -> djinn_k8s::GateObservation {
+        self.gates.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        djinn_k8s::GateObservation::Opened
+    }
+
+    async fn delete_uid(
+        &self,
+        candidate: &djinn_k8s::WarmCandidate,
+    ) -> djinn_k8s::CleanupObservation {
+        let Some(uid) = candidate.uid.clone() else {
+            return djinn_k8s::CleanupObservation::Unresolved("missing UID".into());
+        };
+        self.deleted
+            .lock()
+            .unwrap()
+            .push((candidate.name.clone(), uid.clone()));
+        self.pods
+            .lock()
+            .unwrap()
+            .retain(|pod| pod.uid.as_deref() != Some(uid.as_str()));
+        djinn_k8s::CleanupObservation::ConfirmedDelete
+    }
+}
+
+struct RecoveryDispatcher;
+#[async_trait]
+impl djinn_k8s::WarmJobDispatcher for RecoveryDispatcher {
+    async fn dispatch(
+        &self,
+        _: &str,
+        _: djinn_k8s::WarmJobManifest,
+    ) -> Result<String, String> {
+        panic!("restart reconciliation must not create a Job")
+    }
+}
+
+#[tokio::test]
+async fn production_adapter_cancellation_reconciles_uid_before_capacity_release() {
+    use std::collections::BTreeMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let (service, repository, _) = service(1).await;
+    let identity = GraphWarmLeaseIdentity {
+        project_id: "project-id".into(),
+        warm_request_id: "cancel-recovery".into(),
+        graph_revision: "graph-revision".into(),
+    };
+    let adapter = Arc::new(BuildLeaseGraphWarmAdapter::new(service.clone()));
+    let token = adapter
+        .acquire(
+            identity.clone(),
+            LeaseDeadlines {
+                queue_deadline_ms: 0,
+                launch_deadline_ms: 0,
+            },
+        )
+        .await
+        .unwrap()
+        .grant
+        .fencing_token;
+    adapter
+        .bind(&identity, token.clone(), "pod-uid".into())
+        .await
+        .unwrap();
+    adapter
+        .report(&identity, token.clone(), LeaseState::Active)
+        .await
+        .unwrap();
+    assert!(matches!(
+        service
+            .cancel(LeaseCancelRequest {
+                identity: LeaseIdentity::GraphWarm(identity.clone()),
+                fencing_token: Some(token.clone()),
+                candidate_cleanup: true,
+            })
+            .await,
+        LeaseResult::Cancelled { .. }
+    ));
+
+    let pods = Arc::new(std::sync::Mutex::new(vec![djinn_k8s::WarmCandidateObject {
+        kind: djinn_k8s::WarmCandidateKind::Pod,
+        name: "pod-a".into(),
+        uid: Some("pod-uid".into()),
+        annotations: BTreeMap::from([
+            ("djinn.app/warm-request-id".into(), identity.warm_request_id.clone()),
+            ("djinn.app/graph-revision".into(), identity.graph_revision.clone()),
+            ("djinn.app/fencing-token".into(), token.0.to_string()),
+        ]),
+    }]));
+    let deleted = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let gates = Arc::new(AtomicUsize::new(0));
+    let client = RecoveryCandidateClient {
+        pods,
+        deleted: deleted.clone(),
+        gates: gates.clone(),
+    };
+    let warmer = djinn_k8s::K8sGraphWarmer::with_dispatcher(
+        djinn_k8s::KubernetesConfig::for_testing(),
+        Database::open_in_memory().unwrap(),
+        Arc::new(RecoveryDispatcher),
+        Arc::new(djinn_k8s::NoopJobWatcher),
+    )
+    .with_graph_warm_lease(adapter)
+    .with_warm_candidate_client(client);
+
+    warmer.reconcile_durable_warm_leases().await;
+    assert_eq!(repository.snapshot().await.unwrap().occupied, 1);
+    assert_eq!(
+        deleted.lock().unwrap().as_slice(),
+        [("pod-a".into(), "pod-uid".into())]
+    );
+    assert_eq!(gates.load(Ordering::SeqCst), 0);
+
+    warmer.reconcile_durable_warm_leases().await;
+    assert_eq!(repository.snapshot().await.unwrap().occupied, 0);
+    warmer.reconcile_durable_warm_leases().await;
+    assert_eq!(repository.snapshot().await.unwrap().occupied, 0);
+    assert_eq!(deleted.lock().unwrap().len(), 1);
 }
