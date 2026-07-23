@@ -761,7 +761,6 @@ mod resolve_final_verification_tests {
         EnvironmentConfig, FinalVerificationCommand, FinalVerificationCommandGroup,
         FinalVerificationPlan, FinalVerificationSelectionRule,
     };
-    use tokio::process::Command;
     use tokio_util::sync::CancellationToken;
 
     use super::*;
@@ -807,18 +806,9 @@ mod resolve_final_verification_tests {
     }
 
     async fn run_git(worktree: &std::path::Path, args: &[&str]) {
-        let output = Command::new("git")
-            .args(args)
-            .current_dir(worktree)
-            .output()
+        djinn_git::run_git_command_in(worktree, args.iter().map(|arg| (*arg).to_owned()).collect())
             .await
-            .expect("git command starts");
-        assert!(
-            output.status.success(),
-            "git {:?} failed: {}",
-            args,
-            String::from_utf8_lossy(&output.stderr)
-        );
+            .unwrap_or_else(|error| panic!("git {args:?} failed: {error}"));
     }
 
     /// The production resolver derives selection paths from the persisted
