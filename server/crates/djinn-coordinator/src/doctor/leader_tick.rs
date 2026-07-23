@@ -233,6 +233,41 @@ pub async fn run_cheap_doctor_checks(
         .await
 }
 
+/// Execute the retrieval-refresh portion of an elected leader's cheap Doctor
+/// tick. Election is explicit so this production control flow is executable in
+/// tests rather than being compiled away under `cfg(test)`.
+///
+/// A non-leader returns before touching the source or the finding repository.
+pub async fn run_elected_retrieval_refresh_and_cheap_checks(
+    is_elected_leader: bool,
+    source: Option<&std::sync::Arc<crate::doctor::retrieval_health::RetrievalHealthSource>>,
+    registry: &DoctorRegistry,
+    db: &djinn_db::Database,
+    events_tx: &tokio::sync::broadcast::Sender<djinn_core::events::DjinnEventEnvelope>,
+    run_id: Option<&str>,
+) -> Vec<DoctorCheckRun> {
+    if !is_elected_leader {
+        return Vec::new();
+    }
+
+    let malformed_retrieval_keys = if let Some(source) = source {
+        if let Err(error) = source.refresh().await {
+            warn!(error = %error, "retrieval health refresh failed; stale resolvers suppressed");
+        }
+        crate::doctor::retrieval_health::malformed_retrieval_alarm_keys(&source.snapshot())
+    } else {
+        Vec::new()
+    };
+    run_cheap_doctor_checks_with_preserved_retrieval_keys(
+        registry,
+        db,
+        events_tx,
+        run_id,
+        &malformed_retrieval_keys,
+    )
+    .await
+}
+
 /// Run the cheap subset while retaining prior rows for malformed groups from
 /// an otherwise successful retrieval snapshot. The supplied keys must be
 /// derived from taxonomy-v1 group helpers and include both potential alarms.
@@ -1184,6 +1219,43 @@ mod tests {
                 .expect("refresh row remains")
                 .status,
             "resolved"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn non_leader_retrieval_tick_neither_refreshes_nor_persists_checks() {
+        let db = fresh_db();
+        let (events_tx, _events_rx) = broadcast::channel(16);
+        let source = Arc::new(
+            crate::doctor::retrieval_health::RetrievalHealthSource::failing_initial_refresh_for_test(
+                djinn_core::models::KnowledgeInjectionConfig::default(),
+            ),
+        );
+        let registry = DoctorRegistry::new();
+        crate::doctor::register_retrieval_health_checks(&registry, Arc::clone(&source));
+
+        let runs = run_elected_retrieval_refresh_and_cheap_checks(
+            false,
+            Some(&source),
+            &registry,
+            &db,
+            &events_tx,
+            Some("non-leader"),
+        )
+        .await;
+
+        assert!(runs.is_empty(), "a non-leader must not evaluate Cheap checks");
+        assert!(
+            !source.has_attempted_refresh(),
+            "a non-leader must not touch the retrieval source"
+        );
+        assert!(
+            DoctorFindingRepository::new(db)
+                .list_recent(Default::default())
+                .await
+                .expect("list findings")
+                .is_empty(),
+            "a non-leader must not persist retrieval findings"
         );
     }
 }
