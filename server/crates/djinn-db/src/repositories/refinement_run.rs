@@ -54,6 +54,13 @@ pub struct RefinementPendingIntent {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActiveRefinementRun {
+    pub run_id: String,
+    pub proposal_id: String,
+    pub generation: i32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClaimRefinementIntentRequest {
     pub run_id: String,
     pub intent_id: String,

@@ -14,6 +14,22 @@ use crate::repositories::proposal::ProposalRepository;
 use super::refinement_run::*;
 
 impl ProposalRepository {
+    /// Discover durable running runs without changing leases or heartbeat.
+    pub async fn load_active_refinement_runs(
+        &self,
+    ) -> IntentMutationResult<Vec<ActiveRefinementRun>> {
+        self.db().ensure_initialized().await?;
+        let rows = sqlx::query("SELECT id, proposal_id, generation FROM refinement_runs WHERE state = 'running' ORDER BY created_at").fetch_all(self.db().pool()).await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| ActiveRefinementRun {
+                run_id: row.get("id"),
+                proposal_id: row.get("proposal_id"),
+                generation: row.get("generation"),
+            })
+            .collect())
+    }
+
     /// Idempotently bind an already-correlated task to an intent and advance heartbeat once.
     pub async fn acknowledge_refinement_task_materialization(
         &self,
@@ -260,6 +276,16 @@ impl ProposalRepository {
         ensure_generation(self.db().pool(), run_id, generation).await?;
         let rows = sqlx::query("SELECT i.id, i.run_id, r.generation, i.round, i.phase, i.role, i.state, i.claimed_by, i.claim_expires_at FROM refinement_dispatch_intents i JOIN refinement_runs r ON r.id = i.run_id WHERE i.run_id = $1 AND i.state IN ('pending', 'claimed') ORDER BY i.round, i.id").bind(run_id).fetch_all(self.db().pool()).await?;
         rows.into_iter().map(pending_intent_row).collect()
+    }
+
+    /// Read pending/claimed exact-run work without moving heartbeat.
+    pub async fn load_dispatchable_refinement_intents(
+        &self,
+        run_id: &str,
+        generation: i32,
+    ) -> IntentMutationResult<Vec<RefinementPendingIntent>> {
+        self.load_pending_or_claimed_refinement_intents(run_id, generation)
+            .await
     }
 
     /// CAS claim pending or DB-time-expired work. Polling does not advance heartbeat.

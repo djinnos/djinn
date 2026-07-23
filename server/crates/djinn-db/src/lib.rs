@@ -189,8 +189,8 @@ pub use repositories::{
         ProposalRepository, ProposalUpdateInput,
     },
     refinement_run::{
-        AcknowledgeRefinementTaskMaterializationRequest, AdmitRefinementRunRequest,
-        ClaimRefinementIntentRequest, CompleteRefinementIntentRequest,
+        AcknowledgeRefinementTaskMaterializationRequest, ActiveRefinementRun,
+        AdmitRefinementRunRequest, ClaimRefinementIntentRequest, CompleteRefinementIntentRequest,
         LoadRefinementRunSnapshotRequest, ParkRefinementRunRequest, RefinementAdmissionError,
         RefinementAdmissionOutcome, RefinementAdmissionSource, RefinementDurableProgress,
         RefinementIntentLease, RefinementIntentMutationError, RefinementLifecycleAggregate,
