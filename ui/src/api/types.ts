@@ -87,6 +87,8 @@ export type ProposalListRow = ProposalListOutputSchema.ProposalListRow;
 export type ProposalListSummary = ProposalListOutputSchema.ProposalListSummary;
 export type ProposalFeedback = ProposalShowOutputSchema.ProposalFeedbackModel;
 export type ProposalTarget = ProposalShowOutputSchema.ProposalTargetModel;
+/** Repository-backed lint result for a proposal head or immutable revision. */
+export type ProposalLintResult = ProposalShowOutputSchema.SpecLintResultV1;
 export type ProposalRevision = ProposalShowOutputSchema.ProposalRevisionModel;
 export type ProposalSignoff = ProposalShowOutputSchema.ProposalSignoffModel;
 export type ProposalEpic = ProposalShowOutputSchema.ProposalEpicModel;
