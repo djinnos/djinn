@@ -33,7 +33,6 @@
 //! — see the module docs in `djinn-core::doctor` for the Gas Town invariant.
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
 
 use djinn_core::extension_diagnostics::ExtensionLoadDiagnosticV1;
 use rmcp::{
@@ -45,13 +44,9 @@ use rmcp::{
 use serde::{Deserialize, Serialize};
 
 use djinn_core::doctor::{
-    DoctorCheck, DoctorRegistry, EntryPointCounts, Finding, FindingSeverity,
-    RETRIEVAL_ZERO_RESULT_NAME, ResolverSnapshot, RetrievalHealthDataSource,
-    RetrievalHealthSnapshot, RetrievalProjectWindowSnapshot, RetrievalZeroResultCheck, registry,
+    DoctorCheck, DoctorRegistry, Finding, FindingSeverity, ResolverSnapshot, registry,
 };
-use djinn_db::repositories::retrieval_trace::RetrievalTraceRepository;
 use djinn_db::{DoctorFindingRepository, ProjectRepository, RecentDoctorFindings};
-use time::{Duration, OffsetDateTime};
 
 use crate::server::DjinnMcpServer;
 use crate::tools::AnyJson;
@@ -435,77 +430,6 @@ fn finding_to_entry(row: &djinn_db::DoctorFinding) -> DoctorListFindingEntry {
     }
 }
 
-struct PrefetchedRetrievalHealthSource {
-    snapshot: RetrievalHealthSnapshot,
-}
-
-impl RetrievalHealthDataSource for PrefetchedRetrievalHealthSource {
-    fn snapshot(&self) -> RetrievalHealthSnapshot {
-        self.snapshot.clone()
-    }
-}
-
-async fn prefetch_retrieval_check(server: &DjinnMcpServer) -> Result<Arc<dyn DoctorCheck>, String> {
-    let projects = ProjectRepository::new(server.state.db().clone(), server.state.event_bus())
-        .list()
-        .await
-        .map_err(|e| format!("failed to enumerate active projects: {e}"))?;
-    let until = OffsetDateTime::now_utc();
-    let from = until - Duration::hours(server.state.retrieval_config().window_hours() as i64);
-    let until_s = until
-        .format(&time::format_description::well_known::Iso8601::DEFAULT)
-        .map_err(|e| e.to_string())?;
-    let from_s = from
-        .format(&time::format_description::well_known::Iso8601::DEFAULT)
-        .map_err(|e| e.to_string())?;
-    let repo = RetrievalTraceRepository::new(server.state.db().clone());
-    let mut snapshots = BTreeMap::new();
-    let mut errors = Vec::new();
-    for project in projects {
-        match repo.health_rollup(&project.id, &from_s, &until_s).await {
-            Ok(rollup) => {
-                let counts = rollup
-                    .per_entry_point
-                    .into_iter()
-                    .map(|(entry, evidence)| {
-                        (
-                            entry.as_str().to_owned(),
-                            EntryPointCounts {
-                                total_queries: evidence.trace_count.max(0) as u64,
-                                zero_result_queries: evidence.zero_result_trace_count.max(0) as u64,
-                            },
-                        )
-                    })
-                    .collect();
-                snapshots.insert(
-                    project.id.clone(),
-                    RetrievalProjectWindowSnapshot {
-                        project_id: project.id,
-                        window_start: from,
-                        window_end: until,
-                        entry_point_counts: counts,
-                    },
-                );
-            }
-            Err(e) => errors.push(format!("{}: {e}", project.id)),
-        }
-    }
-    if !errors.is_empty() {
-        return Err(format!(
-            "failed to prefetch complete retrieval-health snapshot: {}",
-            errors.join(", ")
-        ));
-    }
-    Ok(Arc::new(RetrievalZeroResultCheck::new(
-        server.state.retrieval_config(),
-        Arc::new(PrefetchedRetrievalHealthSource {
-            snapshot: RetrievalHealthSnapshot {
-                projects: snapshots,
-            },
-        }),
-    )))
-}
-
 // ---------------------------------------------------------------------------
 // Tool router
 // ---------------------------------------------------------------------------
@@ -541,112 +465,169 @@ impl DjinnMcpServer {
 
         // Snapshot the full directory before resolving the subset so the
         // response always shows what was available, even on error.
-        let mut registered_checks: Vec<DoctorRunCheckMeta> = reg
+        let registered_checks: Vec<DoctorRunCheckMeta> = reg
             .enumerate()
             .into_iter()
             .map(|(name, description)| DoctorRunCheckMeta {
                 name: name.to_owned(),
                 description: description.to_owned(),
             })
+            .chain(std::iter::once(DoctorRunCheckMeta {
+                name: EXTENSION_DIAGNOSTICS_PROBE_NAME.to_owned(),
+                description: EXTENSION_DIAGNOSTICS_PROBE_DESCRIPTION.to_owned(),
+            }))
             .collect();
-
-        registered_checks.push(DoctorRunCheckMeta {
-            name: RETRIEVAL_ZERO_RESULT_NAME.to_owned(),
-            description: "Flags projects whose memory retrieval zero-result rate is strictly above the configured threshold".to_owned(),
-        });
-        registered_checks.push(DoctorRunCheckMeta {
-            name: EXTENSION_DIAGNOSTICS_PROBE_NAME.to_owned(),
-            description: EXTENSION_DIAGNOSTICS_PROBE_DESCRIPTION.to_owned(),
-        });
         let extension_probe_selected = p.check_names.as_ref().is_some_and(|names| {
             names
                 .iter()
                 .any(|name| name == EXTENSION_DIAGNOSTICS_PROBE_NAME)
         });
+        let retrieval_names = [
+            "memory.retrieval_zero_result",
+            "memory.injection_starvation",
+            "memory.retrieval_health_refresh",
+        ];
         let retrieval_selected = p.check_names.as_ref().is_none_or(|names| {
-            names.is_empty() || names.iter().any(|name| name == RETRIEVAL_ZERO_RESULT_NAME)
+            names.is_empty()
+                || names
+                    .iter()
+                    .any(|name| retrieval_names.contains(&name.as_str()))
         });
-        // Determine which ordinary (non-retrieval) checks to run.
-        //
-        // The semantics of `check_names` are:
-        //   - `None` or `Some([])` → run ALL registered checks.
-        //   - `Some(names)` → run only the named checks.
-        //
-        // The retrieval check is handled separately (requires async prefetch).
-        // We strip it from the requested names. When the caller requests ONLY
-        // the retrieval check, the remainder is empty — but `resolve_checks`
-        // treats an empty `Some(vec)` as "run all". We distinguish this from
-        // the `Some([])` case by checking whether the *original* list was
-        // non-empty.
-        let original_was_nonempty = p
-            .check_names
-            .as_ref()
-            .is_some_and(|names| !names.is_empty());
-        let ordinary_names: Option<Vec<String>> = p.check_names.as_ref().map(|names| {
+        let ordinary_names = p.check_names.as_ref().map(|names| {
             names
                 .iter()
                 .filter(|name| {
-                    name.as_str() != RETRIEVAL_ZERO_RESULT_NAME
-                        && name.as_str() != EXTENSION_DIAGNOSTICS_PROBE_NAME
+                    name.as_str() != EXTENSION_DIAGNOSTICS_PROBE_NAME
+                        && !retrieval_names.contains(&name.as_str())
                 })
                 .cloned()
-                .collect()
+                .collect::<Vec<_>>()
         });
-        let mut checks = if !original_was_nonempty {
-            // `None` or `Some([])` → run all registered checks.
-            match resolve_checks(reg, &None) {
-                Ok(c) => c,
-                Err(error) => {
-                    return Json(DoctorRunResponse {
-                        ok: false,
-                        registered_checks,
-                        results: Vec::new(),
-                        total_findings: 0,
-                        error: Some(error),
-                    });
-                }
+        let checks = match resolve_checks(reg, &ordinary_names) {
+            Ok(checks) => checks,
+            Err(error) => {
+                return Json(DoctorRunResponse {
+                    ok: false,
+                    registered_checks,
+                    results: Vec::new(),
+                    total_findings: 0,
+                    error: Some(error),
+                });
             }
-        } else if ordinary_names
+        };
+        let repo = DoctorFindingRepository::new(self.state.db().clone());
+        let run_id = uuid::Uuid::now_v7().to_string();
+        let selected_retrieval_names: Vec<String> = p
+            .check_names
             .as_ref()
-            .is_some_and(|names| !names.is_empty())
-        {
-            // Caller named non-retrieval checks — resolve them.
-            match resolve_checks(reg, &ordinary_names) {
-                Ok(c) => c,
-                Err(error) => {
+            .filter(|names| !names.is_empty())
+            .map(|names| {
+                names
+                    .iter()
+                    .filter(|name| retrieval_names.contains(&name.as_str()))
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_else(|| {
+                retrieval_names
+                    .iter()
+                    .map(|name| (*name).to_owned())
+                    .collect()
+            });
+
+        // Retrieval rows are executed and reconciled only by the coordinator.
+        // Exclude them from the legacy per-check loop even for an all-check
+        // request; that loop is only for non-retrieval registered checks.
+        let checks: Vec<_> = checks
+            .into_iter()
+            .filter(|check| !retrieval_names.contains(&check.name()))
+            .collect();
+        // Do not rerun or insert them below: reconciliation also resolves
+        // healthy absence and preserves indeterminate/malformed groups.
+        let retrieval_runs = if retrieval_selected {
+            match self.state.coordinator().await {
+                Some(coordinator) => match coordinator
+                    .run_retrieval_health_checks(selected_retrieval_names.clone(), run_id.clone())
+                    .await
+                {
+                    Ok(runs) => Some(runs),
+                    Err(error) => {
+                        return Json(DoctorRunResponse {
+                            ok: false,
+                            registered_checks,
+                            results: Vec::new(),
+                            total_findings: 0,
+                            error: Some(error.to_string()),
+                        });
+                    }
+                },
+                None => {
                     return Json(DoctorRunResponse {
                         ok: false,
                         registered_checks,
                         results: Vec::new(),
                         total_findings: 0,
-                        error: Some(error),
+                        error: Some(
+                            "coordinator retrieval health source is not initialized".to_owned(),
+                        ),
                     });
                 }
             }
         } else {
-            // Caller named only the retrieval check — no ordinary checks.
-            Vec::new()
+            None
         };
 
-        if retrieval_selected {
-            match prefetch_retrieval_check(self).await {
-                Ok(check) => checks.push(check),
+        let mut results = Vec::with_capacity(checks.len() + selected_retrieval_names.len());
+        let mut total_findings: i64 = 0;
+        if let Some(runs) = retrieval_runs {
+            let persisted = match repo
+                .list_recent(RecentDoctorFindings {
+                    run_id: Some(run_id.clone()),
+                    ..Default::default()
+                })
+                .await
+            {
+                Ok(rows) => rows,
                 Err(error) => {
                     return Json(DoctorRunResponse {
-                        ok: false, registered_checks, results: vec![DoctorRunCheckResult {
-                            check: DoctorRunCheckMeta { name: RETRIEVAL_ZERO_RESULT_NAME.to_owned(), description: "Flags projects whose memory retrieval zero-result rate is strictly above the configured threshold".to_owned() },
-                            ran: false, error: Some(error), findings: Vec::new(), extension_diagnostics: Vec::new(),
-                        }], total_findings: 0, error: None,
+                        ok: false,
+                        registered_checks,
+                        results: Vec::new(),
+                        total_findings: 0,
+                        error: Some(error.to_string()),
                     });
                 }
+            };
+            for run in runs {
+                let entries: Vec<_> = persisted
+                    .iter()
+                    .filter(|row| row.check_name == run.check_name && row.status == "active")
+                    .map(|row| DoctorRunFindingEntry {
+                        finding_id: row.id.clone(),
+                        check_name: row.check_name.clone(),
+                        severity: row.severity.clone(),
+                        detail: row.detail.clone().unwrap_or_default(),
+                        recommended_action: recommended_action_from_evidence(&row.evidence),
+                        recommended_reason: recommended_reason_from_evidence(&row.evidence),
+                    })
+                    .collect();
+                total_findings += entries.len() as i64;
+                let description = reg
+                    .get(run.check_name)
+                    .map(|check| check.description().to_owned())
+                    .unwrap_or_default();
+                results.push(DoctorRunCheckResult {
+                    check: DoctorRunCheckMeta {
+                        name: run.check_name.to_owned(),
+                        description,
+                    },
+                    ran: true,
+                    error: None,
+                    findings: entries,
+                    extension_diagnostics: Vec::new(),
+                });
             }
         }
-
-        let repo = DoctorFindingRepository::new(self.state.db().clone());
-        let run_id = uuid::Uuid::now_v7().to_string();
-
-        let mut results = Vec::with_capacity(checks.len());
-        let mut total_findings: i64 = 0;
 
         for check in &checks {
             let meta = DoctorRunCheckMeta {

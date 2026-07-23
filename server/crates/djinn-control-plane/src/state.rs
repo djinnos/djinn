@@ -512,9 +512,9 @@ pub mod stubs {
         }
     }
 
-    /// Test-only coordinator stub that accepts refinement starts (returns Ok)
-    /// while still rejecting other operations.  Used by `test_mcp_state` so
-    /// existing refinement tool tests can run without a real coordinator.
+    /// Test-only coordinator stub that accepts refinement operations and
+    /// returns healthy selected-only retrieval runs. Used by `test_mcp_state`
+    /// so direct tool tests exercise the bridge without a real coordinator.
     pub struct StubRefinementAcceptingCoordinator;
     #[async_trait]
     impl CoordinatorOps for StubRefinementAcceptingCoordinator {
@@ -523,6 +523,28 @@ pub mod stubs {
         }
         async fn trigger_dispatch_for_project(&self, _: &str) -> Result<(), String> {
             Err("coordinator not initialized".into())
+        }
+        async fn run_retrieval_health_checks(
+            &self,
+            check_names: Vec<String>,
+            _: String,
+        ) -> Result<Vec<djinn_core::doctor::DoctorCheckRun>, String> {
+            // Exercise the coordinator bridge in direct tool tests without
+            // recreating the removed control-plane retrieval source. A healthy
+            // empty snapshot reports only the checks selected by the caller.
+            Ok(check_names
+                .into_iter()
+                .filter_map(|check_name| match check_name.as_str() {
+                    "memory.retrieval_zero_result" => Some("memory.retrieval_zero_result"),
+                    "memory.injection_starvation" => Some("memory.injection_starvation"),
+                    "memory.retrieval_health_refresh" => Some("memory.retrieval_health_refresh"),
+                    _ => None,
+                })
+                .map(|check_name| djinn_core::doctor::DoctorCheckRun {
+                    check_name,
+                    findings: Vec::new(),
+                })
+                .collect())
         }
         async fn start_proposal_refinement(
             &self,
@@ -1032,5 +1054,30 @@ pub mod stubs {
             Arc::ptr_eq(&metrics_a, &metrics_b),
             "clones of McpState must share the same process-owned metrics Arc"
         );
+    }
+
+    #[tokio::test]
+    async fn direct_tool_stub_returns_only_selected_retrieval_checks() {
+        let coordinator = StubRefinementAcceptingCoordinator;
+        let runs = coordinator
+            .run_retrieval_health_checks(
+                vec![
+                    "memory.injection_starvation".to_owned(),
+                    "not.a.retrieval.check".to_owned(),
+                    "memory.retrieval_health_refresh".to_owned(),
+                ],
+                "test-run".to_owned(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            runs.iter().map(|run| run.check_name).collect::<Vec<_>>(),
+            vec![
+                "memory.injection_starvation",
+                "memory.retrieval_health_refresh"
+            ]
+        );
+        assert!(runs.iter().all(|run| run.findings.is_empty()));
     }
 }

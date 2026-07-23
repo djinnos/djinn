@@ -532,6 +532,25 @@ pub fn run_cheap_subset(registry: &DoctorRegistry) -> DoctorResult<Vec<DoctorChe
     run_subset(registry, DoctorRunSubset::Cheap)
 }
 
+/// Run only named checks from the Cheap subset.
+pub fn run_named_cheap_subset(
+    registry: &DoctorRegistry,
+    check_names: &[String],
+) -> DoctorResult<Vec<DoctorCheckRun>> {
+    registry
+        .cheap_checks()
+        .into_iter()
+        .filter(|check| check_names.iter().any(|name| name == check.name()))
+        .map(|check| {
+            let check_name = check.name();
+            check.run().map(|findings| DoctorCheckRun {
+                check_name,
+                findings,
+            })
+        })
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 /// Run a subset of registered checks and return their findings.
 ///
@@ -937,6 +956,15 @@ mod tests {
         let direct_runs = run_cheap_subset(&registry).expect("cheap wrapper should run");
         assert_eq!(direct_runs.len(), 1);
         assert_eq!(direct_runs[0].check_name, SAMPLE_CHECK_NAME);
+    }
+
+    #[test]
+    fn named_cheap_subset_does_not_run_unselected_checks() {
+        let registry = DoctorRegistry::new();
+        register(&registry, SampleSharedResolverCheck);
+        let runs = run_named_cheap_subset(&registry, &["not.registered".to_owned()])
+            .expect("named cheap subset should not execute other checks");
+        assert!(runs.is_empty());
     }
 
     #[test]
