@@ -83,7 +83,7 @@ use cargo_target_seed::{
     seed_cargo_target_dir, teardown_run_dir, warm_base_dir_for_current_jobs,
 };
 use clap::{Parser, Subcommand};
-use djinn_agent::context::{AgentContext, ReconciliationSweepConfig};
+use djinn_agent::context::{AgentContext, ReconciliationSweepConfig, ShellLaunchContext};
 use djinn_agent::file_time::FileTime;
 use djinn_agent::lsp::LspManager;
 use djinn_agent::roles::RoleRegistry;
@@ -246,6 +246,18 @@ struct WorkerDefaultArgs {
     /// demultiplex per-task-run state on a single TCP listener.
     #[arg(long, env = "DJINN_TASK_RUN_ID")]
     task_run_id: String,
+
+    /// Exact task-run Pod UID injected from Kubernetes downward API metadata.
+    #[arg(long, env = "DJINN_TASK_RUN_POD_UID")]
+    task_run_pod_uid: String,
+
+    /// Authenticated launcher broker socket mounted by the task-run runtime.
+    #[arg(long, env = "DJINN_CGROUP_BROKER_SOCKET", default_value = "/var/run/djinn-cgroup-launcher/broker.sock")]
+    cgroup_broker_socket: PathBuf,
+
+    /// Per-task-run broker credential mounted read-only by the runtime.
+    #[arg(long, env = "DJINN_CGROUP_BROKER_CREDENTIAL_PATH", default_value = "/var/run/djinn-cgroup-launcher/credential")]
+    cgroup_broker_credential_path: PathBuf,
 
     /// Path the launcher bind-mounted `/workspace` at.  Defaults to the
     /// contractual `/workspace` — exposed as a flag so tests can run the
@@ -1891,6 +1903,22 @@ async fn run_task_run(args: WorkerDefaultArgs) -> Result<()> {
     .with_context(|| format!("dial djinn-server at {server_addr}"))?;
     info!(server = %server_addr, "tcp connection up, RPC handshake accepted");
 
+    // The broker connection and readiness proof are established before any
+    // stage can expose shell tools. These paths are runtime mounts, not child
+    // controlled shell environment values.
+    let broker_credential = tokio::fs::read(&args.cgroup_broker_credential_path).await
+        .with_context(|| format!("read broker credential from {}", args.cgroup_broker_credential_path.display()))?;
+    let mut broker_client = djinn_cgroup_launcher::transport::UnixBrokerClient::connect_path(
+        &args.cgroup_broker_socket, &broker_credential,
+    ).context("connect authenticated cgroup launcher broker")?;
+    let mut dumpability = djinn_cgroup_launcher::child::NativeWorkerDumpability;
+    let readiness = djinn_cgroup_launcher::child::prepare_worker_readiness(&mut dumpability)
+        .context("prepare non-dumpable worker broker readiness")?;
+    broker_client.ready(readiness).context("submit broker readiness")?;
+    let shell_launch = ShellLaunchContext::broker_backed(
+        spec.task_id.clone(), spec.task_run_id.clone(), args.task_run_pod_uid.clone(), rpc.clone(), broker_client,
+    );
+
     // 4. Attach to the host-materialised workspace.
     let workspace = Workspace::attach_existing(args.workspace_path.as_path(), &spec.task_branch)
         .context("attach workspace")?;
@@ -1989,6 +2017,7 @@ async fn run_task_run(args: WorkerDefaultArgs) -> Result<()> {
         spec.project_id.clone(),
         spec.read_source_project_ids.clone(),
         spec.knowledge_injection,
+        Some(shell_launch),
     );
     let worker_services: Arc<dyn SupervisorServices> = Arc::new(WorkerSupervisorServices::new(
         rpc.clone(),
@@ -2583,6 +2612,7 @@ fn build_worker_agent_context(
     project_id: String,
     read_source_project_ids: Vec<String>,
     knowledge_injection: KnowledgeInjectionConfig,
+    shell_launch: Option<ShellLaunchContext>,
 ) -> AgentContext {
     use djinn_core::events::DjinnEventEnvelope;
     use djinn_supervisor::services::SerializableDjinnEvent;
@@ -2637,6 +2667,7 @@ fn build_worker_agent_context(
             read_source_project_ids,
         ),
         reconciliation_sweep: ReconciliationSweepConfig::default(),
+        shell_launch,
         memory_intent_planner: djinn_agent::context::MemoryIntentPlannerConfig::from_env(),
         knowledge_injection,
         compaction_cs: djinn_slot::reply_loop::CompactionCriticalSection::default(),
@@ -3013,6 +3044,7 @@ mod tests {
                 spec.project_id,
                 spec.read_source_project_ids,
                 spec.knowledge_injection,
+                None,
             );
             assert_eq!(context.knowledge_injection, resolved);
             let authorization = context.read_source_authorization;
