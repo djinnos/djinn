@@ -65,7 +65,7 @@ export const WarningAndSkippedTier: Story = {
   args: { detail: withLint({ 3: lint({
     warnings: [{ severity: "warning", code: "SPEC_FUTURE_WARNING", message: "An additive server warning", span: { start: 14, end: 28 } }],
     skipped_tiers: [{ tier: "mdx", reason: "LEGACY_BODY_FORMAT", message: "Tier did not apply" }],
-  } as ProposalLintResult) }) },
+  }) }) },
 };
 
 export const LegacyErrorAndUnknownCode: Story = {
