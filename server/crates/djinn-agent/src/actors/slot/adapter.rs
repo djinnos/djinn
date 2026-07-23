@@ -454,6 +454,7 @@ pub async fn resolve_final_verification_for_task_run(
         target: std::env::consts::ARCH.into(),
         features: Vec::new(),
         allowlisted_environment: BTreeMap::new(),
+        services: Vec::new(),
     };
     let resolver: EnvironmentIdentityResolver = Arc::new(move || Ok(identity.clone()));
     let output_directories = output_directories(&manifest.output_only_globs)?;

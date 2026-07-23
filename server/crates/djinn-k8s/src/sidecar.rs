@@ -21,7 +21,7 @@
 //! [`resolve_image_services`] is the impure resolver that reads the catalog for
 //! a project's image (used by the task-run dispatch paths).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use k8s_openapi::api::core::v1::{
     Container, ContainerPort, EmptyDirVolumeSource, EnvVar, Probe, ResourceRequirements,
@@ -32,6 +32,8 @@ use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 
 use djinn_db::{Database, ImageRepository, ServicePreset, ServicePresetRepository};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use thiserror::Error;
 
 use crate::config::KubernetesConfig;
 
@@ -55,6 +57,167 @@ pub struct BackingServiceSpec {
     pub memory_limit: String,
     pub conn_template: String,
     pub conn_env_var: String,
+}
+
+fn valid_digest(value: &str) -> bool {
+    value.len() == 71
+        && value.starts_with("sha256:")
+        && value[7..]
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// Resolve one immutable image catalog strictly for canonical verification.
+/// Dispatch continues to use the fail-open resolver below.
+pub async fn resolve_image_services_strict(
+    db: &Database,
+    image_id: &str,
+) -> Result<Vec<ResolvedCatalogService>, CatalogServiceResolutionError> {
+    let images = ImageRepository::new(db.clone());
+    let image = images
+        .get(image_id)
+        .await
+        .map_err(|_| CatalogServiceResolutionError::LookupFailed)?
+        .ok_or(CatalogServiceResolutionError::MissingImage)?;
+    if image.status != djinn_db::ImageStatus::READY {
+        return Err(CatalogServiceResolutionError::ImageNotReady);
+    }
+    if !image.registry_digest.as_deref().is_some_and(valid_digest) {
+        return Err(CatalogServiceResolutionError::MalformedImageDigest);
+    }
+    let mut preset_ids = images
+        .list_service_presets(image_id)
+        .await
+        .map_err(|_| CatalogServiceResolutionError::LookupFailed)?;
+    preset_ids.sort();
+    let presets = ServicePresetRepository::new(db.clone());
+    let (mut ids, mut types, mut ports, mut env_names) = (
+        BTreeSet::new(),
+        BTreeSet::new(),
+        BTreeSet::new(),
+        BTreeSet::new(),
+    );
+    let mut result = Vec::with_capacity(preset_ids.len());
+    for preset_id in preset_ids {
+        if !ids.insert(preset_id.clone()) {
+            return Err(CatalogServiceResolutionError::Duplicate {
+                kind: "preset ID",
+                value: preset_id,
+            });
+        }
+        let p = presets
+            .get(&preset_id)
+            .await
+            .map_err(|_| CatalogServiceResolutionError::LookupFailed)?
+            .ok_or_else(|| CatalogServiceResolutionError::MissingPreset {
+                preset_id: preset_id.clone(),
+            })?;
+        let digest = p
+            .image_digest
+            .clone()
+            .filter(|d| valid_digest(d))
+            .ok_or_else(|| CatalogServiceResolutionError::MalformedServiceDigest {
+                preset_id: p.id.clone(),
+            })?;
+        let revision = p.verification_protocol_revision.unwrap_or_default();
+        if revision != 1 {
+            return Err(CatalogServiceResolutionError::UnsupportedProtocol {
+                preset_id: p.id,
+                revision,
+            });
+        }
+        if p.image.trim().is_empty()
+            || p.image.contains('@')
+            || p.port <= 0
+            || serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&p.env).is_err()
+            || serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&p.resources)
+                .is_err()
+        {
+            return Err(CatalogServiceResolutionError::MalformedConfiguration { preset_id });
+        }
+        if !types.insert(p.service_type.clone()) {
+            return Err(CatalogServiceResolutionError::Duplicate {
+                kind: "service type",
+                value: p.service_type,
+            });
+        }
+        if !ports.insert(p.port) {
+            return Err(CatalogServiceResolutionError::Duplicate {
+                kind: "port",
+                value: p.port.to_string(),
+            });
+        }
+        let mut names: Vec<String> = p
+            .conn_env_var
+            .split(',')
+            .map(str::trim)
+            .filter(|n| !n.is_empty())
+            .map(ToOwned::to_owned)
+            .collect();
+        names.sort();
+        names.dedup();
+        if names.is_empty() {
+            return Err(CatalogServiceResolutionError::MalformedConfiguration { preset_id });
+        }
+        for name in &names {
+            if !env_names.insert(name.clone()) {
+                return Err(CatalogServiceResolutionError::Duplicate {
+                    kind: "exported environment",
+                    value: name.clone(),
+                });
+            }
+        }
+        let effective = serde_json::json!({"env": serde_json::from_str::<serde_json::Value>(&p.env).unwrap(), "resources": serde_json::from_str::<serde_json::Value>(&p.resources).unwrap(), "conn_template": p.conn_template, "port": p.port, "protocol": revision});
+        result.push(ResolvedCatalogService {
+            preset_id: preset_id.clone(),
+            service_type: p.service_type,
+            image_reference: p.image,
+            image_digest: digest,
+            port: p.port,
+            exported_environment_names: names,
+            verification_protocol_revision: revision as u32,
+            effective_configuration_digest: format!(
+                "sha256:{:x}",
+                Sha256::digest(serde_json::to_vec(&effective).expect("serializable"))
+            ),
+        });
+    }
+    Ok(result)
+}
+
+/// Secret-free immutable material authorized by one catalog image.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedCatalogService {
+    pub preset_id: String,
+    pub service_type: String,
+    pub image_reference: String,
+    pub image_digest: String,
+    pub port: i32,
+    pub exported_environment_names: Vec<String>,
+    pub verification_protocol_revision: u32,
+    pub effective_configuration_digest: String,
+}
+
+#[derive(Clone, Debug, Error, PartialEq, Eq)]
+pub enum CatalogServiceResolutionError {
+    #[error("catalog image is missing")]
+    MissingImage,
+    #[error("catalog image is not ready")]
+    ImageNotReady,
+    #[error("catalog image digest is missing or malformed")]
+    MalformedImageDigest,
+    #[error("service preset {preset_id} is missing")]
+    MissingPreset { preset_id: String },
+    #[error("service preset {preset_id} has a missing or malformed immutable image digest")]
+    MalformedServiceDigest { preset_id: String },
+    #[error("duplicate {kind}: {value}")]
+    Duplicate { kind: &'static str, value: String },
+    #[error("service preset {preset_id} has malformed configuration")]
+    MalformedConfiguration { preset_id: String },
+    #[error("service preset {preset_id} uses unsupported protocol revision {revision}")]
+    UnsupportedProtocol { preset_id: String, revision: i32 },
+    #[error("catalog lookup failed")]
+    LookupFailed,
 }
 
 /// Catalog image selected for a project while resolving native sidecars.

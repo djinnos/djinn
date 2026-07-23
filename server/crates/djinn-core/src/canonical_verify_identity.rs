@@ -14,6 +14,8 @@ pub const FINAL_VERIFICATION_PLAN_VERSION_V1: u32 = 1;
 pub const VERIFICATION_INPUT_MANIFEST_VERSION_V1: u32 = 1;
 pub const ENVIRONMENT_IDENTITY_SCHEMA_VERSION_V1: u32 = 1;
 pub const ENVIRONMENT_IDENTITY_CANONICALIZATION_VERSION_V1: u32 = 1;
+pub const ENVIRONMENT_IDENTITY_SCHEMA_VERSION_V2: u32 = 2;
+pub const ENVIRONMENT_IDENTITY_CANONICALIZATION_VERSION_V2: u32 = 2;
 
 /// A command is an ordered part of a final-verification plan. Its position is
 /// significant and is therefore never sorted during canonicalization.
@@ -140,6 +142,19 @@ pub struct LockfileDigestV1 {
     pub digest: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResolvedCatalogServiceIdentityV1 {
+    pub preset_id: String,
+    pub service_type: String,
+    pub image_reference: String,
+    pub image_digest: String,
+    pub port: i32,
+    pub exported_environment_names: Vec<String>,
+    pub verification_protocol_revision: u32,
+    pub effective_configuration_digest: String,
+}
+
 /// Fully resolved material for identity derivation. All maps are BTreeMaps so
 /// callers cannot accidentally provide non-deterministic iteration order.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -158,6 +173,8 @@ pub struct ResolvedEnvironmentIdentityInputV1 {
     pub target: String,
     pub features: Vec<String>,
     pub allowlisted_environment: BTreeMap<String, String>,
+    #[serde(default)]
+    pub services: Vec<ResolvedCatalogServiceIdentityV1>,
 }
 
 /// Persistable canonical identity. JSON is canonical bytes decoded as UTF-8,
@@ -216,16 +233,20 @@ impl EnvironmentIdentityV1 {
 
 impl ResolvedEnvironmentIdentityInputV1 {
     pub fn canonicalized(mut self) -> Result<Self, EnvironmentIdentityError> {
-        supported(
-            "environment identity schema",
-            self.schema_version,
-            ENVIRONMENT_IDENTITY_SCHEMA_VERSION_V1,
-        )?;
-        supported(
-            "environment identity canonicalization",
-            self.canonicalization_version,
-            ENVIRONMENT_IDENTITY_CANONICALIZATION_VERSION_V1,
-        )?;
+        if !matches!(self.schema_version, 1 | 2)
+            || self.schema_version != self.canonicalization_version
+        {
+            return Err(EnvironmentIdentityError::UnsupportedVersion {
+                kind: "environment identity schema",
+                version: self.schema_version,
+            });
+        }
+        if self.schema_version == 1 && !self.services.is_empty() {
+            return Err(EnvironmentIdentityError::UnsupportedVersion {
+                kind: "environment identity schema",
+                version: self.schema_version,
+            });
+        }
         supported(
             "final verification plan",
             self.plan.version,
@@ -348,6 +369,52 @@ impl ResolvedEnvironmentIdentityInputV1 {
         for (name, value) in &self.allowlisted_environment {
             nonempty("allowlisted environment name", name)?;
             nonempty("allowlisted environment value", value)?;
+        }
+        sort_unique_by(
+            &mut self.services,
+            |service| service.preset_id.clone(),
+            "service preset ID",
+        )?;
+        let (mut types, mut ports, mut env_names) =
+            (BTreeSet::new(), BTreeSet::new(), BTreeSet::new());
+        for service in &mut self.services {
+            nonempty("service preset ID", &service.preset_id)?;
+            nonempty("service type", &service.service_type)?;
+            nonempty("service image reference", &service.image_reference)?;
+            validate_digest("service image", &service.image_digest)?;
+            validate_digest(
+                "effective service configuration",
+                &service.effective_configuration_digest,
+            )?;
+            if service.port <= 0 || service.verification_protocol_revision == 0 {
+                return Err(EnvironmentIdentityError::MissingResolved {
+                    field: "service port or protocol revision",
+                });
+            }
+            normalize_strings(
+                &mut service.exported_environment_names,
+                "service exported environment name",
+            )?;
+            if !types.insert(service.service_type.clone()) {
+                return Err(EnvironmentIdentityError::Duplicate {
+                    kind: "service type",
+                    value: service.service_type.clone(),
+                });
+            }
+            if !ports.insert(service.port) {
+                return Err(EnvironmentIdentityError::Duplicate {
+                    kind: "service port",
+                    value: service.port.to_string(),
+                });
+            }
+            for name in &service.exported_environment_names {
+                if !env_names.insert(name.clone()) {
+                    return Err(EnvironmentIdentityError::Duplicate {
+                        kind: "service exported environment name",
+                        value: name.clone(),
+                    });
+                }
+            }
         }
         Ok(self)
     }

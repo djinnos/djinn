@@ -6,8 +6,8 @@
 use std::{collections::HashMap, fs::File, io::Read, os::fd::RawFd};
 
 use crate::{
-    child::WorkerReadinessAssertion, CgroupFs, CloneIntoCgroup, CpuStat, Error, Invocation,
-    Launcher, Leaf,
+    CgroupFs, CloneIntoCgroup, CpuStat, Error, Invocation, Launcher, Leaf,
+    child::WorkerReadinessAssertion,
 };
 
 pub const WORKER_UID: u32 = 1000;
@@ -370,7 +370,7 @@ impl<F: CgroupFs, S: CloneIntoCgroup, N: NonceSource> Broker<F, S, N> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::child::{prepare_worker_readiness, WorkerDumpability};
+    use crate::child::{WorkerDumpability, prepare_worker_readiness};
     use std::{
         cell::Cell,
         collections::{BTreeSet, HashMap},
@@ -566,15 +566,17 @@ mod tests {
         broker
             .accept_worker_readiness(connection, readiness())
             .unwrap();
-        assert!(broker
-            .begin_invocation(
-                connection,
-                Invocation {
-                    id: "one".into(),
-                    fence: 9
-                }
-            )
-            .is_ok());
+        assert!(
+            broker
+                .begin_invocation(
+                    connection,
+                    Invocation {
+                        id: "one".into(),
+                        fence: 9
+                    }
+                )
+                .is_ok()
+        );
     }
 
     #[test]
