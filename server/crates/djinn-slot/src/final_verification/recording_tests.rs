@@ -103,6 +103,7 @@ fn material(checks: Vec<String>) -> FinalVerificationResolvedMaterial {
             tool_runtime: vec![],
             read_only_external_mounts: vec![],
             output_directories: vec![],
+            catalog_loopback_endpoints: vec![],
         },
         verify_source: VerifySource::Worker,
         required_checks: checks,

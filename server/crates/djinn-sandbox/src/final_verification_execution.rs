@@ -20,7 +20,8 @@ use djinn_git::{
 };
 
 use crate::final_verification::{
-    FinalVerificationError, FinalVerificationRequest, launch_final_verification_with_timeout,
+    FinalVerificationError, FinalVerificationLoopbackEndpoint, FinalVerificationNetworkSession,
+    FinalVerificationRequest, launch_final_verification_in_network_session_with_timeout,
 };
 
 /// Reacquires resolved identity material at each consistency boundary.
@@ -41,6 +42,9 @@ pub struct FinalVerificationExecutionRequest {
     pub read_only_external_mounts: Vec<PathBuf>,
     /// Concrete output-only directories resolved from the manifest globs.
     pub output_directories: Vec<PathBuf>,
+    /// Strict-catalog ports that the attempt-owned session may expose. This is
+    /// resolved before execution and never derived from command input.
+    pub catalog_loopback_endpoints: Vec<FinalVerificationLoopbackEndpoint>,
 }
 
 impl std::fmt::Debug for FinalVerificationExecutionRequest {
@@ -52,6 +56,10 @@ impl std::fmt::Debug for FinalVerificationExecutionRequest {
             .field("tool_runtime", &self.tool_runtime)
             .field("read_only_external_mounts", &self.read_only_external_mounts)
             .field("output_directories", &self.output_directories)
+            .field(
+                "catalog_loopback_endpoints",
+                &self.catalog_loopback_endpoints,
+            )
             .finish_non_exhaustive()
     }
 }
@@ -134,8 +142,23 @@ impl FinalVerificationExecutionEvidence {
 pub async fn execute_final_verification(
     request: FinalVerificationExecutionRequest,
 ) -> FinalVerificationExecutionEvidence {
+    let session =
+        match FinalVerificationNetworkSession::create(request.catalog_loopback_endpoints.clone()) {
+            Ok(session) => session,
+            Err(error) => {
+                return FinalVerificationExecutionEvidence {
+                    manifest_version: 0,
+                    pre_environment_identity: None,
+                    post_environment_identity: None,
+                    fingerprint_f0: None,
+                    fingerprint_f1: None,
+                    commands: Vec::new(),
+                    eligibility_reason: Some(launcher_reason(error)),
+                };
+            }
+        };
     execute_final_verification_with_launcher(request, |request, timeout| {
-        launch_final_verification_with_timeout(request, timeout)
+        launch_final_verification_in_network_session_with_timeout(request, &session, timeout)
     })
     .await
 }
@@ -598,6 +621,7 @@ mod tests {
             tool_runtime: Vec::new(),
             read_only_external_mounts: Vec::new(),
             output_directories,
+            catalog_loopback_endpoints: Vec::new(),
         }
     }
 
