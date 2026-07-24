@@ -89,6 +89,30 @@ const RUN_VERIFICATION_SELECTION_TOTAL: &str = "run_verification_selection_total
 const RUN_VERIFICATION_SELECTIONS: [&str; 2] = ["full", "subset"];
 const RUN_VERIFICATION_CHECK_TOTAL: &str = "run_verification_check_total";
 const RUN_VERIFICATION_CHECK_RESULTS: [&str; 2] = ["pass", "fail"];
+// Build-drift soft gate (ri23). Both metrics carry only fixed, enumerated
+// label values; project/session/command/key identifiers stay in structured
+// tracing fields next to these counters.
+const BUILD_DRIFT_DECISIONS_TOTAL: &str = "djinn_build_drift_decisions_total";
+const BUILD_DRIFT_OUTCOMES: [&str; 5] = [
+    "drift_deny",
+    "argv_equal_pass",
+    "repeat_pass",
+    "unrelated_pass",
+    "ineligible_pass",
+];
+const BUILD_DRIFT_INELIGIBLE_TOTAL: &str = "djinn_build_drift_ineligible_total";
+const BUILD_DRIFT_INELIGIBLE_REASONS: [&str; 10] = [
+    "parse_error",
+    "env_assignment",
+    "redirection",
+    "pipeline",
+    "chain",
+    "subshell",
+    "substitution",
+    "background",
+    "nested_interpreter",
+    "absolute_path",
+];
 const INLINE_PR_CLOSED_TOTAL: &str = "djinn_inline_pr_closed_total";
 const INLINE_BRANCH_DELETED_TOTAL: &str = "djinn_inline_branch_deleted_total";
 const INLINE_CLEANUP_SKIPPED_TOTAL: &str = "djinn_inline_cleanup_skipped_total";
@@ -447,6 +471,30 @@ pub mod final_verification {
         }
         #[cfg(not(feature = "test-support"))]
         false
+    }
+}
+
+/// Bounded build-drift soft-gate counters (ri23).
+///
+/// Both helpers accept only fixed `'static` label values. Project ids, session
+/// ids, commands, and drift keys stay in structured tracing fields emitted next
+/// to these counters — never as metric labels.
+pub mod build_drift {
+    pub const OUTCOME_DRIFT_DENY: &str = "drift_deny";
+    pub const OUTCOME_ARGV_EQUAL_PASS: &str = "argv_equal_pass";
+    pub const OUTCOME_REPEAT_PASS: &str = "repeat_pass";
+    pub const OUTCOME_UNRELATED_PASS: &str = "unrelated_pass";
+    pub const OUTCOME_INELIGIBLE_PASS: &str = "ineligible_pass";
+
+    /// Increment the one terminal decision outcome for a build-drift check.
+    pub fn increment_outcome(outcome: &'static str) {
+        metrics::counter!(super::BUILD_DRIFT_DECISIONS_TOTAL, "outcome" => outcome).increment(1);
+    }
+
+    /// Increment the ineligibility-reason breakdown for a fail-open decision.
+    /// Always paired with `increment_outcome(OUTCOME_INELIGIBLE_PASS)`.
+    pub fn increment_ineligible(reason: &'static str) {
+        metrics::counter!(super::BUILD_DRIFT_INELIGIBLE_TOTAL, "reason" => reason).increment(1);
     }
 }
 
@@ -1174,6 +1222,20 @@ fn register_metrics() {
     );
     for result in RUN_VERIFICATION_CHECK_RESULTS {
         metrics::counter!(RUN_VERIFICATION_CHECK_TOTAL, "result" => result).absolute(0);
+    }
+    metrics::describe_counter!(
+        BUILD_DRIFT_DECISIONS_TOTAL,
+        "Build-drift soft-gate decisions partitioned by bounded terminal outcome."
+    );
+    for outcome in BUILD_DRIFT_OUTCOMES {
+        metrics::counter!(BUILD_DRIFT_DECISIONS_TOTAL, "outcome" => outcome).absolute(0);
+    }
+    metrics::describe_counter!(
+        BUILD_DRIFT_INELIGIBLE_TOTAL,
+        "Build-drift commands that failed open, partitioned by bounded ineligibility reason."
+    );
+    for reason in BUILD_DRIFT_INELIGIBLE_REASONS {
+        metrics::counter!(BUILD_DRIFT_INELIGIBLE_TOTAL, "reason" => reason).absolute(0);
     }
     metrics::describe_gauge!(
         DISPATCH_LAST_SUCCESS_TIMESTAMP,

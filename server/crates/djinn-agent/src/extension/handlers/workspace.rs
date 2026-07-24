@@ -115,11 +115,10 @@ pub(crate) async fn call_shell(
         return Err(msg.to_string());
     }
 
-    // GateGuard shell policy: classify destructive commands for workers.
-    // Runs after cargo steering and before any subprocess execution.
-    // Non-worker roles pass through unconditionally.
-    let session_id = worktree_path.display().to_string();
-    gate_guard_shell_check(state, session_role, &session_id, &p.command).await?;
+    // GateGuard shell policy: classify destructive commands for workers, plus
+    // the advisory build-drift soft gate. Runs after cargo steering and before
+    // any subprocess execution. Non-worker roles pass through unconditionally.
+    gate_guard_shell_check(state, session_role, worktree_path, &p.command).await?;
 
     let timeout_ms = effective_shell_timeout_ms(p.timeout_ms, &p.command);
 

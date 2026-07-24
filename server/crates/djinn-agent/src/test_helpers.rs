@@ -193,6 +193,30 @@ pub async fn fetch_artifact_for_test(
         .await
 }
 
+// ── Build-drift soft gate (ri23) test seams ─────────────────────────────
+
+pub use crate::extension::handlers::gate_guard::build_drift::{
+    BUILD_DRIFT_STEER_MESSAGE, BuildDriftClassification, BuildDriftIneligibleReason,
+    CanonicalCommand, classify_build_drift,
+};
+
+/// Drive the full build-drift decision (pure classification + per-session
+/// deny-once bookkeeping + telemetry) against an in-memory `FileTime`, with the
+/// canonical plan supplied directly. Mirrors the production shell path without
+/// requiring a persisted project row.
+pub async fn build_drift_shell_gate_for_test(
+    state: &AgentContext,
+    session_id: &str,
+    command: &str,
+    project_id: Option<&str>,
+    canonical: &[CanonicalCommand],
+) -> Result<(), String> {
+    crate::extension::handlers::gate_guard::apply_build_drift_decision(
+        state, session_id, command, project_id, canonical,
+    )
+    .await
+}
+
 /// Cheap `SupervisorServices` stub for tests that exercise `call_tool`
 /// against the non-host-bound tool subset (lsp, memory, code_graph, …).
 /// Panics if the test ends up invoking any trait method; the three
