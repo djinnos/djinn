@@ -81,6 +81,13 @@ struct Cli {
     /// This exits before logging, telemetry, Tokio, or database startup.
     #[arg(long, default_value_t = false)]
     allocator_settings: bool,
+
+    /// One-shot operator admin command. When present the process opens the
+    /// database, runs the command, prints its result, and exits before any
+    /// actor or listener starts — the same short-circuit shape as
+    /// `--migrate-only`.
+    #[command(subcommand)]
+    admin: Option<djinn_server::admin::AdminCommand>,
 }
 
 #[allow(clippy::print_stderr)] // Startup validation errors must be visible before logging initializes.
@@ -138,6 +145,11 @@ fn report_allocator_settings() {
         eprintln!("effective jemalloc settings are only available on Linux");
         std::process::exit(1);
     }
+}
+
+#[allow(clippy::print_stdout)] // One-shot operator admin output is written to stdout by design.
+fn print_admin_result(rendered: &str) {
+    println!("{rendered}");
 }
 
 async fn async_main(cli: Cli) {
@@ -281,6 +293,25 @@ async fn async_main(cli: Cli) {
         );
         db.pool().close().await;
         std::process::exit(1);
+    }
+
+    // ── Operator admin short-circuit ──────────────────────────────────
+    // Like `--migrate-only`: run one operator command against the current
+    // schema, print the result, and exit before any actor or listener starts.
+    if let Some(admin) = cli.admin {
+        let result = djinn_server::admin::run_admin_command(&db, admin).await;
+        db.pool().close().await;
+        match result {
+            Ok(rendered) => {
+                print_admin_result(&rendered);
+                return;
+            }
+            Err(error) => {
+                tracing::error!(%error, "admin command failed");
+                print_admin_result(&format!("error: {error}"));
+                std::process::exit(1);
+            }
+        }
     }
 
     // Resolve canonical settings before application composition. Present malformed
