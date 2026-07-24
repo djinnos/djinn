@@ -430,12 +430,22 @@ jobs:
           echo "rustc=$(rustc --version || echo 'unknown')"
           echo "cache-hit=${{ steps.rust-cache.outputs.cache-hit }}"
           echo "::notice::cache-family=server-test shared-key=server-test cache-hit=${{ steps.rust-cache.outputs.cache-hit }}"
+      # Runs in BOTH lanes on purpose. #771 skipped hakari in the merge queue
+      # to save CI minutes, but that made workspace-hack freshness a PR-lane-only
+      # invariant: a PR that changed Cargo.toml without regenerating
+      # workspace-hack could pass its own lane, be re-based by the queue, and
+      # land stale on main — after which the NEXT, innocent PR failed
+      # "Server Clippy" with "workspace-hack is out of date" (observed twice on
+      # 2026-07-24: #2527, #2531). `cargo hakari verify` is metadata-only (no
+      # build) and the install is a prebuilt binary, so the queue cost is
+      # seconds inside a job whose Clippy step dominates. On failure the
+      # `::error::` below is emitted before the job concludes, so the run-level
+      # annotation names this cause even when the fail-fast watcher then
+      # cancels the sibling shards.
       - uses: taiki-e/install-action@v2
-        if: github.event_name != 'merge_group'
         with:
           tool: cargo-hakari
       - name: Verify workspace-hack (hakari)
-        if: github.event_name != 'merge_group'
         run: |
           cargo hakari verify || {
             echo "::error::workspace-hack is out of date. Run 'cargo hakari generate && cargo hakari manage-deps' locally."
