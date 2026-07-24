@@ -8,6 +8,7 @@ use std::sync::OnceLock;
 use metrics_exporter_prometheus::{BuildError, Matcher, PrometheusBuilder, PrometheusHandle};
 
 pub mod memory_retrieval;
+pub mod panic_capture;
 
 pub const PROMETHEUS_TEXT_CONTENT_TYPE: &str = "text/plain; version=0.0.4";
 
