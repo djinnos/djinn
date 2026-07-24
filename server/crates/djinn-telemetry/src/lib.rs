@@ -89,6 +89,30 @@ const RUN_VERIFICATION_SELECTION_TOTAL: &str = "run_verification_selection_total
 const RUN_VERIFICATION_SELECTIONS: [&str; 2] = ["full", "subset"];
 const RUN_VERIFICATION_CHECK_TOTAL: &str = "run_verification_check_total";
 const RUN_VERIFICATION_CHECK_RESULTS: [&str; 2] = ["pass", "fail"];
+// Catalog service provisioning for one final-verification attempt whose plan
+// declares services. Every label is a bounded enum: the lifecycle `phase`, the
+// terminal `outcome`, and a coarse `service_type` classification. Task, run,
+// attempt, fingerprint, and environment identifiers stay in the structured
+// audit event emitted next to this counter, never as metric labels.
+const VERIFY_SERVICE_PROVISIONING_TOTAL: &str = "verify_service_provisioning_total";
+const VERIFY_SERVICE_PROVISIONING_PHASES: [&str; 6] = [
+    "resolve",
+    "proxy",
+    "create",
+    "readiness",
+    "teardown",
+    "complete",
+];
+const VERIFY_SERVICE_PROVISIONING_OUTCOMES: [&str; 6] = [
+    "ok",
+    "unavailable",
+    "protocol-mismatch",
+    "timeout",
+    "rejected",
+    "invalid-response",
+];
+const VERIFY_SERVICE_PROVISIONING_SERVICE_TYPES: [&str; 6] =
+    ["postgres", "redis", "rabbitmq", "other", "multiple", "none"];
 // Build-drift soft gate (ri23). Both metrics carry only fixed, enumerated
 // label values; project/session/command/key identifiers stay in structured
 // tracing fields next to these counters.
@@ -377,6 +401,32 @@ pub mod final_verification {
     pub const CHECK_PASS: &str = "pass";
     pub const CHECK_FAIL: &str = "fail";
 
+    /// Bounded catalog-service provisioning lifecycle phases for one attempt.
+    /// `COMPLETE` is the success terminal (create + readiness + teardown all
+    /// succeeded); the others name the phase that failed.
+    pub const PROVISION_PHASE_RESOLVE: &str = "resolve";
+    pub const PROVISION_PHASE_PROXY: &str = "proxy";
+    pub const PROVISION_PHASE_CREATE: &str = "create";
+    pub const PROVISION_PHASE_READINESS: &str = "readiness";
+    pub const PROVISION_PHASE_TEARDOWN: &str = "teardown";
+    pub const PROVISION_PHASE_COMPLETE: &str = "complete";
+
+    /// Bounded catalog-service provisioning terminal outcomes.
+    pub const PROVISION_OUTCOME_OK: &str = "ok";
+    pub const PROVISION_OUTCOME_UNAVAILABLE: &str = "unavailable";
+    pub const PROVISION_OUTCOME_PROTOCOL_MISMATCH: &str = "protocol-mismatch";
+    pub const PROVISION_OUTCOME_TIMEOUT: &str = "timeout";
+    pub const PROVISION_OUTCOME_REJECTED: &str = "rejected";
+    pub const PROVISION_OUTCOME_INVALID_RESPONSE: &str = "invalid-response";
+
+    /// Bounded coarse service-type classification for the provisioning label.
+    pub const PROVISION_SERVICE_POSTGRES: &str = "postgres";
+    pub const PROVISION_SERVICE_REDIS: &str = "redis";
+    pub const PROVISION_SERVICE_RABBITMQ: &str = "rabbitmq";
+    pub const PROVISION_SERVICE_OTHER: &str = "other";
+    pub const PROVISION_SERVICE_MULTIPLE: &str = "multiple";
+    pub const PROVISION_SERVICE_NONE: &str = "none";
+
     /// An injected recorder failure used to prove telemetry is best-effort.
     #[derive(Debug)]
     pub struct EmissionError;
@@ -430,12 +480,45 @@ pub mod final_verification {
         metrics::counter!(super::RUN_VERIFICATION_CHECK_TOTAL, "result" => result).increment(count);
     }
 
+    /// Increment the one catalog-service provisioning outcome for a
+    /// final-verification attempt whose plan declares services. Best-effort:
+    /// a telemetry failure never changes the coordinator's recording decision.
+    /// All three labels are bounded enums; identifiers stay in the structured
+    /// audit event emitted alongside this counter.
+    pub fn increment_provisioning(
+        phase: &'static str,
+        outcome: &'static str,
+        service_type: &'static str,
+    ) -> Result<(), EmissionError> {
+        #[cfg(feature = "test-support")]
+        PROVISIONING_EMISSION_ATTEMPTS.with(|attempts| attempts.set(attempts.get() + 1));
+        if injected_failure() {
+            return Err(EmissionError);
+        }
+        metrics::counter!(
+            super::VERIFY_SERVICE_PROVISIONING_TOTAL,
+            "phase" => phase,
+            "outcome" => outcome,
+            "service_type" => service_type,
+        )
+        .increment(1);
+        Ok(())
+    }
+
     #[cfg(feature = "test-support")]
     thread_local! {
         static FAIL_NEXT_EMISSION: Cell<bool> = const { Cell::new(false) };
         static LOOKUP_EMISSION_ATTEMPTS: Cell<usize> = const { Cell::new(0) };
         static RECORD_EMISSION_ATTEMPTS: Cell<usize> = const { Cell::new(0) };
         static TOOL_EMISSION_ATTEMPTS: Cell<usize> = const { Cell::new(0) };
+        static PROVISIONING_EMISSION_ATTEMPTS: Cell<usize> = const { Cell::new(0) };
+    }
+
+    /// Return catalog-service provisioning emissions since the failure seam was
+    /// armed (includes the injected failure, exposing duplicates).
+    #[cfg(feature = "test-support")]
+    pub fn provisioning_emission_attempts_for_test() -> usize {
+        PROVISIONING_EMISSION_ATTEMPTS.with(Cell::get)
     }
 
     /// Return `run_verification` tool-attempt emissions since the failure seam
@@ -452,6 +535,7 @@ pub mod final_verification {
         LOOKUP_EMISSION_ATTEMPTS.with(|attempts| attempts.set(0));
         RECORD_EMISSION_ATTEMPTS.with(|attempts| attempts.set(0));
         TOOL_EMISSION_ATTEMPTS.with(|attempts| attempts.set(0));
+        PROVISIONING_EMISSION_ATTEMPTS.with(|attempts| attempts.set(0));
     }
 
     /// Return lookup/record attempts since the failure seam was armed.
@@ -1222,6 +1306,23 @@ fn register_metrics() {
     );
     for result in RUN_VERIFICATION_CHECK_RESULTS {
         metrics::counter!(RUN_VERIFICATION_CHECK_TOTAL, "result" => result).absolute(0);
+    }
+    metrics::describe_counter!(
+        VERIFY_SERVICE_PROVISIONING_TOTAL,
+        "Catalog service provisioning outcomes for final-verification attempts, partitioned by bounded phase, outcome, and service_type."
+    );
+    for phase in VERIFY_SERVICE_PROVISIONING_PHASES {
+        for outcome in VERIFY_SERVICE_PROVISIONING_OUTCOMES {
+            for service_type in VERIFY_SERVICE_PROVISIONING_SERVICE_TYPES {
+                metrics::counter!(
+                    VERIFY_SERVICE_PROVISIONING_TOTAL,
+                    "phase" => phase,
+                    "outcome" => outcome,
+                    "service_type" => service_type,
+                )
+                .absolute(0);
+            }
+        }
     }
     metrics::describe_counter!(
         BUILD_DRIFT_DECISIONS_TOTAL,

@@ -288,6 +288,15 @@ pub async fn coordinate_final_verification_for_agent(
         FinalVerificationRecordingOutcome::Error { detail, .. } => {
             AgentRunVerificationOutcome::Error { detail }
         }
+        // A service-provisioning failure is an infrastructure outcome distinct
+        // from a real check failure, so it maps to the tool's `Error` result
+        // (bucketed with other infrastructure errors) with a bounded detail that
+        // carries no URL, credential, tenant name, or raw backend error.
+        FinalVerificationRecordingOutcome::InfrastructureIneligible { phase, code, .. } => {
+            AgentRunVerificationOutcome::Error {
+                detail: format!("catalog service provisioning failed ({phase:?}/{code:?})"),
+            }
+        }
         FinalVerificationRecordingOutcome::NotConfigured { .. } => {
             AgentRunVerificationOutcome::NotConfigured
         }
