@@ -1324,6 +1324,9 @@ async fn dispatch(
         ServiceRpcRequest::ReleaseLease { request } => {
             ServiceRpcResponse::ReleaseLease(services.release_lease(request).await)
         }
+        ServiceRpcRequest::TerminateWatchdogPod { request } => {
+            ServiceRpcResponse::TerminateWatchdogPod(services.terminate_watchdog_pod(request).await)
+        }
     }
 }
 

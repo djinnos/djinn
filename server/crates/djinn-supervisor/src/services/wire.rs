@@ -553,6 +553,8 @@ pub enum ServiceRpcRequest {
     CancelLease { request: LeaseCancelRequest },
     /// [`crate::SupervisorServices::release_lease`]. Appended at the tail.
     ReleaseLease { request: LeaseReleaseRequest },
+    /// Exact immutable Pod watchdog termination. Appended for bincode stability.
+    TerminateWatchdogPod { request: WatchdogTerminationRequest },
 }
 
 /// Typed response variants — one per [`ServiceRpcRequest`] variant.
@@ -656,6 +658,7 @@ pub enum ServiceRpcResponse {
     BindLeasePod(LeaseResult),
     CancelLease(LeaseResult),
     ReleaseLease(LeaseResult),
+    TerminateWatchdogPod(Result<(), String>),
 }
 
 #[cfg(test)]
