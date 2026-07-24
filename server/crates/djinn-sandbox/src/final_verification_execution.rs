@@ -162,16 +162,19 @@ pub async fn execute_final_verification(
         Err(error) => return service_error_evidence(error.phase, error.code),
     };
     // Proxy setup occurs after leases so it shares the same reverse teardown.
-    let session = match FinalVerificationNetworkSession::create(request.catalog_loopback_endpoints.clone()) {
-        Ok(session) => session,
-        Err(_) => match delete_leases(&leases).await {
-            Ok(()) => return service_error_evidence(
-                ServiceProvisioningPhase::Proxy,
-                ServiceProvisioningCode::Unavailable,
-            ),
-            Err(error) => return service_error_evidence(error.phase, error.code),
-        },
-    };
+    let session =
+        match FinalVerificationNetworkSession::create(request.catalog_loopback_endpoints.clone()) {
+            Ok(session) => session,
+            Err(_) => match delete_leases(&leases).await {
+                Ok(()) => {
+                    return service_error_evidence(
+                        ServiceProvisioningPhase::Proxy,
+                        ServiceProvisioningCode::Unavailable,
+                    );
+                }
+                Err(error) => return service_error_evidence(error.phase, error.code),
+            },
+        };
     let service_environment = leases
         .iter()
         .flat_map(|(_, lease)| lease.environment.clone())
@@ -185,10 +188,11 @@ pub async fn execute_final_verification(
     )
     .await;
     if let Err(error) = delete_leases(&leases).await {
-        evidence.eligibility_reason = Some(FinalVerificationIneligibilityReason::ServiceProvisioning {
-            phase: error.phase,
-            code: error.code,
-        });
+        evidence.eligibility_reason =
+            Some(FinalVerificationIneligibilityReason::ServiceProvisioning {
+                phase: error.phase,
+                code: error.code,
+            });
     }
     evidence
 }
@@ -523,7 +527,10 @@ fn service_error_evidence(
         fingerprint_f0: None,
         fingerprint_f1: None,
         commands: Vec::new(),
-        eligibility_reason: Some(FinalVerificationIneligibilityReason::ServiceProvisioning { phase, code }),
+        eligibility_reason: Some(FinalVerificationIneligibilityReason::ServiceProvisioning {
+            phase,
+            code,
+        }),
     }
 }
 
@@ -572,6 +579,8 @@ fn now_millis() -> u128 {
 mod tests {
     use super::*;
     use std::fs;
+    use std::future::Future;
+    use std::pin::Pin;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -582,6 +591,9 @@ mod tests {
     use tempfile::TempDir;
 
     use crate::final_verification::{FinalVerificationResult, FinalVerificationViolation};
+    use crate::service_provisioning::{
+        CatalogServiceProvisioner, ServiceLease, ServiceProvisioningError,
+    };
 
     const DIGEST: &str = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
@@ -704,6 +716,66 @@ mod tests {
             stdout: Vec::new(),
             stderr: Vec::new(),
         }
+    }
+
+    struct FakeProvisioner {
+        lease: ServiceLease,
+    }
+
+    impl CatalogServiceProvisioner for FakeProvisioner {
+        fn preset_id(&self) -> &str {
+            "postgres"
+        }
+
+        fn create<'a>(
+            &'a self,
+            _: &'a str,
+        ) -> Pin<Box<dyn Future<Output = Result<ServiceLease, ServiceProvisioningError>> + Send + 'a>>
+        {
+            Box::pin(async move { Ok(self.lease.clone()) })
+        }
+
+        fn ready<'a>(
+            &'a self,
+            _: &'a str,
+        ) -> Pin<Box<dyn Future<Output = Result<(), ServiceProvisioningError>> + Send + 'a>>
+        {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn delete<'a>(
+            &'a self,
+            _: &'a str,
+        ) -> Pin<Box<dyn Future<Output = Result<(), ServiceProvisioningError>> + Send + 'a>>
+        {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    async fn execute_with_fake_provisioners(
+        request: FinalVerificationExecutionRequest,
+        launch: impl Fn(
+            FinalVerificationRequest,
+            Duration,
+        ) -> Result<FinalVerificationResult, FinalVerificationError>,
+    ) -> FinalVerificationExecutionEvidence {
+        let leases = create_ready_leases(&request.service_provisioners, "test-attempt")
+            .await
+            .expect("fake provisioners succeed");
+        let service_environment = leases
+            .iter()
+            .flat_map(|(_, lease)| lease.environment.clone())
+            .collect();
+        let evidence = execute_final_verification_with_launcher_and_services(
+            request,
+            service_environment,
+            launch,
+        )
+        .await;
+        delete_leases(&leases)
+            .await
+            .expect("fake teardown succeeds");
+        evidence
     }
 
     #[test]
@@ -870,6 +942,45 @@ mod tests {
                 check_id: "second".into(),
                 exit_code: Some(1),
             })
+        );
+    }
+
+    #[tokio::test]
+    async fn service_credentials_are_execution_only_and_absent_from_evidence() {
+        const SECRET: &str = "super-secret-value";
+        let worktree = git_worktree();
+        let mut command = descriptor("check");
+        command.environment_names = vec!["SECRET_DB".into()];
+        let mut input = identity_input(vec![command], Vec::new());
+        input.input_manifest.environment_names = vec!["SECRET_DB".into()];
+        let mut request = request(worktree.path(), input.clone(), static_resolver(input));
+        request.service_provisioners = vec![Arc::new(FakeProvisioner {
+            lease: ServiceLease {
+                lease_id: "lease".into(),
+                environment: BTreeMap::from([("SECRET_DB".into(), SECRET.into())]),
+            },
+        })];
+        let injected = Arc::new(Mutex::new(BTreeMap::new()));
+        let observed = Arc::clone(&injected);
+
+        let evidence = execute_with_fake_provisioners(request, move |launch, _| {
+            *observed.lock().expect("lock injected environment") = launch.environment;
+            Ok(succeeded())
+        })
+        .await;
+
+        assert_eq!(
+            injected
+                .lock()
+                .expect("lock injected environment")
+                .get("SECRET_DB"),
+            Some(&SECRET.to_string()),
+            "the declared catalog credential reaches only the command environment"
+        );
+        assert!(evidence.eligible());
+        assert!(
+            !format!("{evidence:?}").contains(SECRET),
+            "identities, fingerprints, command evidence, and structured reasons exclude credentials"
         );
     }
 }

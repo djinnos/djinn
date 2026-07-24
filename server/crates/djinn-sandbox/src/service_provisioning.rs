@@ -198,10 +198,13 @@ impl CatalogServiceProvisioner for UnixCatalogServiceProvisioner {
                     })
                 }
                 Response::Created { revision, .. } | Response::Error { revision, .. }
-                    if revision != CONTROL_PROTOCOL_REVISION => Err(err(
-                    ServiceProvisioningPhase::Create,
-                    ServiceProvisioningCode::ProtocolMismatch,
-                )),
+                    if revision != CONTROL_PROTOCOL_REVISION =>
+                {
+                    Err(err(
+                        ServiceProvisioningPhase::Create,
+                        ServiceProvisioningCode::ProtocolMismatch,
+                    ))
+                }
                 Response::Error { .. } => Err(err(
                     ServiceProvisioningPhase::Create,
                     ServiceProvisioningCode::Rejected,
@@ -230,10 +233,13 @@ impl CatalogServiceProvisioner for UnixCatalogServiceProvisioner {
             {
                 Response::Ready { revision } if revision == CONTROL_PROTOCOL_REVISION => Ok(()),
                 Response::Ready { revision } | Response::Error { revision, .. }
-                    if revision != CONTROL_PROTOCOL_REVISION => Err(err(
-                    ServiceProvisioningPhase::Readiness,
-                    ServiceProvisioningCode::ProtocolMismatch,
-                )),
+                    if revision != CONTROL_PROTOCOL_REVISION =>
+                {
+                    Err(err(
+                        ServiceProvisioningPhase::Readiness,
+                        ServiceProvisioningCode::ProtocolMismatch,
+                    ))
+                }
                 Response::Error { .. } => Err(err(
                     ServiceProvisioningPhase::Readiness,
                     ServiceProvisioningCode::Rejected,
@@ -262,10 +268,13 @@ impl CatalogServiceProvisioner for UnixCatalogServiceProvisioner {
             {
                 Response::Deleted { revision } if revision == CONTROL_PROTOCOL_REVISION => Ok(()),
                 Response::Deleted { revision } | Response::Error { revision, .. }
-                    if revision != CONTROL_PROTOCOL_REVISION => Err(err(
-                    ServiceProvisioningPhase::Teardown,
-                    ServiceProvisioningCode::ProtocolMismatch,
-                )),
+                    if revision != CONTROL_PROTOCOL_REVISION =>
+                {
+                    Err(err(
+                        ServiceProvisioningPhase::Teardown,
+                        ServiceProvisioningCode::ProtocolMismatch,
+                    ))
+                }
                 Response::Error { .. } => Err(err(
                     ServiceProvisioningPhase::Teardown,
                     ServiceProvisioningCode::Rejected,
@@ -320,7 +329,27 @@ pub enum Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
     use std::sync::Mutex;
+
+    use tokio::net::UnixListener;
+
+    fn fake_server(socket: &Path, response: &'static str) -> tokio::task::JoinHandle<()> {
+        let listener = UnixListener::bind(socket).expect("bind fake control socket");
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept client");
+            let (read, mut write) = stream.into_split();
+            let mut request = String::new();
+            BufReader::new(read)
+                .read_line(&mut request)
+                .await
+                .expect("read control request");
+            write
+                .write_all(response.as_bytes())
+                .await
+                .expect("write fake control response");
+        })
+    }
 
     struct FakeProvisioner {
         id: &'static str,
@@ -340,27 +369,63 @@ mod tests {
     }
 
     impl CatalogServiceProvisioner for FakeProvisioner {
-        fn preset_id(&self) -> &str { self.id }
+        fn preset_id(&self) -> &str {
+            self.id
+        }
 
-        fn create<'a>(&'a self, _: &'a str) -> Pin<Box<dyn Future<Output = Result<ServiceLease, ServiceProvisioningError>> + Send + 'a>> {
+        fn create<'a>(
+            &'a self,
+            _: &'a str,
+        ) -> Pin<Box<dyn Future<Output = Result<ServiceLease, ServiceProvisioningError>> + Send + 'a>>
+        {
             Box::pin(async move {
-                self.events.lock().unwrap().push(format!("create:{}", self.id));
-                if self.fail_create { return Err(Self::failure(ServiceProvisioningPhase::Create)); }
-                Ok(ServiceLease { lease_id: self.id.into(), environment: BTreeMap::new() })
+                self.events
+                    .lock()
+                    .unwrap()
+                    .push(format!("create:{}", self.id));
+                if self.fail_create {
+                    return Err(Self::failure(ServiceProvisioningPhase::Create));
+                }
+                Ok(ServiceLease {
+                    lease_id: self.id.into(),
+                    environment: BTreeMap::new(),
+                })
             })
         }
 
-        fn ready<'a>(&'a self, _: &'a str) -> Pin<Box<dyn Future<Output = Result<(), ServiceProvisioningError>> + Send + 'a>> {
+        fn ready<'a>(
+            &'a self,
+            _: &'a str,
+        ) -> Pin<Box<dyn Future<Output = Result<(), ServiceProvisioningError>> + Send + 'a>>
+        {
             Box::pin(async move {
-                self.events.lock().unwrap().push(format!("ready:{}", self.id));
-                if self.fail_ready { Err(Self::failure(ServiceProvisioningPhase::Readiness)) } else { Ok(()) }
+                self.events
+                    .lock()
+                    .unwrap()
+                    .push(format!("ready:{}", self.id));
+                if self.fail_ready {
+                    Err(Self::failure(ServiceProvisioningPhase::Readiness))
+                } else {
+                    Ok(())
+                }
             })
         }
 
-        fn delete<'a>(&'a self, _: &'a str) -> Pin<Box<dyn Future<Output = Result<(), ServiceProvisioningError>> + Send + 'a>> {
+        fn delete<'a>(
+            &'a self,
+            _: &'a str,
+        ) -> Pin<Box<dyn Future<Output = Result<(), ServiceProvisioningError>> + Send + 'a>>
+        {
             Box::pin(async move {
-                self.events.lock().unwrap().push(format!("delete:{}", self.id));
-                if self.fail_delete { Err(Self::failure(ServiceProvisioningPhase::Teardown)) } else { Ok(()) }
+                self.events
+                    .lock()
+                    .unwrap()
+                    .push(format!("delete:{}", self.id));
+                if self.fail_delete {
+                    Err(Self::failure(ServiceProvisioningPhase::Teardown))
+                } else {
+                    Ok(())
+                }
             })
         }
     }
@@ -368,26 +433,141 @@ mod tests {
     #[tokio::test]
     async fn create_failure_rolls_back_and_surfaces_teardown_failure() {
         let events = Arc::new(Mutex::new(Vec::new()));
-        let postgres = Arc::new(FakeProvisioner { id: "postgres", fail_create: false, fail_ready: false, fail_delete: true, events: Arc::clone(&events) });
-        let redis = Arc::new(FakeProvisioner { id: "redis", fail_create: true, fail_ready: false, fail_delete: false, events: Arc::clone(&events) });
+        let postgres = Arc::new(FakeProvisioner {
+            id: "postgres",
+            fail_create: false,
+            fail_ready: false,
+            fail_delete: true,
+            events: Arc::clone(&events),
+        });
+        let redis = Arc::new(FakeProvisioner {
+            id: "redis",
+            fail_create: true,
+            fail_ready: false,
+            fail_delete: false,
+            events: Arc::clone(&events),
+        });
         let result = create_ready_leases(&[redis, postgres], "attempt").await;
         assert_eq!(
             result.err().expect("must fail").phase,
             ServiceProvisioningPhase::Teardown
         );
-        assert_eq!(*events.lock().unwrap(), vec!["create:postgres", "ready:postgres", "create:redis", "delete:postgres"]);
+        assert_eq!(
+            *events.lock().unwrap(),
+            vec![
+                "create:postgres",
+                "ready:postgres",
+                "create:redis",
+                "delete:postgres"
+            ]
+        );
     }
 
     #[tokio::test]
     async fn readiness_failure_deletes_current_then_prior_leases_in_reverse_order() {
         let events = Arc::new(Mutex::new(Vec::new()));
-        let postgres = Arc::new(FakeProvisioner { id: "postgres", fail_create: false, fail_ready: false, fail_delete: false, events: Arc::clone(&events) });
-        let redis = Arc::new(FakeProvisioner { id: "redis", fail_create: false, fail_ready: true, fail_delete: false, events: Arc::clone(&events) });
+        let postgres = Arc::new(FakeProvisioner {
+            id: "postgres",
+            fail_create: false,
+            fail_ready: false,
+            fail_delete: false,
+            events: Arc::clone(&events),
+        });
+        let redis = Arc::new(FakeProvisioner {
+            id: "redis",
+            fail_create: false,
+            fail_ready: true,
+            fail_delete: false,
+            events: Arc::clone(&events),
+        });
         let result = create_ready_leases(&[redis, postgres], "attempt").await;
         assert_eq!(
             result.err().expect("must fail").phase,
             ServiceProvisioningPhase::Readiness
         );
-        assert_eq!(*events.lock().unwrap(), vec!["create:postgres", "ready:postgres", "create:redis", "ready:redis", "delete:redis", "delete:postgres"]);
+        assert_eq!(
+            *events.lock().unwrap(),
+            vec![
+                "create:postgres",
+                "ready:postgres",
+                "create:redis",
+                "ready:redis",
+                "delete:redis",
+                "delete:postgres"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn unix_create_rejects_a_mismatched_protocol_revision() {
+        let directory = tempfile::tempdir().expect("create socket directory");
+        let socket = directory.path().join("control.sock");
+        let server = fake_server(
+            &socket,
+            "{\"status\":\"created\",\"revision\":2,\"lease_id\":\"lease\",\"environment\":{}}\n",
+        );
+        let provisioner = UnixCatalogServiceProvisioner::new("postgres".into(), socket, Vec::new());
+
+        assert_eq!(
+            provisioner.create("attempt").await.unwrap_err().code,
+            ServiceProvisioningCode::ProtocolMismatch
+        );
+        server.await.expect("fake server completes");
+    }
+
+    #[tokio::test]
+    async fn unix_ready_reports_a_missing_socket_as_unavailable() {
+        let directory = tempfile::tempdir().expect("create socket directory");
+        let provisioner = UnixCatalogServiceProvisioner::new(
+            "postgres".into(),
+            directory.path().join("missing.sock"),
+            Vec::new(),
+        );
+
+        assert_eq!(
+            provisioner.ready("lease").await.unwrap_err().code,
+            ServiceProvisioningCode::Unavailable
+        );
+    }
+
+    #[tokio::test]
+    async fn unix_delete_rejects_a_malformed_response() {
+        let directory = tempfile::tempdir().expect("create socket directory");
+        let socket = directory.path().join("control.sock");
+        let server = fake_server(&socket, "not json\n");
+        let provisioner = UnixCatalogServiceProvisioner::new("postgres".into(), socket, Vec::new());
+
+        assert_eq!(
+            provisioner.delete("lease").await.unwrap_err().code,
+            ServiceProvisioningCode::InvalidResponse
+        );
+        server.await.expect("fake server completes");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn unix_create_times_out_when_the_server_never_replies() {
+        let directory = tempfile::tempdir().expect("create socket directory");
+        let socket = directory.path().join("control.sock");
+        let listener = UnixListener::bind(&socket).expect("bind fake control socket");
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept client");
+            let (read, _write) = stream.into_split();
+            let mut request = String::new();
+            BufReader::new(read)
+                .read_line(&mut request)
+                .await
+                .expect("read control request");
+            std::future::pending::<()>().await;
+        });
+        let provisioner = UnixCatalogServiceProvisioner::new("postgres".into(), socket, Vec::new());
+        let call = tokio::spawn(async move { provisioner.create("attempt").await });
+
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(16)).await;
+        assert_eq!(
+            call.await.expect("client task completes").unwrap_err().code,
+            ServiceProvisioningCode::Timeout
+        );
+        server.abort();
     }
 }

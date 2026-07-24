@@ -105,101 +105,101 @@ const PREVIOUS_HOOK_MARKER: &str = "previous-hook-large-write:";
 #[cfg(test)]
 #[test]
 fn chained_large_hook() {
-        // `install` is process-global. Exercise it in a separate libtest process
-        // so this fixture can install a deliberately large previous hook.
-        if std::env::var_os("DJINN_PANIC_CAPTURE_CHILD").is_some() {
-            panic::set_hook(Box::new(|_| {
-                eprintln!("{PREVIOUS_HOOK_MARKER}{}", "P".repeat(9 * 1024));
-            }));
-            install();
-            deep_panic(256);
-        }
-        let output = Command::new(std::env::current_exe().expect("test executable"))
-            .args([
-                "--exact",
-                "panic_capture::chained_large_hook",
-                "--nocapture",
-            ])
-            .env("RUST_BACKTRACE", "1")
-            .env("DJINN_PANIC_CAPTURE_CHILD", "1")
-            .output()
-            .expect("run panic hook child");
-        assert!(!output.status.success(), "child must panic");
-
-        let durable = String::from_utf8(output.stderr).expect("panic output is UTF-8");
-        let previous_offset = durable
-            .find(PREVIOUS_HOOK_MARKER)
-            .expect("previous hook fired");
-        let backtrace_offset = durable
-            .find("\"event\":\"djinn.panic_backtrace.v1\"")
-            .expect("Djinn backtrace record was durable");
-        let summary_offset = durable
-            .find("\"event\":\"djinn.panic_summary.v1\"")
-            .expect("Djinn summary record was durable");
-        assert!(previous_offset < backtrace_offset && backtrace_offset < summary_offset);
-        assert!(
-            durable[previous_offset..]
-                .lines()
-                .next()
-                .expect("previous hook line")
-                .len()
-                > 8 * 1024,
-            "previous hook wrote >8 KiB"
-        );
-
-        let backtrace_line = durable
-            .lines()
-            .find(|line| line.contains("\"event\":\"djinn.panic_backtrace.v1\""))
-            .expect("complete backtrace record");
-        let backtrace: serde_json::Value =
-            serde_json::from_str(backtrace_line).expect("valid backtrace JSON");
-        assert!(
-            backtrace["backtrace"]
-                .as_str()
-                .expect("backtrace string")
-                .len()
-                > 8 * 1024
-        );
-
-        let attempt_capture = utf8_tail(&durable, ATTEMPT_CAPTURE_BYTES);
-        let summary_line = attempt_capture
-            .lines()
-            .find(|line| line.contains("\"event\":\"djinn.panic_summary.v1\""))
-            .expect("final summary remains in 8000-byte attempt capture");
-        let summary: serde_json::Value =
-            serde_json::from_str(summary_line).expect("valid summary JSON");
-        assert_eq!(summary["event"], "djinn.panic_summary.v1");
-        assert!(summary_line.len() <= PANIC_SUMMARY_MAX_BYTES);
-        assert!(
-            durable[summary_offset..]
-                .lines()
-                .filter(|line| line.contains("\"event\":\"djinn.panic_"))
-                .all(|line| line.contains("\"event\":\"djinn.panic_summary.v1\""))
-        );
+    // `install` is process-global. Exercise it in a separate libtest process
+    // so this fixture can install a deliberately large previous hook.
+    if std::env::var_os("DJINN_PANIC_CAPTURE_CHILD").is_some() {
+        panic::set_hook(Box::new(|_| {
+            eprintln!("{PREVIOUS_HOOK_MARKER}{}", "P".repeat(9 * 1024));
+        }));
+        install();
+        deep_panic(256);
     }
+    let output = Command::new(std::env::current_exe().expect("test executable"))
+        .args([
+            "--exact",
+            "panic_capture::chained_large_hook",
+            "--nocapture",
+        ])
+        .env("RUST_BACKTRACE", "1")
+        .env("DJINN_PANIC_CAPTURE_CHILD", "1")
+        .output()
+        .expect("run panic hook child");
+    assert!(!output.status.success(), "child must panic");
+
+    let durable = String::from_utf8(output.stderr).expect("panic output is UTF-8");
+    let previous_offset = durable
+        .find(PREVIOUS_HOOK_MARKER)
+        .expect("previous hook fired");
+    let backtrace_offset = durable
+        .find("\"event\":\"djinn.panic_backtrace.v1\"")
+        .expect("Djinn backtrace record was durable");
+    let summary_offset = durable
+        .find("\"event\":\"djinn.panic_summary.v1\"")
+        .expect("Djinn summary record was durable");
+    assert!(previous_offset < backtrace_offset && backtrace_offset < summary_offset);
+    assert!(
+        durable[previous_offset..]
+            .lines()
+            .next()
+            .expect("previous hook line")
+            .len()
+            > 8 * 1024,
+        "previous hook wrote >8 KiB"
+    );
+
+    let backtrace_line = durable
+        .lines()
+        .find(|line| line.contains("\"event\":\"djinn.panic_backtrace.v1\""))
+        .expect("complete backtrace record");
+    let backtrace: serde_json::Value =
+        serde_json::from_str(backtrace_line).expect("valid backtrace JSON");
+    assert!(
+        backtrace["backtrace"]
+            .as_str()
+            .expect("backtrace string")
+            .len()
+            > 8 * 1024
+    );
+
+    let attempt_capture = utf8_tail(&durable, ATTEMPT_CAPTURE_BYTES);
+    let summary_line = attempt_capture
+        .lines()
+        .find(|line| line.contains("\"event\":\"djinn.panic_summary.v1\""))
+        .expect("final summary remains in 8000-byte attempt capture");
+    let summary: serde_json::Value =
+        serde_json::from_str(summary_line).expect("valid summary JSON");
+    assert_eq!(summary["event"], "djinn.panic_summary.v1");
+    assert!(summary_line.len() <= PANIC_SUMMARY_MAX_BYTES);
+    assert!(
+        durable[summary_offset..]
+            .lines()
+            .filter(|line| line.contains("\"event\":\"djinn.panic_"))
+            .all(|line| line.contains("\"event\":\"djinn.panic_summary.v1\""))
+    );
+}
 
 #[cfg(test)]
 #[inline(never)]
 fn deep_panic(depth: usize) {
-        if depth == 0 {
-            panic!("panic capture fixture");
-        }
-        std::hint::black_box(deep_panic(depth - 1));
+    if depth == 0 {
+        panic!("panic capture fixture");
     }
+    std::hint::black_box(deep_panic(depth - 1));
+}
 
 #[cfg(test)]
 fn utf8_tail(value: &str, max_bytes: usize) -> &str {
-        if value.len() <= max_bytes {
-            return value;
-        }
-        let mut start = value.len() - max_bytes;
-        while !value.is_char_boundary(start) {
-            start += 1;
-        }
-        &value[start..]
+    if value.len() <= max_bytes {
+        return value;
     }
+    let mut start = value.len() - max_bytes;
+    while !value.is_char_boundary(start) {
+        start += 1;
+    }
+    &value[start..]
+}
 #[cfg(test)]
 #[test]
 fn utf8_truncation_never_splits_a_code_point() {
-        assert_eq!(truncate_utf8("abc🙂def", 6), "abc");
-    }
+    assert_eq!(truncate_utf8("abc🙂def", 6), "abc");
+}

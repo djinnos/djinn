@@ -405,7 +405,8 @@ pub async fn resolve_final_verification_for_task_run(
                 PathBuf::from("/var/run/djinn/service-control")
                     .join(format!("{}.sock", service.preset_id)),
                 service.exported_environment_names.clone(),
-            )) as Arc<dyn djinn_sandbox::service_provisioning::CatalogServiceProvisioner>
+            ))
+                as Arc<dyn djinn_sandbox::service_provisioning::CatalogServiceProvisioner>
         })
         .collect();
     let manifest = VerificationInputManifestV1 {
