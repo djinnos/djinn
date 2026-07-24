@@ -714,22 +714,31 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           # Shards are the longest-lived and most expensive jobs, so each
-          # hosts a background watcher: if any lane in this run concludes
-          # failure, the run is cancelled instead of burning the remaining
-          # shard minutes behind an already-failed gate. Cancelling from a
-          # bystander AFTER the culprit concluded preserves its red
-          # "failure" label (a self-cancel races finalization and stamps
-          # it "cancelled"). The process dies with the job; redundant
-          # watchers across shards are idempotent. This replaces both the
-          # old dedicated watchdog job (a full runner slot polling for the
-          # entire run) and the invalid workflow_job-based workflow.
+          # hosts a background watcher whose SOLE purpose is CI-minute
+          # savings: if any lane in this run concludes failure, the run is
+          # cancelled instead of burning the remaining shard minutes behind
+          # an already-failed gate. GitHub's API has no per-job cancel, so
+          # `gh run cancel` is run-level and stamps in-flight sibling lanes
+          # "cancelled" — which is why this watcher is NOT the source of
+          # truth for *which* lane/test failed. That attribution lives in
+          # the foreground "Surface shard failure at run level" step below,
+          # which emits a run-summary `::error::` annotation naming the lane
+          # (and the failing test IDs) before the job concludes — i.e.
+          # before any sibling watcher can observe the failure and cancel.
+          # The watcher only fires on a *concluded* failure (the jobs API
+          # reports `conclusion` null until a job fully finishes), so the
+          # culprit lane keeps its own "failure" label. The process dies
+          # with the job; redundant watchers across shards are idempotent.
+          # This replaces both the old dedicated watchdog job (a full runner
+          # slot polling for the entire run) and the invalid workflow_job
+          # workflow.
           nohup bash -c '
             for _ in $(seq 1 240); do
               sleep 15
               failed=$(gh api "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs?per_page=100" \
                 --jq "[.jobs[] | select(.conclusion == \"failure\") | .name] | first // empty" 2>/dev/null || true)
               if [ -n "$failed" ]; then
-                echo "Lane $failed failed — cancelling run ${{ github.run_id }}."
+                echo "Lane $failed failed — cancelling run ${{ github.run_id }} to save the remaining shard minutes (attribution is on the failed lane'"'"'s run-level annotation)."
                 gh run cancel ${{ github.run_id }} --repo ${{ github.repository }} || true
                 exit 0
               fi
@@ -943,8 +952,12 @@ jobs:
           started_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           started_seconds=$(date +%s)
           set +e
-          cargo nextest run --workspace --all-targets --features qdrant --profile "$NEXTEST_PROFILE" --config-file nextest-plan/shard-nextest.toml --test-threads 4
-          status=$?
+          # Tee nextest output to a log the run-level failure-surfacing step
+          # (below) parses for the failing test names. PIPESTATUS[0] is the
+          # cargo exit code, not tee's, so a green run still reports 0.
+          cargo nextest run --workspace --all-targets --features qdrant --profile "$NEXTEST_PROFILE" --config-file nextest-plan/shard-nextest.toml --test-threads 4 \
+            2>&1 | tee "$RUNNER_TEMP/nextest-run.log"
+          status=${PIPESTATUS[0]}
           set -e
           elapsed_seconds=$(( $(date +%s) - started_seconds ))
           mkdir -p nextest-timing
@@ -958,6 +971,54 @@ jobs:
             }
           ' nextest-plan/shard-test-ids.json > "nextest-timing/timing-${{ matrix.shardIndex }}.json"
           exit "$status"
+      - name: Surface shard failure at run level
+        # Runs on ANY failure in this shard (test failure, or an earlier
+        # build/migration/setup step). GitHub's Actions API has no per-job
+        # cancel — the sibling fail-fast watcher can only `gh run cancel` the
+        # whole run, which stamps in-flight lanes "cancelled" and buries which
+        # lane/test actually broke. This step makes the failure unambiguously
+        # attributable at the RUN level regardless of what the cancel does:
+        #   * `::error::` becomes a run-summary annotation (shown at the top of
+        #     the run, aggregated across jobs) naming this lane and, when the
+        #     failure was a test failure, the failing test IDs.
+        #   * a $GITHUB_STEP_SUMMARY block records the same on this job's page.
+        # It runs before the job concludes, so it is emitted before any sibling
+        # watcher can observe this lane's failure and cancel — the annotation
+        # is therefore the durable source of truth for "which lane/test failed".
+        # Not gated on shard.active: a shard can also fail before shard
+        # resolution (build/migration/setup), and those must surface too. The
+        # nextest log is simply absent there, so the generic branch fires.
+        if: failure()
+        run: |
+          set -uo pipefail
+          shard_name="${{ matrix.shard }}"
+          log="$RUNNER_TEMP/nextest-run.log"
+          failed_tests=""
+          if [ -f "$log" ]; then
+            # nextest prints one `    FAIL [   0.005s] <binary-id> <test-name>`
+            # line per failing test; strip the leading marker + timing bracket
+            # to leave `<binary-id> <test-name>`.
+            failed_tests=$(grep -E '^[[:space:]]*FAIL \[' "$log" \
+              | sed -E 's/^[[:space:]]*FAIL \[[^]]*\][[:space:]]+//' \
+              | sort -u || true)
+          fi
+          if [ -n "$failed_tests" ]; then
+            echo "::error title=Server Test ${shard_name} failed::$(printf '%s' "$failed_tests" | paste -sd'; ' -)"
+            {
+              echo "### Server Test ${shard_name} — FAILED"
+              echo
+              echo "Failing tests:"
+              echo
+              printf '%s\n' "$failed_tests" | sed 's/^/- `/;s/$/`/'
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::error title=Server Test ${shard_name} failed::shard concluded failure without nextest FAIL lines (build, migration, or setup step); see this job's log."
+            {
+              echo "### Server Test ${shard_name} — FAILED"
+              echo
+              echo "This shard failed before producing nextest FAIL lines (e.g. a build, migration, or setup step). See this job's log for the failing step."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
       - name: Upload retained shard timing data
         if: always() && steps.shard.outputs.active == 'true'
         uses: actions/upload-artifact@v4
