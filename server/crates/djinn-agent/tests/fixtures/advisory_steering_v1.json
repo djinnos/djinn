@@ -1,0 +1,55 @@
+{
+  "description": "ri23 Part 1 advisory-steering trace corpus. Divergent sessions replayed over unchanged source states. Each session has its own (session_id, project_id) scope. `invocations` are the shell commands the worker attempts within one unchanged source state. Replayed identically under two arms: baseline (gate off) and candidate (gate on).",
+  "canonical": [
+    { "executable": "cargo", "argv": ["clippy", "--all-targets", "--", "-D", "warnings"] },
+    { "executable": "cargo", "argv": ["nextest", "run", "--workspace"] },
+    { "executable": "pnpm", "argv": ["-C", "web", "test"] }
+  ],
+  "sessions": [
+    {
+      "session_id": "sess-A",
+      "project_id": "proj-A",
+      "states": [
+        { "state_id": "A-s1", "invocations": ["cargo build -p crate-a"] },
+        { "state_id": "A-s2", "invocations": ["cargo build -p crate-b"] },
+        { "state_id": "A-s3", "invocations": ["cargo test -p crate-a"] },
+        { "state_id": "A-s4", "invocations": ["cargo build -p crate-a"] }
+      ]
+    },
+    {
+      "session_id": "sess-B",
+      "project_id": "proj-B",
+      "states": [
+        { "state_id": "B-s1", "invocations": ["cargo clippy --all-targets -- -D warnings"] },
+        { "state_id": "B-s2", "invocations": ["cargo build --release"] },
+        { "state_id": "B-s3", "invocations": ["pnpm -C web build"] }
+      ]
+    },
+    {
+      "session_id": "sess-C",
+      "project_id": "proj-C",
+      "states": [
+        { "state_id": "C-s1", "invocations": ["cargo build"] },
+        { "state_id": "C-s2", "invocations": ["cargo nextest run --workspace"] },
+        { "state_id": "C-s3", "invocations": ["go build ./...", "cargo build -p crate-x"] }
+      ]
+    },
+    {
+      "session_id": "sess-D",
+      "project_id": "proj-D",
+      "states": [
+        { "state_id": "D-s1", "invocations": ["FOO=1 cargo build", "cargo build -p d1"] },
+        { "state_id": "D-s2", "invocations": ["cargo build -p d2"] },
+        { "state_id": "D-s3", "invocations": ["cargo build | tee log", "cargo check --workspace"] }
+      ]
+    },
+    {
+      "session_id": "sess-E",
+      "project_id": "proj-E",
+      "states": [
+        { "state_id": "E-s1", "invocations": ["cargo build -p e1"] },
+        { "state_id": "E-s2", "invocations": ["cargo build -p e2"] }
+      ]
+    }
+  ]
+}

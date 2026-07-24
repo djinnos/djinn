@@ -46,7 +46,7 @@ pub(crate) mod ci;
 #[allow(dead_code)]
 pub(crate) mod ci_artifact;
 mod code_intel;
-mod gate_guard;
+pub(crate) mod gate_guard;
 mod jit_pitfalls;
 // Retained for test coverage; production dispatch goes through djinn-mcp-extension.
 #[allow(dead_code)]
