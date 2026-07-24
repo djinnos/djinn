@@ -14,6 +14,7 @@ pub mod liveness;
 pub mod message;
 pub mod models;
 pub mod paths;
+pub mod prepare_build_cache;
 pub mod refinement_liveness;
 pub mod run_progress;
 pub mod test_paths;

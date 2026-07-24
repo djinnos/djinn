@@ -1639,6 +1639,20 @@
   },
   {
     "concurrent_safe": false,
+    "description": "Prepare the platform build cache for this task before you start building, on demand. Stack-neutral: where the platform maintains a warm cache for your stack, this routes cache preparation through the first-use/admission seam and returns a typed outcome WITHOUT you running any build yourself. Outcomes: `ready`/`noop` (the cache is prepared and its path is returned — `noop` means startup already seeded it, so nothing was re-done), `queued` (preparation was deferred under disk pressure or unknown capacity and no cache bytes were allocated), or `not_applicable` (your stack has no platform warm cache). It never intercepts or blocks your shell commands and does not build or submit anything. Call it once up front; re-calling an already-prepared cache is cheap.",
+    "destructive": false,
+    "idempotent": true,
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {},
+      "type": "object"
+    },
+    "name": "prepare_build_cache",
+    "openWorld": false,
+    "readOnly": false
+  },
+  {
+    "concurrent_safe": false,
     "description": "Amend a proposal's acceptance-criteria spec with audited revision semantics. Each amendment targets a zero-based criterion index with operation `rewrite`, `drop`, or `waive`; requires a non-empty reason. Bumps proposal revision, retains sign-offs. Use proposal_ac_set for met-flag reconciliation only.",
     "destructive": false,
     "idempotent": false,

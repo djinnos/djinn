@@ -143,6 +143,73 @@ pub struct TaskContext {
     /// injected into planner/reviewer/lead/architect prompts.  `None` when
     /// there is no active monitored reopen or the role does not receive it.
     pub arbiter_directive: Option<String>,
+
+    // ── Final-verification plan (epic 1bnj) ────────────────────────────────────
+    /// `true` when the resolved project `lifecycle.final_verification` plan is
+    /// non-empty. Drives the conditional agent surface: Worker/Reviewer prompts
+    /// render `run_verification` guidance and the tool is kept in the rendered
+    /// tools section only when this is `true`. Empty-plan projects render legacy
+    /// prompt language and make no claim that a gate runs at submit.
+    pub final_verification_configured: bool,
+}
+
+// ─── Conditional final-verification surface (epic 1bnj) ─────────────────────────
+
+/// Tool name gated on a non-empty resolved `lifecycle.final_verification` plan.
+///
+/// The canonical Worker/Reviewer schema sets advertise this tool
+/// unconditionally (so the reviewed baseline and snapshots capture the full
+/// surface); the live per-project surface and the rendered prompt strip it when
+/// the resolved plan is empty via [`retain_conditional_verification_tools`].
+pub const CONDITIONAL_VERIFICATION_TOOL: &str = "run_verification";
+
+/// Remove the on-demand `run_verification` tool from a role's rendered tool
+/// surface when the resolved project has no `lifecycle.final_verification`
+/// plan configured.
+///
+/// Single source of truth shared by the live MCP tool surface (supervisor
+/// stage) and the rendered prompt tools section so the two cannot drift.
+/// `prepare_build_cache` is intentionally never touched here — it renders for
+/// the Worker unconditionally.
+pub fn retain_conditional_verification_tools(
+    schemas: &mut Vec<serde_json::Value>,
+    final_verification_configured: bool,
+) {
+    if !final_verification_configured {
+        schemas.retain(|schema| {
+            schema.get("name").and_then(|name| name.as_str()) != Some(CONDITIONAL_VERIFICATION_TOOL)
+        });
+    }
+}
+
+/// Render the role-specific `run_verification` guidance block.
+///
+/// Non-empty only for the Worker and Reviewer roles when the resolved plan is
+/// configured. Empty-plan projects (and every other role) render nothing, so
+/// the legacy prompt language stands with no claim that a gate runs at submit.
+fn verification_guidance_section(role_name: &str, final_verification_configured: bool) -> String {
+    if !final_verification_configured {
+        return String::new();
+    }
+    match role_name {
+        "worker" => "## Final Verification\n\n\
+             This project has a configured final-verification gate. Iterate against it: call \
+             `run_verification` to run the canonical gate on the current worktree on demand and \
+             confirm your tree passes before you `submit_work`. It consults a passing result for \
+             an unchanged tree first, so an unchanged tree is never recompiled and calling it is \
+             cheap. Running `cargo`/build/test shell commands yourself for debugging is permitted, \
+             but such manual runs are not credited — only `run_verification` records gate evidence \
+             for the required checks.\n"
+            .to_string(),
+        "reviewer" => "## Independent Verification\n\n\
+             This project has a configured final-verification gate. You may independently re-run it \
+             with `run_verification` to confirm the submitted tree passes on demand — it reuses a \
+             passing result for an unchanged authored tree and executes the checks only when the \
+             tree has changed. Use it to corroborate the worker's submission rather than trusting \
+             it blind.\n"
+            .to_string(),
+        _ => String::new(),
+    }
 }
 
 // ─── Renderer ─────────────────────────────────────────────────────────────────
@@ -178,9 +245,21 @@ pub fn render_prompt_for_role(
         .unwrap_or("");
     out = out.replace("{{role_mode_section}}", mode_section);
 
-    // Dynamic tools section from role schemas
-    let tools_md = format_tools_section(&(tool_schemas)());
+    // Dynamic tools section from role schemas. The canonical schema set
+    // advertises `run_verification` unconditionally; strip it here when the
+    // resolved project has no final-verification plan so the rendered surface
+    // matches the live per-project MCP surface.
+    let mut schemas = (tool_schemas)();
+    retain_conditional_verification_tools(&mut schemas, ctx.final_verification_configured);
+    let tools_md = format_tools_section(&schemas);
     out = out.replace("{{tools_section}}", &tools_md);
+
+    // Role-specific `run_verification` guidance, rendered only for configured
+    // projects (Worker/Reviewer). The placeholder vanishes cleanly for
+    // empty-plan projects and every other role.
+    let verification_guidance =
+        verification_guidance_section(config.name, ctx.final_verification_configured);
+    out = out.replace("{{verification_guidance_section}}", &verification_guidance);
 
     // Task fields
     out = out.replace("{{task_id}}", &task.id);

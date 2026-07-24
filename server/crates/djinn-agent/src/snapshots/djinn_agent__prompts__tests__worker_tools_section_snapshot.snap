@@ -26,5 +26,6 @@ expression: section
 - `memory_write(content, reason, title, type, status?, tags?)`
 - `memory_edit(content, identifier, operation, reason, find_text?, section?, type?)`
 - `request_planner(id, reason)`
+- `prepare_build_cache()`
 - `run_verification()`
 - `submit_work(commit_title, summary, task_id, files_changed?, remaining_concerns?)`

@@ -49,6 +49,7 @@ const BOARD_HEALTH_MISMATCH_COALESCED_TOTAL: &str = "djinn_board_health_mismatch
 const BOARD_HEALTH_MISMATCH_PASS_AGE_SECONDS: &str = "djinn_board_health_mismatch_pass_age_seconds";
 const BOARD_HEALTH_MISMATCH_OUTCOMES_TOTAL: &str = "djinn_board_health_mismatch_outcomes_total";
 const CARGO_TARGET_SEED_TOTAL: &str = "djinn_cargo_target_seed_total";
+const PREPARE_BUILD_CACHE_TOTAL: &str = "djinn_prepare_build_cache_total";
 const CARGO_SEED_HIT_TOTAL: &str = "djinn_cargo_seed_hit_total";
 const CARGO_SEED_COLD_TOTAL: &str = "djinn_cargo_seed_cold_total";
 const CARGO_WARM_BASE_FRESHNESS_SECONDS: &str = "djinn_cargo_warm_base_freshness_seconds";
@@ -1040,6 +1041,34 @@ pub mod cargo_target_seed {
             "fallback_reason" => reason
         )
         .increment(1);
+    }
+}
+
+/// Agent-facing `prepare_build_cache` worker-tool telemetry (epic 1bnj).
+///
+/// Exactly one counter increment is emitted per tool call. The `outcome` label
+/// space is a CLOSED enum (`ready`, `noop`, `queued`, `not-applicable`,
+/// `error`) so series cardinality stays bounded. Identifiers (task-run id,
+/// resolved cache path) are carried in the tool result's structured audit
+/// fields, never as metric labels.
+pub mod prepare_build_cache {
+    /// Ready after admission/seed for a stack with a platform warm cache.
+    pub const OUTCOME_READY: &str = "ready";
+    /// Compatibility ready no-op while eager startup seeding is still active.
+    pub const OUTCOME_NOOP: &str = "noop";
+    /// Deferred (disk pressure / capacity unknown) without allocating bytes.
+    pub const OUTCOME_QUEUED: &str = "queued";
+    /// Stack has no platform warm cache.
+    pub const OUTCOME_NOT_APPLICABLE: &str = "not-applicable";
+    /// Internal failure preparing the cache.
+    pub const OUTCOME_ERROR: &str = "error";
+
+    /// Emit exactly one bounded outcome for a `prepare_build_cache` call.
+    ///
+    /// Callers pass one of the `OUTCOME_*` constants; free-form labels are not
+    /// accepted so the series stays bounded.
+    pub fn increment_outcome(outcome: &'static str) {
+        metrics::counter!(super::PREPARE_BUILD_CACHE_TOTAL, "outcome" => outcome).increment(1);
     }
 }
 

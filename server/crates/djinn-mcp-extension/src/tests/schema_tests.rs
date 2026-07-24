@@ -92,6 +92,7 @@ fn expected_safety_tuple(name: &str) -> Option<(bool, bool, bool, bool)> {
         | "epic_close"
         | "proposal_ac_set"
         | "run_verification"
+        | "prepare_build_cache"
         | "proposal_debate_resolve" => Some(idempotent_mutation),
         "task_create"
         | "epic_create"

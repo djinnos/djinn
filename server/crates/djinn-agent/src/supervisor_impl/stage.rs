@@ -976,6 +976,15 @@ pub(crate) async fn execute_stage(
             return Err(StageError::Setup(format!("env_config: {error}")));
         }
     };
+    // Epic 1bnj: resolve whether the project has a non-empty final-verification
+    // plan. Computed once, before `pre_verification` is moved out of the config,
+    // and used both to gate the Worker/Reviewer `run_verification` surface and to
+    // render the configured-vs-legacy prompt guidance.
+    let final_verification_configured = !env_config
+        .lifecycle
+        .final_verification
+        .normalized_commands()
+        .is_empty();
     let SetupContext {
         prompt_setup_commands,
     } = match resolve_setup_context(
@@ -1101,6 +1110,7 @@ pub(crate) async fn execute_stage(
                 .and_then(|metadata| metadata.last_durable_progress_summary.as_deref()),
             planned_note_search: None,
         }),
+        final_verification_configured,
     })
     .await;
 
@@ -1203,6 +1213,15 @@ pub(crate) async fn execute_stage(
     } else {
         crate::roles::tool_schemas_for(agent_type)
     };
+    // Epic 1bnj: the canonical Worker/Reviewer schema sets advertise
+    // `run_verification` unconditionally; strip it from the live per-project
+    // surface when the resolved project has no final-verification plan so the
+    // model never sees a gate tool that would fail at submit. `prepare_build_cache`
+    // is untouched — it renders for the Worker regardless of gate configuration.
+    djinn_roles::prompts::retain_conditional_verification_tools(
+        &mut tools,
+        final_verification_configured,
+    );
     if let Some(ref registry) = mcp_registry {
         tools.extend_from_slice(registry.tool_schemas());
         // Append native MCP resource tools only when at least one connected
