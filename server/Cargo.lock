@@ -1525,12 +1525,15 @@ dependencies = [
 name = "djinn-log-rotator"
 version = "0.1.0"
 dependencies = [
+ "axum 0.8.9",
  "flate2",
  "libc",
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
  "time",
+ "tokio",
+ "tower 0.5.3",
  "uuid",
  "workspace-hack",
 ]

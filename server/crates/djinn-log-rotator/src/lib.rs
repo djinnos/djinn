@@ -3,9 +3,11 @@
 //! This crate deliberately owns only the policy-independent storage primitive.
 //! Ingest, quotas, and retention are layered on it by later components.
 
+mod http;
 mod identity;
 mod store;
 
+pub use http::{AppState, MAX_RECORD_BYTES, StoreBackend, metrics_router, router};
 pub use identity::{ContainerName, Namespace, PodUid, StreamIdentity};
 pub use store::{
     Clock, Compressor, DEFAULT_MAX_AGE, DEFAULT_MAX_GLOBAL_LOGICAL_BYTES,
