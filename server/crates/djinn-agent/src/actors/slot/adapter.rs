@@ -34,12 +34,8 @@ use crate::context::AgentContext;
 const UNKNOWN_IMAGE_DIGEST: &str =
     "sha256:0000000000000000000000000000000000000000000000000000000000000000";
 
-/// Advisory-lock class id for final-verification invocation leases. Chosen from
-/// the application-specific range to avoid collisions with the migrator and
-/// template-bootstrap locks.
+/// Advisory-lock class id for final-verification invocation leases.
 const FINAL_VERIFICATION_LOCK_CLASS: i32 = 0x4656_5246; // "FVRF"
-/// Per-attempt object id derived by hashing the verification attempt id, so
-/// distinct concurrent attempts do not contend for the same lock row.
 fn final_verification_lock_object(verification_attempt_id: &str) -> i32 {
     let hash = verification_attempt_id
         .as_bytes()
@@ -50,9 +46,7 @@ fn final_verification_lock_object(verification_attempt_id: &str) -> i32 {
     hash as i32
 }
 
-/// Production invocation lease backed by a dedicated Postgres connection holding
-/// a session-scoped advisory lock. The coordinator explicitly releases it before
-/// persistence; releasing drops the connection, which also releases the lock.
+/// Production invocation lease backed by a dedicated Postgres connection.
 struct HostFinalVerificationLease {
     conn: Option<sqlx::postgres::PgConnection>,
     class_id: i32,
@@ -66,8 +60,6 @@ impl HostFinalVerificationLease {
     {
         let class_id = FINAL_VERIFICATION_LOCK_CLASS;
         let object_id = final_verification_lock_object(verification_attempt_id);
-        // Open a dedicated connection (not a pooled one) so the session-scoped
-        // advisory lock persists until the connection is dropped on release.
         let opts = db.pool().connect_options();
         let mut conn = sqlx::Connection::connect_with(&*opts)
             .await
@@ -369,10 +361,7 @@ pub async fn resolve_final_verification_for_task_run(
         .workspace_path
         .map(PathBuf::from)
         .ok_or("task run has no worktree")?;
-    // Catalog authorization is bound at dispatch, never re-selected from a
-    // mutable project. A changed project selection makes verification ineligible.
-    // Resolve it only for a configured plan with a usable worktree: an empty
-    // plan is a typed skip and cannot consume catalog identity material.
+    // Catalog authorization is bound at dispatch, never re-selected from a mutable project.
     let runs = TaskRunRepository::new(db.clone());
     let bound_image_id = runs
         .catalog_image_id(task_run_id)

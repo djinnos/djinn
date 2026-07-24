@@ -5,7 +5,6 @@
 //! branch (stored, ineligible, error) is testable deterministically without
 //! requiring the production hermetic launcher.
 //!
-//! Repository-backed reuse consultation is covered separately.
 
 use std::collections::VecDeque;
 use std::future::Future;
