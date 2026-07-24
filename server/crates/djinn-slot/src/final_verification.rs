@@ -21,8 +21,15 @@ use djinn_sandbox::final_verification_execution::{
     FinalVerificationExecutionEvidence, FinalVerificationExecutionRequest,
     execute_final_verification,
 };
+use djinn_sandbox::service_provisioning::{ServiceProvisioningCode, ServiceProvisioningPhase};
 use time::format_description::well_known::Rfc3339;
 use tokio_util::sync::CancellationToken;
+
+mod provisioning_gate;
+use provisioning_gate::{
+    emit_service_provisioning_outcome, provisioning_outcome_label, provisioning_phase_label,
+    service_provisioning_failure,
+};
 
 use crate::final_verification_agent::{
     AgentRunCapture, CoordinateResult, check_from_command, selection_surface,
@@ -111,6 +118,17 @@ pub enum FinalVerificationRecordingOutcome {
     Ineligible {
         verification_attempt_id: String,
         reason: String,
+    },
+    /// A cataloged service could not be resolved, created, made ready, proxied,
+    /// or torn down. This is a bounded infrastructure outcome, deliberately
+    /// distinct from a worktree command/check failure: the attempt is ineligible
+    /// and no pass may be persisted, but the cause is the service lifecycle, not
+    /// the authored tree. `phase`/`code` are bounded enums; no URL, credential,
+    /// tenant name, or raw backend error is carried.
+    InfrastructureIneligible {
+        verification_attempt_id: String,
+        phase: ServiceProvisioningPhase,
+        code: ServiceProvisioningCode,
     },
     Error {
         verification_attempt_id: String,
@@ -203,6 +221,15 @@ pub(crate) async fn verify_completion_intent(
         FinalVerificationRecordingOutcome::Ineligible { reason, .. } => Err(format!(
             "Final verification rejected this {submit_tool_label} request: {reason}. Fix the worktree and resubmit."
         )),
+        FinalVerificationRecordingOutcome::InfrastructureIneligible { phase, code, .. } => {
+            Err(format!(
+                "Final verification could not provision the required catalog services \
+                 ({phase}/{outcome}) for this {submit_tool_label} request. This is an \
+                 infrastructure error, not a worktree problem; retry once services are available.",
+                phase = provisioning_phase_label(phase),
+                outcome = provisioning_outcome_label(code),
+            ))
+        }
         FinalVerificationRecordingOutcome::Error { detail, .. } => Err(format!(
             "Final verification could not complete: {detail}. Inspect the worktree and resubmit."
         )),
@@ -464,11 +491,28 @@ pub(crate) async fn coordinate_final_verification_core(
         // string. This is a read of the one execution — never a second run.
         capture.checks = evidence.commands.iter().map(check_from_command).collect();
         capture.ineligibility = evidence.eligibility_reason.clone();
+        // Emit exactly one bounded provisioning outcome, plus a structured audit
+        // summary, for any attempt whose plan declared catalog services. This is
+        // the single coordinator point that observes the executed evidence for a
+        // serviced plan (success, command failure, or provisioning failure).
+        emit_service_provisioning_outcome(&request, &verification_attempt_id, &material, &evidence);
         if request.cancellation.is_cancelled() {
             Err(ineligible_outcome(
                 &verification_attempt_id,
                 "cancelled during execution",
             ))
+        } else if let Some((phase, code)) = service_provisioning_failure(&evidence) {
+            // Infrastructure ineligibility is a bounded outcome distinct from a
+            // command/check failure. It flows through the Err path below, which
+            // releases the invocation lease and returns without ever reaching
+            // `persist_evidence` — no passing row can be written.
+            Err(
+                FinalVerificationRecordingOutcome::InfrastructureIneligible {
+                    verification_attempt_id: verification_attempt_id.clone(),
+                    phase,
+                    code,
+                },
+            )
         } else if !evidence.eligible() {
             Err(ineligible_outcome(
                 &verification_attempt_id,
@@ -1056,6 +1100,26 @@ fn emit_outcome(
                 "final verification recording completed"
             )
         }
+        FinalVerificationRecordingOutcome::InfrastructureIneligible {
+            verification_attempt_id,
+            phase,
+            code,
+        } => {
+            // Infrastructure ineligibility records no passing row, so it counts
+            // as an ineligible writer outcome; the bounded provisioning phase/code
+            // ride the structured audit fields, never the record metric labels.
+            let _ = djinn_telemetry::final_verification::increment_record(
+                djinn_telemetry::final_verification::RECORD_INELIGIBLE,
+            );
+            tracing::info!(
+                recording_outcome = "infrastructure_ineligible",
+                task_id = %request.task_id, task_run_id = %request.task_run_id,
+                verification_attempt_id = %verification_attempt_id,
+                provisioning_phase = provisioning_phase_label(*phase),
+                provisioning_outcome = provisioning_outcome_label(*code),
+                "final verification recording completed"
+            )
+        }
         FinalVerificationRecordingOutcome::Error {
             verification_attempt_id,
             detail,
@@ -1158,5 +1222,7 @@ mod tests {
 
 #[cfg(test)]
 mod recording_tests;
+#[cfg(test)]
+mod service_provisioning_tests;
 #[cfg(test)]
 mod telemetry_contract_tests;
