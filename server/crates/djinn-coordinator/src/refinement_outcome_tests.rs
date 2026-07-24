@@ -617,11 +617,14 @@ async fn assert_rejected_outcome_preserves_source(
         "durable run and intent must not move"
     );
     assert_eq!(
-        TaskRepository::new(f.db.clone(), EventBus::noop())
-            .get(&f.task_id)
-            .await
-            .expect("load exact source task after rejected outcome"),
-        task_before,
+        format!(
+            "{:#?}",
+            TaskRepository::new(f.db.clone(), EventBus::noop())
+                .get(&f.task_id)
+                .await
+                .expect("load exact source task after rejected outcome")
+        ),
+        format!("{task_before:#?}"),
         "rejected outcome must not mutate the durable task row"
     );
     assert_eq!(
@@ -1040,4 +1043,41 @@ async fn successful_terminal_replay_is_fenced_before_a_second_transition() {
     let replayed = snapshot(&f).await;
     assert_eq!(replayed.snapshot.run.state, RefinementRunState::Terminal);
     assert_eq!(replayed.snapshot.intents.len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn advocate_proposal_and_progress_failures_leave_durable_source_retryable() {
+    for point in [
+        OutcomeTestSeamPoint::ProposalRead,
+        OutcomeTestSeamPoint::DurableProgress,
+    ] {
+        let mut f = durable_outcome_fixture().await;
+        f.actor
+            .active_refinements
+            .insert(f.run_id.clone(), f.projection.clone());
+        f.actor
+            .refinement_sessions
+            .insert(f.run_id.clone(), f.session.clone());
+        let mut candidate_source = f.projection.clone();
+        // The fixture head is newer than this deliberately stale progress marker,
+        // forcing the durable-progress boundary after the proposal reload.
+        candidate_source.current_revision_seq = 0;
+        let before = snapshot(&f).await;
+        inject_outcome_test_failure(&f.fixture.proposal_id, point);
+        assert!(
+            f.actor
+                .process_advocate_outcome(
+                    &f.run_id,
+                    &f.fixture.proposal_id,
+                    &f.task_id,
+                    &candidate_source,
+                )
+                .await
+                .is_none(),
+            "{point:?} is retryable before publishing a candidate"
+        );
+        assert_eq!(snapshot(&f).await, before);
+        assert_eq!(f.actor.refinement_sessions[&f.run_id].task_id, f.task_id);
+        reset_outcome_test_seam(&f.fixture.proposal_id);
+    }
 }
