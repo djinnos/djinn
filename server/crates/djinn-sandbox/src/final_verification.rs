@@ -642,7 +642,7 @@ fn keeper_main(
         && bring_loopback_up().is_ok();
     if !configured {
         unsafe {
-            libc::write(ready_fd, b"\0".as_ptr().cast(), 1);
+            libc::write(ready_fd, [0_u8].as_ptr().cast(), 1);
             libc::_exit(1)
         };
     }
@@ -651,7 +651,7 @@ fn keeper_main(
         match TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, endpoint.port)) {
             Ok(listener) => listeners.push((listener, child)),
             Err(_) => unsafe {
-                libc::write(ready_fd, b"\0".as_ptr().cast(), 1);
+                libc::write(ready_fd, [0_u8].as_ptr().cast(), 1);
                 libc::_exit(1)
             },
         }
@@ -663,13 +663,8 @@ fn keeper_main(
     // A listener has exactly one inherited private channel and fixed parent port.
     for (listener, channel) in listeners {
         std::thread::spawn(move || {
-            loop {
-                match listener.accept() {
-                    Ok((stream, _)) => {
-                        let _ = send_fd(channel, stream.into_raw_fd());
-                    }
-                    Err(_) => break,
-                }
+            while let Ok((stream, _)) = listener.accept() {
+                let _ = send_fd(channel, stream.into_raw_fd());
             }
         });
     }
@@ -683,7 +678,7 @@ fn bring_loopback_up() -> io::Result<()> {
         return Err(io::Error::last_os_error());
     }
     let mut request: libc::ifreq = unsafe { std::mem::zeroed() };
-    request.ifr_name[..2].copy_from_slice(&[b'l' as i8, b'o' as i8]);
+    request.ifr_name[..2].copy_from_slice(&[b'l' as _, b'o' as _]);
     if unsafe { libc::ioctl(fd, libc::SIOCGIFFLAGS, &mut request) } != 0 {
         close_fd(fd);
         return Err(io::Error::last_os_error());
