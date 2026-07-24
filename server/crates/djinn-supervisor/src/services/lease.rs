@@ -24,6 +24,28 @@ pub struct LeaseDeadlines {
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LeaseFencingToken(pub u64);
+/// Whether the current durable admission epoch authorizes the launcher to lift
+/// the reserved cpu.max quota for a bound v1 (invocation) lease.
+///
+/// This is the agent/launcher-side projection of the admission handoff epoch.
+/// It is deliberately small and fail-closed: only a committed overlap or
+/// invocation-primary epoch with v1 enforcing yields [`Self::Lift`]. A shadow
+/// epoch is observed but never lifts; every other epoch (baseline, missing,
+/// unreadable, stale, or the illegal both-non-enforcing combo) keeps the quota
+/// unleased.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum InvocationLiftDecision {
+    /// The epoch is a committed overlap or invocation-primary phase with v1
+    /// enforcing: a matching durable fencing token may lift cpu.max.
+    Lift,
+    /// v1 is shadowing: the invocation authority observes what it would do but
+    /// never lifts. The launcher stays throttled under v0.
+    Shadow,
+    /// Baseline / missing / unreadable / stale / contradictory epoch: keep the
+    /// launcher quota unleased. This is the fail-closed default.
+    #[default]
+    Unleased,
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TimeoutCredit {
     pub units: u8,

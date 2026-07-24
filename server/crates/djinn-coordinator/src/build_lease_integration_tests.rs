@@ -909,3 +909,46 @@ async fn production_adapter_cancellation_reconciles_uid_before_capacity_release(
     assert_eq!(repository.snapshot().await.unwrap().occupied, 0);
     assert_eq!(deleted.lock().unwrap().len(), 1);
 }
+
+/// AC3 (v1 restart): recovery reads the durable admission epoch and its
+/// reference cap before the lease service opens. A committed epoch with a cap is
+/// observed; a deleted (missing/unreadable) epoch row fails closed to no
+/// observed epoch.
+#[tokio::test]
+async fn recovery_reads_admission_epoch_and_reference_cap() {
+    use djinn_db::{AdmissionHandoffRepository, V0Mode, V1Mode};
+
+    let database = Database::open_in_memory().unwrap();
+    let handoff = Arc::new(AdmissionHandoffRepository::new(database.clone()));
+    // Advance the durable epoch and set a reference cap of 7.
+    handoff
+        .set_modes_and_cap(0, V0Mode::Enforce, V1Mode::Shadow, Some(7))
+        .await
+        .unwrap();
+    let current = handoff.read().await.unwrap().unwrap();
+    assert_eq!(current.epoch, 1);
+    assert_eq!(current.cap, Some(7));
+
+    let repository = Arc::new(BuildLeaseRepository::new(database.clone()));
+    let service = Arc::new(
+        BuildLeaseService::new(Arc::clone(&repository), 1).with_handoff_epoch(Arc::clone(&handoff)),
+    );
+    // Before recovery the epoch has not been observed.
+    assert_eq!(service.observed_epoch(), None);
+    assert!(matches!(service.recover().await, LeaseResult::Status(_)));
+    // Recovery observed the current epoch and adopted its reference cap.
+    assert_eq!(service.observed_epoch(), Some(1));
+
+    // A missing epoch row fails closed: the observed epoch is cleared.
+    handoff.delete_for_test().await.unwrap();
+    let restarted = Arc::new(
+        BuildLeaseService::new(Arc::new(BuildLeaseRepository::new(database.clone())), 1)
+            .with_handoff_epoch(Arc::clone(&handoff)),
+    );
+    assert!(matches!(restarted.recover().await, LeaseResult::Status(_)));
+    assert_eq!(
+        restarted.observed_epoch(),
+        None,
+        "a missing epoch row must leave the observed epoch unknown (fail closed)"
+    );
+}

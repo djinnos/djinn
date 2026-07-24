@@ -177,6 +177,8 @@ const BUILD_ADMISSION_UNKNOWN_CLASSIFICATION_TOTAL: &str =
 const BUILD_ADMISSION_INVENTORY_DEGRADED: &str = "djinn_build_admission_inventory_degraded";
 const BUILD_ADMISSION_JOURNAL_DEGRADED: &str = "djinn_build_admission_journal_degraded";
 const BUILD_ADMISSION_CREATE_UNKNOWN_HEALTH: &str = "djinn_build_admission_create_unknown_health";
+const BUILD_ADMISSION_SHADOW_INVOCATION_TOTAL: &str =
+    "djinn_build_admission_shadow_invocation_total";
 const BUILD_ADMISSION_HANDOFF_WARNING: &str = "djinn_build_admission_handoff_warning";
 const BUILD_ADMISSION_HANDOFF_WARNING_REASONS: [&str; 3] =
     ["unexpected_overlap", "stale_epoch", "epoch_unreadable"];
@@ -1568,6 +1570,10 @@ fn register_metrics() {
         BUILD_ADMISSION_UNKNOWN_CLASSIFICATION_TOTAL,
         "Build-admission requests with an unknown workload classification."
     );
+    metrics::describe_counter!(
+        BUILD_ADMISSION_SHADOW_INVOCATION_TOTAL,
+        "Shadow-mode v1 invocation decisions the launcher observed but did not act on."
+    );
     for metric in [
         BUILD_ADMISSION_INVENTORY_DEGRADED,
         BUILD_ADMISSION_JOURNAL_DEGRADED,
@@ -2698,6 +2704,23 @@ pub mod build_admission {
     /// Record one bounded unknown-classification event.
     pub fn increment_unknown_classification(effective_mode: &'static str, effective_cap: i64) {
         metrics::counter!(super::BUILD_ADMISSION_UNKNOWN_CLASSIFICATION_TOTAL, "effective_mode" => effective_mode, "effective_cap" => effective_cap.to_string()).increment(1);
+    }
+
+    /// Record one bounded shadow-mode v1 invocation decision.
+    ///
+    /// Emitted per user spawn while the epoch has v1 shadowing: the invocation
+    /// authority observes what it *would* do but the launcher never lifts. The
+    /// `decision` label is one of the two bounded outcomes — `would_escalate`
+    /// (v1 would have lifted the quota) or `would_throttle` (v1 would have kept
+    /// it throttled) — so the shadow rollout can be measured before enforcement.
+    pub fn record_shadow_invocation(would_escalate: bool) {
+        let decision = if would_escalate {
+            "would_escalate"
+        } else {
+            "would_throttle"
+        };
+        metrics::counter!(super::BUILD_ADMISSION_SHADOW_INVOCATION_TOTAL, "decision" => decision)
+            .increment(1);
     }
 }
 

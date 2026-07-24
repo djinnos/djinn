@@ -588,10 +588,13 @@ impl AppState {
                 server_epoch,
             )),
         });
-        let build_lease = Arc::new(BuildLeaseService::new(
-            Arc::new(djinn_db::BuildLeaseRepository::new(db.clone())),
-            0,
-        ));
+        let build_lease = Arc::new(
+            BuildLeaseService::new(Arc::new(djinn_db::BuildLeaseRepository::new(db.clone())), 0)
+                // The v1 lease service reads the durable admission epoch (and its
+                // reference cap) on recovery, so a restart observes the current
+                // epoch before admitting or spawning.
+                .with_handoff_epoch(Arc::new(AdmissionHandoffRepository::new(db.clone()))),
+        );
         Self {
             inner: Arc::new(Inner {
                 db,
@@ -935,6 +938,17 @@ impl AppState {
             loop {
                 tokio::select! {
                     _ = ticker.tick() => {
+                        // Drive the controller from the durable epoch on each
+                        // tick so a mid-run epoch advance is authoritative
+                        // without a restart: RequiredFailClosed re-closes a
+                        // controller that is no longer Enforce, and MayDisable
+                        // releases emergency once invocation-primary is
+                        // committed. This runs only on the leader (the loop is
+                        // started inside `become_leader`, after topology is
+                        // confirmed), so it mirrors `finalize` semantics.
+                        if let Some(admission) = state.inner.build_admission.clone() {
+                            state.finalize_build_admission_handoff(&admission).await;
+                        }
                         if let Some(event) = log_state.observe_persistent(
                             SystemClockTrait::new().now_instant(),
                             state.publish_handoff_warning().await,

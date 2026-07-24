@@ -1317,7 +1317,34 @@ fn unavailable(error: impl std::fmt::Display) -> WarmAdmissionError {
 }
 
 fn permit_key(key: &AdmissionJournalKey) -> String {
+    admission_generation_key(key)
+}
+
+/// Canonical string identity for one admission generation.
+///
+/// This is the single source of truth for the `generation_key` used by the
+/// durable admission-handoff per-generation acknowledgements
+/// ([`djinn_db::AdmissionHandoffRepository::record_generation_ack`]) and the
+/// `required_generations` set on the invocation-primary edge. Both the producer
+/// of that required set and every live generation that acknowledges an epoch
+/// MUST format their key through this function so the two byte-match. It is the
+/// same `{domain:?}:{work_id}:{generation}` form used for in-memory permit
+/// bookkeeping.
+#[must_use]
+pub fn admission_generation_key(key: &AdmissionJournalKey) -> String {
     format!("{:?}:{}:{}", key.domain, key.work_id, key.generation)
+}
+
+/// Convenience [`admission_generation_key`] for a task-run generation, whose
+/// admission domain is always [`AdmissionDomain::TaskObservation`] and whose
+/// generation counter is `task.reopen_count`.
+#[must_use]
+pub fn task_run_generation_key(task_id: &str, generation: i64) -> String {
+    admission_generation_key(&AdmissionJournalKey {
+        domain: AdmissionDomain::TaskObservation,
+        work_id: task_id.to_owned(),
+        generation,
+    })
 }
 
 #[async_trait]

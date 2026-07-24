@@ -17,11 +17,13 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{RoleKind, StageError, StageOutcome, TaskRunOutcome, TaskRunSpec};
 
+pub mod invocation_admission;
 pub mod lease;
 pub mod rpc;
 pub mod server;
 pub mod wire;
 
+pub use invocation_admission::evaluate_invocation_lift;
 pub use lease::*;
 pub use wire::{
     BillingSource, CostBasisHint, SerializableCreateSessionParams, SerializableCreateTaskRunParams,
@@ -91,6 +93,24 @@ pub trait SupervisorServices: Send + Sync + 'static {
         _request: WatchdogTerminationRequest,
     ) -> Result<(), String> {
         Err("exact-pod watchdog termination is unavailable".to_owned())
+    }
+
+    /// Read the current durable admission epoch and project whether a bound v1
+    /// invocation may lift the launcher cpu.max quota. The default fails closed
+    /// ([`InvocationLiftDecision::Unleased`]) so an impl without coordination
+    /// state never authorizes a lift.
+    async fn invocation_lift_decision(&self) -> InvocationLiftDecision {
+        InvocationLiftDecision::Unleased
+    }
+
+    /// Record this live generation's acknowledgement of the current admission
+    /// epoch, once the task-run is healthy under the new mode. `generation_key`
+    /// MUST be built through the canonical admission generation-key helper so it
+    /// byte-matches the invocation-primary edge's required-generation set. The
+    /// underlying write is idempotent and stale-fenced in the database; the
+    /// default is a no-op for impls without coordination-state access.
+    async fn record_generation_ack(&self, _generation_key: String) -> Result<(), String> {
+        Ok(())
     }
 
     /// Load the [`Task`] row backing this task-run.  Called once, before the

@@ -16,9 +16,9 @@ use std::time::Duration;
 
 use djinn_core::clock::{Clock, SystemClock};
 use djinn_supervisor::services::{
-    LeaseAbandonRequest, LeaseBindRequest, LeaseDeadlines, LeaseFencingToken, LeaseGrantRequest,
-    LeaseIdentity, LeaseQueueRequest, LeaseReleaseRequest, LeaseResult, LeaseState,
-    LeaseStatusRequest, SupervisorServices, TaskInvocationLeaseIdentity,
+    InvocationLiftDecision, LeaseAbandonRequest, LeaseBindRequest, LeaseDeadlines,
+    LeaseFencingToken, LeaseGrantRequest, LeaseIdentity, LeaseQueueRequest, LeaseReleaseRequest,
+    LeaseResult, LeaseState, LeaseStatusRequest, SupervisorServices, TaskInvocationLeaseIdentity,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -289,9 +289,33 @@ impl LeaseInvocationRunner {
                                     && status.pod_uid.as_deref()
                                         == Some(config.pod_uid.as_str()) =>
                             {
-                                child
-                                    .fenced_lift(&token)
-                                    .map_err(LeaseInvocationError::Launcher)?;
+                                // A matching durable bind is necessary but not
+                                // sufficient: the durable admission epoch decides
+                                // whether the launcher may lift the reserved
+                                // quota. Only a committed overlap /
+                                // invocation-primary epoch (v1 enforcing) lifts;
+                                // shadow observes without lifting; every other
+                                // epoch (baseline, missing, unreadable, stale)
+                                // keeps the quota unleased. The durable lease is
+                                // still held and reconciled to terminal below in
+                                // all three cases, so `fence` is always recorded.
+                                match self.services.invocation_lift_decision().await {
+                                    InvocationLiftDecision::Lift => {
+                                        child
+                                            .fenced_lift(&token)
+                                            .map_err(LeaseInvocationError::Launcher)?;
+                                    }
+                                    InvocationLiftDecision::Shadow => {
+                                        // Reaching a valid bind means v1 would
+                                        // have escalated (lifted); record the
+                                        // bounded shadow observation but leave
+                                        // cpu.max throttled under v0.
+                                        djinn_telemetry::build_admission::record_shadow_invocation(
+                                            true,
+                                        );
+                                    }
+                                    InvocationLiftDecision::Unleased => {}
+                                }
                                 fence = Some(token);
                             }
                             other => lease_failure(

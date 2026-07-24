@@ -222,6 +222,10 @@ struct ScriptedServices {
     pause_grant: AtomicBool,
     queue_entered: Notify,
     grant_entered: Notify,
+    // Durable-epoch lift authorization returned to the runner. Defaults to
+    // `Lift` so the lease-state-machine tests exercise the successful lift path;
+    // the epoch-gating tests override it to `Shadow` / `Unleased`.
+    lift_decision: Mutex<djinn_supervisor::services::InvocationLiftDecision>,
 }
 
 impl ScriptedServices {
@@ -243,7 +247,11 @@ impl ScriptedServices {
             pause_grant: AtomicBool::new(false),
             queue_entered: Notify::new(),
             grant_entered: Notify::new(),
+            lift_decision: Mutex::new(djinn_supervisor::services::InvocationLiftDecision::Lift),
         }
+    }
+    fn set_lift_decision(&self, decision: djinn_supervisor::services::InvocationLiftDecision) {
+        *self.lift_decision.lock().unwrap() = decision;
     }
     fn pop(script: &Mutex<VecDeque<LeaseResult>>) -> LeaseResult {
         script
@@ -304,6 +312,9 @@ impl SupervisorServices for ScriptedServices {
             .unwrap()
             .push(request.fencing_token);
         Self::pop(&self.release)
+    }
+    async fn invocation_lift_decision(&self) -> djinn_supervisor::services::InvocationLiftDecision {
+        *self.lift_decision.lock().unwrap()
     }
     async fn load_task(&self, _: String) -> Result<djinn_core::models::Task, String> {
         unimplemented!()
@@ -517,6 +528,76 @@ async fn repeated_active_statuses_queue_and_lift_exactly_once() {
     assert_eq!(*launcher.lifts.lock().unwrap(), vec![LeaseFencingToken(7)]);
     assert_eq!(launcher.kills.load(Ordering::SeqCst), 1);
     assert_eq!(launcher.empties.load(Ordering::SeqCst), 1);
+    assert!(services.release_calls.load(Ordering::SeqCst) <= 1);
+}
+
+/// AC1: a shadow epoch never lifts cpu.max even on a valid matching bind; the
+/// spawn still traverses the launcher and the durable lease is reconciled.
+#[tokio::test]
+async fn shadow_epoch_binds_but_never_lifts() {
+    let services = Arc::new(ScriptedServices::new(
+        vec![granted(7)],
+        vec![status(LeaseState::Active, Some(7))],
+        vec![status(LeaseState::Active, Some(7)); 20],
+    ));
+    services.set_lift_decision(djinn_supervisor::services::InvocationLiftDecision::Shadow);
+    services
+        .release
+        .lock()
+        .unwrap()
+        .push_back(LeaseResult::Released {
+            candidate_cleanup: false,
+        });
+    let launcher = Arc::new(ScriptedLauncher::default());
+    let cancel = CancellationToken::new();
+    let runner = LeaseInvocationRunner::new(services.clone(), launcher.clone(), clock());
+    let run_cancel = cancel.clone();
+    let run = tokio::spawn(async move { runner.output(command(), config(), run_cancel).await });
+    wait_for(&services.status_calls, 3).await;
+    cancel.cancel();
+    run.await.unwrap().unwrap();
+    // The launcher was driven (queue + grant happened) but never lifted.
+    assert_eq!(services.queue_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(services.grant_calls.load(Ordering::SeqCst), 1);
+    assert!(
+        launcher.lifts.lock().unwrap().is_empty(),
+        "shadow epoch must never lift cpu.max"
+    );
+    // The durable lease is still reconciled to terminal (fence recorded).
+    assert!(services.release_calls.load(Ordering::SeqCst) <= 1);
+    assert_eq!(launcher.kills.load(Ordering::SeqCst), 1);
+}
+
+/// AC3 (agent side): an unknown/stale/baseline epoch keeps the quota unleased —
+/// a matching bind does not lift.
+#[tokio::test]
+async fn unleased_epoch_binds_but_never_lifts() {
+    let services = Arc::new(ScriptedServices::new(
+        vec![granted(7)],
+        vec![status(LeaseState::Active, Some(7))],
+        vec![status(LeaseState::Active, Some(7)); 20],
+    ));
+    services.set_lift_decision(djinn_supervisor::services::InvocationLiftDecision::Unleased);
+    services
+        .release
+        .lock()
+        .unwrap()
+        .push_back(LeaseResult::Released {
+            candidate_cleanup: false,
+        });
+    let launcher = Arc::new(ScriptedLauncher::default());
+    let cancel = CancellationToken::new();
+    let runner = LeaseInvocationRunner::new(services.clone(), launcher.clone(), clock());
+    let run_cancel = cancel.clone();
+    let run = tokio::spawn(async move { runner.output(command(), config(), run_cancel).await });
+    wait_for(&services.status_calls, 3).await;
+    cancel.cancel();
+    run.await.unwrap().unwrap();
+    assert_eq!(services.grant_calls.load(Ordering::SeqCst), 1);
+    assert!(
+        launcher.lifts.lock().unwrap().is_empty(),
+        "unleased epoch must never lift cpu.max"
+    );
     assert!(services.release_calls.load(Ordering::SeqCst) <= 1);
 }
 
