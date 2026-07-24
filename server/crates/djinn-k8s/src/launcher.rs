@@ -26,7 +26,9 @@ use k8s_openapi::api::core::v1::{
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use thiserror::Error;
 
-use djinn_cgroup_launcher::broker::{WORKER_GID, WORKER_UID};
+// Re-exported so every pod render that shares the cache volumes (task-run in
+// `job.rs`, warm in `warm_job.rs`) pins the SAME worker identity from one place.
+pub use djinn_cgroup_launcher::broker::{WORKER_GID, WORKER_UID};
 // Re-export the child/artifact contract constants so djinn-k8s consumers (and
 // intra-doc links here) see the same UIDs the launcher enforces at runtime.
 // `CHILD_UID` is applied by the launcher when it spawns the child, not in the

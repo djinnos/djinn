@@ -75,6 +75,11 @@ mod launcher_handshake;
 mod lifecycle;
 mod worker_services;
 
+// Startup volume-permission validation lives in this package's library target
+// so the deterministic filesystem tests in `tests/volume_contract.rs` drive the
+// exact code the binary runs.
+use djinn_agent_worker::volume_contract;
+
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -1790,6 +1795,15 @@ async fn run_task_run(args: WorkerDefaultArgs) -> Result<()> {
         "worker starting"
     );
 
+    // 0. Readiness: the volumes we were actually given must satisfy the
+    //    artifact-GID / group-write / setgid contract the Pod render only
+    //    *declares*. Fails closed before any work is claimed; never falls back
+    //    to the legacy uid and never repairs (see `volume_contract`).
+    volume_contract::enforce_at_startup(
+        "task-run",
+        &volume_contract::task_run_roots(&args.workspace_path),
+    )?;
+
     // 1. Slurp the TaskRunSpec off the mounted Secret file.
     let spec_bytes = tokio::fs::read(&args.spec_path)
         .await
@@ -2787,6 +2801,18 @@ async fn run_warm_graph(project_id: &str) -> Result<()> {
 /// keeping the body separate makes every return flow through that cleanup while
 /// preserving the historical non-Linux path exactly.
 async fn run_warm_graph_body(project_id: &str) -> Result<()> {
+    // Readiness first. The warm Job shares `/cache` with every task-run, and
+    // its cargo phase is best-effort by design: a non-conforming cache would
+    // otherwise surface as a GREEN warm Job over a permanently frozen warm
+    // base. Fail closed here so the breakage is loud and located.
+    let warm_project_root = std::env::var("DJINN_PROJECT_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from(volume_contract::WORKSPACE_MOUNT_ROOT));
+    volume_contract::enforce_at_startup(
+        "warm-graph",
+        &volume_contract::warm_roots(&warm_project_root, project_id),
+    )?;
+
     let db = bootstrap_warm_database().await?;
     let ctx = WorkerWarmContext {
         db,

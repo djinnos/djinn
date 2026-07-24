@@ -275,14 +275,20 @@ exec {bin} warm-graph "{project_id}"
         volumes: Some(volumes),
         node_selector,
         tolerations,
-        // Run as uid 10001 like task-runs (job.rs). The warm pod shares the
-        // /cache cargo target PVC with workers; without this it runs as root
-        // and writes root-owned cargo artifacts the worker (uid 10001) can't
-        // overwrite, corrupting the shared cache.
+        // The warm pod shares the /cache cargo target PVC with task-runs, so it
+        // MUST carry the same identity and the same volume-ownership contract
+        // qut0 put on the task-run pod — otherwise the two halves of the shared
+        // cache write as different owners and neither can overwrite the other
+        // (task pwrr: the warm pod was still pinned to the legacy 10001 after
+        // task-runs moved to 1000). `fsGroup = ARTIFACT_GID` with
+        // `OnRootMismatch` gives the warm process membership in the artifact
+        // group without an unbounded recursive chown on every pod start; the
+        // worker binary re-validates the mounted result at startup
+        // (`djinn_agent_worker::volume_contract`) and fails closed.
         security_context: Some(k8s_openapi::api::core::v1::PodSecurityContext {
-            run_as_user: Some(10001),
-            run_as_group: Some(10001),
-            ..Default::default()
+            run_as_user: Some(i64::from(crate::launcher::WORKER_UID)),
+            run_as_group: Some(i64::from(crate::launcher::WORKER_GID)),
+            ..crate::launcher::pod_security_context()
         }),
         ..PodSpec::default()
     };
@@ -507,12 +513,28 @@ mod tests {
 
         let pod = spec.template.spec.as_ref().expect("pod");
         assert_eq!(pod.restart_policy.as_deref(), Some("Never"));
-        // Must run as uid 10001 like task-runs to share the /cache cargo target
-        // PVC without writing root-owned artifacts workers can't overwrite.
+        // Must carry the SAME identity and volume-ownership contract as a
+        // task-run pod: both write the shared /cache cargo target PVC, so a
+        // divergent uid/fsGroup leaves artifacts neither side can overwrite.
+        let psc = pod.security_context.as_ref().expect("pod security context");
         assert_eq!(
-            pod.security_context.as_ref().and_then(|s| s.run_as_user),
-            Some(10001),
+            psc.run_as_user,
+            Some(i64::from(crate::launcher::WORKER_UID)),
             "warm pod must run as the worker uid to share the cargo cache safely"
+        );
+        assert_eq!(
+            psc.run_as_group,
+            Some(i64::from(crate::launcher::WORKER_GID))
+        );
+        assert_eq!(
+            psc.fs_group,
+            Some(i64::from(crate::launcher::ARTIFACT_GID)),
+            "warm pod must join the artifact group that owns the shared cache"
+        );
+        assert_eq!(
+            psc.fs_group_change_policy.as_deref(),
+            Some("OnRootMismatch"),
+            "never Always: an unbounded recursive chown would stall warm pod start"
         );
         assert_eq!(
             pod.service_account_name.as_deref(),

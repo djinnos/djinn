@@ -2,6 +2,7 @@
 
 pub mod cargo_incremental_prune;
 pub mod cargo_target_seed;
+pub mod volume_contract;
 
 #[cfg(test)]
 mod tests {

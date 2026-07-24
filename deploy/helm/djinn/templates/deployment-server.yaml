@@ -87,10 +87,39 @@ spec:
       affinity:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      # hostPath / PVC volumes land owned by root:root, but djinn-server runs
-      # as uid 10001. fsGroup only helps for CSI-backed PVCs, not hostPath, so
-      # we chown the three writable mounts up-front in a root initContainer.
-      # Idempotent — re-runs every pod start with negligible cost.
+      # The server writes these volumes as uid {{ .Values.storage.ownership.ownerUid }},
+      # while task-run and warm Job Pods write the SAME volumes as uid/gid 1000
+      # (and the launcher-spawned child as uid 1001, primary group 1000). Give
+      # the server supplementary membership in the artifact group so it can
+      # overwrite and unlink what those Pods create.
+      #
+      # Deliberately NOT `fsGroup`: fsGroup couples group membership to the
+      # kubelet's ownership pass, which on a root-gid mismatch is an UNBOUNDED
+      # recursive chown of the whole volume at mount time — minutes of stalled
+      # pod start on a large cache. `supplementalGroups` grants the same
+      # membership with zero filesystem work; the volume roots are normalized
+      # explicitly below instead.
+      securityContext:
+        supplementalGroups:
+          - {{ .Values.storage.ownership.artifactGid }}
+      {{- if .Values.storage.ownership.normalizeRoots }}
+      # Declare the ownership contract on the volume ROOTS so a fresh install
+      # produces conforming volumes (task pwrr / goxi):
+      #   * group = artifactGid  → shared by server, worker and child;
+      #   * g+w                  → all three can create/overwrite/unlink;
+      #   * setgid on the dir    → new files INHERIT the artifact group rather
+      #                            than the creating process's primary group.
+      #
+      # hostPath / PVC volumes land owned by root:root and fsGroup does nothing
+      # for hostPath at all, so this runs in a root initContainer. It is
+      # idempotent, O(1) and NON-RECURSIVE by design: it touches the three roots
+      # only. Contents that predate the contract need the one-time remediation
+      # in docs/VOLUME_OWNERSHIP_CONTRACT_RUNBOOK.md — a recursive chown here
+      # would stall every pod start.
+      #
+      # Normalizing the root also makes the task-run/warm Pods'
+      # `fsGroupChangePolicy: OnRootMismatch` a guaranteed no-op instead of a
+      # surprise recursive pass.
       initContainers:
         - name: fix-volume-perms
           image: {{ .Values.image.server | quote }}
@@ -105,8 +134,8 @@ spec:
               set -eu
               for d in /var/lib/djinn/mirrors /var/lib/djinn/cache /var/lib/djinn/projects; do
                 mkdir -p "$d"
-                chown 10001:10001 "$d"
-                chmod 0775 "$d"
+                chown {{ .Values.storage.ownership.ownerUid }}:{{ .Values.storage.ownership.artifactGid }} "$d"
+                chmod {{ .Values.storage.ownership.dirMode }} "$d"
               done
           volumeMounts:
             - name: mirrors
@@ -115,6 +144,9 @@ spec:
               mountPath: /var/lib/djinn/cache
             - name: projects
               mountPath: /var/lib/djinn/projects
+      {{- else }}
+      initContainers:
+      {{- end }}
         # Apply pending SQL migrations before the server boots.
         #
         # This was a separate `pre-install,pre-upgrade` Helm hook Job, but a
