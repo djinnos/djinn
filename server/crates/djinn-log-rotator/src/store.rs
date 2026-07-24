@@ -454,11 +454,7 @@ impl<C: Clock, Z: Compressor, F: FilesystemCapacity> LogStore<C, Z, F> {
     }
     fn enforce_retention(&self, stream: &StreamIdentity, added: u64) -> Result<(), StoreError> {
         let cutoff = hour_key(self.clock.now() - self.config.max_age);
-        for segment in self.all_segments()? {
-            if !segment.active && segment.key < cutoff {
-                self.evict(segment, EvictionReason::Age)?;
-            }
-        }
+        self.enforce_age(&cutoff)?;
         self.enforce_quota(
             stream,
             added,
@@ -471,6 +467,31 @@ impl<C: Clock, Z: Compressor, F: FilesystemCapacity> LogStore<C, Z, F> {
             self.config.max_global_logical_bytes,
             EvictionReason::GlobalQuota,
         )
+    }
+    /// Age expiry may rotate an active segment, but must never rewrite it.
+    /// Re-scan after every transition because closing changes the segment's
+    /// eligible eviction state.
+    fn enforce_age(&self, cutoff: &str) -> Result<(), StoreError> {
+        loop {
+            let segments = self.all_segments()?;
+            if let Some(closed) = segments
+                .iter()
+                .filter(|segment| !segment.active && segment.key.as_str() < cutoff)
+                .min_by_key(|segment| (&segment.key, &segment.path))
+            {
+                self.evict(closed.clone(), EvictionReason::Age)?;
+                continue;
+            }
+            if let Some(active) = segments
+                .iter()
+                .filter(|segment| segment.active && segment.key.as_str() < cutoff)
+                .min_by_key(|segment| (&segment.key, &segment.path))
+            {
+                self.close_active(&active.path)?;
+                continue;
+            }
+            return Ok(());
+        }
     }
     fn enforce_quota(
         &self,

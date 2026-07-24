@@ -411,6 +411,71 @@ fn age_evicts_only_segments_older_than_the_exact_boundary() {
 }
 
 #[test]
+fn age_rotates_and_evicts_an_expired_active_in_another_stream() {
+    let root = tempdir().unwrap();
+    let expired_stream = stream();
+    let receiving_stream = alternate_stream();
+    let expired = fixture_segment(root.path(), &expired_stream, "20260716T120000Z", 0, true);
+    // A complete line makes restart sidecar reconciliation deterministic.
+    fs::write(&expired, b"{}\n").unwrap();
+    let log = store_at(root.path(), 1000, datetime!(2026-07-24 12:00 UTC));
+    log.append(&receiving_stream, &json!({"message":"other stream"}))
+        .unwrap();
+    assert!(!expired.exists());
+    assert!(log.eviction_transitions().iter().any(|transition| {
+        transition.reason == djinn_log_rotator::EvictionReason::Age && transition.logical_bytes == 3
+    }));
+}
+
+#[test]
+fn exact_stream_and_global_quota_boundaries_do_not_evict() {
+    let record = json!({"message":"boundary"});
+    let line_bytes = serde_json::to_vec(&record).unwrap().len() as u64 + 1;
+
+    let stream_root = tempdir().unwrap();
+    let id = stream();
+    let retained = fixture_segment(stream_root.path(), &id, "20260720T120000Z", 100, false);
+    let stream_store = store_with_config(
+        stream_root.path(),
+        StoreConfig {
+            max_logical_bytes: 1000,
+            max_stream_logical_bytes: line_bytes + 100,
+            max_global_logical_bytes: 1000,
+            ..StoreConfig::default()
+        },
+        datetime!(2026-07-23 12:00 UTC),
+        FixedCapacity::new(1 << 50, 1 << 50),
+    );
+    stream_store.append(&id, &record).unwrap();
+    assert!(retained.exists());
+    assert!(stream_store.eviction_transitions().is_empty());
+
+    let global_root = tempdir().unwrap();
+    let global_id = stream();
+    let global_retained = fixture_segment(
+        global_root.path(),
+        &alternate_stream(),
+        "20260720T120000Z",
+        100,
+        false,
+    );
+    let global_store = store_with_config(
+        global_root.path(),
+        StoreConfig {
+            max_logical_bytes: 1000,
+            max_stream_logical_bytes: 1000,
+            max_global_logical_bytes: line_bytes + 100,
+            ..StoreConfig::default()
+        },
+        datetime!(2026-07-23 12:00 UTC),
+        FixedCapacity::new(1 << 50, 1 << 50),
+    );
+    global_store.append(&global_id, &record).unwrap();
+    assert!(global_retained.exists());
+    assert!(global_store.eviction_transitions().is_empty());
+}
+
+#[test]
 fn stream_quota_evicts_oldest_closed_before_newer_active() {
     let root = tempdir().unwrap();
     let id = stream();
