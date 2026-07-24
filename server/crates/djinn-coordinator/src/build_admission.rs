@@ -157,6 +157,24 @@ pub enum BuildAdmissionDecision {
     Unclassified,
 }
 
+/// Observe-only disk-capacity adapter for build admission (proposal nquz,
+/// phase 1 — DARK).
+///
+/// A source, when installed, returns what disk admission WOULD do for a build
+/// request — never denying and never allocating. In this phase no production
+/// path installs a source, so the disk dimension is inert; it exists so the
+/// observe substrate and its tests can measure the future policy. The concrete
+/// decision logic lives in [`crate::disk_admission`].
+#[async_trait]
+pub trait DiskCapacitySource: Send + Sync {
+    /// Return the observed disk decision for a build request, or `None` when no
+    /// capacity sample is available (which the caller treats as no-op).
+    async fn observe(
+        &self,
+        request: &BuildAdmissionRequest,
+    ) -> Option<crate::disk_admission::DiskObservation>;
+}
+
 /// Bounded, deterministic readiness reason for Enforce admission gating.
 ///
 /// Enforce admission fails closed until every required gate is healthy. Observe
@@ -248,6 +266,14 @@ pub struct BuildAdmissionController {
     permits_by_task_run: Mutex<HashMap<String, WarmAdmissionPermit>>,
     unclassified_observations: Mutex<u64>,
     would_defer_observations: Mutex<u64>,
+    /// Bounded observe-only disk would-defer signal (proposal nquz, phase 1).
+    ///
+    /// DARK by default: it only advances when a [`DiskCapacitySource`] has been
+    /// installed, which no production path does in this phase. The disk
+    /// dimension NEVER changes an admission decision — it records what disk
+    /// admission WOULD do.
+    disk_would_defer_observations: Mutex<u64>,
+    disk_capacity_source: std::sync::Mutex<Option<Arc<dyn DiskCapacitySource>>>,
     /// Readiness gate flags. The bounded [`BuildAdmissionReadiness`] reason is
     /// DERIVED from these flags in fail-closed priority order, so no caller can
     /// mark Enforce healthy without every real startup check completing:
@@ -309,6 +335,8 @@ impl BuildAdmissionController {
             permits_by_task_run: Mutex::new(HashMap::new()),
             unclassified_observations: Mutex::new(0),
             would_defer_observations: Mutex::new(0),
+            disk_would_defer_observations: Mutex::new(0),
+            disk_capacity_source: std::sync::Mutex::new(None),
             journal_recovered: AtomicBool::new(true),
             journal_healthy: AtomicBool::new(true),
             create_unknown_pending: AtomicU64::new(0),
@@ -518,6 +546,57 @@ impl BuildAdmissionController {
         *self.would_defer_observations.lock().await
     }
 
+    /// Install the observe-only disk-capacity source (proposal nquz).
+    ///
+    /// Phase-1 production never calls this; it exists so the dark disk dimension
+    /// and its tests can run. Installing a source can only add telemetry — it
+    /// can never turn a permit into a denial.
+    pub fn set_disk_capacity_source(&self, source: Arc<dyn DiskCapacitySource>) {
+        *self
+            .disk_capacity_source
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(source);
+    }
+
+    fn disk_capacity_source(&self) -> Option<Arc<dyn DiskCapacitySource>> {
+        self.disk_capacity_source
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    /// Bounded observe-only signal that disk admission WOULD have deferred a
+    /// build; values saturate at 1024. Zero unless a source is installed.
+    pub async fn disk_would_defer_observation_count(&self) -> u64 {
+        *self.disk_would_defer_observations.lock().await
+    }
+
+    /// Record what disk admission WOULD do for a granted build. Never denies and
+    /// never allocates: it only advances a bounded counter and emits a typed
+    /// queue-reason metric when a source reports a would-defer.
+    async fn observe_disk_admission(&self, request: &BuildAdmissionRequest) {
+        let Some(source) = self.disk_capacity_source() else {
+            return;
+        };
+        let Some(observation) = source.observe(request).await else {
+            return;
+        };
+        if let Some(reason) = observation.would_defer {
+            let mut count = self.disk_would_defer_observations.lock().await;
+            *count = count.saturating_add(1).min(1024);
+            drop(count);
+            if self.process_metrics_enabled() {
+                djinn_telemetry::run_dir::increment_queue_reason(reason.as_metric());
+            }
+            tracing::debug!(
+                reason = reason.as_metric(),
+                work_id = %request.work_id,
+                projected_reservation_bytes = observation.projected_reservation_bytes,
+                "disk admission would defer this build (observe-only; dispatch unaffected)"
+            );
+        }
+    }
+
     /// Export bounded admission metrics from the durable journal snapshot.
     /// InvocationBuild rows are intentionally excluded from all v0 views.
     pub async fn publish_metrics(&self) {
@@ -597,6 +676,13 @@ impl BuildAdmissionController {
                 cap: self.cap,
             });
         }
+        // Capture an observe-only copy before any field of `request` is moved.
+        // Only cloned when the dark disk dimension is armed (never in phase-1
+        // production), so the default path pays nothing.
+        let disk_observe_request = self
+            .disk_capacity_source()
+            .is_some()
+            .then(|| request.clone());
         let workload_kind = match request.kind {
             BuildWorkloadKind::TaskRun { .. } => match request.domain {
                 AdmissionDomain::TaskObservation => AdmissionWorkloadKind::Task,
@@ -739,6 +825,11 @@ impl BuildAdmissionController {
         // A durable Reserved row occupies immediately; do not wait for a
         // later cap denial or terminal release to refresh the gauge.
         self.publish_metrics().await;
+        // Observe-only disk dimension: records what disk admission WOULD do for
+        // this granted build without ever changing the decision above.
+        if let Some(observe_request) = disk_observe_request.as_ref() {
+            self.observe_disk_admission(observe_request).await;
+        }
         Ok(BuildAdmissionDecision::Permitted { permit, idempotent })
     }
 
@@ -2730,6 +2821,66 @@ mod tests {
             value >= 1.0,
             "would-defer counter must increment when Observe sees a would-defer"
         );
+    }
+
+    struct StubDiskSource {
+        observation: Option<crate::disk_admission::DiskObservation>,
+    }
+
+    #[async_trait]
+    impl DiskCapacitySource for StubDiskSource {
+        async fn observe(
+            &self,
+            _request: &BuildAdmissionRequest,
+        ) -> Option<crate::disk_admission::DiskObservation> {
+            self.observation
+        }
+    }
+
+    #[tokio::test]
+    async fn disk_dimension_records_would_defer_without_denial() {
+        use crate::disk_admission::{DiskObservation, DiskQueueReason};
+        let c = controller(BuildAdmissionMode::Observe, 4);
+        c.set_disk_capacity_source(Arc::new(StubDiskSource {
+            observation: Some(DiskObservation {
+                would_defer: Some(DiskQueueReason::DiskPressure),
+                projected_reservation_bytes: 8_589_934_592,
+            }),
+        }));
+        // The build is still permitted — the disk dimension never denies.
+        let permit = WarmAdmission::admit(&c, warm("disk-a")).await;
+        assert!(permit.is_ok(), "observe-only disk dimension must not deny");
+        assert_eq!(c.disk_would_defer_observation_count().await, 1);
+    }
+
+    #[tokio::test]
+    async fn disk_dimension_silent_when_source_grants_or_has_no_sample() {
+        use crate::disk_admission::DiskObservation;
+        let granting = controller(BuildAdmissionMode::Observe, 4);
+        granting.set_disk_capacity_source(Arc::new(StubDiskSource {
+            observation: Some(DiskObservation {
+                would_defer: None,
+                projected_reservation_bytes: 0,
+            }),
+        }));
+        WarmAdmission::admit(&granting, warm("disk-grant"))
+            .await
+            .unwrap();
+        assert_eq!(granting.disk_would_defer_observation_count().await, 0);
+
+        let no_sample = controller(BuildAdmissionMode::Observe, 4);
+        no_sample.set_disk_capacity_source(Arc::new(StubDiskSource { observation: None }));
+        WarmAdmission::admit(&no_sample, warm("disk-none"))
+            .await
+            .unwrap();
+        assert_eq!(no_sample.disk_would_defer_observation_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn disk_dimension_is_dark_without_a_source() {
+        let c = controller(BuildAdmissionMode::Observe, 4);
+        WarmAdmission::admit(&c, warm("dark")).await.unwrap();
+        assert_eq!(c.disk_would_defer_observation_count().await, 0);
     }
 
     #[tokio::test]

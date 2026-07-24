@@ -222,6 +222,10 @@ pub use repositories::{
         RepoGraphRetentionRepository, RetentionMode, RetentionSkipClass, RetentionSweepOutcome,
         RetentionSweepRequest,
     },
+    run_dirs::{
+        ReconciledRunDirInput, ReserveRunDirInput, RunDirKey, RunDirRepository, RunDirRow,
+        RunDirState, RunDirStateTotals,
+    },
     scip_indexer_timing::{
         ScipIndexerTiming, ScipIndexerTimingObservation, ScipIndexerTimingRepository,
         TIMING_STATUS_FAILED, TIMING_STATUS_SUCCESS, TIMING_STATUS_TIMED_OUT,
