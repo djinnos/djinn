@@ -131,8 +131,13 @@ fn owner_read_only_files_are_not_a_group_write_violation() {
     chmod(&dir.path().join("sub").join("file"), 0o444);
     validate(&contract(), &root_of(&dir)).expect("444 artifacts are immutable, not misowned");
 
-    // …but an owner-writable file without group-write still fails: that is the
-    // production 644 shape.
+    // …and `git init` copies its template hooks with the template's own mode,
+    // so `.git/hooks/*.sample` is 755 in every fresh clone whatever the umask.
+    chmod(&dir.path().join("sub").join("file"), 0o755);
+    validate(&contract(), &root_of(&dir)).expect("executables are replaced, not written in place");
+
+    // …but an owner-writable, non-executable file without group-write still
+    // fails: that is the production 644 shape.
     chmod(&dir.path().join("sub").join("file"), 0o644);
     let err = validate(&contract(), &root_of(&dir)).expect_err("644 must still fail");
     assert_eq!(err.kind(), "group_write");

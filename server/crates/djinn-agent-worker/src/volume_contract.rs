@@ -23,10 +23,12 @@
 //!     launcher-spawned child (primary group 1000) share every artifact;
 //!   * directories carry **group-write** *and* **setgid**, so files created by
 //!     either identity inherit the artifact group instead of the creator's;
-//!   * files that their owner can write carry **group-write**, so the other
-//!     identity can overwrite them in place (files that are read-only for their
-//!     owner too — git objects, cargo registry sources — are immutable by
-//!     design and are replaced through the directory, not written);
+//!   * files that their owner can write, and that are not executable, carry
+//!     **group-write** so the other identity can overwrite them in place. The
+//!     two exclusions cover the shapes a correct tree legitimately produces —
+//!     `444` git objects / cargo registry sources, and the `755`
+//!     `.git/hooks/*.sample` every clone copies from git's templates — neither
+//!     of which can hide the `644` production shape this exists to catch;
 //!   * the process runs with umask `0002` ([`apply_artifact_umask`]) so
 //!     everything it creates keeps satisfying the above;
 //!   * the process itself is a member of [`ARTIFACT_GID`] (primary or
@@ -70,6 +72,10 @@ const MODE_GROUP_WRITE: u32 = 0o020;
 /// Owner-write bit — a file without it is immutable by design (git objects,
 /// cargo registry sources) rather than mis-permissioned.
 const MODE_OWNER_WRITE: u32 = 0o200;
+/// Any execute bit — git copies its template hooks with the template's own
+/// mode, so `.git/hooks/*.sample` is 755 in every fresh clone whatever the
+/// umask.
+const MODE_ANY_EXEC: u32 = 0o111;
 /// Permission bits we report on (mode & this) — keeps log lines readable.
 const MODE_MASK: u32 = 0o7777;
 
@@ -444,16 +450,25 @@ fn check_metadata(
         });
     }
 
-    // Group-write is required wherever the OWNER can write. A file that is
-    // read-only for its owner too is immutable by design, not a permission
-    // regression: git stores loose objects and packfiles `444`, and cargo lays
-    // down registry sources with the modes recorded in the crate tarball. Those
-    // are replaced by unlink+create, which needs write on the DIRECTORY — which
-    // is checked unconditionally. Keying on the owner-write bit therefore still
-    // catches the exact production shape (dirs 755, files 644) without
-    // rejecting legitimately read-only artifacts.
+    // Directories are checked unconditionally: write permission on the
+    // DIRECTORY is what actually lets the other identity create, replace and
+    // unlink entries, and its absence is what froze the warm base.
+    //
+    // Files are checked when they are owner-writable and not executable.
+    // The two exclusions are not laxity, they are the two shapes a correct tree
+    // legitimately produces:
+    //   * owner-read-only (`444`) — git loose objects and packfiles, cargo
+    //     registry sources carrying the crate tarball's modes. Immutable by
+    //     design and replaced through the directory, never written in place.
+    //   * executable (`755`) — `git init`/`clone` copies the template hooks
+    //     with the template's own mode, so every fresh clone contains
+    //     `.git/hooks/*.sample` at 755 regardless of umask.
+    // Neither shape can mask the failure this exists to catch: the production
+    // volume was dirs `755` (caught on the directory rule) over files `644` —
+    // owner-writable, non-executable, and still caught here.
     let owner_writable = mode & MODE_OWNER_WRITE != 0;
-    if (is_dir || owner_writable) && mode & MODE_GROUP_WRITE == 0 {
+    let executable = mode & MODE_ANY_EXEC != 0;
+    if (is_dir || (owner_writable && !executable)) && mode & MODE_GROUP_WRITE == 0 {
         return Err(VolumeContractError::GroupWrite {
             label: label.to_string(),
             path: path.to_path_buf(),

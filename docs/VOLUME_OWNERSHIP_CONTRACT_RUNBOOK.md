@@ -13,19 +13,23 @@ They can only share those volumes under one contract:
 
 * **group ownership = `1000`** (`ARTIFACT_GID`, `djinn_cgroup_launcher::child`)
   on every directory and file;
-* **group-write (`g+w`)** on every directory, and on every file its owner can
-  write — so any of the three can create, overwrite, and unlink what another
-  produced. Files that are read-only for their owner too (git loose objects and
-  packfiles at `444`, cargo registry sources carrying the tarball's modes) are
-  immutable by design: they are replaced through the directory, so they are not
-  a violation;
+* **group-write (`g+w`)** on every directory — that is what lets any of the
+  three create, replace, and unlink what another produced — and on every file
+  that its owner can write and that is not executable. Two shapes a correct tree
+  legitimately produces are exempt: owner-read-only files (`444` git loose
+  objects and packfiles, cargo registry sources carrying the crate tarball's
+  modes) and executables (`git clone` copies the template hooks with the
+  template's own mode, so `.git/hooks/*.sample` is `755` in every fresh clone).
+  Both are replaced through the directory rather than written in place, and
+  neither can hide the `644` shape that caused the incident;
 * **setgid (`g+s`) on every directory** — so files created there *inherit* the
   artifact group instead of the creating process's primary group. On Linux a
   directory created inside a setgid directory inherits the bit as well, so
   normalizing the volume ROOT propagates it to everything created afterwards;
 * **umask `0002`** in every process that writes these volumes, so new files land
   `664` and new directories `775`. The launcher-spawned child already set it;
-  the worker process and the warm Job's clone wrapper now do too. Without it a
+  `djinn-server` (which clones the mirrors), the worker process, and the warm
+  Job's clone wrapper now do too. Without it a
   process silently writes `755`/`644` into a perfectly conforming volume and
   breaks it from the inside — which is how the frozen warm base kept
   reappearing.
