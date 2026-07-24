@@ -5,7 +5,6 @@
 //! branch (stored, ineligible, error) is testable deterministically without
 //! requiring the production hermetic launcher.
 //!
-//! Repository-backed reuse consultation is covered separately.
 
 use std::collections::VecDeque;
 use std::future::Future;
@@ -511,6 +510,7 @@ pub(crate) fn reuse_material_with_fingerprint_config(
             read_only_external_mounts: vec![],
             output_directories: vec![],
             catalog_loopback_endpoints: vec![],
+            service_provisioners: vec![],
         },
         verify_source: VerifySource::Worker,
         required_checks,
