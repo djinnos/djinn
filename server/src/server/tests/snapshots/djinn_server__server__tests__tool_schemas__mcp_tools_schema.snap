@@ -4852,6 +4852,76 @@ expression: signatures
     "concurrent_safe": false,
     "input_schema": {
       "$defs": {
+        "BuildResourceOverrides": {
+          "additionalProperties": false,
+          "description": "CPU + memory request/limit overrides for one Pod kind. Every field is an\noptional Kubernetes Quantity string; `None` inherits the deployment default.",
+          "properties": {
+            "cpu_limit": {
+              "default": null,
+              "description": "CPU limit override.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "cpu_request": {
+              "default": null,
+              "description": "CPU request override (e.g. `\"4\"`, `\"500m\"`).",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "memory_limit": {
+              "default": null,
+              "description": "Memory limit override.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "memory_request": {
+              "default": null,
+              "description": "Memory request override (e.g. `\"8Gi\"`, `\"512Mi\"`).",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        },
+        "BuildResources": {
+          "additionalProperties": false,
+          "description": "Optional per-project CPU/memory overrides for the task-run and warm Pods.\n\nThe whole object is optional on `EnvironmentConfig`; each inner block is\noptional; each field within a block is optional. Anything unset inherits\nthe deployment default at resolution time. The two blocks are resolved\nseparately — a `task` override never affects `warm` and vice-versa.",
+          "properties": {
+            "task": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/BuildResourceOverrides"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Overrides applied to the task-run Pod."
+            },
+            "warm": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/BuildResourceOverrides"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Overrides applied to the warm-job Pod."
+            }
+          },
+          "type": "object"
+        },
         "CargoCachePolicy": {
           "description": "Per-project Cargo target-cache strategy override.\n\nThe default [`AutoDetected`](Self::AutoDetected) mode is detection-driven:\nconsumers resolve the policy by reading the project shape (Cargo workspace\nlayout, `.cargo/config.toml`, and configured setup command\npatterns) instead of hardcoding one universal compile set. That resolver is\nintentionally non-mutating. It may observe a project's `.cargo/config.toml`,\nincluding `rustc-wrapper = \"sccache\"` and feature-related settings, but it\nmust never create or modify `.cargo/config.toml`.",
           "oneOf": [
@@ -4984,6 +5054,18 @@ expression: signatures
               "default": {},
               "description": "Per-agent-role MCP server defaults. The key is a role\nname (e.g. `\"worker\"`, `\"chat\"`) or `\"*\"` for the fallback applied to\nany role with no explicit entry. The value is the list of MCP server\nnames (from root `mcp.json`) that sessions for that role should\nconnect to by default. Specialist role assignments override these.",
               "type": "object"
+            },
+            "build_resources": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/BuildResources"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional per-project CPU/memory overrides for the task-run and warm\nPods, layered over the deployment-wide defaults. `None` (the default)\nkeeps every kind on its deployment default. Task and warm blocks resolve\nindependently; the resolved quantities are rendered into the k8s Job/Pod\nspecs by `djinn-k8s`. See [`crate::resources::BuildResources`]."
             },
             "cargo_cache_policy": {
               "anyOf": [
@@ -5755,6 +5837,76 @@ expression: signatures
     },
     "output_schema": {
       "$defs": {
+        "BuildResourceOverrides": {
+          "additionalProperties": false,
+          "description": "CPU + memory request/limit overrides for one Pod kind. Every field is an\noptional Kubernetes Quantity string; `None` inherits the deployment default.",
+          "properties": {
+            "cpu_limit": {
+              "default": null,
+              "description": "CPU limit override.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "cpu_request": {
+              "default": null,
+              "description": "CPU request override (e.g. `\"4\"`, `\"500m\"`).",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "memory_limit": {
+              "default": null,
+              "description": "Memory limit override.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "memory_request": {
+              "default": null,
+              "description": "Memory request override (e.g. `\"8Gi\"`, `\"512Mi\"`).",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        },
+        "BuildResources": {
+          "additionalProperties": false,
+          "description": "Optional per-project CPU/memory overrides for the task-run and warm Pods.\n\nThe whole object is optional on `EnvironmentConfig`; each inner block is\noptional; each field within a block is optional. Anything unset inherits\nthe deployment default at resolution time. The two blocks are resolved\nseparately — a `task` override never affects `warm` and vice-versa.",
+          "properties": {
+            "task": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/BuildResourceOverrides"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Overrides applied to the task-run Pod."
+            },
+            "warm": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/BuildResourceOverrides"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Overrides applied to the warm-job Pod."
+            }
+          },
+          "type": "object"
+        },
         "CargoCachePolicy": {
           "description": "Per-project Cargo target-cache strategy override.\n\nThe default [`AutoDetected`](Self::AutoDetected) mode is detection-driven:\nconsumers resolve the policy by reading the project shape (Cargo workspace\nlayout, `.cargo/config.toml`, and configured setup command\npatterns) instead of hardcoding one universal compile set. That resolver is\nintentionally non-mutating. It may observe a project's `.cargo/config.toml`,\nincluding `rustc-wrapper = \"sccache\"` and feature-related settings, but it\nmust never create or modify `.cargo/config.toml`.",
           "oneOf": [
@@ -5887,6 +6039,18 @@ expression: signatures
               "default": {},
               "description": "Per-agent-role MCP server defaults. The key is a role\nname (e.g. `\"worker\"`, `\"chat\"`) or `\"*\"` for the fallback applied to\nany role with no explicit entry. The value is the list of MCP server\nnames (from root `mcp.json`) that sessions for that role should\nconnect to by default. Specialist role assignments override these.",
               "type": "object"
+            },
+            "build_resources": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/BuildResources"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional per-project CPU/memory overrides for the task-run and warm\nPods, layered over the deployment-wide defaults. `None` (the default)\nkeeps every kind on its deployment default. Task and warm blocks resolve\nindependently; the resolved quantities are rendered into the k8s Job/Pod\nspecs by `djinn-k8s`. See [`crate::resources::BuildResources`]."
             },
             "cargo_cache_policy": {
               "anyOf": [
@@ -6678,6 +6842,76 @@ expression: signatures
     "concurrent_safe": false,
     "input_schema": {
       "$defs": {
+        "BuildResourceOverrides": {
+          "additionalProperties": false,
+          "description": "CPU + memory request/limit overrides for one Pod kind. Every field is an\noptional Kubernetes Quantity string; `None` inherits the deployment default.",
+          "properties": {
+            "cpu_limit": {
+              "default": null,
+              "description": "CPU limit override.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "cpu_request": {
+              "default": null,
+              "description": "CPU request override (e.g. `\"4\"`, `\"500m\"`).",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "memory_limit": {
+              "default": null,
+              "description": "Memory limit override.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "memory_request": {
+              "default": null,
+              "description": "Memory request override (e.g. `\"8Gi\"`, `\"512Mi\"`).",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        },
+        "BuildResources": {
+          "additionalProperties": false,
+          "description": "Optional per-project CPU/memory overrides for the task-run and warm Pods.\n\nThe whole object is optional on `EnvironmentConfig`; each inner block is\noptional; each field within a block is optional. Anything unset inherits\nthe deployment default at resolution time. The two blocks are resolved\nseparately — a `task` override never affects `warm` and vice-versa.",
+          "properties": {
+            "task": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/BuildResourceOverrides"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Overrides applied to the task-run Pod."
+            },
+            "warm": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/BuildResourceOverrides"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Overrides applied to the warm-job Pod."
+            }
+          },
+          "type": "object"
+        },
         "CargoCachePolicy": {
           "description": "Per-project Cargo target-cache strategy override.\n\nThe default [`AutoDetected`](Self::AutoDetected) mode is detection-driven:\nconsumers resolve the policy by reading the project shape (Cargo workspace\nlayout, `.cargo/config.toml`, and configured setup command\npatterns) instead of hardcoding one universal compile set. That resolver is\nintentionally non-mutating. It may observe a project's `.cargo/config.toml`,\nincluding `rustc-wrapper = \"sccache\"` and feature-related settings, but it\nmust never create or modify `.cargo/config.toml`.",
           "oneOf": [
@@ -6810,6 +7044,18 @@ expression: signatures
               "default": {},
               "description": "Per-agent-role MCP server defaults. The key is a role\nname (e.g. `\"worker\"`, `\"chat\"`) or `\"*\"` for the fallback applied to\nany role with no explicit entry. The value is the list of MCP server\nnames (from root `mcp.json`) that sessions for that role should\nconnect to by default. Specialist role assignments override these.",
               "type": "object"
+            },
+            "build_resources": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/BuildResources"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional per-project CPU/memory overrides for the task-run and warm\nPods, layered over the deployment-wide defaults. `None` (the default)\nkeeps every kind on its deployment default. Task and warm blocks resolve\nindependently; the resolved quantities are rendered into the k8s Job/Pod\nspecs by `djinn-k8s`. See [`crate::resources::BuildResources`]."
             },
             "cargo_cache_policy": {
               "anyOf": [
@@ -13053,6 +13299,76 @@ expression: signatures
     },
     "output_schema": {
       "$defs": {
+        "BuildResourceOverrides": {
+          "additionalProperties": false,
+          "description": "CPU + memory request/limit overrides for one Pod kind. Every field is an\noptional Kubernetes Quantity string; `None` inherits the deployment default.",
+          "properties": {
+            "cpu_limit": {
+              "default": null,
+              "description": "CPU limit override.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "cpu_request": {
+              "default": null,
+              "description": "CPU request override (e.g. `\"4\"`, `\"500m\"`).",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "memory_limit": {
+              "default": null,
+              "description": "Memory limit override.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "memory_request": {
+              "default": null,
+              "description": "Memory request override (e.g. `\"8Gi\"`, `\"512Mi\"`).",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        },
+        "BuildResources": {
+          "additionalProperties": false,
+          "description": "Optional per-project CPU/memory overrides for the task-run and warm Pods.\n\nThe whole object is optional on `EnvironmentConfig`; each inner block is\noptional; each field within a block is optional. Anything unset inherits\nthe deployment default at resolution time. The two blocks are resolved\nseparately — a `task` override never affects `warm` and vice-versa.",
+          "properties": {
+            "task": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/BuildResourceOverrides"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Overrides applied to the task-run Pod."
+            },
+            "warm": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/BuildResourceOverrides"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Overrides applied to the warm-job Pod."
+            }
+          },
+          "type": "object"
+        },
         "CargoCachePolicy": {
           "description": "Per-project Cargo target-cache strategy override.\n\nThe default [`AutoDetected`](Self::AutoDetected) mode is detection-driven:\nconsumers resolve the policy by reading the project shape (Cargo workspace\nlayout, `.cargo/config.toml`, and configured setup command\npatterns) instead of hardcoding one universal compile set. That resolver is\nintentionally non-mutating. It may observe a project's `.cargo/config.toml`,\nincluding `rustc-wrapper = \"sccache\"` and feature-related settings, but it\nmust never create or modify `.cargo/config.toml`.",
           "oneOf": [
@@ -13185,6 +13501,18 @@ expression: signatures
               "default": {},
               "description": "Per-agent-role MCP server defaults. The key is a role\nname (e.g. `\"worker\"`, `\"chat\"`) or `\"*\"` for the fallback applied to\nany role with no explicit entry. The value is the list of MCP server\nnames (from root `mcp.json`) that sessions for that role should\nconnect to by default. Specialist role assignments override these.",
               "type": "object"
+            },
+            "build_resources": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/BuildResources"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional per-project CPU/memory overrides for the task-run and warm\nPods, layered over the deployment-wide defaults. `None` (the default)\nkeeps every kind on its deployment default. Task and warm blocks resolve\nindependently; the resolved quantities are rendered into the k8s Job/Pod\nspecs by `djinn-k8s`. See [`crate::resources::BuildResources`]."
             },
             "cargo_cache_policy": {
               "anyOf": [
@@ -13914,6 +14242,76 @@ expression: signatures
     },
     "output_schema": {
       "$defs": {
+        "BuildResourceOverrides": {
+          "additionalProperties": false,
+          "description": "CPU + memory request/limit overrides for one Pod kind. Every field is an\noptional Kubernetes Quantity string; `None` inherits the deployment default.",
+          "properties": {
+            "cpu_limit": {
+              "default": null,
+              "description": "CPU limit override.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "cpu_request": {
+              "default": null,
+              "description": "CPU request override (e.g. `\"4\"`, `\"500m\"`).",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "memory_limit": {
+              "default": null,
+              "description": "Memory limit override.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "memory_request": {
+              "default": null,
+              "description": "Memory request override (e.g. `\"8Gi\"`, `\"512Mi\"`).",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        },
+        "BuildResources": {
+          "additionalProperties": false,
+          "description": "Optional per-project CPU/memory overrides for the task-run and warm Pods.\n\nThe whole object is optional on `EnvironmentConfig`; each inner block is\noptional; each field within a block is optional. Anything unset inherits\nthe deployment default at resolution time. The two blocks are resolved\nseparately — a `task` override never affects `warm` and vice-versa.",
+          "properties": {
+            "task": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/BuildResourceOverrides"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Overrides applied to the task-run Pod."
+            },
+            "warm": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/BuildResourceOverrides"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Overrides applied to the warm-job Pod."
+            }
+          },
+          "type": "object"
+        },
         "CargoCachePolicy": {
           "description": "Per-project Cargo target-cache strategy override.\n\nThe default [`AutoDetected`](Self::AutoDetected) mode is detection-driven:\nconsumers resolve the policy by reading the project shape (Cargo workspace\nlayout, `.cargo/config.toml`, and configured setup command\npatterns) instead of hardcoding one universal compile set. That resolver is\nintentionally non-mutating. It may observe a project's `.cargo/config.toml`,\nincluding `rustc-wrapper = \"sccache\"` and feature-related settings, but it\nmust never create or modify `.cargo/config.toml`.",
           "oneOf": [
@@ -14046,6 +14444,18 @@ expression: signatures
               "default": {},
               "description": "Per-agent-role MCP server defaults. The key is a role\nname (e.g. `\"worker\"`, `\"chat\"`) or `\"*\"` for the fallback applied to\nany role with no explicit entry. The value is the list of MCP server\nnames (from root `mcp.json`) that sessions for that role should\nconnect to by default. Specialist role assignments override these.",
               "type": "object"
+            },
+            "build_resources": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/BuildResources"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional per-project CPU/memory overrides for the task-run and warm\nPods, layered over the deployment-wide defaults. `None` (the default)\nkeeps every kind on its deployment default. Task and warm blocks resolve\nindependently; the resolved quantities are rendered into the k8s Job/Pod\nspecs by `djinn-k8s`. See [`crate::resources::BuildResources`]."
             },
             "cargo_cache_policy": {
               "anyOf": [
@@ -14749,6 +15159,76 @@ expression: signatures
     "concurrent_safe": false,
     "input_schema": {
       "$defs": {
+        "BuildResourceOverrides": {
+          "additionalProperties": false,
+          "description": "CPU + memory request/limit overrides for one Pod kind. Every field is an\noptional Kubernetes Quantity string; `None` inherits the deployment default.",
+          "properties": {
+            "cpu_limit": {
+              "default": null,
+              "description": "CPU limit override.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "cpu_request": {
+              "default": null,
+              "description": "CPU request override (e.g. `\"4\"`, `\"500m\"`).",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "memory_limit": {
+              "default": null,
+              "description": "Memory limit override.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "memory_request": {
+              "default": null,
+              "description": "Memory request override (e.g. `\"8Gi\"`, `\"512Mi\"`).",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        },
+        "BuildResources": {
+          "additionalProperties": false,
+          "description": "Optional per-project CPU/memory overrides for the task-run and warm Pods.\n\nThe whole object is optional on `EnvironmentConfig`; each inner block is\noptional; each field within a block is optional. Anything unset inherits\nthe deployment default at resolution time. The two blocks are resolved\nseparately — a `task` override never affects `warm` and vice-versa.",
+          "properties": {
+            "task": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/BuildResourceOverrides"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Overrides applied to the task-run Pod."
+            },
+            "warm": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/BuildResourceOverrides"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Overrides applied to the warm-job Pod."
+            }
+          },
+          "type": "object"
+        },
         "CargoCachePolicy": {
           "description": "Per-project Cargo target-cache strategy override.\n\nThe default [`AutoDetected`](Self::AutoDetected) mode is detection-driven:\nconsumers resolve the policy by reading the project shape (Cargo workspace\nlayout, `.cargo/config.toml`, and configured setup command\npatterns) instead of hardcoding one universal compile set. That resolver is\nintentionally non-mutating. It may observe a project's `.cargo/config.toml`,\nincluding `rustc-wrapper = \"sccache\"` and feature-related settings, but it\nmust never create or modify `.cargo/config.toml`.",
           "oneOf": [
@@ -14881,6 +15361,18 @@ expression: signatures
               "default": {},
               "description": "Per-agent-role MCP server defaults. The key is a role\nname (e.g. `\"worker\"`, `\"chat\"`) or `\"*\"` for the fallback applied to\nany role with no explicit entry. The value is the list of MCP server\nnames (from root `mcp.json`) that sessions for that role should\nconnect to by default. Specialist role assignments override these.",
               "type": "object"
+            },
+            "build_resources": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/BuildResources"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional per-project CPU/memory overrides for the task-run and warm\nPods, layered over the deployment-wide defaults. `None` (the default)\nkeeps every kind on its deployment default. Task and warm blocks resolve\nindependently; the resolved quantities are rendered into the k8s Job/Pod\nspecs by `djinn-k8s`. See [`crate::resources::BuildResources`]."
             },
             "cargo_cache_policy": {
               "anyOf": [
