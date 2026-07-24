@@ -1,0 +1,115 @@
+{
+  "contract": "frozen pre-pod-allocation warm build-cache dispatch gate (ri23 Part 2)",
+  "wait_bound_ms": 45000,
+  "poll_interval_ms": 5,
+  "cases": [
+    {
+      "scenario": "fresh_allocates_immediately",
+      "compile_mode": "compile",
+      "probe_results": ["fresh"],
+      "trigger": "ok",
+      "advance_per_poll_ms": 0,
+      "expected_decision": "fresh_immediate",
+      "expected_outcome": "hit",
+      "expected_reason": "fresh",
+      "expected_probe_calls": 1,
+      "expected_trigger_calls": 0
+    },
+    {
+      "scenario": "no_compile_bypasses_gate",
+      "compile_mode": "none",
+      "probe_results": ["fresh"],
+      "trigger": "ok",
+      "advance_per_poll_ms": 0,
+      "expected_decision": "bypass",
+      "expected_outcome": "fallback",
+      "expected_reason": "no_compile",
+      "expected_probe_calls": 0,
+      "expected_trigger_calls": 0
+    },
+    {
+      "scenario": "missing_waits_then_fresh",
+      "compile_mode": "compile",
+      "probe_results": ["missing", "fresh"],
+      "trigger": "ok",
+      "advance_per_poll_ms": 0,
+      "expected_decision": "waited_fresh",
+      "expected_outcome": "hit",
+      "expected_reason": "missing",
+      "expected_probe_calls": 2,
+      "expected_trigger_calls": 1
+    },
+    {
+      "scenario": "stale_waits_then_fresh",
+      "compile_mode": "compile",
+      "probe_results": ["stale", "fresh"],
+      "trigger": "ok",
+      "advance_per_poll_ms": 0,
+      "expected_decision": "waited_fresh",
+      "expected_outcome": "hit",
+      "expected_reason": "stale",
+      "expected_probe_calls": 2,
+      "expected_trigger_calls": 1
+    },
+    {
+      "scenario": "timeout_cold_dispatches_after_bound",
+      "compile_mode": "compile",
+      "probe_results": ["missing", "missing"],
+      "trigger": "ok",
+      "advance_per_poll_ms": 45000,
+      "expected_decision": "cold_timeout",
+      "expected_outcome": "cold",
+      "expected_reason": "timeout",
+      "expected_probe_calls": 2,
+      "expected_trigger_calls": 1
+    },
+    {
+      "scenario": "inventory_error_on_initial_probe_cold_dispatches",
+      "compile_mode": "compile",
+      "probe_results": ["error"],
+      "trigger": "ok",
+      "advance_per_poll_ms": 0,
+      "expected_decision": "cold_inventory_error",
+      "expected_outcome": "cold",
+      "expected_reason": "inventory_error",
+      "expected_probe_calls": 1,
+      "expected_trigger_calls": 0
+    },
+    {
+      "scenario": "inventory_error_during_poll_cold_dispatches",
+      "compile_mode": "compile",
+      "probe_results": ["missing", "error"],
+      "trigger": "ok",
+      "advance_per_poll_ms": 0,
+      "expected_decision": "cold_inventory_error",
+      "expected_outcome": "cold",
+      "expected_reason": "inventory_error",
+      "expected_probe_calls": 2,
+      "expected_trigger_calls": 1
+    },
+    {
+      "scenario": "warmer_error_cold_dispatches",
+      "compile_mode": "compile",
+      "probe_results": ["missing"],
+      "trigger": "error",
+      "advance_per_poll_ms": 0,
+      "expected_decision": "cold_warmer_error",
+      "expected_outcome": "cold",
+      "expected_reason": "warmer_error",
+      "expected_probe_calls": 1,
+      "expected_trigger_calls": 1
+    },
+    {
+      "scenario": "identity_mismatch_is_never_treated_as_fresh",
+      "compile_mode": "compile",
+      "probe_results": ["stale", "stale"],
+      "trigger": "ok",
+      "advance_per_poll_ms": 45000,
+      "expected_decision": "cold_timeout",
+      "expected_outcome": "cold",
+      "expected_reason": "timeout",
+      "expected_probe_calls": 2,
+      "expected_trigger_calls": 1
+    }
+  ]
+}

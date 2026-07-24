@@ -1708,6 +1708,39 @@ impl CoordinatorActor {
         false
     }
 
+    /// Optional warm build-cache freshness probe (proposal ri23 Part 2).
+    ///
+    /// Returns the warm-substrate probe when one is wired. It is `None` today:
+    /// the warm substrate — which owns inventory / warming / freshness /
+    /// eviction / seeding — has not yet exposed a coordinator-facing probe, so
+    /// the pre-allocation gate is a no-op and dispatch proceeds unchanged. When
+    /// the substrate lands a probe, this is the single seam that lights the gate;
+    /// the dispatch loop below already calls it before pod allocation.
+    fn warm_build_cache_probe(
+        &self,
+    ) -> Option<Arc<dyn super::warm_dispatch_gate::WarmBuildCacheProbe>> {
+        None
+    }
+
+    /// Resolved compile-mode for a project's warm build cache. Defaults to
+    /// `Compile`; the gate only runs when a probe is wired, and the substrate's
+    /// probe remains authoritative for freshness and identity. A future
+    /// stack-aware resolver can return `None` for non-compile stacks so the gate
+    /// bypasses entirely.
+    fn warm_compile_mode_for(&self, _project_id: &str) -> super::warm_dispatch_gate::CompileMode {
+        super::warm_dispatch_gate::CompileMode::Compile
+    }
+
+    /// Resolved environment-identity token the warm base must match to be a hit.
+    ///
+    /// The warm substrate owns the canonical identity; this only threads it to
+    /// the probe, which performs the comparison. Empty until a substrate-defined
+    /// resolver is wired (the probe is `None` until then, so the gate never runs
+    /// with a placeholder identity).
+    fn warm_cache_environment_identity(&self, _project_id: &str) -> String {
+        String::new()
+    }
+
     /// Find all ready tasks (open, no unresolved blockers, non-epic) and dispatch
     /// those that don't already have an active session.
     #[tracing::instrument(
@@ -2923,6 +2956,33 @@ impl CoordinatorActor {
                         std::time::Duration::from_secs(45),
                     )
                     .await;
+            }
+
+            // ri23 Part 2: pre-pod-allocation warm build-cache freshness gate.
+            // Mirrors the architect graph gate above, but for the per-project
+            // warm Cargo build cache. When the warm substrate has wired a
+            // probe, this bounds the wait for a fresh cache and labels the
+            // decision; otherwise it is a best-effort no-op. The task-run pod is
+            // still allocated exactly once below, regardless of the decision.
+            if let Some(warm_probe) = self.warm_build_cache_probe() {
+                let identity = super::warm_dispatch_gate::WarmCacheIdentity {
+                    project_id: task.project_id.clone(),
+                    environment_identity: self.warm_cache_environment_identity(&task.project_id),
+                };
+                let decision = super::warm_dispatch_gate::WarmDispatchGate::default()
+                    .decide_and_record(
+                        self.warm_compile_mode_for(&task.project_id),
+                        warm_probe.as_ref(),
+                        &identity,
+                        &SystemClock::new(),
+                    )
+                    .await;
+                tracing::debug!(
+                    task_id = %task.short_id,
+                    project_id = %task.project_id,
+                    warm_hit = decision.is_warm_hit(),
+                    "CoordinatorActor: warm build-cache dispatch gate decision"
+                );
             }
 
             let build_admission = match self

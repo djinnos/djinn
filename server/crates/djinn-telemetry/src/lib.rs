@@ -57,6 +57,9 @@ const CARGO_WARM_STEP_OUTCOMES: [&str; 3] = ["ok", "failed", "spawn_error"];
 const CARGO_WARM_STEP_WORKSPACE_PATH_HASH: &str = "djinn_cargo_warm_step_workspace_path_hash";
 const CARGO_WARM_STEP_FRESH_COUNT: &str = "djinn_cargo_warm_step_fresh_count";
 const CARGO_WARM_STEP_COMPILING_COUNT: &str = "djinn_cargo_warm_step_compiling_count";
+const WARM_CACHE_DECISION_TOTAL: &str = "djinn_warm_cache_decision_total";
+const WARM_CACHE_COLD_RATE: &str = "djinn_warm_cache_cold_rate";
+const WARM_CACHE_COLD_RATE_ALERT_FIRING: &str = "djinn_warm_cache_cold_rate_alert_firing";
 const CARGO_WARM_INCREMENTAL_PRUNE_TOTAL: &str = "djinn_cargo_warm_incremental_prune_total";
 const CARGO_WARM_INCREMENTAL_PRUNED_BYTES_TOTAL: &str =
     "djinn_cargo_warm_incremental_pruned_bytes_total";
@@ -956,6 +959,240 @@ pub mod cargo_target_seed {
     }
 }
 
+/// Warm build-cache dispatch-gate telemetry (proposal ri23 Part 2).
+///
+/// The coordinator runs a bounded warm build-cache freshness gate before pod
+/// allocation. Every gate decision is emitted here as a single
+/// `(project_id, outcome, reason)` counter increment, and every decision also
+/// feeds a process-global cold-rate alert whose firing state is exposed as a
+/// gauge. The `outcome` and `reason` label spaces are CLOSED enums so the
+/// series cardinality stays bounded by `project_id` alone.
+///
+/// Ownership boundary: the warm substrate owns inventory / warming / freshness
+/// / eviction. This module only labels the decision the coordinator already
+/// made; it never reads or mutates warm state.
+pub mod warm_cache {
+    use std::sync::{Mutex, OnceLock};
+
+    /// Closed outcome classification for a warm-dispatch gate decision.
+    ///
+    /// - `Hit`: the warm cache was fresh for the resolved environment identity
+    ///   (either immediately or after a bounded wait) and the run allocated
+    ///   against it.
+    /// - `Cold`: the gate reached its bound or observed an error and
+    ///   cold-dispatched (allocated without a warm cache).
+    /// - `Fallback`: the stack has no compile step, so the gate was bypassed.
+    ///   A bypass is deliberately NOT a cold dispatch.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum Outcome {
+        Hit,
+        Cold,
+        Fallback,
+    }
+
+    /// Closed reason classification paired with an [`Outcome`].
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum Reason {
+        /// Warm cache was fresh on the first probe (paired with `Hit`).
+        Fresh,
+        /// Warm cache was stale, then became fresh within the bound (`Hit`).
+        Stale,
+        /// Warm cache was missing, then became fresh within the bound (`Hit`).
+        Missing,
+        /// Bounded wait elapsed without the cache going fresh (`Cold`).
+        Timeout,
+        /// The warm inventory probe returned an error (`Cold`).
+        InventoryError,
+        /// The single-flight warm trigger returned an error (`Cold`).
+        WarmerError,
+        /// The stack has no compile step; the gate was bypassed (`Fallback`).
+        NoCompile,
+    }
+
+    /// Every `Outcome` variant, for exhaustive label enumeration in tests.
+    pub const ALL_OUTCOMES: [Outcome; 3] = [Outcome::Hit, Outcome::Cold, Outcome::Fallback];
+
+    /// Every `Reason` variant, for exhaustive label enumeration in tests.
+    pub const ALL_REASONS: [Reason; 7] = [
+        Reason::Fresh,
+        Reason::Stale,
+        Reason::Missing,
+        Reason::Timeout,
+        Reason::InventoryError,
+        Reason::WarmerError,
+        Reason::NoCompile,
+    ];
+
+    pub const DECISION_TOTAL: &str = super::WARM_CACHE_DECISION_TOTAL;
+    pub const COLD_RATE: &str = super::WARM_CACHE_COLD_RATE;
+    pub const COLD_RATE_ALERT_FIRING: &str = super::WARM_CACHE_COLD_RATE_ALERT_FIRING;
+
+    impl Outcome {
+        pub const fn as_label(self) -> &'static str {
+            match self {
+                Self::Hit => "hit",
+                Self::Cold => "cold",
+                Self::Fallback => "fallback",
+            }
+        }
+    }
+
+    impl Reason {
+        pub const fn as_label(self) -> &'static str {
+            match self {
+                Self::Fresh => "fresh",
+                Self::Stale => "stale",
+                Self::Missing => "missing",
+                Self::Timeout => "timeout",
+                Self::InventoryError => "inventory_error",
+                Self::WarmerError => "warmer_error",
+                Self::NoCompile => "no_compile",
+            }
+        }
+    }
+
+    /// Record exactly one warm-dispatch gate decision for a project.
+    ///
+    /// Increments the `(project_id, outcome, reason)` counter and feeds the
+    /// process-global cold-rate alert (which re-emits its gauges). Exactly one
+    /// counter series moves per call, so a caller that emits per decision can
+    /// never double-count or leave a series dark.
+    pub fn record_decision(project_id: &str, outcome: Outcome, reason: Reason) {
+        metrics::counter!(
+            super::WARM_CACHE_DECISION_TOTAL,
+            "project_id" => project_id.to_owned(),
+            "outcome" => outcome.as_label(),
+            "reason" => reason.as_label(),
+        )
+        .increment(1);
+
+        if let Ok(mut alert) = global_alert().lock() {
+            alert.observe(outcome);
+            alert.evaluate();
+        }
+    }
+
+    /// Hysteresis configuration for the cold-rate alert.
+    #[derive(Clone, Copy, Debug)]
+    pub struct ColdRateAlertConfig {
+        /// Fire when the cold rate is at or above this fraction.
+        pub fire_at: f64,
+        /// Clear a firing alert once the cold rate is at or below this fraction.
+        /// Must be `<= fire_at` so the alert does not flap.
+        pub clear_at: f64,
+        /// Minimum observed decisions before the alert is allowed to fire.
+        pub min_samples: u64,
+    }
+
+    impl Default for ColdRateAlertConfig {
+        fn default() -> Self {
+            Self {
+                fire_at: 0.5,
+                clear_at: 0.2,
+                min_samples: 20,
+            }
+        }
+    }
+
+    /// A transition returned by [`ColdRateAlert::evaluate`].
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum AlertTransition {
+        /// The firing state did not change on this evaluation.
+        Unchanged,
+        /// The alert transitioned from clear to firing.
+        Fired,
+        /// The alert transitioned from firing to clear.
+        Cleared,
+    }
+
+    /// Stateful cold-rate alert with hysteresis.
+    ///
+    /// Pure and self-contained: `observe` accumulates decisions and `evaluate`
+    /// applies the hysteresis and emits the `cold_rate` / `alert_firing`
+    /// gauges. Tests drive an owned instance deterministically; production
+    /// feeds a single process-global instance from [`record_decision`].
+    #[derive(Clone, Copy, Debug)]
+    pub struct ColdRateAlert {
+        config: ColdRateAlertConfig,
+        cold: u64,
+        total: u64,
+        firing: bool,
+    }
+
+    impl ColdRateAlert {
+        pub fn new(config: ColdRateAlertConfig) -> Self {
+            Self {
+                config,
+                cold: 0,
+                total: 0,
+                firing: false,
+            }
+        }
+
+        pub fn with_default_config() -> Self {
+            Self::new(ColdRateAlertConfig::default())
+        }
+
+        /// Accumulate one decision. Only `Outcome::Cold` moves the cold count;
+        /// `Fallback` (no-compile bypass) counts toward the total but never as
+        /// cold, so a no-compile stack can never drive the alert.
+        pub fn observe(&mut self, outcome: Outcome) {
+            self.total = self.total.saturating_add(1);
+            if matches!(outcome, Outcome::Cold) {
+                self.cold = self.cold.saturating_add(1);
+            }
+        }
+
+        /// Current cold fraction; zero before any decision is observed.
+        pub fn cold_rate(&self) -> f64 {
+            if self.total == 0 {
+                0.0
+            } else {
+                self.cold as f64 / self.total as f64
+            }
+        }
+
+        pub fn firing(&self) -> bool {
+            self.firing
+        }
+
+        /// Apply the hysteresis rule and emit the alert gauges. Returns the
+        /// transition (if any) so a caller can log or test edge crossings.
+        pub fn evaluate(&mut self) -> AlertTransition {
+            let rate = self.cold_rate();
+            let transition = if self.firing {
+                if rate <= self.config.clear_at {
+                    self.firing = false;
+                    AlertTransition::Cleared
+                } else {
+                    AlertTransition::Unchanged
+                }
+            } else if self.total >= self.config.min_samples && rate >= self.config.fire_at {
+                self.firing = true;
+                AlertTransition::Fired
+            } else {
+                AlertTransition::Unchanged
+            };
+            emit_cold_rate_gauges(rate, self.firing);
+            transition
+        }
+    }
+
+    fn emit_cold_rate_gauges(rate: f64, firing: bool) {
+        metrics::gauge!(super::WARM_CACHE_COLD_RATE).set(rate);
+        metrics::gauge!(super::WARM_CACHE_COLD_RATE_ALERT_FIRING).set(if firing {
+            1.0
+        } else {
+            0.0
+        });
+    }
+
+    fn global_alert() -> &'static Mutex<ColdRateAlert> {
+        static GLOBAL: OnceLock<Mutex<ColdRateAlert>> = OnceLock::new();
+        GLOBAL.get_or_init(|| Mutex::new(ColdRateAlert::with_default_config()))
+    }
+}
+
 /// Render the current registry in Prometheus text format.
 ///
 /// Calling this before `init()` is supported: it initializes the recorder first
@@ -1370,6 +1607,20 @@ fn register_metrics() {
         CARGO_WARM_BASE_FRESHNESS_SECONDS,
         "Seconds elapsed while producing the most recent warm Cargo target base for a project."
     );
+    metrics::describe_counter!(
+        WARM_CACHE_DECISION_TOTAL,
+        "Warm build-cache dispatch-gate decisions partitioned by project_id and the closed outcome (hit, cold, fallback) and reason (fresh, stale, missing, timeout, inventory_error, warmer_error, no_compile) label spaces."
+    );
+    metrics::describe_gauge!(
+        WARM_CACHE_COLD_RATE,
+        "Fraction of warm build-cache dispatch-gate decisions that cold-dispatched, driving the cold-rate alert."
+    );
+    metrics::describe_gauge!(
+        WARM_CACHE_COLD_RATE_ALERT_FIRING,
+        "Whether the warm build-cache cold-rate alert is firing: 1 firing, 0 clear."
+    );
+    metrics::gauge!(WARM_CACHE_COLD_RATE).set(0.0);
+    metrics::gauge!(WARM_CACHE_COLD_RATE_ALERT_FIRING).set(0.0);
     metrics::describe_counter!(
         CARGO_WARM_STEP_TOTAL,
         "Cargo warm-step invocations partitioned by bounded project_id, step, and outcome labels. The free-form cargo argv is intentionally NOT a label; correlate with the djinn_cargo_warm_step workspace path hash gauge and the worker's structured tracing event for full context."

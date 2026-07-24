@@ -1,0 +1,24 @@
+{
+  "contract": "frozen warm build-cache dispatch-gate telemetry (ri23 Part 2)",
+  "decision_metric": "djinn_warm_cache_decision_total",
+  "decision_labels": ["project_id", "outcome", "reason"],
+  "cold_rate_gauge": "djinn_warm_cache_cold_rate",
+  "alert_firing_gauge": "djinn_warm_cache_cold_rate_alert_firing",
+  "outcomes": ["hit", "cold", "fallback"],
+  "reasons": ["fresh", "stale", "missing", "timeout", "inventory_error", "warmer_error", "no_compile"],
+  "decision_cases": [
+    {"scenario": "fresh", "outcome": "hit", "reason": "fresh"},
+    {"scenario": "stale", "outcome": "hit", "reason": "stale"},
+    {"scenario": "missing", "outcome": "hit", "reason": "missing"},
+    {"scenario": "timeout", "outcome": "cold", "reason": "timeout"},
+    {"scenario": "inventory_error", "outcome": "cold", "reason": "inventory_error"},
+    {"scenario": "warmer_error", "outcome": "cold", "reason": "warmer_error"},
+    {"scenario": "no_compile", "outcome": "fallback", "reason": "no_compile"}
+  ],
+  "alert": {
+    "config": {"fire_at": 0.5, "clear_at": 0.2, "min_samples": 10},
+    "below_min_samples": {"cold": 9, "total": 9, "expected_firing": false},
+    "fire": {"cold": 8, "hit": 2, "expected_rate": 0.8, "expected_firing": true},
+    "recover": {"hit": 80, "expected_firing": false}
+  }
+}
