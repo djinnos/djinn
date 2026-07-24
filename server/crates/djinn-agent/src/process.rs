@@ -23,7 +23,7 @@ use djinn_supervisor::services::{
     InvocationLiftDecision, LeaseAbandonRequest, LeaseBindRequest, LeaseDeadlines,
     LeaseFencingToken, LeaseGrantRequest, LeaseIdentity, LeaseQueueRequest, LeaseReleaseRequest,
     LeaseResult, LeaseState, LeaseStatus, LeaseStatusRequest, SupervisorServices,
-    TaskInvocationLeaseIdentity,
+    TaskInvocationLeaseIdentity, WatchdogTerminationRequest,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -143,10 +143,18 @@ impl InvocationJournal {
                 .as_millis(),
         })
     }
+    /// Serialized compare-and-set: persist `watchdog_notified` for the current
+    /// durable record, then hand back the exact-pod termination request built
+    /// from that record. The immutable pod UID (and task/task-run identity) come
+    /// from the durable content, never from the reconstructing process's own
+    /// environment, so recovery targets recorded pod A even when this process is
+    /// pod B. Returns `None` when the record is gone, has advanced to a
+    /// different identity, or was already notified — the persisted bit is what
+    /// makes the callback fire at most once across recurring scans.
     fn notify_if_current(
         &self,
         identity: &TaskInvocationLeaseIdentity,
-    ) -> io::Result<Option<String>> {
+    ) -> io::Result<Option<WatchdogTerminationRequest>> {
         let _guard = self.update_lock.lock().unwrap();
         let content = match fs::read_to_string(self.path(identity)) {
             Ok(content) => content,
@@ -158,9 +166,13 @@ impl InvocationJournal {
             return Ok(None);
         }
         current.watchdog_notified = true;
-        let pod_uid = current.pod_uid.clone();
+        let request = WatchdogTerminationRequest {
+            task_id: current.identity.task_id.clone(),
+            task_run_id: current.identity.task_run_id.clone(),
+            pod_uid: current.pod_uid.clone(),
+        };
         self.replace_unlocked(current)?;
-        Ok(Some(pod_uid))
+        Ok(Some(request))
     }
     fn clear(&self, identity: &TaskInvocationLeaseIdentity) -> io::Result<()> {
         let _guard = self.update_lock.lock().unwrap();
@@ -266,7 +278,19 @@ pub struct InvocationRecovery<'a> {
 }
 
 impl<'a> InvocationRecovery<'a> {
-    pub async fn run(&self, mut watchdog: impl FnMut(&str)) -> io::Result<()> {
+    /// Sweep the durable journal, reconciling terminal records and firing the
+    /// exact-pod `watchdog` for a grace-expired record exactly once. The
+    /// callback receives the full [`WatchdogTerminationRequest`] read from the
+    /// durable record (task, task-run, immutable pod UID); it is invoked only
+    /// after `watchdog_notified` is durably persisted. A callback that cannot
+    /// confirm termination (lost/unavailable transport) must leave the record
+    /// in place — this loop never re-issues the callback once the bit is set,
+    /// and only a matching durable terminal confirmation clears the record.
+    pub async fn run<W, Fut>(&self, mut watchdog: W) -> io::Result<()>
+    where
+        W: FnMut(WatchdogTerminationRequest) -> Fut,
+        Fut: Future<Output = ()>,
+    {
         for record in self.journal.unresolved()? {
             let lease = LeaseIdentity::TaskInvocation(record.identity.clone());
             // Always query the coordinator's durable view. An unavailable reply
@@ -304,9 +328,11 @@ impl<'a> InvocationRecovery<'a> {
                 && !record.watchdog_notified
             {
                 // Re-read while serialized with lifecycle writes. Only the
-                // current durable record can authorize exact-pod deletion.
-                if let Some(pod_uid) = self.journal.notify_if_current(&record.identity)? {
-                    watchdog(&pod_uid);
+                // current durable record can authorize exact-pod deletion, and
+                // it carries the recorded task/task-run/pod UID the callback
+                // must target — not this process's current identity.
+                if let Some(request) = self.journal.notify_if_current(&record.identity)? {
+                    watchdog(request).await;
                 }
             }
         }
@@ -314,11 +340,15 @@ impl<'a> InvocationRecovery<'a> {
     }
 }
 #[allow(dead_code)]
-pub async fn recover_unresolved_invocations(
+pub async fn recover_unresolved_invocations<W, Fut>(
     journal: &InvocationJournal,
     services: &dyn SupervisorServices,
-    watchdog: impl FnMut(&str),
-) -> io::Result<()> {
+    watchdog: W,
+) -> io::Result<()>
+where
+    W: FnMut(WatchdogTerminationRequest) -> Fut,
+    Fut: Future<Output = ()>,
+{
     let clock = SystemClock::new();
     InvocationRecovery {
         journal,

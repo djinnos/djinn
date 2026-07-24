@@ -37,10 +37,37 @@ use djinn_orchestration_types::coordinator::BackgroundWorkTracker;
 use djinn_provider::catalog::{CatalogService, HealthTracker};
 use djinn_slot::reply_loop::CompactionCriticalSection;
 use djinn_supervisor::SupervisorServices;
+use djinn_supervisor::services::WatchdogTerminationRequest;
 
 /// Shared tracker for per-task last-activity timestamps (unix seconds).
 /// Used by stall detection to kill sessions that stop producing tokens.
 pub type ActivityTracker = Arc<std::sync::Mutex<HashMap<String, Arc<AtomicU64>>>>;
+
+/// Issue the exact-pod watchdog termination for one grace-expired durable
+/// record. The [`WatchdogTerminationRequest`] carries the task, task-run, and
+/// immutable pod UID read from the durable journal record — never this
+/// process's current identity — so a reconstructed pod terminates exactly the
+/// pod that was recorded.
+///
+/// A failed or transport-unavailable response is logged and deliberately
+/// swallowed: the recovery scan has already persisted `watchdog_notified`
+/// (serialized CAS), so this request is issued at most once and never retried
+/// in a loop; the durable record and its counted lease are retained, and only a
+/// matching durable terminal confirmation clears the record on a later scan.
+async fn terminate_watchdog_pod(
+    services: Arc<dyn SupervisorServices>,
+    request: WatchdogTerminationRequest,
+) {
+    if let Err(error) = services.terminate_watchdog_pod(request.clone()).await {
+        tracing::error!(
+            task_id = %request.task_id,
+            task_run_id = %request.task_run_id,
+            pod_uid = %request.pod_uid,
+            error = %error,
+            "exact-pod watchdog termination failed; retaining durable record and counted lease"
+        );
+    }
+}
 
 /// Immutable broker-backed shell authority composed from trusted task-run inputs.
 #[derive(Clone)]
@@ -65,21 +92,16 @@ impl ShellLaunchContext {
         let journal = Arc::new(InvocationJournal::new(journal_dir, pod_uid.clone())?);
         const WATCHDOG_GRACE: Duration = Duration::from_secs(300);
         let recovery_clock = SystemClock::new();
+        let startup_watchdog_services = services.clone();
         InvocationRecovery {
             journal: journal.as_ref(),
             services: services.as_ref(),
             clock: &recovery_clock,
             watchdog_grace: WATCHDOG_GRACE,
         }
-        .run(|recorded_pod_uid| {
-            // The exact-pod termination transport is deliberately injected by
-            // its owning runtime layer. This journal callback only preserves a
-            // seam and reports the immutable UID; cancelling this worker does
-            // not prove that Kubernetes deleted the recorded pod.
-            tracing::error!(
-                pod_uid = recorded_pod_uid,
-                "unresolved invocation watchdog fired; exact-pod termination is not wired"
-            );
+        .run(|request| {
+            let services = startup_watchdog_services.clone();
+            terminate_watchdog_pod(services, request)
         })
         .await?;
 
@@ -106,21 +128,23 @@ impl ShellLaunchContext {
                     break;
                 };
                 let recovery_clock = SystemClock::new();
+                let sweep_watchdog_services = services.clone();
                 let _ = InvocationRecovery {
                     journal: recovery_journal.as_ref(),
                     services: services.as_ref(),
                     clock: &recovery_clock,
                     watchdog_grace: WATCHDOG_GRACE,
                 }
-                .run(|recorded_pod_uid| {
-                    tracing::error!(
-                        pod_uid = recorded_pod_uid,
-                        "unresolved invocation watchdog fired; exact-pod termination is not wired"
-                    );
+                .run(|request| {
+                    let services = sweep_watchdog_services.clone();
+                    terminate_watchdog_pod(services, request)
                 })
                 .await;
-                // Drop the strong handle before sleeping again so a concurrent
-                // worker shutdown is never blocked while this sweep is idle.
+                // Drop every strong handle before sleeping again so a concurrent
+                // worker shutdown is never blocked while this sweep is idle. The
+                // per-call watchdog clones live only inside the `run` future,
+                // which has already completed here.
+                drop(sweep_watchdog_services);
                 drop(services);
             }
         });
