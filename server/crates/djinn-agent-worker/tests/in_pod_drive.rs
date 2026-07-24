@@ -489,6 +489,9 @@ async fn handle_rpc(
         ServiceRpcRequest::ReleaseLease { .. } => ServiceRpcResponse::ReleaseLease(
             djinn_supervisor::services::LeaseResult::LeaseUnavailable,
         ),
+        ServiceRpcRequest::TerminateWatchdogPod { .. } => ServiceRpcResponse::TerminateWatchdogPod(
+            Err("fake server: watchdog termination is outside this fixture".into()),
+        ),
     }
 }
 
