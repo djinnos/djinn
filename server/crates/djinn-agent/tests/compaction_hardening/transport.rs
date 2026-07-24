@@ -144,16 +144,16 @@ impl LlmProvider for ScriptedProvider {
         Some(8)
     }
 }
-static RECOVERY_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+static RECOVERY_TEST_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 
 async fn run_case(
     script: Vec<Outcome>,
     compaction: Result<bool, &'static str>,
 ) -> (usize, usize, usize, anyhow::Result<()>) {
     let _serial = RECOVERY_TEST_LOCK
-        .get_or_init(|| Mutex::new(()))
+        .get_or_init(|| tokio::sync::Mutex::new(()))
         .lock()
-        .unwrap();
+        .await;
     let compactions = Arc::new(AtomicUsize::new(0));
     let budget_checks = Arc::new(AtomicUsize::new(0));
     let count = Arc::clone(&compactions);
@@ -279,9 +279,9 @@ async fn recovery_is_one_shot() {
 #[tokio::test]
 async fn oversized_transport_compaction_persists_boundary_occupancy() {
     let _serial = RECOVERY_TEST_LOCK
-        .get_or_init(|| Mutex::new(()))
+        .get_or_init(|| tokio::sync::Mutex::new(()))
         .lock()
-        .unwrap();
+        .await;
     set_transport_recovery_compaction_hook_for_test(None);
     set_transport_recovery_budget_check_hook_for_test(None);
 
