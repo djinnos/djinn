@@ -85,13 +85,27 @@ impl ShellLaunchContext {
 
         // Recovery must run again when a startup record reaches grace, rather
         // than relying on a later process reconstruction or RPC failure.
+        //
+        // This detached sweep MUST hold a `Weak`, never a strong `Arc`, to the
+        // supervisor services. `services` is an `Arc<RpcServices>`, and
+        // `RpcServices` owns the worker's single outbound frame `Sender`; the
+        // worker's orderly shutdown drops every `Arc<RpcServices>` and then
+        // blocks on `background.writer.await`, which only completes once the
+        // last `Sender` clone is gone (the writer loop exits on a closed
+        // channel, not on cancellation). A strong clone parked here across the
+        // `WATCHDOG_GRACE` sleep would keep that `Sender` alive forever and
+        // wedge the worker's exit — the exact 30s cancel-path hang. Upgrade the
+        // `Weak` per iteration and stop once every strong handle is gone (the
+        // worker is tearing down and no further sweep is needed).
         let recovery_journal = journal.clone();
-        let recovery_services = services.clone();
+        let recovery_services = Arc::downgrade(&services);
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(WATCHDOG_GRACE).await;
+                let Some(services) = recovery_services.upgrade() else {
+                    break;
+                };
                 let recovery_clock = SystemClock::new();
-                let services = recovery_services.clone();
                 let _ = InvocationRecovery {
                     journal: recovery_journal.as_ref(),
                     services: services.as_ref(),
@@ -105,6 +119,9 @@ impl ShellLaunchContext {
                     );
                 })
                 .await;
+                // Drop the strong handle before sleeping again so a concurrent
+                // worker shutdown is never blocked while this sweep is idle.
+                drop(services);
             }
         });
         Ok(Self {
