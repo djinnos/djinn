@@ -87,6 +87,16 @@ pub trait GraphWarmerService: Send + Sync {
         ))
     }
 
+    async fn terminate_taskrun_pod_exact(
+        &self,
+        _task_run_id: &str,
+        _pod_uid: &str,
+    ) -> Result<(), WarmerError> {
+        Err(WarmerError::Backend(
+            "exact-pod task-run termination requires the kubernetes runtime".to_string(),
+        ))
+    }
+
     /// List Kubernetes task-run Jobs known to the runtime.
     ///
     /// Default impl returns an empty inventory for non-Kubernetes runtimes so

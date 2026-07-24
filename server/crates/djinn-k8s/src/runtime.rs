@@ -52,7 +52,7 @@ use djinn_runtime::{
 use djinn_supervisor::{ConnectionRegistry, Frame, FramePayload, PendingConnection};
 use k8s_openapi::api::batch::v1::Job;
 use k8s_openapi::api::core::v1::{Pod, Secret};
-use kube::api::{Api, DeleteParams, ListParams, Patch, PatchParams, PostParams};
+use kube::api::{Api, DeleteParams, ListParams, Patch, PatchParams, PostParams, Preconditions};
 use serde_json::json;
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
@@ -1406,6 +1406,71 @@ pub async fn delete_taskrun_job_foreground(
 ) -> Result<(), kube::Error> {
     let job_name = taskrun_job_name(task_run_id);
     delete_job_foreground(client, namespace, &job_name, 30).await
+}
+
+pub async fn terminate_taskrun_pod_exact(
+    client: &kube::Client,
+    namespace: &str,
+    task_run_id: &str,
+    pod_uid: &str,
+) -> Result<(), String> {
+    if task_run_id.trim().is_empty() || pod_uid.trim().is_empty() {
+        return Err("exact-pod termination requires non-empty task-run ID and pod UID".into());
+    }
+    let jobs: Api<Job> = Api::namespaced(client.clone(), namespace);
+    let Some(job) = jobs
+        .get_opt(&taskrun_job_name(task_run_id))
+        .await
+        .map_err(|e| format!("get task-run Job: {e}"))?
+    else {
+        return Ok(());
+    };
+    if job.metadata.deletion_timestamp.is_some() {
+        return Ok(());
+    }
+    let job_uid = job
+        .metadata
+        .uid
+        .ok_or_else(|| "task-run Job has no immutable UID".to_string())?;
+    let pods: Api<Pod> = Api::namespaced(client.clone(), namespace);
+    let selector = format!("{}={task_run_id}", crate::job::LABEL_TASK_RUN_ID);
+    let exact = pods
+        .list(&ListParams::default().labels(&selector))
+        .await
+        .map_err(|e| format!("list task-run Pods: {e}"))?
+        .items
+        .into_iter()
+        .any(|pod| {
+            pod.metadata.uid.as_deref() == Some(pod_uid)
+                && pod
+                    .metadata
+                    .owner_references
+                    .as_ref()
+                    .is_some_and(|owners| {
+                        owners
+                            .iter()
+                            .any(|owner| owner.kind == "Job" && owner.uid == job_uid)
+                    })
+        });
+    if !exact {
+        return Err(
+            "exact pod UID is unavailable or does not belong to the recorded task-run Job".into(),
+        );
+    }
+    let params = DeleteParams {
+        propagation_policy: Some(kube::api::PropagationPolicy::Foreground),
+        grace_period_seconds: Some(30),
+        preconditions: Some(Preconditions {
+            uid: Some(job_uid),
+            ..Preconditions::default()
+        }),
+        ..DeleteParams::default()
+    };
+    match jobs.delete(&taskrun_job_name(task_run_id), &params).await {
+        Ok(_) => Ok(()),
+        Err(kube::Error::Api(response)) if response.code == 404 => Ok(()),
+        Err(e) => Err(format!("delete exact task-run Job: {e}")),
+    }
 }
 
 /// List task-run Jobs in a namespace and return primitive inventory rows.
