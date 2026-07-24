@@ -980,6 +980,10 @@ mod lease_adapter_conformance_tests {
         }
     }
     fn expired_queue(id: &str) -> LeaseQueueRequest {
+        // Test-only wall-clock read: this helper fabricates an already-expired
+        // deadline, which is exactly what the disallowed-method guard cannot
+        // model. Scope the allow to this statement.
+        #[allow(clippy::disallowed_methods)]
         let now_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("wall clock")
