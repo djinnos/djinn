@@ -23,6 +23,9 @@ mod redis;
 pub use postgres::{PostgresAdapter, WrapperServer};
 pub use redis::{RedisAdapter, RedisWrapperServer};
 
+mod rabbitmq;
+pub use rabbitmq::{RabbitAdapter, RabbitWrapperServer};
+
 const OPERATION_DEADLINE: Duration = Duration::from_secs(15);
 const MAX_IDENTIFIER_LEN: usize = 64;
 const MAX_LINE_LEN: usize = 4096;
