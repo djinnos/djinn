@@ -11,8 +11,9 @@ use std::sync::{
 
 use async_trait::async_trait;
 use djinn_db::{
-    BuildLeaseConsumerKind, BuildLeaseKey, BuildLeaseRepository, BuildLeaseRow, BuildLeaseState,
-    GrantNextBuildLeaseResult, QueueBuildLeaseInput, QueueBuildLeaseResult,
+    AdmissionHandoffRepository, BuildLeaseConsumerKind, BuildLeaseKey, BuildLeaseRepository,
+    BuildLeaseRow, BuildLeaseState, GrantNextBuildLeaseResult, QueueBuildLeaseInput,
+    QueueBuildLeaseResult,
 };
 use djinn_supervisor::services::{
     LeaseAbandonRequest, LeaseBindRequest, LeaseCancelRequest, LeaseDeadlines, LeaseFencingToken,
@@ -188,6 +189,15 @@ pub struct BuildLeaseService {
     telemetry: Arc<dyn LeaseTelemetry>,
     cap: AtomicI64,
     recovered: AtomicBool,
+    /// Durable admission-handoff epoch reader. When present, [`Self::recover`]
+    /// and [`Self::recovery_snapshot`] read the epoch (and its reference cap)
+    /// before the service opens, so a restart never admits or spawns without
+    /// having observed the current epoch. `None` in the many tests that exercise
+    /// the lease state machine in isolation (behaviour then unchanged).
+    handoff: Option<Arc<AdmissionHandoffRepository>>,
+    /// The admission epoch observed by the most recent successful recovery, or
+    /// `-1` when none has been observed (unknown/unreadable ⇒ fail closed).
+    observed_epoch: AtomicI64,
     /// Keeps queue+local-drain atomic in this process. Database advisory locks
     /// serialize the same decisions across replacement coordinators.
     operation: Mutex<()>,
@@ -220,13 +230,61 @@ impl BuildLeaseService {
             telemetry,
             cap: AtomicI64::new(cap.max(0)),
             recovered: AtomicBool::new(false),
+            handoff: None,
+            observed_epoch: AtomicI64::new(-1),
             operation: Mutex::new(()),
         }
+    }
+
+    /// Install the durable admission-handoff epoch reader so recovery reads the
+    /// epoch (and its reference cap) before opening.
+    #[must_use]
+    pub fn with_handoff_epoch(mut self, handoff: Arc<AdmissionHandoffRepository>) -> Self {
+        self.handoff = Some(handoff);
+        self
     }
 
     #[must_use]
     pub fn is_ready(&self) -> bool {
         self.recovered.load(Ordering::Acquire)
+    }
+
+    /// The admission epoch observed by the most recent successful recovery, or
+    /// `None` when none has been observed (unknown/unreadable ⇒ fail closed).
+    #[must_use]
+    pub fn observed_epoch(&self) -> Option<i64> {
+        let epoch = self.observed_epoch.load(Ordering::Acquire);
+        (epoch >= 0).then_some(epoch)
+    }
+
+    /// Read the durable admission-handoff epoch and apply its reference cap.
+    ///
+    /// Returns the reference cap to enforce, defaulting to `fallback` (the
+    /// lease-table cap) when no handoff reader is installed or the row carries
+    /// no cap. An unreadable epoch clears the observed epoch (fail closed) and
+    /// retains the fallback cap. The handoff reference cap is authoritative for
+    /// the v1 authority when set, so a restart converges on the epoch's cap
+    /// rather than a stale lease-table value.
+    async fn read_handoff_epoch(&self, fallback: i64) -> i64 {
+        let Some(handoff) = self.handoff.as_ref() else {
+            return fallback;
+        };
+        match handoff.read().await {
+            Ok(Some(row)) => {
+                self.observed_epoch.store(row.epoch, Ordering::Release);
+                row.cap.unwrap_or(fallback)
+            }
+            Ok(None) => {
+                // No durable epoch row: nothing to observe, keep the fallback.
+                self.observed_epoch.store(-1, Ordering::Release);
+                fallback
+            }
+            Err(_) => {
+                // Unreadable epoch: fail closed on the observed epoch.
+                self.observed_epoch.store(-1, Ordering::Release);
+                fallback
+            }
+        }
     }
 
     /// Recover queued and all occupied rows before opening the service.
@@ -237,7 +295,12 @@ impl BuildLeaseService {
         self.pause.before_transaction(LeaseOperation::Recover).await;
         match self.repository.snapshot().await {
             Ok(snapshot) => {
-                self.cap.store(snapshot.cap, Ordering::Release);
+                // Read the durable admission epoch (and its reference cap)
+                // BEFORE the service opens, so a restart never admits or spawns
+                // without having observed the current epoch. The handoff
+                // reference cap is authoritative when set.
+                let cap = self.read_handoff_epoch(snapshot.cap).await;
+                self.cap.store(cap, Ordering::Release);
                 self.publish(&snapshot.rows);
                 self.recovered.store(true, Ordering::Release);
                 LeaseResult::Status(empty_status())
@@ -247,11 +310,17 @@ impl BuildLeaseService {
     }
 
     /// Return the durable non-terminal recovery view without mutating it.
+    ///
+    /// The admission epoch (and its reference cap) is read alongside the lease
+    /// snapshot so the recovery view reflects the epoch's authoritative cap
+    /// before any spawn decision is made.
     pub async fn recovery_snapshot(&self) -> Result<djinn_db::BuildLeaseSnapshot, ()> {
         if !self.is_ready() {
             return Err(());
         }
-        self.repository.snapshot().await.map_err(|_| ())
+        let mut snapshot = self.repository.snapshot().await.map_err(|_| ())?;
+        snapshot.cap = self.read_handoff_epoch(snapshot.cap).await;
+        Ok(snapshot)
     }
 
     /// Capacity changes never revoke occupied rows. Positive changes drain FIFO.

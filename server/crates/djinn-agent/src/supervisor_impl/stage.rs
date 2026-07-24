@@ -906,6 +906,27 @@ pub(crate) async fn execute_stage(
         .map_err(StageError::SessionCreate)?;
     let session_id = session_record.id.clone();
 
+    // The task-run generation is now healthy under the current admission mode:
+    // acknowledge the durable admission epoch for this generation. This runs
+    // through `SupervisorServices` so it covers BOTH the host in-process
+    // (DirectServices → direct DB) and the pod (WorkerSupervisorServices →
+    // in-pod DB) paths. The generation key is the canonical
+    // `TaskObservation:{task_id}:{generation}` form so it byte-matches the
+    // invocation-primary edge's required-generation set. The write is
+    // idempotent and stale-fenced; a failure is non-fatal to the stage (the
+    // durable edge simply stays blocked until a later ack lands).
+    let generation_key = djinn_coordinator::build_admission::task_run_generation_key(
+        &task.id,
+        task.reopen_count.max(0),
+    );
+    if let Err(error) = services.record_generation_ack(generation_key).await {
+        tracing::warn!(
+            task_id = %task.id,
+            %error,
+            "build admission: generation acknowledgement failed; invocation-primary edge stays blocked"
+        );
+    }
+
     // ── MCP + skills ─────────────────────────────────────────────────────────
     // `runtime_role` drives resolution so specialists can override the base
     // role's MCP/skill defaults.  `role_mcp_servers` carries the DB row's

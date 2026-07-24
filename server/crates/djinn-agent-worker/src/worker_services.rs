@@ -57,10 +57,10 @@ use djinn_slot::helpers::{
 };
 use djinn_stack::environment::EnvironmentConfig;
 use djinn_supervisor::services::{
-    BillingSource, CostBasisHint, LeaseAbandonRequest, LeaseBindRequest, LeaseCancelRequest,
-    LeaseGrantRequest, LeaseQueueRequest, LeaseReleaseRequest, LeaseResult, LeaseStatusRequest,
-    SerializableCreateSessionParams, SerializableCreateTaskRunParams, SerializableDjinnEvent,
-    WatchdogTerminationRequest,
+    BillingSource, CostBasisHint, InvocationLiftDecision, LeaseAbandonRequest, LeaseBindRequest,
+    LeaseCancelRequest, LeaseGrantRequest, LeaseQueueRequest, LeaseReleaseRequest, LeaseResult,
+    LeaseStatusRequest, SerializableCreateSessionParams, SerializableCreateTaskRunParams,
+    SerializableDjinnEvent, WatchdogTerminationRequest, evaluate_invocation_lift,
 };
 use djinn_supervisor::{
     BranchPublicationResult, RpcServices, StageError, StageOutcome, SupervisorServices,
@@ -325,6 +325,33 @@ impl SupervisorServices for WorkerSupervisorServices {
         request: WatchdogTerminationRequest,
     ) -> Result<(), String> {
         self.rpc.terminate_watchdog_pod(request).await
+    }
+
+    // Lease-v1 authority (grant/bind above) remains on the host over RPC, but
+    // reading the durable admission epoch does not: workers have direct DB
+    // access by design (see `execute_stage` below, which writes `task_runs`
+    // through `self.agent_context.db`). The epoch is coordination state, and the
+    // pod reads it the same way it reads every other coordination row — from its
+    // in-pod database — rather than adding a bespoke RPC round-trip. Any read
+    // failure fails closed.
+    async fn invocation_lift_decision(&self) -> InvocationLiftDecision {
+        let row = djinn_db::AdmissionHandoffRepository::new(self.agent_context.db.clone())
+            .read()
+            .await
+            .map_err(|_| ());
+        evaluate_invocation_lift(row)
+    }
+
+    async fn record_generation_ack(&self, generation_key: String) -> Result<(), String> {
+        let repo = djinn_db::AdmissionHandoffRepository::new(self.agent_context.db.clone());
+        let epoch = match repo.read().await {
+            Ok(Some(row)) => row.epoch,
+            Ok(None) => return Ok(()),
+            Err(error) => return Err(error.to_string()),
+        };
+        repo.record_generation_ack(epoch, &generation_key)
+            .await
+            .map_err(|error| error.to_string())
     }
 
     async fn report_stage_step(&self, step: &'static str) -> Result<(), String> {
