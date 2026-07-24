@@ -233,7 +233,7 @@ impl PostgresAdapter {
     async fn complete_creation(&self, key: CreationKey, notify: Arc<Notify>) {
         let Ok((lease_id, lease)) = self.new_lease() else {
             self.creations.lock().await.remove(&key);
-            notify.notify_waiters();
+            signal_completion(&notify);
             return;
         };
         if self.provision(&lease).await.is_err() {
@@ -260,7 +260,7 @@ impl PostgresAdapter {
                 environment,
             }),
         );
-        notify.notify_waiters();
+        signal_completion(&notify);
     }
 
     async fn complete_cleanup(
@@ -286,7 +286,7 @@ impl PostgresAdapter {
             creations.insert(key, CreationState::CleanupPending(partial));
         }
         drop(creations);
-        notify.notify_waiters();
+        signal_completion(&notify);
     }
 
     fn new_lease(&self) -> Result<(String, Lease), AdapterError> {
@@ -424,6 +424,15 @@ impl PostgresAdapter {
         url.set_path(&format!("/{}", lease.database));
         Ok(url.into())
     }
+}
+
+/// Wake every registered request and retain one permit for a request that has
+/// observed `Creating` but has not registered its waiter yet. The authoritative
+/// `CreationState` re-check in `await_creation` remains the source of truth;
+/// the stored permit additionally makes the completion edge itself lossless.
+fn signal_completion(notify: &Notify) {
+    notify.notify_waiters();
+    notify.notify_one();
 }
 
 async fn cleanup(admin: &mut PgConnection, database: &str, role: &str) -> Result<(), AdapterError> {
@@ -673,8 +682,8 @@ mod tests {
             .await
             .insert(key.clone(), CreationState::Creating(notify.clone()));
 
-        // Force the precise rejected interleaving: completion and
-        // `notify_waiters` both happen before either waiter is registered.
+        // Force the precise rejected interleaving: state recording and the
+        // completion signal both happen before either waiter is registered.
         adapter.creations.lock().await.insert(
             key.clone(),
             CreationState::Created(CreatedLease {
@@ -682,7 +691,7 @@ mod tests {
                 environment: BTreeMap::new(),
             }),
         );
-        notify.notify_waiters();
+        signal_completion(&notify);
 
         let (first, second) = tokio::time::timeout(Duration::from_millis(50), async {
             tokio::join!(
