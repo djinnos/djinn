@@ -43,6 +43,7 @@ pub mod attempt_lifecycle;
 pub mod commands;
 pub mod extraction_replay_eval;
 pub mod final_verification;
+pub mod final_verification_agent;
 pub mod finalize_handlers;
 pub mod finalize_types;
 pub mod helpers;
@@ -54,6 +55,8 @@ pub mod reply_loop;
 pub mod session_extraction;
 mod supervisor_runner;
 
+#[cfg(test)]
+mod final_verification_agent_tool_tests;
 #[cfg(test)]
 mod finalize_handlers_c2_tests;
 #[cfg(test)]

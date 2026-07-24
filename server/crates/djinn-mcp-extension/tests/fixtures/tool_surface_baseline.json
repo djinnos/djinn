@@ -2195,6 +2195,20 @@
   },
   {
     "concurrent_safe": false,
+    "description": "Run the canonical final-verification gate on the current worktree, on demand. It consults first: if an identical tree (same whole-tree fingerprint, manifest, environment, and required coverage) already has a passing run, it returns that evidence instantly WITHOUT executing any commands. Otherwise it runs the required checks hermetically and records the result. Use it to confirm your work passes before you submit — an unchanged tree is never compiled twice, so calling it is cheap on a fresh hit. Returns a typed outcome (hit / ran-pass / ran-fail / rate-limited / error) with per-check results. It does NOT submit your work; call submit_work / submit_review when you are done.",
+    "destructive": false,
+    "idempotent": true,
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {},
+      "type": "object"
+    },
+    "name": "run_verification",
+    "openWorld": false,
+    "readOnly": false
+  },
+  {
+    "concurrent_safe": false,
     "description": "Execute shell commands in the task worktree. Commands always run from the worktree root.",
     "destructive": true,
     "idempotent": false,

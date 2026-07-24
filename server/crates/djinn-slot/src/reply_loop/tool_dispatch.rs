@@ -169,6 +169,9 @@ pub(super) struct ToolDispatchContext<'a> {
     pub tool_dispatcher: &'a dyn SlotToolDispatcher,
     pub otel_session: Option<&'a telemetry::SessionSpan>,
     pub phase_tracker: Option<&'a Arc<Mutex<SessionPhaseTracker>>>,
+    /// Session cancellation, threaded into the agent-facing `run_verification`
+    /// coordinator client so a kill aborts an in-flight verification run.
+    pub cancel: &'a tokio_util::sync::CancellationToken,
 }
 
 /// Per-call fields passed into [`dispatch_single_tool`].
@@ -235,6 +238,49 @@ pub(super) async fn dispatch_single_tool<'a>(
         tool_span,
         retry_safe,
     } = req;
+    // Agent-facing `run_verification`: a pure client of the authoritative
+    // final-verification coordinator. It is intercepted here (rather than
+    // routed to a generic extension handler) because the coordinator requires
+    // the live `SlotContext`, the same entry the completion-intent path uses.
+    // It is not a finalize tool — the loop continues after a normal tool result.
+    if name == "run_verification" {
+        let value = ctx
+            .ctx
+            .callbacks
+            .run_agent_verification(
+                ctx.task_id,
+                ctx.role_name,
+                args.clone(),
+                ctx.cancel.clone(),
+                ctx.ctx,
+            )
+            .await;
+        // `ran-fail` is a successful tool call that reports failing checks in its
+        // payload — not a tool error. Only outcomes where nothing ran (`error`,
+        // `rate-limited`) mark the tool result as an error.
+        let is_error = value
+            .get("outcome")
+            .and_then(serde_json::Value::as_str)
+            .map(|outcome| matches!(outcome, "error" | "rate-limited"))
+            .unwrap_or(false);
+        let text = ctx.tool_dispatcher.render_result(&id, &name, &value);
+        if let Some(ts) = tool_span {
+            ts.record_output(&text, is_error);
+            if is_error {
+                ts.end_error("run_verification did not run (error or rate limited)");
+            } else {
+                ts.end_ok();
+            }
+        }
+        return (
+            idx,
+            ContentBlock::ToolResult {
+                tool_use_id: id,
+                content: vec![ContentBlock::Text { text }],
+                is_error,
+            },
+        );
+    }
     if ctx.tool_dispatcher.is_stash_tool(&name) {
         let result = ctx.tool_dispatcher.handle_stash_call(&name, args.as_ref());
         let (content, is_error) = match result {
@@ -674,6 +720,9 @@ async fn collect_tool_results_internal(
     indexed_results
 }
 
+#[cfg(test)]
+#[path = "tool_dispatch_budget_tests.rs"]
+mod tool_dispatch_budget_tests;
 #[cfg(test)]
 #[path = "tool_dispatch_tests.rs"]
 mod tool_dispatch_tests;

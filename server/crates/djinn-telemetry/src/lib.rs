@@ -79,6 +79,16 @@ const VERIFY_CACHE_LOOKUP_TOTAL: &str = "verify_cache_lookup_total";
 const VERIFY_CACHE_LOOKUP_OUTCOMES: [&str; 5] = ["hit", "miss", "stale", "error", "disabled"];
 const VERIFY_RUN_RECORD_TOTAL: &str = "verify_run_record_total";
 const VERIFY_RUN_RECORD_OUTCOMES: [&str; 3] = ["stored", "ineligible", "error"];
+// Agent-facing `run_verification` tool attempts. Exactly one bounded terminal
+// outcome per call; correlation identifiers and per-check IDs remain structured
+// tracing/audit fields, never metric labels.
+const RUN_VERIFICATION_TOOL_TOTAL: &str = "run_verification_tool_total";
+const RUN_VERIFICATION_TOOL_OUTCOMES: [&str; 5] =
+    ["hit", "ran-pass", "ran-fail", "error", "rate-limited"];
+const RUN_VERIFICATION_SELECTION_TOTAL: &str = "run_verification_selection_total";
+const RUN_VERIFICATION_SELECTIONS: [&str; 2] = ["full", "subset"];
+const RUN_VERIFICATION_CHECK_TOTAL: &str = "run_verification_check_total";
+const RUN_VERIFICATION_CHECK_RESULTS: [&str; 2] = ["pass", "fail"];
 const INLINE_PR_CLOSED_TOTAL: &str = "djinn_inline_pr_closed_total";
 const INLINE_BRANCH_DELETED_TOTAL: &str = "djinn_inline_branch_deleted_total";
 const INLINE_CLEANUP_SKIPPED_TOTAL: &str = "djinn_inline_cleanup_skipped_total";
@@ -311,6 +321,21 @@ pub mod final_verification {
     pub const RECORD_INELIGIBLE: &str = "ineligible";
     pub const RECORD_ERROR: &str = "error";
 
+    /// Bounded terminal outcomes for one agent-facing `run_verification` call.
+    pub const TOOL_HIT: &str = "hit";
+    pub const TOOL_RAN_PASS: &str = "ran-pass";
+    pub const TOOL_RAN_FAIL: &str = "ran-fail";
+    pub const TOOL_ERROR: &str = "error";
+    pub const TOOL_RATE_LIMITED: &str = "rate-limited";
+
+    /// Command-group selection surfaces for one `run_verification` call.
+    pub const SELECTION_FULL: &str = "full";
+    pub const SELECTION_SUBSET: &str = "subset";
+
+    /// Per-check bounded results for `run_verification`.
+    pub const CHECK_PASS: &str = "pass";
+    pub const CHECK_FAIL: &str = "fail";
+
     /// An injected recorder failure used to prove telemetry is best-effort.
     #[derive(Debug)]
     pub struct EmissionError;
@@ -337,11 +362,46 @@ pub mod final_verification {
         Ok(())
     }
 
+    /// Increment the one terminal outcome for an agent-facing `run_verification`
+    /// tool attempt. Exactly one call per tool invocation.
+    pub fn increment_tool_attempt(outcome: &'static str) -> Result<(), EmissionError> {
+        #[cfg(feature = "test-support")]
+        TOOL_EMISSION_ATTEMPTS.with(|attempts| attempts.set(attempts.get() + 1));
+        if injected_failure() {
+            return Err(EmissionError);
+        }
+        metrics::counter!(super::RUN_VERIFICATION_TOOL_TOTAL, "outcome" => outcome).increment(1);
+        Ok(())
+    }
+
+    /// Increment the command-group selection surface (`full`/`subset`) chosen for
+    /// one `run_verification` call. Best-effort; never gates the tool result.
+    pub fn increment_selection(selection: &'static str) {
+        metrics::counter!(super::RUN_VERIFICATION_SELECTION_TOTAL, "selection" => selection)
+            .increment(1);
+    }
+
+    /// Add to the bounded per-check pass/fail counter for `run_verification`.
+    pub fn add_check_results(result: &'static str, count: u64) {
+        if count == 0 {
+            return;
+        }
+        metrics::counter!(super::RUN_VERIFICATION_CHECK_TOTAL, "result" => result).increment(count);
+    }
+
     #[cfg(feature = "test-support")]
     thread_local! {
         static FAIL_NEXT_EMISSION: Cell<bool> = const { Cell::new(false) };
         static LOOKUP_EMISSION_ATTEMPTS: Cell<usize> = const { Cell::new(0) };
         static RECORD_EMISSION_ATTEMPTS: Cell<usize> = const { Cell::new(0) };
+        static TOOL_EMISSION_ATTEMPTS: Cell<usize> = const { Cell::new(0) };
+    }
+
+    /// Return `run_verification` tool-attempt emissions since the failure seam
+    /// was armed (includes the injected failure, exposing duplicates).
+    #[cfg(feature = "test-support")]
+    pub fn tool_emission_attempts_for_test() -> usize {
+        TOOL_EMISSION_ATTEMPTS.with(Cell::get)
     }
 
     /// Cause one emission to fail in deterministic coordinator tests.
@@ -350,6 +410,7 @@ pub mod final_verification {
         FAIL_NEXT_EMISSION.with(|failure| failure.set(true));
         LOOKUP_EMISSION_ATTEMPTS.with(|attempts| attempts.set(0));
         RECORD_EMISSION_ATTEMPTS.with(|attempts| attempts.set(0));
+        TOOL_EMISSION_ATTEMPTS.with(|attempts| attempts.set(0));
     }
 
     /// Return lookup/record attempts since the failure seam was armed.
@@ -1075,6 +1136,27 @@ fn register_metrics() {
     );
     for outcome in VERIFY_RUN_RECORD_OUTCOMES {
         metrics::counter!(VERIFY_RUN_RECORD_TOTAL, "outcome" => outcome).absolute(0);
+    }
+    metrics::describe_counter!(
+        RUN_VERIFICATION_TOOL_TOTAL,
+        "Agent-facing run_verification tool attempts partitioned by bounded terminal outcome."
+    );
+    for outcome in RUN_VERIFICATION_TOOL_OUTCOMES {
+        metrics::counter!(RUN_VERIFICATION_TOOL_TOTAL, "outcome" => outcome).absolute(0);
+    }
+    metrics::describe_counter!(
+        RUN_VERIFICATION_SELECTION_TOTAL,
+        "run_verification command-group selection surface partitioned by full/subset."
+    );
+    for selection in RUN_VERIFICATION_SELECTIONS {
+        metrics::counter!(RUN_VERIFICATION_SELECTION_TOTAL, "selection" => selection).absolute(0);
+    }
+    metrics::describe_counter!(
+        RUN_VERIFICATION_CHECK_TOTAL,
+        "run_verification per-check results partitioned by bounded pass/fail."
+    );
+    for result in RUN_VERIFICATION_CHECK_RESULTS {
+        metrics::counter!(RUN_VERIFICATION_CHECK_TOTAL, "result" => result).absolute(0);
     }
     metrics::describe_gauge!(
         DISPATCH_LAST_SUCCESS_TIMESTAMP,

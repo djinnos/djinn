@@ -72,6 +72,19 @@ pub fn tool_request_planner() -> RmcpTool {
     )
 }
 
+pub fn tool_run_verification() -> RmcpTool {
+    RmcpTool::new(
+        "run_verification".to_string(),
+        "Run the canonical final-verification gate on the current worktree, on demand. It consults first: if an identical tree (same whole-tree fingerprint, manifest, environment, and required coverage) already has a passing run, it returns that evidence instantly WITHOUT executing any commands. Otherwise it runs the required checks hermetically and records the result. Use it to confirm your work passes before you submit — an unchanged tree is never compiled twice, so calling it is cheap on a fresh hit. Returns a typed outcome (hit / ran-pass / ran-fail / rate-limited / error) with per-check results. It does NOT submit your work; call submit_work / submit_review when you are done."
+            .to_string(),
+        object!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
+        }),
+    )
+}
+
 pub fn tool_shell() -> RmcpTool {
     RmcpTool::new(
         "shell".to_string(),
@@ -467,6 +480,13 @@ pub fn tool_schemas_worker() -> Vec<serde_json::Value> {
         mutation(),
     ));
     tool_values.push(serialize_tool(tool_request_planner(), mutation()));
+    // On-demand canonical final-verification gate (consult-first reuse). Runs
+    // and may record a passing row, but re-running an unchanged tree only
+    // consults, so it is classified idempotent.
+    tool_values.push(serialize_tool(
+        tool_run_verification(),
+        idempotent_mutation(),
+    ));
     tool_values.push(serialize_tool(
         crate::finalize_tools::tool_submit_work(),
         mutation(),
@@ -484,6 +504,12 @@ pub fn tool_schemas_reviewer() -> Vec<serde_json::Value> {
     ));
     // request_planner is the intended planner-escalation path for reviewers.
     tool_values.push(serialize_tool(tool_request_planner(), mutation()));
+    // Reviewers consult the same task-scoped final-verification gate on demand;
+    // an unchanged authored tree is reused with no commands executed.
+    tool_values.push(serialize_tool(
+        tool_run_verification(),
+        idempotent_mutation(),
+    ));
     tool_values.push(serialize_tool(
         crate::finalize_tools::tool_submit_review(),
         mutation(),

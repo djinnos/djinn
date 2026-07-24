@@ -57,6 +57,8 @@ mod task_admin;
 // Retained for test coverage; production dispatch goes through djinn-mcp-extension.
 #[allow(dead_code)]
 mod task_epic;
+pub(crate) mod verification;
+pub(crate) use verification::{RunVerificationLimits, SessionVerificationRateLimiter};
 mod workspace;
 mod workspace_helpers;
 
