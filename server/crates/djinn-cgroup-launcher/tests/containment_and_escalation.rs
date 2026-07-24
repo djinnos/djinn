@@ -3,17 +3,21 @@
 //!
 //! Everything here is driven through fake cgroup-filesystem, clone, peer, and
 //! nonce seams so kernel behaviour is modelled deterministically. No test needs
-//! privileged Kubernetes or cgroup access. The one privilege-dependent
-//! assertion (distinct-UID setgid artifact editing) always runs its unprivileged
-//! mechanism proof and additionally runs the real distinct-UID edit — asserting,
-//! never silently passing — when the environment can switch identity.
+//! privileged Kubernetes or cgroup access.
 //!
-//! Rendered security-context and cluster-wide cap/warm-consumer assertions live
-//! in sibling epics 9y1a/23or, not here.
+//! The privilege-dependent half — a real UID-1001 child attacking a real,
+//! non-dumpable UID-1000 worker, and the distinct-UID setgid artifact edit that
+//! used to sit behind a `geteuid() == 0` check here and therefore never
+//! executed — now lives in `tests/kernel_boundary_under_rendered_context.rs`
+//! (task zf13, goxi AC2), which runs in the privileged
+//! `launcher-kernel-boundary` CI lane and FAILS rather than skips when that
+//! environment is unavailable. What remains below is the unprivileged mechanism
+//! proof, which runs everywhere.
+//!
+//! Cluster-wide cap/warm-consumer assertions live in sibling epics 9y1a/23or.
 
 use std::cell::RefCell;
 use std::collections::BTreeSet;
-use std::ffi::CString;
 use std::os::fd::RawFd;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -564,7 +568,9 @@ fn ac3_incompatible_readiness_profiles_and_missing_worker_readiness_fail_closed(
         owner_uid: 7,
         delegated_controllers: BTreeSet::from(["cpu".to_owned()]),
     };
-    let cases: Vec<(Readiness, fn(&Error) -> bool)> = vec![
+    /// One unsupported readiness profile and the error it must fail closed with.
+    type RejectedProfile = (Readiness, fn(&Error) -> bool);
+    let cases: Vec<RejectedProfile> = vec![
         (
             Readiness {
                 mode: CgroupMode::V1,
@@ -658,18 +664,17 @@ fn set_mode(path: &Path, mode: u32) {
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).expect("set mode");
 }
 
-/// Whether this process can switch to arbitrary worker/child identities. Only
-/// then is the real distinct-UID mutual edit exercised; the mechanism proof
-/// below always runs.
-fn can_switch_identity() -> bool {
-    unsafe { libc::geteuid() == 0 }
-}
-
 /// The child boundary sets GID = ARTIFACT_GID (1000) and umask 0002 so that a
 /// setgid artifact directory yields group-owned, group-writable files that the
 /// distinct worker (UID 1000) and child (UID 1001) — both in group 1000 — can
-/// mutually edit. This proves the mechanism unconditionally and, where the
-/// environment permits identity switching, the real cross-UID edit as well.
+/// mutually edit.
+///
+/// This proves the MECHANISM unconditionally, with the process's own gid, so it
+/// runs everywhere. The real cross-UID edit at the rendered identities is
+/// proven by
+/// `kernel_boundary_under_rendered_context::setgid_artifacts_stay_mutually_editable_across_the_distinct_worker_and_child_uids`,
+/// which executes in the privileged lane and fails loudly there rather than
+/// skipping — the gap that left this half of the AC unproven.
 #[test]
 fn ac3_setgid_gid1000_umask0002_enables_distinct_uid_mutual_edit() {
     // The identities that make mutual editing possible: two distinct UIDs that
@@ -716,89 +721,5 @@ fn ac3_setgid_gid1000_umask0002_enables_distinct_uid_mutual_edit() {
         );
     }
 
-    // Privileged proof: two real processes at the distinct worker/child UIDs,
-    // both in artifact group 1000, mutually edit each other's setgid artifacts.
-    if can_switch_identity() {
-        let dir = base.join("cross-uid");
-        std::fs::create_dir(&dir).expect("cross-uid dir");
-        set_mode(&dir, 0o2775);
-        chown(&dir, WORKER_UID, ARTIFACT_GID);
-
-        // Worker (uid 1000) creates an artifact; child (uid 1001) edits it.
-        let worker_artifact = dir.join("worker-owned.txt");
-        assert_eq!(create_as(&worker_artifact, WORKER_UID, ARTIFACT_GID), 0);
-        assert_eq!(append_as(&worker_artifact, CHILD_UID, ARTIFACT_GID), 0);
-
-        // And the reverse: child creates, worker edits.
-        let child_artifact = dir.join("child-owned.txt");
-        assert_eq!(create_as(&child_artifact, CHILD_UID, ARTIFACT_GID), 0);
-        assert_eq!(append_as(&child_artifact, WORKER_UID, ARTIFACT_GID), 0);
-    }
-
     let _ = std::fs::remove_dir_all(&base);
-}
-
-fn chown(path: &Path, uid: u32, gid: u32) {
-    let c = CString::new(path.as_os_str().to_str().expect("utf8 path")).expect("cstring");
-    let rc = unsafe { libc::chown(c.as_ptr(), uid, gid) };
-    assert_eq!(rc, 0, "chown must succeed when privileged");
-}
-
-/// Fork a child that becomes (uid, gid) under umask 0002 and O_CREAT-writes the
-/// file. Returns the child's exit code (0 on success). Only async-signal-safe
-/// libc calls run post-fork.
-fn create_as(path: &Path, uid: u32, gid: u32) -> i32 {
-    run_as(
-        path,
-        uid,
-        gid,
-        libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC,
-    )
-}
-
-/// Fork a child that becomes (uid, gid) and appends to an existing file,
-/// proving a distinct same-group UID can edit another identity's artifact.
-fn append_as(path: &Path, uid: u32, gid: u32) -> i32 {
-    run_as(path, uid, gid, libc::O_WRONLY | libc::O_APPEND)
-}
-
-fn run_as(path: &Path, uid: u32, gid: u32, open_flags: i32) -> i32 {
-    let c_path = CString::new(path.as_os_str().to_str().expect("utf8 path")).expect("cstring");
-    let payload = b"edit\n";
-    let pid = unsafe { libc::fork() };
-    assert!(pid >= 0, "fork must succeed");
-    if pid == 0 {
-        // Child: only async-signal-safe syscalls from here on.
-        unsafe {
-            libc::umask(0o002);
-            let group = [gid];
-            if libc::setgroups(1, group.as_ptr()) != 0 {
-                libc::_exit(101);
-            }
-            if libc::setresgid(gid, gid, gid) != 0 {
-                libc::_exit(102);
-            }
-            if libc::setresuid(uid, uid, uid) != 0 {
-                libc::_exit(103);
-            }
-            let fd = libc::open(c_path.as_ptr(), open_flags, 0o666);
-            if fd < 0 {
-                libc::_exit(104);
-            }
-            let written = libc::write(fd, payload.as_ptr().cast(), payload.len());
-            libc::close(fd);
-            if written != payload.len() as isize {
-                libc::_exit(105);
-            }
-            libc::_exit(0);
-        }
-    }
-    let mut status = 0;
-    let waited = unsafe { libc::waitpid(pid, &mut status, 0) };
-    assert_eq!(waited, pid, "waitpid must reap the child");
-    if libc::WIFEXITED(status) {
-        libc::WEXITSTATUS(status)
-    } else {
-        -1
-    }
 }
