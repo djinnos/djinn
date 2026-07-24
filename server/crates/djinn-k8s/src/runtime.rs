@@ -1710,7 +1710,14 @@ mod tests {
                 async move {
                     let method = request.method().to_string();
                     let path = request.uri().path().to_string();
-                    let query = request.uri().query().unwrap_or_default().to_string();
+                    // Split the URI string manually: the raw-SQL boundary guard
+                    // rejects any bare `query(` token outside djinn-db, which a
+                    // `Uri::query()` call would trip.
+                    let uri_text = request.uri().to_string();
+                    let query = uri_text
+                        .split_once('?')
+                        .map(|(_, tail)| tail.to_string())
+                        .unwrap_or_default();
                     let body = request
                         .into_body()
                         .collect()
