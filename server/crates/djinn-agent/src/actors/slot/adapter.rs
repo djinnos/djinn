@@ -24,6 +24,7 @@ use djinn_k8s::sidecar::resolve_image_services_strict;
 use djinn_sandbox::final_verification_execution::{
     EnvironmentIdentityResolver, FinalVerificationExecutionRequest,
 };
+use djinn_sandbox::service_provisioning::{ServiceProvisioners, UnixCatalogServiceProvisioner};
 use djinn_supervisor::SupervisorServices;
 use globset::{Glob, GlobSetBuilder};
 
@@ -396,6 +397,17 @@ pub async fn resolve_final_verification_for_task_run(
         .await
         .map_err(|e| format!("strict catalog resolution failed: {e}"))?;
     let catalog_loopback_endpoints = catalog_loopback_endpoints(&services)?;
+    let service_provisioners: ServiceProvisioners = services
+        .iter()
+        .map(|service| {
+            Arc::new(UnixCatalogServiceProvisioner::new(
+                service.preset_id.clone(),
+                PathBuf::from("/var/run/djinn/service-control")
+                    .join(format!("{}.sock", service.preset_id)),
+                service.exported_environment_names.clone(),
+            )) as Arc<dyn djinn_sandbox::service_provisioning::CatalogServiceProvisioner>
+        })
+        .collect();
     let manifest = VerificationInputManifestV1 {
         version: plan.input_manifest.version,
         repo_paths: plan.input_manifest.repo_paths.clone(),
@@ -518,6 +530,7 @@ pub async fn resolve_final_verification_for_task_run(
                 read_only_external_mounts: external_inputs.into_iter().map(|i| i.path).collect(),
                 output_directories,
                 catalog_loopback_endpoints,
+                service_provisioners,
             },
             verify_source: VerifySource::Worker,
             required_checks,

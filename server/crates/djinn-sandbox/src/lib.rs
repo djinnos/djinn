@@ -14,6 +14,8 @@ use anyhow::Result;
 pub mod final_verification;
 #[cfg(target_os = "linux")]
 pub mod final_verification_execution;
+#[cfg(target_os = "linux")]
+pub mod service_provisioning;
 pub mod linux;
 #[cfg(target_os = "macos")]
 pub mod macos;

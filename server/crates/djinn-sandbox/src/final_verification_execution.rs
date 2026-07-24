@@ -23,6 +23,10 @@ use crate::final_verification::{
     FinalVerificationError, FinalVerificationLoopbackEndpoint, FinalVerificationNetworkSession,
     FinalVerificationRequest, launch_final_verification_in_network_session_with_timeout,
 };
+use crate::service_provisioning::{
+    ServiceProvisioners, ServiceProvisioningCode, ServiceProvisioningPhase, create_ready_leases,
+    delete_leases,
+};
 
 /// Reacquires resolved identity material at each consistency boundary.
 pub type EnvironmentIdentityResolver = Arc<
@@ -45,6 +49,8 @@ pub struct FinalVerificationExecutionRequest {
     /// Strict-catalog ports that the attempt-owned session may expose. This is
     /// resolved before execution and never derived from command input.
     pub catalog_loopback_endpoints: Vec<FinalVerificationLoopbackEndpoint>,
+    /// Attempt-scoped catalog leases; never part of identity or durable evidence.
+    pub service_provisioners: ServiceProvisioners,
 }
 
 impl std::fmt::Debug for FinalVerificationExecutionRequest {
@@ -114,6 +120,10 @@ pub enum FinalVerificationIneligibilityReason {
     },
     FingerprintChanged,
     EnvironmentChanged,
+    ServiceProvisioning {
+        phase: ServiceProvisioningPhase,
+        code: ServiceProvisioningCode,
+    },
 }
 
 /// Complete execution material. `eligibility_reason` is `None` only for a
@@ -142,29 +152,64 @@ impl FinalVerificationExecutionEvidence {
 pub async fn execute_final_verification(
     request: FinalVerificationExecutionRequest,
 ) -> FinalVerificationExecutionEvidence {
-    let session =
-        match FinalVerificationNetworkSession::create(request.catalog_loopback_endpoints.clone()) {
-            Ok(session) => session,
-            Err(error) => {
-                return FinalVerificationExecutionEvidence {
-                    manifest_version: 0,
-                    pre_environment_identity: None,
-                    post_environment_identity: None,
-                    fingerprint_f0: None,
-                    fingerprint_f1: None,
-                    commands: Vec::new(),
-                    eligibility_reason: Some(launcher_reason(error)),
-                };
-            }
-        };
-    execute_final_verification_with_launcher(request, |request, timeout| {
-        launch_final_verification_in_network_session_with_timeout(request, &session, timeout)
-    })
+    let leases = match create_ready_leases(
+        &request.service_provisioners,
+        &format!("verify-{}", now_millis()),
+    )
     .await
+    {
+        Ok(leases) => leases,
+        Err(error) => return service_error_evidence(error.phase, error.code),
+    };
+    // Proxy setup occurs after leases so it shares the same reverse teardown.
+    let session = match FinalVerificationNetworkSession::create(request.catalog_loopback_endpoints.clone()) {
+        Ok(session) => session,
+        Err(_) => match delete_leases(&leases).await {
+            Ok(()) => return service_error_evidence(
+                ServiceProvisioningPhase::Proxy,
+                ServiceProvisioningCode::Unavailable,
+            ),
+            Err(error) => return service_error_evidence(error.phase, error.code),
+        },
+    };
+    let service_environment = leases
+        .iter()
+        .flat_map(|(_, lease)| lease.environment.clone())
+        .collect();
+    let mut evidence = execute_final_verification_with_launcher_and_services(
+        request,
+        service_environment,
+        |request, timeout| {
+            launch_final_verification_in_network_session_with_timeout(request, &session, timeout)
+        },
+    )
+    .await;
+    if let Err(error) = delete_leases(&leases).await {
+        evidence.eligibility_reason = Some(FinalVerificationIneligibilityReason::ServiceProvisioning {
+            phase: error.phase,
+            code: error.code,
+        });
+    }
+    evidence
 }
 
+#[cfg(test)]
 async fn execute_final_verification_with_launcher(
     request: FinalVerificationExecutionRequest,
+    launch: impl Fn(
+        FinalVerificationRequest,
+        Duration,
+    ) -> Result<
+        crate::final_verification::FinalVerificationResult,
+        FinalVerificationError,
+    >,
+) -> FinalVerificationExecutionEvidence {
+    execute_final_verification_with_launcher_and_services(request, BTreeMap::new(), launch).await
+}
+
+async fn execute_final_verification_with_launcher_and_services(
+    request: FinalVerificationExecutionRequest,
+    service_environment: BTreeMap<String, String>,
     launch: impl Fn(
         FinalVerificationRequest,
         Duration,
@@ -233,6 +278,7 @@ async fn execute_final_verification_with_launcher(
             &descriptor,
             &declared_environment,
             &initial_input.allowlisted_environment,
+            &service_environment,
         ) {
             Ok(environment) => environment,
             Err(reason) => return ineligible(evidence, reason),
@@ -443,11 +489,17 @@ fn command_environment(
     descriptor: &CanonicalCommandDescriptorV1,
     manifest_names: &BTreeSet<String>,
     allowlisted: &BTreeMap<String, String>,
+    service_environment: &BTreeMap<String, String>,
 ) -> Result<BTreeMap<String, String>, FinalVerificationIneligibilityReason> {
     descriptor
         .environment_names
         .iter()
         .map(|name| {
+            if let Some(value) = service_environment.get(name)
+                && manifest_names.contains(name)
+            {
+                return Ok((name.clone(), value.clone()));
+            }
             if !manifest_names.contains(name) || !allowlisted.contains_key(name) {
                 return Err(
                     FinalVerificationIneligibilityReason::UndeclaredCommandEnvironment {
@@ -458,6 +510,21 @@ fn command_environment(
             Ok((name.clone(), allowlisted[name].clone()))
         })
         .collect()
+}
+
+fn service_error_evidence(
+    phase: ServiceProvisioningPhase,
+    code: ServiceProvisioningCode,
+) -> FinalVerificationExecutionEvidence {
+    FinalVerificationExecutionEvidence {
+        manifest_version: 0,
+        pre_environment_identity: None,
+        post_environment_identity: None,
+        fingerprint_f0: None,
+        fingerprint_f1: None,
+        commands: Vec::new(),
+        eligibility_reason: Some(FinalVerificationIneligibilityReason::ServiceProvisioning { phase, code }),
+    }
 }
 
 fn launcher_reason(error: FinalVerificationError) -> FinalVerificationIneligibilityReason {
@@ -622,6 +689,7 @@ mod tests {
             read_only_external_mounts: Vec::new(),
             output_directories,
             catalog_loopback_endpoints: Vec::new(),
+            service_provisioners: Vec::new(),
         }
     }
 
