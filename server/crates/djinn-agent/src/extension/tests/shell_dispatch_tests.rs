@@ -320,8 +320,14 @@ async fn shell_dispatch_broker_backed_cargo_records_exactly_one_observation() {
 
     assert_eq!(response["ok"], serde_json::json!(false));
     assert_eq!(response["exit_code"], serde_json::json!(17));
-    assert_eq!(response["stdout"], serde_json::json!("broker composition stdout\n"));
-    assert_eq!(response["stderr"], serde_json::json!("broker composition stderr\n"));
+    assert_eq!(
+        response["stdout"],
+        serde_json::json!("broker composition stdout\n")
+    );
+    assert_eq!(
+        response["stderr"],
+        serde_json::json!("broker composition stderr\n")
+    );
     let after = djinn_telemetry::render().expect("render telemetry after dispatch");
     assert_eq!(
         cargo_count(&after, "clippy", "fail"),
