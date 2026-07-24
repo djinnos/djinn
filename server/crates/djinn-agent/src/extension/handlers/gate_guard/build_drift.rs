@@ -335,13 +335,10 @@ fn tokenize(cmd: &str) -> Option<Vec<String>> {
                 has_token = true;
             }
             '\\' if !in_single => {
-                if let Some(next) = chars.next() {
-                    current.push(next);
-                    has_token = true;
-                } else {
-                    // Trailing backslash — malformed.
-                    return None;
-                }
+                // Trailing backslash (no following char) is malformed → None.
+                let next = chars.next()?;
+                current.push(next);
+                has_token = true;
             }
             c if c.is_whitespace() && !in_single && !in_double => {
                 if has_token {
