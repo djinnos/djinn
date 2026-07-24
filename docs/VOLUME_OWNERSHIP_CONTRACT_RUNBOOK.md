@@ -13,10 +13,22 @@ They can only share those volumes under one contract:
 
 * **group ownership = `1000`** (`ARTIFACT_GID`, `djinn_cgroup_launcher::child`)
   on every directory and file;
-* **group-write (`g+w`)** on every directory and file — so any of the three can
-  create, overwrite, and unlink what another produced;
+* **group-write (`g+w`)** on every directory, and on every file its owner can
+  write — so any of the three can create, overwrite, and unlink what another
+  produced. Files that are read-only for their owner too (git loose objects and
+  packfiles at `444`, cargo registry sources carrying the tarball's modes) are
+  immutable by design: they are replaced through the directory, so they are not
+  a violation;
 * **setgid (`g+s`) on every directory** — so files created there *inherit* the
-  artifact group instead of the creating process's primary group.
+  artifact group instead of the creating process's primary group. On Linux a
+  directory created inside a setgid directory inherits the bit as well, so
+  normalizing the volume ROOT propagates it to everything created afterwards;
+* **umask `0002`** in every process that writes these volumes, so new files land
+  `664` and new directories `775`. The launcher-spawned child already set it;
+  the worker process and the warm Job's clone wrapper now do too. Without it a
+  process silently writes `755`/`644` into a perfectly conforming volume and
+  breaks it from the inside — which is how the frozen warm base kept
+  reappearing.
 
 Violating it does not produce a crash. It produces a **silent freeze**: the warm
 Job's cargo phase is best-effort (lock-unavailable, step failure and timeout only
@@ -70,6 +82,14 @@ kubectl -n djinn exec deploy/djinn -- \
 
 Conforming output is `gid=1000` and a mode beginning with `2` (setgid) and
 carrying group-write: `2775` for directories, `664` for files.
+
+## Before upgrading to the version that enforces this
+
+The check fails closed. A cluster whose volumes predate the contract will see
+its first post-upgrade task-run and warm Pods exit at startup with the log line
+above **instead of** silently running against a frozen cache. Run the
+remediation below in the same maintenance window as the upgrade — or run it
+first, since it is safe on a conforming volume.
 
 ## One-time remediation for pre-existing volumes
 

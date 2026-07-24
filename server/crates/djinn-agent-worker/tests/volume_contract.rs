@@ -121,6 +121,47 @@ fn missing_group_write_on_a_nested_file_fails() {
     assert_eq!(err.kind(), "group_write");
 }
 
+/// git loose objects/packfiles are `444` and cargo lays down registry sources
+/// with the tarball's modes. Those are immutable by design and are replaced
+/// through the (group-writable) directory, so they must not be read as a
+/// permission regression.
+#[test]
+fn owner_read_only_files_are_not_a_group_write_violation() {
+    let dir = conforming_tree();
+    chmod(&dir.path().join("sub").join("file"), 0o444);
+    validate(&contract(), &root_of(&dir)).expect("444 artifacts are immutable, not misowned");
+
+    // …but an owner-writable file without group-write still fails: that is the
+    // production 644 shape.
+    chmod(&dir.path().join("sub").join("file"), 0o644);
+    let err = validate(&contract(), &root_of(&dir)).expect_err("644 must still fail");
+    assert_eq!(err.kind(), "group_write");
+}
+
+/// The umask is the other half of the contract: without it the worker creates
+/// 755/644 into a conforming volume and breaks it from the inside.
+#[test]
+fn the_artifact_umask_makes_new_files_conforming() {
+    use djinn_agent_worker::volume_contract::{ARTIFACT_UMASK, apply_artifact_umask};
+
+    let previous = apply_artifact_umask();
+    let dir = TempDir::new().expect("tempdir");
+    chmod(dir.path(), DIR_CONFORMING);
+    let nested = dir.path().join("created");
+    fs::create_dir(&nested).expect("mkdir");
+    fs::write(nested.join("artifact"), b"x").expect("write");
+
+    // setgid on the parent propagates the group AND the setgid bit to the new
+    // directory; the umask supplies the group-write bits.
+    let report = validate(&contract(), &root_of(&dir))
+        .expect("everything created under the artifact umask conforms");
+    assert!(report.entries_sampled >= 3);
+    assert_eq!(ARTIFACT_UMASK, 0o002);
+
+    // SAFETY: restore the harness's umask; same contract as the setter.
+    unsafe { libc::umask(previous) };
+}
+
 #[test]
 fn missing_group_write_on_a_directory_fails() {
     let dir = conforming_tree();

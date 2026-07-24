@@ -342,6 +342,18 @@ async fn run() -> Result<()> {
         warn!(%error, "failed to initialize worker telemetry recorder");
     }
 
+    // Everything this process creates on the shared volumes must stay
+    // group-writable for the launcher-spawned child (uid 1001, group 1000) —
+    // the child already sets `umask 0002`, the worker inherited the container
+    // default 022 and was silently writing 755/644 into the cargo warm base.
+    // Applied before any filesystem work and before the startup contract check.
+    let previous_umask = volume_contract::apply_artifact_umask();
+    info!(
+        previous_umask = format!("{previous_umask:04o}"),
+        umask = format!("{:04o}", volume_contract::ARTIFACT_UMASK),
+        "applied artifact umask"
+    );
+
     let cli = Cli::parse();
 
     match cli.cmd {

@@ -23,7 +23,12 @@
 //!     launcher-spawned child (primary group 1000) share every artifact;
 //!   * directories carry **group-write** *and* **setgid**, so files created by
 //!     either identity inherit the artifact group instead of the creator's;
-//!   * files carry **group-write**, so the other identity can overwrite them;
+//!   * files that their owner can write carry **group-write**, so the other
+//!     identity can overwrite them in place (files that are read-only for their
+//!     owner too — git objects, cargo registry sources — are immutable by
+//!     design and are replaced through the directory, not written);
+//!   * the process runs with umask `0002` ([`apply_artifact_umask`]) so
+//!     everything it creates keeps satisfying the above;
 //!   * the process itself is a member of [`ARTIFACT_GID`] (primary or
 //!     supplementary) — a conforming volume is useless to a pod that is not in
 //!     the group.
@@ -62,6 +67,9 @@ use crate::cargo_target_seed::{RUN_TARGET_ROOT, WARM_BASE_ROOT, warm_base_dir_fo
 const MODE_SETGID: u32 = 0o2000;
 /// Group-write bit.
 const MODE_GROUP_WRITE: u32 = 0o020;
+/// Owner-write bit — a file without it is immutable by design (git objects,
+/// cargo registry sources) rather than mis-permissioned.
+const MODE_OWNER_WRITE: u32 = 0o200;
 /// Permission bits we report on (mode & this) — keeps log lines readable.
 const MODE_MASK: u32 = 0o7777;
 
@@ -436,7 +444,16 @@ fn check_metadata(
         });
     }
 
-    if mode & MODE_GROUP_WRITE == 0 {
+    // Group-write is required wherever the OWNER can write. A file that is
+    // read-only for its owner too is immutable by design, not a permission
+    // regression: git stores loose objects and packfiles `444`, and cargo lays
+    // down registry sources with the modes recorded in the crate tarball. Those
+    // are replaced by unlink+create, which needs write on the DIRECTORY — which
+    // is checked unconditionally. Keying on the owner-write bit therefore still
+    // catches the exact production shape (dirs 755, files 644) without
+    // rejecting legitimately read-only artifacts.
+    let owner_writable = mode & MODE_OWNER_WRITE != 0;
+    if (is_dir || owner_writable) && mode & MODE_GROUP_WRITE == 0 {
         return Err(VolumeContractError::GroupWrite {
             label: label.to_string(),
             path: path.to_path_buf(),
@@ -496,6 +513,31 @@ pub fn supplementary_groups() -> Vec<u32> {
         buf.truncate(filled as usize);
         buf
     }
+}
+
+/// Process umask that keeps the contract true for everything this process
+/// creates: `0o002` clears only "other"-write, so new directories land `775`
+/// and new files `664` instead of `755`/`644`.
+pub const ARTIFACT_UMASK: libc::mode_t = 0o002;
+
+/// Apply [`ARTIFACT_UMASK`] to this process and return the previous mask.
+///
+/// This is the *other half* of the contract, and it was missing: the
+/// launcher-spawned child already sets `umask 0002`
+/// (`djinn_cgroup_launcher::child::prepare_child`), but the worker process
+/// itself inherited the container's default `022`. Everything the worker
+/// created on the shared volumes — the Cargo warm base above all — therefore
+/// landed group-READABLE but not group-WRITABLE, so the child (uid 1001, group
+/// 1000) could not overwrite it even on a perfectly conforming volume. Setgid
+/// on the directories fixes the *group*; only the umask fixes the *mode*.
+///
+/// Must run before any filesystem work, and before [`enforce_at_startup`] so a
+/// first-run pod that creates its own cache subtree creates it conforming.
+pub fn apply_artifact_umask() -> libc::mode_t {
+    // SAFETY: `umask` takes a mode, cannot fail, and touches no memory. It is
+    // process-global, which is exactly the intent, and is applied once at
+    // startup before any worker thread does filesystem work.
+    unsafe { libc::umask(ARTIFACT_UMASK) }
 }
 
 /// Mounted roots a **task-run** Pod must be able to write.

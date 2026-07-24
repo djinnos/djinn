@@ -109,6 +109,12 @@ pub fn build_warm_job(
     // for the broader warm-cost discussion.
     let cmd = format!(
         r#"set -euo pipefail
+# Everything this Pod creates on the shared volumes must stay group-writable for
+# the other identity that reads/writes them (the launcher-spawned child, uid
+# 1001 primary group 1000). The container default 022 would give the clone 755
+# dirs / 644 files, which the worker's startup contract check rejects. See
+# `djinn_agent_worker::volume_contract`.
+umask 0002
 git config --global --add safe.directory "{mirror_path}"
 UPSTREAM_URL="$(git -C "{mirror_path}" config remote.origin.url)"
 git clone --depth 1000 --single-branch "$UPSTREAM_URL" "{project_root}"
