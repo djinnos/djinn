@@ -18,6 +18,7 @@ use djinn_db::{
     AdmissionDomain, AdmissionJournalKey, AdmissionJournalRepository, AdmissionJournalRow,
     AdmissionRecoveryResult, AdmissionState, AdmissionWorkloadKind, CreateStartedInput,
     ReserveAdmissionInput, ReserveAdmissionResult, TerminalAdmissionInput, UidFencedAdmissionInput,
+    V0Mode, V1Mode,
 };
 use djinn_k8s::{
     WarmAdmission, WarmAdmissionError, WarmAdmissionPermit, WarmAdmissionRequest,
@@ -54,6 +55,37 @@ impl BuildAdmissionMode {
             _ => Self::Enforce,
         }
     }
+}
+
+/// Smallest legal reference cap. A cap of zero would deny all admission.
+pub const MIN_ADMISSION_CAP: i64 = 1;
+
+/// Largest legal reference cap. A sane upper bound that rejects an obviously
+/// mistyped configuration up front rather than letting it reach the durable row.
+pub const MAX_ADMISSION_CAP: i64 = 4096;
+
+/// Validate an admission-epoch configuration before it is written durably.
+///
+/// Two rules are enforced up front so a bad configuration never reaches the
+/// durable handoff row:
+///
+/// - The illegal mode combination in which neither authority enforces
+///   (`v0 ∈ {observe, disabled} ∧ v1 ∈ {off, shadow}`) is rejected: something
+///   must actually enforce the cap.
+/// - The reference cap must be within `[MIN_ADMISSION_CAP, MAX_ADMISSION_CAP]`.
+pub fn validate_admission_config(v0: V0Mode, v1: V1Mode, cap: i64) -> Result<(), String> {
+    if !v0.is_enforcing() && !v1.is_enforcing() {
+        return Err(format!(
+            "illegal admission mode combination: neither authority enforces \
+             (v0={v0:?}, v1={v1:?}); at least one of v0 or v1 must enforce the cap"
+        ));
+    }
+    if !(MIN_ADMISSION_CAP..=MAX_ADMISSION_CAP).contains(&cap) {
+        return Err(format!(
+            "admission cap {cap} is out of range [{MIN_ADMISSION_CAP}, {MAX_ADMISSION_CAP}]"
+        ));
+    }
+    Ok(())
 }
 
 /// Typed classification captured before dispatch; only the audited bypass weighs zero.
@@ -1361,6 +1393,37 @@ mod tests {
     use futures::FutureExt;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::Notify;
+
+    #[test]
+    fn validate_admission_config_rejects_illegal_combo_and_out_of_range_cap() {
+        // At least one enforcing authority is legal across the cap range.
+        assert!(validate_admission_config(V0Mode::Enforce, V1Mode::Off, 1).is_ok());
+        assert!(validate_admission_config(V0Mode::Enforce, V1Mode::Shadow, 8).is_ok());
+        assert!(validate_admission_config(V0Mode::Observe, V1Mode::Enforce, 3).is_ok());
+        assert!(
+            validate_admission_config(V0Mode::Disabled, V1Mode::Enforce, MAX_ADMISSION_CAP).is_ok()
+        );
+
+        // Neither authority enforcing is illegal for every non-enforcing pairing.
+        for (v0, v1) in [
+            (V0Mode::Observe, V1Mode::Off),
+            (V0Mode::Observe, V1Mode::Shadow),
+            (V0Mode::Disabled, V1Mode::Off),
+            (V0Mode::Disabled, V1Mode::Shadow),
+        ] {
+            assert!(
+                validate_admission_config(v0, v1, 4).is_err(),
+                "{v0:?}/{v1:?} must be rejected"
+            );
+        }
+
+        // Cap out of range is rejected even with an enforcing authority.
+        assert!(validate_admission_config(V0Mode::Enforce, V1Mode::Off, 0).is_err());
+        assert!(validate_admission_config(V0Mode::Enforce, V1Mode::Off, -1).is_err());
+        assert!(
+            validate_admission_config(V0Mode::Enforce, V1Mode::Off, MAX_ADMISSION_CAP + 1).is_err()
+        );
+    }
 
     fn controller(mode: BuildAdmissionMode, cap: i64) -> BuildAdmissionController {
         BuildAdmissionController::new(
