@@ -104,6 +104,7 @@ fn material(checks: Vec<String>) -> FinalVerificationResolvedMaterial {
             read_only_external_mounts: vec![],
             output_directories: vec![],
             catalog_loopback_endpoints: vec![],
+            service_provisioners: vec![],
         },
         verify_source: VerifySource::Worker,
         required_checks: checks,
