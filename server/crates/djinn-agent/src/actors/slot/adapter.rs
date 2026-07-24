@@ -24,6 +24,7 @@ use djinn_k8s::sidecar::resolve_image_services_strict;
 use djinn_sandbox::final_verification_execution::{
     EnvironmentIdentityResolver, FinalVerificationExecutionRequest,
 };
+use djinn_sandbox::service_provisioning::{ServiceProvisioners, UnixCatalogServiceProvisioner};
 use djinn_supervisor::SupervisorServices;
 use globset::{Glob, GlobSetBuilder};
 
@@ -33,12 +34,8 @@ use crate::context::AgentContext;
 const UNKNOWN_IMAGE_DIGEST: &str =
     "sha256:0000000000000000000000000000000000000000000000000000000000000000";
 
-/// Advisory-lock class id for final-verification invocation leases. Chosen from
-/// the application-specific range to avoid collisions with the migrator and
-/// template-bootstrap locks.
+/// Advisory-lock class id for final-verification invocation leases.
 const FINAL_VERIFICATION_LOCK_CLASS: i32 = 0x4656_5246; // "FVRF"
-/// Per-attempt object id derived by hashing the verification attempt id, so
-/// distinct concurrent attempts do not contend for the same lock row.
 fn final_verification_lock_object(verification_attempt_id: &str) -> i32 {
     let hash = verification_attempt_id
         .as_bytes()
@@ -49,9 +46,7 @@ fn final_verification_lock_object(verification_attempt_id: &str) -> i32 {
     hash as i32
 }
 
-/// Production invocation lease backed by a dedicated Postgres connection holding
-/// a session-scoped advisory lock. The coordinator explicitly releases it before
-/// persistence; releasing drops the connection, which also releases the lock.
+/// Production invocation lease backed by a dedicated Postgres connection.
 struct HostFinalVerificationLease {
     conn: Option<sqlx::postgres::PgConnection>,
     class_id: i32,
@@ -65,8 +60,6 @@ impl HostFinalVerificationLease {
     {
         let class_id = FINAL_VERIFICATION_LOCK_CLASS;
         let object_id = final_verification_lock_object(verification_attempt_id);
-        // Open a dedicated connection (not a pooled one) so the session-scoped
-        // advisory lock persists until the connection is dropped on release.
         let opts = db.pool().connect_options();
         let mut conn = sqlx::Connection::connect_with(&*opts)
             .await
@@ -368,10 +361,7 @@ pub async fn resolve_final_verification_for_task_run(
         .workspace_path
         .map(PathBuf::from)
         .ok_or("task run has no worktree")?;
-    // Catalog authorization is bound at dispatch, never re-selected from a
-    // mutable project. A changed project selection makes verification ineligible.
-    // Resolve it only for a configured plan with a usable worktree: an empty
-    // plan is a typed skip and cannot consume catalog identity material.
+    // Catalog authorization is bound at dispatch, never re-selected from a mutable project.
     let runs = TaskRunRepository::new(db.clone());
     let bound_image_id = runs
         .catalog_image_id(task_run_id)
@@ -396,6 +386,18 @@ pub async fn resolve_final_verification_for_task_run(
         .await
         .map_err(|e| format!("strict catalog resolution failed: {e}"))?;
     let catalog_loopback_endpoints = catalog_loopback_endpoints(&services)?;
+    let service_provisioners: ServiceProvisioners = services
+        .iter()
+        .map(|service| {
+            Arc::new(UnixCatalogServiceProvisioner::new(
+                service.preset_id.clone(),
+                PathBuf::from("/var/run/djinn/service-control")
+                    .join(format!("{}.sock", service.preset_id)),
+                service.exported_environment_names.clone(),
+            ))
+                as Arc<dyn djinn_sandbox::service_provisioning::CatalogServiceProvisioner>
+        })
+        .collect();
     let manifest = VerificationInputManifestV1 {
         version: plan.input_manifest.version,
         repo_paths: plan.input_manifest.repo_paths.clone(),
@@ -518,6 +520,7 @@ pub async fn resolve_final_verification_for_task_run(
                 read_only_external_mounts: external_inputs.into_iter().map(|i| i.path).collect(),
                 output_directories,
                 catalog_loopback_endpoints,
+                service_provisioners,
             },
             verify_source: VerifySource::Worker,
             required_checks,
