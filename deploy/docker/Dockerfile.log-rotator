@@ -1,0 +1,15 @@
+# Build from the repository root. Base images are release-versioned deliberately:
+# release automation must supply an immutable rotator image tag (never `latest`).
+FROM rust:1.85.0-bookworm AS build
+WORKDIR /src
+COPY server/Cargo.toml server/Cargo.lock /src/server/
+COPY server/crates /src/server/crates
+WORKDIR /src/server
+RUN cargo build --release -p djinn-log-rotator
+
+# Debian slim supplies only the glibc runtime needed by the workspace binary.
+FROM debian:bookworm-slim
+RUN groupadd --gid 10002 djinn && useradd --uid 10002 --gid 10002 --no-create-home --shell /usr/sbin/nologin djinn
+COPY --from=build /src/server/target/release/djinn-log-rotator /usr/local/bin/djinn-log-rotator
+USER 10002:10002
+ENTRYPOINT ["/usr/local/bin/djinn-log-rotator"]
