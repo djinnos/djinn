@@ -771,6 +771,14 @@ pub async fn resolve_image_services_with_metadata(
     }
 }
 
+// Exact-arithmetic 12-CPU/48Gi bin-packing fixture (task ny3o). Declared here,
+// as a child of `sidecar`, so it can read the private default-resource envelope
+// via `parse_resources` without adding any production surface. `#[cfg(test)]`
+// only — no effect on production builds.
+#[cfg(test)]
+#[path = "bin_packing_fixture_tests.rs"]
+mod bin_packing_fixture_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;
