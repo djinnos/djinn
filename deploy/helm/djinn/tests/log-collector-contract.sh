@@ -138,6 +138,21 @@ python3 - "$TMPDIR_RENDER/vector-output.jsonl" "$TMPDIR_RENDER/vector-expected.j
 import json, sys
 actual = [json.loads(line)['message'] for line in open(sys.argv[1]) if line.strip()]
 expected = json.load(open(sys.argv[2]))
-assert actual == expected, (actual, expected)
+assert len(actual) == len(expected), (actual, expected)
+for index, (actual_message, expected_message) in enumerate(zip(actual, expected)):
+    try:
+        expected_object = json.loads(expected_message)
+    except (json.JSONDecodeError, TypeError):
+        expected_object = None
+    if isinstance(expected_object, dict):
+        try:
+            actual_object = json.loads(actual_message)
+        except (json.JSONDecodeError, TypeError) as error:
+            raise AssertionError((index, actual_message, expected_message)) from error
+        assert actual_object == expected_object, (index, actual_message, expected_message)
+    else:
+        # Non-JSON messages are preservation contracts, so ordering tolerance must
+        # never weaken their byte-for-byte comparison.
+        assert actual_message == expected_message, (index, actual_message, expected_message)
 print('PASS: rendered Vector VRL sanitization fixtures')
 PY
