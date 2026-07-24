@@ -84,6 +84,15 @@ pub trait SupervisorServices: Send + Sync + 'static {
         LeaseResult::LeaseUnavailable
     }
 
+    /// Requests host-owned deletion of the exact immutable task-run Pod; this
+    /// deliberately never substitutes process-local cancellation.
+    async fn terminate_watchdog_pod(
+        &self,
+        _request: WatchdogTerminationRequest,
+    ) -> Result<(), String> {
+        Err("exact-pod watchdog termination is unavailable".to_owned())
+    }
+
     /// Load the [`Task`] row backing this task-run.  Called once, before the
     /// first stage executes.
     async fn load_task(&self, task_id: String) -> Result<Task, String>;

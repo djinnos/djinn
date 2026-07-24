@@ -1499,6 +1499,26 @@ impl GraphWarmerService for K8sGraphWarmer {
         .map_err(|e| WarmerError::Backend(format!("delete task-run Job: {e}")))
     }
 
+    async fn terminate_taskrun_pod_exact(
+        &self,
+        task_run_id: &str,
+        pod_uid: &str,
+    ) -> Result<(), WarmerError> {
+        let client = self.client.as_ref().ok_or_else(|| {
+            WarmerError::Backend(
+                "exact task-run termination requires a live kube client".to_string(),
+            )
+        })?;
+        crate::runtime::terminate_taskrun_pod_exact(
+            client,
+            &self.dispatch.config.namespace,
+            task_run_id,
+            pod_uid,
+        )
+        .await
+        .map_err(WarmerError::Backend)
+    }
+
     async fn list_taskrun_jobs(&self) -> Result<Vec<TaskrunJobRef>, WarmerError> {
         let client = self.client.as_ref().ok_or_else(|| {
             WarmerError::Backend("task-run Job inventory requires a live kube client".to_string())

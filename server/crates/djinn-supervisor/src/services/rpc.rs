@@ -490,6 +490,21 @@ impl SupervisorServices for RpcServices {
         }
     }
 
+    async fn terminate_watchdog_pod(
+        &self,
+        request: super::lease::WatchdogTerminationRequest,
+    ) -> Result<(), String> {
+        match self
+            .roundtrip(ServiceRpcRequest::TerminateWatchdogPod { request })
+            .await
+        {
+            Ok(ServiceRpcResponse::TerminateWatchdogPod(result)) => result,
+            Ok(ServiceRpcResponse::Err(e)) => Err(format!("rpc transport: {e}")),
+            Ok(other) => Err(format!("rpc protocol: unexpected reply {other:?}")),
+            Err(e) => Err(e),
+        }
+    }
+
     async fn report_stage_step(&self, step: &'static str) -> Result<(), String> {
         // Ship the marker out-of-band on the shared frame channel; the host's
         // reader_loop lowers it to a `StreamEvent::StageStep`. Best-effort —

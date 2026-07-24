@@ -66,6 +66,14 @@ pub struct LeaseReleaseRequest {
     pub fencing_token: LeaseFencingToken,
     pub candidate_cleanup: bool,
 }
+/// Fail-closed request to terminate exactly the immutable Pod recorded for a
+/// task-run. Pod names are intentionally absent because they can be reused.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WatchdogTerminationRequest {
+    pub task_id: String,
+    pub task_run_id: String,
+    pub pod_uid: String,
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LeaseState {
     Queued,

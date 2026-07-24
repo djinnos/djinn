@@ -60,6 +60,7 @@ use djinn_supervisor::services::{
     BillingSource, CostBasisHint, LeaseAbandonRequest, LeaseBindRequest, LeaseCancelRequest,
     LeaseGrantRequest, LeaseQueueRequest, LeaseReleaseRequest, LeaseResult, LeaseStatusRequest,
     SerializableCreateSessionParams, SerializableCreateTaskRunParams, SerializableDjinnEvent,
+    WatchdogTerminationRequest,
 };
 use djinn_supervisor::{
     BranchPublicationResult, RpcServices, StageError, StageOutcome, SupervisorServices,
@@ -317,6 +318,13 @@ impl SupervisorServices for WorkerSupervisorServices {
 
     async fn release_lease(&self, request: LeaseReleaseRequest) -> LeaseResult {
         self.rpc.release_lease(request).await
+    }
+
+    async fn terminate_watchdog_pod(
+        &self,
+        request: WatchdogTerminationRequest,
+    ) -> Result<(), String> {
+        self.rpc.terminate_watchdog_pod(request).await
     }
 
     async fn report_stage_step(&self, step: &'static str) -> Result<(), String> {

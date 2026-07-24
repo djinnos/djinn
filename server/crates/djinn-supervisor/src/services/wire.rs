@@ -39,6 +39,7 @@ use serde::{Deserialize, Serialize};
 use crate::services::lease::{
     LeaseAbandonRequest, LeaseBindRequest, LeaseCancelRequest, LeaseGrantRequest,
     LeaseQueueRequest, LeaseReleaseRequest, LeaseResult, LeaseStatusRequest,
+    WatchdogTerminationRequest,
 };
 use crate::{
     BranchPublicationResult, RoleKind, StageError, StageOutcome, TaskRunOutcome, TaskRunSpec,
@@ -553,6 +554,8 @@ pub enum ServiceRpcRequest {
     CancelLease { request: LeaseCancelRequest },
     /// [`crate::SupervisorServices::release_lease`]. Appended at the tail.
     ReleaseLease { request: LeaseReleaseRequest },
+    /// Exact immutable Pod watchdog termination. Appended for bincode stability.
+    TerminateWatchdogPod { request: WatchdogTerminationRequest },
 }
 
 /// Typed response variants — one per [`ServiceRpcRequest`] variant.
@@ -656,6 +659,7 @@ pub enum ServiceRpcResponse {
     BindLeasePod(LeaseResult),
     CancelLease(LeaseResult),
     ReleaseLease(LeaseResult),
+    TerminateWatchdogPod(Result<(), String>),
 }
 
 #[cfg(test)]
@@ -924,6 +928,39 @@ mod tests {
             }
             other => panic!("unexpected: {other:?}"),
         }
+    }
+
+    #[test]
+    fn watchdog_termination_request_roundtrip_preserves_exact_identities() {
+        let request = WatchdogTerminationRequest {
+            task_id: "task-immutable".into(),
+            task_run_id: "run-immutable".into(),
+            pod_uid: "pod-immutable".into(),
+        };
+        let frame = Frame {
+            correlation_id: 77,
+            payload: FramePayload::Rpc(ServiceRpcRequest::TerminateWatchdogPod {
+                request: request.clone(),
+            }),
+        };
+        let back: Frame = bincode::deserialize(&bincode::serialize(&frame).unwrap()).unwrap();
+        assert_eq!(back.correlation_id, 77);
+        match back.payload {
+            FramePayload::Rpc(ServiceRpcRequest::TerminateWatchdogPod { request: got }) => {
+                assert_eq!(got, request)
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+        let reply = Frame {
+            correlation_id: 77,
+            payload: FramePayload::RpcReply(ServiceRpcResponse::TerminateWatchdogPod(Err(
+                "unconfirmed".into(),
+            ))),
+        };
+        let back: Frame = bincode::deserialize(&bincode::serialize(&reply).unwrap()).unwrap();
+        assert!(
+            matches!(back.payload, FramePayload::RpcReply(ServiceRpcResponse::TerminateWatchdogPod(Err(ref e))) if e == "unconfirmed")
+        );
     }
 
     #[test]

@@ -36,6 +36,7 @@ use djinn_supervisor::services::{
     CostBasisHint, LeaseAbandonRequest, LeaseBindRequest, LeaseCancelRequest, LeaseGrantRequest,
     LeaseQueueRequest, LeaseReleaseRequest, LeaseResult, LeaseStatusRequest,
     SerializableCreateSessionParams, SerializableCreateTaskRunParams, SerializableDjinnEvent,
+    WatchdogTerminationRequest,
 };
 use djinn_supervisor::{
     BranchPublicationResult, RoleKind, StageError, StageOutcome, SupervisorServices,
@@ -990,6 +991,42 @@ impl SupervisorServices for DirectServices {
             return LeaseResult::LeaseUnavailable;
         }
         self.build_lease.release(request).await
+    }
+
+    async fn terminate_watchdog_pod(
+        &self,
+        request: WatchdogTerminationRequest,
+    ) -> Result<(), String> {
+        if request.task_id.trim().is_empty()
+            || request.task_run_id.trim().is_empty()
+            || request.pod_uid.trim().is_empty()
+        {
+            return Err(
+                "exact-pod watchdog termination requires non-empty task, task-run, and pod UID"
+                    .into(),
+            );
+        }
+        let run = self
+            .task_runs
+            .get(&request.task_run_id)
+            .await
+            .map_err(|e| format!("load task-run for exact-pod termination: {e}"))?
+            .ok_or_else(|| "exact-pod watchdog termination task-run is unavailable".to_string())?;
+        if run.task_id != request.task_id {
+            return Err(
+                "exact-pod watchdog termination task identity does not match task-run".into(),
+            );
+        }
+        let warmer = self
+            .callbacks
+            .agent_context
+            .graph_warmer
+            .as_ref()
+            .ok_or_else(|| "exact-pod watchdog termination is unavailable".to_string())?;
+        warmer
+            .terminate_taskrun_pod_exact(&request.task_run_id, &request.pod_uid)
+            .await
+            .map_err(|e| e.to_string())
     }
 
     async fn load_task(&self, task_id: String) -> Result<Task, String> {
