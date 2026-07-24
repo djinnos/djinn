@@ -1,0 +1,90 @@
+{{- if .Values.logCollector.enabled }}
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "djinn.fullname" . }}-log-collector
+  namespace: {{ include "djinn.namespace" . }}
+  labels:
+    {{- include "djinn.labels" . | nindent 4 }}
+    app.kubernetes.io/component: log-collector
+spec:
+  selector:
+    matchLabels:
+      {{- include "djinn.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: log-collector
+  template:
+    metadata:
+      labels:
+        {{- include "djinn.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: log-collector
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        fsGroup: 10002
+      {{- with .Values.resources.taskrun.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.resources.taskrun.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: vector
+          image: {{ .Values.logCollector.vectorImage | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["--config", "/etc/vector/vector.yaml"]
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10002
+            runAsGroup: 10002
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            {{- toYaml .Values.logCollector.resources.vector | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/vector
+              readOnly: true
+            - name: pod-logs
+              mountPath: /source/pods
+              readOnly: true
+            - name: vector-buffer
+              mountPath: /var/lib/vector
+        - name: rotator
+          image: {{ .Values.logCollector.rotatorImage | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            - name: DJINN_LOG_STORE_DIR
+              value: /store/logs
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10002
+            runAsGroup: 10002
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            {{- toYaml .Values.logCollector.resources.rotator | nindent 12 }}
+          volumeMounts:
+            - name: retained-store
+              mountPath: /store
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "djinn.fullname" . }}-log-collector
+        - name: pod-logs
+          hostPath:
+            path: /var/log/pods
+            type: Directory
+        - name: retained-store
+          hostPath:
+            path: {{ .Values.logCollector.storePath | quote }}
+            type: Directory
+        - name: vector-buffer
+          emptyDir:
+            sizeLimit: {{ .Values.logCollector.bufferMiB }}Mi
+{{- end }}

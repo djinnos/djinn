@@ -178,6 +178,7 @@ resources:
     # constraints allow is eligible (preserves the pre-feature behavior).
     nodeSelector: {}
     tolerations: []
+
   # Resource sizing for graph-warm Jobs — the short-lived Pods that populate
   # the canonical graph cache a later task-run adopts. These reach the running
   # server as the DJINN_K8S_WARM_* env vars emitted by
@@ -207,6 +208,41 @@ resources:
     # consistently hits the deadline.
     jobTimeoutSeconds: 3600
 
+# -----------------------------------------------------------------------------
+# Node-local durable pod-log collector (disabled until the host store exists)
+# -----------------------------------------------------------------------------
+# This is deliberately a single-node DaemonSet contract: Vector reads kubelet's
+# pod log files and sends only sanitized NDJSON to the localhost rotator. The
+# rotator is the sole writer of the caller-prepared retained host directory.
+# Scheduling follows task-run placement so the collector and task workloads use
+# the same explicitly selected node pool.
+logCollector:
+  enabled: false
+  # Both images must have a release tag. `latest` is rejected by the schema.
+  vectorImage: timberio/vector:0.43.1-debian
+  rotatorImage: ghcr.io/djinnos/djinn-log-rotator:0.1.0
+  # Caller must create this directory with ownership/mode suitable for uid 10002
+  # before enabling collection; the DaemonSet refuses hostPath auto-creation.
+  storePath: /var/lib/djinn-observability
+  # Vector uses a best-effort disk buffer on an emptyDir, never the retained
+  # store. Full buffers drop new records rather than propagating backpressure to
+  # application containers through kubelet log files.
+  bufferMiB: 64
+  resources:
+    vector:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 500m
+        memory: 256Mi
+    rotator:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 500m
+        memory: 256Mi
 # -----------------------------------------------------------------------------
 # Storage
 # -----------------------------------------------------------------------------

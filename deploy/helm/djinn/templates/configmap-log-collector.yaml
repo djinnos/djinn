@@ -1,0 +1,82 @@
+{{- if .Values.logCollector.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "djinn.fullname" . }}-log-collector
+  namespace: {{ include "djinn.namespace" . }}
+  labels:
+    {{- include "djinn.labels" . | nindent 4 }}
+    app.kubernetes.io/component: log-collector
+immutable: true
+data:
+  vector.yaml: |
+    # Vector has only the kubelet pod-log mount. Its best-effort disk buffer is
+    # an emptyDir, so a stalled local rotator never blocks application writes.
+    data_dir: /var/lib/vector
+    sources:
+      pods:
+        type: file
+        include:
+          - /source/pods/*/*/*.log
+        read_from: beginning
+    transforms:
+      cri:
+        type: remap
+        inputs: [pods]
+        source: |
+          parsed, err = parse_regex(.message, r'^(?P<timestamp>[^ ]+) (?P<stream>stdout|stderr) [^ ] (?P<message>.*)$')
+          if err != null { abort }
+          path, err = parse_regex!(.file, r'^/source/pods/(?P<namespace>[^_]+)_(?P<pod_name>[^_]+)_(?P<pod_uid>[0-9a-f-]+)/(?P<container>[^/]+)/')
+          .timestamp = parsed.timestamp
+          .stream = parsed.stream
+          .message = parsed.message
+          .namespace = path.namespace
+          .pod_name = path.pod_name
+          .pod_uid = path.pod_uid
+          .container = path.container
+      sanitize:
+        type: remap
+        inputs: [cri]
+        source: |
+          # Match the infra_death_log_tail policy case-insensitively. JSON is
+          # changed only after successful parsing; malformed/plain/multiline and
+          # panic-summary records deliberately pass through byte-for-byte.
+          if !contains(.message, "\n") && !contains(.message, "\r") && !contains(.message, "djinn.panic_summary.v1") {
+            json, err = parse_json(.message)
+            if err == null && is_object(json) {
+              for_each(object: json) -> |key, value| {
+                normalized = replace(downcase(string!(key)), r'-', "_")
+                if contains(normalized, "authorization") || contains(normalized, "apikey") || contains(normalized, "api_key") || contains(normalized, "access_token") || contains(normalized, "secret") || contains(normalized, "bearer") || contains(normalized, "password") || contains(normalized, "passwd") {
+                  json[key] = "***REDACTED***"
+                } else if (key == "statement" || key == "sql" || key == "query" || key == "request_body" || key == "response_body" || key == "body") && is_string(value) && strlen!(value) > 2048 {
+                  original_bytes = strlen!(value)
+                  # slice is UTF-8 boundary-safe in VRL; the marker exposes the
+                  # pre-cap byte count for forensic interpretation.
+                  json[key] = "{{ "{{" }} slice!(value, 0, 2048) {{ "}}" }}…[FIELD_TRUNCATED original_bytes={{ "{{" }} original_bytes {{ "}}" }}]"
+                }
+              }
+              .message = encode_json(json)
+            }
+          }
+          .message = replace(.message, r'(?i)^([[:space:]]*(?:API_KEY|APIKEY|SECRET|TOKEN|PASSWORD|PASSWD|AUTH|BEARER|OPENAI_API_KEY|ANTHROPIC_API_KEY|GITHUB_TOKEN|GH_TOKEN|AWS_SECRET|AWS_SESSION_TOKEN)(?:_[A-Z0-9_]+)?=).*$', "${1}***REDACTED***")
+      record:
+        type: remap
+        inputs: [sanitize]
+        source: |
+          . = {"timestamp": .timestamp, "namespace": .namespace, "pod_name": .pod_name, "pod_uid": .pod_uid, "container": .container, "stream": .stream, "message": .message}
+    sinks:
+      rotator:
+        type: http
+        inputs: [record]
+        uri: http://127.0.0.1:8687/ingest
+        method: post
+        encoding:
+          codec: json
+        request:
+          retry_attempts: 10
+          retry_statuses: [507]
+        buffer:
+          type: disk
+          max_size: {{ mul .Values.logCollector.bufferMiB 1048576 }}
+          when_full: drop_newest
+{{- end }}

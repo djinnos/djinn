@@ -29,6 +29,27 @@
         "maxBuildTaskRuns": { "type": "integer", "minimum": 1, "maximum": 64 }
       }
     },
+    "logCollector": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "vectorImage", "rotatorImage", "storePath", "bufferMiB", "resources"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "vectorImage": {
+          "type": "string",
+          "pattern": "^.+:[A-Za-z0-9][A-Za-z0-9._-]*$",
+          "not": { "pattern": ":latest$" }
+        },
+        "rotatorImage": {
+          "type": "string",
+          "pattern": "^.+:[A-Za-z0-9][A-Za-z0-9._-]*$",
+          "not": { "pattern": ":latest$" }
+        },
+        "storePath": { "type": "string", "pattern": "^/[^\\n]*$", "minLength": 2 },
+        "bufferMiB": { "type": "integer", "minimum": 1, "maximum": 64 },
+        "resources": { "type": "object" }
+      }
+    },
     "server": {
       "type": "object",
       "additionalProperties": false,
