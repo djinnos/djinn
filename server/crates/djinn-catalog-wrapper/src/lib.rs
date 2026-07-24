@@ -10,11 +10,13 @@
 //! per-service adapters live in [`postgres`] and [`redis`].
 
 use std::collections::BTreeMap;
+use std::path::Path;
 use std::time::Duration;
 
 use base64::Engine as _;
 use djinn_sandbox::service_provisioning::{CONTROL_PROTOCOL_REVISION, Request, Response};
 use ring::rand::{SecureRandom, SystemRandom};
+use tokio::net::UnixListener;
 use tokio::sync::Notify;
 
 mod postgres;
@@ -58,6 +60,23 @@ struct CreatedLease {
 fn signal_completion(notify: &Notify) {
     notify.notify_waiters();
     notify.notify_one();
+}
+
+/// Bind a wrapper control socket, replacing any stale socket file, and relax its
+/// mode so the uid-10001 worker in the same Pod can connect to a socket the root
+/// wrapper process created. The Pod boundary is the security perimeter; the
+/// control emptyDir is private to the worker and its wrapper sidecars.
+fn bind_control_socket(socket: &Path) -> std::io::Result<UnixListener> {
+    if socket.exists() {
+        std::fs::remove_file(socket)?;
+    }
+    let listener = UnixListener::bind(socket)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(socket, std::fs::Permissions::from_mode(0o666))?;
+    }
+    Ok(listener)
 }
 
 fn request_revision(request: &Request) -> u32 {

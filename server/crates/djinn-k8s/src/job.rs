@@ -22,7 +22,8 @@ use djinn_supervisor::cargo_target_run_dir;
 
 use crate::config::KubernetesConfig;
 use crate::sidecar::{
-    BackingServiceSpec, sidecar_conn_env, sidecar_container, sidecar_dshm_volume,
+    BackingServiceSpec, control_volume, control_volume_mount, sidecar_conn_env, sidecar_container,
+    sidecar_dshm_volume,
 };
 
 /// Label key for the task-run id (Djinn's primary correlator).
@@ -229,6 +230,37 @@ pub fn build_task_run_job(
     let mut worker_env = build_task_run_env(config, &task_run_id_str, project_id, policy);
     worker_env.extend(effective_services.iter().flat_map(sidecar_conn_env));
 
+    // The private control emptyDir is added only when a wrapper sidecar is
+    // injected, and mounted only into the worker and the wrapper sidecars — never
+    // a canonical command container or an unrelated container.
+    let any_wrapper = effective_services.iter().any(|service| service.is_wrapper);
+
+    let mut worker_volume_mounts = vec![
+        volume_mount(VOLUME_SPEC, SPEC_MOUNT_DIR, Some(true)),
+        volume_mount(VOLUME_AUTH_TOKEN, TOKEN_MOUNT_DIR, Some(true)),
+        // Mirror PVC: mounted RW for normal workers (push task_branch
+        // before delegating open_pr) but RO for evidence-spike runs
+        // where write access to the host mirror is a safety violation.
+        volume_mount(VOLUME_MIRROR, MIRROR_MOUNT_DIR, Some(mirror_read_only)),
+        // Cache PVC: default mutable for normal workers (cargo builds write
+        // to private per-run target dirs under /cache).  For evidence-spike
+        // runs, explicitly read-only — no build artifacts should persist.
+        // The None (non-evidence) path preserves the original manifest shape.
+        volume_mount(
+            VOLUME_CACHE,
+            CACHE_MOUNT_DIR,
+            if is_evidence_spike { Some(true) } else { None },
+        ),
+        // Workspace emptyDir: always mutable.  Ephemeral per-Pod
+        // storage — dies with the Pod.  See the `mirror_read_only`
+        // comment above for why this narrow exception is safe.
+        volume_mount(VOLUME_WORKSPACE, WORKSPACE_MOUNT_DIR, None),
+        crate::env_config::env_config_volume_mount(),
+    ];
+    if any_wrapper {
+        worker_volume_mounts.push(control_volume_mount());
+    }
+
     let container = Container {
         name: "worker".to_string(),
         image: Some(project_image_tag.to_string()),
@@ -245,28 +277,7 @@ pub fn build_task_run_job(
             "task-run".to_string(),
         ]),
         env: Some(worker_env),
-        volume_mounts: Some(vec![
-            volume_mount(VOLUME_SPEC, SPEC_MOUNT_DIR, Some(true)),
-            volume_mount(VOLUME_AUTH_TOKEN, TOKEN_MOUNT_DIR, Some(true)),
-            // Mirror PVC: mounted RW for normal workers (push task_branch
-            // before delegating open_pr) but RO for evidence-spike runs
-            // where write access to the host mirror is a safety violation.
-            volume_mount(VOLUME_MIRROR, MIRROR_MOUNT_DIR, Some(mirror_read_only)),
-            // Cache PVC: default mutable for normal workers (cargo builds write
-            // to private per-run target dirs under /cache).  For evidence-spike
-            // runs, explicitly read-only — no build artifacts should persist.
-            // The None (non-evidence) path preserves the original manifest shape.
-            volume_mount(
-                VOLUME_CACHE,
-                CACHE_MOUNT_DIR,
-                if is_evidence_spike { Some(true) } else { None },
-            ),
-            // Workspace emptyDir: always mutable.  Ephemeral per-Pod
-            // storage — dies with the Pod.  See the `mirror_read_only`
-            // comment above for why this narrow exception is safe.
-            volume_mount(VOLUME_WORKSPACE, WORKSPACE_MOUNT_DIR, None),
-            crate::env_config::env_config_volume_mount(),
-        ]),
+        volume_mounts: Some(worker_volume_mounts),
         resources: Some(ResourceRequirements {
             requests: Some(BTreeMap::from([
                 ("cpu".to_string(), Quantity(config.cpu_request.clone())),
@@ -390,6 +401,11 @@ pub fn build_task_run_job(
     // when `is_evidence_spike` is true, so this block is a no-op.
     if !effective_services.is_empty() {
         volumes.push(sidecar_dshm_volume());
+    }
+    // One private control emptyDir, shared only by the worker and the wrapper
+    // sidecars (whose mounts are added in `sidecar_container`).
+    if any_wrapper {
+        volumes.push(control_volume());
     }
 
     // Each declared backing service becomes a native sidecar (initContainer +
@@ -882,6 +898,202 @@ fn volume_mount(name: &str, mount_path: &str, read_only: Option<bool>) -> Volume
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- ij6g catalog wrapper manifest tests --------------------------------
+
+    /// A digest-pinned wrapper sidecar spec for one service type.
+    fn wrapper_spec(service_type: &str, port: i32, preset_id: &str) -> BackingServiceSpec {
+        let socket = crate::sidecar::control_socket_file_name(preset_id);
+        BackingServiceSpec {
+            service_type: service_type.into(),
+            image: format!(
+                "ghcr.io/djinnos/djinn-{service_type}-wrapper@sha256:\
+                 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+            ),
+            is_wrapper: true,
+            control_socket_name: socket,
+            wrapper_env: vec![("CATALOG_TEST_ENV".into(), "value".into())],
+            port,
+            env: Vec::new(),
+            cpu_request: "100m".into(),
+            memory_request: "256Mi".into(),
+            cpu_limit: "500m".into(),
+            memory_limit: "512Mi".into(),
+            conn_template: format!("proto://{{host}}:{{port}}/{service_type}"),
+            conn_env_var: "SVC_URL".into(),
+        }
+    }
+
+    fn all_three_wrappers() -> Vec<BackingServiceSpec> {
+        vec![
+            wrapper_spec("postgres", 5432, "preset-postgres-18"),
+            wrapper_spec("redis", 6379, "preset-redis-7"),
+            wrapper_spec("rabbitmq", 5672, "preset-rabbitmq-4"),
+        ]
+    }
+
+    fn wrapper_job() -> Job {
+        build_task_run_job(
+            &KubernetesConfig::for_testing(),
+            &Uuid::now_v7(),
+            "proj-wrap",
+            "djinn-taskrun-wrap",
+            "registry.example/djinn-project:abc123",
+            &all_three_wrappers(),
+            None,
+            false,
+        )
+    }
+
+    fn pod_of(job: &Job) -> &k8s_openapi::api::core::v1::PodSpec {
+        job.spec
+            .as_ref()
+            .and_then(|s| s.template.spec.as_ref())
+            .expect("pod spec set")
+    }
+
+    fn mounts_control(container: &Container) -> bool {
+        container.volume_mounts.as_ref().is_some_and(|mounts| {
+            mounts
+                .iter()
+                .any(|m| m.name == crate::sidecar::CONTROL_VOLUME)
+        })
+    }
+
+    /// AC3/AC4: all three wrapper sidecars render with the digest-pinned wrapper
+    /// image, the CATALOG_CONTROL_SOCKET env pointing at their per-preset socket,
+    /// and the private control mount; and the worker also mounts the control
+    /// volume so its adapter can reach the sockets.
+    #[test]
+    fn wrapper_sidecars_render_control_socket_and_mounts_for_all_three_types() {
+        let job = wrapper_job();
+        let pod = pod_of(&job);
+        let inits = pod.init_containers.as_ref().expect("init containers set");
+        assert_eq!(inits.len(), 3, "one wrapper sidecar per service type");
+
+        for (svc, port, socket) in [
+            ("postgres", 5432, "preset-postgres-18.sock"),
+            ("redis", 6379, "preset-redis-7.sock"),
+            ("rabbitmq", 5672, "preset-rabbitmq-4.sock"),
+        ] {
+            let c = inits
+                .iter()
+                .find(|c| c.name == format!("svc-{svc}"))
+                .unwrap_or_else(|| panic!("sidecar for {svc}"));
+            // Digest-pinned wrapper image, not the stock image.
+            let image = c.image.as_deref().unwrap();
+            assert!(
+                image.starts_with(&format!("ghcr.io/djinnos/djinn-{svc}-wrapper@sha256:")),
+                "{svc} sidecar must run the digest-pinned wrapper image, got {image}"
+            );
+            let _ = port;
+            // The sidecar binds the exact socket the worker adapter connects to.
+            let env = c.env.as_ref().unwrap();
+            let socket_env = env
+                .iter()
+                .find(|e| e.name == crate::sidecar::CONTROL_SOCKET_ENV)
+                .unwrap_or_else(|| panic!("{svc} CATALOG_CONTROL_SOCKET env"));
+            assert_eq!(
+                socket_env.value.as_deref(),
+                Some(format!("/var/run/djinn/service-control/{socket}").as_str())
+            );
+            // The wrapper admin/env-name wiring is present.
+            assert!(env.iter().any(|e| e.name == "CATALOG_TEST_ENV"));
+            // The private control mount is present on every wrapper sidecar.
+            assert!(
+                mounts_control(c),
+                "{svc} sidecar must mount the control volume"
+            );
+        }
+
+        // The worker mounts the control volume too.
+        assert!(
+            mounts_control(&pod.containers[0]),
+            "worker must mount the control volume"
+        );
+    }
+
+    /// AC3/AC4: exactly one private control emptyDir exists, and it is mounted
+    /// ONLY by the worker and the wrapper sidecars — never any other container.
+    #[test]
+    fn control_volume_is_private_to_worker_and_wrapper_sidecars() {
+        let job = wrapper_job();
+        let pod = pod_of(&job);
+        let volumes = pod.volumes.as_ref().expect("volumes set");
+        let control_volumes = volumes
+            .iter()
+            .filter(|v| v.name == crate::sidecar::CONTROL_VOLUME)
+            .count();
+        assert_eq!(control_volumes, 1, "exactly one private control emptyDir");
+        assert!(
+            volumes
+                .iter()
+                .find(|v| v.name == crate::sidecar::CONTROL_VOLUME)
+                .and_then(|v| v.empty_dir.as_ref())
+                .is_some(),
+            "control volume must be an emptyDir"
+        );
+
+        // Count every container (worker + sidecars) that mounts the control
+        // volume. It must be exactly the worker plus the three wrapper sidecars.
+        let mut mounters = 0;
+        for c in pod
+            .init_containers
+            .iter()
+            .flatten()
+            .chain(pod.containers.iter())
+        {
+            if mounts_control(c) {
+                mounters += 1;
+            }
+        }
+        assert_eq!(mounters, 4, "worker + 3 wrapper sidecars mount control");
+    }
+
+    /// AC3/AC4: a legacy non-wrapper sidecar mounts no control volume, and when
+    /// no wrapper is injected the control emptyDir is absent entirely (manifest
+    /// stays byte-compatible with the pre-wrapper shape).
+    #[test]
+    fn non_wrapper_service_adds_no_control_volume() {
+        let mut legacy = wrapper_spec("postgres", 5432, "preset-postgres-18");
+        legacy.is_wrapper = false;
+        legacy.image = "postgres:18-alpine".into();
+        legacy.wrapper_env = Vec::new();
+        let job = build_task_run_job(
+            &KubernetesConfig::for_testing(),
+            &Uuid::now_v7(),
+            "proj-legacy",
+            "djinn-taskrun-legacy",
+            "registry.example/djinn-project:abc123",
+            &[legacy],
+            None,
+            false,
+        );
+        let pod = pod_of(&job);
+        assert!(
+            pod.volumes
+                .as_ref()
+                .unwrap()
+                .iter()
+                .all(|v| v.name != crate::sidecar::CONTROL_VOLUME),
+            "no control volume without a wrapper sidecar"
+        );
+        assert!(
+            !mounts_control(&pod.containers[0]),
+            "worker must not mount a control volume when no wrapper is injected"
+        );
+        let sidecar = &pod.init_containers.as_ref().unwrap()[0];
+        assert!(!mounts_control(sidecar));
+        assert!(
+            sidecar
+                .env
+                .as_ref()
+                .unwrap()
+                .iter()
+                .all(|e| e.name != crate::sidecar::CONTROL_SOCKET_ENV),
+            "legacy sidecar must not carry the control socket env"
+        );
+    }
 
     fn inventory_job(name: Option<&str>, label: Option<&str>) -> Job {
         let mut labels = BTreeMap::new();
@@ -2013,6 +2225,9 @@ mod tests {
         let postgres = BackingServiceSpec {
             service_type: "postgres".into(),
             image: "postgres:18-alpine".into(),
+            is_wrapper: false,
+            control_socket_name: "preset-postgres-18.sock".into(),
+            wrapper_env: Vec::new(),
             port: 5432,
             env: vec![("POSTGRES_PASSWORD".into(), "postgres".into())],
             cpu_request: "100m".into(),
@@ -2340,6 +2555,9 @@ mod tests {
         let postgres = BackingServiceSpec {
             service_type: "postgres".into(),
             image: "postgres:18-alpine".into(),
+            is_wrapper: false,
+            control_socket_name: "preset-postgres-18.sock".into(),
+            wrapper_env: Vec::new(),
             port: 5432,
             env: vec![("POSTGRES_PASSWORD".into(), "postgres".into())],
             cpu_request: "100m".into(),
@@ -2407,6 +2625,9 @@ mod tests {
         let postgres = BackingServiceSpec {
             service_type: "postgres".into(),
             image: "postgres:18-alpine".into(),
+            is_wrapper: false,
+            control_socket_name: "preset-postgres-18.sock".into(),
+            wrapper_env: Vec::new(),
             port: 5432,
             env: vec![("POSTGRES_PASSWORD".into(), "postgres".into())],
             cpu_request: "100m".into(),
@@ -2492,6 +2713,9 @@ mod tests {
         let postgres = BackingServiceSpec {
             service_type: "postgres".into(),
             image: "postgres:18-alpine".into(),
+            is_wrapper: false,
+            control_socket_name: "preset-postgres-18.sock".into(),
+            wrapper_env: Vec::new(),
             port: 5432,
             env: vec![("POSTGRES_PASSWORD".into(), "postgres".into())],
             cpu_request: "100m".into(),
@@ -2615,6 +2839,9 @@ mod tests {
         let postgres = BackingServiceSpec {
             service_type: "postgres".into(),
             image: "postgres:18-alpine".into(),
+            is_wrapper: false,
+            control_socket_name: "preset-postgres-18.sock".into(),
+            wrapper_env: Vec::new(),
             port: 5432,
             env: vec![("POSTGRES_PASSWORD".into(), "postgres".into())],
             cpu_request: "100m".into(),
@@ -2677,6 +2904,9 @@ mod tests {
         let postgres = BackingServiceSpec {
             service_type: "postgres".into(),
             image: "postgres:18-alpine".into(),
+            is_wrapper: false,
+            control_socket_name: "preset-postgres-18.sock".into(),
+            wrapper_env: Vec::new(),
             port: 5432,
             env: vec![("POSTGRES_PASSWORD".into(), "postgres".into())],
             cpu_request: "100m".into(),
@@ -2739,6 +2969,9 @@ mod tests {
         let postgres = BackingServiceSpec {
             service_type: "postgres".into(),
             image: "postgres:18-alpine".into(),
+            is_wrapper: false,
+            control_socket_name: "preset-postgres-18.sock".into(),
+            wrapper_env: Vec::new(),
             port: 5432,
             env: vec![("POSTGRES_PASSWORD".into(), "postgres".into())],
             cpu_request: "100m".into(),

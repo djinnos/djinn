@@ -41,6 +41,7 @@ pub mod retention;
 pub mod retention_preflight;
 pub mod types;
 pub mod watcher;
+pub mod wrapper_catalog;
 
 pub use build_job::{BuildSubject, LABEL_IMAGE_ID, LABEL_PROJECT_ID};
 pub use config::ImageControllerConfig;
@@ -59,3 +60,8 @@ pub use retention_preflight::{
 };
 pub use types::{BuildRequest, BuildStatus, ProjectImageView};
 pub use watcher::ImageBuildWatcher;
+pub use wrapper_catalog::{
+    WRAPPER_IMAGE_MANIFEST_ENV, WrapperCatalogError, WrapperCatalogReconcileStats,
+    WrapperImageEntry, WrapperImageManifest, load_wrapper_image_manifest,
+    reconcile_wrapper_catalog, reconcile_wrapper_catalog_from_env,
+};

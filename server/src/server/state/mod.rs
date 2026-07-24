@@ -710,6 +710,26 @@ impl AppState {
             "environment_config: boot reseed complete"
         );
 
+        // ij6g: record build/controller-published catalog wrapper image digests
+        // into service_presets so strict canonical verification resolves
+        // `{wrapper_image}@{digest}`. A no-op when the deploy sets no manifest —
+        // strict resolution then stays fail-closed rather than trusting a
+        // fabricated digest.
+        match djinn_image_controller::reconcile_wrapper_catalog_from_env(self.db()).await {
+            Ok(Some(stats)) => tracing::info!(
+                recorded = stats.recorded.len(),
+                unknown = stats.unknown_presets.len(),
+                "wrapper_catalog: boot reconcile complete"
+            ),
+            Ok(None) => {
+                tracing::info!("wrapper_catalog: no wrapper image manifest configured; skipping")
+            }
+            Err(error) => tracing::warn!(
+                %error,
+                "wrapper_catalog: boot reconcile failed; wrapper digests unchanged"
+            ),
+        }
+
         let config = ImageControllerConfig::from_env();
         tracing::info!(
             buildkitd_host = %config.buildkitd_host,
