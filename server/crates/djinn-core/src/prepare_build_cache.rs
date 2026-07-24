@@ -26,6 +26,29 @@
 ///
 /// Stack-neutral by construction: adding a new stack cache is a new variant,
 /// not a change to the tool schema or the worker-facing outcome contract.
+///
+/// # Declaration contract
+///
+/// Every language-specific platform cache MUST be declared as a variant of this
+/// enum, here in `djinn-core`. Consumer crates MUST NOT introduce their own
+/// language or toolchain branches to describe a cache — they only `match` on
+/// the variants declared here, and each arm maps a variant onto an
+/// already-generic value. The intended shape is the total match in the
+/// `prepare_build_cache` handler in `djinn-agent`:
+///
+/// ```ignore
+/// let stack = match cache {
+///     PlatformCache::CargoTargetRunDir { .. } => "rust",
+///     PlatformCache::None => "none",
+/// };
+/// ```
+///
+/// Adding a Python or Node warm cache is therefore a new variant here plus a
+/// new arm in each such match, which the compiler's exhaustiveness check makes
+/// impossible to miss. It is never a new `if language == ...` in a consumer
+/// crate. Keeping the discriminator in this enum is what lets the generic
+/// crates stay language-agnostic; see the `djinn-stack` crate documentation for
+/// the wider language-knowledge seam this belongs to.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum PlatformCache {
     /// Rust cargo warm-target per-run seed directory. `cache_path` is the
