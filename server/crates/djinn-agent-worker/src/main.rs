@@ -407,7 +407,11 @@ fn set_cargo_target_dir_for_children(destination: &Path) {
     unsafe { std::env::set_var(CARGO_TARGET_DIR_ENV, destination) };
 }
 
-fn record_cargo_target_seed_result(seed_context: &'static str, result: &CargoTargetSeedResult) {
+fn record_cargo_target_seed_result(
+    seed_context: &'static str,
+    project_id: &str,
+    result: &CargoTargetSeedResult,
+) {
     let seed_outcome = if result.cold_started() {
         "fallback"
     } else {
@@ -419,8 +423,15 @@ fn record_cargo_target_seed_result(seed_context: &'static str, result: &CargoTar
         ""
     };
 
-    if !result.cold_started() {
+    if result.cold_started() {
+        // Light up the previously-dark per-project cold counter at the seed
+        // decision. The bounded reason label is the same closed
+        // `FALLBACK_REASON_*` value used by the global seed metric.
+        cargo_metrics::record_seed_cold(project_id, fallback_reason);
+    } else {
         djinn_telemetry::cargo_target_seed::increment_seed_hit();
+        // Light up the previously-dark per-project seed-hit counter.
+        cargo_metrics::record_seed_hit(project_id);
     }
 
     info!(
@@ -604,7 +615,7 @@ async fn prepare_cargo_target_dir(spec: &TaskRunSpec, workspace_path: &Path) -> 
     record_seed_terminal_seconds(seed_elapsed, SeedAttemptTerminal::Join(&seed_join_result));
     match seed_join_result {
         Ok(Ok(result)) => {
-            record_cargo_target_seed_result("task_run", &result);
+            record_cargo_target_seed_result("task_run", &spec.project_id, &result);
             let fallback_reason = result
                 .fallback_reason
                 .as_ref()
@@ -666,6 +677,10 @@ async fn prepare_cargo_target_dir(spec: &TaskRunSpec, workspace_path: &Path) -> 
             djinn_telemetry::cargo_target_seed::increment_seed_fallback(
                 djinn_telemetry::cargo_target_seed::FALLBACK_REASON_UNKNOWN,
             );
+            cargo_metrics::record_seed_cold(
+                &spec.project_id,
+                djinn_telemetry::cargo_target_seed::FALLBACK_REASON_UNKNOWN,
+            );
             let fallback_reason = format!("seed helper failed: {err}");
             info!(
                 task_run_id = %spec.task_run_id,
@@ -692,6 +707,10 @@ async fn prepare_cargo_target_dir(spec: &TaskRunSpec, workspace_path: &Path) -> 
         }
         Err(err) => {
             djinn_telemetry::cargo_target_seed::increment_seed_fallback(
+                djinn_telemetry::cargo_target_seed::FALLBACK_REASON_UNKNOWN,
+            );
+            cargo_metrics::record_seed_cold(
+                &spec.project_id,
                 djinn_telemetry::cargo_target_seed::FALLBACK_REASON_UNKNOWN,
             );
             let fallback_reason = format!("seed task join failed: {err}");
@@ -4203,6 +4222,105 @@ warning: something
             "ok seed sum delta must equal elapsed"
         );
         assert_no_seed_identity_labels(&after);
+    }
+
+    /// Read a labeled counter sample value, or 0.0 when absent.
+    fn labeled_counter(rendered: &str, metric: &str, labels: &[(&str, &str)]) -> f64 {
+        rendered
+            .lines()
+            .find(|line| {
+                line.starts_with(metric)
+                    && labels
+                        .iter()
+                        .all(|(k, v)| line.contains(&format!("{k}=\"{v}\"")))
+            })
+            .and_then(|line| line.rsplit_once(' ').and_then(|(_, v)| v.parse().ok()))
+            .unwrap_or(0.0)
+    }
+
+    /// The seed decision must light the previously-dark per-project seed
+    /// counters: a hit increments `djinn_cargo_seed_hit_total{project_id}`, and
+    /// a cold-start fallback increments
+    /// `djinn_cargo_seed_cold_total{project_id, fallback_reason}` with the
+    /// bounded reason label — each exactly once.
+    #[test]
+    fn record_seed_result_lights_per_project_hit_and_cold_counters() {
+        let _guard = seed_telemetry_guard();
+        djinn_telemetry::init().expect("telemetry init");
+
+        let hit_project = "rmxn-seed-hit-project";
+        let cold_project = "rmxn-seed-cold-project";
+
+        let before = djinn_telemetry::render().expect("render before");
+        let hit_before = labeled_counter(
+            &before,
+            djinn_telemetry::cargo_cache::SEED_HIT_TOTAL,
+            &[("project_id", hit_project)],
+        );
+        let cold_reason = djinn_telemetry::cargo_target_seed::FALLBACK_REASON_BASE_MISSING;
+        let cold_before = labeled_counter(
+            &before,
+            djinn_telemetry::cargo_cache::SEED_COLD_TOTAL,
+            &[
+                ("project_id", cold_project),
+                ("fallback_reason", cold_reason),
+            ],
+        );
+
+        let hit_result = CargoTargetSeedResult {
+            elapsed: Duration::from_millis(5),
+            linked_file_count: 1,
+            copied_file_count: 0,
+            skipped_file_count: 0,
+            linked_bytes: 10,
+            copied_bytes: 0,
+            fallback_reason: None,
+        };
+        let cold_result = CargoTargetSeedResult {
+            elapsed: Duration::from_millis(5),
+            linked_file_count: 0,
+            copied_file_count: 0,
+            skipped_file_count: 0,
+            linked_bytes: 0,
+            copied_bytes: 0,
+            fallback_reason: Some(CargoTargetSeedFallback::BaseMissing),
+        };
+
+        record_cargo_target_seed_result("task_run", hit_project, &hit_result);
+        record_cargo_target_seed_result("task_run", cold_project, &cold_result);
+
+        let after = djinn_telemetry::render().expect("render after");
+        assert_eq!(
+            labeled_counter(
+                &after,
+                djinn_telemetry::cargo_cache::SEED_HIT_TOTAL,
+                &[("project_id", hit_project)],
+            ),
+            hit_before + 1.0,
+            "seed hit must light the per-project hit counter exactly once"
+        );
+        assert_eq!(
+            labeled_counter(
+                &after,
+                djinn_telemetry::cargo_cache::SEED_COLD_TOTAL,
+                &[
+                    ("project_id", cold_project),
+                    ("fallback_reason", cold_reason)
+                ],
+            ),
+            cold_before + 1.0,
+            "cold fallback must light the per-project cold counter with the bounded reason once"
+        );
+        // A hit must never touch the cold counter for its project.
+        assert_eq!(
+            labeled_counter(
+                &after,
+                djinn_telemetry::cargo_cache::SEED_COLD_TOTAL,
+                &[("project_id", hit_project)],
+            ),
+            0.0,
+            "a seed hit must not increment the cold counter"
+        );
     }
 
     /// A cold-start fallback seed (missing base) records exactly one `ok`
