@@ -762,7 +762,7 @@ async fn correlation_fence_rejects_missing_and_mismatched_task_identity() {
             "non-current source intent",
             Some((
                 "same-run".to_owned(),
-                "foreign-intent".to_owned()
+                "foreign-intent".to_owned(),
                 1,
                 1,
                 DurablePhase::AdversaryAttack,
