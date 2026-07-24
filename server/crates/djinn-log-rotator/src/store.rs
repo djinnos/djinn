@@ -135,6 +135,13 @@ pub struct WritableState {
     pub required_reserve_bytes: u64,
     pub available_bytes: u64,
 }
+/// A physical-reserve state change. `writable == false` marks reserve entry;
+/// `writable == true` marks recovery after the reserve predicate clears.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReserveTransition {
+    pub state: WritableState,
+}
+#[derive(Clone)]
 struct Segment {
     logical_bytes: u64,
     active: bool,
@@ -156,6 +163,7 @@ pub struct LogStore<
     policy_lock: Mutex<()>,
     state: Mutex<WritableState>,
     transitions: Mutex<Vec<EvictionTransition>>,
+    reserve_transitions: Mutex<Vec<ReserveTransition>>,
 }
 impl LogStore {
     pub fn new(root: impl Into<PathBuf>) -> Result<Self, StoreError> {
@@ -195,6 +203,7 @@ impl<C: Clock, Z: Compressor, F: FilesystemCapacity> LogStore<C, Z, F> {
                 available_bytes: 0,
             }),
             transitions: Mutex::new(Vec::new()),
+            reserve_transitions: Mutex::new(Vec::new()),
         };
         store.recover_all()?;
         Ok(store)
@@ -390,13 +399,21 @@ impl<C: Clock, Z: Compressor, F: FilesystemCapacity> LogStore<C, Z, F> {
         Ok(())
     }
     pub fn writable_state(&self) -> Result<WritableState, StoreError> {
-        self.check_reserve()?;
+        // Observing the state must not turn an exhausted store into an error:
+        // HTTP health/status callers need the typed unwritable state.
+        let _ = self.check_reserve();
         Ok(self.state.lock().expect("state lock poisoned").clone())
     }
     pub fn eviction_transitions(&self) -> Vec<EvictionTransition> {
         self.transitions
             .lock()
             .expect("transition lock poisoned")
+            .clone()
+    }
+    pub fn reserve_transitions(&self) -> Vec<ReserveTransition> {
+        self.reserve_transitions
+            .lock()
+            .expect("reserve transition lock poisoned")
             .clone()
     }
     fn check_reserve(&self) -> Result<(), StoreError> {
@@ -408,7 +425,12 @@ impl<C: Clock, Z: Compressor, F: FilesystemCapacity> LogStore<C, Z, F> {
             .max(total.saturating_mul(self.config.reserve_percent as u64) / 100);
         let writable = available >= required;
         let mut state = self.state.lock().expect("state lock poisoned");
-        if state.writable && !writable {
+        let next = WritableState {
+            writable,
+            required_reserve_bytes: required,
+            available_bytes: available,
+        };
+        if state.writable != writable {
             self.transitions
                 .lock()
                 .expect("transition lock poisoned")
@@ -416,12 +438,14 @@ impl<C: Clock, Z: Compressor, F: FilesystemCapacity> LogStore<C, Z, F> {
                     reason: EvictionReason::Reserve,
                     logical_bytes: 0,
                 });
+            self.reserve_transitions
+                .lock()
+                .expect("reserve transition lock poisoned")
+                .push(ReserveTransition {
+                    state: next.clone(),
+                });
         }
-        *state = WritableState {
-            writable,
-            required_reserve_bytes: required,
-            available_bytes: available,
-        };
+        *state = next;
         if writable {
             Ok(())
         } else {
@@ -470,6 +494,18 @@ impl<C: Clock, Z: Compressor, F: FilesystemCapacity> LogStore<C, Z, F> {
             if total.saturating_add(added) <= limit {
                 return Ok(());
             }
+            let candidate = segments
+                .iter()
+                .filter(|s| {
+                    !s.active && (reason != EvictionReason::StreamQuota || s.dir == stream_dir)
+                })
+                .min_by_key(|s| (&s.key, &s.path));
+            if let Some(segment) = candidate {
+                self.evict(segment.clone(), reason)?;
+                continue;
+            }
+            // Closed segments always win. Rotate an active segment only when
+            // there is no eligible closed segment left to evict.
             let active = segments
                 .iter()
                 .filter(|s| {
@@ -478,16 +514,6 @@ impl<C: Clock, Z: Compressor, F: FilesystemCapacity> LogStore<C, Z, F> {
                 .min_by_key(|s| (&s.key, &s.path));
             if let Some(active) = active {
                 self.close_active(&active.path)?;
-                continue;
-            }
-            let candidate = segments
-                .into_iter()
-                .filter(|s| {
-                    !s.active && (reason != EvictionReason::StreamQuota || s.dir == stream_dir)
-                })
-                .min_by_key(|s| (s.key.clone(), s.path.clone()));
-            if let Some(segment) = candidate {
-                self.evict(segment, reason)?;
             } else {
                 return Err(StoreError::QuotaCannotBeSatisfied);
             }
