@@ -468,6 +468,33 @@ pub async fn reject_admission_create_started_for_test(db: &Database, reject: boo
     }
 }
 
+/// Install a test-only trigger that rejects creation of a successor refinement
+/// intent. This keeps raw failure-injection SQL inside the database-owner crate
+/// while coordinator tests exercise the real atomic completion transaction.
+///
+/// **Not for production use.** Panics on SQL errors.
+pub async fn reject_refinement_successor_for_test(db: &Database) {
+    db.ensure_initialized().await.unwrap();
+    sqlx::query(
+        "CREATE FUNCTION reject_refinement_successor_for_test() RETURNS trigger AS $$ \
+         BEGIN \
+           RAISE EXCEPTION 'injected successor persistence failure'; \
+         END; \
+         $$ LANGUAGE plpgsql",
+    )
+    .execute(db.pool())
+    .await
+    .expect("failed to create refinement successor rejection function");
+    sqlx::query(
+        "CREATE TRIGGER reject_refinement_successor_for_test \
+         BEFORE INSERT ON refinement_dispatch_intents \
+         FOR EACH ROW EXECUTE FUNCTION reject_refinement_successor_for_test()",
+    )
+    .execute(db.pool())
+    .await
+    .expect("failed to create refinement successor rejection trigger");
+}
+
 /// Backdate a task's `updated_at` by a PostgreSQL `interval` string
 /// (e.g. `'20 minutes'`).
 ///
