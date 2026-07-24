@@ -2592,6 +2592,14 @@ export namespace ImageCreateInputSchema {
   [k: string]: string[]
   }
   /**
+   * Optional per-project CPU/memory overrides for the task-run and warm
+   * Pods, layered over the deployment-wide defaults. `None` (the default)
+   * keeps every kind on its deployment default. Task and warm blocks resolve
+   * independently; the resolved quantities are rendered into the k8s Job/Pod
+   * specs by `djinn-k8s`. See [`crate::resources::BuildResources`].
+   */
+  build_resources?: (BuildResources | null)
+  /**
    * Project-level override for Cargo target-cache warming/running policy.
    * 
    * The default is [`CargoCachePolicy::AutoDetected`]: djinn detects the
@@ -2640,6 +2648,46 @@ export namespace ImageCreateInputSchema {
    */
   system_packages?: string[]
   workspaces?: Workspace[]
+  }
+  /**
+   * Optional per-project CPU/memory overrides for the task-run and warm Pods.
+   * 
+   * The whole object is optional on `EnvironmentConfig`; each inner block is
+   * optional; each field within a block is optional. Anything unset inherits
+   * the deployment default at resolution time. The two blocks are resolved
+   * separately — a `task` override never affects `warm` and vice-versa.
+   */
+  export interface BuildResources {
+  /**
+   * Overrides applied to the task-run Pod.
+   */
+  task?: (BuildResourceOverrides | null)
+  /**
+   * Overrides applied to the warm-job Pod.
+   */
+  warm?: (BuildResourceOverrides | null)
+  }
+  /**
+   * CPU + memory request/limit overrides for one Pod kind. Every field is an
+   * optional Kubernetes Quantity string; `None` inherits the deployment default.
+   */
+  export interface BuildResourceOverrides {
+  /**
+   * CPU limit override.
+   */
+  cpu_limit?: string
+  /**
+   * CPU request override (e.g. `"4"`, `"500m"`).
+   */
+  cpu_request?: string
+  /**
+   * Memory limit override.
+   */
+  memory_limit?: string
+  /**
+   * Memory request override (e.g. `"8Gi"`, `"512Mi"`).
+   */
+  memory_request?: string
   }
   /**
    * Explicit Cargo target-cache policy used when auto-detection is overridden.
@@ -2971,6 +3019,14 @@ export namespace ImageListOutputSchema {
   [k: string]: string[]
   }
   /**
+   * Optional per-project CPU/memory overrides for the task-run and warm
+   * Pods, layered over the deployment-wide defaults. `None` (the default)
+   * keeps every kind on its deployment default. Task and warm blocks resolve
+   * independently; the resolved quantities are rendered into the k8s Job/Pod
+   * specs by `djinn-k8s`. See [`crate::resources::BuildResources`].
+   */
+  build_resources?: (BuildResources | null)
+  /**
    * Project-level override for Cargo target-cache warming/running policy.
    * 
    * The default is [`CargoCachePolicy::AutoDetected`]: djinn detects the
@@ -3019,6 +3075,46 @@ export namespace ImageListOutputSchema {
    */
   system_packages?: string[]
   workspaces?: Workspace[]
+  }
+  /**
+   * Optional per-project CPU/memory overrides for the task-run and warm Pods.
+   * 
+   * The whole object is optional on `EnvironmentConfig`; each inner block is
+   * optional; each field within a block is optional. Anything unset inherits
+   * the deployment default at resolution time. The two blocks are resolved
+   * separately — a `task` override never affects `warm` and vice-versa.
+   */
+  export interface BuildResources {
+  /**
+   * Overrides applied to the task-run Pod.
+   */
+  task?: (BuildResourceOverrides | null)
+  /**
+   * Overrides applied to the warm-job Pod.
+   */
+  warm?: (BuildResourceOverrides | null)
+  }
+  /**
+   * CPU + memory request/limit overrides for one Pod kind. Every field is an
+   * optional Kubernetes Quantity string; `None` inherits the deployment default.
+   */
+  export interface BuildResourceOverrides {
+  /**
+   * CPU limit override.
+   */
+  cpu_limit?: string
+  /**
+   * CPU request override (e.g. `"4"`, `"500m"`).
+   */
+  cpu_request?: string
+  /**
+   * Memory limit override.
+   */
+  memory_limit?: string
+  /**
+   * Memory request override (e.g. `"8Gi"`, `"512Mi"`).
+   */
+  memory_request?: string
   }
   /**
    * Explicit Cargo target-cache policy used when auto-detection is overridden.
@@ -3326,6 +3422,14 @@ export namespace ImageUpdateInputSchema {
   [k: string]: string[]
   }
   /**
+   * Optional per-project CPU/memory overrides for the task-run and warm
+   * Pods, layered over the deployment-wide defaults. `None` (the default)
+   * keeps every kind on its deployment default. Task and warm blocks resolve
+   * independently; the resolved quantities are rendered into the k8s Job/Pod
+   * specs by `djinn-k8s`. See [`crate::resources::BuildResources`].
+   */
+  build_resources?: (BuildResources | null)
+  /**
    * Project-level override for Cargo target-cache warming/running policy.
    * 
    * The default is [`CargoCachePolicy::AutoDetected`]: djinn detects the
@@ -3374,6 +3478,46 @@ export namespace ImageUpdateInputSchema {
    */
   system_packages?: string[]
   workspaces?: Workspace[]
+  }
+  /**
+   * Optional per-project CPU/memory overrides for the task-run and warm Pods.
+   * 
+   * The whole object is optional on `EnvironmentConfig`; each inner block is
+   * optional; each field within a block is optional. Anything unset inherits
+   * the deployment default at resolution time. The two blocks are resolved
+   * separately — a `task` override never affects `warm` and vice-versa.
+   */
+  export interface BuildResources {
+  /**
+   * Overrides applied to the task-run Pod.
+   */
+  task?: (BuildResourceOverrides | null)
+  /**
+   * Overrides applied to the warm-job Pod.
+   */
+  warm?: (BuildResourceOverrides | null)
+  }
+  /**
+   * CPU + memory request/limit overrides for one Pod kind. Every field is an
+   * optional Kubernetes Quantity string; `None` inherits the deployment default.
+   */
+  export interface BuildResourceOverrides {
+  /**
+   * CPU limit override.
+   */
+  cpu_limit?: string
+  /**
+   * CPU request override (e.g. `"4"`, `"500m"`).
+   */
+  cpu_request?: string
+  /**
+   * Memory limit override.
+   */
+  memory_limit?: string
+  /**
+   * Memory request override (e.g. `"8Gi"`, `"512Mi"`).
+   */
+  memory_request?: string
   }
   /**
    * Explicit Cargo target-cache policy used when auto-detection is overridden.
@@ -5937,6 +6081,14 @@ export namespace ProjectEnvironmentConfigGetOutputSchema {
   [k: string]: string[]
   }
   /**
+   * Optional per-project CPU/memory overrides for the task-run and warm
+   * Pods, layered over the deployment-wide defaults. `None` (the default)
+   * keeps every kind on its deployment default. Task and warm blocks resolve
+   * independently; the resolved quantities are rendered into the k8s Job/Pod
+   * specs by `djinn-k8s`. See [`crate::resources::BuildResources`].
+   */
+  build_resources?: (BuildResources | null)
+  /**
    * Project-level override for Cargo target-cache warming/running policy.
    * 
    * The default is [`CargoCachePolicy::AutoDetected`]: djinn detects the
@@ -5985,6 +6137,46 @@ export namespace ProjectEnvironmentConfigGetOutputSchema {
    */
   system_packages?: string[]
   workspaces?: Workspace[]
+  }
+  /**
+   * Optional per-project CPU/memory overrides for the task-run and warm Pods.
+   * 
+   * The whole object is optional on `EnvironmentConfig`; each inner block is
+   * optional; each field within a block is optional. Anything unset inherits
+   * the deployment default at resolution time. The two blocks are resolved
+   * separately — a `task` override never affects `warm` and vice-versa.
+   */
+  export interface BuildResources {
+  /**
+   * Overrides applied to the task-run Pod.
+   */
+  task?: (BuildResourceOverrides | null)
+  /**
+   * Overrides applied to the warm-job Pod.
+   */
+  warm?: (BuildResourceOverrides | null)
+  }
+  /**
+   * CPU + memory request/limit overrides for one Pod kind. Every field is an
+   * optional Kubernetes Quantity string; `None` inherits the deployment default.
+   */
+  export interface BuildResourceOverrides {
+  /**
+   * CPU limit override.
+   */
+  cpu_limit?: string
+  /**
+   * CPU request override (e.g. `"4"`, `"500m"`).
+   */
+  cpu_request?: string
+  /**
+   * Memory limit override.
+   */
+  memory_limit?: string
+  /**
+   * Memory request override (e.g. `"8Gi"`, `"512Mi"`).
+   */
+  memory_request?: string
   }
   /**
    * Explicit Cargo target-cache policy used when auto-detection is overridden.
@@ -6276,6 +6468,14 @@ export namespace ProjectEnvironmentConfigResetOutputSchema {
   [k: string]: string[]
   }
   /**
+   * Optional per-project CPU/memory overrides for the task-run and warm
+   * Pods, layered over the deployment-wide defaults. `None` (the default)
+   * keeps every kind on its deployment default. Task and warm blocks resolve
+   * independently; the resolved quantities are rendered into the k8s Job/Pod
+   * specs by `djinn-k8s`. See [`crate::resources::BuildResources`].
+   */
+  build_resources?: (BuildResources | null)
+  /**
    * Project-level override for Cargo target-cache warming/running policy.
    * 
    * The default is [`CargoCachePolicy::AutoDetected`]: djinn detects the
@@ -6324,6 +6524,46 @@ export namespace ProjectEnvironmentConfigResetOutputSchema {
    */
   system_packages?: string[]
   workspaces?: Workspace[]
+  }
+  /**
+   * Optional per-project CPU/memory overrides for the task-run and warm Pods.
+   * 
+   * The whole object is optional on `EnvironmentConfig`; each inner block is
+   * optional; each field within a block is optional. Anything unset inherits
+   * the deployment default at resolution time. The two blocks are resolved
+   * separately — a `task` override never affects `warm` and vice-versa.
+   */
+  export interface BuildResources {
+  /**
+   * Overrides applied to the task-run Pod.
+   */
+  task?: (BuildResourceOverrides | null)
+  /**
+   * Overrides applied to the warm-job Pod.
+   */
+  warm?: (BuildResourceOverrides | null)
+  }
+  /**
+   * CPU + memory request/limit overrides for one Pod kind. Every field is an
+   * optional Kubernetes Quantity string; `None` inherits the deployment default.
+   */
+  export interface BuildResourceOverrides {
+  /**
+   * CPU limit override.
+   */
+  cpu_limit?: string
+  /**
+   * CPU request override (e.g. `"4"`, `"500m"`).
+   */
+  cpu_request?: string
+  /**
+   * Memory limit override.
+   */
+  memory_limit?: string
+  /**
+   * Memory request override (e.g. `"8Gi"`, `"512Mi"`).
+   */
+  memory_request?: string
   }
   /**
    * Explicit Cargo target-cache policy used when auto-detection is overridden.
@@ -6608,6 +6848,14 @@ export namespace ProjectEnvironmentConfigSetInputSchema {
   [k: string]: string[]
   }
   /**
+   * Optional per-project CPU/memory overrides for the task-run and warm
+   * Pods, layered over the deployment-wide defaults. `None` (the default)
+   * keeps every kind on its deployment default. Task and warm blocks resolve
+   * independently; the resolved quantities are rendered into the k8s Job/Pod
+   * specs by `djinn-k8s`. See [`crate::resources::BuildResources`].
+   */
+  build_resources?: (BuildResources | null)
+  /**
    * Project-level override for Cargo target-cache warming/running policy.
    * 
    * The default is [`CargoCachePolicy::AutoDetected`]: djinn detects the
@@ -6656,6 +6904,46 @@ export namespace ProjectEnvironmentConfigSetInputSchema {
    */
   system_packages?: string[]
   workspaces?: Workspace[]
+  }
+  /**
+   * Optional per-project CPU/memory overrides for the task-run and warm Pods.
+   * 
+   * The whole object is optional on `EnvironmentConfig`; each inner block is
+   * optional; each field within a block is optional. Anything unset inherits
+   * the deployment default at resolution time. The two blocks are resolved
+   * separately — a `task` override never affects `warm` and vice-versa.
+   */
+  export interface BuildResources {
+  /**
+   * Overrides applied to the task-run Pod.
+   */
+  task?: (BuildResourceOverrides | null)
+  /**
+   * Overrides applied to the warm-job Pod.
+   */
+  warm?: (BuildResourceOverrides | null)
+  }
+  /**
+   * CPU + memory request/limit overrides for one Pod kind. Every field is an
+   * optional Kubernetes Quantity string; `None` inherits the deployment default.
+   */
+  export interface BuildResourceOverrides {
+  /**
+   * CPU limit override.
+   */
+  cpu_limit?: string
+  /**
+   * CPU request override (e.g. `"4"`, `"500m"`).
+   */
+  cpu_request?: string
+  /**
+   * Memory limit override.
+   */
+  memory_limit?: string
+  /**
+   * Memory request override (e.g. `"8Gi"`, `"512Mi"`).
+   */
+  memory_request?: string
   }
   /**
    * Explicit Cargo target-cache policy used when auto-detection is overridden.

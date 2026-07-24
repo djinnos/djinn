@@ -332,6 +332,7 @@ mod tests {
             cargo_cache_policy: None,
             agent_mcp_defaults: Default::default(),
             global_skills: vec![],
+            build_resources: None,
         }
     }
 

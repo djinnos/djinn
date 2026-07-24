@@ -3484,7 +3484,7 @@ mod inflight_ledger_tests {
 
     pub(super) const WND1_READY_TASK_COUNT: usize = 10;
     pub(super) const WND1_STABLE_MODEL_ID: &str = "test/mock";
-    const WND1_DISPATCH_SETTLE_TIMEOUT: Duration = Duration::from_secs(10);
+    pub(super) const WND1_DISPATCH_SETTLE_TIMEOUT: Duration = Duration::from_secs(10);
     pub(super) const WND1_CONTROLLED_RUNTIME_GUARD: Duration = Duration::from_secs(60);
 
     pub(super) struct Wnd1DispatchFixture {
@@ -3844,7 +3844,18 @@ mod inflight_ledger_tests {
             .sum()
     }
 
-    async fn wait_for_pool_to_forget_task(pool: &djinn_slot::SlotPoolHandle, task_id: &str) {
+    /// Block until the pool has released a task's slot mapping.
+    ///
+    /// `SlotPoolHandle::kill_session` only *sends* the kill; the pool actor
+    /// drops `task_to_slot` later, when the slot's own `Killed`/`Free` event
+    /// arrives through `handle_event`. The same asymmetry applies to a runner
+    /// that completes on its own. Any test that asserts "the pool forgot this
+    /// task" therefore has to wait for that event rather than read the mapping
+    /// straight after the command returns.
+    pub(super) async fn wait_for_pool_to_forget_task(
+        pool: &djinn_slot::SlotPoolHandle,
+        task_id: &str,
+    ) {
         let deadline = tokio::time::Instant::now() + WND1_DISPATCH_SETTLE_TIMEOUT;
         loop {
             if !pool
@@ -8005,6 +8016,7 @@ mod build_admission_route_tests {
     use super::inflight_ledger_tests::{
         WND1_CONTROLLED_RUNTIME_GUARD, WND1_READY_TASK_COUNT, WND1_STABLE_MODEL_ID,
         Wnd1DispatchFixture, configure_wnd1_user_max_sessions, seed_wnd1_ready_worker_tasks,
+        wait_for_pool_to_forget_task,
     };
     use super::*;
     use crate::build_admission::{BuildAdmissionController, BuildAdmissionMode};
@@ -8989,10 +9001,15 @@ mod build_admission_route_tests {
         // already have removed the mapping, in which case TaskNotFound is the
         // expected deterministic outcome.
         let _ = actor.pool.kill_session(&task_id).await;
-        assert!(
-            !actor.pool.has_session(&task_id).await.expect("check pool"),
-            "runner completion must remove the first controlled session"
-        );
+        // Runner completion must remove the first controlled session — but that
+        // removal is event-driven, not synchronous with `kill_session`: the
+        // completed-callback fires before the runner future returns, and the
+        // pool drops `task_to_slot` only once the slot's `Killed`/`Free` event
+        // reaches `handle_event`. Reading the mapping immediately therefore
+        // races the pool actor under load. Wait for the event instead — the
+        // retry below also depends on the mapping being gone, since
+        // `dispatch_ready_tasks` skips any task the pool still holds.
+        wait_for_pool_to_forget_task(&actor.pool, &task_id).await;
         actor
             .clear_planned_dispatch_completion(&task_id, "ambiguous retry fixture settlement")
             .await;
