@@ -27,6 +27,7 @@ use djinn_sandbox::final_verification_execution::{
 use djinn_supervisor::SupervisorServices;
 use globset::{Glob, GlobSetBuilder};
 
+use super::catalog_endpoints::catalog_loopback_endpoints;
 use crate::context::AgentContext;
 
 const UNKNOWN_IMAGE_DIGEST: &str =
@@ -394,6 +395,7 @@ pub async fn resolve_final_verification_for_task_run(
     let services = resolve_image_services_strict(db, &bound_image_id)
         .await
         .map_err(|e| format!("strict catalog resolution failed: {e}"))?;
+    let catalog_loopback_endpoints = catalog_loopback_endpoints(&services)?;
     let manifest = VerificationInputManifestV1 {
         version: plan.input_manifest.version,
         repo_paths: plan.input_manifest.repo_paths.clone(),
@@ -515,6 +517,7 @@ pub async fn resolve_final_verification_for_task_run(
                 tool_runtime: canonical_tool_runtime(),
                 read_only_external_mounts: external_inputs.into_iter().map(|i| i.path).collect(),
                 output_directories,
+                catalog_loopback_endpoints,
             },
             verify_source: VerifySource::Worker,
             required_checks,

@@ -1522,6 +1522,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "djinn-log-rotator"
+version = "0.1.0"
+dependencies = [
+ "flate2",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "time",
+ "uuid",
+ "workspace-hack",
+]
+
+[[package]]
 name = "djinn-lsp"
 version = "0.1.0"
 dependencies = [
@@ -1915,6 +1928,7 @@ dependencies = [
  "chrono",
  "metrics",
  "metrics-exporter-prometheus",
+ "serde_json",
  "workspace-hack",
 ]
 

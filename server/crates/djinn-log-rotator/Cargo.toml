@@ -1,0 +1,22 @@
+[package]
+publish = false
+name = "djinn-log-rotator"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+doctest = false
+
+[dependencies]
+flate2 = "1"
+serde_json = "1"
+thiserror = "2"
+time = { version = "0.3", features = ["formatting", "macros"] }
+uuid = { version = "1", features = ["v4"] }
+workspace-hack.workspace = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+tempfile = "3"
