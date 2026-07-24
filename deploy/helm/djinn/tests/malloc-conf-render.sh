@@ -68,12 +68,38 @@ assert sorted(owners) == ["djinn-server", "migrate"], (
 PY
 }
 
+assert_server_backtrace() {
+    local manifest=$1
+    python3 - "$manifest" <<'PY'
+import re
+import sys
+
+lines = open(sys.argv[1], encoding="utf-8").read().splitlines()
+container_pattern = re.compile(r"^        - name: (.+)$")
+locations = [i for i, line in enumerate(lines) if line == "            - name: RUST_BACKTRACE"]
+
+assert len(locations) == 1, f"expected exactly one RUST_BACKTRACE entry, got {len(locations)}"
+location = locations[0]
+owner = next(
+    (match.group(1) for line in reversed(lines[:location])
+     if (match := container_pattern.match(line))),
+    None,
+)
+assert owner == "djinn-server", f"RUST_BACKTRACE must be owned by djinn-server, got {owner!r}"
+assert location + 1 < len(lines), "RUST_BACKTRACE is missing its value"
+value_match = re.match(r'^              value: "?(.+?)"?$', lines[location + 1])
+assert value_match and value_match.group(1) == "1", "RUST_BACKTRACE must have literal value 1"
+PY
+}
+
 echo "=== default allocator configuration ==="
 render "$TMPDIR_RENDER/default.yaml"
 assert_malloc_conf "$TMPDIR_RENDER/default.yaml" "$DEFAULT_VALUE"
+assert_server_backtrace "$TMPDIR_RENDER/default.yaml"
 
 echo "=== overridden allocator configuration ==="
 render "$TMPDIR_RENDER/override.yaml" --set-string "server.mallocConf=$OVERRIDE_SET_VALUE"
 assert_malloc_conf "$TMPDIR_RENDER/override.yaml" "$OVERRIDE_VALUE"
+assert_server_backtrace "$TMPDIR_RENDER/override.yaml"
 
-echo "=== All MALLOC_CONF Helm render tests passed ==="
+echo "=== All MALLOC_CONF and RUST_BACKTRACE Helm render tests passed ==="
