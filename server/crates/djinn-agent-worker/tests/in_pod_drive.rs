@@ -590,6 +590,7 @@ async fn worker_drives_real_supervisor_in_pod() {
     // 3. Seed the spec + credentials files the worker reads at boot.
     let cfg_dir = TempDir::new().expect("tempdir cfg");
     let workspace_dir = TempDir::new().expect("tempdir workspace");
+    let journal_dir = TempDir::new().expect("tempdir invocation journal");
 
     // One host-minted ID is used by the spec, the K8s-shaped row, and the
     // worker environment; the supervisor persists using spec.task_run_id.
@@ -715,6 +716,7 @@ async fn worker_drives_real_supervisor_in_pod() {
         .env("DJINN_TOKEN_PATH", &token_path)
         .env("DJINN_TASK_RUN_ID", task_run_id)
         .env("DJINN_TASK_RUN_POD_UID", "pod-uid-in-pod-drive")
+        .env("DJINN_INVOCATION_JOURNAL_DIR", journal_dir.path())
         .env("DJINN_CGROUP_BROKER_SOCKET", &broker.socket_path)
         .env(
             "DJINN_CGROUP_BROKER_CREDENTIAL_PATH",

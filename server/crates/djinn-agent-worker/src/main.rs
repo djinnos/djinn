@@ -1944,7 +1944,9 @@ async fn run_task_run(args: WorkerDefaultArgs) -> Result<()> {
         args.task_run_pod_uid.clone(),
         rpc.clone(),
         broker_client,
-    );
+    )
+    .await
+    .context("recover durable invocation journal")?;
 
     // 4. Attach to the host-materialised workspace.
     let workspace = Workspace::attach_existing(args.workspace_path.as_path(), &spec.task_branch)

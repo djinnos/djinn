@@ -1,3 +1,5 @@
+// djinn:allow-oversize — cohesive process lifecycle and durable lease recovery
+// require shared private state; split only with a dedicated module boundary.
 //! Async process spawning via `std::process::Command` + `spawn_blocking`.
 //!
 //! All subprocess creation in the daemon MUST go through this module rather than
@@ -8,17 +10,20 @@
 //!
 //! `std::process::Command` avoids this by not touching the reactor at all.
 
+use std::fs::{self, File, OpenOptions};
 use std::future::Future;
-use std::io;
+use std::io::{self, Write};
+use std::path::PathBuf;
 use std::process::{Command, Output};
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use djinn_core::clock::{Clock, SystemClock};
 use djinn_supervisor::services::{
     InvocationLiftDecision, LeaseAbandonRequest, LeaseBindRequest, LeaseDeadlines,
     LeaseFencingToken, LeaseGrantRequest, LeaseIdentity, LeaseQueueRequest, LeaseReleaseRequest,
-    LeaseResult, LeaseState, LeaseStatusRequest, SupervisorServices, TaskInvocationLeaseIdentity,
+    LeaseResult, LeaseState, LeaseStatus, LeaseStatusRequest, SupervisorServices,
+    TaskInvocationLeaseIdentity,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -78,6 +83,253 @@ mod broker;
 #[allow(unused_imports)] // constructed by the pending workspace broker composition
 pub(crate) use broker::{CgroupLauncherClient, ProcessHandle, UnixBrokerLauncher};
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct UnresolvedInvocation {
+    identity: TaskInvocationLeaseIdentity,
+    pod_uid: String,
+    fence: Option<LeaseFencingToken>,
+    terminal_intent: bool,
+    watchdog_notified: bool,
+    recorded_at_ms: u128,
+}
+
+/// Pod-local write-ahead journal. Replacements fsync the file and parent.
+pub struct InvocationJournal {
+    directory: PathBuf,
+    pod_uid: String,
+    update_lock: Mutex<()>,
+}
+impl InvocationJournal {
+    pub fn new(directory: PathBuf, pod_uid: String) -> io::Result<Self> {
+        if pod_uid.is_empty() || pod_uid.contains('/') || pod_uid.contains('\0') {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid pod UID",
+            ));
+        }
+        fs::create_dir_all(&directory)?;
+        File::open(&directory)?.sync_all()?;
+        Ok(Self {
+            directory,
+            pod_uid,
+            update_lock: Mutex::new(()),
+        })
+    }
+    fn record_at(
+        &self,
+        identity: &TaskInvocationLeaseIdentity,
+        fence: Option<LeaseFencingToken>,
+        terminal_intent: bool,
+        recorded_at: SystemTime,
+    ) -> io::Result<()> {
+        let _guard = self.update_lock.lock().unwrap();
+        let watchdog_notified = match fs::read_to_string(self.path(identity)) {
+            Ok(content) => {
+                let current = parse_unresolved(&content)?;
+                current.identity == *identity && current.watchdog_notified
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+            Err(error) => return Err(error),
+        };
+        self.replace_unlocked(UnresolvedInvocation {
+            identity: identity.clone(),
+            pod_uid: self.pod_uid.clone(),
+            fence,
+            terminal_intent,
+            watchdog_notified,
+            recorded_at_ms: recorded_at
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis(),
+        })
+    }
+    fn notify_if_current(
+        &self,
+        identity: &TaskInvocationLeaseIdentity,
+    ) -> io::Result<Option<String>> {
+        let _guard = self.update_lock.lock().unwrap();
+        let content = match fs::read_to_string(self.path(identity)) {
+            Ok(content) => content,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let mut current = parse_unresolved(&content)?;
+        if current.identity != *identity || current.watchdog_notified {
+            return Ok(None);
+        }
+        current.watchdog_notified = true;
+        let pod_uid = current.pod_uid.clone();
+        self.replace_unlocked(current)?;
+        Ok(Some(pod_uid))
+    }
+    fn clear(&self, identity: &TaskInvocationLeaseIdentity) -> io::Result<()> {
+        let _guard = self.update_lock.lock().unwrap();
+        match fs::remove_file(self.path(identity)) {
+            Ok(()) => File::open(&self.directory)?.sync_all(),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e),
+        }
+    }
+    fn path(&self, identity: &TaskInvocationLeaseIdentity) -> PathBuf {
+        self.directory
+            .join(format!("{}.invocation", identity.invocation_id))
+    }
+    fn replace_unlocked(&self, record: UnresolvedInvocation) -> io::Result<()> {
+        let path = self.path(&record.identity);
+        let tmp = path.with_extension("tmp");
+        let content = format!(
+            "task_id={}\ntask_run_id={}\ninvocation_id={}\npod_uid={}\nfence={}\nterminal_intent={}\nwatchdog_notified={}\nrecorded_at_ms={}\n",
+            record.identity.task_id,
+            record.identity.task_run_id,
+            record.identity.invocation_id,
+            record.pod_uid,
+            record.fence.map(|f| f.0.to_string()).unwrap_or_default(),
+            record.terminal_intent,
+            record.watchdog_notified,
+            record.recorded_at_ms
+        );
+        let mut file = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&tmp)?;
+        file.write_all(content.as_bytes())?;
+        file.sync_all()?;
+        fs::rename(tmp, path)?;
+        File::open(&self.directory)?.sync_all()
+    }
+    fn unresolved(&self) -> io::Result<Vec<UnresolvedInvocation>> {
+        let _guard = self.update_lock.lock().unwrap();
+        fs::read_dir(&self.directory)?
+            .filter_map(Result::ok)
+            .filter(|e| e.path().extension().and_then(|v| v.to_str()) == Some("invocation"))
+            .map(|e| parse_unresolved(&fs::read_to_string(e.path())?))
+            .collect()
+    }
+}
+fn parse_unresolved(content: &str) -> io::Result<UnresolvedInvocation> {
+    let value = |key: &str| {
+        content
+            .lines()
+            .find_map(|line| line.strip_prefix(&format!("{key}=")))
+            .filter(|v| !v.is_empty())
+            .map(str::to_owned)
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, format!("journal missing {key}"))
+            })
+    };
+    let fence = content
+        .lines()
+        .find_map(|line| line.strip_prefix("fence="))
+        .filter(|v| !v.is_empty())
+        .map(|v| v.parse::<u64>().map(LeaseFencingToken))
+        .transpose()
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid journal fence"))?;
+    let terminal_intent = content
+        .lines()
+        .find_map(|line| line.strip_prefix("terminal_intent="))
+        .map(|v| v == "true")
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "journal missing terminal intent",
+            )
+        })?;
+    Ok(UnresolvedInvocation {
+        identity: TaskInvocationLeaseIdentity {
+            task_id: value("task_id")?,
+            task_run_id: value("task_run_id")?,
+            invocation_id: value("invocation_id")?,
+        },
+        pod_uid: value("pod_uid")?,
+        fence,
+        terminal_intent,
+        watchdog_notified: content
+            .lines()
+            .find_map(|line| line.strip_prefix("watchdog_notified="))
+            .map(|v| v == "true")
+            .unwrap_or(false),
+        recorded_at_ms: content
+            .lines()
+            .find_map(|line| line.strip_prefix("recorded_at_ms="))
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0),
+    })
+}
+
+/// Explicit recovery seams keep restart grace and watchdog delivery testable.
+pub struct InvocationRecovery<'a> {
+    pub journal: &'a InvocationJournal,
+    pub services: &'a dyn SupervisorServices,
+    pub clock: &'a dyn Clock,
+    pub watchdog_grace: Duration,
+}
+
+impl<'a> InvocationRecovery<'a> {
+    pub async fn run(&self, mut watchdog: impl FnMut(&str)) -> io::Result<()> {
+        for record in self.journal.unresolved()? {
+            let lease = LeaseIdentity::TaskInvocation(record.identity.clone());
+            // Always query the coordinator's durable view. An unavailable reply
+            // is ambiguous and never proves that local descendants are gone.
+            let status = self
+                .services
+                .lease_status(LeaseStatusRequest {
+                    identity: lease.clone(),
+                })
+                .await;
+            // A record is evidence of an unresolved pod until both sides have
+            // made durable terminal progress. Never turn unavailable,
+            // conflicting, mismatched, or active status into a cleanup request.
+            let confirmed = record.terminal_intent
+                && (terminal_status_matches(&status, record.fence.as_ref())
+                    || matches!(
+                        status,
+                        LeaseResult::Status(LeaseStatus {
+                            state: LeaseState::Queued,
+                            fencing_token: None,
+                            ..
+                        }) if record.fence.is_none()
+                    ) && reconcile_recovered_queued_lease(self.services, lease).await);
+            if confirmed {
+                self.journal.clear(&record.identity)?;
+                continue;
+            }
+            let recorded_at = UNIX_EPOCH + Duration::from_millis(record.recorded_at_ms as u64);
+            if self
+                .clock
+                .now()
+                .duration_since(recorded_at)
+                .unwrap_or_default()
+                >= self.watchdog_grace
+                && !record.watchdog_notified
+            {
+                // Re-read while serialized with lifecycle writes. Only the
+                // current durable record can authorize exact-pod deletion.
+                if let Some(pod_uid) = self.journal.notify_if_current(&record.identity)? {
+                    watchdog(&pod_uid);
+                }
+            }
+        }
+        Ok(())
+    }
+}
+#[allow(dead_code)]
+pub async fn recover_unresolved_invocations(
+    journal: &InvocationJournal,
+    services: &dyn SupervisorServices,
+    watchdog: impl FnMut(&str),
+) -> io::Result<()> {
+    let clock = SystemClock::new();
+    InvocationRecovery {
+        journal,
+        services,
+        clock: &clock,
+        watchdog_grace: Duration::ZERO,
+    }
+    .run(watchdog)
+    .await
+}
+
 #[derive(Clone, Debug)]
 #[cfg_attr(not(test), allow(dead_code))] // consumed by the workspace lease wiring task
 pub(crate) struct LeaseInvocationConfig {
@@ -114,6 +366,7 @@ pub(crate) struct LeaseInvocationRunner {
     services: Arc<dyn SupervisorServices>,
     launcher: Arc<dyn CgroupLauncherClient>,
     clock: Arc<dyn Clock>,
+    journal: Option<Arc<InvocationJournal>>,
 }
 #[cfg_attr(not(test), allow(dead_code))] // consumed by the workspace lease wiring task
 impl LeaseInvocationRunner {
@@ -126,7 +379,12 @@ impl LeaseInvocationRunner {
             services,
             launcher,
             clock,
+            journal: None,
         }
+    }
+    pub(crate) fn with_journal(mut self, journal: Arc<InvocationJournal>) -> Self {
+        self.journal = Some(journal);
+        self
     }
     pub(crate) async fn output(
         &self,
@@ -140,6 +398,11 @@ impl LeaseInvocationRunner {
             invocation_id: uuid::Uuid::now_v7().to_string(),
         };
         let lease = LeaseIdentity::TaskInvocation(identity.clone());
+        if let Some(journal) = &self.journal {
+            journal
+                .record_at(&identity, None, false, self.clock.now())
+                .map_err(LeaseInvocationError::Launcher)?;
+        }
         let mut child = self
             .launcher
             .launch(cmd, &identity)
@@ -301,6 +564,20 @@ impl LeaseInvocationRunner {
                                 // all three cases, so `fence` is always recorded.
                                 match self.services.invocation_lift_decision().await {
                                     InvocationLiftDecision::Lift => {
+                                        // The validated fence must survive before
+                                        // the irreversible cgroup lift. A failed
+                                        // journal write therefore prevents the
+                                        // lift entirely.
+                                        if let Some(journal) = &self.journal {
+                                            journal
+                                                .record_at(
+                                                    &identity,
+                                                    Some(token.clone()),
+                                                    false,
+                                                    self.clock.now(),
+                                                )
+                                                .map_err(LeaseInvocationError::Launcher)?;
+                                        }
                                         child
                                             .fenced_lift(&token)
                                             .map_err(LeaseInvocationError::Launcher)?;
@@ -309,7 +586,11 @@ impl LeaseInvocationRunner {
                                         // Reaching a valid bind means v1 would
                                         // have escalated (lifted); record the
                                         // bounded shadow observation but leave
-                                        // cpu.max throttled under v0.
+                                        // cpu.max throttled under v0. No
+                                        // irreversible lift occurs, so no
+                                        // fence-before-lift journal write is
+                                        // required; `fence` is still reconciled
+                                        // to terminal below.
                                         djinn_telemetry::build_admission::record_shadow_invocation(
                                             true,
                                         );
@@ -350,6 +631,11 @@ impl LeaseInvocationRunner {
             }
             tokio::task::yield_now().await;
         };
+        if let Some(journal) = &self.journal {
+            journal
+                .record_at(&identity, fence.clone(), true, self.clock.now())
+                .map_err(LeaseInvocationError::Launcher)?;
+        }
         child.kill().map_err(LeaseInvocationError::Launcher)?;
         child.wait_empty().map_err(LeaseInvocationError::Launcher)?;
         drain_remote(&mut *child, &mut stdout, &mut stderr)?;
@@ -363,8 +649,13 @@ impl LeaseInvocationRunner {
             termination,
         };
         child.cleanup().map_err(LeaseInvocationError::Launcher)?;
-        if queued {
-            reconcile_terminal_lease(self.services.as_ref(), lease, fence).await;
+        if queued
+            && reconcile_terminal_lease(self.services.as_ref(), lease, fence).await
+            && let Some(journal) = &self.journal
+        {
+            journal
+                .clear(&identity)
+                .map_err(LeaseInvocationError::Launcher)?;
         }
         if let Some(error) = lease_error {
             Err(error)
@@ -448,6 +739,44 @@ fn drain_remote(
     Ok(())
 }
 
+/// A recovery clear requires a terminal coordinator observation for this
+/// record's durable fence. Terminal operation acknowledgements alone are not
+/// enough: their reply can have been lost or belong to an ambiguous retry.
+fn terminal_status_matches(result: &LeaseResult, fence: Option<&LeaseFencingToken>) -> bool {
+    match result {
+        LeaseResult::Status(LeaseStatus {
+            state: LeaseState::Cancelled | LeaseState::Released,
+            fencing_token,
+            ..
+        }) => fencing_token.as_ref() == fence,
+        LeaseResult::Cancelled { .. }
+        | LeaseResult::Released { .. }
+        | LeaseResult::Abandoned { .. } => true,
+        _ => false,
+    }
+}
+
+/// Only an unfenced queued record is safe to abandon after restart. A durable
+/// status query following the request, rather than the abandon acknowledgement,
+/// confirms terminal cleanup before the journal can be removed.
+async fn reconcile_recovered_queued_lease(
+    services: &dyn SupervisorServices,
+    lease: LeaseIdentity,
+) -> bool {
+    let _ = services
+        .abandon_lease(LeaseAbandonRequest {
+            identity: lease.clone(),
+            candidate_cleanup: false,
+        })
+        .await;
+    terminal_status_matches(
+        &services
+            .lease_status(LeaseStatusRequest { identity: lease })
+            .await,
+        None,
+    )
+}
+
 /// Re-read durable state after every uncertain cleanup response. Operations
 /// are idempotent and reuse the same fence, so a lost request cannot cause a
 /// second capacity return or leave a known grant unreleased.
@@ -456,7 +785,7 @@ async fn reconcile_terminal_lease(
     services: &dyn SupervisorServices,
     lease: LeaseIdentity,
     observed_fence: Option<LeaseFencingToken>,
-) {
+) -> bool {
     const RECONCILIATION_ATTEMPTS: usize = 3;
     let mut fence = observed_fence;
     for _ in 0..RECONCILIATION_ATTEMPTS {
@@ -469,7 +798,7 @@ async fn reconcile_terminal_lease(
             LeaseResult::Status(status)
                 if matches!(status.state, LeaseState::Cancelled | LeaseState::Released) =>
             {
-                return;
+                return true;
             }
             LeaseResult::Status(status)
                 if matches!(
@@ -484,7 +813,7 @@ async fn reconcile_terminal_lease(
             }
             LeaseResult::Cancelled { .. }
             | LeaseResult::Released { .. }
-            | LeaseResult::Abandoned { .. } => return,
+            | LeaseResult::Abandoned { .. } => return true,
             _ => {}
         }
         let result = if let Some(token) = fence.clone() {
@@ -509,10 +838,11 @@ async fn reconcile_terminal_lease(
                 | LeaseResult::Cancelled { .. }
                 | LeaseResult::Abandoned { .. }
         ) {
-            return;
+            return true;
         }
         tokio::task::yield_now().await;
     }
+    false
 }
 
 #[cfg_attr(not(test), allow(dead_code))] // consumed by the workspace lease wiring task
