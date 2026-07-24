@@ -110,7 +110,11 @@ if [[ "${1:-}" == "run" ]]; then
                 output_dir="${arg%:/out}"
                 printf 'server fixture\n' > "$output_dir/djinn-server"
                 printf 'worker fixture\n' > "$output_dir/djinn-agent-worker"
-                chmod +x "$output_dir/djinn-server" "$output_dir/djinn-agent-worker"
+                printf 'launcher fixture\n' > "$output_dir/djinn-cgroup-launcher"
+                chmod +x \
+                    "$output_dir/djinn-server" \
+                    "$output_dir/djinn-agent-worker" \
+                    "$output_dir/djinn-cgroup-launcher"
                 ;;
         esac
     done
@@ -245,6 +249,7 @@ assert_equal 'concurrent UI triggers perform one build' \
 run_binaries
 [[ -x "$ARTIFACTS/djinn-server" ]]
 [[ -x "$ARTIFACTS/djinn-agent-worker" ]]
+[[ -x "$ARTIFACTS/djinn-cgroup-launcher" ]]
 [[ -f "$ARTIFACTS/.binaries-inputs.fingerprint" ]]
 assert_contains 'cold binary build invokes Docker' 'docker build' "$CALL_LOG"
 
