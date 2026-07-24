@@ -1185,6 +1185,7 @@ dependencies = [
  "bincode",
  "clap",
  "djinn-agent",
+ "djinn-cgroup-launcher",
  "djinn-core",
  "djinn-db",
  "djinn-git",

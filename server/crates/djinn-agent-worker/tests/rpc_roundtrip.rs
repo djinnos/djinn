@@ -391,6 +391,7 @@ async fn worker_exits_nonzero_when_tcp_auth_rejects() {
         .env("DJINN_CREDENTIALS_PATH", &credentials_path)
         .env("DJINN_TOKEN_PATH", &token_path)
         .env("DJINN_TASK_RUN_ID", task_run_id)
+        .env("DJINN_TASK_RUN_POD_UID", "pod-uid-tcp-reject")
         .env("DJINN_WORKSPACE_PATH", tempdir.path())
         .env("RUST_LOG", "info")
         .stdin(Stdio::null())

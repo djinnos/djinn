@@ -19,6 +19,7 @@ path = "src/main.rs"
 # is activated only for tests via the [dev-dependencies] edge below.
 djinn-agent = { path = "../djinn-agent" }
 djinn-core = { path = "../djinn-core" }
+djinn-cgroup-launcher = { path = "../djinn-cgroup-launcher" }
 djinn-db = { path = "../djinn-db" }
 djinn-git = { path = "../djinn-git" }
 djinn-graph = { path = "../djinn-graph" }

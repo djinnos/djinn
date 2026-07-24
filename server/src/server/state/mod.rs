@@ -1896,6 +1896,9 @@ impl AppState {
             reconciliation_sweep: djinn_agent::context::ReconciliationSweepConfig::from_env(),
             memory_intent_planner: djinn_agent::context::MemoryIntentPlannerConfig::from_env(),
             knowledge_injection: self.inner.knowledge_injection_config,
+            // Host-side contexts have no immutable task-run identity or broker
+            // authority. Shell dispatch therefore remains unavailable here.
+            shell_launch: None,
             compaction_cs: djinn_slot::reply_loop::CompactionCriticalSection::default(),
         }
     }
