@@ -102,7 +102,13 @@ for case in json.loads(fixtures_path.read_text()):
         result = sanitize(value)
         if 'equals' in case: assert result == case['equals'], (case['name'], result)
         else: assert case['contains'] in result, (case['name'], result)
-    runtime.append((value, result))
+    try:
+        source_object = json.loads(value)
+    except json.JSONDecodeError:
+        source_object = None
+    # Only messages originating as JSON objects get semantic comparison.
+    # Every other input remains a byte-preservation contract.
+    runtime.append((value, result, isinstance(source_object, dict)))
 
 # Extract and execute the exact VRL shipped in the rendered ConfigMap.
 sanitize_start = text.index('      sanitize:\n')
@@ -130,8 +136,11 @@ transforms:
       codec: json
 '''.format(data_dir=temporary / 'vector-data', vrl=textwrap.indent(vrl, '      '))
 (temporary / 'vector-fixtures.yaml').write_text(config)
-(temporary / 'vector-input.txt').write_text(''.join(value + '\x1e' for value, _ in runtime))
-(temporary / 'vector-expected.json').write_text(json.dumps([result for _, result in runtime], ensure_ascii=False))
+(temporary / 'vector-input.txt').write_text(''.join(value + '\x1e' for value, _, _ in runtime))
+(temporary / 'vector-expected.json').write_text(json.dumps([
+    {'message': result, 'structural': structural}
+    for _, result, structural in runtime
+], ensure_ascii=False))
 PY
 vector --config "$TMPDIR_RENDER/vector-fixtures.yaml" <"$TMPDIR_RENDER/vector-input.txt" >"$TMPDIR_RENDER/vector-output.jsonl"
 python3 - "$TMPDIR_RENDER/vector-output.jsonl" "$TMPDIR_RENDER/vector-expected.json" <<'PY'
@@ -139,16 +148,15 @@ import json, sys
 actual = [json.loads(line)['message'] for line in open(sys.argv[1]) if line.strip()]
 expected = json.load(open(sys.argv[2]))
 assert len(actual) == len(expected), (actual, expected)
-for index, (actual_message, expected_message) in enumerate(zip(actual, expected)):
-    try:
-        expected_object = json.loads(expected_message)
-    except (json.JSONDecodeError, TypeError):
-        expected_object = None
-    if isinstance(expected_object, dict):
+for index, (actual_message, expectation) in enumerate(zip(actual, expected)):
+    expected_message = expectation['message']
+    if expectation['structural']:
         try:
             actual_object = json.loads(actual_message)
+            expected_object = json.loads(expected_message)
         except (json.JSONDecodeError, TypeError) as error:
             raise AssertionError((index, actual_message, expected_message)) from error
+        assert isinstance(actual_object, dict), (index, actual_message, expected_message)
         assert actual_object == expected_object, (index, actual_message, expected_message)
     else:
         # Non-JSON messages are preservation contracts, so ordering tolerance must
