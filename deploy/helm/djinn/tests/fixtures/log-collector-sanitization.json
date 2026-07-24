@@ -1,7 +1,10 @@
 [
   {"name":"case insensitive JSON secret", "input":"{\"Api-Key\":\"secret\",\"safe\":\"kept\"}", "contains":"\"Api-Key\":\"***REDACTED***\""},
   {"name":"environment assignment", "input":"GitHub_Token=secret", "equals":"GitHub_Token=***REDACTED***"},
-  {"name":"eligible UTF-8 cap", "input":"{\"query\":\"éééééééééééééé\"}", "cap_field":"query"},
+  {"name":"eligible UTF-8 cap at an odd-width boundary", "input":"{\"query\":\"€€€€€€€€€€€€€€€€\"}", "cap_field":"query", "cap_character":"€", "cap_count":683, "contains":"€…[FIELD_TRUNCATED original_bytes=2049]"},
+  {"name":"nested eligible UTF-8 cap", "input":"{\"request\":{\"body\":\"short\"}}", "cap_field":"body", "cap_parent":"request", "cap_character":"€", "cap_count":683, "contains":"€…[FIELD_TRUNCATED original_bytes=2049]"},
+  {"name":"nested object secret", "input":"{\"request\":{\"Authorization\":\"secret\",\"body\":\"keep\"}}", "contains":"\"Authorization\":\"***REDACTED***\""},
+  {"name":"array object secret", "input":"{\"requests\":[{\"Api-Key\":\"secret\"}]}", "contains":"\"Api-Key\":\"***REDACTED***\""},
   {"name":"unrelated field remains intact", "input":"{\"detail\":\"keep\",\"body_count\":\"keep\"}", "equals":"{\"detail\":\"keep\",\"body_count\":\"keep\"}"},
   {"name":"malformed JSON remains intact", "input":"{\"token\":broken", "equals":"{\"token\":broken"},
   {"name":"plain text remains intact", "input":"plain token=not-an-assignment", "equals":"plain token=not-an-assignment"},

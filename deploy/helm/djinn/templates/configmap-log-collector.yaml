@@ -44,17 +44,42 @@ data:
           if !contains(.message, "\n") && !contains(.message, "\r") && !contains(.message, "djinn.panic_summary.v1") {
             json, err = parse_json(.message)
             if err == null && is_object(json) {
+              # Transform the root object, then use map_values' recursive walk
+              # to apply the same policy to every nested object (including
+              # objects held in arrays).
               for_each(json) -> |key, value| {
                 normalized = replace(downcase(string!(key)), r'-', "_")
                 if contains(normalized, "authorization") || contains(normalized, "apikey") || contains(normalized, "api_key") || contains(normalized, "access_token") || contains(normalized, "secret") || contains(normalized, "bearer") || contains(normalized, "password") || contains(normalized, "passwd") {
                   json[key] = "***REDACTED***"
                 } else if (key == "statement" || key == "sql" || key == "query" || key == "request_body" || key == "response_body" || key == "body") && is_string(value) && length(value) > 2048 {
                   original_bytes = length(value)
-                  # slice is UTF-8 boundary-safe in VRL; the marker exposes the
-                  # pre-cap byte count for forensic interpretation.
-                  capped = slice!(value, 0, 2048)
+                  capped = ""
+                  # split on the empty string yields UTF-8 characters, unlike
+                  # slice which accepts raw byte offsets. Keep only complete
+                  # characters whose accumulated bytes fit the cap.
+                  for_each(split(value, "")) -> |_index, character| {
+                    if length(capped) + length(character) <= 2048 { capped = capped + character }
+                  }
                   json[key] = capped + "…[FIELD_TRUNCATED original_bytes=" + to_string(original_bytes) + "]"
                 }
+              }
+              json = map_values(json, recursive: true) -> |nested| {
+                if is_object(nested) {
+                  for_each(nested) -> |key, value| {
+                    normalized = replace(downcase(string!(key)), r'-', "_")
+                    if contains(normalized, "authorization") || contains(normalized, "apikey") || contains(normalized, "api_key") || contains(normalized, "access_token") || contains(normalized, "secret") || contains(normalized, "bearer") || contains(normalized, "password") || contains(normalized, "passwd") {
+                      nested[key] = "***REDACTED***"
+                    } else if (key == "statement" || key == "sql" || key == "query" || key == "request_body" || key == "response_body" || key == "body") && is_string(value) && length(value) > 2048 {
+                      original_bytes = length(value)
+                      capped = ""
+                      for_each(split(value, "")) -> |_index, character| {
+                        if length(capped) + length(character) <= 2048 { capped = capped + character }
+                      }
+                      nested[key] = capped + "…[FIELD_TRUNCATED original_bytes=" + to_string(original_bytes) + "]"
+                    }
+                  }
+                }
+                nested
               }
               .message = encode_json(json)
             }

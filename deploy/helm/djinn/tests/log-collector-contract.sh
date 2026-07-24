@@ -7,6 +7,7 @@ CHART_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 FIXTURES="$SCRIPT_DIR/fixtures/log-collector-sanitization.json"
 command -v helm >/dev/null || { echo 'FAIL: helm is required' >&2; exit 1; }
 command -v python3 >/dev/null || { echo 'FAIL: python3 is required' >&2; exit 1; }
+command -v vector >/dev/null || { echo 'FAIL: vector is required to execute VRL fixtures' >&2; exit 1; }
 
 TMPDIR_RENDER=$(mktemp -d)
 trap 'rm -rf "$TMPDIR_RENDER"' EXIT
@@ -29,10 +30,11 @@ helm template test "$CHART_DIR" --set logCollector.enabled=true \
   --set 'resources.taskrun.tolerations[0].operator=Exists' \
   --show-only templates/daemonset-log-collector.yaml \
   --show-only templates/configmap-log-collector.yaml >"$TMPDIR_RENDER/enabled.yaml"
-python3 - "$TMPDIR_RENDER/enabled.yaml" "$FIXTURES" <<'PY'
-import json, re, sys
-manifest, fixtures = map(open, sys.argv[1:])
-text = manifest.read()
+python3 - "$TMPDIR_RENDER/enabled.yaml" "$FIXTURES" "$TMPDIR_RENDER" <<'PY'
+import json, re, sys, textwrap
+from pathlib import Path
+manifest_path, fixtures_path, temporary = map(Path, sys.argv[1:])
+text = manifest_path.read_text()
 # Mount separation, Directory host paths, security and placement are all
 # explicit textual contracts in this narrowly rendered manifest.
 for expected in ('automountServiceAccountToken: false', 'mountPath: /source/pods',
@@ -42,13 +44,13 @@ for expected in ('automountServiceAccountToken: false', 'mountPath: /source/pods
                  'drop: ["ALL"]', 'workload-type: djinn', 'key: workload-type',
                  'uri: http://127.0.0.1:8687/ingest', 'retry_statuses: [507]',
                  'max_size: 67108864', 'when_full: drop_newest',
-                 'for_each(json) -> |key, value| {', 'original_bytes = length(value)',
-                 'capped = slice!(value, 0, 2048)',
-                 'to_string(original_bytes)'):
+                 'for_each(json) -> |key, value| {', 'map_values(json, recursive: true)',
+                 'original_bytes = length(value)', 'for_each(split(value, ""))',
+                 'length(capped) + length(character) <= 2048', 'to_string(original_bytes)'):
     assert expected in text, expected
 assert 'for_each(object:' not in text
 assert 'strlen!' not in text
-assert '{{ slice!' not in text
+assert 'slice!(value, 0, 2048)' not in text
 vector = text[text.index('- name: vector'):text.index('- name: rotator')]
 rotator = text[text.index('- name: rotator'):text.index('volumes:')]
 assert '/source/pods' in vector and '/store' not in vector
@@ -75,20 +77,67 @@ def sanitize(value):
     try: obj = json.loads(value)
     except json.JSONDecodeError: return env.sub(r'\1***REDACTED***', value)
     if not isinstance(obj, dict): return value
-    for key, item in obj.items():
-        norm = key.lower().replace('-', '_')
-        if any(part in norm for part in sensitive): obj[key] = '***REDACTED***'
-        elif key in fields and isinstance(item, str): obj[key] = cap(item)
+    def visit(item):
+        if isinstance(item, dict):
+            for key, value in item.items():
+                norm = key.lower().replace('-', '_')
+                if any(part in norm for part in sensitive): item[key] = '***REDACTED***'
+                elif key in fields and isinstance(value, str): item[key] = cap(value)
+            for value in item.values(): visit(value)
+        elif isinstance(item, list):
+            for value in item: visit(value)
+    visit(obj)
     return json.dumps(obj, ensure_ascii=False, separators=(',', ':'))
-for case in json.load(fixtures):
+runtime = []
+for case in json.loads(fixtures_path.read_text()):
     value = case['input']
     if case.get('cap_field'):
-        value = json.dumps({case['cap_field']: 'é' * 1100}, ensure_ascii=False, separators=(',', ':'))
+        capped_value = case['cap_character'] * case['cap_count']
+        payload = {case['cap_field']: capped_value}
+        if case.get('cap_parent'): payload = {case['cap_parent']: payload}
+        value = json.dumps(payload, ensure_ascii=False, separators=(',', ':'))
         result = sanitize(value)
-        assert '…[FIELD_TRUNCATED original_bytes=2200]' in result, case['name']
+        assert case['contains'] in result, case['name']
     else:
         result = sanitize(value)
         if 'equals' in case: assert result == case['equals'], (case['name'], result)
         else: assert case['contains'] in result, (case['name'], result)
-print('PASS: log collector render and sanitization contract')
+    runtime.append((value, result))
+
+# Extract and execute the exact VRL shipped in the rendered ConfigMap.
+sanitize_start = text.index('      sanitize:\n')
+source_start = text.index('        source: |\n', sanitize_start) + len('        source: |\n')
+source_end = text.index('\n      record:', source_start)
+vrl = textwrap.dedent(text[source_start:source_end])
+config = '''data_dir: {data_dir}
+sources:
+  fixture_input:
+    type: stdin
+    framing:
+      method: character_delimited
+      character_delimited:
+        delimiter: "\u001e"
+transforms:
+  sanitize:
+    type: remap
+    inputs: [fixture_input]
+    source: |
+{vrl}sinks:
+  fixture_output:
+    type: console
+    inputs: [sanitize]
+    encoding:
+      codec: json
+'''.format(data_dir=temporary / 'vector-data', vrl=textwrap.indent(vrl, '      '))
+(temporary / 'vector-fixtures.yaml').write_text(config)
+(temporary / 'vector-input.txt').write_text(''.join(value + '\x1e' for value, _ in runtime))
+(temporary / 'vector-expected.json').write_text(json.dumps([result for _, result in runtime], ensure_ascii=False))
+PY
+vector --config "$TMPDIR_RENDER/vector-fixtures.yaml" <"$TMPDIR_RENDER/vector-input.txt" >"$TMPDIR_RENDER/vector-output.jsonl"
+python3 - "$TMPDIR_RENDER/vector-output.jsonl" "$TMPDIR_RENDER/vector-expected.json" <<'PY'
+import json, sys
+actual = [json.loads(line)['message'] for line in open(sys.argv[1]) if line.strip()]
+expected = json.load(open(sys.argv[2]))
+assert actual == expected, (actual, expected)
+print('PASS: rendered Vector VRL sanitization fixtures')
 PY
