@@ -184,6 +184,12 @@ pub use djinn_orchestration_types::coordinator::PR_REVIEW_FEEDBACK_EVENT;
 // ─── Test modules ────────────────────────────────────────────────────────
 
 #[cfg(test)]
+mod build_admission_epoch_disruption_tests;
+#[cfg(test)]
+mod build_admission_epoch_matrix_tests;
+#[cfg(test)]
+mod build_admission_epoch_support;
+#[cfg(test)]
 mod build_admission_integration_tests;
 #[cfg(test)]
 mod build_admission_inventory_tests;
