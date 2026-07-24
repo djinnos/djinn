@@ -584,6 +584,166 @@ async fn snapshot(f: &DurableOutcomeFixture) -> djinn_db::RefinementRunSnapshotR
         .expect("run exists")
 }
 
+/// A rejected outcome must stop at the durable correlation fence. In
+/// particular, neither the durable source nor either disposable projection may
+/// move before a repository transition commits.
+async fn assert_rejected_outcome_preserves_source(
+    f: &mut DurableOutcomeFixture,
+    session: RefinementSession,
+) {
+    f.actor
+        .active_refinements
+        .insert(f.run_id.clone(), f.projection.clone());
+    f.actor
+        .refinement_sessions
+        .insert(f.run_id.clone(), f.session.clone());
+    let durable_before = snapshot(f).await;
+    let projection_before = f.actor.active_refinements[&f.run_id].clone();
+    let session_before = f.actor.refinement_sessions[&f.run_id].clone();
+
+    assert_eq!(
+        f.actor
+            .process_refinement_outcome(&f.run_id, &session)
+            .await,
+        RefinementOutcomeApplication::Ignored
+    );
+    assert_eq!(
+        snapshot(f).await.snapshot,
+        durable_before.snapshot,
+        "durable source must not move"
+    );
+    assert_eq!(
+        format!("{:#?}", f.actor.active_refinements[&f.run_id]),
+        format!("{projection_before:#?}"),
+        "rejected outcome must not publish a projection"
+    );
+    assert_eq!(
+        f.actor.refinement_sessions[&f.run_id].task_id, session_before.task_id,
+        "rejected outcome must retain its original session"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn correlation_fence_rejects_missing_and_mismatched_task_identity() {
+    // Each row uses a repository-backed task row. Replacing its correlation
+    // proves the outcome is rejected before proposal/debate reads or progress
+    // writes can advance the exact source intent.
+    let cases = vec![
+        ("missing correlation", None),
+        (
+            "stale generation",
+            Some((
+                "same-run".to_owned(),
+                "same-intent".to_owned(),
+                2,
+                1,
+                DurablePhase::AdversaryAttack,
+                RefinementRole::Adversary,
+            )),
+        ),
+        (
+            "wrong round",
+            Some((
+                "same-run".to_owned(),
+                "same-intent".to_owned(),
+                1,
+                2,
+                DurablePhase::AdversaryAttack,
+                RefinementRole::Adversary,
+            )),
+        ),
+        (
+            "stale phase and role",
+            Some((
+                "same-run".to_owned(),
+                "same-intent".to_owned(),
+                1,
+                1,
+                DurablePhase::AdvocateRevision,
+                RefinementRole::Advocate,
+            )),
+        ),
+    ];
+
+    for (name, replacement) in cases {
+        let mut f = durable_outcome_fixture().await;
+        let correlation = replacement.map(|(run, intent, generation, round, phase, role)| {
+            TaskRefinementCorrelation::new(
+                if run == "same-run" {
+                    f.run_id.clone()
+                } else {
+                    run
+                },
+                if intent == "same-intent" {
+                    f.intent_id.clone()
+                } else {
+                    intent
+                },
+                i64::from(if generation == 1 {
+                    f.generation
+                } else {
+                    generation
+                }),
+                round,
+                phase,
+                role,
+            )
+            .expect("valid deliberately mismatched correlation")
+        });
+        TaskRepository::new(f.db.clone(), EventBus::noop())
+            .set_refinement_correlation(&f.task_id, correlation.as_ref())
+            .await
+            .expect("replace task correlation for fence case");
+        let session = f.session.clone();
+        assert_rejected_outcome_preserves_source(&mut f, session).await;
+        assert_eq!(
+            snapshot(&f).await.snapshot.intents[0].state,
+            RefinementIntentState::Materialized,
+            "{name} must retain the materialized source intent"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn correlation_fence_rejects_session_generation_and_phase_mismatch() {
+    let mut f = durable_outcome_fixture().await;
+
+    // Session identity checks occur even earlier than the task-row fence.
+    let mut wrong_generation = f.session.clone();
+    wrong_generation.generation += 1;
+    assert_rejected_outcome_preserves_source(&mut f, wrong_generation).await;
+    let mut wrong_phase = f.session.clone();
+    wrong_phase.phase = RefinementPhase::AdvocateRevision;
+    assert_rejected_outcome_preserves_source(&mut f, wrong_phase).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn missing_correlated_task_is_retryable_without_moving_any_projection() {
+    let mut f = durable_outcome_fixture().await;
+    f.actor
+        .active_refinements
+        .insert(f.run_id.clone(), f.projection.clone());
+    f.actor
+        .refinement_sessions
+        .insert(f.run_id.clone(), f.session.clone());
+    let durable_before = snapshot(&f).await;
+    let mut missing_task = f.session.clone();
+    missing_task.task_id = uuid::Uuid::now_v7().to_string();
+
+    assert_eq!(
+        f.actor
+            .process_refinement_outcome(&f.run_id, &missing_task)
+            .await,
+        RefinementOutcomeApplication::Retryable
+    );
+    assert_eq!(snapshot(&f).await, durable_before);
+    assert_eq!(
+        f.actor.active_refinements[&f.run_id].phase,
+        RefinementPhase::AdversaryAttack
+    );
+    assert_eq!(f.actor.refinement_sessions[&f.run_id].task_id, f.task_id);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn successor_persistence_failure_retains_exact_source_and_projection() {
     let mut f = durable_outcome_fixture().await;
