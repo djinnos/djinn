@@ -2570,6 +2570,14 @@ mod tests {
                 ..valid.clone()
             },
             WatchdogTerminationRequest {
+                task_run_id: String::new(),
+                ..valid.clone()
+            },
+            WatchdogTerminationRequest {
+                pod_uid: String::new(),
+                ..valid.clone()
+            },
+            WatchdogTerminationRequest {
                 task_id: "other-task".into(),
                 ..valid.clone()
             },
