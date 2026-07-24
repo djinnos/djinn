@@ -183,20 +183,50 @@ impl PostgresAdapter {
                 }
             }
         };
-        if tokio::time::timeout(self.operation_deadline, notify.notified())
-            .await
-            .is_err()
-        {
-            return Err(AdapterError::Rejected);
-        }
-        match self.creations.lock().await.get(&key) {
-            Some(CreationState::Created(created)) => {
-                Ok((created.lease_id.clone(), created.environment.clone()))
+        self.await_creation(&key, notify).await
+    }
+
+    async fn await_creation(
+        &self,
+        key: &CreationKey,
+        mut notify: Arc<Notify>,
+    ) -> Result<(String, BTreeMap<String, String>), AdapterError> {
+        let deadline = tokio::time::Instant::now() + self.operation_deadline;
+        loop {
+            // Register before checking the authoritative state. Completion can
+            // then happen before, during, or after registration without being
+            // lost: either this check observes it or this waiter is notified.
+            let wait_notify = notify.clone();
+            let notified = wait_notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+
+            let current_notify = {
+                let creations = self.creations.lock().await;
+                match creations.get(key) {
+                    Some(CreationState::Created(created)) => {
+                        return Ok((created.lease_id.clone(), created.environment.clone()));
+                    }
+                    Some(CreationState::Creating(current_notify)) => current_notify.clone(),
+                    // Cleanup either succeeded (the entry was removed) or
+                    // remains pending for another retry. Neither case may
+                    // create a new tenant as part of this request.
+                    Some(CreationState::CleanupPending(_)) | None => {
+                        return Err(AdapterError::Rejected);
+                    }
+                }
+            };
+
+            if !Arc::ptr_eq(&notify, &current_notify) {
+                // A cleanup retry can replace the notifier while an older
+                // identical request is waking. Follow authoritative state
+                // rather than waiting on a stale notifier.
+                notify = current_notify;
+                continue;
             }
-            // Cleanup either succeeded (the entry was removed) or remains
-            // pending for another retry. Neither case may create a new tenant
-            // as part of this request.
-            _ => Err(AdapterError::Rejected),
+            if tokio::time::timeout_at(deadline, notified).await.is_err() {
+                return Err(AdapterError::Rejected);
+            }
         }
     }
 
@@ -553,6 +583,10 @@ fn random_password() -> Result<String, AdapterError> {
 mod tests {
     use super::*;
 
+    // These tests count shared server objects, so keep their setup and cleanup
+    // atomic with respect to the other Postgres-backed tests in this module.
+    static POSTGRES_TEST_LOCK: Mutex<()> = Mutex::const_new(());
+
     #[test]
     fn identifier_validation_is_bounded_and_strict() {
         assert!(valid_identifier("attempt_1-A"));
@@ -621,10 +655,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn completion_before_registration_is_observed_by_identical_waiters() {
+        let adapter = PostgresAdapter::new(
+            "postgres://postgres@localhost/postgres",
+            vec!["DATABASE_URL".into()],
+        )
+        .unwrap()
+        .with_operation_deadline(Duration::from_millis(100));
+        let key = CreationKey {
+            attempt_id: "completed_attempt".into(),
+            lease_nonce: "completed_nonce".into(),
+        };
+        let notify = Arc::new(Notify::new());
+        adapter
+            .creations
+            .lock()
+            .await
+            .insert(key.clone(), CreationState::Creating(notify.clone()));
+
+        // Force the precise rejected interleaving: completion and
+        // `notify_waiters` both happen before either waiter is registered.
+        adapter.creations.lock().await.insert(
+            key.clone(),
+            CreationState::Created(CreatedLease {
+                lease_id: "lease_recorded".into(),
+                environment: BTreeMap::new(),
+            }),
+        );
+        notify.notify_waiters();
+
+        let (first, second) = tokio::time::timeout(Duration::from_millis(50), async {
+            tokio::join!(
+                adapter.await_creation(&key, notify.clone()),
+                adapter.await_creation(&key, notify.clone())
+            )
+        })
+        .await
+        .expect("recorded completion was not returned promptly");
+        let Ok((first_lease_id, _)) = first else {
+            panic!("first identical waiter rejected a recorded creation");
+        };
+        let Ok((second_lease_id, _)) = second else {
+            panic!("second identical waiter rejected a recorded creation");
+        };
+        assert_eq!(first_lease_id, "lease_recorded");
+        assert_eq!(second_lease_id, "lease_recorded");
+        assert_eq!(adapter.creations.lock().await.len(), 1);
+        assert!(adapter.leases.lock().await.is_empty());
+    }
+
+    #[tokio::test]
     async fn postgres_leases_are_fresh_and_isolated() {
         let Some(url) = std::env::var("TEST_POSTGRES_URL").ok() else {
             return;
         };
+        let _guard = POSTGRES_TEST_LOCK.lock().await;
         let adapter = PostgresAdapter::new(&url, vec!["DATABASE_URL".into()]).unwrap();
         let (first, second) = tokio::join!(
             adapter.create("attempt_first".into(), "nonce_first".into()),
@@ -673,14 +758,19 @@ mod tests {
         let Some(url) = std::env::var("TEST_POSTGRES_URL").ok() else {
             return;
         };
+        let _guard = POSTGRES_TEST_LOCK.lock().await;
         let adapter = PostgresAdapter::new(&url, vec!["DATABASE_URL".into()]).unwrap();
         let request = || Request::CreateFresh {
             revision: CONTROL_PROTOCOL_REVISION,
             attempt_id: "retry_attempt".into(),
             lease_nonce: "retry_nonce".into(),
         };
-        let first = dispatch(request(), adapter.clone()).await;
-        // Model a lost first response: retry the identical protocol request.
+        let (first, concurrent) = tokio::join!(
+            dispatch(request(), adapter.clone()),
+            dispatch(request(), adapter.clone())
+        );
+        // Model a lost first response after concurrent identical waiters have
+        // both observed completion: retry the identical protocol request.
         let retry = dispatch(request(), adapter.clone()).await;
         let Response::Created {
             lease_id: first_lease_id,
@@ -691,6 +781,14 @@ mod tests {
             panic!("initial CreateFresh did not succeed");
         };
         let Response::Created {
+            lease_id: concurrent_lease_id,
+            environment: concurrent_environment,
+            ..
+        } = concurrent
+        else {
+            panic!("concurrent CreateFresh did not succeed");
+        };
+        let Response::Created {
             lease_id,
             environment: retry_environment,
             ..
@@ -698,11 +796,14 @@ mod tests {
         else {
             panic!("retried CreateFresh did not succeed");
         };
+        assert_eq!(first_lease_id, concurrent_lease_id);
         assert_eq!(first_lease_id, lease_id);
+        let first_keys = first_environment.keys().collect::<Vec<_>>();
         assert_eq!(
-            first_environment.keys().collect::<Vec<_>>(),
-            retry_environment.keys().collect::<Vec<_>>()
+            first_keys,
+            concurrent_environment.keys().collect::<Vec<_>>()
         );
+        assert_eq!(first_keys, retry_environment.keys().collect::<Vec<_>>());
         assert_eq!(adapter.leases.lock().await.len(), 1);
         adapter.delete(&lease_id).await.unwrap();
     }
@@ -712,6 +813,7 @@ mod tests {
         let Some(url) = std::env::var("TEST_POSTGRES_URL").ok() else {
             return;
         };
+        let _guard = POSTGRES_TEST_LOCK.lock().await;
         let adapter = PostgresAdapter::new(&url, vec!["DATABASE_URL".into()])
             .unwrap()
             .with_operation_deadline(Duration::from_millis(25));
@@ -754,6 +856,7 @@ mod tests {
         let Some(url) = std::env::var("TEST_POSTGRES_URL").ok() else {
             return;
         };
+        let _guard = POSTGRES_TEST_LOCK.lock().await;
         let adapter = PostgresAdapter::new(&url, vec!["DATABASE_URL".into()])
             .unwrap()
             .with_operation_deadline(Duration::from_millis(25));
