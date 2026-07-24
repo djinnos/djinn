@@ -309,6 +309,11 @@ async fn concurrent_dispatch_guards_suppress_nested_tool_intervals_and_drop_flus
     assert_eq!(phase_metric_value(&rendered) - before, 7.0);
     assert_phase_labels_are_bounded(&rendered);
 }
+fn test_cancel_token() -> &'static tokio_util::sync::CancellationToken {
+    static TOKEN: std::sync::OnceLock<tokio_util::sync::CancellationToken> =
+        std::sync::OnceLock::new();
+    TOKEN.get_or_init(tokio_util::sync::CancellationToken::new)
+}
 fn test_tracked_dispatch_context<'a>(
     ctx: &'a SlotContext,
     tool_metadata: &'a ToolRuntimeMetadataMap,
@@ -324,6 +329,7 @@ fn test_tracked_dispatch_context<'a>(
         tool_dispatcher: ctx.tool_dispatcher.as_ref().unwrap().as_ref(),
         otel_session: None,
         phase_tracker: Some(phase_tracker),
+        cancel: test_cancel_token(),
     }
 }
 #[test]
@@ -445,6 +451,7 @@ fn test_dispatch_context<'a>(
         tool_dispatcher: ctx.tool_dispatcher.as_ref().unwrap().as_ref(),
         otel_session: None,
         phase_tracker: None,
+        cancel: test_cancel_token(),
     }
 }
 #[tokio::test]

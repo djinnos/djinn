@@ -251,6 +251,10 @@ pub(crate) struct AgentHostCallbacks {
     agent: AgentContext,
     services: Option<&'static dyn SupervisorServices>,
     dispatch_mode: bool,
+    /// Per-session rate limiter for the agent-facing `run_verification` tool.
+    /// Constructed once per host-callbacks instance (per session dispatch) so
+    /// concurrency and hourly-budget accounting is scoped to the session.
+    run_verification_limiter: Arc<crate::extension::handlers::SessionVerificationRateLimiter>,
     /// Test-private observation probe. `None` in every production constructor
     /// and in existing tests preserves all current behavior. When `Some`, it
     /// disables the deterministic `final_verification_outcome_for_test`
@@ -281,6 +285,11 @@ impl AgentHostCallbacks {
     pub(crate) fn dispatch(agent: &AgentContext) -> Self {
         Self {
             agent: agent.clone(),
+            run_verification_limiter: Arc::new(
+                crate::extension::handlers::SessionVerificationRateLimiter::new(
+                    crate::extension::handlers::RunVerificationLimits::from_env(),
+                ),
+            ),
             services: None,
             dispatch_mode: true,
             #[cfg(test)]
@@ -293,6 +302,11 @@ impl AgentHostCallbacks {
     ) -> Self {
         Self {
             agent: agent.clone(),
+            run_verification_limiter: Arc::new(
+                crate::extension::handlers::SessionVerificationRateLimiter::new(
+                    crate::extension::handlers::RunVerificationLimits::from_env(),
+                ),
+            ),
             services: Some(services),
             dispatch_mode: true,
             #[cfg(test)]
@@ -302,6 +316,11 @@ impl AgentHostCallbacks {
     pub(crate) fn extraction(agent: &AgentContext) -> Self {
         Self {
             agent: agent.clone(),
+            run_verification_limiter: Arc::new(
+                crate::extension::handlers::SessionVerificationRateLimiter::new(
+                    crate::extension::handlers::RunVerificationLimits::from_env(),
+                ),
+            ),
             services: None,
             dispatch_mode: false,
             #[cfg(test)]
@@ -324,6 +343,11 @@ impl AgentHostCallbacks {
         (
             Self {
                 agent: agent.clone(),
+                run_verification_limiter: Arc::new(
+                    crate::extension::handlers::SessionVerificationRateLimiter::new(
+                        crate::extension::handlers::RunVerificationLimits::from_env(),
+                    ),
+                ),
                 services: None,
                 dispatch_mode: true,
                 probe: Some(probe.clone()),
@@ -530,6 +554,26 @@ pub async fn resolve_final_verification_for_task_run(
 }
 
 impl djinn_slot::host::SlotHostCallbacks for AgentHostCallbacks {
+    fn run_agent_verification<'a>(
+        &'a self,
+        task_id: &'a str,
+        role_name: &'a str,
+        _arguments: Option<serde_json::Map<String, serde_json::Value>>,
+        cancellation: tokio_util::sync::CancellationToken,
+        ctx: &'a djinn_slot::host::SlotContext,
+    ) -> Pin<Box<dyn Future<Output = serde_json::Value> + Send + 'a>> {
+        let limiter = Arc::clone(&self.run_verification_limiter);
+        Box::pin(async move {
+            crate::extension::handlers::verification::run_verification(
+                &limiter,
+                task_id,
+                role_name,
+                cancellation,
+                ctx,
+            )
+            .await
+        })
+    }
     fn resolve_final_verification<'a>(
         &'a self,
         _task_id: &'a str,

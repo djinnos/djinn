@@ -1014,6 +1014,7 @@ pub async fn run_reply_loop(
                 tool_dispatcher,
                 otel_session: otel_session.as_ref(),
                 phase_tracker: Some(&phase_tracker),
+                cancel,
             };
             let mut stream_state = match consume_provider_stream(StreamLoopContext {
                 provider,
@@ -2671,6 +2672,7 @@ mod tests {
             tool_dispatcher: dispatcher,
             otel_session: None,
             phase_tracker: None,
+            cancel: &cancel,
         };
 
         let state = consume_provider_stream(StreamLoopContext {
@@ -2770,6 +2772,7 @@ mod tests {
             tool_dispatcher: dispatcher,
             otel_session: None,
             phase_tracker: None,
+            cancel: &cancel,
         };
         let activity_ts = Arc::new(AtomicU64::new(0));
         let last_rpc_touch = Arc::new(AtomicU64::new(0));
