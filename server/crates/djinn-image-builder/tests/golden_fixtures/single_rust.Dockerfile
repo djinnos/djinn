@@ -13,6 +13,7 @@ ENV GOMODCACHE=/cache/go/mod GOCACHE=/cache/go/build GOBIN=/cache/go/bin
 ENV PNPM_HOME=/cache/pnpm npm_config_cache=/cache/npm YARN_CACHE_FOLDER=/cache/yarn
 ENV PIP_CACHE_DIR=/cache/pip UV_CACHE_DIR=/cache/uv
 COPY --from=djinn/agent-worker:sha256-golden /usr/local/bin/djinn-agent-worker /opt/djinn/bin/djinn-agent-worker
+COPY --from=djinn/agent-worker:sha256-golden /usr/local/bin/djinn-cgroup-launcher /opt/djinn/bin/djinn-cgroup-launcher
 RUN /tmp/djinn-scripts/install-agent-worker.sh
 RUN TOOLCHAINS="1.84.0" DEFAULT_TOOLCHAIN="1.84.0" COMPONENTS="rust-analyzer clippy rustfmt" /tmp/djinn-scripts/install-rust.sh
 RUN rm -rf /tmp/djinn-scripts

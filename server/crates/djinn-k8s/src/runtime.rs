@@ -657,9 +657,25 @@ impl SessionRuntime for KubernetesRuntime {
             ),
         }
 
-        // 2. Build + create the Job manifest.  The `cargo_cache_policy`
-        //    was extracted from the effective EnvironmentConfig earlier
-        //    (step 1) and is passed through as before.
+        // 2a. Fail-closed enforcement render validation BEFORE the Job is
+        //     submitted — i.e. before any user code can execute. Rejects
+        //     unsupported cgroup-v2 delegation profiles, an out-of-bounds broker
+        //     quota, or an incompatible volume-ownership mode. Grounded in the
+        //     launcher crate's own `Readiness::validate`.
+        if let Err(error) = crate::launcher::validate_enforcement_render(&self.config) {
+            self.drop_pending(&task_run_id_str).await;
+            return Err(RuntimeError::Prepare(format!(
+                "enforcement render validation failed: {error}"
+            )));
+        }
+
+        // 2b. Build + create the Job manifest.  The `cargo_cache_policy`
+        //     was extracted from the effective EnvironmentConfig earlier
+        //     (step 1) and is passed through as before.  The role that executes
+        //     this run is the primary role of its supervisor flow; it drives the
+        //     role-classed CPU request (light vs build-capable). `None` (an
+        //     empty sequence) fails safe to build-capable in the renderer.
+        let role = spec.flow.role_sequence().first().copied();
         let job = build_task_run_job_with_read_sources(
             &self.config,
             &task_run_id,
@@ -669,6 +685,7 @@ impl SessionRuntime for KubernetesRuntime {
             services,
             cargo_cache_policy.as_ref(),
             spec.is_evidence_spike,
+            role,
             read_source_cache_sub_path.as_deref(),
         );
         let jobs: Api<Job> = Api::namespaced(self.client.clone(), ns);
@@ -2905,6 +2922,7 @@ mod tests {
             &[],
             None,
             false,
+            Some(djinn_runtime::RoleKind::Worker),
         );
 
         // The Secret and Job share the same resource name.

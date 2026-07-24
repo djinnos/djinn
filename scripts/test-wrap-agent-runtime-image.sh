@@ -9,6 +9,8 @@ trap 'rm -rf "$TMP"' EXIT
 mkdir -p "$TMP/bin" "$TMP/artifacts"
 printf 'worker fixture\n' > "$TMP/artifacts/djinn-agent-worker"
 chmod +x "$TMP/artifacts/djinn-agent-worker"
+printf 'launcher fixture\n' > "$TMP/artifacts/djinn-cgroup-launcher"
+chmod +x "$TMP/artifacts/djinn-cgroup-launcher"
 
 cat > "$TMP/bin/docker" <<'EOF'
 #!/usr/bin/env bash

@@ -128,12 +128,14 @@ if [[ -f "$UI_OUTPUT_FINGERPRINT" ]]; then
 fi
 
 if [[ -x "$ARTIFACTS_DIR/djinn-server" \
-    && -x "$ARTIFACTS_DIR/djinn-agent-worker" ]] \
+    && -x "$ARTIFACTS_DIR/djinn-agent-worker" \
+    && -x "$ARTIFACTS_DIR/djinn-cgroup-launcher" ]] \
     && tilt_fingerprint_matches "$BUILD_FINGERPRINT" "$CURRENT_FINGERPRINT"; then
     CURRENT_BINARY_OUTPUT_FINGERPRINT="$(
         tilt_input_fingerprint "$ARTIFACTS_DIR" \
             "$ARTIFACTS_DIR/djinn-server" \
-            "$ARTIFACTS_DIR/djinn-agent-worker"
+            "$ARTIFACTS_DIR/djinn-agent-worker" \
+            "$ARTIFACTS_DIR/djinn-cgroup-launcher"
     )"
     if tilt_fingerprint_matches \
         "$BINARY_OUTPUT_FINGERPRINT" "$CURRENT_BINARY_OUTPUT_FINGERPRINT"; then
@@ -189,7 +191,8 @@ echo "==> cargo build (djinn-server + djinn-agent-worker) in $BUILDER_IMAGE_ID"
         cargo build --release --locked \
             --features qdrant \
             -p djinn-server \
-            -p djinn-agent-worker
+            -p djinn-agent-worker \
+            -p djinn-cgroup-launcher
         sccache --show-stats || true
     '
 
@@ -206,33 +209,39 @@ echo "==> extracting binaries into $ARTIFACTS_DIR"
         set -eux
         server_tmp="/out/.djinn-server.$$"
         worker_tmp="/out/.djinn-agent-worker.$$"
-        trap '\''rm -f "$server_tmp" "$worker_tmp"'\'' EXIT
+        launcher_tmp="/out/.djinn-cgroup-launcher.$$"
+        trap '\''rm -f "$server_tmp" "$worker_tmp" "$launcher_tmp"'\'' EXIT
         cp /target/release/djinn-server "$server_tmp"
         cp /target/release/djinn-agent-worker "$worker_tmp"
-        # Strip both binaries to trim image size. `strip` is in binutils
+        cp /target/release/djinn-cgroup-launcher "$launcher_tmp"
+        # Strip all binaries to trim image size. `strip` is in binutils
         # which ships in the rust:*-slim base.
         strip "$server_tmp"
         strip "$worker_tmp"
-        chmod +x "$server_tmp" "$worker_tmp"
+        strip "$launcher_tmp"
+        chmod +x "$server_tmp" "$worker_tmp" "$launcher_tmp"
         # Publish each artifact with one rename. Direct copy + strip generated
         # several file-watch events, reparsed the Tiltfile repeatedly, and
         # could briefly hash an unstripped/partial worker binary.
         mv -f "$server_tmp" /out/djinn-server
         mv -f "$worker_tmp" /out/djinn-agent-worker
+        mv -f "$launcher_tmp" /out/djinn-cgroup-launcher
         trap - EXIT
     '
 
 if [[ ! -x "$ARTIFACTS_DIR/djinn-server" \
-    || ! -x "$ARTIFACTS_DIR/djinn-agent-worker" ]]; then
-    echo "error: binary build completed without both executable artifacts" >&2
+    || ! -x "$ARTIFACTS_DIR/djinn-agent-worker" \
+    || ! -x "$ARTIFACTS_DIR/djinn-cgroup-launcher" ]]; then
+    echo "error: binary build completed without all executable artifacts" >&2
     exit 1
 fi
 CURRENT_BINARY_OUTPUT_FINGERPRINT="$(
     tilt_input_fingerprint "$ARTIFACTS_DIR" \
         "$ARTIFACTS_DIR/djinn-server" \
-        "$ARTIFACTS_DIR/djinn-agent-worker"
+        "$ARTIFACTS_DIR/djinn-agent-worker" \
+        "$ARTIFACTS_DIR/djinn-cgroup-launcher"
 )"
 tilt_store_fingerprint "$BINARY_OUTPUT_FINGERPRINT" "$CURRENT_BINARY_OUTPUT_FINGERPRINT"
 tilt_store_fingerprint "$BUILD_FINGERPRINT" "$CURRENT_FINGERPRINT"
 
-echo "==> done: $ARTIFACTS_DIR/{djinn-server,djinn-agent-worker}"
+echo "==> done: $ARTIFACTS_DIR/{djinn-server,djinn-agent-worker,djinn-cgroup-launcher}"

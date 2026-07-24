@@ -22,13 +22,39 @@ pub struct KubernetesConfig {
     /// ServiceAccount mounted into each worker Pod. Provides the projected
     /// token authenticating back to djinn-server.
     pub service_account: String,
-    /// CPU request (e.g. `"2"`).
+    /// CPU **request** for a *build-capable* task-run Pod (Worker / Verifier /
+    /// Architect and their retry/resume flows, plus the fail-safe default for
+    /// any unknown/new role — see [`crate::launcher::RoleResourceClass`]).
+    ///
+    /// v1 leases default: `"1"`. The `cpu.weight` (CFS share) a container gets
+    /// derives from its REQUEST, so a build-capable pod that will actually
+    /// compile needs a full core of guaranteed share. Prod overrides this to
+    /// `4` via `DJINN_K8S_CPU_REQUEST` (see the taskrun-pod-cpu-4 benchmark
+    /// note) — the env override is preserved, so this default only sets the
+    /// out-of-the-box value.
     pub cpu_request: String,
-    /// CPU limit (e.g. `"2"`).
+    /// CPU **request** for a *light* task-run Pod (Planner / Reviewer / Lead /
+    /// every Refinement sub-role / grooming). These pods orchestrate an agent
+    /// session and never run the project's compile/test toolchain, so they get
+    /// a fractional-core request. v1 leases default: `"300m"`. Overridable via
+    /// `DJINN_K8S_LIGHT_CPU_REQUEST`.
+    ///
+    /// Only the CPU REQUEST is role-classed: the CPU **limit**
+    /// ([`Self::cpu_limit`]) and both memory bounds are identical for light and
+    /// build-capable pods ("same limits everywhere"), and the launcher/broker
+    /// contract is identical regardless of role.
+    pub light_cpu_request: String,
+    /// CPU limit shared by both role classes (light and build-capable). v1
+    /// leases default: `"4"`. The limit is deliberately NOT role-classed — only
+    /// the guaranteed request differs by role. Overridable via
+    /// `DJINN_K8S_CPU_LIMIT`.
     pub cpu_limit: String,
-    /// Memory request (e.g. `"4Gi"`).
+    /// Memory request shared by both role classes. v1 leases default: `"2Gi"`.
+    /// Overridable via `DJINN_K8S_MEMORY_REQUEST` (prod projects a larger
+    /// Burstable value — see the taskrun-memory-burstable note).
     pub memory_request: String,
-    /// Memory limit (e.g. `"4Gi"`).
+    /// Memory limit shared by both role classes. v1 leases default: `"4Gi"`.
+    /// Overridable via `DJINN_K8S_MEMORY_LIMIT`.
     pub memory_limit: String,
     /// TTL (seconds) applied to completed Jobs for auto-GC.
     pub ttl_seconds_after_finished: i32,
@@ -141,6 +167,22 @@ pub struct KubernetesConfig {
     /// `node_selector` above. Surfaced in the chart as
     /// `resources.taskrun.tolerations`.
     pub tolerations: Vec<Toleration>,
+    /// Cgroup-v2 delegation profile the enforcement launcher runs under. The
+    /// only profile v1 supports is `"cgroup-v2-cpu-only"`
+    /// ([`crate::launcher::CGROUP_PROFILE_V2_CPU_ONLY`]): a cgroup-v2 mount with
+    /// a delegated root owned by uid 0 and exactly the `cpu` controller enabled
+    /// for children. [`crate::launcher::validate_enforcement_render`] maps this
+    /// string onto the SAME `Readiness::validate` the launcher runs in-pod, so a
+    /// misconfigured node profile fails closed at dispatch BEFORE any user code
+    /// executes. Overridable via `DJINN_K8S_CGROUP_DELEGATION_PROFILE`.
+    pub cgroup_delegation_profile: String,
+    /// Volume-ownership mode used for the workspace/cache/mirror surfaces. v1
+    /// requires `"fsgroup-on-root-mismatch"`
+    /// ([`crate::launcher::VOLUME_OWNERSHIP_ON_ROOT_MISMATCH`]): `fsGroup =
+    /// ARTIFACT_GID (1000)` re-owned only when the volume root gid mismatches.
+    /// Any other mode fails render validation. Overridable via
+    /// `DJINN_K8S_VOLUME_OWNERSHIP_MODE`.
+    pub volume_ownership_mode: String,
 }
 
 impl KubernetesConfig {
@@ -152,9 +194,15 @@ impl KubernetesConfig {
             image: "djinn-agent-runtime:dev".into(),
             image_pull_policy: "IfNotPresent".into(),
             service_account: "djinn-taskrun".into(),
-            cpu_request: "2".into(),
-            cpu_limit: "2".into(),
-            memory_request: "4Gi".into(),
+            // v1 leases role-classed CPU requests: build-capable pods request a
+            // full core; light (orchestration-only) pods request 300m. The CPU
+            // LIMIT and both memory bounds are shared across roles ("same limits
+            // everywhere"). Prod overrides cpu_request/cpu_limit/memory_* via
+            // the DJINN_K8S_* envs, which are all still honored in from_env().
+            cpu_request: "1".into(),
+            light_cpu_request: "300m".into(),
+            cpu_limit: "4".into(),
+            memory_request: "2Gi".into(),
             memory_limit: "4Gi".into(),
             ttl_seconds_after_finished: 300,
             mirror_pvc: "djinn-mirror".into(),
@@ -183,6 +231,10 @@ impl KubernetesConfig {
             warm_memory_limit: "6Gi".into(),
             node_selector: BTreeMap::new(),
             tolerations: Vec::new(),
+            // v1 leases enforcement contract. Both fail render validation if set
+            // to anything the launcher's runtime readiness check would reject.
+            cgroup_delegation_profile: crate::launcher::CGROUP_PROFILE_V2_CPU_ONLY.into(),
+            volume_ownership_mode: crate::launcher::VOLUME_OWNERSHIP_ON_ROOT_MISMATCH.into(),
         }
     }
 
@@ -200,10 +252,11 @@ impl KubernetesConfig {
     /// | `DJINN_K8S_IMAGE` | `image` | `djinn-agent-runtime:dev` |
     /// | `DJINN_K8S_IMAGE_PULL_POLICY` | `image_pull_policy` | `IfNotPresent` |
     /// | `DJINN_K8S_SERVICE_ACCOUNT` | `service_account` | `djinn-taskrun` |
-    /// | `DJINN_K8S_CPU_REQUEST` | `cpu_request` | `2` |
-    /// | `DJINN_K8S_CPU_LIMIT` | `cpu_limit` | `2` |
-    /// | `DJINN_K8S_MEMORY_REQUEST` | `memory_request` | `4Gi` |
-    /// | `DJINN_K8S_MEMORY_LIMIT` | `memory_limit` | `4Gi` |
+    /// | `DJINN_K8S_CPU_REQUEST` | `cpu_request` (build-capable) | `1` |
+    /// | `DJINN_K8S_LIGHT_CPU_REQUEST` | `light_cpu_request` | `300m` |
+    /// | `DJINN_K8S_CPU_LIMIT` | `cpu_limit` (shared) | `4` |
+    /// | `DJINN_K8S_MEMORY_REQUEST` | `memory_request` (shared) | `2Gi` |
+    /// | `DJINN_K8S_MEMORY_LIMIT` | `memory_limit` (shared) | `4Gi` |
     /// | `DJINN_K8S_TTL_SECONDS` | `ttl_seconds_after_finished` | `300` (parsed as `i32`) |
     /// | `DJINN_K8S_MIRROR_PVC` | `mirror_pvc` | `djinn-mirror` |
     /// | `DJINN_K8S_CACHE_PVC` | `cache_pvc` | `djinn-cache` |
@@ -219,6 +272,8 @@ impl KubernetesConfig {
     /// | `DJINN_K8S_WARM_MEMORY_LIMIT` | `warm_memory_limit` | `6Gi` |
     /// | `DJINN_K8S_NODE_SELECTOR` | `node_selector` | `{}` (parsed as a JSON object of string→string) |
     /// | `DJINN_K8S_TOLERATIONS` | `tolerations` | `[]` (parsed as a JSON array of k8s `Toleration` objects) |
+    /// | `DJINN_K8S_CGROUP_DELEGATION_PROFILE` | `cgroup_delegation_profile` | `cgroup-v2-cpu-only` |
+    /// | `DJINN_K8S_VOLUME_OWNERSHIP_MODE` | `volume_ownership_mode` | `fsgroup-on-root-mismatch` |
     ///
     /// `DJINN_DATABASE_URL` is read from djinn-server's own environment (the
     /// Helm chart projects it via `envFrom: configMap djinn-config`) and
@@ -246,6 +301,9 @@ impl KubernetesConfig {
         }
         if let Ok(v) = std::env::var("DJINN_K8S_CPU_REQUEST") {
             cfg.cpu_request = v;
+        }
+        if let Ok(v) = std::env::var("DJINN_K8S_LIGHT_CPU_REQUEST") {
+            cfg.light_cpu_request = v;
         }
         if let Ok(v) = std::env::var("DJINN_K8S_CPU_LIMIT") {
             cfg.cpu_limit = v;
@@ -356,6 +414,12 @@ impl KubernetesConfig {
                     "DJINN_K8S_TOLERATIONS not valid JSON (expected array of Toleration objects) — keeping default"
                 ),
             }
+        }
+        if let Ok(v) = std::env::var("DJINN_K8S_CGROUP_DELEGATION_PROFILE") {
+            cfg.cgroup_delegation_profile = v;
+        }
+        if let Ok(v) = std::env::var("DJINN_K8S_VOLUME_OWNERSHIP_MODE") {
+            cfg.volume_ownership_mode = v;
         }
         cfg
     }

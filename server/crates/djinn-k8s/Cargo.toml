@@ -8,6 +8,7 @@ edition = "2024"
 doctest = false
 
 [dependencies]
+djinn-cgroup-launcher = { path = "../djinn-cgroup-launcher" }
 djinn-core = { path = "../djinn-core" }
 djinn-db = { path = "../djinn-db" }
 djinn-git = { path = "../djinn-git" }
