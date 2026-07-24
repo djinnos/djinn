@@ -95,15 +95,16 @@ fn truncate_utf8(value: &str, max_bytes: usize) -> String {
     value[..end].to_owned()
 }
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::process::Command;
+use std::process::Command;
 
-    const ATTEMPT_CAPTURE_BYTES: usize = 8_000;
-    const PREVIOUS_HOOK_MARKER: &str = "previous-hook-large-write:";
+#[cfg(test)]
+const ATTEMPT_CAPTURE_BYTES: usize = 8_000;
+#[cfg(test)]
+const PREVIOUS_HOOK_MARKER: &str = "previous-hook-large-write:";
 
-    #[test]
-    fn chained_large_hook() {
+#[cfg(test)]
+#[test]
+fn chained_large_hook() {
         // `install` is process-global. Exercise it in a separate libtest process
         // so this fixture can install a deliberately large previous hook.
         if std::env::var_os("DJINN_PANIC_CAPTURE_CHILD").is_some() {
@@ -116,7 +117,7 @@ mod tests {
         let output = Command::new(std::env::current_exe().expect("test executable"))
             .args([
                 "--exact",
-                "panic_capture::tests::chained_large_hook",
+                "panic_capture::chained_large_hook",
                 "--nocapture",
             ])
             .env("RUST_BACKTRACE", "1")
@@ -177,15 +178,17 @@ mod tests {
         );
     }
 
-    #[inline(never)]
-    fn deep_panic(depth: usize) {
+#[cfg(test)]
+#[inline(never)]
+fn deep_panic(depth: usize) {
         if depth == 0 {
             panic!("panic capture fixture");
         }
         std::hint::black_box(deep_panic(depth - 1));
     }
 
-    fn utf8_tail(value: &str, max_bytes: usize) -> &str {
+#[cfg(test)]
+fn utf8_tail(value: &str, max_bytes: usize) -> &str {
         if value.len() <= max_bytes {
             return value;
         }
@@ -195,8 +198,8 @@ mod tests {
         }
         &value[start..]
     }
-    #[test]
-    fn utf8_truncation_never_splits_a_code_point() {
+#[cfg(test)]
+#[test]
+fn utf8_truncation_never_splits_a_code_point() {
         assert_eq!(truncate_utf8("abc🙂def", 6), "abc");
     }
-}
