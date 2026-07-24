@@ -50,6 +50,9 @@ pub mod audit_sampler;
 pub mod build_admission;
 pub mod build_admission_handoff;
 pub mod build_admission_inventory;
+/// Operator safe-ordering executor composing the durable epoch primitives into
+/// forward-cutover, kill-switch, and rollback workflows.
+pub mod build_admission_transition;
 /// Durable v1 lease service; v0 admission remains rollout authority.
 pub mod build_lease;
 pub mod cargo_warm_base_gc;
