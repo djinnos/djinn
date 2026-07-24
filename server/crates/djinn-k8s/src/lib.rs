@@ -13,6 +13,7 @@ pub mod graph_warmer_identity;
 pub mod infra_death_log_tail;
 pub mod job;
 pub mod label_value;
+pub mod launcher;
 pub mod runtime;
 pub mod secret;
 pub mod sidecar;

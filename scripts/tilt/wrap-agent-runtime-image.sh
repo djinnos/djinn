@@ -16,10 +16,15 @@ BASE_IMAGE="${BASE_IMAGE:-djinn-agent-runtime-base:dev}"
 BASE_BUILD_SCRIPT="${BASE_BUILD_SCRIPT:-$REPO_ROOT/scripts/tilt/build-agent-runtime-base.sh}"
 ARTIFACTS_DIR="${ARTIFACTS_DIR:-$REPO_ROOT/.tilt/artifacts}"
 BINARY="$ARTIFACTS_DIR/djinn-agent-worker"
+LAUNCHER_BINARY="$ARTIFACTS_DIR/djinn-cgroup-launcher"
 DOCKERFILE="$REPO_ROOT/server/docker/djinn-agent-runtime.Dockerfile"
 
 if [[ ! -x "$BINARY" ]]; then
     echo "error: $BINARY not found or not executable — run build-binaries.sh first" >&2
+    exit 1
+fi
+if [[ ! -x "$LAUNCHER_BINARY" ]]; then
+    echo "error: $LAUNCHER_BINARY not found or not executable — run build-binaries.sh first" >&2
     exit 1
 fi
 
@@ -37,6 +42,7 @@ BUILD_CTX="$(mktemp -d)"
 trap 'rm -rf "$BUILD_CTX"' EXIT
 
 cp "$BINARY" "$BUILD_CTX/djinn-agent-worker"
+cp "$LAUNCHER_BINARY" "$BUILD_CTX/djinn-cgroup-launcher"
 cp "$DOCKERFILE" "$BUILD_CTX/Dockerfile"
 
 echo "==> building $IMAGE_TAG (FROM $BASE_IMAGE)"
