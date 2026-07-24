@@ -73,6 +73,7 @@ These patterns are **intentional** and should not be reported as defects unless 
 
 {{reviewer_diff_context_section}}
 
+{{verification_guidance_section}}
 ## Out-of-Workspace AC
 
 If a criterion requires changes to code that lives **outside this workspace** (another project, service, or codebase), mark it as **MET** — the worker cannot fulfil it from here. Add a FEEDBACK note describing where the work belongs so the lead can remove the AC.

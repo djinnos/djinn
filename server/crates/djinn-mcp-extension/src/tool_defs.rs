@@ -85,6 +85,27 @@ pub fn tool_run_verification() -> RmcpTool {
     )
 }
 
+pub fn tool_prepare_build_cache() -> RmcpTool {
+    RmcpTool::new(
+        "prepare_build_cache".to_string(),
+        "Prepare the platform build cache for this task before you start building, on demand. \
+         Stack-neutral: where the platform maintains a warm cache for your stack, this routes \
+         cache preparation through the first-use/admission seam and returns a typed outcome \
+         WITHOUT you running any build yourself. Outcomes: `ready`/`noop` (the cache is prepared \
+         and its path is returned — `noop` means startup already seeded it, so nothing was \
+         re-done), `queued` (preparation was deferred under disk pressure or unknown capacity \
+         and no cache bytes were allocated), or `not_applicable` (your stack has no platform \
+         warm cache). It never intercepts or blocks your shell commands and does not build or \
+         submit anything. Call it once up front; re-calling an already-prepared cache is cheap."
+            .to_string(),
+        object!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
+        }),
+    )
+}
+
 pub fn tool_shell() -> RmcpTool {
     RmcpTool::new(
         "shell".to_string(),
@@ -480,9 +501,22 @@ pub fn tool_schemas_worker() -> Vec<serde_json::Value> {
         mutation(),
     ));
     tool_values.push(serialize_tool(tool_request_planner(), mutation()));
+    // Stack-neutral build-cache preparation. Present for the Worker regardless
+    // of gate configuration — it routes through the worker-side first-use /
+    // admission seam and returns a typed outcome. Idempotent: re-preparing an
+    // already-ready cache only consults.
+    tool_values.push(serialize_tool(
+        tool_prepare_build_cache(),
+        idempotent_mutation(),
+    ));
     // On-demand canonical final-verification gate (consult-first reuse). Runs
     // and may record a passing row, but re-running an unchanged tree only
     // consults, so it is classified idempotent.
+    //
+    // NOTE: the canonical schema set advertises `run_verification`; the live
+    // Worker/Reviewer surface and the rendered prompt strip it when the
+    // resolved `lifecycle.final_verification` plan is empty (see
+    // `djinn_roles::prompts::retain_conditional_verification_tools`).
     tool_values.push(serialize_tool(
         tool_run_verification(),
         idempotent_mutation(),

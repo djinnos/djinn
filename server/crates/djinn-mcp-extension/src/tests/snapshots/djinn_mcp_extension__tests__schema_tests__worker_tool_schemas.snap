@@ -816,6 +816,20 @@ expression: tool_schemas_worker()
     "concurrent_safe": false
   },
   {
+    "name": "prepare_build_cache",
+    "description": "Prepare the platform build cache for this task before you start building, on demand. Stack-neutral: where the platform maintains a warm cache for your stack, this routes cache preparation through the first-use/admission seam and returns a typed outcome WITHOUT you running any build yourself. Outcomes: `ready`/`noop` (the cache is prepared and its path is returned — `noop` means startup already seeded it, so nothing was re-done), `queued` (preparation was deferred under disk pressure or unknown capacity and no cache bytes were allocated), or `not_applicable` (your stack has no platform warm cache). It never intercepts or blocks your shell commands and does not build or submit anything. Call it once up front; re-calling an already-prepared cache is cheap.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    },
+    "readOnly": false,
+    "destructive": false,
+    "idempotent": true,
+    "openWorld": false,
+    "concurrent_safe": false
+  },
+  {
     "name": "run_verification",
     "description": "Run the canonical final-verification gate on the current worktree, on demand. It consults first: if an identical tree (same whole-tree fingerprint, manifest, environment, and required coverage) already has a passing run, it returns that evidence instantly WITHOUT executing any commands. Otherwise it runs the required checks hermetically and records the result. Use it to confirm your work passes before you submit — an unchanged tree is never compiled twice, so calling it is cheap on a fresh hit. Returns a typed outcome (hit / ran-pass / ran-fail / rate-limited / error) with per-check results. It does NOT submit your work; call submit_work / submit_review when you are done.",
     "inputSchema": {

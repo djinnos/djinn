@@ -143,6 +143,7 @@ pub(crate) async fn assemble_for_role_with_extension_diagnostics(
         extension_diagnostics,
         cancellation: None,
         memory_intent_planner: None,
+        final_verification_configured: false,
     })
     .await
 }
@@ -177,6 +178,7 @@ pub(crate) async fn assemble_for_role_with_mcp_instructions(
         extension_diagnostics: &[],
         cancellation: None,
         memory_intent_planner: None,
+        final_verification_configured: false,
     })
     .await
 }
@@ -210,6 +212,7 @@ pub(crate) async fn assemble_for_role_with_resume(
         extension_diagnostics: &[],
         cancellation: None,
         memory_intent_planner: None,
+        final_verification_configured: false,
     })
     .await
 }
