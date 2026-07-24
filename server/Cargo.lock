@@ -1216,6 +1216,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "djinn-catalog-wrapper"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "djinn-sandbox",
+ "hex",
+ "ring",
+ "serde_json",
+ "sqlx",
+ "tempfile",
+ "tokio",
+ "url",
+ "workspace-hack",
+]
+
+[[package]]
 name = "djinn-cgroup-launcher"
 version = "0.1.0"
 dependencies = [
