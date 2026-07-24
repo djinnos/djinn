@@ -500,6 +500,7 @@ async fn worker_observes_host_initiated_cancel() {
     // 2. Spec + credentials + token files.
     let cfg_dir = TempDir::new().expect("tempdir cfg");
     let workspace_dir = TempDir::new().expect("tempdir workspace");
+    let journal_dir = TempDir::new().expect("tempdir invocation journal");
 
     let task_id = "task-cancel-path";
     let task_run_id = "run-cancel-path";
@@ -590,6 +591,7 @@ async fn worker_observes_host_initiated_cancel() {
         .env("DJINN_TOKEN_PATH", &token_path)
         .env("DJINN_TASK_RUN_ID", task_run_id)
         .env("DJINN_TASK_RUN_POD_UID", "pod-uid-cancel-path")
+        .env("DJINN_INVOCATION_JOURNAL_DIR", journal_dir.path())
         .env("DJINN_CGROUP_BROKER_SOCKET", &broker.socket_path)
         .env(
             "DJINN_CGROUP_BROKER_CREDENTIAL_PATH",

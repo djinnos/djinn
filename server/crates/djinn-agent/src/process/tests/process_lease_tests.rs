@@ -220,8 +220,11 @@ struct ScriptedServices {
     release_fences: Mutex<Vec<LeaseFencingToken>>,
     pause_queue: AtomicBool,
     pause_grant: AtomicBool,
+    pause_status: AtomicBool,
     queue_entered: Notify,
     grant_entered: Notify,
+    status_entered: Notify,
+    status_resume: Notify,
     // Durable-epoch lift authorization returned to the runner. Defaults to
     // `Lift` so the lease-state-machine tests exercise the successful lift path;
     // the epoch-gating tests override it to `Shadow` / `Unleased`.
@@ -245,8 +248,11 @@ impl ScriptedServices {
             release_fences: Mutex::new(Vec::new()),
             pause_queue: AtomicBool::new(false),
             pause_grant: AtomicBool::new(false),
+            pause_status: AtomicBool::new(false),
             queue_entered: Notify::new(),
             grant_entered: Notify::new(),
+            status_entered: Notify::new(),
+            status_resume: Notify::new(),
             lift_decision: Mutex::new(djinn_supervisor::services::InvocationLiftDecision::Lift),
         }
     }
@@ -287,6 +293,10 @@ impl SupervisorServices for ScriptedServices {
     }
     async fn lease_status(&self, _: LeaseStatusRequest) -> LeaseResult {
         self.status_calls.fetch_add(1, Ordering::SeqCst);
+        self.status_entered.notify_one();
+        if self.pause_status.load(Ordering::SeqCst) {
+            self.status_resume.notified().await;
+        }
         Self::pop(&self.status)
     }
     async fn abandon_lease(&self, _: LeaseAbandonRequest) -> LeaseResult {
@@ -1275,3 +1285,6 @@ async fn ac4_unresolved_state_without_fence_abandons_at_most_once() {
     assert_eq!(services.release_calls.load(Ordering::SeqCst), 0);
     assert!(services.release_fences.lock().unwrap().is_empty());
 }
+
+#[path = "process_lease_recovery_tests.rs"]
+mod recovery_tests;

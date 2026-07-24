@@ -23,7 +23,10 @@ use tokio::sync::Mutex;
 use crate::actors::coordinator::CoordinatorHandle;
 use crate::file_time::FileTime;
 use crate::lsp::LspManager;
-use crate::process::{LeaseInvocationConfig, LeaseInvocationRunner, UnixBrokerLauncher};
+use crate::process::{
+    InvocationJournal, InvocationRecovery, LeaseInvocationConfig, LeaseInvocationRunner,
+    UnixBrokerLauncher,
+};
 use crate::roles::RoleRegistry;
 use djinn_cgroup_launcher::transport::UnixBrokerClient;
 use djinn_core::clock::{Clock, SystemClock, SystemClock as SystemClockTrait};
@@ -49,23 +52,74 @@ pub struct ShellLaunchContext {
 }
 
 impl ShellLaunchContext {
-    pub fn broker_backed(
+    pub async fn broker_backed(
         task_id: String,
         task_run_id: String,
         pod_uid: String,
         services: Arc<dyn SupervisorServices>,
         client: UnixBrokerClient,
-    ) -> Self {
-        Self {
-            runner: Arc::new(LeaseInvocationRunner::new(
-                services,
-                Arc::new(UnixBrokerLauncher::new(client, 0)),
-                Arc::new(SystemClock::new()),
-            )),
+    ) -> std::io::Result<Self> {
+        let journal_dir = std::env::var_os("DJINN_INVOCATION_JOURNAL_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("/var/run/djinn/invocation-journal"));
+        let journal = Arc::new(InvocationJournal::new(journal_dir, pod_uid.clone())?);
+        const WATCHDOG_GRACE: Duration = Duration::from_secs(300);
+        let recovery_clock = SystemClock::new();
+        InvocationRecovery {
+            journal: journal.as_ref(),
+            services: services.as_ref(),
+            clock: &recovery_clock,
+            watchdog_grace: WATCHDOG_GRACE,
+        }
+        .run(|recorded_pod_uid| {
+            // The exact-pod termination transport is deliberately injected by
+            // its owning runtime layer. This journal callback only preserves a
+            // seam and reports the immutable UID; cancelling this worker does
+            // not prove that Kubernetes deleted the recorded pod.
+            tracing::error!(
+                pod_uid = recorded_pod_uid,
+                "unresolved invocation watchdog fired; exact-pod termination is not wired"
+            );
+        })
+        .await?;
+
+        // Recovery must run again when a startup record reaches grace, rather
+        // than relying on a later process reconstruction or RPC failure.
+        let recovery_journal = journal.clone();
+        let recovery_services = services.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(WATCHDOG_GRACE).await;
+                let recovery_clock = SystemClock::new();
+                let services = recovery_services.clone();
+                let _ = InvocationRecovery {
+                    journal: recovery_journal.as_ref(),
+                    services: services.as_ref(),
+                    clock: &recovery_clock,
+                    watchdog_grace: WATCHDOG_GRACE,
+                }
+                .run(|recorded_pod_uid| {
+                    tracing::error!(
+                        pod_uid = recorded_pod_uid,
+                        "unresolved invocation watchdog fired; exact-pod termination is not wired"
+                    );
+                })
+                .await;
+            }
+        });
+        Ok(Self {
+            runner: Arc::new(
+                LeaseInvocationRunner::new(
+                    services,
+                    Arc::new(UnixBrokerLauncher::new(client, 0)),
+                    Arc::new(SystemClock::new()),
+                )
+                .with_journal(journal),
+            ),
             task_id,
             task_run_id,
             pod_uid,
-        }
+        })
     }
 
     pub(crate) fn invocation(&self, timeout: Duration) -> LeaseInvocationConfig {
