@@ -341,3 +341,441 @@ fn repeated_lint_rejections_are_bounded_by_existing_spawn_cap() {
         "failed writes never consume a refinement round"
     );
 }
+
+#[test]
+fn outcome_application_distinguishes_retry_from_commit() {
+    assert_ne!(
+        RefinementOutcomeApplication::Retryable,
+        RefinementOutcomeApplication::Committed
+    );
+    assert_ne!(
+        RefinementOutcomeApplication::Ignored,
+        RefinementOutcomeApplication::Committed
+    );
+}
+
+use std::time::Instant;
+
+use djinn_core::{
+    events::{DjinnEventEnvelope, EventBus},
+    models::TaskRefinementCorrelation,
+    refinement_liveness::{
+        RefinementIntentState, RefinementPhase as DurablePhase, RefinementRole, RefinementRunState,
+    },
+};
+use djinn_db::{
+    AcknowledgeRefinementTaskMaterializationRequest, AdmitRefinementRunRequest,
+    ClaimRefinementIntentRequest, CompleteRefinementIntentRequest,
+    LoadRefinementRunSnapshotRequest, ProposalCreateInput, ProposalDebateTrailCreateInput,
+    RefinementAdmissionOutcome, RefinementAdmissionSource, UserRepository,
+};
+
+use crate::refinement_dispatch::refinement_cap_tests::{build_refinement_actor, spawn_test_pool};
+
+struct OutcomeProposalFixture {
+    proposal_id: String,
+    user_id: String,
+}
+
+struct DurableOutcomeFixture {
+    db: djinn_db::Database,
+    actor: CoordinatorActor,
+    fixture: OutcomeProposalFixture,
+    run_id: String,
+    generation: i32,
+    intent_id: String,
+    task_id: String,
+    session: RefinementSession,
+    projection: RefinementLoopState,
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn materialize_outcome_intent(
+    actor: &CoordinatorActor,
+    fixture: &OutcomeProposalFixture,
+    run_id: &str,
+    generation: i32,
+    intent_id: &str,
+    round: i32,
+    phase: DurablePhase,
+    role: RefinementRole,
+) -> (String, RefinementSession) {
+    let repo = ProposalRepository::new(actor.db.clone(), EventBus::noop());
+    let owner = format!("coordinator:{}", actor.coordinator_incarnation_id);
+    repo.claim_refinement_intent(ClaimRefinementIntentRequest {
+        run_id: run_id.into(),
+        intent_id: intent_id.into(),
+        generation,
+        owner: owner.clone(),
+        lease_millis: 60_000,
+    })
+    .await
+    .expect("claim source intent")
+    .expect("source lease acquired");
+    let correlation = TaskRefinementCorrelation::new(
+        run_id.into(),
+        intent_id.into(),
+        i64::from(generation),
+        i64::from(round),
+        phase,
+        role,
+    )
+    .expect("valid source correlation");
+    let (local_phase, role_name) = match phase {
+        DurablePhase::AdversaryAttack => (RefinementPhase::AdversaryAttack, "adversary"),
+        DurablePhase::AdvocateRevision => (RefinementPhase::AdvocateRevision, "advocate"),
+        DurablePhase::JudgeAdjudication => (RefinementPhase::JudgeAdjudication, "judge"),
+    };
+    let head = repo
+        .get(&fixture.proposal_id)
+        .await
+        .expect("load proposal")
+        .expect("proposal exists")
+        .latest_revision_seq;
+    let task_id = actor
+        .create_refinement_task_with_context_and_correlation(
+            &fixture.proposal_id,
+            role_name,
+            round,
+            head,
+            "durable outcome regression",
+            None,
+            Some(&fixture.user_id),
+            Some(&correlation),
+        )
+        .await
+        .expect("create correlated source task");
+    assert!(
+        repo.acknowledge_refinement_task_materialization(
+            AcknowledgeRefinementTaskMaterializationRequest {
+                run_id: run_id.into(),
+                intent_id: intent_id.into(),
+                generation,
+                task_id: task_id.clone(),
+                owner,
+            },
+        )
+        .await
+        .expect("acknowledge source task")
+    );
+    (
+        task_id.clone(),
+        RefinementSession {
+            run_id: run_id.into(),
+            generation,
+            task_id,
+            phase: local_phase,
+            dispatched_at: Instant::now(),
+            session_started_at: Some(Instant::now()),
+            model_id: "test/mock".into(),
+        },
+    )
+}
+
+async fn seed_outcome_proposal(db: &djinn_db::Database) -> OutcomeProposalFixture {
+    let project = crate::test_helpers::create_test_project(db).await;
+    let user = UserRepository::new(db.clone())
+        .upsert_from_github(
+            777_101,
+            "refinement-outcome-user",
+            Some("Refinement outcome test user"),
+            None,
+        )
+        .await
+        .expect("create outcome test user");
+    let proposal = djinn_core::auth_context::SESSION_USER_ID
+        .scope(Some(user.id.clone()), async {
+            ProposalRepository::new(db.clone(), EventBus::noop())
+                .create(ProposalCreateInput {
+                    title: "Durable outcome test proposal",
+                    body: "A proposal for correlated durable outcome tests.",
+                    acceptance_criteria: Some("[]"),
+                    status: Some("building"),
+                    body_format: None,
+                })
+                .await
+                .expect("create outcome test proposal")
+        })
+        .await;
+    let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+    repo.add_target(&proposal.id, &project.id, "primary")
+        .await
+        .expect("add outcome proposal target");
+    repo.start_refinement_with_owner(&proposal.id, Some(&user.id))
+        .await
+        .expect("persist outcome refinement owner");
+    OutcomeProposalFixture {
+        proposal_id: proposal.id,
+        user_id: user.id,
+    }
+}
+
+async fn durable_outcome_fixture() -> DurableOutcomeFixture {
+    let db = crate::test_helpers::create_test_db();
+    let fixture = seed_outcome_proposal(&db).await;
+    let (events_tx, _events_rx) = tokio::sync::broadcast::channel::<DjinnEventEnvelope>(256);
+    let pool = spawn_test_pool(&db, 1);
+    let actor = build_refinement_actor(&db, &events_tx, pool);
+    let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+    let admitted = repo
+        .admit_refinement_run(AdmitRefinementRunRequest {
+            proposal_id: fixture.proposal_id.clone(),
+            idempotency_key: uuid::Uuid::now_v7().to_string(),
+            source: RefinementAdmissionSource::Demand {
+                demand_id: uuid::Uuid::now_v7().to_string(),
+            },
+            heartbeat_grace_millis: 60_000,
+        })
+        .await
+        .expect("admit durable outcome run");
+    let (run_id, intent_id, generation) = match admitted {
+        RefinementAdmissionOutcome::Admitted {
+            run_id,
+            intent_id,
+            generation,
+        }
+        | RefinementAdmissionOutcome::Existing {
+            run_id,
+            intent_id,
+            generation,
+        } => (run_id, intent_id, generation),
+    };
+    let head = repo
+        .get(&fixture.proposal_id)
+        .await
+        .expect("load proposal")
+        .expect("proposal exists")
+        .latest_revision_seq;
+    let projection = RefinementLoopState::new(&fixture.proposal_id, head)
+        .with_run_identity(run_id.clone(), generation)
+        .with_attributed_user(Some(fixture.user_id.clone()));
+    let (task_id, session) = materialize_outcome_intent(
+        &actor,
+        &fixture,
+        &run_id,
+        generation,
+        &intent_id,
+        1,
+        DurablePhase::AdversaryAttack,
+        RefinementRole::Adversary,
+    )
+    .await;
+    DurableOutcomeFixture {
+        db,
+        actor,
+        fixture,
+        run_id,
+        generation,
+        intent_id,
+        task_id,
+        session,
+        projection,
+    }
+}
+
+async fn snapshot(f: &DurableOutcomeFixture) -> djinn_db::RefinementRunSnapshotResult {
+    ProposalRepository::new(f.db.clone(), EventBus::noop())
+        .load_refinement_run_snapshot(LoadRefinementRunSnapshotRequest {
+            run_id: f.run_id.clone(),
+            heartbeat_grace_millis: 60_000,
+        })
+        .await
+        .expect("load exact run snapshot")
+        .expect("run exists")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn successor_persistence_failure_retains_exact_source_and_projection() {
+    let mut f = durable_outcome_fixture().await;
+    f.actor
+        .active_refinements
+        .insert(f.run_id.clone(), f.projection.clone());
+    f.actor
+        .refinement_sessions
+        .insert(f.run_id.clone(), f.session.clone());
+    djinn_db::test_support::reject_refinement_successor_for_test(&f.db).await;
+
+    assert_eq!(
+        f.actor
+            .process_refinement_outcome(&f.run_id, &f.session)
+            .await,
+        RefinementOutcomeApplication::Retryable
+    );
+    let projection = &f.actor.active_refinements[&f.run_id];
+    assert_eq!(projection.phase, RefinementPhase::AdversaryAttack);
+    assert_eq!(projection.current_round, f.projection.current_round);
+    assert_eq!(f.actor.refinement_sessions[&f.run_id].task_id, f.task_id);
+    assert!(
+        TaskRepository::new(f.db.clone(), EventBus::noop())
+            .get(&f.task_id)
+            .await
+            .expect("reload exact source task")
+            .is_some()
+    );
+    let durable = snapshot(&f).await;
+    assert_eq!(durable.snapshot.run.state, RefinementRunState::Active);
+    assert_eq!(
+        durable.snapshot.intents.len(),
+        1,
+        "no successor was committed"
+    );
+    assert_eq!(
+        durable.snapshot.intents[0].state,
+        RefinementIntentState::Materialized,
+        "source completion rolled back with successor insertion"
+    );
+}
+
+async fn advance_fixture_to_judge(f: &mut DurableOutcomeFixture) {
+    let repo = ProposalRepository::new(f.db.clone(), EventBus::noop());
+    let next = repo
+        .complete_refinement_intent(CompleteRefinementIntentRequest {
+            run_id: f.run_id.clone(),
+            intent_id: f.intent_id.clone(),
+            generation: f.generation,
+            owner: format!("coordinator:{}", f.actor.coordinator_incarnation_id),
+            next_round: 1,
+            next_phase: DurablePhase::JudgeAdjudication,
+            next_role: RefinementRole::Judge,
+            next_idempotency_key: format!("{}/1/judge_adjudication", f.run_id),
+        })
+        .await
+        .expect("commit judge successor");
+    let (task_id, session) = materialize_outcome_intent(
+        &f.actor,
+        &f.fixture,
+        &f.run_id,
+        f.generation,
+        &next.intent_id,
+        1,
+        DurablePhase::JudgeAdjudication,
+        RefinementRole::Judge,
+    )
+    .await;
+    f.intent_id = next.intent_id;
+    f.task_id = task_id;
+    f.session = session;
+    f.projection.phase = RefinementPhase::JudgeAdjudication;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn successful_park_replay_is_fenced_before_a_second_transition() {
+    let mut f = durable_outcome_fixture().await;
+    advance_fixture_to_judge(&mut f).await;
+    let metadata = serde_json::json!({
+        "kind": "needs_evidence_link_v1",
+        "proposal_id": f.fixture.proposal_id,
+        "judge_task_id": f.task_id,
+        "spike_task_id": uuid::Uuid::now_v7().to_string(),
+        "round": 1,
+        "against_revision_seq": f.projection.current_revision_seq,
+    });
+    ProposalRepository::new(f.db.clone(), EventBus::noop())
+        .add_debate_trail_entry(ProposalDebateTrailCreateInput {
+            proposal_id: &f.fixture.proposal_id,
+            kind: "needs_evidence",
+            body: "evidence required",
+            blocking: true,
+            agent_role: "judge",
+            author_kind: "agent",
+            author_model: None,
+            source_task_id: Some(&f.task_id),
+            against_revision_seq: f.projection.current_revision_seq,
+            round: 1,
+            body_metadata: Some(&metadata),
+        })
+        .await
+        .expect("append needs-evidence decision");
+    let source_projection = f.projection.clone();
+    f.actor
+        .active_refinements
+        .insert(f.run_id.clone(), source_projection.clone());
+
+    assert_eq!(
+        f.actor
+            .process_refinement_outcome(&f.run_id, &f.session)
+            .await,
+        RefinementOutcomeApplication::Committed
+    );
+    assert_eq!(
+        f.actor.active_refinements[&f.run_id].phase,
+        RefinementPhase::AwaitingEvidence
+    );
+    let committed = snapshot(&f).await;
+    assert_eq!(committed.snapshot.run.state, RefinementRunState::Parked);
+    assert_eq!(
+        committed
+            .snapshot
+            .intents
+            .last()
+            .expect("judge intent")
+            .state,
+        RefinementIntentState::Completed
+    );
+
+    // Restore the disposable projection: the durable run/intent must fence replay.
+    f.actor
+        .active_refinements
+        .insert(f.run_id.clone(), source_projection.clone());
+    assert_eq!(
+        f.actor
+            .process_refinement_outcome(&f.run_id, &f.session)
+            .await,
+        RefinementOutcomeApplication::Ignored
+    );
+    assert_eq!(
+        f.actor.active_refinements[&f.run_id].phase,
+        source_projection.phase
+    );
+    let replayed = snapshot(&f).await;
+    assert_eq!(replayed.snapshot.run.state, RefinementRunState::Parked);
+    assert_eq!(
+        replayed.snapshot.intents.len(),
+        committed.snapshot.intents.len()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn successful_terminal_replay_is_fenced_before_a_second_transition() {
+    let mut f = durable_outcome_fixture().await;
+    let source = SourceIntentTransitionRequest {
+        run_id: f.run_id.clone(),
+        intent_id: f.intent_id.clone(),
+        generation: f.generation,
+        expected_round: 1,
+        expected_phase: DurablePhase::AdversaryAttack,
+        expected_role: RefinementRole::Adversary,
+    };
+    let mut terminal_candidate = f.projection.clone();
+    terminal_candidate.terminate(StopReason::HumanAccepted);
+    assert!(
+        f.actor
+            .commit_refinement_candidate(&source, &terminal_candidate)
+            .await,
+        "terminal decision consumes its exact materialized source"
+    );
+    let committed = snapshot(&f).await;
+    assert_eq!(committed.snapshot.run.state, RefinementRunState::Terminal);
+    assert_eq!(committed.snapshot.intents.len(), 1);
+    assert_eq!(
+        committed.snapshot.intents[0].state,
+        RefinementIntentState::Completed
+    );
+
+    f.actor
+        .active_refinements
+        .insert(f.run_id.clone(), f.projection.clone());
+    assert_eq!(
+        f.actor
+            .process_refinement_outcome(&f.run_id, &f.session)
+            .await,
+        RefinementOutcomeApplication::Ignored
+    );
+    assert_eq!(
+        f.actor.active_refinements[&f.run_id].phase,
+        RefinementPhase::AdversaryAttack
+    );
+    let replayed = snapshot(&f).await;
+    assert_eq!(replayed.snapshot.run.state, RefinementRunState::Terminal);
+    assert_eq!(replayed.snapshot.intents.len(), 1);
+}

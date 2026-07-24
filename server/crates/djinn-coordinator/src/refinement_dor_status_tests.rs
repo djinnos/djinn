@@ -509,7 +509,6 @@ async fn approve_verdict_blocked_when_corrupt_head_recomputed() {
     actor.active_refinements.insert(
         run_id.clone(),
         crate::refinement::RefinementLoopState::new(&proposal_id, head_seq)
-            .with_run_identity(run_id.clone(), generation)
             .with_attributed_user(None),
     );
 
@@ -696,7 +695,6 @@ async fn clean_material_revision_restores_semantic_adjudication() {
     actor.active_refinements.insert(
         run_id.clone(),
         crate::refinement::RefinementLoopState::new(&proposal_id, new_head_seq)
-            .with_run_identity(run_id.clone(), generation)
             .with_attributed_user(None),
     );
 
