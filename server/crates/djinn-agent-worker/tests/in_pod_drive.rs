@@ -717,11 +717,8 @@ async fn worker_drives_real_supervisor_in_pod() {
         .env("DJINN_TASK_RUN_ID", task_run_id)
         .env("DJINN_TASK_RUN_POD_UID", "pod-uid-in-pod-drive")
         .env("DJINN_INVOCATION_JOURNAL_DIR", journal_dir.path())
-        .env("DJINN_CGROUP_BROKER_SOCKET", &broker.socket_path)
-        .env(
-            "DJINN_CGROUP_BROKER_CREDENTIAL_PATH",
-            &broker.credential_path,
-        )
+        .env("DJINN_LAUNCHER_SOCKET", &broker.socket_path)
+        .env("DJINN_LAUNCHER_CREDENTIAL_PATH", &broker.credential_path)
         .env("DJINN_WORKSPACE_PATH", workspace_dir.path())
         .env("DJINN_MIRROR_ROOT", mirrors_root.path())
         // Point the in-Pod Database at the test Postgres database.

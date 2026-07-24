@@ -71,6 +71,7 @@ pub mod cargo_metrics;
 mod cargo_target_seed;
 mod checkpoint;
 mod checkpoint_safety;
+mod launcher_handshake;
 mod lifecycle;
 mod worker_services;
 
@@ -251,21 +252,29 @@ struct WorkerDefaultArgs {
     #[arg(long, env = "DJINN_TASK_RUN_POD_UID")]
     task_run_pod_uid: String,
 
-    /// Authenticated launcher broker socket mounted by the task-run runtime.
+    /// cgroup-launcher control socket the sidecar binds inside the shared IPC
+    /// mount. Env name and default match qut0's render (`DJINN_LAUNCHER_SOCKET`
+    /// / `djinn_k8s::launcher::LAUNCHER_SOCKET_PATH`). The worker connects here
+    /// after writing its handshake; an absent mount falls back to the in-process
+    /// broker path (see [`launcher_handshake`]).
     #[arg(
         long,
-        env = "DJINN_CGROUP_BROKER_SOCKET",
-        default_value = "/var/run/djinn-cgroup-launcher/broker.sock"
+        env = "DJINN_LAUNCHER_SOCKET",
+        default_value = "/var/run/djinn/launcher/broker.sock"
     )]
-    cgroup_broker_socket: PathBuf,
+    launcher_socket: PathBuf,
 
-    /// Per-task-run broker credential mounted read-only by the runtime.
+    /// Worker-private launcher credential path inside the shared IPC mount. Env
+    /// name and default match qut0's render (`DJINN_LAUNCHER_CREDENTIAL_PATH` /
+    /// `djinn_k8s::launcher::LAUNCHER_CREDENTIAL_PATH`). The worker WRITES the
+    /// credential here (plus `worker.pid` beside it) for the launcher's serve
+    /// loop to read before it binds the socket.
     #[arg(
         long,
-        env = "DJINN_CGROUP_BROKER_CREDENTIAL_PATH",
-        default_value = "/var/run/djinn-cgroup-launcher/credential"
+        env = "DJINN_LAUNCHER_CREDENTIAL_PATH",
+        default_value = "/var/run/djinn/launcher/credential"
     )]
-    cgroup_broker_credential_path: PathBuf,
+    launcher_credential_path: PathBuf,
 
     /// Path the launcher bind-mounted `/workspace` at.  Defaults to the
     /// contractual `/workspace` — exposed as a flag so tests can run the
@@ -1935,37 +1944,58 @@ async fn run_task_run(args: WorkerDefaultArgs) -> Result<()> {
     .with_context(|| format!("dial djinn-server at {server_addr}"))?;
     info!(server = %server_addr, "tcp connection up, RPC handshake accepted");
 
-    // The broker connection and readiness proof are established before any
-    // stage can expose shell tools. These paths are runtime mounts, not child
-    // controlled shell environment values.
-    let broker_credential = tokio::fs::read(&args.cgroup_broker_credential_path)
-        .await
-        .with_context(|| {
-            format!(
-                "read broker credential from {}",
-                args.cgroup_broker_credential_path.display()
-            )
-        })?;
-    let mut broker_client = djinn_cgroup_launcher::transport::UnixBrokerClient::connect_path(
-        &args.cgroup_broker_socket,
-        &broker_credential,
-    )
-    .context("connect authenticated cgroup launcher broker")?;
-    let mut dumpability = djinn_cgroup_launcher::child::NativeWorkerDumpability;
-    let readiness = djinn_cgroup_launcher::child::prepare_worker_readiness(&mut dumpability)
-        .context("prepare non-dumpable worker broker readiness")?;
-    broker_client
-        .ready(readiness)
-        .context("submit broker readiness")?;
-    let shell_launch = ShellLaunchContext::broker_backed(
-        spec.task_id.clone(),
-        spec.task_run_id.clone(),
-        args.task_run_pod_uid.clone(),
-        rpc.clone(),
-        broker_client,
-    )
+    // Detection-gated launcher handshake (task ab05). qut0 renders a mandatory
+    // cgroup-launcher sidecar whose serve loop waits for a worker handshake
+    // (private credential + worker PID in the shared IPC mount) before it binds
+    // its control socket. The worker writes that handshake and dials the socket
+    // here. When the mount/sidecar is absent (old rendering, or a local/non-pod
+    // run) — or when the handshake fails closed for any reason — the worker uses
+    // the unleased in-process broker path UNCHANGED (`shell_launch = None`); the
+    // handshake never blocks pod startup. Run the blocking write/connect on a
+    // blocking thread so the async runtime is never stalled.
+    let launcher_socket = args.launcher_socket.clone();
+    let launcher_credential_path = args.launcher_credential_path.clone();
+    let handshake = tokio::task::spawn_blocking(move || {
+        let mut dumpability = djinn_cgroup_launcher::child::NativeWorkerDumpability;
+        launcher_handshake::establish(
+            &launcher_socket,
+            &launcher_credential_path,
+            &mut dumpability,
+        )
+    })
     .await
-    .context("recover durable invocation journal")?;
+    .context("join launcher handshake task")?;
+    let shell_launch = match handshake {
+        launcher_handshake::LauncherHandshake::Connected(broker_client) => {
+            info!("cgroup-launcher handshake complete; using leased broker shell path");
+            Some(
+                ShellLaunchContext::broker_backed(
+                    spec.task_id.clone(),
+                    spec.task_run_id.clone(),
+                    args.task_run_pod_uid.clone(),
+                    rpc.clone(),
+                    *broker_client,
+                )
+                .await
+                .context("recover durable invocation journal")?,
+            )
+        }
+        launcher_handshake::LauncherHandshake::AbsentMount => {
+            info!(
+                socket = %args.launcher_socket.display(),
+                "no cgroup-launcher IPC mount; using in-process broker shell path"
+            );
+            None
+        }
+        launcher_handshake::LauncherHandshake::FailedClosed(error) => {
+            warn!(
+                error = %error,
+                socket = %args.launcher_socket.display(),
+                "cgroup-launcher handshake failed; falling back to in-process broker shell path"
+            );
+            None
+        }
+    };
 
     // 4. Attach to the host-materialised workspace.
     let workspace = Workspace::attach_existing(args.workspace_path.as_path(), &spec.task_branch)
@@ -2065,7 +2095,7 @@ async fn run_task_run(args: WorkerDefaultArgs) -> Result<()> {
         spec.project_id.clone(),
         spec.read_source_project_ids.clone(),
         spec.knowledge_injection,
-        Some(shell_launch),
+        shell_launch,
     );
     let worker_services: Arc<dyn SupervisorServices> = Arc::new(WorkerSupervisorServices::new(
         rpc.clone(),
@@ -4932,6 +4962,8 @@ warning: something
             "setsid adoptee must remain outside both registered process groups"
         );
 
+        // Test-only elapsed-time measurement for the shutdown-bound assertion.
+        #[allow(clippy::disallowed_methods)]
         let start = std::time::Instant::now();
         let cleanup = shutdown_linux_warm_lifecycle_with_config(
             reaper,
