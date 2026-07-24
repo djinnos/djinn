@@ -183,6 +183,38 @@ impl AdmissionHandoffRepository {
         row.map(TryInto::try_into).transpose()
     }
 
+    /// Create the `build` singleton at its baseline, born acknowledged for its
+    /// own epoch.
+    ///
+    /// Seeding is idempotent: an already present row is returned untouched, so
+    /// this can never overwrite a live rollout state. The emergency
+    /// acknowledgement is written *with* the row rather than left NULL because
+    /// an unacknowledged `emergency_primary` row is an incomplete epoch — a
+    /// fail-closed state the deployment then has to climb back out of on the
+    /// coordinator leader's handoff tick. Born acknowledged, the seed lands
+    /// directly on the v0-enforcing baseline; it never weakens anything,
+    /// because that baseline still requires the emergency authority.
+    ///
+    /// This is the only writer that creates the row, and it is deliberately
+    /// operator-driven: startup maps an absent row to the configured standalone
+    /// mode, which is the documented remediation for a wedged deployment, so no
+    /// startup path may re-create it implicitly.
+    pub async fn seed_baseline(&self) -> DbResult<AdmissionHandoffRow> {
+        self.db.ensure_initialized().await?;
+        sqlx::query(
+            "INSERT INTO admission_handoff \
+                 (name, phase, epoch, emergency_ack_epoch, v0_mode, v1_mode) \
+             VALUES ($1, 'emergency_primary', 0, 0, 'enforce', 'off') \
+             ON CONFLICT (name) DO NOTHING",
+        )
+        .bind(HANDOFF_NAME)
+        .execute(self.db.pool())
+        .await?;
+        self.read().await?.ok_or_else(|| {
+            DbError::InvalidData("admission handoff singleton absent after seeding".into())
+        })
+    }
+
     /// Remove the singleton to exercise startup behavior for installations
     /// where no durable handoff has been created.
     #[cfg(any(test, feature = "test-support"))]
@@ -526,6 +558,37 @@ mod tests {
         assert_eq!(row.epoch, 0);
         assert_eq!(row.emergency_ack_epoch, None);
         assert_eq!(row.invocation_ack_epoch, None);
+    }
+
+    /// Re-seeding a deployment whose row was deleted (the documented wedge
+    /// remediation) must produce the v0-enforcing baseline that is already
+    /// acknowledged for its own epoch, and must never disturb an existing row.
+    #[tokio::test]
+    async fn seeding_recreates_an_acknowledged_baseline_and_never_overwrites() {
+        let repo = repository().await;
+        repo.delete_for_test().await.unwrap();
+        assert!(repo.read().await.unwrap().is_none());
+
+        let seeded = repo.seed_baseline().await.unwrap();
+        assert_eq!(seeded.phase, AdmissionHandoffPhase::EmergencyPrimary);
+        assert_eq!(seeded.epoch, 0);
+        assert_eq!(seeded.v0_mode, V0Mode::Enforce);
+        assert_eq!(seeded.v1_mode, V1Mode::Off);
+        assert_eq!(seeded.cap, None);
+        assert_eq!(
+            seeded.emergency_ack_epoch,
+            Some(seeded.epoch),
+            "the seed is born acknowledged, so it is never an incomplete epoch"
+        );
+        assert_eq!(seeded.invocation_ack_epoch, None);
+
+        // An in-flight rollout must survive a repeated seed untouched.
+        let armed = repo
+            .set_modes_and_cap(seeded.epoch, V0Mode::Enforce, V1Mode::Shadow, Some(5))
+            .await
+            .unwrap();
+        let reseeded = repo.seed_baseline().await.unwrap();
+        assert_eq!(reseeded, armed, "seeding is idempotent, never destructive");
     }
 
     #[tokio::test]

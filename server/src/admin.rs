@@ -12,6 +12,12 @@
 //! from the current durable state and reports what it did or what it is waiting
 //! on, so an operator (or the runbook) re-runs the command as controller and
 //! generation acknowledgements land.
+//!
+//! `seed` is the one step that creates the durable row rather than transitioning
+//! it. Startup deliberately never re-creates an absent row — mapping absence to
+//! the configured standalone v0 mode is the documented remediation for a wedged
+//! handoff — so restoring the rollout after that remediation is an explicit
+//! operator action rather than an implicit deploy-time side effect.
 
 use std::fmt::Write as _;
 use std::sync::Arc;
@@ -37,6 +43,9 @@ pub enum AdminCommand {
 pub enum EpochAction {
     /// Print the durable epoch row and its derived handoff state.
     Show,
+    /// Create the durable epoch row at its v0-enforcing baseline when it is
+    /// absent. Idempotent: an existing row is reported and left untouched.
+    Seed,
     /// Perform the next safe FORWARD step: arm shadow → arm overlap → enter
     /// overlap → commit invocation-primary → observe v0.
     Advance {
@@ -89,6 +98,16 @@ async fn run_epoch_action(
         EpochAction::Show => {
             let row = exec.show().await.map_err(|e| e.to_string())?;
             Ok(render_show(row.as_ref()))
+        }
+        EpochAction::Seed => {
+            if let Some(row) = exec.show().await.map_err(|e| e.to_string())? {
+                return Ok(format!(
+                    "seed: already present, left untouched\n{}",
+                    render_show(Some(&row))
+                ));
+            }
+            let row = exec.seed().await.map_err(|e| e.to_string())?;
+            Ok(format!("seed: applied\n{}", render_show(Some(&row))))
         }
         EpochAction::SetCap { cap } => {
             let row = require_row(exec).await?;
@@ -226,4 +245,57 @@ fn render_show(row: Option<&AdmissionHandoffRow>) -> String {
             .map_or_else(|| "<none>".to_string(), |e| e.to_string())
     );
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `epoch seed` is the operator surface that restores a deployment whose row
+    /// was deleted, and it must land on a complete (already acknowledged) v0
+    /// baseline so the next `advance` is not blocked waiting for an ack that
+    /// only a healthy coordinator leader can write.
+    #[tokio::test]
+    async fn seed_creates_an_acknowledged_baseline_and_is_idempotent() {
+        let db = Database::open_in_memory().expect("test database");
+        let repo = Arc::new(AdmissionHandoffRepository::new(db));
+        repo.read().await.expect("initialize fixture");
+        repo.delete_for_test().await.expect("remove row");
+
+        let rendered = run_admin_command_with(&repo, EpochAction::Seed)
+            .await
+            .expect("seed applies");
+        assert!(rendered.starts_with("seed: applied"), "{rendered}");
+        let seeded = repo.read().await.expect("read").expect("seeded row");
+        assert_eq!(seeded.phase, AdmissionHandoffPhase::EmergencyPrimary);
+        assert_eq!(seeded.v0_mode, V0Mode::Enforce);
+        assert_eq!(seeded.v1_mode, V1Mode::Off);
+        assert_eq!(seeded.emergency_ack_epoch, Some(seeded.epoch));
+
+        let rendered = run_admin_command_with(&repo, EpochAction::Seed)
+            .await
+            .expect("repeat seed reports the existing row");
+        assert!(rendered.starts_with("seed: already present"), "{rendered}");
+        assert_eq!(repo.read().await.expect("read").expect("row"), seeded);
+
+        // The acknowledged baseline is immediately armable: the shadow step no
+        // longer has to wait for a coordinator tick to complete the epoch.
+        let rendered = run_admin_command_with(
+            &repo,
+            EpochAction::Advance {
+                cap: Some(3),
+                generations: Vec::new(),
+            },
+        )
+        .await
+        .expect("arm shadow");
+        assert!(rendered.starts_with("arm-shadow: applied"), "{rendered}");
+    }
+
+    async fn run_admin_command_with(
+        repo: &Arc<AdmissionHandoffRepository>,
+        action: EpochAction,
+    ) -> Result<String, String> {
+        run_epoch_action(&AdmissionTransitionExecutor::new(repo.clone()), action).await
+    }
 }

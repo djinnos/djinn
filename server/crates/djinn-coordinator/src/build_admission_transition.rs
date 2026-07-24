@@ -145,6 +145,18 @@ impl AdmissionTransitionExecutor {
         self.repo.read().await.map_err(map_db)
     }
 
+    /// Create the durable row at its v0-enforcing baseline, born acknowledged
+    /// for its own epoch.
+    ///
+    /// A deployment whose row was removed (the documented remediation for a
+    /// wedged handoff) has no rollout state at all: startup keeps the configured
+    /// standalone v0 mode and no epoch can be armed. This is the only step that
+    /// creates the row, and it is idempotent — an existing row is returned
+    /// untouched, so it can never overwrite a live rollout.
+    pub async fn seed(&self) -> Result<AdmissionHandoffRow, TransitionError> {
+        self.repo.seed_baseline().await.map_err(map_db)
+    }
+
     /// Read the current row and fail fast if it no longer matches the epoch the
     /// operator observed — a stale-epoch attempt returns `InvalidTransition`
     /// before any mutation is issued.
