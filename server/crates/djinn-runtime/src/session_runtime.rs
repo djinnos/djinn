@@ -77,6 +77,21 @@ pub struct InfraDeathLogTailCapture {
     /// The captured log tail, already truncated to the DB bound.
     /// `None` when capture failed or the Pod had no logs.
     pub log_tail: Option<String>,
+    /// Version of the self-describing attempt-evidence payload.
+    pub schema_version: u8,
+    /// Pod identity and the container selected before logs were requested.
+    pub pod_name: Option<String>,
+    pub pod_uid: Option<String>,
+    pub container_name: Option<String>,
+    /// Terminal status observed before the log request.
+    pub container_exit_reason: Option<String>,
+    pub container_exit_code: Option<i32>,
+    /// Byte accounting for the v2 head/tail frame.
+    pub head_bytes: usize,
+    pub tail_bytes: usize,
+    pub omitted_bytes: usize,
+    /// Ordered names of transformations applied before framing.
+    pub sanitizers: Vec<String>,
     /// Machine-readable error class when capture failed
     /// (e.g. `"pod_not_found"`, `"timeout"`, `"empty_logs"`).
     /// `None` when capture succeeded.
@@ -158,7 +173,7 @@ pub trait SessionRuntime: Send + Sync {
     ///
     /// Implementations MUST:
     /// - Use a short timeout (≤ 10 s) so the capture never blocks teardown.
-    /// - Truncate the captured tail to the DB bound (~16 KiB).
+    /// - Frame the captured tail to the DB bound (8000 bytes).
     /// - Return `None` on any failure — log-tail capture is best-effort
     ///   diagnostic enrichment and must never prevent teardown or task
     ///   finalization.
