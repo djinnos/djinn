@@ -41,6 +41,8 @@
 //! load-bearing assertion: the provider error proves the worker tried to
 //! call the LLM locally, not via the host's `invoke_llm` RPC.
 
+mod common;
+
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -697,6 +699,7 @@ async fn worker_drives_real_supervisor_in_pod() {
         "dispatch must not pre-populate workspace_path"
     );
     let worker_db_url = worker_db.bootstrap_info().target.clone();
+    let broker = common::ReadinessBroker::start(cfg_dir.path());
 
     // 5. Spawn the worker binary against the migrated per-test database.
     let exe = env!("CARGO_BIN_EXE_djinn-agent-worker");
@@ -708,6 +711,12 @@ async fn worker_drives_real_supervisor_in_pod() {
         .env("DJINN_CREDENTIALS_PATH", &creds_path)
         .env("DJINN_TOKEN_PATH", &token_path)
         .env("DJINN_TASK_RUN_ID", task_run_id)
+        .env("DJINN_TASK_RUN_POD_UID", "pod-uid-in-pod-drive")
+        .env("DJINN_CGROUP_BROKER_SOCKET", &broker.socket_path)
+        .env(
+            "DJINN_CGROUP_BROKER_CREDENTIAL_PATH",
+            &broker.credential_path,
+        )
         .env("DJINN_WORKSPACE_PATH", workspace_dir.path())
         .env("DJINN_MIRROR_ROOT", mirrors_root.path())
         // Point the in-Pod Database at the test Postgres database.

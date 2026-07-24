@@ -23,18 +23,85 @@ use tokio::sync::Mutex;
 use crate::actors::coordinator::CoordinatorHandle;
 use crate::file_time::FileTime;
 use crate::lsp::LspManager;
+use crate::process::{LeaseInvocationConfig, LeaseInvocationRunner, UnixBrokerLauncher};
 use crate::roles::RoleRegistry;
-use djinn_core::clock::{Clock, SystemClock as SystemClockTrait};
+use djinn_cgroup_launcher::transport::UnixBrokerClient;
+use djinn_core::clock::{Clock, SystemClock, SystemClock as SystemClockTrait};
 use djinn_core::events::EventBus;
 use djinn_core::models::KnowledgeInjectionConfig;
 use djinn_db::Database;
 use djinn_orchestration_types::coordinator::BackgroundWorkTracker;
 use djinn_provider::catalog::{CatalogService, HealthTracker};
 use djinn_slot::reply_loop::CompactionCriticalSection;
+use djinn_supervisor::SupervisorServices;
 
 /// Shared tracker for per-task last-activity timestamps (unix seconds).
 /// Used by stall detection to kill sessions that stop producing tokens.
 pub type ActivityTracker = Arc<std::sync::Mutex<HashMap<String, Arc<AtomicU64>>>>;
+
+/// Immutable broker-backed shell authority composed from trusted task-run inputs.
+#[derive(Clone)]
+pub struct ShellLaunchContext {
+    runner: Arc<LeaseInvocationRunner>,
+    task_id: String,
+    task_run_id: String,
+    pod_uid: String,
+}
+
+impl ShellLaunchContext {
+    pub fn broker_backed(
+        task_id: String,
+        task_run_id: String,
+        pod_uid: String,
+        services: Arc<dyn SupervisorServices>,
+        client: UnixBrokerClient,
+    ) -> Self {
+        Self {
+            runner: Arc::new(LeaseInvocationRunner::new(
+                services,
+                Arc::new(UnixBrokerLauncher::new(client, 0)),
+                Arc::new(SystemClock::new()),
+            )),
+            task_id,
+            task_run_id,
+            pod_uid,
+        }
+    }
+
+    pub(crate) fn invocation(&self, timeout: Duration) -> LeaseInvocationConfig {
+        LeaseInvocationConfig {
+            task_id: self.task_id.clone(),
+            task_run_id: self.task_run_id.clone(),
+            pod_uid: self.pod_uid.clone(),
+            cpu_usage_threshold_usec: 250_000,
+            queue_deadline_ms: 30_000,
+            launch_deadline_ms: 60_000,
+            timeout,
+        }
+    }
+
+    pub(crate) fn runner(&self) -> &LeaseInvocationRunner {
+        &self.runner
+    }
+
+    /// Compose a shell context around a remote-child runner double in tests.
+    /// Production construction remains restricted to [`Self::broker_backed`],
+    /// which owns the authenticated Unix broker adapter.
+    #[cfg(test)]
+    pub(crate) fn for_test(
+        runner: Arc<LeaseInvocationRunner>,
+        task_id: String,
+        task_run_id: String,
+        pod_uid: String,
+    ) -> Self {
+        Self {
+            runner,
+            task_id,
+            task_run_id,
+            pod_uid,
+        }
+    }
+}
 
 /// Configuration injected into the optional session-start memory intent planner.
 ///
@@ -250,6 +317,8 @@ pub struct AgentContext {
     /// variables at `AgentContext` construction time via
     /// [`ReconciliationSweepConfig::from_env`].
     pub reconciliation_sweep: ReconciliationSweepConfig,
+    /// Missing in host/test contexts. Production shell dispatch fails closed.
+    pub shell_launch: Option<ShellLaunchContext>,
     /// Explicitly injected configuration for the optional session-start memory
     /// intent planner. It remains disabled by default, but keeping it on the
     /// dispatch context makes an enabled deployment reachable without a local

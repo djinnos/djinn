@@ -461,6 +461,7 @@ impl RealPoolKillHarness {
             memory_intent_planner: djinn_agent::context::MemoryIntentPlannerConfig::default(),
             knowledge_injection: djinn_core::models::KnowledgeInjectionConfig::default(),
             reconciliation_sweep: ReconciliationSweepConfig::default(),
+            shell_launch: None,
             compaction_cs: djinn_slot::reply_loop::CompactionCriticalSection::default(),
         };
 

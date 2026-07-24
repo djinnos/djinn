@@ -15,6 +15,8 @@
 //! the `make test` convention shared with `djinn-agent`'s
 //! `phase1_supervisor` integration test.
 
+mod common;
+
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -571,6 +573,7 @@ async fn worker_observes_host_initiated_cancel() {
         .await
         .expect("clone djinn_test_template into per-test worker db");
     let test_db_url = worker_db.bootstrap_info().target.clone();
+    let broker = common::ReadinessBroker::start(cfg_dir.path());
 
     // 4b. Spawn worker against the migrated per-test database.
     let exe = env!("CARGO_BIN_EXE_djinn-agent-worker");
@@ -581,6 +584,12 @@ async fn worker_observes_host_initiated_cancel() {
         .env("DJINN_CREDENTIALS_PATH", &creds_path)
         .env("DJINN_TOKEN_PATH", &token_path)
         .env("DJINN_TASK_RUN_ID", task_run_id)
+        .env("DJINN_TASK_RUN_POD_UID", "pod-uid-cancel-path")
+        .env("DJINN_CGROUP_BROKER_SOCKET", &broker.socket_path)
+        .env(
+            "DJINN_CGROUP_BROKER_CREDENTIAL_PATH",
+            &broker.credential_path,
+        )
         .env("DJINN_WORKSPACE_PATH", workspace_dir.path())
         .env("DJINN_MIRROR_ROOT", mirrors_root.path())
         .env("DJINN_DATABASE_URL", test_db_url)

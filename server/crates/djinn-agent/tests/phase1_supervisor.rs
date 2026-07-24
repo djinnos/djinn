@@ -104,6 +104,7 @@ fn test_agent_context(db: Database) -> AgentContext {
         default_project_id: None,
         read_source_authorization: djinn_agent::context::ReadSourceAuthorization::default(),
         reconciliation_sweep: ReconciliationSweepConfig::default(),
+        shell_launch: None,
         memory_intent_planner: djinn_agent::context::MemoryIntentPlannerConfig::default(),
         knowledge_injection: djinn_core::models::KnowledgeInjectionConfig::default(),
         compaction_cs: djinn_slot::reply_loop::CompactionCriticalSection::default(),

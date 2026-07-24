@@ -16,9 +16,9 @@ use std::time::Duration;
 
 use djinn_core::clock::{Clock, SystemClock};
 use djinn_supervisor::services::{
-    LeaseAbandonRequest, LeaseDeadlines, LeaseFencingToken, LeaseGrantRequest, LeaseIdentity,
-    LeaseQueueRequest, LeaseReleaseRequest, LeaseResult, LeaseState, LeaseStatusRequest,
-    SupervisorServices, TaskInvocationLeaseIdentity,
+    LeaseAbandonRequest, LeaseBindRequest, LeaseDeadlines, LeaseFencingToken, LeaseGrantRequest,
+    LeaseIdentity, LeaseQueueRequest, LeaseReleaseRequest, LeaseResult, LeaseState,
+    LeaseStatusRequest, SupervisorServices, TaskInvocationLeaseIdentity,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -76,14 +76,14 @@ pub fn isolate_process_group(cmd: &mut Command) {
 #[path = "process_broker.rs"]
 mod broker;
 #[allow(unused_imports)] // constructed by the pending workspace broker composition
-pub(crate) use broker::UnixBrokerLauncher;
-use broker::{CgroupLauncherClient, ProcessHandle};
+pub(crate) use broker::{CgroupLauncherClient, ProcessHandle, UnixBrokerLauncher};
 
 #[derive(Clone, Debug)]
 #[cfg_attr(not(test), allow(dead_code))] // consumed by the workspace lease wiring task
 pub(crate) struct LeaseInvocationConfig {
     pub task_id: String,
     pub task_run_id: String,
+    pub pod_uid: String,
     pub cpu_usage_threshold_usec: u64,
     pub queue_deadline_ms: i64,
     pub launch_deadline_ms: i64,
@@ -275,10 +275,32 @@ impl LeaseInvocationRunner {
                         {
                             break 'invocation terminal;
                         }
-                        child
-                            .fenced_lift(&token)
-                            .map_err(LeaseInvocationError::Launcher)?;
-                        fence = Some(token);
+                        match self
+                            .services
+                            .bind_lease_pod(LeaseBindRequest {
+                                identity: lease.clone(),
+                                fencing_token: token.clone(),
+                                pod_uid: config.pod_uid.clone(),
+                            })
+                            .await
+                        {
+                            LeaseResult::Bound(status)
+                                if status.fencing_token.as_ref() == Some(&token)
+                                    && status.pod_uid.as_deref()
+                                        == Some(config.pod_uid.as_str()) =>
+                            {
+                                child
+                                    .fenced_lift(&token)
+                                    .map_err(LeaseInvocationError::Launcher)?;
+                                fence = Some(token);
+                            }
+                            other => lease_failure(
+                                other,
+                                &mut deadline,
+                                &mut credit_used,
+                                &mut lease_error,
+                            ),
+                        }
                     }
                     LeaseResult::LeaseUnavailable => {
                         unavailable_responses += 1;

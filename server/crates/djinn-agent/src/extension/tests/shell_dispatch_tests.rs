@@ -9,7 +9,105 @@
 use super::handlers::call_shell;
 use super::{agent_context_from_db, create_test_db};
 use crate::file_time::destructive_class::WORKTREE_LOCAL_FILE_MUTATION;
+use crate::process::{CgroupLauncherClient, LeaseInvocationRunner, ProcessHandle};
+use djinn_cgroup_launcher::CpuStat;
+use djinn_core::clock::SystemClock;
+use djinn_supervisor::services::{LeaseFencingToken, TaskInvocationLeaseIdentity};
+use std::io;
+use std::process::{Command, ExitStatus};
+use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
+
+/// A remote-child-shaped broker adapter for the workspace composition test.
+/// It deliberately ignores `Command`: unlike the legacy test fallback it never
+/// spawns a local process, and returns output only through a broker handle.
+#[derive(Clone)]
+struct BrokerShellLauncher {
+    state: Arc<Mutex<BrokerShellState>>,
+}
+
+struct BrokerShellState {
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    status: ExitStatus,
+    identities: Vec<TaskInvocationLeaseIdentity>,
+    empties: usize,
+    cleanups: usize,
+}
+
+impl BrokerShellLauncher {
+    fn exited(stdout: &[u8], stderr: &[u8], code: i32) -> Self {
+        use std::os::unix::process::ExitStatusExt;
+
+        Self {
+            state: Arc::new(Mutex::new(BrokerShellState {
+                stdout: stdout.to_vec(),
+                stderr: stderr.to_vec(),
+                status: ExitStatus::from_raw(code << 8),
+                identities: Vec::new(),
+                empties: 0,
+                cleanups: 0,
+            })),
+        }
+    }
+}
+
+impl CgroupLauncherClient for BrokerShellLauncher {
+    fn launch(
+        &self,
+        _: Command,
+        identity: &TaskInvocationLeaseIdentity,
+    ) -> io::Result<Box<dyn ProcessHandle>> {
+        self.state.lock().unwrap().identities.push(identity.clone());
+        Ok(Box::new(BrokerShellHandle {
+            state: self.state.clone(),
+        }))
+    }
+}
+
+struct BrokerShellHandle {
+    state: Arc<Mutex<BrokerShellState>>,
+}
+
+impl ProcessHandle for BrokerShellHandle {
+    fn drain_stdout(&mut self) -> io::Result<Vec<u8>> {
+        Ok(std::mem::take(&mut self.state.lock().unwrap().stdout))
+    }
+
+    fn drain_stderr(&mut self) -> io::Result<Vec<u8>> {
+        Ok(std::mem::take(&mut self.state.lock().unwrap().stderr))
+    }
+
+    fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
+        Ok(Some(self.state.lock().unwrap().status))
+    }
+
+    fn wait(&mut self) -> io::Result<ExitStatus> {
+        Ok(self.state.lock().unwrap().status)
+    }
+
+    fn sample_cpu(&mut self) -> io::Result<CpuStat> {
+        Ok(CpuStat::default())
+    }
+
+    fn fenced_lift(&mut self, _: &LeaseFencingToken) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn kill(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn wait_empty(&mut self) -> io::Result<()> {
+        self.state.lock().unwrap().empties += 1;
+        Ok(())
+    }
+
+    fn cleanup(&mut self) -> io::Result<()> {
+        self.state.lock().unwrap().cleanups += 1;
+        Ok(())
+    }
+}
 
 fn setup(prefix: &str) -> (tempfile::TempDir, crate::context::AgentContext) {
     let dir = crate::test_helpers::test_tempdir(prefix);
@@ -184,6 +282,65 @@ async fn shell_dispatch_fake_cargo_success_has_exact_telemetry_delta_and_schema(
         "arbitrary fake cargo output must not appear in the telemetry scrape"
     );
     assert_cargo_schema_and_buckets(&after, "clippy", "ok", injected);
+}
+
+#[tokio::test]
+async fn shell_dispatch_broker_backed_cargo_records_exactly_one_observation() {
+    let _guard = telemetry_test_guard().await;
+    djinn_telemetry::init().expect("initialize telemetry");
+    let (worktree, mut state) = setup("shell-broker-composition-");
+    let launcher = BrokerShellLauncher::exited(
+        b"broker composition stdout\n",
+        b"broker composition stderr\n",
+        17,
+    );
+    let runner = Arc::new(LeaseInvocationRunner::new(
+        Arc::new(djinn_supervisor::services::rpc::UnimplementedRpcServices::new()),
+        Arc::new(launcher.clone()),
+        Arc::new(SystemClock::new()),
+    ));
+    state.shell_launch = Some(crate::context::ShellLaunchContext::for_test(
+        runner,
+        "trusted-task".into(),
+        "trusted-task-run".into(),
+        "trusted-pod-uid".into(),
+    ));
+
+    let before = djinn_telemetry::render().expect("render telemetry before dispatch");
+    let count_before = cargo_count(&before, "clippy", "fail");
+    let response = call_shell(
+        &state,
+        &shell_args("cargo clippy"),
+        worktree.path(),
+        None,
+        &crate::extension::ToolCancellation::never(),
+    )
+    .await
+    .expect("broker-backed shell dispatch returns its terminal output");
+
+    assert_eq!(response["ok"], serde_json::json!(false));
+    assert_eq!(response["exit_code"], serde_json::json!(17));
+    assert_eq!(
+        response["stdout"],
+        serde_json::json!("broker composition stdout\n")
+    );
+    assert_eq!(
+        response["stderr"],
+        serde_json::json!("broker composition stderr\n")
+    );
+    let after = djinn_telemetry::render().expect("render telemetry after dispatch");
+    assert_eq!(
+        cargo_count(&after, "clippy", "fail"),
+        count_before + 1.0,
+        "one classified broker-backed shell terminal result records exactly once"
+    );
+
+    let broker = launcher.state.lock().unwrap();
+    assert_eq!(broker.identities.len(), 1);
+    assert_eq!(broker.identities[0].task_id, "trusted-task");
+    assert_eq!(broker.identities[0].task_run_id, "trusted-task-run");
+    assert!(!broker.identities[0].invocation_id.is_empty());
+    assert_eq!((broker.empties, broker.cleanups), (1, 1));
 }
 
 #[tokio::test]

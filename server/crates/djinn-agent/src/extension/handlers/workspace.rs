@@ -192,7 +192,6 @@ pub(crate) async fn call_shell(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    crate::process::isolate_process_group(&mut cmd);
 
     // Agent-private cancellation: the child token is cancelled as soon as
     // either the session or global token fires, but the shell future is NOT
@@ -219,12 +218,40 @@ pub(crate) async fn call_shell(
     let clock = SystemClock::new();
     let started = clock.now_instant();
 
-    let runner_result = crate::process::output_with_kill_cancellable(
-        cmd,
-        Duration::from_millis(timeout_ms),
-        child_token,
-    )
-    .await;
+    // Cargo classification is observation-only. Every production shell uses
+    // the immutable broker-backed task-run launch context.
+    let runner_result = if let Some(launch) = state.shell_launch.as_ref() {
+        launch
+            .runner()
+            .output(
+                cmd,
+                launch.invocation(Duration::from_millis(timeout_ms)),
+                child_token,
+            )
+            .await
+            .map(|output| output.process)
+            .map_err(|error| {
+                crate::process::ProcessRunError::Started(std::io::Error::other(format!(
+                    "lease invocation failed: {error:?}"
+                )))
+            })
+    } else {
+        #[cfg(test)]
+        {
+            crate::process::output_with_kill_cancellable(
+                cmd,
+                Duration::from_millis(timeout_ms),
+                child_token,
+            )
+            .await
+        }
+        #[cfg(not(test))]
+        {
+            Err(crate::process::ProcessRunError::Spawn(
+                std::io::Error::other("broker-backed shell launch context is not configured"),
+            ))
+        }
+    };
 
     // Structurally finish exactly one cargo observation from the single
     // terminal value. Exactly-once is structural: one call site after the
