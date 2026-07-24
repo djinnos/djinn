@@ -1,23 +1,58 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use flate2::Compression;
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
 use serde_json::Value;
 use thiserror::Error;
-use time::{OffsetDateTime, UtcOffset};
+use time::{Duration, OffsetDateTime, UtcOffset};
 
 use crate::StreamIdentity;
 
 pub const DEFAULT_MAX_LOGICAL_BYTES: u64 = 128 * 1024 * 1024;
+pub const DEFAULT_MAX_STREAM_LOGICAL_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+pub const DEFAULT_MAX_GLOBAL_LOGICAL_BYTES: u64 = 100 * 1024 * 1024 * 1024;
+pub const DEFAULT_MINIMUM_RESERVE_BYTES: u64 = 20 * 1024 * 1024 * 1024;
+pub const DEFAULT_MAX_AGE: Duration = Duration::days(7);
 const DIR_MODE: u32 = 0o750;
 const FILE_MODE: u32 = 0o640;
 
 pub trait Clock: Send + Sync {
     fn now(&self) -> OffsetDateTime;
+}
+
+pub trait FilesystemCapacity: Send + Sync {
+    fn available_bytes(&self, root: &Path) -> io::Result<u64>;
+    fn total_bytes(&self, root: &Path) -> io::Result<u64>;
+}
+#[derive(Debug, Default)]
+pub struct SystemFilesystemCapacity;
+impl FilesystemCapacity for SystemFilesystemCapacity {
+    fn available_bytes(&self, root: &Path) -> io::Result<u64> {
+        self.stat(root)
+            .map(|s| s.f_bavail.saturating_mul(s.f_frsize))
+    }
+    fn total_bytes(&self, root: &Path) -> io::Result<u64> {
+        self.stat(root)
+            .map(|s| s.f_blocks.saturating_mul(s.f_frsize))
+    }
+}
+impl SystemFilesystemCapacity {
+    fn stat(&self, root: &Path) -> io::Result<libc::statvfs> {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+        let path = CString::new(root.as_os_str().as_bytes())
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "NUL in store path"))?;
+        let mut stat = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+        if unsafe { libc::statvfs(path.as_ptr(), stat.as_mut_ptr()) } == 0 {
+            Ok(unsafe { stat.assume_init() })
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    }
 }
 #[derive(Debug, Default)]
 pub struct SystemClock;
@@ -47,11 +82,21 @@ impl Compressor for GzipCompressor {
 #[derive(Debug, Clone)]
 pub struct StoreConfig {
     pub max_logical_bytes: u64,
+    pub max_stream_logical_bytes: u64,
+    pub max_global_logical_bytes: u64,
+    pub max_age: Duration,
+    pub minimum_reserve_bytes: u64,
+    pub reserve_percent: u8,
 }
 impl Default for StoreConfig {
     fn default() -> Self {
         Self {
             max_logical_bytes: DEFAULT_MAX_LOGICAL_BYTES,
+            max_stream_logical_bytes: DEFAULT_MAX_STREAM_LOGICAL_BYTES,
+            max_global_logical_bytes: DEFAULT_MAX_GLOBAL_LOGICAL_BYTES,
+            max_age: DEFAULT_MAX_AGE,
+            minimum_reserve_bytes: DEFAULT_MINIMUM_RESERVE_BYTES,
+            reserve_percent: 10,
         }
     }
 }
@@ -66,25 +111,82 @@ pub enum StoreError {
     NonObjectRecord,
     #[error("invalid active segment name: {0}")]
     InvalidSegmentName(String),
+    #[error("the physical filesystem reserve is exhausted")]
+    ReserveExhausted,
+    #[error("retention quota cannot be satisfied without rewriting an active segment")]
+    QuotaCannotBeSatisfied,
 }
 
-pub struct LogStore<C: Clock = SystemClock, Z: Compressor = GzipCompressor> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EvictionReason {
+    Age,
+    StreamQuota,
+    GlobalQuota,
+    Reserve,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvictionTransition {
+    pub reason: EvictionReason,
+    pub logical_bytes: u64,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WritableState {
+    pub writable: bool,
+    pub required_reserve_bytes: u64,
+    pub available_bytes: u64,
+}
+/// A physical-reserve state change. `writable == false` marks reserve entry;
+/// `writable == true` marks recovery after the reserve predicate clears.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReserveTransition {
+    pub state: WritableState,
+}
+#[derive(Clone)]
+struct Segment {
+    logical_bytes: u64,
+    active: bool,
+    path: PathBuf,
+    key: String,
+    dir: PathBuf,
+}
+
+pub struct LogStore<
+    C: Clock = SystemClock,
+    Z: Compressor = GzipCompressor,
+    F: FilesystemCapacity = SystemFilesystemCapacity,
+> {
     root: PathBuf,
     config: StoreConfig,
     clock: Arc<C>,
     compressor: Arc<Z>,
+    capacity: Arc<F>,
+    policy_lock: Mutex<()>,
+    state: Mutex<WritableState>,
+    transitions: Mutex<Vec<EvictionTransition>>,
+    reserve_transitions: Mutex<Vec<ReserveTransition>>,
 }
 impl LogStore {
     pub fn new(root: impl Into<PathBuf>) -> Result<Self, StoreError> {
         Self::with_parts(root, StoreConfig::default(), SystemClock, GzipCompressor)
     }
 }
-impl<C: Clock, Z: Compressor> LogStore<C, Z> {
+impl<C: Clock, Z: Compressor> LogStore<C, Z, SystemFilesystemCapacity> {
     pub fn with_parts(
         root: impl Into<PathBuf>,
         config: StoreConfig,
         clock: C,
         compressor: Z,
+    ) -> Result<Self, StoreError> {
+        Self::with_parts_and_capacity(root, config, clock, compressor, SystemFilesystemCapacity)
+    }
+}
+impl<C: Clock, Z: Compressor, F: FilesystemCapacity> LogStore<C, Z, F> {
+    pub fn with_parts_and_capacity(
+        root: impl Into<PathBuf>,
+        config: StoreConfig,
+        clock: C,
+        compressor: Z,
+        capacity: F,
     ) -> Result<Self, StoreError> {
         let root = root.into();
         create_dir(&root)?;
@@ -93,6 +195,15 @@ impl<C: Clock, Z: Compressor> LogStore<C, Z> {
             config,
             clock: Arc::new(clock),
             compressor: Arc::new(compressor),
+            capacity: Arc::new(capacity),
+            policy_lock: Mutex::new(()),
+            state: Mutex::new(WritableState {
+                writable: true,
+                required_reserve_bytes: 0,
+                available_bytes: 0,
+            }),
+            transitions: Mutex::new(Vec::new()),
+            reserve_transitions: Mutex::new(Vec::new()),
         };
         store.recover_all()?;
         Ok(store)
@@ -110,15 +221,19 @@ impl<C: Clock, Z: Compressor> LogStore<C, Z> {
         if !record.is_object() {
             return Err(StoreError::NonObjectRecord);
         }
+        let _policy = self.policy_lock.lock().expect("policy lock poisoned");
+        self.check_reserve()?;
+        let mut line = serde_json::to_vec(record)?;
+        line.push(b'\n');
+        self.enforce_retention(stream, line.len() as u64)?;
         let dir = self.create_stream_dir(stream)?;
         self.recover_directory(&dir)?;
         let hour = hour_key(self.clock.now());
         let (path, logical) = self.active_for_hour(&dir, &hour)?;
-        let mut line = serde_json::to_vec(record)?;
-        line.push(b'\n');
         if logical > 0 && logical.saturating_add(line.len() as u64) > self.config.max_logical_bytes
         {
             self.close_active(&path)?;
+            drop(_policy);
             return self.append(stream, record);
         }
         let mut file = OpenOptions::new().append(true).open(&path)?;
@@ -282,6 +397,206 @@ impl<C: Clock, Z: Compressor> LogStore<C, Z> {
             self.compress_closed(&closed)?;
         }
         Ok(())
+    }
+    pub fn writable_state(&self) -> Result<WritableState, StoreError> {
+        // Observing the state must not turn an exhausted store into an error:
+        // HTTP health/status callers need the typed unwritable state.
+        let _ = self.check_reserve();
+        Ok(self.state.lock().expect("state lock poisoned").clone())
+    }
+    pub fn eviction_transitions(&self) -> Vec<EvictionTransition> {
+        self.transitions
+            .lock()
+            .expect("transition lock poisoned")
+            .clone()
+    }
+    pub fn reserve_transitions(&self) -> Vec<ReserveTransition> {
+        self.reserve_transitions
+            .lock()
+            .expect("reserve transition lock poisoned")
+            .clone()
+    }
+    fn check_reserve(&self) -> Result<(), StoreError> {
+        let total = self.capacity.total_bytes(&self.root)?;
+        let available = self.capacity.available_bytes(&self.root)?;
+        let required = self
+            .config
+            .minimum_reserve_bytes
+            .max(total.saturating_mul(self.config.reserve_percent as u64) / 100);
+        let writable = available >= required;
+        let mut state = self.state.lock().expect("state lock poisoned");
+        let next = WritableState {
+            writable,
+            required_reserve_bytes: required,
+            available_bytes: available,
+        };
+        if state.writable != writable {
+            self.transitions
+                .lock()
+                .expect("transition lock poisoned")
+                .push(EvictionTransition {
+                    reason: EvictionReason::Reserve,
+                    logical_bytes: 0,
+                });
+            self.reserve_transitions
+                .lock()
+                .expect("reserve transition lock poisoned")
+                .push(ReserveTransition {
+                    state: next.clone(),
+                });
+        }
+        *state = next;
+        if writable {
+            Ok(())
+        } else {
+            Err(StoreError::ReserveExhausted)
+        }
+    }
+    fn enforce_retention(&self, stream: &StreamIdentity, added: u64) -> Result<(), StoreError> {
+        let cutoff = hour_key(self.clock.now() - self.config.max_age);
+        self.enforce_age(&cutoff)?;
+        self.enforce_quota(
+            stream,
+            added,
+            self.config.max_stream_logical_bytes,
+            EvictionReason::StreamQuota,
+        )?;
+        self.enforce_quota(
+            stream,
+            added,
+            self.config.max_global_logical_bytes,
+            EvictionReason::GlobalQuota,
+        )
+    }
+    /// Age expiry may rotate an active segment, but must never rewrite it.
+    /// Re-scan after every transition because closing changes the segment's
+    /// eligible eviction state.
+    fn enforce_age(&self, cutoff: &str) -> Result<(), StoreError> {
+        loop {
+            let segments = self.all_segments()?;
+            if let Some(closed) = segments
+                .iter()
+                .filter(|segment| !segment.active && segment.key.as_str() < cutoff)
+                .min_by_key(|segment| (&segment.key, &segment.path))
+            {
+                self.evict(closed.clone(), EvictionReason::Age)?;
+                continue;
+            }
+            if let Some(active) = segments
+                .iter()
+                .filter(|segment| segment.active && segment.key.as_str() < cutoff)
+                .min_by_key(|segment| (&segment.key, &segment.path))
+            {
+                self.close_active(&active.path)?;
+                continue;
+            }
+            return Ok(());
+        }
+    }
+    fn enforce_quota(
+        &self,
+        stream: &StreamIdentity,
+        added: u64,
+        limit: u64,
+        reason: EvictionReason,
+    ) -> Result<(), StoreError> {
+        loop {
+            let segments = self.all_segments()?;
+            let stream_dir = self.stream_path(stream);
+            let total: u64 = if reason == EvictionReason::StreamQuota {
+                segments
+                    .iter()
+                    .filter(|s| s.dir == stream_dir)
+                    .map(|s| s.logical_bytes)
+                    .sum()
+            } else {
+                segments.iter().map(|s| s.logical_bytes).sum()
+            };
+            if total.saturating_add(added) <= limit {
+                return Ok(());
+            }
+            let candidate = segments
+                .iter()
+                .filter(|s| {
+                    !s.active && (reason != EvictionReason::StreamQuota || s.dir == stream_dir)
+                })
+                .min_by_key(|s| (&s.key, &s.path));
+            if let Some(segment) = candidate {
+                self.evict(segment.clone(), reason)?;
+                continue;
+            }
+            // Closed segments always win. Rotate an active segment only when
+            // there is no eligible closed segment left to evict.
+            let active = segments
+                .iter()
+                .filter(|s| {
+                    s.active && (reason != EvictionReason::StreamQuota || s.dir == stream_dir)
+                })
+                .min_by_key(|s| (&s.key, &s.path));
+            if let Some(active) = active {
+                self.close_active(&active.path)?;
+            } else {
+                return Err(StoreError::QuotaCannotBeSatisfied);
+            }
+        }
+    }
+    fn evict(&self, segment: Segment, reason: EvictionReason) -> Result<(), StoreError> {
+        fs::remove_file(&segment.path)?;
+        let marker = sidecar(&segment.path);
+        if marker.exists() {
+            fs::remove_file(marker)?;
+        }
+        sync_directory(&segment.dir)?;
+        self.transitions
+            .lock()
+            .expect("transition lock poisoned")
+            .push(EvictionTransition {
+                reason,
+                logical_bytes: segment.logical_bytes,
+            });
+        Ok(())
+    }
+    fn all_segments(&self) -> Result<Vec<Segment>, StoreError> {
+        let mut result = Vec::new();
+        for namespace in fs::read_dir(&self.root)? {
+            let namespace = namespace?.path();
+            if !namespace.is_dir() {
+                continue;
+            }
+            for pod in fs::read_dir(namespace)? {
+                let pod = pod?.path();
+                if !pod.is_dir() {
+                    continue;
+                }
+                for dir in fs::read_dir(pod)? {
+                    let dir = dir?.path();
+                    if !dir.is_dir() {
+                        continue;
+                    }
+                    for path in gzip_segments(&dir)?
+                        .into_iter()
+                        .chain(active_segments(&dir, None)?)
+                    {
+                        let key = path
+                            .file_name()
+                            .and_then(|v| v.to_str())
+                            .unwrap_or_default()
+                            .split('-')
+                            .next()
+                            .unwrap_or_default()
+                            .to_owned();
+                        result.push(Segment {
+                            logical_bytes: logical_bytes(&path)?,
+                            active: path.to_string_lossy().ends_with(".active"),
+                            path,
+                            key,
+                            dir: dir.clone(),
+                        });
+                    }
+                }
+            }
+        }
+        Ok(result)
     }
 }
 
