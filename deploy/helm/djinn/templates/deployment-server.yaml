@@ -229,6 +229,9 @@ spec:
             {{- toYaml . | nindent 12 }}
             {{- end }}
           env:
+            # The shared panic hook emits a durable structured backtrace.
+            - name: RUST_BACKTRACE
+              value: "1"
             {{- if .Values.database.existingSecret }}
             # External DB URL pulled from a caller-owned Secret (typically
             # provisioned out-of-band for RDS credentials). The configmap

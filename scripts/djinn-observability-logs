@@ -1,0 +1,129 @@
+#!/bin/sh
+# Stream retained Djinn pod logs without changing the store.
+#
+# Usage: djinn-observability-logs --namespace N --pod-uid UUID [--container NAME]
+#        djinn-observability-logs --namespace N --pod-name NAME [--container NAME]
+#
+# The pod-name form is deliberately a fallback for retained layouts whose pod
+# directory is named NAME or NAME-<suffix>; it refuses to guess when more than
+# one directory matches.  Set DJINN_OBSERVABILITY_ROOT for a non-production
+# store root (the default is /var/lib/djinn-observability).
+
+set -eu
+
+ROOT=${DJINN_OBSERVABILITY_ROOT:-/var/lib/djinn-observability}
+namespace=
+pod_uid=
+pod_name=
+container=
+
+usage() {
+    cat >&2 <<'EOF'
+usage: djinn-observability-logs --namespace N --pod-uid UUID [--container NAME]
+       djinn-observability-logs --namespace N --pod-name NAME [--container NAME]
+
+Reads retained .jsonl.gz and .jsonl.active files from
+${DJINN_OBSERVABILITY_ROOT:-/var/lib/djinn-observability}.  --pod-uid is the
+normal safe selector.  --pod-name is an explicit compatibility fallback and
+fails if it selects zero or multiple retained pod directories.
+EOF
+}
+fail() { printf '%s\n' "djinn-observability-logs: $*" >&2; exit 2; }
+valid_label() {
+    value=$1
+    case $value in
+        ''|*[!a-z0-9-]*|-*|*-) return 1 ;;
+    esac
+    [ "${#value}" -le 63 ]
+}
+valid_container() {
+    value=$1
+    case $value in
+        ''|*[!A-Za-z0-9._-]*|[._-]*|*[._-]) return 1 ;;
+    esac
+    [ "${#value}" -le 128 ]
+}
+valid_uid() {
+    # Canonical UUID spelling is the on-disk pod UID contract from the store.
+    printf '%s\n' "$1" | grep -Eq '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+}
+valid_segment() {
+    printf '%s\n' "$1" | grep -Eq '^[0-9]{8}T[0-9]{6}Z-[0-9]{6}\.jsonl\.(active|gz)$'
+}
+
+while [ "$#" -gt 0 ]; do
+    case $1 in
+        --namespace) [ "$#" -ge 2 ] || fail '--namespace requires a value'; namespace=$2; shift 2 ;;
+        --pod-uid) [ "$#" -ge 2 ] || fail '--pod-uid requires a value'; pod_uid=$2; shift 2 ;;
+        --pod-name) [ "$#" -ge 2 ] || fail '--pod-name requires a value'; pod_name=$2; shift 2 ;;
+        --container) [ "$#" -ge 2 ] || fail '--container requires a value'; container=$2; shift 2 ;;
+        --help|-h) usage; exit 0 ;;
+        *) usage; fail "invalid argument: $1" ;;
+    esac
+done
+
+valid_label "$namespace" || fail 'namespace must be a DNS label (not a path)'
+[ -z "$pod_uid" ] || valid_uid "$pod_uid" || fail 'pod UID must be a canonical UUID'
+[ -z "$pod_name" ] || valid_label "$pod_name" || fail 'pod name must be a DNS label (not a path)'
+[ -z "$container" ] || valid_container "$container" || fail 'container is not a safe container segment'
+[ -n "$pod_uid" ] && [ -n "$pod_name" ] && fail 'select either --pod-uid or --pod-name, not both'
+[ -n "$pod_uid" ] || [ -n "$pod_name" ] || fail 'a pod UID is required; use --pod-name only for explicit fallback'
+
+namespace_dir=$ROOT/$namespace
+[ -d "$namespace_dir" ] || fail "no retained logs for namespace $namespace"
+if [ -n "$pod_uid" ]; then
+    pod_dir=$namespace_dir/$pod_uid
+    [ -d "$pod_dir" ] || fail "no retained logs for namespace $namespace pod UID $pod_uid"
+else
+    matches=
+    # NAME is accepted for compatibility; NAME-* supports a retained
+    # name-plus-UID directory convention without treating arbitrary paths as globs.
+    for candidate in "$namespace_dir"/"$pod_name" "$namespace_dir"/"$pod_name"-*; do
+        [ -d "$candidate" ] || continue
+        case " $matches " in *" $candidate "*) ;; *) matches="$matches $candidate" ;; esac
+    done
+    set -- $matches
+    case $# in
+        0) fail "no retained logs for namespace $namespace pod name $pod_name" ;;
+        1) pod_dir=$1 ;;
+        *) fail "pod-name fallback is ambiguous for namespace $namespace pod name $pod_name; use --pod-uid" ;;
+    esac
+fi
+
+list=${DJINN_LOG_LIST_FILE:-${TMPDIR:-/var/tmp}/djinn-observability-logs.$$.list}
+trap 'rm -f -- "$list"' EXIT HUP INT TERM
+: > "$list" || fail "cannot create temporary segment list"
+found=0
+for container_dir in "$pod_dir"/*; do
+    [ -d "$container_dir" ] || continue
+    container_name=${container_dir##*/}
+    valid_container "$container_name" || continue
+    [ -z "$container" ] || [ "$container_name" = "$container" ] || continue
+    for segment in "$container_dir"/*; do
+        [ -f "$segment" ] || continue
+        segment_name=${segment##*/}
+        valid_segment "$segment_name" || continue
+        # Sorting by the store's UTC-hour/sequence contract comes before the
+        # path, making output deterministic across discovered containers.
+        printf '%s\t%s\n' "$segment_name" "$segment" >> "$list"
+        found=1
+    done
+done
+[ "$found" -eq 1 ] || fail "no retained log segments match namespace $namespace"
+
+LC_ALL=C sort -k1,1 -k2,2 "$list" | while IFS="$(printf '\t')" read -r segment_name segment; do
+    case $segment_name in
+        *.jsonl.gz)
+            gzip -cd -- "$segment" || {
+                printf '%s\n' "djinn-observability-logs: corrupt gzip segment: $segment" >&2
+                exit 1
+            }
+            ;;
+        *.jsonl.active)
+            # Snapshot before opening the content: an appender can continue,
+            # but bytes appended after this stat never enter this invocation.
+            size=$(wc -c < "$segment") || exit 1
+            head -c "$size" -- "$segment" || exit 1
+            ;;
+    esac
+done
