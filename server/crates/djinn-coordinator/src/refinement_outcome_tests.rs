@@ -598,6 +598,10 @@ async fn assert_rejected_outcome_preserves_source(
         .refinement_sessions
         .insert(f.run_id.clone(), f.session.clone());
     let durable_before = snapshot(f).await;
+    let task_before = TaskRepository::new(f.db.clone(), EventBus::noop())
+        .get(&f.task_id)
+        .await
+        .expect("load exact source task before rejected outcome");
     let projection_before = f.actor.active_refinements[&f.run_id].clone();
     let session_before = f.actor.refinement_sessions[&f.run_id].clone();
 
@@ -608,9 +612,17 @@ async fn assert_rejected_outcome_preserves_source(
         RefinementOutcomeApplication::Ignored
     );
     assert_eq!(
-        snapshot(f).await.snapshot,
-        durable_before.snapshot,
-        "durable source must not move"
+        snapshot(f).await,
+        durable_before,
+        "durable run and intent must not move"
+    );
+    assert_eq!(
+        TaskRepository::new(f.db.clone(), EventBus::noop())
+            .get(&f.task_id)
+            .await
+            .expect("load exact source task after rejected outcome"),
+        task_before,
+        "rejected outcome must not mutate the durable task row"
     );
     assert_eq!(
         format!("{:#?}", f.actor.active_refinements[&f.run_id]),
@@ -618,16 +630,17 @@ async fn assert_rejected_outcome_preserves_source(
         "rejected outcome must not publish a projection"
     );
     assert_eq!(
-        f.actor.refinement_sessions[&f.run_id].task_id, session_before.task_id,
-        "rejected outcome must retain its original session"
+        format!("{:#?}", f.actor.refinement_sessions[&f.run_id]),
+        format!("{session_before:#?}"),
+        "rejected outcome must retain the complete original session"
     );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn correlation_fence_rejects_missing_and_mismatched_task_identity() {
     // Each row uses a repository-backed task row. Replacing its correlation
-    // proves the outcome is rejected before proposal/debate reads or progress
-    // writes can advance the exact source intent.
+    // verifies every independently-corrupted identity component retains the
+    // exact durable source and both disposable projections.
     let cases = vec![
         ("missing correlation", None),
         (
@@ -653,14 +666,47 @@ async fn correlation_fence_rejects_missing_and_mismatched_task_identity() {
             )),
         ),
         (
-            "stale phase and role",
+            "stale phase",
             Some((
                 "same-run".to_owned(),
                 "same-intent".to_owned(),
                 1,
                 1,
                 DurablePhase::AdvocateRevision,
+                RefinementRole::Adversary,
+            )),
+        ),
+        (
+            "wrong role",
+            Some((
+                "same-run".to_owned(),
+                "same-intent".to_owned(),
+                1,
+                1,
+                DurablePhase::AdversaryAttack,
                 RefinementRole::Advocate,
+            )),
+        ),
+        (
+            "foreign run",
+            Some((
+                uuid::Uuid::now_v7().to_string(),
+                "same-intent".to_owned(),
+                1,
+                1,
+                DurablePhase::AdversaryAttack,
+                RefinementRole::Adversary,
+            )),
+        ),
+        (
+            "non-current source intent",
+            Some((
+                "same-run".to_owned(),
+                uuid::Uuid::now_v7().to_string(),
+                1,
+                1,
+                DurablePhase::AdversaryAttack,
+                RefinementRole::Adversary,
             )),
         ),
     ];
@@ -783,6 +829,62 @@ async fn successor_persistence_failure_retains_exact_source_and_projection() {
         durable.snapshot.intents[0].state,
         RefinementIntentState::Materialized,
         "source completion rolled back with successor insertion"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn successful_successor_replay_creates_one_intent_and_publishes_after_commit() {
+    let mut f = durable_outcome_fixture().await;
+    let source_projection = f.projection.clone();
+    f.actor
+        .active_refinements
+        .insert(f.run_id.clone(), source_projection.clone());
+    f.actor
+        .refinement_sessions
+        .insert(f.run_id.clone(), f.session.clone());
+
+    assert_eq!(
+        f.actor
+            .process_refinement_outcome(&f.run_id, &f.session)
+            .await,
+        RefinementOutcomeApplication::Committed
+    );
+    let committed = snapshot(&f).await;
+    assert_eq!(
+        committed.snapshot.intents.len(),
+        2,
+        "commit creates one successor"
+    );
+    assert_eq!(
+        committed.snapshot.intents[0].state,
+        RefinementIntentState::Completed
+    );
+    assert_eq!(
+        f.actor.active_refinements[&f.run_id].phase,
+        RefinementPhase::JudgeAdjudication,
+        "the projection is published only after the source completion commits"
+    );
+
+    // A stale in-memory projection cannot turn the same completed source into a
+    // second successor: the durable source-intent fence runs before outcome reads.
+    f.actor
+        .active_refinements
+        .insert(f.run_id.clone(), source_projection);
+    assert_eq!(
+        f.actor
+            .process_refinement_outcome(&f.run_id, &f.session)
+            .await,
+        RefinementOutcomeApplication::Ignored
+    );
+    let replayed = snapshot(&f).await;
+    assert_eq!(
+        replayed.snapshot.intents.len(),
+        2,
+        "replay creates no successor"
+    );
+    assert_eq!(
+        replayed, committed,
+        "replay leaves the committed durable state exact"
     );
 }
 
