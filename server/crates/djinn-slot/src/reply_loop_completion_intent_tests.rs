@@ -510,6 +510,7 @@ pub(crate) fn reuse_material_with_fingerprint_config(
             tool_runtime: vec![],
             read_only_external_mounts: vec![],
             output_directories: vec![],
+            catalog_loopback_endpoints: vec![],
         },
         verify_source: VerifySource::Worker,
         required_checks,
