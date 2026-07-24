@@ -279,9 +279,14 @@ impl djinn_graph::WarmContext for WorkerWarmContext {
     }
 }
 
-#[tokio::main]
-async fn main() {
-    let exit = run().await;
+fn main() {
+    // Install before constructing Tokio or dispatching work.
+    djinn_telemetry::panic_capture::install();
+    let exit = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("failed to build Tokio runtime")
+        .block_on(run());
     match exit {
         Ok(()) => std::process::exit(0),
         Err(e) => {

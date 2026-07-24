@@ -572,6 +572,7 @@ fn build_task_run_env(
     policy: Option<&djinn_stack::environment::CargoCachePolicy>,
 ) -> Vec<EnvVar> {
     let mut env = vec![
+        env_var("RUST_BACKTRACE", "1"),
         env_var("DJINN_SERVER_ADDR", &config.server_addr),
         env_var("DJINN_SPEC_PATH", SPEC_MOUNT_FILE),
         env_var("DJINN_CREDENTIALS_PATH", CREDENTIALS_MOUNT_FILE),
@@ -1375,6 +1376,11 @@ mod tests {
             envs.get("CARGO_INCREMENTAL").copied(),
             Some("1"),
             "task-runs use incremental compilation for the iterative worker edit/compile loop"
+        );
+        assert_eq!(
+            envs.get("RUST_BACKTRACE").copied(),
+            Some("1"),
+            "task-run workers must retain panic backtraces"
         );
         assert_eq!(
             envs.get("RUSTC_WRAPPER").copied(),

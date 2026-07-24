@@ -1914,6 +1914,7 @@ dependencies = [
  "chrono",
  "metrics",
  "metrics-exporter-prometheus",
+ "serde_json",
  "workspace-hack",
 ]
 

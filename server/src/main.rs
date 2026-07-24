@@ -85,6 +85,9 @@ struct Cli {
 
 #[allow(clippy::print_stderr)] // Startup validation errors must be visible before logging initializes.
 fn main() {
+    // Install before CLI parsing and Tokio construction so startup panics are durable.
+    djinn_telemetry::panic_capture::install();
+
     if let Err(error) = djinn_server::allocator::validate_malloc_conf_from_env() {
         tracing::error!(%error, "invalid MALLOC_CONF");
         eprintln!("invalid MALLOC_CONF: {error}");
