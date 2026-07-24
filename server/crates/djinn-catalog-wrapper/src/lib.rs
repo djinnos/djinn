@@ -664,6 +664,19 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn completion_signal_retains_a_permit_for_a_late_waiter() {
+        let notify = Notify::new();
+
+        // Exercise the part of the handshake that `notify_waiters()` alone
+        // cannot provide: completion happens with no registered waiter.
+        signal_completion(&notify);
+
+        tokio::time::timeout(Duration::from_millis(50), notify.notified())
+            .await
+            .expect("completion permit was lost before waiter registration");
+    }
+
+    #[tokio::test]
     async fn completion_before_registration_is_observed_by_identical_waiters() {
         let adapter = PostgresAdapter::new(
             "postgres://postgres@localhost/postgres",
