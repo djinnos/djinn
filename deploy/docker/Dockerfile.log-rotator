@@ -1,6 +1,6 @@
 # Build from the repository root. Base images are release-versioned deliberately:
 # release automation must supply an immutable rotator image tag (never `latest`).
-FROM rust:1.85.0-bookworm AS build
+FROM rust:1.88.0-bookworm AS build
 WORKDIR /src
 COPY server/Cargo.toml server/Cargo.lock /src/server/
 COPY server/crates /src/server/crates
