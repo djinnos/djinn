@@ -573,6 +573,29 @@ async fn durable_outcome_fixture() -> DurableOutcomeFixture {
     }
 }
 
+async fn admit_foreign_outcome_run(db: &djinn_db::Database) -> (String, String) {
+    let fixture = seed_outcome_proposal(db).await;
+    let admitted = ProposalRepository::new(db.clone(), EventBus::noop())
+        .admit_refinement_run(AdmitRefinementRunRequest {
+            proposal_id: fixture.proposal_id,
+            idempotency_key: uuid::Uuid::now_v7().to_string(),
+            source: RefinementAdmissionSource::Demand {
+                demand_id: uuid::Uuid::now_v7().to_string(),
+            },
+            heartbeat_grace_millis: 60_000,
+        })
+        .await
+        .expect("admit durable foreign run");
+    match admitted {
+        RefinementAdmissionOutcome::Admitted {
+            run_id, intent_id, ..
+        }
+        | RefinementAdmissionOutcome::Existing {
+            run_id, intent_id, ..
+        } => (run_id, intent_id),
+    }
+}
+
 async fn snapshot(f: &DurableOutcomeFixture) -> djinn_db::RefinementRunSnapshotResult {
     ProposalRepository::new(f.db.clone(), EventBus::noop())
         .load_refinement_run_snapshot(LoadRefinementRunSnapshotRequest {
@@ -727,8 +750,19 @@ async fn correlation_fence_rejects_missing_and_mismatched_task_identity() {
         (
             "foreign run",
             Some((
-                "same-run".to_owned(),
+                "foreign-run".to_owned(),
                 "same-intent".to_owned(),
+                1,
+                1,
+                DurablePhase::AdversaryAttack,
+                RefinementRole::Adversary,
+            )),
+        ),
+        (
+            "non-current source intent",
+            Some((
+                "same-run".to_owned(),
+                "foreign-intent".to_owned()
                 1,
                 1,
                 DurablePhase::AdversaryAttack,
@@ -739,15 +773,32 @@ async fn correlation_fence_rejects_missing_and_mismatched_task_identity() {
 
     for (name, replacement) in cases {
         let mut f = durable_outcome_fixture().await;
+        let foreign_evidence = if matches!(name, "foreign run" | "non-current source intent") {
+            Some(admit_foreign_outcome_run(&f.db).await)
+        } else {
+            None
+        };
         let correlation = replacement.map(|(run, intent, generation, round, phase, role)| {
             TaskRefinementCorrelation::new(
                 if run == "same-run" {
                     f.run_id.clone()
+                } else if run == "foreign-run" {
+                    foreign_evidence
+                        .as_ref()
+                        .expect("foreign run case must materialize durable foreign evidence")
+                        .0
+                        .clone()
                 } else {
                     run
                 },
                 if intent == "same-intent" {
                     f.intent_id.clone()
+                } else if intent == "foreign-intent" {
+                    foreign_evidence
+                        .as_ref()
+                        .expect("non-current intent case must materialize durable foreign evidence")
+                        .1
+                        .clone()
                 } else {
                     intent
                 },
@@ -773,10 +824,7 @@ async fn correlation_fence_rejects_missing_and_mismatched_task_identity() {
                 .await
                 .expect("replace task correlation for fence case");
         }
-        let mut session = f.session.clone();
-        if name == "foreign run" {
-            session.run_id = uuid::Uuid::now_v7().to_string();
-        }
+        let session = f.session.clone();
         assert_rejected_outcome_preserves_source(&mut f, session).await;
         assert_eq!(
             snapshot(&f).await.snapshot.intents[0].state,
