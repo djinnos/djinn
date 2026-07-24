@@ -1,8 +1,9 @@
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::sync::Mutex;
 
+use flate2::read::GzDecoder;
 use djinn_log_rotator::{
     Clock, ContainerName, LogStore, Namespace, PodUid, StoreConfig, StreamIdentity,
 };
@@ -29,12 +30,15 @@ fn stream() -> StreamIdentity {
     )
 }
 fn store(root: &std::path::Path, bytes: u64) -> LogStore<FixedClock> {
+    store_at(root, bytes, datetime!(2026-07-23 12:00 UTC))
+}
+fn store_at(root: &std::path::Path, bytes: u64, time: OffsetDateTime) -> LogStore<FixedClock> {
     LogStore::with_parts(
         root,
         StoreConfig {
             max_logical_bytes: bytes,
         },
-        FixedClock::new(datetime!(2026-07-23 12:00 UTC)),
+        FixedClock::new(time),
         Default::default(),
     )
     .unwrap()
@@ -63,10 +67,14 @@ fn appends_complete_lines_with_modes_and_logical_sidecar() {
             .unwrap(),
         first + second
     );
-    assert_eq!(
-        fs::metadata(root.path()).unwrap().permissions().mode() & 0o777,
-        0o750
-    );
+    for path in [
+        root.path().to_path_buf(),
+        root.path().join("prod"),
+        root.path().join("prod/550e8400-e29b-41d4-a716-446655440000"),
+        dir.clone(),
+    ] {
+        assert_eq!(fs::metadata(path).unwrap().permissions().mode() & 0o777, 0o750);
+    }
     assert_eq!(
         fs::metadata(&active).unwrap().permissions().mode() & 0o777,
         0o640
@@ -88,6 +96,38 @@ fn threshold_rotates_in_order_and_keeps_line_integrity() {
         .collect();
     assert!(names.iter().any(|n| n.contains("-000000.jsonl.gz")));
     assert!(names.iter().any(|n| n.contains("-000001.jsonl.active")));
+}
+
+#[test]
+fn hour_boundary_rotates_to_the_next_hour() {
+    let root = tempdir().unwrap();
+    let id = stream();
+    store(root.path(), 1000).append(&id, &json!({"message":"noon"})).unwrap();
+    let log = store_at(root.path(), 1000, datetime!(2026-07-23 13:00 UTC));
+    log.append(&id, &json!({"message":"one pm"})).unwrap();
+    let names: Vec<_> = fs::read_dir(log.stream_path(&id)).unwrap().map(Result::unwrap)
+        .map(|entry| entry.file_name().into_string().unwrap()).collect();
+    assert!(names.iter().any(|name| name == "20260723T120000Z-000000.jsonl.gz"));
+    assert!(names.iter().any(|name| name == "20260723T130000Z-000000.jsonl.active"));
+}
+
+#[test]
+fn gzip_sidecar_tracks_logical_bytes_not_compressed_size() {
+    let root = tempdir().unwrap();
+    let id = stream();
+    let record = json!({"message": "x".repeat(512)});
+    let logical = serde_json::to_vec(&record).unwrap().len() as u64 + 1;
+    let log = store(root.path(), logical + 1);
+    log.append(&id, &record).unwrap();
+    log.append(&id, &record).unwrap();
+    let gzip = fs::read_dir(log.stream_path(&id)).unwrap().map(Result::unwrap)
+        .map(|entry| entry.path()).find(|path| path.extension().is_some_and(|ext| ext == "gz")).unwrap();
+    let sidecar = fs::read_to_string(format!("{}.bytes", gzip.display())).unwrap().trim().parse::<u64>().unwrap();
+    assert_eq!(sidecar, logical);
+    assert_ne!(sidecar, fs::metadata(&gzip).unwrap().len());
+    let mut content = Vec::new();
+    GzDecoder::new(fs::File::open(gzip).unwrap()).read_to_end(&mut content).unwrap();
+    assert_eq!(content.len() as u64, logical);
 }
 
 #[test]
@@ -177,4 +217,35 @@ fn startup_recovery_completes_each_compression_interruption_idempotently() {
     let _restart = store(root.path(), 1000);
     assert!(gzip.exists());
     assert!(!closed.exists());
+}
+
+#[test]
+fn recovery_preserves_sidecars_across_both_rename_crash_windows() {
+    let root = tempdir().unwrap();
+    let log = store(root.path(), 1000);
+    let id = stream();
+    let expected = log.append(&id, &json!({"message":"complete"})).unwrap();
+    let dir = log.stream_path(&id);
+    let active = fs::read_dir(&dir).unwrap().map(Result::unwrap)
+        .find(|entry| entry.file_name().to_string_lossy().ends_with(".active")).unwrap().path();
+    let closed = active.with_extension("closed");
+
+    // Crash after the segment rename, before `.active.bytes -> .closed.bytes`.
+    fs::rename(&active, &closed).unwrap();
+    store(root.path(), 1000);
+    let gzip = closed.with_extension("gz");
+    assert_eq!(fs::read_to_string(format!("{}.bytes", gzip.display())).unwrap().trim(), expected.to_string());
+    assert!(!std::path::PathBuf::from(format!("{}.bytes", active.display())).exists());
+    assert!(!std::path::PathBuf::from(format!("{}.bytes", closed.display())).exists());
+    store(root.path(), 1000);
+
+    // Crash after unlinking `.closed`, before `.closed.bytes -> .gz.bytes`.
+    let gzip_sidecar = std::path::PathBuf::from(format!("{}.bytes", gzip.display()));
+    let closed_sidecar = std::path::PathBuf::from(format!("{}.bytes", closed.display()));
+    fs::rename(&gzip_sidecar, &closed_sidecar).unwrap();
+    store(root.path(), 1000);
+    assert_eq!(fs::read_to_string(&gzip_sidecar).unwrap().trim(), expected.to_string());
+    assert!(!closed_sidecar.exists());
+    store(root.path(), 1000);
+    assert_eq!(fs::read_to_string(&gzip_sidecar).unwrap().trim(), expected.to_string());
 }

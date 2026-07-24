@@ -110,8 +110,7 @@ impl<C: Clock, Z: Compressor> LogStore<C, Z> {
         if !record.is_object() {
             return Err(StoreError::NonObjectRecord);
         }
-        let dir = self.stream_path(stream);
-        create_dir(&dir)?;
+        let dir = self.create_stream_dir(stream)?;
         self.recover_directory(&dir)?;
         let hour = hour_key(self.clock.now());
         let (path, logical) = self.active_for_hour(&dir, &hour)?;
@@ -131,8 +130,7 @@ impl<C: Clock, Z: Compressor> LogStore<C, Z> {
     }
 
     pub fn recover_stream(&self, stream: &StreamIdentity) -> Result<(), StoreError> {
-        let dir = self.stream_path(stream);
-        create_dir(&dir)?;
+        let dir = self.create_stream_dir(stream)?;
         self.recover_directory(&dir)
     }
 
@@ -157,6 +155,19 @@ impl<C: Clock, Z: Compressor> LogStore<C, Z> {
             }
         }
         Ok(())
+    }
+
+    /// Create each stream component independently so a process umask cannot
+    /// leave namespace or pod directories more permissive than the contract.
+    fn create_stream_dir(&self, stream: &StreamIdentity) -> Result<PathBuf, StoreError> {
+        let namespace = self.root.join(stream.namespace.as_str());
+        let pod = namespace.join(stream.pod_uid.as_str());
+        let container = pod.join(stream.container.as_str());
+        create_dir(&self.root)?;
+        create_dir(&namespace)?;
+        create_dir(&pod)?;
+        create_dir(&container)?;
+        Ok(container)
     }
 
     fn active_for_hour(&self, dir: &Path, hour: &str) -> Result<(PathBuf, u64), StoreError> {
@@ -206,11 +217,10 @@ impl<C: Clock, Z: Compressor> LogStore<C, Z> {
         let gzip = replace_suffix(closed, ".closed", ".gz")?;
         let temp = PathBuf::from(format!("{}.tmp", gzip.display()));
         if gzip.exists() {
+            move_sidecar(&sidecar(closed), &sidecar(&gzip))?;
+            sync_directory(gzip.parent().expect("segment has parent"))?;
             fs::remove_file(closed)?;
-            let closed_sidecar = sidecar(closed);
-            if closed_sidecar.exists() {
-                fs::rename(closed_sidecar, sidecar(&gzip))?;
-            }
+            sync_directory(gzip.parent().expect("segment has parent"))?;
             return Ok(());
         }
         if temp.exists() {
@@ -219,11 +229,11 @@ impl<C: Clock, Z: Compressor> LogStore<C, Z> {
         self.compressor.gzip(closed, &temp)?;
         fs::rename(&temp, &gzip)?;
         sync_directory(gzip.parent().expect("segment has parent"))?;
+        // Move accounting before deleting its source so either crash state can
+        // be reconciled on restart.
+        move_sidecar(&sidecar(closed), &sidecar(&gzip))?;
+        sync_directory(gzip.parent().expect("segment has parent"))?;
         fs::remove_file(closed)?;
-        let closed_sidecar = sidecar(closed);
-        if closed_sidecar.exists() {
-            fs::rename(closed_sidecar, sidecar(&gzip))?;
-        }
         sync_directory(gzip.parent().expect("segment has parent"))?;
         Ok(())
     }
@@ -247,6 +257,15 @@ impl<C: Clock, Z: Compressor> LogStore<C, Z> {
                     fs::remove_file(&path)?;
                 }
             }
+        }
+        // Recover both sidecar-only interruption windows before compression.
+        for closed in closed_segments(dir)? {
+            let active = replace_suffix(&closed, ".closed", ".active")?;
+            move_sidecar(&sidecar(&active), &sidecar(&closed))?;
+        }
+        for gzip in gzip_segments(dir)? {
+            let closed = replace_suffix(&gzip, ".gz", ".closed")?;
+            move_sidecar(&sidecar(&closed), &sidecar(&gzip))?;
         }
         for active in active_segments(dir, None)? {
             let complete = complete_prefix_len(&active)?;
@@ -295,6 +314,19 @@ fn write_logical_bytes(path: &Path, bytes: u64) -> io::Result<()> {
     file.write_all(b"\n")?;
     file.sync_all()?;
     fs::rename(temporary, path)?;
+    Ok(())
+}
+/// Preserve a completed destination accounting marker if recovery observes an
+/// interrupted duplicate source marker as well.
+fn move_sidecar(source: &Path, destination: &Path) -> io::Result<()> {
+    if !source.exists() {
+        return Ok(());
+    }
+    if destination.exists() {
+        fs::remove_file(source)?;
+    } else {
+        fs::rename(source, destination)?;
+    }
     Ok(())
 }
 fn logical_bytes(path: &Path) -> io::Result<u64> {
@@ -352,8 +384,8 @@ fn next_sequence(dir: &Path, hour: &str) -> Result<u32, StoreError> {
     let mut maximum = None;
     for path in active_segments(dir, Some(hour))?
         .into_iter()
-        .chain(closed_segments(dir)?.into_iter())
-        .chain(gzip_segments(dir)?.into_iter())
+        .chain(closed_segments(dir)?)
+        .chain(gzip_segments(dir)?)
     {
         let name = path
             .file_name()
