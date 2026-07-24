@@ -264,7 +264,17 @@ async fn persist_infra_death_on_attempt(
 
     let meta = serde_json::json!({
         "infra_death_log_tail": {
+            "schema_version": capture.schema_version,
             "fetched": capture.log_tail.is_some(),
+            "pod_name": capture.pod_name,
+            "pod_uid": capture.pod_uid,
+            "container_name": capture.container_name,
+            "container_exit_reason": capture.container_exit_reason,
+            "container_exit_code": capture.container_exit_code,
+            "head_bytes": capture.head_bytes,
+            "tail_bytes": capture.tail_bytes,
+            "omitted_bytes": capture.omitted_bytes,
+            "sanitizers": capture.sanitizers,
             "fetch_error_class": capture.fetch_error_class,
             "fetch_error_detail": capture.fetch_error_detail,
             "death_reason": reason,

@@ -17,8 +17,8 @@ use std::time::Duration;
 use djinn_core::models::task_attempt::TASK_ATTEMPT_LOG_TAIL_MAX_LEN;
 use djinn_runtime::InfraDeathLogTailCapture;
 use k8s_openapi::api::core::v1::Pod;
+use serde_json::Value;
 use kube::api::{Api, ListParams};
-use tracing::{debug, warn};
 
 use crate::job::LABEL_TASK_RUN_ID;
 
@@ -110,6 +110,11 @@ fn redact_sensitive_json_fields(input: &str) -> String {
                             out.push_str(&input[last_emitted..key_end + 1]);
                             out.push_str(&input[key_end + 1..val_start]);
                             out.push_str(REDACTED);
+                            // `find_json_value` spans a closing quote for a string;
+                            // retain it so redacted JSON remains valid for capping.
+                            if val_start > 0 && input.as_bytes()[val_start - 1] == b'"' {
+                                out.push('"');
+                            }
                             last_emitted = val_end;
                             // Skip past the value.
                             for (ni, _) in chars.by_ref() {
@@ -196,39 +201,111 @@ fn redact_sensitive_env_assignments(input: &str) -> String {
     out
 }
 
-// ─── Truncation ─────────────────────────────────────────────────────────────
+// ─── V2 sanitizing and framing ───────────────────────────────────────────────
+
+const JSON_VALUE_CAP_BYTES: usize = 2048;
+const HEAD_MAX_BYTES: usize = 1024;
+const SCHEMA_VERSION: u8 = 2;
+const CAPPED_JSON_FIELDS: &[&str] = &[
+    "statement", "sql", "query", "request_body", "response_body", "body",
+];
+
+/// The bytes and transformation record persisted alongside a v2 capture.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedLogTail {
+    pub value: String,
+    pub head_bytes: usize,
+    pub tail_bytes: usize,
+    pub omitted_bytes: usize,
+    pub sanitizers: Vec<String>,
+}
+
+fn prefix_utf8(s: &str, max_bytes: usize) -> &str {
+    let mut end = s.len().min(max_bytes);
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
 
 /// Truncate `s` to at most `max_bytes` bytes at a UTF-8 character boundary,
-/// keeping the END of the string.
-///
-/// Returns the longest valid UTF-8 suffix of `s` whose byte length is ≤
-/// `max_bytes`.  If `s` is already within the limit, it is returned as-is.
-///
-/// The suffix (not the prefix) is what matters for a crash capture: the panic
-/// message is the last thing a dying worker prints.  The 2026-07-22 v0.6.114
-/// outage was undiagnosable because prefix truncation systematically discarded
-/// the panic text while keeping routine startup lines.
+/// keeping the END of the string. Retained for v1 callers and focused tests.
 pub fn truncate_log_tail_utf8(s: &str, max_bytes: usize) -> &str {
-    if s.len() <= max_bytes {
-        return s;
-    }
-    // Find the first char boundary at or after len - max_bytes.
+    if s.len() <= max_bytes { return s; }
     let mut start = s.len() - max_bytes;
-    while start < s.len() && !s.is_char_boundary(start) {
-        start += 1;
-    }
+    while start < s.len() && !s.is_char_boundary(start) { start += 1; }
     &s[start..]
 }
 
-/// Combined redact + truncate helper used by the infra-death capture path.
-///
-/// 1. Redacts secret-bearing patterns.
-/// 2. Truncates to `TASK_ATTEMPT_LOG_TAIL_MAX_LEN` at a UTF-8 boundary.
-pub fn prepare_log_tail(raw: &str) -> String {
-    let redacted = redact_log_tail(raw);
-    let truncated = truncate_log_tail_utf8(&redacted, TASK_ATTEMPT_LOG_TAIL_MAX_LEN);
-    truncated.to_owned()
+fn cap_json_values(value: &mut Value) -> bool {
+    match value {
+        Value::Object(object) => object.iter_mut().fold(false, |changed, (key, value)| {
+            let this = CAPPED_JSON_FIELDS.contains(&key.as_str())
+                && matches!(value, Value::String(text) if text.len() > JSON_VALUE_CAP_BYTES);
+            if this && let Value::String(text) = value {
+                *text = prefix_utf8(text, JSON_VALUE_CAP_BYTES).to_owned();
+            }
+            changed | this | cap_json_values(value)
+        }),
+        Value::Array(values) => values.iter_mut().any(cap_json_values),
+        _ => false,
+    }
 }
+
+/// Cap only eligible JSON object lines. Plain text, arrays, malformed JSON and
+/// any multiline value are deliberately returned byte-for-byte unchanged.
+pub fn cap_supported_json_values(input: &str) -> String {
+    if input.contains('\n') || input.contains('\r') || input.contains("djinn.panic_summary.v1") {
+        return input.to_owned();
+    }
+    let Some(json_start) = input.find('{') else { return input.to_owned(); };
+    let (prefix, json) = input.split_at(json_start);
+    let Ok(mut value) = serde_json::from_str::<Value>(json) else { return input.to_owned(); };
+    if !value.is_object() || !cap_json_values(&mut value) { return input.to_owned(); }
+    format!("{prefix}{value}")
+}
+
+/// Frame an already-sanitized value. Small values are retained verbatim; large
+/// values use the v2 head/tail frame, whose markers are included in the 8000 B
+/// bound and whose accounting is over the sanitized pre-frame bytes.
+pub fn frame_log_tail_v2(sanitized: &str) -> PreparedLogTail {
+    if sanitized.len() <= TASK_ATTEMPT_LOG_TAIL_MAX_LEN {
+        return PreparedLogTail {
+            value: sanitized.to_owned(), head_bytes: sanitized.len(), tail_bytes: 0,
+            omitted_bytes: 0, sanitizers: vec!["sensitive_value_redaction".into(), "json_string_value_cap_2048".into()],
+        };
+    }
+    let head = prefix_utf8(sanitized, HEAD_MAX_BYTES);
+    let head_marker = format!("[DJINN_LOG_HEAD_V2 bytes={}]\n", head.len());
+    let available = TASK_ATTEMPT_LOG_TAIL_MAX_LEN.saturating_sub(head_marker.len() + head.len());
+    let mut tail_len = sanitized.len().saturating_sub(head.len()).min(available);
+    loop {
+        let tail = truncate_log_tail_utf8(sanitized, tail_len);
+        let omitted = sanitized.len() - head.len() - tail.len();
+        let tail_marker = format!("\n[DJINN_LOG_TAIL_V2 bytes={} omitted={}]\n", tail.len(), omitted);
+        if head_marker.len() + head.len() + tail_marker.len() + tail.len() <= TASK_ATTEMPT_LOG_TAIL_MAX_LEN {
+            return PreparedLogTail {
+                value: format!("{head_marker}{head}{tail_marker}{tail}"),
+                head_bytes: head.len(), tail_bytes: tail.len(), omitted_bytes: omitted,
+                sanitizers: vec!["sensitive_value_redaction".into(), "json_string_value_cap_2048".into(), "v2_head_tail_frame".into()],
+            };
+        }
+        if tail_len == 0 { unreachable!("v2 markers fit within the attempt log bound"); }
+        tail_len -= 1;
+        while tail_len > 0 && !sanitized.is_char_boundary(sanitized.len() - tail_len) { tail_len -= 1; }
+    }
+}
+
+/// Apply the v2 order: redact first, cap eligible JSON values second, frame
+/// last. This is intentionally a pure pipeline for fixture coverage.
+pub fn prepare_log_tail_v2(raw: &str) -> PreparedLogTail {
+    let redacted = redact_log_tail(raw);
+    let capped = cap_supported_json_values(&redacted);
+    frame_log_tail_v2(&capped)
+}
+
+/// Compatibility convenience for callers that only need the stored value.
+pub fn prepare_log_tail(raw: &str) -> String { prepare_log_tail_v2(raw).value }
 
 // ─── Fetch error classification ─────────────────────────────────────────────
 
@@ -292,154 +369,79 @@ pub fn classify_fetch_error(err: &kube::Error) -> LogTailFetchError {
 
 // ─── Async capture path (requires kube) ─────────────────────────────────────
 
-/// Try to capture the last log lines from the worker Pod's container after an
-/// infra-death has been detected.  Returns `None` on any failure.
-///
-/// The `namespace` and `client` come from the same `KubernetesRuntime` that
-/// owns the Pod.  The `task_run_id` is used to find the Pod via the standard
-/// task-run label selector.
-pub async fn capture_infra_death_log_tail(
-    client: &kube::Client,
-    namespace: &str,
-    task_run_id: &str,
-) -> Option<InfraDeathLogTailCapture> {
-    let result =
-        tokio::time::timeout(CAPTURE_TIMEOUT, do_capture(client, namespace, task_run_id)).await;
-
-    match result {
-        Ok(capture) => capture,
-        Err(_elapsed) => {
-            warn!(
-                task_run_id,
-                "infra_death_log_tail: capture timed out after {:?}", CAPTURE_TIMEOUT
-            );
-            Some(InfraDeathLogTailCapture {
-                log_tail: None,
-                fetch_error_class: Some(LogTailFetchError::Timeout.as_str().to_owned()),
-                fetch_error_detail: Some(format!(
-                    "log-tail capture timed out after {:?}",
-                    CAPTURE_TIMEOUT
-                )),
-            })
-        }
+fn empty_capture(error_class: Option<String>, error_detail: Option<String>) -> InfraDeathLogTailCapture {
+    InfraDeathLogTailCapture {
+        log_tail: None, schema_version: SCHEMA_VERSION, pod_name: None, pod_uid: None,
+        container_name: None, container_exit_reason: None, container_exit_code: None,
+        head_bytes: 0, tail_bytes: 0, omitted_bytes: 0, sanitizers: Vec::new(),
+        fetch_error_class: error_class, fetch_error_detail: error_detail,
     }
 }
 
-async fn do_capture(
-    client: &kube::Client,
-    namespace: &str,
-    task_run_id: &str,
-) -> Option<InfraDeathLogTailCapture> {
-    let pods: Api<Pod> = Api::namespaced(client.clone(), namespace);
-    let label_selector = format!("{}={}", LABEL_TASK_RUN_ID, task_run_id);
-
-    // 1. Find the Pod.
-    let pod_name = match pods
-        .list(&ListParams::default().labels(&label_selector))
-        .await
-    {
-        Ok(list) => match list.items.into_iter().next() {
-            Some(pod) => {
-                let name = pod.metadata.name.clone().unwrap_or_default();
-                if name.is_empty() {
-                    return Some(InfraDeathLogTailCapture {
-                        log_tail: None,
-                        fetch_error_class: Some(LogTailFetchError::NoPodFound.as_str().to_owned()),
-                        fetch_error_detail: Some("Pod found but has no name".to_owned()),
-                    });
-                }
-                name
-            }
-            None => {
-                debug!(
-                    task_run_id,
-                    "infra_death_log_tail: no Pod found (already GC'd)"
-                );
-                return Some(InfraDeathLogTailCapture {
-                    log_tail: None,
-                    fetch_error_class: Some(LogTailFetchError::NoPodFound.as_str().to_owned()),
-                    fetch_error_detail: Some(
-                        "Pod not found by label (likely already GC'd by Job TTL)".to_owned(),
-                    ),
-                });
-            }
-        },
-        Err(e) => {
-            let classified = classify_fetch_error(&e);
-            warn!(
-                task_run_id,
-                error = %e,
-                error_class = classified.as_str(),
-                "infra_death_log_tail: pod list failed"
-            );
-            let detail = format!("Pod list failed: {e}");
-            return Some(InfraDeathLogTailCapture {
-                log_tail: None,
-                fetch_error_class: Some(classified.as_str().to_owned()),
-                fetch_error_detail: Some(detail),
-            });
-        }
-    };
-
-    // 2. Fetch logs from the `worker` container (falls back to first container).
-    // No `limit_bytes`: the apiserver applies it to the FRONT of the
-    // tail-lines window, which discards the panic text at the end — the one
-    // part a crash capture exists to keep.  `tail_lines` bounds the fetch;
-    // `prepare_log_tail` bounds the stored size from the suffix side.
-    let log_params = kube::api::LogParams {
-        container: Some("worker".to_owned()),
-        tail_lines: Some(LOG_TAIL_LINE_COUNT),
-        ..Default::default()
-    };
-
-    let logs = match pods.logs(&pod_name, &log_params).await {
-        Ok(logs) => logs,
-        Err(e) => {
-            let classified = classify_fetch_error(&e);
-            warn!(
-                task_run_id,
-                pod = %pod_name,
-                error = %e,
-                error_class = classified.as_str(),
-                "infra_death_log_tail: log fetch failed"
-            );
-            let detail = format!("Pod log fetch failed: {e}");
-            return Some(InfraDeathLogTailCapture {
-                log_tail: None,
-                fetch_error_class: Some(classified.as_str().to_owned()),
-                fetch_error_detail: Some(detail),
-            });
-        }
-    };
-
-    if logs.is_empty() {
-        debug!(
-            task_run_id,
-            pod = %pod_name,
-            "infra_death_log_tail: pod logs are empty"
-        );
-        return Some(InfraDeathLogTailCapture {
-            log_tail: None,
-            fetch_error_class: Some("empty_logs".to_owned()),
-            fetch_error_detail: Some("Pod logs are empty".to_owned()),
-        });
+fn pod_capture(pod: &Pod) -> InfraDeathLogTailCapture {
+    let status = pod.status.as_ref().and_then(|status| status.container_statuses.as_ref())
+        .and_then(|statuses| statuses.iter().find(|status| status.name == "worker").or_else(|| statuses.first()));
+    let terminated = status.and_then(|status| status.state.as_ref())
+        .and_then(|state| state.terminated.as_ref());
+    InfraDeathLogTailCapture {
+        log_tail: None, schema_version: SCHEMA_VERSION, pod_name: pod.metadata.name.clone(),
+        pod_uid: pod.metadata.uid.clone(), container_name: status.map(|status| status.name.clone()),
+        container_exit_reason: terminated.and_then(|state| state.reason.clone()),
+        container_exit_code: terminated.map(|state| state.exit_code),
+        head_bytes: 0, tail_bytes: 0, omitted_bytes: 0, sanitizers: Vec::new(),
+        fetch_error_class: None, fetch_error_detail: None,
     }
+}
 
-    // 3. Redact and truncate to the DB bound.
-    let prepared = prepare_log_tail(&logs);
+/// Try to capture worker logs after infra death. Pod identity and terminal
+/// container status are decoded immediately after listing, before the log API
+/// request can race Pod GC.
+pub async fn capture_infra_death_log_tail(client: &kube::Client, namespace: &str, task_run_id: &str) -> Option<InfraDeathLogTailCapture> {
+    match tokio::time::timeout(CAPTURE_TIMEOUT, do_capture(client, namespace, task_run_id)).await {
+        Ok(capture) => capture,
+        Err(_) => Some(empty_capture(Some(LogTailFetchError::Timeout.as_str().into()), Some(format!("log-tail capture timed out after {CAPTURE_TIMEOUT:?}")))),
+    }
+}
 
-    debug!(
-        task_run_id,
-        pod = %pod_name,
-        byte_count = prepared.len(),
-        "infra_death_log_tail: captured successfully"
-    );
-
-    Some(InfraDeathLogTailCapture {
-        log_tail: Some(prepared),
-        fetch_error_class: None,
-        fetch_error_detail: None,
-    })
+async fn do_capture(client: &kube::Client, namespace: &str, task_run_id: &str) -> Option<InfraDeathLogTailCapture> {
+    let pods: Api<Pod> = Api::namespaced(client.clone(), namespace);
+    let selector = format!("{}={}", LABEL_TASK_RUN_ID, task_run_id);
+    let pod = match pods.list(&ListParams::default().labels(&selector)).await {
+        Ok(list) => match list.items.into_iter().next() {
+            Some(pod) if pod.metadata.name.is_some() => pod,
+            Some(_) => return Some(empty_capture(Some(LogTailFetchError::NoPodFound.as_str().into()), Some("Pod found but has no name".into()))),
+            None => return Some(empty_capture(Some(LogTailFetchError::NoPodFound.as_str().into()), Some("Pod not found by label (likely already GC'd by Job TTL)".into()))),
+        },
+        Err(error) => {
+            let classified = classify_fetch_error(&error);
+            return Some(empty_capture(Some(classified.as_str().into()), Some(format!("Pod list failed: {error}"))));
+        }
+    };
+    let mut capture = pod_capture(&pod);
+    let pod_name = capture.pod_name.clone().expect("name checked above");
+    let container = capture.container_name.clone().unwrap_or_else(|| "worker".into());
+    let params = kube::api::LogParams { container: Some(container), tail_lines: Some(LOG_TAIL_LINE_COUNT), ..Default::default() };
+    let logs = match pods.logs(&pod_name, &params).await {
+        Ok(logs) => logs,
+        Err(error) => {
+            let classified = classify_fetch_error(&error);
+            capture.fetch_error_class = Some(classified.as_str().into());
+            capture.fetch_error_detail = Some(format!("Pod log fetch failed: {error}"));
+            return Some(capture);
+        }
+    };
+    if logs.is_empty() {
+        capture.fetch_error_class = Some("empty_logs".into());
+        capture.fetch_error_detail = Some("Pod logs are empty".into());
+        return Some(capture);
+    }
+    let prepared = prepare_log_tail_v2(&logs);
+    capture.log_tail = Some(prepared.value);
+    capture.head_bytes = prepared.head_bytes;
+    capture.tail_bytes = prepared.tail_bytes;
+    capture.omitted_bytes = prepared.omitted_bytes;
+    capture.sanitizers = prepared.sanitizers;
+    Some(capture)
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────────────
@@ -783,6 +785,53 @@ mod tests {
             "api_error"
         );
         assert_eq!(LogTailFetchError::Timeout.as_str(), "timeout");
+    }
+
+    mod attempt_evidence {
+        use super::*;
+        use k8s_openapi::api::core::v1::{
+            ContainerState, ContainerStateTerminated, ContainerStatus, PodStatus,
+        };
+
+        #[test]
+        fn v2_contract() {
+            let secret = "credential-that-must-not-survive";
+            let structured = format!(
+                r#"tracing::event {{"api_key":"{secret}","sql":"{}"}}"#,
+                "é".repeat(1500)
+            );
+            let prepared = prepare_log_tail_v2(&structured);
+            assert!(!prepared.value.contains(secret));
+            assert!(prepared.value.contains(REDACTED));
+            assert!(prepared.value.len() <= "tracing::event ".len() + 2100);
+
+            for unchanged in ["plain text", "{not json}", "[\"array\"]", "{\"sql\":\"x\"}\nsecond"] {
+                assert_eq!(cap_supported_json_values(unchanged), unchanged);
+            }
+            let panic = format!("djinn.panic_summary.v1 {{\"body\":\"{}\"}}", "x".repeat(3000));
+            assert_eq!(cap_supported_json_values(&panic), panic);
+
+            let source = format!("{}{}", "🦀".repeat(3000), "\ndjinn.panic_summary.v1 final summary");
+            let frame = frame_log_tail_v2(&source);
+            assert!(frame.value.len() <= TASK_ATTEMPT_LOG_TAIL_MAX_LEN);
+            assert!(frame.value.starts_with(&format!("[DJINN_LOG_HEAD_V2 bytes={}]\n", frame.head_bytes)));
+            assert!(frame.value.contains(&format!("[DJINN_LOG_TAIL_V2 bytes={} omitted={}]", frame.tail_bytes, frame.omitted_bytes)));
+            assert_eq!(frame.head_bytes + frame.tail_bytes + frame.omitted_bytes, source.len());
+            assert!(frame.value.ends_with("djinn.panic_summary.v1 final summary"));
+            assert!(std::str::from_utf8(frame.value.as_bytes()).is_ok());
+
+            let pod = Pod {
+                metadata: kube::core::ObjectMeta { name: Some("worker-pod".into()), uid: Some("uid-1".into()), ..Default::default() },
+                status: Some(PodStatus { container_statuses: Some(vec![ContainerStatus {
+                    name: "worker".into(), state: Some(ContainerState { terminated: Some(ContainerStateTerminated { reason: Some("OOMKilled".into()), exit_code: 137, ..Default::default() }), ..Default::default() }),
+                    image: String::new(), image_id: String::new(), ready: false, restart_count: 0, ..Default::default()
+                }]), ..Default::default() }), ..Default::default()
+            };
+            let evidence = pod_capture(&pod);
+            assert_eq!(evidence.pod_uid.as_deref(), Some("uid-1"));
+            assert_eq!(evidence.container_exit_reason.as_deref(), Some("OOMKilled"));
+            assert_eq!(evidence.container_exit_code, Some(137));
+        }
     }
 
     // ── log_tail max len constant ───────────────────────────────────────────
