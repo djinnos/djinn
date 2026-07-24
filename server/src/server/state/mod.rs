@@ -3853,7 +3853,7 @@ mod build_admission_config_tests {
                         .await
                         .expect("emergency ack");
                     repository
-                        .advance(row.epoch, AdmissionHandoffPhase::ForwardOverlap)
+                        .advance(row.epoch, AdmissionHandoffPhase::ForwardOverlap, &[])
                         .await
                         .expect("forward advance");
                 }
@@ -3867,7 +3867,7 @@ mod build_admission_config_tests {
                         .await
                         .expect("invocation ack");
                     repository
-                        .advance(row.epoch, AdmissionHandoffPhase::InvocationPrimary)
+                        .advance(row.epoch, AdmissionHandoffPhase::InvocationPrimary, &[])
                         .await
                         .expect("invocation advance");
                 }
@@ -3877,7 +3877,7 @@ mod build_admission_config_tests {
                         .await
                         .expect("invocation ack");
                     repository
-                        .advance(row.epoch, AdmissionHandoffPhase::RollbackOverlap)
+                        .advance(row.epoch, AdmissionHandoffPhase::RollbackOverlap, &[])
                         .await
                         .expect("rollback advance");
                 }
@@ -3891,7 +3891,7 @@ mod build_admission_config_tests {
                         .await
                         .expect("invocation ack");
                     repository
-                        .advance(row.epoch, AdmissionHandoffPhase::EmergencyPrimary)
+                        .advance(row.epoch, AdmissionHandoffPhase::EmergencyPrimary, &[])
                         .await
                         .expect("emergency advance");
                 }

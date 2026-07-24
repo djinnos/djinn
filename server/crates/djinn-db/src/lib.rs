@@ -57,7 +57,7 @@ pub use repositories::tool_call_metrics::{
 pub use repositories::{
     admission_handoff::{
         AdmissionHandoffAuthority, AdmissionHandoffPhase, AdmissionHandoffRepository,
-        AdmissionHandoffRow,
+        AdmissionHandoffRow, V0Mode, V1Mode,
     },
     admission_journal::{
         AdmissionDomain, AdmissionJournalKey, AdmissionJournalRepository, AdmissionJournalRow,

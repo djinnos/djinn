@@ -28,6 +28,9 @@ impl HandoffSnapshot {
             HandoffState::UnexpectedOverlap => Some(HandoffWarningReason::UnexpectedOverlap),
             HandoffState::IncompleteEpoch => Some(HandoffWarningReason::StaleEpoch),
             HandoffState::EpochUnreadable => Some(HandoffWarningReason::EpochUnreadable),
+            // A row where neither authority enforces is a fail-closed
+            // misconfiguration that must surface for attention.
+            HandoffState::IllegalModeCombo => Some(HandoffWarningReason::StaleEpoch),
             HandoffState::ForwardOverlap | HandoffState::RollbackOverlap => {
                 if emergency_enforcing && invocation.enforcing {
                     None
@@ -35,7 +38,8 @@ impl HandoffSnapshot {
                     Some(HandoffWarningReason::StaleEpoch)
                 }
             }
-            HandoffState::EmergencyPrimary => {
+            // Baseline and shadow are both the v0-primary steady state.
+            HandoffState::EmergencyPrimary | HandoffState::Shadow => {
                 if emergency_enforcing {
                     invocation
                         .enforcing
@@ -69,16 +73,26 @@ pub enum EmergencyAuthorityDecision {
 }
 
 /// Bounded protocol classification consumed by later telemetry.
+///
+/// `EmergencyPrimary` is the v0-only baseline (v1 off); `Shadow` is that same
+/// v0 baseline with v1 observing without enforcing; `ForwardOverlap` /
+/// `RollbackOverlap` are the both-enforcing overlaps. `IllegalModeCombo` is the
+/// fail-closed classification for a row in which neither authority enforces.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HandoffState {
     MissingRow,
+    /// v0 baseline: v0 enforcing, v1 off.
     EmergencyPrimary,
+    /// v0 baseline with v1 shadowing (observing, not enforcing).
+    Shadow,
     ForwardOverlap,
     InvocationPrimary,
     RollbackOverlap,
     IncompleteEpoch,
     EpochUnreadable,
     UnexpectedOverlap,
+    /// Neither authority enforces — a misconfiguration that fails closed.
+    IllegalModeCombo,
 }
 
 /// The bounded reasons used by handoff telemetry and persistent lifecycle logs.
@@ -189,6 +203,13 @@ pub fn evaluate_handoff(
             EmergencyAuthorityDecision::ConfiguredStandalone,
             None,
         ),
+        Ok(Some(row)) if !row.v0_mode.is_enforcing() && !row.v1_mode.is_enforcing() => (
+            // Neither authority enforces: no admission control at all. This is a
+            // misconfiguration and fails closed regardless of phase or acks.
+            HandoffState::IllegalModeCombo,
+            EmergencyAuthorityDecision::RequiredFailClosed,
+            Some(row),
+        ),
         Ok(Some(row)) => {
             let emergency_current = row.emergency_ack_epoch == Some(row.epoch);
             let invocation_current = row.invocation_ack_epoch == Some(row.epoch);
@@ -207,11 +228,20 @@ pub fn evaluate_handoff(
                 )
             } else {
                 match row.phase {
-                    AdmissionHandoffPhase::EmergencyPrimary => (
-                        HandoffState::EmergencyPrimary,
-                        EmergencyAuthorityDecision::RequiredFailClosed,
-                        Some(row),
-                    ),
+                    // The v0 baseline distinguishes pure baseline (v1 off) from
+                    // v1 shadowing; both keep v0 enforcing.
+                    AdmissionHandoffPhase::EmergencyPrimary => {
+                        let state = if row.v1_mode == djinn_db::V1Mode::Shadow {
+                            HandoffState::Shadow
+                        } else {
+                            HandoffState::EmergencyPrimary
+                        };
+                        (
+                            state,
+                            EmergencyAuthorityDecision::RequiredFailClosed,
+                            Some(row),
+                        )
+                    }
                     AdmissionHandoffPhase::ForwardOverlap => (
                         HandoffState::ForwardOverlap,
                         EmergencyAuthorityDecision::RequiredFailClosed,
@@ -248,13 +278,158 @@ mod tests {
     use super::*;
 
     fn row(phase: AdmissionHandoffPhase, emergency: bool, invocation: bool) -> AdmissionHandoffRow {
+        row_with_modes(
+            phase,
+            emergency,
+            invocation,
+            djinn_db::V0Mode::Enforce,
+            djinn_db::V1Mode::Off,
+        )
+    }
+
+    fn row_with_modes(
+        phase: AdmissionHandoffPhase,
+        emergency: bool,
+        invocation: bool,
+        v0_mode: djinn_db::V0Mode,
+        v1_mode: djinn_db::V1Mode,
+    ) -> AdmissionHandoffRow {
         AdmissionHandoffRow {
             phase,
             epoch: 7,
             emergency_ack_epoch: emergency.then_some(7),
             invocation_ack_epoch: invocation.then_some(7),
+            v0_mode,
+            v1_mode,
+            cap: None,
             updated_at: "now".into(),
         }
+    }
+
+    #[test]
+    fn evaluate_handoff_distinguishes_baseline_shadow_overlap_and_fails_closed_on_illegal_combo() {
+        use djinn_db::{V0Mode, V1Mode};
+        // Baseline: v0 enforce, v1 off.
+        let baseline = evaluate_handoff(
+            Ok(Some(row_with_modes(
+                AdmissionHandoffPhase::EmergencyPrimary,
+                true,
+                false,
+                V0Mode::Enforce,
+                V1Mode::Off,
+            ))),
+            BuildAdmissionMode::Enforce,
+            true,
+            BuildAdmissionReadiness::Healthy,
+            InvocationAuthorityObservation::default(),
+        );
+        assert_eq!(baseline.state, HandoffState::EmergencyPrimary);
+        assert_eq!(
+            baseline.emergency,
+            EmergencyAuthorityDecision::RequiredFailClosed
+        );
+
+        // Shadow: v0 enforce, v1 shadow — distinct from baseline.
+        let shadow = evaluate_handoff(
+            Ok(Some(row_with_modes(
+                AdmissionHandoffPhase::EmergencyPrimary,
+                true,
+                false,
+                V0Mode::Enforce,
+                V1Mode::Shadow,
+            ))),
+            BuildAdmissionMode::Enforce,
+            true,
+            BuildAdmissionReadiness::Healthy,
+            InvocationAuthorityObservation::default(),
+        );
+        assert_eq!(shadow.state, HandoffState::Shadow);
+        assert_eq!(
+            shadow.emergency,
+            EmergencyAuthorityDecision::RequiredFailClosed
+        );
+
+        // Overlap: both enforce.
+        let overlap = evaluate_handoff(
+            Ok(Some(row_with_modes(
+                AdmissionHandoffPhase::ForwardOverlap,
+                true,
+                true,
+                V0Mode::Enforce,
+                V1Mode::Enforce,
+            ))),
+            BuildAdmissionMode::Enforce,
+            true,
+            BuildAdmissionReadiness::Healthy,
+            InvocationAuthorityObservation { enforcing: true },
+        );
+        assert_eq!(overlap.state, HandoffState::ForwardOverlap);
+
+        // Illegal combo: neither authority enforces — fails closed regardless of acks.
+        for (v0, v1) in [
+            (V0Mode::Observe, V1Mode::Off),
+            (V0Mode::Observe, V1Mode::Shadow),
+            (V0Mode::Disabled, V1Mode::Off),
+            (V0Mode::Disabled, V1Mode::Shadow),
+        ] {
+            let illegal = evaluate_handoff(
+                Ok(Some(row_with_modes(
+                    AdmissionHandoffPhase::EmergencyPrimary,
+                    true,
+                    false,
+                    v0,
+                    v1,
+                ))),
+                BuildAdmissionMode::Enforce,
+                true,
+                BuildAdmissionReadiness::Healthy,
+                InvocationAuthorityObservation::default(),
+            );
+            assert_eq!(
+                illegal.state,
+                HandoffState::IllegalModeCombo,
+                "{v0:?}/{v1:?}"
+            );
+            assert_eq!(
+                illegal.emergency,
+                EmergencyAuthorityDecision::RequiredFailClosed,
+                "illegal combo must fail closed for {v0:?}/{v1:?}"
+            );
+            assert_eq!(
+                illegal.warning_reason(true, InvocationAuthorityObservation::default()),
+                Some(HandoffWarningReason::StaleEpoch)
+            );
+        }
+
+        // Unreadable and incomplete epochs also fail closed.
+        assert_eq!(
+            evaluate_handoff(
+                Err(()),
+                BuildAdmissionMode::Enforce,
+                true,
+                BuildAdmissionReadiness::Healthy,
+                InvocationAuthorityObservation::default(),
+            )
+            .emergency,
+            EmergencyAuthorityDecision::RequiredFailClosed
+        );
+        assert_eq!(
+            evaluate_handoff(
+                Ok(Some(row_with_modes(
+                    AdmissionHandoffPhase::ForwardOverlap,
+                    true,
+                    false,
+                    V0Mode::Enforce,
+                    V1Mode::Enforce,
+                ))),
+                BuildAdmissionMode::Enforce,
+                true,
+                BuildAdmissionReadiness::Healthy,
+                InvocationAuthorityObservation { enforcing: true },
+            )
+            .state,
+            HandoffState::IncompleteEpoch
+        );
     }
 
     #[test]
