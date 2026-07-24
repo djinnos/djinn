@@ -2562,7 +2562,10 @@ mod tests {
         };
         assert_eq!(rpc.terminate_watchdog_pod(valid.clone()).await, Ok(()));
         assert_eq!(rpc.terminate_watchdog_pod(valid.clone()).await, Ok(()));
-        assert_eq!(deletes.lock().unwrap().as_slice(), &[valid.clone()]);
+        assert_eq!(
+            deletes.lock().unwrap().as_slice(),
+            std::slice::from_ref(&valid)
+        );
 
         for rejected in [
             WatchdogTerminationRequest {

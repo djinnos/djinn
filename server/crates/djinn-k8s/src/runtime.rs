@@ -1455,7 +1455,7 @@ pub async fn terminate_taskrun_pod_exact(
         {
             return Err("exact pod UID deletion is not confirmed by the task-run Job".into());
         }
-        return delete_taskrun_job_orphaned(&jobs, task_run_id, &job_uid).await;
+        return delete_taskrun_job_orphaned(&jobs, task_run_id, job_uid).await;
     }
 
     // Reject the entire observation if any labelled Pod is not the recorded
@@ -1466,7 +1466,7 @@ pub async fn terminate_taskrun_pod_exact(
             "exact pod UID is unavailable or does not belong to the recorded task-run Job".into(),
         );
     }
-    let pod_name = exact_taskrun_pod_name(&listed_pods[0], pod_uid, &job_uid).ok_or_else(|| {
+    let pod_name = exact_taskrun_pod_name(&listed_pods[0], pod_uid, job_uid).ok_or_else(|| {
         "exact pod UID is unavailable or does not belong to the recorded task-run Job".to_string()
     })?;
 
@@ -1490,7 +1490,7 @@ pub async fn terminate_taskrun_pod_exact(
     // propagation is deliberate: unlike a cascade, it cannot delete a
     // different-UID Pod that appears between the list and this request. The
     // Job operation is independently fenced by the immutable Job UID.
-    delete_taskrun_job_orphaned(&jobs, task_run_id, &job_uid).await
+    delete_taskrun_job_orphaned(&jobs, task_run_id, job_uid).await
 }
 
 const EXACT_POD_TERMINATION_ANNOTATION: &str = "djinn.dev/exact-pod-termination-uid";
@@ -1691,9 +1691,11 @@ mod tests {
         job_delete_status: u16,
     }
 
-    fn exact_kube_client(
-        replies: ExactKubeReplies,
-    ) -> (kube::Client, Arc<StdMutex<Vec<(String, String, String)>>>) {
+    /// Captured (method, path?query, body) tuples for every request the mocked
+    /// kube service observed, in issue order.
+    type CapturedKubeRequests = Arc<StdMutex<Vec<(String, String, String)>>>;
+
+    fn exact_kube_client(replies: ExactKubeReplies) -> (kube::Client, CapturedKubeRequests) {
         use http::Response;
         use http_body_util::BodyExt;
         use kube::client::Body;
@@ -1995,22 +1997,23 @@ mod tests {
                 .await
                 .is_err()
         );
-        let requests = requests.lock().unwrap();
-        assert_eq!(
-            requests
-                .iter()
-                .filter(|(method, path, _)| method == "DELETE" && path.contains("/pods/"))
-                .count(),
-            1,
-            "confirmation PATCH failure happens only after the Pod DELETE"
-        );
-        assert!(
-            requests
-                .iter()
-                .all(|(method, path, _)| method != "DELETE" || !path.contains("/jobs/")),
-            "failed confirmation must prevent Job teardown"
-        );
-        drop(requests);
+        {
+            let requests = requests.lock().unwrap();
+            assert_eq!(
+                requests
+                    .iter()
+                    .filter(|(method, path, _)| method == "DELETE" && path.contains("/pods/"))
+                    .count(),
+                1,
+                "confirmation PATCH failure happens only after the Pod DELETE"
+            );
+            assert!(
+                requests
+                    .iter()
+                    .all(|(method, path, _)| method != "DELETE" || !path.contains("/jobs/")),
+                "failed confirmation must prevent Job teardown"
+            );
+        }
 
         let mut replies = exact_replies(
             vec![(200, job_json(Some("job-recorded"), false, None))],
@@ -2023,20 +2026,21 @@ mod tests {
                 .await
                 .is_err()
         );
-        let requests = requests.lock().unwrap();
-        assert_eq!(
-            requests
-                .iter()
-                .filter(|(method, _, _)| method == "DELETE")
-                .count(),
-            1
-        );
-        assert!(
-            requests
-                .iter()
-                .all(|(method, path, _)| method != "DELETE" || !path.contains("/jobs/"))
-        );
-        drop(requests);
+        {
+            let requests = requests.lock().unwrap();
+            assert_eq!(
+                requests
+                    .iter()
+                    .filter(|(method, _, _)| method == "DELETE")
+                    .count(),
+                1
+            );
+            assert!(
+                requests
+                    .iter()
+                    .all(|(method, path, _)| method != "DELETE" || !path.contains("/jobs/"))
+            );
+        }
 
         let mut replies = exact_replies(
             vec![(200, job_json(Some("job-recorded"), false, None))],
