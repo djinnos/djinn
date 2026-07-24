@@ -214,6 +214,38 @@ resources:
 # writes mirror clones and task-run Job Pods read from them. The cache PVC is
 # similarly RWX so cargo/pnpm/pip caches survive across task runs.
 storage:
+  # ---------------------------------------------------------------------------
+  # Volume ownership contract (task pwrr / goxi)
+  # ---------------------------------------------------------------------------
+  # The mirrors/cache/projects volumes are written by TWO identities: the server
+  # (uid `ownerUid`) and the task-run + warm Job Pods (uid/gid 1000, plus the
+  # launcher-spawned child at uid 1001 with primary group 1000). They can only
+  # share those volumes if everything on them is group-owned by `artifactGid`
+  # and group-writable, with setgid on directories so newly created files
+  # INHERIT that group instead of the creator's.
+  #
+  # The chart guarantees this for a fresh install by normalizing the three
+  # volume ROOTS in the `fix-volume-perms` initContainer (O(1), non-recursive)
+  # and by giving the server pod supplementary membership in `artifactGid`.
+  # The worker binary re-validates the mounted result at startup and fails
+  # readiness if it does not hold — see
+  # `docs/VOLUME_OWNERSHIP_CONTRACT_RUNBOOK.md` for the one-time remediation of
+  # volumes that predate this contract.
+  ownership:
+    # GID that owns every artifact on the shared volumes. MUST equal
+    # `djinn_cgroup_launcher::child::ARTIFACT_GID` (the fsGroup the task-run and
+    # warm Pod renders pin). Changing it here without changing the binary
+    # constant breaks the contract in both directions.
+    artifactGid: 1000
+    # UID the djinn-server process runs as; it stays the owner of the volume
+    # roots so the server keeps unrestricted access to its own directories.
+    ownerUid: 10001
+    # Mode applied to the volume roots: setgid + rwxrwxr-x.
+    dirMode: "2775"
+    # Normalize the volume roots on every server pod start. Idempotent and O(1)
+    # — it touches the three roots only, never their contents. Disable only if
+    # an external process owns volume provisioning.
+    normalizeRoots: true
   # Mirrors are shared between the server (writer) and image-build + task-run
   # Jobs (readers). In prod this requires RWX storage; on single-node clusters
   # like kind, RWO PVCs work because RWO is enforced per-node, not per-pod.

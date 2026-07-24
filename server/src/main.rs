@@ -95,6 +95,17 @@ fn main() {
     // Install before CLI parsing and Tokio construction so startup panics are durable.
     djinn_telemetry::panic_capture::install();
 
+    // The server shares `mirrors`, `cache` and `projects` with the task-run and
+    // warm Job Pods, which write them as gid 1000 (task pwrr). Everything this
+    // process creates there must therefore stay group-writable: with the
+    // container default umask 022 a freshly cloned mirror lands 755/644 and the
+    // Pods' startup volume-contract check rejects it. 0002 clears only
+    // "other"-write, so new directories are 775 and new files 664; the setgid
+    // bit the chart puts on the volume roots supplies the group.
+    // SAFETY: `umask` takes a mode, cannot fail, and touches no memory. Applied
+    // once here, before any filesystem work or thread spawns.
+    unsafe { libc::umask(0o002) };
+
     if let Err(error) = djinn_server::allocator::validate_malloc_conf_from_env() {
         tracing::error!(%error, "invalid MALLOC_CONF");
         eprintln!("invalid MALLOC_CONF: {error}");

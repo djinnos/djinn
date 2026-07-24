@@ -160,6 +160,28 @@ storage:
 `accessMode` is immutable on an existing PVC — moving RWO → RWX means
 recreating/migrating the claim.
 
+### Ownership contract
+
+All three volumes are written by the server (uid `10001`) *and* by task-run /
+warm Job Pods (uid/gid `1000`, plus the launcher-spawned child at uid `1001`
+with primary group `1000`). Sharing them requires group ownership by the
+artifact GID, group-write, and setgid on directories so new files inherit the
+group:
+
+```yaml
+storage:
+  ownership:
+    artifactGid: 1000     # must match ARTIFACT_GID in the worker binary
+    ownerUid: 10001       # djinn-server's uid; stays the owner of the roots
+    dirMode: "2775"       # setgid + rwxrwxr-x
+    normalizeRoots: true  # O(1), non-recursive initContainer on every pod start
+```
+
+A fresh install is conforming out of the box. The worker validates the mounted
+result at startup and **fails readiness** if it is not — volumes that predate
+this contract need a one-time remediation pass. See the
+[shared-volume ownership contract runbook](../VOLUME_OWNERSHIP_CONTRACT_RUNBOOK.md).
+
 ## Secrets
 
 Every secret supports two delivery modes: inline values (rendered into a
