@@ -16,7 +16,8 @@ use djinn_supervisor::services::{
 use tokio::sync::{Semaphore, mpsc};
 
 use crate::build_lease::{
-    BuildLeaseService, LeaseOperation, LeaseTransactionPause, ManualLeaseClock,
+    BuildLeaseService, LeaseOperation, LeaseTelemetry, LeaseTelemetryConsumer,
+    LeaseTelemetryOutcome, LeaseTelemetryState, LeaseTransactionPause, ManualLeaseClock,
 };
 use crate::graph_warm_lease::BuildLeaseGraphWarmAdapter;
 
@@ -950,5 +951,346 @@ async fn recovery_reads_admission_epoch_and_reference_cap() {
         restarted.observed_epoch(),
         None,
         "a missing epoch row must leave the observed epoch unknown (fail closed)"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// u2oz — end-to-end cross-component invariant proving suite (cap-3 / cap-zero).
+//
+// The tests above prove each lease behaviour in isolation. The ones below prove
+// the WHOLE stack together under a single cap: task-invocation and graph-warm
+// consumers interleave on the one FIFO, the hard invariant (occupied never
+// exceeds the cap) holds across saturation and FIFO promotion, a restart reloads
+// occupied + queued rows AND the admission epoch before it admits again, and
+// every telemetry label the authority emits is a bounded enum (never a raw id).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Bounded-label recording telemetry: it can only ever receive the closed
+/// enum vocabulary (`LeaseOperation`, `LeaseTelemetryConsumer`,
+/// `LeaseTelemetryOutcome`, `LeaseTelemetryState`) plus integer counts. There is
+/// no seam through which a task id, warm-request id, or pod UID could reach a
+/// metric label — that is the structural guarantee AC4 asserts, and these
+/// captures let the tests confirm the emitted vocabulary stays inside the domain.
+#[derive(Default)]
+struct RecordingLeaseTelemetry {
+    operations: std::sync::Mutex<Vec<(LeaseOperation, LeaseTelemetryConsumer)>>,
+    outcomes: std::sync::Mutex<Vec<LeaseTelemetryOutcome>>,
+    states: std::sync::Mutex<Vec<(LeaseTelemetryState, u64)>>,
+}
+impl RecordingLeaseTelemetry {
+    fn recorded_consumer(&self, expected: LeaseTelemetryConsumer) -> bool {
+        self.operations
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(_, consumer)| *consumer == expected)
+    }
+    fn recorded_outcome(&self, expected: LeaseTelemetryOutcome) -> bool {
+        self.outcomes.lock().unwrap().contains(&expected)
+    }
+}
+impl LeaseTelemetry for RecordingLeaseTelemetry {
+    fn state(&self, state: LeaseTelemetryState, count: u64) {
+        self.states.lock().unwrap().push((state, count));
+    }
+    fn outcome(&self, outcome: LeaseTelemetryOutcome) {
+        self.outcomes.lock().unwrap().push(outcome);
+    }
+    fn operation(&self, operation: LeaseOperation, consumer: LeaseTelemetryConsumer) {
+        self.operations.lock().unwrap().push((operation, consumer));
+    }
+}
+
+async fn service_with_telemetry(
+    cap: i64,
+    telemetry: Arc<dyn LeaseTelemetry>,
+) -> (Arc<BuildLeaseService>, Arc<BuildLeaseRepository>) {
+    let repository = Arc::new(BuildLeaseRepository::new(
+        Database::open_in_memory().unwrap(),
+    ));
+    let service = Arc::new(BuildLeaseService::with_seams(
+        Arc::clone(&repository),
+        cap,
+        Arc::new(ManualLeaseClock::new(100)),
+        Arc::new(crate::build_lease::NoopLeaseTransactionPause),
+        telemetry,
+    ));
+    assert!(matches!(service.recover().await, LeaseResult::Status(_)));
+    assert!(matches!(service.set_cap(cap).await, LeaseResult::Status(_)));
+    (service, repository)
+}
+
+fn task(invocation: &str) -> LeaseIdentity {
+    LeaseIdentity::TaskInvocation(TaskInvocationLeaseIdentity {
+        task_id: "cap-three-task".into(),
+        task_run_id: "cap-three-run".into(),
+        invocation_id: invocation.into(),
+    })
+}
+
+/// AC1 + AC4: at cap 3, escalating task trees and graph-warm consumers share the
+/// one FIFO. Occupancy never exceeds 3 across saturation, and each release
+/// promotes exactly the oldest queued consumer (mixed task/warm FIFO). Every
+/// telemetry label emitted throughout is a bounded enum drawn from the closed
+/// vocabulary, and both consumer kinds plus the system operations are exercised.
+#[tokio::test]
+async fn cap_three_mixed_consumers_hold_invariant_and_release_promotes_fifo() {
+    let telemetry = Arc::new(RecordingLeaseTelemetry::default());
+    let (service, repository) = service_with_telemetry(3, telemetry.clone()).await;
+
+    async fn occupied(repository: &BuildLeaseRepository) -> i64 {
+        repository.snapshot().await.unwrap().occupied
+    }
+    async fn queued(repository: &BuildLeaseRepository) -> usize {
+        repository
+            .snapshot()
+            .await
+            .unwrap()
+            .rows
+            .iter()
+            .filter(|row| row.state == BuildLeaseState::Queued)
+            .count()
+    }
+
+    // Fill the three units with a warm / task / warm interleave.
+    let warm_a = match service.queue(request("warm-a", 0, 0)).await {
+        LeaseResult::Granted(grant) => grant.fencing_token,
+        other => panic!("warm A must grant, got {other:?}"),
+    };
+    let task_b = match service
+        .queue(LeaseQueueRequest {
+            identity: task("task-b"),
+            deadlines: LeaseDeadlines {
+                queue_deadline_ms: 0,
+                launch_deadline_ms: 0,
+            },
+        })
+        .await
+    {
+        LeaseResult::Granted(grant) => grant.fencing_token,
+        other => panic!("task B must grant, got {other:?}"),
+    };
+    let _warm_c = match service.queue(request("warm-c", 0, 0)).await {
+        LeaseResult::Granted(grant) => grant.fencing_token,
+        other => panic!("warm C must grant, got {other:?}"),
+    };
+    assert_eq!(occupied(&repository).await, 3, "three units fill the cap");
+
+    // The fourth (task) and fifth (warm) escalations queue behind the cap.
+    assert!(matches!(
+        service
+            .queue(LeaseQueueRequest {
+                identity: task("task-d"),
+                deadlines: LeaseDeadlines {
+                    queue_deadline_ms: 0,
+                    launch_deadline_ms: 0
+                },
+            })
+            .await,
+        LeaseResult::Queued(_)
+    ));
+    assert!(matches!(
+        service.queue(request("warm-e", 0, 0)).await,
+        LeaseResult::Queued(_)
+    ));
+    assert_eq!(
+        occupied(&repository).await,
+        3,
+        "queued escalations never breach the cap"
+    );
+    assert_eq!(queued(&repository).await, 2);
+
+    // Releasing warm A promotes exactly the oldest queued consumer (task D):
+    // occupancy is conserved at 3, and the FIFO ordering is honoured across
+    // consumer kinds — warm E stays queued behind task D.
+    assert!(matches!(
+        service
+            .release(LeaseReleaseRequest {
+                identity: warm("warm-a"),
+                fencing_token: warm_a,
+                candidate_cleanup: true,
+            })
+            .await,
+        LeaseResult::Released {
+            candidate_cleanup: true
+        }
+    ));
+    assert_eq!(occupied(&repository).await, 3, "release promotes one unit");
+    assert!(
+        matches!(
+            service.status(LeaseStatusRequest { identity: task("task-d") }).await,
+            LeaseResult::Status(status) if status.state == djinn_supervisor::services::LeaseState::Granted
+        ),
+        "task D (oldest queued) is promoted first"
+    );
+    assert!(
+        matches!(
+            service.status(LeaseStatusRequest { identity: warm("warm-e") }).await,
+            LeaseResult::Status(status) if status.state == djinn_supervisor::services::LeaseState::Queued
+        ),
+        "warm E stays queued behind task D"
+    );
+
+    // Releasing task B promotes warm E; occupancy again holds at 3.
+    assert!(matches!(
+        service
+            .release(LeaseReleaseRequest {
+                identity: task("task-b"),
+                fencing_token: task_b,
+                candidate_cleanup: true,
+            })
+            .await,
+        LeaseResult::Released { .. }
+    ));
+    assert_eq!(occupied(&repository).await, 3);
+    assert!(
+        matches!(
+            service.status(LeaseStatusRequest { identity: warm("warm-e") }).await,
+            LeaseResult::Status(status) if status.state == djinn_supervisor::services::LeaseState::Granted
+        ),
+        "warm E promotes once a second unit frees"
+    );
+
+    // AC4 (bounded labels): both consumer kinds and the system operations were
+    // recorded, and the captured domains are exactly the closed enum vocabulary.
+    assert!(telemetry.recorded_consumer(LeaseTelemetryConsumer::TaskInvocation));
+    assert!(telemetry.recorded_consumer(LeaseTelemetryConsumer::GraphWarm));
+    assert!(telemetry.recorded_consumer(LeaseTelemetryConsumer::System));
+    assert!(
+        telemetry.recorded_outcome(LeaseTelemetryOutcome::Granted),
+        "grants are recorded as a bounded outcome"
+    );
+    // The occupancy gauge (published on recover) never reports above the cap.
+    for (state, count) in telemetry.states.lock().unwrap().iter() {
+        if *state == LeaseTelemetryState::Occupied {
+            assert!(*count <= 3, "occupied gauge label never exceeds the cap");
+        }
+    }
+}
+
+/// AC4 (v1 restart): a fresh coordinator generation reloads occupied AND queued
+/// rows and the durable admission epoch (adopting its authoritative reference
+/// cap) BEFORE it admits again. The restarted authority is handed a deliberately
+/// wrong local cap of 0; it must converge on the epoch's cap of 3, conserve the
+/// three reloaded occupied units, keep the two reloaded queued rows, and refuse
+/// to admit beyond the reloaded occupancy.
+#[tokio::test]
+async fn cap_three_restart_reloads_occupied_queued_and_epoch_before_admission() {
+    use djinn_db::{AdmissionHandoffRepository, V0Mode, V1Mode};
+
+    let database = Database::open_in_memory().unwrap();
+    database.ensure_initialized().await.unwrap();
+    let handoff = Arc::new(AdmissionHandoffRepository::new(database.clone()));
+    // Commit an epoch carrying the authoritative reference cap of 3.
+    handoff
+        .set_modes_and_cap(0, V0Mode::Enforce, V1Mode::Shadow, Some(3))
+        .await
+        .unwrap();
+    let epoch = handoff.read().await.unwrap().unwrap().epoch;
+
+    let repository = Arc::new(BuildLeaseRepository::new(database.clone()));
+    let first =
+        BuildLeaseService::new(Arc::clone(&repository), 3).with_handoff_epoch(Arc::clone(&handoff));
+    assert!(matches!(first.recover().await, LeaseResult::Status(_)));
+
+    // Occupy three units (warm / warm / task) and queue two more.
+    let warm_a = match first.queue(request("warm-a", 0, 0)).await {
+        LeaseResult::Granted(grant) => grant.fencing_token,
+        other => panic!("expected grant, got {other:?}"),
+    };
+    assert!(matches!(
+        first.queue(request("warm-b", 0, 0)).await,
+        LeaseResult::Granted(_)
+    ));
+    assert!(matches!(
+        first
+            .queue(LeaseQueueRequest {
+                identity: task("task-c"),
+                deadlines: LeaseDeadlines {
+                    queue_deadline_ms: 0,
+                    launch_deadline_ms: 0
+                },
+            })
+            .await,
+        LeaseResult::Granted(_)
+    ));
+    assert!(matches!(
+        first
+            .queue(LeaseQueueRequest {
+                identity: task("task-d"),
+                deadlines: LeaseDeadlines {
+                    queue_deadline_ms: 0,
+                    launch_deadline_ms: 0
+                },
+            })
+            .await,
+        LeaseResult::Queued(_)
+    ));
+    assert!(matches!(
+        first.queue(request("warm-e", 0, 0)).await,
+        LeaseResult::Queued(_)
+    ));
+    assert_eq!(repository.snapshot().await.unwrap().occupied, 3);
+
+    // Restart: a brand-new generation over the same durable rows + epoch, handed
+    // the wrong local cap of 0.
+    let restarted =
+        BuildLeaseService::new(Arc::clone(&repository), 0).with_handoff_epoch(Arc::clone(&handoff));
+    assert_eq!(
+        restarted.observed_epoch(),
+        None,
+        "the epoch is unobserved before recovery"
+    );
+    assert!(matches!(restarted.recover().await, LeaseResult::Status(_)));
+    assert_eq!(
+        restarted.observed_epoch(),
+        Some(epoch),
+        "recovery observes the durable epoch before admitting"
+    );
+
+    let recovered = restarted.recovery_snapshot().await.unwrap();
+    assert_eq!(recovered.occupied, 3, "reloads the three occupied units");
+    assert_eq!(
+        recovered
+            .rows
+            .iter()
+            .filter(|row| row.state == BuildLeaseState::Queued)
+            .count(),
+        2,
+        "reloads both queued rows"
+    );
+    assert_eq!(
+        recovered.cap, 3,
+        "adopts the epoch reference cap, not the wrong local cap"
+    );
+
+    // Admission after restart is bounded by the reloaded occupancy: a fresh
+    // queue stays queued behind the three reloaded units.
+    assert!(matches!(
+        restarted.queue(request("warm-after-restart", 0, 0)).await,
+        LeaseResult::Queued(_)
+    ));
+    assert_eq!(restarted.recovery_snapshot().await.unwrap().occupied, 3);
+
+    // Releasing one reloaded unit promotes the oldest reloaded queued row (task
+    // D) under the adopted cap of 3 — proving the epoch cap, not the local 0,
+    // governs post-restart draining.
+    assert!(matches!(
+        restarted
+            .release(LeaseReleaseRequest {
+                identity: warm("warm-a"),
+                fencing_token: warm_a,
+                candidate_cleanup: true,
+            })
+            .await,
+        LeaseResult::Released { .. }
+    ));
+    assert_eq!(restarted.recovery_snapshot().await.unwrap().occupied, 3);
+    assert!(
+        matches!(
+            restarted.status(LeaseStatusRequest { identity: task("task-d") }).await,
+            LeaseResult::Status(status) if status.state == djinn_supervisor::services::LeaseState::Granted
+        ),
+        "the adopted cap of 3 drains the oldest reloaded queued row"
     );
 }
