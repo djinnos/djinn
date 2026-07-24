@@ -9,6 +9,9 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use base64::Engine as _;
 use djinn_sandbox::service_provisioning::{CONTROL_PROTOCOL_REVISION, Request, Response};
 use ring::rand::{SecureRandom, SystemRandom};
@@ -34,6 +37,8 @@ pub struct PostgresAdapter {
     operation_deadline: Duration,
     #[cfg(test)]
     pause_after_role: Arc<Mutex<Option<Duration>>>,
+    #[cfg(test)]
+    fail_rollback_attempts: Arc<AtomicUsize>,
 }
 
 #[derive(Clone)]
@@ -58,9 +63,28 @@ struct CreatedLease {
     environment: BTreeMap<String, String>,
 }
 
+/// Cleanup authority retained when provisioning may have created backend
+/// objects. Passwords are intentionally not retained here because cleanup
+/// never needs them.
+#[derive(Clone)]
+struct PartialTenant {
+    role: String,
+    database: String,
+}
+
+impl From<&Lease> for PartialTenant {
+    fn from(lease: &Lease) -> Self {
+        Self {
+            role: lease.role.clone(),
+            database: lease.database.clone(),
+        }
+    }
+}
+
 enum CreationState {
     Creating(Arc<Notify>),
     Created(CreatedLease),
+    CleanupPending(PartialTenant),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -91,6 +115,8 @@ impl PostgresAdapter {
             operation_deadline: OPERATION_DEADLINE,
             #[cfg(test)]
             pause_after_role: Arc::new(Mutex::new(None)),
+            #[cfg(test)]
+            fail_rollback_attempts: Arc::new(AtomicUsize::new(0)),
         })
     }
 
@@ -119,67 +145,139 @@ impl PostgresAdapter {
             attempt_id,
             lease_nonce,
         };
-        loop {
-            let notify = {
-                let mut creations = self.creations.lock().await;
-                match creations.get(&key) {
-                    Some(CreationState::Created(created)) => {
-                        return Ok((created.lease_id.clone(), created.environment.clone()));
-                    }
-                    Some(CreationState::Creating(notify)) => notify.clone(),
-                    None => {
-                        let notify = Arc::new(Notify::new());
-                        creations.insert(key.clone(), CreationState::Creating(notify.clone()));
-                        let adapter = self.clone();
-                        let task_key = key.clone();
-                        let task_notify = notify.clone();
-                        // This task, not the request future, owns provisioning and
-                        // rollback. A socket deadline cannot cancel cleanup.
-                        tokio::spawn(async move {
-                            adapter.complete_creation(task_key, task_notify).await;
-                        });
-                        notify
-                    }
+        let notify = {
+            let mut creations = self.creations.lock().await;
+            match creations.get(&key) {
+                Some(CreationState::Created(created)) => {
+                    return Ok((created.lease_id.clone(), created.environment.clone()));
                 }
-            };
-            if tokio::time::timeout(self.operation_deadline, notify.notified())
-                .await
-                .is_err()
-            {
-                return Err(AdapterError::Rejected);
+                Some(CreationState::Creating(notify)) => notify.clone(),
+                Some(CreationState::CleanupPending(partial)) => {
+                    let partial = partial.clone();
+                    let notify = Arc::new(Notify::new());
+                    creations.insert(key.clone(), CreationState::Creating(notify.clone()));
+                    let adapter = self.clone();
+                    let task_key = key.clone();
+                    let task_notify = notify.clone();
+                    // A retry first retries bounded cleanup. Do not discard the
+                    // partial tenant and create another one while it remains.
+                    tokio::spawn(async move {
+                        adapter
+                            .complete_cleanup(task_key, partial, task_notify)
+                            .await;
+                    });
+                    notify
+                }
+                None => {
+                    let notify = Arc::new(Notify::new());
+                    creations.insert(key.clone(), CreationState::Creating(notify.clone()));
+                    let adapter = self.clone();
+                    let task_key = key.clone();
+                    let task_notify = notify.clone();
+                    // This task, not the request future, owns provisioning and
+                    // rollback. A socket deadline cannot cancel cleanup.
+                    tokio::spawn(async move {
+                        adapter.complete_creation(task_key, task_notify).await;
+                    });
+                    notify
+                }
             }
+        };
+        if tokio::time::timeout(self.operation_deadline, notify.notified())
+            .await
+            .is_err()
+        {
+            return Err(AdapterError::Rejected);
+        }
+        match self.creations.lock().await.get(&key) {
+            Some(CreationState::Created(created)) => {
+                Ok((created.lease_id.clone(), created.environment.clone()))
+            }
+            // Cleanup either succeeded (the entry was removed) or remains
+            // pending for another retry. Neither case may create a new tenant
+            // as part of this request.
+            _ => Err(AdapterError::Rejected),
         }
     }
 
     async fn complete_creation(&self, key: CreationKey, notify: Arc<Notify>) {
-        let result = self.create_backend().await;
+        let Ok((lease_id, lease)) = self.new_lease() else {
+            self.creations.lock().await.remove(&key);
+            notify.notify_waiters();
+            return;
+        };
+        if self.provision(&lease).await.is_err() {
+            self.finish_cleanup(key, PartialTenant::from(&lease), notify)
+                .await;
+            return;
+        }
+        let Ok(connection_url) = self.lease_url(&lease) else {
+            self.finish_cleanup(key, PartialTenant::from(&lease), notify)
+                .await;
+            return;
+        };
+        let environment = self
+            .environment_names
+            .iter()
+            .cloned()
+            .map(|name| (name, connection_url.clone()))
+            .collect();
+        self.leases.lock().await.insert(lease_id.clone(), lease);
+        self.creations.lock().await.insert(
+            key,
+            CreationState::Created(CreatedLease {
+                lease_id,
+                environment,
+            }),
+        );
+        notify.notify_waiters();
+    }
+
+    async fn complete_cleanup(
+        &self,
+        key: CreationKey,
+        partial: PartialTenant,
+        notify: Arc<Notify>,
+    ) {
+        self.finish_cleanup(key, partial, notify).await;
+    }
+
+    async fn finish_cleanup(&self, key: CreationKey, partial: PartialTenant, notify: Arc<Notify>) {
+        let cleanup_succeeded = self
+            .rollback(&partial.database, &partial.role)
+            .await
+            .is_ok();
         let mut creations = self.creations.lock().await;
-        match result {
-            Ok((lease_id, lease, environment)) => {
-                self.leases.lock().await.insert(lease_id.clone(), lease);
-                creations.insert(
-                    key,
-                    CreationState::Created(CreatedLease {
-                        lease_id,
-                        environment,
-                    }),
-                );
-            }
-            Err(_) => {
-                creations.remove(&key);
-            }
+        if cleanup_succeeded {
+            creations.remove(&key);
+        } else {
+            // Preserve generated identifiers until cleanup succeeds. This is
+            // the sole authority capable of removing a partial tenant.
+            creations.insert(key, CreationState::CleanupPending(partial));
         }
         drop(creations);
         notify.notify_waiters();
     }
 
-    async fn create_backend(
-        &self,
-    ) -> Result<(String, Lease, BTreeMap<String, String>), AdapterError> {
+    fn new_lease(&self) -> Result<(String, Lease), AdapterError> {
         let lease_id = generated(LEASE_PREFIX, 20)?;
         let role = generated(ROLE_PREFIX, 20)?;
         let database = generated(DATABASE_PREFIX, 20)?;
         let password = random_password()?;
+        Ok((
+            lease_id,
+            Lease {
+                role,
+                database,
+                password,
+            },
+        ))
+    }
+
+    async fn provision(&self, lease: &Lease) -> Result<(), AdapterError> {
+        let role = &lease.role;
+        let database = &lease.database;
+        let password = &lease.password;
         let provision = async {
             let mut admin = self.admin_connection().await?;
             sqlx::query(&format!(
@@ -204,43 +302,43 @@ impl PostgresAdapter {
             .map_err(|_| AdapterError::Rejected)?;
             Ok::<(), AdapterError>(())
         };
-        if tokio::time::timeout(self.operation_deadline, provision)
+        tokio::time::timeout(self.operation_deadline, provision)
             .await
             .ok()
             .and_then(Result::ok)
-            .is_none()
-        {
-            // A timed-out SQL connection is dropped before cleanup. Use a
-            // fresh connection so a stalled database creation cannot strand a
-            // previously-created role.
-            self.rollback(&database, &role).await;
-            return Err(AdapterError::Rejected);
-        }
-
-        let lease = Lease {
-            role,
-            database,
-            password,
-        };
-        let connection_url = self.lease_url(&lease)?;
-        let environment = self
-            .environment_names
-            .iter()
-            .cloned()
-            .map(|name| (name, connection_url.clone()))
-            .collect();
-        Ok((lease_id, lease, environment))
+            .ok_or(AdapterError::Rejected)
     }
 
-    async fn rollback(&self, database: &str, role: &str) {
-        if let Ok(mut admin) = self.admin_connection().await {
-            let _ = cleanup(&mut admin, database, role).await;
+    async fn rollback(&self, database: &str, role: &str) -> Result<(), AdapterError> {
+        #[cfg(test)]
+        if self
+            .fail_rollback_attempts
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                remaining.checked_sub(1)
+            })
+            .is_ok()
+        {
+            return Err(AdapterError::Rejected);
         }
+        // Cleanup is independently bounded; on timeout its retained partial
+        // state makes the next identical request retry safely.
+        tokio::time::timeout(OPERATION_DEADLINE, async {
+            let mut admin = self.admin_connection().await?;
+            cleanup(&mut admin, database, role).await
+        })
+        .await
+        .map_err(|_| AdapterError::Rejected)?
     }
 
     #[cfg(test)]
     async fn pause_after_creating_role(&self, pause: Duration) {
         *self.pause_after_role.lock().await = Some(pause);
+    }
+
+    #[cfg(test)]
+    fn fail_next_rollbacks(&self, attempts: usize) {
+        self.fail_rollback_attempts
+            .store(attempts, Ordering::SeqCst);
     }
 
     #[cfg(test)]
@@ -534,9 +632,9 @@ mod tests {
         );
         let (first_id, first_env) = first.unwrap();
         let (second_id, second_env) = second.unwrap();
+        assert_ne!(first_id, second_id);
         let first_url = &first_env["DATABASE_URL"];
         let second_url = &second_env["DATABASE_URL"];
-        assert_ne!(first_url, second_url);
         let mut first = PgConnection::connect(first_url).await.unwrap();
         sqlx::query("CREATE TABLE only_first(value integer)")
             .execute(&mut first)
@@ -584,10 +682,27 @@ mod tests {
         let first = dispatch(request(), adapter.clone()).await;
         // Model a lost first response: retry the identical protocol request.
         let retry = dispatch(request(), adapter.clone()).await;
-        assert_eq!(first, retry);
-        let Response::Created { lease_id, .. } = retry else {
-            panic!("CreateFresh did not succeed");
+        let Response::Created {
+            lease_id: first_lease_id,
+            environment: first_environment,
+            ..
+        } = first
+        else {
+            panic!("initial CreateFresh did not succeed");
         };
+        let Response::Created {
+            lease_id,
+            environment: retry_environment,
+            ..
+        } = retry
+        else {
+            panic!("retried CreateFresh did not succeed");
+        };
+        assert_eq!(first_lease_id, lease_id);
+        assert_eq!(
+            first_environment.keys().collect::<Vec<_>>(),
+            retry_environment.keys().collect::<Vec<_>>()
+        );
         assert_eq!(adapter.leases.lock().await.len(), 1);
         adapter.delete(&lease_id).await.unwrap();
     }
@@ -615,6 +730,16 @@ mod tests {
                 .await,
             Err(AdapterError::Rejected)
         );
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if adapter.creations.lock().await.is_empty() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("background cleanup did not finish");
         let after: i64 =
             sqlx::query_scalar("SELECT count(*) FROM pg_roles WHERE rolname LIKE 'djinn_role_%'")
                 .fetch_one(&mut admin)
@@ -622,5 +747,71 @@ mod tests {
                 .unwrap();
         assert_eq!(after, before);
         assert!(adapter.leases.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn failed_rollback_retains_authority_until_a_retry_cleans_it() {
+        let Some(url) = std::env::var("TEST_POSTGRES_URL").ok() else {
+            return;
+        };
+        let adapter = PostgresAdapter::new(&url, vec!["DATABASE_URL".into()])
+            .unwrap()
+            .with_operation_deadline(Duration::from_millis(25));
+        let mut admin = PgConnection::connect(&url).await.unwrap();
+        let before: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM pg_roles WHERE rolname LIKE 'djinn_role_%'")
+                .fetch_one(&mut admin)
+                .await
+                .unwrap();
+        adapter
+            .pause_after_creating_role(Duration::from_millis(100))
+            .await;
+        adapter.fail_next_rollbacks(1);
+        assert_eq!(
+            adapter
+                .create("cleanup_attempt".into(), "cleanup_nonce".into())
+                .await,
+            Err(AdapterError::Rejected)
+        );
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if matches!(
+                    adapter.creations.lock().await.get(&CreationKey {
+                        attempt_id: "cleanup_attempt".into(),
+                        lease_nonce: "cleanup_nonce".into(),
+                    }),
+                    Some(CreationState::CleanupPending(_))
+                ) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("partial cleanup authority was discarded");
+        // The identical request retries cleanup instead of creating a second
+        // tenant while the first role/database is still reachable only here.
+        assert_eq!(
+            adapter
+                .create("cleanup_attempt".into(), "cleanup_nonce".into())
+                .await,
+            Err(AdapterError::Rejected)
+        );
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if adapter.creations.lock().await.is_empty() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("retried cleanup did not finish");
+        let after: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM pg_roles WHERE rolname LIKE 'djinn_role_%'")
+                .fetch_one(&mut admin)
+                .await
+                .unwrap();
+        assert_eq!(after, before);
     }
 }
