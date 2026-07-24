@@ -92,6 +92,14 @@ pub enum EnvironmentConfigError {
     },
     #[error("{field}: duplicate name after normalization: {name:?}")]
     DuplicateName { field: String, name: String },
+    #[error("{field}: value {value:?} is not a valid Kubernetes resource quantity")]
+    InvalidQuantity { field: String, value: String },
+    #[error("{field}: request {request:?} exceeds limit {limit:?}")]
+    RequestExceedsLimit {
+        field: String,
+        request: String,
+        limit: String,
+    },
 }
 
 pub type EnvResult<T> = std::result::Result<T, EnvironmentConfigError>;
@@ -163,6 +171,13 @@ pub struct EnvironmentConfig {
     /// is a registered skill identifier.
     #[serde(default)]
     pub global_skills: Vec<String>,
+    /// Optional per-project CPU/memory overrides for the task-run and warm
+    /// Pods, layered over the deployment-wide defaults. `None` (the default)
+    /// keeps every kind on its deployment default. Task and warm blocks resolve
+    /// independently; the resolved quantities are rendered into the k8s Job/Pod
+    /// specs by `djinn-k8s`. See [`crate::resources::BuildResources`].
+    #[serde(default)]
+    pub build_resources: Option<crate::resources::BuildResources>,
 }
 
 impl EnvironmentConfig {
@@ -180,6 +195,7 @@ impl EnvironmentConfig {
             cargo_cache_policy: default_cargo_cache_policy(),
             agent_mcp_defaults: BTreeMap::new(),
             global_skills: Vec::new(),
+            build_resources: None,
         }
     }
 
@@ -337,6 +353,9 @@ impl EnvironmentConfig {
         self.lifecycle.validate()?;
         if let Some(policy) = &self.cargo_cache_policy {
             policy.validate()?;
+        }
+        if let Some(build_resources) = &self.build_resources {
+            build_resources.validate()?;
         }
         Ok(())
     }

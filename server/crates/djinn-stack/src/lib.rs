@@ -16,6 +16,7 @@ pub mod frameworks;
 pub mod heuristics;
 pub mod languages;
 pub mod manifests;
+pub mod resources;
 pub mod schema;
 pub mod slug;
 pub mod test_runners;

@@ -176,6 +176,20 @@ pub struct KubernetesConfig {
     /// misconfigured node profile fails closed at dispatch BEFORE any user code
     /// executes. Overridable via `DJINN_K8S_CGROUP_DELEGATION_PROFILE`.
     pub cgroup_delegation_profile: String,
+    /// Administrator-configured hard bounds for per-project `build_resources`
+    /// overrides on the **task-run** Pod. Empty (the default) leaves every axis
+    /// unbounded — a per-project override is only bounded by request ≤ limit.
+    /// A resolved request below `cpu_min`/`memory_min` or a resolved limit above
+    /// `cpu_max`/`memory_max` fails closed at resolution (no Job created).
+    /// Overridable via `DJINN_K8S_TASK_{CPU,MEMORY}_{MIN,MAX}`.
+    #[serde(default)]
+    pub task_resource_bounds: crate::build_resources::ResourceBounds,
+    /// Administrator-configured hard bounds for per-project `build_resources`
+    /// overrides on the **warm** Pod. Same semantics as
+    /// [`Self::task_resource_bounds`]; overridable via
+    /// `DJINN_K8S_WARM_{CPU,MEMORY}_{MIN,MAX}`.
+    #[serde(default)]
+    pub warm_resource_bounds: crate::build_resources::ResourceBounds,
     /// Volume-ownership mode used for the workspace/cache/mirror surfaces. v1
     /// requires `"fsgroup-on-root-mismatch"`
     /// ([`crate::launcher::VOLUME_OWNERSHIP_ON_ROOT_MISMATCH`]): `fsGroup =
@@ -235,6 +249,11 @@ impl KubernetesConfig {
             // to anything the launcher's runtime readiness check would reject.
             cgroup_delegation_profile: crate::launcher::CGROUP_PROFILE_V2_CPU_ONLY.into(),
             volume_ownership_mode: crate::launcher::VOLUME_OWNERSHIP_ON_ROOT_MISMATCH.into(),
+            // Unbounded by default: per-project build_resources overrides are
+            // gated only by request <= limit until an operator configures the
+            // per-kind DJINN_K8S_{TASK,WARM}_{CPU,MEMORY}_{MIN,MAX} envs.
+            task_resource_bounds: crate::build_resources::ResourceBounds::default(),
+            warm_resource_bounds: crate::build_resources::ResourceBounds::default(),
         }
     }
 
@@ -421,6 +440,18 @@ impl KubernetesConfig {
         if let Ok(v) = std::env::var("DJINN_K8S_VOLUME_OWNERSHIP_MODE") {
             cfg.volume_ownership_mode = v;
         }
+        // Per-project build_resources hard bounds (per Pod kind, per resource).
+        // Unset leaves the axis unbounded. Empty strings are ignored so an
+        // operator can clear a bound by exporting the var empty.
+        let bound = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
+        cfg.task_resource_bounds.cpu_min = bound("DJINN_K8S_TASK_CPU_MIN");
+        cfg.task_resource_bounds.cpu_max = bound("DJINN_K8S_TASK_CPU_MAX");
+        cfg.task_resource_bounds.memory_min = bound("DJINN_K8S_TASK_MEMORY_MIN");
+        cfg.task_resource_bounds.memory_max = bound("DJINN_K8S_TASK_MEMORY_MAX");
+        cfg.warm_resource_bounds.cpu_min = bound("DJINN_K8S_WARM_CPU_MIN");
+        cfg.warm_resource_bounds.cpu_max = bound("DJINN_K8S_WARM_CPU_MAX");
+        cfg.warm_resource_bounds.memory_min = bound("DJINN_K8S_WARM_MEMORY_MIN");
+        cfg.warm_resource_bounds.memory_max = bound("DJINN_K8S_WARM_MEMORY_MAX");
         cfg
     }
 }

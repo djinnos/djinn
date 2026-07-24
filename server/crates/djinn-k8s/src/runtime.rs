@@ -676,7 +676,28 @@ impl SessionRuntime for KubernetesRuntime {
         //     role-classed CPU request (light vs build-capable). `None` (an
         //     empty sequence) fails safe to build-capable in the renderer.
         let role = spec.flow.role_sequence().first().copied();
-        let job = build_task_run_job_with_read_sources(
+        // Resolve per-project build_resources overrides for the task-run Pod
+        // BEFORE the Job is built: a malformed / request-above-limit /
+        // out-of-bounds override fails closed here so no Job is ever created.
+        let role_class = crate::launcher::RoleResourceClass::for_role(role);
+        let resolved_task_resources = match crate::build_resources::resolve_task_run_resources(
+            &self.config,
+            role_class,
+            effective_env_config
+                .build_resources
+                .as_ref()
+                .and_then(|b| b.task.as_ref()),
+            &self.config.task_resource_bounds,
+        ) {
+            Ok(resources) => resources,
+            Err(error) => {
+                self.drop_pending(&task_run_id_str).await;
+                return Err(RuntimeError::Prepare(format!(
+                    "build_resources resolution failed for task-run: {error}"
+                )));
+            }
+        };
+        let mut job = build_task_run_job_with_read_sources(
             &self.config,
             &task_run_id,
             &spec.project_id,
@@ -688,6 +709,7 @@ impl SessionRuntime for KubernetesRuntime {
             role,
             read_source_cache_sub_path.as_deref(),
         );
+        crate::build_resources::apply_resolved_resources(&mut job, resolved_task_resources);
         let jobs: Api<Job> = Api::namespaced(self.client.clone(), ns);
         let created_job = match jobs.create(&PostParams::default(), &job).await {
             Ok(j) => j,

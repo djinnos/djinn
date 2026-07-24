@@ -728,16 +728,46 @@ impl WarmDispatch {
             return;
         }
 
-        let cargo_cache_policy: Option<djinn_stack::environment::CargoCachePolicy> = {
+        let (cargo_cache_policy, warm_build_resources): (
+            Option<djinn_stack::environment::CargoCachePolicy>,
+            Option<djinn_stack::resources::BuildResourceOverrides>,
+        ) = {
             let repo =
                 ProjectRepository::new(self.db.clone(), djinn_core::events::EventBus::noop());
             match repo.get_environment_config(project_id).await {
                 Ok(Some(raw)) => {
-                    serde_json::from_str::<djinn_stack::environment::EnvironmentConfig>(&raw)
-                        .ok()
-                        .and_then(|cfg| cfg.cargo_cache_policy)
+                    match serde_json::from_str::<djinn_stack::environment::EnvironmentConfig>(&raw)
+                    {
+                        Ok(cfg) => (
+                            cfg.cargo_cache_policy,
+                            cfg.build_resources.and_then(|b| b.warm),
+                        ),
+                        Err(_) => (None, None),
+                    }
                 }
-                _ => None,
+                _ => (None, None),
+            }
+        };
+
+        // Resolve per-project build_resources overrides for the warm Pod. A
+        // bad override fails closed: no warm Job is created this cycle.
+        let resolved_warm_resources = match crate::build_resources::resolve_warm_resources(
+            &self.config,
+            warm_build_resources.as_ref(),
+            &self.config.warm_resource_bounds,
+        ) {
+            Ok(resources) => resources,
+            Err(error) => {
+                warn!(
+                    project_id,
+                    %error,
+                    "K8sGraphWarmer: build_resources resolution failed; skipping warm Job"
+                );
+                let mut guard = self.in_flight.lock().await;
+                if let Some(n) = guard.remove(project_id) {
+                    n.notify_waiters();
+                }
+                return;
             }
         };
 
@@ -800,6 +830,7 @@ impl WarmDispatch {
                 cargo_cache_policy.as_ref(),
             ),
         };
+        crate::build_resources::apply_resolved_resources(&mut job, resolved_warm_resources);
         stamp_admission_identity(&mut job, &admission_request);
         let namespace = self.config.namespace.clone();
         let permit = match (lease_grant.as_ref(), self.admission.as_ref()) {
