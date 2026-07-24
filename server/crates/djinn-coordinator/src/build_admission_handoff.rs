@@ -173,9 +173,12 @@ impl HandoffSnapshot {
 ///
 /// Any read failure, stale acknowledgement, or overlap that is not the durable
 /// overlap phase is conservative.  Only a *committed* `InvocationPrimary` row
-/// releases emergency enforcement.  A missing row intentionally does not
-/// invent rollout state: it retains the configured standalone mode, except
-/// that two simultaneously observed authorities are an anomaly.
+/// **whose recorded `v1_mode` is enforcing** releases emergency enforcement; an
+/// invocation acknowledgement on a row where v1 is off or shadowing never
+/// does, because such a row would leave no enforcing authority at all.  A
+/// missing row intentionally does not invent rollout state: it retains the
+/// configured standalone mode, except that two simultaneously observed
+/// authorities are an anomaly.
 #[must_use]
 pub fn evaluate_handoff(
     row: Result<Option<AdmissionHandoffRow>, ()>,
@@ -247,9 +250,21 @@ pub fn evaluate_handoff(
                         EmergencyAuthorityDecision::RequiredFailClosed,
                         Some(row),
                     ),
+                    // Releasing v0 requires v1 to be *both* acknowledged and
+                    // actually enforcing. An acknowledgement alone is never
+                    // sufficient evidence: the invocation-side projection
+                    // refuses to lift a v1 that is off or merely shadowing, so
+                    // a durable row that reached invocation_primary with a
+                    // non-enforcing v1 would otherwise leave zero enforcing
+                    // authorities. That row is out of protocol, and the
+                    // invariant does not depend on it being unreachable.
                     AdmissionHandoffPhase::InvocationPrimary => (
                         HandoffState::InvocationPrimary,
-                        EmergencyAuthorityDecision::MayDisable,
+                        if row.v1_mode.is_enforcing() {
+                            EmergencyAuthorityDecision::MayDisable
+                        } else {
+                            EmergencyAuthorityDecision::RequiredFailClosed
+                        },
                         Some(row),
                     ),
                     AdmissionHandoffPhase::RollbackOverlap => (
@@ -434,11 +449,16 @@ mod tests {
 
     #[test]
     fn every_persisted_phase_has_a_deterministic_emergency_decision() {
+        use djinn_db::{V0Mode, V1Mode};
+        // Each row carries the v1 mode the operator executor actually records
+        // for that phase: off at the v0 baseline, enforcing from the moment the
+        // overlap is armed through the rollback overlap.
         let cases = [
             (
                 AdmissionHandoffPhase::EmergencyPrimary,
                 true,
                 false,
+                V1Mode::Off,
                 HandoffState::EmergencyPrimary,
                 EmergencyAuthorityDecision::RequiredFailClosed,
             ),
@@ -446,6 +466,7 @@ mod tests {
                 AdmissionHandoffPhase::ForwardOverlap,
                 true,
                 true,
+                V1Mode::Enforce,
                 HandoffState::ForwardOverlap,
                 EmergencyAuthorityDecision::RequiredFailClosed,
             ),
@@ -453,6 +474,7 @@ mod tests {
                 AdmissionHandoffPhase::InvocationPrimary,
                 false,
                 true,
+                V1Mode::Enforce,
                 HandoffState::InvocationPrimary,
                 EmergencyAuthorityDecision::MayDisable,
             ),
@@ -460,13 +482,20 @@ mod tests {
                 AdmissionHandoffPhase::RollbackOverlap,
                 true,
                 true,
+                V1Mode::Enforce,
                 HandoffState::RollbackOverlap,
                 EmergencyAuthorityDecision::RequiredFailClosed,
             ),
         ];
-        for (phase, emergency_ack, invocation_ack, state, decision) in cases {
+        for (phase, emergency_ack, invocation_ack, v1_mode, state, decision) in cases {
             let snapshot = evaluate_handoff(
-                Ok(Some(row(phase, emergency_ack, invocation_ack))),
+                Ok(Some(row_with_modes(
+                    phase,
+                    emergency_ack,
+                    invocation_ack,
+                    V0Mode::Enforce,
+                    v1_mode,
+                ))),
                 BuildAdmissionMode::Enforce,
                 true,
                 BuildAdmissionReadiness::Healthy,
@@ -475,6 +504,96 @@ mod tests {
             assert_eq!(snapshot.state, state);
             assert_eq!(snapshot.emergency, decision);
         }
+    }
+
+    /// The out-of-protocol row goxi's invariant must survive: a committed
+    /// `invocation_primary` phase carrying a current invocation acknowledgement
+    /// while the recorded `v1_mode` is not enforcing. The invocation-side
+    /// projection refuses to lift such a row, so releasing v0 here would leave
+    /// zero enforcing authorities.
+    #[test]
+    fn invocation_primary_never_releases_v0_while_v1_is_not_enforcing() {
+        use djinn_db::{V0Mode, V1Mode};
+        for v1_mode in [V1Mode::Off, V1Mode::Shadow] {
+            let out_of_protocol = row_with_modes(
+                AdmissionHandoffPhase::InvocationPrimary,
+                false,
+                true,
+                V0Mode::Enforce,
+                v1_mode,
+            );
+            // The row is complete for its phase: the invocation authority has
+            // acknowledged the exact current epoch, so nothing else fails it
+            // closed.
+            assert_eq!(
+                out_of_protocol.invocation_ack_epoch,
+                Some(out_of_protocol.epoch)
+            );
+            let snapshot = evaluate_handoff(
+                Ok(Some(out_of_protocol)),
+                BuildAdmissionMode::Enforce,
+                true,
+                BuildAdmissionReadiness::Healthy,
+                // The invocation authority is not lifting, exactly as
+                // `evaluate_invocation_lift` projects a non-enforcing v1.
+                InvocationAuthorityObservation::default(),
+            );
+            assert_eq!(snapshot.state, HandoffState::InvocationPrimary);
+            assert_ne!(
+                snapshot.emergency,
+                EmergencyAuthorityDecision::MayDisable,
+                "v0 must not be released while v1 is {v1_mode:?}"
+            );
+            assert_eq!(
+                snapshot.emergency,
+                EmergencyAuthorityDecision::RequiredFailClosed,
+                "{v1_mode:?}: the emergency authority stays required"
+            );
+            // The invariant itself: at least one authority still enforces.
+            let v0_enforcing = snapshot.emergency != EmergencyAuthorityDecision::MayDisable;
+            assert!(
+                v0_enforcing,
+                "{v1_mode:?}: at least one enforcing authority must remain"
+            );
+            // The condition is the recorded mode, not the observation: even an
+            // authority that claims to be enforcing cannot release v0 while the
+            // durable row says v1 is not.
+            assert_eq!(
+                evaluate_handoff(
+                    Ok(Some(row_with_modes(
+                        AdmissionHandoffPhase::InvocationPrimary,
+                        false,
+                        true,
+                        V0Mode::Enforce,
+                        v1_mode,
+                    ))),
+                    BuildAdmissionMode::Enforce,
+                    true,
+                    BuildAdmissionReadiness::Healthy,
+                    InvocationAuthorityObservation { enforcing: true },
+                )
+                .emergency,
+                EmergencyAuthorityDecision::RequiredFailClosed,
+            );
+        }
+        // The genuine cutover is unchanged: an enforcing v1 still releases v0.
+        assert_eq!(
+            evaluate_handoff(
+                Ok(Some(row_with_modes(
+                    AdmissionHandoffPhase::InvocationPrimary,
+                    false,
+                    true,
+                    V0Mode::Observe,
+                    V1Mode::Enforce,
+                ))),
+                BuildAdmissionMode::Enforce,
+                true,
+                BuildAdmissionReadiness::Healthy,
+                InvocationAuthorityObservation { enforcing: true },
+            )
+            .emergency,
+            EmergencyAuthorityDecision::MayDisable,
+        );
     }
 
     #[test]

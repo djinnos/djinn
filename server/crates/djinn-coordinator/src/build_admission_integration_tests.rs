@@ -972,6 +972,22 @@ async fn assert_handoff_restart_snapshot(
 #[tokio::test]
 async fn handoff_crash_matrix_preserves_authority_and_epoch_guards() {
     let repo = AdmissionHandoffRepository::new(Database::open_in_memory().unwrap());
+    // The matrix walks a genuine forward cutover, so the invocation authority is
+    // armed to enforce before any phase advances — exactly as the operator
+    // executor arms it while the row is still emergency-primary. Without it the
+    // invocation-primary rows below would be an out-of-protocol state that can
+    // never release v0, because v1 would not actually be enforcing. Arming
+    // clears both acknowledgements and bumps the epoch, which is precisely the
+    // un-acknowledged state the first expectation asserts.
+    let seeded = repo.read().await.unwrap().unwrap();
+    repo.set_modes_and_cap(
+        seeded.epoch,
+        djinn_db::V0Mode::Enforce,
+        djinn_db::V1Mode::Enforce,
+        None,
+    )
+    .await
+    .unwrap();
     let expectations = [
         (
             AdmissionHandoffPhase::EmergencyPrimary,
