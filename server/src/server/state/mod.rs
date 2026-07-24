@@ -4151,6 +4151,25 @@ mod build_admission_config_tests {
                 cap: 3,
             });
             let repository = handoff_repository(&state);
+            // A real cutover arms the invocation authority to enforce while the
+            // row is still emergency-primary, so the invocation-primary case is
+            // the committed cutover rather than a row where v1 never actually
+            // took over — the emergency controller is released only when some
+            // other authority is genuinely enforcing.
+            let seeded = repository
+                .read()
+                .await
+                .expect("read handoff")
+                .expect("seeded row");
+            repository
+                .set_modes_and_cap(
+                    seeded.epoch,
+                    djinn_db::V0Mode::Enforce,
+                    djinn_db::V1Mode::Enforce,
+                    None,
+                )
+                .await
+                .expect("arm v1 enforce");
             advance_handoff(&repository, phase).await;
             complete_handoff_phase(&repository).await;
             state.initialize_build_admission_handoff().await;
