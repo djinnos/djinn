@@ -1237,6 +1237,7 @@ version = "0.1.0"
 dependencies = [
  "libc",
  "thiserror 2.0.18",
+ "workspace-hack",
 ]
 
 [[package]]
@@ -7371,6 +7372,7 @@ dependencies = [
  "chrono",
  "console",
  "crossbeam-utils",
+ "deranged",
  "digest 0.10.7",
  "either",
  "errno",
@@ -7380,6 +7382,7 @@ dependencies = [
  "futures-executor",
  "futures-io",
  "futures-sink",
+ "futures-task",
  "futures-util",
  "getrandom 0.4.3",
  "git2",
@@ -7425,8 +7428,10 @@ dependencies = [
  "sqlx-postgres",
  "stable_deref_trait",
  "syn 2.0.119",
+ "sync_wrapper",
  "thiserror 2.0.18",
  "time",
+ "time-macros",
  "tokio",
  "tokio-rustls",
  "tokio-stream",

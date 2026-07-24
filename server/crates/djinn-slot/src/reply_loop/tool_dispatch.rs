@@ -721,5 +721,8 @@ async fn collect_tool_results_internal(
 }
 
 #[cfg(test)]
+#[path = "tool_dispatch_budget_tests.rs"]
+mod tool_dispatch_budget_tests;
+#[cfg(test)]
 #[path = "tool_dispatch_tests.rs"]
 mod tool_dispatch_tests;
