@@ -44,15 +44,16 @@ data:
           if !contains(.message, "\n") && !contains(.message, "\r") && !contains(.message, "djinn.panic_summary.v1") {
             json, err = parse_json(.message)
             if err == null && is_object(json) {
-              for_each(object: json) -> |key, value| {
+              for_each(json) -> |key, value| {
                 normalized = replace(downcase(string!(key)), r'-', "_")
                 if contains(normalized, "authorization") || contains(normalized, "apikey") || contains(normalized, "api_key") || contains(normalized, "access_token") || contains(normalized, "secret") || contains(normalized, "bearer") || contains(normalized, "password") || contains(normalized, "passwd") {
                   json[key] = "***REDACTED***"
-                } else if (key == "statement" || key == "sql" || key == "query" || key == "request_body" || key == "response_body" || key == "body") && is_string(value) && strlen!(value) > 2048 {
-                  original_bytes = strlen!(value)
+                } else if (key == "statement" || key == "sql" || key == "query" || key == "request_body" || key == "response_body" || key == "body") && is_string(value) && length(value) > 2048 {
+                  original_bytes = length(value)
                   # slice is UTF-8 boundary-safe in VRL; the marker exposes the
                   # pre-cap byte count for forensic interpretation.
-                  json[key] = "{{ "{{" }} slice!(value, 0, 2048) {{ "}}" }}…[FIELD_TRUNCATED original_bytes={{ "{{" }} original_bytes {{ "}}" }}]"
+                  capped = slice!(value, 0, 2048)
+                  json[key] = capped + "…[FIELD_TRUNCATED original_bytes=" + to_string(original_bytes) + "]"
                 }
               }
               .message = encode_json(json)

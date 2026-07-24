@@ -41,8 +41,14 @@ for expected in ('automountServiceAccountToken: false', 'mountPath: /source/pods
                  'readOnlyRootFilesystem: true', 'allowPrivilegeEscalation: false',
                  'drop: ["ALL"]', 'workload-type: djinn', 'key: workload-type',
                  'uri: http://127.0.0.1:8687/ingest', 'retry_statuses: [507]',
-                 'max_size: 67108864', 'when_full: drop_newest'):
+                 'max_size: 67108864', 'when_full: drop_newest',
+                 'for_each(json) -> |key, value| {', 'original_bytes = length(value)',
+                 'capped = slice!(value, 0, 2048)',
+                 'to_string(original_bytes)'):
     assert expected in text, expected
+assert 'for_each(object:' not in text
+assert 'strlen!' not in text
+assert '{{ slice!' not in text
 vector = text[text.index('- name: vector'):text.index('- name: rotator')]
 rotator = text[text.index('- name: rotator'):text.index('volumes:')]
 assert '/source/pods' in vector and '/store' not in vector
