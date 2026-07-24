@@ -56,6 +56,7 @@ pub mod cargo_warm_base_gc;
 pub(crate) mod ci_preflight_gate;
 pub mod ci_reproduction;
 pub mod context;
+pub mod disk_admission;
 pub mod dispatch_pause;
 pub mod doctor;
 pub mod environment;
@@ -118,6 +119,7 @@ pub async fn record_supervisor_rework_reopen(
 
 pub mod resource_monitor;
 pub mod roles;
+pub mod run_dir_reconcile;
 pub mod supervisor_impl;
 pub mod task_merge;
 pub(crate) mod tripwires;

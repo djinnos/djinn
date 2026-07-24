@@ -184,6 +184,21 @@ const BUILD_ADMISSION_HANDOFF_WARNING_REASONS: [&str; 3] =
     ["unexpected_overlap", "stale_epoch", "epoch_unreadable"];
 const AGENT_SESSION_PHASE_SECONDS_TOTAL: &str = "djinn_agent_session_phase_seconds_total";
 
+// ─── Run-dir disk-admission telemetry (proposal nquz, phase 1) ─────────────
+// Labels are strictly bounded: `state`, `reason`, `tier`, and `outcome` are
+// closed enumerations. Volume, pod, task, and project identifiers appear only in
+// logs and traces, never as metric labels.
+const RUN_DIR_COUNT: &str = "djinn_run_dir_count";
+const RUN_DIR_ALLOCATED_BYTES: &str = "djinn_run_dir_allocated_bytes";
+const RUN_DIR_RESERVED_BYTES: &str = "djinn_run_dir_reserved_bytes";
+const RUN_DIR_UNOWNED_BYTES: &str = "djinn_run_dir_unowned_bytes";
+const RUN_DIR_QUEUE_REASON_TOTAL: &str = "djinn_run_dir_queue_reason_total";
+const RUN_DIR_QUOTA_FAILURE_TOTAL: &str = "djinn_run_dir_quota_failure_total";
+const RUN_DIR_RECLAIM_TOTAL: &str = "djinn_run_dir_reclaim_total";
+const RUN_DIR_RECLAIM_BYTES_TOTAL: &str = "djinn_run_dir_reclaim_bytes_total";
+const RUN_DIR_SEED_TOTAL: &str = "djinn_run_dir_seed_total";
+const RUN_DIR_WARM_BASE_REMOVED_TOTAL: &str = "djinn_run_dir_warm_base_removed_total";
+
 // ─── Linux PSI telemetry (proposal zp5t) ──────────────────────────────
 const NODE_PSI_SOME_AVG10_RATIO: &str = "node_psi_some_avg10_ratio";
 const NODE_PSI_AVAILABLE: &str = "node_psi_available";
@@ -2721,6 +2736,95 @@ pub mod build_admission {
         };
         metrics::counter!(super::BUILD_ADMISSION_SHADOW_INVOCATION_TOTAL, "decision" => decision)
             .increment(1);
+    }
+}
+
+/// Run-dir disk-admission telemetry (proposal nquz, phase 1 — dark/observe).
+///
+/// Every label is a closed enumeration so Prometheus cardinality stays bounded.
+/// Volume, pod, task, and project identifiers are logged, never labelled. In
+/// phase 1 nothing production wires these emitters to a live caller; they exist
+/// so the observe substrate and its tests can record what disk admission WOULD
+/// do without changing any dispatch decision.
+pub mod run_dir {
+    /// The eight lease-lifecycle states plus the reconciliation-only quarantine
+    /// bucket, matching `djinn_db::RunDirState`.
+    pub const STATE_ABSENT: &str = "absent";
+    pub const STATE_RESERVED: &str = "reserved";
+    pub const STATE_SEEDING: &str = "seeding";
+    pub const STATE_READY_ACTIVE: &str = "ready_active";
+    pub const STATE_READY_IDLE: &str = "ready_idle";
+    pub const STATE_RECLAIMABLE: &str = "reclaimable";
+    pub const STATE_RECLAIMING: &str = "reclaiming";
+    pub const STATE_QUARANTINED_UNOWNED: &str = "quarantined_unowned";
+
+    /// Typed queue reasons emitted when disk admission WOULD defer a build.
+    pub const QUEUE_REASON_DISK_PRESSURE: &str = "disk_pressure";
+    pub const QUEUE_REASON_DISK_CAPACITY_UNKNOWN: &str = "disk_capacity_unknown";
+
+    /// Quota-probe / installation failure reasons.
+    pub const QUOTA_FAILURE_PROBE_UNAVAILABLE: &str = "probe_unavailable";
+    pub const QUOTA_FAILURE_INSTALL_FAILED: &str = "install_failed";
+
+    /// Reclaim ordering tiers (dark this phase; defined for a bounded family).
+    pub const RECLAIM_TIER_RECLAIMABLE: &str = "reclaimable";
+    pub const RECLAIM_TIER_READY_IDLE: &str = "ready_idle";
+    pub const RECLAIM_TIER_WARM_BASE_AUX: &str = "warm_base_aux";
+
+    /// Seed / recovery outcomes.
+    pub const SEED_OUTCOME_SEEDED: &str = "seeded";
+    pub const SEED_OUTCOME_RESEEDED: &str = "reseeded";
+    pub const SEED_OUTCOME_RECOVERED_PROMOTED: &str = "recovered_promoted";
+    pub const SEED_OUTCOME_RECOVERED_QUARANTINED: &str = "recovered_quarantined";
+
+    /// Set the absolute run-dir count for one bounded `state`.
+    pub fn set_state_count(state: &'static str, count: u64) {
+        metrics::gauge!(super::RUN_DIR_COUNT, "state" => state).set(count as f64);
+    }
+
+    /// Set the absolute measured allocated bytes tracked in one bounded `state`.
+    pub fn set_state_allocated_bytes(state: &'static str, bytes: u64) {
+        metrics::gauge!(super::RUN_DIR_ALLOCATED_BYTES, "state" => state).set(bytes as f64);
+    }
+
+    /// Set the absolute outstanding reserved bytes for a volume.
+    pub fn set_reserved_bytes(bytes: u64) {
+        metrics::gauge!(super::RUN_DIR_RESERVED_BYTES).set(bytes as f64);
+    }
+
+    /// Set the absolute quarantined-unowned bytes for a volume.
+    pub fn set_unowned_bytes(bytes: u64) {
+        metrics::gauge!(super::RUN_DIR_UNOWNED_BYTES).set(bytes as f64);
+    }
+
+    /// Record one observe-mode disk queue event. `reason` MUST be a
+    /// `QUEUE_REASON_*` constant.
+    pub fn increment_queue_reason(reason: &'static str) {
+        metrics::counter!(super::RUN_DIR_QUEUE_REASON_TOTAL, "reason" => reason).increment(1);
+    }
+
+    /// Record one quota-probe / install failure. `reason` MUST be a
+    /// `QUOTA_FAILURE_*` constant.
+    pub fn increment_quota_failure(reason: &'static str) {
+        metrics::counter!(super::RUN_DIR_QUOTA_FAILURE_TOTAL, "reason" => reason).increment(1);
+    }
+
+    /// Record a reclaim of `count` dirs releasing `bytes` for one bounded
+    /// `tier`. `tier` MUST be a `RECLAIM_TIER_*` constant.
+    pub fn increment_reclaim(tier: &'static str, count: u64, bytes: u64) {
+        metrics::counter!(super::RUN_DIR_RECLAIM_TOTAL, "tier" => tier).increment(count);
+        metrics::counter!(super::RUN_DIR_RECLAIM_BYTES_TOTAL, "tier" => tier).increment(bytes);
+    }
+
+    /// Record one seed / recovery outcome. `outcome` MUST be a `SEED_OUTCOME_*`
+    /// constant.
+    pub fn increment_seed_outcome(outcome: &'static str) {
+        metrics::counter!(super::RUN_DIR_SEED_TOTAL, "outcome" => outcome).increment(1);
+    }
+
+    /// Record one operator-authorized warm-base removal.
+    pub fn increment_warm_base_removed() {
+        metrics::counter!(super::RUN_DIR_WARM_BASE_REMOVED_TOTAL).increment(1);
     }
 }
 
