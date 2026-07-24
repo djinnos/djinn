@@ -584,6 +584,46 @@ async fn snapshot(f: &DurableOutcomeFixture) -> djinn_db::RefinementRunSnapshotR
         .expect("run exists")
 }
 
+fn reset_rejected_outcome_counters(f: &DurableOutcomeFixture, task_id: &str) {
+    reset_outcome_test_seam(task_id);
+    reset_outcome_test_seam(&f.fixture.proposal_id);
+}
+
+fn assert_rejected_outcome_skipped_reads(f: &DurableOutcomeFixture) {
+    let counters = outcome_test_seam_counters(&f.fixture.proposal_id);
+    assert_eq!(
+        counters.proposal_reads, 0,
+        "rejected outcome must not read the proposal"
+    );
+    assert_eq!(
+        counters.debate_reads, 0,
+        "rejected outcome must not read the debate trail"
+    );
+    assert_eq!(
+        counters.progress_writes, 0,
+        "rejected outcome must not write durable progress"
+    );
+}
+
+fn assert_exact_durable_run_and_intents(
+    actual: &djinn_db::RefinementRunSnapshotResult,
+    expected: &djinn_db::RefinementRunSnapshotResult,
+    context: &str,
+) {
+    assert_eq!(
+        actual.proposal_id, expected.proposal_id,
+        "{context}: proposal id"
+    );
+    assert_eq!(
+        actual.generation, expected.generation,
+        "{context}: generation"
+    );
+    assert_eq!(
+        actual.snapshot, expected.snapshot,
+        "{context}: complete durable run and intent snapshot"
+    );
+}
+
 /// A rejected outcome must stop at the durable correlation fence. In
 /// particular, neither the durable source nor either disposable projection may
 /// move before a repository transition commits.
@@ -604,6 +644,7 @@ async fn assert_rejected_outcome_preserves_source(
         .expect("load exact source task before rejected outcome");
     let projection_before = f.actor.active_refinements[&f.run_id].clone();
     let session_before = f.actor.refinement_sessions[&f.run_id].clone();
+    reset_rejected_outcome_counters(f, &session.task_id);
 
     assert_eq!(
         f.actor
@@ -611,10 +652,10 @@ async fn assert_rejected_outcome_preserves_source(
             .await,
         RefinementOutcomeApplication::Ignored
     );
-    assert_eq!(
-        snapshot(f).await,
-        durable_before,
-        "durable run and intent must not move"
+    assert_exact_durable_run_and_intents(
+        &snapshot(f).await,
+        &durable_before,
+        "rejected outcome must not move",
     );
     assert_eq!(
         format!(
@@ -637,6 +678,7 @@ async fn assert_rejected_outcome_preserves_source(
         format!("{session_before:#?}"),
         "rejected outcome must retain the complete original session"
     );
+    assert_rejected_outcome_skipped_reads(f);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -645,7 +687,7 @@ async fn correlation_fence_rejects_missing_and_mismatched_task_identity() {
     // verifies every independently-corrupted identity component retains the
     // exact durable source and both disposable projections.
     let cases = vec![
-        ("missing correlation", None),
+        ("missing intent correlation", None),
         (
             "stale generation",
             Some((
@@ -676,36 +718,17 @@ async fn correlation_fence_rejects_missing_and_mismatched_task_identity() {
                 1,
                 1,
                 DurablePhase::AdvocateRevision,
-                RefinementRole::Adversary,
-            )),
-        ),
-        (
-            "wrong role",
-            Some((
-                "same-run".to_owned(),
-                "same-intent".to_owned(),
-                1,
-                1,
-                DurablePhase::AdversaryAttack,
                 RefinementRole::Advocate,
             )),
         ),
+        // A raw durable row can contain an invalid phase/role pairing even though
+        // the typed constructor prevents new writers from creating one.
+        ("wrong role", None),
         (
             "foreign run",
             Some((
-                uuid::Uuid::now_v7().to_string(),
-                "same-intent".to_owned(),
-                1,
-                1,
-                DurablePhase::AdversaryAttack,
-                RefinementRole::Adversary,
-            )),
-        ),
-        (
-            "non-current source intent",
-            Some((
                 "same-run".to_owned(),
-                uuid::Uuid::now_v7().to_string(),
+                "same-intent".to_owned(),
                 1,
                 1,
                 DurablePhase::AdversaryAttack,
@@ -739,11 +762,21 @@ async fn correlation_fence_rejects_missing_and_mismatched_task_identity() {
             )
             .expect("valid deliberately mismatched correlation")
         });
-        TaskRepository::new(f.db.clone(), EventBus::noop())
-            .set_refinement_correlation(&f.task_id, correlation.as_ref())
-            .await
-            .expect("replace task correlation for fence case");
-        let session = f.session.clone();
+        if name == "wrong role" {
+            djinn_db::test_support::corrupt_refinement_task_role_for_test(
+                &f.db, &f.task_id, "advocate",
+            )
+            .await;
+        } else {
+            TaskRepository::new(f.db.clone(), EventBus::noop())
+                .set_refinement_correlation(&f.task_id, correlation.as_ref())
+                .await
+                .expect("replace task correlation for fence case");
+        }
+        let mut session = f.session.clone();
+        if name == "foreign run" {
+            session.run_id = uuid::Uuid::now_v7().to_string();
+        }
         assert_rejected_outcome_preserves_source(&mut f, session).await;
         assert_eq!(
             snapshot(&f).await.snapshot.intents[0].state,
@@ -776,8 +809,23 @@ async fn missing_correlated_task_is_retryable_without_moving_any_projection() {
         .refinement_sessions
         .insert(f.run_id.clone(), f.session.clone());
     let durable_before = snapshot(&f).await;
+    let task_before = TaskRepository::new(f.db.clone(), EventBus::noop())
+        .get(&f.task_id)
+        .await
+        .expect("load exact durable source task before missing-task outcome");
+    let projection_before = f.actor.active_refinements[&f.run_id].clone();
+    let session_before = f.actor.refinement_sessions[&f.run_id].clone();
     let mut missing_task = f.session.clone();
     missing_task.task_id = uuid::Uuid::now_v7().to_string();
+    assert!(
+        TaskRepository::new(f.db.clone(), EventBus::noop())
+            .get(&missing_task.task_id)
+            .await
+            .expect("confirm missing correlated task is absent before outcome")
+            .is_none(),
+        "missing task case requires no task row"
+    );
+    reset_rejected_outcome_counters(&f, &missing_task.task_id);
 
     assert_eq!(
         f.actor
@@ -785,12 +833,41 @@ async fn missing_correlated_task_is_retryable_without_moving_any_projection() {
             .await,
         RefinementOutcomeApplication::Retryable
     );
-    assert_eq!(snapshot(&f).await, durable_before);
-    assert_eq!(
-        f.actor.active_refinements[&f.run_id].phase,
-        RefinementPhase::AdversaryAttack
+    assert_exact_durable_run_and_intents(
+        &snapshot(&f).await,
+        &durable_before,
+        "missing task must preserve exact durable run and intents",
     );
-    assert_eq!(f.actor.refinement_sessions[&f.run_id].task_id, f.task_id);
+    assert_eq!(
+        format!(
+            "{:#?}",
+            TaskRepository::new(f.db.clone(), EventBus::noop())
+                .get(&f.task_id)
+                .await
+                .expect("reload exact durable source task after missing-task outcome")
+        ),
+        format!("{task_before:#?}"),
+        "missing task outcome must preserve the exact source task row"
+    );
+    assert!(
+        TaskRepository::new(f.db.clone(), EventBus::noop())
+            .get(&missing_task.task_id)
+            .await
+            .expect("reload missing correlated task after outcome")
+            .is_none(),
+        "missing task outcome must retain the expected task absence"
+    );
+    assert_eq!(
+        format!("{:#?}", f.actor.active_refinements[&f.run_id]),
+        format!("{projection_before:#?}"),
+        "missing task outcome must preserve exact active projection"
+    );
+    assert_eq!(
+        format!("{:#?}", f.actor.refinement_sessions[&f.run_id]),
+        format!("{session_before:#?}"),
+        "missing task outcome must preserve exact refinement session"
+    );
+    assert_rejected_outcome_skipped_reads(&f);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -836,7 +913,7 @@ async fn successor_persistence_failure_retains_exact_source_and_projection() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn successful_successor_replay_creates_one_intent_and_publishes_after_commit() {
+async fn completed_replay_of_non_current_source_intent_preserves_exact_state() {
     let mut f = durable_outcome_fixture().await;
     let source_projection = f.projection.clone();
     f.actor
@@ -873,6 +950,14 @@ async fn successful_successor_replay_creates_one_intent_and_publishes_after_comm
     f.actor
         .active_refinements
         .insert(f.run_id.clone(), source_projection);
+    let durable_before_replay = snapshot(&f).await;
+    let task_before_replay = TaskRepository::new(f.db.clone(), EventBus::noop())
+        .get(&f.task_id)
+        .await
+        .expect("load exact task before completed replay");
+    let projection_before_replay = f.actor.active_refinements[&f.run_id].clone();
+    let session_before_replay = f.actor.refinement_sessions[&f.run_id].clone();
+    reset_rejected_outcome_counters(&f, &f.session.task_id);
     assert_eq!(
         f.actor
             .process_refinement_outcome(&f.run_id, &f.session)
@@ -885,10 +970,38 @@ async fn successful_successor_replay_creates_one_intent_and_publishes_after_comm
         2,
         "replay creates no successor"
     );
-    assert_eq!(
-        replayed, committed,
-        "replay leaves the committed durable state exact"
+    assert_exact_durable_run_and_intents(
+        &replayed,
+        &committed,
+        "replay leaves committed durable state exact",
     );
+    assert_exact_durable_run_and_intents(
+        &replayed,
+        &durable_before_replay,
+        "completed replay preserves complete durable run and intent state",
+    );
+    assert_eq!(
+        format!(
+            "{:#?}",
+            TaskRepository::new(f.db.clone(), EventBus::noop())
+                .get(&f.task_id)
+                .await
+                .expect("reload exact task after completed replay")
+        ),
+        format!("{task_before_replay:#?}"),
+        "completed replay preserves the exact durable task row"
+    );
+    assert_eq!(
+        format!("{:#?}", f.actor.active_refinements[&f.run_id]),
+        format!("{projection_before_replay:#?}"),
+        "completed replay preserves the exact active projection"
+    );
+    assert_eq!(
+        format!("{:#?}", f.actor.refinement_sessions[&f.run_id]),
+        format!("{session_before_replay:#?}"),
+        "completed replay preserves the exact refinement session"
+    );
+    assert_rejected_outcome_skipped_reads(&f);
 }
 
 async fn advance_fixture_to_judge(f: &mut DurableOutcomeFixture) {
