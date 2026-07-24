@@ -33,7 +33,7 @@ pub struct LeaseFencingToken(pub u64);
 /// epoch is observed but never lifts; every other epoch (baseline, missing,
 /// unreadable, stale, or the illegal both-non-enforcing combo) keeps the quota
 /// unleased.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum InvocationLiftDecision {
     /// The epoch is a committed overlap or invocation-primary phase with v1
     /// enforcing: a matching durable fencing token may lift cpu.max.
@@ -43,12 +43,8 @@ pub enum InvocationLiftDecision {
     Shadow,
     /// Baseline / missing / unreadable / stale / contradictory epoch: keep the
     /// launcher quota unleased. This is the fail-closed default.
+    #[default]
     Unleased,
-}
-impl Default for InvocationLiftDecision {
-    fn default() -> Self {
-        Self::Unleased
-    }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TimeoutCredit {
