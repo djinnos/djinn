@@ -16,8 +16,9 @@ use base64::Engine as _;
 use djinn_sandbox::service_provisioning::{CONTROL_PROTOCOL_REVISION, Request, Response};
 use ring::rand::{SecureRandom, SystemRandom};
 use sqlx::{Connection, PgConnection};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::{UnixListener, UnixStream};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
+use tokio::net::{TcpStream, UnixListener, UnixStream};
 use tokio::sync::{Mutex, Notify};
 use url::Url;
 
@@ -136,7 +137,7 @@ impl PostgresAdapter {
         Self::new(&admin_url, names)
     }
 
-    async fn create(
+    pub async fn create(
         &self,
         attempt_id: String,
         lease_nonce: String,
@@ -377,7 +378,7 @@ impl PostgresAdapter {
         self
     }
 
-    async fn ready(&self, lease_id: &str) -> Result<(), AdapterError> {
+    pub async fn ready(&self, lease_id: &str) -> Result<(), AdapterError> {
         let lease = self
             .leases
             .lock()
@@ -396,7 +397,7 @@ impl PostgresAdapter {
         Ok(())
     }
 
-    async fn delete(&self, lease_id: &str) -> Result<(), AdapterError> {
+    pub async fn delete(&self, lease_id: &str) -> Result<(), AdapterError> {
         // Retried Delete after a successful first call is intentionally a no-op.
         // Keep a failed cleanup lease so a caller can retry rather than losing
         // the sole authority to clean up its tenant.
@@ -588,6 +589,415 @@ fn random_password() -> Result<String, AdapterError> {
     Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(random))
 }
 
+const REDIS_USER_PREFIX: &str = "djinn_redis_user_";
+const REDIS_KEY_PREFIX: &str = "djinn_redis_tenant_";
+const MAX_REDIS_LEASES: usize = 1024;
+#[derive(Clone)]
+pub struct RedisAdapter {
+    endpoint: Endpoint,
+    names: Vec<String>,
+    leases: Arc<Mutex<HashMap<String, RLease>>>,
+    created: Arc<Mutex<HashMap<CreationKey, CreatedLease>>>,
+}
+#[derive(Clone)]
+struct Endpoint {
+    host: String,
+    port: u16,
+    user: Option<String>,
+    password: Option<String>,
+}
+#[derive(Clone)]
+struct RLease {
+    user: String,
+    password: String,
+    prefix: String,
+}
+impl Endpoint {
+    fn parse(x: &str) -> Result<Self, AdapterError> {
+        let u = Url::parse(x).map_err(|_| AdapterError::Rejected)?;
+        if u.scheme() != "redis" || !matches!(u.path(), "" | "/") {
+            return Err(AdapterError::Rejected);
+        }
+        Ok(Self {
+            host: u.host_str().ok_or(AdapterError::Rejected)?.into(),
+            port: u.port().unwrap_or(6379),
+            user: (!u.username().is_empty()).then(|| u.username().into()),
+            password: u.password().map(str::to_owned),
+        })
+    }
+}
+impl RedisAdapter {
+    pub fn new(x: &str, mut names: Vec<String>) -> Result<Self, AdapterError> {
+        if names.is_empty() || names.iter().any(|x| !valid_environment_name(x)) {
+            return Err(AdapterError::Rejected);
+        }
+        names.sort();
+        names.dedup();
+        Ok(Self {
+            endpoint: Endpoint::parse(x)?,
+            names,
+            leases: Arc::new(Mutex::new(HashMap::new())),
+            created: Arc::new(Mutex::new(HashMap::new())),
+        })
+    }
+    pub fn from_environment() -> Result<Self, AdapterError> {
+        let x = std::env::var("REDIS_WRAPPER_ADMIN_URL")
+            .or_else(|_| std::env::var("REDIS_URL"))
+            .map_err(|_| AdapterError::Rejected)?;
+        Self::new(
+            &x,
+            std::env::var("CATALOG_REDIS_ENV_NAMES")
+                .unwrap_or_else(|_| "REDIS_URL".into())
+                .split(',')
+                .map(str::trim)
+                .filter(|x| !x.is_empty())
+                .map(str::to_owned)
+                .collect(),
+        )
+    }
+    async fn create(
+        &self,
+        a: String,
+        n: String,
+    ) -> Result<(String, BTreeMap<String, String>), AdapterError> {
+        let k = CreationKey {
+            attempt_id: a,
+            lease_nonce: n,
+        };
+        let mut c = self.created.lock().await;
+        if c.len() >= MAX_REDIS_LEASES {
+            return Err(AdapterError::Rejected);
+        }
+        if let Some(x) = c.get(&k).cloned() {
+            return Ok((x.lease_id, x.environment));
+        }
+        if self.leases.lock().await.len() >= MAX_REDIS_LEASES {
+            return Err(AdapterError::Rejected);
+        }
+        let id = generated(LEASE_PREFIX, 20)?;
+        let l = RLease {
+            user: generated(REDIS_USER_PREFIX, 20)?,
+            password: random_password()?,
+            prefix: generated(REDIS_KEY_PREFIX, 20)?,
+        };
+        if self.provision(&l).await.is_err() {
+            let _ = self.remove(&l.user).await;
+            return Err(AdapterError::Rejected);
+        }
+        let host = if self.endpoint.host.contains(':') {
+            format!("[{}]", self.endpoint.host)
+        } else {
+            self.endpoint.host.clone()
+        };
+        let url = format!(
+            "redis://{}:{}@{}:{}",
+            l.user, l.password, host, self.endpoint.port
+        );
+        let environment: BTreeMap<String, String> = self
+            .names
+            .iter()
+            .cloned()
+            .map(|x| (x, url.clone()))
+            .collect();
+        self.leases.lock().await.insert(id.clone(), l);
+        c.insert(
+            k,
+            CreatedLease {
+                lease_id: id.clone(),
+                environment: environment.clone(),
+            },
+        );
+        Ok((id, environment))
+    }
+    async fn provision(&self, l: &RLease) -> Result<(), AdapterError> {
+        let mut c = self.admin().await?;
+        let p = format!("{}:*", l.prefix);
+        let mut x = vec![
+            "ACL".into(),
+            "SETUSER".into(),
+            l.user.clone(),
+            "reset".into(),
+            "on".into(),
+            format!(">{}", l.password),
+            format!("~{p}"),
+            format!("&{p}"),
+            "-@all".into(),
+        ];
+        x.extend(ACL.iter().map(|x| (*x).into()));
+        c.cmd(&x).await.map(|_| ())
+    }
+    async fn ready(&self, id: &str) -> Result<(), AdapterError> {
+        let l = self
+            .leases
+            .lock()
+            .await
+            .get(id)
+            .cloned()
+            .ok_or(AdapterError::Rejected)?;
+        Conn::open(&self.endpoint, Some(&l.user), Some(&l.password))
+            .await?
+            .cmd(&["PING".into()])
+            .await
+            .map(|_| ())
+    }
+    async fn delete(&self, id: &str) -> Result<(), AdapterError> {
+        let Some(l) = self.leases.lock().await.get(id).cloned() else {
+            return Ok(());
+        };
+        let mut c = self.admin().await?;
+        let mut cursor = "0".into();
+        loop {
+            let r = c
+                .cmd(&[
+                    "SCAN".into(),
+                    cursor,
+                    "MATCH".into(),
+                    format!("{}:*", l.prefix),
+                    "COUNT".into(),
+                    "100".into(),
+                ])
+                .await?;
+            let Resp::Array(v) = r else {
+                return Err(AdapterError::Rejected);
+            };
+            let [next, Resp::Array(keys)] = v.as_slice() else {
+                return Err(AdapterError::Rejected);
+            };
+            cursor = next.text().ok_or(AdapterError::Rejected)?.into();
+            let mut u = vec!["UNLINK".into()];
+            for key in keys {
+                u.push(key.text().ok_or(AdapterError::Rejected)?.into())
+            }
+            if u.len() > 1 {
+                c.cmd(&u).await?;
+            }
+            if cursor == "0" {
+                break;
+            }
+        }
+        self.remove(&l.user).await?;
+        self.leases.lock().await.remove(id);
+        self.created
+            .lock()
+            .await
+            .retain(|_, created| created.lease_id != id);
+        Ok(())
+    }
+    async fn admin(&self) -> Result<Conn, AdapterError> {
+        Conn::open(
+            &self.endpoint,
+            self.endpoint.user.as_deref(),
+            self.endpoint.password.as_deref(),
+        )
+        .await
+    }
+    async fn remove(&self, u: &str) -> Result<(), AdapterError> {
+        self.admin()
+            .await?
+            .cmd(&["ACL".into(), "DELUSER".into(), u.into()])
+            .await
+            .map(|_| ())
+    }
+}
+const ACL: &[&str] = &[
+    "+ping",
+    "+get",
+    "+set",
+    "+del",
+    "+unlink",
+    "+exists",
+    "+expire",
+    "+ttl",
+    "+mget",
+    "+mset",
+    "+hget",
+    "+hset",
+    "+hdel",
+    "+lpush",
+    "+rpush",
+    "+lpop",
+    "+rpop",
+    "+sadd",
+    "+srem",
+    "+zadd",
+    "+zrem",
+    "+zrange",
+    "+scan",
+    "+sscan",
+    "+hscan",
+    "+zscan",
+    "+publish",
+    "+subscribe",
+    "+psubscribe",
+    "+unsubscribe",
+    "+punsubscribe",
+]; // Explicitly no ACL, CONFIG, SCRIPT, MODULE, FUNCTION, FLUSHDB, FLUSHALL, or admin command.
+struct Conn {
+    r: BufReader<OwnedReadHalf>,
+    w: OwnedWriteHalf,
+}
+enum Resp {
+    Text(String),
+    Integer,
+    Array(Vec<Resp>),
+}
+impl Resp {
+    fn text(&self) -> Option<&str> {
+        match self {
+            Self::Text(x) => Some(x),
+            _ => None,
+        }
+    }
+}
+impl Conn {
+    async fn open(e: &Endpoint, u: Option<&str>, p: Option<&str>) -> Result<Self, AdapterError> {
+        let s = TcpStream::connect((e.host.as_str(), e.port))
+            .await
+            .map_err(|_| AdapterError::Rejected)?;
+        let (r, w) = s.into_split();
+        let mut c = Self {
+            r: BufReader::new(r),
+            w,
+        };
+        if let Some(p) = p {
+            c.cmd(&match u {
+                Some(u) => vec!["AUTH".into(), u.into(), p.into()],
+                None => vec!["AUTH".into(), p.into()],
+            })
+            .await?;
+        }
+        Ok(c)
+    }
+    async fn cmd(&mut self, x: &[String]) -> Result<Resp, AdapterError> {
+        let mut b = format!("*{}\r\n", x.len()).into_bytes();
+        for a in x {
+            b.extend_from_slice(format!("${}\r\n", a.len()).as_bytes());
+            b.extend_from_slice(a.as_bytes());
+            b.extend_from_slice(b"\r\n")
+        }
+        self.w
+            .write_all(&b)
+            .await
+            .map_err(|_| AdapterError::Rejected)?;
+        read_resp(&mut self.r).await
+    }
+}
+fn read_resp<'a>(
+    r: &'a mut BufReader<OwnedReadHalf>,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Resp, AdapterError>> + Send + 'a>> {
+    Box::pin(async move {
+        let mut k = [0];
+        r.read_exact(&mut k)
+            .await
+            .map_err(|_| AdapterError::Rejected)?;
+        let mut x = String::new();
+        r.read_line(&mut x)
+            .await
+            .map_err(|_| AdapterError::Rejected)?;
+        let x = x.strip_suffix("\r\n").ok_or(AdapterError::Rejected)?;
+        match k[0] {
+            b'+' => Ok(Resp::Text(x.into())),
+            b':' => Ok(Resp::Integer),
+            b'-' => Err(AdapterError::Rejected),
+            b'$' => {
+                let n: usize = x.parse().map_err(|_| AdapterError::Rejected)?;
+                let mut b = vec![0; n + 2];
+                r.read_exact(&mut b)
+                    .await
+                    .map_err(|_| AdapterError::Rejected)?;
+                Ok(Resp::Text(
+                    std::str::from_utf8(&b[..n])
+                        .map_err(|_| AdapterError::Rejected)?
+                        .into(),
+                ))
+            }
+            b'*' => {
+                let n: usize = x.parse().map_err(|_| AdapterError::Rejected)?;
+                let mut v = vec![];
+                for _ in 0..n {
+                    v.push(read_resp(r).await?)
+                }
+                Ok(Resp::Array(v))
+            }
+            _ => Err(AdapterError::Rejected),
+        }
+    })
+}
+
+pub struct RedisWrapperServer {
+    adapter: RedisAdapter,
+}
+impl RedisWrapperServer {
+    pub fn new(adapter: RedisAdapter) -> Self {
+        Self { adapter }
+    }
+    pub async fn serve(self, socket: impl AsRef<Path>) -> Result<(), std::io::Error> {
+        let socket = socket.as_ref();
+        if socket.exists() {
+            std::fs::remove_file(socket)?;
+        }
+        let listener = UnixListener::bind(socket)?;
+        loop {
+            let (stream, _) = listener.accept().await?;
+            let adapter = self.adapter.clone();
+            tokio::spawn(async move {
+                redis_socket(stream, adapter).await;
+            });
+        }
+    }
+}
+async fn redis_socket(stream: UnixStream, adapter: RedisAdapter) {
+    let (read, mut write) = stream.into_split();
+    let mut line = String::new();
+    let response = match tokio::time::timeout(
+        OPERATION_DEADLINE,
+        BufReader::new(read).read_line(&mut line),
+    )
+    .await
+    {
+        Ok(Ok(n)) if n > 0 && n <= MAX_LINE_LEN => match serde_json::from_str(&line) {
+            Ok(request) => redis_dispatch(request, adapter).await,
+            Err(_) => error_response("invalid_request"),
+        },
+        _ => error_response("invalid_request"),
+    };
+    if let Ok(body) = serde_json::to_vec(&response) {
+        let _ = write.write_all(&body).await;
+        let _ = write.write_all(b"\n").await;
+    }
+}
+async fn redis_dispatch(request: Request, adapter: RedisAdapter) -> Response {
+    if request_revision(&request) != CONTROL_PROTOCOL_REVISION {
+        return error_response("revision_mismatch");
+    }
+    let result = match request {
+        Request::CreateFresh {
+            attempt_id,
+            lease_nonce,
+            ..
+        } if valid_identifier(&attempt_id) && valid_identifier(&lease_nonce) => adapter
+            .create(attempt_id, lease_nonce)
+            .await
+            .map(|(lease_id, environment)| Response::Created {
+                revision: CONTROL_PROTOCOL_REVISION,
+                lease_id,
+                environment,
+            }),
+        Request::Ready { lease_id, .. } if valid_identifier(&lease_id) => {
+            adapter.ready(&lease_id).await.map(|()| Response::Ready {
+                revision: CONTROL_PROTOCOL_REVISION,
+            })
+        }
+        Request::Delete { lease_id, .. } if valid_identifier(&lease_id) => {
+            adapter.delete(&lease_id).await.map(|()| Response::Deleted {
+                revision: CONTROL_PROTOCOL_REVISION,
+            })
+        }
+        _ => Err(AdapterError::Rejected),
+    };
+    result.unwrap_or_else(|_| error_response("rejected"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -595,6 +1005,23 @@ mod tests {
     // These tests count shared server objects, so keep their setup and cleanup
     // atomic with respect to the other Postgres-backed tests in this module.
     static POSTGRES_TEST_LOCK: Mutex<()> = Mutex::const_new(());
+
+    #[test]
+    fn redis_acl_is_prefix_scoped_and_has_no_administrative_commands() {
+        assert!(RedisAdapter::new("redis://127.0.0.1:6379", vec!["REDIS_URL".into()]).is_ok());
+        assert!(ACL.contains(&"+publish"));
+        for forbidden in [
+            "+acl",
+            "+config",
+            "+flushdb",
+            "+flushall",
+            "+script",
+            "+module",
+            "+function",
+        ] {
+            assert!(!ACL.contains(&forbidden));
+        }
+    }
 
     #[test]
     fn identifier_validation_is_bounded_and_strict() {

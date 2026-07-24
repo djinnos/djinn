@@ -8,6 +8,10 @@ edition = "2024"
 name = "djinn-postgres-wrapper"
 path = "src/main.rs"
 
+[[bin]]
+name = "djinn-redis-wrapper"
+path = "src/redis_main.rs"
+
 [dependencies]
 djinn-sandbox = { path = "../djinn-sandbox" }
 base64 = "0.22"
