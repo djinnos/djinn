@@ -176,17 +176,33 @@ The phase machine is a strict forward cycle, so you cannot advance
 and no v1 quota is lifted. Re-arm shadow/overlap later to resume. A full reverse
 rollback (`rollback_overlap`) is only defined from `invocation_primary`.
 
-## Shadow-mode observability gap (deferred to `u2oz`)
+## Reading the shadow window
 
-In `shadow` every user spawn traverses the broker, but the runtime currently
-records only the `would_escalate` shadow-invocation decision
-(`djinn_telemetry::build_admission::record_shadow_invocation`, called from
-`server/crates/djinn-agent/src/process.rs`). The complementary `would_throttle`
-decision (v1 *would* have kept the quota throttled because the reference cap is
-already met) is **not** emitted: a shadow request that the invocation authority
-would have denied is not distinguished, because shadow still takes a real lease
-grant rather than a non-enforcing would-decision. This does not weaken v0 (shadow
-never lifts and never denies) and does not affect the executor's shadow arm,
-which correctly sets `v1 = shadow`. Wiring the `would_throttle` branch requires a
-non-enforcing broker capacity check on the shadow request path and belongs with
-the cross-component work in `u2oz`.
+In `shadow` the runtime records both arms of
+`djinn_telemetry::build_admission::record_shadow_invocation`
+(`djinn_build_admission_shadow_invocation_total`, label `decision`), from
+`server/crates/djinn-agent/src/process.rs`:
+
+- `would_escalate` — the spawn crossed the escalation threshold and reached a
+  valid matching durable bind, so v1 *would* have lifted the quota. It stays
+  throttled under v0.
+- `would_throttle` — the spawn ran to terminal without ever crossing
+  `cpu_usage_threshold_usec`, so it was never escalated to the lease authority
+  and v1 would have left it throttled.
+
+The two arms are mutually exclusive (escalation requires a grant, which requires
+queueing), so
+`would_escalate / (would_escalate + would_throttle)` over the window is the
+fraction of observed invocations a cutover would escalate. Both are observation
+only: shadow never lifts `cpu.max` and never denies.
+
+### Remaining gap (deferred to `u2oz`)
+
+`would_throttle` covers invocations that never escalated, not the narrower case
+of a shadow request the invocation authority would have *denied because the
+reference cap is already met* — shadow still takes a real lease grant rather
+than a non-enforcing would-decision, so cap-denial is not distinguished.
+Measuring that needs a non-enforcing broker capacity check on the shadow request
+path and belongs with the cross-component work in `u2oz`. It does not weaken v0
+and does not affect the executor's shadow arm, which correctly sets
+`v1 = shadow`.
