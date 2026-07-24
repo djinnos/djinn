@@ -2109,6 +2109,7 @@ mod tests {
 
     // ── Lease-v1 in-memory RPC/server transport tests ────────────────
 
+    use crate::services::WatchdogTerminationRequest;
     use crate::services::lease::{
         LeaseAbandonRequest, LeaseBindRequest, LeaseCancelRequest, LeaseFencingToken,
         LeaseGrantRequest, LeaseIdentity, LeaseQueueRequest, LeaseReleaseRequest, LeaseResult,
@@ -2121,6 +2122,7 @@ mod tests {
     struct LeaseFakeServices {
         cancel: CancellationToken,
         canned_result: LeaseResult,
+        watchdog_deletes: Arc<std::sync::Mutex<Vec<WatchdogTerminationRequest>>>,
     }
 
     fn sample_lease_identity() -> LeaseIdentity {
@@ -2157,6 +2159,28 @@ mod tests {
         }
         async fn release_lease(&self, _req: LeaseReleaseRequest) -> LeaseResult {
             self.canned_result.clone()
+        }
+        async fn terminate_watchdog_pod(
+            &self,
+            request: WatchdogTerminationRequest,
+        ) -> Result<(), String> {
+            if request.task_id.trim().is_empty()
+                || request.task_run_id.trim().is_empty()
+                || request.pod_uid.trim().is_empty()
+            {
+                return Err("empty exact watchdog identity".into());
+            }
+            if request.task_id != "task-1" || request.task_run_id != "run-1" {
+                return Err("task ownership mismatch".into());
+            }
+            if request.pod_uid != "pod-recorded" {
+                return Err("pod UID unavailable or unconfirmed".into());
+            }
+            let mut deletes = self.watchdog_deletes.lock().unwrap();
+            if !deletes.contains(&request) {
+                deletes.push(request);
+            }
+            Ok(())
         }
 
         async fn load_task(&self, task_id: String) -> Result<Task, String> {
@@ -2350,6 +2374,7 @@ mod tests {
         let services: Arc<dyn SupervisorServices> = Arc::new(LeaseFakeServices {
             cancel: CancellationToken::new(),
             canned_result: canned,
+            watchdog_deletes: Arc::new(std::sync::Mutex::new(Vec::new())),
         });
         let handle = serve_on_unix_socket(&sock, services)
             .await
@@ -2478,6 +2503,7 @@ mod tests {
         let services: Arc<dyn SupervisorServices> = Arc::new(LeaseFakeServices {
             cancel: CancellationToken::new(),
             canned_result: LeaseResult::LeaseUnavailable,
+            watchdog_deletes: Arc::new(std::sync::Mutex::new(Vec::new())),
         });
         let handle = serve_on_unix_socket(&sock, services)
             .await
@@ -2510,6 +2536,56 @@ mod tests {
         let _ = bg.writer.await;
         client_cancel.cancel();
         let _ = bg.reader.await;
+    }
+
+    #[tokio::test]
+    async fn watchdog_transport_preserves_identity_and_never_claims_unconfirmed_delete() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock = dir.path().join("watchdog.sock");
+        let deletes = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let services: Arc<dyn SupervisorServices> = Arc::new(LeaseFakeServices {
+            cancel: CancellationToken::new(),
+            canned_result: LeaseResult::LeaseUnavailable,
+            watchdog_deletes: deletes.clone(),
+        });
+        let handle = serve_on_unix_socket(&sock, services)
+            .await
+            .expect("bind server");
+        let client_cancel = CancellationToken::new();
+        let (rpc, bg) = super::super::rpc::RpcServices::connect_unix(&sock, client_cancel.clone())
+            .await
+            .expect("connect rpc");
+        let valid = WatchdogTerminationRequest {
+            task_id: "task-1".into(),
+            task_run_id: "run-1".into(),
+            pod_uid: "pod-recorded".into(),
+        };
+        assert_eq!(rpc.terminate_watchdog_pod(valid.clone()).await, Ok(()));
+        assert_eq!(rpc.terminate_watchdog_pod(valid.clone()).await, Ok(()));
+        assert_eq!(deletes.lock().unwrap().as_slice(), &[valid.clone()]);
+
+        for rejected in [
+            WatchdogTerminationRequest {
+                task_id: String::new(),
+                ..valid.clone()
+            },
+            WatchdogTerminationRequest {
+                task_id: "other-task".into(),
+                ..valid.clone()
+            },
+            WatchdogTerminationRequest {
+                task_run_id: "other-run".into(),
+                ..valid.clone()
+            },
+            WatchdogTerminationRequest {
+                pod_uid: "pod-replacement".into(),
+                ..valid.clone()
+            },
+        ] {
+            assert!(rpc.terminate_watchdog_pod(rejected).await.is_err());
+        }
+        assert_eq!(deletes.lock().unwrap().as_slice(), &[valid]);
+        teardown(rpc, bg, handle, client_cancel).await;
     }
 
     /// Every lease operation family round-trips through the transport and

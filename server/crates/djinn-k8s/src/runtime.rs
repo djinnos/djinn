@@ -1423,10 +1423,10 @@ pub async fn terminate_taskrun_pod_exact(
         .await
         .map_err(|e| format!("get task-run Job: {e}"))?
     else {
-        return Ok(());
+        return Err("exact-pod watchdog termination task-run Job is unavailable".into());
     };
     if job.metadata.deletion_timestamp.is_some() {
-        return Ok(());
+        return Err("exact-pod watchdog termination task-run Job is not confirmable".into());
     }
     let job_uid = job
         .metadata
@@ -1434,42 +1434,57 @@ pub async fn terminate_taskrun_pod_exact(
         .ok_or_else(|| "task-run Job has no immutable UID".to_string())?;
     let pods: Api<Pod> = Api::namespaced(client.clone(), namespace);
     let selector = format!("{}={task_run_id}", crate::job::LABEL_TASK_RUN_ID);
-    let exact = pods
+    let pod_name = pods
         .list(&ListParams::default().labels(&selector))
         .await
         .map_err(|e| format!("list task-run Pods: {e}"))?
         .items
-        .into_iter()
-        .any(|pod| {
-            pod.metadata.uid.as_deref() == Some(pod_uid)
-                && pod
-                    .metadata
-                    .owner_references
-                    .as_ref()
-                    .is_some_and(|owners| {
-                        owners
-                            .iter()
-                            .any(|owner| owner.kind == "Job" && owner.uid == job_uid)
-                    })
-        });
-    if !exact {
+        .iter()
+        .find_map(|pod| exact_taskrun_pod_name(pod, pod_uid, &job_uid));
+    let Some(pod_name) = pod_name else {
         return Err(
             "exact pod UID is unavailable or does not belong to the recorded task-run Job".into(),
         );
+    };
+    // Do not foreground-delete the Job here. That operation only accepts a
+    // Job UID precondition and could cascade to a replacement Pod. The
+    // destructive API call itself must be fenced by the recorded Pod UID.
+    let params = exact_pod_delete_params(pod_uid);
+    match pods.delete(&pod_name, &params).await {
+        Ok(_) => Ok(()),
+        Err(kube::Error::Api(response)) if response.code == 404 => Ok(()),
+        Err(e) => Err(format!("delete exact task-run Pod: {e}")),
     }
-    let params = DeleteParams {
-        propagation_policy: Some(kube::api::PropagationPolicy::Foreground),
+}
+
+/// Return a mutable Pod name only after binding it to both immutable resource
+/// identities. The subsequent delete repeats the Pod UID binding as a
+/// Kubernetes precondition, so the name alone never authorizes deletion.
+fn exact_taskrun_pod_name(pod: &Pod, pod_uid: &str, job_uid: &str) -> Option<String> {
+    (pod.metadata.uid.as_deref() == Some(pod_uid)
+        && pod
+            .metadata
+            .owner_references
+            .as_ref()
+            .is_some_and(|owners| {
+                owners
+                    .iter()
+                    .any(|owner| owner.kind == "Job" && owner.uid == job_uid)
+            }))
+    .then(|| pod.metadata.name.clone())
+    .flatten()
+    .filter(|name| !name.trim().is_empty())
+}
+
+/// Parameters for the sole destructive exact-Pod watchdog operation.
+fn exact_pod_delete_params(pod_uid: &str) -> DeleteParams {
+    DeleteParams {
         grace_period_seconds: Some(30),
         preconditions: Some(Preconditions {
-            uid: Some(job_uid),
+            uid: Some(pod_uid.to_owned()),
             ..Preconditions::default()
         }),
         ..DeleteParams::default()
-    };
-    match jobs.delete(&taskrun_job_name(task_run_id), &params).await {
-        Ok(_) => Ok(()),
-        Err(kube::Error::Api(response)) if response.code == 404 => Ok(()),
-        Err(e) => Err(format!("delete exact task-run Job: {e}")),
     }
 }
 
@@ -1518,8 +1533,63 @@ mod tests {
     use super::*;
     use djinn_core::models::TaskRunTrigger;
     use djinn_runtime::SupervisorFlow;
+    use k8s_openapi::apimachinery::pkg::apis::meta::v1::{ObjectMeta, OwnerReference};
     use std::collections::HashMap;
     use std::sync::Mutex as StdMutex;
+
+    fn owned_pod(name: &str, pod_uid: &str, owner_uid: &str) -> Pod {
+        Pod {
+            metadata: ObjectMeta {
+                name: Some(name.into()),
+                uid: Some(pod_uid.into()),
+                owner_references: Some(vec![OwnerReference {
+                    api_version: "batch/v1".into(),
+                    block_owner_deletion: Some(true),
+                    controller: Some(true),
+                    kind: "Job".into(),
+                    name: "djinn-taskrun-run-1".into(),
+                    uid: owner_uid.into(),
+                }]),
+                ..ObjectMeta::default()
+            },
+            ..Pod::default()
+        }
+    }
+
+    #[test]
+    fn exact_pod_delete_is_fenced_to_the_requested_pod_uid() {
+        let params = exact_pod_delete_params("pod-recorded");
+        assert_eq!(params.grace_period_seconds, Some(30));
+        assert_eq!(params.propagation_policy, None);
+        assert_eq!(
+            params
+                .preconditions
+                .and_then(|preconditions| preconditions.uid),
+            Some("pod-recorded".into())
+        );
+    }
+
+    #[test]
+    fn exact_pod_selection_rejects_stale_and_wrong_owner_identities() {
+        let recorded = owned_pod("taskrun-pod", "pod-recorded", "job-recorded");
+        let replacement = owned_pod("taskrun-pod", "pod-replacement", "job-recorded");
+        let foreign = owned_pod("foreign-pod", "pod-recorded", "job-foreign");
+
+        assert_eq!(
+            exact_taskrun_pod_name(&recorded, "pod-recorded", "job-recorded"),
+            Some("taskrun-pod".into())
+        );
+        assert_eq!(
+            exact_taskrun_pod_name(&replacement, "pod-recorded", "job-recorded"),
+            None,
+            "a stale UID cannot select a replacement with the same name"
+        );
+        assert_eq!(
+            exact_taskrun_pod_name(&foreign, "pod-recorded", "job-recorded"),
+            None,
+            "a matching Pod UID owned by another Job is not a task-run Pod"
+        );
+    }
 
     #[derive(Default)]
     struct FakeReadSourcePreparation {
