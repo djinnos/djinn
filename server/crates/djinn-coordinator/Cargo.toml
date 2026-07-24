@@ -61,7 +61,6 @@ tempfile = "3"
 filetime = "0.2"
 insta = { version = "1", features = ["json"] }
 tracing-test = "0.2"
-sqlx = { version = "0.8", default-features = false, features = ["postgres", "runtime-tokio-rustls"] }
 djinn-slot = { path = "../djinn-slot", features = ["test-support"] }
 
 [lints.clippy]

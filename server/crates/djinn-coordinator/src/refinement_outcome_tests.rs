@@ -593,10 +593,7 @@ async fn successor_persistence_failure_retains_exact_source_and_projection() {
     f.actor
         .refinement_sessions
         .insert(f.run_id.clone(), f.session.clone());
-    sqlx::query("CREATE FUNCTION reject_refinement_successor_for_test() RETURNS trigger AS $$ BEGIN RAISE EXCEPTION 'injected successor persistence failure'; END; $$ LANGUAGE plpgsql")
-        .execute(f.db.pool()).await.expect("create successor failure function");
-    sqlx::query("CREATE TRIGGER reject_refinement_successor_for_test BEFORE INSERT ON refinement_dispatch_intents FOR EACH ROW EXECUTE FUNCTION reject_refinement_successor_for_test()")
-        .execute(f.db.pool()).await.expect("install successor failure trigger");
+    djinn_db::test_support::reject_refinement_successor_for_test(&f.db).await;
 
     assert_eq!(
         f.actor
