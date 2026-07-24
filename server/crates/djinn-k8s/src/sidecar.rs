@@ -1,3 +1,6 @@
+// djinn:allow-oversize — wrapper-service control wiring plus launcher mount
+// isolation tipped this just past the 50KB byte guard; split the sidecar/wrapper
+// halves when this module is touched substantively.
 //! Native-sidecar injection for backing services (Postgres / Redis / RabbitMQ).
 //!
 //! A project's selected catalog image declares which service presets every
@@ -827,6 +830,61 @@ mod tests {
         let envs = sidecar_conn_env(&s);
         let names: Vec<&str> = envs.iter().map(|e| e.name.as_str()).collect();
         assert_eq!(names, vec!["DATABASE_URL", "TEST_POSTGRES_URL"]);
+    }
+
+    /// AC (qut0): backing-service sidecar resources fall back to the explicit
+    /// 100m/256Mi request + 500m/512Mi limit envelope when the preset omits or
+    /// malforms them, and an explicit resources JSON overrides each field.
+    #[test]
+    fn sidecar_resources_fall_back_and_override() {
+        // Fallback: empty object and malformed JSON both yield the defaults.
+        for json in ["{}", "not-json", ""] {
+            assert_eq!(
+                parse_resources(json),
+                (
+                    "100m".to_string(),
+                    "256Mi".to_string(),
+                    "500m".to_string(),
+                    "512Mi".to_string(),
+                ),
+                "malformed/empty resources {json:?} must fall back to the default envelope"
+            );
+        }
+        // Override: explicit values win per field.
+        assert_eq!(
+            parse_resources(
+                r#"{"cpu_request":"250m","memory_request":"512Mi","cpu_limit":"1","memory_limit":"1Gi"}"#
+            ),
+            (
+                "250m".to_string(),
+                "512Mi".to_string(),
+                "1".to_string(),
+                "1Gi".to_string(),
+            )
+        );
+    }
+
+    /// AC (qut0): a backing-service sidecar has no workspace/broker access — it
+    /// mounts ONLY its shared `/dev/shm` scratch, never the workspace, mirror,
+    /// launcher IPC, or delegated cgroup.
+    #[test]
+    fn sidecar_has_no_workspace_or_broker_mounts() {
+        let cfg = KubernetesConfig::for_testing();
+        let c = sidecar_container(&cfg, &spec());
+        let mounts = c.volume_mounts.as_ref().expect("sidecar mounts");
+        assert_eq!(mounts.len(), 1, "sidecar mounts only /dev/shm");
+        assert_eq!(mounts[0].name, SIDECAR_DSHM_VOLUME);
+        for forbidden in [
+            crate::job::VOLUME_WORKSPACE,
+            crate::job::VOLUME_MIRROR,
+            crate::launcher::VOLUME_LAUNCHER_IPC,
+            crate::launcher::VOLUME_LAUNCHER_CGROUP,
+        ] {
+            assert!(
+                !mounts.iter().any(|m| m.name == forbidden),
+                "backing sidecar must not mount {forbidden}"
+            );
+        }
     }
 
     #[test]

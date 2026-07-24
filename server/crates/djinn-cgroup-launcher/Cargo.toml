@@ -7,6 +7,14 @@ edition = "2024"
 [lib]
 doctest = false
 
+# Packaged sidecar entrypoint. Ships as `/opt/djinn/bin/djinn-cgroup-launcher`
+# in the per-project image alongside `djinn-agent-worker`; the task-run Job
+# renders the launcher sidecar to run it (see `djinn-k8s::launcher`). The binary
+# only composes the lib primitives — it adds no runtime behavior of its own.
+[[bin]]
+name = "djinn-cgroup-launcher"
+path = "src/main.rs"
+
 [dependencies]
 libc = "0.2"
 thiserror = "2"
