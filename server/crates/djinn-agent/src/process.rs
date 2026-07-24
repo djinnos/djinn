@@ -620,7 +620,10 @@ impl LeaseInvocationRunner {
                                         // irreversible lift occurs, so no
                                         // fence-before-lift journal write is
                                         // required; `fence` is still reconciled
-                                        // to terminal below.
+                                        // to terminal below. The complementary
+                                        // `would_throttle` arm is recorded after
+                                        // the loop for invocations that never
+                                        // crossed the escalation threshold.
                                         djinn_telemetry::build_admission::record_shadow_invocation(
                                             true,
                                         );
@@ -686,6 +689,28 @@ impl LeaseInvocationRunner {
             journal
                 .clear(&identity)
                 .map_err(LeaseInvocationError::Launcher)?;
+        }
+        // The shadow measurement baseline, and the complement of the
+        // `would_escalate` arm recorded at the bind above: this invocation ran
+        // to terminal without ever crossing `cpu_usage_threshold_usec`
+        // (`queued` is false), so it was never escalated to the lease authority
+        // and v1 would have left it throttled. Recording only the escalating
+        // arm would make the ratio that decides cutover safety ("of all
+        // observed invocations, what fraction would v1 have escalated?")
+        // unanswerable. The two arms are mutually exclusive: escalation
+        // requires a grant, which requires `queued`.
+        //
+        // Observation only. The epoch is read once, after the child is terminal
+        // and the durable lease is reconciled, and a read failure projects to
+        // `Unleased` — nothing here can lift cpu.max, mint a fence, or move
+        // lease state.
+        if !queued
+            && matches!(
+                self.services.invocation_lift_decision().await,
+                InvocationLiftDecision::Shadow
+            )
+        {
+            djinn_telemetry::build_admission::record_shadow_invocation(false);
         }
         if let Some(error) = lease_error {
             Err(error)

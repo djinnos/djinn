@@ -449,10 +449,11 @@ fn epoch_and_admission_telemetry_labels_stay_bounded_and_carry_no_identifiers() 
             }
         }
 
-        // Shadow-mode escalation/throttle observations. Only `would_escalate`
-        // has a production caller today (the complementary `would_throttle`
-        // branch is deferred with the shadow broker check); both label values
-        // are asserted so the family stays closed when it is wired.
+        // Shadow-mode escalation/throttle observations. Both arms have a
+        // production caller in the agent's lease runner: `would_escalate` at a
+        // valid bind under a shadow epoch, `would_throttle` for an invocation
+        // that finished below the escalation threshold. Both label values are
+        // asserted here so the family stays closed.
         djinn_telemetry::build_admission::record_shadow_invocation(true);
         djinn_telemetry::build_admission::record_shadow_invocation(false);
 
