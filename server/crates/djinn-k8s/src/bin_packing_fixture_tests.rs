@@ -130,6 +130,9 @@ fn default_backing_sidecar_spec() -> BackingServiceSpec {
     BackingServiceSpec {
         service_type: "postgres".into(),
         image: "postgres:18-alpine".into(),
+        is_wrapper: false,
+        control_socket_name: "preset-postgres-18.sock".into(),
+        wrapper_env: Vec::new(),
         port: 5432,
         env: Vec::new(),
         cpu_request,
