@@ -674,6 +674,132 @@ mod tests {
         }
     }
 
+    /// The adversarial kernel-boundary proof (djinn-cgroup-launcher's
+    /// `tests/kernel_boundary_under_rendered_context.rs`, task zf13/goxi AC2)
+    /// cannot depend on this crate — that would be a dependency cycle — so it
+    /// drives its real UID-1000/1001 processes from a checked-in fixture of the
+    /// rendered security context. This test is what keeps that fixture honest:
+    /// it rebuilds the REAL manifest values and asserts every fixture line, so
+    /// changing the render without updating the fixture fails here instead of
+    /// silently proving a boundary nobody ships.
+    #[test]
+    fn rendered_security_context_matches_the_adversarial_proof_fixture() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../djinn-cgroup-launcher/tests/fixtures/rendered-security-context.env");
+        let raw = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("read rendered security-context fixture {path:?}: {e}"));
+        let fixture: BTreeMap<&str, &str> = raw
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .map(|line| {
+                let (key, value) = line.split_once('=').expect("fixture line is key=value");
+                (key.trim(), value.trim())
+            })
+            .collect();
+
+        let worker = worker_security_context();
+        let launcher = launcher_security_context();
+        let pod = pod_security_context();
+        let config = KubernetesConfig::for_testing();
+        let capabilities = |sc: &SecurityContext, take_added: bool| {
+            let caps = sc.capabilities.as_ref().expect("capabilities");
+            let list = if take_added {
+                caps.add.clone().unwrap_or_default()
+            } else {
+                caps.drop.clone().unwrap_or_default()
+            };
+            list.join(",")
+        };
+        let expected: BTreeMap<&str, String> = BTreeMap::from([
+            (
+                "worker_run_as_user",
+                worker.run_as_user.unwrap().to_string(),
+            ),
+            (
+                "worker_run_as_group",
+                worker.run_as_group.unwrap().to_string(),
+            ),
+            (
+                "worker_run_as_non_root",
+                worker.run_as_non_root.unwrap().to_string(),
+            ),
+            (
+                "worker_allow_privilege_escalation",
+                worker.allow_privilege_escalation.unwrap().to_string(),
+            ),
+            ("worker_capabilities_drop", capabilities(&worker, false)),
+            (
+                "launcher_run_as_user",
+                launcher.run_as_user.unwrap().to_string(),
+            ),
+            (
+                "launcher_run_as_group",
+                launcher.run_as_group.unwrap().to_string(),
+            ),
+            (
+                "launcher_allow_privilege_escalation",
+                launcher.allow_privilege_escalation.unwrap().to_string(),
+            ),
+            (
+                "launcher_read_only_root_filesystem",
+                launcher.read_only_root_filesystem.unwrap().to_string(),
+            ),
+            ("launcher_capabilities_drop", capabilities(&launcher, false)),
+            ("launcher_capabilities_add", capabilities(&launcher, true)),
+            ("child_run_as_user", CHILD_UID.to_string()),
+            ("child_run_as_group", ARTIFACT_GID.to_string()),
+            ("child_umask", "0002".to_string()),
+            ("pod_fs_group", pod.fs_group.unwrap().to_string()),
+            (
+                "pod_fs_group_change_policy",
+                pod.fs_group_change_policy.clone().unwrap(),
+            ),
+            (
+                "seccomp_profile",
+                worker.seccomp_profile.as_ref().unwrap().type_.clone(),
+            ),
+            ("launcher_expected_uid", LAUNCHER_UID.to_string()),
+            (
+                "unleased_millicores",
+                LAUNCHER_UNLEASED_MILLICORES.to_string(),
+            ),
+            (
+                "cgroup_delegation_profile",
+                config.cgroup_delegation_profile.clone(),
+            ),
+            (
+                "volume_ownership_mode",
+                config.volume_ownership_mode.clone(),
+            ),
+        ]);
+
+        for (key, value) in &expected {
+            assert_eq!(
+                fixture.get(key).copied(),
+                Some(value.as_str()),
+                "the adversarial proof fixture is stale for `{key}`; update \
+                 crates/djinn-cgroup-launcher/tests/fixtures/rendered-security-context.env"
+            );
+        }
+        let extra: Vec<&&str> = fixture
+            .keys()
+            .filter(|k| !expected.contains_key(*k))
+            .collect();
+        assert!(
+            extra.is_empty(),
+            "the fixture declares keys the render does not produce: {extra:?}"
+        );
+        // The launcher and worker share one seccomp profile; assert it rather
+        // than let the fixture describe only half the contract.
+        assert_eq!(
+            launcher.seccomp_profile.as_ref().unwrap().type_,
+            fixture["seccomp_profile"]
+        );
+        // The render must also actually accept the profile pair it advertises.
+        assert!(validate_enforcement_render(&config).is_ok());
+    }
+
     #[test]
     fn incompatible_volume_ownership_mode_fails_closed() {
         let mut cfg = KubernetesConfig::for_testing();

@@ -453,6 +453,104 @@ jobs:
           }
       - name: Clippy
         run: cargo clippy --all-targets --features qdrant -- -D warnings
+  launcher-kernel-boundary:
+    name: Launcher Kernel Boundary
+    needs: preflight
+    # The proofs need uid 0, real UID separation, a shared PID namespace,
+    # cgroup-v2 delegation and an installable seccomp filter — none of which the
+    # ordinary sharded test lane has. This is the ONLY lane that executes goxi
+    # AC2, so it must never be optional: the suite's always-on guard test
+    # (`the_privileged_lane_is_wired_and_this_proof_cannot_silently_skip`) reads
+    # this file back and fails if the job, its `--ignored` invocation, or the
+    # ZF13_EXPECTED_PROOFS declaration below disappears.
+    if: needs.preflight.outputs.serverTest == 'true' && github.event_name != 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    defaults:
+      run:
+        working-directory: server
+    env:
+      SQLX_OFFLINE: "true"
+      # Number of `#[ignore]`d proofs the suite declares. The run below fails if
+      # fewer than this many actually execute, so a lane that quietly runs zero
+      # tests can never be mistaken for a proven kernel boundary.
+      ZF13_EXPECTED_PROOFS: "3"
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install
+        working-directory: server
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # djinn-cgroup-launcher depends only on libc + thiserror, so this lane
+          # compiles one small crate; it shares the server-test family purely to
+          # reuse an already-warm registry rather than to seed a new one.
+          workspaces: server
+          shared-key: server-test
+          cache-on-failure: true
+          cache-all-crates: true
+          save-if: false
+        id: rust-cache
+      - name: Log cache family and restore status
+        run: |-
+          echo "cache-family=server-test"
+          echo "shared-key=server-test"
+          echo "runner-os=${{ runner.os }}"
+          echo "rustc=$(rustc --version || echo 'unknown')"
+          echo "cache-hit=${{ steps.rust-cache.outputs.cache-hit }}"
+          echo "::notice::cache-family=server-test shared-key=server-test cache-hit=${{ steps.rust-cache.outputs.cache-hit }}"
+      - name: Assert the runner can host the proof
+        run: |
+          set -euo pipefail
+          # Fail here, loudly, rather than let the suite decide it "cannot run".
+          if ! docker info >/dev/null 2>&1; then
+            echo "::error::no container runtime on this runner; the launcher kernel boundary cannot be proven"
+            exit 1
+          fi
+          if [ "$(docker info --format '{{.CgroupVersion}}')" != "2" ]; then
+            echo "::error::the container runtime is not on cgroup v2; the launcher readiness contract rejects v1/hybrid"
+            exit 1
+          fi
+          docker pull --quiet ubuntu:24.04
+      - name: Build the privileged proof binary (unprivileged)
+        id: build
+        run: |
+          set -euo pipefail
+          # Built as the normal user so no root-owned artifacts land in target/;
+          # only the finished binary is then run with elevated privilege.
+          cargo test -p djinn-cgroup-launcher \
+            --test kernel_boundary_under_rendered_context \
+            --no-run --message-format=json > "$RUNNER_TEMP/build.json"
+          binary=$(jq -r 'select(.executable != null and .target.name == "kernel_boundary_under_rendered_context") | .executable' "$RUNNER_TEMP/build.json" | tail -1)
+          if [ -z "$binary" ] || [ ! -x "$binary" ]; then
+            echo "::error::could not locate the built kernel-boundary proof binary"
+            exit 1
+          fi
+          echo "binary=$binary" >> "$GITHUB_OUTPUT"
+      - name: Prove the kernel boundary under the rendered security context
+        run: |
+          set -euo pipefail
+          # A privileged cgroup-v2 container is the closest analogue of the
+          # rendered enforcement Pod a hosted runner can offer: real uid 0, a
+          # private cgroup namespace whose cpu controller the suite can delegate
+          # exactly as the launcher requires, one shared PID namespace for the
+          # worker and its launched child, and /workspace (the rendered
+          # CommandSpec cwd) present. The image matches the runner's userspace,
+          # so the binary built above runs unmodified.
+          #
+          # --test-threads 1 keeps the harness single-threaded, so the worker
+          # fork and the clone3-into-cgroup adversary behave as they do in the
+          # rendered pod.
+          docker run --rm --privileged --cgroupns=private \
+            -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" \
+            ubuntu:24.04 \
+            bash -c 'mkdir -p /workspace && exec "$0" --ignored --test-threads 1 --nocapture' \
+            "${{ steps.build.outputs.binary }}" 2>&1 | tee "$RUNNER_TEMP/zf13.log"
+          passed=$(sed -n 's/^test result: ok\. \([0-9]*\) passed.*/\1/p' "$RUNNER_TEMP/zf13.log" | tail -1)
+          if [ "${passed:-0}" != "$ZF13_EXPECTED_PROOFS" ]; then
+            echo "::error::the launcher kernel-boundary lane executed ${passed:-0} proofs but $ZF13_EXPECTED_PROOFS are declared; goxi AC2 is NOT proven by this run"
+            exit 1
+          fi
+          echo "::notice::launcher kernel boundary proven: $passed/$ZF13_EXPECTED_PROOFS privileged proofs executed"
   server-aarch64-check:
     name: Server aarch64 Check
     needs: preflight

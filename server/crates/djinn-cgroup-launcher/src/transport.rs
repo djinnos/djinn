@@ -1,7 +1,7 @@
 //! Bounded Unix socket transport for authenticated broker controls.
 use crate::{
     CgroupFs, CloneIntoCgroup, CommandSpec, CpuStat, Error, Invocation,
-    broker::{Broker, ConnectionId, ControlNonce, NonceSource, SocketPeer},
+    broker::{Broker, ConnectionId, ControlNonce, NonceSource, SocketPeer, WORKER_GID, WORKER_UID},
     child::WorkerReadinessAssertion,
 };
 use std::{
@@ -58,6 +58,7 @@ impl<F: CgroupFs, S: CloneIntoCgroup, N: NonceSource> UnixBrokerServer<F, S, N> 
         }
         let listener = UnixListener::bind(&path)?;
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+        restrict_socket_to_worker(&path)?;
         Ok(Self {
             broker,
             listener: Some(listener),
@@ -187,6 +188,32 @@ impl<F, S, N> Drop for UnixBrokerServer<F, S, N> {
             let _ = fs::remove_file(path);
         }
     }
+}
+
+/// Hand the 0600 control socket to the worker identity when the broker runs
+/// privileged.
+///
+/// `connect(2)` on a filesystem-backed Unix socket requires WRITE permission on
+/// the socket inode. In the rendered Pod the launcher is uid 0 and the worker is
+/// [`WORKER_UID`], so a root-owned 0600 socket is unreachable by the very peer
+/// the broker exists to serve — while a laxer mode would open it to the
+/// launcher-spawned child (uid 1001). Owner-only, worker-owned is the single
+/// mode that admits exactly the worker: the child is refused by the kernel at
+/// `connect`, before a byte of the protocol is read. Proven by
+/// `tests/kernel_boundary_under_rendered_context.rs`.
+///
+/// Unprivileged embeddings (tests, local runs) already own the socket they just
+/// created, so there is nothing to hand over and this is a no-op.
+fn restrict_socket_to_worker(path: &Path) -> Result<(), Error> {
+    if unsafe { libc::geteuid() } != 0 {
+        return Ok(());
+    }
+    let raw = std::ffi::CString::new(path.as_os_str().as_encoded_bytes())
+        .map_err(|_| Error::UnsafeSocketPath)?;
+    if unsafe { libc::chown(raw.as_ptr(), WORKER_UID, WORKER_GID) } != 0 {
+        return Err(Error::Io(std::io::Error::last_os_error()));
+    }
+    Ok(())
 }
 
 pub struct UnixBrokerClient {
@@ -962,6 +989,35 @@ mod tests {
             assert_eq!(counts.leaves.load(Ordering::SeqCst), 1);
             assert_eq!(counts.clones.load(Ordering::SeqCst), 1);
         }
+    }
+
+    /// Unprivileged embeddings already own their socket, so handing it to the
+    /// worker identity is a no-op that must never weaken the 0600 mode. The
+    /// privileged half (root hands a 0600 socket to uid 1000, which is what
+    /// admits the worker and refuses the uid-1001 child at `connect`) is proven
+    /// in `tests/kernel_boundary_under_rendered_context.rs`.
+    #[test]
+    fn worker_socket_ownership_is_a_no_op_when_unprivileged_and_never_relaxes_mode() {
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let dir = std::env::var_os("CARGO_TARGET_TMPDIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir)
+            .join(format!("djinn-launcher-socket-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("broker.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        restrict_socket_to_worker(&path).unwrap();
+        assert_eq!(
+            fs::symlink_metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600,
+            "the control socket must stay owner-only"
+        );
+        drop(listener);
+        let _ = fs::remove_dir_all(&dir);
     }
 
     fn create_wire(program: &str, cwd: &str, environment: &[(&str, &str)]) -> Vec<u8> {
