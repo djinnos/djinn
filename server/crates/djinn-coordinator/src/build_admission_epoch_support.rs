@@ -333,6 +333,11 @@ impl EpochWorld {
             "{label}: v0 admitted {occupancy} above the epoch cap {cap}"
         );
         assert_eq!(
+            occupancy, cap,
+            "{label}: the burst exceeded the cap in contenders, so a healthy \
+             enforcing v0 must fill it exactly — never fewer, never more"
+        );
+        assert_eq!(
             i64::try_from(permits.len()).unwrap(),
             occupancy,
             "{label}: every v0 permit is durably accounted"
@@ -430,6 +435,10 @@ impl EpochWorld {
         assert_eq!(
             granted, snapshot.occupied,
             "{label}: every v1 grant is durably accounted"
+        );
+        assert_eq!(
+            snapshot.occupied, cap,
+            "{label}: the FIFO fills the epoch cap exactly — never fewer, never more"
         );
 
         // Releasing an occupied lease drains the FIFO into the next queued row,
