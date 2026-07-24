@@ -15,7 +15,7 @@ use ring::rand::{SecureRandom, SystemRandom};
 use sqlx::{Connection, PgConnection};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 use url::Url;
 
 const OPERATION_DEADLINE: Duration = Duration::from_secs(15);
@@ -30,6 +30,10 @@ pub struct PostgresAdapter {
     admin_url: Url,
     environment_names: Vec<String>,
     leases: Arc<Mutex<HashMap<String, Lease>>>,
+    creations: Arc<Mutex<HashMap<CreationKey, CreationState>>>,
+    operation_deadline: Duration,
+    #[cfg(test)]
+    pause_after_role: Arc<Mutex<Option<Duration>>>,
 }
 
 #[derive(Clone)]
@@ -37,6 +41,26 @@ struct Lease {
     role: String,
     database: String,
     password: String,
+}
+
+/// The request identity is the idempotency key for CreateFresh. Keeping it
+/// associated with the returned lease preserves delete authority after a
+/// response is lost and the caller retries.
+#[derive(Clone, Hash, PartialEq, Eq)]
+struct CreationKey {
+    attempt_id: String,
+    lease_nonce: String,
+}
+
+#[derive(Clone)]
+struct CreatedLease {
+    lease_id: String,
+    environment: BTreeMap<String, String>,
+}
+
+enum CreationState {
+    Creating(Arc<Notify>),
+    Created(CreatedLease),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -63,6 +87,10 @@ impl PostgresAdapter {
             admin_url,
             environment_names,
             leases: Arc::new(Mutex::new(HashMap::new())),
+            creations: Arc::new(Mutex::new(HashMap::new())),
+            operation_deadline: OPERATION_DEADLINE,
+            #[cfg(test)]
+            pause_after_role: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -82,20 +110,88 @@ impl PostgresAdapter {
         Self::new(&admin_url, names)
     }
 
-    async fn create(&self) -> Result<(String, BTreeMap<String, String>), AdapterError> {
+    async fn create(
+        &self,
+        attempt_id: String,
+        lease_nonce: String,
+    ) -> Result<(String, BTreeMap<String, String>), AdapterError> {
+        let key = CreationKey {
+            attempt_id,
+            lease_nonce,
+        };
+        loop {
+            let notify = {
+                let mut creations = self.creations.lock().await;
+                match creations.get(&key) {
+                    Some(CreationState::Created(created)) => {
+                        return Ok((created.lease_id.clone(), created.environment.clone()));
+                    }
+                    Some(CreationState::Creating(notify)) => notify.clone(),
+                    None => {
+                        let notify = Arc::new(Notify::new());
+                        creations.insert(key.clone(), CreationState::Creating(notify.clone()));
+                        let adapter = self.clone();
+                        let task_key = key.clone();
+                        let task_notify = notify.clone();
+                        // This task, not the request future, owns provisioning and
+                        // rollback. A socket deadline cannot cancel cleanup.
+                        tokio::spawn(async move {
+                            adapter.complete_creation(task_key, task_notify).await;
+                        });
+                        notify
+                    }
+                }
+            };
+            if tokio::time::timeout(self.operation_deadline, notify.notified())
+                .await
+                .is_err()
+            {
+                return Err(AdapterError::Rejected);
+            }
+        }
+    }
+
+    async fn complete_creation(&self, key: CreationKey, notify: Arc<Notify>) {
+        let result = self.create_backend().await;
+        let mut creations = self.creations.lock().await;
+        match result {
+            Ok((lease_id, lease, environment)) => {
+                self.leases.lock().await.insert(lease_id.clone(), lease);
+                creations.insert(
+                    key,
+                    CreationState::Created(CreatedLease {
+                        lease_id,
+                        environment,
+                    }),
+                );
+            }
+            Err(_) => {
+                creations.remove(&key);
+            }
+        }
+        drop(creations);
+        notify.notify_waiters();
+    }
+
+    async fn create_backend(
+        &self,
+    ) -> Result<(String, Lease, BTreeMap<String, String>), AdapterError> {
         let lease_id = generated(LEASE_PREFIX, 20)?;
         let role = generated(ROLE_PREFIX, 20)?;
         let database = generated(DATABASE_PREFIX, 20)?;
         let password = random_password()?;
-        let mut admin = self.admin_connection().await?;
-
-        let result = async {
+        let provision = async {
+            let mut admin = self.admin_connection().await?;
             sqlx::query(&format!(
                 "CREATE ROLE \"{role}\" LOGIN PASSWORD '{password}'"
             ))
             .execute(&mut admin)
             .await
             .map_err(|_| AdapterError::Rejected)?;
+            #[cfg(test)]
+            if let Some(pause) = *self.pause_after_role.lock().await {
+                tokio::time::sleep(pause).await;
+            }
             sqlx::query(&format!("CREATE DATABASE \"{database}\" OWNER \"{role}\""))
                 .execute(&mut admin)
                 .await
@@ -107,10 +203,17 @@ impl PostgresAdapter {
             .await
             .map_err(|_| AdapterError::Rejected)?;
             Ok::<(), AdapterError>(())
-        }
-        .await;
-        if result.is_err() {
-            let _ = cleanup(&mut admin, &database, &role).await;
+        };
+        if tokio::time::timeout(self.operation_deadline, provision)
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .is_none()
+        {
+            // A timed-out SQL connection is dropped before cleanup. Use a
+            // fresh connection so a stalled database creation cannot strand a
+            // previously-created role.
+            self.rollback(&database, &role).await;
             return Err(AdapterError::Rejected);
         }
 
@@ -126,8 +229,24 @@ impl PostgresAdapter {
             .cloned()
             .map(|name| (name, connection_url.clone()))
             .collect();
-        self.leases.lock().await.insert(lease_id.clone(), lease);
-        Ok((lease_id, environment))
+        Ok((lease_id, lease, environment))
+    }
+
+    async fn rollback(&self, database: &str, role: &str) {
+        if let Ok(mut admin) = self.admin_connection().await {
+            let _ = cleanup(&mut admin, database, role).await;
+        }
+    }
+
+    #[cfg(test)]
+    async fn pause_after_creating_role(&self, pause: Duration) {
+        *self.pause_after_role.lock().await = Some(pause);
+    }
+
+    #[cfg(test)]
+    fn with_operation_deadline(mut self, deadline: Duration) -> Self {
+        self.operation_deadline = deadline;
+        self
     }
 
     async fn ready(&self, lease_id: &str) -> Result<(), AdapterError> {
@@ -252,7 +371,7 @@ async fn dispatch(request: Request, adapter: PostgresAdapter) -> Response {
                 lease_nonce,
                 ..
             } if valid_identifier(&attempt_id) && valid_identifier(&lease_nonce) => {
-                let (lease_id, environment) = adapter.create().await?;
+                let (lease_id, environment) = adapter.create(attempt_id, lease_nonce).await?;
                 Ok(Response::Created {
                     revision: CONTROL_PROTOCOL_REVISION,
                     lease_id,
@@ -409,7 +528,10 @@ mod tests {
             return;
         };
         let adapter = PostgresAdapter::new(&url, vec!["DATABASE_URL".into()]).unwrap();
-        let (first, second) = tokio::join!(adapter.create(), adapter.create());
+        let (first, second) = tokio::join!(
+            adapter.create("attempt_first".into(), "nonce_first".into()),
+            adapter.create("attempt_second".into(), "nonce_second".into())
+        );
         let (first_id, first_env) = first.unwrap();
         let (second_id, second_env) = second.unwrap();
         let first_url = &first_env["DATABASE_URL"];
@@ -430,7 +552,10 @@ mod tests {
         assert_eq!(visible, 0);
         adapter.delete(&first_id).await.unwrap();
         assert!(PgConnection::connect(first_url).await.is_err());
-        let (third_id, third_env) = adapter.create().await.unwrap();
+        let (third_id, third_env) = adapter
+            .create("attempt_third".into(), "nonce_third".into())
+            .await
+            .unwrap();
         let mut third = PgConnection::connect(&third_env["DATABASE_URL"])
             .await
             .unwrap();
@@ -443,5 +568,59 @@ mod tests {
         assert_eq!(tables, 0);
         adapter.delete(&third_id).await.unwrap();
         adapter.delete(&second_id).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn retried_create_fresh_returns_the_original_lease() {
+        let Some(url) = std::env::var("TEST_POSTGRES_URL").ok() else {
+            return;
+        };
+        let adapter = PostgresAdapter::new(&url, vec!["DATABASE_URL".into()]).unwrap();
+        let request = || Request::CreateFresh {
+            revision: CONTROL_PROTOCOL_REVISION,
+            attempt_id: "retry_attempt".into(),
+            lease_nonce: "retry_nonce".into(),
+        };
+        let first = dispatch(request(), adapter.clone()).await;
+        // Model a lost first response: retry the identical protocol request.
+        let retry = dispatch(request(), adapter.clone()).await;
+        assert_eq!(first, retry);
+        let Response::Created { lease_id, .. } = retry else {
+            panic!("CreateFresh did not succeed");
+        };
+        assert_eq!(adapter.leases.lock().await.len(), 1);
+        adapter.delete(&lease_id).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn timeout_after_role_creation_rolls_back_before_replying() {
+        let Some(url) = std::env::var("TEST_POSTGRES_URL").ok() else {
+            return;
+        };
+        let adapter = PostgresAdapter::new(&url, vec!["DATABASE_URL".into()])
+            .unwrap()
+            .with_operation_deadline(Duration::from_millis(25));
+        let mut admin = PgConnection::connect(&url).await.unwrap();
+        let before: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM pg_roles WHERE rolname LIKE 'djinn_role_%'")
+                .fetch_one(&mut admin)
+                .await
+                .unwrap();
+        adapter
+            .pause_after_creating_role(Duration::from_millis(100))
+            .await;
+        assert_eq!(
+            adapter
+                .create("timeout_attempt".into(), "timeout_nonce".into())
+                .await,
+            Err(AdapterError::Rejected)
+        );
+        let after: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM pg_roles WHERE rolname LIKE 'djinn_role_%'")
+                .fetch_one(&mut admin)
+                .await
+                .unwrap();
+        assert_eq!(after, before);
+        assert!(adapter.leases.lock().await.is_empty());
     }
 }
