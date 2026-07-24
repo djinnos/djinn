@@ -22,6 +22,7 @@
 //! a project's image (used by the task-run dispatch paths).
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
 
 use k8s_openapi::api::core::v1::{
     Container, ContainerPort, EmptyDirVolumeSource, EnvVar, Probe, ResourceRequirements,
@@ -43,12 +44,122 @@ use crate::config::KubernetesConfig;
 /// only when at least one service is injected.
 pub const SIDECAR_DSHM_VOLUME: &str = "svc-dshm";
 
+/// Pod volume name for the private service-control `emptyDir`. Mounted only into
+/// the worker container and the wrapper sidecars — never a canonical command
+/// container. The wrapper sidecars bind their protocol-v1 control sockets here
+/// and the worker adapter connects to them.
+pub const CONTROL_VOLUME: &str = "svc-control";
+
+/// In-Pod mount path of the private service-control `emptyDir`. Each wrapper
+/// sidecar binds `<CONTROL_SOCKET_DIR>/<socket>` and the worker adapter connects
+/// to the identical path. This directory is deliberately absent from every
+/// canonical-command Landlock grant, so verification commands cannot reach it.
+pub const CONTROL_SOCKET_DIR: &str = "/var/run/djinn/service-control";
+
+/// Environment variable a wrapper sidecar reads to learn where to bind its
+/// control socket. Consumed by the `djinn-*-wrapper` binaries.
+pub const CONTROL_SOCKET_ENV: &str = "CATALOG_CONTROL_SOCKET";
+
+/// Deterministic, sanitized socket file name for a preset. Every byte that is
+/// not `[a-z0-9_-]` collapses to `_`; the result is lowercased and bounded so a
+/// preset id can never escape the control directory or produce a path-unsafe
+/// name. Distinct presets whose ids sanitize to the same stem collide on
+/// purpose — strict resolution rejects that collision rather than silently
+/// serving two services from one socket.
+pub fn control_socket_file_name(preset_id: &str) -> String {
+    let mut stem: String = preset_id
+        .chars()
+        .map(|c| {
+            let c = c.to_ascii_lowercase();
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    stem.truncate(64);
+    if stem.is_empty() {
+        stem.push('_');
+    }
+    format!("{stem}.sock")
+}
+
+/// Absolute in-Pod path of a preset's control socket. The worker adapter and
+/// the wrapper sidecar derive the identical path from this function so a client
+/// socket always names the socket its wrapper server binds.
+pub fn control_socket_path(preset_id: &str) -> PathBuf {
+    PathBuf::from(CONTROL_SOCKET_DIR).join(control_socket_file_name(preset_id))
+}
+
+/// Absolute in-Pod path for an already-sanitized socket file name.
+pub fn control_socket_path_from_name(socket_name: &str) -> PathBuf {
+    PathBuf::from(CONTROL_SOCKET_DIR).join(socket_name)
+}
+
+/// The private control `emptyDir` volume. Added to the Pod only when at least
+/// one wrapper sidecar is injected.
+pub fn control_volume() -> Volume {
+    Volume {
+        name: CONTROL_VOLUME.to_string(),
+        empty_dir: Some(EmptyDirVolumeSource::default()),
+        ..Volume::default()
+    }
+}
+
+/// The control-socket mount shared by the worker and every wrapper sidecar.
+pub fn control_volume_mount() -> VolumeMount {
+    VolumeMount {
+        name: CONTROL_VOLUME.to_string(),
+        mount_path: CONTROL_SOCKET_DIR.to_string(),
+        ..VolumeMount::default()
+    }
+}
+
+/// The admin-URL environment variable each wrapper binary reads to reach its
+/// co-located stock daemon on Pod loopback. Returns `None` for a service type
+/// that has no catalog wrapper.
+fn wrapper_admin_env_var(service_type: &str) -> Option<&'static str> {
+    match service_type {
+        "postgres" => Some("POSTGRES_WRAPPER_ADMIN_URL"),
+        "redis" => Some("REDIS_WRAPPER_ADMIN_URL"),
+        "rabbitmq" => Some("RABBITMQ_WRAPPER_AMQP_URL"),
+        _ => None,
+    }
+}
+
+/// The exported-environment-names variable each wrapper binary reads to learn
+/// which env names a lease URL is returned under. Returns `None` for a service
+/// type that has no catalog wrapper.
+fn wrapper_env_names_var(service_type: &str) -> Option<&'static str> {
+    match service_type {
+        "postgres" => Some("CATALOG_POSTGRES_ENV_NAMES"),
+        "redis" => Some("CATALOG_REDIS_ENV_NAMES"),
+        "rabbitmq" => Some("CATALOG_RABBITMQ_ENV_NAMES"),
+        _ => None,
+    }
+}
+
 /// Everything the sidecar builder needs from a `service_presets` row. The
 /// caller maps it so this module never reaches into DB row shape.
 #[derive(Clone, Debug)]
 pub struct BackingServiceSpec {
     pub service_type: String,
+    /// The container image the sidecar runs. When a wrapper artifact is
+    /// resolved this is the digest-pinned wrapper reference
+    /// (`{wrapper_image}@{digest}`); legacy presets without a wrapper keep the
+    /// stock service image for dispatch compatibility.
     pub image: String,
+    /// `true` when the sidecar runs a catalog wrapper (stock daemon + protocol
+    /// control server). Drives the private control mount, the socket env, and
+    /// the wrapper admin env. `false` keeps the pre-wrapper dispatch shape.
+    pub is_wrapper: bool,
+    /// Sanitized per-preset control socket file name (see
+    /// [`control_socket_file_name`]).
+    pub control_socket_name: String,
+    /// Extra environment the wrapper binary needs (admin URL + exported env
+    /// names). Empty for non-wrapper sidecars.
+    pub wrapper_env: Vec<(String, String)>,
     pub port: i32,
     pub env: Vec<(String, String)>,
     pub cpu_request: String,
@@ -114,7 +225,8 @@ fn strict_catalog_from_presets(
     // this validation boundary so every caller receives the same identity
     // material even when rows were loaded in a different order.
     rows.sort_by(|left, right| left.0.cmp(&right.0));
-    let (mut ids, mut types, mut ports, mut env_names) = (
+    let (mut ids, mut types, mut ports, mut env_names, mut socket_names) = (
+        BTreeSet::new(),
         BTreeSet::new(),
         BTreeSet::new(),
         BTreeSet::new(),
@@ -127,6 +239,20 @@ fn strict_catalog_from_presets(
                 kind: "preset ID",
                 value: preset_id,
             });
+        }
+        // A wrapper artifact reference is mandatory: a bare stock image has no
+        // protocol control server, so it can never satisfy strict verification.
+        let wrapper_image = p.wrapper_image.clone().filter(|w| !w.trim().is_empty());
+        let wrapper_image = match wrapper_image {
+            Some(w) => w,
+            None => {
+                return Err(CatalogServiceResolutionError::StockImageWithoutWrapper { preset_id });
+            }
+        };
+        // The wrapper reference must be a plain repository ref; the digest is the
+        // sole immutable pin. A digest-suffixed (mutable/ambiguous) ref fails.
+        if wrapper_image.contains('@') {
+            return Err(CatalogServiceResolutionError::MutableWrapperReference { preset_id });
         }
         let digest = p
             .image_digest
@@ -184,13 +310,25 @@ fn strict_catalog_from_presets(
                 });
             }
         }
-        let effective = serde_json::json!({"env": serde_json::from_str::<serde_json::Value>(&p.env).unwrap(), "resources": serde_json::from_str::<serde_json::Value>(&p.resources).unwrap(), "conn_template": p.conn_template, "port": p.port, "protocol": revision});
+        // The socket the worker adapter connects to is derived deterministically
+        // from the preset id. Two presets that sanitize to the same socket name
+        // would share one control socket ambiguously — reject that collision.
+        let control_socket_name = control_socket_file_name(&preset_id);
+        if !socket_names.insert(control_socket_name.clone()) {
+            return Err(CatalogServiceResolutionError::Duplicate {
+                kind: "control socket identity",
+                value: control_socket_name,
+            });
+        }
+        let effective = serde_json::json!({"env": serde_json::from_str::<serde_json::Value>(&p.env).unwrap(), "resources": serde_json::from_str::<serde_json::Value>(&p.resources).unwrap(), "conn_template": p.conn_template, "port": p.port, "protocol": revision, "wrapper_image": wrapper_image});
         result.push(ResolvedCatalogService {
             preset_id: preset_id.clone(),
             service_type: p.service_type,
             image_reference: p.image,
+            wrapper_reference: format!("{wrapper_image}@{digest}"),
             image_digest: digest,
             port: p.port,
+            control_socket_name,
             exported_environment_names: names,
             verification_protocol_revision: revision as u32,
             effective_configuration_digest: format!(
@@ -207,9 +345,16 @@ fn strict_catalog_from_presets(
 pub struct ResolvedCatalogService {
     pub preset_id: String,
     pub service_type: String,
+    /// The stock service image reference (retained for identity/observability).
     pub image_reference: String,
+    /// The digest-pinned wrapper artifact reference the sidecar actually runs:
+    /// `{wrapper_image}@{image_digest}`.
+    pub wrapper_reference: String,
     pub image_digest: String,
     pub port: i32,
+    /// Deterministic sanitized control socket file name the worker adapter
+    /// connects to and the wrapper sidecar binds.
+    pub control_socket_name: String,
     pub exported_environment_names: Vec<String>,
     pub verification_protocol_revision: u32,
     pub effective_configuration_digest: String,
@@ -227,6 +372,10 @@ pub enum CatalogServiceResolutionError {
     MissingPreset { preset_id: String },
     #[error("service preset {preset_id} has a missing or malformed immutable image digest")]
     MalformedServiceDigest { preset_id: String },
+    #[error("service preset {preset_id} has no catalog wrapper image (stock image only)")]
+    StockImageWithoutWrapper { preset_id: String },
+    #[error("service preset {preset_id} wrapper reference is mutable (carries a digest suffix)")]
+    MutableWrapperReference { preset_id: String },
     #[error("duplicate {kind}: {value}")]
     Duplicate { kind: &'static str, value: String },
     #[error("service preset {preset_id} has malformed configuration")]
@@ -319,7 +468,7 @@ pub fn sidecar_conn_env(spec: &BackingServiceSpec) -> Vec<EnvVar> {
 /// appends it to the Pod's `initContainers` (NOT `containers`); the
 /// `restartPolicy: Always` is what makes the kubelet treat it as a sidecar.
 pub fn sidecar_container(config: &KubernetesConfig, spec: &BackingServiceSpec) -> Container {
-    let env: Vec<EnvVar> = spec
+    let mut env: Vec<EnvVar> = spec
         .env
         .iter()
         .map(|(k, v)| EnvVar {
@@ -328,6 +477,33 @@ pub fn sidecar_container(config: &KubernetesConfig, spec: &BackingServiceSpec) -
             ..EnvVar::default()
         })
         .collect();
+    // A wrapper sidecar additionally learns where to bind its control socket and
+    // how to reach its co-located stock daemon (wrapper_env).
+    if spec.is_wrapper {
+        env.push(EnvVar {
+            name: CONTROL_SOCKET_ENV.to_string(),
+            value: Some(
+                control_socket_path_from_name(&spec.control_socket_name)
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+            ..EnvVar::default()
+        });
+        env.extend(spec.wrapper_env.iter().map(|(k, v)| EnvVar {
+            name: k.clone(),
+            value: Some(v.clone()),
+            ..EnvVar::default()
+        }));
+    }
+
+    let mut volume_mounts = vec![VolumeMount {
+        name: SIDECAR_DSHM_VOLUME.to_string(),
+        mount_path: "/dev/shm".to_string(),
+        ..VolumeMount::default()
+    }];
+    if spec.is_wrapper {
+        volume_mounts.push(control_volume_mount());
+    }
 
     let probe = || Probe {
         tcp_socket: Some(TCPSocketAction {
@@ -354,11 +530,7 @@ pub fn sidecar_container(config: &KubernetesConfig, spec: &BackingServiceSpec) -
             container_port: spec.port,
             ..ContainerPort::default()
         }]),
-        volume_mounts: Some(vec![VolumeMount {
-            name: SIDECAR_DSHM_VOLUME.to_string(),
-            mount_path: "/dev/shm".to_string(),
-            ..VolumeMount::default()
-        }]),
+        volume_mounts: Some(volume_mounts),
         // The worker container does not start until this startup probe passes —
         // so the service is accepting connections before any test runs.
         startup_probe: Some(probe()),
@@ -430,15 +602,36 @@ fn append_preset_resolution(
                 port: p.port,
                 conn_env_var: p.conn_env_var.clone(),
             });
+            // A preset with a wrapper repository AND a valid immutable digest
+            // runs the digest-pinned wrapper artifact (stock daemon + control
+            // server). Legacy presets missing either keep the stock image so
+            // ordinary dispatch stays byte-compatible with the pre-wrapper shape.
+            let wrapper = p
+                .wrapper_image
+                .as_deref()
+                .map(str::trim)
+                .filter(|w| !w.is_empty())
+                .zip(p.image_digest.as_deref().filter(|d| valid_digest(d)));
+            let (is_wrapper, image, wrapper_env) = match wrapper {
+                Some((wrapper_image, digest)) => {
+                    let mut wrapper_env = Vec::new();
+                    let admin = render_local_conn(&p.conn_template, p.port);
+                    if let Some(name) = wrapper_admin_env_var(&p.service_type) {
+                        wrapper_env.push((name.to_string(), admin));
+                    }
+                    if let Some(name) = wrapper_env_names_var(&p.service_type) {
+                        wrapper_env.push((name.to_string(), p.conn_env_var.clone()));
+                    }
+                    (true, format!("{wrapper_image}@{digest}"), wrapper_env)
+                }
+                None => (false, p.image.clone(), Vec::new()),
+            };
             specs.push(BackingServiceSpec {
+                control_socket_name: control_socket_file_name(preset_id),
+                is_wrapper,
+                wrapper_env,
                 service_type: p.service_type,
-                // Keep ordinary dispatch compatible with legacy rows, while
-                // rendering every catalog-owned valid digest immutably.
-                image: p
-                    .image_digest
-                    .as_deref()
-                    .filter(|d| valid_digest(d))
-                    .map_or(p.image.clone(), |digest| format!("{}@{digest}", p.image)),
+                image,
                 port: p.port,
                 env: parse_env(&p.env),
                 cpu_request,
@@ -582,6 +775,9 @@ mod tests {
         BackingServiceSpec {
             service_type: "postgres".into(),
             image: "postgres:18-alpine".into(),
+            is_wrapper: false,
+            control_socket_name: "preset-postgres-18.sock".into(),
+            wrapper_env: Vec::new(),
             port: 5432,
             env: vec![("POSTGRES_PASSWORD".into(), "postgres".into())],
             cpu_request: "100m".into(),
@@ -599,6 +795,7 @@ mod tests {
             name: "Postgres 18".into(),
             service_type: "postgres".into(),
             image: "postgres:18-alpine".into(),
+            wrapper_image: Some("ghcr.io/djinnos/djinn-postgres-wrapper".into()),
             image_digest: Some("sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into()),
             verification_protocol_revision: Some(1),
             port: 5432,
@@ -654,7 +851,7 @@ mod tests {
     }
 
     #[test]
-    fn catalog_digest_pins_dispatch_sidecar_image() {
+    fn catalog_wrapper_digest_pins_dispatch_sidecar_image() {
         let mut services = Vec::new();
         append_preset_resolution(
             "project",
@@ -664,9 +861,102 @@ mod tests {
             &mut Vec::new(),
             &mut Vec::new(),
         );
+        // A wrapper preset renders the digest-pinned wrapper artifact, not the
+        // stock image, and is marked as a wrapper so job.rs wires the private
+        // control mount + socket env.
         assert_eq!(
             services[0].image,
-            "postgres:18-alpine@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+            "ghcr.io/djinnos/djinn-postgres-wrapper@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        );
+        assert!(services[0].is_wrapper);
+        assert_eq!(services[0].control_socket_name, "preset-postgres-18.sock");
+        // The wrapper admin URL + exported env names are wired for the binary.
+        assert!(
+            services[0]
+                .wrapper_env
+                .iter()
+                .any(|(k, v)| k == "POSTGRES_WRAPPER_ADMIN_URL"
+                    && v == "postgres://postgres:postgres@127.0.0.1:5432/app_test")
+        );
+        assert!(services[0].wrapper_env.iter().any(
+            |(k, v)| k == "CATALOG_POSTGRES_ENV_NAMES" && v == "DATABASE_URL,TEST_POSTGRES_URL"
+        ));
+    }
+
+    /// A legacy preset with no wrapper image stays dispatch-compatible: the
+    /// sidecar runs the stock image and is not marked as a wrapper.
+    #[test]
+    fn legacy_preset_without_wrapper_runs_stock_image() {
+        let mut legacy = preset();
+        legacy.wrapper_image = None;
+        legacy.image_digest = None;
+        let mut services = Vec::new();
+        append_preset_resolution(
+            "project",
+            "preset-postgres-18",
+            Ok(Some(legacy)),
+            &mut services,
+            &mut Vec::new(),
+            &mut Vec::new(),
+        );
+        assert_eq!(services[0].image, "postgres:18-alpine");
+        assert!(!services[0].is_wrapper);
+        assert!(services[0].wrapper_env.is_empty());
+    }
+
+    /// AC2: strict resolution rejects a preset that has no catalog wrapper
+    /// image, a mutable (digest-suffixed) wrapper reference, and two presets
+    /// whose ids sanitize to a colliding control socket identity.
+    #[test]
+    fn strict_catalog_rejects_wrapper_and_socket_faults() {
+        let mut no_wrapper = preset();
+        no_wrapper.wrapper_image = None;
+        assert!(matches!(
+            strict_catalog_from_presets(vec![("postgres-a".into(), no_wrapper)]),
+            Err(CatalogServiceResolutionError::StockImageWithoutWrapper { .. })
+        ));
+
+        let mut mutable_wrapper = preset();
+        mutable_wrapper.wrapper_image =
+            Some("ghcr.io/djinnos/djinn-postgres-wrapper@sha256:dead".into());
+        assert!(matches!(
+            strict_catalog_from_presets(vec![("postgres-a".into(), mutable_wrapper)]),
+            Err(CatalogServiceResolutionError::MutableWrapperReference { .. })
+        ));
+
+        // "svc/a" and "svc:a" both sanitize to "svc_a.sock".
+        let mut left = preset();
+        left.service_type = "redis".into();
+        left.port = 6390;
+        left.conn_env_var = "LEFT_URL".into();
+        let mut right = preset();
+        right.service_type = "rabbitmq".into();
+        right.port = 6391;
+        right.conn_env_var = "RIGHT_URL".into();
+        assert!(matches!(
+            strict_catalog_from_presets(vec![("svc/a".into(), left), ("svc:a".into(), right)]),
+            Err(CatalogServiceResolutionError::Duplicate {
+                kind: "control socket identity",
+                ..
+            })
+        ));
+    }
+
+    /// AC2: a resolved wrapper service names the exact socket the worker adapter
+    /// connects to, and the pinned wrapper reference the sidecar runs.
+    #[test]
+    fn strict_resolution_exposes_wrapper_reference_and_socket() {
+        let resolved =
+            strict_catalog_from_presets(vec![("preset-postgres-18".into(), preset())]).unwrap();
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(
+            resolved[0].wrapper_reference,
+            "ghcr.io/djinnos/djinn-postgres-wrapper@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        );
+        assert_eq!(resolved[0].control_socket_name, "preset-postgres-18.sock");
+        assert_eq!(
+            control_socket_path("preset-postgres-18"),
+            std::path::Path::new("/var/run/djinn/service-control/preset-postgres-18.sock")
         );
     }
 

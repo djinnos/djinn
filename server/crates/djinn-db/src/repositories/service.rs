@@ -18,7 +18,16 @@ pub struct ServicePreset {
     pub name: String,
     pub service_type: String,
     pub image: String,
-    /// Immutable manifest digest consumed by strict canonical verification.
+    /// Catalog-owned wrapper artifact repository reference (no digest suffix).
+    /// The deployable wrapper image is `{wrapper_image}@{image_digest}`; the
+    /// wrapper packages the stock service runtime plus the protocol-v1 control
+    /// server. `None` = legacy preset with no wrapper (dispatch-only, never
+    /// eligible for strict canonical verification).
+    pub wrapper_image: Option<String>,
+    /// Immutable manifest digest of the wrapper artifact, consumed by strict
+    /// canonical verification. Recorded by the build/controller path; the seed
+    /// leaves it NULL so strict resolution fails closed until a real digest is
+    /// published.
     pub image_digest: Option<String>,
     /// Revision of the catalog wrapper verification protocol.
     pub verification_protocol_revision: Option<i32>,
@@ -42,7 +51,8 @@ fn map_preset(r: &sqlx::postgres::PgRow) -> ServicePreset {
         name: r.get("name"),
         service_type: r.get("service_type"),
         image: r.get("image"),
-        image_digest: r.try_get("image_digest").ok(),
+        wrapper_image: r.try_get("wrapper_image").ok().flatten(),
+        image_digest: r.try_get("image_digest").ok().flatten(),
         verification_protocol_revision: r.try_get("verification_protocol_revision").ok(),
         port: r.get("port"),
         env: r.get("env"),
@@ -56,7 +66,7 @@ fn map_preset(r: &sqlx::postgres::PgRow) -> ServicePreset {
 
 const PRESET_COLS: &str = r#"id, name, service_type, image, port,
     env::text AS env, resources::text AS resources, conn_template, conn_env_var,
-    client_package, image_digest, verification_protocol_revision"#;
+    client_package, wrapper_image, image_digest, verification_protocol_revision"#;
 
 pub struct ServicePresetRepository {
     db: Database,
@@ -83,6 +93,56 @@ impl ServicePresetRepository {
             .await?;
         Ok(row.as_ref().map(map_preset))
     }
+
+    /// Record the build/controller-published wrapper artifact identity for a
+    /// preset: the wrapper repository reference and its immutable manifest
+    /// digest. This is the sole write path for wrapper identity — presets are
+    /// otherwise seeded by migrations, and strict resolution stays fail-closed
+    /// until a real digest is recorded here.
+    ///
+    /// `wrapper_image` must be a plain repository reference with no digest
+    /// suffix; `image_digest` must be a `sha256:<64 lowercase hex>` literal.
+    /// Malformed arguments are rejected before touching the database so a
+    /// fabricated or mutable identity can never be persisted. Returns the number
+    /// of rows updated (0 when the preset id is unknown).
+    pub async fn set_wrapper_identity(
+        &self,
+        preset_id: &str,
+        wrapper_image: &str,
+        image_digest: &str,
+    ) -> Result<u64> {
+        if wrapper_image.trim().is_empty() || wrapper_image.contains('@') {
+            return Err(crate::error::DbError::InvalidData(format!(
+                "wrapper_image for preset {preset_id} must be a digest-free repository reference"
+            )));
+        }
+        if !is_sha256_digest(image_digest) {
+            return Err(crate::error::DbError::InvalidData(format!(
+                "image_digest for preset {preset_id} must be sha256:<64 lowercase hex>"
+            )));
+        }
+        self.db.ensure_initialized().await?;
+        let result = sqlx::query(
+            "UPDATE service_presets SET wrapper_image = $2, image_digest = $3, \
+             verification_protocol_revision = COALESCE(verification_protocol_revision, 1) \
+             WHERE id = $1",
+        )
+        .bind(preset_id)
+        .bind(wrapper_image)
+        .bind(image_digest)
+        .execute(self.db.pool())
+        .await?;
+        Ok(result.rows_affected())
+    }
+}
+
+/// A `sha256:<64 lowercase hex>` digest literal.
+fn is_sha256_digest(value: &str) -> bool {
+    value.len() == 71
+        && value.starts_with("sha256:")
+        && value[7..]
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 #[cfg(test)]
@@ -106,5 +166,77 @@ mod tests {
         // sidecar exports the connection under the conventional DATABASE_URL too.
         assert_eq!(pg.conn_env_var, "DATABASE_URL,TEST_POSTGRES_URL");
         assert_eq!(pg.client_package.as_deref(), Some("postgresql-client"));
+    }
+
+    /// AC1: the seed records catalog-owned wrapper repositories but leaves the
+    /// immutable digest NULL, so strict resolution stays fail-closed until a
+    /// real published digest is recorded (no fabricated literals survive).
+    #[tokio::test]
+    async fn seed_records_wrapper_repository_without_a_digest() {
+        let db = Database::open_in_memory().unwrap();
+        db.ensure_initialized().await.unwrap();
+        let repo = ServicePresetRepository::new(db.clone());
+        for (id, wrapper) in [
+            (
+                "preset-postgres-18",
+                "ghcr.io/djinnos/djinn-postgres-wrapper",
+            ),
+            ("preset-redis-7", "ghcr.io/djinnos/djinn-redis-wrapper"),
+            (
+                "preset-rabbitmq-4",
+                "ghcr.io/djinnos/djinn-rabbitmq-wrapper",
+            ),
+        ] {
+            let preset = repo.get(id).await.unwrap().expect("seeded preset");
+            assert_eq!(preset.wrapper_image.as_deref(), Some(wrapper));
+            assert!(
+                preset.image_digest.is_none(),
+                "fabricated placeholder digest must be cleared for {id}"
+            );
+        }
+    }
+
+    /// AC1: the build/controller write path records a real digest and rejects
+    /// mutable/fabricated identities before touching the database.
+    #[tokio::test]
+    async fn set_wrapper_identity_records_real_digest_and_rejects_malformed() {
+        let db = Database::open_in_memory().unwrap();
+        db.ensure_initialized().await.unwrap();
+        let repo = ServicePresetRepository::new(db.clone());
+        let digest = "sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef";
+
+        // A digest-suffixed wrapper reference is a mutable/ambiguous identity.
+        assert!(matches!(
+            repo.set_wrapper_identity("preset-redis-7", "repo@sha256:dead", digest)
+                .await,
+            Err(crate::error::DbError::InvalidData(_))
+        ));
+        // A non-sha256 digest is rejected before the database write.
+        assert!(matches!(
+            repo.set_wrapper_identity("preset-redis-7", "repo", "latest")
+                .await,
+            Err(crate::error::DbError::InvalidData(_))
+        ));
+
+        let updated = repo
+            .set_wrapper_identity(
+                "preset-redis-7",
+                "ghcr.io/djinnos/djinn-redis-wrapper",
+                digest,
+            )
+            .await
+            .unwrap();
+        assert_eq!(updated, 1);
+        let redis = repo.get("preset-redis-7").await.unwrap().expect("preset");
+        assert_eq!(redis.image_digest.as_deref(), Some(digest));
+        assert_eq!(redis.verification_protocol_revision, Some(1));
+
+        // Unknown preset id updates no rows.
+        assert_eq!(
+            repo.set_wrapper_identity("preset-nope", "repo", digest)
+                .await
+                .unwrap(),
+            0
+        );
     }
 }

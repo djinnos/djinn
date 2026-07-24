@@ -29,7 +29,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use djinn_sandbox::service_provisioning::{CONTROL_PROTOCOL_REVISION, Request, Response};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
-use tokio::net::{TcpStream, UnixListener, UnixStream};
+use tokio::net::{TcpStream, UnixStream};
 use tokio::sync::{Mutex, Notify};
 use url::Url;
 
@@ -766,11 +766,7 @@ impl RabbitWrapperServer {
     }
 
     pub async fn serve(self, socket: impl AsRef<Path>) -> Result<(), std::io::Error> {
-        let socket = socket.as_ref();
-        if socket.exists() {
-            std::fs::remove_file(socket)?;
-        }
-        let listener = UnixListener::bind(socket)?;
+        let listener = crate::bind_control_socket(socket.as_ref())?;
         loop {
             let (stream, _) = listener.accept().await?;
             let adapter = self.adapter.clone();

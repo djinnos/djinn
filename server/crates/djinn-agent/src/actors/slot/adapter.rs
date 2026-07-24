@@ -414,10 +414,12 @@ pub async fn resolve_final_verification_for_task_run(
     let service_provisioners: ServiceProvisioners = services
         .iter()
         .map(|service| {
+            // The socket path is the canonical one strict resolution computed and
+            // rejected collisions on, so a client socket always names the socket
+            // the corresponding wrapper sidecar binds.
             Arc::new(UnixCatalogServiceProvisioner::new(
                 service.preset_id.clone(),
-                PathBuf::from("/var/run/djinn/service-control")
-                    .join(format!("{}.sock", service.preset_id)),
+                djinn_k8s::sidecar::control_socket_path_from_name(&service.control_socket_name),
                 service.exported_environment_names.clone(),
             ))
                 as Arc<dyn djinn_sandbox::service_provisioning::CatalogServiceProvisioner>
