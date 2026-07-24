@@ -1,0 +1,26 @@
+[package]
+publish = false
+name = "djinn-catalog-wrapper"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "djinn-postgres-wrapper"
+path = "src/main.rs"
+
+[dependencies]
+djinn-sandbox = { path = "../djinn-sandbox" }
+base64 = "0.22"
+hex = "0.4"
+ring = "0.17"
+serde_json = "1"
+sqlx = { version = "0.8", features = ["postgres", "runtime-tokio-rustls"] }
+tokio = { version = "1", features = ["full"] }
+url = "2"
+workspace-hack.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true
