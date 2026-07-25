@@ -8,10 +8,51 @@ use crate::database::Database;
 use crate::repositories::note::NoteRepository;
 use djinn_memory::Note;
 
-/// Corrupt a task's durable refinement role to model legacy or externally
-/// malformed correlation evidence that typed task writers refuse to create.
-///
-/// **Not for production use.** Panics on SQL errors.
+/// Durable refinement fields for recovery integration assertions.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RefinementRunAuditForTest {
+    pub generation: i32,
+    pub state: String,
+    pub park_kind: Option<String>,
+    pub stop_tag: Option<String>,
+    pub stop_context: Option<serde_json::Value>,
+    pub typed_reap_count: i64,
+}
+
+/// Read a durable run and its typed phantom-reap audit count for tests.
+pub async fn refinement_run_audit_for_test(
+    db: &Database,
+    run_id: &str,
+) -> RefinementRunAuditForTest {
+    db.ensure_initialized().await.unwrap();
+    let row: (i32, String, Option<String>, Option<String>, Option<serde_json::Value>) =
+        sqlx::query_as(
+            "SELECT generation, state, park_kind, stop_tag, stop_context \
+             FROM refinement_runs WHERE id = $1",
+        )
+        .bind(run_id)
+        .fetch_one(db.pool())
+        .await
+        .expect("failed to read refinement run audit row");
+    let typed_reap_count = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM refinement_runs \
+         WHERE id = $1 AND stop_tag = 'reaped_phantom'",
+    )
+    .bind(run_id)
+    .fetch_one(db.pool())
+    .await
+    .expect("failed to count typed refinement reaps");
+    RefinementRunAuditForTest {
+        generation: row.0,
+        state: row.1,
+        park_kind: row.2,
+        stop_tag: row.3,
+        stop_context: row.4,
+        typed_reap_count,
+    }
+}
+
+/// Corrupt a task role to model malformed legacy correlation evidence.
 pub async fn corrupt_refinement_task_role_for_test(db: &Database, task_id: &str, role: &str) {
     db.ensure_initialized().await.unwrap();
     sqlx::query("UPDATE tasks SET refinement_role = $1 WHERE id = $2")
@@ -44,14 +85,7 @@ pub async fn make_refinement_run_phantom_for_test(db: &Database, run_id: &str) {
     transaction.commit().await.unwrap();
 }
 
-/// Replace a material proposal head without its normal write-time validation.
-///
-/// This is exclusively for legacy-data fixtures: it keeps the current sequence
-/// while changing both the live proposal and its immutable `spec_revision`
-/// snapshot. Lifecycle audit rows at the same sequence are deliberately left
-/// untouched.
-///
-/// **Not for production use.** Panics on SQL errors.
+/// Replace a legacy proposal head and its current spec snapshot for tests.
 pub async fn replace_legacy_proposal_head_for_test(
     db: &Database,
     proposal_id: &str,
