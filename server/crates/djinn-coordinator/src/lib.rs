@@ -57,6 +57,7 @@ pub mod build_admission_transition;
 pub mod build_lease;
 /// Retirement of occupying build leases whose Kubernetes object is provably gone.
 pub mod build_lease_reclaim;
+pub mod build_slot_authority;
 pub mod cargo_warm_base_gc;
 pub(crate) mod ci_preflight_gate;
 pub mod ci_reproduction;

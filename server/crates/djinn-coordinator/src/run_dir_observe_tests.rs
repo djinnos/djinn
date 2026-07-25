@@ -19,6 +19,7 @@ use djinn_db::{
 
 use super::*;
 use crate::build_admission::{
+    CapacitySource,
     BuildAdmissionController, BuildAdmissionDecision, BuildAdmissionMode, BuildAdmissionRequest,
     BuildWorkloadKind, LIGHT_ROLE_AUDIT_REASON, TaskRunRole,
 };
@@ -96,6 +97,7 @@ fn worker_request(id: &str) -> BuildAdmissionRequest {
         kind: BuildWorkloadKind::TaskRun {
             role: TaskRunRole::Worker,
         },
+        capacity: CapacitySource::AcquireDispatchSlot,
     }
 }
 
@@ -110,6 +112,7 @@ async fn bind_lease(db: &Database, task_run_id: &str, pod_uid: &str) -> BuildLea
     };
     let queued = repo
         .queue(&QueueBuildLeaseInput {
+            weight: 1,
             key: key.clone(),
             immutable_identity: format!("task:task-1:{task_run_id}:inv-{task_run_id}"),
             queue_deadline: None,

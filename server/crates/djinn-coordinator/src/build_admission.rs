@@ -17,7 +17,7 @@ use djinn_core::clock::{Clock, SystemClock};
 use djinn_db::{
     AdmissionDomain, AdmissionJournalKey, AdmissionJournalRepository, AdmissionJournalRow,
     AdmissionRecoveryResult, AdmissionState, AdmissionWorkloadKind, CreateStartedInput,
-    ReserveAdmissionInput, ReserveAdmissionResult, TerminalAdmissionInput, UidFencedAdmissionInput,
+    ReserveAdmissionInput, TerminalAdmissionInput, UidFencedAdmissionInput,
     V0Mode, V1Mode,
 };
 use djinn_k8s::{
@@ -203,6 +203,33 @@ impl TaskRunRole {
     }
 }
 
+/// Where a request's build capacity comes from.
+///
+/// This field exists because the previous design had no way to say it, and the
+/// resulting ambiguity was the defect: the v0 journal and the v1 lease each
+/// assumed they were the authority, each enforced `DJINN_MAX_BUILD_TASKRUNS`,
+/// and because they covered disjoint populations they together admitted twice
+/// the operator's intent. Worse, they were structurally blind to each other --
+/// a leased warm Job wrote no journal row at all, so neither could observe the
+/// other's occupancy even in principle.
+///
+/// Making the capacity holder an explicit, exhaustively-matched part of the
+/// request means a new admission caller cannot compile without stating where
+/// its capacity came from. There is no default and no inference.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CapacitySource {
+    /// The controller must acquire a layer-1 dispatch slot before proceeding.
+    /// Used by task dispatch for build-capable roles.
+    AcquireDispatchSlot,
+    /// The caller already occupies a build-lease row and is presenting it. The
+    /// journal write is ledger-only and cannot deny. Used by the graph warmer,
+    /// which holds a `graph_warm` lease before it ever reaches admission.
+    HeldByLease,
+    /// This work occupies no capacity, for an explicitly audited reason.
+    /// Light-role task-runs and the `NonBuild` bypass.
+    ZeroWeight { audit_reason: &'static str },
+}
+
 /// Immutable identity fixed before capacity is reserved.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BuildAdmissionRequest {
@@ -211,6 +238,48 @@ pub struct BuildAdmissionRequest {
     pub generation: i64,
     pub object_name: String,
     pub kind: BuildWorkloadKind,
+    /// Which authority owns this request's capacity. See [`CapacitySource`].
+    pub capacity: CapacitySource,
+}
+
+/// Outcome of one layer-1 dispatch-slot acquisition.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DispatchSlotOutcome {
+    /// Capacity was acquired (or was already held by this exact identity).
+    Granted,
+    /// The unified pool is full. The task stays queued.
+    AtCapacity { occupancy: i64, cap: i64 },
+    /// The authority is not enforcing yet. Nothing was acquired and nothing is
+    /// denied; `would_defer` records what enforcement WOULD have done.
+    Observed { would_defer: bool },
+    /// The authority could not be reached. Fails closed for Enforce.
+    Unavailable,
+}
+
+/// The single capacity authority, as the admission controller sees it.
+///
+/// Implemented over the v1 build lease, which is the only place occupancy is
+/// counted. It is a trait rather than a concrete type for two reasons: it keeps
+/// `djinn-coordinator`'s admission module free of a dependency on the lease's
+/// internals, and -- more importantly -- it is the seam where a cap COMPUTED
+/// from the node's allocatable CPU replaces the hand-set
+/// `DJINN_MAX_BUILD_TASKRUNS` without any change to the grant path. Nothing
+/// below composition reads an environment variable to learn the cap.
+#[async_trait]
+pub trait BuildSlotAuthority: Send + Sync {
+    /// Acquire (or idempotently re-acquire) a dispatch slot for one attempt.
+    async fn acquire_dispatch_slot(&self, task_id: &str, generation: i64) -> DispatchSlotOutcome;
+
+    /// Release a dispatch slot once its task-run reaches a terminal state.
+    /// Idempotent: a slot that was never acquired, or already released, is a
+    /// no-op rather than an error.
+    async fn release_dispatch_slot(&self, task_id: &str, generation: i64);
+
+    /// Currently occupied capacity, in build slots, across EVERY population.
+    async fn occupancy(&self) -> Option<i64>;
+
+    /// The cap being enforced. Resolved by the authority, never by the caller.
+    fn cap(&self) -> i64;
 }
 
 /// Admission decision returned to task dispatch callers.
@@ -293,6 +362,11 @@ struct PermitState {
     /// yet been adopted into Live. Tracked so the startup CreateUnknown gate
     /// is decremented exactly once when the row resolves.
     create_unknown_outstanding: bool,
+    /// Where this permit's capacity came from, retained so the terminal
+    /// transition hands back exactly what admission took -- and nothing else.
+    /// Releasing a slot this permit never acquired would free another
+    /// task-run's capacity.
+    capacity: CapacitySource,
 }
 
 trait QueueClock: Send + Sync {
@@ -408,6 +482,13 @@ pub struct BuildAdmissionController {
     /// test that never opts in cannot corrupt the reading no matter what
     /// admission path it exercises.
     emit_process_metrics: AtomicBool,
+    /// The single build-slot capacity authority (the v1 lease).
+    ///
+    /// `None` means this controller is not capacity-gated -- the Off shape and
+    /// the many focused tests that exercise lifecycle without a pool. It is an
+    /// Option rather than a required field so that "no capacity authority" is a
+    /// visible, matched state instead of a silently permissive default.
+    slot_authority: Option<Arc<dyn BuildSlotAuthority>>,
 }
 
 impl BuildAdmissionController {
@@ -446,7 +527,20 @@ impl BuildAdmissionController {
             queued_lifecycle: std::sync::Mutex::new(HashMap::new()),
             queue_clock: Arc::new(SystemQueueClock),
             emit_process_metrics: AtomicBool::new(!cfg!(test)),
+            slot_authority: None,
         }
+    }
+
+    /// Install the single build-slot capacity authority.
+    ///
+    /// Composition passes the v1 `BuildLeaseService` adapter. This is the ONLY
+    /// place capacity enters the controller; there is no environment read and
+    /// no second cap below this point, which is what lets a node-derived cap
+    /// replace the configured one without touching admission.
+    #[must_use]
+    pub fn with_slot_authority(mut self, authority: Arc<dyn BuildSlotAuthority>) -> Self {
+        self.slot_authority = Some(authority);
+        self
     }
 
     /// Whether this controller may write the process-global admission metrics.
@@ -875,6 +969,7 @@ impl BuildAdmissionController {
             .is_some()
             .then(|| request.clone());
         let kind = request.kind;
+        let capacity = request.capacity.clone();
         let workload_kind = match kind {
             // A Light task-run is orchestration-only: it never runs the
             // project's compile/test toolchain, so it weighs zero slots. It is
@@ -969,61 +1064,32 @@ impl BuildAdmissionController {
                 idempotent: true,
             });
         }
-        let mut idempotent = false;
-        if durable {
-            let reservation = if self.mode() == BuildAdmissionMode::Observe {
-                let observed = self
-                    .journal
-                    .reserve_observed(
-                        &ReserveAdmissionInput {
-                            key: key.clone(),
-                            workload_kind,
-                            creator_server_epoch: self.creator_server_epoch.clone(),
-                            object_name: request.object_name.clone(),
-                        },
-                        self.cap,
-                    )
-                    .await;
-                let observed = match observed {
-                    Ok(observed) => observed,
-                    Err(error) => {
-                        // Observe is telemetry-only: a journal outage must not become a dispatch denial.
-                        tracing::warn!(%error, "build admission observation unavailable; permitting without journal telemetry");
-                        // Surface the live journal failure as a degraded health
-                        // signal even though Observe continues to permit dispatch.
-                        self.mark_journal_unhealthy();
-                        self.publish_metrics().await;
-                        return self
-                            .permit_without_reservation(key, permit_key, request.object_name)
-                            .await;
-                    }
-                };
-                if observed.would_defer {
-                    let mut count = self.would_defer_observations.lock().await;
-                    *count = count.saturating_add(1).min(1024);
-                    if self.process_metrics_enabled() {
-                        djinn_telemetry::build_admission::increment_would_defer(
-                            "observe", self.cap,
-                        );
+        // ── Capacity, decided exactly once, by exactly one authority ────────
+        //
+        // This is the whole of the fix. Capacity is acquired HERE, from the
+        // single build-slot authority, and the journal write below is a pure
+        // ledger append that cannot deny. Previously the journal ran its own
+        // cap check at this point while the v1 lease ran another over a
+        // different population, so the two together admitted 2x the cap.
+        if let CapacitySource::AcquireDispatchSlot = capacity {
+            match self.acquire_dispatch_capacity(&key).await {
+                DispatchSlotOutcome::Granted => {}
+                DispatchSlotOutcome::Observed { would_defer } => {
+                    // Shadow: the authority is not enforcing yet. Nothing was
+                    // acquired and nothing is denied -- this records only what
+                    // enforcement WOULD have done, which is the signal the
+                    // operator reads before arming the epoch.
+                    if would_defer {
+                        let mut count = self.would_defer_observations.lock().await;
+                        *count = count.saturating_add(1).min(1024);
+                        if self.process_metrics_enabled() {
+                            djinn_telemetry::build_admission::increment_would_defer(
+                                "observe", self.cap,
+                            );
+                        }
                     }
                 }
-                observed.reservation
-            } else {
-                self.journal
-                    .reserve(
-                        &ReserveAdmissionInput {
-                            key: key.clone(),
-                            workload_kind,
-                            creator_server_epoch: self.creator_server_epoch.clone(),
-                            object_name: request.object_name.clone(),
-                        },
-                        self.cap,
-                    )
-                    .await
-                    .map_err(unavailable)?
-            };
-            match reservation {
-                ReserveAdmissionResult::Denied { occupancy, cap } => {
+                DispatchSlotOutcome::AtCapacity { occupancy, cap } => {
                     // Atomically install one queued lifecycle record containing
                     // the monotonic start time. Membership and timestamp are
                     // installed under a single lock, so a concurrent
@@ -1047,20 +1113,68 @@ impl BuildAdmissionController {
                     self.publish_metrics().await;
                     return Ok(BuildAdmissionDecision::Denied { occupancy, cap });
                 }
-                ReserveAdmissionResult::Reserved {
-                    idempotent: value, ..
-                } => {
-                    idempotent = value;
-                    // This exact identity has successfully left deferred state.
-                    // Atomically remove membership and extract the start time
-                    // under one lock; emit exactly one admitted observation.
-                    // Other waiters remain queued until their own retry succeeds.
-                    self.finish_queued_wait(
-                        &permit_key,
-                        djinn_telemetry::build_slot_queue::OUTCOME_ADMITTED,
+                DispatchSlotOutcome::Unavailable => {
+                    // A capacity authority we cannot reach is not permission.
+                    // Observe stays non-denying; anything else fails closed.
+                    if self.mode() != BuildAdmissionMode::Observe {
+                        return Ok(BuildAdmissionDecision::Denied {
+                            occupancy: 0,
+                            cap: self.cap,
+                        });
+                    }
+                    tracing::warn!(
+                        "build admission: build-slot authority unavailable; \
+                         Observe continues without capacity accounting"
                     );
                 }
             }
+        }
+
+        let mut idempotent = false;
+        if durable {
+            // Ledger append. This NEVER denies -- capacity was settled above.
+            // It runs for every population including leased warm Jobs, which
+            // previously wrote no row and were invisible to reclamation.
+            let reservation = self
+                .journal
+                .reserve(&ReserveAdmissionInput {
+                    key: key.clone(),
+                    workload_kind,
+                    creator_server_epoch: self.creator_server_epoch.clone(),
+                    object_name: request.object_name.clone(),
+                })
+                .await;
+            let reservation = match reservation {
+                Ok(reservation) => reservation,
+                Err(error) => {
+                    if self.mode() != BuildAdmissionMode::Observe {
+                        // The ledger is how this capacity is later released and
+                        // reclaimed. Losing the row while holding a slot would
+                        // leak that slot, so hand the capacity back before
+                        // failing.
+                        self.release_dispatch_capacity(&key, &capacity).await;
+                        return Err(unavailable(error));
+                    }
+                    // Observe is telemetry-only: a journal outage must not become a dispatch denial.
+                    tracing::warn!(%error, "build admission observation unavailable; permitting without journal telemetry");
+                    // Surface the live journal failure as a degraded health
+                    // signal even though Observe continues to permit dispatch.
+                    self.mark_journal_unhealthy();
+                    self.publish_metrics().await;
+                    return self
+                        .permit_without_reservation(key, permit_key, request.object_name)
+                        .await;
+                }
+            };
+            idempotent = reservation.idempotent;
+            // This exact identity has successfully left deferred state.
+            // Atomically remove membership and extract the start time
+            // under one lock; emit exactly one admitted observation.
+            // Other waiters remain queued until their own retry succeeds.
+            self.finish_queued_wait(
+                &permit_key,
+                djinn_telemetry::build_slot_queue::OUTCOME_ADMITTED,
+            );
         }
         let permit = WarmAdmissionPermit::new();
         let work_key = work_key(&key);
@@ -1071,6 +1185,7 @@ impl BuildAdmissionController {
             durable,
             released: false,
             create_unknown_outstanding: false,
+            capacity,
         };
         self.permits.lock().await.insert(permit.clone(), state);
         self.permits_by_key
@@ -1092,6 +1207,64 @@ impl BuildAdmissionController {
         Ok(BuildAdmissionDecision::Permitted { permit, idempotent })
     }
 
+    /// Occupied build slots across EVERY population, from the one authority.
+    ///
+    /// `None` means the answer is unknown (no authority installed, or it could
+    /// not be reached) and is never treated as "zero" -- an unknown occupancy
+    /// must not clear a fail-closed gate.
+    async fn unified_occupancy(&self) -> Option<i64> {
+        match self.slot_authority.as_ref() {
+            Some(authority) => authority.occupancy().await,
+            None => None,
+        }
+    }
+
+    /// The cap actually in force. The authority resolves it (from the durable
+    /// epoch, and later from measured node capacity); the constructor value is
+    /// only the fallback for a controller with no authority installed.
+    fn effective_cap(&self) -> i64 {
+        match self.slot_authority.as_ref() {
+            Some(authority) => authority.cap(),
+            None => self.cap,
+        }
+    }
+
+    /// Acquire layer-1 dispatch capacity for one attempt from the single
+    /// authority. Absent an authority, admission is not capacity-gated at all
+    /// (the Off / local-dev shape), which is reported as a non-denying
+    /// observation rather than silently granting.
+    async fn acquire_dispatch_capacity(&self, key: &AdmissionJournalKey) -> DispatchSlotOutcome {
+        let Some(authority) = self.slot_authority.as_ref() else {
+            return DispatchSlotOutcome::Observed { would_defer: false };
+        };
+        authority
+            .acquire_dispatch_slot(&key.work_id, key.generation)
+            .await
+    }
+
+    /// Hand back exactly the capacity this permit took, if any.
+    ///
+    /// Matched on the retained [`CapacitySource`] rather than on the domain or
+    /// the role, so a permit that never acquired a slot can never release one.
+    /// `HeldByLease` is deliberately a no-op: the graph warmer owns that lease's
+    /// lifecycle and releases it on its own terms, and releasing it from here
+    /// would free capacity a live warm Job is still using.
+    async fn release_dispatch_capacity(
+        &self,
+        key: &AdmissionJournalKey,
+        capacity: &CapacitySource,
+    ) {
+        if !matches!(capacity, CapacitySource::AcquireDispatchSlot) {
+            return;
+        }
+        let Some(authority) = self.slot_authority.as_ref() else {
+            return;
+        };
+        authority
+            .release_dispatch_slot(&key.work_id, key.generation)
+            .await;
+    }
+
     async fn permit_without_reservation(
         &self,
         key: AdmissionJournalKey,
@@ -1109,6 +1282,13 @@ impl BuildAdmissionController {
                 durable: false,
                 released: false,
                 create_unknown_outstanding: false,
+                // Reached only by paths that took no capacity: Light roles,
+                // the audited NonBuild bypass, and Observe-mode journal
+                // outages. Recording it explicitly means the terminal path
+                // cannot release a slot that was never acquired.
+                capacity: CapacitySource::ZeroWeight {
+                    audit_reason: "permit issued without a capacity reservation",
+                },
             },
         );
         self.permits_by_key
@@ -1184,12 +1364,23 @@ impl BuildAdmissionController {
             self.observe_unclassified().await;
             return Ok(BuildAdmissionDecision::Unclassified);
         };
+        // Layer 1 in one expression: a role certain enough to compile
+        // pre-charges a dispatch slot; a Light role does not, and contends
+        // later (if at all) through the measured invocation lease.
+        let capacity = if role.resource_class().gated_at_dispatch() {
+            CapacitySource::AcquireDispatchSlot
+        } else {
+            CapacitySource::ZeroWeight {
+                audit_reason: LIGHT_ROLE_AUDIT_REASON,
+            }
+        };
         self.admit(BuildAdmissionRequest {
             domain,
             work_id,
             generation,
             object_name,
             kind: BuildWorkloadKind::TaskRun { role },
+            capacity,
         })
         .await
     }
@@ -1445,6 +1636,8 @@ impl BuildAdmissionController {
         );
         let adopts_into_live = matches!(transition, WarmAdmissionTransition::Live { .. });
         let state_permit_key = permit_key(&state.key);
+        let state_key = state.key.clone();
+        let state_capacity = state.capacity.clone();
         let result = match transition {
             WarmAdmissionTransition::CreateStarted => self
                 .journal
@@ -1539,6 +1732,13 @@ impl BuildAdmissionController {
                 }
             };
             if newly_released {
+                // Hand back the layer-1 dispatch slot exactly once, on the same
+                // edge that marks the permit released. Doing it here rather
+                // than on every terminal callback is what keeps a duplicate
+                // terminal signal from releasing capacity twice and letting an
+                // extra build in.
+                self.release_dispatch_capacity(&state_key, &state_capacity)
+                    .await;
                 // Retain one wakeup when the actor is currently handling the event
                 // that performed this release and therefore has no `notified()`
                 // future registered in its select loop.
@@ -1558,14 +1758,21 @@ impl BuildAdmissionController {
             // A terminal release can bring seeded occupancy back within the
             // cap; refresh the over-cap gate from the durable journal rather
             // than trusting in-memory bookkeeping.
+            // Refresh the over-cap gate from the UNIFIED capacity authority,
+            // not from the journal. The journal no longer counts capacity, so
+            // reading occupancy from it here would compare a lifecycle row
+            // count against a build-slot cap -- two different units.
             if transition_durable && self.over_cap.load(Ordering::Acquire) {
-                match self.journal.count_task_or_warm_occupancy().await {
-                    Ok(occupancy) if occupancy <= self.cap => {
+                match self.unified_occupancy().await {
+                    Some(occupancy) if occupancy <= self.effective_cap() => {
                         self.over_cap.store(false, Ordering::Release);
                     }
-                    Ok(_) => {}
-                    Err(error) => {
-                        tracing::warn!(%error, "build admission: failed to refresh over-cap gate after release; retaining it conservatively");
+                    Some(_) => {}
+                    None => {
+                        tracing::warn!(
+                            "build admission: failed to refresh over-cap gate after release; \
+                             retaining it conservatively"
+                        );
                     }
                 }
             }
@@ -1696,6 +1903,22 @@ impl BuildAdmissionController {
                         durable: true,
                         released: false,
                         create_unknown_outstanding: row.state == AdmissionState::CreateUnknown,
+                        // A recovered row's capacity was acquired by the
+                        // predecessor process, but the lease row it acquired
+                        // survives the restart in `build_leases` and is
+                        // recovered alongside. Attributing capacity by DOMAIN
+                        // reconstructs who owns the release: a task-run holds a
+                        // dispatch slot this controller must hand back when it
+                        // terminalizes, while warm/invocation rows are owned by
+                        // consumers that release their own leases.
+                        capacity: match row.key.domain {
+                            AdmissionDomain::TaskObservation => {
+                                CapacitySource::AcquireDispatchSlot
+                            }
+                            AdmissionDomain::WarmBuild | AdmissionDomain::InvocationBuild => {
+                                CapacitySource::HeldByLease
+                            }
+                        },
                     },
                 );
                 seeded = seeded.saturating_add(1);
@@ -1806,6 +2029,13 @@ impl WarmAdmission for BuildAdmissionController {
                 generation: request.generation,
                 object_name: request.object_name,
                 kind: BuildWorkloadKind::GraphWarmJob,
+                // Warm capacity is ALWAYS the graph-warm lease, acquired by the
+                // warmer before it reaches admission. This call is therefore a
+                // ledger append, never a second capacity decision -- which is
+                // exactly the duplication being removed. When no lease service
+                // is composed, `initialize_graph_warmer` leaves warming ungated
+                // and says so; it does not fall back to a second cap here.
+                capacity: CapacitySource::HeldByLease,
             })
             .await?;
         match decision {
@@ -2885,19 +3115,19 @@ mod tests {
         ));
         // Predecessor rows from the old epoch.
         journal
-            .reserve(&predecessor_input("reserved", 0, "old-epoch"), 5)
+            .reserve(&predecessor_input("reserved", 0, "old-epoch"))
             .await
             .unwrap();
         journal
-            .reserve(&predecessor_input("in-flight", 0, "old-epoch"), 5)
+            .reserve(&predecessor_input("in-flight", 0, "old-epoch"))
             .await
             .unwrap();
         journal
-            .reserve(&predecessor_input("unknown", 0, "old-epoch"), 5)
+            .reserve(&predecessor_input("unknown", 0, "old-epoch"))
             .await
             .unwrap();
         journal
-            .reserve(&predecessor_input("live", 0, "old-epoch"), 5)
+            .reserve(&predecessor_input("live", 0, "old-epoch"))
             .await
             .unwrap();
         // Mark in-flight and advance the others.
@@ -3065,7 +3295,7 @@ mod tests {
         // Two predecessor Live rows under a cap of one.
         for work in ["over-a", "over-b"] {
             journal
-                .reserve(&predecessor_input(work, 0, "old-epoch"), 5)
+                .reserve(&predecessor_input(work, 0, "old-epoch"))
                 .await
                 .unwrap();
             journal
@@ -3296,7 +3526,7 @@ mod tests {
         // Seed one predecessor Live row, then adopt that same durable identity.
         for work in ["rec-a"] {
             journal
-                .reserve(&predecessor_input(work, 0, "old-epoch"), 5)
+                .reserve(&predecessor_input(work, 0, "old-epoch"))
                 .await
                 .unwrap();
             journal
@@ -3399,6 +3629,9 @@ mod tests {
                 generation: 0,
                 object_name: "obj".into(),
                 kind: BuildWorkloadKind::NonBuild { audit_reason: "" },
+                capacity: CapacitySource::ZeroWeight {
+                    audit_reason: "unclassified probe",
+                },
             })
             .await
             .unwrap();
@@ -3664,7 +3897,7 @@ mod tests {
         ));
         // Seed a predecessor CreateInFlight row (will become CreateUnknown).
         journal
-            .reserve(&predecessor_input("cu", 0, "old-epoch"), 5)
+            .reserve(&predecessor_input("cu", 0, "old-epoch"))
             .await
             .unwrap();
         journal
@@ -3808,6 +4041,7 @@ mod tests {
                 kind: BuildWorkloadKind::TaskRun {
                     role: TaskRunRole::Worker,
                 },
+                capacity: CapacitySource::HeldByLease,
             })
             .await
             .unwrap();

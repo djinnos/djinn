@@ -14,20 +14,33 @@ const OCCUPYING: [&str; 5] = ["granted", "launching", "bound", "active", "suspec
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BuildLeaseConsumerKind {
+    /// Layer 2: the fine, role-AGNOSTIC escalation unit. One invocation whose
+    /// measured `cpu.stat` usage crossed the build threshold.
     TaskInvocation,
+    /// A full workspace compile dispatched as a Kubernetes Job.
     GraphWarm,
+    /// Layer 1: the coarse, role-DERIVED dispatch admission unit, reserved
+    /// before a task-run pod is created for work certain to compile.
+    ///
+    /// This exists so both layers draw from one pool. Before it, dispatch
+    /// admission was accounted in a second table (`admission_journal`) against
+    /// the same configured cap, so the two authorities together admitted twice
+    /// the operator's intent.
+    TaskDispatch,
 }
 impl BuildLeaseConsumerKind {
-    fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::TaskInvocation => "task_invocation",
             Self::GraphWarm => "graph_warm",
+            Self::TaskDispatch => "task_dispatch",
         }
     }
     fn parse(s: &str) -> DbResult<Self> {
         match s {
             "task_invocation" => Ok(Self::TaskInvocation),
             "graph_warm" => Ok(Self::GraphWarm),
+            "task_dispatch" => Ok(Self::TaskDispatch),
             _ => Err(DbError::InvalidData(format!(
                 "invalid build lease consumer kind `{s}`"
             ))),
@@ -77,6 +90,19 @@ pub struct QueueBuildLeaseInput {
     pub queue_deadline: Option<String>,
     /// Absolute deadline retained while queued and carried into its grant.
     pub launch_deadline: Option<String>,
+    /// Capacity units this row occupies once granted, in build slots.
+    ///
+    /// Derived from the rendered manifests by the policy owner
+    /// (`djinn_runtime::build_slot_weight`), never hand-set here. Zero is
+    /// legal and load-bearing: it is how the non-double-charge rule is
+    /// expressed for a `task_invocation` whose task-run already holds an
+    /// occupying `task_dispatch` row. A zero-weight row still queues, still
+    /// receives a fencing token, and still fences its pod -- it simply buys no
+    /// capacity, because capacity was already bought on its behalf at dispatch.
+    ///
+    /// Immutable once written (enforced by the table trigger): capacity granted
+    /// at one weight may never be re-priced underneath its occupant.
+    pub weight: i64,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BuildLeaseRow {
@@ -94,6 +120,8 @@ pub struct BuildLeaseRow {
     pub bound_pod_uid: Option<String>,
     pub candidate_cleanup: Option<serde_json::Value>,
     pub terminal_reason: Option<String>,
+    /// Capacity units this row occupies while in an occupying state.
+    pub weight: i64,
     pub timeout_credit_consumed: bool,
     pub created_at: String,
     pub updated_at: String,
@@ -165,6 +193,11 @@ impl BuildLeaseRepository {
                 "build lease identity must not be blank".into(),
             ));
         }
+        if input.weight < 0 {
+            return Err(DbError::InvalidData(
+                "build lease weight must be non-negative".into(),
+            ));
+        }
         self.db.ensure_initialized().await?;
         let mut tx = self.db.pool().begin().await?;
         lock(&mut tx).await?;
@@ -179,8 +212,8 @@ impl BuildLeaseRepository {
                 QueueBuildLeaseResult::LeaseIdentityConflict { existing: row }
             });
         }
-        let row = sqlx::query_as::<_, DbRow>(&format!("INSERT INTO build_leases (consumer_kind,consumer_id,immutable_identity,queue_deadline,launch_deadline,state) VALUES ($1,$2,$3,$4::timestamptz,$5::timestamptz,'queued') RETURNING {COLS}"))
-            .bind(input.key.consumer_kind.as_str()).bind(&input.key.consumer_id).bind(&input.immutable_identity).bind(&input.queue_deadline).bind(&input.launch_deadline).fetch_one(&mut *tx).await?;
+        let row = sqlx::query_as::<_, DbRow>(&format!("INSERT INTO build_leases (consumer_kind,consumer_id,immutable_identity,queue_deadline,launch_deadline,weight,state) VALUES ($1,$2,$3,$4::timestamptz,$5::timestamptz,$6,'queued') RETURNING {COLS}"))
+            .bind(input.key.consumer_kind.as_str()).bind(&input.key.consumer_id).bind(&input.immutable_identity).bind(&input.queue_deadline).bind(&input.launch_deadline).bind(input.weight).fetch_one(&mut *tx).await?;
         tx.commit().await?;
         Ok(QueueBuildLeaseResult::Queued {
             row: row.try_into()?,
@@ -203,21 +236,34 @@ impl BuildLeaseRepository {
         set_cap_tx(&mut tx, cap).await?;
         expire_queued_tx(&mut tx, now).await?;
         let occupied = occupancy_tx(&mut tx).await?;
-        if occupied >= cap {
-            tx.commit().await?;
-            return Ok(GrantNextBuildLeaseResult::Empty {
-                occupancy: occupied,
-                cap,
-            });
-        }
-        let candidate: Option<(String, String)> = sqlx::query_as("SELECT consumer_kind, consumer_id FROM build_leases WHERE state='queued' AND (queue_deadline IS NULL OR queue_deadline > $1::timestamptz) ORDER BY enqueue_sequence FOR UPDATE SKIP LOCKED LIMIT 1").bind(now).fetch_optional(&mut *tx).await?;
-        let Some((kind, id)) = candidate else {
+        // Strict FIFO by weight: read the queue head, then ask whether IT fits.
+        //
+        // The head is never skipped in favour of a lighter row further back.
+        // Skipping would leave a heavy consumer -- a warm Job whose CPU request
+        // was raised above one slot -- starved indefinitely behind an unbroken
+        // stream of weight-1 task dispatches, which is precisely the population
+        // that arrives most often. Head-of-line blocking costs some utilisation
+        // when the head does not fit and a lighter row would have; that is the
+        // deliberate price of a starvation-free queue.
+        //
+        // A zero-weight head (the non-double-charge re-entry of an invocation
+        // whose dispatch slot is already held) always fits, so it is granted
+        // immediately and never queues behind capacity it already owns.
+        let candidate: Option<(String, String, i64)> = sqlx::query_as("SELECT consumer_kind, consumer_id, weight FROM build_leases WHERE state='queued' AND (queue_deadline IS NULL OR queue_deadline > $1::timestamptz) ORDER BY enqueue_sequence FOR UPDATE SKIP LOCKED LIMIT 1").bind(now).fetch_optional(&mut *tx).await?;
+        let Some((kind, id, weight)) = candidate else {
             tx.commit().await?;
             return Ok(GrantNextBuildLeaseResult::Empty {
                 occupancy: occupied,
                 cap,
             });
         };
+        if occupied.saturating_add(weight) > cap {
+            tx.commit().await?;
+            return Ok(GrantNextBuildLeaseResult::Empty {
+                occupancy: occupied,
+                cap,
+            });
+        }
         // Coordinator-originated deadlines are durable queue data. Direct
         // repository users may still supply one at grant time, but may not
         // erase a deadline already retained on the queued row.
@@ -225,6 +271,34 @@ impl BuildLeaseRepository {
             .bind(now).bind(launch_deadline).bind(kind).bind(id).fetch_one(&mut *tx).await?;
         tx.commit().await?;
         Ok(GrantNextBuildLeaseResult::Granted(row.try_into()?))
+    }
+
+    /// Whether this task already holds an occupying layer-1 dispatch slot.
+    ///
+    /// This is the durable half of the non-double-charge rule. A build-capable
+    /// task-run reserves a `task_dispatch` slot before its pod exists, for
+    /// exactly the compile it is expected to run; when that compile escalates
+    /// to a `task_invocation` lease, charging capacity again would count one
+    /// physical compile twice. The invocation is therefore weighed against this
+    /// answer, not against its own role.
+    ///
+    /// Matched on the parsed first segment of `consumer_id` rather than a `LIKE`
+    /// prefix, so a task id containing a wildcard character cannot widen the
+    /// match. `split_part` mirrors exactly how `BuildLeaseService` composes the
+    /// dispatch consumer id (`{task_id}:{generation}`).
+    pub async fn has_occupying_dispatch(&self, task_id: &str) -> DbResult<bool> {
+        self.db.ensure_initialized().await?;
+        let found: Option<i64> = sqlx::query_scalar(
+            "SELECT 1 FROM build_leases \
+             WHERE consumer_kind = 'task_dispatch' \
+               AND split_part(consumer_id, ':', 1) = $1 \
+               AND state = ANY($2) LIMIT 1",
+        )
+        .bind(task_id)
+        .bind(OCCUPYING.as_slice())
+        .fetch_optional(self.db.pool())
+        .await?;
+        Ok(found.is_some())
     }
 
     pub async fn set_cap(&self, cap: i64) -> DbResult<BuildLeaseSnapshot> {
@@ -701,7 +775,7 @@ impl BuildLeaseRepository {
 const COLS: &str = "consumer_kind,consumer_id,immutable_identity,enqueue_sequence,fencing_token,state,\
     to_char(queue_deadline AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS queue_deadline,\
     to_char(launch_deadline AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS launch_deadline,\
-    bound_pod_uid,candidate_cleanup,terminal_reason,timeout_credit_consumed,\
+    bound_pod_uid,candidate_cleanup,terminal_reason,weight,timeout_credit_consumed,\
     to_char(created_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS created_at,\
     to_char(updated_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS updated_at,\
     to_char(granted_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS granted_at,\
@@ -725,6 +799,7 @@ struct DbRow {
     bound_pod_uid: Option<String>,
     candidate_cleanup: Option<sqlx::types::Json<serde_json::Value>>,
     terminal_reason: Option<String>,
+    weight: i64,
     timeout_credit_consumed: bool,
     created_at: String,
     updated_at: String,
@@ -746,6 +821,7 @@ impl TryFrom<DbRow> for BuildLeaseRow {
             queue_deadline: v.queue_deadline,
             launch_deadline: v.launch_deadline,
             bound_pod_uid: v.bound_pod_uid,
+            weight: v.weight,
             candidate_cleanup: v.candidate_cleanup.map(|v| v.0),
             terminal_reason: v.terminal_reason,
             timeout_credit_consumed: v.timeout_credit_consumed,
@@ -790,13 +866,20 @@ async fn fetch(
     .await?;
     row.map(TryInto::try_into).transpose()
 }
+/// Occupied capacity, in build slots.
+///
+/// This is a SUM over `weight`, not a COUNT of rows. A zero-weight row is a
+/// real occupant with a real fencing token that contributes no capacity -- see
+/// [`QueueBuildLeaseInput::weight`] for why the non-double-charge rule needs
+/// that. This one expression is now the ONLY capacity accounting in the system;
+/// the v0 admission journal deliberately no longer computes one.
 async fn occupancy_tx(tx: &mut Transaction<'_, Postgres>) -> DbResult<i64> {
-    Ok(
-        sqlx::query_scalar("SELECT COUNT(*)::bigint FROM build_leases WHERE state=ANY($1)")
-            .bind(OCCUPYING.as_slice())
-            .fetch_one(&mut **tx)
-            .await?,
+    Ok(sqlx::query_scalar(
+        "SELECT COALESCE(SUM(weight),0)::bigint FROM build_leases WHERE state=ANY($1)",
     )
+    .bind(OCCUPYING.as_slice())
+    .fetch_one(&mut **tx)
+    .await?)
 }
 async fn set_cap_tx(tx: &mut Transaction<'_, Postgres>, cap: i64) -> DbResult<()> {
     sqlx::query("UPDATE build_lease_caps SET cap=$1,updated_at=now() WHERE singleton=true")
@@ -848,6 +931,15 @@ mod tests {
     const LATER: &str = "2026-01-01T01:00:00Z";
 
     fn input(kind: BuildLeaseConsumerKind, id: &str, identity: &str) -> QueueBuildLeaseInput {
+        weighted_input(kind, id, identity, 1)
+    }
+
+    fn weighted_input(
+        kind: BuildLeaseConsumerKind,
+        id: &str,
+        identity: &str,
+        weight: i64,
+    ) -> QueueBuildLeaseInput {
         QueueBuildLeaseInput {
             key: BuildLeaseKey {
                 consumer_kind: kind,
@@ -856,6 +948,7 @@ mod tests {
             immutable_identity: identity.into(),
             queue_deadline: None,
             launch_deadline: None,
+            weight,
         }
     }
 

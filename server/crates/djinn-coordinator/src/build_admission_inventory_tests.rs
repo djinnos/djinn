@@ -257,7 +257,6 @@ async fn absence_retains_create_unknown_then_late_same_name_create_is_adopted() 
                 creator_server_epoch: "old".into(),
                 object_name: "late-job".into(),
             },
-            3,
         )
         .await
         .unwrap();
@@ -411,7 +410,6 @@ async fn uncertain_presence_never_reclaims_a_create_unknown_row() {
                 creator_server_epoch: "old".into(),
                 object_name: "uncertain-job".into(),
             },
-            3,
         )
         .await
         .unwrap();

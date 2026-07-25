@@ -31,7 +31,7 @@ use tokio::sync::RwLock;
 
 use crate::build_admission::{
     BuildAdmissionController, BuildAdmissionDecision, BuildAdmissionMode, BuildAdmissionReadiness,
-    BuildAdmissionRequest, BuildWorkloadKind,
+    BuildAdmissionRequest, BuildWorkloadKind, CapacitySource,
 };
 use crate::build_admission_inventory::BuildAdmissionReconciler;
 
@@ -265,6 +265,9 @@ fn build_request(id: &str) -> BuildAdmissionRequest {
         generation: 0,
         object_name: format!("job-{id}"),
         kind: BuildWorkloadKind::GraphWarmJob,
+        // Warm capacity is the graph-warm lease; this exercise drives the
+        // journal ledger and its reclamation, which is what #2597 owns.
+        capacity: CapacitySource::HeldByLease,
     }
 }
 

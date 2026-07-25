@@ -731,6 +731,20 @@ pub fn launcher_leased_millicores(config: &KubernetesConfig) -> u32 {
     parse_cpu_millicores(&config.cpu_limit).unwrap_or(LeasedQuota::DEFAULT_MILLICORES)
 }
 
+/// The graph-warm Job's rendered CPU request, in millicores.
+///
+/// Exposed so build-slot weighting is derived from the SAME value that renders
+/// the warm Job, rather than from a number typed into the admission layer. On
+/// the default render this is 4000m -- identical to
+/// [`launcher_leased_millicores`], which is why a warm Job and a leased task
+/// invocation weigh exactly one build slot each.
+#[must_use]
+pub fn warm_job_millicores(config: &KubernetesConfig) -> u32 {
+    parse_cpu_millicores(&config.warm_cpu_request)
+        .or_else(|| parse_cpu_millicores(&config.warm_cpu_limit))
+        .unwrap_or(LeasedQuota::DEFAULT_MILLICORES)
+}
+
 fn parse_cpu_millicores(quantity: &str) -> Option<u32> {
     let quantity = quantity.trim();
     match quantity.strip_suffix('m') {

@@ -232,6 +232,116 @@ impl RoleResourceClass {
     }
 }
 
+/// How much build capacity one workload occupies, in **build slots**.
+///
+/// # The unit is defined by the manifests, not by opinion
+///
+/// One slot is the CPU quota a granted build actually runs under:
+/// `launcher_leased_millicores` (that is, the task-run pod's rendered
+/// `cpu_limit`), 4000m on the default render. Weight is then
+///
+/// ```text
+/// weight = ceil(cpu_millicores / slot_millicores)
+/// ```
+///
+/// so it is DERIVED from the rendered manifests and never hand-picked. Raising
+/// `DJINN_K8S_WARM_CPU_REQUEST` to `8` makes a warm Job weigh 2 automatically,
+/// with no code change and no second place to remember to update.
+///
+/// # Why a warm Job and a task invocation weigh the same
+///
+/// It is tempting to assume a graph-warm Job -- a full workspace compile --
+/// must outweigh a task-run that merely *might* compile briefly. Measured
+/// against the actual render, that is false: the warm Job requests **4000m**
+/// (`warm_cpu_request`/`warm_cpu_limit` both `"4"`, pinned by
+/// `djinn-k8s/src/bin_packing_fixture_tests.rs`) and a leased task invocation
+/// is lifted to **4000m** by the launcher (`cpu_limit` `"4"`). They request
+/// identically.
+///
+/// The intuition is not wrong, it is about the wrong axis: a warm compile runs
+/// far LONGER than a typical task-run compile. But a concurrency semaphore
+/// governs *rate*, not *duration* -- it answers "how many of these may run at
+/// once", and while they run these two cost the node the same. Duration belongs
+/// to scheduling and deadlines, not to the weight of a slot. So 1:1 is the
+/// measured answer, and `weight_for_millicores` keeps it honest if the render
+/// ever diverges.
+///
+/// # Zero is a real weight
+///
+/// [`BuildSlotWeight::REENTRANT`] is how the non-double-charge rule is
+/// expressed: an invocation lease taken by a task-run that already holds a
+/// dispatch slot occupies zero, because that capacity was already bought at
+/// spawn. See [`Self::REENTRANT`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub struct BuildSlotWeight(i64);
+
+impl BuildSlotWeight {
+    /// A workload that buys no capacity.
+    ///
+    /// Two populations are zero-weight, for different reasons:
+    ///
+    /// * **Light dispatch.** A Light task-run is not pre-charged a slot,
+    ///   because pre-charging one 100% of the time for a ~5% event collapses
+    ///   throughput (see [`RoleResourceClass::Light`]). The ~5% that do compile
+    ///   are charged later, at full weight, by their invocation lease.
+    /// * **Re-entrant invocation.** A build-capable task-run already reserved a
+    ///   slot at dispatch for exactly the compile it is now running. Charging
+    ///   its invocation lease again would double-count one physical compile --
+    ///   the same defect, one layer down, that unifying the two authorities
+    ///   exists to fix. It still takes a fencing token and the quota lift; it
+    ///   just does not pay twice.
+    pub const REENTRANT: Self = Self(0);
+
+    /// One full build slot.
+    pub const FULL: Self = Self(1);
+
+    /// Derive a weight from a rendered CPU request/limit and the slot size.
+    ///
+    /// Rounds UP: a workload asking for more than a slot must occupy more than
+    /// a slot, or the cap would under-count the node's real commitment. A
+    /// positive request always yields at least [`Self::FULL`], so no non-zero
+    /// workload can be made free by rounding.
+    #[must_use]
+    pub fn for_millicores(millicores: u32, slot_millicores: u32) -> Self {
+        if millicores == 0 {
+            return Self::REENTRANT;
+        }
+        if slot_millicores == 0 {
+            // A zero slot size is a misconfiguration, not a licence to admit
+            // unboundedly. Charge a full slot and let the cap do its job.
+            return Self::FULL;
+        }
+        let slots = millicores.div_ceil(slot_millicores);
+        Self(i64::from(slots.max(1)))
+    }
+
+    /// The weight a task-run's DISPATCH reserves (layer 1).
+    ///
+    /// Build-capable work is certain enough to compile that it is pre-charged
+    /// before the pod exists; Light work is not. This is the whole of layer 1's
+    /// capacity contribution.
+    #[must_use]
+    pub fn for_dispatch(class: RoleResourceClass, slot_millicores: u32) -> Self {
+        if class.gated_at_dispatch() {
+            Self::for_millicores(slot_millicores, slot_millicores)
+        } else {
+            Self::REENTRANT
+        }
+    }
+
+    /// The durable slot count.
+    #[must_use]
+    pub const fn slots(self) -> i64 {
+        self.0
+    }
+
+    /// Whether this workload buys capacity at all.
+    #[must_use]
+    pub const fn occupies(self) -> bool {
+        self.0 > 0
+    }
+}
+
 /// Template for a task-run's role sequence.
 ///
 /// `NewTask` is the canonical "work" flow: plan, execute, review, verify,

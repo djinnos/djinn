@@ -801,9 +801,7 @@ async fn forced_loss_safety_depends_on_durable_pre_post_state_not_cooperative_sh
                 workload_kind: AdmissionWorkloadKind::Warm,
                 creator_server_epoch: predecessor_epoch.into(),
                 object_name: format!("warm-{work_id}-0"),
-            },
-            1,
-        )
+            })
         .await
         .unwrap();
     journal
