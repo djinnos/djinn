@@ -15,6 +15,8 @@ pub use djinn_sandbox::*;
 #[cfg(target_os = "linux")]
 #[allow(unused_imports)]
 pub use djinn_sandbox::chat_shell;
+#[allow(unused_imports)]
+pub use djinn_sandbox::confidential;
 #[cfg(target_os = "linux")]
 #[allow(unused_imports)]
 pub use djinn_sandbox::linux;

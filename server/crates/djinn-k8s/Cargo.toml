@@ -34,6 +34,9 @@ workspace-hack.workspace = true
 [dev-dependencies]
 async-trait = "0.1"
 djinn-provider = { path = "../djinn-provider" }
+# jqvg drift guard only: the secret mount paths rendered here must stay covered
+# by the shell sandbox's confidential-path denylist.
+djinn-sandbox = { path = "../djinn-sandbox" }
 serde_yaml = "0.9"
 http = "1"
 http-body-util = "0.1"

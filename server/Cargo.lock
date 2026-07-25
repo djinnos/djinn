@@ -1518,6 +1518,7 @@ dependencies = [
  "djinn-git",
  "djinn-provider",
  "djinn-runtime",
+ "djinn-sandbox",
  "djinn-stack",
  "djinn-supervisor",
  "djinn-workspace",

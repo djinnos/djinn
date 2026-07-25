@@ -13,12 +13,13 @@ use landlock::{
     ABI, Access, AccessFs, PathBeneath, PathFd, Ruleset, RulesetAttr, RulesetCreatedAttr,
 };
 
+use crate::confidential;
 use crate::{Sandbox, SandboxScope, djinn_cache_dir, git_dir, git_metadata_dir};
 
 /// Landlock-based filesystem sandbox for Linux ≥ 5.13.
 ///
-/// Restricts the agent child process to read-everywhere, write only to the
-/// task worktree, its git metadata directory, `/var/tmp`, a dedicated djinn
+/// Restricts the agent child process to read-almost-everywhere, write only to
+/// the task worktree, its git metadata directory, `/var/tmp`, a dedicated djinn
 /// agent scratch dir (`$XDG_CACHE_HOME/djinn` or `$HOME/.cache/djinn`), the
 /// shared cross-task cache PVC (`/cache`, where toolchain caches like
 /// `GOMODCACHE`/`GOCACHE`/sccache live, task-run Cargo targets use private
@@ -27,10 +28,36 @@ use crate::{Sandbox, SandboxScope, djinn_cache_dir, git_dir, git_metadata_dir};
 /// nodes. `/tmp` is intentionally not
 /// writable: on typical Linux it's tmpfs, and allowing writes there caused a
 /// 3.8 GB cargo-artifact leak into RAM-backed storage.
+///
+/// "Almost" everywhere: file CONTENT reads are withheld beneath
+/// [`confidential::CONFIDENTIAL_ROOTS`] — the per-task-run Secret mount that
+/// carries the org's provider credentials, and the projected ServiceAccount
+/// token mount (task jqvg). Directory listing and execute stay granted on all
+/// of `/`.
 pub struct LandlockSandbox;
 
 impl Sandbox for LandlockSandbox {
     fn apply(&self, scope: SandboxScope<'_>, cmd: &mut std::process::Command) -> Result<()> {
+        self.apply_with_confidential_roots(
+            scope,
+            cmd,
+            &confidential::present_confidential_roots(confidential::CONFIDENTIAL_ROOTS),
+        )
+    }
+}
+
+impl LandlockSandbox {
+    /// [`Sandbox::apply`] with an explicit set of unreadable roots.
+    ///
+    /// Production always passes [`confidential::CONFIDENTIAL_ROOTS`]; tests
+    /// pass a fixture tree so the denial can be exercised for real on a host
+    /// where the Pod's `/var/run/djinn` mount does not exist.
+    pub(crate) fn apply_with_confidential_roots(
+        &self,
+        scope: SandboxScope<'_>,
+        cmd: &mut std::process::Command,
+        confidential_roots: &[PathBuf],
+    ) -> Result<()> {
         use std::os::unix::process::CommandExt;
 
         scope.validate()?;
@@ -64,6 +91,13 @@ impl Sandbox for LandlockSandbox {
         // construction runs post-fork in pre_exec.
         let cache_dir_for_rule = prepare_cache_dir();
 
+        // Same reasoning for the confidential-path cover: computing it walks
+        // the filesystem with `read_dir`, which allocates. Resolve it here in
+        // the parent so `pre_exec` only has to open the resulting paths.
+        // Recomputed per spawn so a directory that appears mid-run is picked
+        // up on the next command rather than being silently ungranted.
+        let read_file_cover = confidential::read_file_cover(confidential_roots);
+
         // Safety: pre_exec runs in the forked child process. The closure only
         // performs Landlock syscalls and open(2) calls, both of which are
         // async-signal-safe per POSIX.
@@ -73,6 +107,7 @@ impl Sandbox for LandlockSandbox {
                     writable_worktree.as_deref(),
                     git_meta.as_deref(),
                     cache_dir_for_rule.as_deref(),
+                    &read_file_cover,
                 )
                 .map_err(|e| io::Error::new(io::ErrorKind::PermissionDenied, e.to_string()))
             });
@@ -113,6 +148,7 @@ fn apply_policy(
     worktree: Option<&Path>,
     git_meta: Option<&Path>,
     cache_dir: Option<&Path>,
+    read_file_cover: &[PathBuf],
 ) -> anyhow::Result<()> {
     // Use V3 (Linux 5.19+). The probe in mod.rs verified the kernel supports
     // Landlock; V3 covers all practical kernels in 2026.
@@ -121,6 +157,12 @@ fn apply_policy(
 
     // Read-only subset: allow read and execute, deny all write operations.
     let read_exec = AccessFs::Execute | AccessFs::ReadFile | AccessFs::ReadDir;
+
+    // Everything the blanket `/` grant may still carry once file-content reads
+    // are withheld from the confidential mounts: traversal, directory listing
+    // and execute. None of these expose the bytes of a secret file, and
+    // dropping them would break `ls /` and every toolchain lookup.
+    let traverse_exec = AccessFs::Execute | AccessFs::ReadDir;
 
     // Cargo shared build cache: {CARGO_HOME}/build/ (default ~/.cargo/build/).
     // Agents need write access so `cargo test`/`cargo clippy` can use the shared
@@ -133,8 +175,10 @@ fn apply_policy(
     let mut ruleset = Ruleset::default()
         .handle_access(full_access)?
         .create()?
-        // Read + execute access everywhere on the filesystem.
-        .add_rule(PathBeneath::new(PathFd::new("/")?, read_exec))?
+        // Traverse, list and execute everywhere on the filesystem. File-content
+        // reads are granted separately from `read_file_cover` below, which
+        // covers all of `/` minus the confidential mounts (task jqvg).
+        .add_rule(PathBeneath::new(PathFd::new("/")?, traverse_exec))?
         // Full access to /var/tmp (disk-backed) and /dev/null et al.
         // /tmp is intentionally excluded: on Linux it's typically tmpfs and
         // writes there can silently consume RAM.
@@ -142,6 +186,23 @@ fn apply_policy(
         .add_rule(PathBeneath::new(PathFd::new("/dev/null")?, full_access))?
         .add_rule(PathBeneath::new(PathFd::new("/dev/zero")?, full_access))?
         .add_rule(PathBeneath::new(PathFd::new("/dev/urandom")?, full_access))?;
+
+    // File-content reads. `read_file_cover` is `["/"]` on any host without the
+    // Pod secret mounts, which reproduces the historical blanket grant exactly;
+    // in the task-run Pod it is every entry of every ancestor of the
+    // confidential mounts, minus those mounts. A path that vanished between the
+    // parent's `read_dir` and this `open` is skipped rather than failing the
+    // spawn — we cannot log from `pre_exec`, and a missing path grants nothing.
+    //
+    // NOTE: the `full_access` rules below (worktree, /var/tmp, /cache, the
+    // scratch dir, the cargo build dir, `.git/`) include `ReadFile`, so a
+    // confidential root nested beneath one of them would be granted back.
+    // `confidential_roots_do_not_overlap_writable_sandbox_roots` guards that.
+    for path in read_file_cover {
+        if let Ok(fd) = PathFd::new(path) {
+            ruleset = ruleset.add_rule(PathBeneath::new(fd, read_exec))?;
+        }
+    }
 
     if let Some(worktree) = worktree {
         ruleset = ruleset.add_rule(PathBeneath::new(PathFd::new(worktree)?, full_access))?;
@@ -209,6 +270,23 @@ mod tests {
         cmd.args(["-c", "printf x > \"$1\"", "--"]).arg(path);
         LandlockSandbox
             .apply(scope, &mut cmd)
+            .expect("scope should configure Landlock");
+        cmd.output().expect("sandboxed shell should spawn")
+    }
+
+    /// Run `sh -c <script>` under the real sandbox policy with an explicit
+    /// confidential-root set, exactly as production does with
+    /// [`confidential::CONFIDENTIAL_ROOTS`].
+    fn run_sandboxed(
+        scope: SandboxScope<'_>,
+        confidential_roots: &[PathBuf],
+        script: &str,
+        arg: &Path,
+    ) -> std::process::Output {
+        let mut cmd = std::process::Command::new("sh");
+        cmd.args(["-c", script, "--"]).arg(arg);
+        LandlockSandbox
+            .apply_with_confidential_roots(scope, &mut cmd, confidential_roots)
             .expect("scope should configure Landlock");
         cmd.output().expect("sandboxed shell should spawn")
     }
@@ -290,5 +368,187 @@ mod tests {
             "Landlock must retain task-worktree write access"
         );
         assert!(worktree_content.exists());
+    }
+
+    const CREDENTIAL_CANARY: &str = "PROVIDER-CREDENTIAL-CANARY-jqvg";
+    const TOKEN_CANARY: &str = "SERVICE-ACCOUNT-TOKEN-CANARY-jqvg";
+
+    /// jqvg — the regression this whole change exists for.
+    ///
+    /// This does NOT assert on configuration. It builds a fixture with the same
+    /// shape as the task-run Pod's secret mounts, applies the real production
+    /// `apply_policy` through the real `LandlockSandbox`, spawns a real
+    /// `sh -c 'cat ...'`, and fails if the bytes come back. Before this change
+    /// the blanket `PathBeneath("/", ReadFile)` grant let both reads through.
+    #[test]
+    fn shell_sandbox_denies_reading_confidential_mount_contents() {
+        if !crate::probe_landlock() {
+            return;
+        }
+
+        // The fixture must live outside every writable root the policy grants
+        // (`/var/tmp`, `/cache`, the worktree, the cargo build dir, the scratch
+        // dir): those rules carry `ReadFile` and would grant the secret back
+        // through a broader ancestor. The crate directory satisfies that, and
+        // is where the read-source test already puts its fixtures.
+        let fixture = tempfile::tempdir_in(std::env::current_dir().expect("test directory"))
+            .expect("confidential fixture");
+        let root = fixture.path().canonicalize().expect("canonical fixture");
+
+        // Mirror the Pod layout: `/var/run/djinn` + `/var/run/secrets/tokens`.
+        let credentials_dir = root.join("var/run/djinn");
+        let token_dir = root.join("var/run/secrets/tokens");
+        std::fs::create_dir_all(&credentials_dir).expect("credentials mount");
+        std::fs::create_dir_all(&token_dir).expect("token mount");
+        let credentials = credentials_dir.join("credentials.bin");
+        let token = token_dir.join("djinn");
+        std::fs::write(&credentials, CREDENTIAL_CANARY).expect("credentials");
+        std::fs::write(&token, TOKEN_CANARY).expect("token");
+
+        // A neighbour of both mounts, one level up: it must stay readable, or
+        // the exclusion is over-broad.
+        let neighbour = root.join("var/run/neighbour.txt");
+        std::fs::write(&neighbour, "NEIGHBOUR").expect("neighbour");
+
+        let confidential_roots = vec![credentials_dir.clone(), root.join("var/run/secrets")];
+        let worktree = tempfile::tempdir_in("/var/tmp").expect("worktree");
+        let scope = SandboxScope::Worktree(worktree.path());
+
+        for (label, secret, canary) in [
+            ("provider credentials", &credentials, CREDENTIAL_CANARY),
+            ("projected ServiceAccount token", &token, TOKEN_CANARY),
+        ] {
+            let direct = run_sandboxed(scope, &confidential_roots, "cat \"$1\"", secret);
+            assert!(
+                !direct.status.success(),
+                "sandboxed shell read the {label} at {}",
+                secret.display()
+            );
+            assert!(
+                !String::from_utf8_lossy(&direct.stdout).contains(canary),
+                "the {label} canary leaked to a sandboxed shell"
+            );
+
+            // Landlock matches the resolved dentry, not the path string, so the
+            // `/proc/self/root` magic symlink must not launder the read.
+            let laundered = PathBuf::from("/proc/self/root")
+                .join(secret.strip_prefix("/").expect("absolute secret path"));
+            let via_proc = run_sandboxed(scope, &confidential_roots, "cat \"$1\"", &laundered);
+            assert!(
+                !String::from_utf8_lossy(&via_proc.stdout).contains(canary),
+                "the {label} canary leaked via /proc/self/root"
+            );
+        }
+
+        // Legitimate reads must survive. A neighbour inside the excluded dirs'
+        // parent, and a workspace file — plus the fact that `sh` itself
+        // executed at all, which needs `Execute` and `ReadFile` on the
+        // interpreter and its shared libraries.
+        let allowed = run_sandboxed(scope, &confidential_roots, "cat \"$1\"", &neighbour);
+        assert!(
+            allowed.status.success(),
+            "sandboxed shell lost a legitimate read next to the secret mounts: {}",
+            String::from_utf8_lossy(&allowed.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&allowed.stdout), "NEIGHBOUR");
+
+        let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+        let source_read = run_sandboxed(scope, &confidential_roots, "cat \"$1\"", &manifest);
+        assert!(
+            source_read.status.success(),
+            "sandboxed shell lost a legitimate workspace read: {}",
+            String::from_utf8_lossy(&source_read.stderr)
+        );
+        assert!(String::from_utf8_lossy(&source_read.stdout).contains("djinn-sandbox"));
+
+        // Directory listing stays granted everywhere, including at `/` and
+        // inside the excluded mount — a filename is not the secret.
+        for dir in ["/", "/usr"] {
+            let listing = run_sandboxed(scope, &confidential_roots, "ls \"$1\"", Path::new(dir));
+            assert!(
+                listing.status.success(),
+                "sandboxed shell lost `ls {dir}`: {}",
+                String::from_utf8_lossy(&listing.stderr)
+            );
+        }
+
+        // Writes to the secret mounts stay denied, as before.
+        assert!(
+            !run_sandboxed(
+                scope,
+                &confidential_roots,
+                "printf x > \"$1\"",
+                &credentials
+            )
+            .status
+            .success(),
+            "Landlock must still deny writes to the credential mount"
+        );
+    }
+
+    /// The same denial, asserted against the REAL production mount paths on
+    /// any host that actually has them — which includes the task-run Pod djinn
+    /// verifies in, where `/var/run/djinn/credentials.bin` is the org's live
+    /// credential bundle. Self-skips elsewhere; the fixture test above carries
+    /// the guarantee on a developer laptop and in a plain CI container.
+    #[test]
+    fn shell_sandbox_denies_reading_the_real_pod_secret_mounts() {
+        if !crate::probe_landlock() {
+            return;
+        }
+        let roots = confidential::present_confidential_roots(confidential::CONFIDENTIAL_ROOTS);
+        if roots.is_empty() {
+            return;
+        }
+
+        let worktree = tempfile::tempdir_in("/var/tmp").expect("worktree");
+        let scope = SandboxScope::Worktree(worktree.path());
+
+        // Mirrors `djinn_k8s::job::{CREDENTIALS_MOUNT_FILE, TOKEN_MOUNT_FILE}`.
+        for secret in [
+            "/var/run/djinn/credentials.bin",
+            "/var/run/secrets/tokens/djinn",
+        ] {
+            let path = Path::new(secret);
+            if !path.exists() {
+                continue;
+            }
+            let output = run_sandboxed(scope, &roots, "cat \"$1\"", path);
+            assert!(
+                !output.status.success(),
+                "sandboxed shell read the live secret at {secret}"
+            );
+            assert!(
+                output.stdout.is_empty(),
+                "sandboxed shell got {} bytes out of the live secret at {secret}",
+                output.stdout.len()
+            );
+        }
+
+        // The same environment must still serve an ordinary read.
+        let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+        assert!(
+            run_sandboxed(scope, &roots, "cat \"$1\"", &manifest)
+                .status
+                .success(),
+            "the production confidential-root set broke an ordinary read"
+        );
+    }
+
+    /// A confidential root nested under one of the policy's `full_access`
+    /// roots would be granted `ReadFile` back through that broader rule. The
+    /// production set must never overlap them.
+    #[test]
+    fn confidential_roots_do_not_overlap_writable_sandbox_roots() {
+        let writable = ["/var/tmp", "/cache", "/tmp"];
+        for root in confidential::CONFIDENTIAL_ROOTS {
+            for writable_root in writable {
+                assert!(
+                    !Path::new(root).starts_with(writable_root),
+                    "{root} sits under the writable sandbox root {writable_root}, \
+                     whose full-access rule would grant ReadFile back"
+                );
+            }
+        }
     }
 }

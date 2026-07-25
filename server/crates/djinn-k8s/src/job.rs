@@ -506,6 +506,16 @@ pub fn build_task_run_job(
 
     let pod_spec = PodSpec {
         service_account_name: Some(config.service_account.clone()),
+        // jqvg: the task-run Pod runs repository-controlled code (agent shell
+        // commands, `build.rs`, test targets, npm `postinstall`). Nothing in
+        // this Pod speaks to the apiserver — the worker's only authenticated
+        // peer is djinn-server, reached with the audience-bound projected token
+        // on VOLUME_AUTH_TOKEN below — so the default ServiceAccount token has
+        // no legitimate reader here and only supplies a leak with real
+        // apiserver blast radius. Turning automount off removes that file from
+        // the container filesystem entirely, which is strictly stronger than
+        // the sandbox-level read denial that also covers `/var/run/secrets`.
+        automount_service_account_token: Some(false),
         restart_policy: Some("Never".to_string()),
         init_containers,
         containers: vec![container],
@@ -1512,6 +1522,15 @@ mod tests {
             "task grkq: no launcher ⇒ no initContainers for a service-less run"
         );
         assert_eq!(pod.share_process_namespace, None);
+
+        // jqvg: nothing in the task-run Pod speaks to the apiserver, and the
+        // Pod runs repository-controlled code. The apiserver-capable default
+        // ServiceAccount token must not be projected into it at all.
+        assert_eq!(
+            pod.automount_service_account_token,
+            Some(false),
+            "jqvg: the task-run Pod must not automount the apiserver ServiceAccount token"
+        );
 
         // spec → Secret volume with the right name + key-to-path mapping.
         let spec_volume = &volumes[0];
@@ -3684,5 +3703,34 @@ mod tests {
         assert_eq!(cfg.warm_cpu_limit, "4");
         assert_eq!(cfg.warm_memory_request, "2Gi");
         assert_eq!(cfg.warm_memory_limit, "6Gi");
+    }
+
+    /// jqvg drift guard. Every secret this module projects into the worker
+    /// container must sit beneath a root the shell sandbox withholds
+    /// `ReadFile` on, otherwise repository-controlled code can read it again.
+    /// This coupling did not exist when the credential mount was added, which
+    /// is a large part of why the exposure went unnoticed.
+    #[test]
+    fn projected_secret_mounts_stay_covered_by_the_sandbox_denylist() {
+        use std::path::Path;
+
+        for secret in [
+            SPEC_MOUNT_FILE,
+            CREDENTIALS_MOUNT_FILE,
+            TOKEN_MOUNT_FILE,
+            // No longer automounted (see `automount_service_account_token`),
+            // but keep it in the denylist's remit so re-enabling automount
+            // cannot silently re-expose it to a sandboxed shell.
+            "/var/run/secrets/kubernetes.io/serviceaccount/token",
+        ] {
+            assert!(
+                djinn_sandbox::confidential::CONFIDENTIAL_ROOTS
+                    .iter()
+                    .any(|root| Path::new(secret).starts_with(root)),
+                "{secret} is projected into the worker container but is not beneath any \
+                 djinn_sandbox::confidential::CONFIDENTIAL_ROOTS entry — a sandboxed \
+                 shell could read it"
+            );
+        }
     }
 }
