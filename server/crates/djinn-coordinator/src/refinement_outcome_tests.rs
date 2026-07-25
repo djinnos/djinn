@@ -653,6 +653,7 @@ fn assert_exact_durable_run_and_intents(
 async fn assert_rejected_outcome_preserves_source(
     f: &mut DurableOutcomeFixture,
     session: RefinementSession,
+    injected_failure: Option<OutcomeTestSeamPoint>,
 ) {
     f.actor
         .active_refinements
@@ -661,6 +662,13 @@ async fn assert_rejected_outcome_preserves_source(
         .refinement_sessions
         .insert(f.run_id.clone(), f.session.clone());
     let durable_before = snapshot(f).await;
+    let lifecycle_before = ProposalRepository::new(f.db.clone(), EventBus::noop())
+        .revisions(&f.fixture.proposal_id)
+        .await
+        .expect("read lifecycle before rejected outcome")
+        .into_iter()
+        .filter(|revision| revision.event_kind == "refinement_stop")
+        .count();
     let task_before = TaskRepository::new(f.db.clone(), EventBus::noop())
         .get(&f.task_id)
         .await
@@ -668,12 +676,20 @@ async fn assert_rejected_outcome_preserves_source(
     let projection_before = f.actor.active_refinements[&f.run_id].clone();
     let session_before = f.actor.refinement_sessions[&f.run_id].clone();
     reset_rejected_outcome_counters(f, &session.task_id);
+    if let Some(point) = injected_failure {
+        inject_outcome_test_failure(&session.task_id, point);
+    }
 
+    let expected_application = if injected_failure.is_some() {
+        RefinementOutcomeApplication::Retryable
+    } else {
+        RefinementOutcomeApplication::Ignored
+    };
     assert_eq!(
         f.actor
             .process_refinement_outcome(&f.run_id, &session)
             .await,
-        RefinementOutcomeApplication::Ignored
+        expected_application
     );
     assert_exact_durable_run_and_intents(
         &snapshot(f).await,
@@ -692,6 +708,17 @@ async fn assert_rejected_outcome_preserves_source(
         "rejected outcome must not mutate the durable task row"
     );
     assert_eq!(
+        ProposalRepository::new(f.db.clone(), EventBus::noop())
+            .revisions(&f.fixture.proposal_id)
+            .await
+            .expect("read lifecycle after rejected outcome")
+            .into_iter()
+            .filter(|revision| revision.event_kind == "refinement_stop")
+            .count(),
+        lifecycle_before,
+        "rejected outcome must not append a proposal-scoped stop"
+    );
+    assert_eq!(
         format!("{:#?}", f.actor.active_refinements[&f.run_id]),
         format!("{projection_before:#?}"),
         "rejected outcome must not publish a projection"
@@ -702,6 +729,125 @@ async fn assert_rejected_outcome_preserves_source(
         "rejected outcome must retain the complete original session"
     );
     assert_rejected_outcome_skipped_reads(f);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn attributed_user_repository_lookup_failure_creates_no_stop_or_projection_mutation() {
+    let mut f = durable_outcome_fixture().await;
+    f.actor
+        .active_refinements
+        .insert(f.run_id.clone(), f.projection.clone());
+    let before = snapshot(&f).await;
+    let lifecycle_before = ProposalRepository::new(f.db.clone(), EventBus::noop())
+        .revisions(&f.fixture.proposal_id)
+        .await
+        .expect("read lifecycle before attributed-user lookup failure")
+        .into_iter()
+        .filter(|revision| revision.event_kind == "refinement_stop")
+        .count();
+    let projection_before = format!("{:#?}", f.actor.active_refinements[&f.run_id]);
+
+    assert!(
+        f.actor
+            .resolve_owner_identity("missing-attributed-user")
+            .await
+            .is_err()
+    );
+
+    assert_exact_durable_run_and_intents(
+        &snapshot(&f).await,
+        &before,
+        "attributed-user repository lookup failure",
+    );
+    assert_eq!(
+        ProposalRepository::new(f.db.clone(), EventBus::noop())
+            .revisions(&f.fixture.proposal_id)
+            .await
+            .expect("read lifecycle after attributed-user lookup failure")
+            .into_iter()
+            .filter(|revision| revision.event_kind == "refinement_stop")
+            .count(),
+        lifecycle_before
+    );
+    assert_eq!(
+        format!("{:#?}", f.actor.active_refinements[&f.run_id]),
+        projection_before
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn correlated_task_creation_request_failure_creates_no_stop_or_projection_mutation() {
+    let mut f = durable_outcome_fixture().await;
+    f.actor
+        .active_refinements
+        .insert(f.run_id.clone(), f.projection.clone());
+    let before = snapshot(&f).await;
+    let lifecycle_before = ProposalRepository::new(f.db.clone(), EventBus::noop())
+        .revisions(&f.fixture.proposal_id)
+        .await
+        .expect("read lifecycle before correlated task request failure")
+        .into_iter()
+        .filter(|revision| revision.event_kind == "refinement_stop")
+        .count();
+    let projection_before = format!("{:#?}", f.actor.active_refinements[&f.run_id]);
+    let correlation = TaskRefinementCorrelation::new(
+        f.run_id.clone(),
+        f.intent_id.clone(),
+        i64::from(f.generation),
+        1,
+        DurablePhase::AdversaryAttack,
+        RefinementRole::Adversary,
+    )
+    .expect("valid duplicate exact correlation");
+
+    assert!(
+        f.actor
+            .create_refinement_task_with_context_and_correlation(
+                &f.fixture.proposal_id,
+                "adversary",
+                1,
+                f.projection.current_revision_seq,
+                "duplicate correlated request must fail",
+                None,
+                Some(&f.fixture.user_id),
+                Some(&correlation),
+            )
+            .await
+            .is_none(),
+        "repository uniqueness must reject a second task for one intent"
+    );
+
+    assert_exact_durable_run_and_intents(
+        &snapshot(&f).await,
+        &before,
+        "correlated task creation request failure",
+    );
+    assert_eq!(
+        ProposalRepository::new(f.db.clone(), EventBus::noop())
+            .revisions(&f.fixture.proposal_id)
+            .await
+            .expect("read lifecycle after correlated task request failure")
+            .into_iter()
+            .filter(|revision| revision.event_kind == "refinement_stop")
+            .count(),
+        lifecycle_before
+    );
+    assert_eq!(
+        format!("{:#?}", f.actor.active_refinements[&f.run_id]),
+        projection_before
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn outcome_handler_task_reload_failure_creates_no_stop_or_projection_mutation() {
+    let mut f = durable_outcome_fixture().await;
+    let session = f.session.clone();
+    assert_rejected_outcome_preserves_source(
+        &mut f,
+        session,
+        Some(OutcomeTestSeamPoint::TaskReload),
+    )
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -825,7 +971,7 @@ async fn correlation_fence_rejects_missing_and_mismatched_task_identity() {
                 .expect("replace task correlation for fence case");
         }
         let session = f.session.clone();
-        assert_rejected_outcome_preserves_source(&mut f, session).await;
+        assert_rejected_outcome_preserves_source(&mut f, session, None).await;
         assert_eq!(
             snapshot(&f).await.snapshot.intents[0].state,
             RefinementIntentState::Materialized,
@@ -841,10 +987,10 @@ async fn correlation_fence_rejects_session_generation_and_phase_mismatch() {
     // Session identity checks occur even earlier than the task-row fence.
     let mut wrong_generation = f.session.clone();
     wrong_generation.generation += 1;
-    assert_rejected_outcome_preserves_source(&mut f, wrong_generation).await;
+    assert_rejected_outcome_preserves_source(&mut f, wrong_generation, None).await;
     let mut wrong_phase = f.session.clone();
     wrong_phase.phase = RefinementPhase::AdvocateRevision;
-    assert_rejected_outcome_preserves_source(&mut f, wrong_phase).await;
+    assert_rejected_outcome_preserves_source(&mut f, wrong_phase, None).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1224,6 +1370,13 @@ async fn advocate_proposal_and_progress_failures_leave_durable_source_retryable(
         // forcing the durable-progress boundary after the proposal reload.
         candidate_source.current_revision_seq = 0;
         let before = snapshot(&f).await;
+        let lifecycle_before = ProposalRepository::new(f.db.clone(), EventBus::noop())
+            .revisions(&f.fixture.proposal_id)
+            .await
+            .expect("read lifecycle before request failure")
+            .into_iter()
+            .filter(|revision| revision.event_kind == "refinement_stop")
+            .count();
         inject_outcome_test_failure(&f.fixture.proposal_id, point);
         assert!(
             f.actor
@@ -1249,6 +1402,17 @@ async fn advocate_proposal_and_progress_failures_leave_durable_source_retryable(
             "{point:?} must leave durable run state untouched"
         );
         assert_eq!(f.actor.refinement_sessions[&f.run_id].task_id, f.task_id);
+        assert_eq!(
+            ProposalRepository::new(f.db.clone(), EventBus::noop())
+                .revisions(&f.fixture.proposal_id)
+                .await
+                .expect("read lifecycle after request failure")
+                .into_iter()
+                .filter(|revision| revision.event_kind == "refinement_stop")
+                .count(),
+            lifecycle_before,
+            "{point:?} must not append a proposal-scoped stop"
+        );
         reset_outcome_test_seam(&f.fixture.proposal_id);
     }
 }

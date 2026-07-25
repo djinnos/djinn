@@ -873,17 +873,8 @@ impl CoordinatorActor {
                     phase = ?phase,
                     user_id = %user_id,
                     error = %e,
-                    "Refinement dispatch: failed to resolve attributed user row — failing closed"
+                    "Refinement dispatch deferred: failed to resolve attributed user row"
                 );
-                self.terminate_refinement(
-                    run_id,
-                    StopReason::AgentFailure {
-                        role: role_for_phase(phase),
-                        error_code: "agent_failure".into(),
-                        message: format!("failed to resolve attributed user: {e}"),
-                    },
-                )
-                .await;
                 return;
             }
         }
@@ -1048,17 +1039,8 @@ impl CoordinatorActor {
                 tracing::warn!(
                     proposal_id = %proposal_id,
                     phase = ?phase,
-                    "Failed to create refinement task"
+                    "Refinement dispatch deferred: failed to create refinement task"
                 );
-                self.terminate_refinement(
-                    run_id,
-                    StopReason::AgentFailure {
-                        role: role_for_phase(phase),
-                        error_code: "agent_failure".into(),
-                        message: "task creation failed".into(),
-                    },
-                )
-                .await;
                 return;
             }
         };
@@ -1127,7 +1109,8 @@ impl CoordinatorActor {
         // ── Step 5: Dispatch through the slot pool (last side effect) ───────
         //
         // On pool dispatch failure, clear the in-flight reservation so the
-        // slot is immediately available and terminate the refinement.
+        // slot is immediately available. Coordinator infrastructure failures
+        // are retryable and must not be classified as agent outcomes.
         match self.pool.dispatch(&task_id, &project_path, &model_id).await {
             Ok(()) => {
                 self.finish_task_run_build_admission(build_admission, true)
@@ -1164,17 +1147,8 @@ impl CoordinatorActor {
                     task_id = %task_id,
                     phase = ?phase,
                     error = %e,
-                    "Failed to dispatch refinement session"
+                    "Refinement dispatch deferred after pool enqueue failure"
                 );
-                self.terminate_refinement(
-                    run_id,
-                    StopReason::AgentFailure {
-                        role: role_for_phase(phase),
-                        error_code: "agent_failure".into(),
-                        message: format!("dispatch failed: {e}"),
-                    },
-                )
-                .await;
             }
         }
     }
