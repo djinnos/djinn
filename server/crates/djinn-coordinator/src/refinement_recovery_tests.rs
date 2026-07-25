@@ -16,8 +16,8 @@ use djinn_db::{
     AcknowledgeRefinementTaskMaterializationRequest, AdmitRefinementRunRequest,
     ClaimRefinementIntentRequest, CompleteRefinementIntentRequest,
     LoadRefinementRunSnapshotRequest, ParkRefinementRunRequest, ProposalRepository,
-    RefinementAdmissionOutcome, RefinementAdmissionSource, SessionRepository, TaskRepository,
-    TerminalRefinementRunRequest,
+    RefinementAdmissionOutcome, RefinementAdmissionSource, ReleaseRefinementIntentClaimRequest,
+    SessionRepository, TaskRepository, TerminalRefinementRunRequest,
 };
 
 async fn admit(repo: &ProposalRepository, proposal_id: &str, key: &str) -> (String, i32, String) {
