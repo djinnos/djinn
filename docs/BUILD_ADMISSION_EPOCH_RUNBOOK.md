@@ -37,6 +37,7 @@ actor or HTTP listener starts.
 
 ```
 djinn-server epoch show                  # print the durable row + derived state
+djinn-server epoch seed                  # create the row when it is ABSENT (idempotent)
 djinn-server epoch advance --cap N       # perform the next safe FORWARD step
 djinn-server epoch set-cap --cap N        # change the reference cap (epoch-fenced)
 djinn-server epoch rollback --cap N        # perform the next safe ROLLBACK step
@@ -166,6 +167,38 @@ Enforcement must never be enabled without kernel isolation and inventory proofs.
   then retry. A `LeaseContainmentFailed` node must be drained or fixed before it
   can host v1-enforcing spawns; until then the epoch keeps v1 unleased on that
   node fail-closed.
+
+### 6. Absent row (no epoch at all)
+
+Deleting the singleton is the immediate remediation for a wedged handoff, so a
+deployment can legitimately be running with **no** row. This is safe but is one
+step below baseline: `evaluate_handoff` maps `Ok(None)` to
+`HandoffState::MissingRow` / `EmergencyAuthorityDecision::ConfiguredStandalone`,
+which retains the configured standalone v0 mode and never denies — and the whole
+v1 rollout is dormant, so shadow cannot be armed and no would-throttle ratio
+accumulates.
+
+- **Detect:** `epoch show` prints `admission handoff row: <absent>`.
+- **Recover:** `djinn-server epoch seed`. It creates the `emergency_primary`
+  baseline (`v0 = enforce, v1 = off`, cap unset) **born acknowledged for its own
+  epoch**, so the deployment lands on the complete v0 baseline instead of the
+  fail-closed incomplete-epoch state, and `epoch advance` is immediately usable.
+  The command is idempotent: an existing row is reported and left untouched, so
+  it can never disturb a live rollout.
+- **Roll back:** `DELETE FROM admission_handoff WHERE name = 'build';` and
+  restart the coordinator returns the deployment to the dormant standalone
+  behaviour above. This is the one supported raw-SQL escape hatch, and it exists
+  precisely because startup must never re-create the row implicitly — no
+  migration or startup path does.
+- **Expect on the next start:** a seeded row requires v0, so startup promotes
+  even a configured `observe`/`off` controller to a fail-closed `enforce`
+  (`require_enforcement`) and admission stays closed through
+  `JournalRecoveryIncomplete` → `InventoryPending` → `TopologyPending` until the
+  coordinator wins the advisory lock. `confirm_build_admission_topology` then
+  opens the topology gate and writes the emergency ack in the same seam; the
+  periodic handoff loop re-drives it every 5 minutes. Denials logged as
+  `occupancy 0 reached cap N` during that window are the ordinary fail-closed
+  startup state, not a full ledger.
 
 ## Aborting a forward overlap
 
