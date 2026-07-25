@@ -1402,5 +1402,7 @@ fn shadow_epoch_emits_both_would_throttle_arms_from_production_paths() {
     }
 }
 
+#[path = "process_lease_degrade_tests.rs"]
+mod lease_degrade_tests;
 #[path = "process_lease_recovery_tests.rs"]
 mod recovery_tests;
