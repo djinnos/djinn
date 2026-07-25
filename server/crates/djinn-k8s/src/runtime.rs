@@ -1811,8 +1811,15 @@ mod tests {
             assert!(failed_create.is_err());
         });
 
-        assert!(rendered.contains("djinn_taskrun_jobs_started_total 1"));
-        assert!(!rendered.contains("djinn_taskrun_jobs_started_total{"));
+        // Exact line equality is the no-label assertion: a labelled series
+        // renders its label set between the name and the value, so only an
+        // unlabelled counter matches this line verbatim.
+        assert!(
+            rendered
+                .lines()
+                .any(|line| line.trim() == "djinn_taskrun_jobs_started_total 1"),
+            "expected one unlabelled jobs-started series at 1 in:\n{rendered}"
+        );
     }
 
     /// The exact Pod as this protocol leaves it after a confirmed delete: held
