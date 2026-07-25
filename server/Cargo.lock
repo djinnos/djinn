@@ -1522,6 +1522,7 @@ dependencies = [
  "djinn-sandbox",
  "djinn-stack",
  "djinn-supervisor",
+ "djinn-telemetry",
  "djinn-workspace",
  "http",
  "http-body-util",

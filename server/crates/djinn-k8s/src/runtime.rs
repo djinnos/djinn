@@ -204,6 +204,17 @@ const TEARDOWN_POLL_TIMEOUT: Duration = Duration::from_secs(11_400);
 /// Poll interval used inside [`poll_job_terminal_state`].
 const TEARDOWN_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
+/// Preserve the Kubernetes create result while recording only confirmed
+/// apiserver success. Calling this around the awaited `jobs.create` boundary
+/// excludes prerequisite failures, errors, ambiguous calls, and retries that
+/// have not themselves returned `Ok`.
+fn record_confirmed_job_create<T, E>(result: Result<T, E>) -> Result<T, E> {
+    if result.is_ok() {
+        djinn_telemetry::taskrun_lifecycle::increment_job_started();
+    }
+    result
+}
+
 fn service_resolution_activity_payload(
     task_run_id: &str,
     project_id: &str,
@@ -711,22 +722,23 @@ impl SessionRuntime for KubernetesRuntime {
         );
         crate::build_resources::apply_resolved_resources(&mut job, resolved_task_resources);
         let jobs: Api<Job> = Api::namespaced(self.client.clone(), ns);
-        let created_job = match jobs.create(&PostParams::default(), &job).await {
-            Ok(j) => j,
-            Err(e) => {
-                // Best-effort cleanup of the orphan Secret — don't shadow the
-                // original error if cleanup also fails.
-                let secrets_bg = secrets.clone();
-                let name = resource_name.clone();
-                tokio::spawn(async move {
-                    let _ = secrets_bg.delete(&name, &DeleteParams::default()).await;
-                });
-                self.drop_pending(&task_run_id_str).await;
-                return Err(RuntimeError::Prepare(format!(
-                    "create job {resource_name}: {e}"
-                )));
-            }
-        };
+        let created_job =
+            match record_confirmed_job_create(jobs.create(&PostParams::default(), &job).await) {
+                Ok(j) => j,
+                Err(e) => {
+                    // Best-effort cleanup of the orphan Secret — don't shadow the
+                    // original error if cleanup also fails.
+                    let secrets_bg = secrets.clone();
+                    let name = resource_name.clone();
+                    tokio::spawn(async move {
+                        let _ = secrets_bg.delete(&name, &DeleteParams::default()).await;
+                    });
+                    self.drop_pending(&task_run_id_str).await;
+                    return Err(RuntimeError::Prepare(format!(
+                        "create job {resource_name}: {e}"
+                    )));
+                }
+            };
 
         // 3. Attach an OwnerReference so the Secret GCs with the Job.
         let job_uid = match created_job.metadata.uid.clone() {
@@ -1784,6 +1796,24 @@ mod tests {
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::{ObjectMeta, OwnerReference};
     use std::collections::HashMap;
     use std::sync::Mutex as StdMutex;
+
+    #[test]
+    fn jobs_started_counter_moves_only_for_confirmed_job_create_success() {
+        let (_, rendered) = djinn_telemetry::render_isolated(|| {
+            let success: Result<(), &str> = record_confirmed_job_create(Ok(()));
+            assert!(success.is_ok());
+
+            // Prerequisite work does not cross the create boundary, and a
+            // failed/ambiguous create result is returned without a counter.
+            let prerequisite_failure: Result<(), &str> = Err("secret creation failed");
+            assert!(prerequisite_failure.is_err());
+            let failed_create: Result<(), &str> = record_confirmed_job_create(Err("create failed"));
+            assert!(failed_create.is_err());
+        });
+
+        assert!(rendered.contains("djinn_taskrun_jobs_started_total 1"));
+        assert!(!rendered.contains("djinn_taskrun_jobs_started_total{"));
+    }
 
     /// The exact Pod as this protocol leaves it after a confirmed delete: held
     /// by the service-owned finalizer and carrying a `deletionTimestamp`.
