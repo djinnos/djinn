@@ -689,13 +689,14 @@ async fn intent_rows(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     run_id: &str,
 ) -> SnapshotResult<Vec<RefinementIntentSnapshot>> {
-    let rows = sqlx::query("SELECT id, run_id, state, phase, role, claim_expires_at FROM refinement_dispatch_intents WHERE run_id = $1 ORDER BY round, id")
+    let rows = sqlx::query("SELECT id, run_id, round, state, phase, role, claim_expires_at FROM refinement_dispatch_intents WHERE run_id = $1 ORDER BY round, id")
         .bind(run_id).fetch_all(&mut **tx).await?;
     rows.into_iter()
         .map(|row| {
             Ok(RefinementIntentSnapshot {
                 intent_id: row.get("id"),
                 run_id: row.get("run_id"),
+                round: row.get("round"),
                 state: intent_state(row.get("state"))?,
                 phase: phase(row.get("phase"))?,
                 role: role(row.get("role"))?,

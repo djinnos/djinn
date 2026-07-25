@@ -15,7 +15,10 @@
 
 use djinn_core::{
     models::ProposalDebateTrail,
-    refinement_liveness::{RefinementLivenessResult, RefinementStopReason},
+    refinement_liveness::{
+        RefinementLivenessResult, RefinementParkKind, RefinementStopReason,
+        evaluate_refinement_liveness,
+    },
 };
 use djinn_db::{ProposalRepository, TaskRepository, TerminalRefinementRunRequest};
 
@@ -171,7 +174,7 @@ pub(crate) fn derive_resume_plan(
 }
 
 impl CoordinatorActor {
-    /// Startup reconciliation for refinements interrupted by a restart.
+    /// Recover projections from exact durable snapshots, never legacy lifecycle hints.
     ///
     /// Runs once before the message loop. Every DB-dangling refinement (more
     /// `refinement_start` than `refinement_stop` lifecycle rows) either:
@@ -188,46 +191,93 @@ impl CoordinatorActor {
     pub(super) async fn recover_interrupted_refinements(&mut self) {
         let event_bus = crate::events::event_bus_for(&self.events_tx);
         let proposal_repo = ProposalRepository::new(self.db.clone(), event_bus);
-        let dangling = match proposal_repo.dangling_refinement_proposal_ids().await {
+        let runs = match proposal_repo.load_recoverable_refinement_runs().await {
             Ok(ids) => ids,
             Err(e) => {
                 tracing::warn!(
                     error = %e,
-                    "Failed to query dangling refinements for startup recovery"
+                    "Failed to query durable refinement runs for startup recovery"
                 );
                 return;
             }
         };
-        if dangling.is_empty() {
+        if runs.is_empty() {
             return;
         }
         tracing::info!(
-            count = dangling.len(),
+            count = runs.len(),
             "Reconciling refinements interrupted by restart"
         );
-        for proposal_id in dangling {
-            if self.active_refinements.contains_key(&proposal_id) {
+        for run in runs {
+            let exact = match proposal_repo
+                .load_refinement_run_snapshot(djinn_db::LoadRefinementRunSnapshotRequest {
+                    run_id: run.run_id.clone(),
+                    heartbeat_grace_millis: 60_000,
+                })
+                .await
+            {
+                Ok(Some(exact)) if exact.generation == run.generation => exact,
+                Ok(_) => continue,
+                Err(error) => {
+                    tracing::warn!(run_id = %run.run_id, %error, "Failed exact refinement recovery observation");
+                    continue;
+                }
+            };
+            match evaluate_refinement_liveness(&exact.snapshot, exact.observed_at) {
+                RefinementLivenessResult::Terminal { .. } => continue,
+                RefinementLivenessResult::Stale { .. } => {
+                    self.try_reap_exact_stale_run(&exact.proposal_id).await;
+                    continue;
+                }
+                RefinementLivenessResult::Live { .. } => {}
+            }
+            if self.active_refinements.contains_key(&run.run_id) {
                 continue;
             }
-            // A legitimately-converged park is restored to AwaitingHumanReview.
-            if self.try_restore_awaiting_review(&proposal_id).await {
+            if let Some(park) = &exact.snapshot.park {
+                let revision_seq = match proposal_repo.get(&exact.proposal_id).await {
+                    Ok(Some(proposal)) => proposal.latest_revision_seq,
+                    _ => continue,
+                };
+                let mut state = RefinementLoopState::new(&exact.proposal_id, revision_seq)
+                    .with_run_identity(run.run_id.clone(), exact.generation);
+                state.phase = match park.kind {
+                    RefinementParkKind::AwaitingReview => RefinementPhase::AwaitingHumanReview,
+                    RefinementParkKind::AwaitingEvidence => RefinementPhase::AwaitingEvidence,
+                };
+                self.active_refinements.insert(run.run_id, state);
                 continue;
             }
-            // A mid-tribunal run is resumed in place from durable data so it
-            // keeps running across the restart.
-            if self.try_resume_mid_flight(&proposal_id).await {
+            if let Some(intent) = exact.snapshot.intents.iter().find(|intent| {
+                matches!(
+                    intent.state,
+                    djinn_core::refinement_liveness::RefinementIntentState::Pending
+                        | djinn_core::refinement_liveness::RefinementIntentState::Claimed
+                        | djinn_core::refinement_liveness::RefinementIntentState::Materialized
+                )
+            }) {
+                let revision_seq = match proposal_repo.get(&exact.proposal_id).await {
+                    Ok(Some(proposal)) => proposal.latest_revision_seq,
+                    _ => continue,
+                };
+                let mut state = RefinementLoopState::new(&exact.proposal_id, revision_seq)
+                    .with_run_identity(run.run_id.clone(), exact.generation);
+                state.phase = match intent.phase {
+                    djinn_core::refinement_liveness::RefinementPhase::AdversaryAttack => {
+                        RefinementPhase::AdversaryAttack
+                    }
+                    djinn_core::refinement_liveness::RefinementPhase::AdvocateRevision => {
+                        RefinementPhase::AdvocateRevision
+                    }
+                    djinn_core::refinement_liveness::RefinementPhase::JudgeAdjudication => {
+                        RefinementPhase::JudgeAdjudication
+                    }
+                };
+                state.current_round = intent.round;
+                self.active_refinements.insert(run.run_id, state);
                 continue;
             }
-            // A lifecycle row is only a legacy hint. It may identify a proposal
-            // whose current durable run can be evaluated exactly. Only that
-            // exact run/generation observation may be terminalized.
-            if self.try_reap_exact_stale_run(&proposal_id).await {
-                continue;
-            }
-            // Legacy proposal-scoped lifecycle rows cannot establish an exact
-            // durable run/generation. Do not manufacture a stop for an
-            // uncorrelated recovery observation.
-            tracing::warn!(proposal_id = %proposal_id, "Skipping uncorrelated legacy refinement recovery");
+            tracing::warn!(run_id = %exact.snapshot.run.run_id, "live run lacked a recoverable intent or park projection");
         }
     }
 
