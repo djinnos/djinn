@@ -12,7 +12,7 @@ use std::path::Path;
 
 use djinn_agent_worker::volume_contract::{
     ContractMode, VolumeContract, VolumeContractError, VolumeRoot, current_gid, enforce_with,
-    validate,
+    normalize_warm_base_regular_files, validate,
 };
 use tempfile::TempDir;
 
@@ -131,16 +131,64 @@ fn owner_read_only_files_are_not_a_group_write_violation() {
     chmod(&dir.path().join("sub").join("file"), 0o444);
     validate(&contract(), &root_of(&dir)).expect("444 artifacts are immutable, not misowned");
 
-    // …and `git init` copies its template hooks with the template's own mode,
-    // so `.git/hooks/*.sample` is 755 in every fresh clone whatever the umask.
+    // Executables are regular hardlink sources too. A foreign uid cannot
+    // hardlink `755` with fs.protected_hardlinks=1, so they must not evade the
+    // group-write contract as they did in the warm-base incident.
     chmod(&dir.path().join("sub").join("file"), 0o755);
-    validate(&contract(), &root_of(&dir)).expect("executables are replaced, not written in place");
+    let warm_base_root =
+        vec![VolumeRoot::required("cargo-warm-base", dir.path()).cargo_warm_base()];
+    let err =
+        validate(&contract(), &warm_base_root).expect_err("755 warm-base file must fail readiness");
+    assert_eq!(err.kind(), "group_write");
 
-    // …but an owner-writable, non-executable file without group-write still
-    // fails: that is the production 644 shape.
+    // Owner-writable non-executables fail too: that is the production 644
+    // shape.
     chmod(&dir.path().join("sub").join("file"), 0o644);
     let err = validate(&contract(), &root_of(&dir)).expect_err("644 must still fail");
     assert_eq!(err.kind(), "group_write");
+}
+
+#[test]
+fn warm_base_normalization_makes_all_regular_files_group_writable() {
+    let dir = TempDir::new().expect("tempdir");
+    let base = dir.path().join("warm-base");
+    let nested = base.join("debug/build/example/out");
+    fs::create_dir_all(&nested).expect("mkdir base");
+    let build_script = nested.join("build-script-build");
+    let ordinary = base.join("debug/deps/libexample.rlib");
+    fs::create_dir_all(ordinary.parent().expect("parent")).expect("mkdir deps");
+    fs::write(&build_script, b"script").expect("write script");
+    fs::write(&ordinary, b"library").expect("write library");
+    chmod(&build_script, 0o755);
+    chmod(&ordinary, 0o644);
+
+    let result = normalize_warm_base_regular_files(&base).expect("normalize warm base");
+    assert_eq!(result.regular_files, 2);
+    assert_eq!(result.files_normalized, 2);
+    assert_eq!(
+        fs::symlink_metadata(&build_script)
+            .expect("stat script")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o775,
+        "normalization preserves execute while adding group-write"
+    );
+    assert_eq!(
+        fs::symlink_metadata(&ordinary)
+            .expect("stat library")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o664
+    );
+    assert_eq!(
+        normalize_warm_base_regular_files(&base)
+            .expect("second full pass")
+            .files_normalized,
+        0,
+        "successive warm cycles remain converged without a manual chmod"
+    );
 }
 
 /// The umask is the other half of the contract: without it the worker creates

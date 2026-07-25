@@ -13,8 +13,9 @@ use crate::test_support::{checkout_branch, init_repo_with_main_commit, write_and
 use crate::{
     GitError, delete_branch, head_commit_sha, is_non_fast_forward_error,
     is_retryable_git_command_error, is_transient_network_error, rebase_with_retry, retry_delay,
-    rev_list_count, run_git_command, run_git_command_in, run_git_command_in_with_env,
-    run_git_command_with_timeout, run_git_command_with_timeout_in, unmerged_files,
+    rev_list_count, run_git_command, run_git_command_in, run_git_command_in_allow_failure,
+    run_git_command_in_with_env, run_git_command_with_timeout, run_git_command_with_timeout_in,
+    unmerged_files,
 };
 
 // ── Helper ──────────────────────────────────────────────────────────────────
@@ -88,14 +89,141 @@ async fn run_git_command_missing_remote_returns_command_failed() {
     }
 }
 
-/// A uid-1000 worker must clone a uid-10001 mirror. When the test runner can
-/// change ownership, make the fixture's actual `.git` directory foreign and
-/// verify the local clone succeeds through the configured command seam. An
-/// unprivileged local developer cannot create a foreign-owned inode, so that
-/// environment leaves this integration regression to the privileged CI lane.
+// ── safe.directory: cross-UID repository trust (nurw) ───────────────────────
+//
+// git honours `safe.directory` only from protected *file* configuration, and
+// strips command-scope config (`-c`, `GIT_CONFIG_COUNT`/`KEY_0`/`VALUE_0`) from
+// the inner `git-upload-pack` child that `git clone --local` spawns. The
+// previous injection form was therefore a no-op for exactly the operation djinn
+// depends on, and every mirror clone failed once the mirror was owned by the
+// other identity.
+//
+// Note what is NOT a sufficient regression test: "cloning a foreign-owned
+// repository succeeds". git >= 2.48 accepts `clone --local --shared` of a
+// foreign-owned repository regardless of `safe.directory`, so on a modern
+// developer/CI git that assertion passes with the broken mechanism too — the
+// same way the previous test passed while production was wedged. The two tests
+// below instead assert, version-independently, *which scope git resolves the
+// rule in* and *what the stripped-environment child sees*.
+
+/// The scope git resolves `safe.directory` in must be protected file
+/// configuration (`system`/`global`), never `command`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn safe_directory_resolves_in_protected_file_scope() {
+    let fixture = init_repo_with_main_commit();
+
+    let out = run_git_command_in_allow_failure(
+        fixture.path(),
+        vec![
+            "config".into(),
+            "--show-scope".into(),
+            "--get-all".into(),
+            "safe.directory".into(),
+        ],
+    )
+    .await
+    .expect("spawning git must succeed");
+
+    assert!(
+        out.is_success(),
+        "git resolved no safe.directory at all, so a repository owned by the other \
+         djinn identity is rejected outright; stdout: {:?} stderr: {:?}",
+        out.stdout,
+        out.stderr
+    );
+    let scopes: Vec<&str> = out
+        .stdout
+        .lines()
+        .filter_map(|line| line.split_whitespace().next())
+        .collect();
+    assert!(
+        scopes
+            .iter()
+            .any(|scope| matches!(*scope, "system" | "global")),
+        "safe.directory must come from protected file configuration (system/global). \
+         `command` scope is stripped from the inner `git-upload-pack` child of \
+         `git clone --local`, which is what made every mirror clone fail. scopes: {scopes:?}"
+    );
+}
+
+/// The property the previous env-var form was chosen for, and did not deliver:
+/// the inner git process spawned by `git clone --local` must resolve the trust
+/// rule too. Substituting `--upload-pack` with a shim that records what that
+/// child sees observes it directly, on any git version, without privileges.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn inner_child_of_a_local_clone_resolves_the_trust_rule() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let source = init_repo_with_main_commit();
+    let scratch = tempfile::tempdir().expect("create scratch dir");
+    let record = scratch.path().join("child-view");
+    let shim = scratch.path().join("upload-pack-shim.sh");
+    std::fs::write(
+        &shim,
+        "#!/bin/sh\n\
+         git config --show-scope --get-all safe.directory > \"$DJINN_TEST_RECORD\" 2>&1\n\
+         exec git upload-pack \"$@\"\n",
+    )
+    .expect("write upload-pack shim");
+    std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755))
+        .expect("make shim executable");
+
+    let destination = scratch.path().join("clone");
+    run_git_command_in_with_env(
+        scratch.path(),
+        vec![
+            "clone".into(),
+            "--local".into(),
+            "--shared".into(),
+            "--upload-pack".into(),
+            shim.display().to_string(),
+            source.path().display().to_string(),
+            destination.display().to_string(),
+        ],
+        vec![(
+            "DJINN_TEST_RECORD".to_string(),
+            record.display().to_string(),
+        )],
+    )
+    .await
+    .expect("clone through the upload-pack shim must succeed");
+    assert!(
+        destination.join(".git").is_dir(),
+        "clone must be materialized"
+    );
+
+    let child_view = std::fs::read_to_string(&record)
+        .expect("the inner upload-pack child must have recorded its config view");
+    let scope = child_view.split_whitespace().next().unwrap_or_default();
+    assert!(
+        matches!(scope, "system" | "global"),
+        "the inner `git-upload-pack` child of `git clone --local` must resolve \
+         safe.directory in protected file scope. git strips command-scope config from \
+         this child (`trace: run_command: unset GIT_CONFIG_COUNT ...`), so a `-c` or \
+         GIT_CONFIG_* injection leaves it with nothing and cloning a mirror owned by \
+         the other djinn identity fails with \"detected dubious ownership\". \
+         child saw: {child_view:?}"
+    );
+    assert!(
+        child_view.contains('*'),
+        "the child must inherit the trust value itself, got {child_view:?}"
+    );
+}
+
+/// Cloning a repository owned by another uid must work: the server (uid 10001)
+/// and the worker / warm Job (uid 1000) both clone the same mirror, so either
+/// can be the non-owner.
+///
+/// The ownership boundary is created for real with `chown` when the runner is
+/// privileged, otherwise simulated with git's own
+/// `GIT_TEST_ASSUME_DIFFERENT_OWNER`. Either way a *control* clone — carrying
+/// only the pre-fix command-scope injection — runs first: if the control
+/// succeeds, this environment cannot express the failure and there is nothing to
+/// assert, so the test says so instead of passing vacuously. The two tests above
+/// are the version-independent gate.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn local_clone_succeeds_when_repository_is_owned_by_a_different_uid() {
-    use std::os::unix::{ffi::OsStrExt, fs::MetadataExt};
+    use std::os::unix::fs::MetadataExt;
 
     let source = init_repo_with_main_commit();
     let source_git = source.path().join(".git");
@@ -104,46 +232,166 @@ async fn local_clone_succeeds_when_repository_is_owned_by_a_different_uid() {
         .uid();
     let foreign_uid = if current_uid == 10001 { 10002 } else { 10001 };
 
-    // CI's privileged test lane exercises the real ownership boundary. The
-    // task-run image intentionally runs tests as uid 1000, where chown is not
-    // available; returning there avoids turning a capability limitation into a
-    // false test failure.
-    if unsafe {
-        libc::chown(
-            source_git.as_os_str().as_bytes().as_ptr().cast(),
+    let source_git_c =
+        std::ffi::CString::new(source_git.as_os_str().as_encoded_bytes()).expect("path has no NUL");
+    // SAFETY: `source_git_c` is a live NUL-terminated C string.
+    let chowned = unsafe { libc::chown(source_git_c.as_ptr(), foreign_uid, u32::MAX) } == 0;
+    if chowned {
+        assert_eq!(
+            std::fs::metadata(&source_git)
+                .expect("stat foreign-owned source git dir")
+                .uid(),
             foreign_uid,
-            u32::MAX,
-        )
-    } != 0
-    {
-        return;
+            "fixture must be owned by a uid other than the cloning process"
+        );
     }
-    assert_eq!(
-        std::fs::metadata(&source_git)
-            .expect("stat foreign-owned source git dir")
-            .uid(),
-        foreign_uid,
-        "fixture must be owned by a uid other than the cloning process"
-    );
 
-    let destination_parent = tempfile::tempdir().expect("create clone destination parent");
-    let destination = destination_parent.path().join("clone");
-    run_git_command_in_with_env(
-        destination_parent.path(),
+    // Keep the runner's own ~/.gitconfig out of the result either way: an
+    // ambient `safe.directory` there would silently decide the outcome.
+    let home = tempfile::tempdir().expect("create isolated home");
+    let mut trigger = vec![
+        ("HOME".to_string(), home.path().display().to_string()),
+        (
+            "XDG_CONFIG_HOME".to_string(),
+            home.path().join("xdg").display().to_string(),
+        ),
+    ];
+    if !chowned {
+        trigger.push((
+            "GIT_TEST_ASSUME_DIFFERENT_OWNER".to_string(),
+            "1".to_string(),
+        ));
+    }
+
+    let scratch = tempfile::tempdir().expect("create clone destination parent");
+    let clone_args = |destination: &std::path::Path| {
         vec![
-            "clone".into(),
-            "--local".into(),
+            "clone".to_string(),
+            "--local".to_string(),
+            "--shared".to_string(),
             source.path().display().to_string(),
             destination.display().to_string(),
-        ],
-        Vec::new(),
-    )
-    .await
-    .expect("safe.directory must permit cloning a foreign-owned source repository");
+        ]
+    };
 
+    // Control: the pre-fix mechanism, spawned outside the seam on purpose.
+    let control_destination = scratch.path().join("control");
+    let mut control = tokio::process::Command::new("git");
+    control
+        .env("GIT_CONFIG_COUNT", "1")
+        .env("GIT_CONFIG_KEY_0", "safe.directory")
+        .env("GIT_CONFIG_VALUE_0", "*")
+        .env_remove("GIT_CONFIG_SYSTEM")
+        .args(clone_args(&control_destination))
+        .current_dir(scratch.path());
+    for (key, value) in &trigger {
+        control.env(key, value);
+    }
+    let control_out = control.output().await.expect("spawn control clone");
+    if control_out.status.success() {
+        // No ownership rejection is reachable here (unprivileged runner on a git
+        // that accepts `--local --shared` under the simulation), so a successful
+        // clone below would prove nothing.
+        return;
+    }
+
+    let destination = scratch.path().join("clone");
+    run_git_command_in_with_env(scratch.path(), clone_args(&destination), trigger)
+        .await
+        .expect(
+            "the seam must clone a repository owned by another uid — the control clone \
+             carrying only the pre-fix command-scope injection was rejected here",
+        );
     assert!(
         destination.join(".git").is_dir(),
         "clone must be materialized"
+    );
+}
+
+/// `configure_private_dep_access` stores the GitHub installation token as a
+/// `url.<...>.insteadOf` rewrite with `git config --global`, and the agent's own
+/// build tools read it back from `$HOME/.gitconfig` without djinn in the loop.
+/// The trust rule must therefore not be injected as `GIT_CONFIG_GLOBAL`, which
+/// would redirect that write into a djinn-private file nothing else reads.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn global_config_writes_still_land_in_the_home_config() {
+    let fixture = init_repo_with_main_commit();
+    let home = tempfile::tempdir().expect("create isolated home");
+    let env = vec![("HOME".to_string(), home.path().display().to_string())];
+
+    run_git_command_in_with_env(
+        fixture.path(),
+        vec![
+            "config".into(),
+            "--global".into(),
+            "--add".into(),
+            "url.https://x-access-token:token@github.com/owner/.insteadOf".into(),
+            "https://github.com/owner/".into(),
+        ],
+        env,
+    )
+    .await
+    .expect("`git config --global` must succeed through the seam");
+
+    let home_config = std::fs::read_to_string(home.path().join(".gitconfig")).expect(
+        "`git config --global` must keep writing $HOME/.gitconfig; redirecting global \
+         scope would break private-dependency access for cargo/go/pnpm, which read that \
+         file directly",
+    );
+    assert!(
+        home_config.contains("insteadOf"),
+        "the rewrite must be in $HOME/.gitconfig, got {home_config:?}"
+    );
+}
+
+/// Pointing `GIT_CONFIG_SYSTEM` at a generated file shadows the real
+/// `/etc/gitconfig`, so the generated file has to chain to it.
+#[test]
+fn generated_config_chains_to_the_real_system_config() {
+    let chained = crate::generated_config_contents(Some(std::path::Path::new("/etc/git\"conf ig")));
+    assert!(
+        chained.contains("[include]\n\tpath = \"/etc/git\\\"conf ig\"\n"),
+        "the chained path must be quoted and escaped, got {chained:?}"
+    );
+    assert!(
+        chained.contains("[safe]\n\tdirectory = *\n"),
+        "the trust rule must be present, got {chained:?}"
+    );
+
+    let standalone = crate::generated_config_contents(None);
+    assert!(
+        !standalone.contains("[include]"),
+        "with no system config to chain to there must be no include, got {standalone:?}"
+    );
+    assert!(
+        standalone.contains("[safe]\n\tdirectory = *\n"),
+        "the trust rule must be present, got {standalone:?}"
+    );
+}
+
+/// git ignores a `GIT_CONFIG_SYSTEM` pointing at a missing file silently, so a
+/// temp reaper deleting the generated config would resurrect the outage days into
+/// a server's uptime with nothing in the logs. Writing it must be repeatable and
+/// must restore a deleted file.
+#[test]
+fn generated_config_is_rewritten_when_it_disappears() {
+    let dir = tempfile::tempdir().expect("create config dir");
+    let path = dir.path().join("gitconfig");
+
+    crate::materialize_generated_config_at(&path).expect("first write");
+    let first = std::fs::read_to_string(&path).expect("config must exist after the first write");
+
+    std::fs::remove_file(&path).expect("simulate a temp-directory reaper");
+    crate::materialize_generated_config_at(&path).expect("rewrite after deletion");
+
+    let second = std::fs::read_to_string(&path).expect("config must be restored");
+    assert_eq!(
+        first, second,
+        "the rewrite must reproduce the same trust configuration"
+    );
+    assert!(
+        second.contains("[safe]\n\tdirectory = *\n"),
+        "the restored file must carry the trust rule, got {second:?}"
     );
 }
 

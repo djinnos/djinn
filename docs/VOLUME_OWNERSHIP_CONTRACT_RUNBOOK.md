@@ -14,14 +14,19 @@ They can only share those volumes under one contract:
 * **group ownership = `1000`** (`ARTIFACT_GID`, `djinn_cgroup_launcher::child`)
   on every directory and file;
 * **group-write (`g+w`)** on every directory — that is what lets any of the
-  three create, replace, and unlink what another produced — and on every file
-  that its owner can write and that is not executable. Two shapes a correct tree
-  legitimately produces are exempt: owner-read-only files (`444` git loose
-  objects and packfiles, cargo registry sources carrying the crate tarball's
-  modes) and executables (`git clone` copies the template hooks with the
-  template's own mode, so `.git/hooks/*.sample` is `755` in every fresh clone).
-  Both are replaced through the directory rather than written in place, and
-  neither can hide the `644` shape that caused the incident;
+  three create, replace, and unlink what another produced — and on every
+  owner-writable file; for the Cargo warm base this explicitly **includes
+  executables**. Owner-read-only files (`444` git loose objects and packfiles,
+  cargo registry sources carrying the crate tarball's modes) remain exempt
+  because they are replaced through the directory. Git template hooks outside
+  that base retain their `755` exception. Warm-base executables must not be
+  exempt: with `fs.protected_hardlinks=1`, a cross-uid task-run cannot hardlink
+  a foreign-owned regular `755` file. Cargo
+  can preserve that source mode when a build script copies an output, so the
+  warm worker makes a full post-cycle pass over its Cargo base and adds `g+w`
+  (`755` becomes `775`) to every regular file. This deliberately preserves the
+  executable bit and does not recursively `chown`; the base has cross-identity
+  writers, just like `/mirror`, so ownership alignment is not the mechanism;
 * **setgid (`g+s`) on every directory** — so files created there *inherit* the
   artifact group instead of the creating process's primary group. On Linux a
   directory created inside a setgid directory inherits the bit as well, so
@@ -44,14 +49,46 @@ matching group. Therefore mirror ownership is not a readiness requirement and
 operators must not recursively `chown /mirror` to uid `1000` merely to satisfy
 Git.
 
-Every Djinn-managed git process injects `safe.directory=*` through
-`GIT_CONFIG_COUNT=1`, `GIT_CONFIG_KEY_0=safe.directory`, and
-`GIT_CONFIG_VALUE_0=*`. Environment variables are required rather than a
-`git -c` flag because the inner process spawned by `git clone --local` inherits
-the environment but not its parent's command-line flags. This makes the
-2026-07-25 operational `chown /mirror/<project>.git` mitigation unnecessary
-for newly created, restored, and freshly provisioned mirrors; retain the group,
-mode, setgid, and umask contract above instead.
+Every Djinn-managed git process injects `safe.directory=*` through a **config
+file** in protected (system) scope: `djinn_git::git_command` writes
+`$TMPDIR/djinn-git-<euid>/gitconfig` once per process and exports
+`GIT_CONFIG_SYSTEM` pointing at it. The warm Job's shell wrapper does the same
+with its own file. This makes the 2026-07-25 operational
+`chown /mirror/<project>.git` mitigation unnecessary for newly created,
+restored, and freshly provisioned mirrors; retain the group, mode, setgid, and
+umask contract above instead.
+
+**Do not** switch this back to `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_0`/
+`GIT_CONFIG_VALUE_0`, and not to `git -c` either. Both are *command* scope, and
+`git clone --local` does ref discovery through an inner `git-upload-pack` child
+that git spawns with those variables **stripped** — visible in `GIT_TRACE` as
+`trace: run_command: unset GIT_CONFIG_COUNT GIT_DIR; git-upload-pack '<src>'`.
+Measured on git 2.47.3 (the deployed server image) with uid 10001 cloning a
+root-owned repository, `git clone --local --shared` fails with "detected dubious
+ownership" under both command-scope forms and succeeds with `GIT_CONFIG_SYSTEM`.
+The command-scope form is honoured by a git process that reads it *directly*,
+which is why it looked correct, and it had in fact never worked for a mirror
+clone in any released version — the check simply never fired while the server
+owned the mirror.
+
+`GIT_CONFIG_SYSTEM` rather than `GIT_CONFIG_GLOBAL`: `configure_private_dep_access`
+stores the GitHub installation token as a `url.<...>.insteadOf` rewrite with
+`git config --global`, and the agent's build tools (cargo, go, pnpm) read it back
+from `$HOME/.gitconfig` with Djinn nowhere in the loop. Redirecting global scope
+would send that write to a file nothing else reads and silently break
+private-dependency fetches. System scope is additive, so `$HOME/.gitconfig` and
+the XDG config keep being read exactly as before.
+
+**Stopgap that is no longer needed.** On 2026-07-25, with v0.7.3 deployed,
+`git config --global --add safe.directory "*"` was run by hand inside the running
+server pod to unwedge PR creation (120 dubious-ownership errors and 40
+`supervisor_pr_open failed` in 20 minutes). That was ephemeral — lost on every
+pod restart, which is how the outage resurfaced after the rollout replaced the
+pod — and it widened trust for every process sharing that uid, permanently, in a
+file on disk. The generated file above replaces it: it is process-scoped, and it
+is re-created on every start. Do not re-apply the manual command; if dubious
+ownership reappears, the config file is missing or unwritable, and the server
+logs `could not materialize the system-scope safe.directory config` at `WARN`.
 
 Violating it does not produce a crash. It produces a **silent freeze**: the warm
 Job's cargo phase is best-effort (lock-unavailable, step failure and timeout only
@@ -78,9 +115,62 @@ a pod that is not in the group.
 
 It is **bounded**: depth 3, 32 entries per directory, 512 `lstat`s total. It
 checks a *sample of the subtree*, not just the root, because the exact
-production near-miss had a hand-fixed root over a broken subtree. It **never
-repairs** — a recursive `chown` over a 300G cache is a multi-minute stall on pod
-start, which is the whole reason `fsGroupChangePolicy` is `OnRootMismatch`.
+production near-miss had a hand-fixed root over a broken subtree. A passing
+sample (production has reported `entries_sampled=512, budget_exhausted=true`)
+is not proof that every warm-base file conforms. The warm worker therefore does
+the authoritative full regular-file mode normalization after each Cargo cycle;
+the startup check **never repairs** — a recursive `chown` over a 300G cache is a
+multi-minute stall on pod start, which is the whole reason
+`fsGroupChangePolicy` is `OnRootMismatch`.
+
+## `$HOME` is part of the startup check too (9jrg)
+
+The volume contract covers the *mounted* surfaces. It did not cover the one
+writable surface that ships inside the image: `$HOME` (`/home/djinn`).
+
+`qut0` moved the Pod to uid/gid `1000` while the image still owned `/home/djinn`
+as `10001:10001` mode `0775`. The group-write bit was there but pointed at a
+group the Pod does not hold, so the Pod fell through to *other* (`r-x`) and could
+not create a single entry under its own home. Nothing checked it. The first
+consumer to notice was the durable output stash — `$HOME/.cache/djinn/output_stash`
+when `XDG_CACHE_HOME` is unset — and it surfaced hours later, inside the reply
+loop, as `create durable blobs: Permission denied (os error 13)` on **every**
+worker and planner session. Because a worker dies before submitting for review,
+the task returns to `open` and no reviewer is ever spawned; after six consecutive
+failures the coordinator escalates to a 1800s cooldown, so planning looks dormant
+rather than failing.
+
+Two changes close it:
+
+| Layer | Mechanism |
+|-------|-----------|
+| Image | `/home/djinn` keeps uid `10001` as its **owner** and is group-owned by the artifact GID `1000` with `2775`. Three identities write it — uid `10001` (server-side path), uid/gid `1000` (worker), uid `1001`/group `1000` (launcher-spawned child) — and only a shared group can hold all three. Changing the owner instead would break the first. Applied in `djinn-image-builder/scripts/base-debian.sh` (project images, `env-config/v11` forces the rebuild) and `server/docker/djinn-agent-runtime-base.Dockerfile`. |
+| Job render | `XDG_CACHE_HOME=/cache/xdg/<project_id>` — the stash and the SCIP indexer cache resolve `$XDG_CACHE_HOME` first, so they no longer depend on the image home at all, and they land on a *persistent* PVC instead of a container layer that dies with the Pod. |
+| Runtime | `volume_contract::check_home_writable` asks the kernel (`access(W_OK|X_OK)`) whether the running identity can create entries in `$HOME`, and fails readiness with the path, observed ownership/mode and running identity. |
+
+The same rule applies to anything the image pre-creates *under* `$HOME` for the
+runtime identity to write. `install-node.sh` scaffolds `$HOME/.local/state` so
+`fnm` can drop its per-shell multishell symlink there; `mkdir` under the build
+umask leaves it `0755`, which stopped working for the same reason the moment the
+runtime identity stopped being the owner. It is now `2775` too. When adding a
+build-time directory the Pod must write, group-own it to `1000` and give it
+`2775` — owner-only modes are only safe for paths nothing writes at runtime.
+
+`$HOME` is deliberately **not** a `VolumeRoot`: it is an image path, the
+artifact-gid/setgid rules do not apply to it, and it is correct for it to stay
+owned by uid `10001`. Only its effective writability is contractual.
+
+A violation looks like:
+
+```
+volume permission contract VIOLATED  kind=home_not_writable path=/home/djinn ...
+```
+
+This fails closed. Task-run and warm Pods only ever start on a `ready` catalog
+image, and the `env-config/v11` salt bump means every catalog image rebuilds
+before it can be `ready` again — so a pre-fix image cannot be dispatched to. If
+one somehow is, the break-glass is the existing, loud
+`DJINN_VOLUME_CONTRACT_MODE=audit`; the correct fix is to let the image rebuild.
 
 ## Symptom → diagnosis
 
@@ -191,6 +281,17 @@ gap loud instead of silent.
   the bounded check.
 - `server/crates/djinn-agent-worker/tests/volume_contract.rs` — deterministic
   proof that each violation fails readiness and a conforming layout passes.
+- `server/crates/djinn-agent-worker/tests/home_contract.rs` — the `$HOME` arm,
+  proved against a directory owned by a **different** uid than the running
+  process (privileged runs fabricate `10001:10001 0775` and `10001:1000 2775`
+  and judge both from a child dropped to uid/gid 1000).
 - `deploy/helm/djinn/tests/volume-ownership-render.sh` — the render contract.
 - `server/crates/djinn-k8s/src/launcher.rs` — `pod_security_context()` and the
   worker/child/launcher uid contract.
+- `server/crates/djinn-git/src/lib.rs` — the generated protected-scope
+  `safe.directory` config, with the measurements behind it.
+- `server/crates/djinn-git/src/lib_tests.rs` — regression tests that assert which
+  scope git resolves the rule in and what the inner child of
+  `git clone --local` sees. "A clone of a foreign-owned repo succeeds" is not
+  sufficient: git >= 2.48 accepts it either way, so that assertion passes on a
+  modern developer/CI git while production is wedged.

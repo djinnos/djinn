@@ -23,12 +23,14 @@
 //!     launcher-spawned child (primary group 1000) share every artifact;
 //!   * directories carry **group-write** *and* **setgid**, so files created by
 //!     either identity inherit the artifact group instead of the creator's;
-//!   * files that their owner can write, and that are not executable, carry
-//!     **group-write** so the other identity can overwrite them in place. The
-//!     two exclusions cover the shapes a correct tree legitimately produces —
-//!     `444` git objects / cargo registry sources, and the `755`
-//!     `.git/hooks/*.sample` every clone copies from git's templates — neither
-//!     of which can hide the `644` production shape this exists to catch;
+//!   * owner-writable files carry **group-write** so the other identity can
+//!     overwrite them in place. Owner-read-only `444` git objects and cargo
+//!     registry sources remain exempt because they are replaced through their
+//!     directory. Executables are deliberately **not** exempt for the Cargo
+//!     warm base (git template hooks elsewhere retain their `755` exception).
+//!     Cargo can copy a build script with its source `755` mode into that base,
+//!     and a cross-uid consumer cannot hardlink it while
+//!     `fs.protected_hardlinks=1` is enabled;
 //!   * the process runs with umask `0002` ([`apply_artifact_umask`]) so
 //!     everything it creates keeps satisfying the above;
 //!   * the process itself is a member of [`ARTIFACT_GID`] (primary or
@@ -50,11 +52,40 @@
 //!   the volume *root* would be worthless here: the production near-miss had a
 //!   hand-fixed root over a broken subtree — which is also precisely the state
 //!   that makes kubelet's `OnRootMismatch` heuristic skip its recursive pass.
+//!
+//! ## `$HOME` (task 9jrg)
+//!
+//! The contract above covers the *mounted* surfaces and deliberately left one
+//! writable surface out: the container's own `$HOME`. `qut0` moved the pod to
+//! uid 1000 while the image still owned `/home/djinn` as uid 10001 mode `0775`,
+//! so the pod matched "other" (`r-x`) and could not create a single entry
+//! beneath its own home. Nothing checked it, and the first consumer to notice
+//! was the durable output stash resolving `$HOME/.cache/djinn/output_stash` —
+//! which surfaced hours later as `create durable blobs: Permission denied`
+//! inside the reply loop, killing every worker and planner session.
+//!
+//! [`check_home_writable`] closes that gap: a pod that cannot create entries in
+//! its own `$HOME` fails readiness with the path, the observed ownership/mode
+//! and the running identity, instead of degrading into an opaque `EACCES` in
+//! whichever feature touches `$HOME` first (`fnm`'s multishell state, `gopls`,
+//! `npm`, `git config --global`, `rustup`, and the stash all do).
+//!
+//! It is deliberately NOT expressed as a [`VolumeRoot`]: `$HOME` lives in the
+//! image layer, not on a shared volume, so the artifact-gid/setgid rules do not
+//! apply to it and it is *correct* for it to stay owned by the image's uid
+//! 10001 (the server-side path runs as that uid and writes the same directory).
+//! The only invariant that matters is the effective one — "can the identity
+//! that is actually running create something here" — so the check asks the
+//! kernel (`access(W_OK|X_OK)`) rather than re-deriving permission from mode
+//! bits. The image satisfies it for every identity at once by group-owning
+//! `/home/djinn` to [`ARTIFACT_GID`] with `2775`: uid 10001 writes as owner,
+//! the worker (uid/gid 1000) and the launcher-spawned child (uid 1001, group
+//! 1000) write through the group.
 
 use std::collections::VecDeque;
 use std::fs;
 use std::io;
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -72,10 +103,6 @@ const MODE_GROUP_WRITE: u32 = 0o020;
 /// Owner-write bit — a file without it is immutable by design (git objects,
 /// cargo registry sources) rather than mis-permissioned.
 const MODE_OWNER_WRITE: u32 = 0o200;
-/// Any execute bit — git copies its template hooks with the template's own
-/// mode, so `.git/hooks/*.sample` is 755 in every fresh clone whatever the
-/// umask.
-const MODE_ANY_EXEC: u32 = 0o111;
 /// Permission bits we report on (mode & this) — keeps log lines readable.
 const MODE_MASK: u32 = 0o7777;
 
@@ -85,6 +112,11 @@ pub const CACHE_MOUNT_ROOT: &str = "/cache";
 pub const MIRROR_MOUNT_ROOT: &str = "/mirror";
 /// Contractual workspace mount path.
 pub const WORKSPACE_MOUNT_ROOT: &str = "/workspace";
+
+/// The process's home directory. Set as an explicit image `ENV` (see
+/// `djinn-image-builder`'s `emit_path`) precisely because a pod with no home
+/// inherits `HOME="/"`.
+pub const HOME_ENV: &str = "HOME";
 
 /// Env var selecting the enforcement mode (`enforce` | `audit`).
 pub const MODE_ENV: &str = "DJINN_VOLUME_CONTRACT_MODE";
@@ -102,6 +134,72 @@ pub enum ContractMode {
     Audit,
     /// Not running against pod-mounted volumes; nothing to enforce.
     Off,
+}
+
+/// Result of normalizing a completed Cargo warm base.
+///
+/// This is intentionally a full walk rather than a sample. Cargo can preserve
+/// a source executable's mode when it copies a build-script output and can
+/// resurrect an old artifact in a later warm cycle, so a touched-files list is
+/// not a sufficient proof that every seedable source is hardlinkable.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct WarmBaseModeNormalization {
+    /// Regular files encountered during the full walk.
+    pub regular_files: u64,
+    /// Regular files to which the group-write bit was added.
+    pub files_normalized: u64,
+}
+
+/// Add group-write to every regular file below a completed Cargo warm base.
+///
+/// The warm worker owns these files and holds the per-base lock while this
+/// runs. Symlinks are deliberately neither followed nor mutated: they are not
+/// eligible safe-hardlink sources and changing their target would escape the
+/// base invariant. Directories already have their distinct setgid/group-write
+/// contract. This operation preserves every other permission bit, including
+/// execute, so build scripts remain executable (`755` becomes `775`).
+pub fn normalize_warm_base_regular_files(base: &Path) -> io::Result<WarmBaseModeNormalization> {
+    let metadata = match fs::symlink_metadata(base) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok(WarmBaseModeNormalization::default());
+        }
+        Err(error) => return Err(error),
+    };
+    if !metadata.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("warm base {} is not a directory", base.display()),
+        ));
+    }
+
+    let mut result = WarmBaseModeNormalization::default();
+    let mut directories = VecDeque::from([base.to_path_buf()]);
+    while let Some(directory) = directories.pop_front() {
+        for entry in fs::read_dir(&directory)? {
+            let entry = entry?;
+            let path = entry.path();
+            let metadata = fs::symlink_metadata(&path)?;
+            if metadata.file_type().is_symlink() {
+                continue;
+            }
+            if metadata.is_dir() {
+                directories.push_back(path);
+                continue;
+            }
+            if !metadata.is_file() {
+                continue;
+            }
+
+            result.regular_files += 1;
+            let mode = metadata.mode();
+            if mode & MODE_GROUP_WRITE == 0 {
+                fs::set_permissions(&path, fs::Permissions::from_mode(mode | MODE_GROUP_WRITE))?;
+                result.files_normalized += 1;
+            }
+        }
+    }
+    Ok(result)
 }
 
 impl ContractMode {
@@ -166,6 +264,10 @@ pub struct VolumeRoot {
     /// The real, mounted path.
     pub path: PathBuf,
     pub presence: RootPresence,
+    /// Whether regular executable files below this root must be hardlinkable by
+    /// a cross-uid task-run consumer. This is specific to the Cargo warm base;
+    /// git template hooks elsewhere legitimately preserve mode 755.
+    pub require_executable_group_write: bool,
 }
 
 impl VolumeRoot {
@@ -174,6 +276,7 @@ impl VolumeRoot {
             label: label.into(),
             path: path.into(),
             presence: RootPresence::Required,
+            require_executable_group_write: false,
         }
     }
 
@@ -182,7 +285,15 @@ impl VolumeRoot {
             label: label.into(),
             path: path.into(),
             presence: RootPresence::OptionalWhenAbsent,
+            require_executable_group_write: false,
         }
+    }
+
+    /// Mark this root as a Cargo warm base whose regular files must all be
+    /// hardlinkable by a foreign uid.
+    pub fn cargo_warm_base(mut self) -> Self {
+        self.require_executable_group_write = true;
+        self
     }
 }
 
@@ -199,6 +310,10 @@ pub struct VolumeContract {
     pub stat_budget: usize,
     /// Also assert the process is a member of `required_gid`.
     pub require_process_membership: bool,
+    /// Also assert the running identity can create entries in its own `$HOME`
+    /// (task 9jrg). Independent of `required_gid`: `$HOME` is an image path, not
+    /// a mounted volume, and only its *effective* writability is contractual.
+    pub require_writable_home: bool,
 }
 
 impl Default for VolumeContract {
@@ -209,6 +324,7 @@ impl Default for VolumeContract {
             entries_per_dir: 32,
             stat_budget: 512,
             require_process_membership: true,
+            require_writable_home: true,
         }
     }
 }
@@ -289,6 +405,35 @@ pub enum VolumeContractError {
         supplementary: Vec<u32>,
         required_gid: u32,
     },
+
+    #[error(
+        "volume contract [home]: {HOME_ENV} is unset or empty, so every \
+         $HOME-relative path resolves against \"/\" — which no non-root identity \
+         can write"
+    )]
+    HomeUnset,
+
+    #[error("volume contract [home]: {HOME_ENV}={path} is not a directory")]
+    HomeNotADirectory { path: PathBuf },
+
+    #[error(
+        "volume contract [home]: {path} is owned by {observed_uid}:{observed_gid} \
+         mode {observed_mode:o} and the running identity (uid {process_uid}, gid \
+         {process_gid}, supplementary {supplementary:?}) cannot create entries in \
+         it; every $HOME-relative path this pod writes (the durable output stash, \
+         fnm/npm/rustup/git state) fails with EACCES. Group-own $HOME to a gid \
+         this identity holds with mode 2775 instead of changing its owner — the \
+         server-side path runs as the owning uid and writes the same directory"
+    )]
+    HomeNotWritable {
+        path: PathBuf,
+        observed_uid: u32,
+        observed_gid: u32,
+        observed_mode: u32,
+        process_uid: u32,
+        process_gid: u32,
+        supplementary: Vec<u32>,
+    },
 }
 
 impl VolumeContractError {
@@ -302,6 +447,9 @@ impl VolumeContractError {
             Self::GroupWrite { .. } => "group_write",
             Self::Setgid { .. } => "setgid",
             Self::ProcessGroupMembership { .. } => "process_group_membership",
+            Self::HomeUnset { .. } => "home_unset",
+            Self::HomeNotADirectory { .. } => "home_not_a_directory",
+            Self::HomeNotWritable { .. } => "home_not_writable",
         }
     }
 
@@ -313,8 +461,10 @@ impl VolumeContractError {
             | Self::Stat { path, .. }
             | Self::GroupOwner { path, .. }
             | Self::GroupWrite { path, .. }
-            | Self::Setgid { path, .. } => Some(path.as_path()),
-            Self::ProcessGroupMembership { .. } => None,
+            | Self::Setgid { path, .. }
+            | Self::HomeNotADirectory { path }
+            | Self::HomeNotWritable { path, .. } => Some(path.as_path()),
+            Self::ProcessGroupMembership { .. } | Self::HomeUnset => None,
         }
     }
 }
@@ -363,7 +513,14 @@ pub fn validate(
 
         report.roots_checked += 1;
         report.entries_sampled += 1;
-        check_metadata(contract, &root.label, &root.path, &meta, true)?;
+        check_metadata(
+            contract,
+            &root.label,
+            &root.path,
+            &meta,
+            true,
+            root.require_executable_group_write,
+        )?;
         walk_sample(contract, root, &mut report)?;
     }
 
@@ -418,7 +575,14 @@ fn walk_sample(
 
             report.entries_sampled += 1;
             let is_dir = meta.is_dir();
-            check_metadata(contract, &root.label, &path, &meta, is_dir)?;
+            check_metadata(
+                contract,
+                &root.label,
+                &path,
+                &meta,
+                is_dir,
+                root.require_executable_group_write,
+            )?;
 
             if is_dir && depth + 1 < contract.max_depth {
                 queue.push_back((path, depth + 1));
@@ -435,6 +599,7 @@ fn check_metadata(
     path: &Path,
     meta: &fs::Metadata,
     is_dir: bool,
+    require_executable_group_write: bool,
 ) -> Result<(), VolumeContractError> {
     let mode = meta.mode() & MODE_MASK;
     let gid = meta.gid();
@@ -454,21 +619,18 @@ fn check_metadata(
     // DIRECTORY is what actually lets the other identity create, replace and
     // unlink entries, and its absence is what froze the warm base.
     //
-    // Files are checked when they are owner-writable and not executable.
-    // The two exclusions are not laxity, they are the two shapes a correct tree
-    // legitimately produces:
+    // Files are checked when they are owner-writable. The read-only exclusion
+    // is not laxity; it is a shape a correct tree legitimately produces:
     //   * owner-read-only (`444`) — git loose objects and packfiles, cargo
     //     registry sources carrying the crate tarball's modes. Immutable by
     //     design and replaced through the directory, never written in place.
-    //   * executable (`755`) — `git init`/`clone` copies the template hooks
-    //     with the template's own mode, so every fresh clone contains
-    //     `.git/hooks/*.sample` at 755 regardless of umask.
-    // Neither shape can mask the failure this exists to catch: the production
-    // volume was dirs `755` (caught on the directory rule) over files `644` —
-    // owner-writable, non-executable, and still caught here.
+    // Cargo-warm-base executables are checked too: a foreign uid cannot
+    // hardlink a non-group-writable regular file under fs.protected_hardlinks.
+    // Other roots retain the git-template-hook exception described above.
     let owner_writable = mode & MODE_OWNER_WRITE != 0;
-    let executable = mode & MODE_ANY_EXEC != 0;
-    if (is_dir || (owner_writable && !executable)) && mode & MODE_GROUP_WRITE == 0 {
+    if (is_dir || (owner_writable && (require_executable_group_write || mode & 0o111 == 0)))
+        && mode & MODE_GROUP_WRITE == 0
+    {
         return Err(VolumeContractError::GroupWrite {
             label: label.to_string(),
             path: path.to_path_buf(),
@@ -502,6 +664,74 @@ fn check_process_membership(required_gid: u32) -> Result<(), VolumeContractError
         supplementary,
         required_gid,
     })
+}
+
+/// `$HOME` as the running process sees it, `None` when unset or empty.
+pub fn home_from_env() -> Option<PathBuf> {
+    std::env::var_os(HOME_ENV)
+        .map(PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty())
+}
+
+/// Assert the running identity can create entries in `home` (task 9jrg).
+///
+/// The question is effective, not declarative, so it is answered by the kernel:
+/// `access(W_OK|X_OK)` on the directory is exactly the permission `mkdir` and
+/// `create_dir_all` need, and it accounts for the owner/group/other selection,
+/// supplementary groups, POSIX ACLs and a read-only mount — none of which mode
+/// bits alone can settle. Mode and ownership are read only to *report* the
+/// violation. Nothing is created: a probe file would have to be written into a
+/// directory whose writability is exactly what is in doubt, and on the passing
+/// path it would litter `$HOME` on every pod start.
+pub fn check_home_writable(home: Option<&Path>) -> Result<(), VolumeContractError> {
+    let Some(home) = home else {
+        return Err(VolumeContractError::HomeUnset);
+    };
+
+    let meta = fs::metadata(home).map_err(|source| VolumeContractError::Stat {
+        label: "home".to_string(),
+        path: home.to_path_buf(),
+        source,
+    })?;
+    if !meta.is_dir() {
+        return Err(VolumeContractError::HomeNotADirectory {
+            path: home.to_path_buf(),
+        });
+    }
+
+    if can_create_entries_in(home) {
+        return Ok(());
+    }
+
+    Err(VolumeContractError::HomeNotWritable {
+        path: home.to_path_buf(),
+        observed_uid: meta.uid(),
+        observed_gid: meta.gid(),
+        observed_mode: meta.mode() & MODE_MASK,
+        process_uid: current_uid(),
+        process_gid: current_gid(),
+        supplementary: supplementary_groups(),
+    })
+}
+
+/// `access(dir, W_OK | X_OK)` — the kernel's own answer to "may this identity
+/// create, rename and unlink entries here".
+fn can_create_entries_in(dir: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+
+    let Ok(c_path) = std::ffi::CString::new(dir.as_os_str().as_bytes()) else {
+        // A path with an interior NUL cannot name a real directory.
+        return false;
+    };
+    // SAFETY: `access` reads the NUL-terminated path we just built and returns a
+    // status code; it mutates nothing and the CString outlives the call.
+    unsafe { libc::access(c_path.as_ptr(), libc::W_OK | libc::X_OK) == 0 }
+}
+
+/// Effective uid of this process.
+pub fn current_uid() -> u32 {
+    // SAFETY: `geteuid` takes no arguments, cannot fail, and touches no memory.
+    unsafe { libc::geteuid() }
 }
 
 /// Effective gid of this process.
@@ -575,10 +805,13 @@ pub fn warm_roots(project_root: &Path, project_id: &str) -> Vec<VolumeRoot> {
     ));
     roots.extend(git_mirror_roots());
     roots.extend(cache_roots());
-    roots.push(VolumeRoot::optional(
-        "cargo-warm-base",
-        warm_base_dir_for_current_jobs(project_id),
-    ));
+    roots.push(
+        VolumeRoot::optional(
+            "cargo-warm-base",
+            warm_base_dir_for_current_jobs(project_id),
+        )
+        .cargo_warm_base(),
+    );
     roots
 }
 
@@ -641,7 +874,14 @@ pub fn enforce_with(
     }
 
     let started = Instant::now();
-    let outcome = validate(contract, roots);
+    // `$HOME` first: it is a single `stat` + `access`, it is the surface the pod
+    // needs before it can do anything at all, and a violation there explains
+    // failures the volume walk cannot (task 9jrg).
+    let outcome = if contract.require_writable_home {
+        check_home_writable(home_from_env().as_deref()).and_then(|()| validate(contract, roots))
+    } else {
+        validate(contract, roots)
+    };
     let elapsed = started.elapsed();
 
     match outcome {

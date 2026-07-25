@@ -142,6 +142,8 @@ jobs:
         run: node --test scripts/ci-qa-smoke-workflow.test.mjs
       - name: Verify release image validation contract
         run: node --test scripts/ci-release-image-validation.test.mjs
+      - name: Verify shard failure summary contract
+        run: node --test scripts/ci-shard-failure-summary.test.mjs
       - name: Verify retirement manifest generator contract
         run: node --test scripts/test-djinn-retirement-manifest.mjs
       - name: Run retirement manifest strict reconciliation guard
@@ -1234,38 +1236,31 @@ jobs:
         # is therefore the durable source of truth for "which lane/test failed".
         # Not gated on shard.active: a shard can also fail before shard
         # resolution (build/migration/setup), and those must surface too. The
-        # nextest log is simply absent there, so the generic branch fires.
+        # nextest log is simply absent there, and the annotation then reports
+        # that observation — it does NOT name a layer it cannot see.
         if: failure()
         run: |
           set -uo pipefail
-          shard_name="${{ matrix.shard }}"
-          log="$RUNNER_TEMP/nextest-run.log"
-          failed_tests=""
-          if [ -f "$log" ]; then
-            # nextest prints one `    FAIL [   0.005s] <binary-id> <test-name>`
-            # line per failing test; strip the leading marker + timing bracket
-            # to leave `<binary-id> <test-name>`.
-            failed_tests=$(grep -E '^[[:space:]]*FAIL \[' "$log" \
-              | sed -E 's/^[[:space:]]*FAIL \[[^]]*\][[:space:]]+//' \
-              | sort -u || true)
-          fi
-          if [ -n "$failed_tests" ]; then
-            echo "::error title=Server Test ${shard_name} failed::$(printf '%s' "$failed_tests" | paste -sd'; ' -)"
-            {
-              echo "### Server Test ${shard_name} — FAILED"
-              echo
-              echo "Failing tests:"
-              echo
-              printf '%s\n' "$failed_tests" | sed 's/^/- `/;s/$/`/'
-            } >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "::error title=Server Test ${shard_name} failed::shard concluded failure without nextest FAIL lines (build, migration, or setup step); see this job's log."
-            {
-              echo "### Server Test ${shard_name} — FAILED"
-              echo
-              echo "This shard failed before producing nextest FAIL lines (e.g. a build, migration, or setup step). See this job's log for the failing step."
-            } >> "$GITHUB_STEP_SUMMARY"
-          fi
+          # The parsing lives in a checked-in script, NOT in an inline
+          # grep/sed here, because the inline version could not be tested and
+          # was wrong in both of the ways that matter (task 8hrv):
+          #   * it grepped `^[[:space:]]*FAIL \[`, but every profile used here
+          #     inherits [profile.ci] retries, so a real failure prints
+          #     `TRY 3 FAIL [...]` and never a bare `FAIL` line; and
+          #   * nextest colorizes on CI, so the status token arrives as
+          #     `\e[31;1m  TRY 3 FAIL\e[0m [   0.483s]` — the anchor and the
+          #     space before `[` are both wrong even without retries.
+          # It therefore always fell through to a generic message that
+          # ASSERTED "build, migration, or setup step". Nineteen sessions on
+          # task rwpk were sent after a build problem that did not exist; the
+          # failure was an assertion in
+          # djinn-provider::stream_event_consumer_audit. The script is
+          # exercised by scripts/ci-shard-failure-summary.test.mjs against
+          # captured nextest output from that very run.
+          node "$GITHUB_WORKSPACE/scripts/ci-shard-failure-summary.mjs" \
+            --shard "${{ matrix.shard }}" \
+            --log "$RUNNER_TEMP/nextest-run.log" \
+            --summary "$GITHUB_STEP_SUMMARY"
       - name: Upload retained shard timing data
         if: always() && steps.shard.outputs.active == 'true'
         uses: actions/upload-artifact@v4

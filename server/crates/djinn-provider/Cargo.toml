@@ -47,6 +47,8 @@ workspace-hack.workspace = true
 
 [dev-dependencies]
 djinn-db = { path = "../djinn-db", features = ["test-support"] }
+# stream_event_consumer_audit.rs lexes Rust sources instead of counting braces.
+proc-macro2 = { version = "1", features = ["span-locations"] }
 wiremock = "0.6"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 

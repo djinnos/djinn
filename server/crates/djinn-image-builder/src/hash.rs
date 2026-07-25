@@ -117,7 +117,18 @@ pub fn compute_environment_hash(
     // on `agent_worker_ref` missed this whenever that ref was an unversioned
     // tag (`:latest`) or a reused tag — leaving task-run pods on stale agent
     // code after a deploy. Mixing in the version guarantees a rebuild on bump.
-    hasher.update(b"env-config/v10\0");
+    // v10→v11: `/home/djinn` is group-owned by the artifact GID 1000 with setgid
+    // 2775 in base-debian.sh instead of `10001:10001 0775`. Since `qut0` the
+    // task-run/warm Pod runs as uid/gid 1000, so it matched "other" (r-x) on its
+    // own $HOME and could not create anything there — every worker and planner
+    // session died on `create durable blobs: Permission denied` resolving
+    // `$HOME/.cache/djinn/output_stash`, and fnm/gopls/npm/`git config --global`
+    // sat on the same wall (9jrg). The worker now fails readiness loudly on an
+    // unwritable $HOME (`volume_contract::check_home_writable`), which every
+    // cached pre-fix image would trip, so this rebuild is a hard prerequisite,
+    // not an optimization. The script edit already moves script_sha; bump the
+    // salt to document it and guarantee the rebuild.
+    hasher.update(b"env-config/v11\0");
     hasher.update(config_json.as_bytes());
     hasher.update([0u8]);
     hasher.update(script_sha.as_bytes());
