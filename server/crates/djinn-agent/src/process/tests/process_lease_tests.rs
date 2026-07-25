@@ -492,8 +492,8 @@ fn config() -> LeaseInvocationConfig {
         task_run_id: "run".into(),
         pod_uid: "pod".into(),
         cpu_usage_threshold_usec: 1,
-        queue_deadline_ms: 100,
-        launch_deadline_ms: 200,
+        queue_timeout: Duration::from_millis(100),
+        launch_timeout: Duration::from_millis(200),
         timeout: Duration::from_secs(60),
     }
 }
