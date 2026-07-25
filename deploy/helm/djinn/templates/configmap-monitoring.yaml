@@ -1,0 +1,73 @@
+{{- if .Values.monitoring.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "djinn.fullname" . }}-monitoring
+  namespace: {{ include "djinn.namespace" . }}
+data:
+  prometheus.yml: |
+    global: {scrape_interval: 30s, evaluation_interval: 30s}
+    alerting:
+      alertmanagers:
+        - static_configs: [{targets: ["{{ include "djinn.fullname" . }}-alertmanager:9093"]}]
+    rule_files: ["/etc/prometheus/incident-observability.rules.yml"]
+    scrape_configs:
+      - job_name: djinn-server
+        metrics_path: /metrics
+        static_configs: [{targets: ["{{ include "djinn.serviceName.server" . }}:{{ .Values.service.apiPort }}"]}]
+      - job_name: djinn-log-rotator
+        metrics_path: /metrics
+        static_configs: [{targets: ["{{ include "djinn.fullname" . }}-log-rotator:9091"]}]
+  alertmanager.yml: |
+    route:
+      receiver: incident-webhook
+      group_by: [alertname]
+      routes:
+        - matchers: [alertname="Watchdog"]
+          receiver: incident-webhook
+          repeat_interval: 1m
+        - matchers: [severity="critical"]
+          receiver: incident-webhook
+          repeat_interval: 30m
+    receivers:
+      - name: incident-webhook
+        webhook_configs: [{url_file: /etc/alertmanager-webhook/url, send_resolved: true}]
+    inhibit_rules:
+      - source_matchers: [alertname="DjinnServerMetricsMissing"]
+        target_matchers: [alertname=~"DjinnServerMemoryPressure|DjinnLogStoreUnavailable|DjinnLogRotatorMissing"]
+        equal: [namespace]
+  incident-observability.rules.yml: |
+    groups:
+      - name: incident-observability
+        rules:
+          - alert: DjinnDispatchWithoutCompletion
+            expr: increase(djinn_taskrun_jobs_started_total[15m]) >= {{ .Values.monitoring.alerts.dispatchStarts }} and increase(djinn_worker_completions_submitted_total[15m]) == 0
+            for: 5m
+            labels: {severity: critical}
+            annotations: {runbook: server/docs/runbooks/incident-observability.md, summary: Task-run dispatches have no durable completions.}
+          - alert: DjinnServerMemoryPressure
+            expr: djinn_process_rss_bytes / djinn_server_memory_limit_bytes > {{ .Values.monitoring.alerts.memoryPressureThreshold }}
+            for: 10m
+            labels: {severity: warning}
+            annotations: {runbook: server/docs/runbooks/incident-observability.md, summary: djinn-server RSS exceeds its configured memory limit threshold.}
+          - alert: DjinnServerMetricsMissing
+            expr: up{job="djinn-server"} == 0
+            for: 5m
+            labels: {severity: critical}
+            annotations: {runbook: server/docs/runbooks/incident-observability.md, summary: djinn-server metrics scrape is unavailable.}
+          - alert: DjinnLogStoreUnavailable
+            expr: djinn_log_store_writable == 0 or increase(djinn_log_store_evictions_total[15m]) > 0
+            for: 2m
+            labels: {severity: warning}
+            annotations: {runbook: server/docs/runbooks/incident-observability.md, summary: Durable pod-log storage is unavailable or evicting data.}
+          - alert: DjinnLogRotatorMissing
+            expr: up{job="djinn-log-rotator"} == 0
+            for: 2m
+            labels: {severity: warning}
+            annotations: {runbook: server/docs/runbooks/incident-observability.md, summary: No djinn log-rotator metrics target is present.}
+          - alert: Watchdog
+            expr: vector(1)
+            for: 1m
+            labels: {severity: none}
+            annotations: {runbook: server/docs/runbooks/incident-observability.md, summary: Continuous alert pipeline health signal.}
+{{- end }}

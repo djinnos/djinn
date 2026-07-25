@@ -4,7 +4,7 @@ use djinn_log_rotator::{AppState, LogStore, metrics_router, router};
 use tokio::net::TcpListener;
 
 const INGEST_ADDRESS: &str = "127.0.0.1:8687";
-const METRICS_ADDRESS: &str = "127.0.0.1:9091";
+const METRICS_ADDRESS: &str = "0.0.0.0:9091";
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
