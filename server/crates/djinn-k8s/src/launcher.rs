@@ -181,20 +181,16 @@ pub const LAUNCHER_CGROUP_ROOT: &str = "/run/djinn-cgroup";
 /// root is unreachable. The design mounts inside the launcher's own cgroup
 /// namespace, where an invocation leaf IS a descendant of the namespace root.
 ///
-/// The default remains [`Disabled`](CgroupLauncherMode::Disabled) — arming
-/// enforcement is an operator decision, taken with
-/// `DJINN_K8S_CGROUP_LAUNCHER_MODE=required` — and
-/// [`validate_enforcement_render`] still fails closed at dispatch if the render
-/// this build produces could not actually satisfy the launcher's contract.
+/// The default is required: every task run uses the launcher and
+/// [`validate_enforcement_render`] fails closed before dispatch if the rendered
+/// contract cannot be satisfied.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum CgroupLauncherMode {
-    /// No sidecar, no launcher volumes, no launcher env. Shell commands run
-    /// in-process in the worker, unleased. This is the default.
-    #[default]
+    /// No sidecar, no launcher volumes, no launcher env.
     Disabled,
-    /// Arm the sidecar: the launcher establishes its delegated cgroup root and
-    /// every shell command runs in a per-invocation leaf under a CPU lease.
+    /// The default production path: launcher-enforced per-invocation CPU leases.
+    #[default]
     Required,
 }
 
