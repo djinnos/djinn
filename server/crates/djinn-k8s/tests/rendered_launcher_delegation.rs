@@ -306,7 +306,7 @@ fn no_host_path_is_ever_rendered_for_the_cgroup_root() {
 /// cannot start, and does so BEFORE the Job is submitted.
 #[test]
 fn the_armed_render_is_dispatchable_and_every_precondition_still_fails_closed() {
-    let mut config = KubernetesConfig::for_testing();
+    let config = KubernetesConfig::for_testing();
     assert!(
         validate_enforcement_render(&config).is_ok(),
         "the production required config must dispatch"
