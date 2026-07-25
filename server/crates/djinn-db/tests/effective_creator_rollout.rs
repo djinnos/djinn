@@ -921,14 +921,15 @@ async fn persisted_refinement_owner_survives_schema_graduation() {
         root.join("server/crates/djinn-coordinator/src/refinement_recovery.rs"),
     )
     .expect("refinement recovery source exists");
+    let normalized_recovery = recovery.split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(
-        recovery.contains("let attributed_user_id = proposal.refinement_owner_user_id.clone()")
-            && recovery.contains(".with_attributed_user(attributed_user_id)"),
-        "restart recovery must attribute resumed refinement from proposal.refinement_owner_user_id"
+        normalized_recovery
+            .contains(".with_attributed_user(proposal.refinement_owner_user_id.clone())"),
+        "restart recovery must attribute resumed refinement directly from proposal.refinement_owner_user_id"
     );
     assert!(
-        recovery.contains("let (_task_attributed_user, run_task_count"),
-        "tribunal task rows may reconstruct only run state, never owner attribution"
+        !recovery.contains("run_task_count") && !recovery.contains("_task_attributed_user"),
+        "exact-snapshot recovery must not reconstruct run state or owner attribution from tribunal task counts"
     );
 }
 

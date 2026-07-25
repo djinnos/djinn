@@ -135,6 +135,8 @@ pub struct RefinementRunSnapshot {
 pub struct RefinementIntentSnapshot {
     pub intent_id: String,
     pub run_id: String,
+    /// Durable tribunal round selected with this intent.
+    pub round: i32,
     pub state: RefinementIntentState,
     pub phase: RefinementPhase,
     pub role: RefinementRole,
@@ -418,6 +420,7 @@ mod tests {
         RefinementIntentSnapshot {
             intent_id: "intent-1".into(),
             run_id: "run-current".into(),
+            round: 1,
             state,
             phase: RefinementPhase::AdversaryAttack,
             role: RefinementRole::Adversary,

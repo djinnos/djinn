@@ -14,6 +14,25 @@ use crate::repositories::proposal::ProposalRepository;
 use super::refinement_run::*;
 
 impl ProposalRepository {
+    /// Discover all nonterminal exact runs for restart recovery. Unlike the
+    /// dispatcher list this includes parks, which are live but not dispatchable.
+    pub async fn load_recoverable_refinement_runs(
+        &self,
+    ) -> IntentMutationResult<Vec<ActiveRefinementRun>> {
+        self.db().ensure_initialized().await?;
+        let rows = sqlx::query("SELECT id, proposal_id, generation FROM refinement_runs WHERE state IN ('running', 'parked') ORDER BY created_at")
+            .fetch_all(self.db().pool())
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| ActiveRefinementRun {
+                run_id: row.get("id"),
+                proposal_id: row.get("proposal_id"),
+                generation: row.get("generation"),
+            })
+            .collect())
+    }
+
     /// Discover durable running runs without changing leases or heartbeat.
     pub async fn load_active_refinement_runs(
         &self,
