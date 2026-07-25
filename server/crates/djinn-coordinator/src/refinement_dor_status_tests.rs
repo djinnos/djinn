@@ -775,10 +775,12 @@ async fn human_accept_rejected_when_corrupt_head_recomputed() {
 
     // Park the tribunal as if the judge already approved (ready) and the human
     // is about to accept.
+    let run_id = "corrupt-head-review-run";
     let mut state = crate::refinement::RefinementLoopState::new(&proposal_id, head_seq)
+        .with_run_identity(run_id, 1)
         .with_attributed_user(None);
     state.phase = crate::refinement::RefinementPhase::AwaitingHumanReview;
-    actor.active_refinements.insert(proposal_id.clone(), state);
+    actor.active_refinements.insert(run_id.to_owned(), state);
 
     // Corrupt the head after the tribunal parked — the head changed.
     djinn_db::test_support::replace_legacy_proposal_head_for_test(
@@ -812,7 +814,7 @@ async fn human_accept_rejected_when_corrupt_head_recomputed() {
     // is that the refinement did NOT complete/resolve as an acceptance.
     let state = actor
         .active_refinements
-        .get(&proposal_id)
+        .get(run_id)
         .expect("refinement still active after rejected accept");
     assert_ne!(
         state.phase,
@@ -821,7 +823,7 @@ async fn human_accept_rejected_when_corrupt_head_recomputed() {
     );
     // The refinement session must not have been resolved/cleared.
     assert!(
-        actor.active_refinements.contains_key(&proposal_id),
+        actor.active_refinements.contains_key(run_id),
         "refinement must remain active (not resolved) after rejected accept"
     );
 }
