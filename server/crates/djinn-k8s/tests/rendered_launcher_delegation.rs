@@ -55,13 +55,13 @@ use djinn_k8s::config::KubernetesConfig;
 use djinn_k8s::job::build_task_run_job;
 use djinn_k8s::launcher::{
     CgroupLauncherMode, LAUNCHER_CGROUP_ROOT, LAUNCHER_CONTAINER_NAME, LAUNCHER_UID,
-    RenderValidationError, VOLUME_LAUNCHER_CGROUP, validate_enforcement_render,
+    RenderValidationError, VOLUME_LAUNCHER_CGROUP, VOLUME_LAUNCHER_IPC,
+    validate_enforcement_render,
 };
 
-/// Render the real task-run Job under `mode`.
-fn render(mode: CgroupLauncherMode) -> Job {
-    let mut config = KubernetesConfig::for_testing();
-    config.cgroup_launcher_mode = mode;
+/// Render the production/default required profile.
+fn render() -> Job {
+    let config = KubernetesConfig::for_testing();
     build_task_run_job(
         &config,
         &Uuid::now_v7(),
@@ -171,7 +171,7 @@ fn materialize(volume: &Volume, scratch: &Path) -> Option<PathBuf> {
 #[test]
 fn the_rendered_cgroup_root_is_a_mountpoint_and_never_a_delegated_root() {
     let scratch = Scratch::new("delegated-root");
-    let job = render(CgroupLauncherMode::Required);
+    let job = render();
     let pod = pod_of(&job);
 
     let mounted = volumes_mounted_at(pod, LAUNCHER_CGROUP_ROOT);
@@ -242,11 +242,10 @@ fn the_emptydir_delegated_root_that_shipped_the_p0_is_rejected_by_name() {
     }
 }
 
-/// The default rendering carries no launcher surface whatsoever — not the
-/// sidecar, not the cgroup volume, and not a `/run/djinn-cgroup` mount.
+/// The production default is the required enforcement profile.
 #[test]
-fn the_default_rendering_has_no_launcher_surface() {
-    let job = render(CgroupLauncherMode::Disabled);
+fn the_default_rendering_has_the_mandatory_launcher_surface() {
+    let job = render();
     let pod = pod_of(&job);
 
     let containers: BTreeSet<&str> = pod
@@ -256,24 +255,27 @@ fn the_default_rendering_has_no_launcher_surface() {
         .map(|container| container.name.as_str())
         .collect();
     assert!(
-        !containers.contains(LAUNCHER_CONTAINER_NAME),
-        "the launcher sidecar must not render by default: {containers:?}"
+        containers.contains(LAUNCHER_CONTAINER_NAME),
+        "the production default must render the mandatory launcher: {containers:?}"
     );
 
     assert!(
-        volumes_mounted_at(pod, LAUNCHER_CGROUP_ROOT).is_empty(),
-        "nothing may mount a delegated cgroup root by default"
+        volumes_mounted_at(pod, LAUNCHER_CGROUP_ROOT)
+            .iter()
+            .any(|(container, _)| *container == LAUNCHER_CONTAINER_NAME),
+        "the mandatory launcher must mount its private cgroup mountpoint"
     );
     assert!(
-        !pod.volumes
+        pod.volumes
             .iter()
             .flatten()
             .any(|volume| volume.name == VOLUME_LAUNCHER_CGROUP),
-        "the cgroup mountpoint volume must not be declared by default"
+        "the mandatory launcher cgroup mountpoint volume must be declared"
     );
     assert_eq!(
-        pod.host_users, None,
-        "user namespaces are only requested when there is a capability to confine"
+        pod.host_users,
+        Some(false),
+        "the mandatory launcher bootstrap must be user-namespaced"
     );
 }
 
@@ -284,16 +286,14 @@ fn the_default_rendering_has_no_launcher_surface() {
 /// This is the guard against "fix" attempts that reach for one.
 #[test]
 fn no_host_path_is_ever_rendered_for_the_cgroup_root() {
-    for mode in [CgroupLauncherMode::Disabled, CgroupLauncherMode::Required] {
-        let job = render(mode);
-        let pod = pod_of(&job);
-        for (container, volume) in volumes_mounted_at(pod, LAUNCHER_CGROUP_ROOT) {
-            assert!(
-                volume.host_path.is_none(),
-                "{mode:?}: container {container} mounts a hostPath at the cgroup root; \
-                 nsdelegate refuses a target outside the pod's cgroup namespace"
-            );
-        }
+    let job = render();
+    let pod = pod_of(&job);
+    for (container, volume) in volumes_mounted_at(pod, LAUNCHER_CGROUP_ROOT) {
+        assert!(
+            volume.host_path.is_none(),
+            "container {container} mounts a hostPath at the cgroup root; \
+             nsdelegate refuses a target outside the pod's cgroup namespace"
+        );
     }
 }
 
@@ -306,15 +306,11 @@ fn no_host_path_is_ever_rendered_for_the_cgroup_root() {
 /// cannot start, and does so BEFORE the Job is submitted.
 #[test]
 fn the_armed_render_is_dispatchable_and_every_precondition_still_fails_closed() {
-    let mut config = KubernetesConfig::for_testing();
+    let config = KubernetesConfig::for_testing();
     assert!(
         validate_enforcement_render(&config).is_ok(),
-        "the default (disabled) config must dispatch"
+        "the production required config must dispatch"
     );
-
-    config.cgroup_launcher_mode = CgroupLauncherMode::Required;
-    validate_enforcement_render(&config)
-        .expect("the armed render is the shipped enforcement path and must dispatch");
 
     // The lease is the only ceiling left once the launcher container carries no
     // CPU limit, so a pod CPU limit that cannot become one is refused.
@@ -331,11 +327,6 @@ fn the_armed_render_is_dispatchable_and_every_precondition_still_fails_closed() 
         message.contains("bounded only by the node"),
         "the operator must be told what is at stake: {message}"
     );
-
-    // Disarmed, the same config still dispatches: the lease ceiling only
-    // matters when something is actually leasing.
-    unusable.cgroup_launcher_mode = CgroupLauncherMode::Disabled;
-    assert!(validate_enforcement_render(&unusable).is_ok());
 }
 
 /// Defect 1, on the manifest the API server would receive: the launcher
@@ -350,7 +341,7 @@ fn the_armed_render_is_dispatchable_and_every_precondition_still_fails_closed() 
 #[test]
 fn the_armed_launcher_container_has_no_cpu_limit_and_a_real_memory_limit() {
     let config = KubernetesConfig::for_testing();
-    let job = render(CgroupLauncherMode::Required);
+    let job = render();
     let pod = pod_of(&job);
     let launcher = pod
         .init_containers
@@ -372,13 +363,33 @@ fn the_armed_launcher_container_has_no_cpu_limit_and_a_real_memory_limit() {
     // peak lands here — a sidecar-sized memory limit would OOM-kill the first
     // `cargo build`.
     assert_eq!(limits.get("memory").unwrap().0, config.memory_limit);
+    let requests = launcher
+        .resources
+        .as_ref()
+        .and_then(|resources| resources.requests.as_ref())
+        .expect("launcher requests");
+    assert_eq!(requests.get("cpu").unwrap().0, "50m");
+    assert_eq!(requests.get("memory").unwrap().0, "64Mi");
+    let leased = launcher
+        .env
+        .as_ref()
+        .and_then(|env| {
+            env.iter()
+                .find(|var| var.name == "DJINN_LAUNCHER_LEASED_MILLICORES")
+        })
+        .and_then(|var| var.value.as_deref());
+    assert_eq!(
+        leased,
+        Some("4000"),
+        "the lifted quota must be explicit, never max"
+    );
 }
 
 /// The armed pod runs in a user namespace, and the launcher's capabilities are
 /// spelled the way the API server accepts.
 #[test]
 fn the_armed_pod_confines_the_bootstrap_capability() {
-    let job = render(CgroupLauncherMode::Required);
+    let job = render();
     let pod = pod_of(&job);
     assert_eq!(
         pod.host_users,
@@ -399,6 +410,13 @@ fn the_armed_pod_confines_the_bootstrap_capability() {
         .expect("launcher securityContext");
     assert_eq!(security.allow_privilege_escalation, Some(false));
     assert_eq!(security.privileged, None);
+    assert_eq!(
+        security
+            .seccomp_profile
+            .as_ref()
+            .map(|profile| profile.type_.as_str()),
+        Some("RuntimeDefault")
+    );
     let added = security
         .capabilities
         .as_ref()
@@ -414,6 +432,19 @@ fn the_armed_pod_confines_the_bootstrap_capability() {
             "{capability} uses the spelling the API server rejects alongside \
              allowPrivilegeEscalation: false"
         );
+    }
+    for sidecar in pod.init_containers.iter().flatten() {
+        if sidecar.name == LAUNCHER_CONTAINER_NAME {
+            continue;
+        }
+        let mounts = sidecar.volume_mounts.as_deref().unwrap_or_default();
+        for forbidden in [VOLUME_LAUNCHER_IPC, VOLUME_LAUNCHER_CGROUP, "workspace"] {
+            assert!(
+                !mounts.iter().any(|mount| mount.name == forbidden),
+                "optional sidecar {} must not mount {forbidden}",
+                sidecar.name
+            );
+        }
     }
 }
 
