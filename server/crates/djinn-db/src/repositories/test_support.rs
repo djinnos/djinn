@@ -8,6 +8,53 @@ use crate::database::Database;
 use crate::repositories::note::NoteRepository;
 use djinn_memory::Note;
 
+/// Durable refinement fields used to assert recovery side effects in external
+/// integration tests without leaking raw SQL outside the database crate.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RefinementRunAuditForTest {
+    pub generation: i32,
+    pub state: String,
+    pub park_kind: Option<String>,
+    pub stop_tag: Option<String>,
+    pub stop_context: Option<serde_json::Value>,
+    pub typed_reap_count: i64,
+}
+
+/// Read the exact durable run row and its typed phantom-reap audit count.
+///
+/// **Not for production use.** Panics on SQL errors.
+pub async fn refinement_run_audit_for_test(
+    db: &Database,
+    run_id: &str,
+) -> RefinementRunAuditForTest {
+    db.ensure_initialized().await.unwrap();
+    let row: (i32, String, Option<String>, Option<String>, Option<serde_json::Value>) =
+        sqlx::query_as(
+            "SELECT generation, state, park_kind, stop_tag, stop_context \
+             FROM refinement_runs WHERE id = $1",
+        )
+        .bind(run_id)
+        .fetch_one(db.pool())
+        .await
+        .expect("failed to read refinement run audit row");
+    let typed_reap_count = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM refinement_runs \
+         WHERE id = $1 AND stop_tag = 'reaped_phantom'",
+    )
+    .bind(run_id)
+    .fetch_one(db.pool())
+    .await
+    .expect("failed to count typed refinement reaps");
+    RefinementRunAuditForTest {
+        generation: row.0,
+        state: row.1,
+        park_kind: row.2,
+        stop_tag: row.3,
+        stop_context: row.4,
+        typed_reap_count,
+    }
+}
+
 /// Corrupt a task's durable refinement role to model legacy or externally
 /// malformed correlation evidence that typed task writers refuse to create.
 ///

@@ -45,21 +45,6 @@ async fn admit(repo: &ProposalRepository, proposal_id: &str, key: &str) -> (Stri
     }
 }
 
-async fn make_exact_run_stale(db: &djinn_db::Database, run_id: &str) {
-    sqlx::query("UPDATE refinement_dispatch_intents SET state = 'cancelled', claimed_by = NULL, claimed_at = NULL, claim_expires_at = NULL WHERE run_id = $1")
-        .bind(run_id)
-        .execute(db.pool())
-        .await
-        .expect("remove exact-run intent evidence");
-    sqlx::query(
-        "UPDATE refinement_runs SET heartbeat_at = '2000-01-01T00:00:00.000Z' WHERE id = $1",
-    )
-    .bind(run_id)
-    .execute(db.pool())
-    .await
-    .expect("make exact-run heartbeat stale");
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn recovery_preserves_parks_without_terminal_or_reap_writes() {
     for (key, kind, phase) in [
@@ -89,13 +74,13 @@ async fn recovery_preserves_parks_without_terminal_or_reap_writes() {
             .await
             .expect("park exact run")
         );
-        let before: (i32, String, Option<String>, Option<String>, Option<serde_json::Value>) = sqlx::query_as("SELECT generation, state, park_kind, stop_tag, stop_context FROM refinement_runs WHERE id = $1").bind(&run_id).fetch_one(db.pool()).await.expect("read parked row");
+        let before = djinn_db::test_support::refinement_run_audit_for_test(&db, &run_id).await;
 
         actor.recover_interrupted_refinements().await;
         assert_eq!(actor.active_refinements[&run_id].phase, phase);
         actor.active_refinements.clear();
         actor.recover_interrupted_refinements().await;
-        let after: (i32, String, Option<String>, Option<String>, Option<serde_json::Value>) = sqlx::query_as("SELECT generation, state, park_kind, stop_tag, stop_context FROM refinement_runs WHERE id = $1").bind(&run_id).fetch_one(db.pool()).await.expect("read parked row after replay");
+        let after = djinn_db::test_support::refinement_run_audit_for_test(&db, &run_id).await;
         assert_eq!(after, before, "recovery must not write a genuine park");
         assert_eq!(actor.active_refinements[&run_id].phase, phase);
     }
@@ -108,7 +93,7 @@ async fn concurrent_stale_recovery_has_one_cas_winner_and_typed_context() {
     let (events_tx, _events_rx) = tokio::sync::broadcast::channel::<DjinnEventEnvelope>(16);
     let repo = ProposalRepository::new(db.clone(), EventBus::noop());
     let (run_id, generation, _) = admit(&repo, &fixture.proposal_id, "stale-recovery").await;
-    make_exact_run_stale(&db, &run_id).await;
+    djinn_db::test_support::make_refinement_run_phantom_for_test(&db, &run_id).await;
     let mut left = build_refinement_actor(&db, &events_tx, spawn_test_pool(&db, 1));
     let mut right = build_refinement_actor(&db, &events_tx, spawn_test_pool(&db, 1));
     let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
@@ -123,31 +108,19 @@ async fn concurrent_stale_recovery_has_one_cas_winner_and_typed_context() {
     };
     tokio::join!(left_recovery, right_recovery);
 
-    let row: (String, i32, String, serde_json::Value) = sqlx::query_as(
-        "SELECT state, generation, stop_tag, stop_context FROM refinement_runs WHERE id = $1",
-    )
-    .bind(&run_id)
-    .fetch_one(db.pool())
-    .await
-    .expect("read CAS winner");
-    assert_eq!(row.0, "terminal");
-    assert_eq!(row.1, generation);
-    assert_eq!(row.2, "reaped_phantom");
-    assert_eq!(row.3["prior_run_id"], run_id);
-    assert_eq!(row.3["generation"], generation);
+    let row = djinn_db::test_support::refinement_run_audit_for_test(&db, &run_id).await;
+    assert_eq!(row.state, "terminal");
+    assert_eq!(row.generation, generation);
+    assert_eq!(row.stop_tag.as_deref(), Some("reaped_phantom"));
+    let context = row.stop_context.expect("typed reap has structured context");
+    assert_eq!(context["prior_run_id"], run_id);
+    assert_eq!(context["generation"], generation);
     assert_eq!(
-        row.3["evidence_summary"],
+        context["evidence_summary"],
         "startup recovery evaluator classified exact snapshot stale: NoLiveEvidence"
     );
-    let reaps: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM refinement_runs WHERE id = $1 AND stop_tag = 'reaped_phantom'",
-    )
-    .bind(&run_id)
-    .fetch_one(db.pool())
-    .await
-    .expect("count typed reap records");
     assert_eq!(
-        reaps, 1,
+        row.typed_reap_count, 1,
         "the CAS loser cannot emit another typed reap record"
     );
     assert!(!left.active_refinements.contains_key(&run_id));
