@@ -425,7 +425,7 @@ fn launcher_mode_parses_exactly_its_two_documented_values() {
     for mode in [CgroupLauncherMode::Disabled, CgroupLauncherMode::Required] {
         assert_eq!(CgroupLauncherMode::parse(mode.as_str()), Some(mode));
     }
-    assert_eq!(CgroupLauncherMode::default(), CgroupLauncherMode::Disabled);
+    assert_eq!(CgroupLauncherMode::default(), CgroupLauncherMode::Required);
     assert!(!CgroupLauncherMode::Disabled.renders_sidecar());
     assert!(CgroupLauncherMode::Required.renders_sidecar());
     for typo in ["Required", "enabled", "", "requried"] {
