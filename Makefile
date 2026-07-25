@@ -16,13 +16,16 @@ TEST_DB_MIGRATION_GITHUB_LOGIN ?=
 # Postgres (docker-compose.yml → `postgres-test` service at :5433) plus the
 # test harness targets that depend on it.
 
-.PHONY: help dev test-db-migrate test-db-postgres-template test-vault test-db-reset sqlx-prepare sqlx-check sqlx-verify test test-all validate-taskrun-backstop check-boundaries verify-cache-cleanup check-retirement-manifest
+.PHONY: help dev test-db-migrate test-db-postgres-template test-vault test-db-reset sqlx-prepare sqlx-check sqlx-verify test test-all validate-taskrun-backstop check-boundaries verify-cache-cleanup verify-incident-observability check-retirement-manifest
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*##"}; {printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2}'
 
 verify-cache-cleanup: ## Run the read-only cache-cleanup acceptance verifier
 	@./scripts/verify-cache-cleanup.sh
+
+verify-incident-observability: ## Run the hermetic incident-observability acceptance verifier
+	@$(dir $(abspath $(firstword $(MAKEFILE_LIST))))scripts/verify-incident-observability.sh
 
 test-db-migrate: ## Bootstrap and migrate test Postgres; requires TEST_DB_MIGRATION_{USER_ID,GITHUB_ID,GITHUB_LOGIN}
 	@test -n "$(strip $(TEST_DB_MIGRATION_USER_ID))" || { echo "ERROR: TEST_DB_MIGRATION_USER_ID is required and must be a stable local-test user ID" >&2; exit 2; }
