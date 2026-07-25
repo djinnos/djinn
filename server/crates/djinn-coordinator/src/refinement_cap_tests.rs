@@ -816,7 +816,7 @@ async fn same_tick_session_row_lag_defers_second_admission() {
 
 /// Regression: when pool.dispatch() fails after a refinement task has
 /// been created and an in-flight reservation recorded, the reservation
-/// is cleared and the refinement is terminated.
+/// is cleared while the retryable refinement projection is preserved.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dispatch_failure_clears_refinement_inflight_entry() {
     let db = crate::test_helpers::create_test_db();
@@ -856,10 +856,14 @@ async fn dispatch_failure_clears_refinement_inflight_entry() {
     // pool dispatch, and clear the in-flight reservation.
     actor.drive_active_refinements().await;
 
-    // `drive_active_refinements` removes completed entries from the map.
+    // A coordinator-owned pool failure must not terminalize or destructively
+    // remove the retryable refinement projection.
     assert!(
-        !actor.active_refinements.contains_key(&fixture.proposal_id),
-        "refinement must be removed after dispatch-failure termination"
+        actor
+            .active_refinements
+            .values()
+            .any(|state| state.proposal_id == fixture.proposal_id),
+        "refinement projection must remain available for retry after pool dispatch failure"
     );
 
     // The in-flight dispatch ledger must be clean.
