@@ -5,12 +5,43 @@
 //! reads metadata/bytes from it and hardlinks immutable artifacts into the run
 //! dir. Mutable Cargo metadata is copied, and incremental state is skipped so it
 //! is never shared by inode with the warm base.
+//!
+//! # Why a single entry must never discard the base
+//!
+//! The warm base is written by the warm Job (uid 10001) and read by the task-run
+//! worker (uid 1000, gid 1000). With `fs.protected_hardlinks=1` the kernel's
+//! `safe_hardlink_source()` refuses `linkat()` with **EPERM** for any source the
+//! calling process does not own unless it is a *group-writable regular file*.
+//! Measured against a 6.x kernel with a base owned by `10001:1000` and a process
+//! running `1000:1000`:
+//!
+//! | source            | `linkat` | `copy` |
+//! |-------------------|----------|--------|
+//! | regular `0664`    | ok       | ok     |
+//! | regular `0775`    | ok       | ok     |
+//! | regular `0644`    | EPERM    | ok     |
+//! | regular `0755`    | EPERM    | ok     |
+//! | regular `0444`    | EPERM    | ok     |
+//! | regular `0600`    | EPERM    | EACCES |
+//! | symlink `0777`    | EPERM    | ok     |
+//!
+//! A warm base built under `umask 002` is overwhelmingly `0664`/`0775`, but any
+//! file a build script *copies* keeps its SOURCE mode regardless of umask — and
+//! the Cargo registry ships `0644`/`0640`/`0600` sources. So a 38k-file base
+//! reliably contains a handful of entries the kernel will not let the worker
+//! hardlink, while the same entries copy fine.
+//!
+//! Consequently this module treats an unlinkable entry as a *degradation*, not
+//! as a reason to abandon a 36G base: it falls back to a bounded byte copy, and
+//! only reports a cold fallback when the base yielded nothing at all.
 
 use std::fmt;
 use std::fs;
 use std::io;
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -19,6 +50,18 @@ use rayon::prelude::*;
 const DEFAULT_PARALLELISM: usize = 12;
 const MAX_PARALLELISM: usize = 64;
 const PARALLELISM_ENV: &str = "DJINN_CARGO_TARGET_SEED_THREADS";
+
+/// Bytes this seed may spend byte-copying artifacts the kernel refused to
+/// hardlink, before it stops substituting and starts leaving them unseeded.
+///
+/// A copy is always a *correct* substitute for a hardlink (see
+/// [`CloneAction::Hardlink`]) but it costs both wall clock and private disk in
+/// `/cache/cargo-target-runs`, which has caused node DiskPressure before. The
+/// budget is sized to absorb the anomalous minority of a warm base (build-script
+/// `OUT_DIR` payloads and copied registry sources) without ever approaching a
+/// full byte-for-byte duplication of a multi-tens-of-GiB base.
+const DEFAULT_LINK_FALLBACK_COPY_BUDGET_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+const LINK_FALLBACK_COPY_BUDGET_ENV: &str = "DJINN_CARGO_TARGET_SEED_LINK_FALLBACK_COPY_BYTES";
 
 /// Filesystem convention for the warm, per-project Cargo target base.
 pub const WARM_BASE_ROOT: &str = "/cache/cargo-target";
@@ -29,11 +72,33 @@ pub const CARGO_BUILD_JOBS_ENV: &str = "CARGO_BUILD_JOBS";
 /// Filesystem convention for private, per-task-run Cargo target directories.
 pub const RUN_TARGET_ROOT: &str = "/cache/cargo-target-runs";
 
+/// Implementation used to hardlink one base artifact into the run dir.
+///
+/// Production always uses the real `linkat`. The test variant reproduces the
+/// kernel's `safe_hardlink_source()` refusal deterministically, because CI
+/// runners cannot create a base owned by a *different* uid (that needs root)
+/// and a test running as the base owner never observes the refusal at all.
+#[derive(Debug, Default, Clone, Copy, Eq, PartialEq)]
+pub enum LinkBackend {
+    /// `std::fs::hard_link`, i.e. `linkat(..., 0)`.
+    #[default]
+    Native,
+    /// Test-only: refuse exactly what `fs.protected_hardlinks=1` refuses for a
+    /// source owned by another uid — anything that is not a group-writable
+    /// regular file — and let everything else link natively.
+    #[cfg(test)]
+    RefuseSourcesForeignOwnersCannotLink,
+}
+
 /// Options controlling target-dir seed behavior.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct CargoTargetSeedOptions {
     /// Bounded rayon worker count used for scanning and clone operations.
     pub parallelism: usize,
+    /// Byte budget for copying artifacts that could not be hardlinked.
+    pub link_fallback_copy_budget_bytes: u64,
+    /// Hardlink implementation; see [`LinkBackend`].
+    pub link_backend: LinkBackend,
 }
 
 /// Outcome returned by worker teardown so logs can report observable cleanup
@@ -65,14 +130,40 @@ impl CargoTargetSeedOptions {
             .ok()
             .and_then(|raw| raw.parse::<usize>().ok())
             .unwrap_or(DEFAULT_PARALLELISM);
-        Self::new(parallelism)
+        let link_fallback_copy_budget_bytes = std::env::var(LINK_FALLBACK_COPY_BUDGET_ENV)
+            .ok()
+            .and_then(|raw| raw.parse::<u64>().ok())
+            .unwrap_or(DEFAULT_LINK_FALLBACK_COPY_BUDGET_BYTES);
+        Self {
+            link_fallback_copy_budget_bytes,
+            ..Self::new(parallelism)
+        }
     }
 
     /// Build options with a bounded worker count.
     pub fn new(parallelism: usize) -> Self {
         Self {
             parallelism: parallelism.clamp(1, MAX_PARALLELISM),
+            link_fallback_copy_budget_bytes: DEFAULT_LINK_FALLBACK_COPY_BUDGET_BYTES,
+            link_backend: LinkBackend::Native,
         }
+    }
+
+    /// Override the copy budget used when a hardlink is refused. Production
+    /// configures this through [`LINK_FALLBACK_COPY_BUDGET_ENV`].
+    #[cfg(test)]
+    #[must_use]
+    pub fn with_link_fallback_copy_budget_bytes(mut self, bytes: u64) -> Self {
+        self.link_fallback_copy_budget_bytes = bytes;
+        self
+    }
+
+    /// Override the hardlink implementation; see [`LinkBackend`].
+    #[cfg(test)]
+    #[must_use]
+    pub fn with_link_backend(mut self, backend: LinkBackend) -> Self {
+        self.link_backend = backend;
+        self
     }
 }
 
@@ -86,11 +177,74 @@ impl Default for CargoTargetSeedOptions {
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum CloneAction {
     /// Hardlink immutable/heavy artifacts from the warm base into the run dir.
+    ///
+    /// A byte copy is always a semantically valid substitute: hardlinking is
+    /// purely an optimisation for immutable payloads, and a private copy is if
+    /// anything safer because the run can never write through to the base.
     Hardlink,
     /// Byte-copy mutable metadata so the task run can safely rewrite it.
     Copy,
     /// Exclude state that must not be shared or does not need to be seeded.
     Skip,
+}
+
+/// Filesystem operation attempted for one seed entry.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum SeedOp {
+    CreateDir,
+    Hardlink,
+    Copy,
+}
+
+impl SeedOp {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::CreateDir => "create_dir",
+            Self::Hardlink => "hardlink",
+            Self::Copy => "copy",
+        }
+    }
+}
+
+/// One entry-level seed failure, carrying the operation, the exact path and the
+/// ownership/mode facts that explain a kernel refusal.
+///
+/// The production incident this type exists for reported only
+/// `Operation not permitted (os error 1)` with no path and no operation, which
+/// cost hours and a live production Pod to localise.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct SeedEntryError {
+    pub op: SeedOp,
+    pub relative_path: PathBuf,
+    pub message: String,
+    /// Ownership/mode of the source plus this process's identity, when readable.
+    pub identity: Option<String>,
+    /// Why the kernel plausibly refused, when the errno says so.
+    pub hint: Option<&'static str>,
+    /// Failure of the copy substituted for a refused hardlink, when attempted.
+    pub fallback_message: Option<String>,
+}
+
+impl fmt::Display for SeedEntryError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} {}: {}",
+            self.op.as_str(),
+            self.relative_path.display(),
+            self.message
+        )?;
+        if let Some(identity) = &self.identity {
+            write!(f, " [{identity}]")?;
+        }
+        if let Some(hint) = self.hint {
+            write!(f, " ({hint})")?;
+        }
+        if let Some(fallback) = &self.fallback_message {
+            write!(f, "; copy fallback also failed: {fallback}")?;
+        }
+        Ok(())
+    }
 }
 
 /// Metrics and status returned to callers for structured logs.
@@ -102,6 +256,18 @@ pub struct CargoTargetSeedResult {
     pub skipped_file_count: u64,
     pub linked_bytes: u64,
     pub copied_bytes: u64,
+    /// Files the kernel refused to hardlink that were byte-copied instead.
+    pub degraded_link_file_count: u64,
+    /// Files that could be neither linked nor copied, and are simply absent
+    /// from the run dir. Cargo rebuilds the corresponding units.
+    pub unseeded_file_count: u64,
+    /// Seedable (non-skipped) regular files found in the base. `0` with no
+    /// fallback reason means the base was genuinely empty.
+    pub base_seedable_file_count: u64,
+    /// `true` when the link-fallback copy budget stopped further substitution.
+    pub link_fallback_budget_exhausted: bool,
+    /// First entry-level failure, rendered with operation, path and identity.
+    pub first_entry_error: Option<String>,
     /// `Some` means the worker intentionally left a ready private run dir for a
     /// cold Cargo build instead of failing dispatch.
     pub fallback_reason: Option<CargoTargetSeedFallback>,
@@ -110,6 +276,13 @@ pub struct CargoTargetSeedResult {
 impl CargoTargetSeedResult {
     pub fn cold_started(&self) -> bool {
         self.fallback_reason.is_some()
+    }
+
+    /// `true` when the base was used but not in full. A partial seed is a hit:
+    /// Cargo treats a missing artifact as a dirty unit and rebuilds just that
+    /// unit, so partial seeding is always correct and proportionally faster.
+    pub fn degraded(&self) -> bool {
+        !self.cold_started() && (self.degraded_link_file_count > 0 || self.unseeded_file_count > 0)
     }
 }
 
@@ -194,6 +367,11 @@ pub fn seed_cargo_target_dir(
 /// Missing, invalid, or safely-detected clone failures return `Ok` with a
 /// fallback reason so dispatch can proceed with a cold private target dir. The
 /// only hard error is inability to prepare the destination directory itself.
+///
+/// Per-entry failures never abort the seed. See the module docs: an entry the
+/// kernel refuses to hardlink is byte-copied within a budget, and an entry that
+/// can be neither linked nor copied is left absent and counted. A cold fallback
+/// is reported only when the base yielded nothing at all.
 pub fn seed_cargo_target_dir_with_options(
     base_dir: impl AsRef<Path>,
     run_dir: impl AsRef<Path>,
@@ -213,7 +391,10 @@ pub fn seed_cargo_target_dir_with_options(
         Err(err) => {
             return Ok(fallback_result(
                 start,
-                CargoTargetSeedFallback::BaseUnusable(err.to_string()),
+                CargoTargetSeedFallback::BaseUnusable(format!(
+                    "stat {}: {err}",
+                    base_dir.display()
+                )),
             ));
         }
     };
@@ -233,24 +414,32 @@ pub fn seed_cargo_target_dir_with_options(
 
     let entries = match pool.install(|| scan_entries(base_dir)) {
         Ok(entries) => entries,
+        // The only scan error that reaches here is an unreadable base ROOT;
+        // every deeper failure now costs at most its own subtree.
         Err(err) => {
             return Ok(fallback_result(
                 start,
-                CargoTargetSeedFallback::ScanFailed(err.to_string()),
+                CargoTargetSeedFallback::ScanFailed(format!(
+                    "read_dir {}: {err}",
+                    base_dir.display()
+                )),
             ));
         }
     };
+
+    let base_seedable_file_count = entries
+        .iter()
+        .filter(|entry| !entry.is_dir && entry.action != CloneAction::Skip)
+        .count() as u64;
 
     let metrics = Arc::new(SeedCounters::default());
     let first_error = Arc::new(Mutex::new(None::<String>));
 
     pool.install(|| {
         entries.par_iter().for_each(|entry| {
-            if first_error.lock().is_ok_and(|guard| guard.is_some()) {
-                return;
-            }
-
-            if let Err(err) = apply_entry(base_dir, run_dir, entry, &metrics)
+            // Deliberately no short-circuit: one unseedable entry out of 38k
+            // must never discard a multi-tens-of-GiB warm base.
+            if let Err(err) = apply_entry(base_dir, run_dir, entry, &metrics, options)
                 && let Ok(mut guard) = first_error.lock()
                 && guard.is_none()
             {
@@ -259,15 +448,23 @@ pub fn seed_cargo_target_dir_with_options(
         });
     });
 
-    if let Some(err) = first_error.lock().ok().and_then(|guard| guard.clone()) {
-        let mut result = metrics.result(start.elapsed(), None);
-        let reason = CargoTargetSeedFallback::CloneFailed(err);
+    let first_entry_error = first_error.lock().ok().and_then(|guard| guard.clone());
+    let mut result = metrics.result(start.elapsed(), base_seedable_file_count, None);
+    result.first_entry_error = first_entry_error.clone();
+
+    // The base is abandoned only when it yielded nothing usable at all. Any
+    // successfully seeded artifact is worth strictly more than a cold build.
+    if base_seedable_file_count > 0 && result.seeded_file_count() == 0 {
+        let reason = CargoTargetSeedFallback::CloneFailed(
+            first_entry_error.unwrap_or_else(|| "no base entry could be seeded".to_owned()),
+        );
         emit_cargo_target_seed_fallback_metric(&reason);
         result.fallback_reason = Some(reason);
-        return Ok(result);
     }
 
-    Ok(metrics.result(start.elapsed(), None))
+    emit_cargo_target_seed_entry_metrics(&result);
+
+    Ok(result)
 }
 
 /// Remove a private per-task-run Cargo target dir on worker teardown.
@@ -342,6 +539,11 @@ fn fallback_result(start: Instant, reason: CargoTargetSeedFallback) -> CargoTarg
         skipped_file_count: 0,
         linked_bytes: 0,
         copied_bytes: 0,
+        degraded_link_file_count: 0,
+        unseeded_file_count: 0,
+        base_seedable_file_count: 0,
+        link_fallback_budget_exhausted: false,
+        first_entry_error: None,
         fallback_reason: Some(reason),
     }
 }
@@ -349,6 +551,17 @@ fn fallback_result(start: Instant, reason: CargoTargetSeedFallback) -> CargoTarg
 fn emit_cargo_target_seed_fallback_metric(reason: &CargoTargetSeedFallback) {
     djinn_telemetry::cargo_target_seed::increment_seed_fallback(
         cargo_target_seed_fallback_metric_reason(reason),
+    );
+}
+
+fn emit_cargo_target_seed_entry_metrics(result: &CargoTargetSeedResult) {
+    djinn_telemetry::cargo_target_seed::add_seed_entries(
+        djinn_telemetry::cargo_target_seed::DISPOSITION_DEGRADED_COPY,
+        result.degraded_link_file_count,
+    );
+    djinn_telemetry::cargo_target_seed::add_seed_entries(
+        djinn_telemetry::cargo_target_seed::DISPOSITION_UNSEEDED,
+        result.unseeded_file_count,
     );
 }
 
@@ -396,11 +609,19 @@ fn scan_entries(base_dir: &Path) -> io::Result<Vec<SeedEntry>> {
             .map(|relative_dir| scan_dir(base_dir, relative_dir))
             .collect();
 
+        let is_root_level = pending_dirs.len() == 1 && pending_dirs[0].as_os_str().is_empty();
         pending_dirs = Vec::new();
         for scan in scans {
-            let mut scan = scan?;
-            all_entries.append(&mut scan.entries);
-            pending_dirs.append(&mut scan.next_dirs);
+            match scan {
+                Ok(mut scan) => {
+                    all_entries.append(&mut scan.entries);
+                    pending_dirs.append(&mut scan.next_dirs);
+                }
+                // A subdirectory that cannot be read costs only its own subtree.
+                // Only an unreadable base ROOT means there is nothing to seed.
+                Err(err) if is_root_level => return Err(err),
+                Err(_) => {}
+            }
         }
     }
 
@@ -412,10 +633,46 @@ fn scan_dir(base_dir: &Path, relative_dir: &Path) -> io::Result<DirScan> {
     let absolute_dir = base_dir.join(relative_dir);
 
     for entry in fs::read_dir(&absolute_dir)? {
-        let entry = entry?;
+        let Ok(entry) = entry else {
+            continue;
+        };
         let relative_path = relative_dir.join(entry.file_name());
-        let metadata = entry.metadata()?;
         let action = classify_cargo_target_path(&relative_path);
+
+        // `file_type()` does NOT follow symlinks, unlike `metadata()`. A symlink
+        // must never be classified from its target: `linkat` would pin the
+        // SYMLINK inode, which is not `S_ISREG`, and `fs.protected_hardlinks=1`
+        // refuses that for any source this process does not own. Descending
+        // through one can also cycle.
+        let Ok(file_type) = entry.file_type() else {
+            scan.entries.push(skipped_entry(relative_path));
+            continue;
+        };
+
+        if file_type.is_symlink() {
+            // Materialise the target's bytes privately when it resolves to a
+            // regular file; ignore dangling links and symlinked directories.
+            let resolves_to_file = fs::metadata(entry.path())
+                .ok()
+                .filter(std::fs::Metadata::is_file);
+            match (action, resolves_to_file) {
+                (CloneAction::Skip, _) | (_, None) => {
+                    scan.entries.push(skipped_entry(relative_path));
+                }
+                (_, Some(target_meta)) => scan.entries.push(SeedEntry {
+                    relative_path,
+                    action: CloneAction::Copy,
+                    bytes: target_meta.len(),
+                    is_dir: false,
+                }),
+            }
+            continue;
+        }
+
+        let Ok(metadata) = entry.metadata() else {
+            scan.entries.push(skipped_entry(relative_path));
+            continue;
+        };
 
         if metadata.is_dir() {
             if action == CloneAction::Skip {
@@ -442,16 +699,20 @@ fn scan_dir(base_dir: &Path, relative_dir: &Path) -> io::Result<DirScan> {
                 is_dir: false,
             });
         } else {
-            scan.entries.push(SeedEntry {
-                relative_path,
-                action: CloneAction::Skip,
-                bytes: 0,
-                is_dir: false,
-            });
+            scan.entries.push(skipped_entry(relative_path));
         }
     }
 
     Ok(scan)
+}
+
+fn skipped_entry(relative_path: PathBuf) -> SeedEntry {
+    SeedEntry {
+        relative_path,
+        action: CloneAction::Skip,
+        bytes: 0,
+        is_dir: false,
+    }
 }
 
 fn apply_entry(
@@ -459,40 +720,199 @@ fn apply_entry(
     run_dir: &Path,
     entry: &SeedEntry,
     metrics: &SeedCounters,
-) -> io::Result<()> {
+    options: &CargoTargetSeedOptions,
+) -> Result<(), SeedEntryError> {
     match entry.action {
         CloneAction::Skip => {
             metrics.skipped_file_count.fetch_add(1, Ordering::Relaxed);
             Ok(())
         }
         CloneAction::Hardlink | CloneAction::Copy if entry.is_dir => {
-            fs::create_dir_all(run_dir.join(&entry.relative_path))
+            create_dir(run_dir.join(&entry.relative_path).as_path(), entry)
         }
         CloneAction::Hardlink => {
             let source = base_dir.join(&entry.relative_path);
             let destination = run_dir.join(&entry.relative_path);
-            if let Some(parent) = destination.parent() {
-                fs::create_dir_all(parent)?;
+            create_parent_dir(&destination, entry)?;
+
+            let link_err = match link_file(options.link_backend, &source, &destination) {
+                Ok(()) => {
+                    metrics.linked_file_count.fetch_add(1, Ordering::Relaxed);
+                    metrics
+                        .linked_bytes
+                        .fetch_add(entry.bytes, Ordering::Relaxed);
+                    return Ok(());
+                }
+                Err(err) => err,
+            };
+
+            // A hardlink is only an optimisation for immutable payloads, so a
+            // private byte copy is always a correct substitute — and strictly
+            // safer, since the run can never write through to the warm base.
+            // Spend a bounded budget on it rather than lose the artifact.
+            if !metrics.try_reserve_fallback_copy(entry.bytes, options) {
+                metrics.unseeded_file_count.fetch_add(1, Ordering::Relaxed);
+                return Err(
+                    seed_entry_error(SeedOp::Hardlink, entry, &source, &link_err)
+                        .with_fallback_message(format!(
+                            "link-fallback copy budget of {} bytes exhausted",
+                            options.link_fallback_copy_budget_bytes
+                        )),
+                );
             }
-            fs::hard_link(source, destination)?;
-            metrics.linked_file_count.fetch_add(1, Ordering::Relaxed);
-            metrics
-                .linked_bytes
-                .fetch_add(entry.bytes, Ordering::Relaxed);
-            Ok(())
+
+            match fs::copy(&source, &destination) {
+                Ok(copied) => {
+                    // `fs::copy` reproduces the SOURCE's mode on the destination,
+                    // and the entries that land here are precisely the ones whose
+                    // mode is unusual — including `0444`. A read-only artifact in
+                    // the base is fine (nothing writes it there), but in the
+                    // PRIVATE run dir Cargo may need to rewrite that very path
+                    // when it rebuilds the unit, and a `0444` file rejects even
+                    // its owner. The run dir is disposable, so restore owner
+                    // write unconditionally.
+                    ensure_owner_writable(&destination);
+                    metrics
+                        .degraded_link_file_count
+                        .fetch_add(1, Ordering::Relaxed);
+                    metrics.copied_bytes.fetch_add(copied, Ordering::Relaxed);
+                    Ok(())
+                }
+                Err(copy_err) => {
+                    metrics.release_fallback_copy(entry.bytes);
+                    metrics.unseeded_file_count.fetch_add(1, Ordering::Relaxed);
+                    Err(
+                        seed_entry_error(SeedOp::Hardlink, entry, &source, &link_err)
+                            .with_fallback_message(copy_err.to_string()),
+                    )
+                }
+            }
         }
         CloneAction::Copy => {
             let source = base_dir.join(&entry.relative_path);
             let destination = run_dir.join(&entry.relative_path);
-            if let Some(parent) = destination.parent() {
-                fs::create_dir_all(parent)?;
+            create_parent_dir(&destination, entry)?;
+            match fs::copy(&source, &destination) {
+                Ok(copied) => {
+                    // Everything classified `Copy` is copied precisely because
+                    // the run must be able to REWRITE it. `fs::copy` reproduces
+                    // the source mode, so a read-only base entry (a symlinked
+                    // vendored payload, say) would arrive unwritable.
+                    ensure_owner_writable(&destination);
+                    metrics.copied_file_count.fetch_add(1, Ordering::Relaxed);
+                    metrics.copied_bytes.fetch_add(copied, Ordering::Relaxed);
+                    Ok(())
+                }
+                Err(err) => {
+                    metrics.unseeded_file_count.fetch_add(1, Ordering::Relaxed);
+                    Err(seed_entry_error(SeedOp::Copy, entry, &source, &err))
+                }
             }
-            let copied = fs::copy(source, destination)?;
-            metrics.copied_file_count.fetch_add(1, Ordering::Relaxed);
-            metrics.copied_bytes.fetch_add(copied, Ordering::Relaxed);
-            Ok(())
         }
     }
+}
+
+fn link_file(backend: LinkBackend, source: &Path, destination: &Path) -> io::Result<()> {
+    match backend {
+        LinkBackend::Native => fs::hard_link(source, destination),
+        #[cfg(test)]
+        LinkBackend::RefuseSourcesForeignOwnersCannotLink => {
+            if tests::source_is_linkable_by_foreign_owner(source) {
+                fs::hard_link(source, destination)
+            } else {
+                Err(io::Error::from_raw_os_error(libc::EPERM))
+            }
+        }
+    }
+}
+
+/// Restore owner write on a seeded artifact in the private run dir.
+///
+/// Best-effort: failing to widen the mode is not a reason to drop an artifact
+/// that is otherwise correctly seeded.
+#[cfg(unix)]
+fn ensure_owner_writable(destination: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let Ok(meta) = fs::metadata(destination) else {
+        return;
+    };
+    let mode = meta.permissions().mode();
+    if mode & 0o200 != 0 {
+        return;
+    }
+    let _ = fs::set_permissions(destination, fs::Permissions::from_mode(mode | 0o200));
+}
+
+#[cfg(not(unix))]
+fn ensure_owner_writable(_destination: &Path) {}
+
+fn create_dir(path: &Path, entry: &SeedEntry) -> Result<(), SeedEntryError> {
+    fs::create_dir_all(path).map_err(|err| seed_entry_error(SeedOp::CreateDir, entry, path, &err))
+}
+
+fn create_parent_dir(destination: &Path, entry: &SeedEntry) -> Result<(), SeedEntryError> {
+    match destination.parent() {
+        Some(parent) => create_dir(parent, entry),
+        None => Ok(()),
+    }
+}
+
+fn seed_entry_error(
+    op: SeedOp,
+    entry: &SeedEntry,
+    source: &Path,
+    err: &io::Error,
+) -> SeedEntryError {
+    SeedEntryError {
+        op,
+        relative_path: entry.relative_path.clone(),
+        message: err.to_string(),
+        identity: source_identity(source),
+        hint: refusal_hint(op, err),
+        fallback_message: None,
+    }
+}
+
+impl SeedEntryError {
+    fn with_fallback_message(mut self, message: String) -> Self {
+        self.fallback_message = Some(message);
+        self
+    }
+}
+
+/// Render the ownership/mode facts that decide whether the kernel will allow a
+/// hardlink, plus this process's identity. This is the single line that turns
+/// "Operation not permitted (os error 1)" into a diagnosis.
+#[cfg(unix)]
+fn source_identity(source: &Path) -> Option<String> {
+    let meta = fs::symlink_metadata(source).ok()?;
+    Some(format!(
+        "source mode=0{:o} uid={} gid={} nlink={}; process euid={} egid={}",
+        meta.mode(),
+        meta.uid(),
+        meta.gid(),
+        meta.nlink(),
+        // SAFETY: `geteuid`/`getegid` are always-successful, thread-safe reads
+        // of the calling process's credentials.
+        unsafe { libc::geteuid() },
+        unsafe { libc::getegid() },
+    ))
+}
+
+#[cfg(not(unix))]
+fn source_identity(_source: &Path) -> Option<String> {
+    None
+}
+
+fn refusal_hint(op: SeedOp, err: &io::Error) -> Option<&'static str> {
+    if op != SeedOp::Hardlink || err.raw_os_error() != Some(libc::EPERM) {
+        return None;
+    }
+    Some(
+        "fs.protected_hardlinks=1 refuses linkat for a source this process does not own \
+         unless it is a group-writable regular file (kernel safe_hardlink_source)",
+    )
 }
 
 #[derive(Debug, Default)]
@@ -502,12 +922,40 @@ struct SeedCounters {
     skipped_file_count: AtomicU64,
     linked_bytes: AtomicU64,
     copied_bytes: AtomicU64,
+    degraded_link_file_count: AtomicU64,
+    unseeded_file_count: AtomicU64,
+    fallback_copy_reserved_bytes: AtomicU64,
+    fallback_budget_exhausted: AtomicBool,
 }
 
 impl SeedCounters {
+    /// Reserve budget for one link-fallback copy.
+    ///
+    /// Concurrent reservations may overshoot the budget by at most one entry
+    /// per worker thread, which is bounded by [`MAX_PARALLELISM`] and therefore
+    /// irrelevant next to the budget itself.
+    fn try_reserve_fallback_copy(&self, bytes: u64, options: &CargoTargetSeedOptions) -> bool {
+        let previous = self
+            .fallback_copy_reserved_bytes
+            .fetch_add(bytes, Ordering::Relaxed);
+        if previous.saturating_add(bytes) <= options.link_fallback_copy_budget_bytes {
+            return true;
+        }
+        self.release_fallback_copy(bytes);
+        self.fallback_budget_exhausted
+            .store(true, Ordering::Relaxed);
+        false
+    }
+
+    fn release_fallback_copy(&self, bytes: u64) {
+        self.fallback_copy_reserved_bytes
+            .fetch_sub(bytes, Ordering::Relaxed);
+    }
+
     fn result(
         &self,
         elapsed: Duration,
+        base_seedable_file_count: u64,
         fallback_reason: Option<CargoTargetSeedFallback>,
     ) -> CargoTargetSeedResult {
         CargoTargetSeedResult {
@@ -517,8 +965,20 @@ impl SeedCounters {
             skipped_file_count: self.skipped_file_count.load(Ordering::Relaxed),
             linked_bytes: self.linked_bytes.load(Ordering::Relaxed),
             copied_bytes: self.copied_bytes.load(Ordering::Relaxed),
+            degraded_link_file_count: self.degraded_link_file_count.load(Ordering::Relaxed),
+            unseeded_file_count: self.unseeded_file_count.load(Ordering::Relaxed),
+            base_seedable_file_count,
+            link_fallback_budget_exhausted: self.fallback_budget_exhausted.load(Ordering::Relaxed),
+            first_entry_error: None,
             fallback_reason,
         }
+    }
+}
+
+impl CargoTargetSeedResult {
+    /// Files actually present in the run dir because of this seed.
+    pub fn seeded_file_count(&self) -> u64 {
+        self.linked_file_count + self.copied_file_count + self.degraded_link_file_count
     }
 }
 
@@ -547,655 +1007,7 @@ fn file_name_is_cargo_lock(path: &Path) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
+mod tests;
 
-    #[cfg(unix)]
-    use std::os::unix::fs::MetadataExt;
-    use std::sync::{Barrier, MutexGuard};
-
-    const CARGO_TARGET_SEED_TOTAL: &str = "djinn_cargo_target_seed_total";
-
-    #[test]
-    fn classifies_heavy_artifacts_for_hardlink() {
-        assert_eq!(
-            classify_cargo_target_path(Path::new("debug/deps/libserde-abc.rlib")),
-            CloneAction::Hardlink
-        );
-        assert_eq!(
-            classify_cargo_target_path(Path::new("release/build/foo/out/generated.rs")),
-            CloneAction::Hardlink
-        );
-    }
-
-    #[test]
-    fn classifies_fingerprint_and_dep_info_for_copy() {
-        assert_eq!(
-            classify_cargo_target_path(Path::new("debug/.fingerprint/foo/lib-foo.json")),
-            CloneAction::Copy
-        );
-        assert_eq!(
-            classify_cargo_target_path(Path::new("debug/deps/foo.d")),
-            CloneAction::Copy
-        );
-        assert_eq!(
-            classify_cargo_target_path(Path::new("debug/build/foo/output.d")),
-            CloneAction::Copy
-        );
-    }
-
-    #[test]
-    fn classifies_build_directory_lock_for_skip() {
-        // Cargo's per-profile lock files must never be hardlinked: flock attaches
-        // to the inode, so a shared lock serializes `cargo` across every run and
-        // the warm base via the shared PVC. All three variants emitted by the
-        // pinned toolchain (`.cargo-lock`, `.cargo-build-lock`,
-        // `.cargo-artifact-lock`) must be skipped in both `debug/` and `release/`.
-        for name in [".cargo-lock", ".cargo-build-lock", ".cargo-artifact-lock"] {
-            assert_eq!(
-                classify_cargo_target_path(Path::new(&format!("debug/{name}"))),
-                CloneAction::Skip,
-                "debug/{name} must be skipped"
-            );
-            assert_eq!(
-                classify_cargo_target_path(Path::new(&format!("release/{name}"))),
-                CloneAction::Skip,
-                "release/{name} must be skipped"
-            );
-            // Root-level and target-triple-nested variants are skipped by name.
-            assert_eq!(
-                classify_cargo_target_path(Path::new(name)),
-                CloneAction::Skip,
-                "root-level {name} must be skipped"
-            );
-            assert_eq!(
-                classify_cargo_target_path(Path::new(&format!(
-                    "x86_64-unknown-linux-gnu/debug/{name}"
-                ))),
-                CloneAction::Skip,
-                "target-triple-nested {name} must be skipped"
-            );
-        }
-    }
-
-    #[test]
-    fn cargo_lock_matcher_excludes_non_lock_cargo_metadata() {
-        // The matcher is `.cargo` prefix + `lock` substring, so `.cargo` files
-        // that are NOT locks (e.g. a hypothetical in-place-rewritten metadata
-        // file) must fall through to their normal classification rather than
-        // being wrongly skipped.
-        assert_ne!(
-            classify_cargo_target_path(Path::new("debug/.cargo-metadata.json")),
-            CloneAction::Skip
-        );
-        assert_ne!(
-            classify_cargo_target_path(Path::new(".rustc_info.json")),
-            CloneAction::Skip
-        );
-    }
-
-    #[test]
-    fn classifies_rustc_info_cache_for_copy() {
-        // `.rustc_info.json` is rewritten in place by cargo, so a hardlink would
-        // write through to the shared warm base. Copy gives each run a private
-        // inode while inheriting the cached value.
-        assert_eq!(
-            classify_cargo_target_path(Path::new(".rustc_info.json")),
-            CloneAction::Copy
-        );
-    }
-
-    #[test]
-    fn classifies_incremental_for_skip_even_under_fingerprint() {
-        assert_eq!(
-            classify_cargo_target_path(Path::new("debug/incremental/foo/s-cache.bin")),
-            CloneAction::Skip
-        );
-        assert_eq!(
-            classify_cargo_target_path(Path::new("debug/.fingerprint/incremental/foo.d")),
-            CloneAction::Skip
-        );
-    }
-
-    #[test]
-    fn missing_base_returns_cold_start_and_prepares_run_dir() {
-        let _guard = metric_test_guard();
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let base = tmp.path().join("missing-base");
-        let run = tmp.path().join("run-target");
-
-        let result =
-            seed_cargo_target_dir_with_options(&base, &run, &CargoTargetSeedOptions::new(2))
-                .expect("missing base should not fail dispatch");
-
-        assert_eq!(
-            result.fallback_reason,
-            Some(CargoTargetSeedFallback::BaseMissing)
-        );
-        assert!(result.cold_started());
-        assert!(run.is_dir());
-        assert_eq!(result.linked_file_count, 0);
-        assert_eq!(result.copied_file_count, 0);
-        assert_eq!(result.skipped_file_count, 0);
-    }
-
-    #[test]
-    fn task_variant_one_does_not_seed_sibling_variant_four() {
-        let _guard = metric_test_guard();
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let warm_root = tmp.path().join("cargo-target");
-        let project_id = "project";
-        let task_base = warm_base_dir_for_jobs_at_root(&warm_root, project_id, 1);
-        let sibling_base = warm_base_dir_for_jobs_at_root(&warm_root, project_id, 4);
-        let run = tmp.path().join("run-target");
-        let sibling_artifact = Path::new("debug/deps/libsibling.rlib");
-        write_base_file(&sibling_base, sibling_artifact, b"variant four only");
-
-        let result =
-            seed_cargo_target_dir_with_options(&task_base, &run, &CargoTargetSeedOptions::new(1))
-                .expect("missing exact variant should cold-start");
-
-        assert_eq!(
-            result.fallback_reason,
-            Some(CargoTargetSeedFallback::BaseMissing)
-        );
-        assert!(result.cold_started());
-        assert!(
-            !run.join(sibling_artifact).exists(),
-            "a task for mold-jobs-1 must not seed mold-jobs-4 artifacts"
-        );
-    }
-
-    #[test]
-    fn task_variant_one_reuses_only_its_matching_warm_base() {
-        let _guard = metric_test_guard();
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let warm_root = tmp.path().join("cargo-target");
-        let project_id = "project";
-        let task_base = warm_base_dir_for_jobs_at_root(&warm_root, project_id, 1);
-        let sibling_base = warm_base_dir_for_jobs_at_root(&warm_root, project_id, 4);
-        let additional_base = warm_base_dir_for_jobs_at_root(&warm_root, project_id, 8);
-        let run = tmp.path().join("run-target");
-        let matching_artifact = Path::new("debug/deps/libmatching.rlib");
-        let sibling_artifact = Path::new("debug/deps/libsibling.rlib");
-
-        assert_ne!(task_base, sibling_base);
-        assert_ne!(task_base, additional_base);
-        assert_ne!(sibling_base, additional_base);
-        write_base_file(&sibling_base, sibling_artifact, b"variant four");
-        write_base_file(&task_base, matching_artifact, b"variant one");
-
-        let result =
-            seed_cargo_target_dir_with_options(&task_base, &run, &CargoTargetSeedOptions::new(1))
-                .expect("matching variant should seed");
-
-        assert_eq!(result.fallback_reason, None);
-        assert!(!result.cold_started());
-        assert_eq!(
-            fs::read(run.join(matching_artifact)).expect("read matching seeded artifact"),
-            b"variant one"
-        );
-        assert!(
-            !run.join(sibling_artifact).exists(),
-            "a matching seed must not include sibling variant artifacts"
-        );
-    }
-
-    #[test]
-    fn non_directory_base_returns_cold_start() {
-        let _guard = metric_test_guard();
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let base = tmp.path().join("base-file");
-        let run = tmp.path().join("run-target");
-        fs::write(&base, b"not a directory").expect("write base file");
-
-        let result =
-            seed_cargo_target_dir_with_options(&base, &run, &CargoTargetSeedOptions::new(2))
-                .expect("non-directory base should not fail dispatch");
-
-        assert_eq!(
-            result.fallback_reason,
-            Some(CargoTargetSeedFallback::BaseNotDirectory)
-        );
-        assert!(run.is_dir());
-    }
-
-    #[test]
-    fn seeds_target_tree_with_required_clone_semantics() {
-        let _guard = metric_test_guard();
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let base = tmp.path().join("warm-base");
-        let run = tmp.path().join("run-target");
-
-        let heavy = Path::new("debug/deps/libfoo.rlib");
-        let fingerprint = Path::new("debug/.fingerprint/foo-abc/invoked.timestamp");
-        let dep_info = Path::new("debug/deps/foo.d");
-        let incremental = Path::new("debug/incremental/foo-abc/s-cache.bin");
-        // Every cargo lock variant, in both profile dirs, must be skipped.
-        let lock_files = [
-            Path::new("debug/.cargo-lock"),
-            Path::new("debug/.cargo-build-lock"),
-            Path::new("debug/.cargo-artifact-lock"),
-            Path::new("release/.cargo-lock"),
-            Path::new("release/.cargo-build-lock"),
-            Path::new("release/.cargo-artifact-lock"),
-        ];
-        let rustc_info = Path::new(".rustc_info.json");
-
-        write_base_file(&base, heavy, b"large immutable artifact");
-        write_base_file(&base, fingerprint, b"fingerprint metadata");
-        write_base_file(&base, dep_info, b"dep-info metadata");
-        write_base_file(&base, incremental, b"incremental state");
-        for lock in lock_files {
-            write_base_file(&base, lock, b"");
-        }
-        write_base_file(&base, rustc_info, b"rustc info cache");
-
-        let result =
-            seed_cargo_target_dir_with_options(&base, &run, &CargoTargetSeedOptions::new(4))
-                .expect("seed target dir");
-
-        assert_eq!(result.fallback_reason, None);
-        assert_eq!(result.linked_file_count, 1);
-        // fingerprint + dep-info + .rustc_info.json are byte-copied.
-        assert_eq!(result.copied_file_count, 3);
-        assert!(
-            result.skipped_file_count > lock_files.len() as u64,
-            "incremental state and every cargo lock variant should be skipped"
-        );
-
-        assert_eq!(
-            fs::read(run.join(heavy)).expect("read linked artifact"),
-            b"large immutable artifact"
-        );
-        assert_eq!(
-            fs::read(run.join(fingerprint)).expect("read copied fingerprint"),
-            b"fingerprint metadata"
-        );
-        assert_eq!(
-            fs::read(run.join(dep_info)).expect("read copied dep-info"),
-            b"dep-info metadata"
-        );
-        assert!(
-            !run.join(incremental).exists(),
-            "incremental state must not be seeded into the private run dir"
-        );
-        assert!(
-            !run.join("debug/incremental").exists(),
-            "incremental directories must be skipped before descent"
-        );
-        for lock in lock_files {
-            assert!(
-                !run.join(lock).exists(),
-                "cargo lock file {} must not be seeded into the private run dir",
-                lock.display()
-            );
-        }
-        assert_eq!(
-            fs::read(run.join(rustc_info)).expect("read copied rustc info"),
-            b"rustc info cache"
-        );
-
-        #[cfg(unix)]
-        {
-            assert_same_inode(&base.join(heavy), &run.join(heavy));
-            assert_different_inode(&base.join(fingerprint), &run.join(fingerprint));
-            assert_different_inode(&base.join(dep_info), &run.join(dep_info));
-            // No seeded file may share an inode with ANY base file whose name
-            // matches the cargo lock pattern: flock is inode-scoped, so a shared
-            // inode would make this run's `cargo` serialize against the base and
-            // every sibling. Each lock is skipped entirely, so it must simply be
-            // absent from the run dir.
-            let base_lock_inodes: std::collections::HashSet<(u64, u64)> = lock_files
-                .iter()
-                .map(|lock| {
-                    let meta = fs::metadata(base.join(lock)).expect("base lock metadata");
-                    (meta.dev(), meta.ino())
-                })
-                .collect();
-            for entry in walk_files(&run) {
-                let meta = fs::metadata(&entry).expect("run file metadata");
-                assert!(
-                    !base_lock_inodes.contains(&(meta.dev(), meta.ino())),
-                    "seeded file {} shares an inode with a base cargo lock file",
-                    entry.display()
-                );
-            }
-            // `.rustc_info.json` is copied, so the run owns a private inode and a
-            // cargo rewrite cannot corrupt the shared warm base.
-            assert_different_inode(&base.join(rustc_info), &run.join(rustc_info));
-        }
-    }
-
-    #[test]
-    fn incremental_prune_preserves_seedable_path_actions_and_contents() {
-        let _guard = metric_test_guard();
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let cache_root = tmp.path().join("cache");
-        let base = cache_root.join("project");
-        let before_run = tmp.path().join("before-run");
-        let after_run = tmp.path().join("after-run");
-        populate_prune_parity_fixture(&base);
-
-        let before = seedable_snapshot(&base);
-        assert_incremental_is_skipped(&base);
-        let before_result =
-            seed_cargo_target_dir_with_options(&base, &before_run, &CargoTargetSeedOptions::new(1))
-                .expect("seed before prune");
-
-        let prune = crate::cargo_incremental_prune::prune_fixture_incremental(&base, &cache_root)
-            .expect("prune warm incremental fixture");
-        assert_eq!(prune.outcome.as_str(), "pruned");
-        assert!(!base.join("debug/incremental").exists());
-
-        let after = seedable_snapshot(&base);
-        let after_result =
-            seed_cargo_target_dir_with_options(&base, &after_run, &CargoTargetSeedOptions::new(1))
-                .expect("seed after prune");
-
-        assert_eq!(
-            before, after,
-            "pruning may only remove skipped incremental state"
-        );
-        assert_eq!(
-            seed_result_without_skips(&before_result),
-            seed_result_without_skips(&after_result),
-            "all Hardlink/Copy output counts and bytes must survive pruning"
-        );
-        assert_seeded_snapshot(&base, &before_run, &before);
-        assert_seeded_snapshot(&base, &after_run, &after);
-        assert_prune_kept_non_incremental_fixture(&base);
-    }
-
-    #[test]
-    fn concurrent_prune_and_seed_scan_never_selects_incremental_or_changes_candidates() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let cache_root = tmp.path().join("cache");
-        let base = cache_root.join("project");
-        populate_prune_parity_fixture(&base);
-        let expected = seedable_snapshot(&base);
-        let barrier = Arc::new(Barrier::new(2));
-        let scan_base = base.clone();
-        let scan_barrier = Arc::clone(&barrier);
-
-        let scan = std::thread::spawn(move || {
-            let entries = scan_entries(&scan_base).expect("concurrent seed scan");
-            assert!(
-                entries
-                    .iter()
-                    .filter(|entry| has_component(&entry.relative_path, "incremental"))
-                    .all(|entry| entry.action == CloneAction::Skip),
-                "incremental entries observed by a seed scan must always be skipped"
-            );
-            scan_barrier.wait();
-            seedable_snapshot_from_entries(&scan_base, entries)
-        });
-
-        barrier.wait();
-        crate::cargo_incremental_prune::prune_fixture_incremental(&base, &cache_root)
-            .expect("concurrent prune");
-        let concurrent = scan.join().expect("seed scan thread");
-        let after = seedable_snapshot(&base);
-
-        assert_eq!(expected, concurrent);
-        assert_eq!(expected, after);
-        assert_prune_kept_non_incremental_fixture(&base);
-    }
-
-    #[test]
-    fn emits_fallback_metric_with_bounded_reason_label() {
-        let _guard = metric_test_guard();
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let base = tmp.path().join("missing-base");
-        let run = tmp.path().join("run-target");
-        let reason = djinn_telemetry::cargo_target_seed::FALLBACK_REASON_BASE_MISSING;
-        let before = fallback_metric_value(reason);
-
-        let result =
-            seed_cargo_target_dir_with_options(&base, &run, &CargoTargetSeedOptions::new(2))
-                .expect("missing base should not fail dispatch");
-
-        assert_eq!(
-            result.fallback_reason,
-            Some(CargoTargetSeedFallback::BaseMissing)
-        );
-        let after = fallback_metric_value(reason);
-        assert_eq!(
-            after,
-            before + 1.0,
-            "fallback metric should increment exactly once for BaseMissing"
-        );
-    }
-
-    #[test]
-    fn successful_seed_does_not_emit_fallback_metric() {
-        let _guard = metric_test_guard();
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let base = tmp.path().join("warm-base");
-        let run = tmp.path().join("run-target");
-        write_base_file(
-            &base,
-            Path::new("debug/deps/libsuccess.rlib"),
-            b"seeded artifact",
-        );
-        let before = total_fallback_metric_value();
-
-        let result =
-            seed_cargo_target_dir_with_options(&base, &run, &CargoTargetSeedOptions::new(2))
-                .expect("seed target dir");
-
-        assert_eq!(result.fallback_reason, None);
-        assert_eq!(total_fallback_metric_value(), before);
-    }
-
-    #[test]
-    fn teardown_run_dir_removes_private_dir_and_ignores_missing() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let run = tmp.path().join("run-target");
-        fs::create_dir_all(run.join("debug/deps")).expect("create run tree");
-        fs::write(run.join("debug/deps/libfoo.rlib"), b"artifact").expect("write run file");
-
-        let removed = teardown_run_dir(&run).expect("remove run dir");
-        assert_eq!(removed.outcome(), "removed");
-        assert_eq!(removed.removed_count(), 1);
-        assert!(!run.exists());
-
-        let missing = teardown_run_dir(&run).expect("missing run dir should be non-fatal");
-        assert_eq!(missing.outcome(), "already_absent");
-        assert_eq!(missing.removed_count(), 0);
-    }
-
-    /// Recursively collect every regular file under `root` (test-only helper for
-    /// the inode-level lock-sharing assertion).
-    fn walk_files(root: &Path) -> Vec<PathBuf> {
-        let mut files = Vec::new();
-        let mut stack = vec![root.to_path_buf()];
-        while let Some(dir) = stack.pop() {
-            let Ok(read) = fs::read_dir(&dir) else {
-                continue;
-            };
-            for entry in read.flatten() {
-                let path = entry.path();
-                let meta = fs::symlink_metadata(&path).expect("entry metadata");
-                if meta.is_dir() {
-                    stack.push(path);
-                } else if meta.is_file() {
-                    files.push(path);
-                }
-            }
-        }
-        files
-    }
-
-    fn write_base_file(base: &Path, relative: &Path, contents: &[u8]) {
-        let path = base.join(relative);
-        fs::create_dir_all(path.parent().expect("relative path parent")).expect("create parent");
-        fs::write(path, contents).expect("write base file");
-    }
-
-    fn populate_prune_parity_fixture(base: &Path) {
-        write_base_file(
-            base,
-            Path::new("debug/deps/libalpha.rlib"),
-            b"alpha artifact",
-        );
-        fs::hard_link(
-            base.join("debug/deps/libalpha.rlib"),
-            base.join("debug/deps/libalpha-alias.rlib"),
-        )
-        .expect("hardlink fixture artifact");
-        write_base_file(base, Path::new("debug/deps/alpha.d"), b"alpha dep-info");
-        write_base_file(
-            base,
-            Path::new("debug/.fingerprint/alpha-abc/invoked.timestamp"),
-            b"fingerprint metadata",
-        );
-        write_base_file(base, Path::new(".rustc_info.json"), b"rustc metadata");
-        write_base_file(
-            base,
-            Path::new("release/build/alpha/out/generated.rs"),
-            b"unrelated hardlink candidate",
-        );
-        write_base_file(base, Path::new("unrelated/keep.txt"), b"unrelated subtree");
-        write_base_file(
-            base,
-            Path::new("debug/incremental/alpha/session.bin"),
-            b"disposable incremental state",
-        );
-        write_base_file(
-            base,
-            Path::new("debug/incremental/alpha/work-products.bin"),
-            b"more disposable state",
-        );
-    }
-
-    fn seedable_snapshot(base: &Path) -> Vec<(PathBuf, CloneAction, Vec<u8>)> {
-        seedable_snapshot_from_entries(base, scan_entries(base).expect("scan seed fixture"))
-    }
-
-    fn seedable_snapshot_from_entries(
-        base: &Path,
-        entries: Vec<SeedEntry>,
-    ) -> Vec<(PathBuf, CloneAction, Vec<u8>)> {
-        let mut snapshot: Vec<_> = entries
-            .into_iter()
-            .filter(|entry| !entry.is_dir && entry.action != CloneAction::Skip)
-            .map(|entry| {
-                let contents =
-                    fs::read(base.join(&entry.relative_path)).expect("read seed candidate");
-                (entry.relative_path, entry.action, contents)
-            })
-            .collect();
-        snapshot.sort_by(|left, right| left.0.cmp(&right.0));
-        snapshot
-    }
-
-    fn assert_incremental_is_skipped(base: &Path) {
-        let entries = scan_entries(base).expect("scan incremental fixture");
-        assert!(
-            entries
-                .iter()
-                .filter(|entry| has_component(&entry.relative_path, "incremental"))
-                .all(|entry| entry.action == CloneAction::Skip),
-            "CARGO_INCREMENTAL=1 warm state must remain represented as skipped seed input"
-        );
-    }
-
-    fn seed_result_without_skips(result: &CargoTargetSeedResult) -> (u64, u64, u64, u64) {
-        (
-            result.linked_file_count,
-            result.copied_file_count,
-            result.linked_bytes,
-            result.copied_bytes,
-        )
-    }
-
-    fn assert_seeded_snapshot(
-        base: &Path,
-        run: &Path,
-        snapshot: &[(PathBuf, CloneAction, Vec<u8>)],
-    ) {
-        for (relative, action, contents) in snapshot {
-            assert_eq!(
-                fs::read(run.join(relative)).expect("read seeded candidate"),
-                *contents
-            );
-            #[cfg(unix)]
-            match action {
-                CloneAction::Hardlink => {
-                    assert_same_inode(&base.join(relative), &run.join(relative))
-                }
-                CloneAction::Copy => {
-                    assert_different_inode(&base.join(relative), &run.join(relative))
-                }
-                CloneAction::Skip => panic!("snapshot excludes skipped entries"),
-            }
-        }
-    }
-
-    fn assert_prune_kept_non_incremental_fixture(base: &Path) {
-        assert_eq!(
-            fs::read(base.join("debug/deps/libalpha.rlib")).expect("deps survives"),
-            b"alpha artifact"
-        );
-        assert_eq!(
-            fs::read(base.join("debug/.fingerprint/alpha-abc/invoked.timestamp"))
-                .expect("fingerprint survives"),
-            b"fingerprint metadata"
-        );
-        assert_eq!(
-            fs::read(base.join("unrelated/keep.txt")).expect("unrelated subtree survives"),
-            b"unrelated subtree"
-        );
-    }
-
-    fn metric_test_guard() -> MutexGuard<'static, ()> {
-        crate::tests::seed_telemetry_guard()
-    }
-
-    fn total_fallback_metric_value() -> f64 {
-        [
-            djinn_telemetry::cargo_target_seed::FALLBACK_REASON_BASE_MISSING,
-            djinn_telemetry::cargo_target_seed::FALLBACK_REASON_BASE_NOT_DIRECTORY,
-            djinn_telemetry::cargo_target_seed::FALLBACK_REASON_BASE_UNUSABLE,
-            djinn_telemetry::cargo_target_seed::FALLBACK_REASON_SCAN_FAILED,
-            djinn_telemetry::cargo_target_seed::FALLBACK_REASON_CLONE_FAILED,
-            djinn_telemetry::cargo_target_seed::FALLBACK_REASON_UNKNOWN,
-        ]
-        .into_iter()
-        .map(fallback_metric_value)
-        .sum()
-    }
-
-    fn fallback_metric_value(reason: &str) -> f64 {
-        djinn_telemetry::render()
-            .expect("render telemetry")
-            .lines()
-            .find_map(|line| {
-                let (sample, value) = line.rsplit_once(' ')?;
-                if sample.starts_with(CARGO_TARGET_SEED_TOTAL)
-                    && sample.contains("outcome=\"fallback\"")
-                    && sample.contains(&format!("fallback_reason=\"{reason}\""))
-                {
-                    value.parse::<f64>().ok()
-                } else {
-                    None
-                }
-            })
-            .unwrap_or(0.0)
-    }
-
-    #[cfg(unix)]
-    fn assert_same_inode(left: &Path, right: &Path) {
-        let left = fs::metadata(left).expect("left metadata");
-        let right = fs::metadata(right).expect("right metadata");
-        assert_eq!((left.dev(), left.ino()), (right.dev(), right.ino()));
-    }
-
-    #[cfg(unix)]
-    fn assert_different_inode(left: &Path, right: &Path) {
-        let left = fs::metadata(left).expect("left metadata");
-        let right = fs::metadata(right).expect("right metadata");
-        assert_ne!((left.dev(), left.ino()), (right.dev(), right.ino()));
-    }
-}
+#[cfg(test)]
+mod foreign_owner_tests;
