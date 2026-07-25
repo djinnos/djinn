@@ -2,13 +2,16 @@ name: Release
 
 # Builds + publishes every OCI image djinn ships to ghcr.io/djinnos.
 # Replaces the split release-server / release-desktop / image-builder-
-# publish workflows. Four images land in the registry per run:
+# publish workflows. Seven images land in the registry per run:
 #
 #   djinn-server              — control plane, API + embedded UI on :3000
 #   djinn-image-builder       — BuildKit wrapper used by image-controller
 #   djinn-agent-runtime-base  — heavy base: rustup, sccache, mold, LSPs
 #   djinn-agent-runtime       — thin top: runtime-base + djinn-agent-worker
 #                               + djinn-cgroup-launcher
+#   djinn-postgres-wrapper    — Postgres service wrapper for strict verification
+#   djinn-redis-wrapper       — Redis service wrapper for strict verification
+#   djinn-rabbitmq-wrapper    — RabbitMQ service wrapper for strict verification
 #
 # Triggers:
 #   * tag push `v*`             — publishes SemVer tags (`:1.2.3`, `:1.2`, `:1`)
@@ -427,15 +430,83 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
 
+  # The wrapper build script owns both the build contexts and the manifest
+  # format. Keep CI on that path so its pushed-digest evidence cannot drift
+  # from the local release procedure.
+  wrapper-images:
+    name: catalog service wrappers
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Select wrapper release tag
+        id: tag
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            tag="${GITHUB_REF_NAME#v}"
+          elif [ -n "$INPUT_TAG" ]; then
+            tag="${INPUT_TAG#v}"
+          else
+            tag="sha-${GITHUB_SHA::7}"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+      - name: Build and publish catalog service wrappers
+        env:
+          REGISTRY: ${{ env.REGISTRY }}/${{ env.OWNER }}
+          TAG: ${{ steps.tag.outputs.tag }}
+          MANIFEST: ${{ runner.temp }}/wrapper-image-manifest.json
+          PUSH: "1"
+        run: ./server/docker/build-wrapper-images.sh
+      - name: Verify pushed wrapper digests
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+          MANIFEST: ${{ runner.temp }}/wrapper-image-manifest.json
+        run: |
+          set -euo pipefail
+          while IFS=$'\t' read -r image digest; do
+            actual=$(docker buildx imagetools inspect --format '{{.Manifest.Digest}}' "$image:$TAG")
+            test "$actual" = "$digest" || {
+              echo "::error::$image:$TAG resolved to $actual, manifest records $digest"
+              exit 1
+            }
+          done < <(python3 - "$MANIFEST" <<'PY'
+          import json
+          import sys
+
+          for entry in json.load(open(sys.argv[1]))["entries"]:
+              print(f'{entry["wrapper_image"]}\t{entry["image_digest"]}')
+          PY
+          )
+      - name: Confirm wrapper build cleanup
+        if: always()
+        run: test -z "$(git status --porcelain -- server/docker)"
+      - name: Publish wrapper image manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: wrapper-image-manifest
+          path: ${{ runner.temp }}/wrapper-image-manifest.json
+          retention-days: 90
+          if-no-files-found: error
+
   # ── Changelog / GitHub Release (tag pushes only) ──────────────────────
   # Publishes a GitHub Release for the tag with notes auto-generated from the
-  # PRs merged since the previous tag. Gated on the server + runtime image
-  # jobs so a published Release always corresponds to images that shipped.
+  # PRs merged since the previous tag. Gated on the server, runtime, and
+  # wrapper-image jobs so a published Release corresponds to every image and
+  # its deployable digest manifest.
   # Categories + exclusions come from `.github/release.yml`.
   release-notes:
     name: GitHub Release + changelog
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [server, runtime]
+    needs: [server, runtime, wrapper-images]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
