@@ -69,18 +69,29 @@ const CREDENTIAL_BYTES: usize = 32;
 const CONNECT_POLL: Duration = Duration::from_millis(100);
 const CONNECT_ATTEMPTS: u32 = 300;
 
-/// Typed, bounded outcome of the launcher handshake. Every variant other than
-/// [`LauncherHandshake::Connected`] routes the worker to unleased, in-process
-/// shell execution (see the module docs).
+/// Explicit worker-visible enforcement intent rendered by `djinn-k8s`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LauncherEnforcement { Disabled, Required }
+
+impl LauncherEnforcement {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim() {
+            "disabled" => Some(Self::Disabled),
+            "required" => Some(Self::Required),
+            _ => None,
+        }
+    }
+}
+
+/// Typed, bounded outcome of a required launcher handshake. Callers must reject
+/// every variant other than [`LauncherHandshake::Connected`] before shell setup.
 pub enum LauncherHandshake {
     /// The sidecar is present and authenticated us: the broker client is live
     /// and readiness has been accepted.
     Connected(Box<UnixBrokerClient>),
-    /// No IPC mount / sidecar — the launcher is not rendered, this is an old
-    /// rendering, or a local/non-pod run. Shells run in-process, unleased.
+    /// Required IPC mount / sidecar is absent.
     AbsentMount,
-    /// The mount was present but the handshake failed. Fail closed to unleased
-    /// in-process execution; the reason is carried for logging.
+    /// The required mount was present but the handshake failed.
     FailedClosed(HandshakeError),
 }
 
@@ -102,7 +113,7 @@ pub enum HandshakeError {
     Ready(#[source] LauncherError),
 }
 
-/// Establish the leased broker path, gated on the sidecar's presence.
+/// Establish the required leased broker path.
 ///
 /// `socket_path` is `DJINN_LAUNCHER_SOCKET` and `credential_path` is
 /// `DJINN_LAUNCHER_CREDENTIAL_PATH` (both projected by qut0's render). The

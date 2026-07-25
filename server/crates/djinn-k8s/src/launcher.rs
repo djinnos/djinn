@@ -2,9 +2,9 @@
 //! cgroup-launcher sidecar, the v1 worker/child/launcher security contract, and
 //! the fail-closed render/startup validation seam.
 //!
-//! The launcher sidecar is **not** unconditionally rendered: arming enforcement
-//! is an operator decision ([`CgroupLauncherMode`], default
-//! [`Disabled`](CgroupLauncherMode::Disabled)). The armed path is real and
+//! The launcher sidecar is rendered by the production default
+//! ([`CgroupLauncherMode::Required]). An explicit disabled mode remains for
+//! local/development profiles. The armed path is real and
 //! measured — the launcher establishes its own delegated cgroup v2 root, throttles
 //! an unleased invocation to [`LAUNCHER_UNLEASED_MILLICORES`], and lifts it to the
 //! pod's declared CPU budget on a fenced lease. `djinn-cgroup-launcher`'s
@@ -181,21 +181,25 @@ pub const LAUNCHER_CGROUP_ROOT: &str = "/run/djinn-cgroup";
 /// root is unreachable. The design mounts inside the launcher's own cgroup
 /// namespace, where an invocation leaf IS a descendant of the namespace root.
 ///
-/// The default remains [`Disabled`](CgroupLauncherMode::Disabled) — arming
-/// enforcement is an operator decision, taken with
-/// `DJINN_K8S_CGROUP_LAUNCHER_MODE=required` — and
-/// [`validate_enforcement_render`] still fails closed at dispatch if the render
-/// this build produces could not actually satisfy the launcher's contract.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+/// Production defaults to [`Required`](CgroupLauncherMode::Required). An
+/// operator may set `DJINN_K8S_CGROUP_LAUNCHER_MODE=disabled` only for a local
+/// or development profile that deliberately uses direct worker execution.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum CgroupLauncherMode {
-    /// No sidecar, no launcher volumes, no launcher env. Shell commands run
-    /// in-process in the worker, unleased. This is the default.
-    #[default]
+    /// No sidecar, no launcher volumes, no launcher IPC env. Shell commands run
+    /// in-process in the worker, unleased. This is for explicit local/development
+    /// profiles only.
     Disabled,
     /// Arm the sidecar: the launcher establishes its delegated cgroup root and
     /// every shell command runs in a per-invocation leaf under a CPU lease.
     Required,
+}
+
+impl Default for CgroupLauncherMode {
+    fn default() -> Self {
+        Self::Required
+    }
 }
 
 impl CgroupLauncherMode {

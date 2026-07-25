@@ -79,7 +79,10 @@ buildAdmission:
 # render is refused at dispatch before a Job is submitted, and a launcher that
 # cannot establish its delegation exits non-zero before binding its socket.
 cgroupLauncher:
-  mode: disabled
+  # Production task-runs must use the brokered invocation-leaf path. Set this
+  # explicitly to `disabled` only for local/development environments where the
+  # launcher runtime profile is intentionally unavailable.
+  mode: required
 
 # -----------------------------------------------------------------------------
 # Server deployment

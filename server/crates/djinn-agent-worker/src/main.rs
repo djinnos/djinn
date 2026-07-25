@@ -259,6 +259,16 @@ struct WorkerDefaultArgs {
     #[arg(long, env = "DJINN_TASK_RUN_POD_UID")]
     task_run_pod_uid: String,
 
+    /// Explicit launcher enforcement intent rendered with the task-run Job.
+    /// `required` rejects startup when the authenticated broker cannot be used;
+    /// `disabled` is the explicit local/development direct-execution profile.
+    #[arg(
+        long,
+        env = "DJINN_CGROUP_LAUNCHER_MODE",
+        default_value = "disabled"
+    )]
+    launcher_enforcement: String,
+
     /// cgroup-launcher control socket the sidecar binds inside the shared IPC
     /// mount. Env name and default match qut0's render (`DJINN_LAUNCHER_SOCKET`
     /// / `djinn_k8s::launcher::LAUNCHER_SOCKET_PATH`). The worker connects here
@@ -2232,60 +2242,43 @@ async fn run_task_run(args: WorkerDefaultArgs) -> Result<()> {
     .with_context(|| format!("dial djinn-server at {server_addr}"))?;
     info!(server = %server_addr, "tcp connection up, RPC handshake accepted");
 
-    // Detection-gated launcher handshake (task ab05). When a cgroup-launcher
-    // sidecar is rendered, its serve loop waits for a worker handshake (private
-    // credential + worker PID in the shared IPC mount) before it binds its
-    // control socket. The worker writes that handshake and dials the socket here.
-    //
-    // When the mount/sidecar is absent — which is the DEFAULT since task grkq,
-    // and also covers old renderings and local/non-pod runs — or when the
-    // handshake fails closed for any reason, `shell_launch` stays `None` and the
-    // shell handler executes commands IN-PROCESS at the pod's own quota
-    // (unleased, no cgroup leaf, no lease lift). That is a real, supported
-    // production path, not a stub. The handshake never blocks pod startup. Run
-    // the blocking write/connect on a blocking thread so the async runtime is
-    // never stalled.
-    let launcher_socket = args.launcher_socket.clone();
-    let launcher_credential_path = args.launcher_credential_path.clone();
-    let handshake = tokio::task::spawn_blocking(move || {
-        let mut dumpability = djinn_cgroup_launcher::child::NativeWorkerDumpability;
-        launcher_handshake::establish(
-            &launcher_socket,
-            &launcher_credential_path,
-            &mut dumpability,
-        )
-    })
-    .await
-    .context("join launcher handshake task")?;
-    let shell_launch = match handshake {
-        launcher_handshake::LauncherHandshake::Connected(broker_client) => {
-            info!("cgroup-launcher handshake complete; using leased broker shell path");
-            Some(
-                ShellLaunchContext::broker_backed(
-                    spec.task_id.clone(),
-                    spec.task_run_id.clone(),
-                    args.task_run_pod_uid.clone(),
-                    rpc.clone(),
-                    *broker_client,
-                )
-                .await
-                .context("recover durable invocation journal")?,
-            )
-        }
-        launcher_handshake::LauncherHandshake::AbsentMount => {
-            info!(
-                socket = %args.launcher_socket.display(),
-                "no cgroup-launcher IPC mount; shell commands run in-process, unleased"
-            );
+    // The explicit mode, not mount detection, controls whether direct execution
+    // is permitted. Required mode authenticates before AgentContext exists.
+    let launcher_enforcement = launcher_handshake::LauncherEnforcement::parse(
+        &args.launcher_enforcement,
+    )
+    .ok_or_else(|| anyhow::anyhow!(
+        "DJINN_CGROUP_LAUNCHER_MODE must be `required` or `disabled`, got {:?}",
+        args.launcher_enforcement
+    ))?;
+    let shell_launch = match launcher_enforcement {
+        launcher_handshake::LauncherEnforcement::Disabled => {
+            info!("cgroup launcher explicitly disabled; using local direct shell path");
             None
         }
-        launcher_handshake::LauncherHandshake::FailedClosed(error) => {
-            warn!(
-                error = %error,
-                socket = %args.launcher_socket.display(),
-                "cgroup-launcher handshake failed; degrading to unleased in-process shell execution"
-            );
-            None
+        launcher_handshake::LauncherEnforcement::Required => {
+            let launcher_socket = args.launcher_socket.clone();
+            let launcher_credential_path = args.launcher_credential_path.clone();
+            let handshake = tokio::task::spawn_blocking(move || {
+                let mut dumpability = djinn_cgroup_launcher::child::NativeWorkerDumpability;
+                launcher_handshake::establish(&launcher_socket, &launcher_credential_path, &mut dumpability)
+            })
+            .await
+            .context("join required launcher handshake task")?;
+            match handshake {
+                launcher_handshake::LauncherHandshake::Connected(broker_client) => Some(
+                    ShellLaunchContext::broker_backed(
+                        spec.task_id.clone(), spec.task_run_id.clone(), args.task_run_pod_uid.clone(),
+                        rpc.clone(), *broker_client,
+                    ).await.context("recover durable invocation journal")?,
+                ),
+                launcher_handshake::LauncherHandshake::AbsentMount => anyhow::bail!(
+                    "required cgroup-launcher IPC mount is absent at {}", args.launcher_credential_path.display()
+                ),
+                launcher_handshake::LauncherHandshake::FailedClosed(error) => anyhow::bail!(
+                    "required cgroup-launcher handshake failed at {}: {error}", args.launcher_socket.display()
+                ),
+            }
         }
     };
 

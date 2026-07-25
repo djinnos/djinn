@@ -265,13 +265,14 @@ pub fn build_task_run_job(
     // runs use `effective_services` (empty) so no DB connection env is injected.
     let mut worker_env = build_task_run_env(config, &task_run_id_str, project_id, policy);
     worker_env.extend(effective_services.iter().flat_map(sidecar_conn_env));
-    // Broker socket + worker-private credential paths so the worker can dial the
-    // cgroup-launcher sidecar — only when that sidecar is actually rendered.
-    //
-    // Task grkq: these MUST NOT be emitted when the launcher is disabled. The
-    // worker's handshake is detection-gated on the IPC mount existing; projecting
-    // the paths (and the mount) without a sidecar would make it wait out the full
-    // 30s connect window on every pod start before falling back.
+    // The worker receives an explicit enforcement intent instead of inferring it
+    // from an incidental directory. Required mode may never degrade to direct execution.
+    worker_env.push(env_var(
+        "DJINN_CGROUP_LAUNCHER_MODE",
+        config.cgroup_launcher_mode.as_str(),
+    ));
+    // IPC paths exist only with the sidecar; disabled local/development runs skip
+    // the handshake entirely and retain no launcher IPC surface.
     let renders_launcher = config.cgroup_launcher_mode.renders_sidecar();
     if renders_launcher {
         worker_env.extend(worker_launcher_env());
