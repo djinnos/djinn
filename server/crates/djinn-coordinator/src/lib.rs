@@ -200,6 +200,8 @@ mod build_admission_inventory_tests;
 #[cfg(test)]
 mod build_admission_light_role_tests;
 #[cfg(test)]
+mod build_admission_stale_reclaim_tests;
+#[cfg(test)]
 mod build_lease_cap_arming_tests;
 #[cfg(test)]
 mod build_lease_integration_tests;

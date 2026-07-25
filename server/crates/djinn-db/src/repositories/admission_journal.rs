@@ -185,6 +185,36 @@ pub struct TerminalAdmissionInput {
     pub object_uid: Option<String>,
 }
 
+/// One occupying generation and the exact identity an absence proof was taken
+/// against.
+///
+/// Reclamation is a compare-and-set, never a blind write: every field below is
+/// re-read under the row lock and must still match, so a row that changed after
+/// the Kubernetes evidence was gathered — it acquired a UID, advanced to Live,
+/// or was re-created by a newer dispatch — is refused rather than terminalized.
+/// This is what keeps the existing fencing semantics intact while still
+/// releasing capacity whose object is provably gone.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReclaimAbsentInput {
+    pub key: AdmissionJournalKey,
+    pub observed_state: AdmissionState,
+    pub observed_creator_server_epoch: String,
+    pub observed_object_name: String,
+    pub observed_object_uid: Option<String>,
+}
+
+/// Outcome of one evidence-fenced reclamation attempt.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ReclaimAbsentOutcome {
+    /// The row still matched the proof and was retired to Terminal.
+    Reclaimed(AdmissionJournalRow),
+    /// The row was already Terminal; capacity was released by someone else.
+    AlreadyTerminal(AdmissionJournalRow),
+    /// The row no longer matches the observation the proof was taken against;
+    /// nothing was written.
+    Fenced { reason: String },
+}
+
 /// Atomic predecessor-epoch recovery report.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AdmissionRecoveryResult {
@@ -521,6 +551,42 @@ impl AdmissionJournalRepository {
         active_rows(self.db.pool()).await
     }
 
+    /// Occupying rows, each flagged with whether it has been untouched for at
+    /// least `settle_seconds`.
+    ///
+    /// Settlement is evaluated against the database clock that wrote
+    /// `updated_at`, so it needs no timestamp parsing and no agreement between
+    /// process clocks. It is NOT by itself a reason to release anything: a
+    /// Kubernetes create that a dead process POSTed can still be admitted by
+    /// the API server for a short window after the process is gone, and this
+    /// flag is what stops reconciliation from racing that window. Absence of
+    /// the object remains the only proof.
+    pub async fn list_active_rows_with_settlement(
+        &self,
+        settle_seconds: i64,
+    ) -> DbResult<Vec<(AdmissionJournalRow, bool)>> {
+        if settle_seconds < 0 {
+            return Err(DbError::InvalidData(
+                "settle window must be non-negative".into(),
+            ));
+        }
+        self.db.ensure_initialized().await?;
+        let rows = sqlx::query_as::<_, SettlementDbRow>(&format!(
+            "SELECT {JOURNAL_COLUMNS}, (updated_at <= now() - make_interval(secs => $2)) AS settled \
+             FROM admission_journal WHERE state = ANY($1) ORDER BY domain, work_id, generation"
+        ))
+        .bind(OCCUPYING_STATES.as_slice())
+        .bind(settle_seconds as f64)
+        .fetch_all(self.db.pool())
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                let settled = row.settled.unwrap_or(false);
+                AdmissionJournalRow::try_from(row.row).map(|row| (row, settled))
+            })
+            .collect()
+    }
+
     pub async fn recover_predecessor_epoch(
         &self,
         predecessor_epoch: &str,
@@ -579,6 +645,62 @@ impl AdmissionJournalRepository {
             marked_create_unknown,
             active_rows: rows,
         })
+    }
+
+    /// Retire one occupying generation whose Kubernetes object is provably gone.
+    ///
+    /// Recovery only terminalizes `reserved` rows and converts `create_in_flight`
+    /// into occupying `create_unknown`. Nothing else in the journal can leave an
+    /// occupying state without a lifecycle callback from the process that
+    /// created the object, so a generation whose object vanished with its
+    /// creator occupies capacity forever. This is the durable half of the
+    /// reconciliation that fixes that; the caller owns the Kubernetes evidence.
+    ///
+    /// The write is fenced by a compare-and-set on the full observed identity
+    /// (state, creator epoch, object name, object UID). Anything that changed
+    /// since the proof was gathered yields [`ReclaimAbsentOutcome::Fenced`] and
+    /// writes nothing, so this can never terminalize a row that might still
+    /// correspond to live work. Unlike the lifecycle mutations it deliberately
+    /// does not require the row to be the latest generation: a superseded
+    /// occupying generation is, by definition, a lifecycle that already ended.
+    pub async fn reclaim_absent_object(
+        &self,
+        input: &ReclaimAbsentInput,
+    ) -> DbResult<ReclaimAbsentOutcome> {
+        if input.observed_state == AdmissionState::Terminal {
+            return Err(DbError::InvalidData(
+                "reclamation evidence must describe an occupying state".into(),
+            ));
+        }
+        self.db.ensure_initialized().await?;
+        let mut tx = self.db.pool().begin().await?;
+        lock_work(&mut tx, input.key.domain, &input.key.work_id).await?;
+        let Some(row) = fetch_row_for_update(&mut tx, &input.key).await? else {
+            tx.commit().await?;
+            return Ok(ReclaimAbsentOutcome::Fenced {
+                reason: "admission row no longer exists".into(),
+            });
+        };
+        if row.state == AdmissionState::Terminal {
+            tx.commit().await?;
+            return Ok(ReclaimAbsentOutcome::AlreadyTerminal(row));
+        }
+        if row.state != input.observed_state
+            || row.creator_server_epoch != input.observed_creator_server_epoch
+            || row.object_name != input.observed_object_name
+            || row.object_uid != input.observed_object_uid
+        {
+            let reason = format!(
+                "admission row changed after the absence proof (observed {:?}/{}, found {:?}/{})",
+                input.observed_state, input.observed_object_name, row.state, row.object_name
+            );
+            tx.commit().await?;
+            return Ok(ReclaimAbsentOutcome::Fenced { reason });
+        }
+        let reclaimed =
+            update_state(&mut tx, &input.key, "terminal", row.object_uid.as_deref()).await?;
+        tx.commit().await?;
+        Ok(ReclaimAbsentOutcome::Reclaimed(reclaimed))
     }
 
     /// Count rows that currently occupy task-or-warm capacity.
@@ -705,6 +827,13 @@ impl AdmissionJournalRepository {
 }
 
 #[derive(sqlx::FromRow)]
+struct SettlementDbRow {
+    #[sqlx(flatten)]
+    row: JournalDbRow,
+    settled: Option<bool>,
+}
+
+#[derive(sqlx::FromRow)]
 struct JournalDbRow {
     domain: String,
     work_id: String,
@@ -793,6 +922,24 @@ async fn fetch_row(
 }
 
 const JOURNAL_COLUMNS: &str = "domain, work_id, generation, workload_kind, state, creator_server_epoch, object_name, object_uid, created_at::text, updated_at::text, terminal_at::text";
+
+/// Row-locked fetch of one exact generation, without the latest-generation
+/// requirement [`current_row_for_update`] imposes on lifecycle mutations.
+async fn fetch_row_for_update(
+    tx: &mut Transaction<'_, Postgres>,
+    key: &AdmissionJournalKey,
+) -> DbResult<Option<AdmissionJournalRow>> {
+    let row = sqlx::query_as::<_, JournalDbRow>(&format!(
+        "SELECT {JOURNAL_COLUMNS} FROM admission_journal \
+         WHERE domain = $1 AND work_id = $2 AND generation = $3 FOR UPDATE"
+    ))
+    .bind(key.domain.as_str())
+    .bind(&key.work_id)
+    .bind(key.generation)
+    .fetch_optional(&mut **tx)
+    .await?;
+    row.map(TryInto::try_into).transpose()
+}
 
 fn invalid_state(operation: &str, state: AdmissionState) -> DbError {
     DbError::InvalidTransition(format!("cannot {operation} from {state:?}"))

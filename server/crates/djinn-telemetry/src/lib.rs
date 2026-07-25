@@ -247,7 +247,15 @@ const BUILD_ADMISSION_CREATE_UNKNOWN_HEALTH: &str = "djinn_build_admission_creat
 const BUILD_ADMISSION_SHADOW_INVOCATION_TOTAL: &str =
     "djinn_build_admission_shadow_invocation_total";
 const BUILD_ADMISSION_TRANSITION_TOTAL: &str = "djinn_build_admission_transition_total";
-const BUILD_ADMISSION_TRANSITION_OUTCOMES: [&str; 2] = ["accepted", "rejected"];
+// One closed enumeration for every durable journal write attempt: the two
+// lifecycle outcomes plus the two startup-reconciliation outcomes. Extending
+// this family rather than adding a parallel metric keeps a single query able to
+// answer "is the journal accepting writes, and is anything reclaiming stale
+// occupancy" for a whole fleet.
+const BUILD_ADMISSION_TRANSITION_OUTCOMES: [&str; 4] =
+    ["accepted", "rejected", "reclaimed", "reclaim_fenced"];
+const BUILD_ADMISSION_OCCUPANCY_OVER_CAP: &str = "djinn_build_admission_occupancy_over_cap";
+const BUILD_ADMISSION_STALE_ROWS: &str = "djinn_build_admission_stale_rows";
 const BUILD_ADMISSION_HANDOFF_WARNING: &str = "djinn_build_admission_handoff_warning";
 const BUILD_ADMISSION_HANDOFF_WARNING_REASONS: [&str; 3] =
     ["unexpected_overlap", "stale_epoch", "epoch_unreadable"];
@@ -2246,12 +2254,19 @@ fn register_metrics() {
         BUILD_ADMISSION_INVENTORY_DEGRADED,
         BUILD_ADMISSION_JOURNAL_DEGRADED,
         BUILD_ADMISSION_CREATE_UNKNOWN_HEALTH,
+        BUILD_ADMISSION_OCCUPANCY_OVER_CAP,
     ] {
         metrics::describe_gauge!(
             metric,
             "Bounded build-admission health signal; one means degraded."
         );
     }
+    metrics::describe_gauge!(
+        BUILD_ADMISSION_STALE_ROWS,
+        "Occupying admission-journal rows whose Kubernetes object was proven \
+         absent by the last reconciliation pass. A population above the cap is \
+         the shape that wedges every admission once the cap is armed."
+    );
     metrics::describe_gauge!(
         BUILD_ADMISSION_HANDOFF_WARNING,
         "Current bounded emergency-to-invocation admission handoff warning; one means active."
@@ -3352,6 +3367,14 @@ pub mod build_admission {
         }
     }
 
+    /// One durable-write outcome for the closed `outcome` enumeration.
+    pub const OUTCOME_ACCEPTED: &str = "accepted";
+    pub const OUTCOME_REJECTED: &str = "rejected";
+    /// A stale occupying row was terminalized against Kubernetes absence proof.
+    pub const OUTCOME_RECLAIMED: &str = "reclaimed";
+    /// A reclamation was refused because the row no longer matched its proof.
+    pub const OUTCOME_RECLAIM_FENCED: &str = "reclaim_fenced";
+
     /// Set readiness-derived health gauges. `true` means degraded.
     pub fn set_health(
         effective_mode: &'static str,
@@ -3359,11 +3382,19 @@ pub mod build_admission {
         inventory_degraded: bool,
         journal_degraded: bool,
         create_unknown: bool,
+        occupancy_over_cap: bool,
     ) {
         let cap = effective_cap.to_string();
         metrics::gauge!(super::BUILD_ADMISSION_INVENTORY_DEGRADED, "effective_mode" => effective_mode, "effective_cap" => cap.clone()).set(f64::from(inventory_degraded));
         metrics::gauge!(super::BUILD_ADMISSION_JOURNAL_DEGRADED, "effective_mode" => effective_mode, "effective_cap" => cap.clone()).set(f64::from(journal_degraded));
-        metrics::gauge!(super::BUILD_ADMISSION_CREATE_UNKNOWN_HEALTH, "effective_mode" => effective_mode, "effective_cap" => cap).set(f64::from(create_unknown));
+        metrics::gauge!(super::BUILD_ADMISSION_CREATE_UNKNOWN_HEALTH, "effective_mode" => effective_mode, "effective_cap" => cap.clone()).set(f64::from(create_unknown));
+        metrics::gauge!(super::BUILD_ADMISSION_OCCUPANCY_OVER_CAP, "effective_mode" => effective_mode, "effective_cap" => cap).set(f64::from(occupancy_over_cap));
+    }
+
+    /// Set the absolute count of occupying rows whose object was proven absent
+    /// by the last reconciliation pass.
+    pub fn set_stale_rows(effective_mode: &'static str, effective_cap: i64, stale_rows: u64) {
+        metrics::gauge!(super::BUILD_ADMISSION_STALE_ROWS, "effective_mode" => effective_mode, "effective_cap" => effective_cap.to_string()).set(stale_rows as f64);
     }
     /// Record one bounded Observe-mode would-defer event.
     pub fn increment_would_defer(effective_mode: &'static str, effective_cap: i64) {
@@ -3376,10 +3407,26 @@ pub mod build_admission {
     /// the shape that makes the journal unsafe to arm as a grant authority —
     /// without reading a single log line.
     pub fn record_transition(effective_mode: &'static str, effective_cap: i64, accepted: bool) {
+        let outcome = if accepted {
+            OUTCOME_ACCEPTED
+        } else {
+            OUTCOME_REJECTED
+        };
+        record_transition_outcome(effective_mode, effective_cap, outcome);
+    }
+
+    /// Record one durable admission-journal write attempt under the closed
+    /// `outcome` enumeration. `outcome` MUST be one of the `OUTCOME_*`
+    /// constants; reconciliation reports `reclaimed` / `reclaim_fenced` through
+    /// the same family the lifecycle reports `accepted` / `rejected` through.
+    pub fn record_transition_outcome(
+        effective_mode: &'static str,
+        effective_cap: i64,
+        outcome: &'static str,
+    ) {
         let cap = effective_cap.to_string();
-        let outcome = if accepted { "accepted" } else { "rejected" };
-        // Both series exist as soon as either is written, so a zero-rejection
-        // process is distinguishable from an unreported one.
+        // Every series exists as soon as any is written, so a process that has
+        // reclaimed nothing is distinguishable from one that never reported.
         for candidate in super::BUILD_ADMISSION_TRANSITION_OUTCOMES {
             metrics::counter!(super::BUILD_ADMISSION_TRANSITION_TOTAL, "effective_mode" => effective_mode, "effective_cap" => cap.clone(), "outcome" => candidate)
                 .increment(u64::from(candidate == outcome));

@@ -1,18 +1,32 @@
 //! Conservative Kubernetes inventory classification and reconciliation.
 use crate::build_admission::{BuildAdmissionController, BuildAdmissionMode};
 use djinn_db::{
-    AdmissionDomain, AdmissionJournalKey, AdmissionRecoveryResult, AdmissionState,
-    AdmissionWorkloadKind, AdoptLiveAdmissionInput, TerminalAdmissionInput,
+    AdmissionDomain, AdmissionJournalKey, AdmissionJournalRow, AdmissionRecoveryResult,
+    AdmissionState, AdmissionWorkloadKind, AdoptLiveAdmissionInput, ReclaimAbsentInput,
+    ReclaimAbsentOutcome, TerminalAdmissionInput,
 };
 use djinn_k8s::{
-    LABEL_ADMISSION_DOMAIN, LABEL_ADMISSION_GENERATION, LABEL_ADMISSION_WORK_ID, UidGetResult,
-    WorkloadInventory, WorkloadRecord, has_canonical_warm_signature,
+    LABEL_ADMISSION_DOMAIN, LABEL_ADMISSION_GENERATION, LABEL_ADMISSION_WORK_ID, ObjectPresence,
+    UidGetResult, WorkloadInventory, WorkloadObjectKind, WorkloadRecord,
+    has_canonical_warm_signature,
 };
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
+    time::Duration,
 };
 use tokio::sync::Mutex;
+
+/// How long an occupying row must sit untouched before its object's absence is
+/// allowed to retire it.
+///
+/// This is a guard, never the reason. A Kubernetes create that a since-dead
+/// process POSTed can still be admitted by the API server shortly after that
+/// process is gone, so a row that was written moments ago is not yet safe to
+/// judge by a LIST/GET. Five minutes is far beyond any create-admission window
+/// and far below the lifetime of the stale populations this reclaims.
+pub const DEFAULT_RECLAIM_SETTLE_WINDOW: Duration = Duration::from_secs(300);
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ClassifiedWorkload {
     pub key: AdmissionJournalKey,
@@ -23,7 +37,18 @@ pub struct ClassifiedWorkload {
 pub struct InventoryReport {
     pub adopted: usize,
     pub released: usize,
+    /// Occupying rows in a pre-Live state that were retired because their
+    /// Kubernetes object was proven absent.
+    pub reclaimed: usize,
+    /// Rows whose object was proven absent, counted before any reclamation.
+    /// This is the size of the stale population, not the size of the fix.
+    pub stale: usize,
+    /// Reclamations refused because the row changed after its absence proof.
+    pub fenced: usize,
     pub blockers: Vec<String>,
+}
+fn identity(key: &AdmissionJournalKey) -> String {
+    format!("{:?}:{}:{}", key.domain, key.work_id, key.generation)
 }
 fn domain(v: &str) -> Option<AdmissionDomain> {
     match v {
@@ -104,6 +129,18 @@ fn classify(r: &WorkloadRecord) -> Result<Option<ClassifiedWorkload>, String> {
             object: r.clone(),
         }));
     }
+    // Image builds share the namespace but are not project compiles under the
+    // shared task/warm cap: the image controller dispatches them, they execute
+    // on buildkitd, and they have never carried an admission identity. They
+    // must be RECOGNISED here rather than falling through to the
+    // unclassifiable catch-all below, which marks the inventory gate pending
+    // and would keep Enforce fail-closed for as long as any image is building.
+    if l.get("djinn.app/component")
+        .is_some_and(|value| value == "image-build")
+        || r.name.starts_with("djinn-build-")
+    {
+        return Ok(None);
+    }
     if (r.name.starts_with("djinn-") || l.keys().any(|k| k.starts_with("djinn.app/")))
         && !r.terminal
         && !r.images.is_empty()
@@ -115,6 +152,7 @@ fn classify(r: &WorkloadRecord) -> Result<Option<ClassifiedWorkload>, String> {
 pub struct BuildAdmissionReconciler {
     controller: Arc<BuildAdmissionController>,
     inventory: Arc<dyn WorkloadInventory>,
+    settle_window: Duration,
     serial: Mutex<()>,
 }
 impl BuildAdmissionReconciler {
@@ -122,12 +160,61 @@ impl BuildAdmissionReconciler {
         controller: Arc<BuildAdmissionController>,
         inventory: Arc<dyn WorkloadInventory>,
     ) -> Self {
+        Self::with_settle_window(controller, inventory, DEFAULT_RECLAIM_SETTLE_WINDOW)
+    }
+
+    /// Reconcile with an explicit settle window. Tests use a zero window to
+    /// exercise reclamation without sleeping; production uses the default.
+    pub fn with_settle_window(
+        controller: Arc<BuildAdmissionController>,
+        inventory: Arc<dyn WorkloadInventory>,
+        settle_window: Duration,
+    ) -> Self {
         Self {
             controller,
             inventory,
+            settle_window,
             serial: Mutex::new(()),
         }
     }
+    /// Whether a pre-Live occupying row's Kubernetes object is provably gone.
+    ///
+    /// Every clause is a fence that must open; none of them is a heuristic
+    /// about how old the row looks:
+    ///
+    /// * the row's creator epoch is not this process, so no in-process dispatch
+    ///   can still be mid-create for it — the only process that could have
+    ///   finished this create is gone;
+    /// * the row has settled, so the API server can no longer be admitting a
+    ///   create the dead process POSTed;
+    /// * the authoritative LIST that just succeeded contains no object under
+    ///   this row's name, and it did not classify to a live workload;
+    /// * a direct GET, taken now and independently of the LIST snapshot,
+    ///   answers that no object with that name exists. `Uncertain` — a
+    ///   transport or permission failure — is never proof, so a degraded API
+    ///   server leaves every row occupying.
+    async fn is_reclaimable(
+        &self,
+        row: &AdmissionJournalRow,
+        classified: &Option<&ClassifiedWorkload>,
+        listed_names: &HashSet<String>,
+        settled: &HashMap<String, bool>,
+    ) -> bool {
+        if row.creator_server_epoch == self.controller.server_epoch() {
+            return false;
+        }
+        if !settled.get(&identity(&row.key)).copied().unwrap_or(false) {
+            return false;
+        }
+        if classified.is_some() || listed_names.contains(&row.object_name) {
+            return false;
+        }
+        self.inventory
+            .presence(WorkloadObjectKind::Job, &row.object_name)
+            .await
+            == ObjectPresence::Absent
+    }
+
     pub async fn reconcile(&self) -> InventoryReport {
         let _g = self.serial.lock().await;
         if self.controller.mode() == BuildAdmissionMode::Off {
@@ -147,10 +234,15 @@ impl BuildAdmissionReconciler {
         let mut out = InventoryReport::default();
         let mut cs = Vec::new();
         let mut ids = HashSet::new();
+        // Every Job name the authoritative LIST returned, including records
+        // classification skipped or rejected. A row whose object name appears
+        // here is never a reclamation candidate, whatever we could or could not
+        // make of that object's labels.
+        let listed_names: HashSet<String> = records.iter().map(|r| r.name.clone()).collect();
         for r in records {
             match classify(&r) {
                 Ok(Some(c)) => {
-                    let id = format!("{:?}:{}:{}", c.key.domain, c.key.work_id, c.key.generation);
+                    let id = identity(&c.key);
                     if ids.insert(id) {
                         cs.push(c)
                     } else {
@@ -186,7 +278,12 @@ impl BuildAdmissionReconciler {
                 }
             }
         }
-        let active = match self.controller.journal().list_active_rows().await {
+        let active = match self
+            .controller
+            .journal()
+            .list_active_rows_with_settlement(self.settle_window.as_secs() as i64)
+            .await
+        {
             Ok(rows) => rows,
             Err(error) => {
                 self.controller.mark_journal_unhealthy();
@@ -196,51 +293,94 @@ impl BuildAdmissionReconciler {
                 return out;
             }
         };
-        let by: HashMap<_, _> = cs
+        let settled: HashMap<String, bool> = active
             .iter()
-            .map(|c| {
-                (
-                    format!("{:?}:{}:{}", c.key.domain, c.key.work_id, c.key.generation),
-                    c,
-                )
-            })
+            .map(|(row, settled)| (identity(&row.key), *settled))
             .collect();
+        let active: Vec<AdmissionJournalRow> = active.into_iter().map(|(row, _)| row).collect();
+        let by: HashMap<_, _> = cs.iter().map(|c| (identity(&c.key), c)).collect();
         for row in &active {
-            if row.state != AdmissionState::Live {
+            let id = identity(&row.key);
+            if row.state == AdmissionState::Live {
+                let proof = if let Some(c) = by.get(&id) {
+                    c.object.terminal && c.object.uid.as_deref() == row.object_uid.as_deref()
+                } else if let Some(uid) = row.object_uid.as_deref() {
+                    self.inventory
+                        .get_uid(WorkloadObjectKind::Job, &row.object_name, uid)
+                        .await
+                        == UidGetResult::NotFound
+                } else {
+                    false
+                };
+                if proof {
+                    out.stale += 1;
+                    match self
+                        .controller
+                        .journal()
+                        .mark_terminal(&TerminalAdmissionInput {
+                            key: row.key.clone(),
+                            object_uid: row.object_uid.clone(),
+                        })
+                        .await
+                    {
+                        Ok(_) => {
+                            out.released += 1;
+                            self.controller.release_notifier().notify_one();
+                        }
+                        Err(error) => {
+                            self.controller.mark_journal_unhealthy();
+                            out.blockers.push(error.to_string());
+                        }
+                    }
+                }
                 continue;
             }
-            let id = format!(
-                "{:?}:{}:{}",
-                row.key.domain, row.key.work_id, row.key.generation
-            );
-            let proof = if let Some(c) = by.get(&id) {
-                c.object.terminal && c.object.uid.as_deref() == row.object_uid.as_deref()
-            } else if let Some(uid) = row.object_uid.as_deref() {
-                self.inventory
-                    .get_uid(djinn_k8s::WorkloadObjectKind::Job, &row.object_name, uid)
-                    .await
-                    == UidGetResult::NotFound
-            } else {
-                false
+            // Reserved / CreateInFlight / CreateUnknown. Recovery retires
+            // Reserved rows and converts CreateInFlight into occupying
+            // CreateUnknown, and adoption rescues a CreateUnknown row whose
+            // object still exists — but nothing at all terminalizes one whose
+            // object is gone. Those rows occupy the shared cap forever, which
+            // is how a fleet accumulates a stale population large enough to
+            // deny every admission the moment the cap is armed.
+            if !self
+                .is_reclaimable(row, &by.get(&id).copied(), &listed_names, &settled)
+                .await
+            {
+                continue;
+            }
+            out.stale += 1;
+            let input = ReclaimAbsentInput {
+                key: row.key.clone(),
+                observed_state: row.state,
+                observed_creator_server_epoch: row.creator_server_epoch.clone(),
+                observed_object_name: row.object_name.clone(),
+                observed_object_uid: row.object_uid.clone(),
             };
-            if proof {
-                match self
-                    .controller
-                    .journal()
-                    .mark_terminal(&TerminalAdmissionInput {
-                        key: row.key.clone(),
-                        object_uid: row.object_uid.clone(),
-                    })
-                    .await
-                {
-                    Ok(_) => {
-                        out.released += 1;
-                        self.controller.release_notifier().notify_one();
-                    }
-                    Err(error) => {
-                        self.controller.mark_journal_unhealthy();
-                        out.blockers.push(error.to_string());
-                    }
+            match self
+                .controller
+                .journal()
+                .reclaim_absent_object(&input)
+                .await
+            {
+                Ok(ReclaimAbsentOutcome::Reclaimed(_)) => {
+                    out.reclaimed += 1;
+                    self.controller.release_notifier().notify_one();
+                }
+                Ok(ReclaimAbsentOutcome::AlreadyTerminal(_)) => {}
+                Ok(ReclaimAbsentOutcome::Fenced { reason }) => {
+                    out.fenced += 1;
+                    tracing::warn!(
+                        work_id = %row.key.work_id,
+                        generation = row.key.generation,
+                        object = %row.object_name,
+                        %reason,
+                        "build_admission: refused to reclaim an admission row that changed \
+                         after its absence proof"
+                    );
+                }
+                Err(error) => {
+                    self.controller.mark_journal_unhealthy();
+                    out.blockers.push(error.to_string());
                 }
             }
         }
@@ -281,6 +421,11 @@ impl BuildAdmissionReconciler {
         // blockers, but the blockers branch and any adoption under partial
         // inventory still need this explicit publication.
         self.controller.publish_metrics().await;
+        // Publish the size of the stale population itself, loudly when it is
+        // large enough to have wedged the cap. Discovering this by reading
+        // thousands of per-transition warn lines is not an operating model.
+        self.controller
+            .publish_reconciliation(out.stale, out.released + out.reclaimed, out.fenced);
         out
     }
 }

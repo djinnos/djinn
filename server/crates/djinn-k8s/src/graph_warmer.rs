@@ -1269,6 +1269,21 @@ impl K8sGraphWarmer {
         self.dispatch.admission.clone()
     }
 
+    /// The broad Kubernetes workload inventory backed by this warmer's client.
+    ///
+    /// Build-admission reconciliation needs the same client selection and
+    /// namespace the warmer dispatches into, and the composition root must not
+    /// build a second client. `None` under the test/mock-dispatcher path, which
+    /// owns no live client and therefore has no Kubernetes objects to inventory.
+    pub fn workload_inventory(&self) -> Option<Arc<dyn crate::WorkloadInventory>> {
+        self.client.clone().map(|client| {
+            Arc::new(crate::KubeWorkloadInventory::new(
+                client,
+                self.dispatch.config.namespace.clone(),
+            )) as Arc<dyn crate::WorkloadInventory>
+        })
+    }
+
     /// Override the merge-storm debounce policy (builder style). Production
     /// takes it from the environment via [`Self::new`]; tests use this to
     /// exercise the quiet-window / max-wait / disabled behaviours with short
