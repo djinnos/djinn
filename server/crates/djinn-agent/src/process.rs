@@ -372,13 +372,19 @@ pub(crate) struct LeaseInvocationConfig {
     pub timeout: Duration,
 }
 
+/// A lease response that stops the invocation.
+///
+/// There is deliberately no wait-timeout variant: losing the queue is
+/// contention, not a failure, and contention degrades to unleased execution
+/// (see [`lease_failure`]) instead of killing the command. Only responses that
+/// mean the lease authority cannot be used coherently at all — an identity
+/// conflict, or repeated unavailability — end the invocation here.
 #[derive(Debug)]
 #[allow(dead_code)] // consumed by this runner now and workspace lease wiring next
 pub(crate) enum LeaseInvocationError {
     Process(ProcessRunError),
     Launcher(io::Error),
     LeaseIdentityConflict,
-    LeaseWaitTimeout,
     LeaseUnavailable,
 }
 
@@ -441,6 +447,12 @@ impl LeaseInvocationRunner {
         let mut deadline = self.clock.now_instant() + config.timeout;
         let (mut queued, mut fence, mut credit_used, mut lease_error) = (false, None, false, None);
         let mut unavailable_responses = 0_u8;
+        // Set once the durable queue ends without capacity for this invocation.
+        // From then on the child runs to its own terminal state at the
+        // launcher's unleased quota and the lease authority is never contacted
+        // again for a grant. See `lease_failure` for why the degrade is
+        // one-way.
+        let mut unleased_degrade = false;
         // This variable is assigned only by `terminal_now` or by a service
         // wait that observed terminal intent. Consequently no later response
         // can authorize a cgroup lift.
@@ -452,7 +464,16 @@ impl LeaseInvocationRunner {
                 break terminal;
             }
             let cpu = child.sample_cpu().map_err(LeaseInvocationError::Launcher)?;
-            let result = if !queued && cpu.usage_usec >= config.cpu_usage_threshold_usec {
+            let result = if unleased_degrade {
+                // Degraded: the child keeps running at the launcher's unleased
+                // quota (250m) until it exits on its own, its command timeout
+                // fires, or it is cancelled. Contention makes a command slow,
+                // never dead — nothing here kills the child, and no further
+                // lease request is issued. The durable record is still
+                // reconciled to terminal after the loop.
+                tokio::task::yield_now().await;
+                continue;
+            } else if !queued && cpu.usage_usec >= config.cpu_usage_threshold_usec {
                 queued = true;
                 match await_lease_or_terminal(
                     self.services.queue_lease(LeaseQueueRequest {
@@ -504,6 +525,7 @@ impl LeaseInvocationRunner {
                         &mut deadline,
                         &mut credit_used,
                         &mut lease_error,
+                        &mut unleased_degrade,
                     );
                     break (
                         child.try_wait().map_err(started_lease_error)?,
@@ -531,7 +553,13 @@ impl LeaseInvocationRunner {
                         status.fencing_token
                     }
                     other => {
-                        lease_failure(other, &mut deadline, &mut credit_used, &mut lease_error);
+                        lease_failure(
+                            other,
+                            &mut deadline,
+                            &mut credit_used,
+                            &mut lease_error,
+                            &mut unleased_degrade,
+                        );
                         None
                     }
                 }
@@ -644,6 +672,7 @@ impl LeaseInvocationRunner {
                                 &mut deadline,
                                 &mut credit_used,
                                 &mut lease_error,
+                                &mut unleased_degrade,
                             ),
                         }
                     }
@@ -655,12 +684,17 @@ impl LeaseInvocationRunner {
                                 &mut deadline,
                                 &mut credit_used,
                                 &mut lease_error,
+                                &mut unleased_degrade,
                             );
                         }
                     }
-                    other => {
-                        lease_failure(other, &mut deadline, &mut credit_used, &mut lease_error)
-                    }
+                    other => lease_failure(
+                        other,
+                        &mut deadline,
+                        &mut credit_used,
+                        &mut lease_error,
+                        &mut unleased_degrade,
+                    ),
                 }
             }
             if lease_error.is_some() {
@@ -911,12 +945,32 @@ async fn reconcile_terminal_lease(
 fn started_lease_error(error: io::Error) -> LeaseInvocationError {
     LeaseInvocationError::Process(ProcessRunError::Started(error))
 }
+/// Classify a lease response that did not produce a usable grant.
+///
+/// Contention is not a failure. A command that cannot get a lease must queue
+/// and be slow, not die: when the durable queue ends without capacity — a wait
+/// timeout, or a terminal record observed before any grant — the invocation
+/// sets `unleased` and the caller keeps the child running at the launcher's
+/// unleased quota. Killing the child there was the old behaviour and it burned
+/// the agent's session on `LeaseWaitTimeout` for work that was merely queued.
+///
+/// The degrade is **one-way**. Every terminal reason, `deadline_expired`
+/// included, is a terminal durable state for this invocation id; the
+/// coordinator can never grant that row again, and this invocation's identity
+/// is immutable (it is journaled before launch and drives watchdog recovery),
+/// so re-escalating would require minting a second lease identity for one
+/// child. Re-escalation is therefore out of reach without a redesign of the
+/// identity/journal contract.
+///
+/// Only responses meaning the lease authority cannot be used coherently at all
+/// — an identity conflict, or repeated unavailability — remain hard errors.
 #[cfg_attr(not(test), allow(dead_code))] // consumed by the workspace lease wiring task
 fn lease_failure(
     result: LeaseResult,
     deadline: &mut std::time::Instant,
     credit_used: &mut bool,
     output: &mut Option<LeaseInvocationError>,
+    unleased: &mut bool,
 ) {
     match result {
         LeaseResult::LeaseIdentityConflict { .. } => {
@@ -929,9 +983,19 @@ fn lease_failure(
             *deadline += Duration::from_millis(u64::from(credit.retry_after_ms));
             *credit_used = true;
         }
-        LeaseResult::LeaseWaitTimeout { .. } => {
-            *output = Some(LeaseInvocationError::LeaseWaitTimeout)
-        }
+        // Queue timeout (credit spent or never issued), and the terminal
+        // records a timed-out queue leaves behind: the coordinator terminalizes
+        // an expired row as `deadline_expired`, which a later status read
+        // reports as a cancelled terminal state. Both mean the same thing —
+        // this invocation will never hold the lease — so both degrade.
+        LeaseResult::LeaseWaitTimeout { .. }
+        | LeaseResult::Cancelled { .. }
+        | LeaseResult::Released { .. }
+        | LeaseResult::Abandoned { .. }
+        | LeaseResult::Status(LeaseStatus {
+            state: LeaseState::Cancelled | LeaseState::Released,
+            ..
+        }) => *unleased = true,
         _ => {}
     }
 }
@@ -1360,6 +1424,7 @@ mod tests {
         let mut deadline = std::time::Instant::now();
         let mut used = false;
         let mut error = None;
+        let mut unleased = false;
         lease_failure(
             LeaseResult::LeaseIdentityConflict {
                 identity: LeaseIdentity::TaskInvocation(test_identity()),
@@ -1367,6 +1432,7 @@ mod tests {
             &mut deadline,
             &mut used,
             &mut error,
+            &mut unleased,
         );
         assert!(matches!(
             error,
@@ -1378,24 +1444,93 @@ mod tests {
             &mut deadline,
             &mut used,
             &mut error,
+            &mut unleased,
         );
         assert!(matches!(
             error,
             Some(LeaseInvocationError::LeaseUnavailable)
         ));
-        error = None;
-        lease_failure(
+        assert!(
+            !unleased,
+            "an unusable lease authority is a failure, never a degrade"
+        );
+    }
+
+    /// A queue that ends without capacity degrades to unleased execution: no
+    /// error is produced for the caller to kill the child with. Every response
+    /// shape a lost queue can take — the timeout itself and the terminal record
+    /// the coordinator leaves behind — degrades identically.
+    #[test]
+    fn lost_queue_responses_degrade_without_error() {
+        for result in [
             LeaseResult::LeaseWaitTimeout {
                 timeout_credit: None,
             },
+            LeaseResult::Cancelled {
+                candidate_cleanup: false,
+            },
+            LeaseResult::Released {
+                candidate_cleanup: false,
+            },
+            LeaseResult::Abandoned {
+                candidate_cleanup: false,
+            },
+            LeaseResult::Status(LeaseStatus {
+                state: LeaseState::Cancelled,
+                fencing_token: None,
+                deadlines: LeaseDeadlines {
+                    queue_deadline_ms: 0,
+                    launch_deadline_ms: 0,
+                },
+                pod_uid: None,
+                candidate_cleanup: false,
+            }),
+        ] {
+            let mut deadline = std::time::Instant::now();
+            let original = deadline;
+            let mut used = true;
+            let mut error = None;
+            let mut unleased = false;
+            lease_failure(
+                result.clone(),
+                &mut deadline,
+                &mut used,
+                &mut error,
+                &mut unleased,
+            );
+            assert!(error.is_none(), "{result:?} must not fail the invocation");
+            assert!(unleased, "{result:?} must degrade to unleased execution");
+            assert_eq!(deadline, original);
+        }
+    }
+
+    /// A queued row that has not lost the queue keeps waiting: no degrade, no
+    /// error. Without this the runner would abandon the lease on its first
+    /// still-queued poll.
+    #[test]
+    fn still_queued_responses_neither_fail_nor_degrade() {
+        let mut deadline = std::time::Instant::now();
+        let mut used = false;
+        let mut error = None;
+        let mut unleased = false;
+        lease_failure(
+            LeaseResult::Status(LeaseStatus {
+                state: LeaseState::Queued,
+                fencing_token: None,
+                deadlines: LeaseDeadlines {
+                    queue_deadline_ms: 0,
+                    launch_deadline_ms: 0,
+                },
+                pod_uid: None,
+                candidate_cleanup: false,
+            }),
             &mut deadline,
             &mut used,
             &mut error,
+            &mut unleased,
         );
-        assert!(matches!(
-            error,
-            Some(LeaseInvocationError::LeaseWaitTimeout)
-        ));
+        assert!(error.is_none());
+        assert!(!unleased);
     }
 
     #[test]
@@ -1410,14 +1545,23 @@ mod tests {
                 retry_after_ms: 25,
             }),
         };
-        lease_failure(credit.clone(), &mut deadline, &mut used, &mut error);
+        let mut unleased = false;
+        lease_failure(
+            credit.clone(),
+            &mut deadline,
+            &mut used,
+            &mut error,
+            &mut unleased,
+        );
         assert_eq!(deadline, original + Duration::from_millis(25));
-        lease_failure(credit, &mut deadline, &mut used, &mut error);
+        assert!(!unleased, "the one credited retry still waits for capacity");
+        lease_failure(credit, &mut deadline, &mut used, &mut error, &mut unleased);
         assert_eq!(deadline, original + Duration::from_millis(25));
-        assert!(matches!(
-            error,
-            Some(LeaseInvocationError::LeaseWaitTimeout)
-        ));
+        assert!(error.is_none());
+        assert!(
+            unleased,
+            "the spent credit degrades to unleased instead of failing"
+        );
     }
 
     #[test]
