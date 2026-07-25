@@ -176,6 +176,7 @@ const JEMALLOC_ALLOCATED_BYTES: &str = "djinn_jemalloc_allocated_bytes";
 const JEMALLOC_RESIDENT_BYTES: &str = "djinn_jemalloc_resident_bytes";
 const JEMALLOC_RETAINED_BYTES: &str = "djinn_jemalloc_retained_bytes";
 const SERVER_MEMORY_SCRAPE_OUTCOME: &str = "djinn_server_memory_scrape_outcome";
+const SERVER_MEMORY_LIMIT_BYTES: &str = "djinn_server_memory_limit_bytes";
 const CANONICAL_GRAPH_SLOT_PRESENT: &str = "djinn_canonical_graph_slot_present";
 const CANONICAL_GRAPH_SLOT_APPROX_SERIALIZED_BYTES: &str =
     "djinn_canonical_graph_slot_approx_serialized_bytes";
@@ -631,6 +632,10 @@ pub mod build_drift {
 /// limited to fixed source and outcome enums so a read failure never creates a
 /// series from an error, path, PID, or other process identity.
 pub mod server_memory {
+    /// The configured Kubernetes memory limit for the server container.
+    /// This remains unlabelled because there is one configured limit per
+    /// process and identity labels would make the alerting series unbounded.
+    pub const LIMIT_BYTES: &str = super::SERVER_MEMORY_LIMIT_BYTES;
     pub const SOURCE_PROCESS_STATUS: &str = "process_status";
     pub const SOURCE_JEMALLOC: &str = "jemalloc";
     pub const OUTCOME_OK: &str = "ok";
@@ -640,6 +645,11 @@ pub mod server_memory {
         metrics::gauge!(super::PROCESS_RSS_BYTES).set(rss_bytes as f64);
         metrics::gauge!(super::PROCESS_ANON_RSS_BYTES).set(anon_rss_bytes as f64);
         set_outcome(SOURCE_PROCESS_STATUS, OUTCOME_OK);
+    }
+
+    /// Set the chart-configured server memory limit in bytes.
+    pub fn record_limit_bytes(limit_bytes: u64) {
+        metrics::gauge!(super::SERVER_MEMORY_LIMIT_BYTES).set(limit_bytes as f64);
     }
 
     pub fn record_process_unavailable() {
@@ -1674,6 +1684,10 @@ fn register_metrics() {
     metrics::describe_gauge!(
         JEMALLOC_RETAINED_BYTES,
         "Current jemalloc retained bytes after refreshing its statistics epoch."
+    );
+    metrics::describe_gauge!(
+        SERVER_MEMORY_LIMIT_BYTES,
+        "Configured Kubernetes memory limit for the server container in bytes."
     );
     metrics::describe_gauge!(
         SERVER_MEMORY_SCRAPE_OUTCOME,

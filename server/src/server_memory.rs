@@ -8,6 +8,10 @@ use std::fmt;
 
 const PROC_STATUS_PATH: &str = "/proc/self/status";
 const KIB_BYTES: u64 = 1024;
+/// Strict chart-to-server contract for the server container memory limit.
+/// Helm obtains it from a `resourceFieldRef` with `divisor: 1`, so this
+/// application boundary never interprets Kubernetes quantity syntax.
+pub const MEMORY_LIMIT_BYTES_ENV: &str = "DJINN_SERVER_MEMORY_LIMIT_BYTES";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ProcessMemory {
@@ -39,6 +43,43 @@ impl fmt::Display for ProcStatusError {
 }
 
 impl std::error::Error for ProcStatusError {}
+
+/// Configure the unlabelled server memory-limit gauge from decimal bytes.
+///
+/// An absent value is the deterministic local-development default: no limit
+/// gauge is emitted. A present value must be a positive ASCII decimal count;
+/// accepting quantities or malformed values could publish a misleading limit.
+pub fn configure_memory_limit_bytes(value: Option<&str>) -> Result<(), String> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(format!(
+            "{MEMORY_LIMIT_BYTES_ENV} must be a non-zero decimal byte count"
+        ));
+    }
+    let limit_bytes = value.parse::<u64>().map_err(|_| {
+        format!("{MEMORY_LIMIT_BYTES_ENV} must fit in an unsigned 64-bit byte count")
+    })?;
+    if limit_bytes == 0 {
+        return Err(format!(
+            "{MEMORY_LIMIT_BYTES_ENV} must be a non-zero decimal byte count"
+        ));
+    }
+    djinn_telemetry::server_memory::record_limit_bytes(limit_bytes);
+    Ok(())
+}
+
+/// Read and validate the chart-injected memory-limit environment variable.
+pub fn configure_memory_limit_from_env() -> Result<(), String> {
+    match std::env::var(MEMORY_LIMIT_BYTES_ENV) {
+        Ok(value) => configure_memory_limit_bytes(Some(&value)),
+        Err(std::env::VarError::NotPresent) => configure_memory_limit_bytes(None),
+        Err(std::env::VarError::NotUnicode(_)) => Err(format!(
+            "{MEMORY_LIMIT_BYTES_ENV} must be valid UTF-8 decimal bytes"
+        )),
+    }
+}
 
 fn parse_proc_status(status: &str) -> Result<ProcessMemory, ProcStatusError> {
     let vm_rss = parse_kib_field(status, "VmRSS")?;
@@ -118,7 +159,7 @@ fn refresh_jemalloc() {
 
 #[cfg(test)]
 mod tests {
-    use super::{ProcStatusError, ProcessMemory, parse_proc_status};
+    use super::{ProcStatusError, ProcessMemory, configure_memory_limit_bytes, parse_proc_status};
 
     #[test]
     fn parses_vm_rss_and_anonymous_rss_in_kib() {
@@ -155,6 +196,39 @@ mod tests {
             parse_proc_status("VmRSS:\t123 kB\nRssAnon:\t123 bytes\n"),
             Err(ProcStatusError::MalformedRssAnon)
         );
+    }
+
+    #[test]
+    fn memory_limit_config_is_absent_or_strict_decimal_bytes() {
+        assert_eq!(configure_memory_limit_bytes(None), Ok(()));
+        for value in ["0", "2Gi", " 2147483648"] {
+            assert_eq!(
+                configure_memory_limit_bytes(Some(value)),
+                Err(
+                    "DJINN_SERVER_MEMORY_LIMIT_BYTES must be a non-zero decimal byte count"
+                        .to_owned()
+                )
+            );
+        }
+        assert_eq!(
+            configure_memory_limit_bytes(Some("18446744073709551616")),
+            Err(
+                "DJINN_SERVER_MEMORY_LIMIT_BYTES must fit in an unsigned 64-bit byte count"
+                    .to_owned()
+            )
+        );
+    }
+
+    #[test]
+    fn memory_limit_telemetry_is_one_unlabelled_byte_gauge() {
+        djinn_telemetry::init().expect("telemetry init");
+        configure_memory_limit_bytes(Some("2147483648")).expect("valid byte limit");
+        let rendered = djinn_telemetry::render().expect("render memory-limit telemetry");
+        let samples: Vec<_> = rendered
+            .lines()
+            .filter(|line| line.starts_with("djinn_server_memory_limit_bytes"))
+            .collect();
+        assert_eq!(samples, ["djinn_server_memory_limit_bytes 2147483648"]);
     }
 
     #[test]
