@@ -118,6 +118,38 @@ use tracing_subscriber::EnvFilter;
 /// commit/push plus the terminal RPC flush with comfortable slack.
 const SOFT_DEADLINE_MARGIN: Duration = Duration::from_secs(600);
 
+/// The only two shell-execution choices at worker composition. Direct execution
+/// is intentionally constructible only through the explicit disabled profile.
+enum LauncherShellPath {
+    Direct,
+    Broker(Box<djinn_cgroup_launcher::transport::UnixBrokerClient>),
+}
+
+/// Convert the rendered enforcement intent and typed handshake result into the
+/// sole allowed shell path. Keeping this branch separate from supervisor setup
+/// makes it impossible for an absent/broken required launcher to accidentally
+/// become `None` (the direct `ShellLaunchContext` path).
+fn select_launcher_shell_path(
+    enforcement: launcher_handshake::LauncherEnforcement,
+    handshake: Option<launcher_handshake::LauncherHandshake>,
+) -> Result<LauncherShellPath> {
+    use launcher_handshake::{LauncherEnforcement, LauncherHandshake};
+
+    match enforcement {
+        LauncherEnforcement::Disabled => Ok(LauncherShellPath::Direct),
+        LauncherEnforcement::Required => match handshake {
+            Some(LauncherHandshake::Connected(client)) => Ok(LauncherShellPath::Broker(client)),
+            Some(LauncherHandshake::AbsentMount) => {
+                anyhow::bail!("required cgroup-launcher IPC mount is absent")
+            }
+            Some(LauncherHandshake::FailedClosed(error)) => {
+                anyhow::bail!("required cgroup-launcher handshake failed: {error}")
+            }
+            None => anyhow::bail!("required cgroup-launcher handshake was not attempted"),
+        },
+    }
+}
+
 /// Floor for the armed soft-deadline interval. For small configured deadlines
 /// (tests, tuned-down installs) `deadline - margin` can underflow or land
 /// implausibly early; clamp so the timer never fires immediately at startup.
@@ -259,11 +291,17 @@ struct WorkerDefaultArgs {
     #[arg(long, env = "DJINN_TASK_RUN_POD_UID")]
     task_run_pod_uid: String,
 
+    /// Explicit launcher enforcement intent rendered with the task-run Job.
+    /// `required` rejects startup when the authenticated broker cannot be used;
+    /// `disabled` is the explicit local/development direct-execution profile.
+    #[arg(long, env = "DJINN_CGROUP_LAUNCHER_MODE", default_value = "required")]
+    launcher_enforcement: String,
+
     /// cgroup-launcher control socket the sidecar binds inside the shared IPC
     /// mount. Env name and default match qut0's render (`DJINN_LAUNCHER_SOCKET`
     /// / `djinn_k8s::launcher::LAUNCHER_SOCKET_PATH`). The worker connects here
-    /// after writing its handshake; an absent mount means shells run in-process
-    /// and unleased (see [`launcher_handshake`]).
+    /// after writing its handshake. Required mode rejects an absent mount;
+    /// only explicit disabled mode permits the local direct path.
     #[arg(
         long,
         env = "DJINN_LAUNCHER_SOCKET",
@@ -2232,61 +2270,51 @@ async fn run_task_run(args: WorkerDefaultArgs) -> Result<()> {
     .with_context(|| format!("dial djinn-server at {server_addr}"))?;
     info!(server = %server_addr, "tcp connection up, RPC handshake accepted");
 
-    // Detection-gated launcher handshake (task ab05). When a cgroup-launcher
-    // sidecar is rendered, its serve loop waits for a worker handshake (private
-    // credential + worker PID in the shared IPC mount) before it binds its
-    // control socket. The worker writes that handshake and dials the socket here.
-    //
-    // When the mount/sidecar is absent — which is the DEFAULT since task grkq,
-    // and also covers old renderings and local/non-pod runs — or when the
-    // handshake fails closed for any reason, `shell_launch` stays `None` and the
-    // shell handler executes commands IN-PROCESS at the pod's own quota
-    // (unleased, no cgroup leaf, no lease lift). That is a real, supported
-    // production path, not a stub. The handshake never blocks pod startup. Run
-    // the blocking write/connect on a blocking thread so the async runtime is
-    // never stalled.
-    let launcher_socket = args.launcher_socket.clone();
-    let launcher_credential_path = args.launcher_credential_path.clone();
-    let handshake = tokio::task::spawn_blocking(move || {
-        let mut dumpability = djinn_cgroup_launcher::child::NativeWorkerDumpability;
-        launcher_handshake::establish(
-            &launcher_socket,
-            &launcher_credential_path,
-            &mut dumpability,
+    // The explicit mode, not mount detection, controls whether direct execution
+    // is permitted. Required mode authenticates before AgentContext exists.
+    let launcher_enforcement = launcher_handshake::LauncherEnforcement::parse(
+        &args.launcher_enforcement,
+    )
+    .ok_or_else(|| {
+        anyhow::anyhow!(
+            "DJINN_CGROUP_LAUNCHER_MODE must be `required` or `disabled`, got {:?}",
+            args.launcher_enforcement
         )
-    })
-    .await
-    .context("join launcher handshake task")?;
-    let shell_launch = match handshake {
-        launcher_handshake::LauncherHandshake::Connected(broker_client) => {
-            info!("cgroup-launcher handshake complete; using leased broker shell path");
-            Some(
-                ShellLaunchContext::broker_backed(
-                    spec.task_id.clone(),
-                    spec.task_run_id.clone(),
-                    args.task_run_pod_uid.clone(),
-                    rpc.clone(),
-                    *broker_client,
+    })?;
+    let handshake = if launcher_enforcement == launcher_handshake::LauncherEnforcement::Required {
+        let launcher_socket = args.launcher_socket.clone();
+        let launcher_credential_path = args.launcher_credential_path.clone();
+        Some(
+            tokio::task::spawn_blocking(move || {
+                let mut dumpability = djinn_cgroup_launcher::child::NativeWorkerDumpability;
+                launcher_handshake::establish(
+                    &launcher_socket,
+                    &launcher_credential_path,
+                    &mut dumpability,
                 )
-                .await
-                .context("recover durable invocation journal")?,
+            })
+            .await
+            .context("join required launcher handshake task")?,
+        )
+    } else {
+        None
+    };
+    let shell_launch = match select_launcher_shell_path(launcher_enforcement, handshake)? {
+        LauncherShellPath::Direct => {
+            info!("cgroup launcher explicitly disabled; using local direct shell path");
+            None
+        }
+        LauncherShellPath::Broker(broker_client) => Some(
+            ShellLaunchContext::broker_backed(
+                spec.task_id.clone(),
+                spec.task_run_id.clone(),
+                args.task_run_pod_uid.clone(),
+                rpc.clone(),
+                *broker_client,
             )
-        }
-        launcher_handshake::LauncherHandshake::AbsentMount => {
-            info!(
-                socket = %args.launcher_socket.display(),
-                "no cgroup-launcher IPC mount; shell commands run in-process, unleased"
-            );
-            None
-        }
-        launcher_handshake::LauncherHandshake::FailedClosed(error) => {
-            warn!(
-                error = %error,
-                socket = %args.launcher_socket.display(),
-                "cgroup-launcher handshake failed; degrading to unleased in-process shell execution"
-            );
-            None
-        }
+            .await
+            .context("recover durable invocation journal")?,
+        ),
     };
 
     // 4. Attach to the host-materialised workspace.
@@ -3373,11 +3401,81 @@ mod tests {
         RepoGraphNode, RepoGraphNodeKind, RepoNodeKey,
     };
     use std::collections::BTreeMap;
-    use std::io::Write;
+    use std::io::{Read, Write};
     use std::process::Command;
     use tracing::dispatcher::Dispatch;
 
     static CARGO_INSTRUMENT_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn disabled_launcher_profile_selects_only_the_local_direct_path() {
+        assert!(matches!(
+            select_launcher_shell_path(launcher_handshake::LauncherEnforcement::Disabled, None)
+                .expect("explicit disabled profile permits local direct execution"),
+            LauncherShellPath::Direct
+        ));
+    }
+
+    #[test]
+    fn required_launcher_profile_selects_the_authenticated_broker_path() {
+        use launcher_handshake::{LauncherEnforcement, LauncherHandshake};
+        use std::os::unix::net::UnixStream;
+
+        let (mut server, client_stream) = UnixStream::pair().expect("in-memory Unix socket pair");
+        let server = std::thread::spawn(move || {
+            let mut length = [0; 4];
+            server
+                .read_exact(&mut length)
+                .expect("read AUTH frame length");
+            let mut request = vec![0; u32::from_be_bytes(length) as usize];
+            server.read_exact(&mut request).expect("read AUTH frame");
+            assert_eq!(request, [1, b't', b'e', b's', b't']);
+            server
+                .write_all(&1_u32.to_be_bytes())
+                .and_then(|()| server.write_all(&[0]))
+                .expect("write successful AUTH response");
+        });
+        let client =
+            djinn_cgroup_launcher::transport::UnixBrokerClient::connect(client_stream, b"test")
+                .expect("broker accepts authenticated client");
+        server.join().expect("test broker thread");
+
+        assert!(matches!(
+            select_launcher_shell_path(
+                LauncherEnforcement::Required,
+                Some(LauncherHandshake::Connected(Box::new(client))),
+            )
+            .expect("required authenticated handshake selects broker"),
+            LauncherShellPath::Broker(_)
+        ));
+    }
+
+    #[test]
+    fn required_launcher_failures_cannot_select_the_direct_path() {
+        use launcher_handshake::{HandshakeError, LauncherEnforcement, LauncherHandshake};
+
+        for handshake in [
+            Some(LauncherHandshake::AbsentMount),
+            Some(LauncherHandshake::FailedClosed(
+                HandshakeError::ConnectTimeout,
+            )),
+            None,
+        ] {
+            let error = match select_launcher_shell_path(LauncherEnforcement::Required, handshake) {
+                Ok(LauncherShellPath::Direct) => {
+                    panic!("required launcher failure selected forbidden direct execution")
+                }
+                Ok(LauncherShellPath::Broker(_)) => {
+                    panic!("required launcher failure selected an unavailable broker")
+                }
+                Err(error) => error,
+            };
+            assert!(
+                error.to_string().contains("required cgroup-launcher"),
+                "required-mode error must preserve enforcement context: {error}"
+            );
+        }
+    }
 
     #[tokio::test]
     async fn worker_context_authorization_preserves_zero_one_and_multiple_immutable_grants() {
