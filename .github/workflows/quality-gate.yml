@@ -26,6 +26,82 @@ env:
   CARGO_BUILD_BUILD_DIR: target
   RUSTC_WRAPPER: ""
   RUSTFLAGS: -D warnings
+  # ---------------------------------------------------------------------------
+  # Runner disk headroom preflight (shared body + thresholds, defined ONCE here)
+  #
+  # Run 30087861197 died like this, as an annotation on `Plan Server Test
+  # Shards` and nowhere else:
+  #
+  #   System.IO.IOException: No space left on device :
+  #     '/home/runner/actions-runner/cached/2.336.0/_diag/Worker_*.log'
+  #      at GitHub.Runner.Worker.Worker.RunAsync(...)
+  #   Unhandled exception. ... aborting
+  #
+  # The RUNNER PROCESS ITSELF could not write its own diagnostic log. That is
+  # not a test failure and it has no test-shaped signal: the worker aborts, the
+  # job is orphaned, the run is cancelled at run level, and six checks go red
+  # with nothing naming the host as the cause. The steps below convert that
+  # class of failure into one named, early, deterministic step failure on the
+  # job that is about to consume the disk.
+  #
+  # Threshold: 14 GiB, measured against the heaviest lane (`server-test`).
+  # `cargo nextest run --workspace --all-targets --features qdrant --no-run`
+  # leaves ~11-12 GiB in server/target, on top of the ~2.3 GiB restored
+  # rust-cache, the postgres service image, and the runner's own _diag logs.
+  # 14 GiB is the floor at which that lane can finish. It also sits far below
+  # what a healthy hosted runner has free after the reclaim set below, so a
+  # healthy runner never trips it — a preflight that false-fails is worse than
+  # no preflight.
+  CI_RUNNER_DISK_MIN_GB: "14"
+  # Warn band. Free space between MIN and WARN still completes the build but is
+  # already abnormal for a hosted runner, so annotate it: the run summary is
+  # exactly where runner-host failures surface and where nobody currently has
+  # anything to look at.
+  CI_RUNNER_DISK_WARN_GB: "22"
+  # Invoked by the heavy jobs as `bash -c "$CI_RUNNER_DISK_PREFLIGHT"`. Kept as
+  # a workflow-level env body rather than copied per job so the threshold and
+  # the reclaim set exist in exactly one place; a composite action would be the
+  # other option but would live outside this file.
+  CI_RUNNER_DISK_PREFLIGHT: |
+    set -euo pipefail
+    MIN_GB="${CI_RUNNER_DISK_MIN_GB:-14}"
+    WARN_GB="${CI_RUNNER_DISK_WARN_GB:-22}"
+    # _diag lives under /home/runner, so measure the volume that actually
+    # holds it (usually / on hosted runners, but do not assume that).
+    VOL=/home/runner
+    [ -d "$VOL" ] || VOL=/
+    # Parse POSIX `df -Pk` available KB with awk. Never parse `df -h` output:
+    # its unit suffixes are locale/size dependent and unusable for comparison.
+    avail_kb() { df -Pk "$1" | awk 'NR==2 { print $4 + 0 }'; }
+    as_gib() { awk -v kb="$1" 'BEGIN { printf "%.1f", kb / 1048576 }'; }
+    MIN_KB=$(( MIN_GB * 1048576 ))
+    WARN_KB=$(( WARN_GB * 1048576 ))
+    BEFORE_KB="$(avail_kb "$VOL")"
+    echo "runner-disk volume=$VOL before=$(as_gib "$BEFORE_KB")GiB min=${MIN_GB}GiB warn=${WARN_GB}GiB"
+    df -h "$VOL" | tail -1
+    AFTER_KB="$BEFORE_KB"
+    if [ "$BEFORE_KB" -lt "$MIN_KB" ]; then
+      echo "::notice title=Reclaiming runner disk::Only $(as_gib "$BEFORE_KB")GiB free (need >= ${MIN_GB}GiB); dropping preinstalled SDKs and cached docker images before deciding to fail."
+      sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+        /opt/hostedtoolcache/CodeQL /usr/local/share/boost \
+        "${AGENT_TOOLSDIRECTORY:-}" 2>/dev/null || true
+      if command -v docker >/dev/null 2>&1; then
+        docker image prune -af >/dev/null 2>&1 || true
+      fi
+      AFTER_KB="$(avail_kb "$VOL")"
+      echo "runner-disk volume=$VOL after-reclaim=$(as_gib "$AFTER_KB")GiB"
+      df -h "$VOL" | tail -1
+    fi
+    AVAIL_GB="$(as_gib "$AFTER_KB")"
+    if [ "$AFTER_KB" -lt "$MIN_KB" ]; then
+      echo "::error title=Insufficient runner disk::Runner has only ${AVAIL_GB}GiB free on the volume holding /home/runner (need >= ${MIN_GB}GiB). Failing preflight rather than dying mid-run inside the runner's own diagnostic logging (see run 30087861197)."
+      exit 1
+    fi
+    if [ "$AFTER_KB" -lt "$WARN_KB" ]; then
+      echo "::warning title=Low runner disk::${AVAIL_GB}GiB free on the volume holding /home/runner — above the ${MIN_GB}GiB floor but below the ${WARN_GB}GiB expected for a healthy hosted runner. If this lane dies without a test failure, this is why (see run 30087861197)."
+    else
+      echo "::notice title=Runner disk OK::${AVAIL_GB}GiB free on the volume holding /home/runner (floor ${MIN_GB}GiB)."
+    fi
 jobs:
   preflight:
     name: Preflight routing
@@ -240,6 +316,12 @@ jobs:
           # cargo-hold), not more mtime-based artifact caching.
         id: rust-cache
       - uses: taiki-e/install-action@nextest
+      - name: Runner disk headroom preflight
+        # Body/thresholds: CI_RUNNER_DISK_PREFLIGHT at the top of this file.
+        # Placed after the cache restore and before the workspace build, i.e.
+        # at the moment the remaining free space actually has to cover the
+        # build. See run 30087861197.
+        run: bash -c "$CI_RUNNER_DISK_PREFLIGHT"
       - name: Build test binaries (populate cache)
         run: cargo nextest run --workspace --all-targets --features qdrant --no-run
       - name: Log cache family and restore status
@@ -451,6 +533,9 @@ jobs:
             echo "::error::workspace-hack is out of date. Run 'cargo hakari generate && cargo hakari manage-deps' locally."
             exit 1
           }
+      - name: Runner disk headroom preflight
+        # Body/thresholds: CI_RUNNER_DISK_PREFLIGHT at the top of this file.
+        run: bash -c "$CI_RUNNER_DISK_PREFLIGHT"
       - name: Clippy
         run: cargo clippy --all-targets --features qdrant -- -D warnings
   launcher-kernel-boundary:
@@ -613,6 +698,13 @@ jobs:
           cache-all-crates: true
           save-if: false
       - uses: taiki-e/install-action@nextest
+      - name: Runner disk headroom preflight
+        # Body/thresholds: CI_RUNNER_DISK_PREFLIGHT at the top of this file.
+        # This is the lane that died in run 30087861197: its discovery build
+        # (`cargo nextest list --workspace --all-targets`) filled the runner
+        # volume, and the failure surfaced only as the runner aborting while
+        # writing its own _diag log. Gate before the discovery build.
+        run: bash -c "$CI_RUNNER_DISK_PREFLIGHT"
       - name: Discover current nextest tests and plan exact-once shards
         id: plan
         env:
@@ -951,6 +1043,14 @@ jobs:
           done
           echo "::warning::disk reclaim did not finish within 180s; continuing"
           cat "$RUNNER_TEMP/disk-reclaim.log" || true
+      - name: Runner disk headroom preflight
+        # Body/thresholds: CI_RUNNER_DISK_PREFLIGHT at the top of this file.
+        # Deliberately AFTER the background reclaim above has been waited on:
+        # this measures what the ~11-12 GiB all-targets build is actually
+        # about to draw from, and reclaims again only if that is not enough.
+        # The unconditional background reclaim stays as-is — it is a latency
+        # optimisation, this is the gate.
+        run: bash -c "$CI_RUNNER_DISK_PREFLIGHT"
       - name: Build test binaries (concurrent with planner discovery)
         run: cargo nextest run --workspace --all-targets --features qdrant --no-run
       - name: Wait for and download full shard plan
@@ -1296,6 +1396,9 @@ jobs:
           cache-all-crates: true
           save-if: false
         id: rust-cache
+      - name: Runner disk headroom preflight
+        # Body/thresholds: CI_RUNNER_DISK_PREFLIGHT at the top of this file.
+        run: bash -c "$CI_RUNNER_DISK_PREFLIGHT"
       - name: Log cache family and restore status
         run: |-
           echo "cache-family=server-test"
@@ -1387,6 +1490,9 @@ jobs:
           cache-all-crates: true
           save-if: false
         id: rust-cache
+      - name: Runner disk headroom preflight
+        # Body/thresholds: CI_RUNNER_DISK_PREFLIGHT at the top of this file.
+        run: bash -c "$CI_RUNNER_DISK_PREFLIGHT"
       - name: Log cache family and restore status
         run: |-
           echo "cache-family=server-test"

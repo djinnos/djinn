@@ -68,7 +68,14 @@ pub enum PrState {
 }
 
 /// A single CI check run associated with a pull request.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// `started_at`, `completed_at` and `output.annotations_count` are the
+/// *structural execution signals* consumers use to tell a check that actually
+/// ran and produced a diagnosis from one that was swept up by a run-level
+/// cancel or never executed at all (a `needs:`-dependent aggregator). All three
+/// are `#[serde(default)]` because GitHub omits them for checks that never
+/// started, and because non-Actions check providers may not populate them.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CheckRun {
     pub id: u64,
     #[serde(default)]
@@ -77,6 +84,35 @@ pub struct CheckRun {
     pub status: String,
     pub conclusion: Option<String>,
     pub html_url: String,
+    /// RFC-3339 timestamp when the check run began executing.
+    #[serde(default)]
+    pub started_at: Option<String>,
+    /// RFC-3339 timestamp when the check run finished.
+    ///
+    /// GitHub can report a `completed_at` that is *at or before* `started_at`
+    /// for a job that was cancelled before it ever dispatched work — that
+    /// non-positive interval is the signal that the lane never executed.
+    #[serde(default)]
+    pub completed_at: Option<String>,
+    /// The check run's output block, whose `annotations_count` tells us
+    /// whether this lane produced any diagnosis at all.
+    #[serde(default)]
+    pub output: Option<CheckRunOutput>,
+}
+
+/// The `output` block of a check run.
+///
+/// Only `annotations_count` is load-bearing for triage: runner-host failures
+/// (out of disk, runner crash) surface as *annotations*, never as a check-run
+/// conclusion and often not in job logs either.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CheckRunOutput {
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub summary: Option<String>,
+    #[serde(default)]
+    pub annotations_count: Option<u64>,
 }
 
 /// A GitHub Actions job within a workflow run.

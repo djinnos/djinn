@@ -46,6 +46,8 @@ fn make_task() -> Task {
         ci_head_sha: None,
         ci_pr_number: None,
         ci_blocking_required_check_names: "[]".into(),
+        ci_primary_blocking_check: None,
+        ci_failure_annotations: None,
         ci_failure_fingerprint: None,
         ci_first_seen_at: None,
         ci_last_seen_at: None,

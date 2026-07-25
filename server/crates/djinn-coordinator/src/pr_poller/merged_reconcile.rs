@@ -397,6 +397,8 @@ mod tests {
             head_sha: "deadbeef".into(),
             ci_status: CiStatus::Failing,
             blocking_required_check_names: vec!["ci".into()],
+            primary_blocking_check: None,
+            failure_annotations: None,
             failure_fingerprint: Some("fp".into()),
             same_signature_count: 0,
             last_remediation_base_sha: None,

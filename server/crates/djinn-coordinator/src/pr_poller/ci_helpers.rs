@@ -101,6 +101,30 @@ impl CoordinatorActor {
             return false;
         }
 
+        // ── 1b. Inconclusive guard ────────────────────────────────────────────
+        // Blocking failures exist, but if every one of them was cancelled or
+        // never executed then the run reached no verdict about the code. This
+        // is the run-level-abort signature (a fail-fast watcher cancelling the
+        // whole run, or a runner-host crash). Reworking here dispatches an
+        // agent to fix code that was never shown to be broken — the exact
+        // failure that cost six sessions and three reopens on task `tlu1`.
+        //
+        // The `pr_draft` path classifies this as `CiStatus::Inconclusive`
+        // before reaching a handler; this guard covers the `pr_review` path,
+        // which routes failed checks here directly.
+        if ci_triage::is_inconclusive(&blocking) {
+            tracing::info!(
+                task_id = %task_short_id,
+                pr = pull_number,
+                sha = %current_sha,
+                blocking_count = blocking.len(),
+                blocking = ?blocking.iter().map(|cr| &cr.name).collect::<Vec<_>>(),
+                "PR poller: every blocking required check was cancelled or never executed — \
+                 INCONCLUSIVE run, not a failing one; not reopening for rework"
+            );
+            return false;
+        }
+
         // Pre-compute CI failure sections for potential use in terminal
         // escalation paths. This mirrors `log_ci_failure_comment`: parse every
         // distinct Actions run id from the failed check-runs, fetch run jobs,
@@ -1350,7 +1374,13 @@ pub(crate) fn ci_merge_gate_verdict(
             }
             match snap.ci_status {
                 CiStatus::Passing => CiMergeGateVerdict::Allow,
-                CiStatus::Pending | CiStatus::Unknown => CiMergeGateVerdict::Hold,
+                // Inconclusive holds rather than blocks: the run reached no
+                // verdict, so there is nothing to declare broken, but neither
+                // is there evidence the head is safe to merge. A retrigger is
+                // already in flight; the next observation decides.
+                CiStatus::Pending | CiStatus::Unknown | CiStatus::Inconclusive => {
+                    CiMergeGateVerdict::Hold
+                }
                 CiStatus::Failing => CiMergeGateVerdict::Block,
             }
         }

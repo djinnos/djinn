@@ -1,6 +1,6 @@
 use super::*;
 use djinn_core::clock::{Clock, SystemClock};
-use djinn_core::models::{CiStatus, TaskPrCiSnapshotInput};
+use djinn_core::models::CiStatus;
 
 impl CoordinatorActor {
     pub(crate) async fn poll_pr_statuses(&mut self) {
@@ -180,8 +180,29 @@ impl CoordinatorActor {
             }
 
             // ── CI gate decision (from durable snapshot) ─────────────────
-            // Pending/Unknown → hold; Failing → remediation; Passing → advance.
+            // Pending/Unknown → hold; Inconclusive → retrigger and hold;
+            // Failing → remediation; Passing → advance.
             match ci_status {
+                CiStatus::Inconclusive => {
+                    // Every blocking required check was cancelled or never
+                    // executed, so the run says nothing about the code. Re-run
+                    // the failed jobs and hold in `pr_draft`. Dispatching a
+                    // remediation attempt here is what burned six sessions on
+                    // task `tlu1`: agents were sent to fix code that had never
+                    // been shown to be broken.
+                    self.retrigger_inconclusive_run(
+                        gh_client,
+                        &task.id,
+                        &task.short_id,
+                        &pr.head.sha,
+                        &owner,
+                        &repo,
+                        pull_number,
+                        &checks,
+                    )
+                    .await;
+                    continue;
+                }
                 CiStatus::Pending | CiStatus::Unknown => {
                     // No CI configured after min-age guard — treat as green.
                     if checks.check_runs.is_empty() {
@@ -878,254 +899,6 @@ impl CoordinatorActor {
         sections.join("\n")
     }
 
-    /// Persist a CI gate snapshot. Write-through; failures are non-blocking.
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn persist_ci_snapshot(
-        &self,
-        task_id: &str,
-        pr_number: u64,
-        head_sha: &str,
-        ci_status: CiStatus,
-        blocking_required_check_names: Vec<String>,
-        failure_fingerprint: Option<String>,
-        same_signature_count: i64,
-        last_remediation_base_sha: Option<String>,
-    ) {
-        let task_repo = self.task_repo();
-        let input = TaskPrCiSnapshotInput {
-            task_id: task_id.to_owned(),
-            pr_number: pr_number as i64,
-            head_sha: head_sha.to_owned(),
-            ci_status,
-            blocking_required_check_names,
-            failure_fingerprint,
-            same_signature_count,
-            last_remediation_base_sha,
-        };
-        if let Err(e) = task_repo.upsert_ci_snapshot(input).await {
-            tracing::warn!(
-                task_id = %task_id,
-                pr = pr_number,
-                ci_status = %ci_status,
-                error = %e,
-                "PR poller: failed to persist CI snapshot (non-fatal)"
-            );
-        }
-    }
-
-    // ── CI snapshot recording (sole writer for GitHub-derived CI fields) ─────
-
-    /// Record CI snapshot. Sole writer of GitHub-derived CI fields.
-    /// Resets to `pending` when the head SHA changes.
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn record_ci_snapshot(
-        &self,
-        task_id: &str,
-        task_short_id: &str,
-        pr_number: i64,
-        head_sha: &str,
-        base_ref: &str,
-        pull_number: u64,
-        gh_client: &GitHubApiClient,
-        owner: &str,
-        repo: &str,
-        checks: &djinn_provider::github_api::CheckRunsResponse,
-    ) -> CiStatus {
-        let task_repo = self.task_repo();
-
-        // ── Head-sha change detection ───────────────────────────────────────
-        // When the PR's head SHA changes (new push), reset to `pending` and
-        // clear stale failure/fingerprint/same-signature data.
-        let stored_sha = task_repo
-            .get_ci_snapshot_for_task_pr(task_id, pr_number)
-            .await
-            .ok()
-            .flatten()
-            .map(|s| s.head_sha);
-
-        if stored_sha.as_deref() != Some(head_sha) {
-            match task_repo
-                .reset_ci_snapshot_for_head(task_id, pr_number, head_sha)
-                .await
-            {
-                Ok(_snapshot) => {
-                    tracing::info!(
-                        task_id = %task_short_id,
-                        pr = pull_number,
-                        old_sha = ?stored_sha.as_deref().map(|s| &s[..s.len().min(12)]),
-                        new_sha = &head_sha[..head_sha.len().min(12)],
-                        "PR poller: head SHA changed — reset CI snapshot to pending, cleared stale data"
-                    );
-                    // If there are no completed checks, the snapshot is now
-                    // `pending` for the new head — nothing more to classify.
-                    if checks.check_runs.is_empty()
-                        || !checks.check_runs.iter().all(|cr| cr.status == "completed")
-                    {
-                        // Leave as `pending`; the next poll will re-evaluate
-                        // when all checks complete.
-                        return CiStatus::Pending;
-                    }
-                    // Fall through to classify the completed checks below.
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        task_id = %task_short_id,
-                        pr = pull_number,
-                        error = %e,
-                        "PR poller: failed to reset CI snapshot for head change"
-                    );
-                    return CiStatus::Unknown;
-                }
-            }
-        }
-
-        // ── Classify check state ────────────────────────────────────────────
-        let ci_status = if checks.check_runs.is_empty() {
-            // No checks exist — repo has no CI configured. After the
-            // minimum-age guard elapses, the poller treats this as green
-            // (see the no-CI fast path in `poll_pr_draft_tasks`). The
-            // snapshot records `unknown` to distinguish from "checks
-            // still running" (`pending`).
-            CiStatus::Unknown
-        } else if checks.check_runs.iter().all(|cr| cr.status == "completed") {
-            let failed_checks: Vec<&CheckRun> = checks
-                .check_runs
-                .iter()
-                .filter(|cr| {
-                    matches!(
-                        cr.conclusion.as_deref(),
-                        Some("failure") | Some("timed_out") | Some("cancelled")
-                    )
-                })
-                .collect();
-
-            let required_contexts = self
-                .resolve_required_contexts(gh_client, owner, repo, base_ref, pull_number)
-                .await;
-            let blocking = blocking_failed_checks(&failed_checks, required_contexts.as_deref());
-
-            if blocking.is_empty() {
-                // All required checks passed (or no CI configured).
-                CiStatus::Passing
-            } else {
-                // At least one required check failed.
-                CiStatus::Failing
-            }
-        } else {
-            // Checks still running.
-            CiStatus::Pending
-        };
-
-        // ── Compute fingerprint for failing state ───────────────────────────
-        let (failure_fingerprint, blocking_names) = if ci_status == CiStatus::Failing {
-            let failed_checks: Vec<&CheckRun> = checks
-                .check_runs
-                .iter()
-                .filter(|cr| {
-                    matches!(
-                        cr.conclusion.as_deref(),
-                        Some("failure") | Some("timed_out") | Some("cancelled")
-                    )
-                })
-                .collect();
-
-            let required_contexts = self
-                .resolve_required_contexts(gh_client, owner, repo, base_ref, pull_number)
-                .await;
-            let blocking = blocking_failed_checks(&failed_checks, required_contexts.as_deref());
-
-            // Build failure sections for fingerprint computation.
-            let (sections, _) = ci_helpers::build_ci_failure_sections(None, &blocking);
-            let fp = compute_ci_failure_fingerprint(&blocking, &sections);
-            let names: Vec<String> = blocking.iter().map(|cr| cr.name.clone()).collect();
-            (Some(fp), names)
-        } else {
-            (None, Vec::new())
-        };
-
-        let input = TaskPrCiSnapshotInput {
-            task_id: task_id.to_string(),
-            pr_number,
-            head_sha: head_sha.to_string(),
-            ci_status,
-            blocking_required_check_names: blocking_names,
-            failure_fingerprint,
-            // Let the repository layer manage same-signature counting and
-            // timestamps via upsert semantics.
-            same_signature_count: 0,
-            last_remediation_base_sha: None,
-        };
-
-        match task_repo.upsert_ci_snapshot(input).await {
-            Ok(snapshot) => {
-                tracing::debug!(
-                    task_id = %task_short_id,
-                    pr = pull_number,
-                    ci_status = %snapshot.ci_status,
-                    blocking_count = snapshot.blocking_required_check_names.len(),
-                    fingerprint = ?snapshot.failure_fingerprint,
-                    same_sig_count = snapshot.same_signature_count,
-                    "PR poller: CI snapshot recorded"
-                );
-            }
-            Err(e) => {
-                tracing::warn!(
-                    task_id = %task_short_id,
-                    pr = pull_number,
-                    error = %e,
-                    "PR poller: failed to record CI snapshot"
-                );
-            }
-        }
-
-        ci_status
-    }
-
-    /// Record `unknown` CI status when GitHub data is unavailable.
-    pub(crate) async fn record_ci_snapshot_unavailable(
-        &self,
-        task_id: &str,
-        task_short_id: &str,
-        pr_number: i64,
-    ) {
-        let task_repo = self.task_repo();
-        if let Ok(Some(existing)) = task_repo
-            .get_ci_snapshot_for_task_pr(task_id, pr_number)
-            .await
-            && !existing.head_sha.is_empty()
-            && existing.ci_status != CiStatus::Unknown
-        {
-            let input = TaskPrCiSnapshotInput {
-                task_id: task_id.to_string(),
-                pr_number,
-                head_sha: existing.head_sha.clone(),
-                ci_status: CiStatus::Unknown,
-                blocking_required_check_names: Vec::new(),
-                failure_fingerprint: None,
-                same_signature_count: 0,
-                last_remediation_base_sha: None,
-            };
-            match task_repo.upsert_ci_snapshot(input).await {
-                Ok(snapshot) => {
-                    tracing::info!(
-                        task_id = %task_short_id,
-                        pr = pr_number,
-                        sha = &snapshot.head_sha[..snapshot.head_sha.len().min(12)],
-                        "PR poller: GitHub data unavailable — recorded unknown CI status with updated timestamp"
-                    );
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        task_id = %task_short_id,
-                        pr = pr_number,
-                        error = %e,
-                        "PR poller: failed to record unavailable CI snapshot"
-                    );
-                }
-            }
-        }
-    }
-
     // ── pr_review polling (review monitoring) ────────────────────────────────
 }
 
@@ -1170,6 +943,15 @@ pub(crate) enum PrDraftCiAction {
     /// Required CI checks have failed — route through the shared
     /// `handle_ci_failure` remediation/intervention handler.
     RouteToRemediation,
+    /// The run completed but reached no verdict: every blocking required check
+    /// was cancelled or never executed. Re-run the failed jobs and hold in
+    /// `pr_draft`.
+    ///
+    /// Distinct from both `Hold` (which does nothing) and
+    /// `RouteToRemediation` (which dispatches an agent to fix code). Sending a
+    /// worker to remediate an inconclusive run is what burned six sessions on
+    /// task `tlu1`: the code had never been shown to be broken.
+    RetriggerAndHold,
 }
 
 /// Decide the `pr_draft` CI gate action from the durable snapshot status and
@@ -1193,6 +975,7 @@ pub(crate) fn decide_pr_draft_ci_action(
                 PrDraftCiAction::Hold
             }
         }
+        CiStatus::Inconclusive => PrDraftCiAction::RetriggerAndHold,
         CiStatus::Failing => PrDraftCiAction::RouteToRemediation,
         CiStatus::Passing => PrDraftCiAction::Proceed {
             needs_passing_persist: false,

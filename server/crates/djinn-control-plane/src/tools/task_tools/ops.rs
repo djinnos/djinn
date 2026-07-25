@@ -88,6 +88,7 @@ pub(crate) fn task_to_response(task: &Task) -> TaskResponse {
         ci_status: task_ci_status(task),
         ci_gate_state: task_ci_gate_state(task),
         ci_primary_blocking_check: ci.as_ref().and_then(|ci| ci.primary_blocking_check.clone()),
+        ci_failure_annotations: ci.as_ref().and_then(|ci| ci.failure_annotations.clone()),
         ci_summary_reason: ci.as_ref().map(|ci| ci.summary_reason.clone()),
         ci_merge_blocked_reason: ci.as_ref().and_then(|ci| ci.merge_blocked_reason.clone()),
         ci,

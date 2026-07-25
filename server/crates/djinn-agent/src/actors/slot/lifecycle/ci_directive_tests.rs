@@ -259,7 +259,7 @@ fn build_ci_blocking_directive_default_and_optional_field_cases() {
                 Some("fp-abc"),
                 Some("base-sha-123"),
             ),
-            vec!["**Blocking checks:** unknown"],
+            vec!["**Blocking checks (ranked, most causal first):** unknown"],
             vec![],
         ),
         (
@@ -468,4 +468,105 @@ fn build_ci_blocking_directive_merge_queue_optional_fields_degrade_gracefully() 
         !directive.contains("Merge-queue failure fingerprint"),
         "missing merge-queue fingerprint line must be omitted: {directive}"
     );
+}
+
+// ── wnqw: triage signal reaches the worker prompt ────────────────────────────
+//
+// Built from GitHub Actions run 30087861197 on PR #2525: a runner host filled
+// its own disk, the fail-fast watcher cancelled the whole run, and the board
+// pointed six sessions of agents at a never-executed aggregator.
+
+/// The tlu1 cascade as it lands in the durable snapshot: ranked check list,
+/// the ranked primary, and the annotation carrying the real cause.
+fn tlu1_task() -> djinn_core::models::Task {
+    let mut task = task_with_ci(
+        "failing",
+        Some("cbe3b7034deadbeef"),
+        Some(2525),
+        r#"["Plan Server Test Shards","Quality Gate","Server Test (shard-1, 0)","Publish Nextest Timing"]"#,
+        Some("fp-tlu1"),
+        Some("base-tlu1"),
+    );
+    task.ci_primary_blocking_check = Some("Plan Server Test Shards".into());
+    task.ci_failure_annotations = Some(
+        "Annotations on `Plan Server Test Shards`:\n\
+         - [failure] System.IO.IOException: No space left on device : \
+         '/home/runner/actions-runner/cached/2.336.0/_diag/Worker_20260724-105745-utc.log'"
+            .into(),
+    );
+    task
+}
+
+#[test]
+fn failing_directive_names_the_ranked_lane_and_shows_its_annotation() {
+    let directive = build_ci_blocking_directive(&tlu1_task()).expect("directive must be Some");
+
+    assert_contains_all(
+        &directive,
+        &[
+            "**Start here:** `Plan Server Test Shards`",
+            // The whole point: the cause is legible without opening GitHub.
+            "No space left on device",
+            "_diag/Worker_20260724-105745-utc.log",
+            // And the worker is told what to do with an infra failure.
+            "retrigger CI and report the infrastructure failure",
+        ],
+    );
+}
+
+#[test]
+fn failing_directive_omits_the_start_here_line_when_nothing_was_ranked() {
+    let mut task = tlu1_task();
+    task.ci_primary_blocking_check = None;
+    task.ci_failure_annotations = None;
+
+    let directive = build_ci_blocking_directive(&task).expect("directive must be Some");
+
+    assert!(
+        !directive.contains("**Start here:**"),
+        "no ranked lane means no lane to point at: {directive}"
+    );
+    assert!(
+        !directive.contains("```"),
+        "no annotations means no empty evidence block: {directive}"
+    );
+}
+
+#[test]
+fn inconclusive_directive_forbids_remediation_and_names_no_lane() {
+    let mut task = tlu1_task();
+    task.ci_status = "inconclusive".into();
+    task.ci_primary_blocking_check = None;
+    task.ci_failure_fingerprint = None;
+    // An inconclusive run has no remediation baseline; the directive must
+    // render anyway, because silence would leave the worker with no guidance.
+    task.ci_last_remediation_base_sha = None;
+
+    let directive = build_ci_blocking_directive(&task).expect("inconclusive must still speak");
+
+    assert_contains_all(
+        &directive,
+        &[
+            "INCONCLUSIVE, not red",
+            "Do NOT start a remediation attempt",
+            "CI is being retriggered",
+        ],
+    );
+    assert!(
+        !directive.contains("You MUST fix"),
+        "an inconclusive run must never issue a fix order: {directive}"
+    );
+    assert!(
+        !directive.contains("**Start here:**"),
+        "there is no causal lane to start from: {directive}"
+    );
+}
+
+#[test]
+fn inconclusive_directive_does_not_displace_a_real_failing_directive() {
+    // `failing` still wins: the inconclusive section is a fallback for the
+    // head lane, never an addition to it.
+    let directive = build_ci_blocking_directive(&tlu1_task()).expect("directive must be Some");
+    assert!(directive.contains("REQUIRED CI is failing"));
+    assert!(!directive.contains("INCONCLUSIVE, not red"));
 }

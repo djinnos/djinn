@@ -15,7 +15,18 @@ export type Project = import("./server").Project;
  * CI status values exposed by the backend CiStatus enum.
  * Wire values are lowercase snake-case strings.
  */
-export type CiStatus = "passing" | "failing" | "pending" | "unknown";
+export type CiStatus =
+  | "passing"
+  | "failing"
+  | "pending"
+  /**
+   * The run completed but reached no verdict about the code: every blocking
+   * required check was cancelled or never executed (the signature of a
+   * run-level abort or a runner-host failure). Warrants a retrigger, not a
+   * remediation attempt.
+   */
+  | "inconclusive"
+  | "unknown";
 
 /**
  * Structured CI gate snapshot from the backend.
@@ -30,8 +41,19 @@ export interface CiGateSnapshot {
   head_sha: string;
   /** Names of required checks that are currently failing and blocking merge. */
   blocking_required_check_names: string[];
-  /** Primary blocking required check name, when CI is failing. */
+  /**
+   * The check to triage first: the earliest-started blocking lane that
+   * actually executed and hard-failed. Never a cancelled lane or a
+   * `needs:`-dependent aggregator that did not execute. Absent when the run
+   * was inconclusive.
+   */
   primary_blocking_check?: string | null;
+  /**
+   * Bounded rendering of the GitHub annotations on `primary_blocking_check`.
+   * Runner-host failures surface only as annotations, so this is often the
+   * only place the real cause appears.
+   */
+  failure_annotations?: string | null;
   /** Stable fingerprint of the current failure signature. */
   failure_fingerprint?: string | null;
   /** Human-readable summary derived from the structured CI gate snapshot. */

@@ -1084,6 +1084,11 @@ mod tests {
                     "Quality Gate".to_string(),
                     "Tests".to_string(),
                 ],
+                primary_blocking_check: Some("Quality Gate".to_string()),
+                failure_annotations: Some(
+                    "Annotations on `Quality Gate`:\n- [failure] No space left on device"
+                        .to_string(),
+                ),
                 failure_fingerprint: Some("fp-1".to_string()),
                 same_signature_count: 2,
                 last_remediation_base_sha: Some("base-1".to_string()),
@@ -1104,6 +1109,13 @@ mod tests {
             .unwrap();
         assert_eq!(read.head_sha, "abc123");
         assert_eq!(read.failure_fingerprint.as_deref(), Some("fp-1"));
+        assert_eq!(read.primary_blocking_check.as_deref(), Some("Quality Gate"));
+        assert!(
+            read.failure_annotations
+                .as_deref()
+                .is_some_and(|a| a.contains("No space left on device")),
+            "captured annotations must round-trip through the snapshot table"
+        );
 
         let mapped = repo.get(&task.id).await.unwrap().unwrap();
         assert_eq!(mapped.ci_status, "failing");
@@ -1113,6 +1125,63 @@ mod tests {
             vec!["Quality Gate".to_string(), "Tests".to_string()]
         );
         assert_eq!(mapped.ci_same_signature_count, 2);
+        // wnqw: the promotion subqueries must carry the triage evidence onto
+        // the Task, or the board and the agent prompt never see it.
+        assert_eq!(
+            mapped.ci_primary_blocking_check.as_deref(),
+            Some("Quality Gate")
+        );
+        assert!(
+            mapped
+                .ci_failure_annotations
+                .as_deref()
+                .is_some_and(|a| a.contains("No space left on device")),
+            "annotations must be promoted onto Task, not stranded in the snapshot table"
+        );
+    }
+
+    /// wnqw: `inconclusive` must be a persistable CI status (the migration
+    /// widens the `ci_status` CHECK constraint), and its evidence columns must
+    /// round-trip as empty rather than being silently coerced.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ci_snapshot_persists_inconclusive_status_with_no_primary_check() {
+        let db = Database::open_in_memory().unwrap();
+        let (bus, _captured) = capturing_bus();
+        let repo = TaskRepository::new(db.clone(), bus);
+        let project = make_project(&db).await;
+        let epic_id = make_epic(&db, &project.id).await;
+        let task = make_task(&repo, &epic_id, "task", Some(r#"[{"title":"ac"}]"#)).await;
+
+        let snapshot = repo
+            .upsert_ci_snapshot(TaskPrCiSnapshotInput {
+                task_id: task.id.clone(),
+                pr_number: 2525,
+                head_sha: "cbe3b7034".to_string(),
+                ci_status: CiStatus::Inconclusive,
+                blocking_required_check_names: vec![
+                    "Server Test (shard-1, 0)".to_string(),
+                    "Publish Nextest Timing".to_string(),
+                ],
+                primary_blocking_check: None,
+                failure_annotations: None,
+                failure_fingerprint: None,
+                same_signature_count: 0,
+                last_remediation_base_sha: None,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(snapshot.ci_status, CiStatus::Inconclusive);
+        assert!(snapshot.primary_blocking_check.is_none());
+        assert!(
+            snapshot.failure_fingerprint.is_none(),
+            "no causal lane means no fingerprint — a cancelled cascade must not \
+             manufacture a signature for same_signature_count to count"
+        );
+
+        let mapped = repo.get(&task.id).await.unwrap().unwrap();
+        assert_eq!(mapped.ci_status, "inconclusive");
+        assert!(mapped.ci_primary_blocking_check.is_none());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1130,6 +1199,8 @@ mod tests {
             head_sha: "old-head".to_string(),
             ci_status: CiStatus::Failing,
             blocking_required_check_names: vec!["Tests".to_string()],
+            primary_blocking_check: None,
+            failure_annotations: None,
             failure_fingerprint: Some("old-fp".to_string()),
             same_signature_count: 4,
             last_remediation_base_sha: Some("old-base".to_string()),
@@ -1177,6 +1248,8 @@ mod tests {
             head_sha: "sha-green".to_string(),
             ci_status: CiStatus::Passing,
             blocking_required_check_names: vec![],
+            primary_blocking_check: None,
+            failure_annotations: None,
             failure_fingerprint: None,
             same_signature_count: 0,
             last_remediation_base_sha: None,
@@ -1193,6 +1266,8 @@ mod tests {
                 head_sha: "sha-green".to_string(),
                 ci_status: CiStatus::Unknown,
                 blocking_required_check_names: vec![],
+                primary_blocking_check: None,
+                failure_annotations: None,
                 failure_fingerprint: None,
                 same_signature_count: 0,
                 last_remediation_base_sha: None,
@@ -1214,6 +1289,8 @@ mod tests {
                 head_sha: "sha-green".to_string(),
                 ci_status: CiStatus::Failing,
                 blocking_required_check_names: vec!["Tests".to_string()],
+                primary_blocking_check: None,
+                failure_annotations: None,
                 failure_fingerprint: Some("fp".to_string()),
                 same_signature_count: 1,
                 last_remediation_base_sha: None,
@@ -1234,6 +1311,8 @@ mod tests {
                 head_sha: "sha-new".to_string(),
                 ci_status: CiStatus::Unknown,
                 blocking_required_check_names: vec![],
+                primary_blocking_check: None,
+                failure_annotations: None,
                 failure_fingerprint: None,
                 same_signature_count: 0,
                 last_remediation_base_sha: None,
@@ -1411,6 +1490,8 @@ mod tests {
             head_sha: "sha-x".to_string(),
             ci_status: CiStatus::Passing,
             blocking_required_check_names: vec![],
+            primary_blocking_check: None,
+            failure_annotations: None,
             failure_fingerprint: None,
             same_signature_count: 0,
             last_remediation_base_sha: None,
@@ -1440,6 +1521,8 @@ mod tests {
                 head_sha: "sha-x".to_string(),
                 ci_status: CiStatus::Passing,
                 blocking_required_check_names: vec![],
+                primary_blocking_check: None,
+                failure_annotations: None,
                 failure_fingerprint: None,
                 same_signature_count: 0,
                 last_remediation_base_sha: None,
@@ -1470,6 +1553,8 @@ mod tests {
             head_sha: "old-sha".to_string(),
             ci_status: CiStatus::Passing,
             blocking_required_check_names: vec![],
+            primary_blocking_check: None,
+            failure_annotations: None,
             failure_fingerprint: None,
             same_signature_count: 0,
             last_remediation_base_sha: None,
@@ -1497,6 +1582,8 @@ mod tests {
                 head_sha: "new-sha".to_string(),
                 ci_status: CiStatus::Pending,
                 blocking_required_check_names: vec![],
+                primary_blocking_check: None,
+                failure_annotations: None,
                 failure_fingerprint: None,
                 same_signature_count: 0,
                 last_remediation_base_sha: None,
@@ -2697,6 +2784,8 @@ macro_rules! task_select_where_id {
                 (SELECT s.head_sha FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_head_sha,
                 (SELECT s.pr_number FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_pr_number,
                 COALESCE((SELECT s.blocking_required_check_names::text FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1), '[]') AS ci_blocking_required_check_names,
+                (SELECT s.primary_blocking_check FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_primary_blocking_check,
+                (SELECT s.failure_annotations FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_failure_annotations,
                 (SELECT s.failure_fingerprint FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_failure_fingerprint,
                 (SELECT s.first_seen_at FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_first_seen_at,
                 (SELECT s.last_seen_at FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_last_seen_at,

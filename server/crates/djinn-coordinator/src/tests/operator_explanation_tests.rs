@@ -690,6 +690,8 @@ async fn zps8_submitted_head_in_ledger_blocks_stale_ci_strike() {
         head_sha: "stale-head-sha".to_string(),
         ci_status: djinn_core::models::CiStatus::Failing,
         blocking_required_check_names: vec!["CI Test".to_string()],
+        primary_blocking_check: None,
+        failure_annotations: None,
         failure_fingerprint: Some("fp:stale-ci".to_string()),
         same_signature_count: 1,
         last_remediation_base_sha: None,

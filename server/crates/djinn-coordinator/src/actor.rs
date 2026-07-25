@@ -224,6 +224,14 @@ pub(super) struct CoordinatorActor {
     /// terminal red blocking CI while parked in `needs_task_review`). Losing it
     /// delays, rather than accelerates, the review-stuck planner intervention.
     pub(super) review_stuck_sha_first_seen: HashMap<String, (String, StdInstant)>,
+    /// Restart-safe-to-lose: `"{task_id}:{head_sha}:{run_id}"` keys for
+    /// inconclusive Actions runs already retriggered.
+    ///
+    /// Bounds retriggers to one per run id per head so a sick runner fleet
+    /// cannot be re-run in a loop. Losing it on restart costs at most one extra
+    /// re-run per affected PR, which is strictly safer than the alternative of
+    /// persisting state that could suppress a needed retry.
+    pub(super) ci_inconclusive_retriggered: std::collections::HashSet<String>,
     /// Restart-safe-to-lose: consecutive merge failure count per task. A restart
     /// resets the recheck threshold, which is safe because the next poll observes
     /// GitHub's current PR/CI state.
@@ -611,6 +619,7 @@ impl CoordinatorActor {
             pr_status_cache: HashMap::new(),
             pr_draft_first_seen: HashMap::new(),
             review_stuck_sha_first_seen: HashMap::new(),
+            ci_inconclusive_retriggered: HashSet::new(),
             merge_fail_count: HashMap::new(),
             auto_approve_attempted: HashMap::new(),
             delegated_to_github: HashMap::new(),

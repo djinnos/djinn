@@ -26652,6 +26652,13 @@ expression: signatures
               },
               "type": "array"
             },
+            "failure_annotations": {
+              "description": "Bounded rendering of the GitHub annotations on\n[`Self::primary_blocking_check`].\n\nRunner-host failures — out of disk, runner process crash — surface ONLY\nas annotations, not as a check conclusion and often not in job logs\neither. This field is what lets a reader see `No space left on device`\nwithout opening GitHub.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "failure_fingerprint": {
               "description": "Stable fingerprint of the current failure signature (e.g. sorted\nfailing check names + head SHA). `None` when not failing.",
               "type": [
@@ -26737,7 +26744,7 @@ expression: signatures
               ]
             },
             "primary_blocking_check": {
-              "description": "Primary blocking required check name, when CI is failing.\n\n`Some(_)` when `status == failing` and at least one required check\nfailed.  This is the first element of `blocking_required_check_names`\n(sorted alphabetically) for compact display.  `None` otherwise.",
+              "description": "The single required check to triage first — the earliest-started\nblocking lane that actually executed and hard-failed.\n\nSelected by the PR poller from *structural execution evidence*\n(conclusion class, execution interval, annotation count, start order),\nnever from name order and never from a list of job names. A check that\nwas `cancelled`, or that never executed, is a symptom of a run-level\nabort rather than a cause, and is never selected.\n\n`None` when no blocking check carries causal information — i.e. `status`\nis `inconclusive` and the run should be retriggered, not remediated.",
               "type": [
                 "string",
                 "null"
@@ -26779,6 +26786,11 @@ expression: signatures
                 "pending",
                 "unknown"
               ],
+              "type": "string"
+            },
+            {
+              "const": "inconclusive",
+              "description": "Every blocking required check was cancelled or never executed, so the\nrun reached no verdict about the code. Warrants a retrigger, not a\nremediation attempt.",
               "type": "string"
             },
             {
@@ -26870,6 +26882,11 @@ expression: signatures
               "type": "string"
             },
             {
+              "const": "inconclusive",
+              "description": "The run completed but reached **no verdict about the code**: every\nblocking required check was `cancelled`, or never executed at all.\n\nThis is the signature of a run-level abort — GitHub's `fail-fast`\nmatrices, a `gh run cancel` from an in-shard watcher, or a runner-host\ncrash — which stamps every in-flight sibling `cancelled` and leaves\n`needs:`-dependent aggregators with a zero-length, never-executed\ncheck run. None of those lanes carry information about their own\nhealth, so the run is *inconclusive*, not red.\n\nThe distinction is load-bearing: an inconclusive run warrants a\n**retrigger**, whereas a failing run warrants a remediation attempt.\nTreating an inconclusive run as failing dispatches agents to fix code\nthat was never proven broken.",
+              "type": "string"
+            },
+            {
               "const": "unknown",
               "description": "CI state is not known (e.g. PR not yet polled, no checks present).",
               "type": "string"
@@ -26933,6 +26950,13 @@ expression: signatures
               ],
               "description": "Current-head required-CI gate snapshot for this task's PR, if any."
             },
+            "ci_failure_annotations": {
+              "description": "Bounded rendering of the GitHub annotations on\n`ci_primary_blocking_check`. Runner-host failures (out of disk, runner\ncrash) surface only as annotations, so this is often the only place the\nreal cause appears.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "ci_gate_state": {
               "$ref": "#/$defs/CiGateState",
               "description": "Top-level alias for `ci.gate_state`, including `awaiting_ci` for\n`pr_draft` + pending/unknown."
@@ -26945,7 +26969,7 @@ expression: signatures
               ]
             },
             "ci_primary_blocking_check": {
-              "description": "Primary blocking required check/job when required CI is failing.",
+              "description": "The required check/job to triage first — the earliest-started blocking\nlane that actually executed and hard-failed. Never a cancelled lane and\nnever a `needs:`-dependent aggregator that did not execute; both are\nsymptoms of a run-level abort rather than causes. Absent when the run\nwas inconclusive.",
               "type": [
                 "string",
                 "null"
