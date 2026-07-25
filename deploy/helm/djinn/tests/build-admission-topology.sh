@@ -90,6 +90,15 @@ render "$TMPDIR_RENDER/enforce-rolling.yaml" \
     --set server.strategy.rollingUpdate.maxUnavailable=1
 assert_server_contract "$TMPDIR_RENDER/enforce-rolling.yaml" enforce 5 1 RollingUpdate 0 1
 
+echo "=== valid Enforce non-overlapping RollingUpdate string quantities ==="
+render "$TMPDIR_RENDER/enforce-rolling-strings.yaml" \
+    --set-string buildAdmission.mode=enforce \
+    --set buildAdmission.maxBuildTaskRuns=6 \
+    --set-string server.strategy.type=RollingUpdate \
+    --set-string server.strategy.rollingUpdate.maxSurge=0 \
+    --set-string server.strategy.rollingUpdate.maxUnavailable=1
+assert_server_contract "$TMPDIR_RENDER/enforce-rolling-strings.yaml" enforce 6 1 RollingUpdate 0 1
+
 expect_rejected zero-replicas --set server.replicas=0
 expect_rejected multiple-replicas --set server.replicas=2
 expect_rejected surge-capable --set server.strategy.rollingUpdate.maxSurge=1 --set server.strategy.rollingUpdate.maxUnavailable=0
