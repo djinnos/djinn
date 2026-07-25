@@ -22,9 +22,8 @@ use djinn_supervisor::cargo_target_run_dir;
 
 use crate::config::KubernetesConfig;
 use crate::launcher::{
-    RoleResourceClass, launcher_cgroup_volume, launcher_ipc_volume, launcher_sidecar_container,
-    pod_security_context, worker_launcher_env, worker_launcher_ipc_mount, worker_resources,
-    worker_security_context,
+    RoleResourceClass, launcher_ipc_volume, launcher_sidecar_container, pod_security_context,
+    worker_launcher_env, worker_launcher_ipc_mount, worker_resources, worker_security_context,
 };
 use crate::sidecar::{
     BackingServiceSpec, control_volume, control_volume_mount, sidecar_conn_env, sidecar_container,
@@ -241,8 +240,16 @@ pub fn build_task_run_job(
     let mut worker_env = build_task_run_env(config, &task_run_id_str, project_id, policy);
     worker_env.extend(effective_services.iter().flat_map(sidecar_conn_env));
     // Broker socket + worker-private credential paths so the worker can dial the
-    // mandatory cgroup-launcher sidecar.
-    worker_env.extend(worker_launcher_env());
+    // cgroup-launcher sidecar — only when that sidecar is actually rendered.
+    //
+    // Task grkq: these MUST NOT be emitted when the launcher is disabled. The
+    // worker's handshake is detection-gated on the IPC mount existing; projecting
+    // the paths (and the mount) without a sidecar would make it wait out the full
+    // 30s connect window on every pod start before falling back.
+    let renders_launcher = config.cgroup_launcher_mode.renders_sidecar();
+    if renders_launcher {
+        worker_env.extend(worker_launcher_env());
+    }
 
     // The private control emptyDir is added only when a wrapper sidecar is
     // injected, and mounted only into the worker and the wrapper sidecars — never
@@ -270,11 +277,13 @@ pub fn build_task_run_job(
         // comment above for why this narrow exception is safe.
         volume_mount(VOLUME_WORKSPACE, WORKSPACE_MOUNT_DIR, None),
         crate::env_config::env_config_volume_mount(),
-        // Broker control socket + worker-private launcher credential. Shared
-        // with the mandatory cgroup-launcher sidecar only; never mounted into a
-        // backing sidecar, and closed off from the launcher-spawned child.
-        worker_launcher_ipc_mount(),
     ];
+    if renders_launcher {
+        // Broker control socket + worker-private launcher credential. Shared
+        // with the cgroup-launcher sidecar only; never mounted into a backing
+        // sidecar, and closed off from the launcher-spawned child.
+        worker_volume_mounts.push(worker_launcher_ipc_mount());
+    }
     if any_wrapper {
         worker_volume_mounts.push(control_volume_mount());
     }
@@ -409,14 +418,20 @@ pub fn build_task_run_job(
             ..Volume::default()
         },
         crate::env_config::env_config_volume(project_id),
-        // Enforcement volumes for the mandatory cgroup-launcher sidecar. Always
-        // present on a task-run pod: the launcher is mandatory. `launcher-ipc`
-        // (Memory emptyDir) carries the broker control socket + worker-private
-        // credential (worker + launcher only); `launcher-cgroup` is the
-        // launcher's private delegated cgroup root (launcher only).
-        launcher_ipc_volume(),
-        launcher_cgroup_volume(),
     ];
+    if renders_launcher {
+        // Enforcement volume for the cgroup-launcher sidecar: `launcher-ipc`
+        // (Memory emptyDir) carries the broker control socket + worker-private
+        // credential (worker + launcher only).
+        //
+        // There is deliberately NO `launcher-cgroup` volume. The delegated
+        // cgroup root used to be rendered as a plain emptyDir, which is not a
+        // cgroup2 tree at all. It is not a volume at all in the goxi design:
+        // the launcher mounts cgroup2 itself inside its own cgroup namespace.
+        // See the note in `launcher.rs` where that builder used to live, and
+        // `CgroupLauncherMode` for the measured evidence.
+        volumes.push(launcher_ipc_volume());
+    }
     // Backing-service sidecars share a Memory /dev/shm (Postgres needs more than
     // the 64Mi default). Added only when services are injected so the manifest
     // is byte-identical to the pre-feature shape for service-less projects.
@@ -431,22 +446,32 @@ pub fn build_task_run_job(
         volumes.push(control_volume());
     }
 
-    // The mandatory cgroup-launcher is a native sidecar (initContainer +
-    // restartPolicy: Always): it comes up before the worker (which dials its
-    // broker socket) and is torn down when the worker exits, so the Job still
-    // reaches Completed. It is ALWAYS present — including for evidence spikes —
-    // because enforcement is not optional.
+    // The cgroup-launcher is a native sidecar (initContainer + restartPolicy:
+    // Always): it comes up before the worker (which dials its broker socket) and
+    // is torn down when the worker exits, so the Job still reaches Completed.
+    //
+    // Task grkq: it is rendered ONLY when `cgroup_launcher_mode` arms it. It was
+    // previously unconditional, but its delegated cgroup root was an emptyDir,
+    // so the sidecar died in `NativeCgroupFs::open` on every pod and the broker
+    // socket never bound. `validate_enforcement_render` currently rejects the
+    // armed mode outright, so in practice no task-run pod renders it — see
+    // `CgroupLauncherMode` for the measured reason.
     //
     // Each declared backing service is then ALSO a native sidecar, appended
     // AFTER the launcher.  For evidence-spike runs, `effective_services` is
-    // empty so no product databases start, but the launcher stays.
-    let mut init_container_vec = vec![launcher_sidecar_container(config, project_image_tag)];
+    // empty so no product databases start.
+    let mut init_container_vec = Vec::new();
+    if renders_launcher {
+        init_container_vec.push(launcher_sidecar_container(config, project_image_tag));
+    }
     init_container_vec.extend(
         effective_services
             .iter()
             .map(|s| sidecar_container(config, s)),
     );
-    let init_containers = Some(init_container_vec);
+    // Emit no `initContainers` key at all when nothing is injected, restoring the
+    // pre-enforcement shape for a service-less project with the launcher off.
+    let init_containers = (!init_container_vec.is_empty()).then_some(init_container_vec);
 
     // Pin Pods to a dedicated NodePool when the operator has configured one.
     // Both fields stay `None` if the corresponding config entry is empty so
@@ -467,10 +492,12 @@ pub fn build_task_run_job(
         // RPC frame (TerminalReport) before SIGKILL — K8s default 30s is
         // tight when the supervisor is mid-stream over a slow link.
         termination_grace_period_seconds: Some(config.task_run_termination_grace_period_seconds),
-        // shareProcessNamespace lets the launcher sidecar see the worker process
-        // (PID auth via SO_PEERCRED / the broker's worker_pid contract) so it can
-        // authenticate the worker and clone children into the delegated cgroup.
-        share_process_namespace: Some(true),
+        // shareProcessNamespace exists ONLY so the launcher sidecar can see the
+        // worker process (PID auth via SO_PEERCRED / the broker's `worker_pid`
+        // contract). It is a real widening — every backing-service sidecar can
+        // then see the worker's `/proc` entries — so it is set only when the
+        // launcher is actually rendered (task grkq).
+        share_process_namespace: renders_launcher.then_some(true),
         // v1 leases security contract (qut0). The per-container securityContexts
         // set the UIDs now (worker=1000, launcher=0); the pod context ties
         // `fsGroup` to the artifact GID (1000) with `fsGroupChangePolicy:
@@ -1007,17 +1034,18 @@ mod tests {
         let job = wrapper_job();
         let pod = pod_of(&job);
         let inits = pod.init_containers.as_ref().expect("init containers set");
-        // The mandatory cgroup-launcher sidecar renders first, followed by one
-        // wrapper sidecar per service type.
+        // Task grkq: the cgroup-launcher sidecar is OFF by default, so the init
+        // containers are exactly one wrapper sidecar per service type.
         assert_eq!(
             inits.len(),
-            4,
-            "mandatory launcher sidecar + one wrapper sidecar per service type"
+            3,
+            "one wrapper sidecar per service type (no launcher by default)"
         );
-        assert_eq!(
-            inits[0].name,
-            crate::launcher::LAUNCHER_CONTAINER_NAME,
-            "the mandatory cgroup-launcher sidecar renders first"
+        assert!(
+            !inits
+                .iter()
+                .any(|c| c.name == crate::launcher::LAUNCHER_CONTAINER_NAME),
+            "the cgroup-launcher sidecar is disabled by default (task grkq)"
         );
 
         for (svc, port, socket) in [
@@ -1404,10 +1432,11 @@ mod tests {
         );
 
         // Volume mounts: 5 from the pre-env-config layout + the
-        // environment-config mount (P4) + the launcher IPC mount (qut0 leases v1).
+        // environment-config mount (P4). Task grkq: the launcher IPC mount is
+        // NOT rendered by default — `cgroup_launcher_mode` is `Disabled`.
         let mounts = container.volume_mounts.as_ref().expect("volume_mounts set");
-        assert_eq!(mounts.len(), 7, "expected 7 volume mounts");
-        let expected_mounts: [(&str, &str, Option<bool>); 7] = [
+        assert_eq!(mounts.len(), 6, "expected 6 volume mounts");
+        let expected_mounts: [(&str, &str, Option<bool>); 6] = [
             (VOLUME_SPEC, SPEC_MOUNT_DIR, Some(true)),
             (VOLUME_AUTH_TOKEN, TOKEN_MOUNT_DIR, Some(true)),
             (VOLUME_MIRROR, MIRROR_MOUNT_DIR, Some(false)),
@@ -1418,11 +1447,6 @@ mod tests {
                 crate::env_config::ENV_CONFIG_MOUNT_DIR,
                 Some(true),
             ),
-            (
-                crate::launcher::VOLUME_LAUNCHER_IPC,
-                crate::launcher::LAUNCHER_IPC_DIR,
-                None,
-            ),
         ];
         for (mount, (exp_name, exp_path, exp_ro)) in mounts.iter().zip(expected_mounts.iter()) {
             assert_eq!(&mount.name, exp_name);
@@ -1430,9 +1454,11 @@ mod tests {
             assert_eq!(mount.read_only, *exp_ro);
         }
 
-        // Volumes mirror the mount list, plus the launcher-only cgroup volume.
+        // Volumes mirror the mount list exactly. Task grkq: neither the launcher
+        // IPC volume nor a `launcher-cgroup` volume is rendered by default (the
+        // latter can never be rendered — no volume source is a cgroup2 tree).
         let volumes = pod.volumes.as_ref().expect("volumes set");
-        assert_eq!(volumes.len(), 8, "expected 8 volumes");
+        assert_eq!(volumes.len(), 6, "expected 6 volumes");
         let expected_volume_names = [
             VOLUME_SPEC,
             VOLUME_AUTH_TOKEN,
@@ -1440,12 +1466,25 @@ mod tests {
             VOLUME_CACHE,
             VOLUME_WORKSPACE,
             crate::env_config::VOLUME_ENV_CONFIG,
-            crate::launcher::VOLUME_LAUNCHER_IPC,
-            crate::launcher::VOLUME_LAUNCHER_CGROUP,
         ];
         for (volume, expected_name) in volumes.iter().zip(expected_volume_names.iter()) {
             assert_eq!(&volume.name, expected_name);
         }
+        for absent in [
+            crate::launcher::VOLUME_LAUNCHER_IPC,
+            crate::launcher::VOLUME_LAUNCHER_CGROUP,
+        ] {
+            assert!(
+                volumes.iter().all(|v| v.name != absent),
+                "task grkq: {absent} must not be rendered with the launcher disabled"
+            );
+        }
+        // No sidecars at all for a service-less run with the launcher off.
+        assert!(
+            pod.init_containers.is_none(),
+            "task grkq: no launcher ⇒ no initContainers for a service-less run"
+        );
+        assert_eq!(pod.share_process_namespace, None);
 
         // spec → Secret volume with the right name + key-to-path mapping.
         let spec_volume = &volumes[0];
@@ -2319,14 +2358,12 @@ mod tests {
             .as_ref()
             .and_then(|s| s.template.spec.as_ref())
             .expect("pod spec");
-        // The mandatory launcher sidecar is ALWAYS present; with no backing
-        // services it is the ONLY init container and there is no svc-dshm volume.
-        let bare_inits = bare_pod
-            .init_containers
-            .as_ref()
-            .expect("launcher sidecar is always an init container");
-        assert_eq!(bare_inits.len(), 1, "no services ⇒ launcher sidecar only");
-        assert_eq!(bare_inits[0].name, crate::launcher::LAUNCHER_CONTAINER_NAME);
+        // Task grkq: the launcher sidecar is off by default, so a service-less
+        // run renders NO init containers at all and no svc-dshm volume.
+        assert!(
+            bare_pod.init_containers.is_none(),
+            "no services + launcher disabled ⇒ no initContainers"
+        );
         assert!(
             !bare_pod
                 .volumes
@@ -2355,13 +2392,12 @@ mod tests {
             .and_then(|s| s.template.spec.as_ref())
             .expect("pod spec");
 
-        // Native sidecars in initContainers: the mandatory launcher first, then
-        // the backing service after it.
+        // Native sidecars in initContainers. Task grkq: the launcher is off by
+        // default, so the backing service is the only init container.
         let inits = pod.init_containers.as_ref().expect("init_containers set");
-        assert_eq!(inits.len(), 2);
-        assert_eq!(inits[0].name, crate::launcher::LAUNCHER_CONTAINER_NAME);
-        assert_eq!(inits[1].name, "svc-postgres");
-        assert_eq!(inits[1].restart_policy.as_deref(), Some("Always"));
+        assert_eq!(inits.len(), 1);
+        assert_eq!(inits[0].name, "svc-postgres");
+        assert_eq!(inits[0].restart_policy.as_deref(), Some("Always"));
 
         // Connection env var exported to the worker container.
         let worker = &pod.containers[0];
@@ -2661,21 +2697,18 @@ mod tests {
             .and_then(|s| s.template.spec.as_ref())
             .expect("pod spec set");
 
-        // The mandatory launcher sidecar is still present (enforcement is not
-        // optional), but NO backing-service sidecar is injected.
-        let inits = pod
-            .init_containers
-            .as_ref()
-            .expect("launcher sidecar is always present");
-        assert_eq!(
-            inits.len(),
-            1,
-            "evidence-spike must inject only the launcher, no backing services"
-        );
-        assert_eq!(inits[0].name, crate::launcher::LAUNCHER_CONTAINER_NAME);
+        // NO backing-service sidecar is injected. Task grkq: the launcher is off
+        // by default too, so an evidence spike renders no init containers at all.
         assert!(
-            !inits.iter().any(|c| c.name.starts_with("svc-")),
+            pod.init_containers
+                .iter()
+                .flatten()
+                .all(|c| !c.name.starts_with("svc-")),
             "evidence-spike must not inject backing-service sidecars"
+        );
+        assert!(
+            pod.init_containers.is_none(),
+            "evidence-spike with the launcher disabled renders no initContainers"
         );
 
         // No svc-dshm volume.
@@ -2742,11 +2775,11 @@ mod tests {
             .and_then(|s| s.template.spec.as_ref())
             .expect("pod spec set");
 
-        // Launcher + backing-service sidecar both injected for normal runs.
+        // The backing-service sidecar IS injected for normal runs. Task grkq:
+        // the launcher is off by default, so it is the only init container.
         let inits = pod.init_containers.as_ref().expect("init_containers set");
-        assert_eq!(inits.len(), 2);
-        assert_eq!(inits[0].name, crate::launcher::LAUNCHER_CONTAINER_NAME);
-        assert_eq!(inits[1].name, "svc-postgres");
+        assert_eq!(inits.len(), 1);
+        assert_eq!(inits[0].name, "svc-postgres");
 
         // Connection env var IS present.
         let worker = &pod.containers[0];
@@ -3210,6 +3243,15 @@ mod tests {
         )
     }
 
+    /// Task grkq: a config with the cgroup-launcher explicitly ARMED. The
+    /// default (`CgroupLauncherMode::Disabled`) renders no sidecar at all, so
+    /// every launcher-shaped render assertion has to opt in through this.
+    fn armed_launcher_config() -> KubernetesConfig {
+        let mut cfg = KubernetesConfig::for_testing();
+        cfg.cgroup_launcher_mode = crate::launcher::CgroupLauncherMode::Required;
+        cfg
+    }
+
     fn worker_cpu_request(job: &Job) -> String {
         let pod = job.spec.as_ref().unwrap().template.spec.as_ref().unwrap();
         pod.containers[0]
@@ -3283,33 +3325,96 @@ mod tests {
         );
     }
 
-    /// AC1/AC3: the mandatory launcher sidecar renders on every task pod with
-    /// shareProcessNamespace, reusing the worker image with the packaged
-    /// launcher binary as its entrypoint.
+    /// Task grkq (P0): the cgroup-launcher sidecar is OFF by default and only
+    /// renders when `cgroup_launcher_mode` arms it. The disabled arm proves no
+    /// launcher container, volume, mount or env leaks into an ordinary task pod
+    /// (and `shareProcessNamespace` stays unset); the armed arm proves the
+    /// sidecar still renders correctly — WITHOUT ever re-introducing a
+    /// `launcher-cgroup` volume, which is the regression this task removed.
     #[test]
-    fn mandatory_launcher_sidecar_with_share_process_namespace() {
+    fn launcher_sidecar_and_share_process_namespace_are_off_by_default_and_render_when_armed() {
         let image = "registry.example/proj:tag";
-        let job = build_task_run_job(
-            &KubernetesConfig::for_testing(),
-            &Uuid::now_v7(),
-            "proj-xyz",
-            "djinn-taskrun-role",
-            image,
-            &[],
-            None,
-            false,
-            Some(RoleKind::Worker),
-        );
-        let pod = job.spec.as_ref().unwrap().template.spec.as_ref().unwrap();
-        assert_eq!(pod.share_process_namespace, Some(true));
+        let build = |cfg: &KubernetesConfig| {
+            build_task_run_job(
+                cfg,
+                &Uuid::now_v7(),
+                "proj-xyz",
+                "djinn-taskrun-role",
+                image,
+                &[],
+                None,
+                false,
+                Some(RoleKind::Worker),
+            )
+        };
 
-        let launcher = pod
-            .init_containers
+        // ---- Disabled (the default) -------------------------------------
+        let default_job = build(&KubernetesConfig::for_testing());
+        let pod = default_job
+            .spec
             .as_ref()
             .unwrap()
-            .iter()
-            .find(|c| c.name == crate::launcher::LAUNCHER_CONTAINER_NAME)
-            .expect("launcher sidecar present");
+            .template
+            .spec
+            .as_ref()
+            .unwrap();
+        assert!(
+            pod.init_containers
+                .iter()
+                .flatten()
+                .all(|c| c.name != crate::launcher::LAUNCHER_CONTAINER_NAME),
+            "no launcher sidecar by default"
+        );
+        for absent in [
+            crate::launcher::VOLUME_LAUNCHER_IPC,
+            crate::launcher::VOLUME_LAUNCHER_CGROUP,
+        ] {
+            assert!(
+                pod.volumes.iter().flatten().all(|v| v.name != absent),
+                "{absent} must not be rendered by default"
+            );
+        }
+        let worker = &pod.containers[0];
+        assert!(
+            worker
+                .volume_mounts
+                .iter()
+                .flatten()
+                .all(|m| m.mount_path != crate::launcher::LAUNCHER_IPC_DIR),
+            "worker must not mount the launcher IPC dir by default"
+        );
+        for env_name in ["DJINN_LAUNCHER_SOCKET", "DJINN_LAUNCHER_CREDENTIAL_PATH"] {
+            assert!(
+                worker.env.iter().flatten().all(|e| e.name != env_name),
+                "{env_name} must not be exported to the worker by default"
+            );
+        }
+        assert_eq!(
+            pod.share_process_namespace, None,
+            "shareProcessNamespace exists only for the launcher; unset by default"
+        );
+
+        // ---- Required (explicitly armed) --------------------------------
+        let armed_job = build(&armed_launcher_config());
+        let armed = armed_job
+            .spec
+            .as_ref()
+            .unwrap()
+            .template
+            .spec
+            .as_ref()
+            .unwrap();
+        assert_eq!(armed.share_process_namespace, Some(true));
+        let inits = armed
+            .init_containers
+            .as_ref()
+            .expect("armed launcher renders an init container");
+        assert_eq!(
+            inits[0].name,
+            crate::launcher::LAUNCHER_CONTAINER_NAME,
+            "the launcher sidecar renders first when armed"
+        );
+        let launcher = &inits[0];
         assert_eq!(
             launcher.image.as_deref(),
             Some(image),
@@ -3321,6 +3426,26 @@ mod tests {
             "runs the packaged launcher binary — no fabricated image ref"
         );
         assert_eq!(launcher.restart_policy.as_deref(), Some("Always"));
+        assert!(
+            armed
+                .volumes
+                .iter()
+                .flatten()
+                .any(|v| v.name == crate::launcher::VOLUME_LAUNCHER_IPC),
+            "the IPC volume renders when armed"
+        );
+        // P0 REGRESSION GUARD (task grkq): the delegated cgroup root must NEVER
+        // be rendered as a volume again. The emptyDir that used to back it was
+        // not a cgroup2 tree, so the sidecar CrashLoopBackOffed on every pod; no
+        // volume source can supply a delegated cgroup v2 subtree here.
+        assert!(
+            armed
+                .volumes
+                .iter()
+                .flatten()
+                .all(|v| v.name != crate::launcher::VOLUME_LAUNCHER_CGROUP),
+            "no `launcher-cgroup` volume may be rendered, even when armed"
+        );
     }
 
     /// AC1: distinct worker/child UIDs, artifact GID, fsGroup/setgid ownership,
@@ -3349,13 +3474,35 @@ mod tests {
         );
 
         // Launcher container: uid 0, minimal caps only, restricted seccomp.
-        let launcher = pod
+        // Task grkq: the launcher only renders when armed, so its half of the
+        // contract is asserted against an armed config. The worker/pod half
+        // above is unconditional and stays on the default config.
+        let armed_job = build_task_run_job(
+            &armed_launcher_config(),
+            &Uuid::now_v7(),
+            "proj-xyz",
+            "djinn-taskrun-role",
+            "registry.example/proj:tag",
+            &[],
+            None,
+            false,
+            Some(RoleKind::Worker),
+        );
+        let armed_pod = armed_job
+            .spec
+            .as_ref()
+            .unwrap()
+            .template
+            .spec
+            .as_ref()
+            .unwrap();
+        let launcher = armed_pod
             .init_containers
             .as_ref()
             .unwrap()
             .iter()
             .find(|c| c.name == crate::launcher::LAUNCHER_CONTAINER_NAME)
-            .unwrap();
+            .expect("armed launcher sidecar present");
         let lsc = launcher
             .security_context
             .as_ref()
@@ -3384,12 +3531,14 @@ mod tests {
         assert_eq!(psc.run_as_user, None);
     }
 
-    /// AC1/AC2: credential + delegated-cgroup mount isolation. The IPC surface
-    /// is shared only by worker + launcher; the delegated cgroup is launcher-only;
-    /// no backing sidecar can touch either (no workspace/broker access).
+    /// AC1/AC2: credential mount isolation, asserted against an ARMED launcher
+    /// config (task grkq: nothing launcher-shaped renders by default). The IPC
+    /// surface is shared only by worker + launcher, no backing sidecar can touch
+    /// it (nor the workspace/mirror), and NO delegated-cgroup volume is rendered
+    /// at all — that volume was the P0 CrashLoopBackOff and it is gone for good.
     #[test]
-    fn launcher_credential_and_cgroup_mounts_are_isolated() {
-        let cfg = KubernetesConfig::for_testing();
+    fn launcher_credential_mounts_are_isolated_and_no_cgroup_volume_is_rendered() {
+        let cfg = armed_launcher_config();
         let postgres = BackingServiceSpec {
             service_type: "postgres".into(),
             image: "postgres:18-alpine".into(),
@@ -3436,9 +3585,16 @@ mod tests {
             .find(|c| c.name == crate::launcher::LAUNCHER_CONTAINER_NAME)
             .unwrap();
         assert!(mount_names(launcher).contains(&crate::launcher::VOLUME_LAUNCHER_IPC.to_string()));
-        // Delegated cgroup: launcher only (not the worker).
+        // Task grkq: no delegated-cgroup volume exists on the pod at all, and no
+        // container mounts one — not even the launcher. A volumeMount naming a
+        // volume the pod does not declare is a manifest the API server rejects,
+        // so both sides had to go together (see `launcher.rs`).
         assert!(
-            mount_names(launcher).contains(&crate::launcher::VOLUME_LAUNCHER_CGROUP.to_string())
+            pod.volumes
+                .iter()
+                .flatten()
+                .all(|v| v.name != crate::launcher::VOLUME_LAUNCHER_CGROUP),
+            "no `launcher-cgroup` volume may be rendered"
         );
         assert!(
             !mount_names(worker).contains(&crate::launcher::VOLUME_LAUNCHER_CGROUP.to_string())

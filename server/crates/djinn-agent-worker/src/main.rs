@@ -260,8 +260,8 @@ struct WorkerDefaultArgs {
     /// cgroup-launcher control socket the sidecar binds inside the shared IPC
     /// mount. Env name and default match qut0's render (`DJINN_LAUNCHER_SOCKET`
     /// / `djinn_k8s::launcher::LAUNCHER_SOCKET_PATH`). The worker connects here
-    /// after writing its handshake; an absent mount falls back to the in-process
-    /// broker path (see [`launcher_handshake`]).
+    /// after writing its handshake; an absent mount means shells run in-process
+    /// and unleased (see [`launcher_handshake`]).
     #[arg(
         long,
         env = "DJINN_LAUNCHER_SOCKET",
@@ -1970,15 +1970,19 @@ async fn run_task_run(args: WorkerDefaultArgs) -> Result<()> {
     .with_context(|| format!("dial djinn-server at {server_addr}"))?;
     info!(server = %server_addr, "tcp connection up, RPC handshake accepted");
 
-    // Detection-gated launcher handshake (task ab05). qut0 renders a mandatory
-    // cgroup-launcher sidecar whose serve loop waits for a worker handshake
-    // (private credential + worker PID in the shared IPC mount) before it binds
-    // its control socket. The worker writes that handshake and dials the socket
-    // here. When the mount/sidecar is absent (old rendering, or a local/non-pod
-    // run) — or when the handshake fails closed for any reason — the worker uses
-    // the unleased in-process broker path UNCHANGED (`shell_launch = None`); the
-    // handshake never blocks pod startup. Run the blocking write/connect on a
-    // blocking thread so the async runtime is never stalled.
+    // Detection-gated launcher handshake (task ab05). When a cgroup-launcher
+    // sidecar is rendered, its serve loop waits for a worker handshake (private
+    // credential + worker PID in the shared IPC mount) before it binds its
+    // control socket. The worker writes that handshake and dials the socket here.
+    //
+    // When the mount/sidecar is absent — which is the DEFAULT since task grkq,
+    // and also covers old renderings and local/non-pod runs — or when the
+    // handshake fails closed for any reason, `shell_launch` stays `None` and the
+    // shell handler executes commands IN-PROCESS at the pod's own quota
+    // (unleased, no cgroup leaf, no lease lift). That is a real, supported
+    // production path, not a stub. The handshake never blocks pod startup. Run
+    // the blocking write/connect on a blocking thread so the async runtime is
+    // never stalled.
     let launcher_socket = args.launcher_socket.clone();
     let launcher_credential_path = args.launcher_credential_path.clone();
     let handshake = tokio::task::spawn_blocking(move || {
@@ -2009,7 +2013,7 @@ async fn run_task_run(args: WorkerDefaultArgs) -> Result<()> {
         launcher_handshake::LauncherHandshake::AbsentMount => {
             info!(
                 socket = %args.launcher_socket.display(),
-                "no cgroup-launcher IPC mount; using in-process broker shell path"
+                "no cgroup-launcher IPC mount; shell commands run in-process, unleased"
             );
             None
         }
@@ -2017,7 +2021,7 @@ async fn run_task_run(args: WorkerDefaultArgs) -> Result<()> {
             warn!(
                 error = %error,
                 socket = %args.launcher_socket.display(),
-                "cgroup-launcher handshake failed; falling back to in-process broker shell path"
+                "cgroup-launcher handshake failed; degrading to unleased in-process shell execution"
             );
             None
         }

@@ -375,6 +375,20 @@ pub enum Error {
     InvalidQuota(u16),
     #[error("cgroup v2 is required (v1 and hybrid mounts are unsupported)")]
     NotCgroupV2,
+    #[error(
+        "delegated cgroup root {path} is not a cgroup2 filesystem (statfs f_type {actual:#x}, \
+         expected {expected:#x}); nothing mounted a delegated cgroup v2 subtree there"
+    )]
+    DelegatedRootIsNotCgroupFs {
+        path: String,
+        actual: i64,
+        expected: i64,
+    },
+    #[error(
+        "clone3(CLONE_INTO_CGROUP) is unreachable in this sandbox (errno {errno}); the only \
+         child-spawn seam is denied, so no command could ever be launched"
+    )]
+    Clone3Unavailable { errno: i32 },
     #[error("delegated cgroup root is read-only")]
     ReadOnlyDelegation,
     #[error("delegated cgroup owner {actual} differs from launcher uid {expected}")]
@@ -448,6 +462,14 @@ impl NativeCgroupFs {
         #[cfg(unix)]
         let root_writable = metadata.permissions().mode() & 0o222 != 0
             && metadata.permissions().mode() & 0o022 == 0;
+        // Prove the delegated root IS a cgroup2 tree BEFORE reading any control
+        // file. Without this, a root that is any other filesystem (an emptyDir,
+        // a tmpfs, a plain directory) surfaces only as a bare `ENOENT` from the
+        // `cgroup.subtree_control` read below — an opaque `Io` error that says
+        // nothing about the delegation actually being absent. Task grkq: that
+        // exact opacity is what turned "nothing mounts a cgroup2 tree here" into
+        // an unexplained sidecar CrashLoopBackOff.
+        assert_cgroup2_filesystem(&root_path)?;
         let controllers = fs::read_to_string(root_path.join("cgroup.subtree_control"))?
             .split_ascii_whitespace()
             .map(str::to_owned)
@@ -562,6 +584,45 @@ impl CgroupFs for NativeCgroupFs {
     }
 }
 
+/// `statfs.f_type` of a cgroup v2 hierarchy (`CGROUP2_SUPER_MAGIC`, see
+/// `include/uapi/linux/magic.h`). Hard-coded rather than taken from `libc`
+/// because its type differs per libc target (`__fsword_t` vs `c_ulong`).
+pub const CGROUP2_SUPER_MAGIC: i64 = 0x6367_7270;
+
+/// Fail closed unless `path` really is a cgroup v2 filesystem.
+///
+/// This is the first readiness check, deliberately ahead of every control-file
+/// read: a delegated root that is not a cgroup2 mount can never satisfy any
+/// later check, and saying so by name is the difference between a diagnosable
+/// startup failure and an opaque `ENOENT`.
+fn assert_cgroup2_filesystem(path: &Path) -> Result<(), Error> {
+    use std::os::unix::ffi::OsStrExt;
+
+    let c_path = CString::new(path.as_os_str().as_bytes()).map_err(|_| Error::UnsafeLeafName)?;
+    let mut buf = std::mem::MaybeUninit::<libc::statfs>::uninit();
+    // SAFETY: `c_path` is a NUL-terminated path and `buf` is a live, correctly
+    // sized `statfs` allocation; `statfs` only writes through it on success.
+    if unsafe { libc::statfs(c_path.as_ptr(), buf.as_mut_ptr()) } != 0 {
+        return Err(io::Error::last_os_error().into());
+    }
+    // SAFETY: `statfs` returned 0, so it initialized `buf`.
+    //
+    // The cast is load-bearing even where it is a no-op: `statfs.f_type` is
+    // `__fsword_t` (i64) on 64-bit glibc but `c_ulong` on musl and `i32` on
+    // 32-bit targets, so normalizing to `i64` is what makes this compile
+    // everywhere. Clippy only sees the target it is running on.
+    #[allow(clippy::unnecessary_cast)]
+    let actual = unsafe { buf.assume_init() }.f_type as i64;
+    if actual != CGROUP2_SUPER_MAGIC {
+        return Err(Error::DelegatedRootIsNotCgroupFs {
+            path: path.display().to_string(),
+            actual,
+            expected: CGROUP2_SUPER_MAGIC,
+        });
+    }
+    Ok(())
+}
+
 fn safe_control_file(file: &str) -> Result<CString, Error> {
     if file.contains('/') || file.contains('\0') {
         return Err(Error::UnsafeLeafName);
@@ -620,6 +681,88 @@ impl CloneIntoCgroup for DenyClone3 {
 /// target cgroup and crosses the credential/isolation boundary before exec.
 pub struct NativeClone3;
 
+/// `CLONE_INTO_CGROUP` (`include/uapi/linux/sched.h`), as a `u64`.
+///
+/// **Do not replace this with `libc::CLONE_INTO_CGROUP`.** On glibc targets the
+/// `libc` crate declares it as `pub const CLONE_INTO_CGROUP: c_int =
+/// 0x200000000` — a value that does not fit in a 32-bit `c_int`, and which the
+/// crate's blanket `allow(overflowing_literals)` truncates to **0** instead of
+/// rejecting. Using it silently passed `flags: 0` to `clone3`, so the child was
+/// an ordinary fork that stayed in the LAUNCHER's cgroup: the delegated leaf and
+/// the `cpu.max` written on it governed nothing at all. Found while adding the
+/// startup preflight for task grkq. `clone_flag_is_the_kernel_value` guards it.
+const CLONE_INTO_CGROUP: u64 = 0x2_0000_0000;
+
+/// `clone3` argument block. Hoisted to module scope so the startup preflight
+/// and the production spawn path use the SAME layout — a preflight that probed
+/// a different struct would prove nothing about the real call.
+#[repr(C)]
+#[derive(Default)]
+struct CloneArgs {
+    flags: u64,
+    pidfd: u64,
+    child_tid: u64,
+    parent_tid: u64,
+    exit_signal: u64,
+    stack: u64,
+    stack_size: u64,
+    tls: u64,
+    set_tid: u64,
+    set_tid_size: u64,
+    cgroup: u64,
+}
+
+impl NativeClone3 {
+    /// Startup readiness probe: is `clone3(CLONE_INTO_CGROUP)` reachable at all?
+    ///
+    /// The launcher's ONLY child-spawn seam is `clone3` with
+    /// `CLONE_INTO_CGROUP`. A sandbox that denies it (task grkq: the container
+    /// runtime's `RuntimeDefault` seccomp profile answers `clone3` with `ENOSYS`
+    /// so glibc falls back to `clone`, and this call site has no such fallback)
+    /// cannot launch a single command — but without this probe that only shows
+    /// up much later, once per command, as an opaque spawn error. Run it before
+    /// the broker binds its socket so an unusable sandbox fails readiness loudly
+    /// and BEFORE the pod accepts work.
+    ///
+    /// The probe passes a syntactically valid but unopened cgroup descriptor.
+    /// The kernel validates that descriptor before it forks, so:
+    ///   * `EBADF` — the syscall is reachable and no child was created;
+    ///   * anything else (notably `ENOSYS`/`EPERM` from a seccomp filter, or
+    ///     `EINVAL` on a kernel without `CLONE_INTO_CGROUP`) — unavailable.
+    pub fn preflight() -> Result<(), Error> {
+        // A descriptor inside the kernel's accepted range (`cgroup` is rejected
+        // with EINVAL above INT_MAX) that this process has certainly not opened.
+        const UNOPENED_FD: u64 = i32::MAX as u64;
+        let args = CloneArgs {
+            flags: CLONE_INTO_CGROUP,
+            exit_signal: libc::SIGCHLD as u64,
+            cgroup: UNOPENED_FD,
+            ..CloneArgs::default()
+        };
+        // SAFETY: a raw `clone3` with a deliberately invalid `cgroup` descriptor.
+        // The kernel rejects it during argument validation, before `copy_process`
+        // forks, so no child can be created and the `rc == 0` arm is unreachable.
+        let rc = unsafe {
+            libc::syscall(
+                libc::SYS_clone3,
+                &raw const args,
+                std::mem::size_of::<CloneArgs>(),
+            )
+        };
+        if rc == 0 {
+            // Defensive: a child here would be an unowned process. Exit it
+            // immediately rather than letting a preflight leak a process.
+            unsafe { libc::_exit(0) };
+        }
+        let errno = io::Error::last_os_error().raw_os_error().unwrap_or(0);
+        if errno == libc::EBADF {
+            Ok(())
+        } else {
+            Err(Error::Clone3Unavailable { errno })
+        }
+    }
+}
+
 /// Close every non-stdio descriptor with one kernel operation. In particular,
 /// do not enumerate `/proc/self/fd`: `read_dir` owns a descriptor which is
 /// reported by that directory and then closed when the iterator is dropped,
@@ -655,38 +798,17 @@ impl CloneIntoCgroup for NativeClone3 {
         {
             return Err(Error::Io(io::Error::last_os_error()));
         }
-        #[repr(C)]
-        struct Args {
-            flags: u64,
-            pidfd: u64,
-            child_tid: u64,
-            parent_tid: u64,
-            exit_signal: u64,
-            stack: u64,
-            stack_size: u64,
-            tls: u64,
-            set_tid: u64,
-            set_tid_size: u64,
-            cgroup: u64,
-        }
-        let args = Args {
-            flags: libc::CLONE_INTO_CGROUP as u64,
-            pidfd: 0,
-            child_tid: 0,
-            parent_tid: 0,
+        let args = CloneArgs {
+            flags: CLONE_INTO_CGROUP,
             exit_signal: libc::SIGCHLD as u64,
-            stack: 0,
-            stack_size: 0,
-            tls: 0,
-            set_tid: 0,
-            set_tid_size: 0,
             cgroup: cgroup as u64,
+            ..CloneArgs::default()
         };
         let pid = unsafe {
             libc::syscall(
                 libc::SYS_clone3,
                 &raw const args,
-                std::mem::size_of::<Args>(),
+                std::mem::size_of::<CloneArgs>(),
             )
         } as i32;
         if pid < 0 {
@@ -876,6 +998,25 @@ mod tests {
     }
     fn create(l: &mut Launcher<FakeFs, FakeClone>, name: &str) -> Leaf {
         l.create_command(name, invocation(), &command()).unwrap().0
+    }
+
+    /// The clone flag must be the kernel's `CLONE_INTO_CGROUP`, and must NOT be
+    /// sourced from `libc`, whose glibc declaration truncates it to 0 (see the
+    /// constant's doc comment). With a zero flag `clone3` degrades to a plain
+    /// fork: the child stays in the launcher's own cgroup, so the delegated leaf
+    /// and its `cpu.max` govern nothing and the containment claim is false.
+    #[test]
+    fn clone_flag_is_the_kernel_value() {
+        assert_eq!(CLONE_INTO_CGROUP, 0x2_0000_0000);
+        assert_ne!(
+            CLONE_INTO_CGROUP, 0,
+            "a zero flag silently turns clone3 into an ordinary fork"
+        );
+        assert_ne!(
+            u64::from(libc::CLONE_INTO_CGROUP as u32),
+            CLONE_INTO_CGROUP,
+            "libc's constant still truncates; keep using the local one"
+        );
     }
 
     #[test]

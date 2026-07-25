@@ -412,7 +412,13 @@ pub struct AgentContext {
     /// variables at `AgentContext` construction time via
     /// [`ReconciliationSweepConfig::from_env`].
     pub reconciliation_sweep: ReconciliationSweepConfig,
-    /// Missing in host/test contexts. Production shell dispatch fails closed.
+    /// The broker-backed, leased shell launch context.
+    ///
+    /// `None` in host/test contexts, and in any worker whose cgroup-launcher
+    /// sidecar is absent or whose handshake failed — which is the default
+    /// rendering since task grkq. `None` does NOT disable shell dispatch: the
+    /// handler then runs commands in-process at the pod's own quota (unleased,
+    /// no cgroup leaf, no lease lift).
     pub shell_launch: Option<ShellLaunchContext>,
     /// Explicitly injected configuration for the optional session-start memory
     /// intent planner. It remains disabled by default, but keeping it on the

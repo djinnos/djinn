@@ -11,9 +11,12 @@
 //! Configuration is read from the environment the Job renders
 //! (`djinn-k8s::launcher`): the delegated cgroup root, control socket path, the
 //! worker-private credential path, the expected delegated-root owner uid, and the
-//! unleased broker quota. Anything missing/invalid, or a delegated cgroup that
+//! unleased broker quota. Anything missing/invalid, a sandbox that denies the
+//! `clone3(CLONE_INTO_CGROUP)` child-spawn seam, or a delegated cgroup that
 //! fails the [`Readiness`](djinn_cgroup_launcher::Readiness) contract, exits
-//! non-zero BEFORE the broker accepts a single connection.
+//! non-zero with a NAMED error BEFORE the broker accepts a single connection.
+//! Every one of those conditions is a readiness failure, never a per-command
+//! error discovered after the pod has taken work (task grkq).
 
 use std::io::Write;
 use std::path::Path;
@@ -61,9 +64,18 @@ fn run() -> Result<(), MainError> {
         .parse()
         .map_err(|_| MainError::InvalidEnv("DJINN_LAUNCHER_UNLEASED_MILLICORES"))?;
 
-    // Open + validate the delegated cgroup root. `NativeCgroupFs::open` runs the
-    // full readiness contract (cgroup-v2, root writable, owner == expected uid,
-    // exactly the cpu controller delegated) and fails closed otherwise.
+    // Readiness gate 1 — the child-spawn seam. `clone3(CLONE_INTO_CGROUP)` is
+    // the launcher's ONLY way to start a command; a sandbox that denies it (a
+    // seccomp profile answering `clone3` with ENOSYS, or a kernel without
+    // CLONE_INTO_CGROUP) can never run anything. Probe it here so that failure
+    // is a loud, named startup failure instead of an opaque per-command spawn
+    // error surfacing after the pod has already accepted work (task grkq).
+    NativeClone3::preflight()?;
+
+    // Readiness gate 2 — the delegated cgroup root. `NativeCgroupFs::open` runs
+    // the full readiness contract (really a cgroup2 filesystem, cgroup-v2 mode,
+    // root writable and not group/other-writable, owner == expected uid, exactly
+    // the cpu controller delegated) and fails closed, by name, otherwise.
     let fs = NativeCgroupFs::open(&cgroup_root, expected_uid)?;
     let launcher = Launcher::new(
         fs,
