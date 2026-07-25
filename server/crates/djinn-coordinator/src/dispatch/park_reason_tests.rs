@@ -46,6 +46,8 @@ fn test_task(
         ci_head_sha: Some("head-sha-3t22".to_string()),
         ci_pr_number: Some(42),
         ci_blocking_required_check_names: ci_blocking_required_check_names.to_string(),
+        ci_primary_blocking_check: None,
+        ci_failure_annotations: None,
         ci_failure_fingerprint: ci_failure_fingerprint.map(|s| s.to_string()),
         ci_first_seen_at: Some("2026-07-04T22:05:00Z".to_string()),
         ci_last_seen_at: Some("2026-07-04T22:09:00Z".to_string()),

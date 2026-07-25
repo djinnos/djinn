@@ -138,6 +138,9 @@ const CI_STATUS_LABELS: Record<string, { label: string; className: string }> = {
   passing: { label: "Passing", className: "text-emerald-500" },
   pending: { label: "Pending", className: "text-blue-500" },
   failing: { label: "Failing", className: "text-red-500" },
+  // Amber, not red: the run reached no verdict about the code. Rendering this
+  // as a failure is what sent agents to fix code that was never broken.
+  inconclusive: { label: "Inconclusive", className: "text-amber-500" },
   unknown: { label: "Unknown", className: "text-zinc-400" },
   awaiting_ci: { label: "Awaiting CI", className: "text-blue-500" },
 };
@@ -176,16 +179,41 @@ function CiStatusSection({ ci }: { ci?: CiGateSnapshot | null }) {
             <span className="font-medium">PR:</span> #{ci.pr_number}
           </div>
         )}
-        {ci.status === "failing" && ci.blocking_required_check_names.length > 0 && (
+        {(ci.status === "failing" || ci.status === "inconclusive") &&
+          ci.blocking_required_check_names.length > 0 && (
+            <div>
+              <span className="font-medium">
+                {ci.status === "inconclusive"
+                  ? "Checks with no verdict:"
+                  : "Blocking checks (most causal first):"}
+              </span>{" "}
+              <ul className="mt-1 space-y-0.5">
+                {ci.blocking_required_check_names.map((name) => (
+                  <li
+                    key={name}
+                    className={`font-mono text-xs ${
+                      ci.status === "inconclusive"
+                        ? "text-amber-400"
+                        : name === ci.primary_blocking_check
+                          ? "text-red-400 font-semibold"
+                          : "text-zinc-400"
+                    }`}
+                  >
+                    {name}
+                    {name === ci.primary_blocking_check && " ← start here"}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+        {ci.failure_annotations && (
           <div>
-            <span className="font-medium">Blocking checks:</span>{" "}
-            <ul className="mt-1 space-y-0.5">
-              {ci.blocking_required_check_names.map((name) => (
-                <li key={name} className="font-mono text-xs text-red-400">
-                  {name}
-                </li>
-              ))}
-            </ul>
+            <span className="font-medium">Annotations:</span>
+            {/* Runner-host failures (out of disk, runner crash) appear only
+                here — not in the conclusion, and usually not in job logs. */}
+            <pre className="mt-1 overflow-x-auto rounded bg-zinc-900/60 p-2 font-mono text-xs whitespace-pre-wrap text-zinc-300">
+              {ci.failure_annotations}
+            </pre>
           </div>
         )}
         {ci.status === "failing" && ci.failure_fingerprint && (

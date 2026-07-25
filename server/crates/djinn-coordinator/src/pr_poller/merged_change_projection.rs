@@ -551,6 +551,8 @@ mod tests {
                     head_sha: sha.to_owned(),
                     ci_status: djinn_core::models::CiStatus::Passing,
                     blocking_required_check_names: vec![],
+                    primary_blocking_check: None,
+                    failure_annotations: None,
                     failure_fingerprint: None,
                     same_signature_count: 0,
                     last_remediation_base_sha: None,

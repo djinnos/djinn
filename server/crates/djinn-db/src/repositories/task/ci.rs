@@ -9,7 +9,8 @@ use sqlx::Row;
 /// that maps a row through `ci_snapshot_from_row` returns the same shape —
 /// including the merge-queue (`mq_*`) lane.
 const CI_SNAPSHOT_COLUMNS: &str = "task_id, pr_number, head_sha, ci_status, \
-     blocking_required_check_names, failure_fingerprint, \
+     blocking_required_check_names, primary_blocking_check, failure_annotations, \
+     failure_fingerprint, \
      first_seen_at, last_seen_at, same_signature_count, \
      last_remediation_base_sha, \
      mq_state, mq_run_id, mq_head_sha, mq_failed_check_names, \
@@ -67,6 +68,8 @@ fn ci_snapshot_from_row(row: sqlx::postgres::PgRow) -> Result<TaskPrCiSnapshot> 
             .unwrap_or_default(),
         ci_status: CiStatus::parse(&ci_status_raw)?,
         blocking_required_check_names,
+        primary_blocking_check: row.try_get("primary_blocking_check")?,
+        failure_annotations: row.try_get("failure_annotations")?,
         failure_fingerprint: row.try_get("failure_fingerprint")?,
         first_seen_at: row.try_get("first_seen_at")?,
         last_seen_at: row.try_get("last_seen_at")?,
@@ -117,9 +120,10 @@ impl TaskRepository {
         let sql = format!(
             r#"INSERT INTO task_pr_ci_snapshots (
                     task_id, pr_number, head_sha, ci_status,
-                    blocking_required_check_names, failure_fingerprint,
+                    blocking_required_check_names, primary_blocking_check,
+                    failure_annotations, failure_fingerprint,
                     same_signature_count, last_remediation_base_sha
-                ) VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8)
+                ) VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9, $10)
                 ON CONFLICT (task_id, pr_number) DO UPDATE SET
                     first_seen_at = CASE
                         WHEN COALESCE(task_pr_ci_snapshots.head_sha, '') = COALESCE(EXCLUDED.head_sha, '')
@@ -146,6 +150,8 @@ impl TaskRepository {
                         ELSE EXCLUDED.ci_status
                     END,
                     blocking_required_check_names = EXCLUDED.blocking_required_check_names,
+                    primary_blocking_check = EXCLUDED.primary_blocking_check,
+                    failure_annotations = EXCLUDED.failure_annotations,
                     failure_fingerprint = EXCLUDED.failure_fingerprint,
                     last_seen_at = {UTC_NOW_TEXT},
                     same_signature_count = CASE
@@ -180,6 +186,8 @@ impl TaskRepository {
             .bind(&input.head_sha)
             .bind(input.ci_status.as_str())
             .bind(blocking_names)
+            .bind(&input.primary_blocking_check)
+            .bind(&input.failure_annotations)
             .bind(&input.failure_fingerprint)
             .bind(input.same_signature_count)
             .bind(&input.last_remediation_base_sha)
@@ -264,13 +272,16 @@ impl TaskRepository {
         let sql = format!(
             r#"INSERT INTO task_pr_ci_snapshots (
                     task_id, pr_number, head_sha, ci_status,
-                    blocking_required_check_names, failure_fingerprint,
+                    blocking_required_check_names, primary_blocking_check,
+                    failure_annotations, failure_fingerprint,
                     same_signature_count, last_remediation_base_sha
-                ) VALUES ($1, $2, $3, 'unknown', '[]'::jsonb, NULL, 0, NULL)
+                ) VALUES ($1, $2, $3, 'unknown', '[]'::jsonb, NULL, NULL, NULL, 0, NULL)
                 ON CONFLICT (task_id, pr_number) DO UPDATE SET
                     head_sha = EXCLUDED.head_sha,
                     ci_status = 'unknown',
                     blocking_required_check_names = '[]'::jsonb,
+                    primary_blocking_check = NULL,
+                    failure_annotations = NULL,
                     failure_fingerprint = NULL,
                     first_seen_at = CASE
                         WHEN COALESCE(task_pr_ci_snapshots.head_sha, '') = COALESCE(EXCLUDED.head_sha, '')

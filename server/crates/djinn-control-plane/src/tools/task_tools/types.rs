@@ -321,13 +321,28 @@ pub struct CiGateSnapshot {
     pub head_sha: String,
     /// Names of required checks that are currently failing and blocking merge.
     pub blocking_required_check_names: Vec<String>,
-    /// Primary blocking required check name, when CI is failing.
+    /// The single required check to triage first — the earliest-started
+    /// blocking lane that actually executed and hard-failed.
     ///
-    /// `Some(_)` when `status == failing` and at least one required check
-    /// failed.  This is the first element of `blocking_required_check_names`
-    /// (sorted alphabetically) for compact display.  `None` otherwise.
+    /// Selected by the PR poller from *structural execution evidence*
+    /// (conclusion class, execution interval, annotation count, start order),
+    /// never from name order and never from a list of job names. A check that
+    /// was `cancelled`, or that never executed, is a symptom of a run-level
+    /// abort rather than a cause, and is never selected.
+    ///
+    /// `None` when no blocking check carries causal information — i.e. `status`
+    /// is `inconclusive` and the run should be retriggered, not remediated.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub primary_blocking_check: Option<String>,
+    /// Bounded rendering of the GitHub annotations on
+    /// [`Self::primary_blocking_check`].
+    ///
+    /// Runner-host failures — out of disk, runner process crash — surface ONLY
+    /// as annotations, not as a check conclusion and often not in job logs
+    /// either. This field is what lets a reader see `No space left on device`
+    /// without opening GitHub.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure_annotations: Option<String>,
     /// Stable fingerprint of the current failure signature (e.g. sorted
     /// failing check names + head SHA). `None` when not failing.
     pub failure_fingerprint: Option<String>,
@@ -445,6 +460,10 @@ pub enum CiGateState {
     Passing,
     Failing,
     Pending,
+    /// Every blocking required check was cancelled or never executed, so the
+    /// run reached no verdict about the code. Warrants a retrigger, not a
+    /// remediation attempt.
+    Inconclusive,
     Unknown,
     /// Task is in `pr_draft` and CI has not completed yet (pending/unknown).
     AwaitingCi,
@@ -457,6 +476,7 @@ impl CiGateState {
             Self::Passing => "passing",
             Self::Failing => "failing",
             Self::Pending => "pending",
+            Self::Inconclusive => "inconclusive",
             Self::Unknown => "unknown",
             Self::AwaitingCi => "awaiting_ci",
         }
@@ -483,6 +503,10 @@ fn derive_gate_state(ci_status: CiStatus, task_status: &str) -> CiGateState {
             CiStatus::Passing => CiGateState::Passing,
             CiStatus::Failing => CiGateState::Failing,
             CiStatus::Pending => CiGateState::Pending,
+            // Inconclusive is surfaced as-is even in `pr_draft`: unlike
+            // pending/unknown it is a *completed* run, and collapsing it into
+            // `awaiting_ci` would hide the fact that a retrigger is owed.
+            CiStatus::Inconclusive => CiGateState::Inconclusive,
             CiStatus::Unknown => CiGateState::Unknown,
         }
     }
@@ -505,13 +529,13 @@ pub fn task_ci_gate_snapshot(t: &Task) -> Option<CiGateSnapshot> {
     let status = task_ci_status(t);
     let gate_state = task_ci_gate_state(t);
     let blocking_checks = parse_string_array(&t.ci_blocking_required_check_names);
-    let primary_blocking_check = if status == CiStatus::Failing && !blocking_checks.is_empty() {
-        // blocking_required_check_names is kept sorted alphabetically by
-        // the pr_poller; the first element is the canonical primary blocker.
-        Some(blocking_checks[0].clone())
-    } else {
-        None
-    };
+    // Read the poller's ranked selection. NEVER re-derive this as
+    // `blocking_checks[0]`: under a run-level cancel that element can be a
+    // `needs:`-dependent aggregator that never executed, which is a symptom by
+    // construction and cannot be a root cause. The poller ranks by structural
+    // execution evidence and stores the winner; `None` means the run was
+    // inconclusive and there is nothing to triage.
+    let primary_blocking_check = t.ci_primary_blocking_check.clone();
     let summary_reason = match status {
         CiStatus::Passing => "All required checks passed".to_string(),
         CiStatus::Failing => {
@@ -520,6 +544,13 @@ pub fn task_ci_gate_snapshot(t: &Task) -> Option<CiGateSnapshot> {
             } else {
                 "Required checks failing".to_string()
             }
+        }
+        CiStatus::Inconclusive => {
+            let n = blocking_checks.len();
+            format!(
+                "CI inconclusive: all {n} blocking required check(s) were cancelled or never \
+                 executed — no verdict about the code. Retrigger CI; do not remediate."
+            )
         }
         CiStatus::Pending => "Required checks pending".to_string(),
         CiStatus::Unknown => "CI state unknown".to_string(),
@@ -532,6 +563,11 @@ pub fn task_ci_gate_snapshot(t: &Task) -> Option<CiGateSnapshot> {
                 } else {
                     "Blocked by failing required checks".to_string()
                 }
+            }
+            CiStatus::Inconclusive => {
+                "Blocked by an inconclusive CI run (every blocking required check was \
+                 cancelled or never executed); awaiting a retrigger"
+                    .to_string()
             }
             CiStatus::Pending => "Waiting for required checks to complete".to_string(),
             CiStatus::Unknown => "CI state unknown; cannot confirm merge safety".to_string(),
@@ -546,6 +582,7 @@ pub fn task_ci_gate_snapshot(t: &Task) -> Option<CiGateSnapshot> {
         head_sha: head_sha.to_string(),
         blocking_required_check_names: blocking_checks,
         primary_blocking_check,
+        failure_annotations: t.ci_failure_annotations.clone(),
         failure_fingerprint: t.ci_failure_fingerprint.clone(),
         summary_reason,
         merge_blocked_reason,
@@ -672,9 +709,19 @@ pub struct TaskResponse {
     /// Top-level alias for `ci.gate_state`, including `awaiting_ci` for
     /// `pr_draft` + pending/unknown.
     pub ci_gate_state: CiGateState,
-    /// Primary blocking required check/job when required CI is failing.
+    /// The required check/job to triage first — the earliest-started blocking
+    /// lane that actually executed and hard-failed. Never a cancelled lane and
+    /// never a `needs:`-dependent aggregator that did not execute; both are
+    /// symptoms of a run-level abort rather than causes. Absent when the run
+    /// was inconclusive.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ci_primary_blocking_check: Option<String>,
+    /// Bounded rendering of the GitHub annotations on
+    /// `ci_primary_blocking_check`. Runner-host failures (out of disk, runner
+    /// crash) surface only as annotations, so this is often the only place the
+    /// real cause appears.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ci_failure_annotations: Option<String>,
     /// Human-readable structured CI summary reason.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ci_summary_reason: Option<String>,
@@ -1229,9 +1276,19 @@ pub struct TaskListItem {
     /// Top-level alias for `ci.gate_state`, including `awaiting_ci` for
     /// `pr_draft` + pending/unknown.
     pub ci_gate_state: CiGateState,
-    /// Primary blocking required check/job when required CI is failing.
+    /// The required check/job to triage first — the earliest-started blocking
+    /// lane that actually executed and hard-failed. Never a cancelled lane and
+    /// never a `needs:`-dependent aggregator that did not execute; both are
+    /// symptoms of a run-level abort rather than causes. Absent when the run
+    /// was inconclusive.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ci_primary_blocking_check: Option<String>,
+    /// Bounded rendering of the GitHub annotations on
+    /// `ci_primary_blocking_check`. Runner-host failures (out of disk, runner
+    /// crash) surface only as annotations, so this is often the only place the
+    /// real cause appears.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ci_failure_annotations: Option<String>,
     /// Human-readable structured CI summary reason.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ci_summary_reason: Option<String>,
@@ -1302,6 +1359,7 @@ pub fn task_to_response(t: &Task) -> TaskResponse {
         ci_status: task_ci_status(t),
         ci_gate_state: task_ci_gate_state(t),
         ci_primary_blocking_check: ci.as_ref().and_then(|ci| ci.primary_blocking_check.clone()),
+        ci_failure_annotations: ci.as_ref().and_then(|ci| ci.failure_annotations.clone()),
         ci_summary_reason: ci.as_ref().map(|ci| ci.summary_reason.clone()),
         ci_merge_blocked_reason: ci.as_ref().and_then(|ci| ci.merge_blocked_reason.clone()),
         ci,
@@ -1348,6 +1406,7 @@ pub fn task_to_list_item(
         ci_status: base.ci_status,
         ci_gate_state: base.ci_gate_state,
         ci_primary_blocking_check: base.ci_primary_blocking_check,
+        ci_failure_annotations: base.ci_failure_annotations,
         ci_summary_reason: base.ci_summary_reason,
         ci_merge_blocked_reason: base.ci_merge_blocked_reason,
         ci: base.ci,

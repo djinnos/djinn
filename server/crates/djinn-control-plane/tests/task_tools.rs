@@ -756,6 +756,8 @@ async fn task_show_exposes_ci_gate_snapshot_fields() {
         head_sha: "deadbeefcafebabe00000000000000000000ffff".into(),
         ci_status: CiStatus::Failing,
         blocking_required_check_names: vec!["Server Size Guard".into(), "clippy".into()],
+        primary_blocking_check: None,
+        failure_annotations: None,
         failure_fingerprint: Some("sha:dead|checks:clippy,size".into()),
         same_signature_count: 2,
         last_remediation_base_sha: Some("base1234".into()),

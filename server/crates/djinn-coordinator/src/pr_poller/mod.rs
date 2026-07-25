@@ -133,6 +133,8 @@ pub(crate) fn merge_queue_lane_escalation_section(
 }
 mod ci_failure_analysis;
 mod ci_helpers;
+mod ci_snapshot;
+mod ci_triage;
 mod conversation_resolution;
 mod installation;
 mod merged_change_projection;

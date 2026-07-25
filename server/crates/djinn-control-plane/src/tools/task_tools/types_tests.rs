@@ -35,6 +35,8 @@ fn task_with_merge_commit_sha(merge_commit_sha: Option<&str>) -> Task {
         ci_head_sha: None,
         ci_pr_number: None,
         ci_blocking_required_check_names: "[]".into(),
+        ci_primary_blocking_check: None,
+        ci_failure_annotations: None,
         ci_failure_fingerprint: None,
         ci_first_seen_at: None,
         ci_last_seen_at: None,
@@ -80,6 +82,7 @@ fn task_with_ci_snapshot() -> Task {
     task.ci_head_sha = Some("deadbeefcafebabe00000000000000000000ffff".into());
     task.ci_pr_number = Some(42);
     task.ci_blocking_required_check_names = r#"["Server Size Guard","clippy"]"#.into();
+    task.ci_primary_blocking_check = Some("Server Size Guard".into());
     task.ci_failure_fingerprint = Some("sha:deadbeef|checks:clippy,size".into());
     task.ci_first_seen_at = Some("2026-06-14T00:00:00Z".into());
     task.ci_last_seen_at = Some("2026-06-14T00:05:00Z".into());
@@ -297,11 +300,13 @@ fn failing_ci_serializes_primary_blocking_check() {
     task.ci_status = "failing".into();
     task.ci_head_sha = Some("abcdef".into());
     task.ci_blocking_required_check_names = r#"["Quality Gate","clippy"]"#.into();
+    // The primary is whatever the poller RANKED, carried in its own column.
+    // It is no longer re-derived from the position of a name in the list.
+    task.ci_primary_blocking_check = Some("Quality Gate".into());
     let response = task_to_response(&task);
     let serialized = serde_json::to_value(&response).unwrap();
     let ci = &serialized["ci"];
 
-    // Alphabetically sorted: Quality Gate < clippy
     assert_eq!(ci["primary_blocking_check"], "Quality Gate");
     assert!(
         ci["summary_reason"]
@@ -410,6 +415,7 @@ fn regression_required_red_ci_blocks_closed_presentation_from_structured_snapsho
     task.ci_head_sha = Some("failing1234567890".into());
     task.ci_pr_number = Some(44);
     task.ci_blocking_required_check_names = r#"["Quality Gate","Server Tests"]"#.into();
+    task.ci_primary_blocking_check = Some("Quality Gate".into());
     task.ci_failure_fingerprint = Some("lint+tests@failing1234567890".into());
     task.ci_first_seen_at = Some("2026-06-01T00:00:00Z".into());
     task.ci_last_seen_at = Some("2026-06-01T00:10:00Z".into());
@@ -778,4 +784,109 @@ fn forward_compatible_list_consumer_ignores_new_reconciliation_fields() {
 
     assert_eq!(legacy.head_sha, "deadbeefcafebabe00000000000000000000ffff");
     assert_eq!(ci_value["heads_diverged"], true);
+}
+
+// ── wnqw: triage-signal contract ─────────────────────────────────────────────
+//
+// Reconstructed from GitHub Actions run 30087861197 on PR #2525, where a
+// runner-host disk failure cascaded into six red required checks and the board
+// named a never-executed aggregator as the thing to fix.
+
+#[test]
+fn primary_blocking_check_reads_the_ranked_column_not_list_order() {
+    let mut task = task_with_ci_snapshot();
+    // The list is ranked by the poller, but the DTO must not assume that: it
+    // reads the explicitly-selected column. Put a lane the poller did NOT
+    // select at position 0 to prove the DTO is not re-deriving from order.
+    task.ci_blocking_required_check_names =
+        r#"["Publish Nextest Timing","Plan Server Test Shards"]"#.into();
+    task.ci_primary_blocking_check = Some("Plan Server Test Shards".into());
+
+    let serialized = serde_json::to_value(task_to_response(&task)).unwrap();
+
+    assert_eq!(
+        serialized["ci"]["primary_blocking_check"],
+        "Plan Server Test Shards"
+    );
+    assert_eq!(
+        serialized["ci_primary_blocking_check"],
+        "Plan Server Test Shards"
+    );
+    assert!(
+        serialized["ci"]["summary_reason"]
+            .as_str()
+            .unwrap()
+            .contains("Plan Server Test Shards"),
+        "summary_reason must name the ranked lane, not the first list element"
+    );
+}
+
+#[test]
+fn failure_annotations_surface_the_runner_host_cause() {
+    let mut task = task_with_ci_snapshot();
+    task.ci_failure_annotations = Some(
+        "Annotations on `Plan Server Test Shards`:\n\
+         - [failure] System.IO.IOException: No space left on device"
+            .into(),
+    );
+
+    let serialized = serde_json::to_value(task_to_response(&task)).unwrap();
+
+    for field in [
+        &serialized["ci"]["failure_annotations"],
+        &serialized["ci_failure_annotations"],
+    ] {
+        assert!(
+            field.as_str().unwrap().contains("No space left on device"),
+            "the cause must be readable off the board without opening GitHub"
+        );
+    }
+}
+
+#[test]
+fn inconclusive_ci_has_no_primary_check_and_says_retrigger() {
+    let mut task = task_with_ci_snapshot();
+    task.ci_status = "inconclusive".into();
+    task.ci_primary_blocking_check = None;
+    task.ci_failure_fingerprint = None;
+
+    let serialized = serde_json::to_value(task_to_response(&task)).unwrap();
+
+    assert_eq!(serialized["ci_status"], "inconclusive");
+    assert_eq!(serialized["ci_gate_state"], "inconclusive");
+    assert!(
+        serialized["ci"].get("primary_blocking_check").is_none(),
+        "an inconclusive run has nothing to triage"
+    );
+    let summary = serialized["ci"]["summary_reason"].as_str().unwrap();
+    assert!(
+        summary.contains("Retrigger"),
+        "summary must say retrigger: {summary}"
+    );
+    assert!(
+        summary.contains("do not remediate"),
+        "summary must steer away from remediation: {summary}"
+    );
+    assert!(
+        serialized["ci"]["merge_blocked_reason"]
+            .as_str()
+            .unwrap()
+            .contains("inconclusive"),
+        "merge stays blocked, but for the honest reason"
+    );
+}
+
+#[test]
+fn inconclusive_is_not_collapsed_into_awaiting_ci_in_pr_draft() {
+    let mut task = task_with_ci_snapshot();
+    task.status = "pr_draft".into();
+    task.ci_status = "inconclusive".into();
+    task.ci_primary_blocking_check = None;
+
+    let serialized = serde_json::to_value(task_to_response(&task)).unwrap();
+
+    assert_eq!(
+        serialized["ci_gate_state"], "inconclusive",
+        "a completed-but-inconclusive run must not read as still-waiting"
+    );
 }

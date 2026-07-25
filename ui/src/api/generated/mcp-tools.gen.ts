@@ -12502,23 +12502,34 @@ export namespace TaskListOutputSchema {
    */
   ci?: (CiGateSnapshot | null)
   /**
+   * Bounded rendering of the GitHub annotations on
+   * `ci_primary_blocking_check`. Runner-host failures (out of disk, runner
+   * crash) surface only as annotations, so this is often the only place the
+   * real cause appears.
+   */
+  ci_failure_annotations?: string
+  /**
    * Top-level alias for `ci.gate_state`, including `awaiting_ci` for
    * `pr_draft` + pending/unknown.
    */
-  ci_gate_state: (("passing" | "failing" | "pending" | "unknown") | "awaiting_ci")
+  ci_gate_state: (("passing" | "failing" | "pending" | "unknown") | "inconclusive" | "awaiting_ci")
   /**
    * Structured merge/close blocking reason when current-head CI is not passing.
    */
   ci_merge_blocked_reason?: string
   /**
-   * Primary blocking required check/job when required CI is failing.
+   * The required check/job to triage first — the earliest-started blocking
+   * lane that actually executed and hard-failed. Never a cancelled lane and
+   * never a `needs:`-dependent aggregator that did not execute; both are
+   * symptoms of a run-level abort rather than causes. Absent when the run
+   * was inconclusive.
    */
   ci_primary_blocking_check?: string
   /**
    * Top-level alias for `ci.status` (`passing`, `failing`, `pending`, or
    * `unknown`) sourced from the durable current-head CI snapshot.
    */
-  ci_status: ("passing" | "failing" | "pending" | "unknown")
+  ci_status: ("passing" | "failing" | "pending" | "inconclusive" | "unknown")
   /**
    * Human-readable structured CI summary reason.
    */
@@ -12592,6 +12603,16 @@ export namespace TaskListOutputSchema {
    */
   blocking_required_check_names: string[]
   /**
+   * Bounded rendering of the GitHub annotations on
+   * [`Self::primary_blocking_check`].
+   * 
+   * Runner-host failures — out of disk, runner process crash — surface ONLY
+   * as annotations, not as a check conclusion and often not in job logs
+   * either. This field is what lets a reader see `No space left on device`
+   * without opening GitHub.
+   */
+  failure_annotations?: string
+  /**
    * Stable fingerprint of the current failure signature (e.g. sorted
    * failing check names + head SHA). `None` when not failing.
    */
@@ -12611,7 +12632,7 @@ export namespace TaskListOutputSchema {
    * 
    * UI consumers render this value directly as the badge text.
    */
-  gate_state: (("passing" | "failing" | "pending" | "unknown") | "awaiting_ci")
+  gate_state: (("passing" | "failing" | "pending" | "unknown") | "inconclusive" | "awaiting_ci")
   /**
    * Head SHA of the GitHub PR branch, when known.
    */
@@ -12667,11 +12688,17 @@ export namespace TaskListOutputSchema {
    */
   pr_number?: number
   /**
-   * Primary blocking required check name, when CI is failing.
+   * The single required check to triage first — the earliest-started
+   * blocking lane that actually executed and hard-failed.
    * 
-   * `Some(_)` when `status == failing` and at least one required check
-   * failed.  This is the first element of `blocking_required_check_names`
-   * (sorted alphabetically) for compact display.  `None` otherwise.
+   * Selected by the PR poller from *structural execution evidence*
+   * (conclusion class, execution interval, annotation count, start order),
+   * never from name order and never from a list of job names. A check that
+   * was `cancelled`, or that never executed, is a symptom of a run-level
+   * abort rather than a cause, and is never selected.
+   * 
+   * `None` when no blocking check carries causal information — i.e. `status`
+   * is `inconclusive` and the run should be retriggered, not remediated.
    */
   primary_blocking_check?: string
   /**
@@ -12682,7 +12709,7 @@ export namespace TaskListOutputSchema {
   /**
    * Current required-CI status for the PR head.
    */
-  status: ("passing" | "failing" | "pending" | "unknown")
+  status: ("passing" | "failing" | "pending" | "inconclusive" | "unknown")
   /**
    * Human-readable summary of the current CI gate state.
    * 

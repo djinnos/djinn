@@ -30,6 +30,8 @@ async fn seed_failing_ci_snapshot(
         head_sha: head.to_owned(),
         ci_status: status,
         blocking_required_check_names: vec!["Quality Gate".to_owned()],
+        primary_blocking_check: None,
+        failure_annotations: None,
         failure_fingerprint: Some("fp-sig".to_owned()),
         same_signature_count,
         last_remediation_base_sha: baseline.map(str::to_owned),

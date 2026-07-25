@@ -342,6 +342,58 @@ impl GitHubApiClient {
         })
     }
 
+    /// Re-run only the failed jobs of a workflow run.
+    ///
+    /// Used to retrigger an *inconclusive* run — one whose required checks were
+    /// all swept up by a run-level cancel (or by a runner-host crash) rather
+    /// than genuinely failing. Such a run carries no verdict about the code, so
+    /// re-running it is the correct response; dispatching a remediation attempt
+    /// is not.
+    ///
+    /// GitHub reuses the same run id for the re-run, which makes the run id a
+    /// stable dedupe key for "we already retriggered this one".
+    pub async fn rerun_failed_jobs(
+        &self,
+        owner: &str,
+        repo: &str,
+        run_id: u64,
+    ) -> std::result::Result<(), GitHubApiError> {
+        let url = format!(
+            "{}/repos/{}/{}/actions/runs/{}/rerun-failed-jobs",
+            self.base_url, owner, repo, run_id
+        );
+
+        let resp = self
+            .send_with_retry(|token| {
+                let url = url.clone();
+                let http = self.http.clone();
+                async move {
+                    let resp = http
+                        .post(&url)
+                        .bearer_auth(&token)
+                        .header("Accept", "application/vnd.github+json")
+                        .header("X-GitHub-Api-Version", "2022-11-28")
+                        .header("Content-Length", "0")
+                        .send()
+                        .await?;
+                    handle_rate_limit(resp).await
+                }
+            })
+            .await?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(GitHubApiError::http(
+                "rerun_failed_jobs",
+                format!("/repos/{owner}/{repo}/actions/runs/{run_id}/rerun-failed-jobs"),
+                status,
+                body,
+            ));
+        }
+        Ok(())
+    }
+
     /// List jobs for a workflow run.
     pub async fn list_run_jobs(
         &self,

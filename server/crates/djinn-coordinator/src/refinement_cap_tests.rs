@@ -171,6 +171,7 @@ pub(crate) fn build_refinement_actor(
         pr_status_cache: HashMap::new(),
         pr_draft_first_seen: HashMap::new(),
         review_stuck_sha_first_seen: HashMap::new(),
+        ci_inconclusive_retriggered: HashSet::new(),
         merge_fail_count: HashMap::new(),
         auto_approve_attempted: HashMap::new(),
         delegated_to_github: HashMap::new(),

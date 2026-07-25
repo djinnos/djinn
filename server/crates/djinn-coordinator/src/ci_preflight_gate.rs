@@ -359,6 +359,8 @@ mod tests {
             head_sha: "abc123".to_string(),
             ci_status: status,
             blocking_required_check_names: names.into_iter().map(str::to_string).collect(),
+            primary_blocking_check: None,
+            failure_annotations: None,
             failure_fingerprint: Some("fp".to_string()),
             first_seen_at: "now".to_string(),
             last_seen_at: "now".to_string(),
