@@ -14,14 +14,19 @@ They can only share those volumes under one contract:
 * **group ownership = `1000`** (`ARTIFACT_GID`, `djinn_cgroup_launcher::child`)
   on every directory and file;
 * **group-write (`g+w`)** on every directory — that is what lets any of the
-  three create, replace, and unlink what another produced — and on every file
-  that its owner can write and that is not executable. Two shapes a correct tree
-  legitimately produces are exempt: owner-read-only files (`444` git loose
-  objects and packfiles, cargo registry sources carrying the crate tarball's
-  modes) and executables (`git clone` copies the template hooks with the
-  template's own mode, so `.git/hooks/*.sample` is `755` in every fresh clone).
-  Both are replaced through the directory rather than written in place, and
-  neither can hide the `644` shape that caused the incident;
+  three create, replace, and unlink what another produced — and on every
+  owner-writable file; for the Cargo warm base this explicitly **includes
+  executables**. Owner-read-only files (`444` git loose objects and packfiles,
+  cargo registry sources carrying the crate tarball's modes) remain exempt
+  because they are replaced through the directory. Git template hooks outside
+  that base retain their `755` exception. Warm-base executables must not be
+  exempt: with `fs.protected_hardlinks=1`, a cross-uid task-run cannot hardlink
+  a foreign-owned regular `755` file. Cargo
+  can preserve that source mode when a build script copies an output, so the
+  warm worker makes a full post-cycle pass over its Cargo base and adds `g+w`
+  (`755` becomes `775`) to every regular file. This deliberately preserves the
+  executable bit and does not recursively `chown`; the base has cross-identity
+  writers, just like `/mirror`, so ownership alignment is not the mechanism;
 * **setgid (`g+s`) on every directory** — so files created there *inherit* the
   artifact group instead of the creating process's primary group. On Linux a
   directory created inside a setgid directory inherits the bit as well, so
@@ -78,9 +83,13 @@ a pod that is not in the group.
 
 It is **bounded**: depth 3, 32 entries per directory, 512 `lstat`s total. It
 checks a *sample of the subtree*, not just the root, because the exact
-production near-miss had a hand-fixed root over a broken subtree. It **never
-repairs** — a recursive `chown` over a 300G cache is a multi-minute stall on pod
-start, which is the whole reason `fsGroupChangePolicy` is `OnRootMismatch`.
+production near-miss had a hand-fixed root over a broken subtree. A passing
+sample (production has reported `entries_sampled=512, budget_exhausted=true`)
+is not proof that every warm-base file conforms. The warm worker therefore does
+the authoritative full regular-file mode normalization after each Cargo cycle;
+the startup check **never repairs** — a recursive `chown` over a 300G cache is a
+multi-minute stall on pod start, which is the whole reason
+`fsGroupChangePolicy` is `OnRootMismatch`.
 
 ## Symptom → diagnosis
 

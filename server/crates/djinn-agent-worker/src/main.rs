@@ -1186,6 +1186,30 @@ async fn warm_cargo_target_base(
         );
     }
 
+    // Cargo preserves source modes when build scripts copy their outputs, so
+    // umask alone cannot maintain the cross-uid hardlink invariant: a fresh
+    // `755` build script in this base would make `linkat` fail under
+    // fs.protected_hardlinks. Do a complete post-cycle pass, not merely over
+    // files this cycle reports touching: Cargo can resurrect an older artifact.
+    // This runs while the warm-base lock is still held and on the uid that owns
+    // the base. Task-run seeding retains its per-entry copy/skip degradation
+    // path as the safety net if a future filesystem anomaly escapes this pass.
+    match volume_contract::normalize_warm_base_regular_files(&base_dir) {
+        Ok(result) => info!(
+            project_id,
+            warm_base = %base_dir.display(),
+            regular_files = result.regular_files,
+            files_normalized = result.files_normalized,
+            "cargo warm: normalized group-write mode on every regular warm-base file"
+        ),
+        Err(error) => warn!(
+            project_id,
+            warm_base = %base_dir.display(),
+            error = %error,
+            "cargo warm: could not normalize all warm-base regular-file modes; seed degradation remains the safety net"
+        ),
+    }
+
     info!(
         project_id,
         workspace_dir = %workspace_dir.display(),
