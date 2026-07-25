@@ -90,18 +90,33 @@ impl RoleKind {
     }
 }
 
-/// Whether a role's task-run may run the project's compile/test toolchain.
+/// How *likely* a role's task-run is to run the project's compile/test
+/// toolchain — a dispatch-admission prior, NOT a capability boundary.
+///
+/// # Two layers, and this enum governs only the coarse one
+///
+/// Compile pressure is governed in two independent layers, and only the first
+/// one reads this enum:
+///
+/// * **Layer 1 — dispatch admission (coarse, role-derived, this enum).**
+///   `djinn-coordinator` charges a scarce build slot only to work that is
+///   *certain* to compile, and `djinn-k8s` sizes the pod's CPU **request** the
+///   same way. Gating on a role that compiles ~5% of the time would queue it
+///   behind builds it almost never competes with and collapse throughput.
+/// * **Layer 2 — the invocation lease (fine, measured, role-AGNOSTIC).**
+///   `djinn-agent`'s `LeaseInvocationRunner` queues a CPU lease purely on the
+///   invocation's own measured `cpu.stat` usage crossing a threshold. It takes
+///   no role input at all, and `BuildLeaseService::queue` is keyed only by
+///   `{task_id, task_run_id, invocation_id}`. A Reviewer's compile takes a
+///   lease on exactly the same terms as a Worker's.
+///
+/// So this enum answers "should dispatch pre-charge a slot?", never "is this
+/// role allowed to compile?". The answer to the latter is *everyone*, and it is
+/// enforced by measurement in layer 2. See [`Self::gated_at_dispatch`].
 ///
 /// # Why this lives in `djinn-runtime` and not where it is used
 ///
-/// Two layers need the same answer and must never disagree:
-///
-/// * `djinn-k8s` sizes the pod — a Light role gets a fractional-core CPU
-///   request because it will never compile.
-/// * `djinn-coordinator` admits the task-run — a Light role must NOT consume one
-///   of the scarce build slots, or the cap starves Planners and Refinement
-///   tribunals behind builds they were never going to compete with.
-///
+/// Both layer-1 consumers need the same answer and must never disagree.
 /// Before this existed, `build_admission.rs` recorded the assumption in a
 /// comment ("All currently dispatchable task-run roles are build-producing
 /// work") and `djinn-k8s` recorded the opposite in code. `djinn-core`'s
@@ -111,14 +126,30 @@ impl RoleKind {
 /// here and both consumers already depend on this crate.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum RoleResourceClass {
-    /// Orchestration-only roles that never run the project's compile/test
-    /// toolchain: Planner, Reviewer, Lead, every Refinement sub-role, and
-    /// grooming (a Planner-driven flow). Fractional-core CPU request, and no
-    /// build-admission slot.
+    /// Orchestration-first roles — Planner, Reviewer, Lead, and every
+    /// Refinement sub-role — which are *unlikely* to run the project's
+    /// compile/test toolchain, not incapable of it.
+    ///
+    /// Measured against production transcripts on 2026-07-25: 4 of 73 light
+    /// task-run sessions (5.5%) ran a real compile; reviewers alone were 3 of
+    /// 37 (8.1%), one of them running `cargo check -p …`, `cargo clippy
+    /// --all-targets` and `cargo test --no-run` in a single session. Commit
+    /// `1719ef8c3` (2026-06-20) had already recorded a reviewer burning ~12
+    /// minutes on a cold `cargo check` "despite task-reviewer.md already
+    /// instructing it not to". An earlier revision of this comment claimed
+    /// these roles "never run the project's compile/test toolchain"; that was
+    /// false when it was written and is corrected here.
+    ///
+    /// Light therefore means: fractional-core CPU **request**, and no
+    /// build-admission slot — because pre-charging a slot 100% of the time for
+    /// a ~5% event on an oversubscribed pool is the wrong trade. The ~5% that
+    /// do compile are not unaccounted for; they are governed by the measured
+    /// invocation lease (layer 2), exactly like a Worker's compile.
     Light,
-    /// Roles that may compile/build/test: Worker, Verifier, Architect, and any
-    /// retry/resume of those. Full-core CPU request, and one build slot. Also
-    /// the FAIL-SAFE default for a missing/unknown/newly-added role.
+    /// Roles whose task-run is *expected* to compile/build/test: Worker,
+    /// Verifier, Architect, and any retry/resume of those. Full-core CPU
+    /// request, and one build slot pre-charged at dispatch. Also the FAIL-SAFE
+    /// default for a missing/unknown/newly-added role.
     BuildCapable,
 }
 
@@ -130,6 +161,10 @@ impl RoleResourceClass {
     /// **fail safe to build-capable** so a pod that might compile is never
     /// under-provisioned and never escapes the admission cap. Only the
     /// explicitly-listed light roles are ever classed light.
+    ///
+    /// This is a *prior*, not a permission: see the type-level docs for why a
+    /// Light role that does compile is still governed, by the measured
+    /// invocation lease rather than by this enum.
     pub fn for_role(role: Option<RoleKind>) -> Self {
         match role {
             Some(
@@ -146,16 +181,45 @@ impl RoleResourceClass {
     /// `Refinement`, so they are listed here explicitly. Matching is
     /// case-insensitive and, like [`Self::for_role`], anything unrecognized
     /// fails safe to build-capable.
+    ///
+    /// There is deliberately no `"grooming"` arm. Grooming is a Planner-driven
+    /// flow, and it dispatches under the role NAME `planner`
+    /// (`djinn-agent/src/roles/mod.rs`) — no layer ever produces the string
+    /// `"grooming"` as a role. `djinn_coordinator::TaskRunRole::parse` has no
+    /// grooming arm either, and its own test already asserts that
+    /// `Some("grooming")` is Unclassified at admission. An arm here was
+    /// unreachable in every caller and read as if a second grooming role
+    /// existed; it was removed rather than made reachable, because making it
+    /// reachable would mean inventing a dispatch role that nothing emits.
     pub fn for_role_name(role: &str) -> Self {
         match role.trim().to_ascii_lowercase().as_str() {
-            "planner" | "reviewer" | "lead" | "refinement" | "advocate" | "adversary" | "judge"
-            | "grooming" => Self::Light,
+            "planner" | "reviewer" | "lead" | "refinement" | "advocate" | "adversary" | "judge" => {
+                Self::Light
+            }
             _ => Self::BuildCapable,
         }
     }
 
-    /// Does a task-run of this class consume a build-admission slot?
-    pub fn consumes_build_slot(self) -> bool {
+    /// Is a task-run of this class pre-charged a build slot at DISPATCH?
+    ///
+    /// This is the whole of layer 1 (see the type-level docs). It answers only
+    /// "does admission reserve capacity before this task-run starts?" — never
+    /// "may this task-run compile?".
+    ///
+    /// # There is deliberately no `may_take_invocation_lease` companion
+    ///
+    /// Lease eligibility is role-INDEPENDENT: every invocation, from every
+    /// role, becomes lease-eligible by crossing the measured `cpu.stat`
+    /// threshold in `djinn-agent`'s `LeaseInvocationRunner`. A predicate on
+    /// this enum would therefore return `true` for every input — a constant
+    /// dressed as a classification, and an open invitation for a future author
+    /// to "fix" it into a role-dependent gate, which would silently starve the
+    /// ~5% of light task-runs that do compile. The invariant is encoded as a
+    /// documented absence plus tests: `LeaseInvocationRunner`'s config struct
+    /// carries no role field (`djinn-agent`, exhaustive-destructure test), and
+    /// the rendered launcher sidecar and `DJINN_LAUNCHER_LEASED_MILLICORES`
+    /// are asserted identical across both classes (`djinn-k8s`).
+    pub fn gated_at_dispatch(self) -> bool {
         matches!(self, Self::BuildCapable)
     }
 

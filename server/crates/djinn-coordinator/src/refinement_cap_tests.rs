@@ -546,9 +546,11 @@ async fn capacity_free_retry_dispatches_exactly_one_refinement() {
         .await
         .expect("controlled refinement create callback must execute");
     // Task `h1yv`: the tribunal roles (advocate/adversary/judge) are
-    // `djinn_runtime::RoleResourceClass::Light` — orchestration-only, they never
-    // run the project's compile/test toolchain — so build admission grants a
-    // zero-slot permit and writes NO journal row. This assertion previously
+    // `djinn_runtime::RoleResourceClass::Light` — unlikely enough to run the
+    // project's compile/test toolchain that pre-charging them a slot is the
+    // wrong trade — so build admission grants a zero-slot permit and writes NO
+    // journal row. A tribunal round that does compile is governed by the
+    // measured invocation lease, not here. This assertion previously
     // demanded one durable generation; the invariant that survives is that a
     // tribunal round reserves nothing and occupies nothing. The user-model cap
     // exercised by this test (AC#3) is a separate, still-enforced gate.

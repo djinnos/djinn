@@ -3193,6 +3193,113 @@ pub mod cache_cleanup {
     }
 }
 
+/// The session's `djinn_runtime::RoleResourceClass`, as a bounded metric label.
+///
+/// Two values, forever: a role is either pre-charged a build slot at dispatch
+/// or it is not. The strings are byte-identical to
+/// `RoleResourceClass::as_str()`; `djinn-telemetry` deliberately does not
+/// depend on `djinn-runtime` (the dependency runs the other way for several
+/// consumers), so the pairing is locked by a test in a crate that sees both.
+///
+/// # Why this label exists
+///
+/// `RoleResourceClass::Light` used to be documented as "never runs the
+/// project's compile/test toolchain". Production transcripts measured on
+/// 2026-07-25 say otherwise: 5.5% of light task-run sessions compiled.
+/// Labelling the two in-pod compile observations by class turns that from a
+/// one-off transcript archaeology exercise into a standing measurement — which
+/// is the precondition for arming the invocation semaphore, since a shadow
+/// rollout you cannot slice is a shadow rollout you cannot read.
+pub mod role_class {
+    use std::cell::Cell;
+    use std::sync::atomic::{AtomicU8, Ordering};
+
+    pub const CLASS_LIGHT: &str = "light";
+    pub const CLASS_BUILD_CAPABLE: &str = "build-capable";
+
+    /// The complete label vocabulary. Any recorder taking a `class` must reject
+    /// or normalize anything outside it; the guard test asserts the length.
+    pub const ALL_CLASSES: [&str; 2] = [CLASS_LIGHT, CLASS_BUILD_CAPABLE];
+
+    /// `0` = unobserved (fails safe to build-capable), `1` = light,
+    /// `2` = build-capable.
+    static PROCESS_CLASS: AtomicU8 = AtomicU8::new(0);
+
+    thread_local! {
+        /// Thread-scoped override, mirroring [`super::render_isolated`]'s
+        /// thread-local recorder: a test that publishes a class on its own
+        /// thread reads that class back deterministically, even while other
+        /// tests in the same binary publish a different one.
+        static THREAD_CLASS: Cell<u8> = const { Cell::new(0) };
+    }
+
+    /// Publish the class of the role this PROCESS is running, for recorders
+    /// that are deliberately role-blind and must stay that way.
+    ///
+    /// A task-run pod hosts exactly one role, so the class is a process-level
+    /// constant, not a per-invocation input. The invocation-lease runner
+    /// (`djinn-agent`'s `LeaseInvocationRunner`) queues purely on measured
+    /// `cpu.stat` and takes no role input at all — plumbing a role into it just
+    /// to label a counter would put a role-shaped field exactly where a future
+    /// author would reach for one to make leasing role-dependent. Publishing
+    /// the class here keeps the label available and the runner blind.
+    ///
+    /// Writes both the calling thread's value and the process-wide fallback, so
+    /// a recorder running on a different worker thread of a multi-thread
+    /// runtime still sees it. Idempotent and last-write-wins; an unset value
+    /// reads as build-capable so an unobserved process never under-reports
+    /// compile pressure. Anything outside [`ALL_CLASSES`] collapses onto the
+    /// fail-safe value rather than widening the label domain.
+    pub fn observe(class: &str) {
+        let encoded = if class == CLASS_LIGHT { 1 } else { 2 };
+        THREAD_CLASS.with(|cell| cell.set(encoded));
+        PROCESS_CLASS.store(encoded, Ordering::Relaxed);
+    }
+
+    /// The published class — the calling thread's, else the process-wide
+    /// fallback, else `CLASS_BUILD_CAPABLE` when nothing has been observed.
+    #[must_use]
+    pub fn current() -> &'static str {
+        let encoded = match THREAD_CLASS.with(Cell::get) {
+            0 => PROCESS_CLASS.load(Ordering::Relaxed),
+            thread_scoped => thread_scoped,
+        };
+        match encoded {
+            1 => CLASS_LIGHT,
+            _ => CLASS_BUILD_CAPABLE,
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::{
+            ALL_CLASSES, CLASS_BUILD_CAPABLE, CLASS_LIGHT, PROCESS_CLASS, THREAD_CLASS, current,
+            observe,
+        };
+        use std::sync::atomic::Ordering;
+
+        /// Unobserved reads as build-capable: an unlabelled process must never
+        /// under-report compile pressure by claiming to be light.
+        #[test]
+        fn defaults_to_build_capable_and_round_trips() {
+            THREAD_CLASS.with(|cell| cell.set(0));
+            PROCESS_CLASS.store(0, Ordering::Relaxed);
+            assert_eq!(current(), CLASS_BUILD_CAPABLE);
+            observe(CLASS_LIGHT);
+            assert_eq!(current(), CLASS_LIGHT);
+            observe(CLASS_BUILD_CAPABLE);
+            assert_eq!(current(), CLASS_BUILD_CAPABLE);
+            // Anything outside the vocabulary collapses onto the fail-safe
+            // value rather than widening the label domain.
+            observe("architect");
+            assert_eq!(current(), CLASS_BUILD_CAPABLE);
+            assert!(ALL_CLASSES.contains(&current()));
+            THREAD_CLASS.with(|cell| cell.set(0));
+            PROCESS_CLASS.store(0, Ordering::Relaxed);
+        }
+    }
+}
+
 /// Bounded cargo and workspace duration telemetry (proposal zp5t).
 ///
 /// Collectors for subprocess and workspace lifecycle durations. All label
@@ -3217,13 +3324,40 @@ pub mod cargo_invocation {
     /// Record the duration of a classified cargo subprocess invocation.
     ///
     /// `kind` must be one of the `KIND_*` constants; `exit` must be one of the
-    /// `EXIT_*` constants. The duration is measured in seconds and emitted as a
-    /// histogram with proposal zp5t bucket boundaries.
-    pub fn record_seconds(kind: &'static str, exit: &'static str, duration: std::time::Duration) {
+    /// `EXIT_*` constants; `class` must be one of
+    /// [`super::role_class::ALL_CLASSES`]. The duration is measured in seconds
+    /// and emitted as a histogram with proposal zp5t bucket boundaries.
+    ///
+    /// # Transport
+    ///
+    /// Emits a structured `tracing::info!` alongside the histogram. Every
+    /// caller of this function runs INSIDE the task-run pod
+    /// (`djinn-agent`'s shell handler), and `djinn-agent-worker` calls
+    /// [`crate::init`] but serves no HTTP `/metrics` endpoint — nothing ever
+    /// scrapes an in-pod recorder, so the histogram alone is written and lost.
+    /// The log line is collected by the pod-log pipeline that already exists,
+    /// which is strictly smaller than standing up an in-pod HTTP server or
+    /// widening the host RPC. The histogram is kept because the same code path
+    /// is exercised by host-side tests via [`crate::render`].
+    pub fn record_seconds(
+        kind: &'static str,
+        exit: &'static str,
+        class: &'static str,
+        duration: std::time::Duration,
+    ) {
+        tracing::info!(
+            metric = super::CARGO_INVOCATION_SECONDS,
+            kind,
+            exit,
+            class,
+            duration_seconds = duration.as_secs_f64(),
+            "cargo invocation observed"
+        );
         metrics::histogram!(
             super::CARGO_INVOCATION_SECONDS,
             "kind" => kind,
             "exit" => exit,
+            "class" => class,
         )
         .record(duration);
     }
@@ -3445,13 +3579,34 @@ pub mod build_admission {
     /// `decision` label is one of the two bounded outcomes — `would_escalate`
     /// (v1 would have lifted the quota) or `would_throttle` (v1 would have kept
     /// it throttled) — so the shadow rollout can be measured before enforcement.
+    ///
+    /// The `class` label is the PROCESS's role class
+    /// ([`super::role_class::current`]), not a per-invocation input: the
+    /// invocation-lease runner queues purely on measured `cpu.stat` and is
+    /// deliberately role-blind, so the class is read from the process rather
+    /// than threaded through it. Without this slice, "what fraction of
+    /// invocations would escalate?" cannot be split by whether dispatch ever
+    /// charged that role a build slot — which is precisely the number that
+    /// decides whether arming the semaphore starves light roles.
+    ///
+    /// Like [`super::cargo_invocation::record_seconds`], this also emits a
+    /// structured `tracing::info!`: every production caller lives in the
+    /// task-run pod, and `djinn-agent-worker` exposes no `/metrics` endpoint,
+    /// so a counter alone would never leave the pod.
     pub fn record_shadow_invocation(would_escalate: bool) {
         let decision = if would_escalate {
             "would_escalate"
         } else {
             "would_throttle"
         };
-        metrics::counter!(super::BUILD_ADMISSION_SHADOW_INVOCATION_TOTAL, "decision" => decision)
+        let class = super::role_class::current();
+        tracing::info!(
+            metric = super::BUILD_ADMISSION_SHADOW_INVOCATION_TOTAL,
+            decision,
+            class,
+            "build admission shadow invocation observed"
+        );
+        metrics::counter!(super::BUILD_ADMISSION_SHADOW_INVOCATION_TOTAL, "decision" => decision, "class" => class)
             .increment(1);
     }
 }
@@ -5653,6 +5808,7 @@ mod tests {
             cargo_invocation::record_seconds(
                 cargo_invocation::KIND_CHECK,
                 cargo_invocation::EXIT_OK,
+                role_class::CLASS_BUILD_CAPABLE,
                 std::time::Duration::from_secs(1),
             );
         });
@@ -5685,13 +5841,21 @@ mod tests {
         let mut rendered = String::new();
         for kind in cargo_invocation::ALL_KINDS {
             for exit in cargo_invocation::ALL_EXITS {
-                let labels = &[("kind", kind), ("exit", exit)];
+                // The class label is exercised across the whole cross-product:
+                // a light-role compile must render the same bucket family as a
+                // build-capable one, only under a different `class`.
+                let class = if exit == cargo_invocation::EXIT_OK {
+                    role_class::CLASS_LIGHT
+                } else {
+                    role_class::CLASS_BUILD_CAPABLE
+                };
+                let labels = &[("kind", kind), ("exit", exit), ("class", class)];
                 let before = render().unwrap();
                 let count_before =
                     histogram_count(&before, "djinn_cargo_invocation_seconds_count", labels);
                 let sum_before =
                     histogram_count(&before, "djinn_cargo_invocation_seconds_sum", labels);
-                cargo_invocation::record_seconds(kind, exit, duration);
+                cargo_invocation::record_seconds(kind, exit, class, duration);
                 rendered = render().unwrap();
                 let count_after =
                     histogram_count(&rendered, "djinn_cargo_invocation_seconds_count", labels);
@@ -5724,7 +5888,12 @@ mod tests {
                 let inf = rendered_sample(
                     &rendered,
                     "djinn_cargo_invocation_seconds_bucket",
-                    &[("kind", kind), ("exit", exit), ("le", "+Inf")],
+                    &[
+                        ("kind", kind),
+                        ("exit", exit),
+                        ("class", class),
+                        ("le", "+Inf"),
+                    ],
                 );
                 let expected = format!(" {count_after}");
                 assert!(
@@ -5758,6 +5927,66 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Extract every distinct `class="…"` value on lines for `metric`.
+    fn rendered_class_values(rendered: &str, metric: &str) -> std::collections::BTreeSet<String> {
+        rendered
+            .lines()
+            .filter(|line| line.starts_with(metric))
+            .filter_map(|line| {
+                let start = line.find("class=\"")? + 7;
+                let end = line[start..].find('"')? + start;
+                Some(line[start..end].to_string())
+            })
+            .collect()
+    }
+
+    /// The `class` label domain is closed at exactly two values on BOTH
+    /// carriers, and nothing else can widen it.
+    ///
+    /// This is the cardinality guard that makes the label safe to ship: a role
+    /// name accidentally passed through instead of a class ("reviewer",
+    /// "advocate", …) would show up here immediately, and on a metric emitted
+    /// once per cargo invocation across every task-run pod, that is the
+    /// difference between two series and dozens.
+    #[test]
+    fn class_label_domain_is_exactly_two_values_on_both_carriers() {
+        let _guard = test_guard();
+        init().unwrap();
+        assert_eq!(role_class::ALL_CLASSES.len(), 2);
+
+        for class in role_class::ALL_CLASSES {
+            cargo_invocation::record_seconds(
+                cargo_invocation::KIND_CHECK,
+                cargo_invocation::EXIT_OK,
+                class,
+                std::time::Duration::from_secs(1),
+            );
+        }
+        // The shadow counter reads the PROCESS class rather than taking one,
+        // so drive it through both published values.
+        for class in role_class::ALL_CLASSES {
+            role_class::observe(class);
+            build_admission::record_shadow_invocation(true);
+            build_admission::record_shadow_invocation(false);
+        }
+
+        let rendered = render().unwrap();
+        let expected: std::collections::BTreeSet<String> = role_class::ALL_CLASSES
+            .iter()
+            .map(|c| (*c).to_string())
+            .collect();
+        assert_eq!(
+            rendered_class_values(&rendered, "djinn_cargo_invocation_seconds"),
+            expected,
+            "cargo_invocation class label domain must be exactly the two classes"
+        );
+        assert_eq!(
+            rendered_class_values(&rendered, BUILD_ADMISSION_SHADOW_INVOCATION_TOTAL),
+            expected,
+            "shadow invocation class label domain must be exactly the two classes"
+        );
     }
 
     #[test]

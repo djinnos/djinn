@@ -1,4 +1,4 @@
-//! Deterministic cargo invocation outcome tests for `workspace`.
+//! Deterministic cargo invocation outcome tests for `shell_exec::finish_shell`.
 
 use super::*;
 use crate::process::{ProcessOutput, ProcessRunError, ProcessTermination};
@@ -6,16 +6,30 @@ use djinn_core::clock::{Clock, TestClock};
 use djinn_telemetry::cargo_invocation::{
     EXIT_CANCELLED, EXIT_FAIL, EXIT_OK, KIND_BUILD, KIND_CHECK, KIND_CLIPPY, KIND_OTHER, KIND_TEST,
 };
+use djinn_telemetry::role_class::{ALL_CLASSES, CLASS_BUILD_CAPABLE, CLASS_LIGHT};
 use std::os::unix::process::ExitStatusExt;
 use std::sync::{Arc, Mutex};
 
-/// Collected recorder calls: `(kind, exit, duration)`.
-type Calls = Arc<Mutex<Vec<(&'static str, &'static str, std::time::Duration)>>>;
+/// Collected recorder calls: `(kind, exit, duration, class)`. `class` is last
+/// so the pre-existing positional assertions on kind/exit/duration keep their
+/// meaning.
+type Calls = Arc<
+    Mutex<
+        Vec<(
+            &'static str,
+            &'static str,
+            std::time::Duration,
+            &'static str,
+        )>,
+    >,
+>;
 
-fn fake_recorder(calls: &Calls) -> impl Fn(&'static str, &'static str, std::time::Duration) {
+fn fake_recorder(
+    calls: &Calls,
+) -> impl Fn(&'static str, &'static str, &'static str, std::time::Duration) {
     let calls = calls.clone();
-    move |kind, exit, dur| {
-        calls.lock().unwrap().push((kind, exit, dur));
+    move |kind, exit, class, dur| {
+        calls.lock().unwrap().push((kind, exit, dur, class));
     }
 }
 
@@ -38,13 +52,33 @@ fn run_finish(
     classification: Option<&'static str>,
     result: &Result<ProcessOutput, ProcessRunError>,
     elapsed: std::time::Duration,
-) -> Vec<(&'static str, &'static str, std::time::Duration)> {
+) -> Vec<(
+    &'static str,
+    &'static str,
+    std::time::Duration,
+    &'static str,
+)> {
+    run_finish_as(classification, CLASS_BUILD_CAPABLE, result, elapsed)
+}
+
+#[allow(clippy::disallowed_methods)]
+fn run_finish_as(
+    classification: Option<&'static str>,
+    class: &'static str,
+    result: &Result<ProcessOutput, ProcessRunError>,
+    elapsed: std::time::Duration,
+) -> Vec<(
+    &'static str,
+    &'static str,
+    std::time::Duration,
+    &'static str,
+)> {
     let calls: Calls = Arc::new(Mutex::new(Vec::new()));
     let recorder = fake_recorder(&calls);
     let clock = TestClock::new(std::time::SystemTime::UNIX_EPOCH, std::time::Instant::now());
     let started = clock.now_instant();
     clock.advance_mono(elapsed);
-    finish_shell(classification, started, result, &clock, recorder);
+    finish_shell(classification, class, started, result, &clock, recorder);
     calls.lock().unwrap().clone()
 }
 
@@ -220,7 +254,14 @@ fn duration_is_monotonic_not_wall_clock() {
     // Move wall-clock forward by 10 minutes; leave monotonic unchanged.
     clock.advance_wall(std::time::Duration::from_secs(600));
     let result = Ok(make_output(0, ProcessTermination::Exited));
-    finish_shell(Some(KIND_CHECK), started, &result, &clock, recorder);
+    finish_shell(
+        Some(KIND_CHECK),
+        CLASS_BUILD_CAPABLE,
+        started,
+        &result,
+        &clock,
+        recorder,
+    );
     let recorded = calls.lock().unwrap().clone();
     assert_eq!(recorded.len(), 1);
     assert_eq!(
@@ -228,4 +269,47 @@ fn duration_is_monotonic_not_wall_clock() {
         std::time::Duration::ZERO,
         "duration must follow monotonic time, not wall-clock"
     );
+}
+
+/// The `class` label passes through verbatim and is the ONLY thing the class
+/// changes: a light-role compile is recorded with the same kind, exit and
+/// duration as a build-capable one. This is the observability half of "light
+/// roles are not gated at dispatch, but they are not invisible either".
+#[test]
+fn class_label_passes_through_and_changes_nothing_else() {
+    let result = Ok(make_output(0, ProcessTermination::Exited));
+    let light = run_finish_as(
+        Some(KIND_CLIPPY),
+        CLASS_LIGHT,
+        &result,
+        std::time::Duration::from_millis(1500),
+    );
+    let build = run_finish_as(
+        Some(KIND_CLIPPY),
+        CLASS_BUILD_CAPABLE,
+        &result,
+        std::time::Duration::from_millis(1500),
+    );
+    assert_eq!(light.len(), 1);
+    assert_eq!(build.len(), 1);
+    assert_eq!(light[0].3, CLASS_LIGHT);
+    assert_eq!(build[0].3, CLASS_BUILD_CAPABLE);
+    assert_eq!(
+        (light[0].0, light[0].1, light[0].2),
+        (build[0].0, build[0].1, build[0].2),
+        "class must label the observation, never alter it"
+    );
+}
+
+/// A non-cargo command records nothing regardless of class: the class never
+/// creates an observation that the kind classifier did not.
+#[test]
+fn class_does_not_create_observations() {
+    let result = Ok(make_output(0, ProcessTermination::Exited));
+    for class in ALL_CLASSES {
+        assert!(
+            run_finish_as(None, class, &result, std::time::Duration::from_secs(1)).is_empty(),
+            "class {class} must not manufacture an observation"
+        );
+    }
 }

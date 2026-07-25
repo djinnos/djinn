@@ -8641,9 +8641,11 @@ mod build_admission_route_tests {
     ///
     /// This test previously asserted the opposite (an occupying row before the
     /// pool create). Task `h1yv` inverted it: a Planner is
-    /// [`djinn_runtime::RoleResourceClass::Light`] — orchestration-only, it
-    /// never runs the project's compile/test toolchain — so it is admitted with
-    /// a zero-slot permit and leaves no journal row. The route invariant that
+    /// [`djinn_runtime::RoleResourceClass::Light`] — unlikely enough to run the
+    /// project's compile/test toolchain that pre-charging it a slot is the wrong
+    /// trade — so it is admitted with a zero-slot permit and leaves no journal
+    /// row. A Planner that does compile is governed by the measured invocation
+    /// lease, not by dispatch admission. The route invariant that
     /// still matters is that the escalation dispatches at all while a scarce cap
     /// is in force, and that it adds nothing to durable occupancy.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

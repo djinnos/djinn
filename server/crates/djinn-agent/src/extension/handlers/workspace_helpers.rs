@@ -5,14 +5,16 @@ use ::djinn_telemetry::cargo_invocation::{
 };
 use std::borrow::Cow;
 
-/// Denial message for `cargo check`/`cargo build` by worker/reviewer roles.
+/// Denial message for `cargo check`/`cargo build` in any task-run session.
 /// These cold-build the whole workspace (~12min); clippy reuses the warm cache.
-pub(crate) const CARGO_CHECK_DENIED_MSG: &str = "cargo check / cargo build (for type-checking) is disabled for the worker and reviewer roles: it produces different artifacts than the warm cargo cache and cold-builds the workspace. Use `cargo clippy -p <crate>` instead (it reuses the warm cache and also lints). `cargo test`/`cargo nextest`, `cargo tree`, `cargo metadata`, and `cargo fmt` are allowed.";
+pub(crate) const CARGO_CHECK_DENIED_MSG: &str = "cargo check / cargo build (for type-checking) is disabled in task-run sessions: it produces different artifacts than the warm cargo cache and cold-builds the workspace. Use `cargo clippy -p <crate>` instead (it reuses the warm cache and also lints). `cargo test`/`cargo nextest`, `cargo tree`, `cargo metadata`, and `cargo fmt` are allowed.";
 
-/// Does this shell command, run by a code-executing role (worker or reviewer),
-/// invoke a `cargo check` or `cargo build` whose only purpose is type-checking?
-/// Returns the denial message when so. We allow clippy/test/nextest/tree/metadata/fmt
-/// and all non-cargo commands.
+/// Does this shell command invoke a `cargo check` or `cargo build` whose only
+/// purpose is type-checking? Returns the denial message when so. We allow
+/// clippy/test/nextest/tree/metadata/fmt and all non-cargo commands.
+///
+/// Role-blind on purpose: the warm cache is clippy-shaped, which is a property
+/// of the pod, not of whoever is driving it.
 ///
 /// Robust to: `bash -lc "cargo check"`, leading paths
 /// (`/usr/local/bin/cargo build`), `cargo +nightly check`, and `&&`/`;`/`|`

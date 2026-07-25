@@ -57,11 +57,12 @@ impl CoordinatorActor {
             // shared, pure liveness authority evaluated at the DB observation.
             match evaluate_refinement_liveness(&exact.snapshot, exact.observed_at) {
                 RefinementLivenessResult::Terminal { .. } => continue,
-                RefinementLivenessResult::Stale { .. } => {
+                RefinementLivenessResult::Stale { reason } => {
                     self.try_reap_exact_stale_run(
                         &exact.proposal_id,
                         &exact.snapshot.run.run_id,
                         exact.generation,
+                        reason,
                     )
                     .await;
                     continue;
@@ -112,7 +113,13 @@ impl CoordinatorActor {
     }
 
     /// Terminalize only the exact snapshot that the evaluator declared stale.
-    async fn try_reap_exact_stale_run(&self, proposal_id: &str, run_id: &str, generation: i32) {
+    async fn try_reap_exact_stale_run(
+        &self,
+        proposal_id: &str,
+        run_id: &str,
+        generation: i32,
+        stale_reason: djinn_core::refinement_liveness::RefinementStaleReason,
+    ) {
         let repo = ProposalRepository::new(
             self.db.clone(),
             crate::events::event_bus_for(&self.events_tx),
@@ -120,7 +127,9 @@ impl CoordinatorActor {
         let reason = RefinementStopReason::ReapedPhantom {
             prior_run_id: run_id.to_owned(),
             generation: generation as u64,
-            evidence_summary: "startup recovery found no live exact-run evidence".into(),
+            evidence_summary: format!(
+                "startup recovery evaluator classified exact snapshot stale: {stale_reason:?}"
+            ),
         };
         match repo
             .terminal_refinement_run(TerminalRefinementRunRequest {

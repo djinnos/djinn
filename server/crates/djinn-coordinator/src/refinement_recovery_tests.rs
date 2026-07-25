@@ -47,6 +47,88 @@ async fn admit(repo: &ProposalRepository, proposal_id: &str, key: &str) -> (Stri
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn recovery_preserves_parks_without_terminal_or_reap_writes() {
+    for (key, kind, phase) in [
+        (
+            "preserve-review-park",
+            RefinementParkKind::AwaitingReview,
+            RefinementPhase::AwaitingHumanReview,
+        ),
+        (
+            "preserve-evidence-park",
+            RefinementParkKind::AwaitingEvidence,
+            RefinementPhase::AwaitingEvidence,
+        ),
+    ] {
+        let db = crate::test_helpers::create_test_db();
+        let fixture = seed_refinement_fixture(&db).await;
+        let (events_tx, _events_rx) = tokio::sync::broadcast::channel::<DjinnEventEnvelope>(16);
+        let mut actor = build_refinement_actor(&db, &events_tx, spawn_test_pool(&db, 1));
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let (run_id, generation, _) = admit(&repo, &fixture.proposal_id, key).await;
+        assert!(
+            repo.park_refinement_run(ParkRefinementRunRequest {
+                run_id: run_id.clone(),
+                generation,
+                kind
+            })
+            .await
+            .expect("park exact run")
+        );
+        let before = djinn_db::test_support::refinement_run_audit_for_test(&db, &run_id).await;
+
+        actor.recover_interrupted_refinements().await;
+        assert_eq!(actor.active_refinements[&run_id].phase, phase);
+        actor.active_refinements.clear();
+        actor.recover_interrupted_refinements().await;
+        let after = djinn_db::test_support::refinement_run_audit_for_test(&db, &run_id).await;
+        assert_eq!(after, before, "recovery must not write a genuine park");
+        assert_eq!(actor.active_refinements[&run_id].phase, phase);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_stale_recovery_has_one_cas_winner_and_typed_context() {
+    let db = crate::test_helpers::create_test_db();
+    let fixture = seed_refinement_fixture(&db).await;
+    let (events_tx, _events_rx) = tokio::sync::broadcast::channel::<DjinnEventEnvelope>(16);
+    let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+    let (run_id, generation, _) = admit(&repo, &fixture.proposal_id, "stale-recovery").await;
+    djinn_db::test_support::make_refinement_run_phantom_for_test(&db, &run_id).await;
+    let mut left = build_refinement_actor(&db, &events_tx, spawn_test_pool(&db, 1));
+    let mut right = build_refinement_actor(&db, &events_tx, spawn_test_pool(&db, 1));
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+    let left_barrier = barrier.clone();
+    let left_recovery = async {
+        left_barrier.wait().await;
+        left.recover_interrupted_refinements().await
+    };
+    let right_recovery = async {
+        barrier.wait().await;
+        right.recover_interrupted_refinements().await
+    };
+    tokio::join!(left_recovery, right_recovery);
+
+    let row = djinn_db::test_support::refinement_run_audit_for_test(&db, &run_id).await;
+    assert_eq!(row.state, "terminal");
+    assert_eq!(row.generation, generation);
+    assert_eq!(row.stop_tag.as_deref(), Some("reaped_phantom"));
+    let context = row.stop_context.expect("typed reap has structured context");
+    assert_eq!(context["prior_run_id"], run_id);
+    assert_eq!(context["generation"], generation);
+    assert_eq!(
+        context["evidence_summary"],
+        "startup recovery evaluator classified exact snapshot stale: NoLiveEvidence"
+    );
+    assert_eq!(
+        row.typed_reap_count, 1,
+        "the CAS loser cannot emit another typed reap record"
+    );
+    assert!(!left.active_refinements.contains_key(&run_id));
+    assert!(!right.active_refinements.contains_key(&run_id));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn recovery_hydrates_claimed_run_by_exact_run_id() {
     let db = crate::test_helpers::create_test_db();
     let fixture = seed_refinement_fixture(&db).await;
