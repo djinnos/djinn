@@ -26,8 +26,8 @@ fn lease_invocation_config_carries_no_role_field() {
         task_run_id: "run".into(),
         pod_uid: "pod".into(),
         cpu_usage_threshold_usec: 1,
-        queue_deadline_ms: 1,
-        launch_deadline_ms: 1,
+        queue_timeout: std::time::Duration::from_secs(2),
+        launch_timeout: std::time::Duration::from_secs(3),
         timeout: std::time::Duration::from_secs(1),
     };
     // Exhaustive: no `..` rest pattern. Adding a field breaks this line.
@@ -36,16 +36,16 @@ fn lease_invocation_config_carries_no_role_field() {
         task_run_id,
         pod_uid,
         cpu_usage_threshold_usec,
-        queue_deadline_ms,
-        launch_deadline_ms,
+        queue_timeout,
+        launch_timeout,
         timeout,
     } = config;
     assert_eq!(task_id, "task");
     assert_eq!(task_run_id, "run");
     assert_eq!(pod_uid, "pod");
     assert_eq!(cpu_usage_threshold_usec, 1);
-    assert_eq!(queue_deadline_ms, 1);
-    assert_eq!(launch_deadline_ms, 1);
+    assert_eq!(queue_timeout, std::time::Duration::from_secs(2));
+    assert_eq!(launch_timeout, std::time::Duration::from_secs(3));
     assert_eq!(timeout, std::time::Duration::from_secs(1));
 }
 
