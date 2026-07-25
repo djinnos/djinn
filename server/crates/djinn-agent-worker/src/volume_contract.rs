@@ -23,12 +23,14 @@
 //!     launcher-spawned child (primary group 1000) share every artifact;
 //!   * directories carry **group-write** *and* **setgid**, so files created by
 //!     either identity inherit the artifact group instead of the creator's;
-//!   * files that their owner can write, and that are not executable, carry
-//!     **group-write** so the other identity can overwrite them in place. The
-//!     two exclusions cover the shapes a correct tree legitimately produces —
-//!     `444` git objects / cargo registry sources, and the `755`
-//!     `.git/hooks/*.sample` every clone copies from git's templates — neither
-//!     of which can hide the `644` production shape this exists to catch;
+//!   * owner-writable files carry **group-write** so the other identity can
+//!     overwrite them in place. Owner-read-only `444` git objects and cargo
+//!     registry sources remain exempt because they are replaced through their
+//!     directory. Executables are deliberately **not** exempt for the Cargo
+//!     warm base (git template hooks elsewhere retain their `755` exception).
+//!     Cargo can copy a build script with its source `755` mode into that base,
+//!     and a cross-uid consumer cannot hardlink it while
+//!     `fs.protected_hardlinks=1` is enabled;
 //!   * the process runs with umask `0002` ([`apply_artifact_umask`]) so
 //!     everything it creates keeps satisfying the above;
 //!   * the process itself is a member of [`ARTIFACT_GID`] (primary or
@@ -54,7 +56,7 @@
 use std::collections::VecDeque;
 use std::fs;
 use std::io;
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -72,10 +74,6 @@ const MODE_GROUP_WRITE: u32 = 0o020;
 /// Owner-write bit — a file without it is immutable by design (git objects,
 /// cargo registry sources) rather than mis-permissioned.
 const MODE_OWNER_WRITE: u32 = 0o200;
-/// Any execute bit — git copies its template hooks with the template's own
-/// mode, so `.git/hooks/*.sample` is 755 in every fresh clone whatever the
-/// umask.
-const MODE_ANY_EXEC: u32 = 0o111;
 /// Permission bits we report on (mode & this) — keeps log lines readable.
 const MODE_MASK: u32 = 0o7777;
 
@@ -102,6 +100,72 @@ pub enum ContractMode {
     Audit,
     /// Not running against pod-mounted volumes; nothing to enforce.
     Off,
+}
+
+/// Result of normalizing a completed Cargo warm base.
+///
+/// This is intentionally a full walk rather than a sample. Cargo can preserve
+/// a source executable's mode when it copies a build-script output and can
+/// resurrect an old artifact in a later warm cycle, so a touched-files list is
+/// not a sufficient proof that every seedable source is hardlinkable.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct WarmBaseModeNormalization {
+    /// Regular files encountered during the full walk.
+    pub regular_files: u64,
+    /// Regular files to which the group-write bit was added.
+    pub files_normalized: u64,
+}
+
+/// Add group-write to every regular file below a completed Cargo warm base.
+///
+/// The warm worker owns these files and holds the per-base lock while this
+/// runs. Symlinks are deliberately neither followed nor mutated: they are not
+/// eligible safe-hardlink sources and changing their target would escape the
+/// base invariant. Directories already have their distinct setgid/group-write
+/// contract. This operation preserves every other permission bit, including
+/// execute, so build scripts remain executable (`755` becomes `775`).
+pub fn normalize_warm_base_regular_files(base: &Path) -> io::Result<WarmBaseModeNormalization> {
+    let metadata = match fs::symlink_metadata(base) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok(WarmBaseModeNormalization::default());
+        }
+        Err(error) => return Err(error),
+    };
+    if !metadata.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("warm base {} is not a directory", base.display()),
+        ));
+    }
+
+    let mut result = WarmBaseModeNormalization::default();
+    let mut directories = VecDeque::from([base.to_path_buf()]);
+    while let Some(directory) = directories.pop_front() {
+        for entry in fs::read_dir(&directory)? {
+            let entry = entry?;
+            let path = entry.path();
+            let metadata = fs::symlink_metadata(&path)?;
+            if metadata.file_type().is_symlink() {
+                continue;
+            }
+            if metadata.is_dir() {
+                directories.push_back(path);
+                continue;
+            }
+            if !metadata.is_file() {
+                continue;
+            }
+
+            result.regular_files += 1;
+            let mode = metadata.mode();
+            if mode & MODE_GROUP_WRITE == 0 {
+                fs::set_permissions(&path, fs::Permissions::from_mode(mode | MODE_GROUP_WRITE))?;
+                result.files_normalized += 1;
+            }
+        }
+    }
+    Ok(result)
 }
 
 impl ContractMode {
@@ -166,6 +230,10 @@ pub struct VolumeRoot {
     /// The real, mounted path.
     pub path: PathBuf,
     pub presence: RootPresence,
+    /// Whether regular executable files below this root must be hardlinkable by
+    /// a cross-uid task-run consumer. This is specific to the Cargo warm base;
+    /// git template hooks elsewhere legitimately preserve mode 755.
+    pub require_executable_group_write: bool,
 }
 
 impl VolumeRoot {
@@ -174,6 +242,7 @@ impl VolumeRoot {
             label: label.into(),
             path: path.into(),
             presence: RootPresence::Required,
+            require_executable_group_write: false,
         }
     }
 
@@ -182,7 +251,15 @@ impl VolumeRoot {
             label: label.into(),
             path: path.into(),
             presence: RootPresence::OptionalWhenAbsent,
+            require_executable_group_write: false,
         }
+    }
+
+    /// Mark this root as a Cargo warm base whose regular files must all be
+    /// hardlinkable by a foreign uid.
+    pub fn cargo_warm_base(mut self) -> Self {
+        self.require_executable_group_write = true;
+        self
     }
 }
 
@@ -363,7 +440,14 @@ pub fn validate(
 
         report.roots_checked += 1;
         report.entries_sampled += 1;
-        check_metadata(contract, &root.label, &root.path, &meta, true)?;
+        check_metadata(
+            contract,
+            &root.label,
+            &root.path,
+            &meta,
+            true,
+            root.require_executable_group_write,
+        )?;
         walk_sample(contract, root, &mut report)?;
     }
 
@@ -418,7 +502,14 @@ fn walk_sample(
 
             report.entries_sampled += 1;
             let is_dir = meta.is_dir();
-            check_metadata(contract, &root.label, &path, &meta, is_dir)?;
+            check_metadata(
+                contract,
+                &root.label,
+                &path,
+                &meta,
+                is_dir,
+                root.require_executable_group_write,
+            )?;
 
             if is_dir && depth + 1 < contract.max_depth {
                 queue.push_back((path, depth + 1));
@@ -435,6 +526,7 @@ fn check_metadata(
     path: &Path,
     meta: &fs::Metadata,
     is_dir: bool,
+    require_executable_group_write: bool,
 ) -> Result<(), VolumeContractError> {
     let mode = meta.mode() & MODE_MASK;
     let gid = meta.gid();
@@ -454,21 +546,18 @@ fn check_metadata(
     // DIRECTORY is what actually lets the other identity create, replace and
     // unlink entries, and its absence is what froze the warm base.
     //
-    // Files are checked when they are owner-writable and not executable.
-    // The two exclusions are not laxity, they are the two shapes a correct tree
-    // legitimately produces:
+    // Files are checked when they are owner-writable. The read-only exclusion
+    // is not laxity; it is a shape a correct tree legitimately produces:
     //   * owner-read-only (`444`) — git loose objects and packfiles, cargo
     //     registry sources carrying the crate tarball's modes. Immutable by
     //     design and replaced through the directory, never written in place.
-    //   * executable (`755`) — `git init`/`clone` copies the template hooks
-    //     with the template's own mode, so every fresh clone contains
-    //     `.git/hooks/*.sample` at 755 regardless of umask.
-    // Neither shape can mask the failure this exists to catch: the production
-    // volume was dirs `755` (caught on the directory rule) over files `644` —
-    // owner-writable, non-executable, and still caught here.
+    // Cargo-warm-base executables are checked too: a foreign uid cannot
+    // hardlink a non-group-writable regular file under fs.protected_hardlinks.
+    // Other roots retain the git-template-hook exception described above.
     let owner_writable = mode & MODE_OWNER_WRITE != 0;
-    let executable = mode & MODE_ANY_EXEC != 0;
-    if (is_dir || (owner_writable && !executable)) && mode & MODE_GROUP_WRITE == 0 {
+    if (is_dir || (owner_writable && (require_executable_group_write || mode & 0o111 == 0)))
+        && mode & MODE_GROUP_WRITE == 0
+    {
         return Err(VolumeContractError::GroupWrite {
             label: label.to_string(),
             path: path.to_path_buf(),
@@ -575,10 +664,13 @@ pub fn warm_roots(project_root: &Path, project_id: &str) -> Vec<VolumeRoot> {
     ));
     roots.extend(git_mirror_roots());
     roots.extend(cache_roots());
-    roots.push(VolumeRoot::optional(
-        "cargo-warm-base",
-        warm_base_dir_for_current_jobs(project_id),
-    ));
+    roots.push(
+        VolumeRoot::optional(
+            "cargo-warm-base",
+            warm_base_dir_for_current_jobs(project_id),
+        )
+        .cargo_warm_base(),
+    );
     roots
 }
 
