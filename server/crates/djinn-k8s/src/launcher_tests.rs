@@ -291,8 +291,7 @@ fn valid_config_passes_render_validation() {
 /// closed, and the launcher's own startup readiness is unchanged.
 #[test]
 fn the_armed_render_passes_validation() {
-    let mut cfg = KubernetesConfig::for_testing();
-    cfg.cgroup_launcher_mode = CgroupLauncherMode::Required;
+    let cfg = KubernetesConfig::for_testing();
     validate_enforcement_render(&cfg)
         .expect("the armed render must be dispatchable; it is the shipped enforcement path");
 }
@@ -304,7 +303,6 @@ fn the_armed_render_passes_validation() {
 fn an_armed_render_with_an_unusable_lease_quota_fails_closed() {
     for limit in ["500m", "not-a-quantity", "128"] {
         let mut cfg = KubernetesConfig::for_testing();
-        cfg.cgroup_launcher_mode = CgroupLauncherMode::Required;
         cfg.cpu_limit = limit.to_string();
         assert!(
             matches!(
