@@ -12,15 +12,15 @@ command -v vector >/dev/null || { echo 'FAIL: vector is required to execute VRL 
 TMPDIR_RENDER=$(mktemp -d)
 trap 'rm -rf "$TMPDIR_RENDER"' EXIT
 # Defaults must remain inert.
-helm template test "$CHART_DIR" >"$TMPDIR_RENDER/default.yaml"
+helm template test "$CHART_DIR" --is-upgrade >"$TMPDIR_RENDER/default.yaml"
 ! grep -q 'log-collector' "$TMPDIR_RENDER/default.yaml"
 # Schema rejects mutable tags and capacities outside the bounded 64 MiB contract.
 for bad in 'logCollector.rotatorImage=example/rotator:latest' 'logCollector.vectorImage=example/vector:latest' 'logCollector.bufferMiB=65' 'logCollector.storePath=relative'; do
-  if helm template test "$CHART_DIR" --set logCollector.enabled=true --set "$bad" >/dev/null 2>&1; then
+  if helm template test "$CHART_DIR" --is-upgrade --set logCollector.enabled=true --set "$bad" >/dev/null 2>&1; then
     echo "FAIL: schema accepted $bad" >&2; exit 1
   fi
 done
-helm template test "$CHART_DIR" --set logCollector.enabled=true \
+helm template test "$CHART_DIR" --is-upgrade --set logCollector.enabled=true \
   --set logCollector.rotatorImage=example/rotator:1.2.3 \
   --set logCollector.vectorImage=example/vector:0.43.1 \
   --set logCollector.storePath=/caller/retained \

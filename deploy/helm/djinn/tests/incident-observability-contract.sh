@@ -17,7 +17,7 @@ trap 'rm -rf "$render_dir"' EXIT
 bash "$SCRIPT_DIR/log-collector-contract.sh"
 
 # Disabled defaults must not install either operator-opt-in component.
-helm template incident-defaults "$CHART_DIR" >"$render_dir/default.yaml"
+helm template incident-defaults "$CHART_DIR" --is-upgrade >"$render_dir/default.yaml"
 if grep -Eq 'name: .*-(prometheus|alertmanager|monitoring|log-collector)' "$render_dir/default.yaml"; then
   echo 'FAIL: disabled observability defaults rendered an opt-in component' >&2
   exit 1
@@ -25,6 +25,7 @@ fi
 
 # Schema accept fixture carries all values needed for the enabled render.
 helm template incident-enabled "$CHART_DIR" \
+  --is-upgrade \
   -f "$FIXTURES/incident-observability-schema-accept.yaml" \
   --show-only templates/deployment-monitoring.yaml \
   --show-only templates/configmap-monitoring.yaml \
