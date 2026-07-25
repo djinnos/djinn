@@ -481,9 +481,41 @@ fn record_cargo_target_seed_result(
         linked_file_count = result.linked_file_count,
         copied_file_count = result.copied_file_count,
         skipped_file_count = result.skipped_file_count,
+        degraded_link_file_count = result.degraded_link_file_count,
+        unseeded_file_count = result.unseeded_file_count,
+        base_seedable_file_count = result.base_seedable_file_count,
         elapsed_ms = result.elapsed.as_millis(),
         "cargo target seed result"
     );
+
+    // A cold fallback on a project that HAS a populated warm base is the
+    // difference between a 60-second task and a 40-minute one. It is an
+    // operational failure, not an informational note, so it is logged at ERROR
+    // with the exact entry that defeated the seed.
+    if result.cold_started() && result.base_seedable_file_count > 0 {
+        error!(
+            seed_context,
+            project_id,
+            fallback_reason,
+            base_seedable_file_count = result.base_seedable_file_count,
+            seeded_file_count = result.seeded_file_count(),
+            first_entry_error = result.first_entry_error.as_deref().unwrap_or(""),
+            "cargo target seed: WARM BASE PRESENT BUT DISCARDED — this task run compiles from \
+             scratch; every seedable artifact in the warm base was thrown away"
+        );
+    } else if result.degraded() {
+        warn!(
+            seed_context,
+            project_id,
+            base_seedable_file_count = result.base_seedable_file_count,
+            degraded_link_file_count = result.degraded_link_file_count,
+            unseeded_file_count = result.unseeded_file_count,
+            link_fallback_budget_exhausted = result.link_fallback_budget_exhausted,
+            first_entry_error = result.first_entry_error.as_deref().unwrap_or(""),
+            "cargo target seed: warm base seeded with degradations; artifacts the kernel refused \
+             to hardlink were byte-copied or left for Cargo to rebuild"
+        );
+    }
 }
 
 fn cargo_target_seed_fallback_reason(reason: Option<&CargoTargetSeedFallback>) -> &'static str {
@@ -693,6 +725,8 @@ async fn prepare_cargo_target_dir(spec: &TaskRunSpec, workspace_path: &Path) -> 
                     skipped_file_count = result.skipped_file_count,
                     linked_bytes = result.linked_bytes,
                     copied_bytes = result.copied_bytes,
+                    base_seedable_file_count = result.base_seedable_file_count,
+                    first_entry_error = result.first_entry_error.as_deref().unwrap_or(""),
                     fallback_reason,
                     "cargo target seed: falling back to cold private target dir"
                 );
@@ -709,6 +743,9 @@ async fn prepare_cargo_target_dir(spec: &TaskRunSpec, workspace_path: &Path) -> 
                     skipped_file_count = result.skipped_file_count,
                     linked_bytes = result.linked_bytes,
                     copied_bytes = result.copied_bytes,
+                    degraded_link_file_count = result.degraded_link_file_count,
+                    unseeded_file_count = result.unseeded_file_count,
+                    base_seedable_file_count = result.base_seedable_file_count,
                     "cargo target seed: seeded private run target dir"
                 );
             }
@@ -4428,6 +4465,11 @@ warning: something
                 skipped_file_count: 0,
                 linked_bytes: 0,
                 copied_bytes: 0,
+                degraded_link_file_count: 0,
+                unseeded_file_count: 0,
+                base_seedable_file_count: 0,
+                link_fallback_budget_exhausted: false,
+                first_entry_error: None,
                 fallback_reason: None,
             }));
         assert_eq!(
@@ -4551,6 +4593,11 @@ warning: something
             skipped_file_count: 0,
             linked_bytes: 10,
             copied_bytes: 0,
+            degraded_link_file_count: 0,
+            unseeded_file_count: 0,
+            base_seedable_file_count: 1,
+            link_fallback_budget_exhausted: false,
+            first_entry_error: None,
             fallback_reason: None,
         };
         let cold_result = CargoTargetSeedResult {
@@ -4560,6 +4607,11 @@ warning: something
             skipped_file_count: 0,
             linked_bytes: 0,
             copied_bytes: 0,
+            degraded_link_file_count: 0,
+            unseeded_file_count: 0,
+            base_seedable_file_count: 0,
+            link_fallback_budget_exhausted: false,
+            first_entry_error: None,
             fallback_reason: Some(CargoTargetSeedFallback::BaseMissing),
         };
 

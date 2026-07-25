@@ -49,6 +49,7 @@ const BOARD_HEALTH_MISMATCH_COALESCED_TOTAL: &str = "djinn_board_health_mismatch
 const BOARD_HEALTH_MISMATCH_PASS_AGE_SECONDS: &str = "djinn_board_health_mismatch_pass_age_seconds";
 const BOARD_HEALTH_MISMATCH_OUTCOMES_TOTAL: &str = "djinn_board_health_mismatch_outcomes_total";
 const CARGO_TARGET_SEED_TOTAL: &str = "djinn_cargo_target_seed_total";
+const CARGO_TARGET_SEED_ENTRY_TOTAL: &str = "djinn_cargo_target_seed_entry_total";
 const PREPARE_BUILD_CACHE_TOTAL: &str = "djinn_prepare_build_cache_total";
 const CARGO_SEED_HIT_TOTAL: &str = "djinn_cargo_seed_hit_total";
 const CARGO_SEED_COLD_TOTAL: &str = "djinn_cargo_seed_cold_total";
@@ -1163,6 +1164,29 @@ pub mod cargo_target_seed {
         )
         .increment(1);
     }
+
+    /// A base artifact the kernel refused to hardlink that was byte-copied
+    /// into the run dir instead of being discarded with the whole base.
+    pub const DISPOSITION_DEGRADED_COPY: &str = "degraded_copy";
+    /// A base artifact that could be neither hardlinked nor copied and is
+    /// simply absent from the run dir; Cargo rebuilds that unit.
+    pub const DISPOSITION_UNSEEDED: &str = "unseeded";
+
+    /// The complete closed disposition label set for per-entry seed outcomes.
+    pub const DISPOSITIONS: [&str; 2] = [DISPOSITION_DEGRADED_COPY, DISPOSITION_UNSEEDED];
+
+    /// Add per-entry seed dispositions for one completed seed. Zero counts are
+    /// intentionally still recorded as no-ops so the series stays continuous.
+    pub fn add_seed_entries(disposition: &'static str, count: u64) {
+        if count == 0 {
+            return;
+        }
+        metrics::counter!(
+            super::CARGO_TARGET_SEED_ENTRY_TOTAL,
+            "disposition" => disposition
+        )
+        .increment(count);
+    }
 }
 
 /// Agent-facing `prepare_build_cache` worker-tool telemetry (epic 1bnj).
@@ -1845,6 +1869,13 @@ fn register_metrics() {
             "fallback_reason" => reason
         )
         .absolute(0);
+    }
+    metrics::describe_counter!(
+        CARGO_TARGET_SEED_ENTRY_TOTAL,
+        "Per-entry Cargo target seed degradations partitioned by a bounded disposition label."
+    );
+    for disposition in cargo_target_seed::DISPOSITIONS {
+        metrics::counter!(CARGO_TARGET_SEED_ENTRY_TOTAL, "disposition" => disposition).absolute(0);
     }
     metrics::describe_counter!(
         CARGO_SEED_HIT_TOTAL,
