@@ -1,5 +1,5 @@
 //! Rendered-surface guards for the configuration-aware `run_verification`
-//! surface and the unconditional `prepare_build_cache` worker tool (epic 1bnj).
+//! surface (epic 1bnj).
 //!
 //! Both the configured (non-empty final-verification plan) and empty-plan cases
 //! are covered for Worker and Reviewer, at the schema-surface level and in the
@@ -31,15 +31,11 @@ fn live_surface(schemas: Vec<serde_json::Value>, configured: bool) -> Vec<String
 }
 
 #[test]
-fn worker_surface_gates_run_verification_but_always_has_prepare_build_cache() {
+fn worker_surface_gates_run_verification() {
     let configured = live_surface(tool_schemas_worker(), true);
     assert!(
         configured.iter().any(|n| n == "run_verification"),
         "configured worker must advertise run_verification"
-    );
-    assert!(
-        configured.iter().any(|n| n == "prepare_build_cache"),
-        "configured worker must advertise prepare_build_cache"
     );
 
     let empty = live_surface(tool_schemas_worker(), false);
@@ -47,22 +43,14 @@ fn worker_surface_gates_run_verification_but_always_has_prepare_build_cache() {
         !empty.iter().any(|n| n == "run_verification"),
         "empty-plan worker must NOT advertise run_verification"
     );
-    assert!(
-        empty.iter().any(|n| n == "prepare_build_cache"),
-        "prepare_build_cache renders for the worker regardless of gate configuration"
-    );
 }
 
 #[test]
-fn reviewer_surface_gates_run_verification_and_never_has_prepare_build_cache() {
+fn reviewer_surface_gates_run_verification() {
     let configured = live_surface(tool_schemas_reviewer(), true);
     assert!(
         configured.iter().any(|n| n == "run_verification"),
         "configured reviewer must advertise run_verification"
-    );
-    assert!(
-        !configured.iter().any(|n| n == "prepare_build_cache"),
-        "prepare_build_cache is a worker-only tool"
     );
 
     let empty = live_surface(tool_schemas_reviewer(), false);
@@ -70,6 +58,24 @@ fn reviewer_surface_gates_run_verification_and_never_has_prepare_build_cache() {
         !empty.iter().any(|n| n == "run_verification"),
         "empty-plan reviewer must NOT advertise run_verification"
     );
+}
+
+/// The `prepare_build_cache` worker tool was removed: it resolved its
+/// platform-cache descriptor against the HOST cache root while running inside
+/// the task-run pod, so it answered `not_applicable` on every call. Guard the
+/// removal so it cannot silently return to the agent surface.
+#[test]
+fn prepare_build_cache_is_absent_from_every_role_surface() {
+    for schemas in [tool_schemas_worker(), tool_schemas_reviewer()] {
+        for configured in [true, false] {
+            assert!(
+                !live_surface(schemas.clone(), configured)
+                    .iter()
+                    .any(|n| n == "prepare_build_cache"),
+                "prepare_build_cache must not be advertised on any role surface"
+            );
+        }
+    }
 }
 
 async fn make_task() -> djinn_core::models::Task {
@@ -133,9 +139,9 @@ async fn worker_prompt_prose_is_configuration_aware() {
         !empty.contains("- `run_verification()`"),
         "empty-plan worker tools section must omit run_verification"
     );
-    // prepare_build_cache is present in both cases.
-    assert!(empty.contains("- `prepare_build_cache()`"));
-    assert!(configured.contains("- `prepare_build_cache()`"));
+    // The removed prepare_build_cache tool must not reappear in the prose.
+    assert!(!empty.contains("prepare_build_cache"));
+    assert!(!configured.contains("prepare_build_cache"));
 }
 
 #[tokio::test]
