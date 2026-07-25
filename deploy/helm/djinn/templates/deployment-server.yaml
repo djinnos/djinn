@@ -548,6 +548,15 @@ spec:
             {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
+            # Kubelet converts the server container's configured quantity to a
+            # strict decimal byte count. This follows extraEnv so the alerting
+            # limit cannot be overridden independently of resources.server.
+            - name: DJINN_SERVER_MEMORY_LIMIT_BYTES
+              valueFrom:
+                resourceFieldRef:
+                  containerName: djinn-server
+                  resource: limits.memory
+                  divisor: "1"
           volumeMounts:
             - name: mirrors
               mountPath: /var/lib/djinn/mirrors
