@@ -2591,8 +2591,8 @@ mod tests {
             .as_ref()
             .and_then(|s| s.template.spec.as_ref())
             .expect("pod spec");
-        // Task grkq: the launcher sidecar is off by default, so a service-less
-        // run renders NO init containers at all and no svc-dshm volume.
+        // This local compatibility fixture explicitly disables the launcher, so
+        // a service-less run renders no init containers and no svc-dshm volume.
         assert!(
             bare_pod.init_containers.is_none(),
             "no services + launcher disabled ⇒ no initContainers"
@@ -2625,8 +2625,8 @@ mod tests {
             .and_then(|s| s.template.spec.as_ref())
             .expect("pod spec");
 
-        // Native sidecars in initContainers. Task grkq: the launcher is off by
-        // default, so the backing service is the only init container.
+        // Native sidecars in initContainers. The explicit disabled local profile
+        // leaves the backing service as the only init container.
         let inits = pod.init_containers.as_ref().expect("init_containers set");
         assert_eq!(inits.len(), 1);
         assert_eq!(inits[0].name, "svc-postgres");
@@ -2930,8 +2930,8 @@ mod tests {
             .and_then(|s| s.template.spec.as_ref())
             .expect("pod spec set");
 
-        // NO backing-service sidecar is injected. Task grkq: the launcher is off
-        // by default too, so an evidence spike renders no init containers at all.
+        // No backing-service sidecar is injected. This explicit disabled fixture
+        // therefore renders no init containers at all for an evidence spike.
         assert!(
             pod.init_containers
                 .iter()

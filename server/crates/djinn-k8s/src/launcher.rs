@@ -184,7 +184,7 @@ pub const LAUNCHER_CGROUP_ROOT: &str = "/run/djinn-cgroup";
 /// Production defaults to [`Required`](CgroupLauncherMode::Required). An
 /// operator may set `DJINN_K8S_CGROUP_LAUNCHER_MODE=disabled` only for a local
 /// or development profile that deliberately uses direct worker execution.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum CgroupLauncherMode {
     /// No sidecar, no launcher volumes, no launcher IPC env. Shell commands run
@@ -193,13 +193,8 @@ pub enum CgroupLauncherMode {
     Disabled,
     /// Arm the sidecar: the launcher establishes its delegated cgroup root and
     /// every shell command runs in a per-invocation leaf under a CPU lease.
+    #[default]
     Required,
-}
-
-impl Default for CgroupLauncherMode {
-    fn default() -> Self {
-        Self::Required
-    }
 }
 
 impl CgroupLauncherMode {

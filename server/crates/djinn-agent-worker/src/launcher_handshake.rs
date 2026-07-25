@@ -127,8 +127,9 @@ pub fn establish<D: WorkerDumpability>(
     dumpability: &mut D,
 ) -> LauncherHandshake {
     // Detection: the launcher IPC mount is the credential file's parent
-    // directory (qut0's Memory emptyDir at LAUNCHER_IPC_DIR). Absent → the
-    // sidecar was not rendered (or this is a local/non-pod run) → in-process.
+    // directory (qut0's Memory emptyDir at LAUNCHER_IPC_DIR). Its absence is a
+    // typed outcome; the explicit enforcement mode decides whether startup may
+    // continue (only the disabled local/development profile may do so).
     let Some(mount_dir) = credential_path.parent() else {
         return LauncherHandshake::AbsentMount;
     };

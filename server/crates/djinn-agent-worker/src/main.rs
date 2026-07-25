@@ -294,7 +294,7 @@ struct WorkerDefaultArgs {
     /// Explicit launcher enforcement intent rendered with the task-run Job.
     /// `required` rejects startup when the authenticated broker cannot be used;
     /// `disabled` is the explicit local/development direct-execution profile.
-    #[arg(long, env = "DJINN_CGROUP_LAUNCHER_MODE", default_value = "disabled")]
+    #[arg(long, env = "DJINN_CGROUP_LAUNCHER_MODE", default_value = "required")]
     launcher_enforcement: String,
 
     /// cgroup-launcher control socket the sidecar binds inside the shared IPC
@@ -3401,7 +3401,7 @@ mod tests {
         RepoGraphNode, RepoGraphNodeKind, RepoNodeKey,
     };
     use std::collections::BTreeMap;
-    use std::io::Write;
+    use std::io::{Read, Write};
     use std::process::Command;
     use tracing::dispatcher::Dispatch;
 
@@ -3413,6 +3413,40 @@ mod tests {
             select_launcher_shell_path(launcher_handshake::LauncherEnforcement::Disabled, None)
                 .expect("explicit disabled profile permits local direct execution"),
             LauncherShellPath::Direct
+        ));
+    }
+
+    #[test]
+    fn required_launcher_profile_selects_the_authenticated_broker_path() {
+        use launcher_handshake::{LauncherEnforcement, LauncherHandshake};
+        use std::os::unix::net::UnixStream;
+
+        let (mut server, client_stream) = UnixStream::pair().expect("in-memory Unix socket pair");
+        let server = std::thread::spawn(move || {
+            let mut length = [0; 4];
+            server
+                .read_exact(&mut length)
+                .expect("read AUTH frame length");
+            let mut request = vec![0; u32::from_be_bytes(length) as usize];
+            server.read_exact(&mut request).expect("read AUTH frame");
+            assert_eq!(request, [1, b't', b'e', b's', b't']);
+            server
+                .write_all(&1_u32.to_be_bytes())
+                .and_then(|()| server.write_all(&[0]))
+                .expect("write successful AUTH response");
+        });
+        let client =
+            djinn_cgroup_launcher::transport::UnixBrokerClient::connect(client_stream, b"test")
+                .expect("broker accepts authenticated client");
+        server.join().expect("test broker thread");
+
+        assert!(matches!(
+            select_launcher_shell_path(
+                LauncherEnforcement::Required,
+                Some(LauncherHandshake::Connected(Box::new(client))),
+            )
+            .expect("required authenticated handshake selects broker"),
+            LauncherShellPath::Broker(_)
         ));
     }
 
