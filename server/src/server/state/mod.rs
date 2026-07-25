@@ -26,6 +26,7 @@ use djinn_agent::roles::RoleRegistry;
 use djinn_agent::runtime_bridge::{K8sTokenReviewValidator, RuntimeKind, runtime_kind};
 use djinn_coordinator::build_lease::BuildLeaseService;
 use djinn_coordinator::graph_warm_lease::BuildLeaseGraphWarmAdapter;
+use djinn_coordinator::run_dir_observe::{RunDirObserveSeams, arm_disk_observation};
 use djinn_core::clock::{Clock, SystemClock as SystemClockTrait};
 use djinn_core::models::KnowledgeInjectionConfig;
 use djinn_db::{
@@ -999,6 +1000,37 @@ impl AppState {
                 admission.publish_metrics().await;
             }
         }
+    }
+
+    /// Arm the observe-only disk dimension of build admission (proposal nquz,
+    /// phase 1).
+    ///
+    /// Leader-only, and deliberately so: it writes `run_dirs` ledger rows and
+    /// reads the cache PVC that only the active coordinator owns. It performs no
+    /// filesystem mutation whatsoever — every unresolved, malformed, symlinked,
+    /// or unreadable entry is recorded `quarantined_unowned` and left on disk —
+    /// and it cannot change an admission outcome, because the capacity source it
+    /// installs is consulted only after a permit has already been issued.
+    ///
+    /// An unavailable project-quota probe is recorded (a future `enforce` is
+    /// prohibited on that volume) but never fails startup: observe mode exists
+    /// precisely to run on volumes that cannot yet be enforced.
+    async fn initialize_run_dir_disk_observation(&self) {
+        self.initialize_run_dir_disk_observation_with(RunDirObserveSeams::production())
+            .await;
+    }
+
+    /// Seam-bearing implementation of [`Self::initialize_run_dir_disk_observation`].
+    ///
+    /// Startup regressions drive a deterministic volume, capacity probe, and
+    /// clock through the exact production composition rather than a parallel
+    /// implementation.
+    async fn initialize_run_dir_disk_observation_with(
+        &self,
+        seams: RunDirObserveSeams,
+    ) -> Option<djinn_coordinator::run_dir_observe::RunDirObserveReport> {
+        let admission = self.inner.build_admission.clone()?;
+        Some(arm_disk_observation(self.db(), &admission, seams).await)
     }
 
     /// Restore task identities that were durably ready when the previous
@@ -2225,6 +2257,12 @@ impl AppState {
         // open Enforce admission, so standby pods stay fail-closed with
         // `TopologyPending` (and their dispatch subsystems never start).
         self.confirm_build_admission_topology().await;
+
+        // Observe-only disk dimension (proposal nquz). Runs after the topology
+        // gate because it writes the shared run-dir ledger and inventories the
+        // shared cache PVC — leader-only work. It never mutates the volume and
+        // never changes a grant.
+        self.initialize_run_dir_disk_observation().await;
 
         let retention_config = ImageControllerConfig::from_env();
         if let Err(error) = self.run_zot_retention_preflight(&retention_config).await {
@@ -4438,6 +4476,291 @@ mod build_admission_config_tests {
         state.confirm_build_admission_topology().await;
         assert_eq!(admission.readiness(), BuildAdmissionReadiness::Healthy);
         assert!(admission.is_ready());
+    }
+
+    // ── Observe-only disk dimension (proposal nquz) ────────────────────
+
+    /// A capacity probe the test controls. Only the `statvfs` syscall and the
+    /// monotonic clock are substituted; the volume, the ledger, the controller,
+    /// and the startup seam itself are all the production ones.
+    struct FixedCapacity(djinn_coordinator::cargo_warm_base_gc::CapacitySnapshot);
+
+    impl djinn_coordinator::cargo_warm_base_gc::FilesystemCapacity for FixedCapacity {
+        fn capacity(
+            &self,
+            _path: &std::path::Path,
+        ) -> Result<djinn_coordinator::cargo_warm_base_gc::CapacitySnapshot, String> {
+            Ok(self.0)
+        }
+    }
+
+    const NQUZ_GIB: u64 = 1024 * 1024 * 1024;
+
+    fn run_dir_seams(
+        root: std::path::PathBuf,
+        available_bytes: u64,
+    ) -> djinn_coordinator::run_dir_observe::RunDirObserveSeams {
+        djinn_coordinator::run_dir_observe::RunDirObserveSeams {
+            root,
+            volume_id: "startup-volume".to_owned(),
+            config: djinn_coordinator::disk_admission::DiskAdmissionConfig {
+                cache_budget_bytes: 100 * NQUZ_GIB,
+                critical_free_bytes: 20 * NQUZ_GIB,
+                warning_free_bytes: 40 * NQUZ_GIB,
+                emergency_headroom_bytes: 10 * NQUZ_GIB,
+                per_lease_growth_bytes: 4 * NQUZ_GIB,
+                max_sample_age: std::time::Duration::from_secs(90),
+            },
+            inventory: Arc::new(djinn_coordinator::run_dir_observe::FilesystemRunDirInventory),
+            capacity: Arc::new(FixedCapacity(
+                djinn_coordinator::cargo_warm_base_gc::CapacitySnapshot {
+                    total_bytes: 500 * NQUZ_GIB,
+                    available_bytes,
+                },
+            )),
+            clock: Arc::new(djinn_coordinator::run_dir_observe::SystemObserveClock),
+        }
+    }
+
+    fn task_run_admission_request(
+        work_id: &str,
+    ) -> djinn_coordinator::build_admission::BuildAdmissionRequest {
+        djinn_coordinator::build_admission::BuildAdmissionRequest {
+            domain: AdmissionDomain::TaskObservation,
+            work_id: work_id.to_owned(),
+            generation: 0,
+            object_name: format!("djinn-taskrun-{work_id}"),
+            kind: djinn_coordinator::build_admission::BuildWorkloadKind::TaskRun {
+                role: djinn_coordinator::build_admission::TaskRunRole::Worker,
+            },
+        }
+    }
+
+    /// The whole point of the observe phase: the coordinator's real startup
+    /// seam inventories the volume, writes ledger rows, and installs the
+    /// capacity source — and NOTHING about dispatch changes.
+    ///
+    /// The volume is deliberately at critical pressure, which is the strongest
+    /// signal enforce would ever act on. The grant must be byte-identical to the
+    /// pre-arming grant, no directory may be created or removed, and no run-dir
+    /// row may carry a reservation, quota, or temp path.
+    #[tokio::test]
+    async fn run_dir_disk_observation_startup_never_changes_a_grant_or_the_volume() {
+        use djinn_coordinator::build_admission::BuildAdmissionDecision;
+
+        let state = state_for_admission_config(BuildAdmissionConfig {
+            mode: BuildAdmissionMode::Observe,
+            cap: 4,
+        });
+        let admission = state
+            .inner
+            .build_admission
+            .as_ref()
+            .expect("Observe composes a controller")
+            .clone();
+
+        let volume = tempfile::tempdir().expect("temp volume");
+        let run_dir = "11111111-1111-1111-1111-111111111111";
+        std::fs::create_dir(volume.path().join(run_dir)).expect("run dir");
+        std::fs::write(
+            volume.path().join(run_dir).join("payload"),
+            vec![9_u8; 4096],
+        )
+        .expect("payload");
+        std::fs::create_dir(volume.path().join("operator-scratch")).expect("malformed dir");
+
+        // Baseline grant with the disk dimension still dark.
+        let before = admission
+            .admit(task_run_admission_request("before"))
+            .await
+            .expect("observe admits");
+        assert!(matches!(before, BuildAdmissionDecision::Permitted { .. }));
+        assert_eq!(admission.disk_would_defer_observation_count().await, 0);
+
+        // The production startup seam, driven with a critical volume.
+        let report = state
+            .initialize_run_dir_disk_observation_with(run_dir_seams(
+                volume.path().to_path_buf(),
+                NQUZ_GIB,
+            ))
+            .await
+            .expect("a composed controller arms observation");
+
+        assert!(!report.reconcile.inventory_failed);
+        assert_eq!(report.reconcile.scanned, 2);
+        assert_eq!(
+            report.reconcile.resolved, 0,
+            "with no pod-bound lease evidence, nothing may be claimed as owned"
+        );
+        assert_eq!(report.reconcile.quarantined, 2);
+        assert!(
+            report.reconcile.unowned_bytes() > 0,
+            "quarantined bytes still count against the volume"
+        );
+
+        // The grant after arming is identical; only the observe counter moved.
+        let after = admission
+            .admit(task_run_admission_request("after"))
+            .await
+            .expect("observe admits");
+        assert!(
+            matches!(after, BuildAdmissionDecision::Permitted { .. }),
+            "installing a disk capacity source must never turn a permit into a denial"
+        );
+        assert_eq!(
+            admission.disk_would_defer_observation_count().await,
+            1,
+            "critical pressure is recorded once, as telemetry only"
+        );
+
+        // No reservation, quota, or temp/final materialization anywhere.
+        let rows = djinn_db::RunDirRepository::new(state.db().clone())
+            .list_by_volume("startup-volume")
+            .await
+            .expect("ledger readable");
+        assert_eq!(rows.len(), 2);
+        for row in &rows {
+            assert_eq!(row.state, djinn_db::RunDirState::QuarantinedUnowned);
+            assert_eq!(row.reserved_bytes, 0, "observe reserves no bytes");
+            assert!(row.quota_id.is_none(), "observe assigns no quota");
+            assert!(row.temp_path.is_none(), "observe creates no temp directory");
+        }
+
+        // The volume is untouched: nothing deleted, nothing added.
+        let mut names: Vec<String> = std::fs::read_dir(volume.path())
+            .expect("volume readable")
+            .filter_map(|entry| Some(entry.ok()?.file_name().to_string_lossy().into_owned()))
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            vec![run_dir.to_owned(), "operator-scratch".to_owned()]
+        );
+    }
+
+    /// A rerun of the startup seam is idempotent: the same rows, no duplicates,
+    /// and still no deletion.
+    #[tokio::test]
+    async fn run_dir_disk_observation_startup_is_idempotent() {
+        let state = state_for_admission_config(BuildAdmissionConfig {
+            mode: BuildAdmissionMode::Observe,
+            cap: 4,
+        });
+        let volume = tempfile::tempdir().expect("temp volume");
+        std::fs::create_dir(volume.path().join("22222222-2222-2222-2222-222222222222"))
+            .expect("run dir");
+
+        let first = state
+            .initialize_run_dir_disk_observation_with(run_dir_seams(
+                volume.path().to_path_buf(),
+                400 * NQUZ_GIB,
+            ))
+            .await
+            .expect("armed");
+        let second = state
+            .initialize_run_dir_disk_observation_with(run_dir_seams(
+                volume.path().to_path_buf(),
+                400 * NQUZ_GIB,
+            ))
+            .await
+            .expect("armed");
+        assert_eq!(first.reconcile.quarantined, second.reconcile.quarantined);
+
+        let rows = djinn_db::RunDirRepository::new(state.db().clone())
+            .list_by_volume("startup-volume")
+            .await
+            .expect("ledger readable");
+        assert_eq!(rows.len(), 1, "a rerun must not duplicate ledger rows");
+        assert!(
+            volume
+                .path()
+                .join("22222222-2222-2222-2222-222222222222")
+                .exists()
+        );
+    }
+
+    /// A missing or unreadable volume, and a quota probe that reports
+    /// unavailable, must NOT fail observe-mode startup. Production runs on a
+    /// volume with no `prjquota` mount option today.
+    #[tokio::test]
+    async fn unavailable_quota_and_missing_volume_do_not_fail_observe_startup() {
+        let state = state_for_admission_config(BuildAdmissionConfig {
+            mode: BuildAdmissionMode::Observe,
+            cap: 4,
+        });
+        let admission = state
+            .inner
+            .build_admission
+            .as_ref()
+            .expect("Observe composes a controller")
+            .clone();
+
+        let report = state
+            .initialize_run_dir_disk_observation_with(run_dir_seams(
+                std::path::PathBuf::from("/nonexistent/djinn/cargo-target-runs"),
+                400 * NQUZ_GIB,
+            ))
+            .await
+            .expect("armed even with no volume");
+        assert!(report.reconcile.inventory_failed);
+        assert!(
+            report.quota.enforce_prohibited,
+            "a volume with no project quota may never be armed for enforce"
+        );
+
+        // Startup completed and admission still works.
+        assert!(matches!(
+            admission
+                .admit(task_run_admission_request("after-missing-volume"))
+                .await
+                .expect("observe admits"),
+            djinn_coordinator::build_admission::BuildAdmissionDecision::Permitted { .. }
+        ));
+    }
+
+    /// The production composition must inventory the path the server pod
+    /// actually mounts. A seam that pointed at the Job-pod `/cache` path would
+    /// silently reconcile an empty volume forever.
+    #[test]
+    fn production_seams_target_the_server_pod_cache_mount() {
+        let seams = djinn_coordinator::run_dir_observe::RunDirObserveSeams::production();
+        assert_eq!(seams.root, djinn_core::paths::cargo_target_runs_root());
+        assert_eq!(
+            seams.volume_id,
+            djinn_coordinator::run_dir_observe::volume_id_from_env()
+        );
+    }
+
+    /// Leader-only composition: the ledger write and the PVC scan belong to the
+    /// single lock-holding coordinator, so the seam must be reachable from
+    /// `become_leader` and from nowhere in the every-pod `initialize` path.
+    #[test]
+    fn run_dir_disk_observation_is_composed_only_in_become_leader() {
+        let source = include_str!("mod.rs");
+        // Assembled at runtime so this assertion does not match its own literal
+        // inside the file it reads.
+        let call = format!("self.initialize_run_dir_disk_{}().await", "observation");
+        let call = call.as_str();
+        assert_eq!(
+            source.matches(call).count(),
+            1,
+            "exactly one production call site"
+        );
+        let leader = source
+            .find("pub async fn become_leader")
+            .expect("become_leader exists");
+        let observation = source.find(call).expect("call site exists");
+        assert!(
+            observation > leader,
+            "disk observation must be armed inside become_leader"
+        );
+        let initialize = source
+            .find("pub async fn initialize(&self)")
+            .expect("initialize exists");
+        assert!(
+            !source[initialize..leader].contains(call),
+            "standby pods must never arm disk observation"
+        );
     }
 
     /// Regression for the 2026-07-19 admission-handoff seed wedge.

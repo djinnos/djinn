@@ -790,6 +790,13 @@ impl CoordinatorActor {
 
     /// Mark a runtime task-run live and bind its UID to this exact generation.
     /// Terminal events must use this UID binding rather than a task-ID lookup.
+    ///
+    /// The permit is resolved from the task's CURRENT admission generation, not
+    /// from a caller-side counter: a second dispatch attempt at the same
+    /// `reopen_count` reserves its own generation, and binding a fresh runtime
+    /// UID onto the retired generation is exactly what made every observation
+    /// transition fail the UID fence. `generation` remains the fallback for a
+    /// permit that predates this process's work-scoped bookkeeping.
     pub(crate) async fn live_task_run_build_admission(
         &self,
         task_id: &str,
@@ -799,7 +806,11 @@ impl CoordinatorActor {
         let Some(controller) = self.admission_controller() else {
             return;
         };
-        let Some(permit) = controller.task_run_permit(task_id, generation).await else {
+        let permit = match controller.current_task_run_permit(task_id).await {
+            Some(permit) => Some(permit),
+            None => controller.task_run_permit(task_id, generation).await,
+        };
+        let Some(permit) = permit else {
             return;
         };
         if let Err(error) = controller
@@ -9498,5 +9509,137 @@ mod build_admission_route_tests {
                 .is_none(),
             "stale generation callback must not emit a release notification"
         );
+    }
+
+    /// Drive one full task-run attempt through the production admission route:
+    /// reserve + CreateStarted, the pool-outcome transition, the session-started
+    /// Live observation, and the session-terminal release.
+    async fn drive_task_run_attempt(
+        actor: &mut CoordinatorActor,
+        db: &djinn_db::Database,
+        fixture: &Wnd1DispatchFixture,
+        task_id: &str,
+        reopen_count: i64,
+        task_run_id: &str,
+    ) {
+        let permit = actor
+            .begin_task_run_build_admission(
+                "worker",
+                task_id,
+                reopen_count,
+                format!("task-run-{task_id}-{reopen_count}"),
+            )
+            .await
+            .expect("admission permits the attempt");
+        actor.finish_task_run_build_admission(permit, true).await;
+
+        let session_repo =
+            djinn_db::SessionRepository::new(db.clone(), djinn_core::events::EventBus::noop());
+        let mut session = session_repo
+            .create(djinn_db::CreateSessionParams {
+                project_id: &fixture.project_id,
+                task_id: Some(task_id),
+                model: &fixture.model_id,
+                agent_type: "worker",
+                metadata_json: None,
+                task_run_id: None,
+                pricing: None,
+                cost_basis: None,
+            })
+            .await
+            .expect("create attempt session");
+        session.task_run_id = Some(task_run_id.to_owned());
+        session.status = "running".to_owned();
+        actor
+            .handle_event(DjinnEventEnvelope {
+                entity_type: "session",
+                action: "started",
+                payload: serde_json::to_value(&session).expect("serialize started"),
+                id: None,
+                project_id: None,
+                from_sync: false,
+            })
+            .await;
+        session.status = "completed".to_owned();
+        actor
+            .handle_event(DjinnEventEnvelope {
+                entity_type: "session",
+                action: "completed",
+                payload: serde_json::to_value(&session).expect("serialize terminal"),
+                id: None,
+                project_id: None,
+                from_sync: false,
+            })
+            .await;
+    }
+
+    /// Regression (ymx9): a task retried at the same `reopen_count` is a second
+    /// task-run object with its own runtime UID, and must own its own admission
+    /// generation.
+    ///
+    /// Both attempts run the production admission route end to end — the same
+    /// `begin`/`finish`/session-event path `dispatch_ready_tasks` uses — in the
+    /// mode production runs (`Observe`). Before the fix the second attempt
+    /// inherited the first attempt's retired row, so its create observation was
+    /// rejected with `cannot mark create unknown from Terminal` and both of its
+    /// UID-bearing observations with `Kubernetes UID does not match admission
+    /// row`, leaving the second runtime UID unrecorded.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn retried_attempts_at_one_reopen_count_each_record_their_own_runtime_uid() {
+        let db = crate::test_helpers::create_test_db();
+        let (events_tx, _events_rx) = tokio::sync::broadcast::channel(256);
+        let fixture = seed_wnd1_ready_worker_tasks(&db, WND1_READY_TASK_COUNT).await;
+        let journal = route_journal(&db);
+        let controller = route_controller(&journal, BuildAdmissionMode::Observe, 4);
+        let (runtime, _started_rx, _completed_rx) = AdmissionRouteRuntime::new(journal.clone());
+        let mut actor = build_route_actor(&db, &events_tx, &runtime, 2);
+        actor.build_admission = Some(controller.clone());
+
+        let task_id = fixture.task_ids[0].clone();
+        close_all_except(&db, &fixture, &task_id).await;
+
+        // Two dispatch attempts of the SAME task at the SAME reopen_count: the
+        // ordinary retry shape after a failed or interrupted first attempt.
+        for task_run_id in ["task-run-uid-first", "task-run-uid-second"] {
+            drive_task_run_attempt(&mut actor, &db, &fixture, &task_id, 0, task_run_id).await;
+        }
+
+        let history = journal
+            .list_history(AdmissionDomain::TaskObservation, &task_id)
+            .await
+            .expect("read generation history");
+        assert_eq!(
+            history.len(),
+            2,
+            "each dispatch attempt is its own object lifecycle and its own generation"
+        );
+        assert_eq!(
+            history
+                .iter()
+                .map(|row| (row.key.generation, row.object_uid.as_deref(), row.state))
+                .collect::<Vec<_>>(),
+            vec![
+                (0, Some("task-run-uid-first"), AdmissionState::Terminal),
+                (1, Some("task-run-uid-second"), AdmissionState::Terminal),
+            ],
+            "the UID persisted at Live is the UID the terminal observation \
+             released, per attempt"
+        );
+        assert_eq!(
+            journal
+                .count_task_or_warm_occupancy()
+                .await
+                .expect("count occupancy"),
+            0,
+            "both attempts released their own occupancy"
+        );
+        assert_eq!(
+            controller.rejected_transition_count(),
+            0,
+            "Observe mode must emit successful journal observations; last \
+             rejection: {:?}",
+            controller.last_transition_rejection().await
+        );
+        assert!(controller.accepted_transition_count() >= 8);
     }
 }

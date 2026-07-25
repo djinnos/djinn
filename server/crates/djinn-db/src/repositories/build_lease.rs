@@ -229,6 +229,27 @@ impl BuildLeaseRepository {
         Ok(row)
     }
 
+    /// Every task-invocation lease that has been fenced onto a concrete pod.
+    ///
+    /// `bound_pod_uid` is the ONLY durable pod-UID evidence this database holds:
+    /// the schema's `build_leases_bound_uid_check` constraint permits it solely
+    /// in the pod-bound and terminal states, and it is written exclusively by
+    /// the fencing-token `bind` path. Run-dir reconciliation (proposal nquz)
+    /// therefore reads it as authoritative ownership; every directory without a
+    /// matching row stays quarantined. Read-only and lock-free: it is a startup
+    /// inventory query, never part of a lease decision.
+    pub async fn list_pod_bound_task_invocations(&self) -> DbResult<Vec<BuildLeaseRow>> {
+        self.db.ensure_initialized().await?;
+        let rows = sqlx::query_as::<_, DbRow>(&format!(
+            "SELECT {COLS} FROM build_leases \
+             WHERE consumer_kind='task_invocation' AND bound_pod_uid IS NOT NULL \
+             ORDER BY consumer_id"
+        ))
+        .fetch_all(self.db.pool())
+        .await?;
+        rows.into_iter().map(BuildLeaseRow::try_from).collect()
+    }
+
     /// Atomically consume the one retry credit attached to a committed queue
     /// deadline. False covers both replay and non-timeout terminal rows.
     pub async fn consume_timeout_credit(&self, key: &BuildLeaseKey) -> DbResult<bool> {

@@ -360,6 +360,15 @@ impl AdmissionJournalRepository {
         Ok(result)
     }
 
+    /// Record an ambiguous create outcome for this generation.
+    ///
+    /// A create report can legitimately arrive after the generation already
+    /// reached its terminal outcome — the dispatch side effect and the
+    /// lifecycle observation are separate messages with no ordering guarantee.
+    /// A late create report is therefore a defined idempotent no-op that
+    /// retains the terminal row: ambiguity about a create can never resurrect
+    /// occupancy that a terminal observation already released. Stale
+    /// generations are still rejected by [`current_row_for_update`].
     pub async fn mark_create_unknown(
         &self,
         key: &AdmissionJournalKey,
@@ -371,7 +380,7 @@ impl AdmissionJournalRepository {
             AdmissionState::CreateInFlight => {
                 update_state(&mut tx, key, "create_unknown", None).await?
             }
-            AdmissionState::CreateUnknown => row,
+            AdmissionState::CreateUnknown | AdmissionState::Terminal => row,
             state => return Err(invalid_state("mark create unknown", state)),
         };
         tx.commit().await?;
@@ -604,6 +613,62 @@ impl AdmissionJournalRepository {
         rows.into_iter().map(TryInto::try_into).collect()
     }
 
+    /// Resolve the generation a dispatch attempt must reserve for `work_id`.
+    ///
+    /// A generation is one object lifecycle: exactly one create, at most one
+    /// Kubernetes UID, one terminal release. A caller-supplied generation (a
+    /// task's `reopen_count`, or the warm path's fixed generation) is therefore
+    /// only a *floor*, never the identity itself — a second dispatch attempt at
+    /// the same floor is a second object with its own UID and must not inherit
+    /// the retired row's recorded UID.
+    ///
+    /// Resolution, under the same per-work advisory lock the mutations take:
+    /// * no retained row — the requested generation, so first-ever dispatch
+    ///   keeps the caller's numbering,
+    /// * latest retained generation nonterminal — that generation, so a
+    ///   duplicate dispatch or a restart resumes the in-flight row idempotently
+    ///   instead of double-reserving capacity,
+    /// * latest retained generation terminal — one past it, so a new attempt
+    ///   always starts from a row with no object UID.
+    ///
+    /// The result is never below `requested`, keeping the journal generation
+    /// aligned with a caller counter that advances faster than dispatch does.
+    /// Allocation intentionally does not insert a row: callers must reserve the
+    /// returned generation through [`Self::reserve`] or
+    /// [`Self::reserve_observed`].
+    pub async fn resolve_dispatch_generation(
+        &self,
+        domain: AdmissionDomain,
+        work_id: &str,
+        requested: i64,
+    ) -> DbResult<i64> {
+        if requested < 0 {
+            return Err(DbError::InvalidData(
+                "admission generation must be non-negative".into(),
+            ));
+        }
+        self.db.ensure_initialized().await?;
+        let mut tx = self.db.pool().begin().await?;
+        lock_work(&mut tx, domain, work_id).await?;
+        let latest: Option<(i64, String)> = sqlx::query_as(
+            "SELECT generation, state FROM admission_journal \
+             WHERE domain = $1 AND work_id = $2 ORDER BY generation DESC LIMIT 1",
+        )
+        .bind(domain.as_str())
+        .bind(work_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        let resolved = match latest {
+            None => requested,
+            Some((generation, state)) => match AdmissionState::parse(&state)? {
+                AdmissionState::Terminal => generation.saturating_add(1),
+                _ => generation,
+            },
+        };
+        Ok(resolved.max(requested))
+    }
+
     /// Allocate the next generation only if the latest retained generation is terminal.
     ///
     /// Allocation intentionally does not insert a row: callers must reserve the
@@ -772,439 +837,5 @@ where
 }
 
 #[cfg(test)]
-mod tests {
-    use std::sync::Arc;
-
-    use super::*;
-
-    fn input(domain: AdmissionDomain, work_id: &str, generation: i64) -> ReserveAdmissionInput {
-        ReserveAdmissionInput {
-            key: AdmissionJournalKey {
-                domain,
-                work_id: work_id.into(),
-                generation,
-            },
-            workload_kind: match domain {
-                AdmissionDomain::TaskObservation => AdmissionWorkloadKind::Task,
-                AdmissionDomain::WarmBuild => AdmissionWorkloadKind::Warm,
-                AdmissionDomain::InvocationBuild => AdmissionWorkloadKind::Invocation,
-            },
-            creator_server_epoch: "epoch-1".into(),
-            object_name: format!("admission-{work_id}-{generation}"),
-        }
-    }
-
-    fn create_started(input: &ReserveAdmissionInput) -> CreateStartedInput {
-        CreateStartedInput {
-            key: input.key.clone(),
-            creator_server_epoch: input.creator_server_epoch.clone(),
-            object_name: input.object_name.clone(),
-        }
-    }
-
-    fn uid_input(input: &ReserveAdmissionInput, object_uid: &str) -> UidFencedAdmissionInput {
-        UidFencedAdmissionInput {
-            key: input.key.clone(),
-            object_uid: object_uid.into(),
-        }
-    }
-
-    async fn set_state(db: &Database, key: &AdmissionJournalKey, state: &str) {
-        sqlx::query(
-            "UPDATE admission_journal SET state = $1, terminal_at = \
-             CASE WHEN $1 = 'terminal' THEN now() ELSE NULL END WHERE domain = $2 AND work_id = $3 AND generation = $4",
-        )
-        .bind(state)
-        .bind(key.domain.as_str())
-        .bind(&key.work_id)
-        .bind(key.generation)
-        .execute(db.pool())
-        .await
-        .unwrap();
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn cap_one_concurrent_reservation_has_one_winner() {
-        let db = Database::open_in_memory().unwrap();
-        let repo = Arc::new(AdmissionJournalRepository::new(db));
-        let first = {
-            let repo = Arc::clone(&repo);
-            tokio::spawn(async move {
-                repo.reserve(&input(AdmissionDomain::TaskObservation, "a", 0), 1)
-                    .await
-                    .unwrap()
-            })
-        };
-        let second = {
-            let repo = Arc::clone(&repo);
-            tokio::spawn(async move {
-                repo.reserve(&input(AdmissionDomain::WarmBuild, "b", 0), 1)
-                    .await
-                    .unwrap()
-            })
-        };
-        let results = [first.await.unwrap(), second.await.unwrap()];
-        assert_eq!(
-            results
-                .iter()
-                .filter(|r| matches!(r, ReserveAdmissionResult::Reserved { .. }))
-                .count(),
-            1
-        );
-        assert_eq!(repo.count_task_or_warm_occupancy().await.unwrap(), 1);
-    }
-
-    #[tokio::test]
-    async fn duplicate_reservation_is_idempotent() {
-        let db = Database::open_in_memory().unwrap();
-        let repo = AdmissionJournalRepository::new(db);
-        let input = input(AdmissionDomain::TaskObservation, "same", 0);
-        assert!(matches!(
-            repo.reserve(&input, 1).await.unwrap(),
-            ReserveAdmissionResult::Reserved {
-                idempotent: false,
-                ..
-            }
-        ));
-        assert!(matches!(
-            repo.reserve(&input, 1).await.unwrap(),
-            ReserveAdmissionResult::Reserved {
-                idempotent: true,
-                ..
-            }
-        ));
-        assert_eq!(repo.count_task_or_warm_occupancy().await.unwrap(), 1);
-    }
-
-    #[tokio::test]
-    async fn all_occupying_states_count_but_terminal_history_does_not() {
-        let db = Database::open_in_memory().unwrap();
-        let repo = AdmissionJournalRepository::new(db.clone());
-        for (index, state) in [
-            "reserved",
-            "create_in_flight",
-            "create_unknown",
-            "live",
-            "terminal",
-        ]
-        .iter()
-        .enumerate()
-        {
-            let input = input(
-                AdmissionDomain::TaskObservation,
-                &format!("work-{index}"),
-                0,
-            );
-            repo.reserve(&input, 10).await.unwrap();
-            set_state(&db, &input.key, state).await;
-        }
-        assert_eq!(repo.count_task_or_warm_occupancy().await.unwrap(), 4);
-        let history = repo
-            .list_history(AdmissionDomain::TaskObservation, "work-4")
-            .await
-            .unwrap();
-        assert_eq!(history[0].state, AdmissionState::Terminal);
-    }
-
-    #[tokio::test]
-    async fn reservation_domains_are_separate_but_task_warm_share_cap() {
-        let db = Database::open_in_memory().unwrap();
-        let repo = AdmissionJournalRepository::new(db);
-        assert!(matches!(
-            repo.reserve(&input(AdmissionDomain::InvocationBuild, "same", 0), 0)
-                .await
-                .unwrap(),
-            ReserveAdmissionResult::Reserved { .. }
-        ));
-        assert!(matches!(
-            repo.reserve(&input(AdmissionDomain::TaskObservation, "same", 0), 1)
-                .await
-                .unwrap(),
-            ReserveAdmissionResult::Reserved { .. }
-        ));
-        assert!(matches!(
-            repo.reserve(&input(AdmissionDomain::WarmBuild, "same", 0), 1)
-                .await
-                .unwrap(),
-            ReserveAdmissionResult::Denied { .. }
-        ));
-    }
-
-    #[tokio::test]
-    async fn next_generation_requires_terminal_predecessor() {
-        let db = Database::open_in_memory().unwrap();
-        let repo = AdmissionJournalRepository::new(db.clone());
-        let input = input(AdmissionDomain::TaskObservation, "history", 0);
-        assert_eq!(
-            repo.allocate_next_generation(AdmissionDomain::TaskObservation, "history")
-                .await
-                .unwrap(),
-            0
-        );
-        repo.reserve(&input, 1).await.unwrap();
-        assert!(matches!(
-            repo.allocate_next_generation(AdmissionDomain::TaskObservation, "history")
-                .await,
-            Err(DbError::InvalidTransition(_))
-        ));
-        set_state(&db, &input.key, "terminal").await;
-        assert_eq!(
-            repo.allocate_next_generation(AdmissionDomain::TaskObservation, "history")
-                .await
-                .unwrap(),
-            1
-        );
-    }
-
-    #[tokio::test]
-    async fn definitive_and_ambiguous_create_failures_have_distinct_occupancy() {
-        let db = Database::open_in_memory().unwrap();
-        let repo = AdmissionJournalRepository::new(db);
-        let reserved = input(AdmissionDomain::TaskObservation, "definitive-reserved", 0);
-        let in_flight = input(AdmissionDomain::TaskObservation, "definitive-flight", 0);
-        let ambiguous = input(AdmissionDomain::TaskObservation, "ambiguous", 0);
-        for reservation in [&reserved, &in_flight, &ambiguous] {
-            repo.reserve(reservation, 3).await.unwrap();
-        }
-
-        assert_eq!(
-            repo.mark_definitive_create_failure(&reserved.key)
-                .await
-                .unwrap()
-                .state,
-            AdmissionState::Terminal
-        );
-        assert_eq!(
-            repo.mark_definitive_create_failure(&reserved.key)
-                .await
-                .unwrap()
-                .state,
-            AdmissionState::Terminal
-        );
-        repo.mark_create_started(&create_started(&in_flight))
-            .await
-            .unwrap();
-        assert_eq!(
-            repo.mark_definitive_create_failure(&in_flight.key)
-                .await
-                .unwrap()
-                .state,
-            AdmissionState::Terminal
-        );
-
-        repo.mark_create_started(&create_started(&ambiguous))
-            .await
-            .unwrap();
-        assert_eq!(
-            repo.mark_create_started(&create_started(&ambiguous))
-                .await
-                .unwrap()
-                .state,
-            AdmissionState::CreateInFlight
-        );
-        assert_eq!(
-            repo.mark_create_unknown(&ambiguous.key)
-                .await
-                .unwrap()
-                .state,
-            AdmissionState::CreateUnknown
-        );
-        assert_eq!(
-            repo.mark_create_unknown(&ambiguous.key)
-                .await
-                .unwrap()
-                .state,
-            AdmissionState::CreateUnknown
-        );
-        // LIST absence is deliberately not an input to this repository: ambiguity occupies.
-        assert_eq!(repo.count_task_or_warm_occupancy().await.unwrap(), 1);
-        assert_eq!(repo.list_active_rows().await.unwrap()[0].key, ambiguous.key);
-        assert_eq!(
-            repo.mark_live(&uid_input(&ambiguous, "uid-ambiguous"))
-                .await
-                .unwrap()
-                .state,
-            AdmissionState::Live
-        );
-    }
-
-    #[tokio::test]
-    async fn cancellation_is_reserved_only_and_idempotent() {
-        let db = Database::open_in_memory().unwrap();
-        let repo = AdmissionJournalRepository::new(db);
-        let cancelled = input(AdmissionDomain::TaskObservation, "cancelled", 0);
-        let posted = input(AdmissionDomain::TaskObservation, "posted", 0);
-        repo.reserve(&cancelled, 2).await.unwrap();
-        repo.reserve(&posted, 2).await.unwrap();
-        assert_eq!(
-            repo.cancel_reserved(&cancelled.key).await.unwrap().state,
-            AdmissionState::Terminal
-        );
-        assert_eq!(
-            repo.cancel_reserved(&cancelled.key).await.unwrap().state,
-            AdmissionState::Terminal
-        );
-        repo.mark_create_started(&create_started(&posted))
-            .await
-            .unwrap();
-        assert!(matches!(
-            repo.cancel_reserved(&posted.key).await,
-            Err(DbError::InvalidTransition(_))
-        ));
-        assert_eq!(repo.count_task_or_warm_occupancy().await.unwrap(), 1);
-    }
-
-    #[tokio::test]
-    async fn stale_generations_and_mismatched_uids_cannot_release_current_work() {
-        let db = Database::open_in_memory().unwrap();
-        let repo = AdmissionJournalRepository::new(db);
-        let first = input(AdmissionDomain::TaskObservation, "fenced", 0);
-        repo.reserve(&first, 1).await.unwrap();
-        repo.mark_create_started(&create_started(&first))
-            .await
-            .unwrap();
-        repo.mark_live(&uid_input(&first, "uid-first"))
-            .await
-            .unwrap();
-        repo.mark_terminal(&TerminalAdmissionInput {
-            key: first.key.clone(),
-            object_uid: Some("uid-first".into()),
-        })
-        .await
-        .unwrap();
-
-        let second = input(AdmissionDomain::TaskObservation, "fenced", 1);
-        repo.reserve(&second, 1).await.unwrap();
-        repo.mark_create_started(&create_started(&second))
-            .await
-            .unwrap();
-        repo.mark_live(&uid_input(&second, "uid-current"))
-            .await
-            .unwrap();
-        assert!(matches!(
-            repo.mark_live(&uid_input(&first, "uid-first")).await,
-            Err(DbError::InvalidTransition(_))
-        ));
-        assert!(matches!(
-            repo.mark_terminal(&TerminalAdmissionInput {
-                key: second.key.clone(),
-                object_uid: Some("wrong-uid".into()),
-            })
-            .await,
-            Err(DbError::InvalidTransition(_))
-        ));
-        assert_eq!(
-            repo.mark_live(&uid_input(&second, "uid-current"))
-                .await
-                .unwrap()
-                .state,
-            AdmissionState::Live
-        );
-        assert_eq!(repo.count_task_or_warm_occupancy().await.unwrap(), 1);
-        for _ in 0..2 {
-            assert_eq!(
-                repo.mark_terminal(&TerminalAdmissionInput {
-                    key: second.key.clone(),
-                    object_uid: Some("uid-current".into()),
-                })
-                .await
-                .unwrap()
-                .state,
-                AdmissionState::Terminal
-            );
-        }
-        assert_eq!(repo.count_task_or_warm_occupancy().await.unwrap(), 0);
-    }
-
-    #[tokio::test]
-    async fn predecessor_recovery_retires_only_reserved_and_retains_ambiguous_work() {
-        let db = Database::open_in_memory().unwrap();
-        let repo = AdmissionJournalRepository::new(db);
-        let reserved = input(AdmissionDomain::TaskObservation, "recover-reserved", 0);
-        let flight = input(AdmissionDomain::TaskObservation, "recover-flight", 0);
-        let unknown = input(AdmissionDomain::TaskObservation, "recover-unknown", 0);
-        let live = input(AdmissionDomain::TaskObservation, "recover-live", 0);
-        let mut successor = input(AdmissionDomain::TaskObservation, "recover-successor", 0);
-        successor.creator_server_epoch = "epoch-2".into();
-        for reservation in [&reserved, &flight, &unknown, &live, &successor] {
-            repo.reserve(reservation, 5).await.unwrap();
-        }
-        repo.mark_create_started(&create_started(&flight))
-            .await
-            .unwrap();
-        repo.mark_create_started(&create_started(&unknown))
-            .await
-            .unwrap();
-        repo.mark_create_unknown(&unknown.key).await.unwrap();
-        repo.mark_create_started(&create_started(&live))
-            .await
-            .unwrap();
-        repo.mark_live(&uid_input(&live, "uid-live")).await.unwrap();
-
-        let report = repo.recover_predecessor_epoch("epoch-1").await.unwrap();
-        assert_eq!(report.retired_reserved, 1);
-        assert_eq!(report.marked_create_unknown, 1);
-        let states = report
-            .active_rows
-            .iter()
-            .map(|row| (row.key.work_id.as_str(), row.state))
-            .collect::<Vec<_>>();
-        assert_eq!(
-            states,
-            vec![
-                ("recover-flight", AdmissionState::CreateUnknown),
-                ("recover-live", AdmissionState::Live),
-                ("recover-successor", AdmissionState::Reserved),
-                ("recover-unknown", AdmissionState::CreateUnknown),
-            ]
-        );
-    }
-
-    #[tokio::test]
-    async fn recover_all_predecessors_retires_every_predecessor_epoch_atomically() {
-        let db = Database::open_in_memory().unwrap();
-        let repo = AdmissionJournalRepository::new(db);
-        // Two distinct predecessor epochs plus the current replacement epoch.
-        let mut pred_a = input(AdmissionDomain::WarmBuild, "pred-a-reserved", 0);
-        pred_a.creator_server_epoch = "epoch-a".into();
-        let mut pred_a_flight = input(AdmissionDomain::WarmBuild, "pred-a-flight", 0);
-        pred_a_flight.creator_server_epoch = "epoch-a".into();
-        let mut pred_b = input(AdmissionDomain::WarmBuild, "pred-b-reserved", 0);
-        pred_b.creator_server_epoch = "epoch-b".into();
-        let mut current = input(AdmissionDomain::WarmBuild, "current-reserved", 0);
-        current.creator_server_epoch = "replacement-epoch".into();
-        for reservation in [&pred_a, &pred_a_flight, &pred_b, &current] {
-            repo.reserve(reservation, 10).await.unwrap();
-        }
-        repo.mark_create_started(&create_started(&pred_a_flight))
-            .await
-            .unwrap();
-
-        // recover_all_predecessors processes every epoch except the current one.
-        let report = repo
-            .recover_all_predecessors("replacement-epoch")
-            .await
-            .unwrap();
-        assert_eq!(
-            report.retired_reserved, 2,
-            "both predecessor Reserved retired"
-        );
-        assert_eq!(
-            report.marked_create_unknown, 1,
-            "the single predecessor CreateInFlight converted to CreateUnknown"
-        );
-        // The current-epoch Reserved row is untouched.
-        let states = report
-            .active_rows
-            .iter()
-            .map(|row| (row.key.work_id.as_str(), row.state))
-            .collect::<Vec<_>>();
-        assert_eq!(
-            states,
-            vec![
-                ("current-reserved", AdmissionState::Reserved),
-                ("pred-a-flight", AdmissionState::CreateUnknown),
-            ]
-        );
-    }
-}
+#[path = "admission_journal_tests.rs"]
+mod tests;

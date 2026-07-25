@@ -11,6 +11,7 @@ fn config() -> DiskAdmissionConfig {
     DiskAdmissionConfig {
         cache_budget_bytes: 100 * GIB,
         critical_free_bytes: 20 * GIB,
+        warning_free_bytes: 40 * GIB,
         emergency_headroom_bytes: 10 * GIB,
         per_lease_growth_bytes: 4 * GIB,
         max_sample_age: Duration::from_secs(90),
