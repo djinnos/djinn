@@ -46,6 +46,7 @@
 //! into several `#[test]`s sharing one process would make all but the first
 //! fail for a reason that has nothing to do with what they assert.
 
+use std::collections::BTreeMap;
 use std::ffi::CString;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -71,6 +72,12 @@ const LEASED_MILLICORES: u32 = LeasedQuota::DEFAULT_MILLICORES;
 /// How many busy loops the probe command runs. Two, so that a lifted leaf can
 /// demonstrably exceed one core while staying inside a four-core lease.
 const SPINNERS: u64 = 2;
+
+/// Checked-in bridge from the production Job renderer to this crate. The
+/// `djinn-k8s` contract test rebuilds its default required Job and requires
+/// every key in this file to match the manifest; this suite refuses to measure
+/// a hand-maintained approximation instead.
+const RENDERED_CONTRACT_FIXTURE: &str = "fixtures/rendered-security-context.env";
 
 // ═══════════════════ always-on: the lane cannot silently skip ════════════════
 
@@ -106,6 +113,73 @@ fn the_lease_lifecycle_lane_is_wired() {
     );
 }
 
+fn rendered_contract() -> BTreeMap<String, String> {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join(RENDERED_CONTRACT_FIXTURE);
+    std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("read rendered Job contract {}: {error}", path.display()))
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(|line| {
+            let (key, value) = line
+                .split_once('=')
+                .unwrap_or_else(|| panic!("rendered Job contract line is key=value: {line}"));
+            (key.trim().to_owned(), value.trim().to_owned())
+        })
+        .collect()
+}
+
+/// The cpu.stat lane consumes the mandatory Job contract `djinn-k8s` validates
+/// against its production/default render. A launcher CPU limit would hide
+/// throttling at an ancestor, while an implicit or unlimited lift would make
+/// the post-fence measurement describe the wrong Pod.
+#[test]
+fn the_cpu_stat_lane_consumes_the_rendered_required_job_contract() {
+    assert_rendered_required_job_contract();
+}
+
+fn assert_rendered_required_job_contract() {
+    let contract = rendered_contract();
+    for (key, expected) in [
+        ("seccomp_profile", "RuntimeDefault"),
+        ("launcher_host_users", "false"),
+        ("worker_allow_privilege_escalation", "false"),
+        ("launcher_allow_privilege_escalation", "false"),
+        ("launcher_capabilities_drop", "ALL"),
+        (
+            "launcher_capabilities_add",
+            "SETUID,SETGID,SETPCAP,SYS_ADMIN,SYS_RESOURCE",
+        ),
+        ("launcher_cpu_limit", "none"),
+        ("launcher_cpu_request", "50m"),
+        ("launcher_memory_request", "64Mi"),
+        ("launcher_memory_limit", "4Gi"),
+        ("launcher_lease_quota_millicores", "4000"),
+    ] {
+        assert_eq!(contract.get(key).map(String::as_str), Some(expected));
+    }
+    assert_eq!(
+        contract["unleased_millicores"]
+            .parse::<u16>()
+            .expect("rendered unleased quota"),
+        UNLEASED_MILLICORES,
+        "the measured throttle must use the rendered unleased quota"
+    );
+    assert_eq!(
+        contract["leased_millicores"]
+            .parse::<u32>()
+            .expect("rendered lifted quota"),
+        LEASED_MILLICORES,
+        "the matching-fence lift must use the rendered explicit lease quota"
+    );
+    assert_eq!(
+        contract["launcher_lease_quota_millicores"], contract["leased_millicores"],
+        "the rendered launcher environment and the cpu.stat lift must name one quota"
+    );
+}
+
 /// The quotas this proof measures are the ones the launcher crate ships, so a
 /// change to either default cannot leave the measurement asserting a number
 /// nobody uses.
@@ -127,6 +201,9 @@ fn the_measured_quotas_are_the_shipped_defaults() {
             (CI job launcher-kernel-boundary)"]
 #[test]
 fn the_delegated_lease_throttles_and_lifts_measured_on_cpu_stat() {
+    // This is deliberately in the ignored proof too: the CI lane that measures
+    // cpu.stat cannot run against a stale security/resource approximation.
+    assert_rendered_required_job_contract();
     require_root();
     let root = scratch_dir("lease-lifecycle");
 
