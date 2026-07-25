@@ -290,6 +290,18 @@ struct WorkerDefaultArgs {
     workspace_path: PathBuf,
 }
 
+/// READ THIS BEFORE ADDING A REQUIRED ARGUMENT ABOVE.
+///
+/// Nothing on the command line supplies these — the Pod runs
+/// `djinn-agent-worker task-run` with no flags — so every required argument must
+/// be rendered into the container environment by `djinn_k8s::job`. Task opsu's
+/// P0 was a required argument (`--task-run-pod-uid`, #2513) that no renderer ever
+/// supplied: every task-run Pod in production exited 2 in argv parsing.
+/// [`rendered_job_env_contract`] derives the required set from the clap
+/// definition above and fails when the rendered Job cannot satisfy it.
+#[cfg(test)]
+mod rendered_job_env_contract;
+
 /// Local [`djinn_graph::WarmContext`] implementation for the worker binary.
 ///
 /// Mirrors the subset of `djinn-server::AppState::minimal_for_warm_only`
