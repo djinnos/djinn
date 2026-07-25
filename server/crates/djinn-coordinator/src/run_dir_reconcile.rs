@@ -29,12 +29,19 @@ pub struct ReconcileInventoryEntry {
 }
 
 /// Authoritative ownership resolved from pod/terminal evidence.
+///
+/// `pod_uid` and `task_run_id` are required — they ARE the authoritative
+/// binding. `project_id` and `base_fingerprint` are optional because a startup
+/// reconciler observes a directory that was published by a previous process and
+/// may hold no durable record of which base it was seeded from; recording
+/// `None` is honest, whereas inventing a fingerprint would corrupt the seed
+/// projection that reads it back.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ResolvedOwnership {
     pub pod_uid: String,
     pub task_run_id: String,
-    pub project_id: String,
-    pub base_fingerprint: String,
+    pub project_id: Option<String>,
+    pub base_fingerprint: Option<String>,
     pub state: RunDirState,
 }
 
@@ -108,8 +115,8 @@ pub fn plan_reconciliation(
                         pod_uid: owned.pod_uid,
                     },
                     task_run_id: Some(owned.task_run_id),
-                    project_id: Some(owned.project_id),
-                    base_fingerprint: Some(owned.base_fingerprint),
+                    project_id: owned.project_id,
+                    base_fingerprint: owned.base_fingerprint,
                     state: owned.state,
                     measured_bytes: entry.measured_bytes as i64,
                     final_path: Some(entry.final_path.clone()),
