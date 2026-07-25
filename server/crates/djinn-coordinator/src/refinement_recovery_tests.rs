@@ -533,18 +533,7 @@ async fn recover_reaps_exactly_correlated_phantom_once() {
     // Remove the initial intent and age its heartbeat: the shared evaluator now
     // has no exact-run live evidence. A stale legacy park blocks the old
     // proposal-only resume path, leaving only the exact recovery branch.
-    sqlx::query("DELETE FROM refinement_dispatch_intents WHERE run_id = $1")
-        .bind(&run_id)
-        .execute(db.pool())
-        .await
-        .expect("remove phantom intent evidence");
-    sqlx::query(
-        "UPDATE refinement_runs SET heartbeat_at = '2000-01-01T00:00:00.000Z' WHERE id = $1",
-    )
-    .bind(&run_id)
-    .execute(db.pool())
-    .await
-    .expect("age phantom heartbeat");
+    djinn_db::test_support::make_refinement_run_phantom_for_test(&db, &run_id).await;
     let original = repo.get(&fixture.proposal_id).await.unwrap().unwrap();
     seed_awaiting_review_park(
         &db,

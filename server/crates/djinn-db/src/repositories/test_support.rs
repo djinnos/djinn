@@ -22,6 +22,28 @@ pub async fn corrupt_refinement_task_role_for_test(db: &Database, task_id: &str,
         .expect("failed to corrupt refinement task role");
 }
 
+/// Remove an exact run's intent evidence and age its heartbeat so recovery can
+/// exercise the otherwise-unrepresentable phantom-run boundary.
+///
+/// **Not for production use.** Panics on SQL errors.
+pub async fn make_refinement_run_phantom_for_test(db: &Database, run_id: &str) {
+    db.ensure_initialized().await.unwrap();
+    let mut transaction = db.pool().begin().await.unwrap();
+    sqlx::query("DELETE FROM refinement_dispatch_intents WHERE run_id = $1")
+        .bind(run_id)
+        .execute(&mut *transaction)
+        .await
+        .expect("failed to remove phantom refinement intent evidence");
+    sqlx::query(
+        "UPDATE refinement_runs SET heartbeat_at = '2000-01-01T00:00:00.000Z' WHERE id = $1",
+    )
+    .bind(run_id)
+    .execute(&mut *transaction)
+    .await
+    .expect("failed to age phantom refinement run heartbeat");
+    transaction.commit().await.unwrap();
+}
+
 /// Replace a material proposal head without its normal write-time validation.
 ///
 /// This is exclusively for legacy-data fixtures: it keeps the current sequence
