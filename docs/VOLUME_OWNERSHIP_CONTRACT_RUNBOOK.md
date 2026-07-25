@@ -34,6 +34,25 @@ They can only share those volumes under one contract:
   breaks it from the inside — which is how the frozen warm base kept
   reappearing.
 
+### Mirror ownership and Git trust
+
+`/mirror` deliberately has a cross-identity owner contract: `djinn-server`
+may create a mirror as uid `10001`, while task-run and warm workers consume it
+as uid `1000`. Group `1000`, `g+w`, and setgid make the files mutually usable,
+but Git's `safe.directory` ownership check requires a matching **uid**, not a
+matching group. Therefore mirror ownership is not a readiness requirement and
+operators must not recursively `chown /mirror` to uid `1000` merely to satisfy
+Git.
+
+Every Djinn-managed git process injects `safe.directory=*` through
+`GIT_CONFIG_COUNT=1`, `GIT_CONFIG_KEY_0=safe.directory`, and
+`GIT_CONFIG_VALUE_0=*`. Environment variables are required rather than a
+`git -c` flag because the inner process spawned by `git clone --local` inherits
+the environment but not its parent's command-line flags. This makes the
+2026-07-25 operational `chown /mirror/<project>.git` mitigation unnecessary
+for newly created, restored, and freshly provisioned mirrors; retain the group,
+mode, setgid, and umask contract above instead.
+
 Violating it does not produce a crash. It produces a **silent freeze**: the warm
 Job's cargo phase is best-effort (lock-unavailable, step failure and timeout only
 `WARN`) while the Job reports success from the graph phase, so a cache the warm

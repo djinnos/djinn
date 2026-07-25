@@ -115,7 +115,12 @@ pub fn build_warm_job(
 # dirs / 644 files, which the worker's startup contract check rejects. See
 # `djinn_agent_worker::volume_contract`.
 umask 0002
-git config --global --add safe.directory "{mirror_path}"
+# The mirror is server-owned (uid 10001) while this pod runs as uid 1000.
+# Keep this in inherited environment variables, not `git -c`, so any nested
+# git process receives the same trust rule.
+export GIT_CONFIG_COUNT=1
+export GIT_CONFIG_KEY_0=safe.directory
+export GIT_CONFIG_VALUE_0='*'
 UPSTREAM_URL="$(git -C "{mirror_path}" config remote.origin.url)"
 git clone --depth 1000 --single-branch "$UPSTREAM_URL" "{project_root}"
 # Install JS deps before indexing so scip-typescript can resolve
@@ -587,6 +592,25 @@ mod tests {
         assert_eq!(cmd[0], "/bin/bash");
         assert_eq!(cmd[1], "-c");
         assert!(cmd[2].contains("git clone"), "bash -c script: {}", cmd[2]);
+        // The read-only mirror is server-owned while the warmer runs as the
+        // worker uid. The shell must export, rather than locally configure,
+        // safe.directory so every git child inherits it.
+        for setting in [
+            "export GIT_CONFIG_COUNT=1",
+            "export GIT_CONFIG_KEY_0=safe.directory",
+            "export GIT_CONFIG_VALUE_0='*'",
+        ] {
+            assert!(
+                cmd[2].contains(setting),
+                "warm shell must export {setting}: {}",
+                cmd[2]
+            );
+        }
+        assert!(
+            !cmd[2].contains("git config --global --add safe.directory"),
+            "safe.directory must be inherited instead of persisted globally: {}",
+            cmd[2]
+        );
         // Warm clone must give the coupling index enough history to walk
         // `cursor..HEAD` without a forced unshallow on every warm. Depth
         // 1000 covers the typical case (warm cadence is <100 new commits,
