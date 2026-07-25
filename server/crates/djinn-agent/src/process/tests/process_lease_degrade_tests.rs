@@ -364,33 +364,254 @@ async fn repeated_unavailability_still_fails() {
     assert!(launcher.lifts().is_empty());
 }
 
-/// Production composition seam: the real `DirectServices` lease authority over
-/// a real durable repository, driven by the real runner — no hand-built lease
-/// response anywhere.
+// ---------------------------------------------------------------------------
+// Production composition seam: the real `DirectServices` lease authority over a
+// real durable repository, driven by the real runner — no hand-built lease
+// response anywhere.
+// ---------------------------------------------------------------------------
+
+/// Current wall clock as Unix epoch milliseconds.
+#[allow(clippy::disallowed_methods)] // test-only reference clock for absolute deadlines
+fn wall_clock_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("wall clock")
+        .as_millis() as i64
+}
+
+/// A runner clock frozen at an exact, caller-known epoch millisecond. The
+/// invocation deadline contract is absolute epoch milliseconds, so the runner's
+/// clock and the coordinator's clock must agree on "now" for a rendered deadline
+/// to be in the future — and pinning `now` to a value the test already holds
+/// makes the rendered deadline exactly predictable rather than a tolerance band.
+#[allow(clippy::disallowed_methods)] // test-only monotonic seam; the wall side is explicit
+fn clock_pinned_at(now_ms: i64) -> Arc<TestClock> {
+    Arc::new(TestClock::new(
+        std::time::UNIX_EPOCH + Duration::from_millis(now_ms as u64),
+        Instant::now(),
+    ))
+}
+
+/// Drive the durable admission epoch to a committed forward overlap with v1
+/// enforcing — the only state in which a bound invocation may lift `cpu.max`.
+/// Every write goes through the real repository, so the arming sequence is the
+/// operator sequence.
+async fn arm_invocation_lift(db: &djinn_db::Database) {
+    use djinn_db::{AdmissionHandoffAuthority, AdmissionHandoffPhase, V0Mode, V1Mode};
+
+    let handoff = djinn_db::AdmissionHandoffRepository::new(db.clone());
+    let row = handoff
+        .seed_baseline()
+        .await
+        .expect("seed the baseline epoch");
+    let row = handoff
+        .set_modes_and_cap(row.epoch, V0Mode::Enforce, V1Mode::Enforce, None)
+        .await
+        .expect("arm v1 enforcement");
+    handoff
+        .acknowledge(AdmissionHandoffAuthority::Emergency, row.epoch)
+        .await
+        .expect("emergency acknowledges the armed epoch");
+    let row = handoff
+        .advance(row.epoch, AdmissionHandoffPhase::ForwardOverlap, &[])
+        .await
+        .expect("enter the forward overlap");
+    handoff
+        .acknowledge(AdmissionHandoffAuthority::Emergency, row.epoch)
+        .await
+        .expect("emergency acknowledges the overlap");
+    handoff
+        .acknowledge(AdmissionHandoffAuthority::Invocation, row.epoch)
+        .await
+        .expect("invocation acknowledges the overlap");
+}
+
+/// Compose the production lease authority over a fresh database with an armed
+/// cap. `lease_clock` is the coordinator's own deadline clock: advancing it past
+/// a rendered deadline is how a test expires one without waiting.
+async fn real_lease_services(
+    db: &djinn_db::Database,
+    lease_clock: Arc<dyn djinn_coordinator::build_lease::LeaseClock>,
+) -> Arc<crate::direct_services::DirectServices> {
+    let build_lease = Arc::new(
+        djinn_coordinator::build_lease::BuildLeaseService::with_seams(
+            Arc::new(djinn_db::BuildLeaseRepository::new(db.clone())),
+            // The cap `DJINN_MAX_BUILD_TASKRUNS` arms in production; without it
+            // `grant_next` short-circuits on `occupied >= cap` and nothing is
+            // ever granted (see `build_lease_cap_arming_tests`).
+            4,
+            lease_clock,
+            Arc::new(djinn_coordinator::build_lease::NoopLeaseTransactionPause),
+            Arc::new(djinn_coordinator::build_lease::MetricsLeaseTelemetry),
+        )
+        .with_handoff_epoch(Arc::new(djinn_db::AdmissionHandoffRepository::new(
+            db.clone(),
+        ))),
+    );
+    Arc::new(crate::direct_services::DirectServices::with_build_lease(
+        crate::test_helpers::agent_context_from_db(db.clone(), CancellationToken::new()),
+        CancellationToken::new(),
+        build_lease,
+    ))
+}
+
+fn durable_row(
+    db: &djinn_db::Database,
+    invocation_id: &str,
+) -> impl std::future::Future<Output = djinn_db::BuildLeaseRow> + use<> {
+    let repository = djinn_db::BuildLeaseRepository::new(db.clone());
+    let key = djinn_db::BuildLeaseKey {
+        consumer_kind: djinn_db::BuildLeaseConsumerKind::TaskInvocation,
+        consumer_id: invocation_id.to_string(),
+    };
+    async move {
+        repository
+            .get(&key)
+            .await
+            .expect("read the durable lease row")
+            .expect("the invocation queued a durable lease row")
+    }
+}
+
+/// The defect this test exists for: `ShellLaunchContext::invocation` rendered
+/// `queue_deadline_ms: 30_000` and `launch_deadline_ms: 60_000` — plainly
+/// intended as 30s and 60s — but [`LeaseDeadlines`] carries ABSOLUTE Unix epoch
+/// milliseconds. `30_000` is therefore `1970-01-01T00:00:30Z`, so the
+/// coordinator terminalized every task-invocation lease as `deadline_expired`
+/// the instant it was queued. Combined with the (correct) degrade to unleased
+/// execution, every escalating shell command would have run at the launcher's
+/// 250m quota forever instead of the leased 4-CPU quota — silently, ~16x slower.
 ///
-/// `queue_deadline_ms` is passed exactly as `ShellLaunchContext::invocation`
-/// passes it (30_000), which the coordinator reads as an absolute epoch
-/// timestamp and therefore treats as already expired. That is the production
-/// path that made every escalating shell command hit a queue timeout: it must
-/// now produce a successful command result at the unleased quota.
+/// The deadlines here are not restated: they come from the production producer
+/// itself, so a regression in `ShellLaunchContext::invocation` fails this test.
+#[tokio::test]
+async fn rendered_invocation_deadlines_are_granted_and_reach_the_fenced_lift() {
+    let db = crate::test_helpers::create_test_db();
+    arm_invocation_lift(&db).await;
+    let services = real_lease_services(
+        &db,
+        Arc::new(djinn_coordinator::build_lease::SystemLeaseClock),
+    )
+    .await;
+    let launcher = Arc::new(DegradeLauncher::completing());
+    // The runner's "now". The coordinator keeps its own real clock, so a
+    // correctly rendered deadline must land ahead of it for the lease to be
+    // granted at all.
+    let now_ms = wall_clock_ms();
+    let runner = Arc::new(LeaseInvocationRunner::new(
+        services,
+        launcher.clone(),
+        clock_pinned_at(now_ms),
+    ));
+    // The exact config a task pod renders, straight from the production
+    // producer — no deadline literal appears in this test.
+    let context = crate::context::ShellLaunchContext::for_test(
+        Arc::clone(&runner),
+        "task".into(),
+        "run".into(),
+        "pod".into(),
+    );
+    let output = runner
+        .output(
+            command(),
+            context.invocation(Duration::from_secs(60)),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("the rendered deadlines must produce a usable lease");
+
+    assert_eq!(output.process.termination, ProcessTermination::Exited);
+    assert_eq!(output.process.output.status.code(), Some(0));
+    assert_eq!(launcher.killed_while_running(), 0);
+    // The whole point: the lease was actually granted, bound, and lifted off the
+    // unleased 250m quota. Under the defect this list was always empty.
+    assert_eq!(
+        launcher.lifts().len(),
+        1,
+        "a lease queued with the rendered deadlines must reach the fenced lift"
+    );
+
+    let row = durable_row(&db, &output.identity.invocation_id).await;
+    assert_ne!(
+        row.terminal_reason.as_deref(),
+        Some("deadline_expired"),
+        "the rendered queue deadline must not be in the past"
+    );
+
+    // The stored deadlines are absolute instants exactly 30s / 60s past the
+    // runner's `now` — not 1970, and not the raw timeouts.
+    assert_eq!(
+        durable_deadline_ms(
+            row.queue_deadline
+                .as_deref()
+                .expect("the queued row retains its deadline"),
+        ),
+        now_ms + 30_000,
+        "the durable queue deadline must be now + 30s"
+    );
+    assert_eq!(
+        durable_deadline_ms(
+            row.launch_deadline
+                .as_deref()
+                .expect("the granted row retains its launch deadline"),
+        ),
+        now_ms + 60_000,
+        "the durable launch deadline must be now + 60s"
+    );
+}
+
+/// Parse a durable deadline column back to epoch milliseconds. `COLS` selects
+/// `queue_deadline::text`, so the value arrives in Postgres' text rendering of
+/// `timestamptz` (`2026-07-25 20:30:00.123456+00`), whose fractional part is
+/// omitted when it is zero.
+fn durable_deadline_ms(value: &str) -> i64 {
+    const FORMAT: &[time::format_description::BorrowedFormatItem<'_>] = time::macros::format_description!(
+        version = 2,
+        "[year]-[month]-[day] [hour]:[minute]:[second][optional [.[subsecond]]][offset_hour sign:mandatory]"
+    );
+    (time::OffsetDateTime::parse(value, FORMAT)
+        .unwrap_or_else(|error| panic!("durable deadline `{value}` is not parseable: {error}"))
+        .unix_timestamp_nanos()
+        / 1_000_000) as i64
+}
+
+/// The degrade path from the lost-queue fix must stay reachable and correct: a
+/// deadline the coordinator's clock has genuinely passed still expires, and the
+/// command still succeeds at the unleased quota rather than dying.
+///
+/// Expiry is constructed explicitly by advancing the coordinator's own deadline
+/// clock an hour past the rendered (absolute, correct) deadline. It deliberately
+/// no longer relies on a relative value being misread as an epoch timestamp —
+/// that was the defect, and once fixed this test would otherwise have asserted
+/// nothing.
 #[tokio::test]
 async fn real_lease_authority_queue_timeout_degrades_to_a_successful_command() {
     let db = crate::test_helpers::create_test_db();
-    let services = Arc::new(crate::direct_services::DirectServices::new(
-        crate::test_helpers::agent_context_from_db(db.clone(), CancellationToken::new()),
-        CancellationToken::new(),
+    arm_invocation_lift(&db).await;
+    let now_ms = wall_clock_ms();
+    // One hour past every deadline this invocation can render.
+    let expired_clock = Arc::new(djinn_coordinator::build_lease::ManualLeaseClock::new(
+        now_ms + 3_600_000,
     ));
+    let services = real_lease_services(&db, expired_clock).await;
     let launcher = Arc::new(DegradeLauncher::completing());
-    let runner = LeaseInvocationRunner::new(services, launcher.clone(), clock());
-    // The exact deadlines `ShellLaunchContext::invocation` renders in a task
-    // pod.
-    let production_deadlines = LeaseInvocationConfig {
-        queue_deadline_ms: 30_000,
-        launch_deadline_ms: 60_000,
-        ..config()
-    };
+    let runner = Arc::new(LeaseInvocationRunner::new(
+        services,
+        launcher.clone(),
+        clock_pinned_at(now_ms),
+    ));
+    let context = crate::context::ShellLaunchContext::for_test(
+        Arc::clone(&runner),
+        "task".into(),
+        "run".into(),
+        "pod".into(),
+    );
     let output = runner
-        .output(command(), production_deadlines, CancellationToken::new())
+        .output(
+            command(),
+            context.invocation(Duration::from_secs(60)),
+            CancellationToken::new(),
+        )
         .await
         .expect("a real queue timeout must not fail the command");
 
@@ -410,14 +631,34 @@ async fn real_lease_authority_queue_timeout_degrades_to_a_successful_command() {
     // Prove the successful result came through the timeout path rather than a
     // queue that simply never resolved: the durable row this invocation created
     // is terminal for the expired deadline.
-    let row = djinn_db::BuildLeaseRepository::new(db)
-        .get(&djinn_db::BuildLeaseKey {
-            consumer_kind: djinn_db::BuildLeaseConsumerKind::TaskInvocation,
-            consumer_id: output.identity.invocation_id.clone(),
-        })
-        .await
-        .expect("read the durable lease row")
-        .expect("the invocation queued a durable lease row");
+    let row = durable_row(&db, &output.identity.invocation_id).await;
     assert_eq!(row.state, djinn_db::BuildLeaseState::Terminal);
     assert_eq!(row.terminal_reason.as_deref(), Some("deadline_expired"));
+}
+
+/// Unit boundary for the conversion itself: a configured timeout becomes an
+/// absolute instant, and `Duration::ZERO` stays `0` — the contract's "no
+/// deadline", which the graph-warm recovery and worker paths already pass.
+#[test]
+fn timeouts_render_as_absolute_epoch_deadlines() {
+    let now_ms = 1_800_000_000_000_i64;
+    assert_eq!(
+        deadline_epoch_ms(now_ms, Duration::from_secs(30)),
+        now_ms + 30_000
+    );
+    assert_eq!(
+        deadline_epoch_ms(now_ms, Duration::ZERO),
+        0,
+        "zero means no deadline, never an expired one"
+    );
+    assert_eq!(
+        deadline_epoch_ms(i64::MAX, Duration::from_secs(30)),
+        i64::MAX,
+        "the conversion saturates instead of wrapping into the past"
+    );
+    assert_eq!(epoch_ms(std::time::UNIX_EPOCH), 0);
+    assert_eq!(
+        epoch_ms(std::time::UNIX_EPOCH + Duration::from_millis(1_234)),
+        1_234
+    );
 }

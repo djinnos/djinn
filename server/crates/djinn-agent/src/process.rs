@@ -367,8 +367,20 @@ pub(crate) struct LeaseInvocationConfig {
     pub task_run_id: String,
     pub pod_uid: String,
     pub cpu_usage_threshold_usec: u64,
-    pub queue_deadline_ms: i64,
-    pub launch_deadline_ms: i64,
+    /// How long this invocation may sit in the durable queue before the
+    /// coordinator terminalizes it as `deadline_expired`.
+    ///
+    /// Deliberately a [`Duration`] and not a bare `i64`: the wire contract
+    /// ([`LeaseDeadlines`]) carries ABSOLUTE epoch milliseconds, and a caller
+    /// that wrote its intended timeout there produced a 1970 deadline that
+    /// expired every task-invocation lease on arrival. The conversion to an
+    /// absolute instant happens once, in [`LeaseInvocationRunner::lease_deadlines`],
+    /// against this runner's clock at the moment the queue request is issued —
+    /// so a config value can no longer be mistaken for a timestamp.
+    pub queue_timeout: Duration,
+    /// How long a granted lease may remain unlaunched before the coordinator
+    /// marks it `suspect`. Same units contract as [`Self::queue_timeout`].
+    pub launch_timeout: Duration,
     pub timeout: Duration,
 }
 
@@ -422,6 +434,27 @@ impl LeaseInvocationRunner {
         self.journal = Some(journal);
         self
     }
+
+    /// Render the invocation's configured timeouts as the wire deadlines the
+    /// coordinator actually understands.
+    ///
+    /// [`LeaseDeadlines`] carries ABSOLUTE Unix epoch milliseconds: the
+    /// coordinator persists them as timestamps and `expire_deadlines` compares
+    /// them against its own wall clock. Handing it a raw timeout instead placed
+    /// every task-invocation deadline in 1970, so the durable row was
+    /// terminalized as `deadline_expired` before the queue could ever be
+    /// granted and the invocation degraded to the launcher's unleased 250m
+    /// quota for the whole command. The conversion therefore lives here — one
+    /// place, at the moment the request is issued, reading this runner's
+    /// injected clock so it stays deterministic under test.
+    fn lease_deadlines(&self, config: &LeaseInvocationConfig) -> LeaseDeadlines {
+        let now_ms = epoch_ms(self.clock.now());
+        LeaseDeadlines {
+            queue_deadline_ms: deadline_epoch_ms(now_ms, config.queue_timeout),
+            launch_deadline_ms: deadline_epoch_ms(now_ms, config.launch_timeout),
+        }
+    }
+
     pub(crate) async fn output(
         &self,
         cmd: Command,
@@ -429,8 +462,8 @@ impl LeaseInvocationRunner {
         cancel: CancellationToken,
     ) -> Result<LeaseInvocationOutput, LeaseInvocationError> {
         let identity = TaskInvocationLeaseIdentity {
-            task_id: config.task_id,
-            task_run_id: config.task_run_id,
+            task_id: config.task_id.clone(),
+            task_run_id: config.task_run_id.clone(),
             invocation_id: uuid::Uuid::now_v7().to_string(),
         };
         let lease = LeaseIdentity::TaskInvocation(identity.clone());
@@ -478,10 +511,7 @@ impl LeaseInvocationRunner {
                 match await_lease_or_terminal(
                     self.services.queue_lease(LeaseQueueRequest {
                         identity: lease.clone(),
-                        deadlines: LeaseDeadlines {
-                            queue_deadline_ms: config.queue_deadline_ms,
-                            launch_deadline_ms: config.launch_deadline_ms,
-                        },
+                        deadlines: self.lease_deadlines(&config),
                     }),
                     &mut *child,
                     &cancel,
@@ -944,6 +974,28 @@ async fn reconcile_terminal_lease(
 #[cfg_attr(not(test), allow(dead_code))] // consumed by the workspace lease wiring task
 fn started_lease_error(error: io::Error) -> LeaseInvocationError {
     LeaseInvocationError::Process(ProcessRunError::Started(error))
+}
+
+/// Wall-clock instant as Unix epoch milliseconds. A pre-epoch clock reads as 0,
+/// which the deadline contract treats as "no deadline" rather than "expired".
+fn epoch_ms(now: SystemTime) -> i64 {
+    now.duration_since(UNIX_EPOCH).map_or(0, |since| {
+        i64::try_from(since.as_millis()).unwrap_or(i64::MAX)
+    })
+}
+
+/// Project a relative timeout onto the absolute epoch-millisecond instant the
+/// coordinator compares against its own clock.
+///
+/// `Duration::ZERO` renders `0`, which [`LeaseDeadlines`] defines as *no
+/// deadline* (the durable column stays NULL) — the same thing the graph-warm
+/// recovery and worker paths already pass. It is deliberately not "expires
+/// immediately".
+fn deadline_epoch_ms(now_ms: i64, timeout: Duration) -> i64 {
+    if timeout.is_zero() {
+        return 0;
+    }
+    now_ms.saturating_add(i64::try_from(timeout.as_millis()).unwrap_or(i64::MAX))
 }
 /// Classify a lease response that did not produce a usable grant.
 ///
