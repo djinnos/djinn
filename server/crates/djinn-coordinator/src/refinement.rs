@@ -1044,15 +1044,59 @@ mod tests {
     // ── Shared typed stop contract ───────────────────────────────────────
 
     #[test]
-    fn typed_stop_reason_round_trips_structured_context() {
-        let reason = StopReason::AgentFailure {
-            role: RefinementRole::Judge,
-            error_code: "session_timeout".into(),
-            message: "agent session timed out".into(),
-        };
-        let wire = serde_json::to_value(&reason).expect("typed reason serializes");
-        assert_eq!(wire["tag"], "agent_failure");
-        assert_eq!(serde_json::from_value::<StopReason>(wire).unwrap(), reason);
+    fn every_typed_stop_reason_round_trips_structured_context_without_role_fallback() {
+        let reasons = vec![
+            StopReason::AdversaryDry,
+            StopReason::RoundCap,
+            StopReason::SpawnCap,
+            StopReason::RepeatedObjection {
+                signature: "missing acceptance criteria".into(),
+                occurrences: 2,
+            },
+            StopReason::AgentFailure {
+                role: RefinementRole::Advocate,
+                error_code: "revision_failed".into(),
+                message: "advocate could not save the revision".into(),
+            },
+            StopReason::AgentFailure {
+                role: RefinementRole::Adversary,
+                error_code: "session_timeout".into(),
+                message: "adversary session timed out".into(),
+            },
+            StopReason::AgentFailure {
+                role: RefinementRole::Judge,
+                error_code: "verdict_failed".into(),
+                message: "judge could not issue a verdict".into(),
+            },
+            // The convergence aliases remain distinct typed outcomes.
+            StopReason::HumanAccepted,
+            StopReason::HumanRejected,
+            StopReason::Interrupted {
+                detail: Some("coordinator restarted".into()),
+            },
+            StopReason::ReapedPhantom {
+                prior_run_id: "run-previous".into(),
+                generation: 7,
+                evidence_summary: "expired lease with no materialized task".into(),
+            },
+            StopReason::OperatorStop {
+                actor: "operator-42".into(),
+                reason: Some("manual cancellation".into()),
+            },
+            StopReason::UnknownLegacy {
+                original_value: "historic_stop".into(),
+                source_row: "proposal lifecycle row".into(),
+            },
+        ];
+
+        for reason in reasons {
+            let wire = serde_json::to_value(&reason).expect("typed reason serializes");
+            assert_eq!(wire["tag"], reason.tag());
+            assert_eq!(
+                serde_json::from_value::<StopReason>(wire).expect("typed reason deserializes"),
+                reason
+            );
+        }
     }
 
     // ── Restored awaiting-review park (startup recovery) ─────────────────

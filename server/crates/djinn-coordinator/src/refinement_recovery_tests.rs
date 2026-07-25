@@ -173,7 +173,14 @@ async fn recover_restores_awaiting_review_park_and_does_not_stamp_interrupted() 
     assert!(!restored.is_complete());
     assert_eq!(restored.current_revision_seq, head);
     assert_eq!(restored.snapshot_revision_seq, head);
-    assert_eq!(restored.stop_reason, Some(StopReason::RoundCap));
+    assert_eq!(
+        restored.stop_reason,
+        Some(StopReason::UnknownLegacy {
+            original_value: "round_cap".into(),
+            source_row: "proposal lifecycle awaiting-review park".into(),
+        }),
+        "legacy proposal-scoped tags must not be promoted to an exact-run stop"
+    );
 
     assert_eq!(
         interrupted_stop_count(&db, &fixture.proposal_id).await,
@@ -346,9 +353,10 @@ async fn recover_closes_orphaned_open_task_and_redispatches_same_round() {
 
 /// (c) A ready (non-blocking) Judge verdict with NO durable awaiting-review park
 /// is contradictory (a ready verdict must persist a park). Recovery cannot
-/// fabricate the snapshot revision, so it falls back to the interrupted stamp.
+/// correlate that legacy proposal-scoped observation to an exact run, so it
+/// creates no stop row.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn recover_stamps_interrupted_for_ready_verdict_without_park() {
+async fn recover_skips_uncorrelated_ready_verdict_without_park() {
     let db = crate::test_helpers::create_test_db();
     let fixture = seed_refinement_fixture(&db).await;
     let (events_tx, _events_rx) = tokio::sync::broadcast::channel::<DjinnEventEnvelope>(256);
@@ -369,8 +377,8 @@ async fn recover_stamps_interrupted_for_ready_verdict_without_park() {
     );
     assert_eq!(
         interrupted_stop_count(&db, &fixture.proposal_id).await,
-        1,
-        "ambiguous reconstruction falls back to the interrupted stamp"
+        0,
+        "ambiguous legacy recovery must not manufacture a proposal-scoped stop"
     );
 }
 
@@ -429,10 +437,11 @@ async fn recover_reconstructs_spawn_budget_from_run_tasks() {
 }
 
 /// A dangling refinement that parked awaiting review but whose spec has since
-/// moved on (head revision no longer equals the parked refined revision) falls
-/// back to the interrupted stamp — the converged result is stale.
+/// moved on (head revision no longer equals the parked refined revision) cannot
+/// be restored. It remains an uncorrelated legacy observation and creates no
+/// stop row.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn recover_stamps_interrupted_when_parked_spec_moved_on() {
+async fn recover_skips_uncorrelated_stale_park() {
     let db = crate::test_helpers::create_test_db();
     let fixture = seed_refinement_fixture(&db).await;
     let (events_tx, _events_rx) = tokio::sync::broadcast::channel::<DjinnEventEnvelope>(256);
@@ -479,7 +488,7 @@ async fn recover_stamps_interrupted_when_parked_spec_moved_on() {
     );
     assert_eq!(
         interrupted_stop_count(&db, &fixture.proposal_id).await,
-        1,
-        "a stale park must fall back to the interrupted stamp"
+        0,
+        "a stale legacy park must not manufacture a proposal-scoped stop"
     );
 }

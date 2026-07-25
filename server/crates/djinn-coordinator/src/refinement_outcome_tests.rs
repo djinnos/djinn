@@ -1252,3 +1252,81 @@ async fn advocate_proposal_and_progress_failures_leave_durable_source_retryable(
         reset_outcome_test_seam(&f.fixture.proposal_id);
     }
 }
+
+/// Every terminal outcome consumes its exact source intent and never emits a
+/// proposal-scoped compatibility lifecycle stop row.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn every_typed_terminal_outcome_persists_once_on_its_exact_run() {
+    let reasons = vec![
+        StopReason::AdversaryDry,
+        StopReason::RoundCap,
+        StopReason::SpawnCap,
+        StopReason::RepeatedObjection {
+            signature: "same blocking objection".into(),
+            occurrences: 2,
+        },
+        StopReason::AgentFailure {
+            role: RefinementRole::Advocate,
+            error_code: "advocate_failed".into(),
+            message: "revision failed".into(),
+        },
+        StopReason::AgentFailure {
+            role: RefinementRole::Adversary,
+            error_code: "adversary_failed".into(),
+            message: "attack failed".into(),
+        },
+        StopReason::AgentFailure {
+            role: RefinementRole::Judge,
+            error_code: "judge_failed".into(),
+            message: "verdict failed".into(),
+        },
+        StopReason::HumanAccepted,
+        StopReason::HumanRejected,
+    ];
+
+    for reason in reasons {
+        let f = durable_outcome_fixture().await;
+        let source = SourceIntentTransitionRequest {
+            run_id: f.run_id.clone(),
+            intent_id: f.intent_id.clone(),
+            generation: f.generation,
+            expected_round: 1,
+            expected_phase: DurablePhase::AdversaryAttack,
+            expected_role: RefinementRole::Adversary,
+        };
+        let mut candidate = f.projection.clone();
+        candidate.terminate(reason.clone());
+        assert!(
+            f.actor
+                .commit_refinement_candidate(&source, &candidate)
+                .await
+        );
+
+        let committed = snapshot(&f).await;
+        assert_eq!(committed.snapshot.run.state, RefinementRunState::Terminal);
+        assert_eq!(committed.snapshot.run.terminal_reason, Some(reason.clone()));
+        assert_eq!(
+            committed.snapshot.intents[0].state,
+            RefinementIntentState::Completed
+        );
+        assert!(
+            ProposalRepository::new(f.db.clone(), EventBus::noop())
+                .revisions(&f.fixture.proposal_id)
+                .await
+                .expect("read proposal revisions")
+                .iter()
+                .all(|revision| revision.event_kind != "refinement_stop"),
+            "{reason:?} must not use proposal-scoped lifecycle persistence"
+        );
+
+        assert!(
+            !f.actor
+                .commit_refinement_candidate(&source, &candidate)
+                .await
+        );
+        assert_eq!(
+            snapshot(&f).await.snapshot.run.terminal_reason,
+            Some(reason)
+        );
+    }
+}
