@@ -62,16 +62,16 @@ buildAdmission:
 # is lifted to the pod's full CPU limit only once it demonstrates it is actually
 # CPU-hungry.
 #
-#   disabled  (default) — no sidecar, no cgroup leaf, no lease. Shell commands
-#                         run in-process in the worker at the pod's own quota.
-#                         This is the behaviour that shipped before task 7deu.
-#   required            — render the cgroup-launcher sidecar. The launcher
+#   required  (default) — render the cgroup-launcher sidecar. The launcher
 #                         establishes its own delegated cgroup v2 root at
 #                         startup, which needs `SYS_ADMIN` for the duration of
 #                         that bootstrap; it drops the capability irreversibly
 #                         before the broker accepts any work, and the pod runs
 #                         with `hostUsers: false` so even that window is inside
 #                         a user namespace.
+#   disabled            — explicit local/development compatibility: no sidecar,
+#                         cgroup leaf, or lease; shell commands run in-process
+#                         at the pod's own quota.
 #
 # Requires a cgroup-v2 node whose kubelet offers the `cpu` controller to
 # container cgroups, and (for `hostUsers: false`) a runtime with user-namespace
@@ -79,7 +79,10 @@ buildAdmission:
 # render is refused at dispatch before a Job is submitted, and a launcher that
 # cannot establish its delegation exits non-zero before binding its socket.
 cgroupLauncher:
-  mode: disabled
+  # Production task-runs must use the brokered invocation-leaf path. Set this
+  # explicitly to `disabled` only for local/development environments where the
+  # launcher runtime profile is intentionally unavailable.
+  mode: required
 
 # -----------------------------------------------------------------------------
 # Server deployment

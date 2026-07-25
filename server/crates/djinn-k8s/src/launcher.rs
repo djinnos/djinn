@@ -2,9 +2,9 @@
 //! cgroup-launcher sidecar, the v1 worker/child/launcher security contract, and
 //! the fail-closed render/startup validation seam.
 //!
-//! The launcher sidecar is **not** unconditionally rendered: arming enforcement
-//! is an operator decision ([`CgroupLauncherMode`], default
-//! [`Disabled`](CgroupLauncherMode::Disabled)). The armed path is real and
+//! The launcher sidecar is rendered by the production default
+//! ([`CgroupLauncherMode::Required]). An explicit disabled mode remains for
+//! local/development profiles. The armed path is real and
 //! measured — the launcher establishes its own delegated cgroup v2 root, throttles
 //! an unleased invocation to [`LAUNCHER_UNLEASED_MILLICORES`], and lifts it to the
 //! pod's declared CPU budget on a fenced lease. `djinn-cgroup-launcher`'s
@@ -181,15 +181,18 @@ pub const LAUNCHER_CGROUP_ROOT: &str = "/run/djinn-cgroup";
 /// root is unreachable. The design mounts inside the launcher's own cgroup
 /// namespace, where an invocation leaf IS a descendant of the namespace root.
 ///
-/// The default is required: every task run uses the launcher and
-/// [`validate_enforcement_render`] fails closed before dispatch if the rendered
-/// contract cannot be satisfied.
+/// Production defaults to [`Required`](CgroupLauncherMode::Required). An
+/// operator may set `DJINN_K8S_CGROUP_LAUNCHER_MODE=disabled` only for a local
+/// or development profile that deliberately uses direct worker execution.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum CgroupLauncherMode {
-    /// No sidecar, no launcher volumes, no launcher env.
+    /// No sidecar, no launcher volumes, no launcher IPC env. Shell commands run
+    /// in-process in the worker, unleased. This is for explicit local/development
+    /// profiles only.
     Disabled,
-    /// The default production path: launcher-enforced per-invocation CPU leases.
+    /// Arm the sidecar: the launcher establishes its delegated cgroup root and
+    /// every shell command runs in a per-invocation leaf under a CPU lease.
     #[default]
     Required,
 }
@@ -665,8 +668,8 @@ pub enum RenderValidationError {
         "cgroup launcher mode is `required`, but the launcher container this build renders cannot \
          establish a delegated cgroup v2 subtree: {reason}. Arming enforcement with this render \
          would submit a Pod whose sidecar fails startup readiness, so it is refused before the Job \
-         exists. Run with DJINN_K8S_CGROUP_LAUNCHER_MODE=disabled (the default) until the render \
-         is repaired. See djinn_k8s::launcher::CgroupLauncherMode."
+         exists. Correct the rendered runtime profile; `disabled` is reserved for explicit local/\
+         development compatibility. See djinn_k8s::launcher::CgroupLauncherMode."
     )]
     ArmedRenderCannotDelegate { reason: &'static str },
     #[error(

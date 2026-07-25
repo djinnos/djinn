@@ -199,9 +199,10 @@ pub struct KubernetesConfig {
     pub volume_ownership_mode: String,
     /// Whether a task-run Pod renders the cgroup-launcher sidecar.
     ///
-    /// Defaults to [`CgroupLauncherMode::Required`]: every task-run Pod receives
-    /// the launcher, its private IPC/cgroup surfaces, and enforced invocation
-    /// leaves. Operators may explicitly disable it only for emergency rollback.
+    /// Defaults to [`CgroupLauncherMode::Required`]: the launcher sidecar,
+    /// private IPC/cgroup surfaces, and worker enforcement signal are rendered
+    /// together. `disabled` remains an explicit local/development compatibility
+    /// profile.
     /// Overridable via `DJINN_K8S_CGROUP_LAUNCHER_MODE`; an unrecognized value is
     /// ignored with a warning rather than silently flipping enforcement.
     #[serde(default)]
@@ -257,7 +258,7 @@ impl KubernetesConfig {
             // to anything the launcher's runtime readiness check would reject.
             cgroup_delegation_profile: crate::launcher::CGROUP_PROFILE_V2_CPU_ONLY.into(),
             volume_ownership_mode: crate::launcher::VOLUME_OWNERSHIP_ON_ROOT_MISMATCH.into(),
-            // The production profile requires the launcher on every task run.
+            // Production task-runs require the launcher and use fresh invocation leaves.
             cgroup_launcher_mode: CgroupLauncherMode::Required,
             // Unbounded by default: per-project build_resources overrides are
             // gated only by request <= limit until an operator configures the
