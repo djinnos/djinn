@@ -458,7 +458,7 @@ fn epoch_and_admission_telemetry_labels_stay_bounded_and_carry_no_identifiers() 
         djinn_telemetry::build_admission::record_shadow_invocation(false);
 
         for mode in ["enforce", "observe", "off"] {
-            djinn_telemetry::build_admission::set_health(mode, 3, true, true, true);
+            djinn_telemetry::build_admission::set_health(mode, 3, true, true, true, true);
             djinn_telemetry::build_admission::increment_would_defer(mode, 3);
             djinn_telemetry::build_admission::increment_unknown_classification(mode, 3);
         }

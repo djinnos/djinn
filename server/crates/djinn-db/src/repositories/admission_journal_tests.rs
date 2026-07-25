@@ -498,3 +498,90 @@ async fn recover_all_predecessors_retires_every_predecessor_epoch_atomically() {
         ]
     );
 }
+
+#[tokio::test]
+async fn reclaim_absent_object_is_fenced_by_the_full_observed_identity() {
+    let repo = AdmissionJournalRepository::new(Database::open_in_memory().unwrap());
+    let reserved = input(AdmissionDomain::WarmBuild, "reclaim", 0);
+    repo.reserve(&reserved, 4).await.unwrap();
+    repo.mark_create_started(&create_started(&reserved))
+        .await
+        .unwrap();
+    repo.recover_all_predecessors("replacement-epoch")
+        .await
+        .unwrap();
+    let row = repo.list_active_rows().await.unwrap().remove(0);
+    assert_eq!(row.state, AdmissionState::CreateUnknown);
+
+    let proof = ReclaimAbsentInput {
+        key: row.key.clone(),
+        observed_state: row.state,
+        observed_creator_server_epoch: row.creator_server_epoch.clone(),
+        observed_object_name: row.object_name.clone(),
+        observed_object_uid: row.object_uid.clone(),
+    };
+
+    // A proof taken against a different state writes nothing.
+    let stale_proof = ReclaimAbsentInput {
+        observed_state: AdmissionState::Reserved,
+        ..proof.clone()
+    };
+    assert!(matches!(
+        repo.reclaim_absent_object(&stale_proof).await.unwrap(),
+        ReclaimAbsentOutcome::Fenced { .. }
+    ));
+    assert_eq!(repo.count_task_or_warm_occupancy().await.unwrap(), 1);
+
+    // A proof taken against a different object name writes nothing either: the
+    // absence that was proven was some other object's.
+    let renamed = ReclaimAbsentInput {
+        observed_object_name: "a-different-job".into(),
+        ..proof.clone()
+    };
+    assert!(matches!(
+        repo.reclaim_absent_object(&renamed).await.unwrap(),
+        ReclaimAbsentOutcome::Fenced { .. }
+    ));
+    assert_eq!(repo.count_task_or_warm_occupancy().await.unwrap(), 1);
+
+    // The matching proof retires the row and releases its capacity.
+    assert!(matches!(
+        repo.reclaim_absent_object(&proof).await.unwrap(),
+        ReclaimAbsentOutcome::Reclaimed(_)
+    ));
+    assert_eq!(repo.count_task_or_warm_occupancy().await.unwrap(), 0);
+
+    // Replaying the same proof is an idempotent no-op, not an error.
+    assert!(matches!(
+        repo.reclaim_absent_object(&proof).await.unwrap(),
+        ReclaimAbsentOutcome::AlreadyTerminal(_)
+    ));
+
+    // A retired generation still yields the next one to a new dispatch, so
+    // reclamation composes with generation resolution instead of stranding the
+    // work item on a generation that can never advance.
+    assert_eq!(
+        repo.resolve_dispatch_generation(AdmissionDomain::WarmBuild, "reclaim", 0)
+            .await
+            .unwrap(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn settlement_flags_rows_against_the_database_clock() {
+    let repo = AdmissionJournalRepository::new(Database::open_in_memory().unwrap());
+    let reserved = input(AdmissionDomain::TaskObservation, "settle", 0);
+    repo.reserve(&reserved, 4).await.unwrap();
+
+    let settled_now = repo.list_active_rows_with_settlement(0).await.unwrap();
+    assert_eq!(settled_now.len(), 1);
+    assert!(settled_now[0].1, "a zero window settles immediately");
+
+    let unsettled = repo.list_active_rows_with_settlement(3600).await.unwrap();
+    assert!(
+        !unsettled[0].1,
+        "a row written moments ago is not settled against an hour-long window"
+    );
+    assert!(repo.list_active_rows_with_settlement(-1).await.is_err());
+}

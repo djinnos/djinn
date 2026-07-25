@@ -30,10 +30,29 @@ pub enum UidGetResult {
     Uncertain,
 }
 
+/// Authoritative answer to "does an object with this name exist right now?".
+///
+/// Distinct from [`UidGetResult`], which can only be asked about a row that
+/// already recorded a UID. An admission row that never reached Live has no UID
+/// at all, so absence of its object can only be established by name.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ObjectPresence {
+    /// The API server returned an object under this name. `uid` is its
+    /// immutable identity when the metadata carried one.
+    Present { uid: Option<String> },
+    /// The API server answered authoritatively that no such object exists.
+    Absent,
+    /// The probe could not answer. Never treated as proof of anything.
+    Uncertain,
+}
+
 #[async_trait]
 pub trait WorkloadInventory: Send + Sync {
     async fn list(&self) -> Result<Vec<WorkloadRecord>, String>;
     async fn get_uid(&self, kind: WorkloadObjectKind, name: &str, uid: &str) -> UidGetResult;
+
+    /// Probe one named object independently of any recorded UID.
+    async fn presence(&self, kind: WorkloadObjectKind, name: &str) -> ObjectPresence;
 }
 
 pub struct KubeWorkloadInventory {
@@ -107,6 +126,24 @@ impl WorkloadInventory for KubeWorkloadInventory {
             Ok(Some(found)) if found == uid => UidGetResult::Present,
             Ok(None) => UidGetResult::NotFound,
             _ => UidGetResult::Uncertain,
+        }
+    }
+
+    async fn presence(&self, kind: WorkloadObjectKind, name: &str) -> ObjectPresence {
+        let result = match kind {
+            WorkloadObjectKind::Job => Api::<Job>::namespaced(self.client.clone(), &self.namespace)
+                .get_opt(name)
+                .await
+                .map(|v| v.map(|o| o.metadata.uid)),
+            WorkloadObjectKind::Pod => Api::<Pod>::namespaced(self.client.clone(), &self.namespace)
+                .get_opt(name)
+                .await
+                .map(|v| v.map(|o| o.metadata.uid)),
+        };
+        match result {
+            Ok(Some(uid)) => ObjectPresence::Present { uid },
+            Ok(None) => ObjectPresence::Absent,
+            Err(_) => ObjectPresence::Uncertain,
         }
     }
 }
