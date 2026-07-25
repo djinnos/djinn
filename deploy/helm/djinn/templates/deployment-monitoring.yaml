@@ -1,0 +1,77 @@
+{{- if .Values.monitoring.enabled }}
+apiVersion: v1
+kind: Service
+metadata: {name: {{ include "djinn.fullname" . }}-alertmanager, namespace: {{ include "djinn.namespace" . }}}
+spec:
+  selector:
+    {{- include "djinn.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: alertmanager
+  ports: [{name: http, port: 9093, targetPort: http}]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: {{ include "djinn.fullname" . }}-log-rotator, namespace: {{ include "djinn.namespace" . }}}
+spec:
+  selector:
+    {{- include "djinn.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: log-collector
+  ports: [{name: metrics, port: 9091, targetPort: metrics}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "djinn.fullname" . }}-prometheus
+  namespace: {{ include "djinn.namespace" . }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app.kubernetes.io/component: prometheus, app.kubernetes.io/instance: {{ .Release.Name }}}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/component: prometheus, app.kubernetes.io/instance: {{ .Release.Name }}}
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - name: prometheus
+          image: {{ .Values.monitoring.prometheus.image | quote }}
+          args: ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.path=/prometheus", "--storage.tsdb.retention.time={{ .Values.monitoring.prometheus.retention }}"]
+          ports: [{name: http, containerPort: 9090}]
+          resources: {{- toYaml .Values.monitoring.prometheus.resources | nindent 12 }}
+          volumeMounts: [{name: config, mountPath: /etc/prometheus, readOnly: true}, {name: state, mountPath: /prometheus}]
+      volumes:
+        - name: config
+          configMap: {name: {{ include "djinn.fullname" . }}-monitoring}
+        - name: state
+          emptyDir: {}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "djinn.fullname" . }}-alertmanager
+  namespace: {{ include "djinn.namespace" . }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app.kubernetes.io/component: alertmanager, app.kubernetes.io/instance: {{ .Release.Name }}}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/component: alertmanager, app.kubernetes.io/instance: {{ .Release.Name }}}
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - name: alertmanager
+          image: {{ .Values.monitoring.alertmanager.image | quote }}
+          args: ["--config.file=/etc/alertmanager/alertmanager.yml", "--storage.path=/alertmanager"]
+          ports: [{name: http, containerPort: 9093}]
+          resources: {{- toYaml .Values.monitoring.alertmanager.resources | nindent 12 }}
+          volumeMounts: [{name: config, mountPath: /etc/alertmanager, readOnly: true}, {name: webhook, mountPath: /etc/alertmanager-webhook, readOnly: true}, {name: state, mountPath: /alertmanager}]
+      volumes:
+        - name: config
+          configMap: {name: {{ include "djinn.fullname" . }}-monitoring}
+        - name: webhook
+          secret:
+            secretName: {{ .Values.monitoring.alertmanager.webhookSecret.name | quote }}
+            items: [{key: {{ .Values.monitoring.alertmanager.webhookSecret.key | quote }}, path: url}]
+        - name: state
+          emptyDir: {}
+{{- end }}

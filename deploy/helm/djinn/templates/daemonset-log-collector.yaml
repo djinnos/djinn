@@ -56,6 +56,10 @@ spec:
         - name: rotator
           image: {{ .Values.logCollector.rotatorImage | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: metrics
+              containerPort: 9091
+              protocol: TCP
           env:
             - name: DJINN_LOG_STORE_DIR
               value: /store/logs

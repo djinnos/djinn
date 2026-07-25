@@ -288,6 +288,27 @@ logCollector:
         cpu: 500m
         memory: 256Mi
 # -----------------------------------------------------------------------------
+# Incident monitoring (operator opt-in)
+# -----------------------------------------------------------------------------
+# The monitoring stack keeps seven days of pod-local state. Its webhook URL is
+# read solely from an operator-owned Secret, never from a Helm value.
+monitoring:
+  enabled: false
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    retention: 7d
+    resources:
+      requests: {cpu: 100m, memory: 256Mi}
+      limits: {cpu: "1", memory: 2Gi}
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    # Required when enabled; key contains a full HTTPS webhook URL.
+    webhookSecret: {name: "", key: url}
+    resources:
+      requests: {cpu: 50m, memory: 128Mi}
+      limits: {cpu: 500m, memory: 512Mi}
+  alerts: {dispatchStarts: 3, memoryPressureThreshold: 0.85}
+# -----------------------------------------------------------------------------
 # Storage
 # -----------------------------------------------------------------------------
 # RWX is required for the mirrors PVC on multi-node clusters — the controller

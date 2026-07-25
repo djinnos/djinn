@@ -1,0 +1,72 @@
+rule_files:
+  - incident-observability-rules.yaml
+evaluation_interval: 1m
+tests:
+  - name: healthy idle and one long run do not dispatch-alert
+    interval: 1m
+    input_series:
+      - series: 'djinn_taskrun_jobs_started_total'
+        values: '0+0x20'
+      - series: 'djinn_worker_completions_submitted_total'
+        values: '0+0x20'
+      - series: 'up{job="djinn-server"}'
+        values: '1+0x20'
+      - series: 'djinn_log_store_writable'
+        values: '1+0x20'
+      - series: 'up{job="djinn-log-rotator"}'
+        values: '1+0x20'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: DjinnDispatchWithoutCompletion
+        exp_alerts: []
+  - name: crash-loop dispatch fires while reset contributes zero
+    interval: 1m
+    input_series:
+      - series: 'djinn_taskrun_jobs_started_total'
+        values: '0+1x15 0+0x5'
+      - series: 'djinn_worker_completions_submitted_total'
+        values: '0+0x20'
+    alert_rule_test:
+      - eval_time: 14m
+        alertname: DjinnDispatchWithoutCompletion
+        exp_alerts:
+          - exp_labels: {severity: critical}
+      - eval_time: 20m
+        alertname: DjinnDispatchWithoutCompletion
+        exp_alerts: []
+      - eval_time: 19m
+        alertname: Watchdog
+        exp_alerts:
+          - exp_labels: {severity: none}
+  - name: memory server scrape log failure and rotator absence truth table
+    interval: 1m
+    input_series:
+      - series: 'process_resident_memory_bytes'
+        values: '900+0x20'
+      - series: 'djinn_server_memory_limit_bytes'
+        values: '1000+0x20'
+      - series: 'up{job="djinn-server"}'
+        values: '0+0x20'
+      - series: 'djinn_log_store_writable'
+        values: '0+0x20'
+      - series: 'djinn_log_store_evictions_total{reason="reserve"}'
+        values: '0+0x15 1+0x5'
+      - series: 'up{job="djinn-log-rotator"}'
+        values: '0+0x20'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: DjinnServerMemoryPressure
+        exp_alerts:
+          - exp_labels: {severity: warning}
+      - eval_time: 7m
+        alertname: DjinnServerMetricsMissing
+        exp_alerts:
+          - exp_labels: {job: djinn-server, severity: critical}
+      - eval_time: 4m
+        alertname: DjinnLogStoreUnavailable
+        exp_alerts:
+          - exp_labels: {severity: warning}
+      - eval_time: 4m
+        alertname: DjinnLogRotatorMissing
+        exp_alerts:
+          - exp_labels: {job: djinn-log-rotator, severity: warning}

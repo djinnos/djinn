@@ -1,0 +1,33 @@
+groups:
+  - name: incident-observability
+    rules:
+      - alert: DjinnDispatchWithoutCompletion
+        expr: increase(djinn_taskrun_jobs_started_total[15m]) >= 3 and increase(djinn_worker_completions_submitted_total[15m]) == 0
+        for: 5m
+        labels: {severity: critical}
+        annotations: {runbook: server/docs/runbooks/incident-observability.md}
+      - alert: DjinnServerMemoryPressure
+        expr: process_resident_memory_bytes / djinn_server_memory_limit_bytes > 0.85
+        for: 10m
+        labels: {severity: warning}
+        annotations: {runbook: server/docs/runbooks/incident-observability.md}
+      - alert: DjinnServerMetricsMissing
+        expr: up{job="djinn-server"} == 0
+        for: 5m
+        labels: {severity: critical}
+        annotations: {runbook: server/docs/runbooks/incident-observability.md}
+      - alert: DjinnLogStoreUnavailable
+        expr: djinn_log_store_writable == 0 or increase(djinn_log_store_evictions_total[15m]) > 0
+        for: 2m
+        labels: {severity: warning}
+        annotations: {runbook: server/docs/runbooks/incident-observability.md}
+      - alert: DjinnLogRotatorMissing
+        expr: up{job="djinn-log-rotator"} == 0
+        for: 2m
+        labels: {severity: warning}
+        annotations: {runbook: server/docs/runbooks/incident-observability.md}
+      - alert: Watchdog
+        expr: vector(1)
+        for: 1m
+        labels: {severity: none}
+        annotations: {runbook: server/docs/runbooks/incident-observability.md}
