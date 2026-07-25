@@ -144,6 +144,78 @@ pub fn read_file_cover(confidential_roots: &[PathBuf]) -> Vec<PathBuf> {
     cover
 }
 
+/// Arm a Landlock layer on `cmd` that denies reading file CONTENT beneath the
+/// confidential roots, and restricts **nothing else**.
+///
+/// This is for the command paths that are not under the full shell sandbox —
+/// notably project setup hooks, which are operator-configured but invoke the
+/// repository's own build tooling, so `build.rs`, an npm `postinstall` or a
+/// Makefile target still executes repository-controlled code there. Applying
+/// the full [`crate::linux::LandlockSandbox`] would additionally impose
+/// write-confinement and could break a hook that legitimately writes outside
+/// the worktree; this layer handles only `ReadFile`, so every other access
+/// stays exactly as it was. Landlock layers intersect, so it also composes
+/// safely with the full sandbox if both are ever applied.
+///
+/// No-op when Landlock is unavailable, or when no confidential root exists on
+/// this host — both cases leave the command's behaviour byte-identical.
+#[cfg(target_os = "linux")]
+pub fn deny_confidential_reads(cmd: &mut std::process::Command) {
+    deny_confidential_reads_beneath(cmd, &present_confidential_roots(CONFIDENTIAL_ROOTS));
+}
+
+/// [`deny_confidential_reads`] with an explicit root set, so tests can exercise
+/// the real layer against a fixture tree.
+#[cfg(target_os = "linux")]
+pub(crate) fn deny_confidential_reads_beneath(
+    cmd: &mut std::process::Command,
+    confidential_roots: &[PathBuf],
+) {
+    use landlock::{AccessFs, PathBeneath, PathFd, Ruleset, RulesetAttr, RulesetCreatedAttr};
+    use std::os::unix::process::CommandExt;
+
+    if !crate::probe_landlock() {
+        return;
+    }
+    // Computed in the parent: `read_dir` allocates and is not
+    // async-signal-safe. `pre_exec` only opens the resulting paths.
+    let cover = read_file_cover(confidential_roots);
+    if cover.len() == 1 && cover[0] == Path::new("/") {
+        // Nothing to protect on this host — do not arm a layer at all.
+        return;
+    }
+
+    // Safety: `pre_exec` runs in the forked child. The closure only performs
+    // Landlock syscalls and `open(2)` via `PathFd::new`, both async-signal-safe.
+    unsafe {
+        cmd.pre_exec(move || {
+            let to_io =
+                |e: std::io::Error| std::io::Error::new(std::io::ErrorKind::PermissionDenied, e);
+            let mut ruleset = Ruleset::default()
+                .handle_access(AccessFs::ReadFile)
+                .map_err(|e| to_io(std::io::Error::other(e.to_string())))?
+                .create()
+                .map_err(|e| to_io(std::io::Error::other(e.to_string())))?;
+            for path in &cover {
+                if let Ok(fd) = PathFd::new(path) {
+                    ruleset = ruleset
+                        .add_rule(PathBeneath::new(fd, AccessFs::ReadFile))
+                        .map_err(|e| to_io(std::io::Error::other(e.to_string())))?;
+                }
+            }
+            ruleset
+                .restrict_self()
+                .map_err(|e| to_io(std::io::Error::other(e.to_string())))?;
+            Ok(())
+        });
+    }
+}
+
+/// Non-Linux hosts have no Landlock; the task-run Pod is Linux-only, so this is
+/// a no-op that keeps call sites free of `cfg` noise.
+#[cfg(not(target_os = "linux"))]
+pub fn deny_confidential_reads(_cmd: &mut std::process::Command) {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -221,6 +293,59 @@ mod tests {
         );
         // Unrelated top-level entries stay readable.
         assert!(cover.contains(&PathBuf::from("/etc")));
+    }
+
+    /// The standalone read-denial layer must block the secret and leave
+    /// everything else — including writes outside the worktree, which the full
+    /// shell sandbox would deny — completely alone.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn read_denial_layer_blocks_the_secret_and_nothing_else() {
+        if !crate::probe_landlock() {
+            return;
+        }
+        // Outside every writable root the full sandbox grants, so no broader
+        // rule can hand `ReadFile` back. See the matching note in `linux.rs`.
+        let fixture = tempfile::tempdir_in(std::env::current_dir().expect("test directory"))
+            .expect("fixture");
+        let base = fixture.path().canonicalize().expect("canonical fixture");
+        let secret_dir = base.join("var/run/djinn");
+        std::fs::create_dir_all(&secret_dir).expect("secret dir");
+        let secret = secret_dir.join("credentials.bin");
+        std::fs::write(&secret, "LAYER-CANARY").expect("secret");
+        let neighbour = base.join("var/run/neighbour.txt");
+        std::fs::write(&neighbour, "NEIGHBOUR").expect("neighbour");
+        let roots = vec![secret_dir, base.join("var/run/secrets")];
+
+        let run = |script: &str, arg: &Path| {
+            let mut cmd = std::process::Command::new("sh");
+            cmd.args(["-c", script, "--"]).arg(arg);
+            deny_confidential_reads_beneath(&mut cmd, &roots);
+            cmd.output().expect("child should spawn")
+        };
+
+        let denied = run("cat \"$1\"", &secret);
+        assert!(!denied.status.success(), "the layer must deny the secret");
+        assert!(
+            !String::from_utf8_lossy(&denied.stdout).contains("LAYER-CANARY"),
+            "the canary leaked through the read-denial layer"
+        );
+
+        let allowed = run("cat \"$1\"", &neighbour);
+        assert!(
+            allowed.status.success(),
+            "a neighbouring read must still work: {}",
+            String::from_utf8_lossy(&allowed.stderr)
+        );
+
+        // The layer handles only `ReadFile`, so an ordinary write outside any
+        // worktree — which the full sandbox would deny — must still succeed.
+        let scratch = base.join("scratch.txt");
+        assert!(
+            run("printf ok > \"$1\"", &scratch).status.success(),
+            "the read-denial layer must not impose write confinement"
+        );
+        assert!(scratch.exists());
     }
 
     /// A nested pair must collapse to the broader exclusion, otherwise the
