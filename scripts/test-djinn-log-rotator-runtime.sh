@@ -5,7 +5,7 @@
 # it must run serially with other rotator runtime fixtures.
 set -eu
 
-SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+SCRIPT_DIR=${DJINN_LOG_ROTATOR_RUNTIME_SCRIPT_DIR:-$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)}
 REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
 SERVER_ROOT=$REPO_ROOT/server
 HELPER=$SCRIPT_DIR/djinn-observability-logs
@@ -148,6 +148,7 @@ assert_store_contract() {
     [ "$physical" = "$logical" ] || fail "logical sidecar ($logical) does not match complete active bytes ($physical)"
 }
 
+if [ "${DJINN_LOG_ROTATOR_RUNTIME_LIBRARY:-0}" != 1 ]; then
 start_rotator
 curl --silent --show-error --fail http://127.0.0.1:8687/healthz >/dev/null || fail 'ingest health endpoint failed'
 curl --silent --show-error --fail http://127.0.0.1:9091/healthz >/dev/null || fail 'metrics health endpoint failed'
@@ -176,3 +177,4 @@ assert_messages "$BASE/after-restart.out" 'before-restart-one,before-restart-two
 assert_store_contract
 
 printf 'ok - djinn log rotator real-process restart and retrieval fixture\n'
+fi
