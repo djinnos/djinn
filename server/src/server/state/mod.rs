@@ -1089,6 +1089,12 @@ impl AppState {
     /// inventory succeeds. The in-process runtime has no Kubernetes objects
     /// to inventory, so its (empty) listing trivially completes the gate.
     /// Observe records the same degradation but never denies.
+    ///
+    /// When the runtime owns a live Kubernetes client this runs the full
+    /// [`BuildAdmissionReconciler`] rather than a bare listing: recovery alone
+    /// retires Reserved rows and converts CreateInFlight into occupying
+    /// CreateUnknown, so without a reconciliation pass every occupying row
+    /// whose object died with its creator holds shared capacity permanently.
     async fn initialize_build_admission_inventory(&self) {
         let Some(admission) = self.inner.build_admission.clone() else {
             // Off: no controller, no readiness coupling.
@@ -1104,6 +1110,38 @@ impl AppState {
             );
             return;
         };
+        if let Some(inventory) = warmer
+            .as_any()
+            .downcast_ref::<djinn_k8s::K8sGraphWarmer>()
+            .and_then(djinn_k8s::K8sGraphWarmer::workload_inventory)
+        {
+            let report =
+                djinn_coordinator::build_admission_inventory::BuildAdmissionReconciler::new(
+                    admission.clone(),
+                    inventory,
+                )
+                .reconcile()
+                .await;
+            if report.blockers.is_empty() {
+                tracing::info!(
+                    mode = ?admission.mode(),
+                    adopted = report.adopted,
+                    released = report.released,
+                    reclaimed = report.reclaimed,
+                    stale = report.stale,
+                    fenced = report.fenced,
+                    readiness = ?admission.readiness(),
+                    "build_admission: Kubernetes inventory reconciliation complete"
+                );
+            } else {
+                tracing::error!(
+                    mode = ?admission.mode(),
+                    blockers = ?report.blockers,
+                    "build_admission: Kubernetes inventory reconciliation blocked; Enforce remains fail-closed"
+                );
+            }
+            return;
+        }
         match warmer.list_taskrun_jobs().await {
             Ok(jobs) => {
                 admission.mark_inventory_ready();

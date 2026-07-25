@@ -51,8 +51,8 @@ pub use token_review::TokenReviewer;
 pub use warm_job::{build_leased_warm_job, build_warm_job};
 pub use workload_inventory::{
     KubeWorkloadInventory, LABEL_ADMISSION_DOMAIN, LABEL_ADMISSION_GENERATION,
-    LABEL_ADMISSION_WORK_ID, UidGetResult, WorkloadInventory, WorkloadObjectKind, WorkloadRecord,
-    has_canonical_warm_signature,
+    LABEL_ADMISSION_WORK_ID, ObjectPresence, UidGetResult, WorkloadInventory, WorkloadObjectKind,
+    WorkloadRecord, has_canonical_warm_signature,
 };
 
 /// Re-exported `kube::Client` type so non-owner callers can name the

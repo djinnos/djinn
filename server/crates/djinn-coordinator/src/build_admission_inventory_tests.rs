@@ -12,8 +12,8 @@ use djinn_db::{
     ReserveAdmissionInput,
 };
 use djinn_k8s::{
-    LABEL_ADMISSION_DOMAIN, LABEL_ADMISSION_GENERATION, LABEL_ADMISSION_WORK_ID, UidGetResult,
-    WorkloadInventory, WorkloadObjectKind, WorkloadRecord,
+    LABEL_ADMISSION_DOMAIN, LABEL_ADMISSION_GENERATION, LABEL_ADMISSION_WORK_ID, ObjectPresence,
+    UidGetResult, WorkloadInventory, WorkloadObjectKind, WorkloadRecord,
 };
 use futures::FutureExt;
 use tokio::sync::RwLock;
@@ -26,6 +26,7 @@ use crate::{
 struct FakeInventory {
     records: RwLock<Result<Vec<WorkloadRecord>, String>>,
     gets: RwLock<HashMap<(String, String), UidGetResult>>,
+    presence: RwLock<HashMap<String, ObjectPresence>>,
     list_calls: std::sync::atomic::AtomicUsize,
 }
 
@@ -34,6 +35,7 @@ impl FakeInventory {
         Self {
             records: RwLock::new(Ok(records)),
             gets: RwLock::new(HashMap::new()),
+            presence: RwLock::new(HashMap::new()),
             list_calls: std::sync::atomic::AtomicUsize::new(0),
         }
     }
@@ -47,6 +49,10 @@ impl FakeInventory {
             .write()
             .await
             .insert((name.into(), uid.into()), result);
+    }
+
+    async fn presence_returns(&self, name: &str, result: ObjectPresence) {
+        self.presence.write().await.insert(name.into(), result);
     }
 }
 
@@ -65,6 +71,17 @@ impl WorkloadInventory for FakeInventory {
             .get(&(name.into(), uid.into()))
             .copied()
             .unwrap_or(UidGetResult::Uncertain)
+    }
+
+    /// Defaults to `Uncertain`: a probe that was never programmed must never
+    /// be read as proof that an object is gone.
+    async fn presence(&self, _kind: WorkloadObjectKind, name: &str) -> ObjectPresence {
+        self.presence
+            .read()
+            .await
+            .get(name)
+            .cloned()
+            .unwrap_or(ObjectPresence::Uncertain)
     }
 }
 
@@ -328,6 +345,84 @@ async fn authoritative_uid_not_found_releases_and_emits_wakeup() {
 
     assert_eq!(report.released, 1);
     assert!(notified.now_or_never().is_some());
+    assert!(
+        controller
+            .journal()
+            .list_active_rows()
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+/// A degraded API server answers `Uncertain`, which is not evidence. The row
+/// keeps occupying until a probe can actually answer.
+#[tokio::test]
+async fn uncertain_presence_never_reclaims_a_create_unknown_row() {
+    let controller = controller(BuildAdmissionMode::Enforce, 3);
+    let key = AdmissionJournalKey {
+        domain: AdmissionDomain::TaskObservation,
+        work_id: "uncertain".into(),
+        generation: 4,
+    };
+    controller
+        .journal()
+        .reserve(
+            &ReserveAdmissionInput {
+                key: key.clone(),
+                workload_kind: AdmissionWorkloadKind::Task,
+                creator_server_epoch: "old".into(),
+                object_name: "uncertain-job".into(),
+            },
+            3,
+        )
+        .await
+        .unwrap();
+    controller
+        .journal()
+        .mark_create_started(&CreateStartedInput {
+            key: key.clone(),
+            creator_server_epoch: "old".into(),
+            object_name: "uncertain-job".into(),
+        })
+        .await
+        .unwrap();
+    controller
+        .journal()
+        .recover_predecessor_epoch("old")
+        .await
+        .unwrap();
+
+    let inventory = Arc::new(FakeInventory::new(vec![]));
+    inventory
+        .presence_returns("uncertain-job", ObjectPresence::Uncertain)
+        .await;
+    let report = BuildAdmissionReconciler::with_settle_window(
+        controller.clone(),
+        inventory.clone(),
+        std::time::Duration::ZERO,
+    )
+    .reconcile()
+    .await;
+    assert_eq!(report.reclaimed, 0);
+    assert_eq!(report.stale, 0, "an unanswerable probe proves nothing");
+    assert_eq!(
+        controller.journal().list_active_rows().await.unwrap()[0].state,
+        AdmissionState::CreateUnknown
+    );
+
+    // The same probe, now able to answer, retires the row.
+    inventory
+        .presence_returns("uncertain-job", ObjectPresence::Absent)
+        .await;
+    let report = BuildAdmissionReconciler::with_settle_window(
+        controller.clone(),
+        inventory,
+        std::time::Duration::ZERO,
+    )
+    .reconcile()
+    .await;
+    assert_eq!(report.reclaimed, 1);
     assert!(
         controller
             .journal()

@@ -369,6 +369,12 @@ pub struct BuildAdmissionController {
     /// Seeded durable occupancy exceeded the configured cap at recovery.
     /// Cleared when a terminal release brings occupancy back within the cap.
     over_cap: AtomicBool,
+    /// Whether the loud over-cap alarm has already been logged for the current
+    /// episode. Occupancy is republished on every admission and every
+    /// lifecycle transition, so the alarm is edge-triggered: exactly one
+    /// `ERROR` when durable occupancy crosses the cap and exactly one `INFO`
+    /// when it comes back under, instead of one line per publication.
+    over_cap_alarm_active: AtomicBool,
     /// The broad Kubernetes inventory LIST completed successfully.
     inventory_ready: AtomicBool,
     /// The single-active topology gate (coordinator leadership) is held by
@@ -423,6 +429,7 @@ impl BuildAdmissionController {
             journal_healthy: AtomicBool::new(true),
             create_unknown_pending: AtomicU64::new(0),
             over_cap: AtomicBool::new(false),
+            over_cap_alarm_active: AtomicBool::new(false),
             inventory_ready: AtomicBool::new(true),
             topology_ready: AtomicBool::new(true),
             draining: AtomicBool::new(false),
@@ -697,7 +704,10 @@ impl BuildAdmissionController {
         if self.mode() == BuildAdmissionMode::Off {
             djinn_telemetry::build_slot_occupancy::set_slots_in_use(0);
             djinn_telemetry::build_slot_occupancy::set_slots_queued(0);
-            djinn_telemetry::build_admission::set_health(mode, self.cap, false, false, false);
+            djinn_telemetry::build_admission::set_health(
+                mode, self.cap, false, false, false, false,
+            );
+            djinn_telemetry::build_admission::set_stale_rows(mode, self.cap, 0);
             return;
         }
         // Keep individual health gauges independent. `readiness()` is a
@@ -735,6 +745,14 @@ impl BuildAdmissionController {
         } else {
             0
         };
+        // Durable occupancy above the cap is the exact shape that denies every
+        // admission once the cap is armed, and it is invisible in a log stream
+        // that only reports per-transition warnings. Export it as a bounded
+        // gauge and alarm on the edge so it is never something a human has to
+        // discover by reading thousands of warn lines.
+        let over_cap =
+            !journal_snapshot_degraded && i64::try_from(occupied).unwrap_or(i64::MAX) > self.cap;
+        self.report_over_cap_edge(over_cap, occupied);
         djinn_telemetry::build_slot_occupancy::set_slots_in_use(occupied);
         djinn_telemetry::build_slot_occupancy::set_slots_queued(queued);
         djinn_telemetry::build_admission::set_health(
@@ -745,7 +763,89 @@ impl BuildAdmissionController {
                 || !self.journal_recovered.load(Ordering::Acquire)
                 || !self.journal_healthy.load(Ordering::Acquire),
             self.create_unknown_pending.load(Ordering::Acquire) > 0,
+            over_cap,
         );
+    }
+
+    /// Log the over-cap alarm exactly once per episode, in both directions.
+    fn report_over_cap_edge(&self, over_cap: bool, occupancy: usize) {
+        if self
+            .over_cap_alarm_active
+            .compare_exchange(!over_cap, over_cap, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+        if over_cap {
+            tracing::error!(
+                occupancy,
+                cap = self.cap,
+                mode = ?self.mode(),
+                "build_admission: durable occupancy exceeds the configured cap; every \
+                 enforced admission will be denied until the excess is released. Run the \
+                 stale-admission-occupancy runbook."
+            );
+        } else {
+            tracing::info!(
+                occupancy,
+                cap = self.cap,
+                "build_admission: durable occupancy is back within the configured cap"
+            );
+        }
+    }
+
+    /// Publish the outcome of one reconciliation pass over durable occupancy.
+    ///
+    /// `stale_rows` is the number of occupying rows whose Kubernetes object the
+    /// pass proved absent, counted BEFORE reclamation, so the gauge reports the
+    /// size of the problem rather than the size of the fix.
+    pub fn publish_reconciliation(&self, stale_rows: usize, reclaimed: usize, fenced: usize) {
+        if stale_rows > 0 || reclaimed > 0 {
+            let level_is_alarm = i64::try_from(stale_rows).unwrap_or(i64::MAX) > self.cap;
+            if level_is_alarm {
+                tracing::error!(
+                    stale_rows,
+                    reclaimed,
+                    fenced,
+                    cap = self.cap,
+                    mode = ?self.mode(),
+                    "build_admission: reconciliation found more occupying rows with absent \
+                     Kubernetes objects than the configured cap; this is the population that \
+                     wedges the board when the cap is armed"
+                );
+            } else {
+                tracing::info!(
+                    stale_rows,
+                    reclaimed,
+                    fenced,
+                    cap = self.cap,
+                    "build_admission: reconciliation released stale durable occupancy"
+                );
+            }
+        }
+        if !self.process_metrics_enabled() {
+            return;
+        }
+        let mode = match self.mode() {
+            BuildAdmissionMode::Off => "off",
+            BuildAdmissionMode::Observe => "observe",
+            BuildAdmissionMode::Enforce => "enforce",
+        };
+        djinn_telemetry::build_admission::set_stale_rows(mode, self.cap, stale_rows as u64);
+        for _ in 0..reclaimed {
+            djinn_telemetry::build_admission::record_transition_outcome(
+                mode,
+                self.cap,
+                djinn_telemetry::build_admission::OUTCOME_RECLAIMED,
+            );
+        }
+        for _ in 0..fenced {
+            djinn_telemetry::build_admission::record_transition_outcome(
+                mode,
+                self.cap,
+                djinn_telemetry::build_admission::OUTCOME_RECLAIM_FENCED,
+            );
+        }
     }
 
     pub async fn admit(
@@ -3870,11 +3970,102 @@ mod tests {
             "djinn_build_admission_inventory_degraded",
             "djinn_build_admission_journal_degraded",
             "djinn_build_admission_create_unknown_health",
+            "djinn_build_admission_occupancy_over_cap",
+            "djinn_build_admission_stale_rows",
             "djinn_build_slots_in_use",
             "djinn_build_slots_queued",
         ] {
             assert_no_identity_labels(&rendered, metric);
         }
+    }
+
+    /// Durable occupancy above the cap must be readable as a bounded gauge, and
+    /// reclamation must report through the same `outcome` family the lifecycle
+    /// transitions report through — not a parallel metric nobody queries.
+    #[tokio::test]
+    async fn telemetry_reports_over_cap_occupancy_and_reclamation_outcomes() {
+        let _guard = telemetry_guard();
+        djinn_telemetry::init().unwrap();
+
+        let controller = controller(BuildAdmissionMode::Enforce, 2);
+        controller.enable_process_metrics_for_test();
+        controller.mark_ready();
+        let labels = [("effective_mode", "enforce"), ("effective_cap", "2")];
+
+        controller.publish_metrics().await;
+        assert_eq!(
+            sample_value(
+                &djinn_telemetry::render().unwrap(),
+                "djinn_build_admission_occupancy_over_cap",
+                &labels
+            ),
+            0.0
+        );
+
+        for index in 0..2 {
+            WarmAdmission::admit(&controller, warm(&format!("over-cap-{index}")))
+                .await
+                .expect("a fresh controller admits up to the cap");
+        }
+        // The cap itself refuses a third reservation, so drive occupancy above
+        // it the way a predecessor epoch does: adopt a durable row directly.
+        controller
+            .journal()
+            .adopt_live(&djinn_db::AdoptLiveAdmissionInput {
+                key: AdmissionJournalKey {
+                    domain: AdmissionDomain::WarmBuild,
+                    work_id: "seeded-over-cap".into(),
+                    generation: 0,
+                },
+                workload_kind: AdmissionWorkloadKind::Warm,
+                creator_server_epoch: "predecessor".into(),
+                object_name: "seeded-over-cap-job".into(),
+                object_uid: "seeded-uid".into(),
+            })
+            .await
+            .unwrap();
+        controller.publish_metrics().await;
+        let rendered = djinn_telemetry::render().unwrap();
+        assert_eq!(
+            sample_value(
+                &rendered,
+                "djinn_build_admission_occupancy_over_cap",
+                &labels
+            ),
+            1.0,
+            "occupancy above the cap must be visible without reading a log"
+        );
+
+        controller.publish_reconciliation(7, 5, 2);
+        let rendered = djinn_telemetry::render().unwrap();
+        assert_eq!(
+            sample_value(&rendered, "djinn_build_admission_stale_rows", &labels),
+            7.0
+        );
+        assert_eq!(
+            sample_value(
+                &rendered,
+                "djinn_build_admission_transition_total",
+                &[
+                    ("effective_mode", "enforce"),
+                    ("effective_cap", "2"),
+                    ("outcome", "reclaimed")
+                ]
+            ),
+            5.0
+        );
+        assert_eq!(
+            sample_value(
+                &rendered,
+                "djinn_build_admission_transition_total",
+                &[
+                    ("effective_mode", "enforce"),
+                    ("effective_cap", "2"),
+                    ("outcome", "reclaim_fenced")
+                ]
+            ),
+            2.0
+        );
     }
 
     struct FakeQueueClock {
