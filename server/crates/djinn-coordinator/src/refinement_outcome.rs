@@ -16,8 +16,9 @@ use djinn_core::refinement_liveness::{
 };
 use djinn_db::{
     CompleteRefinementIntentRequest, EffectiveCreatorProvenance, LoadRefinementRunSnapshotRequest,
-    ParkRefinementRunFromIntentRequest, ProposalRepository, SourceIntentTransitionRequest,
-    TaskRepository, TerminalRefinementRunFromIntentRequest, UserSettingsRepository,
+    ParkRefinementRunFromIntentRequest, ProposalRepository, ResolveRefinementHumanReviewRequest,
+    SourceIntentTransitionRequest, TaskRepository, TerminalRefinementRunFromIntentRequest,
+    UserSettingsRepository,
 };
 
 use super::refinement::{
@@ -728,7 +729,7 @@ impl CoordinatorActor {
         &mut self,
         proposal_id: &str,
         accept: bool,
-        feedback: Option<String>,
+        _feedback: Option<String>,
     ) -> Result<(), String> {
         let Some((run_id, state)) = self
             .active_refinements
@@ -741,12 +742,13 @@ impl CoordinatorActor {
         if !state.is_awaiting_human_review() {
             return Err("refinement is not awaiting human review".into());
         }
+        if state.run_id.is_empty() || state.generation <= 0 {
+            return Err("human review requires an exact durable refinement run".into());
+        }
 
         // The head may have changed after the Judge parked the tribunal. Check
-        // the same shared latest-head result immediately before a human accept
-        // can act on that ready verdict. A corrupt legacy head is recomputed
-        // synchronously and resumed as a blocking adjudication; a later clean
-        // material revision naturally passes without touching lint history.
+        // readiness before asking the repository to atomically terminalize the
+        // exact parked generation.
         if accept {
             let readiness = self.evaluate_proposal_readiness(proposal_id).await;
             if !readiness.as_ref().is_some_and(|result| result.ready) {
@@ -757,153 +759,47 @@ impl CoordinatorActor {
                         "Current proposal head could not be resolved for shared DoR/lint readiness."
                             .to_string()
                     });
-                if let Some(state) = self.active_refinements.get_mut(&run_id) {
-                    state.record_judge_verdict(&JudgeVerdictResult {
-                        body: context.clone(),
-                        blocking: true,
-                    });
-                }
                 return Err(format!(
                     "cannot accept refinement while current-head machine readiness is blocking: {context}"
                 ));
             }
         }
 
-        if !accept
-            && let Err(e) = self
-                .reset_live_spec_to_revision(proposal_id, state.snapshot_revision_seq)
-                .await
-        {
-            tracing::warn!(
-                proposal_id = %proposal_id,
-                error = %e,
-                "Failed to revert spec to snapshot on reject"
-            );
-        }
-
-        if let Some(s) = self.active_refinements.get_mut(&run_id) {
-            s.resolve_human_review(accept, false);
-        }
-
-        let reason_tag = if accept {
-            "human_accepted"
-        } else {
-            "human_rejected"
-        };
-        let meta = serde_json::json!({
-            "source": "human_review",
-            "event": "refinement_stop",
-            "reason_tag": reason_tag,
-            "feedback": feedback,
-        });
-        let event_bus = crate::events::event_bus_for(&self.events_tx);
-        let proposal_repo = ProposalRepository::new(self.db.clone(), event_bus);
-        if let Err(e) = proposal_repo
-            .record_refinement_lifecycle(proposal_id, "refinement_stop", Some(&meta))
-            .await
-        {
-            tracing::warn!(
-                proposal_id = %proposal_id,
-                error = %e,
-                "Failed to persist human-review resolution"
-            );
-        }
-
-        self.refinement_sessions.remove(&run_id);
-        self.active_refinements.retain(|_, s| !s.is_complete());
-        tracing::info!(
-            proposal_id = %proposal_id,
-            accept,
-            "Human resolved refinement review"
+        let repo = ProposalRepository::new(
+            self.db.clone(),
+            crate::events::event_bus_for(&self.events_tx),
         );
-        Ok(())
-    }
-
-    /// Reset the live proposal spec to the state at `target_revision_seq`.
-    /// Best-effort: logs a warning and continues on failure.
-    async fn reset_live_spec_to_revision(
-        &self,
-        proposal_id: &str,
-        target_revision_seq: i32,
-    ) -> Result<(), String> {
-        let event_bus = crate::events::event_bus_for(&self.events_tx);
-        let proposal_repo = ProposalRepository::new(self.db.clone(), event_bus);
-
-        let revisions = proposal_repo
-            .revisions(proposal_id)
+        let resolved = repo
+            .resolve_refinement_human_review(ResolveRefinementHumanReviewRequest {
+                run_id: state.run_id.clone(),
+                generation: state.generation,
+                snapshot_revision_seq: state.snapshot_revision_seq,
+                accept,
+            })
             .await
-            .map_err(|e| format!("failed to read revisions: {e}"))?;
-
-        let target_rev = revisions
-            .iter()
-            .rev()
-            .find(|r| r.event_kind == "spec_revision" && r.seq <= target_revision_seq);
-
-        let Some(rev) = target_rev else {
-            return Err(format!(
-                "no spec_revision found at or before seq {target_revision_seq}"
-            ));
-        };
-
-        if rev.body.is_empty() && rev.title.is_empty() {
-            return Ok(());
+            .map_err(|error| format!("failed to resolve exact human review transition: {error}"))?;
+        if !resolved {
+            return Err("exact refinement run is no longer awaiting human review".into());
         }
 
-        let event_bus2 = crate::events::event_bus_for(&self.events_tx);
-        let proposal_repo2 = ProposalRepository::new(self.db.clone(), event_bus2);
-        let current = proposal_repo2
-            .get(proposal_id)
-            .await
-            .map_err(|e| format!("failed to read proposal: {e}"))?
-            .ok_or_else(|| format!("proposal not found: {proposal_id}"))?;
-
-        let event_bus3 = crate::events::event_bus_for(&self.events_tx);
-        let proposal_repo3 = ProposalRepository::new(self.db.clone(), event_bus3);
-        proposal_repo3
-            .update(
-                proposal_id,
-                djinn_db::ProposalUpdateInput {
-                    title: &rev.title,
-                    body: &rev.body,
-                    acceptance_criteria: &rev.acceptance_criteria,
-                    status: &current.status,
-                    superseded_by: current.superseded_by.as_deref(),
-                    body_format: Some(&rev.body_format),
-                    event_metadata: Some(&serde_json::json!({
-                        "source": "refinement_reject_revert",
-                        "reverted_from_seq": current.latest_revision_seq,
-                        "reverted_to_seq": target_revision_seq,
-                    })),
-                },
-            )
-            .await
-            .map_err(|e| format!("failed to revert proposal body: {e}"))?;
-
+        if let Some(current) = self.active_refinements.get_mut(&run_id) {
+            current.resolve_human_review(accept, false);
+        }
+        self.refinement_sessions.remove(&run_id);
+        self.active_refinements
+            .retain(|_, state| !state.is_complete());
+        tracing::info!(proposal_id = %proposal_id, accept, run_id = %run_id, "Human resolved exact refinement review");
         Ok(())
     }
 
-    /// Persist refinement-stop lifecycle metadata.
+    /// Stop persistence is exclusively owned by exact run transitions.  This
+    /// legacy proposal-scoped helper intentionally does not write a lifecycle row.
     pub(super) async fn persist_refinement_stop(&self, proposal_id: &str, reason: &StopReason) {
-        let event_bus = crate::events::event_bus_for(&self.events_tx);
-        let proposal_repo = ProposalRepository::new(self.db.clone(), event_bus);
-
-        let stop_meta = serde_json::json!({
-            "source": "refinement_loop",
-            "event": "refinement_stop",
-            "reason_tag": reason.tag(),
-            "reason_detail": format!("{reason:?}"),
-        });
-
-        if let Err(e) = proposal_repo
-            .record_refinement_lifecycle(proposal_id, "refinement_stop", Some(&stop_meta))
-            .await
-        {
-            tracing::warn!(
-                proposal_id = %proposal_id,
-                error = %e,
-                "Failed to persist refinement_stop lifecycle metadata"
-            );
-        }
+        tracing::warn!(
+            proposal_id,
+            reason = reason.tag(),
+            "ignoring uncorrelated refinement stop request"
+        );
     }
 
     /// Read the `diverse_refinement` user setting for the proposal's owner.
@@ -1420,31 +1316,11 @@ impl CoordinatorActor {
 }
 
 fn durable_stop_reason(reason: Option<&StopReason>) -> RefinementStopReason {
-    match reason {
-        Some(StopReason::RoundCap) => RefinementStopReason::RoundCap,
-        Some(StopReason::SpawnCap) => RefinementStopReason::SpawnCap,
-        Some(StopReason::RepeatedObjection {
-            signature,
-            occurrences,
-        }) => RefinementStopReason::RepeatedObjection {
-            signature: signature.clone(),
-            occurrences: *occurrences as u64,
-        },
-        Some(StopReason::HumanAccepted) => RefinementStopReason::HumanAccepted,
-        Some(StopReason::HumanRejected) => RefinementStopReason::HumanRejected,
-        Some(StopReason::AgentFailure { role, error }) => RefinementStopReason::AgentFailure {
-            role: match role.as_str() {
-                "advocate" => RefinementRole::Advocate,
-                "judge" => RefinementRole::Judge,
-                _ => RefinementRole::Adversary,
-            },
-            error_code: "agent_failure".into(),
-            message: error.clone(),
-        },
-        _ => RefinementStopReason::Interrupted {
+    reason
+        .cloned()
+        .unwrap_or(RefinementStopReason::Interrupted {
             detail: Some("refinement completed without a typed reason".into()),
-        },
-    }
+        })
 }
 
 /// Classify and handle the result of a `close_refinement_task` transition.

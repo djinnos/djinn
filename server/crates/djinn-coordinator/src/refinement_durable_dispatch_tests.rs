@@ -2,7 +2,8 @@ use djinn_core::{
     events::{DjinnEventEnvelope, EventBus},
     models::TaskRefinementCorrelation,
     refinement_liveness::{
-        DbTimestamp, RefinementIntentState, RefinementPhase, RefinementStopReason,
+        DbTimestamp, RefinementIntentState, RefinementPhase, RefinementRunState,
+        RefinementStopReason,
     },
 };
 use djinn_db::{
@@ -399,6 +400,19 @@ async fn materialized_enqueue_failure_is_retried_with_the_same_task() {
     let (run_id, generation) =
         admit_run(&repo, &fixture.proposal_id, "durable-enqueue-retry").await;
     let intent_id = only_intent(&repo, &run_id, generation).await;
+    let lifecycle_before = repo
+        .revisions(&fixture.proposal_id)
+        .await
+        .expect("read lifecycle before enqueue failure")
+        .into_iter()
+        .filter(|revision| revision.event_kind == "refinement_stop")
+        .count();
+    let projection =
+        super::super::refinement::RefinementLoopState::new(fixture.proposal_id.clone(), 0)
+            .with_run_identity(run_id.clone(), generation)
+            .with_attributed_user(Some(fixture.user_id.clone()));
+    actor.active_refinements.insert(run_id.clone(), projection);
+    let projection_before = format!("{:#?}", actor.active_refinements[&run_id]);
 
     actor.drive_active_refinements().await;
     let task_repo = TaskRepository::new(db.clone(), EventBus::noop());
@@ -414,6 +428,34 @@ async fn materialized_enqueue_failure_is_retried_with_the_same_task() {
             .expect("read retry intent")[0]
             .state,
         RefinementIntentState::Materialized
+    );
+    let failed_enqueue_snapshot = repo
+        .load_refinement_run_snapshot(LoadRefinementRunSnapshotRequest {
+            run_id: run_id.clone(),
+            heartbeat_grace_millis: 60_000,
+        })
+        .await
+        .expect("read exact run after enqueue failure")
+        .expect("exact run remains");
+    assert_eq!(
+        failed_enqueue_snapshot.snapshot.run.state,
+        RefinementRunState::Active
+    );
+    assert_eq!(failed_enqueue_snapshot.snapshot.run.terminal_reason, None);
+    assert_eq!(
+        format!("{:#?}", actor.active_refinements[&run_id]),
+        projection_before,
+        "enqueue failure must not destructively mutate the run projection"
+    );
+    assert_eq!(
+        repo.revisions(&fixture.proposal_id)
+            .await
+            .expect("read lifecycle after enqueue failure")
+            .into_iter()
+            .filter(|revision| revision.event_kind == "refinement_stop")
+            .count(),
+        lifecycle_before,
+        "pool failure must not append a proposal-scoped lifecycle stop"
     );
 
     actor.pool = refinement_cap_tests::spawn_test_pool(&db, 1);

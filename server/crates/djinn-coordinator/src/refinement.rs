@@ -22,6 +22,8 @@
 
 use std::collections::HashMap;
 
+use djinn_core::refinement_liveness::{RefinementRole, RefinementStopReason};
+
 // ─── Constants ──────────────────────────────────────────────────────────────
 
 /// Default hard round cap.
@@ -39,67 +41,21 @@ pub const DEFAULT_REPEAT_OBJECTION_THRESHOLD: usize = 2;
 
 // ─── Public types ───────────────────────────────────────────────────────────
 
-/// Stop reason for the refinement loop. Every termination path produces a
-/// deterministic reason that is persisted for audit and used in UI status.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum StopReason {
-    /// Two consecutive adversary rounds produced no new blocking objections.
-    AdversaryDry,
-    /// Hard round cap reached.
-    RoundCap,
-    /// Total agent spawn cap reached.
-    SpawnCap,
-    /// A blocking objection with the same normalized signature appeared
-    /// `repeat_objection_threshold` times across rounds.
-    RepeatedObjection {
-        signature: String,
-        occurrences: usize,
-    },
-    /// An agent session failed (crashed, timeout, empty response, etc.).
-    AgentFailure { role: String, error: String },
-    /// The human accepted the refined spec at the final review.
-    HumanAccepted,
-    /// The human rejected the refined spec at the final review (no re-loop).
-    HumanRejected,
-    /// The in-memory loop was lost across a server restart and reconciled by
-    /// startup recovery. The spec is left as-is; the user can start a fresh
-    /// refinement.
-    Interrupted,
-}
+/// The state machine uses the shared durable stop contract directly. Keeping
+/// this alias avoids a coordinator-local tag/context serialization boundary.
+pub type StopReason = RefinementStopReason;
 
-impl StopReason {
-    /// Machine-readable tag for telemetry and event metadata.
-    pub fn tag(&self) -> &'static str {
-        match self {
-            StopReason::AdversaryDry => "adversary_dry",
-            StopReason::RoundCap => "round_cap",
-            StopReason::SpawnCap => "spawn_cap",
-            StopReason::RepeatedObjection { .. } => "repeated_objection",
-            StopReason::AgentFailure { .. } => "agent_failure",
-            StopReason::HumanAccepted => "human_accepted",
-            StopReason::HumanRejected => "human_rejected",
-            StopReason::Interrupted => "interrupted",
-        }
-    }
-
-    /// Best-effort reconstruction of a stop reason from its persisted `tag`.
-    ///
-    /// Only the field-free variants round-trip; reasons that carry additional
-    /// context (`RepeatedObjection`, `AgentFailure`) cannot be rebuilt from the
-    /// tag alone and return `None`. Used by startup recovery to restore the
-    /// parked stop reason on an awaiting-review refinement. The parked phase is
-    /// what drives status/resolve, so a `None` here is a benign loss of the
-    /// display reason, never a correctness issue.
-    pub fn from_tag(tag: &str) -> Option<StopReason> {
-        match tag {
-            "adversary_dry" => Some(StopReason::AdversaryDry),
-            "round_cap" => Some(StopReason::RoundCap),
-            "spawn_cap" => Some(StopReason::SpawnCap),
-            "human_accepted" => Some(StopReason::HumanAccepted),
-            "human_rejected" => Some(StopReason::HumanRejected),
-            "interrupted" => Some(StopReason::Interrupted),
-            _ => None,
-        }
+/// Convert the coordinator phase to the canonical durable role identity.
+pub fn role_for_phase(phase: RefinementPhase) -> RefinementRole {
+    match phase {
+        RefinementPhase::AdversaryAttack => RefinementRole::Adversary,
+        RefinementPhase::AdvocateRevision => RefinementRole::Advocate,
+        RefinementPhase::JudgeAdjudication => RefinementRole::Judge,
+        // Callers have already gated parks and terminal states before mapping
+        // a role. There is no string fallback for an invalid phase.
+        RefinementPhase::AwaitingHumanReview
+        | RefinementPhase::Complete
+        | RefinementPhase::AwaitingEvidence => unreachable!("non-dispatchable refinement phase"),
     }
 }
 
@@ -371,8 +327,9 @@ impl RefinementLoopState {
                 && !self.pending_advocate_lint_violations.is_empty()
             {
                 StopReason::AgentFailure {
-                    role: "advocate".into(),
-                    error: "SPEC_LINT_REJECTED persisted until the established session/spawn cap"
+                    role: RefinementRole::Advocate,
+                    error_code: "spec_lint_rejected".into(),
+                    message: "SPEC_LINT_REJECTED persisted until the established session/spawn cap"
                         .into(),
                 }
             } else {
@@ -425,7 +382,7 @@ impl RefinementLoopState {
         if let Some((sig, count)) = self.detect_repeated_signature() {
             let reason = StopReason::RepeatedObjection {
                 signature: sig,
-                occurrences: count,
+                occurrences: count as u64,
             };
             self.escalate(reason.clone());
             return AdversaryPassOutcome::Escalated(reason);
@@ -999,8 +956,9 @@ mod tests {
     fn agent_failure_terminates_loop() {
         let mut state = RefinementLoopState::new("p1", 0);
         state.terminate(StopReason::AgentFailure {
-            role: "adversary".into(),
-            error: "session crashed".into(),
+            role: RefinementRole::Adversary,
+            error_code: "session_crashed".into(),
+            message: "session crashed".into(),
         });
         assert!(state.is_complete());
         assert!(matches!(
@@ -1083,53 +1041,62 @@ mod tests {
         assert!(sig.ends_with('”'));
     }
 
-    // ── StopReason tag ───────────────────────────────────────────────────
+    // ── Shared typed stop contract ───────────────────────────────────────
 
     #[test]
-    fn stop_reason_tags_are_stable() {
-        assert_eq!(StopReason::AdversaryDry.tag(), "adversary_dry");
-        assert_eq!(StopReason::RoundCap.tag(), "round_cap");
-        assert_eq!(StopReason::SpawnCap.tag(), "spawn_cap");
-        assert_eq!(
-            StopReason::RepeatedObjection {
-                signature: "x".into(),
-                occurrences: 2,
-            }
-            .tag(),
-            "repeated_objection"
-        );
-        assert_eq!(
-            StopReason::AgentFailure {
-                role: "advocate".into(),
-                error: "timeout".into(),
-            }
-            .tag(),
-            "agent_failure"
-        );
-        assert_eq!(StopReason::HumanAccepted.tag(), "human_accepted");
-        assert_eq!(StopReason::HumanRejected.tag(), "human_rejected");
-    }
-
-    #[test]
-    fn stop_reason_from_tag_roundtrips_field_free_variants() {
-        for reason in [
+    fn every_typed_stop_reason_round_trips_structured_context_without_role_fallback() {
+        let reasons = vec![
             StopReason::AdversaryDry,
             StopReason::RoundCap,
             StopReason::SpawnCap,
+            StopReason::RepeatedObjection {
+                signature: "missing acceptance criteria".into(),
+                occurrences: 2,
+            },
+            StopReason::AgentFailure {
+                role: RefinementRole::Advocate,
+                error_code: "revision_failed".into(),
+                message: "advocate could not save the revision".into(),
+            },
+            StopReason::AgentFailure {
+                role: RefinementRole::Adversary,
+                error_code: "session_timeout".into(),
+                message: "adversary session timed out".into(),
+            },
+            StopReason::AgentFailure {
+                role: RefinementRole::Judge,
+                error_code: "verdict_failed".into(),
+                message: "judge could not issue a verdict".into(),
+            },
+            // The convergence aliases remain distinct typed outcomes.
             StopReason::HumanAccepted,
             StopReason::HumanRejected,
-            StopReason::Interrupted,
-        ] {
-            assert_eq!(StopReason::from_tag(reason.tag()), Some(reason));
-        }
-    }
+            StopReason::Interrupted {
+                detail: Some("coordinator restarted".into()),
+            },
+            StopReason::ReapedPhantom {
+                prior_run_id: "run-previous".into(),
+                generation: 7,
+                evidence_summary: "expired lease with no materialized task".into(),
+            },
+            StopReason::OperatorStop {
+                actor: "operator-42".into(),
+                reason: Some("manual cancellation".into()),
+            },
+            StopReason::UnknownLegacy {
+                original_value: "historic_stop".into(),
+                source_row: "proposal lifecycle row".into(),
+            },
+        ];
 
-    #[test]
-    fn stop_reason_from_tag_returns_none_for_fielded_and_unknown() {
-        // Variants that carry context cannot be rebuilt from the tag alone.
-        assert_eq!(StopReason::from_tag("repeated_objection"), None);
-        assert_eq!(StopReason::from_tag("agent_failure"), None);
-        assert_eq!(StopReason::from_tag("nonsense"), None);
+        for reason in reasons {
+            let wire = serde_json::to_value(&reason).expect("typed reason serializes");
+            assert_eq!(wire["tag"], reason.tag());
+            assert_eq!(
+                serde_json::from_value::<StopReason>(wire).expect("typed reason deserializes"),
+                reason
+            );
+        }
     }
 
     // ── Restored awaiting-review park (startup recovery) ─────────────────
