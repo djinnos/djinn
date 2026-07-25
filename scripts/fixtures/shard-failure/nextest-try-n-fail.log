@@ -1,3 +1,49 @@
-[31;1m  TRY 3 FAIL[0m [   0.483s] (2477/2842) [35;1mdjinn-provider[0m [36mstream_event_consumer_audit[0m[36m::[0m[34;1mchecked_in_classification_covers_every_production_stream_event_match[0m
-     Summary [ 196.905s] 2842 tests run: 2841 passed, 1 failed, 0 skipped
-  TRY 3 FAIL [   0.483s] (2477/2842) djinn-provider stream_event_consumer_audit::checked_in_classification_covers_every_production_stream_event_match
+[32;1m Nextest run[0m ID [1mb4689864-1a40-4b1b-9312-5497a9c5f809[0m with nextest profile: [1mpull-request[0m
+[32;1m    Starting[0m [1m2842[0m tests across [1m110[0m binaries ([1m8481[0m tests and [1m50[0m binaries [33;1mskipped[0m, including [1m8473[0m tests and [1m50[0m binaries via [1mprofile.pull-request.default-filter[0m)
+[32;1m        PASS[0m [   0.011s] (2363/2842) [35;1mdjinn-runtime[0m [36mspec::tests[0m[36m::[0m[34;1mfailed_outcome_throttle_without_retry_after_bincode_roundtrip[0m
+[32;1m        PASS[0m [   0.007s] (2364/2842) [35;1mdjinn-runtime[0m [36mspec::tests[0m[36m::[0m[34;1mtask_run_report_bincode_roundtrip[0m
+[35;1m  TRY 1 FAIL[0m [   0.526s] (─────────) [35;1mdjinn-provider::stream_event_consumer_audit[0m [34;1mchecked_in_classification_covers_every_production_stream_event_match[0m
+[35;1m [0m [35;1mstdout[0m [35;1m───[0m
+
+    running 1 test
+    test checked_in_classification_covers_every_production_stream_event_match ... FAILED
+
+    failures:
+
+    failures:
+        checked_in_classification_covers_every_production_stream_event_match
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.52s
+    [0m
+[35;1m [0m [35;1mstderr[0m [35;1m───[0m
+[35;1m  TRY 2 FAIL[0m [   0.491s] (─────────) [35;1mdjinn-provider::stream_event_consumer_audit[0m [34;1mchecked_in_classification_covers_every_production_stream_event_match[0m
+[31;1m  TRY 3 FAIL[0m [   0.483s] (2477/2842) [35;1mdjinn-provider::stream_event_consumer_audit[0m [34;1mchecked_in_classification_covers_every_production_stream_event_match[0m
+[31;1m [0m [31;1mstdout[0m [31;1m───[0m
+
+    running 1 test
+    test checked_in_classification_covers_every_production_stream_event_match ... FAILED
+
+    failures:
+
+    failures:
+        checked_in_classification_covers_every_production_stream_event_match
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.48s
+    [0m
+[31;1m [0m [31;1mstderr[0m [31;1m───[0m
+
+    [0m[31;1mthread 'checked_in_classification_covers_every_production_stream_event_match' (25382) panicked at crates/djinn-provider/tests/stream_event_consumer_audit.rs:228:5:[0m
+    [31;1massertion `left == right` failed: update the classification fixture for every production StreamEvent match site; this audit is not behavioral coverage[0m
+      left: {"server/crates/djinn-agent/src/actors/slot/supervisor_runner.rs::await_report_from_stream#1", "server/crates/djinn-agent/src/direct_services.rs::append_direct_response_event#1", "server/crates/djinn-compaction/src/summarizer.rs::call_llm_for_summary#1", "server/crates/djinn-k8s/src/runtime.rs::record_arbiter_session_termination#1", "server/crates/djinn-provider/src/completion.rs::collect_completion#1", "server/crates/djinn-slot/src/reply_loop/streaming.rs::apply_persistence_event#1", "server/crates/djinn-slot/src/reply_loop/streaming.rs::consume_provider_stream#1", "server/src/server/chat/handler.rs::drain_provider_turn#1", "server/src/server/chat/handler.rs::generate_chat_title#1"}
+     right: {"server/crates/djinn-agent/src/actors/slot/supervisor_runner.rs::await_report_from_stream#1", "server/crates/djinn-agent/src/direct_services.rs::append_direct_response_event#1", "server/crates/djinn-compaction/src/summarizer.rs::call_llm_for_summary#1", "server/crates/djinn-provider/src/completion.rs::collect_completion#1", "server/crates/djinn-slot/src/reply_loop/streaming.rs::apply_persistence_event#1", "server/crates/djinn-slot/src/reply_loop/streaming.rs::consume_provider_stream#1", "server/src/server/chat/handler.rs::drain_provider_turn#1", "server/src/server/chat/handler.rs::generate_chat_title#1"}
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace[0m
+
+[31;1m  Cancelling[0m due to [31;1mtest failure[0m: [1m3[0m tests still running
+[32;1m        PASS[0m [   0.614s] (2478/2842) [35;1mdjinn-server[0m [36mserver::chat::tests::compaction[0m[36m::[0m[34;1mnewer_boundary_with_stale_tail_hash_falls_back[0m
+[32;1m        PASS[0m [   0.740s] (2479/2842) [35;1mdjinn-server[0m [36mserver::chat::compaction_boundary::tests[0m[36m::[0m[34;1mrecord_and_complete_chat_compaction_boundary[0m
+[32;1m        PASS[0m [   0.733s] (2480/2842) [35;1mdjinn-server[0m [36mserver::chat::tests::interruption[0m[36m::[0m[34;1mhttp_completion_aggregates_consumes_and_does_not_reinject_notices[0m
+────────────
+[31;1m     Summary[0m [ 196.905s] [1m2480[0m/[1m2842[0m tests run: [1m2479[0m [32;1mpassed[0m ([1m1[0m [33;1mleaky[0m), [1m1[0m [31;1mfailed[0m, [1m8481[0m [33;1mskipped[0m
+[31;1m  TRY 3 FAIL[0m [   0.483s] (2477/2842) [35;1mdjinn-provider::stream_event_consumer_audit[0m [34;1mchecked_in_classification_covers_every_production_stream_event_match[0m
+[33;1mwarning[0m: [1m362[0m/[1m2842[0m tests were not run due to [33;1mtest failure[0m (run with [1m--no-fail-fast[0m to run all tests, or run with [1m--max-fail[0m)
+[31;1merror[0m: test run failed

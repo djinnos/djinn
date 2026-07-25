@@ -1,5 +1,11 @@
-        FAIL [   0.012s] (1/2) djinn-db repositories::note::tests::rrf_orders_by_fused_rank
-        FAIL [   0.483s] (2/2) djinn-provider stream_event_consumer_audit::checked_in_classification_covers_every_production_stream_event_match
-     Summary [   0.500s] 2 tests run: 0 passed, 2 failed, 0 skipped
-        FAIL [   0.012s] (1/2) djinn-db repositories::note::tests::rrf_orders_by_fused_rank
-        FAIL [   0.483s] (2/2) djinn-provider stream_event_consumer_audit::checked_in_classification_covers_every_production_stream_event_match
+[32;1m Nextest run[0m ID [1mb4689864-1a40-4b1b-9312-5497a9c5f809[0m with nextest profile: [1mpull-request[0m
+[32;1m    Starting[0m [1m2842[0m tests across [1m110[0m binaries ([1m8481[0m tests and [1m50[0m binaries [33;1mskipped[0m, including [1m8473[0m tests and [1m50[0m binaries via [1mprofile.pull-request.default-filter[0m)
+[32;1m        PASS[0m [   0.011s] (2363/2842) [35;1mdjinn-runtime[0m [36mspec::tests[0m[36m::[0m[34;1mfailed_outcome_throttle_without_retry_after_bincode_roundtrip[0m
+[31;1m        FAIL[0m [   0.104s] (11/2842) [35;1mdjinn-db[0m [34;1mrepositories::note::tests::rrf_orders_by_fused_rank[0m
+[32;1m        PASS[0m [   0.007s] (2364/2842) [35;1mdjinn-runtime[0m [36mspec::tests[0m[36m::[0m[34;1mtask_run_report_bincode_roundtrip[0m
+[31;1m        FAIL[0m [   0.483s] (12/2842) [35;1mdjinn-provider::stream_event_consumer_audit[0m [34;1mchecked_in_classification_covers_every_production_stream_event_match[0m
+────────────
+[31;1m     Summary[0m [ 196.905s] [1m2480[0m/[1m2842[0m tests run: [1m2479[0m [32;1mpassed[0m ([1m1[0m [33;1mleaky[0m), [1m1[0m [31;1mfailed[0m, [1m8481[0m [33;1mskipped[0m
+[31;1m        FAIL[0m [   0.104s] (11/2842) [35;1mdjinn-db[0m [34;1mrepositories::note::tests::rrf_orders_by_fused_rank[0m
+[31;1m        FAIL[0m [   0.483s] (12/2842) [35;1mdjinn-provider::stream_event_consumer_audit[0m [34;1mchecked_in_classification_covers_every_production_stream_event_match[0m
+[31;1merror[0m: test run failed

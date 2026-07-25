@@ -1,4 +1,6 @@
-    Starting 2842 tests across 118 binaries
-        PASS [   0.008s] (1/2) djinn-runtime spec::tests::task_run_spec_roundtrips
-     Summary [   0.010s] 1 test run: 1 passed, 0 failed, 0 skipped
-error: test run failed
+   Compiling djinn-server v0.6.0 (/home/runner/work/djinn/djinn/server/crates/djinn-server)
+error: linking with `cc` failed: exit status: 1
+  = note: /usr/bin/ld: final link failed: No space left on device
+
+error: could not compile `djinn-server` (lib test) due to 1 previous error
+[31;1merror[0m: command [1mcargo test --no-run[0m exited with code 101

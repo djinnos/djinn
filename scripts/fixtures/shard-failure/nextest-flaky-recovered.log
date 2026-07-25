@@ -1,3 +1,8 @@
-  TRY 1 FAIL [   0.100s] (1/1) djinn-provider stream_event_consumer_audit::flaky_test
-  TRY 2 PASS [   0.050s] (1/1) djinn-provider stream_event_consumer_audit::flaky_test
-     Summary [   0.150s] 1 test run: 1 passed, 0 failed, 0 skipped
+[32;1m Nextest run[0m ID [1mb4689864-1a40-4b1b-9312-5497a9c5f809[0m with nextest profile: [1mpull-request[0m
+[32;1m    Starting[0m [1m2842[0m tests across [1m110[0m binaries ([1m8481[0m tests and [1m50[0m binaries [33;1mskipped[0m, including [1m8473[0m tests and [1m50[0m binaries via [1mprofile.pull-request.default-filter[0m)
+[32;1m        PASS[0m [   0.011s] (2363/2842) [35;1mdjinn-runtime[0m [36mspec::tests[0m[36m::[0m[34;1mfailed_outcome_throttle_without_retry_after_bincode_roundtrip[0m
+[35;1m  TRY 1 FAIL[0m [   0.526s] (─────────) [35;1mdjinn-server[0m [36mserver::chat::tests::handler[0m[36m::[0m[34;1mcompletions_rejects_non_uuid_session[0m
+[33;1m   DELAY 2/3[0m by   0.625s (─────────) [35;1mdjinn-server[0m [36mserver::chat::tests::handler[0m[36m::[0m[34;1mcompletions_rejects_non_uuid_session[0m
+[33;1m  TRY 2 PASS[0m [   0.501s] (12/2842) [35;1mdjinn-server[0m [36mserver::chat::tests::handler[0m[36m::[0m[34;1mcompletions_rejects_non_uuid_session[0m
+────────────
+[32;1m     Summary[0m [ 196.905s] [1m2842[0m tests run: [1m2842[0m [32;1mpassed[0m ([1m1[0m [33;1mflaky[0m), [1m0[0m [33;1mskipped[0m
