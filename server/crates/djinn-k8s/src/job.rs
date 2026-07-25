@@ -558,8 +558,11 @@ pub fn build_task_run_job(
         // before cutover so the root gid already matches and the recursive pass
         // is skipped. See the matching notes in `launcher.rs` and `config.rs`.
         //
-        // (The legacy uid-10001 / git "dubious ownership" concern is now covered
-        // by the `safe.directory=*` GIT_CONFIG_* envs set in build_task_run_env.)
+        // (The legacy uid-10001 / git "dubious ownership" concern is covered by
+        // the protected system-scope `safe.directory` config that
+        // `djinn_git::git_command` exports — not by the GIT_CONFIG_* envs in
+        // build_task_run_env, which git strips from the inner child of
+        // `git clone --local`. See nurw and djinn-git/src/lib.rs.)
         security_context: Some(pod_security_context()),
         ..PodSpec::default()
     };
@@ -743,11 +746,16 @@ fn build_task_run_env(
     // image runs as root by default (USER reset by language-toolchain
     // layers), so the worker process sees the /mirror dir as
     // 10001:10001 — git 2.35.2+ rejects that with "dubious ownership"
-    // unless safe.directory is set. We inject the env vars at the Pod
-    // level so the worker process inherits them; the worker's Rust code
-    // also sets them per-Command (run_git_command), but the Pod-level
-    // env is the belt-and-suspenders that guarantees any subprocess
-    // tree gets them.
+    // unless safe.directory is set.
+    //
+    // These Pod-level vars cover a *direct* git invocation in the Pod and
+    // nothing more. They are NOT what makes the mirror clone work: git strips
+    // command-scope config from the inner `git-upload-pack` child that
+    // `git clone --local` spawns, so this form is a no-op for exactly that
+    // operation (nurw — it wedged every PR open on v0.7.3). Mirror clones are
+    // trusted by `djinn_git::git_command`, which exports a protected
+    // system-scope config file that survives into the child; see the
+    // measurements in djinn-git/src/lib.rs.
     env.push(env_var("GIT_CONFIG_COUNT", "1"));
     env.push(env_var("GIT_CONFIG_KEY_0", "safe.directory"));
     env.push(env_var("GIT_CONFIG_VALUE_0", "*"));

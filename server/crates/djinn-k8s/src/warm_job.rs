@@ -115,12 +115,16 @@ pub fn build_warm_job(
 # dirs / 644 files, which the worker's startup contract check rejects. See
 # `djinn_agent_worker::volume_contract`.
 umask 0002
-# The mirror is server-owned (uid 10001) while this pod runs as uid 1000.
-# Keep this in inherited environment variables, not `git -c`, so any nested
-# git process receives the same trust rule.
-export GIT_CONFIG_COUNT=1
-export GIT_CONFIG_KEY_0=safe.directory
-export GIT_CONFIG_VALUE_0='*'
+# The mirror is server-owned (uid 10001) while this pod runs as uid 1000, so git
+# needs a `safe.directory` exception for it. It must be a config FILE in protected
+# scope: git honours safe.directory only from system/global files in the inner
+# `git-upload-pack` child of `git clone --local`, and strips command-scope config
+# from that child. SYSTEM, not GLOBAL, so `git config --global` (the private-dep
+# url.insteadOf token rewrite) keeps writing $HOME/.gitconfig where cargo/go/pnpm
+# read it. See djinn-git/src/lib.rs and the volume-ownership runbook (nurw).
+export GIT_CONFIG_SYSTEM={WORKSPACE_MOUNT_DIR}/.djinn-gitconfig
+unset GIT_CONFIG_NOSYSTEM
+printf '[safe]\n\tdirectory = *\n' > "$GIT_CONFIG_SYSTEM"
 UPSTREAM_URL="$(git -C "{mirror_path}" config remote.origin.url)"
 git clone --depth 1000 --single-branch "$UPSTREAM_URL" "{project_root}"
 # Install JS deps before indexing so scip-typescript can resolve
@@ -593,22 +597,30 @@ mod tests {
         assert_eq!(cmd[1], "-c");
         assert!(cmd[2].contains("git clone"), "bash -c script: {}", cmd[2]);
         // The read-only mirror is server-owned while the warmer runs as the
-        // worker uid. The shell must export, rather than locally configure,
-        // safe.directory so every git child inherits it.
+        // worker uid, so the shell needs a safe.directory exception for it. It
+        // must be an exported config FILE: git honours safe.directory only from
+        // protected file scope in the inner child of `git clone --local` and
+        // strips GIT_CONFIG_COUNT/KEY_0/VALUE_0 from that child (nurw).
         for setting in [
-            "export GIT_CONFIG_COUNT=1",
-            "export GIT_CONFIG_KEY_0=safe.directory",
-            "export GIT_CONFIG_VALUE_0='*'",
+            "export GIT_CONFIG_SYSTEM=/workspace/.djinn-gitconfig",
+            "unset GIT_CONFIG_NOSYSTEM",
+            r#"printf '[safe]\n\tdirectory = *\n' > "$GIT_CONFIG_SYSTEM""#,
         ] {
             assert!(
                 cmd[2].contains(setting),
-                "warm shell must export {setting}: {}",
+                "warm shell must set up the trust file with {setting}: {}",
                 cmd[2]
             );
         }
         assert!(
+            !cmd[2].contains("export GIT_CONFIG_COUNT"),
+            "command-scope config is stripped from the inner child of `git clone --local`, \
+             so it must not be the mechanism: {}",
+            cmd[2]
+        );
+        assert!(
             !cmd[2].contains("git config --global --add safe.directory"),
-            "safe.directory must be inherited instead of persisted globally: {}",
+            "safe.directory must be inherited instead of persisted into $HOME/.gitconfig: {}",
             cmd[2]
         );
         // Warm clone must give the coupling index enough history to walk
