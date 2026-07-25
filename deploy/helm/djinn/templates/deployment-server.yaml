@@ -428,8 +428,9 @@ spec:
             - name: DJINN_K8S_WARM_JOB_TIMEOUT_SECONDS
               value: {{ .Values.resources.warm.jobTimeoutSeconds | quote }}
             # Per-invocation CPU lease. `required` renders the cgroup-launcher
-            # sidecar onto every task-run Pod; `disabled` (the default) renders
-            # no launcher surface at all. The server refuses to dispatch an
+            # sidecar onto every task-run Pod; `disabled` is an explicit local
+            # development compatibility profile that renders no launcher surface.
+            # The server refuses to dispatch an
             # armed render it could not satisfy, so a mis-set value fails closed
             # at dispatch rather than producing pods whose sidecar cannot start.
             # See `deploy/helm/djinn/values.yaml` and
