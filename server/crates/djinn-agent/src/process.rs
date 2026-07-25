@@ -616,7 +616,14 @@ impl LeaseInvocationRunner {
                                         // Reaching a valid bind means v1 would
                                         // have escalated (lifted); record the
                                         // bounded shadow observation but leave
-                                        // cpu.max throttled under v0. No
+                                        // cpu.max throttled under v0.
+                                        //
+                                        // Shadow CLAMPS. The leaf stays at the
+                                        // broker's 250m unleased quota for the
+                                        // whole command — arming shadow makes
+                                        // leased builds slower, never faster. It
+                                        // is an observation mode; see
+                                        // `evaluate_invocation_lift`. No
                                         // irreversible lift occurs, so no
                                         // fence-before-lift journal write is
                                         // required; `fence` is still reconciled

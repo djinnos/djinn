@@ -5,6 +5,8 @@ use std::collections::BTreeMap;
 use k8s_openapi::api::core::v1::Toleration;
 use serde::{Deserialize, Serialize};
 
+use crate::launcher::CgroupLauncherMode;
+
 /// Configuration for `KubernetesRuntime`.
 ///
 /// Loaded once at djinn-server boot and cloned into the runtime. Fields
@@ -195,6 +197,21 @@ pub struct KubernetesConfig {
     /// Any other mode fails render validation. Overridable via
     /// `DJINN_K8S_VOLUME_OWNERSHIP_MODE`.
     pub volume_ownership_mode: String,
+    /// Whether a task-run Pod renders the cgroup-launcher sidecar.
+    ///
+    /// Defaults to [`CgroupLauncherMode::Disabled`]: no sidecar, no launcher
+    /// volumes, no launcher env, and the worker runs shell commands in-process
+    /// at the unleased quota. `required` is retained as the arming switch but is
+    /// currently rejected by [`crate::launcher::validate_enforcement_render`],
+    /// because the launcher security context this build renders lacks the
+    /// `CAP_SYS_ADMIN` the goxi runtime profile specifies, so the launcher
+    /// cannot establish its own cgroup2 mount. That is an unbuilt profile, not a
+    /// platform limit: with the designed capabilities the full leaf lifecycle
+    /// works (task grkq — see [`CgroupLauncherMode`] for the measured evidence).
+    /// Overridable via `DJINN_K8S_CGROUP_LAUNCHER_MODE`; an unrecognized value is
+    /// ignored with a warning rather than silently flipping enforcement.
+    #[serde(default)]
+    pub cgroup_launcher_mode: CgroupLauncherMode,
 }
 
 impl KubernetesConfig {
@@ -246,6 +263,10 @@ impl KubernetesConfig {
             // to anything the launcher's runtime readiness check would reject.
             cgroup_delegation_profile: crate::launcher::CGROUP_PROFILE_V2_CPU_ONLY.into(),
             volume_ownership_mode: crate::launcher::VOLUME_OWNERSHIP_ON_ROOT_MISMATCH.into(),
+            // Disabled by default: the rendered pod cannot obtain a delegated
+            // cgroup v2 subtree without privileges this contract refuses, so a
+            // mandatory sidecar would CrashLoopBackOff on every task run.
+            cgroup_launcher_mode: CgroupLauncherMode::Disabled,
             // Unbounded by default: per-project build_resources overrides are
             // gated only by request <= limit until an operator configures the
             // per-kind DJINN_K8S_{TASK,WARM}_{CPU,MEMORY}_{MIN,MAX} envs.
@@ -289,6 +310,7 @@ impl KubernetesConfig {
     /// | `DJINN_K8S_TOLERATIONS` | `tolerations` | `[]` (parsed as a JSON array of k8s `Toleration` objects) |
     /// | `DJINN_K8S_CGROUP_DELEGATION_PROFILE` | `cgroup_delegation_profile` | `cgroup-v2-cpu-only` |
     /// | `DJINN_K8S_VOLUME_OWNERSHIP_MODE` | `volume_ownership_mode` | `fsgroup-on-root-mismatch` |
+    /// | `DJINN_K8S_CGROUP_LAUNCHER_MODE` | `cgroup_launcher_mode` | `disabled` (`required` is currently rejected at render validation) |
     ///
     /// `DJINN_DATABASE_URL` is read from djinn-server's own environment (the
     /// Helm chart projects it via `envFrom: configMap djinn-config`) and
@@ -423,6 +445,17 @@ impl KubernetesConfig {
         }
         if let Ok(v) = std::env::var("DJINN_K8S_VOLUME_OWNERSHIP_MODE") {
             cfg.volume_ownership_mode = v;
+        }
+        if let Ok(v) = std::env::var("DJINN_K8S_CGROUP_LAUNCHER_MODE") {
+            match CgroupLauncherMode::parse(&v) {
+                Some(mode) => cfg.cgroup_launcher_mode = mode,
+                // Keep the safe default rather than guessing: a typo must never
+                // arm (or silently disarm) the enforcement sidecar.
+                None => tracing::warn!(
+                    value = %v,
+                    "DJINN_K8S_CGROUP_LAUNCHER_MODE is not `disabled` or `required` — keeping default"
+                ),
+            }
         }
         // Per-project build_resources hard bounds (per Pod kind, per resource).
         // Unset leaves the axis unbounded. Empty strings are ignored so an

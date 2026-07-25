@@ -1,6 +1,12 @@
-//! Enforcement-pod rendering: role-classed resources, the mandatory
+//! Enforcement-pod rendering: role-classed resources, the (mode-gated)
 //! cgroup-launcher sidecar, the v1 worker/child/launcher security contract, and
 //! the fail-closed render/startup validation seam.
+//!
+//! The launcher sidecar is **not** unconditionally rendered. See
+//! [`CgroupLauncherMode`] for the measured reason: a Pod holding this module's
+//! security contract cannot obtain a writable, delegated cgroup v2 subtree on a
+//! containerd/k3s cgroup-v2 node without privileges the contract refuses. The
+//! default is [`CgroupLauncherMode::Disabled`].
 //!
 //! This module is *pure*: every function is a deterministic manifest builder or
 //! a `Result`-returning validator. Nothing here talks to a cluster or mutates
@@ -24,6 +30,7 @@ use k8s_openapi::api::core::v1::{
     ResourceRequirements, SeccompProfile, SecurityContext, Volume, VolumeMount,
 };
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 // Re-exported so every pod render that shares the cache volumes (task-run in
@@ -96,6 +103,96 @@ pub const VOLUME_LAUNCHER_CGROUP: &str = "launcher-cgroup";
 /// Mount path of [`VOLUME_LAUNCHER_CGROUP`] (the delegated cgroup-v2 root the
 /// launcher opens; owned by [`LAUNCHER_UID`]).
 pub const LAUNCHER_CGROUP_ROOT: &str = "/run/djinn-cgroup";
+
+/// Whether an enforcement task-run Pod renders the cgroup-launcher sidecar.
+///
+/// # Why this is not simply "always on" (task grkq)
+///
+/// **This is an implementation gap, NOT a Kubernetes limitation.** Delegated
+/// cgroup v2 enforcement is entirely achievable here; the runtime profile the
+/// goxi proposal specifies was simply never built. Do not read this as "cgroup
+/// enforcement is impossible on Kubernetes" — that is false, and measurably so.
+///
+/// goxi specifies that the launcher runs with `CAP_SYS_ADMIN`,
+/// `CAP_SYS_RESOURCE`, `CAP_SETUID`, `CAP_SETGID`, "the runtime-default seccomp
+/// profile plus an allowlist for cgroup setup and clone3", and "a dedicated
+/// read-write cgroup-v2 mount visible only in the launcher container". What
+/// this module renders is [`launcher_capabilities`] — `drop: ALL` plus only
+/// `SETUID`/`SETGID`/`SETPCAP` — a plain `RuntimeDefault` seccomp profile, and
+/// (previously) an `emptyDir` where the RW cgroup2 mount belongs.
+///
+/// Measured on a real kubelet + containerd node (kind, k8s v1.36.1, cgroup v2),
+/// three containers differing only in security context:
+///
+/// * **With the designed profile** — `CAP_SYS_ADMIN` + `CAP_SYS_RESOURCE`, and
+///   the launcher establishing its own cgroup2 mount inside its own cgroup
+///   namespace — the entire launcher lifecycle works: `mount -t cgroup2` RW,
+///   vacate the root into `init/`, enable `+cpu` in `cgroup.subtree_control`,
+///   create an invocation leaf, write the 250m unleased `cpu.max`,
+///   `clone3(CLONE_INTO_CGROUP)` a child into it (confirmed present in the
+///   leaf's `cgroup.procs`), read `cpu.stat` showing real throttling
+///   (`nr_throttled 4`), lift to `max`, then kill/drain/remove.
+/// * **With `seccompProfile: RuntimeDefault` and those capabilities** — the
+///   same lifecycle succeeds. The container runtime's default profile denies
+///   `clone3` with `ENOSYS` only for containers WITHOUT `CAP_SYS_ADMIN`; with it,
+///   `clone3` is permitted. So goxi's "allowlist for clone3" needs no `Localhost`
+///   seccomp profile at all — `RuntimeDefault` suffices once the capability is
+///   granted.
+/// * **With the profile this module actually renders** — the very first step,
+///   `mount("none", root, "cgroup2", ...)`, fails with `EPERM`.
+///
+/// The single blocking divergence is therefore `CAP_SYS_ADMIN`. A `hostPath`
+/// onto a node subtree is NOT the route (the pod's private cgroup namespace is
+/// mounted `nsdelegate`, so `clone3(CLONE_INTO_CGROUP)` into a target outside
+/// that namespace root fails with `ENOENT`) — but that is a property of the
+/// workaround, not of the design, which mounts inside the launcher's own cgroup
+/// namespace where an invocation leaf IS a descendant of the namespace root.
+///
+/// Until the designed profile is rendered — capability set, chart runtime-profile
+/// plumbing, and the launcher-established cgroup2 mount — the default is
+/// [`Disabled`](CgroupLauncherMode::Disabled): no sidecar, no launcher volume,
+/// no launcher env, and the worker executes shells in-process at the unleased
+/// quota. [`Required`](CgroupLauncherMode::Required) is the arming switch, and
+/// [`validate_enforcement_render`] rejects it fail-closed at dispatch rather
+/// than shipping a Pod whose sidecar cannot start. That gate is what a follow-up
+/// flips once the runtime profile lands.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CgroupLauncherMode {
+    /// No sidecar, no launcher volumes, no launcher env. Shell commands run
+    /// in-process in the worker, unleased. This is the default.
+    #[default]
+    Disabled,
+    /// Arm the mandatory sidecar. Currently unsatisfiable in this topology and
+    /// rejected by [`validate_enforcement_render`].
+    Required,
+}
+
+impl CgroupLauncherMode {
+    /// Stable config/telemetry string.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Disabled => "disabled",
+            Self::Required => "required",
+        }
+    }
+
+    /// Parse the `DJINN_K8S_CGROUP_LAUNCHER_MODE` value. Unknown values are
+    /// rejected rather than silently defaulting, so a typo can neither arm nor
+    /// disarm enforcement by accident.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim() {
+            "disabled" => Some(Self::Disabled),
+            "required" => Some(Self::Required),
+            _ => None,
+        }
+    }
+
+    /// Does this mode render the sidecar and its volumes?
+    pub fn renders_sidecar(&self) -> bool {
+        matches!(self, Self::Required)
+    }
+}
 
 /// v1 resource class a task-run Pod is provisioned under, derived from the role
 /// that executes the run. Only the CPU **request** differs between the two — the
@@ -294,14 +391,23 @@ pub fn launcher_ipc_volume() -> Volume {
     }
 }
 
-/// The launcher's private delegated cgroup root volume (launcher-only).
-pub fn launcher_cgroup_volume() -> Volume {
-    Volume {
-        name: VOLUME_LAUNCHER_CGROUP.to_string(),
-        empty_dir: Some(EmptyDirVolumeSource::default()),
-        ..Volume::default()
-    }
-}
+// NOTE (task grkq): there is deliberately NO `launcher_cgroup_volume()` here.
+//
+// This function used to return `EmptyDirVolumeSource::default()` for
+// [`VOLUME_LAUNCHER_CGROUP`]. An emptyDir is an ordinary directory on the node
+// filesystem, so `/run/djinn-cgroup` had no `cgroup.subtree_control` and the
+// launcher's `NativeCgroupFs::open` failed with a bare ENOENT on every pod —
+// CrashLoopBackOff for the sidecar, no broker socket, and (before the fallback
+// was restored) a hard failure for every single shell command in every task run.
+//
+// It is not replaced by a hostPath: as documented on [`CgroupLauncherMode`], a
+// hostPath cannot supply a *usable* delegated root either, because the pod's
+// private cgroup namespace plus `nsdelegate` refuse `clone3(CLONE_INTO_CGROUP)`
+// into anything outside it. Rendering a volume source that provably cannot
+// satisfy the launcher's readiness contract is worse than rendering none: it
+// re-creates exactly the failure this task exists to remove. When a real
+// node-level delegation mechanism exists, add the volume source together with
+// the render validation that proves it is a cgroup2 tree.
 
 /// Worker-side mount of the IPC volume so the worker can dial the broker socket
 /// and read its private credential.
@@ -346,14 +452,15 @@ pub fn launcher_sidecar_container(config: &KubernetesConfig, project_image_tag: 
                 &LAUNCHER_UNLEASED_MILLICORES.to_string(),
             ),
         ]),
-        volume_mounts: Some(vec![
-            worker_launcher_ipc_mount(),
-            VolumeMount {
-                name: VOLUME_LAUNCHER_CGROUP.to_string(),
-                mount_path: LAUNCHER_CGROUP_ROOT.to_string(),
-                ..VolumeMount::default()
-            },
-        ]),
+        // IPC only. There is deliberately no mount at [`LAUNCHER_CGROUP_ROOT`]:
+        // the delegated root is not something a *volume source* can supply — in
+        // the goxi design the launcher mounts cgroup2 there ITSELF, inside its
+        // own cgroup namespace, which needs `CAP_SYS_ADMIN` rather than a volume
+        // (see [`CgroupLauncherMode`]). A volumeMount naming a volume the pod
+        // does not declare is also a manifest the API server rejects outright.
+        // The launcher still reads `DJINN_LAUNCHER_CGROUP_ROOT` and creates the
+        // mount point there when it is granted the capability to do so.
+        volume_mounts: Some(vec![worker_launcher_ipc_mount()]),
         security_context: Some(launcher_security_context()),
         resources: Some(ResourceRequirements {
             requests: Some(BTreeMap::from([
@@ -407,6 +514,17 @@ pub enum RenderValidationError {
         mode: String,
         expected: &'static str,
     },
+    #[error(
+        "cgroup launcher mode is `required`, but the launcher security context this build renders \
+         cannot obtain a delegated cgroup v2 subtree: it lacks CAP_SYS_ADMIN, so the launcher's \
+         own `mount -t cgroup2` fails with EPERM. This is an unbuilt runtime profile, not a \
+         platform limit — the goxi profile (CAP_SYS_ADMIN + CAP_SYS_RESOURCE, with the launcher \
+         mounting cgroup2 inside its own cgroup namespace) drives the full leaf lifecycle \
+         successfully, and RuntimeDefault seccomp already permits clone3 once CAP_SYS_ADMIN is \
+         granted. Run with DJINN_K8S_CGROUP_LAUNCHER_MODE=disabled (the default) until the \
+         designed profile is rendered. See djinn_k8s::launcher::CgroupLauncherMode."
+    )]
+    CgroupDelegationUnavailable,
 }
 
 /// Map a supported/unsupported cgroup-delegation profile string onto the
@@ -485,6 +603,17 @@ pub fn validate_enforcement_render(config: &KubernetesConfig) -> Result<(), Rend
             mode: config.volume_ownership_mode.clone(),
             expected: VOLUME_OWNERSHIP_ON_ROOT_MISMATCH,
         });
+    }
+
+    // 4. The launcher may only be ARMED if this topology can actually deliver a
+    //    delegated cgroup v2 subtree. It cannot (see `CgroupLauncherMode`), so
+    //    `required` fails closed at dispatch — before a Job is submitted and
+    //    therefore before any pod can come up with a sidecar that cannot start.
+    //    This is the render-time half of the readiness contract; the launcher
+    //    binary enforces the runtime half (`NativeClone3::preflight` +
+    //    `NativeCgroupFs::open`) before it binds its control socket.
+    if config.cgroup_launcher_mode.renders_sidecar() {
+        return Err(RenderValidationError::CgroupDelegationUnavailable);
     }
 
     Ok(())

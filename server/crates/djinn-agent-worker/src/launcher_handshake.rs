@@ -25,12 +25,23 @@
 //! ## Detection-gated fallback (never block pod startup)
 //!
 //! The IPC mount is the parent directory of the credential path. When it is
-//! absent — an old rendering without the sidecar, or a local/non-pod run — the
-//! handshake is skipped and the caller keeps the unleased in-process broker path
-//! UNCHANGED. Any failure AFTER detection (write error, the socket never binds,
-//! a credential/peer rejection, a readiness failure) is a typed, bounded outcome
-//! that also falls back to the in-process path. The handshake never returns an
-//! unbounded wait and never propagates an error that would fail pod startup.
+//! absent — the launcher is not rendered (the default since task grkq), an old
+//! rendering without the sidecar, or a local/non-pod run — the handshake is
+//! skipped. Any failure AFTER detection (write error, the socket never binds, a
+//! credential/peer rejection, a readiness failure) is a typed, bounded outcome
+//! that folds into the same result. The handshake never returns an unbounded
+//! wait and never propagates an error that would fail pod startup.
+//!
+//! ## What the fallback actually is
+//!
+//! Anything other than [`LauncherHandshake::Connected`] leaves
+//! `AgentContext::shell_launch` as `None`, and the shell handler then runs the
+//! command **in-process in the worker** (`process::output_with_kill_cancellable`)
+//! at whatever quota the pod itself has — i.e. unleased, with no cgroup leaf and
+//! no lease lift. There is no "in-process broker": earlier revisions of this
+//! comment said so, and worse, the in-process arm was compiled only under
+//! `#[cfg(test)]`, so in production this "fallback" made every shell command
+//! fail. Both are fixed; if you change the shell handler, keep this accurate.
 
 use std::fs::File;
 use std::io::Read;
@@ -59,17 +70,17 @@ const CONNECT_POLL: Duration = Duration::from_millis(100);
 const CONNECT_ATTEMPTS: u32 = 300;
 
 /// Typed, bounded outcome of the launcher handshake. Every variant other than
-/// [`LauncherHandshake::Connected`] routes the worker to the unleased in-process
-/// broker path unchanged.
+/// [`LauncherHandshake::Connected`] routes the worker to unleased, in-process
+/// shell execution (see the module docs).
 pub enum LauncherHandshake {
     /// The sidecar is present and authenticated us: the broker client is live
     /// and readiness has been accepted.
     Connected(Box<UnixBrokerClient>),
-    /// No IPC mount / sidecar (old rendering, or a local/non-pod run). Use the
-    /// in-process path unchanged.
+    /// No IPC mount / sidecar — the launcher is not rendered, this is an old
+    /// rendering, or a local/non-pod run. Shells run in-process, unleased.
     AbsentMount,
-    /// The mount was present but the handshake failed. Fail closed to the
-    /// in-process path; the reason is carried for logging.
+    /// The mount was present but the handshake failed. Fail closed to unleased
+    /// in-process execution; the reason is carried for logging.
     FailedClosed(HandshakeError),
 }
 

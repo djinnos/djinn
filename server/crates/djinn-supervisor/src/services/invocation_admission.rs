@@ -30,6 +30,22 @@ use crate::services::lease::InvocationLiftDecision;
 /// The caller additionally requires a matching durable fencing token before it
 /// acts on a [`InvocationLiftDecision::Lift`]; this function never authorizes a
 /// lift on epoch alone.
+///
+/// # Shadow CLAMPS — it does not speed anything up
+///
+/// Read this before arming `v1 = shadow` in production. Only
+/// [`InvocationLiftDecision::Lift`] ever raises `cpu.max`. `Shadow` binds the
+/// invocation and records telemetry (the "would throttle" arms) and then leaves
+/// the leaf pinned at the broker's unleased quota —
+/// `UnleasedQuota::DEFAULT_MILLICORES`, i.e. **250m** — for the whole command.
+/// `Unleased` is a literal no-op with the same effect. So a rollout that seeds
+/// the epoch and arms shadow makes every leased build slower, not faster: it is
+/// an observation mode whose entire purpose is to measure what enforcement
+/// *would* do. This is correct by design and asserted by
+/// `shadow_epoch_binds_but_never_lifts` and `unleased_epoch_binds_but_never_lifts`
+/// in `djinn-agent`'s `process/tests/process_lease_tests.rs` — do not "fix" it.
+/// Only `v1 = enforce` with a fully acknowledged
+/// `ForwardOverlap`/`InvocationPrimary`/`RollbackOverlap` phase lifts the quota.
 #[must_use]
 pub fn evaluate_invocation_lift(
     row: Result<Option<AdmissionHandoffRow>, ()>,
