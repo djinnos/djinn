@@ -91,6 +91,55 @@ the startup check **never repairs** — a recursive `chown` over a 300G cache is
 multi-minute stall on pod start, which is the whole reason
 `fsGroupChangePolicy` is `OnRootMismatch`.
 
+## `$HOME` is part of the startup check too (9jrg)
+
+The volume contract covers the *mounted* surfaces. It did not cover the one
+writable surface that ships inside the image: `$HOME` (`/home/djinn`).
+
+`qut0` moved the Pod to uid/gid `1000` while the image still owned `/home/djinn`
+as `10001:10001` mode `0775`. The group-write bit was there but pointed at a
+group the Pod does not hold, so the Pod fell through to *other* (`r-x`) and could
+not create a single entry under its own home. Nothing checked it. The first
+consumer to notice was the durable output stash — `$HOME/.cache/djinn/output_stash`
+when `XDG_CACHE_HOME` is unset — and it surfaced hours later, inside the reply
+loop, as `create durable blobs: Permission denied (os error 13)` on **every**
+worker and planner session. Because a worker dies before submitting for review,
+the task returns to `open` and no reviewer is ever spawned; after six consecutive
+failures the coordinator escalates to a 1800s cooldown, so planning looks dormant
+rather than failing.
+
+Two changes close it:
+
+| Layer | Mechanism |
+|-------|-----------|
+| Image | `/home/djinn` keeps uid `10001` as its **owner** and is group-owned by the artifact GID `1000` with `2775`. Three identities write it — uid `10001` (server-side path), uid/gid `1000` (worker), uid `1001`/group `1000` (launcher-spawned child) — and only a shared group can hold all three. Changing the owner instead would break the first. Applied in `djinn-image-builder/scripts/base-debian.sh` (project images, `env-config/v11` forces the rebuild) and `server/docker/djinn-agent-runtime-base.Dockerfile`. |
+| Job render | `XDG_CACHE_HOME=/cache/xdg/<project_id>` — the stash and the SCIP indexer cache resolve `$XDG_CACHE_HOME` first, so they no longer depend on the image home at all, and they land on a *persistent* PVC instead of a container layer that dies with the Pod. |
+| Runtime | `volume_contract::check_home_writable` asks the kernel (`access(W_OK|X_OK)`) whether the running identity can create entries in `$HOME`, and fails readiness with the path, observed ownership/mode and running identity. |
+
+The same rule applies to anything the image pre-creates *under* `$HOME` for the
+runtime identity to write. `install-node.sh` scaffolds `$HOME/.local/state` so
+`fnm` can drop its per-shell multishell symlink there; `mkdir` under the build
+umask leaves it `0755`, which stopped working for the same reason the moment the
+runtime identity stopped being the owner. It is now `2775` too. When adding a
+build-time directory the Pod must write, group-own it to `1000` and give it
+`2775` — owner-only modes are only safe for paths nothing writes at runtime.
+
+`$HOME` is deliberately **not** a `VolumeRoot`: it is an image path, the
+artifact-gid/setgid rules do not apply to it, and it is correct for it to stay
+owned by uid `10001`. Only its effective writability is contractual.
+
+A violation looks like:
+
+```
+volume permission contract VIOLATED  kind=home_not_writable path=/home/djinn ...
+```
+
+This fails closed. Task-run and warm Pods only ever start on a `ready` catalog
+image, and the `env-config/v11` salt bump means every catalog image rebuilds
+before it can be `ready` again — so a pre-fix image cannot be dispatched to. If
+one somehow is, the break-glass is the existing, loud
+`DJINN_VOLUME_CONTRACT_MODE=audit`; the correct fix is to let the image rebuild.
+
 ## Symptom → diagnosis
 
 A pod that fails this check logs one line and exits:
@@ -200,6 +249,10 @@ gap loud instead of silent.
   the bounded check.
 - `server/crates/djinn-agent-worker/tests/volume_contract.rs` — deterministic
   proof that each violation fails readiness and a conforming layout passes.
+- `server/crates/djinn-agent-worker/tests/home_contract.rs` — the `$HOME` arm,
+  proved against a directory owned by a **different** uid than the running
+  process (privileged runs fabricate `10001:10001 0775` and `10001:1000 2775`
+  and judge both from a child dropped to uid/gid 1000).
 - `deploy/helm/djinn/tests/volume-ownership-render.sh` — the render contract.
 - `server/crates/djinn-k8s/src/launcher.rs` — `pod_security_context()` and the
   worker/child/launcher uid contract.

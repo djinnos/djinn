@@ -159,10 +159,19 @@ COPY --from=lsp /usr/local/bin/rust-analyzer /usr/local/bin/rust-analyzer
 
 # Non-root user. Uid/gid 10001 matches the `djinn` user baked into the
 # server image so shared PVCs (mirrors, cache) mount cleanly on both sides.
+# $HOME keeps uid 10001 as its owner but is group-owned by the artifact GID
+# (1000) with setgid 2775, because three identities write it: uid 10001 here and
+# on the server side, uid/gid 1000 for the task-run/warm Pod since `qut0`, and
+# uid 1001/group 1000 for the launcher-spawned child. At 10001:10001 0775 the pod
+# matched "other" (r-x) and could not create a single entry under its own home —
+# `create durable blobs: Permission denied` killed every worker and planner
+# session (9jrg). Mirrors `djinn-image-builder/scripts/base-debian.sh`.
 RUN groupadd --system --gid 10001 djinn \
     && useradd --system --uid 10001 --gid 10001 --home /home/djinn --create-home --shell /usr/sbin/nologin djinn \
     && mkdir -p /workspace /mirror /cache/cargo /cache/pnpm /cache/pip /cache/sccache /cache/rustup /var/run/djinn \
-    && chown -R djinn:djinn /workspace /cache /var/run/djinn /home/djinn
+    && chown -R djinn:djinn /workspace /cache /var/run/djinn /home/djinn \
+    && chown -R 10001:1000 /home/djinn \
+    && chmod 2775 /home/djinn
 
 # Per-run env defaults. Overridable by the Job spec (K8sRuntime) or the
 # docker-run env (LocalDockerRuntime) if a task needs per-task-specific

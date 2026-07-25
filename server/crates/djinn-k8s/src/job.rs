@@ -826,6 +826,46 @@ fn common_cache_env_vars(project_id: &str, cpu_limit: &str) -> Vec<EnvVar> {
     // process count bounded by the node's real capacity.
     let jobs = cpu_limit_to_jobs(cpu_limit).to_string();
     vec![
+        // Generic XDG cache root, rendered for the same reason CARGO_HOME,
+        // SCCACHE_DIR, GOMODCACHE and PNPM_HOME are: `$HOME`-relative stores are
+        // both unwritable and ephemeral in these pods (task 9jrg).
+        //
+        // Unwritable: `qut0` moved these pods to uid/gid 1000 while the image's
+        // /home/djinn stayed uid 10001 mode 0775, so the pod matched "other"
+        // (r-x). The durable output stash resolves
+        // `$XDG_CACHE_HOME/djinn/output_stash`, falling back to
+        // `$HOME/.cache/djinn/output_stash`, so with XDG_CACHE_HOME unset every
+        // worker and planner session died on `create durable blobs: Permission
+        // denied` before it could submit for review. The SCIP indexer cache
+        // (djinn-graph scip_indexer/cache.rs) resolves the same pair.
+        //
+        // Ephemeral: even with the image's ownership fixed, `$HOME/.cache` is a
+        // container layer that dies with the Pod — so a stash the coordinator
+        // GCs on a retention window (`DJINN_OUTPUT_STASH_GC_RETENTION_DAYS`) and
+        // reads back after a restart would never actually survive one. The
+        // `/cache` PVC is persistent, group-owned by the artifact GID with
+        // setgid 2775 (so `create_dir_all` under the worker's 0002 umask
+        // inherits a conforming subtree), verified at startup by the
+        // volume-ownership contract rather than assumed, and inside the agent's
+        // Landlock allowlist — which follows automatically, because the sandbox
+        // derives its djinn cache dir from this very env var.
+        //
+        // Namespaced per project like SCCACHE_DIR/CARGO_TARGET_DIR: the PVC is
+        // shared cluster-wide and stashed blobs are verbatim tool output, which
+        // must not commingle across project boundaries. NOT per task run: the
+        // stash is read back after a restart and expires on a retention window,
+        // so a per-run directory would quietly make the durable stash per-run.
+        //
+        // Retention: the coordinator's stash GC runs in the server process
+        // against the server's OWN root, so it does not sweep this one — nor did
+        // it sweep the pod-side stash before, which lived on a container layer
+        // that died with the Pod. The server mounts this same claim (at
+        // /var/lib/djinn/cache), so extending that sweep to the per-project roots
+        // needs no new volume plumbing.
+        env_var(
+            "XDG_CACHE_HOME",
+            &format!("{CACHE_MOUNT_DIR}/xdg/{project_id}"),
+        ),
         env_var("CARGO_HOME", &format!("{CACHE_MOUNT_DIR}/cargo")),
         // NOTE: we deliberately do NOT force `RUSTC_WRAPPER=sccache` or
         // `CARGO_INCREMENTAL=0` here. The fast path is incremental compilation
@@ -1723,6 +1763,70 @@ mod tests {
         assert_eq!(
             envs.get("DJINN_DATABASE_URL").copied(),
             Some("postgres://djinn@djinn-postgres.djinn.svc:5432/djinn")
+        );
+    }
+
+    /// The durable output stash resolves `$XDG_CACHE_HOME/djinn/output_stash`,
+    /// falling back to `$HOME/.cache/djinn/output_stash`. Since `qut0` the Pod
+    /// runs as uid/gid 1000 while the image's `/home/djinn` is owned by uid
+    /// 10001, so leaving `XDG_CACHE_HOME` unset put the stash on a path the Pod
+    /// cannot create — every worker and planner session died on `create durable
+    /// blobs: Permission denied` (9jrg). It must be rendered, it must sit on the
+    /// persistent PVC (the stash is GC'd on a retention window, so a container
+    /// layer that dies with the Pod is not a home for it), and it must be
+    /// namespaced per project.
+    #[test]
+    fn routes_the_xdg_cache_home_to_the_persistent_pvc_not_the_image_home() {
+        let cfg = KubernetesConfig::for_testing();
+        let task_run_id = Uuid::now_v7();
+
+        let job = build_task_run_job(
+            &cfg,
+            &task_run_id,
+            "proj-xyz",
+            "djinn-taskrun-test",
+            "registry.example:5000/djinn-project-p:abc123def456",
+            &[],
+            None,
+            false,
+            None,
+        );
+        let envs = task_run_job_envs(&job);
+
+        let xdg = envs
+            .get("XDG_CACHE_HOME")
+            .copied()
+            .expect("XDG_CACHE_HOME must be rendered; unset falls back to an unwritable $HOME");
+        assert_eq!(
+            xdg, "/cache/xdg/proj-xyz",
+            "the XDG cache root must live on the persistent /cache PVC, namespaced per project"
+        );
+        assert!(
+            xdg.starts_with(&format!("{CACHE_MOUNT_DIR}/")),
+            "{xdg} must be under the group-1000-writable cache mount"
+        );
+        assert!(
+            !xdg.contains("/home/"),
+            "{xdg} must not resolve under the image home, which uid 1000 cannot write"
+        );
+        assert!(
+            !xdg.contains(&task_run_id.to_string()),
+            "{xdg} must be shared across runs: the stash is read back after a restart \
+             and GC'd on a retention window, so a per-run dir would make it per-run"
+        );
+
+        // Same routing for warm Pods: they run as the same uid against the same
+        // unwritable image home, and the SCIP indexer cache resolves the same
+        // env pair.
+        let warm_env = warm_cache_env_vars("proj-xyz", &cfg.cpu_limit, None);
+        let warm: BTreeMap<&str, &str> = warm_env
+            .iter()
+            .map(|e| (e.name.as_str(), e.value.as_deref().unwrap_or_default()))
+            .collect();
+        assert_eq!(
+            warm.get("XDG_CACHE_HOME").copied(),
+            Some("/cache/xdg/proj-xyz"),
+            "warm and task-run Pods must resolve the same XDG cache root"
         );
     }
 

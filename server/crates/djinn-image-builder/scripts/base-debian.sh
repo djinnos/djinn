@@ -69,17 +69,39 @@ rm -rf /var/lib/apt/lists/*
 
 mkdir -p /opt/djinn/bin /etc/profile.d /etc/djinn
 
-# Runtime user. The task-run/warm Pods run as runAsUser=10001, but this image
-# (FROM debian:trixie-slim) otherwise has no matching passwd entry or home
-# directory, so $HOME resolves to "/" and every $HOME-relative path the agent
-# uses — its Landlock scratch dir (~/.cache/djinn), the LSP auto-install dir
-# (~/.local/share/djinn/bin, used for gopls/rust-analyzer/npm servers), and
-# Go's default GOCACHE (~/.cache/go-build) — lands in root-owned / and fails
-# with EACCES. Create the user + a writable home so HOME=/home/djinn (set as
-# an ENV in the generated Dockerfile) is actually usable. The `|| true`s keep
-# the build idempotent if the uid/gid ever pre-exist on a newer base.
+# Runtime user. This image (FROM debian:trixie-slim) otherwise has no matching
+# passwd entry or home directory, so $HOME resolves to "/" and every
+# $HOME-relative path the agent uses — its Landlock scratch dir (~/.cache/djinn),
+# the LSP auto-install dir (~/.local/share/djinn/bin, used for
+# gopls/rust-analyzer/npm servers), and Go's default GOCACHE (~/.cache/go-build)
+# — lands in root-owned / and fails with EACCES. Create the user + a writable
+# home so HOME=/home/djinn (set as an ENV in the generated Dockerfile) is
+# actually usable. The `|| true`s keep the build idempotent if the uid/gid ever
+# pre-exist on a newer base.
 groupadd --system --gid 10001 djinn 2>/dev/null || true
 useradd --system --uid 10001 --gid 10001 --home-dir /home/djinn --shell /usr/sbin/nologin djinn 2>/dev/null || true
 mkdir -p /home/djinn
-chown 10001:10001 /home/djinn
-chmod 0775 /home/djinn
+
+# THREE identities write this home, and only a group can hold all three (9jrg):
+#   * uid 10001 — the image's own `djinn` user; the server-side path runs as it.
+#   * uid/gid 1000 — the task-run/warm Pod since `qut0` (`runAsUser: 1000`,
+#     `fsGroup: 1000`), the artifact GID the volume-ownership contract enforces.
+#   * uid 1001, group 1000 — the cgroup-launcher-spawned child that runs the
+#     agent's shell commands.
+# It was `10001:10001 0775`. The group-write bit was already there — it was
+# pointed at the WRONG group, one the pod does not hold — so uid 1000 fell through
+# to "other" (r-x) and could not create ANYTHING under its own $HOME.
+# `$HOME/.cache/djinn/output_stash` was the first consumer to notice, and every
+# worker and planner session died on `create durable blobs: Permission denied`;
+# fnm's multishell state, gopls, `git config --global` and `npm` all sit on the
+# same wall.
+#
+# Keep the OWNER as 10001 — changing it would break the identity that legitimately
+# owns this path on the server side — and re-point the GROUP at the artifact GID
+# so the group bits apply to the two identities that need them. setgid so anything
+# created here keeps the shared gid instead of the creator's private one, matching
+# the mounted-volume contract's directory mode.
+# 1000 is `djinn_cgroup_launcher::child::ARTIFACT_GID`; the numeric form is
+# deliberate — the gid needs no passwd/group entry in this image to be usable.
+chown 10001:1000 /home/djinn
+chmod 2775 /home/djinn
