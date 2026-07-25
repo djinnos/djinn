@@ -168,6 +168,10 @@ async fn async_main(cli: Cli) {
     if let Err(e) = djinn_telemetry::init() {
         tracing::warn!(error = %e, "failed to initialize Prometheus telemetry");
     }
+    if let Err(error) = djinn_server::server_memory::configure_memory_limit_from_env() {
+        tracing::error!(%error, "invalid server memory-limit telemetry configuration");
+        std::process::exit(1);
+    }
 
     let has_bootstrap_identity = cli.bootstrap_designated_operator_github_id.is_some()
         || cli.bootstrap_designated_operator_github_login.is_some()
