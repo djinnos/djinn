@@ -32,8 +32,13 @@
 //!    `kernel.unprivileged_userns_clone=0`, or we're running inside a
 //!    container that already dropped the cap), we fall through — the other
 //!    layers still apply. See [`NAMESPACE_PROBE`] for the detection logic.
-//! 5. **Landlock v3.** `AccessFs::ReadFile | ReadDir | Execute` on `/`, and
+//! 5. **Landlock v3.** `AccessFs::ReadDir | Execute` on `/` plus `ReadFile`
+//!    on everything except [`crate::confidential::CONFIDENTIAL_ROOTS`], and
 //!    no write rules anywhere. Applied via `restrict_self()` in the child.
+//!    Withholding `ReadFile` on the confidential mounts is task jqvg: a
+//!    blanket `ReadFile` on `/` let a chat `cat` reach the task-run Pod's
+//!    credential Secret and projected ServiceAccount token, and Landlock is
+//!    additive so the exception cannot be carved out of a `/` grant.
 //! 6. **Seccomp-bpf.** Errno-denies a hard deny list covering ptrace,
 //!    module loading, pivot_root, bpf, perf_event_open, and friends.
 //! 7. **rlimits.** `RLIMIT_AS=512 MiB`, `RLIMIT_CPU=20s`,
@@ -211,6 +216,16 @@ impl ChatShellSandbox {
         let cwd = resolve_cwd(&self.clone_root, req.cwd.as_deref())?;
 
         let namespaces_ok = probe_namespaces();
+
+        // File-content reads are granted over everything EXCEPT the task-run
+        // Pod's credential/token mounts (task jqvg). Computed here in the
+        // parent because it walks the filesystem with `read_dir`; `pre_exec`
+        // only opens the resulting paths.
+        let read_file_cover =
+            crate::confidential::read_file_cover(&crate::confidential::present_confidential_roots(
+                crate::confidential::CONFIDENTIAL_ROOTS,
+            ));
+
         let mut cmd = Command::new(&req.argv[0]);
         cmd.args(&req.argv[1..])
             .current_dir(&cwd)
@@ -245,7 +260,7 @@ impl ChatShellSandbox {
                 if namespaces_ok {
                     enter_namespaces()?;
                 }
-                apply_landlock()?;
+                apply_landlock(&read_file_cover)?;
                 apply_seccomp()?;
                 apply_rlimits()?;
                 Ok(())
@@ -480,21 +495,36 @@ fn enter_namespaces() -> io::Result<()> {
     Ok(())
 }
 
-fn apply_landlock() -> io::Result<()> {
+fn apply_landlock(read_file_cover: &[PathBuf]) -> io::Result<()> {
     let abi = ABI::V3;
     let full = AccessFs::from_all(abi);
     let read_exec = AccessFs::Execute | AccessFs::ReadFile | AccessFs::ReadDir;
+    // Traverse, list and execute stay granted on all of `/`; only file-content
+    // reads are withheld, and only beneath the confidential mounts (jqvg).
+    let traverse_exec = AccessFs::Execute | AccessFs::ReadDir;
 
     let root = PathFd::new("/")
         .map_err(|e| io::Error::new(io::ErrorKind::PermissionDenied, e.to_string()))?;
 
-    let ruleset = Ruleset::default()
+    let mut ruleset = Ruleset::default()
         .handle_access(full)
         .map_err(|e| io::Error::new(io::ErrorKind::PermissionDenied, e.to_string()))?
         .create()
         .map_err(|e| io::Error::new(io::ErrorKind::PermissionDenied, e.to_string()))?
-        .add_rule(PathBeneath::new(root, read_exec))
+        .add_rule(PathBeneath::new(root, traverse_exec))
         .map_err(|e| io::Error::new(io::ErrorKind::PermissionDenied, e.to_string()))?;
+
+    // `read_file_cover` is `["/"]` on any host without the Pod secret mounts,
+    // which reproduces the previous blanket read grant exactly. A path that
+    // vanished since the parent enumerated it is skipped — we cannot log from
+    // `pre_exec`, and a missing path grants nothing.
+    for path in read_file_cover {
+        if let Ok(fd) = PathFd::new(path) {
+            ruleset = ruleset
+                .add_rule(PathBeneath::new(fd, read_exec))
+                .map_err(|e| io::Error::new(io::ErrorKind::PermissionDenied, e.to_string()))?;
+        }
+    }
 
     ruleset
         .restrict_self()
