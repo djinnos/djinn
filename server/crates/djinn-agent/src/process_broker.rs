@@ -217,25 +217,69 @@ fn command_spec(command: Command) -> io::Result<CommandSpec> {
         .get_current_dir()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "command cwd is required"))?;
     let cwd = text(cwd.as_os_str(), "cwd")?;
-    let environment = command
-        .get_envs()
-        .filter_map(|(key, value)| {
-            value.map(|value| {
-                Ok((
-                    text(key, "environment key")?,
-                    text(value, "environment value")?,
-                ))
-            })
-        })
-        .collect::<io::Result<Vec<_>>>()?;
     let spec = CommandSpec {
         program,
         argv,
         cwd,
-        environment,
+        environment: child_environment(&command)?,
     };
     spec.validate().map_err(broker_error)?;
     Ok(spec)
+}
+
+/// The environment a brokered child is given.
+///
+/// # Why the worker's own environment has to be forwarded (task 7deu, defect 2)
+///
+/// The launcher execs the child with **exactly** the environment in the
+/// [`CommandSpec`] — never the broker's. That is the right isolation property,
+/// but `Command::get_envs()` returns only the variables a caller explicitly set
+/// on the command, not the ones the process inherited. Under the in-process
+/// path the child inherits the pod's environment; under the broker path it got
+/// nothing. So a brokered build ran with no `CARGO_TARGET_DIR` (a cold build, in
+/// the wrong directory, missing the warm cache), no `CARGO_BUILD_RUSTFLAGS` (no
+/// mold linker), no `RUSTUP_HOME`, and no `CARGO_BUILD_JOBS` — the last of which
+/// silently reverted the load-103 fix.
+///
+/// Compilation is 60-90% of task wall clock, so that is not a rough edge; it is
+/// the feature making the thing it governs dramatically slower.
+///
+/// The fix keeps the allow-list closed and forwards through it:
+/// `djinn_cgroup_launcher::is_allowed_environment_key` is the single predicate,
+/// applied here as a convenience and re-applied inside the privileged broker by
+/// `CommandSpec::validate`, which is the actual control. Explicit per-command
+/// values win over inherited ones; the launcher then overrides the parallelism
+/// pins with values derived from the quota the leaf will really run at, because
+/// only it knows that.
+fn child_environment(command: &Command) -> io::Result<Vec<(String, String)>> {
+    use std::collections::BTreeMap;
+
+    let mut environment: BTreeMap<String, String> = std::env::vars()
+        .filter(|(key, _)| djinn_cgroup_launcher::is_allowed_environment_key(key))
+        .collect();
+
+    for (key, value) in command.get_envs() {
+        let key = key.to_str().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "environment key must be UTF-8")
+        })?;
+        match value {
+            // `Command::env_remove` is represented as a `None` value.
+            None => {
+                environment.remove(key);
+            }
+            Some(value) => {
+                let value = value.to_str().ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "environment value must be UTF-8",
+                    )
+                })?;
+                environment.insert(key.to_owned(), value.to_owned());
+            }
+        }
+    }
+
+    Ok(environment.into_iter().collect())
 }
 
 #[cfg(test)]
@@ -277,5 +321,74 @@ impl ProcessHandle for std::process::Child {
 
     fn cleanup(&mut self) -> io::Result<()> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod broker_environment_tests {
+    use super::*;
+
+    /// The pod's build environment must survive the broker hop, or a brokered
+    /// build runs cold, in the wrong target directory, without mold — the exact
+    /// regression that made routing through the launcher a net loss.
+    #[test]
+    fn the_inherited_build_environment_reaches_the_child() {
+        // SAFETY: single-threaded test, and both keys are test-local.
+        unsafe {
+            std::env::set_var("CARGO_TARGET_DIR", "/cache/cargo-target/proj/mold-jobs-4");
+            std::env::set_var("DJINN_BROKER_ENV_TEST_SECRET", "kept");
+            std::env::set_var("AWS_SECRET_ACCESS_KEY", "must-not-leak");
+        }
+
+        let mut command = Command::new("/bin/sh");
+        command.current_dir("/workspace");
+        let spec = command_spec(command).expect("spec");
+        let value = |key: &str| {
+            spec.environment
+                .iter()
+                .find(|(name, _)| name == key)
+                .map(|(_, value)| value.as_str())
+        };
+
+        assert_eq!(
+            value("CARGO_TARGET_DIR"),
+            Some("/cache/cargo-target/proj/mold-jobs-4"),
+            "the warm cache directory must reach a brokered build"
+        );
+        // The allow-list is still closed: an unlisted key is not forwarded.
+        assert_eq!(value("AWS_SECRET_ACCESS_KEY"), None);
+
+        unsafe {
+            std::env::remove_var("CARGO_TARGET_DIR");
+            std::env::remove_var("DJINN_BROKER_ENV_TEST_SECRET");
+            std::env::remove_var("AWS_SECRET_ACCESS_KEY");
+        }
+    }
+
+    /// An explicitly-set value wins over the inherited one, and `env_remove`
+    /// really removes rather than being ignored.
+    #[test]
+    fn explicit_command_environment_overrides_and_removes() {
+        // SAFETY: single-threaded test, test-local key.
+        unsafe { std::env::set_var("RUST_LOG", "inherited") };
+
+        let mut command = Command::new("/bin/sh");
+        command.current_dir("/workspace");
+        command.env("RUST_LOG", "explicit");
+        command.env("CARGO_INCREMENTAL", "0");
+        command.env_remove("TERM");
+        let spec = command_spec(command).expect("spec");
+        let value = |key: &str| {
+            spec.environment
+                .iter()
+                .find(|(name, _)| name == key)
+                .map(|(_, value)| value.as_str())
+        };
+
+        assert_eq!(value("RUST_LOG"), Some("explicit"));
+        assert_eq!(value("CARGO_INCREMENTAL"), Some("0"));
+        assert_eq!(value("TERM"), None);
+
+        unsafe { std::env::remove_var("RUST_LOG") };
     }
 }

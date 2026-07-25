@@ -49,6 +49,39 @@ buildAdmission:
   maxBuildTaskRuns: 3
 
 # -----------------------------------------------------------------------------
+# Per-invocation CPU lease (cgroup launcher)
+# -----------------------------------------------------------------------------
+# The other half of the throughput semaphore. `buildAdmission` bounds HOW MANY
+# task-runs may build concurrently; this bounds how much CPU each one gets while
+# it is building, per invocation rather than per pod.
+#
+# Why per-invocation: a static pod cap strands capacity. A worker holds its slot
+# through LLM streaming while compiling nothing, planners never compile at all,
+# and different repositories compile at very different speeds. With the launcher
+# armed, every shell command starts in its own cgroup leaf throttled to 250m and
+# is lifted to the pod's full CPU limit only once it demonstrates it is actually
+# CPU-hungry.
+#
+#   disabled  (default) — no sidecar, no cgroup leaf, no lease. Shell commands
+#                         run in-process in the worker at the pod's own quota.
+#                         This is the behaviour that shipped before task 7deu.
+#   required            — render the cgroup-launcher sidecar. The launcher
+#                         establishes its own delegated cgroup v2 root at
+#                         startup, which needs `SYS_ADMIN` for the duration of
+#                         that bootstrap; it drops the capability irreversibly
+#                         before the broker accepts any work, and the pod runs
+#                         with `hostUsers: false` so even that window is inside
+#                         a user namespace.
+#
+# Requires a cgroup-v2 node whose kubelet offers the `cpu` controller to
+# container cgroups, and (for `hostUsers: false`) a runtime with user-namespace
+# support — Kubernetes 1.33+. Every precondition fails CLOSED: an unusable
+# render is refused at dispatch before a Job is submitted, and a launcher that
+# cannot establish its delegation exits non-zero before binding its socket.
+cgroupLauncher:
+  mode: disabled
+
+# -----------------------------------------------------------------------------
 # Server deployment
 # -----------------------------------------------------------------------------
 # Keep this availability-first rolling update for off/observe. When enabling

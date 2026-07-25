@@ -23,8 +23,8 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use djinn_cgroup_launcher::{
-    CgroupFs, CgroupMode, ChildProcess, CloneIntoCgroup, CommandSpec, Error, Invocation, Launcher,
-    LauncherConfig, Readiness,
+    CgroupFs, CgroupMode, ChildProcess, CommandSpec, Error, Invocation, Launcher, LauncherConfig,
+    Readiness, SpawnIntoCgroup,
     broker::{
         Broker, BrokerConfig, OsNonceSource, PeerCredentials, UnixPeer, WORKER_GID, WORKER_UID,
     },
@@ -143,8 +143,8 @@ impl FakeClone {
         })))
     }
 }
-impl CloneIntoCgroup for FakeClone {
-    fn clone_into_cgroup(
+impl SpawnIntoCgroup for FakeClone {
+    fn spawn_into_cgroup(
         &mut self,
         _target: RawFd,
         _invocation: &Invocation,
@@ -153,7 +153,7 @@ impl CloneIntoCgroup for FakeClone {
         let mut state = self.0.borrow_mut();
         state.attempts += 1;
         if state.deny {
-            return Err(Error::CloneDenied);
+            return Err(Error::SpawnDenied);
         }
         Ok(ChildProcess {
             pid: 4242,
@@ -200,7 +200,7 @@ fn broker() -> Broker<FakeCgroup, FakeClone, OsNonceSource> {
     let launcher = Launcher::new(
         FakeCgroup::with_owner(0),
         FakeClone::allow(),
-        LauncherConfig::new(None, 0).expect("launcher config"),
+        LauncherConfig::new(None, None, 0).expect("launcher config"),
     )
     .expect("launcher");
     Broker::new(
@@ -244,7 +244,7 @@ fn ac2_daemon_and_double_fork_stay_in_one_cgroup_and_release_gates_on_populated_
     let mut launcher = Launcher::new(
         fs.clone(),
         clone.clone(),
-        LauncherConfig::new(None, 7).expect("config"),
+        LauncherConfig::new(None, None, 7).expect("config"),
     )
     .expect("launcher");
 
@@ -316,7 +316,7 @@ fn ac2_cleanup_after_kill_still_requires_empty_before_unlink() {
     let mut launcher = Launcher::new(
         fs.clone(),
         FakeClone::allow(),
-        LauncherConfig::new(None, 3).expect("config"),
+        LauncherConfig::new(None, None, 3).expect("config"),
     )
     .expect("launcher");
     let (mut leaf, _) = launcher
@@ -620,7 +620,7 @@ fn ac3_incompatible_readiness_profiles_and_missing_worker_readiness_fail_closed(
         let result = Launcher::new(
             FakeCgroup::with_readiness(readiness),
             FakeClone::allow(),
-            LauncherConfig::new(None, 7).expect("config"),
+            LauncherConfig::new(None, None, 7).expect("config"),
         );
         match result {
             Err(error) => assert!(expected(&error), "unexpected error {error:?}"),

@@ -6,8 +6,8 @@
 use std::{collections::HashMap, fs::File, io::Read, os::fd::RawFd};
 
 use crate::{
-    CgroupFs, ChildProcess, CloneIntoCgroup, CommandSpec, CpuStat, Error, Invocation, Launcher,
-    Leaf, child::WorkerReadinessAssertion,
+    CgroupFs, ChildProcess, CommandSpec, CpuStat, Error, Invocation, Launcher, Leaf,
+    SpawnIntoCgroup, child::WorkerReadinessAssertion,
 };
 
 pub const WORKER_UID: u32 = 1000;
@@ -144,7 +144,7 @@ pub struct Broker<F, S, N = OsNonceSource> {
     active: HashMap<String, ActiveInvocation>,
 }
 
-impl<F: CgroupFs, S: CloneIntoCgroup, N: NonceSource> Broker<F, S, N> {
+impl<F: CgroupFs, S: SpawnIntoCgroup, N: NonceSource> Broker<F, S, N> {
     pub fn new(launcher: Launcher<F, S>, config: BrokerConfig, nonces: N) -> Result<Self, Error> {
         Ok(Self {
             launcher,
@@ -516,8 +516,8 @@ mod tests {
         }
     }
     struct Clone;
-    impl CloneIntoCgroup for Clone {
-        fn clone_into_cgroup(
+    impl SpawnIntoCgroup for Clone {
+        fn spawn_into_cgroup(
             &mut self,
             _: RawFd,
             _: &Invocation,
@@ -534,7 +534,7 @@ mod tests {
         let launcher = Launcher::new(
             Fs::ready(),
             Clone,
-            crate::LauncherConfig::new(None, 0).unwrap(),
+            crate::LauncherConfig::new(None, None, 0).unwrap(),
         )
         .unwrap();
         Broker::new(
@@ -693,8 +693,12 @@ mod tests {
     fn duplicate_create_does_not_clone_or_replace_the_active_leaf() {
         let fs = Fs::ready();
         let creates = Rc::clone(&fs.creates);
-        let launcher =
-            Launcher::new(fs, Clone, crate::LauncherConfig::new(None, 0).unwrap()).unwrap();
+        let launcher = Launcher::new(
+            fs,
+            Clone,
+            crate::LauncherConfig::new(None, None, 0).unwrap(),
+        )
+        .unwrap();
         let mut broker = Broker::new(
             launcher,
             BrokerConfig::worker(42, b"private".to_vec()).unwrap(),
@@ -737,8 +741,12 @@ mod tests {
         let fs = Fs::ready();
         let events = Rc::clone(&fs.events);
         *events.borrow_mut() = "populated 1".into();
-        let launcher =
-            Launcher::new(fs, Clone, crate::LauncherConfig::new(None, 0).unwrap()).unwrap();
+        let launcher = Launcher::new(
+            fs,
+            Clone,
+            crate::LauncherConfig::new(None, None, 0).unwrap(),
+        )
+        .unwrap();
         let mut broker = Broker::new(
             launcher,
             BrokerConfig::worker(42, b"private".to_vec()).unwrap(),

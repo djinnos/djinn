@@ -8625,10 +8625,18 @@ mod build_admission_route_tests {
 
     // ─── AC1: Retry / planner-escalation route ────────────────────────────
 
-    /// Prove the planner-escalation dispatch route records an admission row
-    /// before the pool create.
+    /// Prove the planner-escalation dispatch route goes through build admission
+    /// and dispatches WITHOUT reserving a build slot.
+    ///
+    /// This test previously asserted the opposite (an occupying row before the
+    /// pool create). Task `h1yv` inverted it: a Planner is
+    /// [`djinn_runtime::RoleResourceClass::Light`] — orchestration-only, it
+    /// never runs the project's compile/test toolchain — so it is admitted with
+    /// a zero-slot permit and leaves no journal row. The route invariant that
+    /// still matters is that the escalation dispatches at all while a scarce cap
+    /// is in force, and that it adds nothing to durable occupancy.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn planner_escalation_route_reserves_before_pool_create() {
+    async fn planner_escalation_route_dispatches_without_consuming_a_build_slot() {
         let db = crate::test_helpers::create_test_db();
         let (events_tx, _events_rx) = tokio::sync::broadcast::channel(256);
         let fixture = seed_wnd1_ready_worker_tasks(&db, WND1_READY_TASK_COUNT).await;
@@ -8677,18 +8685,31 @@ mod build_admission_route_tests {
 
         let snapshot = runtime.snapshot(&dispatched_id);
         assert!(
-            snapshot.row_existed,
-            "planner-escalation route must have an admission row before the \
-             pool create fires"
+            !snapshot.row_existed,
+            "a light planner task-run must reserve no admission row"
+        );
+        assert_eq!(
+            snapshot.occupancy, 0,
+            "a light planner task-run must add nothing to build occupancy"
         );
 
-        // The review task's admission history must show exactly one generation.
+        // The review task leaves no admission history at all: nothing was
+        // reserved, so there is nothing to release.
         let history = journal
             .list_history(AdmissionDomain::TaskObservation, &dispatched_id)
             .await
             .expect("read planner admission history");
-        assert_eq!(history.len(), 1);
-        assert_eq!(history[0].state, AdmissionState::CreateUnknown);
+        assert!(
+            history.is_empty(),
+            "a light planner task-run writes no journal rows, got {history:?}"
+        );
+        assert_eq!(
+            journal
+                .count_task_or_warm_occupancy()
+                .await
+                .expect("read occupancy"),
+            0
+        );
 
         runtime.release(&dispatched_id).await;
     }

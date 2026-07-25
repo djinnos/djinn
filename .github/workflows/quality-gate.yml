@@ -560,6 +560,12 @@ jobs:
       # fewer than this many actually execute, so a lane that quietly runs zero
       # tests can never be mistaken for a proven kernel boundary.
       ZF13_EXPECTED_PROOFS: "3"
+      # Number of `#[ignore]`d proofs `delegated_cpu_lease_lifecycle.rs`
+      # declares. That suite is the ONLY place the CPU lease is proven to
+      # actually govern CPU — measured on `cpu.stat` over a wall-clock window
+      # rather than by reading `cpu.max` back — so a run that executes zero of
+      # its proofs must fail rather than look green (task 7deu).
+      LEASE_LIFECYCLE_EXPECTED_PROOFS: "1"
     steps:
       - uses: actions/checkout@v4
       - run: rustup toolchain install
@@ -604,6 +610,7 @@ jobs:
           # only the finished binary is then run with elevated privilege.
           cargo test -p djinn-cgroup-launcher \
             --test kernel_boundary_under_rendered_context \
+            --test delegated_cpu_lease_lifecycle \
             --no-run --message-format=json > "$RUNNER_TEMP/build.json"
           binary=$(jq -r 'select(.executable != null and .target.name == "kernel_boundary_under_rendered_context") | .executable' "$RUNNER_TEMP/build.json" | tail -1)
           if [ -z "$binary" ] || [ ! -x "$binary" ]; then
@@ -611,6 +618,12 @@ jobs:
             exit 1
           fi
           echo "binary=$binary" >> "$GITHUB_OUTPUT"
+          lease=$(jq -r 'select(.executable != null and .target.name == "delegated_cpu_lease_lifecycle") | .executable' "$RUNNER_TEMP/build.json" | tail -1)
+          if [ -z "$lease" ] || [ ! -x "$lease" ]; then
+            echo "::error::could not locate the built CPU-lease lifecycle proof binary"
+            exit 1
+          fi
+          echo "lease=$lease" >> "$GITHUB_OUTPUT"
       - name: Prove the kernel boundary under the rendered security context
         run: |
           set -euo pipefail
@@ -636,6 +649,32 @@ jobs:
             exit 1
           fi
           echo "::notice::launcher kernel boundary proven: $passed/$ZF13_EXPECTED_PROOFS privileged proofs executed"
+      - name: Prove the per-invocation CPU lease actually governs CPU
+        run: |
+          set -euo pipefail
+          # Task 7deu. The same privileged cgroup-v2 container, running the
+          # ONLY suite that measures behaviour rather than configuration: the
+          # launcher mounts its own delegated cgroup2 root, drops CAP_SYS_ADMIN
+          # and proves it can no longer mount, spawns a real child into an
+          # invocation leaf, and measures `cpu.stat usage_usec` over a
+          # wall-clock window unleased and then lifted. Reading `cpu.max` back
+          # cannot see any of the defects this replaces — an ancestor CPU limit
+          # clamping every leaf, or a clone flag that truncated to zero so the
+          # child was never in the cgroup at all.
+          #
+          # --test-threads 1 because the proof's capability drop is irreversible
+          # and process-wide.
+          docker run --rm --privileged --cgroupns=private \
+            -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" \
+            ubuntu:24.04 \
+            bash -c 'mkdir -p /workspace && exec "$0" --ignored --test-threads 1 --nocapture' \
+            "${{ steps.build.outputs.lease }}" 2>&1 | tee "$RUNNER_TEMP/lease.log"
+          passed=$(sed -n 's/^test result: ok\. \([0-9]*\) passed.*/\1/p' "$RUNNER_TEMP/lease.log" | tail -1)
+          if [ "${passed:-0}" != "$LEASE_LIFECYCLE_EXPECTED_PROOFS" ]; then
+            echo "::error::the CPU-lease lifecycle lane executed ${passed:-0} proofs but $LEASE_LIFECYCLE_EXPECTED_PROOFS are declared; the lease is NOT proven to govern CPU by this run"
+            exit 1
+          fi
+          echo "::notice::per-invocation CPU lease proven: $passed/$LEASE_LIFECYCLE_EXPECTED_PROOFS privileged proofs executed"
   server-aarch64-check:
     name: Server aarch64 Check
     needs: preflight

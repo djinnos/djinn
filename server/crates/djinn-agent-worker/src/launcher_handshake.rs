@@ -236,8 +236,8 @@ mod tests {
     use djinn_cgroup_launcher::child::WorkerDumpability;
     use djinn_cgroup_launcher::transport::UnixBrokerServer;
     use djinn_cgroup_launcher::{
-        CgroupFs, CgroupMode, ChildProcess, CloneIntoCgroup, CommandSpec, Error, Invocation,
-        Launcher, LauncherConfig, Readiness,
+        CgroupFs, CgroupMode, ChildProcess, CommandSpec, Error, Invocation, Launcher,
+        LauncherConfig, Readiness, SpawnIntoCgroup,
     };
 
     /// A dumpability double that reports the worker as already non-dumpable
@@ -268,27 +268,27 @@ mod tests {
             })
         }
         fn create_direct_child(&mut self, _: &str) -> Result<RawFd, Error> {
-            Err(Error::CloneDenied)
+            Err(Error::SpawnDenied)
         }
         fn write_leaf(&mut self, _: RawFd, _: &str, _: &str) -> Result<(), Error> {
-            Err(Error::CloneDenied)
+            Err(Error::SpawnDenied)
         }
         fn read_leaf(&mut self, _: RawFd, _: &str) -> Result<String, Error> {
-            Err(Error::CloneDenied)
+            Err(Error::SpawnDenied)
         }
         fn remove_leaf(&mut self, _: RawFd, _: &str) -> Result<(), Error> {
             Ok(())
         }
     }
     struct NoClone;
-    impl CloneIntoCgroup for NoClone {
-        fn clone_into_cgroup(
+    impl SpawnIntoCgroup for NoClone {
+        fn spawn_into_cgroup(
             &mut self,
             _: RawFd,
             _: &Invocation,
             _: &CommandSpec,
         ) -> Result<ChildProcess, Error> {
-            Err(Error::CloneDenied)
+            Err(Error::SpawnDenied)
         }
     }
 
@@ -339,7 +339,7 @@ mod tests {
             let launcher = Launcher::new(
                 FakeFs { owner_uid },
                 NoClone,
-                LauncherConfig::new(None, owner_uid).expect("launcher config"),
+                LauncherConfig::new(None, None, owner_uid).expect("launcher config"),
             )
             .expect("launcher readiness");
             let broker = Broker::new(launcher, config, OsNonceSource).expect("broker");
