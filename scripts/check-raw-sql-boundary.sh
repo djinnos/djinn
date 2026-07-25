@@ -11,7 +11,7 @@
 #
 # Usage:
 #   BASE_SHA=<sha> ./scripts/check-raw-sql-boundary.sh
-#   ./scripts/check-raw-sql-boundary.sh                      # falls back to origin/main
+#   ./scripts/check-raw-sql-boundary.sh                      # uses locally available origin/main
 #   printf '%s\n' server/crates/foo/src/lib.rs | ./scripts/check-raw-sql-boundary.sh --files-from-stdin
 #   SQLX_GUARD_MODE=files-from-stdin ./scripts/check-raw-sql-boundary.sh < changed-files.txt
 #
@@ -21,7 +21,7 @@
 #                   Read changed file paths from stdin; check only in-scope Rust files.
 #
 # Environment:
-#   BASE_SHA        Base commit to diff HEAD against (default: origin/main).
+#   BASE_SHA        Base commit to diff HEAD against (default: locally available origin/main).
 #   SQLX_GUARD_MODE Override mode selection: "diff" or "files-from-stdin".
 #
 # Exit codes:
@@ -46,7 +46,7 @@ Modes:
   --files-from-stdin  Read changed file paths from stdin (also SQLX_GUARD_MODE=files-from-stdin).
 
 Environment:
-  BASE_SHA   Base commit to diff HEAD against (default: origin/main).
+  BASE_SHA   Base commit to diff HEAD against (default: locally available origin/main).
 
 Checks changed Rust files outside the approved SQL boundaries for raw sqlx
 query usage (sqlx::query, sqlx::query!, sqlx::query_as!, sqlx::query_scalar!,
@@ -210,17 +210,6 @@ check_files() {
 # ── Diff mode: collect changed files from git ──────────────────────────
 
 get_changed_files_from_diff() {
-    BASE_SHA=${BASE_SHA:-}
-    if [ -z "$BASE_SHA" ]; then
-        git fetch --no-tags --depth=1 origin main >/dev/null 2>&1 || true
-        BASE_SHA=$(git rev-parse --verify origin/main 2>/dev/null || true)
-    fi
-
-    if [ -z "$BASE_SHA" ]; then
-        echo "::error::check-raw-sql-boundary: could not determine a base SHA to diff against." >&2
-        exit 1
-    fi
-
     echo "Checking raw-sqlx boundary against base $BASE_SHA ..."
 
     # Diff to find changed (Added, Modified, Copied) Rust files. We only care
@@ -229,10 +218,30 @@ get_changed_files_from_diff() {
     git diff --name-only --diff-filter=ACMR "$BASE_SHA...HEAD" -- '*.rs' || true
 }
 
+resolve_base_sha() {
+    BASE_SHA=${BASE_SHA:-}
+    if [ -z "$BASE_SHA" ]; then
+        BASE_SHA=$(git rev-parse --verify origin/main^{commit} 2>/dev/null || true)
+    else
+        BASE_SHA=$(git rev-parse --verify "$BASE_SHA^{commit}" 2>/dev/null || true)
+    fi
+
+    if [ -z "$BASE_SHA" ]; then
+        echo "::error::check-raw-sql-boundary: could not resolve a base commit. Set BASE_SHA to an available commit, or fetch origin/main outside this guard." >&2
+        exit 2
+    fi
+
+    if ! git merge-base "$BASE_SHA" HEAD >/dev/null 2>&1; then
+        echo "::error::check-raw-sql-boundary: $BASE_SHA has no locally available merge-base with HEAD. Set BASE_SHA to a commit with available history; this guard will not fetch or modify origin/main." >&2
+        exit 2
+    fi
+}
+
 # ── Main ───────────────────────────────────────────────────────────────
 
 case "$MODE" in
     diff)
+        resolve_base_sha
         get_changed_files_from_diff | check_files
         ;;
     files-from-stdin)
