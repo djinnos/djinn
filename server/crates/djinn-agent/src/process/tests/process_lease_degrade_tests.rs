@@ -379,12 +379,17 @@ fn wall_clock_ms() -> i64 {
         .as_millis() as i64
 }
 
-/// A runner clock pinned to real wall time. The invocation deadline contract is
-/// absolute epoch milliseconds, so the runner's clock and the coordinator's
-/// clock must agree on "now" for a rendered deadline to be in the future.
-#[allow(clippy::disallowed_methods)] // test-only reference clock for absolute deadlines
-fn wall_clock() -> Arc<TestClock> {
-    Arc::new(TestClock::new(SystemTime::now(), Instant::now()))
+/// A runner clock frozen at an exact, caller-known epoch millisecond. The
+/// invocation deadline contract is absolute epoch milliseconds, so the runner's
+/// clock and the coordinator's clock must agree on "now" for a rendered deadline
+/// to be in the future — and pinning `now` to a value the test already holds
+/// makes the rendered deadline exactly predictable rather than a tolerance band.
+#[allow(clippy::disallowed_methods)] // test-only monotonic seam; the wall side is explicit
+fn clock_pinned_at(now_ms: i64) -> Arc<TestClock> {
+    Arc::new(TestClock::new(
+        std::time::UNIX_EPOCH + Duration::from_millis(now_ms as u64),
+        Instant::now(),
+    ))
 }
 
 /// Drive the durable admission epoch to a committed forward overlap with v1
@@ -489,10 +494,14 @@ async fn rendered_invocation_deadlines_are_granted_and_reach_the_fenced_lift() {
     )
     .await;
     let launcher = Arc::new(DegradeLauncher::completing());
+    // The runner's "now". The coordinator keeps its own real clock, so a
+    // correctly rendered deadline must land ahead of it for the lease to be
+    // granted at all.
+    let now_ms = wall_clock_ms();
     let runner = Arc::new(LeaseInvocationRunner::new(
         services,
         launcher.clone(),
-        wall_clock(),
+        clock_pinned_at(now_ms),
     ));
     // The exact config a task pod renders, straight from the production
     // producer — no deadline literal appears in this test.
@@ -502,7 +511,6 @@ async fn rendered_invocation_deadlines_are_granted_and_reach_the_fenced_lift() {
         "run".into(),
         "pod".into(),
     );
-    let before_ms = wall_clock_ms();
     let output = runner
         .output(
             command(),
@@ -511,7 +519,6 @@ async fn rendered_invocation_deadlines_are_granted_and_reach_the_fenced_lift() {
         )
         .await
         .expect("the rendered deadlines must produce a usable lease");
-    let after_ms = wall_clock_ms();
 
     assert_eq!(output.process.termination, ProcessTermination::Exited);
     assert_eq!(output.process.output.status.code(), Some(0));
@@ -531,24 +538,25 @@ async fn rendered_invocation_deadlines_are_granted_and_reach_the_fenced_lift() {
         "the rendered queue deadline must not be in the past"
     );
 
-    // The stored deadline is an absolute instant ~30s from now, not 1970.
-    let queue_deadline_ms = durable_deadline_ms(
-        row.queue_deadline
-            .as_deref()
-            .expect("the queued row retains its deadline"),
+    // The stored deadlines are absolute instants exactly 30s / 60s past the
+    // runner's `now` — not 1970, and not the raw timeouts.
+    assert_eq!(
+        durable_deadline_ms(
+            row.queue_deadline
+                .as_deref()
+                .expect("the queued row retains its deadline"),
+        ),
+        now_ms + 30_000,
+        "the durable queue deadline must be now + 30s"
     );
-    assert!(
-        queue_deadline_ms >= before_ms + 30_000 && queue_deadline_ms <= after_ms + 30_000,
-        "queue deadline {queue_deadline_ms} is not ~30s ahead of [{before_ms}, {after_ms}]"
-    );
-    let launch_deadline_ms = durable_deadline_ms(
-        row.launch_deadline
-            .as_deref()
-            .expect("the granted row retains its launch deadline"),
-    );
-    assert!(
-        launch_deadline_ms >= before_ms + 60_000 && launch_deadline_ms <= after_ms + 60_000,
-        "launch deadline {launch_deadline_ms} is not ~60s ahead of [{before_ms}, {after_ms}]"
+    assert_eq!(
+        durable_deadline_ms(
+            row.launch_deadline
+                .as_deref()
+                .expect("the granted row retains its launch deadline"),
+        ),
+        now_ms + 60_000,
+        "the durable launch deadline must be now + 60s"
     );
 }
 
@@ -580,16 +588,17 @@ fn durable_deadline_ms(value: &str) -> i64 {
 async fn real_lease_authority_queue_timeout_degrades_to_a_successful_command() {
     let db = crate::test_helpers::create_test_db();
     arm_invocation_lift(&db).await;
+    let now_ms = wall_clock_ms();
     // One hour past every deadline this invocation can render.
     let expired_clock = Arc::new(djinn_coordinator::build_lease::ManualLeaseClock::new(
-        wall_clock_ms() + 3_600_000,
+        now_ms + 3_600_000,
     ));
     let services = real_lease_services(&db, expired_clock).await;
     let launcher = Arc::new(DegradeLauncher::completing());
     let runner = Arc::new(LeaseInvocationRunner::new(
         services,
         launcher.clone(),
-        wall_clock(),
+        clock_pinned_at(now_ms),
     ));
     let context = crate::context::ShellLaunchContext::for_test(
         Arc::clone(&runner),
