@@ -13,8 +13,8 @@ use crate::test_support::{checkout_branch, init_repo_with_main_commit, write_and
 use crate::{
     GitError, delete_branch, head_commit_sha, is_non_fast_forward_error,
     is_retryable_git_command_error, is_transient_network_error, rebase_with_retry, retry_delay,
-    rev_list_count, run_git_command, run_git_command_in, run_git_command_with_timeout,
-    run_git_command_with_timeout_in, unmerged_files,
+    rev_list_count, run_git_command, run_git_command_in, run_git_command_in_with_env,
+    run_git_command_with_timeout, run_git_command_with_timeout_in, unmerged_files,
 };
 
 // ── Helper ──────────────────────────────────────────────────────────────────
@@ -86,6 +86,65 @@ async fn run_git_command_missing_remote_returns_command_failed() {
         }
         other => panic!("expected CommandFailed, got: {other:?}"),
     }
+}
+
+/// A uid-1000 worker must clone a uid-10001 mirror. When the test runner can
+/// change ownership, make the fixture's actual `.git` directory foreign and
+/// verify the local clone succeeds through the configured command seam. An
+/// unprivileged local developer cannot create a foreign-owned inode, so that
+/// environment leaves this integration regression to the privileged CI lane.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn local_clone_succeeds_when_repository_is_owned_by_a_different_uid() {
+    use std::os::unix::{ffi::OsStrExt, fs::MetadataExt};
+
+    let source = init_repo_with_main_commit();
+    let source_git = source.path().join(".git");
+    let current_uid = std::fs::metadata(&source_git)
+        .expect("stat source git dir")
+        .uid();
+    let foreign_uid = if current_uid == 10001 { 10002 } else { 10001 };
+
+    // CI's privileged test lane exercises the real ownership boundary. The
+    // task-run image intentionally runs tests as uid 1000, where chown is not
+    // available; returning there avoids turning a capability limitation into a
+    // false test failure.
+    if unsafe {
+        libc::chown(
+            source_git.as_os_str().as_bytes().as_ptr().cast(),
+            foreign_uid,
+            u32::MAX,
+        )
+    } != 0
+    {
+        return;
+    }
+    assert_eq!(
+        std::fs::metadata(&source_git)
+            .expect("stat foreign-owned source git dir")
+            .uid(),
+        foreign_uid,
+        "fixture must be owned by a uid other than the cloning process"
+    );
+
+    let destination_parent = tempfile::tempdir().expect("create clone destination parent");
+    let destination = destination_parent.path().join("clone");
+    run_git_command_in_with_env(
+        destination_parent.path(),
+        vec![
+            "clone".into(),
+            "--local".into(),
+            source.path().display().to_string(),
+            destination.display().to_string(),
+        ],
+        Vec::new(),
+    )
+    .await
+    .expect("safe.directory must permit cloning a foreign-owned source repository");
+
+    assert!(
+        destination.join(".git").is_dir(),
+        "clone must be materialized"
+    );
 }
 
 // ── run_git_command_with_timeout: Timeout ───────────────────────────────────
