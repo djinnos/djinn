@@ -224,24 +224,32 @@ fn metric_labels(line: &str) -> Vec<&str> {
         .unwrap_or_default()
 }
 
-fn cargo_count(rendered: &str, kind: &str, exit: &str) -> f64 {
+fn cargo_count(rendered: &str, kind: &str, exit: &str, class: &str) -> f64 {
     let expected_exit = format!("exit=\"{exit}\"");
     let expected_kind = format!("kind=\"{kind}\"");
+    let expected_class = format!("class=\"{class}\"");
     cargo_metric_lines(rendered)
         .into_iter()
         .find(|line| {
             let labels = metric_labels(line);
             line.starts_with("djinn_cargo_invocation_seconds_count{")
-                && labels.len() == 2
+                && labels.len() == 3
                 && labels.contains(&expected_kind.as_str())
                 && labels.contains(&expected_exit.as_str())
+                && labels.contains(&expected_class.as_str())
         })
         .and_then(|line| line.rsplit_once(' '))
         .and_then(|(_, value)| value.parse().ok())
         .unwrap_or(0.0)
 }
 
-fn assert_cargo_schema_and_buckets(rendered: &str, kind: &str, exit: &str, injected: &str) {
+fn assert_cargo_schema_and_buckets(
+    rendered: &str,
+    kind: &str,
+    exit: &str,
+    class: &str,
+    injected: &str,
+) {
     let lines = cargo_metric_lines(rendered);
     assert!(
         !lines.is_empty(),
@@ -251,9 +259,9 @@ fn assert_cargo_schema_and_buckets(rendered: &str, kind: &str, exit: &str, injec
     for line in &lines {
         let labels = metric_labels(line);
         let expected = if line.contains("_bucket{") {
-            ["exit", "kind", "le"].as_slice()
+            ["class", "exit", "kind", "le"].as_slice()
         } else {
-            ["exit", "kind"].as_slice()
+            ["class", "exit", "kind"].as_slice()
         };
         let mut keys: Vec<_> = labels
             .iter()
@@ -289,12 +297,15 @@ fn assert_cargo_schema_and_buckets(rendered: &str, kind: &str, exit: &str, injec
     ];
     let expected_kind = format!("kind=\"{kind}\"");
     let expected_exit = format!("exit=\"{exit}\"");
+    let expected_class = format!("class=\"{class}\"");
     let buckets: Vec<_> = lines
         .iter()
         .filter(|line| line.starts_with("djinn_cargo_invocation_seconds_bucket{"))
         .filter(|line| {
             let labels = metric_labels(line);
-            labels.contains(&expected_kind.as_str()) && labels.contains(&expected_exit.as_str())
+            labels.contains(&expected_kind.as_str())
+                && labels.contains(&expected_exit.as_str())
+                && labels.contains(&expected_class.as_str())
         })
         .filter_map(|line| {
             metric_labels(line).into_iter().find_map(|label| {
@@ -324,7 +335,7 @@ async fn shell_dispatch_fake_cargo_success_has_exact_telemetry_delta_and_schema(
     let cargo = write_fake_cargo(worktree.path(), &format!("printf '%s\\n' '{injected}'"));
     let command = format!("{} clippy", cargo.display());
     let before = djinn_telemetry::render().expect("render telemetry before dispatch");
-    let count_before = cargo_count(&before, "clippy", "ok");
+    let count_before = cargo_count(&before, "clippy", "ok", "light");
 
     let response = call_shell(
         &state,
@@ -338,12 +349,16 @@ async fn shell_dispatch_fake_cargo_success_has_exact_telemetry_delta_and_schema(
     assert_eq!(response["ok"], serde_json::json!(true));
 
     let after = djinn_telemetry::render().expect("render telemetry after dispatch");
-    assert_eq!(cargo_count(&after, "clippy", "ok"), count_before + 1.0);
+    assert_eq!(
+        cargo_count(&after, "clippy", "ok", "light"),
+        count_before + 1.0,
+        "a reviewer is Light, so its cargo invocation must be labelled light"
+    );
     assert!(
         !after.contains(injected),
         "arbitrary fake cargo output must not appear in the telemetry scrape"
     );
-    assert_cargo_schema_and_buckets(&after, "clippy", "ok", injected);
+    assert_cargo_schema_and_buckets(&after, "clippy", "ok", "light", injected);
 }
 
 #[tokio::test]
@@ -369,7 +384,7 @@ async fn shell_dispatch_broker_backed_cargo_records_exactly_one_observation() {
     ));
 
     let before = djinn_telemetry::render().expect("render telemetry before dispatch");
-    let count_before = cargo_count(&before, "clippy", "fail");
+    let count_before = cargo_count(&before, "clippy", "fail", "build-capable");
     let response = call_shell(
         &state,
         &shell_args("cargo clippy"),
@@ -392,7 +407,7 @@ async fn shell_dispatch_broker_backed_cargo_records_exactly_one_observation() {
     );
     let after = djinn_telemetry::render().expect("render telemetry after dispatch");
     assert_eq!(
-        cargo_count(&after, "clippy", "fail"),
+        cargo_count(&after, "clippy", "fail", "build-capable"),
         count_before + 1.0,
         "one classified broker-backed shell terminal result records exactly once"
     );
@@ -403,6 +418,50 @@ async fn shell_dispatch_broker_backed_cargo_records_exactly_one_observation() {
     assert_eq!(broker.identities[0].task_run_id, "trusted-task-run");
     assert!(!broker.identities[0].invocation_id.is_empty());
     assert_eq!((broker.empties, broker.cleanups), (1, 1));
+}
+
+/// The warm-cache steer is role-blind.
+///
+/// It used to fire only for `Some("worker") | Some("reviewer")` — a second,
+/// contradictory classifier that disagreed with `djinn_runtime::RoleResourceClass`
+/// in both directions (it classed Reviewer with Worker, and its comment claimed
+/// architect never runs cargo while `spec.rs` classes Architect build-capable).
+/// The cache is clippy-warmed, which is a property of the POD, so `cargo check`
+/// cold-builds the workspace no matter who typed it. Architect, verifier,
+/// planner, lead, the refinement sub-roles and an absent role are all steered
+/// now, and reviewer — the one Light role measured to compile — keeps its steer.
+#[tokio::test]
+async fn cargo_check_steer_applies_to_every_role() {
+    let (worktree, state) = setup("shell-cargo-steer-every-role-");
+    for role in [
+        Some("worker"),
+        Some("reviewer"),
+        Some("architect"),
+        Some("verifier"),
+        Some("planner"),
+        Some("lead"),
+        Some("advocate"),
+        Some("adversary"),
+        Some("judge"),
+        Some("mystery"),
+        None,
+    ] {
+        for command in ["cargo check -p djinn-db", "cargo build -p djinn-db"] {
+            let error = call_shell(
+                &state,
+                &shell_args(command),
+                worktree.path(),
+                role,
+                &crate::extension::ToolCancellation::never(),
+            )
+            .await
+            .expect_err(&format!("{command} must be steered for role {role:?}"));
+            assert!(
+                error.contains("cargo clippy -p <crate>"),
+                "role {role:?} must get the clippy steer, got: {error}"
+            );
+        }
+    }
 }
 
 /// Workspace composition: a shell command that loses the build-lease queue must
@@ -434,9 +493,12 @@ async fn shell_dispatch_lease_queue_timeout_returns_the_command_result_not_an_er
         "degrade-pod-uid".into(),
     ));
 
+    // `cargo clippy`, not `cargo check`/`cargo build`: the warm-cache steer
+    // denies those for every role now that the classifier is shared, and this
+    // test is about the lease-degradation path, not the steer.
     let response = call_shell(
         &state,
-        &shell_args("cargo build"),
+        &shell_args("cargo clippy"),
         worktree.path(),
         None,
         &crate::extension::ToolCancellation::never(),
@@ -471,7 +533,7 @@ async fn shell_dispatch_fake_cargo_failure_has_exact_telemetry_delta() {
     );
     let command = format!("{} test", cargo.display());
     let before = djinn_telemetry::render().expect("render telemetry before dispatch");
-    let count_before = cargo_count(&before, "test", "fail");
+    let count_before = cargo_count(&before, "test", "fail", "light");
 
     let response = call_shell(
         &state,
@@ -485,12 +547,15 @@ async fn shell_dispatch_fake_cargo_failure_has_exact_telemetry_delta() {
     assert_eq!(response["ok"], serde_json::json!(false));
 
     let after = djinn_telemetry::render().expect("render telemetry after dispatch");
-    assert_eq!(cargo_count(&after, "test", "fail"), count_before + 1.0);
+    assert_eq!(
+        cargo_count(&after, "test", "fail", "light"),
+        count_before + 1.0
+    );
     assert!(
         !after.contains(injected),
         "arbitrary fake cargo error text must not appear in the telemetry scrape"
     );
-    assert_cargo_schema_and_buckets(&after, "test", "fail", injected);
+    assert_cargo_schema_and_buckets(&after, "test", "fail", "light", injected);
 }
 
 #[tokio::test]

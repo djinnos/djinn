@@ -878,7 +878,7 @@ impl BuildAdmissionController {
             // build-capable role fall through and reserve normally; an unknown
             // role never reaches here at all (`admit_task_run` rejects it as
             // Unclassified before constructing the request).
-            BuildWorkloadKind::TaskRun { role } if !role.resource_class().consumes_build_slot() => {
+            BuildWorkloadKind::TaskRun { role } if !role.resource_class().gated_at_dispatch() => {
                 let key = AdmissionJournalKey {
                     domain: request.domain,
                     work_id: request.work_id,

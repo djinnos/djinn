@@ -3553,6 +3553,56 @@ mod tests {
             res(&light).requests.unwrap().get("memory"),
             res(&build).requests.unwrap().get("memory"),
         );
+
+        // The CPU REQUEST is the only thing the class moves. Leasing is
+        // role-agnostic — `LeaseInvocationRunner` queues on measured `cpu.stat`
+        // and takes no role input — so the launcher sidecar a light pod renders
+        // must be byte-identical to a build-capable pod's, including the quota
+        // the broker hands a leased invocation. If a future change makes a
+        // light pod lease less CPU (or renders it no launcher at all), the ~5%
+        // of light task-runs that do compile would be throttled by their role
+        // rather than by measurement, and this fails.
+        let init = |job: &Job| {
+            job.spec
+                .as_ref()
+                .unwrap()
+                .template
+                .spec
+                .as_ref()
+                .unwrap()
+                .init_containers
+                .clone()
+                .unwrap_or_default()
+        };
+        let launcher = |job: &Job| {
+            init(job)
+                .into_iter()
+                .find(|c| c.name == crate::launcher::LAUNCHER_CONTAINER_NAME)
+                .unwrap_or_else(|| {
+                    panic!("every task-run pod must render the cgroup-launcher sidecar")
+                })
+        };
+        let light_launcher = launcher(&light);
+        let build_launcher = launcher(&build);
+        let leased = |c: &Container| {
+            c.env
+                .as_ref()
+                .unwrap()
+                .iter()
+                .find(|e| e.name == "DJINN_LAUNCHER_LEASED_MILLICORES")
+                .unwrap_or_else(|| panic!("launcher must declare DJINN_LAUNCHER_LEASED_MILLICORES"))
+                .value
+                .clone()
+        };
+        assert_eq!(
+            leased(&light_launcher),
+            leased(&build_launcher),
+            "leased millicores must not depend on the role class"
+        );
+        assert_eq!(
+            light_launcher, build_launcher,
+            "the launcher sidecar must render identically for both classes"
+        );
     }
 
     /// Production/default rendering requires the cgroup-launcher. The explicit
