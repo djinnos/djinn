@@ -1,0 +1,6 @@
+# Mutable monitoring and rotator images are forbidden.
+monitoring:
+  prometheus:
+    image: prom/prometheus:latest
+logCollector:
+  rotatorImage: ghcr.io/djinnos/djinn-log-rotator:latest

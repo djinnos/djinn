@@ -4,6 +4,16 @@ Installs djinn-server (controller), Postgres 16 (SQL state, JSONB), qdrant
 (vector store), and the Phase 3 image pipeline (BuildKit + Zot + image
 controller).
 
+## Incident observability
+
+The opt-in `monitoring` and `logCollector` chart values are checked locally by
+`tests/incident-observability-contract.sh`; its named output is
+`helm_contract::incident_observability`. This repository verification renders
+the schema and manifests, including the existing collector contract. It does
+not prepare node disks, create the webhook Secret, activate an external paging
+provider, or prove a real page. Those are operator-owned production gates in
+[the incident observability runbook](../../../server/docs/runbooks/incident-observability.md).
+
 ## Cache cleanup mode
 
 The shipped production value is `cacheCleanup.mode: delete`, rendered as the

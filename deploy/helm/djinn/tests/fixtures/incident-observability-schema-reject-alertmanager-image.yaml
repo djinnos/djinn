@@ -1,0 +1,3 @@
+monitoring:
+  alertmanager:
+    image: prom/alertmanager:latest

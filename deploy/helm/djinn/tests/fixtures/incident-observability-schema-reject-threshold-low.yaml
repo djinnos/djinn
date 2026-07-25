@@ -1,0 +1,3 @@
+monitoring:
+  alerts:
+    memoryPressureThreshold: 0
