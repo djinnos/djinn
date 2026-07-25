@@ -31,7 +31,7 @@
 #   PATTERN                 POSIX extended grep pattern used to detect usage.
 #   CAPABILITY_BOUNDARY_MODE
 #                           Override mode selection: "diff" or "files-from-stdin".
-#   BASE_SHA                Base commit to diff HEAD against (default: origin/main).
+#   BASE_SHA                Base commit to diff HEAD against (default: locally available origin/main).
 #   ALLOWLIST               Optional path to a TOML allowlist (default:
 #                           scripts/capability-boundary-allowlist.toml).
 #
@@ -71,7 +71,7 @@ Modes:
                       CAPABILITY_BOUNDARY_MODE=files-from-stdin).
 
 Environment:
-  BASE_SHA                Base commit to diff HEAD against (default: origin/main).
+  BASE_SHA                Base commit to diff HEAD against (default: locally available origin/main).
   ALLOWLIST               Path to TOML allowlist file (default:
                           scripts/capability-boundary-allowlist.toml).
   CAPABILITY_BOUNDARY_MODE
@@ -469,22 +469,30 @@ check_files() {
 # ── Diff mode: collect changed files from git ──────────────────────────
 
 get_changed_files_from_diff() {
-    BASE_SHA=${BASE_SHA:-}
-    if [ -z "$BASE_SHA" ]; then
-        git fetch --no-tags --depth=1 origin main >/dev/null 2>&1 || true
-        BASE_SHA=$(git rev-parse --verify origin/main 2>/dev/null || true)
-    fi
-
-    if [ -z "$BASE_SHA" ]; then
-        printf '::error::check-capability-boundaries: could not determine a base SHA to diff against.\n' >&2
-        exit 2
-    fi
-
     printf 'Checking %s boundary against base %s ...\n' "$CAPABILITY" "$BASE_SHA"
 
     # Diff to find changed (Added, Modified, Copied) Rust files.  Deleted and
     # renamed-from files are naturally skipped by the subsequent [ -f ] check.
     git diff --name-only --diff-filter=ACMR "$BASE_SHA...HEAD" -- '*.rs' || true
+}
+
+resolve_base_sha() {
+    BASE_SHA=${BASE_SHA:-}
+    if [ -z "$BASE_SHA" ]; then
+        BASE_SHA=$(git rev-parse --verify origin/main^{commit} 2>/dev/null || true)
+    else
+        BASE_SHA=$(git rev-parse --verify "$BASE_SHA^{commit}" 2>/dev/null || true)
+    fi
+
+    if [ -z "$BASE_SHA" ]; then
+        printf '%s\n' '::error::check-capability-boundaries: could not resolve a base commit. Set BASE_SHA to an available commit, or fetch origin/main outside this guard.' >&2
+        exit 2
+    fi
+
+    if ! git merge-base "$BASE_SHA" HEAD >/dev/null 2>&1; then
+        printf '%s\n' "::error::check-capability-boundaries: $BASE_SHA has no locally available merge-base with HEAD. Set BASE_SHA to a commit with available history; this guard will not fetch or modify origin/main." >&2
+        exit 2
+    fi
 }
 
 # ── Main ───────────────────────────────────────────────────────────────
@@ -493,6 +501,7 @@ validate_config
 
 case "$MODE" in
     diff)
+        resolve_base_sha
         get_changed_files_from_diff | check_files
         ;;
     files-from-stdin)

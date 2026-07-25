@@ -15,10 +15,10 @@
 #
 # Usage:
 #   BASE_SHA=<sha> ./scripts/check-migrations-immutable.sh
-#   ./scripts/check-migrations-immutable.sh            # falls back to origin/main
+#   ./scripts/check-migrations-immutable.sh            # uses locally available origin/main
 #
 # Environment:
-#   BASE_SHA   Base commit to diff HEAD against. If unset, origin/main is used.
+#   BASE_SHA   Base commit to diff HEAD against. If unset, locally available origin/main is used.
 #   MIGRATIONS_GLOB
 #              Pathspec for migration files
 #              (default: server/crates/djinn-db/migrations_postgres).
@@ -37,13 +37,19 @@ MIGRATIONS_GLOB=${MIGRATIONS_GLOB:-server/crates/djinn-db/migrations_postgres}
 
 BASE_SHA=${BASE_SHA:-}
 if [ -z "$BASE_SHA" ]; then
-    git fetch --no-tags --depth=1 origin main >/dev/null 2>&1 || true
-    BASE_SHA=$(git rev-parse --verify origin/main 2>/dev/null || true)
+    BASE_SHA=$(git rev-parse --verify origin/main^{commit} 2>/dev/null || true)
+else
+    BASE_SHA=$(git rev-parse --verify "$BASE_SHA^{commit}" 2>/dev/null || true)
 fi
 
 if [ -z "$BASE_SHA" ]; then
-    echo "::error::check-migrations-immutable: could not determine a base SHA to diff against." >&2
-    exit 1
+    echo "::error::check-migrations-immutable: could not resolve a base commit. Set BASE_SHA to an available commit, or fetch origin/main outside this guard." >&2
+    exit 2
+fi
+
+if ! git merge-base "$BASE_SHA" HEAD >/dev/null 2>&1; then
+    echo "::error::check-migrations-immutable: $BASE_SHA has no locally available merge-base with HEAD. Set BASE_SHA to a commit with available history; this guard will not fetch or modify origin/main." >&2
+    exit 2
 fi
 
 echo "Checking migration immutability against base $BASE_SHA ..."
