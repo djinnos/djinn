@@ -21,9 +21,28 @@ use djinn_sandbox::final_verification_execution::{
     FinalVerificationExecutionEvidence, FinalVerificationExecutionRequest,
     execute_final_verification,
 };
+use djinn_sandbox::service_provisioning::{ServiceProvisioningCode, ServiceProvisioningPhase};
 use time::format_description::well_known::Rfc3339;
 use tokio_util::sync::CancellationToken;
 
+mod provisioning_gate;
+use provisioning_gate::{
+    emit_service_provisioning_outcome, provisioning_outcome_label, provisioning_phase_label,
+    service_provisioning_failure,
+};
+
+use crate::final_verification_agent::{
+    AgentRunCapture, CoordinateResult, check_from_command, selection_surface,
+};
+// Re-export the agent-facing `run_verification` client surface so the public
+// `djinn_slot::final_verification::*` paths stay stable after the epic-hexh
+// module split into `final_verification_agent`. `FinalVerificationPreLeaseGate`
+// is also consumed internally by `coordinate_final_verification_core`.
+pub use crate::final_verification_agent::{
+    AgentRunVerificationOutcome, AgentVerificationCheckResult, FinalVerificationPreLeaseGate,
+    FinalVerificationRateLimited, FinalVerificationRunPermit,
+    coordinate_final_verification_for_agent,
+};
 use crate::host::SlotContext;
 use crate::output_parser::{CompletionIntent, FinalVerificationDisposition};
 
@@ -99,6 +118,17 @@ pub enum FinalVerificationRecordingOutcome {
     Ineligible {
         verification_attempt_id: String,
         reason: String,
+    },
+    /// A cataloged service could not be resolved, created, made ready, proxied,
+    /// or torn down. This is a bounded infrastructure outcome, deliberately
+    /// distinct from a worktree command/check failure: the attempt is ineligible
+    /// and no pass may be persisted, but the cause is the service lifecycle, not
+    /// the authored tree. `phase`/`code` are bounded enums; no URL, credential,
+    /// tenant name, or raw backend error is carried.
+    InfrastructureIneligible {
+        verification_attempt_id: String,
+        phase: ServiceProvisioningPhase,
+        code: ServiceProvisioningCode,
     },
     Error {
         verification_attempt_id: String,
@@ -191,6 +221,15 @@ pub(crate) async fn verify_completion_intent(
         FinalVerificationRecordingOutcome::Ineligible { reason, .. } => Err(format!(
             "Final verification rejected this {submit_tool_label} request: {reason}. Fix the worktree and resubmit."
         )),
+        FinalVerificationRecordingOutcome::InfrastructureIneligible { phase, code, .. } => {
+            Err(format!(
+                "Final verification could not provision the required catalog services \
+                 ({phase}/{outcome}) for this {submit_tool_label} request. This is an \
+                 infrastructure error, not a worktree problem; retry once services are available.",
+                phase = provisioning_phase_label(phase),
+                outcome = provisioning_outcome_label(code),
+            ))
+        }
         FinalVerificationRecordingOutcome::Error { detail, .. } => Err(format!(
             "Final verification could not complete: {detail}. Inspect the worktree and resubmit."
         )),
@@ -274,16 +313,45 @@ pub async fn coordinate_final_verification(
     request: FinalVerificationCoordinatorRequest,
     ctx: &SlotContext,
 ) -> FinalVerificationRecordingOutcome {
+    let mut capture = AgentRunCapture::default();
+    match coordinate_final_verification_core(request, ctx, None, &mut capture).await {
+        CoordinateResult::Outcome(outcome) => outcome,
+        // Unreachable without a gate: the completion-intent path passes no gate
+        // and therefore never rate limits. Fail closed defensively.
+        CoordinateResult::RateLimited(rate_limited) => FinalVerificationRecordingOutcome::Error {
+            verification_attempt_id: uuid::Uuid::now_v7().to_string(),
+            detail: format!(
+                "unexpected rate-limit without a gate: {}",
+                rate_limited.detail
+            ),
+        },
+    }
+}
+
+/// Shared consult-or-run core for both the completion-intent path (no gate) and
+/// the agent tool client (gate + capture). It owns the one lease, one execution,
+/// and one possible durable row. When `gate` is `Some`, it is consulted exactly
+/// once after a consult miss and immediately before lease acquisition.
+pub(crate) async fn coordinate_final_verification_core(
+    request: FinalVerificationCoordinatorRequest,
+    ctx: &SlotContext,
+    gate: Option<&mut dyn FinalVerificationPreLeaseGate>,
+    capture: &mut AgentRunCapture,
+) -> CoordinateResult {
     let verification_attempt_id = uuid::Uuid::now_v7().to_string();
     let verify_run_id = uuid::Uuid::now_v7().to_string();
+    // Only the agent tool path (which supplies a gate) needs the selection
+    // surface for its telemetry. The completion-intent path must not resolve the
+    // identity input eagerly here — that would change its resolver call pattern.
+    let gated = gate.is_some();
 
     // Cancellation is authoritative even when tests inject a typed outcome.
     if request.cancellation.is_cancelled() {
-        return emit_ineligible(
+        return CoordinateResult::Outcome(emit_ineligible(
             &request,
             &verification_attempt_id,
             "cancelled before resolution",
-        );
+        ));
     }
 
     // Keep production on the complete resolve/lease/execute/persist path while
@@ -291,7 +359,7 @@ pub async fn coordinate_final_verification(
     // coordinator boundary without a sandbox or durable verify-run fixture.
     #[cfg(any(test, feature = "test-support"))]
     if let Some(outcome) = ctx.callbacks.final_verification_outcome_for_test(&request) {
-        return emit_outcome(&request, outcome);
+        return CoordinateResult::Outcome(emit_outcome(&request, outcome));
     }
     // Resolve the plan's configured/unconfigured state BEFORE any settings
     // lookup, VerifyRun repository construction, C0 derivation, or cache
@@ -326,15 +394,28 @@ pub async fn coordinate_final_verification(
                 "",
                 ctx,
             );
-            return emit_outcome(
+            return CoordinateResult::Outcome(emit_outcome(
                 &request,
                 FinalVerificationRecordingOutcome::NotConfigured {
                     verification_attempt_id,
                 },
-            );
+            ));
         }
-        Err(detail) => return emit_error(&request, &verification_attempt_id, &detail),
+        Err(detail) => {
+            return CoordinateResult::Outcome(emit_error(
+                &request,
+                &verification_attempt_id,
+                &detail,
+            ));
+        }
     };
+    // Record the bounded full/subset selection surface for the agent tool
+    // telemetry as soon as the configured material is resolved. Best-effort:
+    // an identity-resolution error leaves the selection unset. Gated so the
+    // completion-intent path never adds an identity-resolver call.
+    if gated && let Ok(input) = (material.execution_request.resolve_environment_identity)() {
+        capture.selection = Some(selection_surface(&input.selection));
+    }
     // Consultation runs only for configured plans. The material resolved
     // above is reused for C0 derivation so no second plan resolution or
     // settings-gate round-trip is needed before the lookup.
@@ -342,17 +423,32 @@ pub async fn coordinate_final_verification(
         consult_reusable_final_verification(&request, &verification_attempt_id, &material, ctx)
             .await
     {
-        return emit_outcome(
+        return CoordinateResult::Outcome(emit_outcome(
             &request,
             FinalVerificationRecordingOutcome::Reused {
                 verification_attempt_id,
                 evidence: Box::new(evidence),
             },
-        );
+        ));
     }
     if request.cancellation.is_cancelled() {
-        return emit_ineligible(&request, &verification_attempt_id, "cancelled before lease");
+        return CoordinateResult::Outcome(emit_ineligible(
+            &request,
+            &verification_attempt_id,
+            "cancelled before lease",
+        ));
     }
+    // Per-session admission gate: enforced AFTER a consult miss and BEFORE any
+    // lease acquisition. A denial returns a typed rate-limited outcome and never
+    // acquires a lease or executes a command. The permit is held for the whole
+    // run and released on drop when this function returns.
+    let _run_permit = match gate {
+        Some(gate) => match gate.acquire() {
+            Ok(permit) => Some(permit),
+            Err(rate_limited) => return CoordinateResult::RateLimited(rate_limited),
+        },
+        None => None,
+    };
     let mut lease = match ctx
         .callbacks
         .acquire_final_verification_lease(
@@ -364,7 +460,13 @@ pub async fn coordinate_final_verification(
         .await
     {
         Ok(lease) => lease,
-        Err(detail) => return emit_error(&request, &verification_attempt_id, &detail),
+        Err(detail) => {
+            return CoordinateResult::Outcome(emit_error(
+                &request,
+                &verification_attempt_id,
+                &detail,
+            ));
+        }
     };
 
     let execution_result = if request.cancellation.is_cancelled() {
@@ -384,11 +486,33 @@ pub async fn coordinate_final_verification(
             Some(evidence) => evidence,
             None => execute_final_verification(material.execution_request.clone()).await,
         };
+        // Capture per-check evidence and the structured ineligibility reason for
+        // the agent tool client before the outcome collapses to a bounded
+        // string. This is a read of the one execution — never a second run.
+        capture.checks = evidence.commands.iter().map(check_from_command).collect();
+        capture.ineligibility = evidence.eligibility_reason.clone();
+        // Emit exactly one bounded provisioning outcome, plus a structured audit
+        // summary, for any attempt whose plan declared catalog services. This is
+        // the single coordinator point that observes the executed evidence for a
+        // serviced plan (success, command failure, or provisioning failure).
+        emit_service_provisioning_outcome(&request, &verification_attempt_id, &material, &evidence);
         if request.cancellation.is_cancelled() {
             Err(ineligible_outcome(
                 &verification_attempt_id,
                 "cancelled during execution",
             ))
+        } else if let Some((phase, code)) = service_provisioning_failure(&evidence) {
+            // Infrastructure ineligibility is a bounded outcome distinct from a
+            // command/check failure. It flows through the Err path below, which
+            // releases the invocation lease and returns without ever reaching
+            // `persist_evidence` — no passing row can be written.
+            Err(
+                FinalVerificationRecordingOutcome::InfrastructureIneligible {
+                    verification_attempt_id: verification_attempt_id.clone(),
+                    phase,
+                    code,
+                },
+            )
         } else if !evidence.eligible() {
             Err(ineligible_outcome(
                 &verification_attempt_id,
@@ -423,7 +547,7 @@ pub async fn coordinate_final_verification(
             .await
         }
     };
-    emit_outcome(&request, outcome)
+    CoordinateResult::Outcome(emit_outcome(&request, outcome))
 }
 
 /// Resolve the project gate before constructing a verify-run repository. Every
@@ -976,6 +1100,26 @@ fn emit_outcome(
                 "final verification recording completed"
             )
         }
+        FinalVerificationRecordingOutcome::InfrastructureIneligible {
+            verification_attempt_id,
+            phase,
+            code,
+        } => {
+            // Infrastructure ineligibility records no passing row, so it counts
+            // as an ineligible writer outcome; the bounded provisioning phase/code
+            // ride the structured audit fields, never the record metric labels.
+            let _ = djinn_telemetry::final_verification::increment_record(
+                djinn_telemetry::final_verification::RECORD_INELIGIBLE,
+            );
+            tracing::info!(
+                recording_outcome = "infrastructure_ineligible",
+                task_id = %request.task_id, task_run_id = %request.task_run_id,
+                verification_attempt_id = %verification_attempt_id,
+                provisioning_phase = provisioning_phase_label(*phase),
+                provisioning_outcome = provisioning_outcome_label(*code),
+                "final verification recording completed"
+            )
+        }
         FinalVerificationRecordingOutcome::Error {
             verification_attempt_id,
             detail,
@@ -1078,5 +1222,7 @@ mod tests {
 
 #[cfg(test)]
 mod recording_tests;
+#[cfg(test)]
+mod service_provisioning_tests;
 #[cfg(test)]
 mod telemetry_contract_tests;

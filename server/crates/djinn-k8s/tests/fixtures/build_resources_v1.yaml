@@ -1,0 +1,152 @@
+# build_resources_v1 — contract cases for per-project build_resources overrides.
+#
+# Each case resolves one Pod kind (`kind: task | warm`) against the
+# deployment defaults from `KubernetesConfig::for_testing()`, optional
+# per-kind admin `bounds`, and the given `overrides`.
+#
+# expect:
+#   ok      — resolution succeeds; if `expected` is present the rendered
+#             request/limit quantities must match it byte-for-byte; if
+#             `inherits_defaults` is true the rendered quantities must equal the
+#             deployment defaults for that kind.
+#   reject  — resolution MUST fail (no Job is created); `reject_kind` names the
+#             ResolveError variant expected.
+cases:
+  # Unset fields inherit the deployment defaults for each kind.
+  - name: task_unset_inherits_defaults
+    kind: task
+    expect: ok
+    inherits_defaults: true
+
+  - name: warm_unset_inherits_defaults
+    kind: warm
+    expect: ok
+    inherits_defaults: true
+
+  # A partial override inherits the deployment default for the unset fields
+  # while the set field renders unchanged.
+  - name: task_partial_override_inherits_rest
+    kind: task
+    overrides:
+      memory_limit: "8Gi"
+    expect: ok
+
+  # Valid distinct task quantities render unchanged into the task spec.
+  - name: task_distinct_valid_renders_unchanged
+    kind: task
+    overrides:
+      cpu_request: "2"
+      cpu_limit: "3"
+      memory_request: "5Gi"
+      memory_limit: "6Gi"
+    expect: ok
+    expected:
+      cpu_request: "2"
+      cpu_limit: "3"
+      memory_request: "5Gi"
+      memory_limit: "6Gi"
+
+  # Valid distinct warm quantities render unchanged into the warm spec — and
+  # are distinct from the task numbers above (kinds resolve independently).
+  - name: warm_distinct_valid_renders_unchanged
+    kind: warm
+    overrides:
+      cpu_request: "6"
+      cpu_limit: "6"
+      memory_request: "10Gi"
+      memory_limit: "12Gi"
+    expect: ok
+    expected:
+      cpu_request: "6"
+      cpu_limit: "6"
+      memory_request: "10Gi"
+      memory_limit: "12Gi"
+
+  # Millicore + binary-SI forms round-trip unchanged.
+  - name: task_millicore_and_mi_render_unchanged
+    kind: task
+    overrides:
+      cpu_request: "500m"
+      cpu_limit: "1500m"
+      memory_request: "512Mi"
+      memory_limit: "1024Mi"
+    expect: ok
+    expected:
+      cpu_request: "500m"
+      cpu_limit: "1500m"
+      memory_request: "512Mi"
+      memory_limit: "1024Mi"
+
+  # Malformed quantity → reject, no Job.
+  - name: task_malformed_rejects
+    kind: task
+    overrides:
+      cpu_request: "not-a-quantity"
+    expect: reject
+    reject_kind: invalid_quantity
+
+  # Zero / negative are non-positive → reject.
+  - name: task_zero_rejects
+    kind: task
+    overrides:
+      memory_request: "0"
+    expect: reject
+    reject_kind: invalid_quantity
+
+  - name: warm_negative_rejects
+    kind: warm
+    overrides:
+      cpu_limit: "-1"
+    expect: reject
+    reject_kind: invalid_quantity
+
+  # Request above limit after defaults+overrides combine → reject. Only the
+  # request is overridden (to above the "4" default cpu_limit).
+  - name: task_request_above_limit_rejects
+    kind: task
+    overrides:
+      cpu_request: "8"
+    expect: reject
+    reject_kind: request_exceeds_limit
+
+  # Below the admin minimum → reject.
+  - name: task_below_minimum_rejects
+    kind: task
+    bounds:
+      cpu_min: "2"
+    overrides:
+      cpu_request: "1"
+      cpu_limit: "4"
+    expect: reject
+    reject_kind: below_minimum
+
+  # Above the admin maximum → reject.
+  - name: warm_above_maximum_rejects
+    kind: warm
+    bounds:
+      memory_max: "8Gi"
+    overrides:
+      memory_request: "4Gi"
+      memory_limit: "16Gi"
+    expect: reject
+    reject_kind: above_maximum
+
+  # Within configured bounds → ok.
+  - name: task_within_bounds_ok
+    kind: task
+    bounds:
+      cpu_min: "1"
+      cpu_max: "8"
+      memory_min: "1Gi"
+      memory_max: "16Gi"
+    overrides:
+      cpu_request: "2"
+      cpu_limit: "4"
+      memory_request: "4Gi"
+      memory_limit: "8Gi"
+    expect: ok
+    expected:
+      cpu_request: "2"
+      cpu_limit: "4"
+      memory_request: "4Gi"
+      memory_limit: "8Gi"

@@ -337,6 +337,10 @@ impl ReplyLoopHarness {
             ci_blocking_directive: None,
             worker_resume_note: None,
             arbiter_directive: None,
+            // Render the full canonical surface (incl. run_verification) for the
+            // shared worker-prompt harness so signature-coverage assertions see
+            // every worker tool.
+            final_verification_configured: true,
         };
         let system_prompt = djinn_roles::prompts::render_prompt_for_role(
             role_config,
@@ -5144,6 +5148,8 @@ async fn rendered_worker_prompt_uses_signature_only_tool_section() {
         ci_head_sha: None,
         ci_pr_number: None,
         ci_blocking_required_check_names: "[]".to_string(),
+        ci_primary_blocking_check: None,
+        ci_failure_annotations: None,
         ci_failure_fingerprint: None,
         ci_first_seen_at: None,
         ci_last_seen_at: None,
@@ -5191,6 +5197,7 @@ async fn rendered_worker_prompt_uses_signature_only_tool_section() {
         ci_blocking_directive: None,
         worker_resume_note: None,
         arbiter_directive: None,
+        final_verification_configured: true,
     };
     let system_prompt = djinn_roles::prompts::render_prompt_for_role(
         role_config,

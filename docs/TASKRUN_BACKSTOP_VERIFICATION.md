@@ -169,7 +169,9 @@ If the assertion fails, capture server/coordinator logs around the kill time. Ba
 - `reason` (`startup`, `periodic`, or an explicit backstop test reason)
 - `job_name`
 - `task_run_id`
-- `db_classification` (`absent`, `session_interrupted`, `task_run_completed`, `task_run_interrupted`, etc.)
+- `outcome` (`Live`, `Success`, or `Failure`) — the shared
+  `djinn_core::job_retention` classification, plus `delete_after` on retain
+  decisions
 
 ```bash
 kubectl logs -n "$NS" deploy/djinn-server --since=10m | \

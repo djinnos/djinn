@@ -49,14 +49,32 @@ const BOARD_HEALTH_MISMATCH_COALESCED_TOTAL: &str = "djinn_board_health_mismatch
 const BOARD_HEALTH_MISMATCH_PASS_AGE_SECONDS: &str = "djinn_board_health_mismatch_pass_age_seconds";
 const BOARD_HEALTH_MISMATCH_OUTCOMES_TOTAL: &str = "djinn_board_health_mismatch_outcomes_total";
 const CARGO_TARGET_SEED_TOTAL: &str = "djinn_cargo_target_seed_total";
+const PREPARE_BUILD_CACHE_TOTAL: &str = "djinn_prepare_build_cache_total";
 const CARGO_SEED_HIT_TOTAL: &str = "djinn_cargo_seed_hit_total";
 const CARGO_SEED_COLD_TOTAL: &str = "djinn_cargo_seed_cold_total";
 const CARGO_WARM_BASE_FRESHNESS_SECONDS: &str = "djinn_cargo_warm_base_freshness_seconds";
 const CARGO_WARM_STEP_TOTAL: &str = "djinn_cargo_warm_step_total";
-const CARGO_WARM_STEP_OUTCOMES: [&str; 3] = ["ok", "failed", "spawn_error"];
+// A warm step that was killed at its own budget is NOT a spawn failure: it ran
+// and left partial progress in the warm base. `timeout` is its own closed label
+// so the convergence signal is not conflated with "could not start cargo".
+const CARGO_WARM_STEP_OUTCOMES: [&str; 4] = ["ok", "failed", "spawn_error", "timeout"];
+const CARGO_WARM_STEP_SECONDS: &str = "djinn_cargo_warm_step_seconds";
+const CARGO_WARM_BASE_UNITS: &str = "djinn_cargo_warm_base_units";
+const CARGO_WARM_BASE_PHASES: [&str; 2] = ["pre_compile", "post_compile"];
+const CARGO_WARM_BASE_UNIT_KINDS: [&str; 3] = ["fingerprint_units", "test_units", "dep_files"];
+const CARGO_WARM_SWEEP_DECISION_TOTAL: &str = "djinn_cargo_warm_sweep_decision_total";
+const CARGO_WARM_SWEEP_DECISIONS: [&str; 4] = [
+    "swept",
+    "skipped_no_stamp",
+    "skipped_no_success",
+    "skipped_truncated",
+];
 const CARGO_WARM_STEP_WORKSPACE_PATH_HASH: &str = "djinn_cargo_warm_step_workspace_path_hash";
 const CARGO_WARM_STEP_FRESH_COUNT: &str = "djinn_cargo_warm_step_fresh_count";
 const CARGO_WARM_STEP_COMPILING_COUNT: &str = "djinn_cargo_warm_step_compiling_count";
+const WARM_CACHE_DECISION_TOTAL: &str = "djinn_warm_cache_decision_total";
+const WARM_CACHE_COLD_RATE: &str = "djinn_warm_cache_cold_rate";
+const WARM_CACHE_COLD_RATE_ALERT_FIRING: &str = "djinn_warm_cache_cold_rate_alert_firing";
 const CARGO_WARM_INCREMENTAL_PRUNE_TOTAL: &str = "djinn_cargo_warm_incremental_prune_total";
 const CARGO_WARM_INCREMENTAL_PRUNED_BYTES_TOTAL: &str =
     "djinn_cargo_warm_incremental_pruned_bytes_total";
@@ -79,6 +97,64 @@ const VERIFY_CACHE_LOOKUP_TOTAL: &str = "verify_cache_lookup_total";
 const VERIFY_CACHE_LOOKUP_OUTCOMES: [&str; 5] = ["hit", "miss", "stale", "error", "disabled"];
 const VERIFY_RUN_RECORD_TOTAL: &str = "verify_run_record_total";
 const VERIFY_RUN_RECORD_OUTCOMES: [&str; 3] = ["stored", "ineligible", "error"];
+// Agent-facing `run_verification` tool attempts. Exactly one bounded terminal
+// outcome per call; correlation identifiers and per-check IDs remain structured
+// tracing/audit fields, never metric labels.
+const RUN_VERIFICATION_TOOL_TOTAL: &str = "run_verification_tool_total";
+const RUN_VERIFICATION_TOOL_OUTCOMES: [&str; 5] =
+    ["hit", "ran-pass", "ran-fail", "error", "rate-limited"];
+const RUN_VERIFICATION_SELECTION_TOTAL: &str = "run_verification_selection_total";
+const RUN_VERIFICATION_SELECTIONS: [&str; 2] = ["full", "subset"];
+const RUN_VERIFICATION_CHECK_TOTAL: &str = "run_verification_check_total";
+const RUN_VERIFICATION_CHECK_RESULTS: [&str; 2] = ["pass", "fail"];
+// Catalog service provisioning for one final-verification attempt whose plan
+// declares services. Every label is a bounded enum: the lifecycle `phase`, the
+// terminal `outcome`, and a coarse `service_type` classification. Task, run,
+// attempt, fingerprint, and environment identifiers stay in the structured
+// audit event emitted next to this counter, never as metric labels.
+const VERIFY_SERVICE_PROVISIONING_TOTAL: &str = "verify_service_provisioning_total";
+const VERIFY_SERVICE_PROVISIONING_PHASES: [&str; 6] = [
+    "resolve",
+    "proxy",
+    "create",
+    "readiness",
+    "teardown",
+    "complete",
+];
+const VERIFY_SERVICE_PROVISIONING_OUTCOMES: [&str; 6] = [
+    "ok",
+    "unavailable",
+    "protocol-mismatch",
+    "timeout",
+    "rejected",
+    "invalid-response",
+];
+const VERIFY_SERVICE_PROVISIONING_SERVICE_TYPES: [&str; 6] =
+    ["postgres", "redis", "rabbitmq", "other", "multiple", "none"];
+// Build-drift soft gate (ri23). Both metrics carry only fixed, enumerated
+// label values; project/session/command/key identifiers stay in structured
+// tracing fields next to these counters.
+const BUILD_DRIFT_DECISIONS_TOTAL: &str = "djinn_build_drift_decisions_total";
+const BUILD_DRIFT_OUTCOMES: [&str; 5] = [
+    "drift_deny",
+    "argv_equal_pass",
+    "repeat_pass",
+    "unrelated_pass",
+    "ineligible_pass",
+];
+const BUILD_DRIFT_INELIGIBLE_TOTAL: &str = "djinn_build_drift_ineligible_total";
+const BUILD_DRIFT_INELIGIBLE_REASONS: [&str; 10] = [
+    "parse_error",
+    "env_assignment",
+    "redirection",
+    "pipeline",
+    "chain",
+    "subshell",
+    "substitution",
+    "background",
+    "nested_interpreter",
+    "absolute_path",
+];
 const INLINE_PR_CLOSED_TOTAL: &str = "djinn_inline_pr_closed_total";
 const INLINE_BRANCH_DELETED_TOTAL: &str = "djinn_inline_branch_deleted_total";
 const INLINE_CLEANUP_SKIPPED_TOTAL: &str = "djinn_inline_cleanup_skipped_total";
@@ -167,10 +243,27 @@ const BUILD_ADMISSION_UNKNOWN_CLASSIFICATION_TOTAL: &str =
 const BUILD_ADMISSION_INVENTORY_DEGRADED: &str = "djinn_build_admission_inventory_degraded";
 const BUILD_ADMISSION_JOURNAL_DEGRADED: &str = "djinn_build_admission_journal_degraded";
 const BUILD_ADMISSION_CREATE_UNKNOWN_HEALTH: &str = "djinn_build_admission_create_unknown_health";
+const BUILD_ADMISSION_SHADOW_INVOCATION_TOTAL: &str =
+    "djinn_build_admission_shadow_invocation_total";
 const BUILD_ADMISSION_HANDOFF_WARNING: &str = "djinn_build_admission_handoff_warning";
 const BUILD_ADMISSION_HANDOFF_WARNING_REASONS: [&str; 3] =
     ["unexpected_overlap", "stale_epoch", "epoch_unreadable"];
 const AGENT_SESSION_PHASE_SECONDS_TOTAL: &str = "djinn_agent_session_phase_seconds_total";
+
+// ─── Run-dir disk-admission telemetry (proposal nquz, phase 1) ─────────────
+// Labels are strictly bounded: `state`, `reason`, `tier`, and `outcome` are
+// closed enumerations. Volume, pod, task, and project identifiers appear only in
+// logs and traces, never as metric labels.
+const RUN_DIR_COUNT: &str = "djinn_run_dir_count";
+const RUN_DIR_ALLOCATED_BYTES: &str = "djinn_run_dir_allocated_bytes";
+const RUN_DIR_RESERVED_BYTES: &str = "djinn_run_dir_reserved_bytes";
+const RUN_DIR_UNOWNED_BYTES: &str = "djinn_run_dir_unowned_bytes";
+const RUN_DIR_QUEUE_REASON_TOTAL: &str = "djinn_run_dir_queue_reason_total";
+const RUN_DIR_QUOTA_FAILURE_TOTAL: &str = "djinn_run_dir_quota_failure_total";
+const RUN_DIR_RECLAIM_TOTAL: &str = "djinn_run_dir_reclaim_total";
+const RUN_DIR_RECLAIM_BYTES_TOTAL: &str = "djinn_run_dir_reclaim_bytes_total";
+const RUN_DIR_SEED_TOTAL: &str = "djinn_run_dir_seed_total";
+const RUN_DIR_WARM_BASE_REMOVED_TOTAL: &str = "djinn_run_dir_warm_base_removed_total";
 
 // ─── Linux PSI telemetry (proposal zp5t) ──────────────────────────────
 const NODE_PSI_SOME_AVG10_RATIO: &str = "node_psi_some_avg10_ratio";
@@ -311,6 +404,47 @@ pub mod final_verification {
     pub const RECORD_INELIGIBLE: &str = "ineligible";
     pub const RECORD_ERROR: &str = "error";
 
+    /// Bounded terminal outcomes for one agent-facing `run_verification` call.
+    pub const TOOL_HIT: &str = "hit";
+    pub const TOOL_RAN_PASS: &str = "ran-pass";
+    pub const TOOL_RAN_FAIL: &str = "ran-fail";
+    pub const TOOL_ERROR: &str = "error";
+    pub const TOOL_RATE_LIMITED: &str = "rate-limited";
+
+    /// Command-group selection surfaces for one `run_verification` call.
+    pub const SELECTION_FULL: &str = "full";
+    pub const SELECTION_SUBSET: &str = "subset";
+
+    /// Per-check bounded results for `run_verification`.
+    pub const CHECK_PASS: &str = "pass";
+    pub const CHECK_FAIL: &str = "fail";
+
+    /// Bounded catalog-service provisioning lifecycle phases for one attempt.
+    /// `COMPLETE` is the success terminal (create + readiness + teardown all
+    /// succeeded); the others name the phase that failed.
+    pub const PROVISION_PHASE_RESOLVE: &str = "resolve";
+    pub const PROVISION_PHASE_PROXY: &str = "proxy";
+    pub const PROVISION_PHASE_CREATE: &str = "create";
+    pub const PROVISION_PHASE_READINESS: &str = "readiness";
+    pub const PROVISION_PHASE_TEARDOWN: &str = "teardown";
+    pub const PROVISION_PHASE_COMPLETE: &str = "complete";
+
+    /// Bounded catalog-service provisioning terminal outcomes.
+    pub const PROVISION_OUTCOME_OK: &str = "ok";
+    pub const PROVISION_OUTCOME_UNAVAILABLE: &str = "unavailable";
+    pub const PROVISION_OUTCOME_PROTOCOL_MISMATCH: &str = "protocol-mismatch";
+    pub const PROVISION_OUTCOME_TIMEOUT: &str = "timeout";
+    pub const PROVISION_OUTCOME_REJECTED: &str = "rejected";
+    pub const PROVISION_OUTCOME_INVALID_RESPONSE: &str = "invalid-response";
+
+    /// Bounded coarse service-type classification for the provisioning label.
+    pub const PROVISION_SERVICE_POSTGRES: &str = "postgres";
+    pub const PROVISION_SERVICE_REDIS: &str = "redis";
+    pub const PROVISION_SERVICE_RABBITMQ: &str = "rabbitmq";
+    pub const PROVISION_SERVICE_OTHER: &str = "other";
+    pub const PROVISION_SERVICE_MULTIPLE: &str = "multiple";
+    pub const PROVISION_SERVICE_NONE: &str = "none";
+
     /// An injected recorder failure used to prove telemetry is best-effort.
     #[derive(Debug)]
     pub struct EmissionError;
@@ -337,11 +471,79 @@ pub mod final_verification {
         Ok(())
     }
 
+    /// Increment the one terminal outcome for an agent-facing `run_verification`
+    /// tool attempt. Exactly one call per tool invocation.
+    pub fn increment_tool_attempt(outcome: &'static str) -> Result<(), EmissionError> {
+        #[cfg(feature = "test-support")]
+        TOOL_EMISSION_ATTEMPTS.with(|attempts| attempts.set(attempts.get() + 1));
+        if injected_failure() {
+            return Err(EmissionError);
+        }
+        metrics::counter!(super::RUN_VERIFICATION_TOOL_TOTAL, "outcome" => outcome).increment(1);
+        Ok(())
+    }
+
+    /// Increment the command-group selection surface (`full`/`subset`) chosen for
+    /// one `run_verification` call. Best-effort; never gates the tool result.
+    pub fn increment_selection(selection: &'static str) {
+        metrics::counter!(super::RUN_VERIFICATION_SELECTION_TOTAL, "selection" => selection)
+            .increment(1);
+    }
+
+    /// Add to the bounded per-check pass/fail counter for `run_verification`.
+    pub fn add_check_results(result: &'static str, count: u64) {
+        if count == 0 {
+            return;
+        }
+        metrics::counter!(super::RUN_VERIFICATION_CHECK_TOTAL, "result" => result).increment(count);
+    }
+
+    /// Increment the one catalog-service provisioning outcome for a
+    /// final-verification attempt whose plan declares services. Best-effort:
+    /// a telemetry failure never changes the coordinator's recording decision.
+    /// All three labels are bounded enums; identifiers stay in the structured
+    /// audit event emitted alongside this counter.
+    pub fn increment_provisioning(
+        phase: &'static str,
+        outcome: &'static str,
+        service_type: &'static str,
+    ) -> Result<(), EmissionError> {
+        #[cfg(feature = "test-support")]
+        PROVISIONING_EMISSION_ATTEMPTS.with(|attempts| attempts.set(attempts.get() + 1));
+        if injected_failure() {
+            return Err(EmissionError);
+        }
+        metrics::counter!(
+            super::VERIFY_SERVICE_PROVISIONING_TOTAL,
+            "phase" => phase,
+            "outcome" => outcome,
+            "service_type" => service_type,
+        )
+        .increment(1);
+        Ok(())
+    }
+
     #[cfg(feature = "test-support")]
     thread_local! {
         static FAIL_NEXT_EMISSION: Cell<bool> = const { Cell::new(false) };
         static LOOKUP_EMISSION_ATTEMPTS: Cell<usize> = const { Cell::new(0) };
         static RECORD_EMISSION_ATTEMPTS: Cell<usize> = const { Cell::new(0) };
+        static TOOL_EMISSION_ATTEMPTS: Cell<usize> = const { Cell::new(0) };
+        static PROVISIONING_EMISSION_ATTEMPTS: Cell<usize> = const { Cell::new(0) };
+    }
+
+    /// Return catalog-service provisioning emissions since the failure seam was
+    /// armed (includes the injected failure, exposing duplicates).
+    #[cfg(feature = "test-support")]
+    pub fn provisioning_emission_attempts_for_test() -> usize {
+        PROVISIONING_EMISSION_ATTEMPTS.with(Cell::get)
+    }
+
+    /// Return `run_verification` tool-attempt emissions since the failure seam
+    /// was armed (includes the injected failure, exposing duplicates).
+    #[cfg(feature = "test-support")]
+    pub fn tool_emission_attempts_for_test() -> usize {
+        TOOL_EMISSION_ATTEMPTS.with(Cell::get)
     }
 
     /// Cause one emission to fail in deterministic coordinator tests.
@@ -350,6 +552,8 @@ pub mod final_verification {
         FAIL_NEXT_EMISSION.with(|failure| failure.set(true));
         LOOKUP_EMISSION_ATTEMPTS.with(|attempts| attempts.set(0));
         RECORD_EMISSION_ATTEMPTS.with(|attempts| attempts.set(0));
+        TOOL_EMISSION_ATTEMPTS.with(|attempts| attempts.set(0));
+        PROVISIONING_EMISSION_ATTEMPTS.with(|attempts| attempts.set(0));
     }
 
     /// Return lookup/record attempts since the failure seam was armed.
@@ -369,6 +573,30 @@ pub mod final_verification {
         }
         #[cfg(not(feature = "test-support"))]
         false
+    }
+}
+
+/// Bounded build-drift soft-gate counters (ri23).
+///
+/// Both helpers accept only fixed `'static` label values. Project ids, session
+/// ids, commands, and drift keys stay in structured tracing fields emitted next
+/// to these counters — never as metric labels.
+pub mod build_drift {
+    pub const OUTCOME_DRIFT_DENY: &str = "drift_deny";
+    pub const OUTCOME_ARGV_EQUAL_PASS: &str = "argv_equal_pass";
+    pub const OUTCOME_REPEAT_PASS: &str = "repeat_pass";
+    pub const OUTCOME_UNRELATED_PASS: &str = "unrelated_pass";
+    pub const OUTCOME_INELIGIBLE_PASS: &str = "ineligible_pass";
+
+    /// Increment the one terminal decision outcome for a build-drift check.
+    pub fn increment_outcome(outcome: &'static str) {
+        metrics::counter!(super::BUILD_DRIFT_DECISIONS_TOTAL, "outcome" => outcome).increment(1);
+    }
+
+    /// Increment the ineligibility-reason breakdown for a fail-open decision.
+    /// Always paired with `increment_outcome(OUTCOME_INELIGIBLE_PASS)`.
+    pub fn increment_ineligible(reason: &'static str) {
+        metrics::counter!(super::BUILD_DRIFT_INELIGIBLE_TOTAL, "reason" => reason).increment(1);
     }
 }
 
@@ -658,6 +886,11 @@ pub mod cargo_warm_step {
     pub const OUTCOME_OK: &str = "ok";
     pub const OUTCOME_FAILED: &str = "failed";
     pub const OUTCOME_SPAWN_ERROR: &str = "spawn_error";
+    /// The step ran and was killed at its configured budget. It is a partial
+    /// result, not a failure to start cargo, and downstream consumers must be
+    /// able to tell the two apart (a truncated step still advanced the warm
+    /// base; a spawn error advanced nothing).
+    pub const OUTCOME_TIMEOUT: &str = "timeout";
 
     /// Stable labels for the cargo warm step. Keep this list closed so the
     /// `step` label cardinality stays bounded.
@@ -667,7 +900,44 @@ pub mod cargo_warm_step {
     pub const STEP_TEST_NO_RUN: &str = "test_no_run";
 
     pub const STEP_TOTAL: &str = super::CARGO_WARM_STEP_TOTAL;
+    pub const STEP_SECONDS: &str = super::CARGO_WARM_STEP_SECONDS;
     pub const WORKSPACE_PATH_HASH: &str = super::CARGO_WARM_STEP_WORKSPACE_PATH_HASH;
+
+    /// Every closed `outcome` label value, for exhaustive enumeration in tests
+    /// and in consumers that must branch on the full space.
+    pub const ALL_OUTCOMES: [&str; 4] = [
+        OUTCOME_OK,
+        OUTCOME_FAILED,
+        OUTCOME_SPAWN_ERROR,
+        OUTCOME_TIMEOUT,
+    ];
+
+    /// Whether the outcome means "cargo ran and left partial progress in the
+    /// warm base" rather than "the step never produced anything". Consumers
+    /// that gate destructive warm-base maintenance on step results must use
+    /// this instead of a bare `outcome == OUTCOME_OK` test.
+    pub fn outcome_left_partial_progress(outcome: &str) -> bool {
+        outcome == OUTCOME_TIMEOUT
+    }
+
+    /// Record the wall-clock a single warm step consumed, partitioned by the
+    /// same bounded `(project_id, step, outcome)` triple as the counter. A
+    /// truncated step's sample is its budget, which is what makes "how much of
+    /// the enclosing deadline did this step burn" answerable from metrics.
+    pub fn record_step_seconds(
+        project_id: &str,
+        step: &'static str,
+        outcome: &'static str,
+        seconds: f64,
+    ) {
+        metrics::histogram!(
+            super::CARGO_WARM_STEP_SECONDS,
+            "project_id" => project_id.to_owned(),
+            "step" => step,
+            "outcome" => outcome,
+        )
+        .record(seconds);
+    }
 
     /// Increment the cargo warm-step counter for a `(project_id, step, outcome)`
     /// bucket. The free-form cargo argv is intentionally NOT a label so metric
@@ -734,6 +1004,71 @@ pub mod cargo_warm_step {
             hash = hash.wrapping_mul(PRIME);
         }
         hash
+    }
+}
+
+/// Bounded telemetry for the *contents* of the Cargo warm base, sampled either
+/// side of the warm compile phase.
+///
+/// This is the convergence instrument: if successive warm cycles accumulate
+/// test-target artifacts, `test_units` at `post_compile` rises cycle over
+/// cycle; if the tail sweep reclaims them faster than a truncated compile step
+/// produces them, it does not. Every label is a closed enum — the census counts
+/// themselves are gauge *values*, never labels.
+pub mod cargo_warm_base {
+    pub const PHASE_PRE_COMPILE: &str = "pre_compile";
+    pub const PHASE_POST_COMPILE: &str = "post_compile";
+    pub const ALL_PHASES: [&str; 2] = [PHASE_PRE_COMPILE, PHASE_POST_COMPILE];
+
+    /// Cargo unit directories under `debug/.fingerprint`.
+    pub const KIND_FINGERPRINT_UNITS: &str = "fingerprint_units";
+    /// Fingerprint units that carry a `test-*.json` fingerprint — i.e. units
+    /// compiled with `--test`, which is exactly what the `--no-run` warm step
+    /// exists to produce.
+    pub const KIND_TEST_UNITS: &str = "test_units";
+    /// Regular files under `debug/deps` (the linked artifacts themselves).
+    pub const KIND_DEP_FILES: &str = "dep_files";
+    pub const ALL_UNIT_KINDS: [&str; 3] = [KIND_FINGERPRINT_UNITS, KIND_TEST_UNITS, KIND_DEP_FILES];
+
+    pub const UNITS: &str = super::CARGO_WARM_BASE_UNITS;
+    pub const SWEEP_DECISION_TOTAL: &str = super::CARGO_WARM_SWEEP_DECISION_TOTAL;
+
+    /// The tail `cargo sweep --file` ran.
+    pub const DECISION_SWEPT: &str = "swept";
+    /// Skipped: the pre-compile `cargo sweep --stamp` never landed.
+    pub const DECISION_SKIPPED_NO_STAMP: &str = "skipped_no_stamp";
+    /// Skipped: no warm step completed successfully.
+    pub const DECISION_SKIPPED_NO_SUCCESS: &str = "skipped_no_success";
+    /// Skipped: at least one warm step was killed at its budget, so artifacts
+    /// older than the stamp are "not yet rebuilt", not "no longer needed".
+    pub const DECISION_SKIPPED_TRUNCATED: &str = "skipped_truncated";
+    pub const ALL_SWEEP_DECISIONS: [&str; 4] = [
+        DECISION_SWEPT,
+        DECISION_SKIPPED_NO_STAMP,
+        DECISION_SKIPPED_NO_SUCCESS,
+        DECISION_SKIPPED_TRUNCATED,
+    ];
+
+    /// Publish one warm-base census count for a `(project_id, phase, kind)`
+    /// bucket.
+    pub fn set_units(project_id: &str, phase: &'static str, kind: &'static str, count: u64) {
+        metrics::gauge!(
+            super::CARGO_WARM_BASE_UNITS,
+            "project_id" => project_id.to_owned(),
+            "phase" => phase,
+            "kind" => kind,
+        )
+        .set(count as f64);
+    }
+
+    /// Record exactly one tail-sweep decision per warm cycle.
+    pub fn increment_sweep_decision(project_id: &str, decision: &'static str) {
+        metrics::counter!(
+            super::CARGO_WARM_SWEEP_DECISION_TOTAL,
+            "project_id" => project_id.to_owned(),
+            "decision" => decision,
+        )
+        .increment(1);
     }
 }
 
@@ -827,6 +1162,268 @@ pub mod cargo_target_seed {
             "fallback_reason" => reason
         )
         .increment(1);
+    }
+}
+
+/// Agent-facing `prepare_build_cache` worker-tool telemetry (epic 1bnj).
+///
+/// Exactly one counter increment is emitted per tool call. The `outcome` label
+/// space is a CLOSED enum (`ready`, `noop`, `queued`, `not-applicable`,
+/// `error`) so series cardinality stays bounded. Identifiers (task-run id,
+/// resolved cache path) are carried in the tool result's structured audit
+/// fields, never as metric labels.
+pub mod prepare_build_cache {
+    /// Ready after admission/seed for a stack with a platform warm cache.
+    pub const OUTCOME_READY: &str = "ready";
+    /// Compatibility ready no-op while eager startup seeding is still active.
+    pub const OUTCOME_NOOP: &str = "noop";
+    /// Deferred (disk pressure / capacity unknown) without allocating bytes.
+    pub const OUTCOME_QUEUED: &str = "queued";
+    /// Stack has no platform warm cache.
+    pub const OUTCOME_NOT_APPLICABLE: &str = "not-applicable";
+    /// Internal failure preparing the cache.
+    pub const OUTCOME_ERROR: &str = "error";
+
+    /// Emit exactly one bounded outcome for a `prepare_build_cache` call.
+    ///
+    /// Callers pass one of the `OUTCOME_*` constants; free-form labels are not
+    /// accepted so the series stays bounded.
+    pub fn increment_outcome(outcome: &'static str) {
+        metrics::counter!(super::PREPARE_BUILD_CACHE_TOTAL, "outcome" => outcome).increment(1);
+    }
+}
+
+/// Warm build-cache dispatch-gate telemetry (proposal ri23 Part 2).
+///
+/// The coordinator runs a bounded warm build-cache freshness gate before pod
+/// allocation. Every gate decision is emitted here as a single
+/// `(project_id, outcome, reason)` counter increment, and every decision also
+/// feeds a process-global cold-rate alert whose firing state is exposed as a
+/// gauge. The `outcome` and `reason` label spaces are CLOSED enums so the
+/// series cardinality stays bounded by `project_id` alone.
+///
+/// Ownership boundary: the warm substrate owns inventory / warming / freshness
+/// / eviction. This module only labels the decision the coordinator already
+/// made; it never reads or mutates warm state.
+pub mod warm_cache {
+    use std::sync::{Mutex, OnceLock};
+
+    /// Closed outcome classification for a warm-dispatch gate decision.
+    ///
+    /// - `Hit`: the warm cache was fresh for the resolved environment identity
+    ///   (either immediately or after a bounded wait) and the run allocated
+    ///   against it.
+    /// - `Cold`: the gate reached its bound or observed an error and
+    ///   cold-dispatched (allocated without a warm cache).
+    /// - `Fallback`: the stack has no compile step, so the gate was bypassed.
+    ///   A bypass is deliberately NOT a cold dispatch.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum Outcome {
+        Hit,
+        Cold,
+        Fallback,
+    }
+
+    /// Closed reason classification paired with an [`Outcome`].
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum Reason {
+        /// Warm cache was fresh on the first probe (paired with `Hit`).
+        Fresh,
+        /// Warm cache was stale, then became fresh within the bound (`Hit`).
+        Stale,
+        /// Warm cache was missing, then became fresh within the bound (`Hit`).
+        Missing,
+        /// Bounded wait elapsed without the cache going fresh (`Cold`).
+        Timeout,
+        /// The warm inventory probe returned an error (`Cold`).
+        InventoryError,
+        /// The single-flight warm trigger returned an error (`Cold`).
+        WarmerError,
+        /// The stack has no compile step; the gate was bypassed (`Fallback`).
+        NoCompile,
+    }
+
+    /// Every `Outcome` variant, for exhaustive label enumeration in tests.
+    pub const ALL_OUTCOMES: [Outcome; 3] = [Outcome::Hit, Outcome::Cold, Outcome::Fallback];
+
+    /// Every `Reason` variant, for exhaustive label enumeration in tests.
+    pub const ALL_REASONS: [Reason; 7] = [
+        Reason::Fresh,
+        Reason::Stale,
+        Reason::Missing,
+        Reason::Timeout,
+        Reason::InventoryError,
+        Reason::WarmerError,
+        Reason::NoCompile,
+    ];
+
+    pub const DECISION_TOTAL: &str = super::WARM_CACHE_DECISION_TOTAL;
+    pub const COLD_RATE: &str = super::WARM_CACHE_COLD_RATE;
+    pub const COLD_RATE_ALERT_FIRING: &str = super::WARM_CACHE_COLD_RATE_ALERT_FIRING;
+
+    impl Outcome {
+        pub const fn as_label(self) -> &'static str {
+            match self {
+                Self::Hit => "hit",
+                Self::Cold => "cold",
+                Self::Fallback => "fallback",
+            }
+        }
+    }
+
+    impl Reason {
+        pub const fn as_label(self) -> &'static str {
+            match self {
+                Self::Fresh => "fresh",
+                Self::Stale => "stale",
+                Self::Missing => "missing",
+                Self::Timeout => "timeout",
+                Self::InventoryError => "inventory_error",
+                Self::WarmerError => "warmer_error",
+                Self::NoCompile => "no_compile",
+            }
+        }
+    }
+
+    /// Record exactly one warm-dispatch gate decision for a project.
+    ///
+    /// Increments the `(project_id, outcome, reason)` counter and feeds the
+    /// process-global cold-rate alert (which re-emits its gauges). Exactly one
+    /// counter series moves per call, so a caller that emits per decision can
+    /// never double-count or leave a series dark.
+    pub fn record_decision(project_id: &str, outcome: Outcome, reason: Reason) {
+        metrics::counter!(
+            super::WARM_CACHE_DECISION_TOTAL,
+            "project_id" => project_id.to_owned(),
+            "outcome" => outcome.as_label(),
+            "reason" => reason.as_label(),
+        )
+        .increment(1);
+
+        if let Ok(mut alert) = global_alert().lock() {
+            alert.observe(outcome);
+            alert.evaluate();
+        }
+    }
+
+    /// Hysteresis configuration for the cold-rate alert.
+    #[derive(Clone, Copy, Debug)]
+    pub struct ColdRateAlertConfig {
+        /// Fire when the cold rate is at or above this fraction.
+        pub fire_at: f64,
+        /// Clear a firing alert once the cold rate is at or below this fraction.
+        /// Must be `<= fire_at` so the alert does not flap.
+        pub clear_at: f64,
+        /// Minimum observed decisions before the alert is allowed to fire.
+        pub min_samples: u64,
+    }
+
+    impl Default for ColdRateAlertConfig {
+        fn default() -> Self {
+            Self {
+                fire_at: 0.5,
+                clear_at: 0.2,
+                min_samples: 20,
+            }
+        }
+    }
+
+    /// A transition returned by [`ColdRateAlert::evaluate`].
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum AlertTransition {
+        /// The firing state did not change on this evaluation.
+        Unchanged,
+        /// The alert transitioned from clear to firing.
+        Fired,
+        /// The alert transitioned from firing to clear.
+        Cleared,
+    }
+
+    /// Stateful cold-rate alert with hysteresis.
+    ///
+    /// Pure and self-contained: `observe` accumulates decisions and `evaluate`
+    /// applies the hysteresis and emits the `cold_rate` / `alert_firing`
+    /// gauges. Tests drive an owned instance deterministically; production
+    /// feeds a single process-global instance from [`record_decision`].
+    #[derive(Clone, Copy, Debug)]
+    pub struct ColdRateAlert {
+        config: ColdRateAlertConfig,
+        cold: u64,
+        total: u64,
+        firing: bool,
+    }
+
+    impl ColdRateAlert {
+        pub fn new(config: ColdRateAlertConfig) -> Self {
+            Self {
+                config,
+                cold: 0,
+                total: 0,
+                firing: false,
+            }
+        }
+
+        pub fn with_default_config() -> Self {
+            Self::new(ColdRateAlertConfig::default())
+        }
+
+        /// Accumulate one decision. Only `Outcome::Cold` moves the cold count;
+        /// `Fallback` (no-compile bypass) counts toward the total but never as
+        /// cold, so a no-compile stack can never drive the alert.
+        pub fn observe(&mut self, outcome: Outcome) {
+            self.total = self.total.saturating_add(1);
+            if matches!(outcome, Outcome::Cold) {
+                self.cold = self.cold.saturating_add(1);
+            }
+        }
+
+        /// Current cold fraction; zero before any decision is observed.
+        pub fn cold_rate(&self) -> f64 {
+            if self.total == 0 {
+                0.0
+            } else {
+                self.cold as f64 / self.total as f64
+            }
+        }
+
+        pub fn firing(&self) -> bool {
+            self.firing
+        }
+
+        /// Apply the hysteresis rule and emit the alert gauges. Returns the
+        /// transition (if any) so a caller can log or test edge crossings.
+        pub fn evaluate(&mut self) -> AlertTransition {
+            let rate = self.cold_rate();
+            let transition = if self.firing {
+                if rate <= self.config.clear_at {
+                    self.firing = false;
+                    AlertTransition::Cleared
+                } else {
+                    AlertTransition::Unchanged
+                }
+            } else if self.total >= self.config.min_samples && rate >= self.config.fire_at {
+                self.firing = true;
+                AlertTransition::Fired
+            } else {
+                AlertTransition::Unchanged
+            };
+            emit_cold_rate_gauges(rate, self.firing);
+            transition
+        }
+    }
+
+    fn emit_cold_rate_gauges(rate: f64, firing: bool) {
+        metrics::gauge!(super::WARM_CACHE_COLD_RATE).set(rate);
+        metrics::gauge!(super::WARM_CACHE_COLD_RATE_ALERT_FIRING).set(if firing {
+            1.0
+        } else {
+            0.0
+        });
+    }
+
+    fn global_alert() -> &'static Mutex<ColdRateAlert> {
+        static GLOBAL: OnceLock<Mutex<ColdRateAlert>> = OnceLock::new();
+        GLOBAL.get_or_init(|| Mutex::new(ColdRateAlert::with_default_config()))
     }
 }
 
@@ -1076,6 +1673,58 @@ fn register_metrics() {
     for outcome in VERIFY_RUN_RECORD_OUTCOMES {
         metrics::counter!(VERIFY_RUN_RECORD_TOTAL, "outcome" => outcome).absolute(0);
     }
+    metrics::describe_counter!(
+        RUN_VERIFICATION_TOOL_TOTAL,
+        "Agent-facing run_verification tool attempts partitioned by bounded terminal outcome."
+    );
+    for outcome in RUN_VERIFICATION_TOOL_OUTCOMES {
+        metrics::counter!(RUN_VERIFICATION_TOOL_TOTAL, "outcome" => outcome).absolute(0);
+    }
+    metrics::describe_counter!(
+        RUN_VERIFICATION_SELECTION_TOTAL,
+        "run_verification command-group selection surface partitioned by full/subset."
+    );
+    for selection in RUN_VERIFICATION_SELECTIONS {
+        metrics::counter!(RUN_VERIFICATION_SELECTION_TOTAL, "selection" => selection).absolute(0);
+    }
+    metrics::describe_counter!(
+        RUN_VERIFICATION_CHECK_TOTAL,
+        "run_verification per-check results partitioned by bounded pass/fail."
+    );
+    for result in RUN_VERIFICATION_CHECK_RESULTS {
+        metrics::counter!(RUN_VERIFICATION_CHECK_TOTAL, "result" => result).absolute(0);
+    }
+    metrics::describe_counter!(
+        VERIFY_SERVICE_PROVISIONING_TOTAL,
+        "Catalog service provisioning outcomes for final-verification attempts, partitioned by bounded phase, outcome, and service_type."
+    );
+    for phase in VERIFY_SERVICE_PROVISIONING_PHASES {
+        for outcome in VERIFY_SERVICE_PROVISIONING_OUTCOMES {
+            for service_type in VERIFY_SERVICE_PROVISIONING_SERVICE_TYPES {
+                metrics::counter!(
+                    VERIFY_SERVICE_PROVISIONING_TOTAL,
+                    "phase" => phase,
+                    "outcome" => outcome,
+                    "service_type" => service_type,
+                )
+                .absolute(0);
+            }
+        }
+    }
+    metrics::describe_counter!(
+        BUILD_DRIFT_DECISIONS_TOTAL,
+        "Build-drift soft-gate decisions partitioned by bounded terminal outcome."
+    );
+    for outcome in BUILD_DRIFT_OUTCOMES {
+        metrics::counter!(BUILD_DRIFT_DECISIONS_TOTAL, "outcome" => outcome).absolute(0);
+    }
+    metrics::describe_counter!(
+        BUILD_DRIFT_INELIGIBLE_TOTAL,
+        "Build-drift commands that failed open, partitioned by bounded ineligibility reason."
+    );
+    for reason in BUILD_DRIFT_INELIGIBLE_REASONS {
+        metrics::counter!(BUILD_DRIFT_INELIGIBLE_TOTAL, "reason" => reason).absolute(0);
+    }
     metrics::describe_gauge!(
         DISPATCH_LAST_SUCCESS_TIMESTAMP,
         "Unix timestamp in seconds for the last successful dispatch."
@@ -1210,6 +1859,20 @@ fn register_metrics() {
         "Seconds elapsed while producing the most recent warm Cargo target base for a project."
     );
     metrics::describe_counter!(
+        WARM_CACHE_DECISION_TOTAL,
+        "Warm build-cache dispatch-gate decisions partitioned by project_id and the closed outcome (hit, cold, fallback) and reason (fresh, stale, missing, timeout, inventory_error, warmer_error, no_compile) label spaces."
+    );
+    metrics::describe_gauge!(
+        WARM_CACHE_COLD_RATE,
+        "Fraction of warm build-cache dispatch-gate decisions that cold-dispatched, driving the cold-rate alert."
+    );
+    metrics::describe_gauge!(
+        WARM_CACHE_COLD_RATE_ALERT_FIRING,
+        "Whether the warm build-cache cold-rate alert is firing: 1 firing, 0 clear."
+    );
+    metrics::gauge!(WARM_CACHE_COLD_RATE).set(0.0);
+    metrics::gauge!(WARM_CACHE_COLD_RATE_ALERT_FIRING).set(0.0);
+    metrics::describe_counter!(
         CARGO_WARM_STEP_TOTAL,
         "Cargo warm-step invocations partitioned by bounded project_id, step, and outcome labels. The free-form cargo argv is intentionally NOT a label; correlate with the djinn_cargo_warm_step workspace path hash gauge and the worker's structured tracing event for full context."
     );
@@ -1219,6 +1882,37 @@ fn register_metrics() {
             "project_id" => "",
             "step" => "",
             "outcome" => outcome
+        )
+        .absolute(0);
+    }
+    metrics::describe_histogram!(
+        CARGO_WARM_STEP_SECONDS,
+        "Wall-clock seconds consumed by one cargo warm step, partitioned by the same bounded project_id, step, and outcome labels as djinn_cargo_warm_step_total. A `timeout` sample equals the step's configured budget."
+    );
+    metrics::describe_gauge!(
+        CARGO_WARM_BASE_UNITS,
+        "Census of the cargo warm base sampled either side of the compile phase, partitioned by project_id, the closed phase (pre_compile, post_compile) and the closed kind (fingerprint_units, test_units, dep_files). Rising post_compile test_units across cycles is the warm base converging on test-target artifacts."
+    );
+    for phase in CARGO_WARM_BASE_PHASES {
+        for kind in CARGO_WARM_BASE_UNIT_KINDS {
+            metrics::gauge!(
+                CARGO_WARM_BASE_UNITS,
+                "project_id" => "",
+                "phase" => phase,
+                "kind" => kind
+            )
+            .set(0.0);
+        }
+    }
+    metrics::describe_counter!(
+        CARGO_WARM_SWEEP_DECISION_TOTAL,
+        "Tail `cargo sweep --file` decisions for one warm cycle, partitioned by project_id and the fixed decisions swept, skipped_no_stamp, skipped_no_success, and skipped_truncated."
+    );
+    for decision in CARGO_WARM_SWEEP_DECISIONS {
+        metrics::counter!(
+            CARGO_WARM_SWEEP_DECISION_TOTAL,
+            "project_id" => "",
+            "decision" => decision
         )
         .absolute(0);
     }
@@ -1485,6 +2179,10 @@ fn register_metrics() {
     metrics::describe_counter!(
         BUILD_ADMISSION_UNKNOWN_CLASSIFICATION_TOTAL,
         "Build-admission requests with an unknown workload classification."
+    );
+    metrics::describe_counter!(
+        BUILD_ADMISSION_SHADOW_INVOCATION_TOTAL,
+        "Shadow-mode v1 invocation decisions the launcher observed but did not act on."
     );
     for metric in [
         BUILD_ADMISSION_INVENTORY_DEGRADED,
@@ -2616,6 +3314,112 @@ pub mod build_admission {
     /// Record one bounded unknown-classification event.
     pub fn increment_unknown_classification(effective_mode: &'static str, effective_cap: i64) {
         metrics::counter!(super::BUILD_ADMISSION_UNKNOWN_CLASSIFICATION_TOTAL, "effective_mode" => effective_mode, "effective_cap" => effective_cap.to_string()).increment(1);
+    }
+
+    /// Record one bounded shadow-mode v1 invocation decision.
+    ///
+    /// Emitted per user spawn while the epoch has v1 shadowing: the invocation
+    /// authority observes what it *would* do but the launcher never lifts. The
+    /// `decision` label is one of the two bounded outcomes — `would_escalate`
+    /// (v1 would have lifted the quota) or `would_throttle` (v1 would have kept
+    /// it throttled) — so the shadow rollout can be measured before enforcement.
+    pub fn record_shadow_invocation(would_escalate: bool) {
+        let decision = if would_escalate {
+            "would_escalate"
+        } else {
+            "would_throttle"
+        };
+        metrics::counter!(super::BUILD_ADMISSION_SHADOW_INVOCATION_TOTAL, "decision" => decision)
+            .increment(1);
+    }
+}
+
+/// Run-dir disk-admission telemetry (proposal nquz, phase 1 — dark/observe).
+///
+/// Every label is a closed enumeration so Prometheus cardinality stays bounded.
+/// Volume, pod, task, and project identifiers are logged, never labelled. In
+/// phase 1 nothing production wires these emitters to a live caller; they exist
+/// so the observe substrate and its tests can record what disk admission WOULD
+/// do without changing any dispatch decision.
+pub mod run_dir {
+    /// The eight lease-lifecycle states plus the reconciliation-only quarantine
+    /// bucket, matching `djinn_db::RunDirState`.
+    pub const STATE_ABSENT: &str = "absent";
+    pub const STATE_RESERVED: &str = "reserved";
+    pub const STATE_SEEDING: &str = "seeding";
+    pub const STATE_READY_ACTIVE: &str = "ready_active";
+    pub const STATE_READY_IDLE: &str = "ready_idle";
+    pub const STATE_RECLAIMABLE: &str = "reclaimable";
+    pub const STATE_RECLAIMING: &str = "reclaiming";
+    pub const STATE_QUARANTINED_UNOWNED: &str = "quarantined_unowned";
+
+    /// Typed queue reasons emitted when disk admission WOULD defer a build.
+    pub const QUEUE_REASON_DISK_PRESSURE: &str = "disk_pressure";
+    pub const QUEUE_REASON_DISK_CAPACITY_UNKNOWN: &str = "disk_capacity_unknown";
+
+    /// Quota-probe / installation failure reasons.
+    pub const QUOTA_FAILURE_PROBE_UNAVAILABLE: &str = "probe_unavailable";
+    pub const QUOTA_FAILURE_INSTALL_FAILED: &str = "install_failed";
+
+    /// Reclaim ordering tiers (dark this phase; defined for a bounded family).
+    pub const RECLAIM_TIER_RECLAIMABLE: &str = "reclaimable";
+    pub const RECLAIM_TIER_READY_IDLE: &str = "ready_idle";
+    pub const RECLAIM_TIER_WARM_BASE_AUX: &str = "warm_base_aux";
+
+    /// Seed / recovery outcomes.
+    pub const SEED_OUTCOME_SEEDED: &str = "seeded";
+    pub const SEED_OUTCOME_RESEEDED: &str = "reseeded";
+    pub const SEED_OUTCOME_RECOVERED_PROMOTED: &str = "recovered_promoted";
+    pub const SEED_OUTCOME_RECOVERED_QUARANTINED: &str = "recovered_quarantined";
+
+    /// Set the absolute run-dir count for one bounded `state`.
+    pub fn set_state_count(state: &'static str, count: u64) {
+        metrics::gauge!(super::RUN_DIR_COUNT, "state" => state).set(count as f64);
+    }
+
+    /// Set the absolute measured allocated bytes tracked in one bounded `state`.
+    pub fn set_state_allocated_bytes(state: &'static str, bytes: u64) {
+        metrics::gauge!(super::RUN_DIR_ALLOCATED_BYTES, "state" => state).set(bytes as f64);
+    }
+
+    /// Set the absolute outstanding reserved bytes for a volume.
+    pub fn set_reserved_bytes(bytes: u64) {
+        metrics::gauge!(super::RUN_DIR_RESERVED_BYTES).set(bytes as f64);
+    }
+
+    /// Set the absolute quarantined-unowned bytes for a volume.
+    pub fn set_unowned_bytes(bytes: u64) {
+        metrics::gauge!(super::RUN_DIR_UNOWNED_BYTES).set(bytes as f64);
+    }
+
+    /// Record one observe-mode disk queue event. `reason` MUST be a
+    /// `QUEUE_REASON_*` constant.
+    pub fn increment_queue_reason(reason: &'static str) {
+        metrics::counter!(super::RUN_DIR_QUEUE_REASON_TOTAL, "reason" => reason).increment(1);
+    }
+
+    /// Record one quota-probe / install failure. `reason` MUST be a
+    /// `QUOTA_FAILURE_*` constant.
+    pub fn increment_quota_failure(reason: &'static str) {
+        metrics::counter!(super::RUN_DIR_QUOTA_FAILURE_TOTAL, "reason" => reason).increment(1);
+    }
+
+    /// Record a reclaim of `count` dirs releasing `bytes` for one bounded
+    /// `tier`. `tier` MUST be a `RECLAIM_TIER_*` constant.
+    pub fn increment_reclaim(tier: &'static str, count: u64, bytes: u64) {
+        metrics::counter!(super::RUN_DIR_RECLAIM_TOTAL, "tier" => tier).increment(count);
+        metrics::counter!(super::RUN_DIR_RECLAIM_BYTES_TOTAL, "tier" => tier).increment(bytes);
+    }
+
+    /// Record one seed / recovery outcome. `outcome` MUST be a `SEED_OUTCOME_*`
+    /// constant.
+    pub fn increment_seed_outcome(outcome: &'static str) {
+        metrics::counter!(super::RUN_DIR_SEED_TOTAL, "outcome" => outcome).increment(1);
+    }
+
+    /// Record one operator-authorized warm-base removal.
+    pub fn increment_warm_base_removed() {
+        metrics::counter!(super::RUN_DIR_WARM_BASE_REMOVED_TOTAL).increment(1);
     }
 }
 

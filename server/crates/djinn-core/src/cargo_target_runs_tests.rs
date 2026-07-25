@@ -756,3 +756,56 @@ impl Filesystem for RaceToSymlinkFilesystem {
         fs::remove_dir_all(path)
     }
 }
+
+// ── Per-run allocated-byte measurement (proposal nquz phase 1) ──────────────
+
+#[cfg(unix)]
+#[test]
+fn measure_run_dir_returns_positive_bytes_for_seeded_dir() {
+    let tmp = tempfile::tempdir().unwrap();
+    let id = "22222222-2222-2222-2222-222222222222";
+    mkdir(tmp.path(), id);
+    let bytes = measure_run_dir_allocated_bytes(tmp.path(), id)
+        .unwrap()
+        .expect("seeded dir is measurable");
+    assert!(bytes > 0, "a seeded dir with artifacts must allocate bytes");
+}
+
+#[cfg(unix)]
+#[test]
+fn measure_run_dir_absent_dir_is_none() {
+    let tmp = tempfile::tempdir().unwrap();
+    let id = "33333333-3333-3333-3333-333333333333";
+    assert_eq!(
+        measure_run_dir_allocated_bytes(tmp.path(), id).unwrap(),
+        None
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn measure_run_dir_malformed_id_is_none() {
+    let tmp = tempfile::tempdir().unwrap();
+    assert_eq!(
+        measure_run_dir_allocated_bytes(tmp.path(), "../escape").unwrap(),
+        None
+    );
+    assert_eq!(
+        measure_run_dir_allocated_bytes(tmp.path(), "").unwrap(),
+        None
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn measure_run_dir_refuses_top_level_symlink() {
+    let tmp = tempfile::tempdir().unwrap();
+    let real = mkdir(tmp.path(), "real-target");
+    let link_id = "44444444-4444-4444-4444-444444444444";
+    symlink(&real, tmp.path().join(link_id)).unwrap();
+    assert_eq!(
+        measure_run_dir_allocated_bytes(tmp.path(), link_id).unwrap(),
+        None,
+        "a top-level symlink is never a seeded run dir"
+    );
+}

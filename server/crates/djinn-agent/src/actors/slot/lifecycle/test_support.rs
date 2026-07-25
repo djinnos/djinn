@@ -143,6 +143,7 @@ pub(crate) async fn assemble_for_role_with_extension_diagnostics(
         extension_diagnostics,
         cancellation: None,
         memory_intent_planner: None,
+        final_verification_configured: false,
     })
     .await
 }
@@ -177,6 +178,7 @@ pub(crate) async fn assemble_for_role_with_mcp_instructions(
         extension_diagnostics: &[],
         cancellation: None,
         memory_intent_planner: None,
+        final_verification_configured: false,
     })
     .await
 }
@@ -210,6 +212,7 @@ pub(crate) async fn assemble_for_role_with_resume(
         extension_diagnostics: &[],
         cancellation: None,
         memory_intent_planner: None,
+        final_verification_configured: false,
     })
     .await
 }
@@ -255,6 +258,8 @@ pub(crate) fn task_with_ci(
         ci_head_sha: ci_head_sha.map(Into::into),
         ci_pr_number,
         ci_blocking_required_check_names: ci_blocking_checks.into(),
+        ci_primary_blocking_check: None,
+        ci_failure_annotations: None,
         ci_failure_fingerprint: ci_failure_fingerprint.map(Into::into),
         ci_first_seen_at: None,
         ci_last_seen_at: None,

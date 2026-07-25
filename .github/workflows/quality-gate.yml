@@ -26,6 +26,82 @@ env:
   CARGO_BUILD_BUILD_DIR: target
   RUSTC_WRAPPER: ""
   RUSTFLAGS: -D warnings
+  # ---------------------------------------------------------------------------
+  # Runner disk headroom preflight (shared body + thresholds, defined ONCE here)
+  #
+  # Run 30087861197 died like this, as an annotation on `Plan Server Test
+  # Shards` and nowhere else:
+  #
+  #   System.IO.IOException: No space left on device :
+  #     '/home/runner/actions-runner/cached/2.336.0/_diag/Worker_*.log'
+  #      at GitHub.Runner.Worker.Worker.RunAsync(...)
+  #   Unhandled exception. ... aborting
+  #
+  # The RUNNER PROCESS ITSELF could not write its own diagnostic log. That is
+  # not a test failure and it has no test-shaped signal: the worker aborts, the
+  # job is orphaned, the run is cancelled at run level, and six checks go red
+  # with nothing naming the host as the cause. The steps below convert that
+  # class of failure into one named, early, deterministic step failure on the
+  # job that is about to consume the disk.
+  #
+  # Threshold: 14 GiB, measured against the heaviest lane (`server-test`).
+  # `cargo nextest run --workspace --all-targets --features qdrant --no-run`
+  # leaves ~11-12 GiB in server/target, on top of the ~2.3 GiB restored
+  # rust-cache, the postgres service image, and the runner's own _diag logs.
+  # 14 GiB is the floor at which that lane can finish. It also sits far below
+  # what a healthy hosted runner has free after the reclaim set below, so a
+  # healthy runner never trips it — a preflight that false-fails is worse than
+  # no preflight.
+  CI_RUNNER_DISK_MIN_GB: "14"
+  # Warn band. Free space between MIN and WARN still completes the build but is
+  # already abnormal for a hosted runner, so annotate it: the run summary is
+  # exactly where runner-host failures surface and where nobody currently has
+  # anything to look at.
+  CI_RUNNER_DISK_WARN_GB: "22"
+  # Invoked by the heavy jobs as `bash -c "$CI_RUNNER_DISK_PREFLIGHT"`. Kept as
+  # a workflow-level env body rather than copied per job so the threshold and
+  # the reclaim set exist in exactly one place; a composite action would be the
+  # other option but would live outside this file.
+  CI_RUNNER_DISK_PREFLIGHT: |
+    set -euo pipefail
+    MIN_GB="${CI_RUNNER_DISK_MIN_GB:-14}"
+    WARN_GB="${CI_RUNNER_DISK_WARN_GB:-22}"
+    # _diag lives under /home/runner, so measure the volume that actually
+    # holds it (usually / on hosted runners, but do not assume that).
+    VOL=/home/runner
+    [ -d "$VOL" ] || VOL=/
+    # Parse POSIX `df -Pk` available KB with awk. Never parse `df -h` output:
+    # its unit suffixes are locale/size dependent and unusable for comparison.
+    avail_kb() { df -Pk "$1" | awk 'NR==2 { print $4 + 0 }'; }
+    as_gib() { awk -v kb="$1" 'BEGIN { printf "%.1f", kb / 1048576 }'; }
+    MIN_KB=$(( MIN_GB * 1048576 ))
+    WARN_KB=$(( WARN_GB * 1048576 ))
+    BEFORE_KB="$(avail_kb "$VOL")"
+    echo "runner-disk volume=$VOL before=$(as_gib "$BEFORE_KB")GiB min=${MIN_GB}GiB warn=${WARN_GB}GiB"
+    df -h "$VOL" | tail -1
+    AFTER_KB="$BEFORE_KB"
+    if [ "$BEFORE_KB" -lt "$MIN_KB" ]; then
+      echo "::notice title=Reclaiming runner disk::Only $(as_gib "$BEFORE_KB")GiB free (need >= ${MIN_GB}GiB); dropping preinstalled SDKs and cached docker images before deciding to fail."
+      sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+        /opt/hostedtoolcache/CodeQL /usr/local/share/boost \
+        "${AGENT_TOOLSDIRECTORY:-}" 2>/dev/null || true
+      if command -v docker >/dev/null 2>&1; then
+        docker image prune -af >/dev/null 2>&1 || true
+      fi
+      AFTER_KB="$(avail_kb "$VOL")"
+      echo "runner-disk volume=$VOL after-reclaim=$(as_gib "$AFTER_KB")GiB"
+      df -h "$VOL" | tail -1
+    fi
+    AVAIL_GB="$(as_gib "$AFTER_KB")"
+    if [ "$AFTER_KB" -lt "$MIN_KB" ]; then
+      echo "::error title=Insufficient runner disk::Runner has only ${AVAIL_GB}GiB free on the volume holding /home/runner (need >= ${MIN_GB}GiB). Failing preflight rather than dying mid-run inside the runner's own diagnostic logging (see run 30087861197)."
+      exit 1
+    fi
+    if [ "$AFTER_KB" -lt "$WARN_KB" ]; then
+      echo "::warning title=Low runner disk::${AVAIL_GB}GiB free on the volume holding /home/runner — above the ${MIN_GB}GiB floor but below the ${WARN_GB}GiB expected for a healthy hosted runner. If this lane dies without a test failure, this is why (see run 30087861197)."
+    else
+      echo "::notice title=Runner disk OK::${AVAIL_GB}GiB free on the volume holding /home/runner (floor ${MIN_GB}GiB)."
+    fi
 jobs:
   preflight:
     name: Preflight routing
@@ -240,6 +316,12 @@ jobs:
           # cargo-hold), not more mtime-based artifact caching.
         id: rust-cache
       - uses: taiki-e/install-action@nextest
+      - name: Runner disk headroom preflight
+        # Body/thresholds: CI_RUNNER_DISK_PREFLIGHT at the top of this file.
+        # Placed after the cache restore and before the workspace build, i.e.
+        # at the moment the remaining free space actually has to cover the
+        # build. See run 30087861197.
+        run: bash -c "$CI_RUNNER_DISK_PREFLIGHT"
       - name: Build test binaries (populate cache)
         run: cargo nextest run --workspace --all-targets --features qdrant --no-run
       - name: Log cache family and restore status
@@ -430,19 +512,169 @@ jobs:
           echo "rustc=$(rustc --version || echo 'unknown')"
           echo "cache-hit=${{ steps.rust-cache.outputs.cache-hit }}"
           echo "::notice::cache-family=server-test shared-key=server-test cache-hit=${{ steps.rust-cache.outputs.cache-hit }}"
+      # Runs in BOTH lanes on purpose. #771 skipped hakari in the merge queue
+      # to save CI minutes, but that made workspace-hack freshness a PR-lane-only
+      # invariant: a PR that changed Cargo.toml without regenerating
+      # workspace-hack could pass its own lane, be re-based by the queue, and
+      # land stale on main — after which the NEXT, innocent PR failed
+      # "Server Clippy" with "workspace-hack is out of date" (observed twice on
+      # 2026-07-24: #2527, #2531). `cargo hakari verify` is metadata-only (no
+      # build) and the install is a prebuilt binary, so the queue cost is
+      # seconds inside a job whose Clippy step dominates. On failure the
+      # `::error::` below is emitted before the job concludes, so the run-level
+      # annotation names this cause even when the fail-fast watcher then
+      # cancels the sibling shards.
       - uses: taiki-e/install-action@v2
-        if: github.event_name != 'merge_group'
         with:
           tool: cargo-hakari
       - name: Verify workspace-hack (hakari)
-        if: github.event_name != 'merge_group'
         run: |
           cargo hakari verify || {
             echo "::error::workspace-hack is out of date. Run 'cargo hakari generate && cargo hakari manage-deps' locally."
             exit 1
           }
+      - name: Runner disk headroom preflight
+        # Body/thresholds: CI_RUNNER_DISK_PREFLIGHT at the top of this file.
+        run: bash -c "$CI_RUNNER_DISK_PREFLIGHT"
       - name: Clippy
         run: cargo clippy --all-targets --features qdrant -- -D warnings
+  launcher-kernel-boundary:
+    name: Launcher Kernel Boundary
+    needs: preflight
+    # The proofs need uid 0, real UID separation, a shared PID namespace,
+    # cgroup-v2 delegation and an installable seccomp filter — none of which the
+    # ordinary sharded test lane has. This is the ONLY lane that executes goxi
+    # AC2, so it must never be optional: the suite's always-on guard test
+    # (`the_privileged_lane_is_wired_and_this_proof_cannot_silently_skip`) reads
+    # this file back and fails if the job, its `--ignored` invocation, or the
+    # ZF13_EXPECTED_PROOFS declaration below disappears.
+    if: needs.preflight.outputs.serverTest == 'true' && github.event_name != 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    defaults:
+      run:
+        working-directory: server
+    env:
+      SQLX_OFFLINE: "true"
+      # Number of `#[ignore]`d proofs the suite declares. The run below fails if
+      # fewer than this many actually execute, so a lane that quietly runs zero
+      # tests can never be mistaken for a proven kernel boundary.
+      ZF13_EXPECTED_PROOFS: "3"
+      # Number of `#[ignore]`d proofs `delegated_cpu_lease_lifecycle.rs`
+      # declares. That suite is the ONLY place the CPU lease is proven to
+      # actually govern CPU — measured on `cpu.stat` over a wall-clock window
+      # rather than by reading `cpu.max` back — so a run that executes zero of
+      # its proofs must fail rather than look green (task 7deu).
+      LEASE_LIFECYCLE_EXPECTED_PROOFS: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install
+        working-directory: server
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # djinn-cgroup-launcher depends only on libc + thiserror, so this lane
+          # compiles one small crate; it shares the server-test family purely to
+          # reuse an already-warm registry rather than to seed a new one.
+          workspaces: server
+          shared-key: server-test
+          cache-on-failure: true
+          cache-all-crates: true
+          save-if: false
+        id: rust-cache
+      - name: Log cache family and restore status
+        run: |-
+          echo "cache-family=server-test"
+          echo "shared-key=server-test"
+          echo "runner-os=${{ runner.os }}"
+          echo "rustc=$(rustc --version || echo 'unknown')"
+          echo "cache-hit=${{ steps.rust-cache.outputs.cache-hit }}"
+          echo "::notice::cache-family=server-test shared-key=server-test cache-hit=${{ steps.rust-cache.outputs.cache-hit }}"
+      - name: Assert the runner can host the proof
+        run: |
+          set -euo pipefail
+          # Fail here, loudly, rather than let the suite decide it "cannot run".
+          if ! docker info >/dev/null 2>&1; then
+            echo "::error::no container runtime on this runner; the launcher kernel boundary cannot be proven"
+            exit 1
+          fi
+          if [ "$(docker info --format '{{.CgroupVersion}}')" != "2" ]; then
+            echo "::error::the container runtime is not on cgroup v2; the launcher readiness contract rejects v1/hybrid"
+            exit 1
+          fi
+          docker pull --quiet ubuntu:24.04
+      - name: Build the privileged proof binary (unprivileged)
+        id: build
+        run: |
+          set -euo pipefail
+          # Built as the normal user so no root-owned artifacts land in target/;
+          # only the finished binary is then run with elevated privilege.
+          cargo test -p djinn-cgroup-launcher \
+            --test kernel_boundary_under_rendered_context \
+            --test delegated_cpu_lease_lifecycle \
+            --no-run --message-format=json > "$RUNNER_TEMP/build.json"
+          binary=$(jq -r 'select(.executable != null and .target.name == "kernel_boundary_under_rendered_context") | .executable' "$RUNNER_TEMP/build.json" | tail -1)
+          if [ -z "$binary" ] || [ ! -x "$binary" ]; then
+            echo "::error::could not locate the built kernel-boundary proof binary"
+            exit 1
+          fi
+          echo "binary=$binary" >> "$GITHUB_OUTPUT"
+          lease=$(jq -r 'select(.executable != null and .target.name == "delegated_cpu_lease_lifecycle") | .executable' "$RUNNER_TEMP/build.json" | tail -1)
+          if [ -z "$lease" ] || [ ! -x "$lease" ]; then
+            echo "::error::could not locate the built CPU-lease lifecycle proof binary"
+            exit 1
+          fi
+          echo "lease=$lease" >> "$GITHUB_OUTPUT"
+      - name: Prove the kernel boundary under the rendered security context
+        run: |
+          set -euo pipefail
+          # A privileged cgroup-v2 container is the closest analogue of the
+          # rendered enforcement Pod a hosted runner can offer: real uid 0, a
+          # private cgroup namespace whose cpu controller the suite can delegate
+          # exactly as the launcher requires, one shared PID namespace for the
+          # worker and its launched child, and /workspace (the rendered
+          # CommandSpec cwd) present. The image matches the runner's userspace,
+          # so the binary built above runs unmodified.
+          #
+          # --test-threads 1 keeps the harness single-threaded, so the worker
+          # fork and the clone3-into-cgroup adversary behave as they do in the
+          # rendered pod.
+          docker run --rm --privileged --cgroupns=private \
+            -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" \
+            ubuntu:24.04 \
+            bash -c 'mkdir -p /workspace && exec "$0" --ignored --test-threads 1 --nocapture' \
+            "${{ steps.build.outputs.binary }}" 2>&1 | tee "$RUNNER_TEMP/zf13.log"
+          passed=$(sed -n 's/^test result: ok\. \([0-9]*\) passed.*/\1/p' "$RUNNER_TEMP/zf13.log" | tail -1)
+          if [ "${passed:-0}" != "$ZF13_EXPECTED_PROOFS" ]; then
+            echo "::error::the launcher kernel-boundary lane executed ${passed:-0} proofs but $ZF13_EXPECTED_PROOFS are declared; goxi AC2 is NOT proven by this run"
+            exit 1
+          fi
+          echo "::notice::launcher kernel boundary proven: $passed/$ZF13_EXPECTED_PROOFS privileged proofs executed"
+      - name: Prove the per-invocation CPU lease actually governs CPU
+        run: |
+          set -euo pipefail
+          # Task 7deu. The same privileged cgroup-v2 container, running the
+          # ONLY suite that measures behaviour rather than configuration: the
+          # launcher mounts its own delegated cgroup2 root, drops CAP_SYS_ADMIN
+          # and proves it can no longer mount, spawns a real child into an
+          # invocation leaf, and measures `cpu.stat usage_usec` over a
+          # wall-clock window unleased and then lifted. Reading `cpu.max` back
+          # cannot see any of the defects this replaces — an ancestor CPU limit
+          # clamping every leaf, or a clone flag that truncated to zero so the
+          # child was never in the cgroup at all.
+          #
+          # --test-threads 1 because the proof's capability drop is irreversible
+          # and process-wide.
+          docker run --rm --privileged --cgroupns=private \
+            -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" \
+            ubuntu:24.04 \
+            bash -c 'mkdir -p /workspace && exec "$0" --ignored --test-threads 1 --nocapture' \
+            "${{ steps.build.outputs.lease }}" 2>&1 | tee "$RUNNER_TEMP/lease.log"
+          passed=$(sed -n 's/^test result: ok\. \([0-9]*\) passed.*/\1/p' "$RUNNER_TEMP/lease.log" | tail -1)
+          if [ "${passed:-0}" != "$LEASE_LIFECYCLE_EXPECTED_PROOFS" ]; then
+            echo "::error::the CPU-lease lifecycle lane executed ${passed:-0} proofs but $LEASE_LIFECYCLE_EXPECTED_PROOFS are declared; the lease is NOT proven to govern CPU by this run"
+            exit 1
+          fi
+          echo "::notice::per-invocation CPU lease proven: $passed/$LEASE_LIFECYCLE_EXPECTED_PROOFS privileged proofs executed"
   server-aarch64-check:
     name: Server aarch64 Check
     needs: preflight
@@ -505,6 +737,13 @@ jobs:
           cache-all-crates: true
           save-if: false
       - uses: taiki-e/install-action@nextest
+      - name: Runner disk headroom preflight
+        # Body/thresholds: CI_RUNNER_DISK_PREFLIGHT at the top of this file.
+        # This is the lane that died in run 30087861197: its discovery build
+        # (`cargo nextest list --workspace --all-targets`) filled the runner
+        # volume, and the failure surfaced only as the runner aborting while
+        # writing its own _diag log. Gate before the discovery build.
+        run: bash -c "$CI_RUNNER_DISK_PREFLIGHT"
       - name: Discover current nextest tests and plan exact-once shards
         id: plan
         env:
@@ -714,22 +953,31 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           # Shards are the longest-lived and most expensive jobs, so each
-          # hosts a background watcher: if any lane in this run concludes
-          # failure, the run is cancelled instead of burning the remaining
-          # shard minutes behind an already-failed gate. Cancelling from a
-          # bystander AFTER the culprit concluded preserves its red
-          # "failure" label (a self-cancel races finalization and stamps
-          # it "cancelled"). The process dies with the job; redundant
-          # watchers across shards are idempotent. This replaces both the
-          # old dedicated watchdog job (a full runner slot polling for the
-          # entire run) and the invalid workflow_job-based workflow.
+          # hosts a background watcher whose SOLE purpose is CI-minute
+          # savings: if any lane in this run concludes failure, the run is
+          # cancelled instead of burning the remaining shard minutes behind
+          # an already-failed gate. GitHub's API has no per-job cancel, so
+          # `gh run cancel` is run-level and stamps in-flight sibling lanes
+          # "cancelled" — which is why this watcher is NOT the source of
+          # truth for *which* lane/test failed. That attribution lives in
+          # the foreground "Surface shard failure at run level" step below,
+          # which emits a run-summary `::error::` annotation naming the lane
+          # (and the failing test IDs) before the job concludes — i.e.
+          # before any sibling watcher can observe the failure and cancel.
+          # The watcher only fires on a *concluded* failure (the jobs API
+          # reports `conclusion` null until a job fully finishes), so the
+          # culprit lane keeps its own "failure" label. The process dies
+          # with the job; redundant watchers across shards are idempotent.
+          # This replaces both the old dedicated watchdog job (a full runner
+          # slot polling for the entire run) and the invalid workflow_job
+          # workflow.
           nohup bash -c '
             for _ in $(seq 1 240); do
               sleep 15
               failed=$(gh api "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs?per_page=100" \
                 --jq "[.jobs[] | select(.conclusion == \"failure\") | .name] | first // empty" 2>/dev/null || true)
               if [ -n "$failed" ]; then
-                echo "Lane $failed failed — cancelling run ${{ github.run_id }}."
+                echo "Lane $failed failed — cancelling run ${{ github.run_id }} to save the remaining shard minutes (attribution is on the failed lane'"'"'s run-level annotation)."
                 gh run cancel ${{ github.run_id }} --repo ${{ github.repository }} || true
                 exit 0
               fi
@@ -834,6 +1082,14 @@ jobs:
           done
           echo "::warning::disk reclaim did not finish within 180s; continuing"
           cat "$RUNNER_TEMP/disk-reclaim.log" || true
+      - name: Runner disk headroom preflight
+        # Body/thresholds: CI_RUNNER_DISK_PREFLIGHT at the top of this file.
+        # Deliberately AFTER the background reclaim above has been waited on:
+        # this measures what the ~11-12 GiB all-targets build is actually
+        # about to draw from, and reclaims again only if that is not enough.
+        # The unconditional background reclaim stays as-is — it is a latency
+        # optimisation, this is the gate.
+        run: bash -c "$CI_RUNNER_DISK_PREFLIGHT"
       - name: Build test binaries (concurrent with planner discovery)
         run: cargo nextest run --workspace --all-targets --features qdrant --no-run
       - name: Wait for and download full shard plan
@@ -943,8 +1199,12 @@ jobs:
           started_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           started_seconds=$(date +%s)
           set +e
-          cargo nextest run --workspace --all-targets --features qdrant --profile "$NEXTEST_PROFILE" --config-file nextest-plan/shard-nextest.toml --test-threads 4
-          status=$?
+          # Tee nextest output to a log the run-level failure-surfacing step
+          # (below) parses for the failing test names. PIPESTATUS[0] is the
+          # cargo exit code, not tee's, so a green run still reports 0.
+          cargo nextest run --workspace --all-targets --features qdrant --profile "$NEXTEST_PROFILE" --config-file nextest-plan/shard-nextest.toml --test-threads 4 \
+            2>&1 | tee "$RUNNER_TEMP/nextest-run.log"
+          status=${PIPESTATUS[0]}
           set -e
           elapsed_seconds=$(( $(date +%s) - started_seconds ))
           mkdir -p nextest-timing
@@ -958,6 +1218,54 @@ jobs:
             }
           ' nextest-plan/shard-test-ids.json > "nextest-timing/timing-${{ matrix.shardIndex }}.json"
           exit "$status"
+      - name: Surface shard failure at run level
+        # Runs on ANY failure in this shard (test failure, or an earlier
+        # build/migration/setup step). GitHub's Actions API has no per-job
+        # cancel — the sibling fail-fast watcher can only `gh run cancel` the
+        # whole run, which stamps in-flight lanes "cancelled" and buries which
+        # lane/test actually broke. This step makes the failure unambiguously
+        # attributable at the RUN level regardless of what the cancel does:
+        #   * `::error::` becomes a run-summary annotation (shown at the top of
+        #     the run, aggregated across jobs) naming this lane and, when the
+        #     failure was a test failure, the failing test IDs.
+        #   * a $GITHUB_STEP_SUMMARY block records the same on this job's page.
+        # It runs before the job concludes, so it is emitted before any sibling
+        # watcher can observe this lane's failure and cancel — the annotation
+        # is therefore the durable source of truth for "which lane/test failed".
+        # Not gated on shard.active: a shard can also fail before shard
+        # resolution (build/migration/setup), and those must surface too. The
+        # nextest log is simply absent there, so the generic branch fires.
+        if: failure()
+        run: |
+          set -uo pipefail
+          shard_name="${{ matrix.shard }}"
+          log="$RUNNER_TEMP/nextest-run.log"
+          failed_tests=""
+          if [ -f "$log" ]; then
+            # nextest prints one `    FAIL [   0.005s] <binary-id> <test-name>`
+            # line per failing test; strip the leading marker + timing bracket
+            # to leave `<binary-id> <test-name>`.
+            failed_tests=$(grep -E '^[[:space:]]*FAIL \[' "$log" \
+              | sed -E 's/^[[:space:]]*FAIL \[[^]]*\][[:space:]]+//' \
+              | sort -u || true)
+          fi
+          if [ -n "$failed_tests" ]; then
+            echo "::error title=Server Test ${shard_name} failed::$(printf '%s' "$failed_tests" | paste -sd'; ' -)"
+            {
+              echo "### Server Test ${shard_name} — FAILED"
+              echo
+              echo "Failing tests:"
+              echo
+              printf '%s\n' "$failed_tests" | sed 's/^/- `/;s/$/`/'
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::error title=Server Test ${shard_name} failed::shard concluded failure without nextest FAIL lines (build, migration, or setup step); see this job's log."
+            {
+              echo "### Server Test ${shard_name} — FAILED"
+              echo
+              echo "This shard failed before producing nextest FAIL lines (e.g. a build, migration, or setup step). See this job's log for the failing step."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
       - name: Upload retained shard timing data
         if: always() && steps.shard.outputs.active == 'true'
         uses: actions/upload-artifact@v4
@@ -1127,6 +1435,9 @@ jobs:
           cache-all-crates: true
           save-if: false
         id: rust-cache
+      - name: Runner disk headroom preflight
+        # Body/thresholds: CI_RUNNER_DISK_PREFLIGHT at the top of this file.
+        run: bash -c "$CI_RUNNER_DISK_PREFLIGHT"
       - name: Log cache family and restore status
         run: |-
           echo "cache-family=server-test"
@@ -1218,6 +1529,9 @@ jobs:
           cache-all-crates: true
           save-if: false
         id: rust-cache
+      - name: Runner disk headroom preflight
+        # Body/thresholds: CI_RUNNER_DISK_PREFLIGHT at the top of this file.
+        run: bash -c "$CI_RUNNER_DISK_PREFLIGHT"
       - name: Log cache family and restore status
         run: |-
           echo "cache-family=server-test"

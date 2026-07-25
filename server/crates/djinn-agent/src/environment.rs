@@ -138,6 +138,42 @@ pub async fn environment_config_for_path(db: &Database, worktree_path: &Path) ->
     }
 }
 
+/// A workspace path resolved to its owning project id (if any) plus the
+/// project's `environment_config`.
+///
+/// Bundling both lets callers that need the project id *and* the config (e.g.
+/// the build-drift soft gate, which folds the project id into its deny key and
+/// reads `lifecycle.final_verification.command_groups` from the config) do a
+/// single project-id resolution instead of two.
+pub struct ResolvedProjectEnvironment {
+    /// The resolved owning project id, or `None` when the path matches no row.
+    pub project_id: Option<String>,
+    /// The project's environment config (empty on any soft-failure).
+    pub config: EnvironmentConfig,
+}
+
+/// Resolve `worktree_path` to its owning project id and environment config in
+/// one pass. Both degrade softly: an unresolved path yields
+/// `project_id = None` and an empty config.
+pub async fn resolved_project_environment_for_path(
+    db: &Database,
+    worktree_path: &Path,
+) -> ResolvedProjectEnvironment {
+    match resolve_project_id_for_path(db, worktree_path).await {
+        Some(id) => {
+            let config = environment_config_for_project_id(db, &id).await;
+            ResolvedProjectEnvironment {
+                project_id: Some(id),
+                config,
+            }
+        }
+        None => ResolvedProjectEnvironment {
+            project_id: None,
+            config: EnvironmentConfig::empty(),
+        },
+    }
+}
+
 /// Decide whether a project has indexable code for the canonical-graph
 /// warmer — the gate behind the "code-less repo" warm skip.
 ///

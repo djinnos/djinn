@@ -5004,6 +5004,18 @@
                 "type": "string"
               },
               "default": []
+            },
+            "build_resources": {
+              "description": "Optional per-project CPU/memory overrides for the task-run and warm\nPods, layered over the deployment-wide defaults. `None` (the default)\nkeeps every kind on its deployment default. Task and warm blocks resolve\nindependently; the resolved quantities are rendered into the k8s Job/Pod\nspecs by `djinn-k8s`. See [`crate::resources::BuildResources`].",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/BuildResources"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
             }
           },
           "additionalProperties": false
@@ -5692,6 +5704,76 @@
             "label",
             "args"
           ]
+        },
+        "BuildResources": {
+          "description": "Optional per-project CPU/memory overrides for the task-run and warm Pods.\n\nThe whole object is optional on `EnvironmentConfig`; each inner block is\noptional; each field within a block is optional. Anything unset inherits\nthe deployment default at resolution time. The two blocks are resolved\nseparately — a `task` override never affects `warm` and vice-versa.",
+          "type": "object",
+          "properties": {
+            "task": {
+              "description": "Overrides applied to the task-run Pod.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/BuildResourceOverrides"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "warm": {
+              "description": "Overrides applied to the warm-job Pod.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/BuildResourceOverrides"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            }
+          },
+          "additionalProperties": false
+        },
+        "BuildResourceOverrides": {
+          "description": "CPU + memory request/limit overrides for one Pod kind. Every field is an\noptional Kubernetes Quantity string; `None` inherits the deployment default.",
+          "type": "object",
+          "properties": {
+            "cpu_request": {
+              "description": "CPU request override (e.g. `\"4\"`, `\"500m\"`).",
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "cpu_limit": {
+              "description": "CPU limit override.",
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "memory_request": {
+              "description": "Memory request override (e.g. `\"8Gi\"`, `\"512Mi\"`).",
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "memory_limit": {
+              "description": "Memory limit override.",
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            }
+          },
+          "additionalProperties": false
         }
       },
       "type": "object",
@@ -5948,6 +6030,18 @@
                 "type": "string"
               },
               "default": []
+            },
+            "build_resources": {
+              "description": "Optional per-project CPU/memory overrides for the task-run and warm\nPods, layered over the deployment-wide defaults. `None` (the default)\nkeeps every kind on its deployment default. Task and warm blocks resolve\nindependently; the resolved quantities are rendered into the k8s Job/Pod\nspecs by `djinn-k8s`. See [`crate::resources::BuildResources`].",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/BuildResources"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
             }
           },
           "additionalProperties": false
@@ -6636,6 +6730,76 @@
             "label",
             "args"
           ]
+        },
+        "BuildResources": {
+          "description": "Optional per-project CPU/memory overrides for the task-run and warm Pods.\n\nThe whole object is optional on `EnvironmentConfig`; each inner block is\noptional; each field within a block is optional. Anything unset inherits\nthe deployment default at resolution time. The two blocks are resolved\nseparately — a `task` override never affects `warm` and vice-versa.",
+          "type": "object",
+          "properties": {
+            "task": {
+              "description": "Overrides applied to the task-run Pod.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/BuildResourceOverrides"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "warm": {
+              "description": "Overrides applied to the warm-job Pod.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/BuildResourceOverrides"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            }
+          },
+          "additionalProperties": false
+        },
+        "BuildResourceOverrides": {
+          "description": "CPU + memory request/limit overrides for one Pod kind. Every field is an\noptional Kubernetes Quantity string; `None` inherits the deployment default.",
+          "type": "object",
+          "properties": {
+            "cpu_request": {
+              "description": "CPU request override (e.g. `\"4\"`, `\"500m\"`).",
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "cpu_limit": {
+              "description": "CPU limit override.",
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "memory_request": {
+              "description": "Memory request override (e.g. `\"8Gi\"`, `\"512Mi\"`).",
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "memory_limit": {
+              "description": "Memory limit override.",
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            }
+          },
+          "additionalProperties": false
         }
       },
       "type": "object",
@@ -6834,6 +6998,18 @@
                 "type": "string"
               },
               "default": []
+            },
+            "build_resources": {
+              "description": "Optional per-project CPU/memory overrides for the task-run and warm\nPods, layered over the deployment-wide defaults. `None` (the default)\nkeeps every kind on its deployment default. Task and warm blocks resolve\nindependently; the resolved quantities are rendered into the k8s Job/Pod\nspecs by `djinn-k8s`. See [`crate::resources::BuildResources`].",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/BuildResources"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
             }
           },
           "additionalProperties": false
@@ -7522,6 +7698,76 @@
             "label",
             "args"
           ]
+        },
+        "BuildResources": {
+          "description": "Optional per-project CPU/memory overrides for the task-run and warm Pods.\n\nThe whole object is optional on `EnvironmentConfig`; each inner block is\noptional; each field within a block is optional. Anything unset inherits\nthe deployment default at resolution time. The two blocks are resolved\nseparately — a `task` override never affects `warm` and vice-versa.",
+          "type": "object",
+          "properties": {
+            "task": {
+              "description": "Overrides applied to the task-run Pod.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/BuildResourceOverrides"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "warm": {
+              "description": "Overrides applied to the warm-job Pod.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/BuildResourceOverrides"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            }
+          },
+          "additionalProperties": false
+        },
+        "BuildResourceOverrides": {
+          "description": "CPU + memory request/limit overrides for one Pod kind. Every field is an\noptional Kubernetes Quantity string; `None` inherits the deployment default.",
+          "type": "object",
+          "properties": {
+            "cpu_request": {
+              "description": "CPU request override (e.g. `\"4\"`, `\"500m\"`).",
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "cpu_limit": {
+              "description": "CPU limit override.",
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "memory_request": {
+              "description": "Memory request override (e.g. `\"8Gi\"`, `\"512Mi\"`).",
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "memory_limit": {
+              "description": "Memory limit override.",
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            }
+          },
+          "additionalProperties": false
         }
       },
       "type": "object",
@@ -13249,6 +13495,18 @@
                 "type": "string"
               },
               "default": []
+            },
+            "build_resources": {
+              "description": "Optional per-project CPU/memory overrides for the task-run and warm\nPods, layered over the deployment-wide defaults. `None` (the default)\nkeeps every kind on its deployment default. Task and warm blocks resolve\nindependently; the resolved quantities are rendered into the k8s Job/Pod\nspecs by `djinn-k8s`. See [`crate::resources::BuildResources`].",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/BuildResources"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
             }
           },
           "additionalProperties": false
@@ -13937,6 +14195,76 @@
             "label",
             "args"
           ]
+        },
+        "BuildResources": {
+          "description": "Optional per-project CPU/memory overrides for the task-run and warm Pods.\n\nThe whole object is optional on `EnvironmentConfig`; each inner block is\noptional; each field within a block is optional. Anything unset inherits\nthe deployment default at resolution time. The two blocks are resolved\nseparately — a `task` override never affects `warm` and vice-versa.",
+          "type": "object",
+          "properties": {
+            "task": {
+              "description": "Overrides applied to the task-run Pod.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/BuildResourceOverrides"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "warm": {
+              "description": "Overrides applied to the warm-job Pod.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/BuildResourceOverrides"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            }
+          },
+          "additionalProperties": false
+        },
+        "BuildResourceOverrides": {
+          "description": "CPU + memory request/limit overrides for one Pod kind. Every field is an\noptional Kubernetes Quantity string; `None` inherits the deployment default.",
+          "type": "object",
+          "properties": {
+            "cpu_request": {
+              "description": "CPU request override (e.g. `\"4\"`, `\"500m\"`).",
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "cpu_limit": {
+              "description": "CPU limit override.",
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "memory_request": {
+              "description": "Memory request override (e.g. `\"8Gi\"`, `\"512Mi\"`).",
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "memory_limit": {
+              "description": "Memory limit override.",
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            }
+          },
+          "additionalProperties": false
         }
       },
       "type": "object",
@@ -14111,6 +14439,18 @@
                 "type": "string"
               },
               "default": []
+            },
+            "build_resources": {
+              "description": "Optional per-project CPU/memory overrides for the task-run and warm\nPods, layered over the deployment-wide defaults. `None` (the default)\nkeeps every kind on its deployment default. Task and warm blocks resolve\nindependently; the resolved quantities are rendered into the k8s Job/Pod\nspecs by `djinn-k8s`. See [`crate::resources::BuildResources`].",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/BuildResources"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
             }
           },
           "additionalProperties": false
@@ -14799,6 +15139,76 @@
             "label",
             "args"
           ]
+        },
+        "BuildResources": {
+          "description": "Optional per-project CPU/memory overrides for the task-run and warm Pods.\n\nThe whole object is optional on `EnvironmentConfig`; each inner block is\noptional; each field within a block is optional. Anything unset inherits\nthe deployment default at resolution time. The two blocks are resolved\nseparately — a `task` override never affects `warm` and vice-versa.",
+          "type": "object",
+          "properties": {
+            "task": {
+              "description": "Overrides applied to the task-run Pod.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/BuildResourceOverrides"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "warm": {
+              "description": "Overrides applied to the warm-job Pod.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/BuildResourceOverrides"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            }
+          },
+          "additionalProperties": false
+        },
+        "BuildResourceOverrides": {
+          "description": "CPU + memory request/limit overrides for one Pod kind. Every field is an\noptional Kubernetes Quantity string; `None` inherits the deployment default.",
+          "type": "object",
+          "properties": {
+            "cpu_request": {
+              "description": "CPU request override (e.g. `\"4\"`, `\"500m\"`).",
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "cpu_limit": {
+              "description": "CPU limit override.",
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "memory_request": {
+              "description": "Memory request override (e.g. `\"8Gi\"`, `\"512Mi\"`).",
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "memory_limit": {
+              "description": "Memory limit override.",
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            }
+          },
+          "additionalProperties": false
         }
       },
       "type": "object",
@@ -14947,6 +15357,18 @@
                 "type": "string"
               },
               "default": []
+            },
+            "build_resources": {
+              "description": "Optional per-project CPU/memory overrides for the task-run and warm\nPods, layered over the deployment-wide defaults. `None` (the default)\nkeeps every kind on its deployment default. Task and warm blocks resolve\nindependently; the resolved quantities are rendered into the k8s Job/Pod\nspecs by `djinn-k8s`. See [`crate::resources::BuildResources`].",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/BuildResources"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
             }
           },
           "additionalProperties": false
@@ -15635,6 +16057,76 @@
             "label",
             "args"
           ]
+        },
+        "BuildResources": {
+          "description": "Optional per-project CPU/memory overrides for the task-run and warm Pods.\n\nThe whole object is optional on `EnvironmentConfig`; each inner block is\noptional; each field within a block is optional. Anything unset inherits\nthe deployment default at resolution time. The two blocks are resolved\nseparately — a `task` override never affects `warm` and vice-versa.",
+          "type": "object",
+          "properties": {
+            "task": {
+              "description": "Overrides applied to the task-run Pod.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/BuildResourceOverrides"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "warm": {
+              "description": "Overrides applied to the warm-job Pod.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/BuildResourceOverrides"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            }
+          },
+          "additionalProperties": false
+        },
+        "BuildResourceOverrides": {
+          "description": "CPU + memory request/limit overrides for one Pod kind. Every field is an\noptional Kubernetes Quantity string; `None` inherits the deployment default.",
+          "type": "object",
+          "properties": {
+            "cpu_request": {
+              "description": "CPU request override (e.g. `\"4\"`, `\"500m\"`).",
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "cpu_limit": {
+              "description": "CPU limit override.",
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "memory_request": {
+              "description": "Memory request override (e.g. `\"8Gi\"`, `\"512Mi\"`).",
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "memory_limit": {
+              "description": "Memory limit override.",
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            }
+          },
+          "additionalProperties": false
         }
       },
       "type": "object",
@@ -26472,7 +26964,14 @@
               "$ref": "#/$defs/CiGateState"
             },
             "ci_primary_blocking_check": {
-              "description": "Primary blocking required check/job when required CI is failing.",
+              "description": "The required check/job to triage first — the earliest-started blocking\nlane that actually executed and hard-failed. Never a cancelled lane and\nnever a `needs:`-dependent aggregator that did not execute; both are\nsymptoms of a run-level abort rather than causes. Absent when the run\nwas inconclusive.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "ci_failure_annotations": {
+              "description": "Bounded rendering of the GitHub annotations on\n`ci_primary_blocking_check`. Runner-host failures (out of disk, runner\ncrash) surface only as annotations, so this is often the only place the\nreal cause appears.",
               "type": [
                 "string",
                 "null"
@@ -26567,7 +27066,14 @@
               }
             },
             "primary_blocking_check": {
-              "description": "Primary blocking required check name, when CI is failing.\n\n`Some(_)` when `status == failing` and at least one required check\nfailed.  This is the first element of `blocking_required_check_names`\n(sorted alphabetically) for compact display.  `None` otherwise.",
+              "description": "The single required check to triage first — the earliest-started\nblocking lane that actually executed and hard-failed.\n\nSelected by the PR poller from *structural execution evidence*\n(conclusion class, execution interval, annotation count, start order),\nnever from name order and never from a list of job names. A check that\nwas `cancelled`, or that never executed, is a symptom of a run-level\nabort rather than a cause, and is never selected.\n\n`None` when no blocking check carries causal information — i.e. `status`\nis `inconclusive` and the run should be retriggered, not remediated.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "failure_annotations": {
+              "description": "Bounded rendering of the GitHub annotations on\n[`Self::primary_blocking_check`].\n\nRunner-host failures — out of disk, runner process crash — surface ONLY\nas annotations, not as a check conclusion and often not in job logs\neither. This field is what lets a reader see `No space left on device`\nwithout opening GitHub.",
               "type": [
                 "string",
                 "null"
@@ -26689,6 +27195,11 @@
               "const": "pending"
             },
             {
+              "description": "The run completed but reached **no verdict about the code**: every\nblocking required check was `cancelled`, or never executed at all.\n\nThis is the signature of a run-level abort — GitHub's `fail-fast`\nmatrices, a `gh run cancel` from an in-shard watcher, or a runner-host\ncrash — which stamps every in-flight sibling `cancelled` and leaves\n`needs:`-dependent aggregators with a zero-length, never-executed\ncheck run. None of those lanes carry information about their own\nhealth, so the run is *inconclusive*, not red.\n\nThe distinction is load-bearing: an inconclusive run warrants a\n**retrigger**, whereas a failing run warrants a remediation attempt.\nTreating an inconclusive run as failing dispatches agents to fix code\nthat was never proven broken.",
+              "type": "string",
+              "const": "inconclusive"
+            },
+            {
               "description": "CI state is not known (e.g. PR not yet polled, no checks present).",
               "type": "string",
               "const": "unknown"
@@ -26706,6 +27217,11 @@
                 "pending",
                 "unknown"
               ]
+            },
+            {
+              "description": "Every blocking required check was cancelled or never executed, so the\nrun reached no verdict about the code. Warrants a retrigger, not a\nremediation attempt.",
+              "type": "string",
+              "const": "inconclusive"
             },
             {
               "description": "Task is in `pr_draft` and CI has not completed yet (pending/unknown).",

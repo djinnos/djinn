@@ -5,6 +5,7 @@
 //! typed configuration, and empty trait-impl shell — real cluster wiring
 //! arrives in PR 3.
 
+pub mod build_resources;
 pub mod config;
 pub mod env_config;
 pub mod graph_warmer;
@@ -13,6 +14,7 @@ pub mod graph_warmer_identity;
 pub mod infra_death_log_tail;
 pub mod job;
 pub mod label_value;
+pub mod launcher;
 pub mod runtime;
 pub mod secret;
 pub mod sidecar;
@@ -20,6 +22,10 @@ pub mod token_review;
 pub mod warm_job;
 pub mod workload_inventory;
 
+pub use build_resources::{
+    ResolveError, ResourceBounds, apply_resolved_resources, resolve_task_run_resources,
+    resolve_warm_resources,
+};
 pub use config::KubernetesConfig;
 pub use env_config::{
     ENV_CONFIG_KEY, ENV_CONFIG_MOUNT_DIR, ENV_CONFIG_MOUNT_FILE, VOLUME_ENV_CONFIG,

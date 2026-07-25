@@ -1,6 +1,8 @@
 // djinn:allow-oversize — session recovery + preservation gate for reap/stall/escalated termination
 use super::super::*;
 use crate::pr_poller::pr_cleanup::CloseKind;
+use djinn_core::clock::{Clock, SystemClock};
+use djinn_core::job_retention::{JobRetentionEvidence, SessionEvidence};
 use djinn_core::models::TransitionAction;
 use djinn_core::models::task_attempt::TaskAttemptOutcome;
 use djinn_db::{
@@ -62,7 +64,7 @@ pub(crate) const ZOMBIE_HARD_CAP_SECS: u64 = 10 * 60;
 pub(crate) const HARD_RUNTIME_CAP_SECS: u64 = 3 * 60 * 60;
 
 impl CoordinatorActor {
-    async fn teardown_zombie_taskrun_job(
+    pub(crate) async fn teardown_zombie_taskrun_job(
         &self,
         task_id: &str,
         session_id: &str,
@@ -75,6 +77,72 @@ impl CoordinatorActor {
             return;
         };
 
+        let jobs = match runtime_ops.list_taskrun_jobs().await {
+            Ok(jobs) => jobs,
+            Err(e) => {
+                tracing::warn!(task_id = %task_id, session_id = %session_id, task_run_id = %task_run_id, error = %e,
+                    "CoordinatorActor: failed to inventory task-run Jobs during zombie reap; preserving Job");
+                return;
+            }
+        };
+        let Some(job) = jobs
+            .iter()
+            .find(|job| job.task_run_id.trim() == task_run_id)
+        else {
+            return;
+        };
+        let task_run = match djinn_db::TaskRunRepository::new(self.db.clone())
+            .get(task_run_id)
+            .await
+        {
+            Ok(run) => run,
+            Err(e) => {
+                tracing::warn!(task_id = %task_id, session_id = %session_id, task_run_id = %task_run_id, error = %e,
+                    "CoordinatorActor: failed to load task-run during zombie reap; preserving Job");
+                return;
+            }
+        };
+        let sessions = match djinn_db::SessionRepository::new(
+            self.db.clone(),
+            crate::events::event_bus_for(&self.events_tx),
+        )
+        .list_for_task_run(task_run_id)
+        .await
+        {
+            Ok(sessions) => sessions,
+            Err(e) => {
+                tracing::warn!(task_id = %task_id, session_id = %session_id, task_run_id = %task_run_id, error = %e,
+                    "CoordinatorActor: failed to load task-run sessions during zombie reap; preserving Job");
+                return;
+            }
+        };
+        let session_evidence: Vec<_> = sessions
+            .iter()
+            .map(|session| SessionEvidence {
+                status: &session.status,
+                ended_at: Self::parse_retention_timestamp(session.ended_at.as_deref()),
+            })
+            .collect();
+        let now = SystemClock::new().now();
+        let decision = djinn_core::job_retention::classify_taskrun_job(
+            now,
+            JobRetentionEvidence {
+                created_at: job.created_at,
+                completed_at: job.completed_at,
+                terminal_condition: job.terminal_condition.as_deref(),
+                task_run_status: task_run.as_ref().map(|run| run.status.as_str()),
+                task_run_ended_at: task_run
+                    .as_ref()
+                    .and_then(|run| Self::parse_retention_timestamp(run.ended_at.as_deref())),
+                sessions: &session_evidence,
+            },
+        );
+        if !decision.should_delete(now) {
+            tracing::debug!(task_id = %task_id, session_id = %session_id, task_run_id = %task_run_id,
+                outcome = ?decision.outcome, delete_after = ?decision.delete_after,
+                "CoordinatorActor: task-run Job retained by common policy during zombie reap");
+            return;
+        }
         if let Err(e) = runtime_ops.teardown_taskrun_job(task_run_id).await {
             tracing::warn!(
                 task_id = %task_id,
@@ -84,6 +152,17 @@ impl CoordinatorActor {
                 "CoordinatorActor: task-run Job teardown failed during zombie reap (continuing DB recovery)"
             );
         }
+    }
+
+    fn parse_retention_timestamp(raw: Option<&str>) -> Option<std::time::SystemTime> {
+        use time::format_description::well_known::{Iso8601, Rfc3339};
+
+        raw.and_then(|value| {
+            time::OffsetDateTime::parse(value, &Iso8601::DEFAULT)
+                .or_else(|_| time::OffsetDateTime::parse(value, &Rfc3339))
+                .ok()
+        })
+        .map(std::time::SystemTime::from)
     }
 
     #[tracing::instrument(

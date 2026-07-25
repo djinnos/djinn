@@ -1190,6 +1190,7 @@ dependencies = [
  "djinn-db",
  "djinn-git",
  "djinn-graph",
+ "djinn-k8s",
  "djinn-provider",
  "djinn-runtime",
  "djinn-slot",
@@ -1216,11 +1217,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "djinn-catalog-wrapper"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "djinn-sandbox",
+ "hex",
+ "ring",
+ "serde_json",
+ "sqlx",
+ "tempfile",
+ "tokio",
+ "url",
+ "workspace-hack",
+]
+
+[[package]]
 name = "djinn-cgroup-launcher"
 version = "0.1.0"
 dependencies = [
  "libc",
  "thiserror 2.0.18",
+ "workspace-hack",
 ]
 
 [[package]]
@@ -1495,11 +1513,13 @@ dependencies = [
  "anyhow",
  "async-trait",
  "bincode",
+ "djinn-cgroup-launcher",
  "djinn-core",
  "djinn-db",
  "djinn-git",
  "djinn-provider",
  "djinn-runtime",
+ "djinn-sandbox",
  "djinn-stack",
  "djinn-supervisor",
  "djinn-workspace",
@@ -1509,6 +1529,7 @@ dependencies = [
  "kube",
  "serde",
  "serde_json",
+ "serde_yaml",
  "sha2 0.10.9",
  "thiserror 2.0.18",
  "time",
@@ -7355,6 +7376,7 @@ dependencies = [
  "chrono",
  "console",
  "crossbeam-utils",
+ "deranged",
  "digest 0.10.7",
  "either",
  "errno",
@@ -7364,6 +7386,7 @@ dependencies = [
  "futures-executor",
  "futures-io",
  "futures-sink",
+ "futures-task",
  "futures-util",
  "getrandom 0.4.3",
  "git2",
@@ -7409,8 +7432,10 @@ dependencies = [
  "sqlx-postgres",
  "stable_deref_trait",
  "syn 2.0.119",
+ "sync_wrapper",
  "thiserror 2.0.18",
  "time",
+ "time-macros",
  "tokio",
  "tokio-rustls",
  "tokio-stream",

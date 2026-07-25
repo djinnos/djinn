@@ -104,6 +104,7 @@ const PREVIOUS_HOOK_MARKER: &str = "previous-hook-large-write:";
 
 #[cfg(test)]
 #[test]
+#[allow(clippy::print_stderr)]
 fn chained_large_hook() {
     // `install` is process-global. Exercise it in a separate libtest process
     // so this fixture can install a deliberately large previous hook.
@@ -180,6 +181,9 @@ fn chained_large_hook() {
 
 #[cfg(test)]
 #[inline(never)]
+// `black_box` deliberately wraps the recursive unit call to keep the deep frame
+// stack intact for the fixture; the unit argument is the point, not a mistake.
+#[allow(clippy::unit_arg)]
 fn deep_panic(depth: usize) {
     if depth == 0 {
         panic!("panic capture fixture");

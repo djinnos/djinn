@@ -152,4 +152,8 @@ pub(crate) struct PromptContextInputs<'a> {
     /// of the broad, reusable `AgentContext`.
     pub cancellation: Option<&'a CancellationToken>,
     pub memory_intent_planner: Option<MemoryIntentPlannerInvocation<'a>>,
+    /// `true` when the resolved project `lifecycle.final_verification` plan is
+    /// non-empty. Drives the conditional Worker/Reviewer `run_verification`
+    /// surface and prompt guidance (epic 1bnj).
+    pub final_verification_configured: bool,
 }

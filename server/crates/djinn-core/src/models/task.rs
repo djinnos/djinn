@@ -114,6 +114,21 @@ pub enum CiStatus {
     Failing,
     /// Required checks are still running; no blocking failure yet.
     Pending,
+    /// The run completed but reached **no verdict about the code**: every
+    /// blocking required check was `cancelled`, or never executed at all.
+    ///
+    /// This is the signature of a run-level abort — GitHub's `fail-fast`
+    /// matrices, a `gh run cancel` from an in-shard watcher, or a runner-host
+    /// crash — which stamps every in-flight sibling `cancelled` and leaves
+    /// `needs:`-dependent aggregators with a zero-length, never-executed
+    /// check run. None of those lanes carry information about their own
+    /// health, so the run is *inconclusive*, not red.
+    ///
+    /// The distinction is load-bearing: an inconclusive run warrants a
+    /// **retrigger**, whereas a failing run warrants a remediation attempt.
+    /// Treating an inconclusive run as failing dispatches agents to fix code
+    /// that was never proven broken.
+    Inconclusive,
     /// CI state is not known (e.g. PR not yet polled, no checks present).
     #[default]
     Unknown,
@@ -126,6 +141,7 @@ impl CiStatus {
             Self::Passing => "passing",
             Self::Failing => "failing",
             Self::Pending => "pending",
+            Self::Inconclusive => "inconclusive",
             Self::Unknown => "unknown",
         }
     }
@@ -136,9 +152,16 @@ impl CiStatus {
             "passing" => Ok(Self::Passing),
             "failing" => Ok(Self::Failing),
             "pending" => Ok(Self::Pending),
+            "inconclusive" => Ok(Self::Inconclusive),
             "unknown" => Ok(Self::Unknown),
             other => Err(Error::Internal(format!("unknown ci_status: {other}"))),
         }
+    }
+
+    /// True when this status represents a completed run that reached no
+    /// verdict about the code and should be retriggered rather than remediated.
+    pub fn is_inconclusive(&self) -> bool {
+        matches!(self, Self::Inconclusive)
     }
 }
 
@@ -161,11 +184,36 @@ pub struct TaskPrCiSnapshot {
     pub pr_number: i64,
     pub head_sha: String,
     pub ci_status: CiStatus,
-    /// Names of required checks that are currently failing and blocking merge.
+    /// Names of required checks that are currently failing and blocking merge,
+    /// **ranked by causal evidence** (see the `ci_triage` module in
+    /// `djinn-coordinator`): lanes that actually executed and hard-failed come
+    /// first, then lanes that ran but were cancelled, then lanes that never
+    /// executed at all. Within a tier, earliest start wins.
     pub blocking_required_check_names: Vec<String>,
+    /// The single check to triage first: the earliest-started lane that
+    /// actually executed and hard-failed.
+    ///
+    /// `None` when no blocking check carries causal information — i.e. the run
+    /// is [`CiStatus::Inconclusive`]. Deliberately NOT "the first element of
+    /// `blocking_required_check_names`": under a run-level cancel that element
+    /// can be a never-executed aggregator, which is a symptom by construction.
+    pub primary_blocking_check: Option<String>,
+    /// Bounded, human-readable rendering of the GitHub *annotations* on
+    /// [`Self::primary_blocking_check`].
+    ///
+    /// Runner-host failures (out of disk, runner crash) surface ONLY as
+    /// annotations — not as a check conclusion, and often not in job logs
+    /// either. Capturing them here is what lets an agent read
+    /// `No space left on device` off the board instead of hunting in GitHub.
+    pub failure_annotations: Option<String>,
     /// Stable fingerprint of the current failure signature (e.g. sorted failing
     /// check names + head SHA). Used by downstream remediation escalation to
     /// detect unchanged-head repeated failures.
+    ///
+    /// Computed from the **causal** checks only. Cancelled siblings and
+    /// never-executed aggregators are excluded: their messages are identical
+    /// across unrelated incidents, so including them collapses distinct
+    /// failures into one signature and makes `same_signature_count` count noise.
     pub failure_fingerprint: Option<String>,
     /// ISO-8601 timestamp when this snapshot was first observed.
     pub first_seen_at: String,
@@ -229,7 +277,13 @@ pub struct TaskPrCiSnapshotInput {
     pub pr_number: i64,
     pub head_sha: String,
     pub ci_status: CiStatus,
+    /// Ranked by causal evidence; see
+    /// [`TaskPrCiSnapshot::blocking_required_check_names`].
     pub blocking_required_check_names: Vec<String>,
+    /// See [`TaskPrCiSnapshot::primary_blocking_check`].
+    pub primary_blocking_check: Option<String>,
+    /// See [`TaskPrCiSnapshot::failure_annotations`].
+    pub failure_annotations: Option<String>,
     pub failure_fingerprint: Option<String>,
     pub same_signature_count: i64,
     pub last_remediation_base_sha: Option<String>,
@@ -266,6 +320,8 @@ impl TaskPrCiSnapshot {
             head_sha: input.head_sha,
             ci_status: input.ci_status,
             blocking_required_check_names: input.blocking_required_check_names,
+            primary_blocking_check: input.primary_blocking_check,
+            failure_annotations: input.failure_annotations,
             failure_fingerprint: input.failure_fingerprint,
             first_seen_at,
             last_seen_at,
@@ -452,9 +508,18 @@ pub struct Task {
     /// GitHub PR number for the promoted CI snapshot, when one exists.
     #[cfg_attr(feature = "sqlx", sqlx(default))]
     pub ci_pr_number: Option<i64>,
-    /// JSON array of blocking required check names for the current PR head.
+    /// JSON array of blocking required check names for the current PR head,
+    /// ranked by causal evidence (causal lanes first, never-executed last).
     #[cfg_attr(feature = "sqlx", sqlx(default))]
     pub ci_blocking_required_check_names: String,
+    /// The lane to triage first — the earliest-started blocking check that
+    /// actually executed and hard-failed. `None` when the run is inconclusive.
+    #[cfg_attr(feature = "sqlx", sqlx(default))]
+    pub ci_primary_blocking_check: Option<String>,
+    /// Bounded rendering of the GitHub annotations on the primary blocking
+    /// check. This is where runner-host failures live.
+    #[cfg_attr(feature = "sqlx", sqlx(default))]
+    pub ci_failure_annotations: Option<String>,
     #[cfg_attr(feature = "sqlx", sqlx(default))]
     pub ci_failure_fingerprint: Option<String>,
     #[cfg_attr(feature = "sqlx", sqlx(default))]
@@ -2204,6 +2269,10 @@ mod tests {
             head_sha: "abc123".to_owned(),
             ci_status: CiStatus::Failing,
             blocking_required_check_names: vec!["Quality Gate".to_owned()],
+            primary_blocking_check: Some("Quality Gate".to_owned()),
+            failure_annotations: Some(
+                "Annotations on `Quality Gate`:\n- [failure] boom".to_owned(),
+            ),
             failure_fingerprint: Some("abc123:Quality Gate".to_owned()),
             same_signature_count: 3,
             last_remediation_base_sha: Some("base999".to_owned()),
@@ -2219,6 +2288,18 @@ mod tests {
         assert_eq!(snapshot.head_sha, "abc123");
         assert_eq!(snapshot.ci_status, CiStatus::Failing);
         assert_eq!(snapshot.blocking_required_check_names, &["Quality Gate"]);
+        assert_eq!(
+            snapshot.primary_blocking_check,
+            Some("Quality Gate".to_owned()),
+            "the ranked triage target must survive from_input"
+        );
+        assert!(
+            snapshot
+                .failure_annotations
+                .as_deref()
+                .is_some_and(|a| a.contains("boom")),
+            "captured annotations must survive from_input"
+        );
         assert_eq!(
             snapshot.failure_fingerprint,
             Some("abc123:Quality Gate".to_owned())
@@ -2244,6 +2325,8 @@ mod tests {
             head_sha: "deadbeef".to_owned(),
             ci_status: CiStatus::Pending,
             blocking_required_check_names: vec!["Tests".to_owned(), "Lint".to_owned()],
+            primary_blocking_check: None,
+            failure_annotations: None,
             failure_fingerprint: None,
             first_seen_at: "2026-06-29T12:00:00Z".to_owned(),
             last_seen_at: "2026-06-29T12:00:00Z".to_owned(),

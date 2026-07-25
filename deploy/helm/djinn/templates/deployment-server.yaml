@@ -63,6 +63,7 @@ spec:
         checksum/configmap: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
         checksum/secret-github-app: {{ include (print $.Template.BasePath "/secret-github-app.yaml") . | sha256sum }}
         checksum/secret-vault-key: {{ include (print $.Template.BasePath "/secret-vault-key.yaml") . | sha256sum }}
+        checksum/configmap-wrapper-manifest: {{ include (print $.Template.BasePath "/configmap-wrapper-manifest.yaml") . | sha256sum }}
       labels:
         {{- include "djinn.server.selectorLabels" . | nindent 8 }}
     spec:
@@ -87,10 +88,39 @@ spec:
       affinity:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      # hostPath / PVC volumes land owned by root:root, but djinn-server runs
-      # as uid 10001. fsGroup only helps for CSI-backed PVCs, not hostPath, so
-      # we chown the three writable mounts up-front in a root initContainer.
-      # Idempotent — re-runs every pod start with negligible cost.
+      # The server writes these volumes as uid {{ .Values.storage.ownership.ownerUid }},
+      # while task-run and warm Job Pods write the SAME volumes as uid/gid 1000
+      # (and the launcher-spawned child as uid 1001, primary group 1000). Give
+      # the server supplementary membership in the artifact group so it can
+      # overwrite and unlink what those Pods create.
+      #
+      # Deliberately NOT `fsGroup`: fsGroup couples group membership to the
+      # kubelet's ownership pass, which on a root-gid mismatch is an UNBOUNDED
+      # recursive chown of the whole volume at mount time — minutes of stalled
+      # pod start on a large cache. `supplementalGroups` grants the same
+      # membership with zero filesystem work; the volume roots are normalized
+      # explicitly below instead.
+      securityContext:
+        supplementalGroups:
+          - {{ .Values.storage.ownership.artifactGid }}
+      {{- if .Values.storage.ownership.normalizeRoots }}
+      # Declare the ownership contract on the volume ROOTS so a fresh install
+      # produces conforming volumes (task pwrr / goxi):
+      #   * group = artifactGid  → shared by server, worker and child;
+      #   * g+w                  → all three can create/overwrite/unlink;
+      #   * setgid on the dir    → new files INHERIT the artifact group rather
+      #                            than the creating process's primary group.
+      #
+      # hostPath / PVC volumes land owned by root:root and fsGroup does nothing
+      # for hostPath at all, so this runs in a root initContainer. It is
+      # idempotent, O(1) and NON-RECURSIVE by design: it touches the three roots
+      # only. Contents that predate the contract need the one-time remediation
+      # in docs/VOLUME_OWNERSHIP_CONTRACT_RUNBOOK.md — a recursive chown here
+      # would stall every pod start.
+      #
+      # Normalizing the root also makes the task-run/warm Pods'
+      # `fsGroupChangePolicy: OnRootMismatch` a guaranteed no-op instead of a
+      # surprise recursive pass.
       initContainers:
         - name: fix-volume-perms
           image: {{ .Values.image.server | quote }}
@@ -105,8 +135,8 @@ spec:
               set -eu
               for d in /var/lib/djinn/mirrors /var/lib/djinn/cache /var/lib/djinn/projects; do
                 mkdir -p "$d"
-                chown 10001:10001 "$d"
-                chmod 0775 "$d"
+                chown {{ .Values.storage.ownership.ownerUid }}:{{ .Values.storage.ownership.artifactGid }} "$d"
+                chmod {{ .Values.storage.ownership.dirMode }} "$d"
               done
           volumeMounts:
             - name: mirrors
@@ -115,6 +145,9 @@ spec:
               mountPath: /var/lib/djinn/cache
             - name: projects
               mountPath: /var/lib/djinn/projects
+      {{- else }}
+      initContainers:
+      {{- end }}
         # Apply pending SQL migrations before the server boots.
         #
         # This was a separate `pre-install,pre-upgrade` Helm hook Job, but a
@@ -394,6 +427,15 @@ spec:
               value: {{ .Values.resources.warm.limits.memory | quote }}
             - name: DJINN_K8S_WARM_JOB_TIMEOUT_SECONDS
               value: {{ .Values.resources.warm.jobTimeoutSeconds | quote }}
+            # Per-invocation CPU lease. `required` renders the cgroup-launcher
+            # sidecar onto every task-run Pod; `disabled` (the default) renders
+            # no launcher surface at all. The server refuses to dispatch an
+            # armed render it could not satisfy, so a mis-set value fails closed
+            # at dispatch rather than producing pods whose sidecar cannot start.
+            # See `deploy/helm/djinn/values.yaml` and
+            # `djinn_k8s::launcher::CgroupLauncherMode`.
+            - name: DJINN_K8S_CGROUP_LAUNCHER_MODE
+              value: {{ .Values.cgroupLauncher.mode | quote }}
             # Pod scheduling for task-run + warm Jobs. JSON-encoded so the
             # controller can deserialize directly into k8s_openapi types
             # without bringing a YAML parser into the dispatch path. The
@@ -410,6 +452,16 @@ spec:
             {{- end }}
             - name: DJINN_VAULT_KEY_PATH
               value: /var/run/secrets/djinn/vault.key
+            {{- if .Values.serviceWrappers.imageManifest }}
+            # ij6g: path of the projected catalog wrapper image manifest. The
+            # image controller reads it once at boot and records each
+            # `{wrapper_image}@{digest}` into `service_presets`. Omitted (with
+            # its ConfigMap + volume) when no manifest is configured, so strict
+            # service verification stays fail-closed instead of resolving a
+            # wrapper image with no verified digest.
+            - name: DJINN_WRAPPER_IMAGE_MANIFEST
+              value: /var/run/djinn/wrapper/wrapper-image-manifest.json
+            {{- end }}
             {{- if $githubAppConfigAttempted }}
             - name: GITHUB_APP_PRIVATE_KEY_PATH
               value: /var/run/secrets/djinn/github-app/private-key.pem
@@ -512,6 +564,11 @@ spec:
               mountPath: /var/run/secrets/djinn/github-app
               readOnly: true
             {{- end }}
+            {{- if .Values.serviceWrappers.imageManifest }}
+            - name: wrapper-manifest
+              mountPath: /var/run/djinn/wrapper
+              readOnly: true
+            {{- end }}
           resources:
             {{- toYaml .Values.resources.server | nindent 12 }}
           lifecycle:
@@ -577,5 +634,13 @@ spec:
             # can read the file. The Secret is namespace-scoped + only
             # mounted into this Pod, so "world-readable" inside the
             # container is fine.
+            defaultMode: 0444
+        {{- end }}
+        {{- if .Values.serviceWrappers.imageManifest }}
+        - name: wrapper-manifest
+          configMap:
+            name: {{ include "djinn.fullname" . }}-wrapper-manifest
+            # 0444 so the non-root djinn user can read it regardless of which
+            # uid the image runs as.
             defaultMode: 0444
         {{- end }}

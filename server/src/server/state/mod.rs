@@ -588,10 +588,13 @@ impl AppState {
                 server_epoch,
             )),
         });
-        let build_lease = Arc::new(BuildLeaseService::new(
-            Arc::new(djinn_db::BuildLeaseRepository::new(db.clone())),
-            0,
-        ));
+        let build_lease = Arc::new(
+            BuildLeaseService::new(Arc::new(djinn_db::BuildLeaseRepository::new(db.clone())), 0)
+                // The v1 lease service reads the durable admission epoch (and its
+                // reference cap) on recovery, so a restart observes the current
+                // epoch before admitting or spawning.
+                .with_handoff_epoch(Arc::new(AdmissionHandoffRepository::new(db.clone()))),
+        );
         Self {
             inner: Arc::new(Inner {
                 db,
@@ -709,6 +712,26 @@ impl AppState {
             errors = stats.errors,
             "environment_config: boot reseed complete"
         );
+
+        // ij6g: record build/controller-published catalog wrapper image digests
+        // into service_presets so strict canonical verification resolves
+        // `{wrapper_image}@{digest}`. A no-op when the deploy sets no manifest —
+        // strict resolution then stays fail-closed rather than trusting a
+        // fabricated digest.
+        match djinn_image_controller::reconcile_wrapper_catalog_from_env(self.db()).await {
+            Ok(Some(stats)) => tracing::info!(
+                recorded = stats.recorded.len(),
+                unknown = stats.unknown_presets.len(),
+                "wrapper_catalog: boot reconcile complete"
+            ),
+            Ok(None) => {
+                tracing::info!("wrapper_catalog: no wrapper image manifest configured; skipping")
+            }
+            Err(error) => tracing::warn!(
+                %error,
+                "wrapper_catalog: boot reconcile failed; wrapper digests unchanged"
+            ),
+        }
 
         let config = ImageControllerConfig::from_env();
         tracing::info!(
@@ -915,6 +938,17 @@ impl AppState {
             loop {
                 tokio::select! {
                     _ = ticker.tick() => {
+                        // Drive the controller from the durable epoch on each
+                        // tick so a mid-run epoch advance is authoritative
+                        // without a restart: RequiredFailClosed re-closes a
+                        // controller that is no longer Enforce, and MayDisable
+                        // releases emergency once invocation-primary is
+                        // committed. This runs only on the leader (the loop is
+                        // started inside `become_leader`, after topology is
+                        // confirmed), so it mirrors `finalize` semantics.
+                        if let Some(admission) = state.inner.build_admission.clone() {
+                            state.finalize_build_admission_handoff(&admission).await;
+                        }
                         if let Some(event) = log_state.observe_persistent(
                             SystemClockTrait::new().now_instant(),
                             state.publish_handoff_warning().await,
@@ -3853,7 +3887,7 @@ mod build_admission_config_tests {
                         .await
                         .expect("emergency ack");
                     repository
-                        .advance(row.epoch, AdmissionHandoffPhase::ForwardOverlap)
+                        .advance(row.epoch, AdmissionHandoffPhase::ForwardOverlap, &[])
                         .await
                         .expect("forward advance");
                 }
@@ -3867,7 +3901,7 @@ mod build_admission_config_tests {
                         .await
                         .expect("invocation ack");
                     repository
-                        .advance(row.epoch, AdmissionHandoffPhase::InvocationPrimary)
+                        .advance(row.epoch, AdmissionHandoffPhase::InvocationPrimary, &[])
                         .await
                         .expect("invocation advance");
                 }
@@ -3877,7 +3911,7 @@ mod build_admission_config_tests {
                         .await
                         .expect("invocation ack");
                     repository
-                        .advance(row.epoch, AdmissionHandoffPhase::RollbackOverlap)
+                        .advance(row.epoch, AdmissionHandoffPhase::RollbackOverlap, &[])
                         .await
                         .expect("rollback advance");
                 }
@@ -3891,7 +3925,7 @@ mod build_admission_config_tests {
                         .await
                         .expect("invocation ack");
                     repository
-                        .advance(row.epoch, AdmissionHandoffPhase::EmergencyPrimary)
+                        .advance(row.epoch, AdmissionHandoffPhase::EmergencyPrimary, &[])
                         .await
                         .expect("emergency advance");
                 }
@@ -4117,6 +4151,25 @@ mod build_admission_config_tests {
                 cap: 3,
             });
             let repository = handoff_repository(&state);
+            // A real cutover arms the invocation authority to enforce while the
+            // row is still emergency-primary, so the invocation-primary case is
+            // the committed cutover rather than a row where v1 never actually
+            // took over — the emergency controller is released only when some
+            // other authority is genuinely enforcing.
+            let seeded = repository
+                .read()
+                .await
+                .expect("read handoff")
+                .expect("seeded row");
+            repository
+                .set_modes_and_cap(
+                    seeded.epoch,
+                    djinn_db::V0Mode::Enforce,
+                    djinn_db::V1Mode::Enforce,
+                    None,
+                )
+                .await
+                .expect("arm v1 enforce");
             advance_handoff(&repository, phase).await;
             complete_handoff_phase(&repository).await;
             state.initialize_build_admission_handoff().await;
@@ -4385,6 +4438,145 @@ mod build_admission_config_tests {
         state.confirm_build_admission_topology().await;
         assert_eq!(admission.readiness(), BuildAdmissionReadiness::Healthy);
         assert!(admission.is_ready());
+    }
+
+    /// Regression for the 2026-07-19 admission-handoff seed wedge.
+    ///
+    /// Migration 129 seeds `('build', 'emergency_primary', 0)` with no
+    /// acknowledgement, which `evaluate_handoff` classifies as `IncompleteEpoch`
+    /// → `RequiredFailClosed`: startup promotes even a configured-Observe
+    /// controller to a fail-closed Enforce. The wedge was that nothing in
+    /// production could then complete that epoch — `mark_topology_ready` had no
+    /// production call site, so readiness parked at `TopologyPending` forever,
+    /// the seeded epoch was never acknowledged, and every dispatch was denied
+    /// until an operator deleted the row by hand.
+    ///
+    /// A freshly seeded row must now self-open with no manual intervention: the
+    /// ordered startup gates run, coordinator leadership confirms the
+    /// single-active topology, and that same seam writes the first emergency
+    /// acknowledgement, leaving a healthy enforcing v0 baseline that admits work
+    /// and survives a restart.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn freshly_seeded_handoff_epoch_self_opens_without_operator_intervention() {
+        use djinn_agent::actors::coordinator::BuildAdmissionReadiness;
+        use djinn_coordinator::build_admission::BuildAdmissionDecision;
+
+        // This walks the real startup seams, which publish the process-global
+        // admission gauges; serialize against the other tests that read them.
+        let _telemetry_guard = BUILD_ADMISSION_TELEMETRY_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let db = Database::open_in_memory().expect("test database");
+        let state = state_for_admission_config_with_db(
+            db.clone(),
+            BuildAdmissionConfig {
+                mode: BuildAdmissionMode::Observe,
+                cap: 3,
+            },
+        );
+        let repository = handoff_repository(&state);
+        let seeded = repository.read().await.expect("read").expect("seeded row");
+        assert_eq!(seeded.phase, AdmissionHandoffPhase::EmergencyPrimary);
+        assert_eq!(
+            seeded.emergency_ack_epoch, None,
+            "the migration seeds an unacknowledged epoch"
+        );
+
+        // The durable row is read before recovery. An incomplete epoch is
+        // fail-closed, so the configured-Observe controller is promoted to
+        // Enforce with every startup gate reset.
+        state.initialize_build_admission_handoff().await;
+        let controller = admission(&state).clone();
+        assert_eq!(
+            controller.mode(),
+            BuildAdmissionMode::Enforce,
+            "an incomplete durable epoch promotes the configured standalone mode"
+        );
+        assert_eq!(
+            controller.readiness(),
+            BuildAdmissionReadiness::JournalRecoveryIncomplete
+        );
+
+        // Journal recovery and the Kubernetes inventory advance their own gates
+        // and must not acknowledge anything: only a fully healthy controller may.
+        state.initialize_build_admission_recovery().await;
+        assert_eq!(
+            controller.readiness(),
+            BuildAdmissionReadiness::InventoryPending
+        );
+        *state.inner.graph_warmer.write().await =
+            Some(Arc::new(build_in_process_graph_warmer(state.clone())));
+        state.initialize_build_admission_inventory().await;
+        assert_eq!(
+            controller.readiness(),
+            BuildAdmissionReadiness::TopologyPending
+        );
+        assert_eq!(
+            repository
+                .read()
+                .await
+                .expect("read")
+                .expect("row")
+                .emergency_ack_epoch,
+            None,
+            "no gate short of topology may acknowledge the seeded epoch"
+        );
+
+        // Winning the coordinator advisory lock is the single-active topology
+        // gate AND the production writer of the first acknowledgement.
+        state.confirm_build_admission_topology().await;
+        assert_eq!(controller.readiness(), BuildAdmissionReadiness::Healthy);
+        assert_eq!(controller.mode(), BuildAdmissionMode::Enforce);
+        assert_eq!(
+            repository
+                .read()
+                .await
+                .expect("read")
+                .expect("row")
+                .emergency_ack_epoch,
+            Some(seeded.epoch),
+            "coordinator leadership acknowledges the seeded epoch without an operator"
+        );
+
+        // The completed epoch is the enforcing v0 baseline: it admits real work
+        // rather than denying it at the fail-closed readiness gate.
+        let decision = controller
+            .admit_task_run(
+                Some("worker"),
+                AdmissionDomain::TaskObservation,
+                "seeded-epoch-task".to_owned(),
+                0,
+                "seeded-epoch-job".to_owned(),
+            )
+            .await
+            .expect("admission decision");
+        assert!(
+            matches!(decision, BuildAdmissionDecision::Permitted { .. }),
+            "a self-opened epoch admits work: {decision:?}"
+        );
+
+        // A restart re-reads the now-acknowledged row and stays the enforcing
+        // baseline instead of falling back into the incomplete-epoch state.
+        let restarted = state_for_admission_config_with_db(
+            db,
+            BuildAdmissionConfig {
+                mode: BuildAdmissionMode::Observe,
+                cap: 3,
+            },
+        );
+        restarted.initialize_build_admission_handoff().await;
+        assert_eq!(admission(&restarted).mode(), BuildAdmissionMode::Enforce);
+        assert_eq!(
+            repository
+                .read()
+                .await
+                .expect("read")
+                .expect("row")
+                .emergency_ack_epoch,
+            Some(seeded.epoch),
+            "the acknowledged epoch survives a restart untouched"
+        );
     }
 
     #[tokio::test]

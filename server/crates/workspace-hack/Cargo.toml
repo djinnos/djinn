@@ -24,6 +24,7 @@ byteorder = { version = "1.5.0" }
 chrono = { version = "0.4.45", features = ["serde"] }
 console = { version = "0.16.4", default-features = false, features = ["ansi-parsing", "std", "unicode-width"] }
 crossbeam-utils = { version = "0.8.22" }
+deranged = { version = "0.5.8", features = ["serde"] }
 digest = { version = "0.10.7", features = ["mac", "oid", "std"] }
 either = { version = "1.16.0", features = ["serde", "use_std"] }
 form_urlencoded = { version = "1.2.2" }
@@ -32,6 +33,7 @@ futures-core = { version = "0.3.32" }
 futures-executor = { version = "0.3.32" }
 futures-io = { version = "0.3.32" }
 futures-sink = { version = "0.3.32" }
+futures-task = { version = "0.3.32", default-features = false, features = ["std"] }
 futures-util = { version = "0.3.32", features = ["channel", "io", "sink"] }
 git2 = { version = "0.20.4", features = ["vendored-libgit2", "vendored-openssl"] }
 hashbrown = { version = "0.16.1", features = ["serde"] }
@@ -67,6 +69,7 @@ sqlx = { version = "0.8.6", features = ["mysql", "postgres", "runtime-tokio-rust
 sqlx-mysql = { version = "0.8.6", default-features = false, features = ["any", "json", "migrate", "offline"] }
 sqlx-postgres = { version = "0.8.6", default-features = false, features = ["any", "json", "migrate", "offline"] }
 stable_deref_trait = { version = "1.2.1" }
+sync_wrapper = { version = "1.0.2", default-features = false, features = ["futures"] }
 thiserror = { version = "2.0.18" }
 time = { version = "0.3.53", features = ["formatting", "macros", "parsing", "serde"] }
 tokio = { version = "1.52.3", features = ["full", "test-util"] }
@@ -100,6 +103,7 @@ futures-channel = { version = "0.3.32", features = ["sink"] }
 futures-core = { version = "0.3.32" }
 futures-io = { version = "0.3.32" }
 futures-sink = { version = "0.3.32" }
+futures-task = { version = "0.3.32", default-features = false, features = ["std"] }
 futures-util = { version = "0.3.32", features = ["channel", "io", "sink"] }
 hmac = { version = "0.12.1", default-features = false, features = ["reset"] }
 indexmap = { version = "2.14.0" }
@@ -125,6 +129,7 @@ sqlx-postgres = { version = "0.8.6", default-features = false, features = ["any"
 stable_deref_trait = { version = "1.2.1" }
 syn = { version = "2.0.119", features = ["extra-traits", "fold", "full", "visit", "visit-mut"] }
 thiserror = { version = "2.0.18" }
+time-macros = { version = "0.2.31", default-features = false, features = ["formatting", "parsing", "serde"] }
 tokio = { version = "1.52.3", features = ["full", "test-util"] }
 tokio-stream = { version = "0.1.18", features = ["fs", "net", "sync"] }
 tokio-util = { version = "0.7.18", features = ["codec", "io", "time"] }

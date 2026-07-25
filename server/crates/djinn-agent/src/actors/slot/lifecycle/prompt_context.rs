@@ -1107,6 +1107,7 @@ pub(crate) async fn assemble_prompt_context(inputs: PromptContextInputs<'_>) -> 
         extension_diagnostics,
         cancellation,
         memory_intent_planner,
+        final_verification_configured,
     } = inputs;
     let uncancelled = CancellationToken::new();
     let cancellation = cancellation.unwrap_or(&uncancelled);
@@ -1344,6 +1345,7 @@ pub(crate) async fn assemble_prompt_context(inputs: PromptContextInputs<'_>) -> 
             ci_blocking_directive: ci_blocking_directive.clone(),
             worker_resume_note: worker_resume_note.map(str::to_string),
             arbiter_directive: arbiter_directive.map(str::to_string),
+            final_verification_configured,
         },
     );
     let system_prompt_with_extensions =
@@ -1598,6 +1600,10 @@ mod tests;
 #[cfg(test)]
 #[path = "rendered_surface_guard_tests.rs"]
 mod rendered_surface_guard_tests;
+
+#[cfg(test)]
+#[path = "conditional_verification_surface_tests.rs"]
+mod conditional_verification_surface_tests;
 
 #[cfg(test)]
 #[path = "attempt_history_prompt_tests.rs"]

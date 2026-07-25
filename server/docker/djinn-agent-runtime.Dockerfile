@@ -21,6 +21,13 @@ FROM ${BASE_IMAGE}
 COPY djinn-agent-worker /usr/local/bin/djinn-agent-worker
 RUN chmod +x /usr/local/bin/djinn-agent-worker
 
+# The mandatory cgroup-launcher sidecar runs from the SAME image as the worker
+# with a different entrypoint (see djinn-k8s::launcher). Ship its binary here at
+# /usr/local/bin; the image-builder copies it on to /opt/djinn/bin in the
+# per-project image so the rendered launcher command resolves to a real artifact.
+COPY djinn-cgroup-launcher /usr/local/bin/djinn-cgroup-launcher
+RUN chmod +x /usr/local/bin/djinn-cgroup-launcher
+
 # Seed the cache-backed RUSTUP_HOME from the build-time install on first start.
 # The base image installs rustup into $RUSTUP_SEED_DIR (=/usr/local/rustup,
 # read-only for the djinn user) so the heavy layer is shared and immutable.

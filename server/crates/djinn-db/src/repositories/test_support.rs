@@ -8,6 +8,20 @@ use crate::database::Database;
 use crate::repositories::note::NoteRepository;
 use djinn_memory::Note;
 
+/// Corrupt a task's durable refinement role to model legacy or externally
+/// malformed correlation evidence that typed task writers refuse to create.
+///
+/// **Not for production use.** Panics on SQL errors.
+pub async fn corrupt_refinement_task_role_for_test(db: &Database, task_id: &str, role: &str) {
+    db.ensure_initialized().await.unwrap();
+    sqlx::query("UPDATE tasks SET refinement_role = $1 WHERE id = $2")
+        .bind(role)
+        .bind(task_id)
+        .execute(db.pool())
+        .await
+        .expect("failed to corrupt refinement task role");
+}
+
 /// Replace a material proposal head without its normal write-time validation.
 ///
 /// This is exclusively for legacy-data fixtures: it keeps the current sequence

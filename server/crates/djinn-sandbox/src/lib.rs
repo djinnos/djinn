@@ -8,6 +8,11 @@ use std::sync::LazyLock;
 
 use anyhow::Result;
 
+/// Filesystem paths that repository-controlled code must never be able to read
+/// (the per-task-run credential Secret and the projected ServiceAccount token).
+/// Consumed by both Linux Landlock backends.
+pub mod confidential;
+
 /// Strict reusable-final-verification launcher. Unlike [`SANDBOX`], this
 /// module never selects the heuristic fallback backend.
 #[cfg(target_os = "linux")]

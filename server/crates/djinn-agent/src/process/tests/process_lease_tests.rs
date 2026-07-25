@@ -217,10 +217,18 @@ struct ScriptedServices {
     status_calls: AtomicUsize,
     abandon_calls: AtomicUsize,
     release_calls: AtomicUsize,
+    release_fences: Mutex<Vec<LeaseFencingToken>>,
     pause_queue: AtomicBool,
     pause_grant: AtomicBool,
+    pause_status: AtomicBool,
     queue_entered: Notify,
     grant_entered: Notify,
+    status_entered: Notify,
+    status_resume: Notify,
+    // Durable-epoch lift authorization returned to the runner. Defaults to
+    // `Lift` so the lease-state-machine tests exercise the successful lift path;
+    // the epoch-gating tests override it to `Shadow` / `Unleased`.
+    lift_decision: Mutex<djinn_supervisor::services::InvocationLiftDecision>,
 }
 
 impl ScriptedServices {
@@ -237,11 +245,19 @@ impl ScriptedServices {
             status_calls: AtomicUsize::new(0),
             abandon_calls: AtomicUsize::new(0),
             release_calls: AtomicUsize::new(0),
+            release_fences: Mutex::new(Vec::new()),
             pause_queue: AtomicBool::new(false),
             pause_grant: AtomicBool::new(false),
+            pause_status: AtomicBool::new(false),
             queue_entered: Notify::new(),
             grant_entered: Notify::new(),
+            status_entered: Notify::new(),
+            status_resume: Notify::new(),
+            lift_decision: Mutex::new(djinn_supervisor::services::InvocationLiftDecision::Lift),
         }
+    }
+    fn set_lift_decision(&self, decision: djinn_supervisor::services::InvocationLiftDecision) {
+        *self.lift_decision.lock().unwrap() = decision;
     }
     fn pop(script: &Mutex<VecDeque<LeaseResult>>) -> LeaseResult {
         script
@@ -277,6 +293,10 @@ impl SupervisorServices for ScriptedServices {
     }
     async fn lease_status(&self, _: LeaseStatusRequest) -> LeaseResult {
         self.status_calls.fetch_add(1, Ordering::SeqCst);
+        self.status_entered.notify_one();
+        if self.pause_status.load(Ordering::SeqCst) {
+            self.status_resume.notified().await;
+        }
         Self::pop(&self.status)
     }
     async fn abandon_lease(&self, _: LeaseAbandonRequest) -> LeaseResult {
@@ -295,9 +315,16 @@ impl SupervisorServices for ScriptedServices {
             candidate_cleanup: false,
         })
     }
-    async fn release_lease(&self, _: LeaseReleaseRequest) -> LeaseResult {
+    async fn release_lease(&self, request: LeaseReleaseRequest) -> LeaseResult {
         self.release_calls.fetch_add(1, Ordering::SeqCst);
+        self.release_fences
+            .lock()
+            .unwrap()
+            .push(request.fencing_token);
         Self::pop(&self.release)
+    }
+    async fn invocation_lift_decision(&self) -> djinn_supervisor::services::InvocationLiftDecision {
+        *self.lift_decision.lock().unwrap()
     }
     async fn load_task(&self, _: String) -> Result<djinn_core::models::Task, String> {
         unimplemented!()
@@ -514,6 +541,76 @@ async fn repeated_active_statuses_queue_and_lift_exactly_once() {
     assert!(services.release_calls.load(Ordering::SeqCst) <= 1);
 }
 
+/// AC1: a shadow epoch never lifts cpu.max even on a valid matching bind; the
+/// spawn still traverses the launcher and the durable lease is reconciled.
+#[tokio::test]
+async fn shadow_epoch_binds_but_never_lifts() {
+    let services = Arc::new(ScriptedServices::new(
+        vec![granted(7)],
+        vec![status(LeaseState::Active, Some(7))],
+        vec![status(LeaseState::Active, Some(7)); 20],
+    ));
+    services.set_lift_decision(djinn_supervisor::services::InvocationLiftDecision::Shadow);
+    services
+        .release
+        .lock()
+        .unwrap()
+        .push_back(LeaseResult::Released {
+            candidate_cleanup: false,
+        });
+    let launcher = Arc::new(ScriptedLauncher::default());
+    let cancel = CancellationToken::new();
+    let runner = LeaseInvocationRunner::new(services.clone(), launcher.clone(), clock());
+    let run_cancel = cancel.clone();
+    let run = tokio::spawn(async move { runner.output(command(), config(), run_cancel).await });
+    wait_for(&services.status_calls, 3).await;
+    cancel.cancel();
+    run.await.unwrap().unwrap();
+    // The launcher was driven (queue + grant happened) but never lifted.
+    assert_eq!(services.queue_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(services.grant_calls.load(Ordering::SeqCst), 1);
+    assert!(
+        launcher.lifts.lock().unwrap().is_empty(),
+        "shadow epoch must never lift cpu.max"
+    );
+    // The durable lease is still reconciled to terminal (fence recorded).
+    assert!(services.release_calls.load(Ordering::SeqCst) <= 1);
+    assert_eq!(launcher.kills.load(Ordering::SeqCst), 1);
+}
+
+/// AC3 (agent side): an unknown/stale/baseline epoch keeps the quota unleased —
+/// a matching bind does not lift.
+#[tokio::test]
+async fn unleased_epoch_binds_but_never_lifts() {
+    let services = Arc::new(ScriptedServices::new(
+        vec![granted(7)],
+        vec![status(LeaseState::Active, Some(7))],
+        vec![status(LeaseState::Active, Some(7)); 20],
+    ));
+    services.set_lift_decision(djinn_supervisor::services::InvocationLiftDecision::Unleased);
+    services
+        .release
+        .lock()
+        .unwrap()
+        .push_back(LeaseResult::Released {
+            candidate_cleanup: false,
+        });
+    let launcher = Arc::new(ScriptedLauncher::default());
+    let cancel = CancellationToken::new();
+    let runner = LeaseInvocationRunner::new(services.clone(), launcher.clone(), clock());
+    let run_cancel = cancel.clone();
+    let run = tokio::spawn(async move { runner.output(command(), config(), run_cancel).await });
+    wait_for(&services.status_calls, 3).await;
+    cancel.cancel();
+    run.await.unwrap().unwrap();
+    assert_eq!(services.grant_calls.load(Ordering::SeqCst), 1);
+    assert!(
+        launcher.lifts.lock().unwrap().is_empty(),
+        "unleased epoch must never lift cpu.max"
+    );
+    assert!(services.release_calls.load(Ordering::SeqCst) <= 1);
+}
+
 #[tokio::test]
 async fn terminal_intent_while_grant_paused_permanently_prevents_lift() {
     let services = Arc::new(ScriptedServices::new(
@@ -692,3 +789,618 @@ async fn below_threshold_broker_backed_shell_never_contacts_supervisor() {
     assert_eq!(services.grant_calls.load(Ordering::SeqCst), 0);
     assert_eq!(services.status_calls.load(Ordering::SeqCst), 0);
 }
+
+// ══════════════════════════════════════════════════════════════════════════
+// AC 1 + AC 4 fixture harness.
+//
+// A remote-child launcher double whose queue-relevant behaviour is driven only
+// by an injected `cpu.stat` reading and a wait-poll countdown — never by the
+// command string. It records lifts/kills/empties/cleanups and how many times it
+// was sampled so tests can prove the queue decision is parser-independent and
+// the escalation race orderings resolve deterministically.
+// ══════════════════════════════════════════════════════════════════════════
+
+#[derive(Clone)]
+struct FixtureLauncher {
+    state: Arc<Mutex<FixtureState>>,
+}
+
+struct FixtureState {
+    cpu_usage_usec: u64,
+    /// Number of `try_wait` polls after which the child reports natural exit.
+    /// `None` means it runs until killed.
+    exit_after_polls: Option<usize>,
+    exit_code: i32,
+    wait_polls: usize,
+    killed: bool,
+    samples: usize,
+    lifts: Vec<LeaseFencingToken>,
+    kills: usize,
+    empties: usize,
+    cleanups: usize,
+}
+
+impl FixtureLauncher {
+    fn new(cpu_usage_usec: u64, exit_after_polls: Option<usize>) -> Self {
+        Self {
+            state: Arc::new(Mutex::new(FixtureState {
+                cpu_usage_usec,
+                exit_after_polls,
+                exit_code: 0,
+                wait_polls: 0,
+                killed: false,
+                samples: 0,
+                lifts: Vec::new(),
+                kills: 0,
+                empties: 0,
+                cleanups: 0,
+            })),
+        }
+    }
+    fn set_cpu(&self, usage_usec: u64) {
+        self.state.lock().unwrap().cpu_usage_usec = usage_usec;
+    }
+    fn samples(&self) -> usize {
+        self.state.lock().unwrap().samples
+    }
+    fn lifts(&self) -> Vec<LeaseFencingToken> {
+        self.state.lock().unwrap().lifts.clone()
+    }
+}
+
+impl CgroupLauncherClient for FixtureLauncher {
+    fn launch(
+        &self,
+        _: Command,
+        _: &TaskInvocationLeaseIdentity,
+    ) -> io::Result<Box<dyn ProcessHandle>> {
+        Ok(Box::new(FixtureHandle {
+            state: self.state.clone(),
+        }))
+    }
+}
+
+struct FixtureHandle {
+    state: Arc<Mutex<FixtureState>>,
+}
+
+impl ProcessHandle for FixtureHandle {
+    fn drain_stdout(&mut self) -> io::Result<Vec<u8>> {
+        Ok(Vec::new())
+    }
+    fn drain_stderr(&mut self) -> io::Result<Vec<u8>> {
+        Ok(Vec::new())
+    }
+    fn try_wait(&mut self) -> io::Result<Option<std::process::ExitStatus>> {
+        use std::os::unix::process::ExitStatusExt;
+        let mut state = self.state.lock().unwrap();
+        if state.killed {
+            return Ok(Some(std::process::ExitStatus::from_raw(9)));
+        }
+        state.wait_polls += 1;
+        if let Some(limit) = state.exit_after_polls
+            && state.wait_polls >= limit
+        {
+            return Ok(Some(std::process::ExitStatus::from_raw(
+                state.exit_code << 8,
+            )));
+        }
+        Ok(None)
+    }
+    fn wait(&mut self) -> io::Result<std::process::ExitStatus> {
+        loop {
+            if let Some(status) = self.try_wait()? {
+                return Ok(status);
+            }
+            std::thread::yield_now();
+        }
+    }
+    fn sample_cpu(&mut self) -> io::Result<CpuStat> {
+        let mut state = self.state.lock().unwrap();
+        state.samples += 1;
+        Ok(CpuStat {
+            usage_usec: state.cpu_usage_usec,
+            ..CpuStat::default()
+        })
+    }
+    fn fenced_lift(&mut self, token: &LeaseFencingToken) -> io::Result<()> {
+        self.state.lock().unwrap().lifts.push(token.clone());
+        Ok(())
+    }
+    fn kill(&mut self) -> io::Result<()> {
+        let mut state = self.state.lock().unwrap();
+        state.kills += 1;
+        state.killed = true;
+        Ok(())
+    }
+    fn wait_empty(&mut self) -> io::Result<()> {
+        self.state.lock().unwrap().empties += 1;
+        Ok(())
+    }
+    fn cleanup(&mut self) -> io::Result<()> {
+        self.state.lock().unwrap().cleanups += 1;
+        Ok(())
+    }
+}
+
+/// Fixtures whose consumption never crosses the threshold: light `grep`,
+/// `git status`, and a short script.
+const LIGHT_FIXTURES: &[&str] = &["grep -rn TODO src", "git status", "sh -c 'echo hello'"];
+
+/// Fixtures whose consumption crosses the threshold and must queue exactly once
+/// regardless of whether the command classifier can name them: direct Cargo,
+/// a nested repository script, a malformed/parser-over-budget command, Make,
+/// npm, Bazel, and Go.
+const HEAVY_FIXTURES: &[&str] = &[
+    "cargo build --workspace",
+    "sh -c 'bash scripts/repository-build.sh'",
+    "cargo ((( --parser-cannot-classify-this",
+    "make -j16 all",
+    "npm run build",
+    "bazel build //...",
+    "go build ./...",
+];
+
+fn cmd_from(fixture: &str) -> Command {
+    let mut command = Command::new("sh");
+    command.arg("-c").arg(fixture);
+    command
+}
+
+fn config_with_threshold(threshold_usec: u64) -> LeaseInvocationConfig {
+    LeaseInvocationConfig {
+        cpu_usage_threshold_usec: threshold_usec,
+        ..config()
+    }
+}
+
+async fn poll_until(mut predicate: impl FnMut() -> bool) {
+    for _ in 0..100_000 {
+        if predicate() {
+            return;
+        }
+        tokio::task::yield_now().await;
+    }
+    panic!("condition was never observed");
+}
+
+// ─── AC 1: light fixtures finish unleased with zero lease calls ───────────
+
+#[tokio::test]
+async fn ac1_light_fixtures_finish_unleased_with_zero_lease_calls() {
+    for fixture in LIGHT_FIXTURES {
+        let services = Arc::new(ScriptedServices::new(vec![], vec![], vec![]));
+        // Consumption stays at zero; the child exits on its own after a few polls.
+        let launcher = Arc::new(FixtureLauncher::new(0, Some(4)));
+        let runner = LeaseInvocationRunner::new(services.clone(), launcher.clone(), clock());
+        let output = runner
+            .output(
+                cmd_from(fixture),
+                config_with_threshold(1_000),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("light fixture {fixture:?} completes"));
+
+        assert_eq!(
+            output.process.termination,
+            ProcessTermination::Exited,
+            "light fixture {fixture:?} finishes on its own"
+        );
+        assert!(
+            launcher.samples() > 0,
+            "light fixture {fixture:?} is measured at the unleased quota"
+        );
+        assert!(
+            launcher.lifts().is_empty(),
+            "light fixture {fixture:?} never lifts its quota"
+        );
+        assert_eq!(
+            services.queue_calls.load(Ordering::SeqCst),
+            0,
+            "light fixture {fixture:?} must issue zero lease calls"
+        );
+        assert_eq!(services.grant_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(services.status_calls.load(Ordering::SeqCst), 0);
+    }
+}
+
+// ─── AC 1: heavy fixtures queue exactly once after crossing the threshold ──
+
+#[tokio::test]
+async fn ac1_heavy_fixtures_queue_exactly_once_after_cpu_threshold() {
+    for fixture in HEAVY_FIXTURES {
+        let services = Arc::new(ScriptedServices::new(
+            vec![status(LeaseState::Queued, None)],
+            vec![],
+            vec![status(LeaseState::Queued, None); 64],
+        ));
+        services
+            .abandon
+            .lock()
+            .unwrap()
+            .push_back(LeaseResult::Abandoned {
+                candidate_cleanup: false,
+            });
+        // Starts below threshold and never exits on its own.
+        let launcher = Arc::new(FixtureLauncher::new(0, None));
+        let runner = Arc::new(LeaseInvocationRunner::new(
+            services.clone(),
+            launcher.clone(),
+            clock(),
+        ));
+        let cancel = CancellationToken::new();
+        let run_cancel = cancel.clone();
+        let run_services = services.clone();
+        let run_launcher = launcher.clone();
+        let run = tokio::spawn(async move {
+            runner
+                .output(cmd_from(fixture), config_with_threshold(1_000), run_cancel)
+                .await
+        });
+
+        // Below the threshold: sampled repeatedly, never queued.
+        let below = run_launcher.clone();
+        poll_until(move || below.samples() >= 3).await;
+        assert_eq!(
+            run_services.queue_calls.load(Ordering::SeqCst),
+            0,
+            "heavy fixture {fixture:?} must not queue below the threshold"
+        );
+
+        // Consumption crosses the configured threshold.
+        launcher.set_cpu(5_000);
+        let queued = services.clone();
+        poll_until(move || queued.queue_calls.load(Ordering::SeqCst) >= 1).await;
+
+        cancel.cancel();
+        run.await
+            .expect("runner task joins")
+            .unwrap_or_else(|_| panic!("heavy fixture {fixture:?} is cleaned up"));
+
+        assert_eq!(
+            services.queue_calls.load(Ordering::SeqCst),
+            1,
+            "heavy fixture {fixture:?} must queue exactly once"
+        );
+    }
+}
+
+/// The heavy expectation comes only from injected `cpu.stat` growth: a
+/// well-formed Cargo invocation and a malformed/parser-over-budget command that
+/// no classifier can name produce byte-identical queue behaviour.
+#[tokio::test]
+async fn ac1_queue_decision_is_identical_for_wellformed_and_malformed_commands() {
+    async fn queue_calls_for(fixture: &'static str) -> usize {
+        let services = Arc::new(ScriptedServices::new(
+            vec![status(LeaseState::Queued, None)],
+            vec![],
+            vec![status(LeaseState::Queued, None); 64],
+        ));
+        services
+            .abandon
+            .lock()
+            .unwrap()
+            .push_back(LeaseResult::Abandoned {
+                candidate_cleanup: false,
+            });
+        let launcher = Arc::new(FixtureLauncher::new(5_000, None));
+        let runner = Arc::new(LeaseInvocationRunner::new(
+            services.clone(),
+            launcher.clone(),
+            clock(),
+        ));
+        let cancel = CancellationToken::new();
+        let run_cancel = cancel.clone();
+        let run_services = services.clone();
+        let run = tokio::spawn(async move {
+            runner
+                .output(cmd_from(fixture), config_with_threshold(1_000), run_cancel)
+                .await
+        });
+        poll_until(move || run_services.queue_calls.load(Ordering::SeqCst) >= 1).await;
+        cancel.cancel();
+        run.await.expect("join").expect("cleaned up");
+        services.queue_calls.load(Ordering::SeqCst)
+    }
+
+    let wellformed = queue_calls_for("cargo build --workspace").await;
+    let malformed = queue_calls_for("cargo ((( --parser-cannot-classify-this").await;
+    assert_eq!(wellformed, 1);
+    assert_eq!(
+        wellformed, malformed,
+        "queue behaviour must be identical regardless of command classification"
+    );
+}
+
+// ─── AC 4: paused-response race orderings around grant ────────────────────
+
+/// Natural exit on the grant side of the race: the grant response is paused, the
+/// child exits first, and terminal intent permanently prevents any lift.
+#[tokio::test]
+async fn ac4_natural_exit_while_grant_paused_prevents_lift() {
+    let services = Arc::new(ScriptedServices::new(
+        vec![granted(7)],
+        vec![],
+        vec![status(LeaseState::Granted, Some(7)); 8],
+    ));
+    services.pause_grant.store(true, Ordering::SeqCst);
+    // The child exits while the grant future is still left pending.
+    let launcher = Arc::new(FixtureLauncher::new(5_000, Some(6)));
+    let runner = LeaseInvocationRunner::new(services.clone(), launcher.clone(), clock());
+    let output = runner
+        .output(
+            cmd_from("cargo build"),
+            config_with_threshold(1_000),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("child exits before the paused grant resolves");
+
+    assert_eq!(output.process.termination, ProcessTermination::Exited);
+    assert_eq!(services.queue_calls.load(Ordering::SeqCst), 1);
+    assert!(
+        services.grant_calls.load(Ordering::SeqCst) >= 1,
+        "the grant stage is reached before the child's natural exit wins"
+    );
+    assert!(
+        launcher.lifts().is_empty(),
+        "a natural exit before grant resolution can never lift the quota"
+    );
+}
+
+/// Fallback timeout on the queue side: the queue response is paused and the
+/// injected fake clock crosses the deadline, terminating without a lift.
+#[tokio::test]
+async fn ac4_fallback_timeout_on_paused_response_terminates_without_lift() {
+    let services = Arc::new(ScriptedServices::new(vec![], vec![], vec![]));
+    services.pause_queue.store(true, Ordering::SeqCst);
+    let launcher = Arc::new(FixtureLauncher::new(5_000, None));
+    let test_clock = clock();
+    let runner = LeaseInvocationRunner::new(services.clone(), launcher.clone(), test_clock.clone());
+    let run_services = services.clone();
+    let run = tokio::spawn(async move {
+        runner
+            .output(
+                cmd_from("cargo build"),
+                config_with_threshold(1_000),
+                CancellationToken::new(),
+            )
+            .await
+    });
+    poll_until(move || run_services.queue_calls.load(Ordering::SeqCst) >= 1).await;
+    // Cross the fallback deadline while the response is still paused.
+    test_clock.advance_mono(Duration::from_secs(120));
+    let output = run.await.expect("join").expect("times out cleanly");
+
+    assert_eq!(output.process.termination, ProcessTermination::TimedOut);
+    assert_eq!(services.queue_calls.load(Ordering::SeqCst), 1);
+    assert!(launcher.lifts().is_empty(), "a timed-out queue never lifts");
+}
+
+/// Cancellation before a grant is issued: the queue response is paused, cancel
+/// fires, and the whole cgroup lifecycle still runs exactly once with no lift.
+#[tokio::test]
+async fn ac4_cancellation_before_grant_prevents_lift() {
+    let services = Arc::new(ScriptedServices::new(vec![], vec![], vec![]));
+    services.pause_queue.store(true, Ordering::SeqCst);
+    let launcher = Arc::new(FixtureLauncher::new(5_000, None));
+    let runner = Arc::new(LeaseInvocationRunner::new(
+        services.clone(),
+        launcher.clone(),
+        clock(),
+    ));
+    let cancel = CancellationToken::new();
+    let run_cancel = cancel.clone();
+    let run_services = services.clone();
+    let run = tokio::spawn(async move {
+        runner
+            .output(
+                cmd_from("cargo build"),
+                config_with_threshold(1_000),
+                run_cancel,
+            )
+            .await
+    });
+    poll_until(move || run_services.queue_calls.load(Ordering::SeqCst) >= 1).await;
+    cancel.cancel();
+    let output = run.await.expect("join").expect("cancelled cleanly");
+
+    assert_eq!(output.process.termination, ProcessTermination::Cancelled);
+    assert!(launcher.lifts().is_empty());
+    let state = launcher.state.lock().unwrap();
+    assert_eq!((state.kills, state.empties, state.cleanups), (1, 1, 1));
+}
+
+/// Unresolved terminal state with a recorded fence reconciles with a release
+/// that carries the exact fencing token, at most once, and never abandons.
+#[tokio::test]
+async fn ac4_unresolved_state_releases_with_exact_fence_at_most_once() {
+    let services = Arc::new(ScriptedServices::new(
+        vec![granted(11)],
+        vec![status(LeaseState::Active, Some(11))],
+        vec![status(LeaseState::Active, Some(11)); 32],
+    ));
+    services
+        .release
+        .lock()
+        .unwrap()
+        .push_back(LeaseResult::Released {
+            candidate_cleanup: false,
+        });
+    let launcher = Arc::new(ScriptedLauncher::default());
+    let cancel = CancellationToken::new();
+    let runner = LeaseInvocationRunner::new(services.clone(), launcher.clone(), clock());
+    let run_cancel = cancel.clone();
+    let run = tokio::spawn(async move { runner.output(command(), config(), run_cancel).await });
+    wait_for(&services.status_calls, 3).await;
+    cancel.cancel();
+    run.await.unwrap().unwrap();
+
+    assert_eq!(*launcher.lifts.lock().unwrap(), vec![LeaseFencingToken(11)]);
+    assert_eq!(
+        *services.release_fences.lock().unwrap(),
+        vec![LeaseFencingToken(11)],
+        "release must carry the exact fencing token"
+    );
+    assert!(
+        services.release_calls.load(Ordering::SeqCst) <= 1,
+        "capacity is released at most once"
+    );
+    assert_eq!(services.abandon_calls.load(Ordering::SeqCst), 0);
+}
+
+/// Unresolved terminal state before any fence was recorded reconciles with a
+/// single abandon and never releases capacity.
+#[tokio::test]
+async fn ac4_unresolved_state_without_fence_abandons_at_most_once() {
+    let services = Arc::new(ScriptedServices::new(
+        vec![],
+        vec![],
+        vec![status(LeaseState::Queued, None); 8],
+    ));
+    services.pause_queue.store(true, Ordering::SeqCst);
+    services
+        .abandon
+        .lock()
+        .unwrap()
+        .push_back(LeaseResult::Abandoned {
+            candidate_cleanup: false,
+        });
+    let launcher = Arc::new(ScriptedLauncher::default());
+    let cancel = CancellationToken::new();
+    let runner = LeaseInvocationRunner::new(services.clone(), launcher.clone(), clock());
+    let run_cancel = cancel.clone();
+    let run = tokio::spawn(async move { runner.output(command(), config(), run_cancel).await });
+    wait_for(&services.queue_calls, 1).await;
+    cancel.cancel();
+    run.await.unwrap().unwrap();
+
+    assert!(launcher.lifts.lock().unwrap().is_empty());
+    assert_eq!(
+        services.abandon_calls.load(Ordering::SeqCst),
+        1,
+        "an unresolved lease without a fence abandons exactly once"
+    );
+    assert_eq!(services.release_calls.load(Ordering::SeqCst), 0);
+    assert!(services.release_fences.lock().unwrap().is_empty());
+}
+
+/// Both shadow-observation arms come from real invocation paths, so the shadow
+/// window produces a ratio rather than a single half of one.
+///
+/// `would_escalate` is produced by an invocation that crossed the escalation
+/// threshold and reached a valid matching bind under a shadow epoch;
+/// `would_throttle` by one that ran to terminal below the threshold and was
+/// never escalated. Neither counter is incremented by the test: each is emitted
+/// by driving `LeaseInvocationRunner` end to end. The whole scenario shares one
+/// current-thread runtime because the isolated recorder is thread-local.
+#[test]
+fn shadow_epoch_emits_both_would_throttle_arms_from_production_paths() {
+    let (_, rendered) = djinn_telemetry::render_isolated(|| {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("current-thread runtime builds");
+        runtime.block_on(async {
+            // ── Escalating arm: shadow epoch + a valid matching bind. ──────
+            let services = Arc::new(ScriptedServices::new(
+                vec![granted(7)],
+                vec![status(LeaseState::Active, Some(7))],
+                vec![status(LeaseState::Active, Some(7)); 20],
+            ));
+            services.set_lift_decision(djinn_supervisor::services::InvocationLiftDecision::Shadow);
+            services
+                .release
+                .lock()
+                .unwrap()
+                .push_back(LeaseResult::Released {
+                    candidate_cleanup: false,
+                });
+            let launcher = Arc::new(ScriptedLauncher::default());
+            let cancel = CancellationToken::new();
+            let runner = LeaseInvocationRunner::new(services.clone(), launcher.clone(), clock());
+            let run_cancel = cancel.clone();
+            let run =
+                tokio::spawn(async move { runner.output(command(), config(), run_cancel).await });
+            wait_for(&services.status_calls, 3).await;
+            cancel.cancel();
+            run.await.unwrap().unwrap();
+            assert_eq!(services.grant_calls.load(Ordering::SeqCst), 1);
+            assert!(
+                launcher.lifts.lock().unwrap().is_empty(),
+                "the escalating shadow arm must still never lift cpu.max"
+            );
+
+            // ── Non-escalating arm: the child never crosses the escalation
+            // threshold, so the lease authority is never contacted at all. ──
+            let services = Arc::new(ScriptedServices::new(vec![], vec![], vec![]));
+            services.set_lift_decision(djinn_supervisor::services::InvocationLiftDecision::Shadow);
+            let launcher = Arc::new(BrokerBackedLauncher::running(0));
+            let runner = LeaseInvocationRunner::new(services.clone(), launcher.clone(), clock());
+            let cancel = CancellationToken::new();
+            let run_cancel = cancel.clone();
+            let run =
+                tokio::spawn(async move { runner.output(command(), config(), run_cancel).await });
+            for _ in 0..10_000 {
+                if launcher.state.lock().unwrap().samples > 0 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+            assert!(
+                launcher.state.lock().unwrap().samples > 0,
+                "the below-threshold child was never sampled"
+            );
+            cancel.cancel();
+            run.await.unwrap().unwrap();
+            assert_eq!(
+                services.queue_calls.load(Ordering::SeqCst),
+                0,
+                "a below-threshold invocation never escalates"
+            );
+            assert_eq!(services.grant_calls.load(Ordering::SeqCst), 0);
+        });
+    });
+
+    let samples: Vec<&str> = rendered
+        .lines()
+        .filter(|line| line.starts_with("djinn_build_admission_shadow_invocation_total{"))
+        .collect();
+    assert_eq!(
+        samples.len(),
+        2,
+        "both shadow arms emit exactly one bounded series each:\n{rendered}"
+    );
+    for (decision, sample) in [("would_escalate", 1), ("would_throttle", 1)]
+        .into_iter()
+        .map(|(decision, value)| {
+            (
+                decision,
+                format!(
+                    "djinn_build_admission_shadow_invocation_total{{decision=\"{decision}\"}} {value}"
+                ),
+            )
+        })
+    {
+        assert!(
+            rendered.lines().any(|line| line == sample),
+            "missing the {decision} arm in:\n{rendered}"
+        );
+    }
+    // No new cardinality: `decision` remains the only label on the family.
+    for sample in samples {
+        let labels = sample
+            .split_once('{')
+            .and_then(|(_, rest)| rest.split_once('}'))
+            .map(|(labels, _)| labels)
+            .expect("rendered sample carries a label block");
+        assert!(
+            labels.starts_with("decision=\"") && !labels.contains(','),
+            "shadow invocation samples carry only the bounded decision label: {labels}"
+        );
+    }
+}
+
+#[path = "process_lease_recovery_tests.rs"]
+mod recovery_tests;

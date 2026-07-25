@@ -952,14 +952,14 @@ async fn assert_handoff_restart_snapshot(
         ));
     }
     assert!(matches!(
-        repo.advance(row.epoch, handoff_next(expected.legal_next))
+        repo.advance(row.epoch, handoff_next(expected.legal_next), &[])
             .await,
         Err(djinn_db::Error::InvalidTransition(_))
     ));
     if !expected.advance_allowed {
         assert!(
             matches!(
-                repo.advance(row.epoch, expected.legal_next).await,
+                repo.advance(row.epoch, expected.legal_next, &[]).await,
                 Err(djinn_db::Error::InvalidTransition(_))
             ),
             "current-epoch acknowledgement guard rejects phase advance"
@@ -972,6 +972,22 @@ async fn assert_handoff_restart_snapshot(
 #[tokio::test]
 async fn handoff_crash_matrix_preserves_authority_and_epoch_guards() {
     let repo = AdmissionHandoffRepository::new(Database::open_in_memory().unwrap());
+    // The matrix walks a genuine forward cutover, so the invocation authority is
+    // armed to enforce before any phase advances — exactly as the operator
+    // executor arms it while the row is still emergency-primary. Without it the
+    // invocation-primary rows below would be an out-of-protocol state that can
+    // never release v0, because v1 would not actually be enforcing. Arming
+    // clears both acknowledgements and bumps the epoch, which is precisely the
+    // un-acknowledged state the first expectation asserts.
+    let seeded = repo.read().await.unwrap().unwrap();
+    repo.set_modes_and_cap(
+        seeded.epoch,
+        djinn_db::V0Mode::Enforce,
+        djinn_db::V1Mode::Enforce,
+        None,
+    )
+    .await
+    .unwrap();
     let expectations = [
         (
             AdmissionHandoffPhase::EmergencyPrimary,
@@ -1135,7 +1151,7 @@ async fn handoff_crash_matrix_preserves_authority_and_epoch_guards() {
             }
             HandoffMatrixAction::Commit(next) => {
                 assert_eq!(next, handoff_next(before.phase));
-                repo.advance(before.epoch, next).await.unwrap();
+                repo.advance(before.epoch, next, &[]).await.unwrap();
             }
         }
     }
@@ -1148,13 +1164,17 @@ async fn handoff_crash_matrix_preserves_authority_and_epoch_guards() {
         Err(djinn_db::Error::InvalidTransition(_))
     ));
     assert!(matches!(
-        repo.advance(current.epoch, AdmissionHandoffPhase::InvocationPrimary)
+        repo.advance(current.epoch, AdmissionHandoffPhase::InvocationPrimary, &[])
             .await,
         Err(djinn_db::Error::InvalidTransition(_))
     ));
     assert!(matches!(
-        repo.advance(current.epoch - 1, AdmissionHandoffPhase::ForwardOverlap)
-            .await,
+        repo.advance(
+            current.epoch - 1,
+            AdmissionHandoffPhase::ForwardOverlap,
+            &[]
+        )
+        .await,
         Err(djinn_db::Error::InvalidTransition(_))
     ));
 
@@ -1193,6 +1213,9 @@ async fn handoff_crash_matrix_preserves_authority_and_epoch_guards() {
                 epoch: 9,
                 emergency_ack_epoch: Some(9),
                 invocation_ack_epoch: None,
+                v0_mode: djinn_db::V0Mode::Enforce,
+                v1_mode: djinn_db::V1Mode::Off,
+                cap: None,
                 updated_at: "test".into(),
             })),
             true,
@@ -1209,6 +1232,9 @@ async fn handoff_crash_matrix_preserves_authority_and_epoch_guards() {
                 epoch: 9,
                 emergency_ack_epoch: None,
                 invocation_ack_epoch: Some(9),
+                v0_mode: djinn_db::V0Mode::Enforce,
+                v1_mode: djinn_db::V1Mode::Off,
+                cap: None,
                 updated_at: "test".into(),
             })),
             true,
@@ -1225,6 +1251,9 @@ async fn handoff_crash_matrix_preserves_authority_and_epoch_guards() {
                 epoch: 9,
                 emergency_ack_epoch: Some(9),
                 invocation_ack_epoch: None,
+                v0_mode: djinn_db::V0Mode::Enforce,
+                v1_mode: djinn_db::V1Mode::Off,
+                cap: None,
                 updated_at: "test".into(),
             })),
             true,
@@ -1238,6 +1267,9 @@ async fn handoff_crash_matrix_preserves_authority_and_epoch_guards() {
                 epoch: 9,
                 emergency_ack_epoch: Some(9),
                 invocation_ack_epoch: Some(9),
+                v0_mode: djinn_db::V0Mode::Enforce,
+                v1_mode: djinn_db::V1Mode::Off,
+                cap: None,
                 updated_at: "test".into(),
             })),
             true,
@@ -1251,6 +1283,9 @@ async fn handoff_crash_matrix_preserves_authority_and_epoch_guards() {
                 epoch: 9,
                 emergency_ack_epoch: Some(8),
                 invocation_ack_epoch: Some(9),
+                v0_mode: djinn_db::V0Mode::Enforce,
+                v1_mode: djinn_db::V1Mode::Off,
+                cap: None,
                 updated_at: "test".into(),
             })),
             true,

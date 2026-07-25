@@ -46,7 +46,7 @@ pub(crate) mod ci;
 #[allow(dead_code)]
 pub(crate) mod ci_artifact;
 mod code_intel;
-mod gate_guard;
+pub(crate) mod gate_guard;
 mod jit_pitfalls;
 // Retained for test coverage; production dispatch goes through djinn-mcp-extension.
 #[allow(dead_code)]
@@ -54,9 +54,13 @@ mod memory_agent;
 // Retained for test coverage; production dispatch goes through djinn-mcp-extension.
 #[allow(dead_code)]
 mod task_admin;
-// Retained for test coverage; production dispatch goes through djinn-mcp-extension.
+// Stack-neutral build-cache preparation worker tool (epic 1bnj). Handled in
+// this local fallback because it reads the pod build environment directly.
+pub(crate) mod prepare_build_cache;
 #[allow(dead_code)]
 mod task_epic;
+pub(crate) mod verification;
+pub(crate) use verification::{RunVerificationLimits, SessionVerificationRateLimiter};
 mod workspace;
 mod workspace_helpers;
 
@@ -258,6 +262,14 @@ pub(super) async fn dispatch_tool_call(
                 session_role,
             )
             .await
+        }
+
+        // ── Build-cache preparation (stack-neutral worker tool) ─────────
+        // Resolves the platform warm-cache descriptor from the pod environment
+        // and returns a typed outcome; a ready no-op while eager startup
+        // seeding is still authoritative (epic 1bnj).
+        "prepare_build_cache" => {
+            prepare_build_cache::call_prepare_build_cache(session_task_id).await
         }
 
         // ── Code graph (agent-local bridge) ─────────────────────────────

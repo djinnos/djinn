@@ -50,6 +50,14 @@
         "resources": { "type": "object" }
       }
     },
+    "cgroupLauncher": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode"],
+      "properties": {
+        "mode": { "type": "string", "enum": ["disabled", "required"] }
+      }
+    },
     "server": {
       "type": "object",
       "additionalProperties": false,

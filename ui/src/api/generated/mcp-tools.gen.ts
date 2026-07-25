@@ -2592,6 +2592,14 @@ export namespace ImageCreateInputSchema {
   [k: string]: string[]
   }
   /**
+   * Optional per-project CPU/memory overrides for the task-run and warm
+   * Pods, layered over the deployment-wide defaults. `None` (the default)
+   * keeps every kind on its deployment default. Task and warm blocks resolve
+   * independently; the resolved quantities are rendered into the k8s Job/Pod
+   * specs by `djinn-k8s`. See [`crate::resources::BuildResources`].
+   */
+  build_resources?: (BuildResources | null)
+  /**
    * Project-level override for Cargo target-cache warming/running policy.
    * 
    * The default is [`CargoCachePolicy::AutoDetected`]: djinn detects the
@@ -2640,6 +2648,46 @@ export namespace ImageCreateInputSchema {
    */
   system_packages?: string[]
   workspaces?: Workspace[]
+  }
+  /**
+   * Optional per-project CPU/memory overrides for the task-run and warm Pods.
+   * 
+   * The whole object is optional on `EnvironmentConfig`; each inner block is
+   * optional; each field within a block is optional. Anything unset inherits
+   * the deployment default at resolution time. The two blocks are resolved
+   * separately — a `task` override never affects `warm` and vice-versa.
+   */
+  export interface BuildResources {
+  /**
+   * Overrides applied to the task-run Pod.
+   */
+  task?: (BuildResourceOverrides | null)
+  /**
+   * Overrides applied to the warm-job Pod.
+   */
+  warm?: (BuildResourceOverrides | null)
+  }
+  /**
+   * CPU + memory request/limit overrides for one Pod kind. Every field is an
+   * optional Kubernetes Quantity string; `None` inherits the deployment default.
+   */
+  export interface BuildResourceOverrides {
+  /**
+   * CPU limit override.
+   */
+  cpu_limit?: string
+  /**
+   * CPU request override (e.g. `"4"`, `"500m"`).
+   */
+  cpu_request?: string
+  /**
+   * Memory limit override.
+   */
+  memory_limit?: string
+  /**
+   * Memory request override (e.g. `"8Gi"`, `"512Mi"`).
+   */
+  memory_request?: string
   }
   /**
    * Explicit Cargo target-cache policy used when auto-detection is overridden.
@@ -2971,6 +3019,14 @@ export namespace ImageListOutputSchema {
   [k: string]: string[]
   }
   /**
+   * Optional per-project CPU/memory overrides for the task-run and warm
+   * Pods, layered over the deployment-wide defaults. `None` (the default)
+   * keeps every kind on its deployment default. Task and warm blocks resolve
+   * independently; the resolved quantities are rendered into the k8s Job/Pod
+   * specs by `djinn-k8s`. See [`crate::resources::BuildResources`].
+   */
+  build_resources?: (BuildResources | null)
+  /**
    * Project-level override for Cargo target-cache warming/running policy.
    * 
    * The default is [`CargoCachePolicy::AutoDetected`]: djinn detects the
@@ -3019,6 +3075,46 @@ export namespace ImageListOutputSchema {
    */
   system_packages?: string[]
   workspaces?: Workspace[]
+  }
+  /**
+   * Optional per-project CPU/memory overrides for the task-run and warm Pods.
+   * 
+   * The whole object is optional on `EnvironmentConfig`; each inner block is
+   * optional; each field within a block is optional. Anything unset inherits
+   * the deployment default at resolution time. The two blocks are resolved
+   * separately — a `task` override never affects `warm` and vice-versa.
+   */
+  export interface BuildResources {
+  /**
+   * Overrides applied to the task-run Pod.
+   */
+  task?: (BuildResourceOverrides | null)
+  /**
+   * Overrides applied to the warm-job Pod.
+   */
+  warm?: (BuildResourceOverrides | null)
+  }
+  /**
+   * CPU + memory request/limit overrides for one Pod kind. Every field is an
+   * optional Kubernetes Quantity string; `None` inherits the deployment default.
+   */
+  export interface BuildResourceOverrides {
+  /**
+   * CPU limit override.
+   */
+  cpu_limit?: string
+  /**
+   * CPU request override (e.g. `"4"`, `"500m"`).
+   */
+  cpu_request?: string
+  /**
+   * Memory limit override.
+   */
+  memory_limit?: string
+  /**
+   * Memory request override (e.g. `"8Gi"`, `"512Mi"`).
+   */
+  memory_request?: string
   }
   /**
    * Explicit Cargo target-cache policy used when auto-detection is overridden.
@@ -3326,6 +3422,14 @@ export namespace ImageUpdateInputSchema {
   [k: string]: string[]
   }
   /**
+   * Optional per-project CPU/memory overrides for the task-run and warm
+   * Pods, layered over the deployment-wide defaults. `None` (the default)
+   * keeps every kind on its deployment default. Task and warm blocks resolve
+   * independently; the resolved quantities are rendered into the k8s Job/Pod
+   * specs by `djinn-k8s`. See [`crate::resources::BuildResources`].
+   */
+  build_resources?: (BuildResources | null)
+  /**
    * Project-level override for Cargo target-cache warming/running policy.
    * 
    * The default is [`CargoCachePolicy::AutoDetected`]: djinn detects the
@@ -3374,6 +3478,46 @@ export namespace ImageUpdateInputSchema {
    */
   system_packages?: string[]
   workspaces?: Workspace[]
+  }
+  /**
+   * Optional per-project CPU/memory overrides for the task-run and warm Pods.
+   * 
+   * The whole object is optional on `EnvironmentConfig`; each inner block is
+   * optional; each field within a block is optional. Anything unset inherits
+   * the deployment default at resolution time. The two blocks are resolved
+   * separately — a `task` override never affects `warm` and vice-versa.
+   */
+  export interface BuildResources {
+  /**
+   * Overrides applied to the task-run Pod.
+   */
+  task?: (BuildResourceOverrides | null)
+  /**
+   * Overrides applied to the warm-job Pod.
+   */
+  warm?: (BuildResourceOverrides | null)
+  }
+  /**
+   * CPU + memory request/limit overrides for one Pod kind. Every field is an
+   * optional Kubernetes Quantity string; `None` inherits the deployment default.
+   */
+  export interface BuildResourceOverrides {
+  /**
+   * CPU limit override.
+   */
+  cpu_limit?: string
+  /**
+   * CPU request override (e.g. `"4"`, `"500m"`).
+   */
+  cpu_request?: string
+  /**
+   * Memory limit override.
+   */
+  memory_limit?: string
+  /**
+   * Memory request override (e.g. `"8Gi"`, `"512Mi"`).
+   */
+  memory_request?: string
   }
   /**
    * Explicit Cargo target-cache policy used when auto-detection is overridden.
@@ -5937,6 +6081,14 @@ export namespace ProjectEnvironmentConfigGetOutputSchema {
   [k: string]: string[]
   }
   /**
+   * Optional per-project CPU/memory overrides for the task-run and warm
+   * Pods, layered over the deployment-wide defaults. `None` (the default)
+   * keeps every kind on its deployment default. Task and warm blocks resolve
+   * independently; the resolved quantities are rendered into the k8s Job/Pod
+   * specs by `djinn-k8s`. See [`crate::resources::BuildResources`].
+   */
+  build_resources?: (BuildResources | null)
+  /**
    * Project-level override for Cargo target-cache warming/running policy.
    * 
    * The default is [`CargoCachePolicy::AutoDetected`]: djinn detects the
@@ -5985,6 +6137,46 @@ export namespace ProjectEnvironmentConfigGetOutputSchema {
    */
   system_packages?: string[]
   workspaces?: Workspace[]
+  }
+  /**
+   * Optional per-project CPU/memory overrides for the task-run and warm Pods.
+   * 
+   * The whole object is optional on `EnvironmentConfig`; each inner block is
+   * optional; each field within a block is optional. Anything unset inherits
+   * the deployment default at resolution time. The two blocks are resolved
+   * separately — a `task` override never affects `warm` and vice-versa.
+   */
+  export interface BuildResources {
+  /**
+   * Overrides applied to the task-run Pod.
+   */
+  task?: (BuildResourceOverrides | null)
+  /**
+   * Overrides applied to the warm-job Pod.
+   */
+  warm?: (BuildResourceOverrides | null)
+  }
+  /**
+   * CPU + memory request/limit overrides for one Pod kind. Every field is an
+   * optional Kubernetes Quantity string; `None` inherits the deployment default.
+   */
+  export interface BuildResourceOverrides {
+  /**
+   * CPU limit override.
+   */
+  cpu_limit?: string
+  /**
+   * CPU request override (e.g. `"4"`, `"500m"`).
+   */
+  cpu_request?: string
+  /**
+   * Memory limit override.
+   */
+  memory_limit?: string
+  /**
+   * Memory request override (e.g. `"8Gi"`, `"512Mi"`).
+   */
+  memory_request?: string
   }
   /**
    * Explicit Cargo target-cache policy used when auto-detection is overridden.
@@ -6276,6 +6468,14 @@ export namespace ProjectEnvironmentConfigResetOutputSchema {
   [k: string]: string[]
   }
   /**
+   * Optional per-project CPU/memory overrides for the task-run and warm
+   * Pods, layered over the deployment-wide defaults. `None` (the default)
+   * keeps every kind on its deployment default. Task and warm blocks resolve
+   * independently; the resolved quantities are rendered into the k8s Job/Pod
+   * specs by `djinn-k8s`. See [`crate::resources::BuildResources`].
+   */
+  build_resources?: (BuildResources | null)
+  /**
    * Project-level override for Cargo target-cache warming/running policy.
    * 
    * The default is [`CargoCachePolicy::AutoDetected`]: djinn detects the
@@ -6324,6 +6524,46 @@ export namespace ProjectEnvironmentConfigResetOutputSchema {
    */
   system_packages?: string[]
   workspaces?: Workspace[]
+  }
+  /**
+   * Optional per-project CPU/memory overrides for the task-run and warm Pods.
+   * 
+   * The whole object is optional on `EnvironmentConfig`; each inner block is
+   * optional; each field within a block is optional. Anything unset inherits
+   * the deployment default at resolution time. The two blocks are resolved
+   * separately — a `task` override never affects `warm` and vice-versa.
+   */
+  export interface BuildResources {
+  /**
+   * Overrides applied to the task-run Pod.
+   */
+  task?: (BuildResourceOverrides | null)
+  /**
+   * Overrides applied to the warm-job Pod.
+   */
+  warm?: (BuildResourceOverrides | null)
+  }
+  /**
+   * CPU + memory request/limit overrides for one Pod kind. Every field is an
+   * optional Kubernetes Quantity string; `None` inherits the deployment default.
+   */
+  export interface BuildResourceOverrides {
+  /**
+   * CPU limit override.
+   */
+  cpu_limit?: string
+  /**
+   * CPU request override (e.g. `"4"`, `"500m"`).
+   */
+  cpu_request?: string
+  /**
+   * Memory limit override.
+   */
+  memory_limit?: string
+  /**
+   * Memory request override (e.g. `"8Gi"`, `"512Mi"`).
+   */
+  memory_request?: string
   }
   /**
    * Explicit Cargo target-cache policy used when auto-detection is overridden.
@@ -6608,6 +6848,14 @@ export namespace ProjectEnvironmentConfigSetInputSchema {
   [k: string]: string[]
   }
   /**
+   * Optional per-project CPU/memory overrides for the task-run and warm
+   * Pods, layered over the deployment-wide defaults. `None` (the default)
+   * keeps every kind on its deployment default. Task and warm blocks resolve
+   * independently; the resolved quantities are rendered into the k8s Job/Pod
+   * specs by `djinn-k8s`. See [`crate::resources::BuildResources`].
+   */
+  build_resources?: (BuildResources | null)
+  /**
    * Project-level override for Cargo target-cache warming/running policy.
    * 
    * The default is [`CargoCachePolicy::AutoDetected`]: djinn detects the
@@ -6656,6 +6904,46 @@ export namespace ProjectEnvironmentConfigSetInputSchema {
    */
   system_packages?: string[]
   workspaces?: Workspace[]
+  }
+  /**
+   * Optional per-project CPU/memory overrides for the task-run and warm Pods.
+   * 
+   * The whole object is optional on `EnvironmentConfig`; each inner block is
+   * optional; each field within a block is optional. Anything unset inherits
+   * the deployment default at resolution time. The two blocks are resolved
+   * separately — a `task` override never affects `warm` and vice-versa.
+   */
+  export interface BuildResources {
+  /**
+   * Overrides applied to the task-run Pod.
+   */
+  task?: (BuildResourceOverrides | null)
+  /**
+   * Overrides applied to the warm-job Pod.
+   */
+  warm?: (BuildResourceOverrides | null)
+  }
+  /**
+   * CPU + memory request/limit overrides for one Pod kind. Every field is an
+   * optional Kubernetes Quantity string; `None` inherits the deployment default.
+   */
+  export interface BuildResourceOverrides {
+  /**
+   * CPU limit override.
+   */
+  cpu_limit?: string
+  /**
+   * CPU request override (e.g. `"4"`, `"500m"`).
+   */
+  cpu_request?: string
+  /**
+   * Memory limit override.
+   */
+  memory_limit?: string
+  /**
+   * Memory request override (e.g. `"8Gi"`, `"512Mi"`).
+   */
+  memory_request?: string
   }
   /**
    * Explicit Cargo target-cache policy used when auto-detection is overridden.
@@ -12214,23 +12502,34 @@ export namespace TaskListOutputSchema {
    */
   ci?: (CiGateSnapshot | null)
   /**
+   * Bounded rendering of the GitHub annotations on
+   * `ci_primary_blocking_check`. Runner-host failures (out of disk, runner
+   * crash) surface only as annotations, so this is often the only place the
+   * real cause appears.
+   */
+  ci_failure_annotations?: string
+  /**
    * Top-level alias for `ci.gate_state`, including `awaiting_ci` for
    * `pr_draft` + pending/unknown.
    */
-  ci_gate_state: (("passing" | "failing" | "pending" | "unknown") | "awaiting_ci")
+  ci_gate_state: (("passing" | "failing" | "pending" | "unknown") | "inconclusive" | "awaiting_ci")
   /**
    * Structured merge/close blocking reason when current-head CI is not passing.
    */
   ci_merge_blocked_reason?: string
   /**
-   * Primary blocking required check/job when required CI is failing.
+   * The required check/job to triage first — the earliest-started blocking
+   * lane that actually executed and hard-failed. Never a cancelled lane and
+   * never a `needs:`-dependent aggregator that did not execute; both are
+   * symptoms of a run-level abort rather than causes. Absent when the run
+   * was inconclusive.
    */
   ci_primary_blocking_check?: string
   /**
    * Top-level alias for `ci.status` (`passing`, `failing`, `pending`, or
    * `unknown`) sourced from the durable current-head CI snapshot.
    */
-  ci_status: ("passing" | "failing" | "pending" | "unknown")
+  ci_status: ("passing" | "failing" | "pending" | "inconclusive" | "unknown")
   /**
    * Human-readable structured CI summary reason.
    */
@@ -12304,6 +12603,16 @@ export namespace TaskListOutputSchema {
    */
   blocking_required_check_names: string[]
   /**
+   * Bounded rendering of the GitHub annotations on
+   * [`Self::primary_blocking_check`].
+   * 
+   * Runner-host failures — out of disk, runner process crash — surface ONLY
+   * as annotations, not as a check conclusion and often not in job logs
+   * either. This field is what lets a reader see `No space left on device`
+   * without opening GitHub.
+   */
+  failure_annotations?: string
+  /**
    * Stable fingerprint of the current failure signature (e.g. sorted
    * failing check names + head SHA). `None` when not failing.
    */
@@ -12323,7 +12632,7 @@ export namespace TaskListOutputSchema {
    * 
    * UI consumers render this value directly as the badge text.
    */
-  gate_state: (("passing" | "failing" | "pending" | "unknown") | "awaiting_ci")
+  gate_state: (("passing" | "failing" | "pending" | "unknown") | "inconclusive" | "awaiting_ci")
   /**
    * Head SHA of the GitHub PR branch, when known.
    */
@@ -12379,11 +12688,17 @@ export namespace TaskListOutputSchema {
    */
   pr_number?: number
   /**
-   * Primary blocking required check name, when CI is failing.
+   * The single required check to triage first — the earliest-started
+   * blocking lane that actually executed and hard-failed.
    * 
-   * `Some(_)` when `status == failing` and at least one required check
-   * failed.  This is the first element of `blocking_required_check_names`
-   * (sorted alphabetically) for compact display.  `None` otherwise.
+   * Selected by the PR poller from *structural execution evidence*
+   * (conclusion class, execution interval, annotation count, start order),
+   * never from name order and never from a list of job names. A check that
+   * was `cancelled`, or that never executed, is a symptom of a run-level
+   * abort rather than a cause, and is never selected.
+   * 
+   * `None` when no blocking check carries causal information — i.e. `status`
+   * is `inconclusive` and the run should be retriggered, not remediated.
    */
   primary_blocking_check?: string
   /**
@@ -12394,7 +12709,7 @@ export namespace TaskListOutputSchema {
   /**
    * Current required-CI status for the PR head.
    */
-  status: ("passing" | "failing" | "pending" | "unknown")
+  status: ("passing" | "failing" | "pending" | "inconclusive" | "unknown")
   /**
    * Human-readable summary of the current CI gate state.
    * 

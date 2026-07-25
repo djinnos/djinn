@@ -238,6 +238,95 @@ pub fn inventory_cargo_target_runs(
     Err(CargoTargetRunsInventoryError::UnsupportedPlatform)
 }
 
+/// Measure the allocated bytes (`st_blocks * 512`, inode-deduplicated, no symlink
+/// follow) of a single per-run directory `<root>/<id>`.
+///
+/// This is the per-row measurement the disk-admission ledger records as
+/// `measured_bytes` during reconciliation and after a lease releases. It never
+/// deletes and never follows symlinks. Returns:
+///
+/// - `Ok(Some(bytes))` when the run dir exists and was fully measured;
+/// - `Ok(None)` when `id` is malformed (cannot be a seeded run dir) or the dir
+///   is absent — a missing dir contributes zero tracked bytes;
+/// - `Err(..)` only on a byte-accounting overflow or an unreadable, present dir,
+///   which must never be mistaken for zero.
+#[cfg(unix)]
+pub fn measure_run_dir_allocated_bytes(
+    root: &Path,
+    id: &str,
+) -> Result<Option<u64>, CargoTargetRunsInventoryError> {
+    let Some(dir) = run_dir_within(root, id) else {
+        return Ok(None);
+    };
+    let metadata = match fs::symlink_metadata(&dir) {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(CargoTargetRunsInventoryError::RootRead(err)),
+    };
+    // A top-level symlink is never a seeded run dir; refuse to measure through it.
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Ok(None);
+    }
+    let mut seen = HashSet::new();
+    let mut total = allocated_bytes(&metadata, &mut seen)?.unwrap_or(0);
+    total = total
+        .checked_add(measure_dir_tree(&dir, &mut seen)?)
+        .ok_or(CargoTargetRunsInventoryError::ByteOverflow)?;
+    Ok(Some(total))
+}
+
+#[cfg(not(unix))]
+pub fn measure_run_dir_allocated_bytes(
+    _root: &Path,
+    _id: &str,
+) -> Result<Option<u64>, CargoTargetRunsInventoryError> {
+    Err(CargoTargetRunsInventoryError::UnsupportedPlatform)
+}
+
+/// Recursively sum `st_blocks * 512` for a directory subtree, deduplicating by
+/// `(dev, ino)` and never following symlinks. A present-but-unreadable subtree is
+/// a hard error so a partial measurement cannot masquerade as a small dir.
+#[cfg(unix)]
+fn measure_dir_tree(
+    path: &Path,
+    seen: &mut HashSet<(u64, u64)>,
+) -> Result<u64, CargoTargetRunsInventoryError> {
+    let entries = fs::read_dir(path).map_err(CargoTargetRunsInventoryError::RootRead)?;
+    let mut total = 0_u64;
+    for entry in entries {
+        let entry = entry.map_err(CargoTargetRunsInventoryError::RootRead)?;
+        let metadata =
+            fs::symlink_metadata(entry.path()).map_err(CargoTargetRunsInventoryError::RootRead)?;
+        if let Some(bytes) = allocated_bytes(&metadata, seen)? {
+            total = total
+                .checked_add(bytes)
+                .ok_or(CargoTargetRunsInventoryError::ByteOverflow)?;
+        }
+        if metadata.is_dir() && !metadata.file_type().is_symlink() {
+            total = total
+                .checked_add(measure_dir_tree(&entry.path(), seen)?)
+                .ok_or(CargoTargetRunsInventoryError::ByteOverflow)?;
+        }
+    }
+    Ok(total)
+}
+
+/// Allocated bytes for one inode, or `None` if already counted this walk.
+#[cfg(unix)]
+fn allocated_bytes(
+    metadata: &fs::Metadata,
+    seen: &mut HashSet<(u64, u64)>,
+) -> Result<Option<u64>, CargoTargetRunsInventoryError> {
+    if !seen.insert((metadata.dev(), metadata.ino())) {
+        return Ok(None);
+    }
+    metadata
+        .blocks()
+        .checked_mul(512)
+        .ok_or(CargoTargetRunsInventoryError::ByteOverflow)
+        .map(Some)
+}
+
 #[cfg(unix)]
 fn inventory_directory(
     path: &Path,

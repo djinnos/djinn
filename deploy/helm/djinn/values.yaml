@@ -49,6 +49,39 @@ buildAdmission:
   maxBuildTaskRuns: 3
 
 # -----------------------------------------------------------------------------
+# Per-invocation CPU lease (cgroup launcher)
+# -----------------------------------------------------------------------------
+# The other half of the throughput semaphore. `buildAdmission` bounds HOW MANY
+# task-runs may build concurrently; this bounds how much CPU each one gets while
+# it is building, per invocation rather than per pod.
+#
+# Why per-invocation: a static pod cap strands capacity. A worker holds its slot
+# through LLM streaming while compiling nothing, planners never compile at all,
+# and different repositories compile at very different speeds. With the launcher
+# armed, every shell command starts in its own cgroup leaf throttled to 250m and
+# is lifted to the pod's full CPU limit only once it demonstrates it is actually
+# CPU-hungry.
+#
+#   disabled  (default) — no sidecar, no cgroup leaf, no lease. Shell commands
+#                         run in-process in the worker at the pod's own quota.
+#                         This is the behaviour that shipped before task 7deu.
+#   required            — render the cgroup-launcher sidecar. The launcher
+#                         establishes its own delegated cgroup v2 root at
+#                         startup, which needs `SYS_ADMIN` for the duration of
+#                         that bootstrap; it drops the capability irreversibly
+#                         before the broker accepts any work, and the pod runs
+#                         with `hostUsers: false` so even that window is inside
+#                         a user namespace.
+#
+# Requires a cgroup-v2 node whose kubelet offers the `cpu` controller to
+# container cgroups, and (for `hostUsers: false`) a runtime with user-namespace
+# support — Kubernetes 1.33+. Every precondition fails CLOSED: an unusable
+# render is refused at dispatch before a Job is submitted, and a launcher that
+# cannot establish its delegation exits non-zero before binding its socket.
+cgroupLauncher:
+  mode: disabled
+
+# -----------------------------------------------------------------------------
 # Server deployment
 # -----------------------------------------------------------------------------
 # Keep this availability-first rolling update for off/observe. When enabling
@@ -206,6 +239,14 @@ resources:
     # 3600s (60 min) covers a cold single-pass warm of a ~12-crate workspace
     # (~20-25 min observed) with ample margin. Raise it if a larger workspace
     # consistently hits the deadline.
+    #
+    # This is the ONLY warm wall-clock knob that matters: it is the Job's
+    # activeDeadlineSeconds, it drives the in-process warm watcher deadline
+    # (that value plus a fixed 300s slack), and it is projected into the warm
+    # Pod as DJINN_WARM_JOB_DEADLINE_SECONDS, where the in-Pod per-step cargo
+    # budgets clamp against it. A step can therefore never be given a bound
+    # that outlives the deadline which would kill the Pod anyway; to give the
+    # test-binary compile more room, raise this rather than a per-step override.
     jobTimeoutSeconds: 3600
 
 # -----------------------------------------------------------------------------
@@ -250,6 +291,38 @@ logCollector:
 # writes mirror clones and task-run Job Pods read from them. The cache PVC is
 # similarly RWX so cargo/pnpm/pip caches survive across task runs.
 storage:
+  # ---------------------------------------------------------------------------
+  # Volume ownership contract (task pwrr / goxi)
+  # ---------------------------------------------------------------------------
+  # The mirrors/cache/projects volumes are written by TWO identities: the server
+  # (uid `ownerUid`) and the task-run + warm Job Pods (uid/gid 1000, plus the
+  # launcher-spawned child at uid 1001 with primary group 1000). They can only
+  # share those volumes if everything on them is group-owned by `artifactGid`
+  # and group-writable, with setgid on directories so newly created files
+  # INHERIT that group instead of the creator's.
+  #
+  # The chart guarantees this for a fresh install by normalizing the three
+  # volume ROOTS in the `fix-volume-perms` initContainer (O(1), non-recursive)
+  # and by giving the server pod supplementary membership in `artifactGid`.
+  # The worker binary re-validates the mounted result at startup and fails
+  # readiness if it does not hold — see
+  # `docs/VOLUME_OWNERSHIP_CONTRACT_RUNBOOK.md` for the one-time remediation of
+  # volumes that predate this contract.
+  ownership:
+    # GID that owns every artifact on the shared volumes. MUST equal
+    # `djinn_cgroup_launcher::child::ARTIFACT_GID` (the fsGroup the task-run and
+    # warm Pod renders pin). Changing it here without changing the binary
+    # constant breaks the contract in both directions.
+    artifactGid: 1000
+    # UID the djinn-server process runs as; it stays the owner of the volume
+    # roots so the server keeps unrestricted access to its own directories.
+    ownerUid: 10001
+    # Mode applied to the volume roots: setgid + rwxrwxr-x.
+    dirMode: "2775"
+    # Normalize the volume roots on every server pod start. Idempotent and O(1)
+    # — it touches the three roots only, never their contents. Disable only if
+    # an external process owns volume provisioning.
+    normalizeRoots: true
   # Mirrors are shared between the server (writer) and image-build + task-run
   # Jobs (readers). In prod this requires RWX storage; on single-node clusters
   # like kind, RWO PVCs work because RWO is enforced per-node, not per-pod.
@@ -479,6 +552,32 @@ env:
   # account type `User`) as well as an organization. Intended for local/solo
   # evaluation; production remains organization-only by default.
   allowUserInstallations: false
+
+# -----------------------------------------------------------------------------
+# Catalog service-wrapper image identities (ij6g)
+# -----------------------------------------------------------------------------
+# `server/docker/build-wrapper-images.sh` builds the three catalog wrapper
+# images (Postgres/Redis/RabbitMQ) and writes a manifest recording the digest
+# buildx ACTUALLY pushed for each one. Paste that manifest here and the chart
+# projects it into the server container as a file, pointing
+# DJINN_WRAPPER_IMAGE_MANIFEST at it. On boot the image controller
+# (`reconcile_wrapper_catalog_from_env`) records each identity into
+# `service_presets`, so strict canonical verification can resolve
+# `{wrapper_image}@{digest}` for attempt-scoped service leases.
+#
+# Accepts either the manifest JSON as a string or the equivalent YAML mapping
+# (`{entries: [{preset_id, wrapper_image, image_digest}, ...]}`); both render
+# to the same JSON file.
+#
+# Digests must be the real `sha256:<64 hex>` the registry returned —
+# `ServicePresetRepository::set_wrapper_identity` rejects mutable or malformed
+# identities before any write, so a placeholder can never become deployable.
+# Empty (the default) renders no ConfigMap and no env var: the controller then
+# leaves wrapper digests unpopulated and strict resolution stays fail-closed.
+# Left null rather than "" so overriding it with the mapping form doesn't make
+# Helm's coalesce warn about replacing a scalar with a table.
+serviceWrappers:
+  imageManifest: null
 
 # Arbitrary extra env injected into the server container. Useful for ad-hoc
 # tuning knobs without re-templating.

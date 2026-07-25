@@ -52,7 +52,7 @@ use djinn_runtime::{
 use djinn_supervisor::{ConnectionRegistry, Frame, FramePayload, PendingConnection};
 use k8s_openapi::api::batch::v1::Job;
 use k8s_openapi::api::core::v1::{Pod, Secret};
-use kube::api::{Api, DeleteParams, ListParams, Patch, PatchParams, PostParams};
+use kube::api::{Api, DeleteParams, ListParams, Patch, PatchParams, PostParams, Preconditions};
 use serde_json::json;
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
@@ -657,10 +657,47 @@ impl SessionRuntime for KubernetesRuntime {
             ),
         }
 
-        // 2. Build + create the Job manifest.  The `cargo_cache_policy`
-        //    was extracted from the effective EnvironmentConfig earlier
-        //    (step 1) and is passed through as before.
-        let job = build_task_run_job_with_read_sources(
+        // 2a. Fail-closed enforcement render validation BEFORE the Job is
+        //     submitted — i.e. before any user code can execute. Rejects
+        //     unsupported cgroup-v2 delegation profiles, an out-of-bounds broker
+        //     quota, or an incompatible volume-ownership mode. Grounded in the
+        //     launcher crate's own `Readiness::validate`.
+        if let Err(error) = crate::launcher::validate_enforcement_render(&self.config) {
+            self.drop_pending(&task_run_id_str).await;
+            return Err(RuntimeError::Prepare(format!(
+                "enforcement render validation failed: {error}"
+            )));
+        }
+
+        // 2b. Build + create the Job manifest.  The `cargo_cache_policy`
+        //     was extracted from the effective EnvironmentConfig earlier
+        //     (step 1) and is passed through as before.  The role that executes
+        //     this run is the primary role of its supervisor flow; it drives the
+        //     role-classed CPU request (light vs build-capable). `None` (an
+        //     empty sequence) fails safe to build-capable in the renderer.
+        let role = spec.flow.role_sequence().first().copied();
+        // Resolve per-project build_resources overrides for the task-run Pod
+        // BEFORE the Job is built: a malformed / request-above-limit /
+        // out-of-bounds override fails closed here so no Job is ever created.
+        let role_class = crate::launcher::RoleResourceClass::for_role(role);
+        let resolved_task_resources = match crate::build_resources::resolve_task_run_resources(
+            &self.config,
+            role_class,
+            effective_env_config
+                .build_resources
+                .as_ref()
+                .and_then(|b| b.task.as_ref()),
+            &self.config.task_resource_bounds,
+        ) {
+            Ok(resources) => resources,
+            Err(error) => {
+                self.drop_pending(&task_run_id_str).await;
+                return Err(RuntimeError::Prepare(format!(
+                    "build_resources resolution failed for task-run: {error}"
+                )));
+            }
+        };
+        let mut job = build_task_run_job_with_read_sources(
             &self.config,
             &task_run_id,
             &spec.project_id,
@@ -669,8 +706,10 @@ impl SessionRuntime for KubernetesRuntime {
             services,
             cargo_cache_policy.as_ref(),
             spec.is_evidence_spike,
+            role,
             read_source_cache_sub_path.as_deref(),
         );
+        crate::build_resources::apply_resolved_resources(&mut job, resolved_task_resources);
         let jobs: Api<Job> = Api::namespaced(self.client.clone(), ns);
         let created_job = match jobs.create(&PostParams::default(), &job).await {
             Ok(j) => j,
@@ -1408,6 +1447,295 @@ pub async fn delete_taskrun_job_foreground(
     delete_job_foreground(client, namespace, &job_name, 30).await
 }
 
+/// Terminate exactly the immutable Pod recorded for a task-run, then tear down
+/// its owning Job.
+///
+/// Delete acceptance is durably observable rather than inferred from a second
+/// best-effort Kubernetes write: a service-owned finalizer holds the exact Pod
+/// across the DELETE, so `deletionTimestamp` + the recorded UID stay readable
+/// until this code releases the hold. Ordering is hold -> UID-fenced Pod DELETE
+/// -> UID-fenced orphan Job DELETE -> release, which makes every write after
+/// the destructive step retryable; no step can lose confirmation once the
+/// irreversible operation has happened.
+///
+/// Failure semantics:
+/// - hold write fails: typed error, zero destructive calls;
+/// - Pod DELETE fails: hold released best-effort, typed error, no Job teardown,
+///   and a later empty list is still unconfirmed;
+/// - Job DELETE fails: typed error; the retry re-reads the held terminating Pod
+///   and resumes teardown without a second destructive Pod call;
+/// - release fails: typed error; the retry finds the Job already absent and the
+///   held Pod still visible, and completes the release terminally.
+pub async fn terminate_taskrun_pod_exact(
+    client: &kube::Client,
+    namespace: &str,
+    task_run_id: &str,
+    pod_uid: &str,
+) -> Result<(), String> {
+    if task_run_id.trim().is_empty() || pod_uid.trim().is_empty() {
+        return Err("exact-pod termination requires non-empty task-run ID and pod UID".into());
+    }
+    let jobs: Api<Job> = Api::namespaced(client.clone(), namespace);
+    let pods: Api<Pod> = Api::namespaced(client.clone(), namespace);
+    let selector = format!("{}={task_run_id}", crate::job::LABEL_TASK_RUN_ID);
+    let Some(job) = jobs
+        .get_opt(&taskrun_job_name(task_run_id))
+        .await
+        .map_err(|e| format!("get task-run Job: {e}"))?
+    else {
+        // An absent Job can be the tail of this protocol's own completed
+        // teardown: the hold below keeps the deleted Pod observable, so a
+        // release that failed after the Job DELETE is finished here instead of
+        // erroring forever. Every other absent Job stays unconfirmed.
+        return release_confirmed_exact_pod(&pods, &selector, task_run_id, pod_uid).await;
+    };
+    if job.metadata.deletion_timestamp.is_some() {
+        return Err("exact-pod watchdog termination task-run Job is not confirmable".into());
+    }
+    let job_uid = job
+        .metadata
+        .uid
+        .as_deref()
+        .ok_or_else(|| "task-run Job has no immutable UID".to_string())?;
+    let listed_pods = pods
+        .list(&ListParams::default().labels(&selector))
+        .await
+        .map_err(|e| format!("list task-run Pods: {e}"))?
+        .items;
+
+    // An empty list is never authorization. The exact Pod either does not
+    // exist yet under a live Job, or a previous run of this protocol already
+    // released it — and that run deleted the Job first, so the absent-Job
+    // branch above owns the confirmed case. Absence alone proves nothing.
+    if listed_pods.is_empty() {
+        return Err("exact pod UID deletion is not confirmed by the task-run Job".into());
+    }
+
+    // Reject the entire observation if any labelled Pod is not the recorded
+    // immutable object. Finding the old Pod must not authorize teardown while
+    // a replacement or foreign Pod is also present.
+    if listed_pods.len() != 1 {
+        return Err(
+            "exact pod UID is unavailable or does not belong to the recorded task-run Job".into(),
+        );
+    }
+    let pod = &listed_pods[0];
+    let pod_name = exact_taskrun_pod_name(pod, pod_uid, job_uid).ok_or_else(|| {
+        "exact pod UID is unavailable or does not belong to the recorded task-run Job".to_string()
+    })?;
+
+    // `deletionTimestamp` on the exact immutable UID is Kubernetes' own durable
+    // record that this object was accepted for deletion. Acquire the hold
+    // *before* the destructive call so that record cannot evaporate with the
+    // object: with a service-owned finalizer the terminating Pod stays visible
+    // until this code releases it, and every write after the delete becomes a
+    // retryable step instead of a one-shot confirmation that can be lost.
+    let mut held = pod_holds_termination_finalizer(pod);
+    if pod.metadata.deletion_timestamp.is_none() {
+        if !held {
+            hold_exact_pod(&pods, pod, &pod_name, pod_uid).await?;
+            held = true;
+        }
+        // The sole destructive operation is fenced by the recorded Pod UID.
+        let params = exact_pod_delete_params(pod_uid);
+        match pods.delete(&pod_name, &params).await {
+            Ok(_) => {}
+            Err(kube::Error::Api(response)) if response.code == 404 => {}
+            Err(e) => {
+                // An unconfirmed delete must not leave a hold behind: an
+                // unreleased finalizer would block the Job controller's own
+                // reaping of a Pod this call never deleted.
+                let _ = release_exact_pod_hold(&pods, &pod_name, pod_uid, pod).await;
+                return Err(format!("delete exact task-run Pod: {e}"));
+            }
+        }
+    }
+
+    // Remove the controller while the confirmation is still observable. Orphan
+    // propagation is deliberate: unlike a cascade, it cannot delete a
+    // different-UID Pod that appears between the list and this request. The
+    // Job operation is independently fenced by the immutable Job UID, and a
+    // failure here is retryable because the held Pod still proves the delete.
+    delete_taskrun_job_orphaned(&jobs, task_run_id, job_uid).await?;
+
+    if held {
+        release_exact_pod_hold(&pods, &pod_name, pod_uid, pod).await?;
+    }
+    Ok(())
+}
+
+/// Service-owned finalizer that makes an accepted exact-Pod deletion durably
+/// observable. It is added only immediately before this module's UID-fenced Pod
+/// DELETE, so a Pod carrying it with a `deletionTimestamp` is proof that this
+/// protocol deleted exactly that immutable object.
+const EXACT_POD_TERMINATION_FINALIZER: &str = "djinn.dev/exact-pod-termination";
+
+fn pod_holds_termination_finalizer(pod: &Pod) -> bool {
+    pod.metadata.finalizers.as_ref().is_some_and(|finalizers| {
+        finalizers
+            .iter()
+            .any(|finalizer| finalizer == EXACT_POD_TERMINATION_FINALIZER)
+    })
+}
+
+fn finalizers_without_termination_hold(pod: &Pod) -> Vec<String> {
+    pod.metadata
+        .finalizers
+        .clone()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|finalizer| finalizer != EXACT_POD_TERMINATION_FINALIZER)
+        .collect()
+}
+
+/// Add the confirmation hold to the exact Pod, fenced by its immutable UID and
+/// the observed resourceVersion so a same-name replacement can never be held.
+/// This write happens *before* the destructive call, so its failure returns a
+/// typed error with zero destructive operations issued.
+async fn hold_exact_pod(
+    pods: &Api<Pod>,
+    pod: &Pod,
+    pod_name: &str,
+    pod_uid: &str,
+) -> Result<(), String> {
+    let resource_version = pod
+        .metadata
+        .resource_version
+        .as_deref()
+        .ok_or_else(|| "exact task-run Pod has no resource version".to_string())?;
+    let mut finalizers = finalizers_without_termination_hold(pod);
+    finalizers.push(EXACT_POD_TERMINATION_FINALIZER.to_string());
+    let patch = serde_json::json!({
+        "metadata": {
+            "uid": pod_uid,
+            "resourceVersion": resource_version,
+            "finalizers": finalizers
+        }
+    });
+    pods.patch(pod_name, &PatchParams::default(), &Patch::Merge(&patch))
+        .await
+        .map_err(|e| format!("hold exact task-run Pod for confirmation: {e}"))?;
+    Ok(())
+}
+
+/// Release the confirmation hold, restoring exactly the finalizers observed on
+/// the Pod before it was held. The write is UID-fenced and idempotent: a 404
+/// means the object already completed deletion.
+async fn release_exact_pod_hold(
+    pods: &Api<Pod>,
+    pod_name: &str,
+    pod_uid: &str,
+    observed: &Pod,
+) -> Result<(), String> {
+    let patch = serde_json::json!({
+        "metadata": {
+            "uid": pod_uid,
+            "finalizers": finalizers_without_termination_hold(observed)
+        }
+    });
+    match pods
+        .patch(pod_name, &PatchParams::default(), &Patch::Merge(&patch))
+        .await
+    {
+        Ok(_) => Ok(()),
+        Err(kube::Error::Api(response)) if response.code == 404 => Ok(()),
+        Err(e) => Err(format!("release exact task-run Pod hold: {e}")),
+    }
+}
+
+/// Finish a teardown whose Job is already gone. This is a terminal resolution
+/// only when the held, terminating Pod carrying this protocol's own finalizer
+/// is still visible with the recorded UID under the canonical Job owner — the
+/// exact state left behind when the Job DELETE succeeded and the release did
+/// not. Anything else keeps the original unavailable-Job error.
+async fn release_confirmed_exact_pod(
+    pods: &Api<Pod>,
+    selector: &str,
+    task_run_id: &str,
+    pod_uid: &str,
+) -> Result<(), String> {
+    let listed_pods = pods
+        .list(&ListParams::default().labels(selector))
+        .await
+        .map_err(|e| format!("list task-run Pods: {e}"))?
+        .items;
+    let job_name = taskrun_job_name(task_run_id);
+    let confirmed = listed_pods.into_iter().find(|pod| {
+        pod.metadata.uid.as_deref() == Some(pod_uid)
+            && pod.metadata.deletion_timestamp.is_some()
+            && pod_holds_termination_finalizer(pod)
+            && pod
+                .metadata
+                .owner_references
+                .as_ref()
+                .is_some_and(|owners| {
+                    owners
+                        .iter()
+                        .any(|owner| owner.kind == "Job" && owner.name == job_name)
+                })
+    });
+    let Some(pod) = confirmed else {
+        return Err("exact-pod watchdog termination task-run Job is unavailable".into());
+    };
+    let pod_name = pod
+        .metadata
+        .name
+        .clone()
+        .filter(|name| !name.trim().is_empty())
+        .ok_or_else(|| "exact-pod watchdog termination task-run Job is unavailable".to_string())?;
+    release_exact_pod_hold(pods, &pod_name, pod_uid, &pod).await
+}
+
+async fn delete_taskrun_job_orphaned(
+    jobs: &Api<Job>,
+    task_run_id: &str,
+    job_uid: &str,
+) -> Result<(), String> {
+    let params = DeleteParams {
+        propagation_policy: Some(kube::api::PropagationPolicy::Orphan),
+        preconditions: Some(Preconditions {
+            uid: Some(job_uid.to_owned()),
+            ..Preconditions::default()
+        }),
+        ..DeleteParams::default()
+    };
+    jobs.delete(&taskrun_job_name(task_run_id), &params)
+        .await
+        .map_err(|e| format!("delete confirmed task-run Job: {e}"))?;
+    Ok(())
+}
+
+/// Return a mutable Pod name only after binding it to both immutable resource
+/// identities. The subsequent delete repeats the Pod UID binding as a
+/// Kubernetes precondition, so the name alone never authorizes deletion.
+fn exact_taskrun_pod_name(pod: &Pod, pod_uid: &str, job_uid: &str) -> Option<String> {
+    (pod.metadata.uid.as_deref() == Some(pod_uid)
+        && pod
+            .metadata
+            .owner_references
+            .as_ref()
+            .is_some_and(|owners| {
+                owners
+                    .iter()
+                    .any(|owner| owner.kind == "Job" && owner.uid == job_uid)
+            }))
+    .then(|| pod.metadata.name.clone())
+    .flatten()
+    .filter(|name| !name.trim().is_empty())
+}
+
+/// Parameters for the sole destructive exact-Pod watchdog operation.
+fn exact_pod_delete_params(pod_uid: &str) -> DeleteParams {
+    DeleteParams {
+        grace_period_seconds: Some(30),
+        preconditions: Some(Preconditions {
+            uid: Some(pod_uid.to_owned()),
+            ..Preconditions::default()
+        }),
+        ..DeleteParams::default()
+    }
+}
+
 /// List task-run Jobs in a namespace and return primitive inventory rows.
 pub async fn list_taskrun_jobs(
     client: &kube::Client,
@@ -1453,8 +1781,675 @@ mod tests {
     use super::*;
     use djinn_core::models::TaskRunTrigger;
     use djinn_runtime::SupervisorFlow;
+    use k8s_openapi::apimachinery::pkg::apis::meta::v1::{ObjectMeta, OwnerReference};
     use std::collections::HashMap;
     use std::sync::Mutex as StdMutex;
+
+    /// The exact Pod as this protocol leaves it after a confirmed delete: held
+    /// by the service-owned finalizer and carrying a `deletionTimestamp`.
+    fn held_terminating_pod(name: &str, pod_uid: &str, owner_uid: &str) -> Pod {
+        let mut pod = owned_pod(name, pod_uid, owner_uid);
+        pod.metadata.deletion_timestamp =
+            Some(k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
+                "2026-01-01T00:00:00Z".parse().expect("fixed timestamp"),
+            ));
+        pod.metadata.finalizers = Some(vec![EXACT_POD_TERMINATION_FINALIZER.into()]);
+        pod
+    }
+
+    fn owned_pod(name: &str, pod_uid: &str, owner_uid: &str) -> Pod {
+        Pod {
+            metadata: ObjectMeta {
+                name: Some(name.into()),
+                uid: Some(pod_uid.into()),
+                resource_version: Some("11".into()),
+                owner_references: Some(vec![OwnerReference {
+                    api_version: "batch/v1".into(),
+                    block_owner_deletion: Some(true),
+                    controller: Some(true),
+                    kind: "Job".into(),
+                    name: "djinn-taskrun-run-1".into(),
+                    uid: owner_uid.into(),
+                }]),
+                ..ObjectMeta::default()
+            },
+            ..Pod::default()
+        }
+    }
+
+    #[test]
+    fn exact_pod_delete_is_fenced_to_the_requested_pod_uid() {
+        let params = exact_pod_delete_params("pod-recorded");
+        assert_eq!(params.grace_period_seconds, Some(30));
+        assert_eq!(params.propagation_policy, None);
+        assert_eq!(
+            params
+                .preconditions
+                .and_then(|preconditions| preconditions.uid),
+            Some("pod-recorded".into())
+        );
+    }
+
+    #[test]
+    fn exact_pod_selection_rejects_stale_and_wrong_owner_identities() {
+        let recorded = owned_pod("taskrun-pod", "pod-recorded", "job-recorded");
+        let replacement = owned_pod("taskrun-pod", "pod-replacement", "job-recorded");
+        let foreign = owned_pod("foreign-pod", "pod-recorded", "job-foreign");
+
+        assert_eq!(
+            exact_taskrun_pod_name(&recorded, "pod-recorded", "job-recorded"),
+            Some("taskrun-pod".into())
+        );
+        assert_eq!(
+            exact_taskrun_pod_name(&replacement, "pod-recorded", "job-recorded"),
+            None,
+            "a stale UID cannot select a replacement with the same name"
+        );
+        assert_eq!(
+            exact_taskrun_pod_name(&foreign, "pod-recorded", "job-recorded"),
+            None,
+            "a matching Pod UID owned by another Job is not a task-run Pod"
+        );
+    }
+
+    /// Per-call status sequence for one mocked verb. Statuses are consumed in
+    /// issue order; an exhausted queue keeps replying `200` so a test only has
+    /// to spell out the calls whose outcome it is asserting.
+    #[derive(Clone)]
+    struct StatusQueue(Arc<StdMutex<Vec<u16>>>);
+
+    impl StatusQueue {
+        fn next(&self) -> u16 {
+            let mut queue = self.0.lock().unwrap();
+            if queue.is_empty() {
+                200
+            } else {
+                queue.remove(0)
+            }
+        }
+    }
+
+    fn statuses(values: &[u16]) -> StatusQueue {
+        StatusQueue(Arc::new(StdMutex::new(values.to_vec())))
+    }
+
+    #[derive(Clone)]
+    struct ExactKubeReplies {
+        jobs: Arc<StdMutex<Vec<(u16, serde_json::Value)>>>,
+        pod_lists: Arc<StdMutex<Vec<(u16, serde_json::Value)>>>,
+        pod_patch_status: StatusQueue,
+        pod_delete_status: StatusQueue,
+        job_delete_status: StatusQueue,
+    }
+
+    /// Captured (method, path?query, body) tuples for every request the mocked
+    /// kube service observed, in issue order.
+    type CapturedKubeRequests = Arc<StdMutex<Vec<(String, String, String)>>>;
+
+    fn exact_kube_client(replies: ExactKubeReplies) -> (kube::Client, CapturedKubeRequests) {
+        use http::Response;
+        use http_body_util::BodyExt;
+        use kube::client::Body;
+        use tower::service_fn;
+
+        let requests = Arc::new(StdMutex::new(Vec::new()));
+        let captured = requests.clone();
+        let client = kube::Client::new(
+            service_fn(move |request: http::Request<Body>| {
+                let replies = replies.clone();
+                let captured = captured.clone();
+                async move {
+                    let method = request.method().to_string();
+                    let path = request.uri().path().to_string();
+                    // Split the URI string manually: the raw-SQL boundary guard
+                    // rejects the bare sqlx-style call token outside djinn-db,
+                    // which the direct Uri accessor for the query string trips.
+                    let uri_text = request.uri().to_string();
+                    let query = uri_text
+                        .split_once('?')
+                        .map(|(_, tail)| tail.to_string())
+                        .unwrap_or_default();
+                    let body = request
+                        .into_body()
+                        .collect()
+                        .await
+                        .expect("collect kube request")
+                        .to_bytes();
+                    captured.lock().unwrap().push((
+                        method.clone(),
+                        format!("{path}?{query}"),
+                        String::from_utf8(body.to_vec()).expect("JSON request body"),
+                    ));
+                    let (status, value) = if method == "GET" && path.contains("/jobs/") {
+                        replies.jobs.lock().unwrap().remove(0)
+                    } else if method == "GET" && path.ends_with("/pods") {
+                        // An exhausted queue means "nothing further exists":
+                        // the absent-Job path lists Pods too, and a test that
+                        // scripts no observation asserts on an empty cluster.
+                        let mut lists = replies.pod_lists.lock().unwrap();
+                        if lists.is_empty() {
+                            (200, pod_list_json(vec![]))
+                        } else {
+                            lists.remove(0)
+                        }
+                    } else if method == "PATCH" && path.contains("/pods/") {
+                        let status = replies.pod_patch_status.next();
+                        if status < 400 {
+                            (
+                                status,
+                                serde_json::to_value(held_terminating_pod(
+                                    "taskrun-pod",
+                                    "pod-recorded",
+                                    "job-recorded",
+                                ))
+                                .expect("serialize patched Pod"),
+                            )
+                        } else {
+                            (status, api_error(status, "mock patch failed"))
+                        }
+                    } else if method == "DELETE" && path.contains("/pods/") {
+                        let status = replies.pod_delete_status.next();
+                        (status, delete_response(status))
+                    } else if method == "DELETE" && path.contains("/jobs/") {
+                        let status = replies.job_delete_status.next();
+                        (status, delete_response(status))
+                    } else {
+                        panic!("unexpected kube request {method} {path}");
+                    };
+                    Ok::<_, std::io::Error>(
+                        Response::builder()
+                            .status(status)
+                            .header("content-type", "application/json")
+                            .body(Body::from(value.to_string().into_bytes()))
+                            .unwrap(),
+                    )
+                }
+            }),
+            "djinn",
+        );
+        (client, requests)
+    }
+
+    fn api_error(code: u16, message: &str) -> serde_json::Value {
+        serde_json::json!({
+            "apiVersion":"v1", "kind":"Status", "status":"Failure",
+            "reason":"InternalError", "message":message, "code":code
+        })
+    }
+
+    /// A genuinely-absent object: `reason` is what the kube client uses to
+    /// distinguish "gone" from "the read failed with a 404-shaped error".
+    fn not_found() -> serde_json::Value {
+        serde_json::json!({
+            "apiVersion":"v1", "kind":"Status", "status":"Failure",
+            "reason":"NotFound", "message":"NotFound", "code":404
+        })
+    }
+
+    fn delete_response(status: u16) -> serde_json::Value {
+        let failed = status >= 400;
+        serde_json::json!({
+            "apiVersion": "v1", "kind": "Status",
+            "status": if failed { "Failure" } else { "Success" },
+            "reason": if failed { "InternalError" } else { "" },
+            "message": if failed { "mock delete failed" } else { "" },
+            "code": status
+        })
+    }
+
+    fn job_json(uid: Option<&str>, deleting: bool) -> serde_json::Value {
+        serde_json::json!({
+            "apiVersion": "batch/v1", "kind": "Job",
+            "metadata": {
+                "name": "djinn-taskrun-run-1", "uid": uid, "resourceVersion": "7",
+                "deletionTimestamp": deleting.then_some("2026-01-01T00:00:00Z")
+            },
+            "spec": {"template": {"spec": {"containers": [], "restartPolicy": "Never"}}}
+        })
+    }
+
+    fn pod_list_json(pods: Vec<Pod>) -> serde_json::Value {
+        serde_json::json!({
+            "apiVersion": "v1", "kind": "PodList", "metadata": {}, "items": pods
+        })
+    }
+
+    fn exact_replies(
+        jobs: Vec<(u16, serde_json::Value)>,
+        pod_lists: Vec<(u16, serde_json::Value)>,
+    ) -> ExactKubeReplies {
+        ExactKubeReplies {
+            jobs: Arc::new(StdMutex::new(jobs)),
+            pod_lists: Arc::new(StdMutex::new(pod_lists)),
+            pod_patch_status: statuses(&[]),
+            pod_delete_status: statuses(&[]),
+            job_delete_status: statuses(&[]),
+        }
+    }
+
+    /// Mutation trace: `VERB resource` for every non-read request, in order.
+    fn mutation_order(requests: &CapturedKubeRequests) -> Vec<String> {
+        requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(method, _, _)| method == "DELETE" || method == "PATCH")
+            .map(|(method, path, _)| {
+                let resource = if path.contains("/pods") {
+                    "pods"
+                } else {
+                    "jobs"
+                };
+                format!("{method} {resource}")
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn exact_termination_holds_deletes_then_releases_the_recorded_pod() {
+        let replies = exact_replies(
+            vec![(200, job_json(Some("job-recorded"), false))],
+            vec![(
+                200,
+                pod_list_json(vec![owned_pod(
+                    "taskrun-pod",
+                    "pod-recorded",
+                    "job-recorded",
+                )]),
+            )],
+        );
+        let (client, requests) = exact_kube_client(replies);
+
+        terminate_taskrun_pod_exact(&client, "djinn", "run-1", "pod-recorded")
+            .await
+            .expect("exact termination");
+
+        assert_eq!(
+            mutation_order(&requests),
+            ["PATCH pods", "DELETE pods", "DELETE jobs", "PATCH pods"],
+            "the hold must precede the destructive call and outlive Job teardown"
+        );
+
+        let requests = requests.lock().unwrap();
+        let patches = requests
+            .iter()
+            .filter(|(method, _, _)| method == "PATCH")
+            .collect::<Vec<_>>();
+        let hold: serde_json::Value = serde_json::from_str(&patches[0].2).unwrap();
+        assert!(patches[0].1.contains("/pods/taskrun-pod?"));
+        assert_eq!(hold["metadata"]["uid"], "pod-recorded");
+        assert_eq!(
+            hold["metadata"]["resourceVersion"], "11",
+            "the hold is fenced to the observed Pod, never a same-name replacement"
+        );
+        assert_eq!(
+            hold["metadata"]["finalizers"],
+            serde_json::json!([EXACT_POD_TERMINATION_FINALIZER])
+        );
+        let release: serde_json::Value = serde_json::from_str(&patches[1].2).unwrap();
+        assert_eq!(release["metadata"]["uid"], "pod-recorded");
+        assert_eq!(
+            release["metadata"]["finalizers"],
+            serde_json::json!([]),
+            "the release restores exactly the finalizers observed before the hold"
+        );
+
+        let deletes = requests
+            .iter()
+            .filter(|(method, _, _)| method == "DELETE")
+            .collect::<Vec<_>>();
+        assert_eq!(deletes.len(), 2, "one Pod and one UID-fenced Job delete");
+        let pod_delete: serde_json::Value = serde_json::from_str(&deletes[0].2).unwrap();
+        assert!(deletes[0].1.contains("/pods/taskrun-pod?"));
+        assert_eq!(pod_delete["preconditions"]["uid"], "pod-recorded");
+        let job_delete: serde_json::Value = serde_json::from_str(&deletes[1].2).unwrap();
+        assert!(deletes[1].1.contains("/jobs/djinn-taskrun-run-1?"));
+        assert_eq!(job_delete["preconditions"]["uid"], "job-recorded");
+        assert_eq!(job_delete["propagationPolicy"], "Orphan");
+    }
+
+    /// The liveness regression: an irreversible Pod DELETE that succeeds must
+    /// stay confirmable when the very next durable write fails. The hold keeps
+    /// `deletionTimestamp` + the recorded UID readable, so the retry resolves
+    /// terminally instead of erroring forever and pinning the counted lease.
+    #[tokio::test]
+    async fn successful_delete_with_failed_release_resolves_terminally_on_retry() {
+        let mut replies = exact_replies(
+            vec![
+                (200, job_json(Some("job-recorded"), false)),
+                // The first attempt tore the Job down before the release, so
+                // the retry sees no Job at all.
+                (404, not_found()),
+            ],
+            vec![
+                (
+                    200,
+                    pod_list_json(vec![owned_pod(
+                        "taskrun-pod",
+                        "pod-recorded",
+                        "job-recorded",
+                    )]),
+                ),
+                (
+                    200,
+                    pod_list_json(vec![held_terminating_pod(
+                        "taskrun-pod",
+                        "pod-recorded",
+                        "job-recorded",
+                    )]),
+                ),
+            ],
+        );
+        // hold, then a failed release, then a successful release on retry.
+        replies.pod_patch_status = statuses(&[200, 500, 200]);
+        let (client, requests) = exact_kube_client(replies);
+
+        assert!(
+            terminate_taskrun_pod_exact(&client, "djinn", "run-1", "pod-recorded")
+                .await
+                .is_err(),
+            "a failed release must not claim success"
+        );
+        terminate_taskrun_pod_exact(&client, "djinn", "run-1", "pod-recorded")
+            .await
+            .expect("the held terminating Pod proves the delete and resolves the retry");
+
+        assert_eq!(
+            mutation_order(&requests),
+            [
+                "PATCH pods",
+                "DELETE pods",
+                "DELETE jobs",
+                "PATCH pods",
+                "PATCH pods"
+            ],
+            "the retry replays only the lost release, never a second destructive call"
+        );
+        let requests = requests.lock().unwrap();
+        let release: serde_json::Value =
+            serde_json::from_str(&requests.last().expect("final request").2).unwrap();
+        assert_eq!(release["metadata"]["uid"], "pod-recorded");
+        assert_eq!(release["metadata"]["finalizers"], serde_json::json!([]));
+    }
+
+    /// The same guarantee one step earlier: a failed Job teardown is retryable
+    /// because the hold is released last, so the confirmed delete is still
+    /// observable on the next attempt.
+    #[tokio::test]
+    async fn successful_delete_with_failed_teardown_resolves_terminally_on_retry() {
+        let mut replies = exact_replies(
+            vec![
+                (200, job_json(Some("job-recorded"), false)),
+                (200, job_json(Some("job-recorded"), false)),
+            ],
+            vec![
+                (
+                    200,
+                    pod_list_json(vec![owned_pod(
+                        "taskrun-pod",
+                        "pod-recorded",
+                        "job-recorded",
+                    )]),
+                ),
+                (
+                    200,
+                    pod_list_json(vec![held_terminating_pod(
+                        "taskrun-pod",
+                        "pod-recorded",
+                        "job-recorded",
+                    )]),
+                ),
+            ],
+        );
+        replies.job_delete_status = statuses(&[500, 200]);
+        let (client, requests) = exact_kube_client(replies);
+
+        assert!(
+            terminate_taskrun_pod_exact(&client, "djinn", "run-1", "pod-recorded")
+                .await
+                .is_err(),
+            "a failed teardown must not claim success"
+        );
+        terminate_taskrun_pod_exact(&client, "djinn", "run-1", "pod-recorded")
+            .await
+            .expect("the held terminating Pod resumes teardown");
+
+        assert_eq!(
+            mutation_order(&requests),
+            [
+                "PATCH pods",
+                "DELETE pods",
+                "DELETE jobs",
+                "DELETE jobs",
+                "PATCH pods"
+            ],
+            "exactly one destructive Pod call survives the retry"
+        );
+    }
+
+    #[tokio::test]
+    async fn exact_termination_rejects_every_unconfirmed_boundary_without_delete() {
+        let cases = vec![
+            ("absent Job", (404, not_found()), vec![]),
+            (
+                "absent Job with an unheld Pod",
+                (404, not_found()),
+                vec![(
+                    200,
+                    pod_list_json(vec![owned_pod(
+                        "taskrun-pod",
+                        "pod-recorded",
+                        "job-recorded",
+                    )]),
+                )],
+            ),
+            (
+                "absent Job with a foreign held Pod",
+                (404, not_found()),
+                vec![(
+                    200,
+                    pod_list_json(vec![held_terminating_pod(
+                        "taskrun-pod",
+                        "pod-replacement",
+                        "job-recorded",
+                    )]),
+                )],
+            ),
+            ("get failure", (500, api_error(500, "get failed")), vec![]),
+            (
+                "deleting Job",
+                (200, job_json(Some("job-recorded"), true)),
+                vec![],
+            ),
+            ("unidentifiable Job", (200, job_json(None, false)), vec![]),
+            (
+                "empty list",
+                (200, job_json(Some("job-recorded"), false)),
+                vec![(200, pod_list_json(vec![]))],
+            ),
+            (
+                "replacement UID",
+                (200, job_json(Some("job-recorded"), false)),
+                vec![(
+                    200,
+                    pod_list_json(vec![owned_pod(
+                        "taskrun-pod",
+                        "pod-replacement",
+                        "job-recorded",
+                    )]),
+                )],
+            ),
+            (
+                "replacement alongside the recorded Pod",
+                (200, job_json(Some("job-recorded"), false)),
+                vec![(
+                    200,
+                    pod_list_json(vec![
+                        owned_pod("taskrun-pod", "pod-recorded", "job-recorded"),
+                        owned_pod("taskrun-pod-2", "pod-replacement", "job-recorded"),
+                    ]),
+                )],
+            ),
+            (
+                "foreign owner",
+                (200, job_json(Some("job-recorded"), false)),
+                vec![(
+                    200,
+                    pod_list_json(vec![owned_pod(
+                        "taskrun-pod",
+                        "pod-recorded",
+                        "job-foreign",
+                    )]),
+                )],
+            ),
+        ];
+        for (name, job, lists) in cases {
+            let (client, requests) = exact_kube_client(exact_replies(vec![job], lists));
+            assert!(
+                terminate_taskrun_pod_exact(&client, "djinn", "run-1", "pod-recorded")
+                    .await
+                    .is_err(),
+                "{name} must be unavailable/unconfirmed"
+            );
+            let requests = requests.lock().unwrap();
+            assert!(
+                requests.iter().all(|(method, _, _)| method != "DELETE"),
+                "{name} issued a destructive call"
+            );
+            assert!(
+                requests.iter().all(|(method, _, _)| method != "PATCH"),
+                "{name} wrote state that a later retry could mistake for confirmation"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn exact_termination_propagates_list_hold_and_independent_delete_failures() {
+        let exact_pods = || {
+            vec![(
+                200,
+                pod_list_json(vec![owned_pod(
+                    "taskrun-pod",
+                    "pod-recorded",
+                    "job-recorded",
+                )]),
+            )]
+        };
+        let live_job = || vec![(200, job_json(Some("job-recorded"), false))];
+
+        let (client, requests) = exact_kube_client(exact_replies(
+            live_job(),
+            vec![(500, api_error(500, "list failed"))],
+        ));
+        assert!(
+            terminate_taskrun_pod_exact(&client, "djinn", "run-1", "pod-recorded")
+                .await
+                .is_err()
+        );
+        assert!(mutation_order(&requests).is_empty());
+
+        let mut replies = exact_replies(live_job(), exact_pods());
+        replies.pod_patch_status = statuses(&[500]);
+        let (client, requests) = exact_kube_client(replies);
+        assert!(
+            terminate_taskrun_pod_exact(&client, "djinn", "run-1", "pod-recorded")
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            mutation_order(&requests),
+            ["PATCH pods"],
+            "an unacquired hold must precede — and therefore prevent — every destructive call"
+        );
+
+        let mut replies = exact_replies(live_job(), exact_pods());
+        replies.pod_delete_status = statuses(&[500]);
+        let (client, requests) = exact_kube_client(replies);
+        assert!(
+            terminate_taskrun_pod_exact(&client, "djinn", "run-1", "pod-recorded")
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            mutation_order(&requests),
+            ["PATCH pods", "DELETE pods", "PATCH pods"],
+            "a failed delete tears down its own hold and never reaches Job teardown"
+        );
+
+        let mut replies = exact_replies(live_job(), exact_pods());
+        replies.job_delete_status = statuses(&[500]);
+        let (client, requests) = exact_kube_client(replies);
+        assert!(
+            terminate_taskrun_pod_exact(&client, "djinn", "run-1", "pod-recorded")
+                .await
+                .is_err(),
+            "successful Pod DELETE plus failed Job DELETE must not claim success"
+        );
+        assert_eq!(
+            mutation_order(&requests),
+            ["PATCH pods", "DELETE pods", "DELETE jobs"],
+            "the hold is retained so the confirmed delete stays observable"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_pod_delete_does_not_authorize_an_empty_list_retry() {
+        let mut replies = exact_replies(
+            vec![
+                (200, job_json(Some("job-recorded"), false)),
+                (200, job_json(Some("job-recorded"), false)),
+            ],
+            vec![
+                (
+                    200,
+                    pod_list_json(vec![owned_pod(
+                        "taskrun-pod",
+                        "pod-recorded",
+                        "job-recorded",
+                    )]),
+                ),
+                (200, pod_list_json(vec![])),
+            ],
+        );
+        replies.pod_delete_status = statuses(&[500]);
+        let (client, requests) = exact_kube_client(replies);
+
+        assert!(
+            terminate_taskrun_pod_exact(&client, "djinn", "run-1", "pod-recorded")
+                .await
+                .is_err(),
+            "failed exact Pod DELETE must be unavailable"
+        );
+        assert!(
+            terminate_taskrun_pod_exact(&client, "djinn", "run-1", "pod-recorded")
+                .await
+                .is_err(),
+            "an empty list without confirmed deletion must remain unavailable"
+        );
+
+        assert_eq!(
+            mutation_order(&requests),
+            ["PATCH pods", "DELETE pods", "PATCH pods"],
+            "the retry issues nothing: a failed delete leaves no confirmable state"
+        );
+        let requests = requests.lock().unwrap();
+        let last_patch = requests
+            .iter()
+            .rfind(|(method, _, _)| method == "PATCH")
+            .expect("release patch");
+        let release: serde_json::Value = serde_json::from_str(&last_patch.2).unwrap();
+        assert_eq!(
+            release["metadata"]["finalizers"],
+            serde_json::json!([]),
+            "the hold behind an unconfirmed delete is dropped, not left to block reaping"
+        );
+        assert!(
+            requests
+                .iter()
+                .all(|(method, path, _)| method != "DELETE" || !path.contains("/jobs/")),
+            "neither failed call may claim success by tearing down the Job"
+        );
+    }
 
     #[derive(Default)]
     struct FakeReadSourcePreparation {
@@ -2225,6 +3220,7 @@ mod tests {
             &[],
             None,
             false,
+            Some(djinn_runtime::RoleKind::Worker),
         );
 
         // The Secret and Job share the same resource name.

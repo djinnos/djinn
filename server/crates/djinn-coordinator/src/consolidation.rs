@@ -491,6 +491,7 @@ mod tests {
             pr_status_cache: std::collections::HashMap::new(),
             pr_draft_first_seen: std::collections::HashMap::new(),
             review_stuck_sha_first_seen: std::collections::HashMap::new(),
+            ci_inconclusive_retriggered: std::collections::HashSet::new(),
             merge_fail_count: std::collections::HashMap::new(),
             auto_approve_attempted: std::collections::HashMap::new(),
             delegated_to_github: std::collections::HashMap::new(),

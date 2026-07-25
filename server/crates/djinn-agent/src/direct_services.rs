@@ -33,9 +33,10 @@ use djinn_db::{EffectiveCreatorProvenance, SessionRepository};
 use djinn_stack::environment::EnvironmentConfig;
 use djinn_supervisor::services::wire::{PlannerAttemptResult, PlannerOutcome};
 use djinn_supervisor::services::{
-    CostBasisHint, LeaseAbandonRequest, LeaseBindRequest, LeaseCancelRequest, LeaseGrantRequest,
-    LeaseQueueRequest, LeaseReleaseRequest, LeaseResult, LeaseStatusRequest,
-    SerializableCreateSessionParams, SerializableCreateTaskRunParams, SerializableDjinnEvent,
+    CostBasisHint, InvocationLiftDecision, LeaseAbandonRequest, LeaseBindRequest,
+    LeaseCancelRequest, LeaseGrantRequest, LeaseQueueRequest, LeaseReleaseRequest, LeaseResult,
+    LeaseStatusRequest, SerializableCreateSessionParams, SerializableCreateTaskRunParams,
+    SerializableDjinnEvent, WatchdogTerminationRequest, evaluate_invocation_lift,
 };
 use djinn_supervisor::{
     BranchPublicationResult, RoleKind, StageError, StageOutcome, SupervisorServices,
@@ -276,10 +277,17 @@ impl DirectServices {
         // The durable cap is recovered from the existing database before the
         // first operation. The constructor's zero is intentionally not a
         // launcher quota lift.
-        let build_lease = Arc::new(BuildLeaseService::new(
-            Arc::new(BuildLeaseRepository::new(agent_context.db.clone())),
-            0,
-        ));
+        let build_lease = Arc::new(
+            BuildLeaseService::new(
+                Arc::new(BuildLeaseRepository::new(agent_context.db.clone())),
+                0,
+            )
+            // Recovery reads the durable admission epoch (and its reference cap)
+            // before the lease service opens.
+            .with_handoff_epoch(Arc::new(djinn_db::AdmissionHandoffRepository::new(
+                agent_context.db.clone(),
+            ))),
+        );
         Self::with_provider_override_and_build_lease(
             agent_context,
             cancel,
@@ -990,6 +998,71 @@ impl SupervisorServices for DirectServices {
             return LeaseResult::LeaseUnavailable;
         }
         self.build_lease.release(request).await
+    }
+
+    async fn terminate_watchdog_pod(
+        &self,
+        request: WatchdogTerminationRequest,
+    ) -> Result<(), String> {
+        if request.task_id.trim().is_empty()
+            || request.task_run_id.trim().is_empty()
+            || request.pod_uid.trim().is_empty()
+        {
+            return Err(
+                "exact-pod watchdog termination requires non-empty task, task-run, and pod UID"
+                    .into(),
+            );
+        }
+        let run = self
+            .task_runs
+            .get(&request.task_run_id)
+            .await
+            .map_err(|e| format!("load task-run for exact-pod termination: {e}"))?
+            .ok_or_else(|| "exact-pod watchdog termination task-run is unavailable".to_string())?;
+        if run.task_id != request.task_id {
+            return Err(
+                "exact-pod watchdog termination task identity does not match task-run".into(),
+            );
+        }
+        let warmer = self
+            .callbacks
+            .agent_context
+            .graph_warmer
+            .as_ref()
+            .ok_or_else(|| "exact-pod watchdog termination is unavailable".to_string())?;
+        warmer
+            .terminate_taskrun_pod_exact(&request.task_run_id, &request.pod_uid)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    /// Read the durable admission epoch (host in-process path) and project
+    /// whether a bound v1 invocation may lift the launcher quota. Any read
+    /// failure fails closed to [`InvocationLiftDecision::Unleased`].
+    async fn invocation_lift_decision(&self) -> InvocationLiftDecision {
+        let row =
+            djinn_db::AdmissionHandoffRepository::new(self.callbacks.agent_context.db.clone())
+                .read()
+                .await
+                .map_err(|_| ());
+        evaluate_invocation_lift(row)
+    }
+
+    /// Record this live generation's acknowledgement of the current admission
+    /// epoch (host in-process path). Idempotent + stale-fenced in the database.
+    /// A missing epoch row or a read/write failure is non-fatal: the durable
+    /// invocation-primary edge stays blocked (fail closed) until the ack lands.
+    async fn record_generation_ack(&self, generation_key: String) -> Result<(), String> {
+        let repo =
+            djinn_db::AdmissionHandoffRepository::new(self.callbacks.agent_context.db.clone());
+        let epoch = match repo.read().await {
+            Ok(Some(row)) => row.epoch,
+            Ok(None) => return Ok(()),
+            Err(error) => return Err(error.to_string()),
+        };
+        repo.record_generation_ack(epoch, &generation_key)
+            .await
+            .map_err(|error| error.to_string())
     }
 
     async fn load_task(&self, task_id: String) -> Result<Task, String> {

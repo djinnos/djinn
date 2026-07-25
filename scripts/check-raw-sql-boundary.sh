@@ -1,10 +1,13 @@
 #!/bin/sh
 # Raw-SQL boundary guard.
 #
-# All direct sqlx query usage MUST live inside `server/crates/djinn-db/`.
-# Other crates should go through djinn-db's repository/query layer.
-# This guard fails when changed Rust files outside djinn-db introduce raw
-# sqlx query calls (sqlx::query, sqlx::query!, sqlx::query_as!, etc.).
+# Direct sqlx query usage for Djinn's application database MUST live inside
+# `server/crates/djinn-db/`. Other application crates should go through
+# djinn-db's repository/query layer. The catalog wrapper is also excluded: it
+# administers isolated databases in an external catalog service and therefore
+# cannot route those service-control statements through Djinn's repository.
+# This guard fails when changed Rust files outside approved boundaries
+# introduce raw sqlx query calls (sqlx::query, sqlx::query!, etc.).
 #
 # Usage:
 #   BASE_SHA=<sha> ./scripts/check-raw-sql-boundary.sh
@@ -45,9 +48,10 @@ Modes:
 Environment:
   BASE_SHA   Base commit to diff HEAD against (default: origin/main).
 
-Checks changed Rust files outside server/crates/djinn-db/ for raw sqlx query
-usage (sqlx::query, sqlx::query!, sqlx::query_as!, sqlx::query_scalar!, and
-same-module imported forms like query!, query_as!, query_scalar!, query_scalar).
+Checks changed Rust files outside the approved SQL boundaries for raw sqlx
+query usage (sqlx::query, sqlx::query!, sqlx::query_as!, sqlx::query_scalar!,
+and same-module imported forms like query!, query_as!, query_scalar!,
+query_scalar).
 EOF
 }
 
@@ -88,7 +92,8 @@ esac
 # ── Scope / filter helpers ─────────────────────────────────────────────
 
 # is_in_scope_rs_file returns 0 if the path is a Rust source file we should
-# inspect. Generated paths and the djinn-db crate are excluded.
+# inspect. Generated paths, the djinn-db crate, and the external-service catalog
+# wrapper are excluded.
 is_in_scope_rs_file() {
     path=$1
 
@@ -110,9 +115,12 @@ is_in_scope_rs_file() {
             ;;
     esac
 
-    # Exclude djinn-db — it is ALLOWED to use raw sqlx.
+    # Exclude the approved SQL boundaries. djinn-db owns Djinn's application
+    # database queries. djinn-catalog-wrapper intentionally issues DDL against
+    # separately cataloged tenant services; those statements do not belong in
+    # Djinn's application repository layer.
     case "$path" in
-        server/crates/djinn-db/*)
+        server/crates/djinn-db/*|server/crates/djinn-catalog-wrapper/*)
             return 1
             ;;
     esac

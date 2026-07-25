@@ -109,6 +109,12 @@ pub fn build_warm_job(
     // for the broader warm-cost discussion.
     let cmd = format!(
         r#"set -euo pipefail
+# Everything this Pod creates on the shared volumes must stay group-writable for
+# the other identity that reads/writes them (the launcher-spawned child, uid
+# 1001 primary group 1000). The container default 022 would give the clone 755
+# dirs / 644 files, which the worker's startup contract check rejects. See
+# `djinn_agent_worker::volume_contract`.
+umask 0002
 git config --global --add safe.directory "{mirror_path}"
 UPSTREAM_URL="$(git -C "{mirror_path}" config remote.origin.url)"
 git clone --depth 1000 --single-branch "$UPSTREAM_URL" "{project_root}"
@@ -156,6 +162,18 @@ exec {bin} warm-graph "{project_id}"
         // invocation failures surface in the Pod log instead of being
         // silently absent.
         env_var("RUST_LOG", "info,djinn=debug"),
+        // Project the Job's own activeDeadlineSeconds (set below from
+        // `warm_job_timeout_seconds`) so the in-Pod warm can size its per-step
+        // cargo budgets against the deadline that will kill it. Without this
+        // the worker would bound a step by a constant that may be larger than
+        // the Job deadline, which does not give the step more time — it just
+        // relocates the truncation from an observable `outcome="timeout"` step
+        // record to an unobservable kubelet kill. Mirrors the task-run path's
+        // DJINN_TASK_RUN_ACTIVE_DEADLINE_SECONDS projection in `job.rs`.
+        env_var(
+            "DJINN_WARM_JOB_DEADLINE_SECONDS",
+            &config.warm_job_timeout_seconds.to_string(),
+        ),
     ];
     // Forward the server's DB connection so `bootstrap_warm_database` in
     // djinn-agent-worker reaches the same Postgres instance as the server.
@@ -275,14 +293,20 @@ exec {bin} warm-graph "{project_id}"
         volumes: Some(volumes),
         node_selector,
         tolerations,
-        // Run as uid 10001 like task-runs (job.rs). The warm pod shares the
-        // /cache cargo target PVC with workers; without this it runs as root
-        // and writes root-owned cargo artifacts the worker (uid 10001) can't
-        // overwrite, corrupting the shared cache.
+        // The warm pod shares the /cache cargo target PVC with task-runs, so it
+        // MUST carry the same identity and the same volume-ownership contract
+        // qut0 put on the task-run pod — otherwise the two halves of the shared
+        // cache write as different owners and neither can overwrite the other
+        // (task pwrr: the warm pod was still pinned to the legacy 10001 after
+        // task-runs moved to 1000). `fsGroup = ARTIFACT_GID` with
+        // `OnRootMismatch` gives the warm process membership in the artifact
+        // group without an unbounded recursive chown on every pod start; the
+        // worker binary re-validates the mounted result at startup
+        // (`djinn_agent_worker::volume_contract`) and fails closed.
         security_context: Some(k8s_openapi::api::core::v1::PodSecurityContext {
-            run_as_user: Some(10001),
-            run_as_group: Some(10001),
-            ..Default::default()
+            run_as_user: Some(i64::from(crate::launcher::WORKER_UID)),
+            run_as_group: Some(i64::from(crate::launcher::WORKER_GID)),
+            ..crate::launcher::pod_security_context()
         }),
         ..PodSpec::default()
     };
@@ -507,12 +531,28 @@ mod tests {
 
         let pod = spec.template.spec.as_ref().expect("pod");
         assert_eq!(pod.restart_policy.as_deref(), Some("Never"));
-        // Must run as uid 10001 like task-runs to share the /cache cargo target
-        // PVC without writing root-owned artifacts workers can't overwrite.
+        // Must carry the SAME identity and volume-ownership contract as a
+        // task-run pod: both write the shared /cache cargo target PVC, so a
+        // divergent uid/fsGroup leaves artifacts neither side can overwrite.
+        let psc = pod.security_context.as_ref().expect("pod security context");
         assert_eq!(
-            pod.security_context.as_ref().and_then(|s| s.run_as_user),
-            Some(10001),
+            psc.run_as_user,
+            Some(i64::from(crate::launcher::WORKER_UID)),
             "warm pod must run as the worker uid to share the cargo cache safely"
+        );
+        assert_eq!(
+            psc.run_as_group,
+            Some(i64::from(crate::launcher::WORKER_GID))
+        );
+        assert_eq!(
+            psc.fs_group,
+            Some(i64::from(crate::launcher::ARTIFACT_GID)),
+            "warm pod must join the artifact group that owns the shared cache"
+        );
+        assert_eq!(
+            psc.fs_group_change_policy.as_deref(),
+            Some("OnRootMismatch"),
+            "never Always: an unbounded recursive chown would stall warm pod start"
         );
         assert_eq!(
             pod.service_account_name.as_deref(),
@@ -600,6 +640,13 @@ mod tests {
             Some(MIRROR_MOUNT_DIR)
         );
         assert_eq!(envs.get("DJINN_WARM_PROJECT_ID").copied(), Some("proj-xyz"));
+        // The in-Pod warm sizes its per-step cargo budgets against the Job's
+        // own activeDeadlineSeconds; the two must be the same number or a step
+        // bound could silently exceed the deadline that kills the Pod.
+        assert_eq!(
+            envs.get("DJINN_WARM_JOB_DEADLINE_SECONDS").copied(),
+            Some(cfg.warm_job_timeout_seconds.to_string().as_str()),
+        );
         // DJINN_SERVER_ADDR is intentionally absent — `warm-graph` lives
         // on a disjoint subcommand whose `WorkerDefaultArgs` are not
         // parsed, so any residual envs would only be noise.
@@ -775,6 +822,29 @@ mod tests {
         // than an accidental assertion of the default timeout.
         assert_eq!(spec.active_deadline_seconds, Some(1_237));
         assert_eq!(spec.backoff_limit, Some(0));
+        {
+            // A non-default deadline must reach the in-Pod warm verbatim: the
+            // per-step cargo budgets clamp against this value, so a stale or
+            // absent projection would let a step outlive the Job.
+            let projected: BTreeMap<&str, &str> = spec
+                .template
+                .spec
+                .as_ref()
+                .expect("pod spec")
+                .containers
+                .first()
+                .expect("warm container")
+                .env
+                .as_ref()
+                .expect("container environment")
+                .iter()
+                .map(|e| (e.name.as_str(), e.value.as_deref().unwrap_or_default()))
+                .collect();
+            assert_eq!(
+                projected.get("DJINN_WARM_JOB_DEADLINE_SECONDS").copied(),
+                Some("1237"),
+            );
+        }
 
         let pod = spec.template.spec.as_ref().expect("pod spec");
         let container = pod.containers.first().expect("warm container");

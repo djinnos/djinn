@@ -115,11 +115,10 @@ pub(crate) async fn call_shell(
         return Err(msg.to_string());
     }
 
-    // GateGuard shell policy: classify destructive commands for workers.
-    // Runs after cargo steering and before any subprocess execution.
-    // Non-worker roles pass through unconditionally.
-    let session_id = worktree_path.display().to_string();
-    gate_guard_shell_check(state, session_role, &session_id, &p.command).await?;
+    // GateGuard shell policy: classify destructive commands for workers, plus
+    // the advisory build-drift soft gate. Runs after cargo steering and before
+    // any subprocess execution. Non-worker roles pass through unconditionally.
+    gate_guard_shell_check(state, session_role, worktree_path, &p.command).await?;
 
     let timeout_ms = effective_shell_timeout_ms(p.timeout_ms, &p.command);
 
@@ -218,8 +217,22 @@ pub(crate) async fn call_shell(
     let clock = SystemClock::new();
     let started = clock.now_instant();
 
-    // Cargo classification is observation-only. Every production shell uses
-    // the immutable broker-backed task-run launch context.
+    // Cargo classification is observation-only.
+    //
+    // Two real execution paths, and BOTH must work in production (task grkq):
+    //
+    //   * `Some(launch)` — the cgroup-launcher sidecar came up and the worker
+    //     completed its handshake, so the command is launched by the broker into
+    //     a delegated cgroup leaf and is eligible for a CPU lease lift.
+    //   * `None` — no launcher (it is not rendered by default, the pod predates
+    //     it, this is a local/non-pod run, or the handshake failed closed). The
+    //     command runs in-process at whatever quota the pod itself has, i.e.
+    //     unleased. This arm used to be `#[cfg(test)]`-only, with production
+    //     returning "broker-backed shell launch context is not configured" —
+    //     which turned any launcher problem into EVERY shell command failing,
+    //     while the surrounding doc comments claimed a fallback existed. It is
+    //     now a genuine production path; degrading to unleased execution is the
+    //     documented contract.
     let runner_result = if let Some(launch) = state.shell_launch.as_ref() {
         launch
             .runner()
@@ -236,21 +249,18 @@ pub(crate) async fn call_shell(
                 )))
             })
     } else {
-        #[cfg(test)]
-        {
-            crate::process::output_with_kill_cancellable(
-                cmd,
-                Duration::from_millis(timeout_ms),
-                child_token,
-            )
-            .await
-        }
-        #[cfg(not(test))]
-        {
-            Err(crate::process::ProcessRunError::Spawn(
-                std::io::Error::other("broker-backed shell launch context is not configured"),
-            ))
-        }
+        // Put the child in its own process group BEFORE spawning. The in-process
+        // runner's timeout/cancellation cleanup signals `-pgid`, so without this
+        // the child shares the worker's group and the whole TERM/grace/KILL
+        // sequence targets a process group that does not exist — a timed-out or
+        // cancelled command would simply keep running.
+        crate::process::isolate_process_group(&mut cmd);
+        crate::process::output_with_kill_cancellable(
+            cmd,
+            Duration::from_millis(timeout_ms),
+            child_token,
+        )
+        .await
     };
 
     // Structurally finish exactly one cargo observation from the single

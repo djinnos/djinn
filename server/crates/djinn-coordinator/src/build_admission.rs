@@ -18,11 +18,13 @@ use djinn_db::{
     AdmissionDomain, AdmissionJournalKey, AdmissionJournalRepository, AdmissionJournalRow,
     AdmissionRecoveryResult, AdmissionState, AdmissionWorkloadKind, CreateStartedInput,
     ReserveAdmissionInput, ReserveAdmissionResult, TerminalAdmissionInput, UidFencedAdmissionInput,
+    V0Mode, V1Mode,
 };
 use djinn_k8s::{
     WarmAdmission, WarmAdmissionError, WarmAdmissionPermit, WarmAdmissionRequest,
     WarmAdmissionTransition,
 };
+use djinn_runtime::RoleResourceClass;
 use tokio::sync::{Mutex, Notify};
 
 /// Policy applied at the coordinator admission boundary.
@@ -56,20 +58,72 @@ impl BuildAdmissionMode {
     }
 }
 
-/// Typed classification captured before dispatch; only the audited bypass weighs zero.
+/// Smallest legal reference cap. A cap of zero would deny all admission.
+pub const MIN_ADMISSION_CAP: i64 = 1;
+
+/// Largest legal reference cap. A sane upper bound that rejects an obviously
+/// mistyped configuration up front rather than letting it reach the durable row.
+pub const MAX_ADMISSION_CAP: i64 = 4096;
+
+/// Validate an admission-epoch configuration before it is written durably.
+///
+/// Two rules are enforced up front so a bad configuration never reaches the
+/// durable handoff row:
+///
+/// - The illegal mode combination in which neither authority enforces
+///   (`v0 ∈ {observe, disabled} ∧ v1 ∈ {off, shadow}`) is rejected: something
+///   must actually enforce the cap.
+/// - The reference cap must be within `[MIN_ADMISSION_CAP, MAX_ADMISSION_CAP]`.
+pub fn validate_admission_config(v0: V0Mode, v1: V1Mode, cap: i64) -> Result<(), String> {
+    if !v0.is_enforcing() && !v1.is_enforcing() {
+        return Err(format!(
+            "illegal admission mode combination: neither authority enforces \
+             (v0={v0:?}, v1={v1:?}); at least one of v0 or v1 must enforce the cap"
+        ));
+    }
+    if !(MIN_ADMISSION_CAP..=MAX_ADMISSION_CAP).contains(&cap) {
+        return Err(format!(
+            "admission cap {cap} is out of range [{MIN_ADMISSION_CAP}, {MAX_ADMISSION_CAP}]"
+        ));
+    }
+    Ok(())
+}
+
+/// Typed classification captured before dispatch. Two classes weigh zero: the
+/// explicitly audited [`BuildWorkloadKind::NonBuild`] bypass, and a task-run
+/// whose role is [`RoleResourceClass::Light`] (see [`TaskRunRole`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BuildWorkloadKind {
     TaskRun {
         role: TaskRunRole,
     },
     GraphWarmJob,
-    /// Explicit, auditable non-build work. This is the only zero-slot class.
+    /// Explicit, auditable non-build work.
     NonBuild {
         audit_reason: &'static str,
     },
 }
 
-/// All currently dispatchable task-run roles are build-producing work.
+/// Audit reason recorded when a Light (orchestration-only) task-run is admitted
+/// without reserving a build slot.
+///
+/// Distinct and greppable on purpose: it is the single string that explains why
+/// an admitted task-run left no journal row behind.
+pub const LIGHT_ROLE_AUDIT_REASON: &str =
+    "light role: orchestration-only, never runs the project toolchain";
+
+/// Every task-run role the coordinator can dispatch.
+///
+/// These roles are NOT uniformly build-producing. Only Worker and Architect
+/// (and Verifier, which is an in-pod stage — see [`TaskRunRole::parse`]) run the
+/// project's compile/test toolchain; Planner, Reviewer, Lead and the refinement
+/// tribunal (Advocate/Adversary/Judge) are orchestration-only. The distinction
+/// is owned by [`djinn_runtime::RoleResourceClass`] — the single classifier
+/// shared with `djinn-k8s` pod sizing — and reached here through
+/// [`TaskRunRole::resource_class`]. Admission consumes a build slot only for
+/// [`RoleResourceClass::BuildCapable`]: with a production cap of 3 on a 12-vCPU
+/// node, charging a Planner or a tribunal round a slot would queue it behind
+/// builds it never competes with and collapse throughput.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TaskRunRole {
     Worker,
@@ -84,6 +138,20 @@ pub enum TaskRunRole {
 
 impl TaskRunRole {
     /// Classify a known coordinator role. Unknown and missing values fail closed.
+    ///
+    /// There is deliberately no `"verifier"` arm. `djinn_runtime::RoleKind`
+    /// carries a `Verifier`, but it is an IN-POD supervisor stage, not a
+    /// coordinator dispatch role: `djinn_roles::AgentType` has no `Verifier`
+    /// variant, `RoleRegistry::new` registers none, and the agent maps
+    /// `RoleKind::Verifier` back onto `AgentType::Worker`
+    /// (`djinn-agent/src/actors/slot/lifecycle/role_overrides.rs`,
+    /// `djinn-agent/src/supervisor_impl/stage.rs`). Every production caller of
+    /// `admit_task_run` passes either a `RoleRegistry` dispatch role, the literal
+    /// `"planner"` (`dispatch/retry.rs`), or a refinement `agent_type`
+    /// (`advocate`/`adversary`/`judge`) — never `"verifier"`. A verifier's
+    /// compile therefore runs inside a Worker task-run that already holds a slot.
+    /// If a verifier ever becomes separately dispatchable it must be added here
+    /// as build-capable; until then adding it would be dead classification.
     #[must_use]
     pub fn parse(value: Option<&str>) -> Option<Self> {
         match value {
@@ -97,6 +165,32 @@ impl TaskRunRole {
             Some("judge") => Some(Self::Judge),
             _ => None,
         }
+    }
+
+    /// Canonical lowercase dispatch-role string; the exact inverse of
+    /// [`Self::parse`], which the round-trip test locks.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Worker => "worker",
+            Self::Reviewer => "reviewer",
+            Self::Lead => "lead",
+            Self::Planner => "planner",
+            Self::Architect => "architect",
+            Self::Advocate => "advocate",
+            Self::Adversary => "adversary",
+            Self::Judge => "judge",
+        }
+    }
+
+    /// Whether this role's task-run may run the project's compile/test toolchain.
+    ///
+    /// Delegates to [`djinn_runtime::RoleResourceClass`] rather than keeping a
+    /// second table here: pod sizing and build admission must never disagree
+    /// about what "light" means.
+    #[must_use]
+    pub fn resource_class(self) -> RoleResourceClass {
+        RoleResourceClass::for_role_name(self.as_str())
     }
 }
 
@@ -123,6 +217,24 @@ pub enum BuildAdmissionDecision {
     },
     /// Classification was absent or unrecognized. The observation counter is bounded.
     Unclassified,
+}
+
+/// Observe-only disk-capacity adapter for build admission (proposal nquz,
+/// phase 1 — DARK).
+///
+/// A source, when installed, returns what disk admission WOULD do for a build
+/// request — never denying and never allocating. In this phase no production
+/// path installs a source, so the disk dimension is inert; it exists so the
+/// observe substrate and its tests can measure the future policy. The concrete
+/// decision logic lives in [`crate::disk_admission`].
+#[async_trait]
+pub trait DiskCapacitySource: Send + Sync {
+    /// Return the observed disk decision for a build request, or `None` when no
+    /// capacity sample is available (which the caller treats as no-op).
+    async fn observe(
+        &self,
+        request: &BuildAdmissionRequest,
+    ) -> Option<crate::disk_admission::DiskObservation>;
 }
 
 /// Bounded, deterministic readiness reason for Enforce admission gating.
@@ -216,6 +328,14 @@ pub struct BuildAdmissionController {
     permits_by_task_run: Mutex<HashMap<String, WarmAdmissionPermit>>,
     unclassified_observations: Mutex<u64>,
     would_defer_observations: Mutex<u64>,
+    /// Bounded observe-only disk would-defer signal (proposal nquz, phase 1).
+    ///
+    /// DARK by default: it only advances when a [`DiskCapacitySource`] has been
+    /// installed, which no production path does in this phase. The disk
+    /// dimension NEVER changes an admission decision — it records what disk
+    /// admission WOULD do.
+    disk_would_defer_observations: Mutex<u64>,
+    disk_capacity_source: std::sync::Mutex<Option<Arc<dyn DiskCapacitySource>>>,
     /// Readiness gate flags. The bounded [`BuildAdmissionReadiness`] reason is
     /// DERIVED from these flags in fail-closed priority order, so no caller can
     /// mark Enforce healthy without every real startup check completing:
@@ -277,6 +397,8 @@ impl BuildAdmissionController {
             permits_by_task_run: Mutex::new(HashMap::new()),
             unclassified_observations: Mutex::new(0),
             would_defer_observations: Mutex::new(0),
+            disk_would_defer_observations: Mutex::new(0),
+            disk_capacity_source: std::sync::Mutex::new(None),
             journal_recovered: AtomicBool::new(true),
             journal_healthy: AtomicBool::new(true),
             create_unknown_pending: AtomicU64::new(0),
@@ -486,6 +608,57 @@ impl BuildAdmissionController {
         *self.would_defer_observations.lock().await
     }
 
+    /// Install the observe-only disk-capacity source (proposal nquz).
+    ///
+    /// Phase-1 production never calls this; it exists so the dark disk dimension
+    /// and its tests can run. Installing a source can only add telemetry — it
+    /// can never turn a permit into a denial.
+    pub fn set_disk_capacity_source(&self, source: Arc<dyn DiskCapacitySource>) {
+        *self
+            .disk_capacity_source
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(source);
+    }
+
+    fn disk_capacity_source(&self) -> Option<Arc<dyn DiskCapacitySource>> {
+        self.disk_capacity_source
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    /// Bounded observe-only signal that disk admission WOULD have deferred a
+    /// build; values saturate at 1024. Zero unless a source is installed.
+    pub async fn disk_would_defer_observation_count(&self) -> u64 {
+        *self.disk_would_defer_observations.lock().await
+    }
+
+    /// Record what disk admission WOULD do for a granted build. Never denies and
+    /// never allocates: it only advances a bounded counter and emits a typed
+    /// queue-reason metric when a source reports a would-defer.
+    async fn observe_disk_admission(&self, request: &BuildAdmissionRequest) {
+        let Some(source) = self.disk_capacity_source() else {
+            return;
+        };
+        let Some(observation) = source.observe(request).await else {
+            return;
+        };
+        if let Some(reason) = observation.would_defer {
+            let mut count = self.disk_would_defer_observations.lock().await;
+            *count = count.saturating_add(1).min(1024);
+            drop(count);
+            if self.process_metrics_enabled() {
+                djinn_telemetry::run_dir::increment_queue_reason(reason.as_metric());
+            }
+            tracing::debug!(
+                reason = reason.as_metric(),
+                work_id = %request.work_id,
+                projected_reservation_bytes = observation.projected_reservation_bytes,
+                "disk admission would defer this build (observe-only; dispatch unaffected)"
+            );
+        }
+    }
+
     /// Export bounded admission metrics from the durable journal snapshot.
     /// InvocationBuild rows are intentionally excluded from all v0 views.
     pub async fn publish_metrics(&self) {
@@ -565,7 +738,49 @@ impl BuildAdmissionController {
                 cap: self.cap,
             });
         }
-        let workload_kind = match request.kind {
+        // Capture an observe-only copy before any field of `request` is moved.
+        // Only cloned when the dark disk dimension is armed (never in phase-1
+        // production), so the default path pays nothing.
+        let disk_observe_request = self
+            .disk_capacity_source()
+            .is_some()
+            .then(|| request.clone());
+        let kind = request.kind;
+        let workload_kind = match kind {
+            // A Light task-run is orchestration-only: it never runs the
+            // project's compile/test toolchain, so it weighs zero slots. It is
+            // admitted the same way the audited NonBuild bypass is — a permit
+            // with no journal reservation, via `permit_without_reservation` —
+            // which means it can never be Denied at the cap and its terminal
+            // transition is a no-op that cannot touch occupancy (the permit is
+            // recorded `durable: false`, and occupancy is always derived from
+            // the journal, never from in-memory permits). Warm builds and every
+            // build-capable role fall through and reserve normally; an unknown
+            // role never reaches here at all (`admit_task_run` rejects it as
+            // Unclassified before constructing the request).
+            BuildWorkloadKind::TaskRun { role } if !role.resource_class().consumes_build_slot() => {
+                let key = AdmissionJournalKey {
+                    domain: request.domain,
+                    work_id: request.work_id,
+                    generation: request.generation,
+                };
+                let permit_key = permit_key(&key);
+                if let Some(permit) = self.permits_by_key.lock().await.get(&permit_key).cloned() {
+                    return Ok(BuildAdmissionDecision::Permitted {
+                        permit,
+                        idempotent: true,
+                    });
+                }
+                tracing::debug!(
+                    role = role.as_str(),
+                    resource_class = role.resource_class().as_str(),
+                    audit_reason = LIGHT_ROLE_AUDIT_REASON,
+                    "build admission: zero-slot task-run permitted without reservation"
+                );
+                return self
+                    .permit_without_reservation(key, permit_key, request.object_name)
+                    .await;
+            }
             BuildWorkloadKind::TaskRun { .. } => match request.domain {
                 AdmissionDomain::TaskObservation => AdmissionWorkloadKind::Task,
                 AdmissionDomain::InvocationBuild => AdmissionWorkloadKind::Invocation,
@@ -707,6 +922,11 @@ impl BuildAdmissionController {
         // A durable Reserved row occupies immediately; do not wait for a
         // later cap denial or terminal release to refresh the gauge.
         self.publish_metrics().await;
+        // Observe-only disk dimension: records what disk admission WOULD do for
+        // this granted build without ever changing the decision above.
+        if let Some(observe_request) = disk_observe_request.as_ref() {
+            self.observe_disk_admission(observe_request).await;
+        }
         Ok(BuildAdmissionDecision::Permitted { permit, idempotent })
     }
 
@@ -1285,7 +1505,34 @@ fn unavailable(error: impl std::fmt::Display) -> WarmAdmissionError {
 }
 
 fn permit_key(key: &AdmissionJournalKey) -> String {
+    admission_generation_key(key)
+}
+
+/// Canonical string identity for one admission generation.
+///
+/// This is the single source of truth for the `generation_key` used by the
+/// durable admission-handoff per-generation acknowledgements
+/// ([`djinn_db::AdmissionHandoffRepository::record_generation_ack`]) and the
+/// `required_generations` set on the invocation-primary edge. Both the producer
+/// of that required set and every live generation that acknowledges an epoch
+/// MUST format their key through this function so the two byte-match. It is the
+/// same `{domain:?}:{work_id}:{generation}` form used for in-memory permit
+/// bookkeeping.
+#[must_use]
+pub fn admission_generation_key(key: &AdmissionJournalKey) -> String {
     format!("{:?}:{}:{}", key.domain, key.work_id, key.generation)
+}
+
+/// Convenience [`admission_generation_key`] for a task-run generation, whose
+/// admission domain is always [`AdmissionDomain::TaskObservation`] and whose
+/// generation counter is `task.reopen_count`.
+#[must_use]
+pub fn task_run_generation_key(task_id: &str, generation: i64) -> String {
+    admission_generation_key(&AdmissionJournalKey {
+        domain: AdmissionDomain::TaskObservation,
+        work_id: task_id.to_owned(),
+        generation,
+    })
 }
 
 #[async_trait]
@@ -1361,6 +1608,37 @@ mod tests {
     use futures::FutureExt;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::Notify;
+
+    #[test]
+    fn validate_admission_config_rejects_illegal_combo_and_out_of_range_cap() {
+        // At least one enforcing authority is legal across the cap range.
+        assert!(validate_admission_config(V0Mode::Enforce, V1Mode::Off, 1).is_ok());
+        assert!(validate_admission_config(V0Mode::Enforce, V1Mode::Shadow, 8).is_ok());
+        assert!(validate_admission_config(V0Mode::Observe, V1Mode::Enforce, 3).is_ok());
+        assert!(
+            validate_admission_config(V0Mode::Disabled, V1Mode::Enforce, MAX_ADMISSION_CAP).is_ok()
+        );
+
+        // Neither authority enforcing is illegal for every non-enforcing pairing.
+        for (v0, v1) in [
+            (V0Mode::Observe, V1Mode::Off),
+            (V0Mode::Observe, V1Mode::Shadow),
+            (V0Mode::Disabled, V1Mode::Off),
+            (V0Mode::Disabled, V1Mode::Shadow),
+        ] {
+            assert!(
+                validate_admission_config(v0, v1, 4).is_err(),
+                "{v0:?}/{v1:?} must be rejected"
+            );
+        }
+
+        // Cap out of range is rejected even with an enforcing authority.
+        assert!(validate_admission_config(V0Mode::Enforce, V1Mode::Off, 0).is_err());
+        assert!(validate_admission_config(V0Mode::Enforce, V1Mode::Off, -1).is_err());
+        assert!(
+            validate_admission_config(V0Mode::Enforce, V1Mode::Off, MAX_ADMISSION_CAP + 1).is_err()
+        );
+    }
 
     fn controller(mode: BuildAdmissionMode, cap: i64) -> BuildAdmissionController {
         BuildAdmissionController::new(
@@ -2667,6 +2945,66 @@ mod tests {
             value >= 1.0,
             "would-defer counter must increment when Observe sees a would-defer"
         );
+    }
+
+    struct StubDiskSource {
+        observation: Option<crate::disk_admission::DiskObservation>,
+    }
+
+    #[async_trait]
+    impl DiskCapacitySource for StubDiskSource {
+        async fn observe(
+            &self,
+            _request: &BuildAdmissionRequest,
+        ) -> Option<crate::disk_admission::DiskObservation> {
+            self.observation
+        }
+    }
+
+    #[tokio::test]
+    async fn disk_dimension_records_would_defer_without_denial() {
+        use crate::disk_admission::{DiskObservation, DiskQueueReason};
+        let c = controller(BuildAdmissionMode::Observe, 4);
+        c.set_disk_capacity_source(Arc::new(StubDiskSource {
+            observation: Some(DiskObservation {
+                would_defer: Some(DiskQueueReason::DiskPressure),
+                projected_reservation_bytes: 8_589_934_592,
+            }),
+        }));
+        // The build is still permitted — the disk dimension never denies.
+        let permit = WarmAdmission::admit(&c, warm("disk-a")).await;
+        assert!(permit.is_ok(), "observe-only disk dimension must not deny");
+        assert_eq!(c.disk_would_defer_observation_count().await, 1);
+    }
+
+    #[tokio::test]
+    async fn disk_dimension_silent_when_source_grants_or_has_no_sample() {
+        use crate::disk_admission::DiskObservation;
+        let granting = controller(BuildAdmissionMode::Observe, 4);
+        granting.set_disk_capacity_source(Arc::new(StubDiskSource {
+            observation: Some(DiskObservation {
+                would_defer: None,
+                projected_reservation_bytes: 0,
+            }),
+        }));
+        WarmAdmission::admit(&granting, warm("disk-grant"))
+            .await
+            .unwrap();
+        assert_eq!(granting.disk_would_defer_observation_count().await, 0);
+
+        let no_sample = controller(BuildAdmissionMode::Observe, 4);
+        no_sample.set_disk_capacity_source(Arc::new(StubDiskSource { observation: None }));
+        WarmAdmission::admit(&no_sample, warm("disk-none"))
+            .await
+            .unwrap();
+        assert_eq!(no_sample.disk_would_defer_observation_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn disk_dimension_is_dark_without_a_source() {
+        let c = controller(BuildAdmissionMode::Observe, 4);
+        WarmAdmission::admit(&c, warm("dark")).await.unwrap();
+        assert_eq!(c.disk_would_defer_observation_count().await, 0);
     }
 
     #[tokio::test]

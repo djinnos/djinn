@@ -30,6 +30,93 @@ use super::refinement_dispatch::RefinementSession;
 use super::refinement_lint_evidence::advocate_lint_rejection_from_session;
 pub(super) use super::refinement_lint_evidence::format_advocate_lint_correction_context;
 
+/// Target-scoped ordering probes for the repository-backed outcome matrix.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum OutcomeTestSeamPoint {
+    TaskReload,
+    ProposalRead,
+    DebateRead,
+    DurableProgress,
+    ParkPersistence,
+    TerminalPersistence,
+}
+
+#[cfg(test)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(super) struct OutcomeTestSeamCounters {
+    pub(super) task_reloads: usize,
+    pub(super) proposal_reads: usize,
+    pub(super) debate_reads: usize,
+    pub(super) progress_writes: usize,
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct OutcomeTestSeamState {
+    targets:
+        std::collections::HashMap<String, (OutcomeTestSeamCounters, Option<OutcomeTestSeamPoint>)>,
+}
+
+#[cfg(test)]
+static OUTCOME_TEST_SEAM: std::sync::LazyLock<std::sync::Mutex<OutcomeTestSeamState>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(OutcomeTestSeamState::default()));
+
+#[cfg(test)]
+pub(super) fn reset_outcome_test_seam(target: &str) {
+    OUTCOME_TEST_SEAM
+        .lock()
+        .expect("outcome seam lock")
+        .targets
+        .remove(target);
+}
+
+#[cfg(test)]
+pub(super) fn inject_outcome_test_failure(target: &str, point: OutcomeTestSeamPoint) {
+    OUTCOME_TEST_SEAM
+        .lock()
+        .expect("outcome seam lock")
+        .targets
+        .entry(target.to_owned())
+        .or_default()
+        .1 = Some(point);
+}
+
+#[cfg(test)]
+pub(super) fn outcome_test_seam_counters(target: &str) -> OutcomeTestSeamCounters {
+    OUTCOME_TEST_SEAM
+        .lock()
+        .expect("outcome seam lock")
+        .targets
+        .get(target)
+        .map(|(counts, _)| *counts)
+        .unwrap_or_default()
+}
+
+#[cfg(test)]
+fn outcome_test_seam(target: &str, point: OutcomeTestSeamPoint) -> bool {
+    let mut seam = OUTCOME_TEST_SEAM.lock().expect("outcome seam lock");
+    let (counts, failure) = seam.targets.entry(target.to_owned()).or_default();
+    match point {
+        OutcomeTestSeamPoint::TaskReload => counts.task_reloads += 1,
+        OutcomeTestSeamPoint::ProposalRead => counts.proposal_reads += 1,
+        OutcomeTestSeamPoint::DebateRead => counts.debate_reads += 1,
+        OutcomeTestSeamPoint::DurableProgress => counts.progress_writes += 1,
+        OutcomeTestSeamPoint::ParkPersistence | OutcomeTestSeamPoint::TerminalPersistence => {}
+    }
+    // Disarm only on a match. Several probes share one target key and are
+    // crossed in a fixed order (a proposal is read before its durable progress
+    // is written), so an unconditional `take()` lets the earliest probe consume
+    // an injection aimed at a later one — the later point then never fires and
+    // the call under test wrongly succeeds.
+    if *failure == Some(point) {
+        *failure = None;
+        true
+    } else {
+        false
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum RefinementOutcomeApplication {
     Ignored,
@@ -186,6 +273,10 @@ impl CoordinatorActor {
             return OutcomeFence::Ignored;
         }
         let event_bus = crate::events::event_bus_for(&self.events_tx);
+        #[cfg(test)]
+        if outcome_test_seam(&session.task_id, OutcomeTestSeamPoint::TaskReload) {
+            return OutcomeFence::Retryable;
+        }
         let task = match TaskRepository::new(self.db.clone(), event_bus.clone())
             .get(&session.task_id)
             .await
@@ -278,6 +369,10 @@ impl CoordinatorActor {
         );
         let result = match candidate.phase {
             RefinementPhase::AwaitingHumanReview => {
+                #[cfg(test)]
+                if outcome_test_seam(&source.run_id, OutcomeTestSeamPoint::ParkPersistence) {
+                    return false;
+                }
                 repo.park_refinement_run_from_intent(ParkRefinementRunFromIntentRequest {
                     source: source.clone(),
                     kind: RefinementParkKind::AwaitingReview,
@@ -285,6 +380,10 @@ impl CoordinatorActor {
                 .await
             }
             RefinementPhase::AwaitingEvidence => {
+                #[cfg(test)]
+                if outcome_test_seam(&source.run_id, OutcomeTestSeamPoint::ParkPersistence) {
+                    return false;
+                }
                 repo.park_refinement_run_from_intent(ParkRefinementRunFromIntentRequest {
                     source: source.clone(),
                     kind: RefinementParkKind::AwaitingEvidence,
@@ -292,6 +391,10 @@ impl CoordinatorActor {
                 .await
             }
             RefinementPhase::Complete => {
+                #[cfg(test)]
+                if outcome_test_seam(&source.run_id, OutcomeTestSeamPoint::TerminalPersistence) {
+                    return false;
+                }
                 repo.terminal_refinement_run_from_intent(TerminalRefinementRunFromIntentRequest {
                     source: source.clone(),
                     reason: durable_stop_reason(candidate.stop_reason.as_ref()),
@@ -359,6 +462,10 @@ impl CoordinatorActor {
             self.db.clone(),
             crate::events::event_bus_for(&self.events_tx),
         );
+        #[cfg(test)]
+        if outcome_test_seam(proposal_id, OutcomeTestSeamPoint::ProposalRead) {
+            return None;
+        }
         let proposal = match repo.get(proposal_id).await {
             Ok(Some(value)) => value,
             Ok(None) => {
@@ -395,6 +502,10 @@ impl CoordinatorActor {
                 .get(run_id)
                 .map(|session| session.model_id.clone());
             let metadata = build_revision_event_metadata(state.current_round, model_id.as_deref());
+            #[cfg(test)]
+            if outcome_test_seam(proposal_id, OutcomeTestSeamPoint::DurableProgress) {
+                return None;
+            }
             if let Err(error) = repo
                 .set_spec_revisions_event_metadata_range(
                     proposal_id,
@@ -425,6 +536,10 @@ impl CoordinatorActor {
             self.db.clone(),
             crate::events::event_bus_for(&self.events_tx),
         );
+        #[cfg(test)]
+        if outcome_test_seam(proposal_id, OutcomeTestSeamPoint::DebateRead) {
+            return None;
+        }
         let entries = match repo.debate_trail(proposal_id).await {
             Ok(value) => value,
             Err(error) => {
@@ -508,6 +623,10 @@ impl CoordinatorActor {
             self.db.clone(),
             crate::events::event_bus_for(&self.events_tx),
         );
+        #[cfg(test)]
+        if outcome_test_seam(proposal_id, OutcomeTestSeamPoint::DebateRead) {
+            return None;
+        }
         let entries = match repo.debate_trail(proposal_id).await {
             Ok(value) => value,
             Err(error) => {

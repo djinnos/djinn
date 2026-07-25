@@ -5,6 +5,8 @@ use std::collections::BTreeMap;
 use k8s_openapi::api::core::v1::Toleration;
 use serde::{Deserialize, Serialize};
 
+use crate::launcher::CgroupLauncherMode;
+
 /// Configuration for `KubernetesRuntime`.
 ///
 /// Loaded once at djinn-server boot and cloned into the runtime. Fields
@@ -22,16 +24,40 @@ pub struct KubernetesConfig {
     /// ServiceAccount mounted into each worker Pod. Provides the projected
     /// token authenticating back to djinn-server.
     pub service_account: String,
-    /// CPU request (e.g. `"2"`).
+    /// CPU **request** for a *build-capable* task-run Pod (Worker / Verifier /
+    /// Architect and their retry/resume flows, plus the fail-safe default for
+    /// any unknown/new role — see [`crate::launcher::RoleResourceClass`]).
+    ///
+    /// v1 leases default: `"1"`. The `cpu.weight` (CFS share) a container gets
+    /// derives from its REQUEST, so a build-capable pod that will actually
+    /// compile needs a full core of guaranteed share. Prod overrides this to
+    /// `4` via `DJINN_K8S_CPU_REQUEST` (see the taskrun-pod-cpu-4 benchmark
+    /// note) — the env override is preserved, so this default only sets the
+    /// out-of-the-box value.
     pub cpu_request: String,
-    /// CPU limit (e.g. `"2"`).
+    /// CPU **request** for a *light* task-run Pod (Planner / Reviewer / Lead /
+    /// every Refinement sub-role / grooming). These pods orchestrate an agent
+    /// session and never run the project's compile/test toolchain, so they get
+    /// a fractional-core request. v1 leases default: `"300m"`. Overridable via
+    /// `DJINN_K8S_LIGHT_CPU_REQUEST`.
+    ///
+    /// Only the CPU REQUEST is role-classed: the CPU **limit**
+    /// ([`Self::cpu_limit`]) and both memory bounds are identical for light and
+    /// build-capable pods ("same limits everywhere"), and the launcher/broker
+    /// contract is identical regardless of role.
+    pub light_cpu_request: String,
+    /// CPU limit shared by both role classes (light and build-capable). v1
+    /// leases default: `"4"`. The limit is deliberately NOT role-classed — only
+    /// the guaranteed request differs by role. Overridable via
+    /// `DJINN_K8S_CPU_LIMIT`.
     pub cpu_limit: String,
-    /// Memory request (e.g. `"4Gi"`).
+    /// Memory request shared by both role classes. v1 leases default: `"2Gi"`.
+    /// Overridable via `DJINN_K8S_MEMORY_REQUEST` (prod projects a larger
+    /// Burstable value — see the taskrun-memory-burstable note).
     pub memory_request: String,
-    /// Memory limit (e.g. `"4Gi"`).
+    /// Memory limit shared by both role classes. v1 leases default: `"4Gi"`.
+    /// Overridable via `DJINN_K8S_MEMORY_LIMIT`.
     pub memory_limit: String,
-    /// TTL (seconds) applied to completed Jobs for auto-GC.
-    pub ttl_seconds_after_finished: i32,
     /// RWX PVC backing the task-run mirror (mounted read-only at `/mirror`).
     pub mirror_pvc: String,
     /// RWX PVC holding canonical project roots. Task-run Pods mount only an
@@ -141,6 +167,51 @@ pub struct KubernetesConfig {
     /// `node_selector` above. Surfaced in the chart as
     /// `resources.taskrun.tolerations`.
     pub tolerations: Vec<Toleration>,
+    /// Cgroup-v2 delegation profile the enforcement launcher runs under. The
+    /// only profile v1 supports is `"cgroup-v2-cpu-only"`
+    /// ([`crate::launcher::CGROUP_PROFILE_V2_CPU_ONLY`]): a cgroup-v2 mount with
+    /// a delegated root owned by uid 0 and exactly the `cpu` controller enabled
+    /// for children. [`crate::launcher::validate_enforcement_render`] maps this
+    /// string onto the SAME `Readiness::validate` the launcher runs in-pod, so a
+    /// misconfigured node profile fails closed at dispatch BEFORE any user code
+    /// executes. Overridable via `DJINN_K8S_CGROUP_DELEGATION_PROFILE`.
+    pub cgroup_delegation_profile: String,
+    /// Administrator-configured hard bounds for per-project `build_resources`
+    /// overrides on the **task-run** Pod. Empty (the default) leaves every axis
+    /// unbounded — a per-project override is only bounded by request ≤ limit.
+    /// A resolved request below `cpu_min`/`memory_min` or a resolved limit above
+    /// `cpu_max`/`memory_max` fails closed at resolution (no Job created).
+    /// Overridable via `DJINN_K8S_TASK_{CPU,MEMORY}_{MIN,MAX}`.
+    #[serde(default)]
+    pub task_resource_bounds: crate::build_resources::ResourceBounds,
+    /// Administrator-configured hard bounds for per-project `build_resources`
+    /// overrides on the **warm** Pod. Same semantics as
+    /// [`Self::task_resource_bounds`]; overridable via
+    /// `DJINN_K8S_WARM_{CPU,MEMORY}_{MIN,MAX}`.
+    #[serde(default)]
+    pub warm_resource_bounds: crate::build_resources::ResourceBounds,
+    /// Volume-ownership mode used for the workspace/cache/mirror surfaces. v1
+    /// requires `"fsgroup-on-root-mismatch"`
+    /// ([`crate::launcher::VOLUME_OWNERSHIP_ON_ROOT_MISMATCH`]): `fsGroup =
+    /// ARTIFACT_GID (1000)` re-owned only when the volume root gid mismatches.
+    /// Any other mode fails render validation. Overridable via
+    /// `DJINN_K8S_VOLUME_OWNERSHIP_MODE`.
+    pub volume_ownership_mode: String,
+    /// Whether a task-run Pod renders the cgroup-launcher sidecar.
+    ///
+    /// Defaults to [`CgroupLauncherMode::Disabled`]: no sidecar, no launcher
+    /// volumes, no launcher env, and the worker runs shell commands in-process
+    /// at the unleased quota. `required` is retained as the arming switch but is
+    /// currently rejected by [`crate::launcher::validate_enforcement_render`],
+    /// because the launcher security context this build renders lacks the
+    /// `CAP_SYS_ADMIN` the goxi runtime profile specifies, so the launcher
+    /// cannot establish its own cgroup2 mount. That is an unbuilt profile, not a
+    /// platform limit: with the designed capabilities the full leaf lifecycle
+    /// works (task grkq — see [`CgroupLauncherMode`] for the measured evidence).
+    /// Overridable via `DJINN_K8S_CGROUP_LAUNCHER_MODE`; an unrecognized value is
+    /// ignored with a warning rather than silently flipping enforcement.
+    #[serde(default)]
+    pub cgroup_launcher_mode: CgroupLauncherMode,
 }
 
 impl KubernetesConfig {
@@ -152,11 +223,16 @@ impl KubernetesConfig {
             image: "djinn-agent-runtime:dev".into(),
             image_pull_policy: "IfNotPresent".into(),
             service_account: "djinn-taskrun".into(),
-            cpu_request: "2".into(),
-            cpu_limit: "2".into(),
-            memory_request: "4Gi".into(),
+            // v1 leases role-classed CPU requests: build-capable pods request a
+            // full core; light (orchestration-only) pods request 300m. The CPU
+            // LIMIT and both memory bounds are shared across roles ("same limits
+            // everywhere"). Prod overrides cpu_request/cpu_limit/memory_* via
+            // the DJINN_K8S_* envs, which are all still honored in from_env().
+            cpu_request: "1".into(),
+            light_cpu_request: "300m".into(),
+            cpu_limit: "4".into(),
+            memory_request: "2Gi".into(),
             memory_limit: "4Gi".into(),
-            ttl_seconds_after_finished: 300,
             mirror_pvc: "djinn-mirror".into(),
             projects_pvc: "djinn-projects".into(),
             cache_pvc: "djinn-cache".into(),
@@ -183,6 +259,19 @@ impl KubernetesConfig {
             warm_memory_limit: "6Gi".into(),
             node_selector: BTreeMap::new(),
             tolerations: Vec::new(),
+            // v1 leases enforcement contract. Both fail render validation if set
+            // to anything the launcher's runtime readiness check would reject.
+            cgroup_delegation_profile: crate::launcher::CGROUP_PROFILE_V2_CPU_ONLY.into(),
+            volume_ownership_mode: crate::launcher::VOLUME_OWNERSHIP_ON_ROOT_MISMATCH.into(),
+            // Disabled by default: the rendered pod cannot obtain a delegated
+            // cgroup v2 subtree without privileges this contract refuses, so a
+            // mandatory sidecar would CrashLoopBackOff on every task run.
+            cgroup_launcher_mode: CgroupLauncherMode::Disabled,
+            // Unbounded by default: per-project build_resources overrides are
+            // gated only by request <= limit until an operator configures the
+            // per-kind DJINN_K8S_{TASK,WARM}_{CPU,MEMORY}_{MIN,MAX} envs.
+            task_resource_bounds: crate::build_resources::ResourceBounds::default(),
+            warm_resource_bounds: crate::build_resources::ResourceBounds::default(),
         }
     }
 
@@ -200,11 +289,11 @@ impl KubernetesConfig {
     /// | `DJINN_K8S_IMAGE` | `image` | `djinn-agent-runtime:dev` |
     /// | `DJINN_K8S_IMAGE_PULL_POLICY` | `image_pull_policy` | `IfNotPresent` |
     /// | `DJINN_K8S_SERVICE_ACCOUNT` | `service_account` | `djinn-taskrun` |
-    /// | `DJINN_K8S_CPU_REQUEST` | `cpu_request` | `2` |
-    /// | `DJINN_K8S_CPU_LIMIT` | `cpu_limit` | `2` |
-    /// | `DJINN_K8S_MEMORY_REQUEST` | `memory_request` | `4Gi` |
-    /// | `DJINN_K8S_MEMORY_LIMIT` | `memory_limit` | `4Gi` |
-    /// | `DJINN_K8S_TTL_SECONDS` | `ttl_seconds_after_finished` | `300` (parsed as `i32`) |
+    /// | `DJINN_K8S_CPU_REQUEST` | `cpu_request` (build-capable) | `1` |
+    /// | `DJINN_K8S_LIGHT_CPU_REQUEST` | `light_cpu_request` | `300m` |
+    /// | `DJINN_K8S_CPU_LIMIT` | `cpu_limit` (shared) | `4` |
+    /// | `DJINN_K8S_MEMORY_REQUEST` | `memory_request` (shared) | `2Gi` |
+    /// | `DJINN_K8S_MEMORY_LIMIT` | `memory_limit` (shared) | `4Gi` |
     /// | `DJINN_K8S_MIRROR_PVC` | `mirror_pvc` | `djinn-mirror` |
     /// | `DJINN_K8S_CACHE_PVC` | `cache_pvc` | `djinn-cache` |
     /// | `DJINN_K8S_SERVER_ADDR` | `server_addr` | `djinn.djinn.svc.cluster.local:8443` |
@@ -219,6 +308,9 @@ impl KubernetesConfig {
     /// | `DJINN_K8S_WARM_MEMORY_LIMIT` | `warm_memory_limit` | `6Gi` |
     /// | `DJINN_K8S_NODE_SELECTOR` | `node_selector` | `{}` (parsed as a JSON object of string→string) |
     /// | `DJINN_K8S_TOLERATIONS` | `tolerations` | `[]` (parsed as a JSON array of k8s `Toleration` objects) |
+    /// | `DJINN_K8S_CGROUP_DELEGATION_PROFILE` | `cgroup_delegation_profile` | `cgroup-v2-cpu-only` |
+    /// | `DJINN_K8S_VOLUME_OWNERSHIP_MODE` | `volume_ownership_mode` | `fsgroup-on-root-mismatch` |
+    /// | `DJINN_K8S_CGROUP_LAUNCHER_MODE` | `cgroup_launcher_mode` | `disabled` (`required` is currently rejected at render validation) |
     ///
     /// `DJINN_DATABASE_URL` is read from djinn-server's own environment (the
     /// Helm chart projects it via `envFrom: configMap djinn-config`) and
@@ -228,8 +320,6 @@ impl KubernetesConfig {
     /// Postgres instance and helpers like `resolve_role_overrides` /
     /// `build_prompt_context` succeed mid-run).
     ///
-    /// A malformed `DJINN_K8S_TTL_SECONDS` is logged at `warn` and falls
-    /// back to the default — the runtime still boots.
     pub fn from_env() -> Self {
         let mut cfg = Self::for_testing();
         if let Ok(v) = std::env::var("DJINN_K8S_NAMESPACE") {
@@ -247,6 +337,9 @@ impl KubernetesConfig {
         if let Ok(v) = std::env::var("DJINN_K8S_CPU_REQUEST") {
             cfg.cpu_request = v;
         }
+        if let Ok(v) = std::env::var("DJINN_K8S_LIGHT_CPU_REQUEST") {
+            cfg.light_cpu_request = v;
+        }
         if let Ok(v) = std::env::var("DJINN_K8S_CPU_LIMIT") {
             cfg.cpu_limit = v;
         }
@@ -255,16 +348,6 @@ impl KubernetesConfig {
         }
         if let Ok(v) = std::env::var("DJINN_K8S_MEMORY_LIMIT") {
             cfg.memory_limit = v;
-        }
-        if let Ok(v) = std::env::var("DJINN_K8S_TTL_SECONDS") {
-            match v.parse::<i32>() {
-                Ok(n) => cfg.ttl_seconds_after_finished = n,
-                Err(e) => tracing::warn!(
-                    value = %v,
-                    error = %e,
-                    "DJINN_K8S_TTL_SECONDS not a valid i32 — keeping default"
-                ),
-            }
         }
         if let Ok(v) = std::env::var("DJINN_K8S_MIRROR_PVC") {
             cfg.mirror_pvc = v;
@@ -357,6 +440,35 @@ impl KubernetesConfig {
                 ),
             }
         }
+        if let Ok(v) = std::env::var("DJINN_K8S_CGROUP_DELEGATION_PROFILE") {
+            cfg.cgroup_delegation_profile = v;
+        }
+        if let Ok(v) = std::env::var("DJINN_K8S_VOLUME_OWNERSHIP_MODE") {
+            cfg.volume_ownership_mode = v;
+        }
+        if let Ok(v) = std::env::var("DJINN_K8S_CGROUP_LAUNCHER_MODE") {
+            match CgroupLauncherMode::parse(&v) {
+                Some(mode) => cfg.cgroup_launcher_mode = mode,
+                // Keep the safe default rather than guessing: a typo must never
+                // arm (or silently disarm) the enforcement sidecar.
+                None => tracing::warn!(
+                    value = %v,
+                    "DJINN_K8S_CGROUP_LAUNCHER_MODE is not `disabled` or `required` — keeping default"
+                ),
+            }
+        }
+        // Per-project build_resources hard bounds (per Pod kind, per resource).
+        // Unset leaves the axis unbounded. Empty strings are ignored so an
+        // operator can clear a bound by exporting the var empty.
+        let bound = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
+        cfg.task_resource_bounds.cpu_min = bound("DJINN_K8S_TASK_CPU_MIN");
+        cfg.task_resource_bounds.cpu_max = bound("DJINN_K8S_TASK_CPU_MAX");
+        cfg.task_resource_bounds.memory_min = bound("DJINN_K8S_TASK_MEMORY_MIN");
+        cfg.task_resource_bounds.memory_max = bound("DJINN_K8S_TASK_MEMORY_MAX");
+        cfg.warm_resource_bounds.cpu_min = bound("DJINN_K8S_WARM_CPU_MIN");
+        cfg.warm_resource_bounds.cpu_max = bound("DJINN_K8S_WARM_CPU_MAX");
+        cfg.warm_resource_bounds.memory_min = bound("DJINN_K8S_WARM_MEMORY_MIN");
+        cfg.warm_resource_bounds.memory_max = bound("DJINN_K8S_WARM_MEMORY_MAX");
         cfg
     }
 }
@@ -365,10 +477,6 @@ impl KubernetesConfig {
 mod tests {
     use super::*;
 
-    // Both tests in this module mutate the same `DJINN_K8S_TTL_SECONDS`
-    // env var. `cargo test` runs tests in parallel threads within one
-    // process, so without a lock the two races: one test's set_var/
-    // remove_var can clobber the other's between set and from_env().
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     /// `from_env()` honors the env vars it documents.  This is a sanity
@@ -384,7 +492,6 @@ mod tests {
             std::env::set_var("DJINN_K8S_IMAGE", "repo/img:tag");
             std::env::set_var("DJINN_K8S_SERVER_ADDR", "djinn:9000");
             std::env::set_var("DJINN_K8S_PROJECTS_PVC", "owner-cache-projects-pvc");
-            std::env::set_var("DJINN_K8S_TTL_SECONDS", "600");
             std::env::set_var(
                 "DJINN_DATABASE_URL",
                 "postgres://djinn:djinn@djinn-postgres:5432/djinn",
@@ -395,7 +502,6 @@ mod tests {
         assert_eq!(cfg.image, "repo/img:tag");
         assert_eq!(cfg.server_addr, "djinn:9000");
         assert_eq!(cfg.projects_pvc, "owner-cache-projects-pvc");
-        assert_eq!(cfg.ttl_seconds_after_finished, 600);
         // Unset vars fall back to `for_testing` defaults.
         assert_eq!(cfg.service_account, "djinn-taskrun");
         // DB URL forwarded as-is for warm Pod env projection.
@@ -411,7 +517,6 @@ mod tests {
             std::env::remove_var("DJINN_K8S_IMAGE");
             std::env::remove_var("DJINN_K8S_SERVER_ADDR");
             std::env::remove_var("DJINN_K8S_PROJECTS_PVC");
-            std::env::remove_var("DJINN_K8S_TTL_SECONDS");
             std::env::remove_var("DJINN_DATABASE_URL");
         }
     }
@@ -450,32 +555,6 @@ mod tests {
             match saved_tol {
                 Some(prev) => std::env::set_var("DJINN_K8S_TOLERATIONS", prev),
                 None => std::env::remove_var("DJINN_K8S_TOLERATIONS"),
-            }
-        }
-    }
-
-    /// A malformed `DJINN_K8S_TTL_SECONDS` falls back to the default —
-    /// the runtime should still boot instead of crashing the Helm rollout
-    /// if an operator typos the value.
-    #[test]
-    fn from_env_ttl_parse_error_falls_back_to_default() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        // SAFETY: serialized against sibling test via ENV_LOCK; we save +
-        // restore the key so a concurrent `cargo test` run can't observe
-        // the transient `not-a-number` state.
-        let saved = std::env::var("DJINN_K8S_TTL_SECONDS").ok();
-        unsafe {
-            std::env::set_var("DJINN_K8S_TTL_SECONDS", "not-a-number");
-        }
-        let cfg = KubernetesConfig::from_env();
-        assert_eq!(
-            cfg.ttl_seconds_after_finished,
-            KubernetesConfig::for_testing().ttl_seconds_after_finished
-        );
-        unsafe {
-            match saved {
-                Some(prev) => std::env::set_var("DJINN_K8S_TTL_SECONDS", prev),
-                None => std::env::remove_var("DJINN_K8S_TTL_SECONDS"),
             }
         }
     }

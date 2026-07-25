@@ -74,6 +74,8 @@ fn fixture_task(task_id: &str, project_id: &str) -> Task {
         ci_head_sha: None,
         ci_pr_number: None,
         ci_blocking_required_check_names: "[]".into(),
+        ci_primary_blocking_check: None,
+        ci_failure_annotations: None,
         ci_failure_fingerprint: None,
         ci_first_seen_at: None,
         ci_last_seen_at: None,
@@ -408,6 +410,11 @@ async fn start_fake_server(
                         ServiceRpcRequest::ReleaseLease { .. } => ServiceRpcResponse::ReleaseLease(
                             djinn_supervisor::services::LeaseResult::LeaseUnavailable,
                         ),
+                        ServiceRpcRequest::TerminateWatchdogPod { .. } => {
+                            ServiceRpcResponse::TerminateWatchdogPod(Err(
+                                "fake server: watchdog termination is outside this fixture".into(),
+                            ))
+                        }
                     };
                     let reply = Frame {
                         correlation_id,
@@ -495,6 +502,7 @@ async fn worker_observes_host_initiated_cancel() {
     // 2. Spec + credentials + token files.
     let cfg_dir = TempDir::new().expect("tempdir cfg");
     let workspace_dir = TempDir::new().expect("tempdir workspace");
+    let journal_dir = TempDir::new().expect("tempdir invocation journal");
 
     let task_id = "task-cancel-path";
     let task_run_id = "run-cancel-path";
@@ -585,11 +593,9 @@ async fn worker_observes_host_initiated_cancel() {
         .env("DJINN_TOKEN_PATH", &token_path)
         .env("DJINN_TASK_RUN_ID", task_run_id)
         .env("DJINN_TASK_RUN_POD_UID", "pod-uid-cancel-path")
-        .env("DJINN_CGROUP_BROKER_SOCKET", &broker.socket_path)
-        .env(
-            "DJINN_CGROUP_BROKER_CREDENTIAL_PATH",
-            &broker.credential_path,
-        )
+        .env("DJINN_INVOCATION_JOURNAL_DIR", journal_dir.path())
+        .env("DJINN_LAUNCHER_SOCKET", &broker.socket_path)
+        .env("DJINN_LAUNCHER_CREDENTIAL_PATH", &broker.credential_path)
         .env("DJINN_WORKSPACE_PATH", workspace_dir.path())
         .env("DJINN_MIRROR_ROOT", mirrors_root.path())
         .env("DJINN_DATABASE_URL", test_db_url)

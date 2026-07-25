@@ -35,8 +35,8 @@ pub use handle::RunHandle;
 pub use session_runtime::{InfraDeathLogTailCapture, RuntimeError, SessionRuntime};
 pub use spec::{
     LoopGuardKind, LoopGuardTrip, ProviderFailureClass, ResumeLifecycleMetadata,
-    ResumeSelectionReason, ResumeSourceKind, RoleKind, SupervisorFlow, TaskRunOutcome,
-    TaskRunReport, TaskRunSpec, role_sequence,
+    ResumeSelectionReason, ResumeSourceKind, RoleKind, RoleResourceClass, SupervisorFlow,
+    TaskRunOutcome, TaskRunReport, TaskRunSpec, role_sequence,
 };
 pub use stream::{BiStream, STAGE_STEP_FIRST_TURN, StreamEvent, StreamFrame, stage_step};
 pub use warmer::{GraphWarmerService, TaskrunJobRef, WarmerError};

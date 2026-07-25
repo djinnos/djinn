@@ -81,12 +81,30 @@ struct Cli {
     /// This exits before logging, telemetry, Tokio, or database startup.
     #[arg(long, default_value_t = false)]
     allocator_settings: bool,
+
+    /// One-shot operator admin command. When present the process opens the
+    /// database, runs the command, prints its result, and exits before any
+    /// actor or listener starts — the same short-circuit shape as
+    /// `--migrate-only`.
+    #[command(subcommand)]
+    admin: Option<djinn_server::admin::AdminCommand>,
 }
 
 #[allow(clippy::print_stderr)] // Startup validation errors must be visible before logging initializes.
 fn main() {
     // Install before CLI parsing and Tokio construction so startup panics are durable.
     djinn_telemetry::panic_capture::install();
+
+    // The server shares `mirrors`, `cache` and `projects` with the task-run and
+    // warm Job Pods, which write them as gid 1000 (task pwrr). Everything this
+    // process creates there must therefore stay group-writable: with the
+    // container default umask 022 a freshly cloned mirror lands 755/644 and the
+    // Pods' startup volume-contract check rejects it. 0002 clears only
+    // "other"-write, so new directories are 775 and new files 664; the setgid
+    // bit the chart puts on the volume roots supplies the group.
+    // SAFETY: `umask` takes a mode, cannot fail, and touches no memory. Applied
+    // once here, before any filesystem work or thread spawns.
+    unsafe { libc::umask(0o002) };
 
     if let Err(error) = djinn_server::allocator::validate_malloc_conf_from_env() {
         tracing::error!(%error, "invalid MALLOC_CONF");
@@ -138,6 +156,11 @@ fn report_allocator_settings() {
         eprintln!("effective jemalloc settings are only available on Linux");
         std::process::exit(1);
     }
+}
+
+#[allow(clippy::print_stdout)] // One-shot operator admin output is written to stdout by design.
+fn print_admin_result(rendered: &str) {
+    println!("{rendered}");
 }
 
 async fn async_main(cli: Cli) {
@@ -281,6 +304,25 @@ async fn async_main(cli: Cli) {
         );
         db.pool().close().await;
         std::process::exit(1);
+    }
+
+    // ── Operator admin short-circuit ──────────────────────────────────
+    // Like `--migrate-only`: run one operator command against the current
+    // schema, print the result, and exit before any actor or listener starts.
+    if let Some(admin) = cli.admin {
+        let result = djinn_server::admin::run_admin_command(&db, admin).await;
+        db.pool().close().await;
+        match result {
+            Ok(rendered) => {
+                print_admin_result(&rendered);
+                return;
+            }
+            Err(error) => {
+                tracing::error!(%error, "admin command failed");
+                print_admin_result(&format!("error: {error}"));
+                std::process::exit(1);
+            }
+        }
     }
 
     // Resolve canonical settings before application composition. Present malformed

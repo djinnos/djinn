@@ -3,26 +3,33 @@
 //! No cluster interaction — [`build_task_run_job`] produces a
 //! [`k8s_openapi::api::batch::v1::Job`] value that PR 3 will hand to
 //! `kube::Api::<Job>::create`. Structuring the builder as a pure function
-//! keeps unit testing trivial: `build_task_run_job(&cfg, &id, secret_name)` +
+//! keeps unit testing trivial: `build_task_run_job(&cfg, &id, secret_name, None)` +
 //! struct assertions against the returned `Job`.
 
 use std::collections::BTreeMap;
 
 use k8s_openapi::api::batch::v1::{Job, JobSpec};
 use k8s_openapi::api::core::v1::{
-    Container, EmptyDirVolumeSource, EnvVar, KeyToPath, PersistentVolumeClaimVolumeSource, PodSpec,
-    PodTemplateSpec, ProjectedVolumeSource, ResourceRequirements, SecretVolumeSource,
-    ServiceAccountTokenProjection, Toleration, Volume, VolumeMount, VolumeProjection,
+    Container, EmptyDirVolumeSource, EnvVar, EnvVarSource, KeyToPath, ObjectFieldSelector,
+    PersistentVolumeClaimVolumeSource, PodSpec, PodTemplateSpec, ProjectedVolumeSource,
+    SecretVolumeSource, ServiceAccountTokenProjection, Toleration, Volume, VolumeMount,
+    VolumeProjection,
 };
-use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use uuid::Uuid;
 
+use djinn_runtime::RoleKind;
 use djinn_supervisor::cargo_target_run_dir;
 
 use crate::config::KubernetesConfig;
+use crate::launcher::{
+    RoleResourceClass, launcher_cgroup_mountpoint_volume, launcher_ipc_volume,
+    launcher_sidecar_container, pod_host_users, pod_security_context, worker_launcher_env,
+    worker_launcher_ipc_mount, worker_resources, worker_security_context,
+};
 use crate::sidecar::{
-    BackingServiceSpec, sidecar_conn_env, sidecar_container, sidecar_dshm_volume,
+    BackingServiceSpec, control_volume, control_volume_mount, sidecar_conn_env, sidecar_container,
+    sidecar_dshm_volume,
 };
 
 /// Label key for the task-run id (Djinn's primary correlator).
@@ -113,10 +120,34 @@ pub fn taskrun_job_ref_from_job(job: &Job) -> Option<djinn_runtime::TaskrunJobRe
         .as_ref()
         .map(|time| std::time::SystemTime::from(time.0));
 
+    let completed_at = job
+        .status
+        .as_ref()
+        .and_then(|status| status.completion_time.as_ref())
+        .map(|time| std::time::SystemTime::from(time.0));
+    let terminal_condition = job.status.as_ref().and_then(|status| {
+        let conditions = status.conditions.as_ref()?;
+        if conditions
+            .iter()
+            .any(|condition| condition.type_ == "Failed")
+        {
+            Some("Failed".to_string())
+        } else if conditions
+            .iter()
+            .any(|condition| condition.type_ == "Complete")
+        {
+            Some("Complete".to_string())
+        } else {
+            None
+        }
+    });
+
     Some(djinn_runtime::TaskrunJobRef {
         job_name,
         task_run_id,
         created_at,
+        completed_at,
+        terminal_condition,
     })
 }
 
@@ -169,7 +200,7 @@ pub const VOLUME_WORKSPACE: &str = "workspace";
 ///
 /// The Job runs exactly one Pod (`restartPolicy: Never`, `backoffLimit: 0`);
 /// Djinn's supervisor owns retry policy at the task level. Completed Jobs
-/// are GC'd after `config.ttl_seconds_after_finished`.
+/// are GC'd by the static 3600-second Kubernetes safety-net TTL.
 ///
 /// `task_run_id` supplies both the resource name suffix and the label value;
 /// `secret_name` is the name of the Secret produced by
@@ -197,10 +228,16 @@ pub fn build_task_run_job(
     services: &[BackingServiceSpec],
     policy: Option<&djinn_stack::environment::CargoCachePolicy>,
     is_evidence_spike: bool,
+    // The RoleKind that executes this task-run, threaded from dispatch (derived
+    // from `spec.flow` — see `runtime.rs`). Drives the role-classed CPU request
+    // via [`RoleResourceClass`]. `None` / unknown / any future role FAILS SAFE
+    // to build-capable so a pod that might compile is never under-provisioned.
+    role: Option<RoleKind>,
 ) -> Job {
     let task_run_id_str = task_run_id.to_string();
     let labels = job_labels(&task_run_id_str);
     let job_name = format!("djinn-taskrun-{task_run_id}");
+    let role_class = RoleResourceClass::for_role(role);
 
     // Evidence-spike runs receive no backing-service connection env vars —
     // the worker has no business reaching product databases/queues for a
@@ -228,6 +265,54 @@ pub fn build_task_run_job(
     // runs use `effective_services` (empty) so no DB connection env is injected.
     let mut worker_env = build_task_run_env(config, &task_run_id_str, project_id, policy);
     worker_env.extend(effective_services.iter().flat_map(sidecar_conn_env));
+    // Broker socket + worker-private credential paths so the worker can dial the
+    // cgroup-launcher sidecar — only when that sidecar is actually rendered.
+    //
+    // Task grkq: these MUST NOT be emitted when the launcher is disabled. The
+    // worker's handshake is detection-gated on the IPC mount existing; projecting
+    // the paths (and the mount) without a sidecar would make it wait out the full
+    // 30s connect window on every pod start before falling back.
+    let renders_launcher = config.cgroup_launcher_mode.renders_sidecar();
+    if renders_launcher {
+        worker_env.extend(worker_launcher_env());
+    }
+
+    // The private control emptyDir is added only when a wrapper sidecar is
+    // injected, and mounted only into the worker and the wrapper sidecars — never
+    // a canonical command container or an unrelated container.
+    let any_wrapper = effective_services.iter().any(|service| service.is_wrapper);
+
+    let mut worker_volume_mounts = vec![
+        volume_mount(VOLUME_SPEC, SPEC_MOUNT_DIR, Some(true)),
+        volume_mount(VOLUME_AUTH_TOKEN, TOKEN_MOUNT_DIR, Some(true)),
+        // Mirror PVC: mounted RW for normal workers (push task_branch
+        // before delegating open_pr) but RO for evidence-spike runs
+        // where write access to the host mirror is a safety violation.
+        volume_mount(VOLUME_MIRROR, MIRROR_MOUNT_DIR, Some(mirror_read_only)),
+        // Cache PVC: default mutable for normal workers (cargo builds write
+        // to private per-run target dirs under /cache).  For evidence-spike
+        // runs, explicitly read-only — no build artifacts should persist.
+        // The None (non-evidence) path preserves the original manifest shape.
+        volume_mount(
+            VOLUME_CACHE,
+            CACHE_MOUNT_DIR,
+            if is_evidence_spike { Some(true) } else { None },
+        ),
+        // Workspace emptyDir: always mutable.  Ephemeral per-Pod
+        // storage — dies with the Pod.  See the `mirror_read_only`
+        // comment above for why this narrow exception is safe.
+        volume_mount(VOLUME_WORKSPACE, WORKSPACE_MOUNT_DIR, None),
+        crate::env_config::env_config_volume_mount(),
+    ];
+    if renders_launcher {
+        // Broker control socket + worker-private launcher credential. Shared
+        // with the cgroup-launcher sidecar only; never mounted into a backing
+        // sidecar, and closed off from the launcher-spawned child.
+        worker_volume_mounts.push(worker_launcher_ipc_mount());
+    }
+    if any_wrapper {
+        worker_volume_mounts.push(control_volume_mount());
+    }
 
     let container = Container {
         name: "worker".to_string(),
@@ -245,42 +330,19 @@ pub fn build_task_run_job(
             "task-run".to_string(),
         ]),
         env: Some(worker_env),
-        volume_mounts: Some(vec![
-            volume_mount(VOLUME_SPEC, SPEC_MOUNT_DIR, Some(true)),
-            volume_mount(VOLUME_AUTH_TOKEN, TOKEN_MOUNT_DIR, Some(true)),
-            // Mirror PVC: mounted RW for normal workers (push task_branch
-            // before delegating open_pr) but RO for evidence-spike runs
-            // where write access to the host mirror is a safety violation.
-            volume_mount(VOLUME_MIRROR, MIRROR_MOUNT_DIR, Some(mirror_read_only)),
-            // Cache PVC: default mutable for normal workers (cargo builds write
-            // to private per-run target dirs under /cache).  For evidence-spike
-            // runs, explicitly read-only — no build artifacts should persist.
-            // The None (non-evidence) path preserves the original manifest shape.
-            volume_mount(
-                VOLUME_CACHE,
-                CACHE_MOUNT_DIR,
-                if is_evidence_spike { Some(true) } else { None },
-            ),
-            // Workspace emptyDir: always mutable.  Ephemeral per-Pod
-            // storage — dies with the Pod.  See the `mirror_read_only`
-            // comment above for why this narrow exception is safe.
-            volume_mount(VOLUME_WORKSPACE, WORKSPACE_MOUNT_DIR, None),
-            crate::env_config::env_config_volume_mount(),
-        ]),
-        resources: Some(ResourceRequirements {
-            requests: Some(BTreeMap::from([
-                ("cpu".to_string(), Quantity(config.cpu_request.clone())),
-                (
-                    "memory".to_string(),
-                    Quantity(config.memory_request.clone()),
-                ),
-            ])),
-            limits: Some(BTreeMap::from([
-                ("cpu".to_string(), Quantity(config.cpu_limit.clone())),
-                ("memory".to_string(), Quantity(config.memory_limit.clone())),
-            ])),
-            ..ResourceRequirements::default()
-        }),
+        // Base mounts + ij6g's conditional wrapper control mount + qut0's
+        // mandatory launcher IPC mount are all folded into worker_volume_mounts
+        // above.
+        volume_mounts: Some(worker_volume_mounts),
+        // Role-classed resources: CPU request varies by role class; CPU limit
+        // and memory bounds are shared ("role changes REQUESTS only").
+        resources: Some(worker_resources(config, role_class)),
+        // v1 security contract: worker runs as uid/gid 1000 (NOT the legacy
+        // pod-wide uid 10001), drops all capabilities, restricted seccomp.
+        // Non-dumpability is asserted by the worker at runtime before it
+        // authenticates to the broker. See the fsGroup deploy-risk note on the
+        // pod securityContext below.
+        security_context: Some(worker_security_context()),
         ..Container::default()
     };
 
@@ -383,6 +445,19 @@ pub fn build_task_run_job(
         },
         crate::env_config::env_config_volume(project_id),
     ];
+    if renders_launcher {
+        // Enforcement volumes for the cgroup-launcher sidecar:
+        //   * `launcher-ipc` — Memory emptyDir carrying the broker control
+        //     socket + worker-private credential (worker + launcher only);
+        //   * `launcher-cgroup` — Memory emptyDir supplying a writable
+        //     MOUNTPOINT, not a delegated cgroup root. The delegation itself is
+        //     established by the launcher's own `mount(2)` inside its cgroup
+        //     namespace; no volume source can supply one, which is what task
+        //     grkq's P0 proved. `readOnlyRootFilesystem: true` is why the
+        //     mountpoint has to come from a volume at all.
+        volumes.push(launcher_ipc_volume());
+        volumes.push(launcher_cgroup_mountpoint_volume());
+    }
     // Backing-service sidecars share a Memory /dev/shm (Postgres needs more than
     // the 64Mi default). Added only when services are injected so the manifest
     // is byte-identical to the pre-feature shape for service-less projects.
@@ -391,18 +466,38 @@ pub fn build_task_run_job(
     if !effective_services.is_empty() {
         volumes.push(sidecar_dshm_volume());
     }
+    // One private control emptyDir, shared only by the worker and the wrapper
+    // sidecars (whose mounts are added in `sidecar_container`).
+    if any_wrapper {
+        volumes.push(control_volume());
+    }
 
-    // Each declared backing service becomes a native sidecar (initContainer +
-    // restartPolicy: Always). `None` when there are none, keeping the manifest
-    // unchanged for projects without injected services.  For evidence-spike
-    // runs, `effective_services` is empty so no sidecar init containers are
-    // injected — the read-only investigation must not start product databases.
-    let init_containers = (!effective_services.is_empty()).then(|| {
+    // The cgroup-launcher is a native sidecar (initContainer + restartPolicy:
+    // Always): it comes up before the worker (which dials its broker socket) and
+    // is torn down when the worker exits, so the Job still reaches Completed.
+    //
+    // Task grkq: it is rendered ONLY when `cgroup_launcher_mode` arms it. It was
+    // previously unconditional, but its delegated cgroup root was an emptyDir,
+    // so the sidecar died in `NativeCgroupFs::open` on every pod and the broker
+    // socket never bound. `validate_enforcement_render` currently rejects the
+    // armed mode outright, so in practice no task-run pod renders it — see
+    // `CgroupLauncherMode` for the measured reason.
+    //
+    // Each declared backing service is then ALSO a native sidecar, appended
+    // AFTER the launcher.  For evidence-spike runs, `effective_services` is
+    // empty so no product databases start.
+    let mut init_container_vec = Vec::new();
+    if renders_launcher {
+        init_container_vec.push(launcher_sidecar_container(config, project_image_tag));
+    }
+    init_container_vec.extend(
         effective_services
             .iter()
-            .map(|s| sidecar_container(config, s))
-            .collect::<Vec<_>>()
-    });
+            .map(|s| sidecar_container(config, s)),
+    );
+    // Emit no `initContainers` key at all when nothing is injected, restoring the
+    // pre-enforcement shape for a service-less project with the launcher off.
+    let init_containers = (!init_container_vec.is_empty()).then_some(init_container_vec);
 
     // Pin Pods to a dedicated NodePool when the operator has configured one.
     // Both fields stay `None` if the corresponding config entry is empty so
@@ -413,6 +508,16 @@ pub fn build_task_run_job(
 
     let pod_spec = PodSpec {
         service_account_name: Some(config.service_account.clone()),
+        // jqvg: the task-run Pod runs repository-controlled code (agent shell
+        // commands, `build.rs`, test targets, npm `postinstall`). Nothing in
+        // this Pod speaks to the apiserver — the worker's only authenticated
+        // peer is djinn-server, reached with the audience-bound projected token
+        // on VOLUME_AUTH_TOKEN below — so the default ServiceAccount token has
+        // no legitimate reader here and only supplies a leak with real
+        // apiserver blast radius. Turning automount off removes that file from
+        // the container filesystem entirely, which is strictly stronger than
+        // the sandbox-level read denial that also covers `/var/run/secrets`.
+        automount_service_account_token: Some(false),
         restart_policy: Some("Never".to_string()),
         init_containers,
         containers: vec![container],
@@ -423,23 +528,39 @@ pub fn build_task_run_job(
         // RPC frame (TerminalReport) before SIGKILL — K8s default 30s is
         // tight when the supervisor is mid-stream over a slow link.
         termination_grace_period_seconds: Some(config.task_run_termination_grace_period_seconds),
-        // Force the worker to run as uid 10001 (the djinn user baked
-        // into the agent-runtime base image — see
-        // server/docker/djinn-agent-runtime.Dockerfile) so it matches
-        // the uid that owns the shared /mirror PVC. The per-project
-        // devcontainer image layers `USER root` for apt-installs and
-        // never restores USER djinn, so without this override the
-        // worker runs as uid 0 and git 2.35.2+ rejects /mirror with
-        // "dubious ownership". GIT_CONFIG_VALUE_0=* via env vars (set
-        // in build_task_run_env) was tried first and silently failed
-        // — git apparently disregards wildcard safe.directory from
-        // env, only honoring it from file config. fsGroup doesn't
-        // apply to PVCs (only to emptyDir / configMap volumes).
-        security_context: Some(k8s_openapi::api::core::v1::PodSecurityContext {
-            run_as_user: Some(10001),
-            run_as_group: Some(10001),
-            ..Default::default()
-        }),
+        // shareProcessNamespace exists ONLY so the launcher sidecar can see the
+        // worker process (PID auth via SO_PEERCRED / the broker's `worker_pid`
+        // contract). It is a real widening — every backing-service sidecar can
+        // then see the worker's `/proc` entries — so it is set only when the
+        // launcher is actually rendered (task grkq).
+        share_process_namespace: renders_launcher.then_some(true),
+        // User namespaces (GA since k8s 1.33). Set ONLY when the launcher is
+        // armed, because only then does a container in this pod hold
+        // CAP_SYS_ADMIN — and only for the launcher's bootstrap phase. Mapping
+        // it into a user namespace puts the non-namespaced sysctls that make it
+        // a node-wide escape primitive (`/proc/sys/kernel/core_pattern`) out of
+        // reach. See `launcher::pod_host_users`.
+        host_users: pod_host_users(config.cgroup_launcher_mode),
+        // v1 leases security contract (qut0). The per-container securityContexts
+        // set the UIDs now (worker=1000, launcher=0); the pod context ties
+        // `fsGroup` to the artifact GID (1000) with `fsGroupChangePolicy:
+        // OnRootMismatch` so workspace/cache/mirror volumes are group-owned by
+        // the artifact GID (setgid), letting the launcher-spawned child (group
+        // 1000) write artifacts the worker (uid/gid 1000) can read.
+        //
+        // DEPLOY RISK: the legacy pod ran as uid 10001, and the VPS's large
+        // `/mirror` and `/cache` PVCs are currently owned by 10001:10001.
+        // `fsGroup=1000` makes the kubelet recursively re-own the volume to group
+        // 1000 on the first mount whose root gid mismatches. `OnRootMismatch`
+        // limits this to that first pod, but that first task-run/warm pod after
+        // deploy pays a one-time, potentially slow recursive re-own of those huge
+        // caches. Mitigation: run a one-shot `chgrp -R 1000 /mirror /cache`
+        // before cutover so the root gid already matches and the recursive pass
+        // is skipped. See the matching notes in `launcher.rs` and `config.rs`.
+        //
+        // (The legacy uid-10001 / git "dubious ownership" concern is now covered
+        // by the `safe.directory=*` GIT_CONFIG_* envs set in build_task_run_env.)
+        security_context: Some(pod_security_context()),
         ..PodSpec::default()
     };
 
@@ -472,7 +593,10 @@ pub fn build_task_run_job(
         spec: Some(JobSpec {
             template,
             backoff_limit: Some(0),
-            ttl_seconds_after_finished: Some(config.ttl_seconds_after_finished),
+            // Static failed-job safety net. The coordinator may delete known
+            // successes earlier, but this must never become a configurable
+            // short retention policy for unknown or failed outcomes.
+            ttl_seconds_after_finished: Some(3600),
             // Cap total Pod wall-clock so a stuck RPC connection or
             // runaway LLM stream can't keep the worker alive forever
             // (TTL doesn't fire until the Pod exits). `i64` per the
@@ -501,6 +625,7 @@ pub fn build_task_run_job_with_read_sources(
     services: &[BackingServiceSpec],
     policy: Option<&djinn_stack::environment::CargoCachePolicy>,
     is_evidence_spike: bool,
+    role: Option<RoleKind>,
     owner_cache_sub_path: Option<&str>,
 ) -> Job {
     let mut job = build_task_run_job(
@@ -512,6 +637,7 @@ pub fn build_task_run_job_with_read_sources(
         services,
         policy,
         is_evidence_spike,
+        role,
     );
     let Some(owner_cache_sub_path) = owner_cache_sub_path else {
         return job;
@@ -578,6 +704,13 @@ fn build_task_run_env(
         env_var("DJINN_CREDENTIALS_PATH", CREDENTIALS_MOUNT_FILE),
         env_var("DJINN_TOKEN_PATH", TOKEN_MOUNT_FILE),
         env_var("DJINN_TASK_RUN_ID", task_run_id_str),
+        // The worker REQUIRES this (clap, no default) and uses it as the
+        // immutable fence for the durable invocation journal and for the
+        // watchdog's exact-Pod termination, which matches it against
+        // `pod.metadata.uid` (see `runtime::exact_taskrun_pod_name`). It is the
+        // POD's own UID, not the Job's, so it can only come from the downward
+        // API at admission — no host-side value exists when the Job is built.
+        downward_api_env_var("DJINN_TASK_RUN_POD_UID", "metadata.uid"),
         // TMPDIR points the supervisor's TempDir::new() (used by
         // mirror.clone_ephemeral) at the writable /workspace emptyDir
         // instead of the container's tmpfs root, which has stricter
@@ -870,6 +1003,23 @@ fn env_var(name: &str, value: &str) -> EnvVar {
     }
 }
 
+/// Env var sourced from the Pod's own object metadata at admission (downward
+/// API). Values that only exist once the apiserver has created the Pod — its
+/// UID above all — cannot be baked into the manifest the dispatcher renders.
+fn downward_api_env_var(name: &str, field_path: &str) -> EnvVar {
+    EnvVar {
+        name: name.to_string(),
+        value_from: Some(EnvVarSource {
+            field_ref: Some(ObjectFieldSelector {
+                field_path: field_path.to_string(),
+                ..ObjectFieldSelector::default()
+            }),
+            ..EnvVarSource::default()
+        }),
+        ..EnvVar::default()
+    }
+}
+
 fn volume_mount(name: &str, mount_path: &str, read_only: Option<bool>) -> VolumeMount {
     VolumeMount {
         name: name.to_string(),
@@ -882,6 +1032,216 @@ fn volume_mount(name: &str, mount_path: &str, read_only: Option<bool>) -> Volume
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- ij6g catalog wrapper manifest tests --------------------------------
+
+    /// A digest-pinned wrapper sidecar spec for one service type.
+    fn wrapper_spec(service_type: &str, port: i32, preset_id: &str) -> BackingServiceSpec {
+        let socket = crate::sidecar::control_socket_file_name(preset_id);
+        BackingServiceSpec {
+            service_type: service_type.into(),
+            image: format!(
+                "ghcr.io/djinnos/djinn-{service_type}-wrapper@sha256:\
+                 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+            ),
+            is_wrapper: true,
+            control_socket_name: socket,
+            wrapper_env: vec![("CATALOG_TEST_ENV".into(), "value".into())],
+            port,
+            env: Vec::new(),
+            cpu_request: "100m".into(),
+            memory_request: "256Mi".into(),
+            cpu_limit: "500m".into(),
+            memory_limit: "512Mi".into(),
+            conn_template: format!("proto://{{host}}:{{port}}/{service_type}"),
+            conn_env_var: "SVC_URL".into(),
+        }
+    }
+
+    fn all_three_wrappers() -> Vec<BackingServiceSpec> {
+        vec![
+            wrapper_spec("postgres", 5432, "preset-postgres-18"),
+            wrapper_spec("redis", 6379, "preset-redis-7"),
+            wrapper_spec("rabbitmq", 5672, "preset-rabbitmq-4"),
+        ]
+    }
+
+    fn wrapper_job() -> Job {
+        build_task_run_job(
+            &KubernetesConfig::for_testing(),
+            &Uuid::now_v7(),
+            "proj-wrap",
+            "djinn-taskrun-wrap",
+            "registry.example/djinn-project:abc123",
+            &all_three_wrappers(),
+            None,
+            false,
+            None,
+        )
+    }
+
+    fn pod_of(job: &Job) -> &k8s_openapi::api::core::v1::PodSpec {
+        job.spec
+            .as_ref()
+            .and_then(|s| s.template.spec.as_ref())
+            .expect("pod spec set")
+    }
+
+    fn mounts_control(container: &Container) -> bool {
+        container.volume_mounts.as_ref().is_some_and(|mounts| {
+            mounts
+                .iter()
+                .any(|m| m.name == crate::sidecar::CONTROL_VOLUME)
+        })
+    }
+
+    /// AC3/AC4: all three wrapper sidecars render with the digest-pinned wrapper
+    /// image, the CATALOG_CONTROL_SOCKET env pointing at their per-preset socket,
+    /// and the private control mount; and the worker also mounts the control
+    /// volume so its adapter can reach the sockets.
+    #[test]
+    fn wrapper_sidecars_render_control_socket_and_mounts_for_all_three_types() {
+        let job = wrapper_job();
+        let pod = pod_of(&job);
+        let inits = pod.init_containers.as_ref().expect("init containers set");
+        // Task grkq: the cgroup-launcher sidecar is OFF by default, so the init
+        // containers are exactly one wrapper sidecar per service type.
+        assert_eq!(
+            inits.len(),
+            3,
+            "one wrapper sidecar per service type (no launcher by default)"
+        );
+        assert!(
+            !inits
+                .iter()
+                .any(|c| c.name == crate::launcher::LAUNCHER_CONTAINER_NAME),
+            "the cgroup-launcher sidecar is disabled by default (task grkq)"
+        );
+
+        for (svc, port, socket) in [
+            ("postgres", 5432, "preset-postgres-18.sock"),
+            ("redis", 6379, "preset-redis-7.sock"),
+            ("rabbitmq", 5672, "preset-rabbitmq-4.sock"),
+        ] {
+            let c = inits
+                .iter()
+                .find(|c| c.name == format!("svc-{svc}"))
+                .unwrap_or_else(|| panic!("sidecar for {svc}"));
+            // Digest-pinned wrapper image, not the stock image.
+            let image = c.image.as_deref().unwrap();
+            assert!(
+                image.starts_with(&format!("ghcr.io/djinnos/djinn-{svc}-wrapper@sha256:")),
+                "{svc} sidecar must run the digest-pinned wrapper image, got {image}"
+            );
+            let _ = port;
+            // The sidecar binds the exact socket the worker adapter connects to.
+            let env = c.env.as_ref().unwrap();
+            let socket_env = env
+                .iter()
+                .find(|e| e.name == crate::sidecar::CONTROL_SOCKET_ENV)
+                .unwrap_or_else(|| panic!("{svc} CATALOG_CONTROL_SOCKET env"));
+            assert_eq!(
+                socket_env.value.as_deref(),
+                Some(format!("/var/run/djinn/service-control/{socket}").as_str())
+            );
+            // The wrapper admin/env-name wiring is present.
+            assert!(env.iter().any(|e| e.name == "CATALOG_TEST_ENV"));
+            // The private control mount is present on every wrapper sidecar.
+            assert!(
+                mounts_control(c),
+                "{svc} sidecar must mount the control volume"
+            );
+        }
+
+        // The worker mounts the control volume too.
+        assert!(
+            mounts_control(&pod.containers[0]),
+            "worker must mount the control volume"
+        );
+    }
+
+    /// AC3/AC4: exactly one private control emptyDir exists, and it is mounted
+    /// ONLY by the worker and the wrapper sidecars — never any other container.
+    #[test]
+    fn control_volume_is_private_to_worker_and_wrapper_sidecars() {
+        let job = wrapper_job();
+        let pod = pod_of(&job);
+        let volumes = pod.volumes.as_ref().expect("volumes set");
+        let control_volumes = volumes
+            .iter()
+            .filter(|v| v.name == crate::sidecar::CONTROL_VOLUME)
+            .count();
+        assert_eq!(control_volumes, 1, "exactly one private control emptyDir");
+        assert!(
+            volumes
+                .iter()
+                .find(|v| v.name == crate::sidecar::CONTROL_VOLUME)
+                .and_then(|v| v.empty_dir.as_ref())
+                .is_some(),
+            "control volume must be an emptyDir"
+        );
+
+        // Count every container (worker + sidecars) that mounts the control
+        // volume. It must be exactly the worker plus the three wrapper sidecars.
+        let mut mounters = 0;
+        for c in pod
+            .init_containers
+            .iter()
+            .flatten()
+            .chain(pod.containers.iter())
+        {
+            if mounts_control(c) {
+                mounters += 1;
+            }
+        }
+        assert_eq!(mounters, 4, "worker + 3 wrapper sidecars mount control");
+    }
+
+    /// AC3/AC4: a legacy non-wrapper sidecar mounts no control volume, and when
+    /// no wrapper is injected the control emptyDir is absent entirely (manifest
+    /// stays byte-compatible with the pre-wrapper shape).
+    #[test]
+    fn non_wrapper_service_adds_no_control_volume() {
+        let mut legacy = wrapper_spec("postgres", 5432, "preset-postgres-18");
+        legacy.is_wrapper = false;
+        legacy.image = "postgres:18-alpine".into();
+        legacy.wrapper_env = Vec::new();
+        let job = build_task_run_job(
+            &KubernetesConfig::for_testing(),
+            &Uuid::now_v7(),
+            "proj-legacy",
+            "djinn-taskrun-legacy",
+            "registry.example/djinn-project:abc123",
+            &[legacy],
+            None,
+            false,
+            None,
+        );
+        let pod = pod_of(&job);
+        assert!(
+            pod.volumes
+                .as_ref()
+                .unwrap()
+                .iter()
+                .all(|v| v.name != crate::sidecar::CONTROL_VOLUME),
+            "no control volume without a wrapper sidecar"
+        );
+        assert!(
+            !mounts_control(&pod.containers[0]),
+            "worker must not mount a control volume when no wrapper is injected"
+        );
+        let sidecar = &pod.init_containers.as_ref().unwrap()[0];
+        assert!(!mounts_control(sidecar));
+        assert!(
+            sidecar
+                .env
+                .as_ref()
+                .unwrap()
+                .iter()
+                .all(|e| e.name != crate::sidecar::CONTROL_SOCKET_ENV),
+            "legacy sidecar must not carry the control socket env"
+        );
+    }
 
     fn inventory_job(name: Option<&str>, label: Option<&str>) -> Job {
         let mut labels = BTreeMap::new();
@@ -914,7 +1274,9 @@ mod tests {
             .as_ref()
             .expect("container.env set")
             .iter()
-            .map(|e| (e.name.as_str(), e.value.as_deref().expect("env value")))
+            // Downward-API vars (DJINN_TASK_RUN_POD_UID) carry `valueFrom`, not
+            // `value`; asserted by djinn-agent-worker's `rendered_job_env_contract`.
+            .map(|e| (e.name.as_str(), e.value.as_deref().unwrap_or_default()))
             .collect()
     }
 
@@ -992,6 +1354,7 @@ mod tests {
             &[],
             None,
             false,
+            None,
         );
 
         // Metadata.
@@ -1015,7 +1378,7 @@ mod tests {
         // Job-level knobs.
         let spec = job.spec.as_ref().expect("job.spec set");
         assert_eq!(spec.backoff_limit, Some(0));
-        assert_eq!(spec.ttl_seconds_after_finished, Some(300));
+        assert_eq!(spec.ttl_seconds_after_finished, Some(3600));
         // activeDeadlineSeconds caps total Pod wall-clock — see Gap 4 in
         // the Phase 7 worker-functionality audit.
         assert_eq!(
@@ -1091,12 +1454,7 @@ mod tests {
             .as_ref()
             .expect("container.env set")
             .iter()
-            .map(|e| {
-                (
-                    e.name.as_str(),
-                    e.value.as_deref().expect("env value present"),
-                )
-            })
+            .map(|e| (e.name.as_str(), e.value.as_deref().unwrap_or_default()))
             .collect();
         assert_eq!(
             envs.get("DJINN_SERVER_ADDR").copied(),
@@ -1131,6 +1489,34 @@ mod tests {
             envs.get("DJINN_TASK_RUN_DEADLINE_SECONDS").copied(),
             Some(cfg.task_run_active_deadline_seconds.to_string().as_str())
         );
+        // The worker requires the Pod's OWN immutable UID (it fences the durable
+        // invocation journal, and the watchdog matches it against
+        // `pod.metadata.uid`). It cannot be a literal — the UID does not exist
+        // until the apiserver admits the Pod — so it MUST come from the downward
+        // API. Rendering it as anything else (metadata.name, the Job UID) breaks
+        // exact-Pod termination silently. Task opsu: it was missing entirely and
+        // every task-run Pod exited 2 in argv parsing.
+        let pod_uid = container
+            .env
+            .as_ref()
+            .expect("container.env set")
+            .iter()
+            .find(|e| e.name == "DJINN_TASK_RUN_POD_UID")
+            .expect("DJINN_TASK_RUN_POD_UID is required by the worker binary");
+        assert!(
+            pod_uid.value.is_none(),
+            "a Pod UID cannot be known when the manifest is rendered"
+        );
+        assert_eq!(
+            pod_uid
+                .value_from
+                .as_ref()
+                .and_then(|source| source.field_ref.as_ref())
+                .map(|field| field.field_path.as_str()),
+            Some("metadata.uid"),
+            "the worker's Pod UID must come from the downward API"
+        );
+
         // DB env vars are gated on the corresponding config fields being
         // `Some`. `for_testing()` leaves them `None`, so they should be
         // absent here — see `forwards_db_env_vars_when_configured` for
@@ -1141,7 +1527,8 @@ mod tests {
         );
 
         // Volume mounts: 5 from the pre-env-config layout + the
-        // environment-config mount added in P4.
+        // environment-config mount (P4). Task grkq: the launcher IPC mount is
+        // NOT rendered by default — `cgroup_launcher_mode` is `Disabled`.
         let mounts = container.volume_mounts.as_ref().expect("volume_mounts set");
         assert_eq!(mounts.len(), 6, "expected 6 volume mounts");
         let expected_mounts: [(&str, &str, Option<bool>); 6] = [
@@ -1162,7 +1549,9 @@ mod tests {
             assert_eq!(mount.read_only, *exp_ro);
         }
 
-        // Volumes mirror the mount list.
+        // Volumes mirror the mount list exactly. Task grkq: neither the launcher
+        // IPC volume nor a `launcher-cgroup` volume is rendered by default (the
+        // latter can never be rendered — no volume source is a cgroup2 tree).
         let volumes = pod.volumes.as_ref().expect("volumes set");
         assert_eq!(volumes.len(), 6, "expected 6 volumes");
         let expected_volume_names = [
@@ -1176,6 +1565,30 @@ mod tests {
         for (volume, expected_name) in volumes.iter().zip(expected_volume_names.iter()) {
             assert_eq!(&volume.name, expected_name);
         }
+        for absent in [
+            crate::launcher::VOLUME_LAUNCHER_IPC,
+            crate::launcher::VOLUME_LAUNCHER_CGROUP,
+        ] {
+            assert!(
+                volumes.iter().all(|v| v.name != absent),
+                "task grkq: {absent} must not be rendered with the launcher disabled"
+            );
+        }
+        // No sidecars at all for a service-less run with the launcher off.
+        assert!(
+            pod.init_containers.is_none(),
+            "task grkq: no launcher ⇒ no initContainers for a service-less run"
+        );
+        assert_eq!(pod.share_process_namespace, None);
+
+        // jqvg: nothing in the task-run Pod speaks to the apiserver, and the
+        // Pod runs repository-controlled code. The apiserver-capable default
+        // ServiceAccount token must not be projected into it at all.
+        assert_eq!(
+            pod.automount_service_account_token,
+            Some(false),
+            "jqvg: the task-run Pod must not automount the apiserver ServiceAccount token"
+        );
 
         // spec → Secret volume with the right name + key-to-path mapping.
         let spec_volume = &volumes[0];
@@ -1288,6 +1701,7 @@ mod tests {
             &[],
             None,
             false,
+            None,
         );
 
         let pod = job
@@ -1301,7 +1715,9 @@ mod tests {
             .as_ref()
             .expect("container.env set")
             .iter()
-            .map(|e| (e.name.as_str(), e.value.as_deref().expect("env value")))
+            // Downward-API vars (DJINN_TASK_RUN_POD_UID) carry `valueFrom`, not
+            // `value`; asserted by djinn-agent-worker's `rendered_job_env_contract`.
+            .map(|e| (e.name.as_str(), e.value.as_deref().unwrap_or_default()))
             .collect();
 
         assert_eq!(
@@ -1329,6 +1745,7 @@ mod tests {
             &[],
             None,
             false,
+            None,
         );
 
         let pod = job
@@ -1342,7 +1759,9 @@ mod tests {
             .as_ref()
             .expect("container.env set")
             .iter()
-            .map(|e| (e.name.as_str(), e.value.as_deref().expect("env value")))
+            // Downward-API vars (DJINN_TASK_RUN_POD_UID) carry `valueFrom`, not
+            // `value`; asserted by djinn-agent-worker's `rendered_job_env_contract`.
+            .map(|e| (e.name.as_str(), e.value.as_deref().unwrap_or_default()))
             .collect();
 
         assert_eq!(envs.get("CARGO_HOME").copied(), Some("/cache/cargo"));
@@ -1389,20 +1808,20 @@ mod tests {
         );
         assert_eq!(
             envs.get("CARGO_BUILD_RUSTFLAGS").copied(),
-            Some("-Clink-arg=-fuse-ld=mold -Clink-arg=-Wl,--threads=2"),
+            Some("-Clink-arg=-fuse-ld=mold -Clink-arg=-Wl,--threads=4"),
             "task-runs default to the mold fast linker (installed in the devcontainer image)"
         );
         // Cargo/nextest parallelism is capped at the task-run pod's CPU LIMIT
-        // (for_testing default "2") so a node full of cold-rebuilding pods can't
-        // oversubscribe on the host core count (load-103 incident).
+        // (v1 leases for_testing default "4") so a node full of cold-rebuilding
+        // pods can't oversubscribe on the host core count (load-103 incident).
         assert_eq!(
             envs.get("CARGO_BUILD_JOBS").copied(),
-            Some("2"),
+            Some("4"),
             "task-run CARGO_BUILD_JOBS must be pinned to the pod's CPU limit, not the host core count"
         );
         assert_eq!(
             envs.get("NEXTEST_TEST_THREADS").copied(),
-            Some("2"),
+            Some("4"),
             "task-run NEXTEST_TEST_THREADS must match the pod's CPU limit"
         );
     }
@@ -1420,6 +1839,7 @@ mod tests {
             &[],
             None,
             false,
+            None,
         );
         let env = task_run_job_envs(&job);
 
@@ -1910,6 +2330,7 @@ mod tests {
             &[],
             None,
             false,
+            None,
         );
         let second_job = build_task_run_job(
             &cfg,
@@ -1920,6 +2341,7 @@ mod tests {
             &[],
             None,
             false,
+            None,
         );
 
         let first_envs = task_run_job_envs(&first_job);
@@ -1985,6 +2407,7 @@ mod tests {
             &[],
             None,
             false,
+            None,
         );
 
         let pod = job
@@ -2013,6 +2436,9 @@ mod tests {
         let postgres = BackingServiceSpec {
             service_type: "postgres".into(),
             image: "postgres:18-alpine".into(),
+            is_wrapper: false,
+            control_socket_name: "preset-postgres-18.sock".into(),
+            wrapper_env: Vec::new(),
             port: 5432,
             env: vec![("POSTGRES_PASSWORD".into(), "postgres".into())],
             cpu_request: "100m".into(),
@@ -2033,15 +2459,18 @@ mod tests {
             &[],
             None,
             false,
+            None,
         );
         let bare_pod = bare
             .spec
             .as_ref()
             .and_then(|s| s.template.spec.as_ref())
             .expect("pod spec");
+        // Task grkq: the launcher sidecar is off by default, so a service-less
+        // run renders NO init containers at all and no svc-dshm volume.
         assert!(
             bare_pod.init_containers.is_none(),
-            "no services ⇒ no initContainers (manifest unchanged)"
+            "no services + launcher disabled ⇒ no initContainers"
         );
         assert!(
             !bare_pod
@@ -2063,6 +2492,7 @@ mod tests {
             std::slice::from_ref(&postgres),
             None,
             false,
+            None,
         );
         let pod = job
             .spec
@@ -2070,7 +2500,8 @@ mod tests {
             .and_then(|s| s.template.spec.as_ref())
             .expect("pod spec");
 
-        // Native sidecar in initContainers.
+        // Native sidecars in initContainers. Task grkq: the launcher is off by
+        // default, so the backing service is the only init container.
         let inits = pod.init_containers.as_ref().expect("init_containers set");
         assert_eq!(inits.len(), 1);
         assert_eq!(inits[0].name, "svc-postgres");
@@ -2212,6 +2643,7 @@ mod tests {
             &[],
             None,
             true, // is_evidence_spike
+            None,
         );
         let pod = job
             .spec
@@ -2263,6 +2695,7 @@ mod tests {
             &[],
             None,
             true,
+            None,
         );
         let pod = job
             .spec
@@ -2312,6 +2745,7 @@ mod tests {
             &[],
             None,
             true,
+            None,
         );
         let pod = job
             .spec
@@ -2340,6 +2774,9 @@ mod tests {
         let postgres = BackingServiceSpec {
             service_type: "postgres".into(),
             image: "postgres:18-alpine".into(),
+            is_wrapper: false,
+            control_socket_name: "preset-postgres-18.sock".into(),
+            wrapper_env: Vec::new(),
             port: 5432,
             env: vec![("POSTGRES_PASSWORD".into(), "postgres".into())],
             cpu_request: "100m".into(),
@@ -2360,6 +2797,7 @@ mod tests {
             std::slice::from_ref(&postgres),
             None,
             true, // is_evidence_spike
+            None,
         );
         let pod = job
             .spec
@@ -2367,10 +2805,18 @@ mod tests {
             .and_then(|s| s.template.spec.as_ref())
             .expect("pod spec set");
 
-        // No init containers (no sidecar).
+        // NO backing-service sidecar is injected. Task grkq: the launcher is off
+        // by default too, so an evidence spike renders no init containers at all.
+        assert!(
+            pod.init_containers
+                .iter()
+                .flatten()
+                .all(|c| !c.name.starts_with("svc-")),
+            "evidence-spike must not inject backing-service sidecars"
+        );
         assert!(
             pod.init_containers.is_none(),
-            "evidence-spike must not inject backing-service sidecars"
+            "evidence-spike with the launcher disabled renders no initContainers"
         );
 
         // No svc-dshm volume.
@@ -2407,6 +2853,9 @@ mod tests {
         let postgres = BackingServiceSpec {
             service_type: "postgres".into(),
             image: "postgres:18-alpine".into(),
+            is_wrapper: false,
+            control_socket_name: "preset-postgres-18.sock".into(),
+            wrapper_env: Vec::new(),
             port: 5432,
             env: vec![("POSTGRES_PASSWORD".into(), "postgres".into())],
             cpu_request: "100m".into(),
@@ -2426,6 +2875,7 @@ mod tests {
             std::slice::from_ref(&postgres),
             None,
             false, // NOT evidence spike
+            None,
         );
         let pod = job
             .spec
@@ -2433,7 +2883,8 @@ mod tests {
             .and_then(|s| s.template.spec.as_ref())
             .expect("pod spec set");
 
-        // Sidecar IS injected for normal runs.
+        // The backing-service sidecar IS injected for normal runs. Task grkq:
+        // the launcher is off by default, so it is the only init container.
         let inits = pod.init_containers.as_ref().expect("init_containers set");
         assert_eq!(inits.len(), 1);
         assert_eq!(inits[0].name, "svc-postgres");
@@ -2492,6 +2943,9 @@ mod tests {
         let postgres = BackingServiceSpec {
             service_type: "postgres".into(),
             image: "postgres:18-alpine".into(),
+            is_wrapper: false,
+            control_socket_name: "preset-postgres-18.sock".into(),
+            wrapper_env: Vec::new(),
             port: 5432,
             env: vec![("POSTGRES_PASSWORD".into(), "postgres".into())],
             cpu_request: "100m".into(),
@@ -2511,6 +2965,7 @@ mod tests {
             std::slice::from_ref(&postgres),
             None,
             false,
+            None,
         );
         let pod = job
             .spec
@@ -2553,6 +3008,7 @@ mod tests {
             &[],
             None,
             false,
+            None,
         );
         let pod = job
             .spec
@@ -2615,6 +3071,9 @@ mod tests {
         let postgres = BackingServiceSpec {
             service_type: "postgres".into(),
             image: "postgres:18-alpine".into(),
+            is_wrapper: false,
+            control_socket_name: "preset-postgres-18.sock".into(),
+            wrapper_env: Vec::new(),
             port: 5432,
             env: vec![("POSTGRES_PASSWORD".into(), "postgres".into())],
             cpu_request: "100m".into(),
@@ -2634,6 +3093,7 @@ mod tests {
             std::slice::from_ref(&postgres),
             None,
             false,
+            None,
         );
         let pod = job
             .spec
@@ -2677,6 +3137,9 @@ mod tests {
         let postgres = BackingServiceSpec {
             service_type: "postgres".into(),
             image: "postgres:18-alpine".into(),
+            is_wrapper: false,
+            control_socket_name: "preset-postgres-18.sock".into(),
+            wrapper_env: Vec::new(),
             port: 5432,
             env: vec![("POSTGRES_PASSWORD".into(), "postgres".into())],
             cpu_request: "100m".into(),
@@ -2696,6 +3159,7 @@ mod tests {
             std::slice::from_ref(&postgres),
             None,
             false,
+            None,
         );
         let pod = job
             .spec
@@ -2739,6 +3203,9 @@ mod tests {
         let postgres = BackingServiceSpec {
             service_type: "postgres".into(),
             image: "postgres:18-alpine".into(),
+            is_wrapper: false,
+            control_socket_name: "preset-postgres-18.sock".into(),
+            wrapper_env: Vec::new(),
             port: 5432,
             env: vec![("POSTGRES_PASSWORD".into(), "postgres".into())],
             cpu_request: "100m".into(),
@@ -2789,6 +3256,7 @@ mod tests {
             &[],
             None,
             false,
+            None,
             Some("octo/owner-repo/.task-runtime/read-sources"),
         );
         let pod = job.spec.unwrap().template.spec.unwrap();
@@ -2848,6 +3316,7 @@ mod tests {
             None,
             false,
             None,
+            None,
         );
         let pod = job.spec.unwrap().template.spec.unwrap();
         assert!(!pod.volumes.as_ref().unwrap().iter().any(|volume| {
@@ -2864,5 +3333,512 @@ mod tests {
                 .iter()
                 .any(|mount| mount.name == "read-sources")
         );
+    }
+
+    // ── qut0: v1 leases enforcement rendering ─────────────────────────────
+
+    fn job_for_role(role: Option<RoleKind>) -> Job {
+        build_task_run_job(
+            &KubernetesConfig::for_testing(),
+            &Uuid::now_v7(),
+            "proj-xyz",
+            "djinn-taskrun-role",
+            "registry.example/proj:tag",
+            &[],
+            None,
+            false,
+            role,
+        )
+    }
+
+    /// Task grkq: a config with the cgroup-launcher explicitly ARMED. The
+    /// default (`CgroupLauncherMode::Disabled`) renders no sidecar at all, so
+    /// every launcher-shaped render assertion has to opt in through this.
+    fn armed_launcher_config() -> KubernetesConfig {
+        let mut cfg = KubernetesConfig::for_testing();
+        cfg.cgroup_launcher_mode = crate::launcher::CgroupLauncherMode::Required;
+        cfg
+    }
+
+    fn worker_cpu_request(job: &Job) -> String {
+        let pod = job.spec.as_ref().unwrap().template.spec.as_ref().unwrap();
+        pod.containers[0]
+            .resources
+            .as_ref()
+            .unwrap()
+            .requests
+            .as_ref()
+            .unwrap()
+            .get("cpu")
+            .unwrap()
+            .0
+            .clone()
+    }
+
+    /// AC1: every RoleKind — plus grooming (Planner flow), retry/resume, and the
+    /// unknown/missing default — renders the correct role-classed CPU request.
+    #[test]
+    fn role_classed_cpu_request_covers_every_role_and_default() {
+        let cfg = KubernetesConfig::for_testing();
+
+        // Light roles (Planner covers grooming; Refinement covers every
+        // advocate/adversary/judge sub-role).
+        for role in [
+            RoleKind::Planner,
+            RoleKind::Reviewer,
+            RoleKind::Lead,
+            RoleKind::Refinement,
+        ] {
+            assert_eq!(
+                worker_cpu_request(&job_for_role(Some(role))),
+                cfg.light_cpu_request,
+                "{role:?} must render the light CPU request"
+            );
+        }
+
+        // Build-capable roles (Worker/Verifier/Architect). Retry/resume of these
+        // routes through the same RoleKind at dispatch, so classifying the
+        // RoleKind is sufficient.
+        for role in [RoleKind::Worker, RoleKind::Verifier, RoleKind::Architect] {
+            assert_eq!(
+                worker_cpu_request(&job_for_role(Some(role))),
+                cfg.cpu_request,
+                "{role:?} must render the build-capable CPU request"
+            );
+        }
+
+        // Missing/unknown role fails safe to build-capable.
+        assert_eq!(worker_cpu_request(&job_for_role(None)), cfg.cpu_request);
+
+        // Limits + memory are identical across classes ("same limits everywhere").
+        let light = job_for_role(Some(RoleKind::Planner));
+        let build = job_for_role(Some(RoleKind::Worker));
+        let res = |job: &Job| {
+            job.spec
+                .as_ref()
+                .unwrap()
+                .template
+                .spec
+                .as_ref()
+                .unwrap()
+                .containers[0]
+                .resources
+                .clone()
+                .unwrap()
+        };
+        assert_eq!(res(&light).limits, res(&build).limits);
+        assert_eq!(
+            res(&light).requests.unwrap().get("memory"),
+            res(&build).requests.unwrap().get("memory"),
+        );
+    }
+
+    /// Task grkq (P0): the cgroup-launcher sidecar is OFF by default and only
+    /// renders when `cgroup_launcher_mode` arms it. The disabled arm proves no
+    /// launcher container, volume, mount or env leaks into an ordinary task pod
+    /// (and `shareProcessNamespace` stays unset); the armed arm proves the
+    /// sidecar still renders correctly — WITHOUT ever re-introducing a
+    /// `launcher-cgroup` volume, which is the regression this task removed.
+    #[test]
+    fn launcher_sidecar_and_share_process_namespace_are_off_by_default_and_render_when_armed() {
+        let image = "registry.example/proj:tag";
+        let build = |cfg: &KubernetesConfig| {
+            build_task_run_job(
+                cfg,
+                &Uuid::now_v7(),
+                "proj-xyz",
+                "djinn-taskrun-role",
+                image,
+                &[],
+                None,
+                false,
+                Some(RoleKind::Worker),
+            )
+        };
+
+        // ---- Disabled (the default) -------------------------------------
+        let default_job = build(&KubernetesConfig::for_testing());
+        let pod = default_job
+            .spec
+            .as_ref()
+            .unwrap()
+            .template
+            .spec
+            .as_ref()
+            .unwrap();
+        assert!(
+            pod.init_containers
+                .iter()
+                .flatten()
+                .all(|c| c.name != crate::launcher::LAUNCHER_CONTAINER_NAME),
+            "no launcher sidecar by default"
+        );
+        for absent in [
+            crate::launcher::VOLUME_LAUNCHER_IPC,
+            crate::launcher::VOLUME_LAUNCHER_CGROUP,
+        ] {
+            assert!(
+                pod.volumes.iter().flatten().all(|v| v.name != absent),
+                "{absent} must not be rendered by default"
+            );
+        }
+        let worker = &pod.containers[0];
+        assert!(
+            worker
+                .volume_mounts
+                .iter()
+                .flatten()
+                .all(|m| m.mount_path != crate::launcher::LAUNCHER_IPC_DIR),
+            "worker must not mount the launcher IPC dir by default"
+        );
+        for env_name in ["DJINN_LAUNCHER_SOCKET", "DJINN_LAUNCHER_CREDENTIAL_PATH"] {
+            assert!(
+                worker.env.iter().flatten().all(|e| e.name != env_name),
+                "{env_name} must not be exported to the worker by default"
+            );
+        }
+        assert_eq!(
+            pod.share_process_namespace, None,
+            "shareProcessNamespace exists only for the launcher; unset by default"
+        );
+
+        // ---- Required (explicitly armed) --------------------------------
+        let armed_job = build(&armed_launcher_config());
+        let armed = armed_job
+            .spec
+            .as_ref()
+            .unwrap()
+            .template
+            .spec
+            .as_ref()
+            .unwrap();
+        assert_eq!(armed.share_process_namespace, Some(true));
+        let inits = armed
+            .init_containers
+            .as_ref()
+            .expect("armed launcher renders an init container");
+        assert_eq!(
+            inits[0].name,
+            crate::launcher::LAUNCHER_CONTAINER_NAME,
+            "the launcher sidecar renders first when armed"
+        );
+        let launcher = &inits[0];
+        assert_eq!(
+            launcher.image.as_deref(),
+            Some(image),
+            "reuses worker image"
+        );
+        assert_eq!(
+            launcher.command.as_deref(),
+            Some(&[crate::launcher::LAUNCHER_BIN.to_string()][..]),
+            "runs the packaged launcher binary — no fabricated image ref"
+        );
+        assert_eq!(launcher.restart_policy.as_deref(), Some("Always"));
+        assert!(
+            armed
+                .volumes
+                .iter()
+                .flatten()
+                .any(|v| v.name == crate::launcher::VOLUME_LAUNCHER_IPC),
+            "the IPC volume renders when armed"
+        );
+        // P0 REGRESSION GUARD (tasks grkq → 7deu): the `launcher-cgroup` volume
+        // is a writable MOUNTPOINT, never a delegated cgroup root. An emptyDir
+        // used to be handed to the launcher AS the delegated root, which is not
+        // a cgroup2 tree, so the sidecar CrashLoopBackOffed on every pod. The
+        // volume must therefore be declared (or the volumeMount dangles and the
+        // API server rejects the manifest) AND be mounted only by the launcher,
+        // which then establishes the real delegation with its own `mount(2)`.
+        // `tests/rendered_launcher_delegation.rs` proves the distinction against
+        // the real `NativeCgroupFs`.
+        let cgroup_volume = armed
+            .volumes
+            .iter()
+            .flatten()
+            .find(|v| v.name == crate::launcher::VOLUME_LAUNCHER_CGROUP)
+            .expect("the armed render must declare the cgroup mountpoint volume");
+        assert!(
+            cgroup_volume.empty_dir.is_some(),
+            "the mountpoint is an emptyDir; it is mounted OVER, not read"
+        );
+        assert!(
+            cgroup_volume.host_path.is_none(),
+            "a hostPath cannot supply a usable delegated root under nsdelegate"
+        );
+        let mounters: Vec<&str> = armed
+            .containers
+            .iter()
+            .chain(armed.init_containers.iter().flatten())
+            .filter(|container| {
+                container
+                    .volume_mounts
+                    .iter()
+                    .flatten()
+                    .any(|mount| mount.name == crate::launcher::VOLUME_LAUNCHER_CGROUP)
+            })
+            .map(|container| container.name.as_str())
+            .collect();
+        assert_eq!(
+            mounters,
+            vec![crate::launcher::LAUNCHER_CONTAINER_NAME],
+            "only the launcher may see the cgroup mountpoint"
+        );
+
+        // User namespaces confine the launcher's bootstrap CAP_SYS_ADMIN.
+        assert_eq!(armed.host_users, Some(false));
+    }
+
+    /// AC1: distinct worker/child UIDs, artifact GID, fsGroup/setgid ownership,
+    /// and the restricted capability/seccomp profile on both containers.
+    #[test]
+    fn worker_child_launcher_security_contract_is_rendered() {
+        let job = job_for_role(Some(RoleKind::Worker));
+        let pod = job.spec.as_ref().unwrap().template.spec.as_ref().unwrap();
+
+        // Worker container: uid/gid 1000, non-root, drop ALL, restricted seccomp.
+        let worker = &pod.containers[0];
+        let wsc = worker
+            .security_context
+            .as_ref()
+            .expect("worker securityContext");
+        assert_eq!(wsc.run_as_user, Some(1000));
+        assert_eq!(wsc.run_as_group, Some(1000));
+        assert_eq!(wsc.allow_privilege_escalation, Some(false));
+        assert_eq!(
+            wsc.capabilities.as_ref().unwrap().drop.as_deref(),
+            Some(&["ALL".to_string()][..])
+        );
+        assert_eq!(
+            wsc.seccomp_profile.as_ref().unwrap().type_,
+            "RuntimeDefault"
+        );
+
+        // Launcher container: uid 0, minimal caps only, restricted seccomp.
+        // Task grkq: the launcher only renders when armed, so its half of the
+        // contract is asserted against an armed config. The worker/pod half
+        // above is unconditional and stays on the default config.
+        let armed_job = build_task_run_job(
+            &armed_launcher_config(),
+            &Uuid::now_v7(),
+            "proj-xyz",
+            "djinn-taskrun-role",
+            "registry.example/proj:tag",
+            &[],
+            None,
+            false,
+            Some(RoleKind::Worker),
+        );
+        let armed_pod = armed_job
+            .spec
+            .as_ref()
+            .unwrap()
+            .template
+            .spec
+            .as_ref()
+            .unwrap();
+        let launcher = armed_pod
+            .init_containers
+            .as_ref()
+            .unwrap()
+            .iter()
+            .find(|c| c.name == crate::launcher::LAUNCHER_CONTAINER_NAME)
+            .expect("armed launcher sidecar present");
+        let lsc = launcher
+            .security_context
+            .as_ref()
+            .expect("launcher securityContext");
+        assert_eq!(lsc.run_as_user, Some(0));
+        let add = lsc.capabilities.as_ref().unwrap().add.as_ref().unwrap();
+        // Task 7deu: SYS_ADMIN/SYS_RESOURCE are granted for the launcher's
+        // bootstrap phase ONLY — it `capset`s them away before the broker binds
+        // its socket, so no user-controlled code ever runs while they are held.
+        // See `launcher::launcher_capabilities`.
+        assert_eq!(
+            add,
+            &["SETUID", "SETGID", "SETPCAP", "SYS_ADMIN", "SYS_RESOURCE"]
+        );
+        // The `CAP_`-prefixed spelling is what the API server rejects alongside
+        // `allowPrivilegeEscalation: false`.
+        assert!(!add.iter().any(|c| c.starts_with("CAP_")));
+        assert_eq!(lsc.allow_privilege_escalation, Some(false));
+        assert_eq!(
+            lsc.seccomp_profile.as_ref().unwrap().type_,
+            "RuntimeDefault"
+        );
+
+        // Distinct worker vs launcher UIDs.
+        assert_ne!(wsc.run_as_user, lsc.run_as_user);
+
+        // Pod-level fsGroup ties workspace/cache ownership to the artifact GID
+        // (child writes group 1000; worker reads it), re-owned OnRootMismatch.
+        let psc = pod.security_context.as_ref().expect("pod securityContext");
+        assert_eq!(psc.fs_group, Some(1000));
+        assert_eq!(
+            psc.fs_group_change_policy.as_deref(),
+            Some("OnRootMismatch")
+        );
+        // Legacy pod-wide uid 10001 override is gone.
+        assert_eq!(psc.run_as_user, None);
+    }
+
+    /// AC1/AC2: credential mount isolation, asserted against an ARMED launcher
+    /// config (task grkq: nothing launcher-shaped renders by default). The IPC
+    /// surface is shared only by worker + launcher, no backing sidecar can touch
+    /// it (nor the workspace/mirror), and NO delegated-cgroup volume is rendered
+    /// at all — that volume was the P0 CrashLoopBackOff and it is gone for good.
+    #[test]
+    fn launcher_credential_mounts_are_isolated_and_no_cgroup_volume_is_rendered() {
+        let cfg = armed_launcher_config();
+        let postgres = BackingServiceSpec {
+            service_type: "postgres".into(),
+            image: "postgres:18-alpine".into(),
+            is_wrapper: false,
+            control_socket_name: "preset-postgres-18.sock".into(),
+            wrapper_env: Vec::new(),
+            port: 5432,
+            env: vec![("POSTGRES_PASSWORD".into(), "postgres".into())],
+            cpu_request: "100m".into(),
+            memory_request: "256Mi".into(),
+            cpu_limit: "500m".into(),
+            memory_limit: "512Mi".into(),
+            conn_template: "postgres://postgres:postgres@{host}:{port}/app_test".into(),
+            conn_env_var: "TEST_POSTGRES_URL".into(),
+        };
+        let job = build_task_run_job(
+            &cfg,
+            &Uuid::now_v7(),
+            "proj-xyz",
+            "djinn-taskrun-role",
+            "registry.example/proj:tag",
+            std::slice::from_ref(&postgres),
+            None,
+            false,
+            Some(RoleKind::Worker),
+        );
+        let pod = job.spec.as_ref().unwrap().template.spec.as_ref().unwrap();
+
+        let mount_names = |c: &Container| -> Vec<String> {
+            c.volume_mounts
+                .as_ref()
+                .map(|m| m.iter().map(|v| v.name.clone()).collect())
+                .unwrap_or_default()
+        };
+
+        // IPC volume: worker + launcher only.
+        let worker = &pod.containers[0];
+        assert!(mount_names(worker).contains(&crate::launcher::VOLUME_LAUNCHER_IPC.to_string()));
+        let launcher = pod
+            .init_containers
+            .as_ref()
+            .unwrap()
+            .iter()
+            .find(|c| c.name == crate::launcher::LAUNCHER_CONTAINER_NAME)
+            .unwrap();
+        assert!(mount_names(launcher).contains(&crate::launcher::VOLUME_LAUNCHER_IPC.to_string()));
+        // Tasks grkq → 7deu: the cgroup MOUNTPOINT volume is declared and
+        // mounted by the launcher alone. A volumeMount naming a volume the pod
+        // does not declare is a manifest the API server rejects, so both sides
+        // have to move together (see `launcher.rs`). The worker must never see
+        // it: the delegated tree is the launcher's private authority surface.
+        assert!(
+            pod.volumes
+                .iter()
+                .flatten()
+                .any(|v| v.name == crate::launcher::VOLUME_LAUNCHER_CGROUP),
+            "the armed render must declare the `launcher-cgroup` mountpoint volume"
+        );
+        assert!(
+            mount_names(launcher).contains(&crate::launcher::VOLUME_LAUNCHER_CGROUP.to_string())
+        );
+        assert!(
+            !mount_names(worker).contains(&crate::launcher::VOLUME_LAUNCHER_CGROUP.to_string())
+        );
+
+        // Backing sidecar gets neither IPC nor cgroup nor workspace access.
+        let svc = pod
+            .init_containers
+            .as_ref()
+            .unwrap()
+            .iter()
+            .find(|c| c.name == "svc-postgres")
+            .unwrap();
+        let svc_mounts = mount_names(svc);
+        for forbidden in [
+            crate::launcher::VOLUME_LAUNCHER_IPC,
+            crate::launcher::VOLUME_LAUNCHER_CGROUP,
+            VOLUME_WORKSPACE,
+            VOLUME_MIRROR,
+        ] {
+            assert!(
+                !svc_mounts.contains(&forbidden.to_string()),
+                "backing sidecar must not mount {forbidden}"
+            );
+        }
+
+        // The IPC volume is a Memory-backed emptyDir (socket + credential never
+        // touch disk), and the worker carries the broker socket/credential env.
+        let ipc_vol = pod
+            .volumes
+            .as_ref()
+            .unwrap()
+            .iter()
+            .find(|v| v.name == crate::launcher::VOLUME_LAUNCHER_IPC)
+            .unwrap();
+        assert_eq!(
+            ipc_vol.empty_dir.as_ref().unwrap().medium.as_deref(),
+            Some("Memory")
+        );
+        let worker_envs: BTreeMap<&str, &str> = worker
+            .env
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|e| (e.name.as_str(), e.value.as_deref().unwrap_or_default()))
+            .collect();
+        assert_eq!(
+            worker_envs.get("DJINN_LAUNCHER_SOCKET").copied(),
+            Some(crate::launcher::LAUNCHER_SOCKET_PATH)
+        );
+    }
+
+    /// AC1: graph-warm resources must NOT regress (config.rs ~L175). The v1
+    /// leases work only touches the task-run CPU request classing; the warm
+    /// pod's 4 CPU / 2Gi request / 6Gi limit envelope is preserved.
+    #[test]
+    fn graph_warm_resources_are_preserved() {
+        let cfg = KubernetesConfig::for_testing();
+        assert_eq!(cfg.warm_cpu_request, "4");
+        assert_eq!(cfg.warm_cpu_limit, "4");
+        assert_eq!(cfg.warm_memory_request, "2Gi");
+        assert_eq!(cfg.warm_memory_limit, "6Gi");
+    }
+
+    /// jqvg drift guard. Every secret this module projects into the worker
+    /// container must sit beneath a root the shell sandbox withholds
+    /// `ReadFile` on, otherwise repository-controlled code can read it again.
+    /// This coupling did not exist when the credential mount was added, which
+    /// is a large part of why the exposure went unnoticed.
+    #[test]
+    fn projected_secret_mounts_stay_covered_by_the_sandbox_denylist() {
+        use std::path::Path;
+
+        for secret in [
+            SPEC_MOUNT_FILE,
+            CREDENTIALS_MOUNT_FILE,
+            TOKEN_MOUNT_FILE,
+            // No longer automounted (see `automount_service_account_token`),
+            // but keep it in the denylist's remit so re-enabling automount
+            // cannot silently re-expose it to a sandboxed shell.
+            "/var/run/secrets/kubernetes.io/serviceaccount/token",
+        ] {
+            assert!(
+                djinn_sandbox::confidential::CONFIDENTIAL_ROOTS
+                    .iter()
+                    .any(|root| Path::new(secret).starts_with(root)),
+                "{secret} is projected into the worker container but is not beneath any \
+                 djinn_sandbox::confidential::CONFIDENTIAL_ROOTS entry — a sandboxed \
+                 shell could read it"
+            );
+        }
     }
 }

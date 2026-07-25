@@ -983,4 +983,209 @@ mod tests {
             "identities, fingerprints, command evidence, and structured reasons exclude credentials"
         );
     }
+
+    /// A provisioner that mints a fresh, empty attempt-scoped service store on
+    /// every `create` and exposes its lease id in the command environment. The
+    /// injected launcher records the row count it observed before writing, so
+    /// two forced executions can prove each attempt saw fresh empty state.
+    struct FreshStateProvisioner {
+        nonce: String,
+        store: Arc<Mutex<BTreeMap<String, Vec<String>>>>,
+        created: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl CatalogServiceProvisioner for FreshStateProvisioner {
+        fn preset_id(&self) -> &str {
+            "preset-postgres-18"
+        }
+        fn create<'a>(
+            &'a self,
+            attempt: &'a str,
+        ) -> Pin<Box<dyn Future<Output = Result<ServiceLease, ServiceProvisioningError>> + Send + 'a>>
+        {
+            let lease_id = format!("db-{attempt}-{}", self.nonce);
+            let store = Arc::clone(&self.store);
+            let created = Arc::clone(&self.created);
+            Box::pin(async move {
+                // Fresh, empty state for this attempt's lease.
+                store.lock().unwrap().insert(lease_id.clone(), Vec::new());
+                created.lock().unwrap().push(lease_id.clone());
+                Ok(ServiceLease {
+                    lease_id: lease_id.clone(),
+                    environment: BTreeMap::from([("DB_LEASE".to_string(), lease_id)]),
+                })
+            })
+        }
+        fn ready<'a>(
+            &'a self,
+            _: &'a str,
+        ) -> Pin<Box<dyn Future<Output = Result<(), ServiceProvisioningError>> + Send + 'a>>
+        {
+            Box::pin(async { Ok(()) })
+        }
+        fn delete<'a>(
+            &'a self,
+            lease: &'a str,
+        ) -> Pin<Box<dyn Future<Output = Result<(), ServiceProvisioningError>> + Send + 'a>>
+        {
+            let store = Arc::clone(&self.store);
+            Box::pin(async move {
+                store.lock().unwrap().remove(lease);
+                Ok(())
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn two_forced_executions_each_observe_fresh_attempt_scoped_service_state() {
+        let store = Arc::new(Mutex::new(BTreeMap::<String, Vec<String>>::new()));
+        let created = Arc::new(Mutex::new(Vec::<String>::new()));
+        let observed_rows = Arc::new(Mutex::new(Vec::<usize>::new()));
+
+        for run in 0..2 {
+            let worktree = git_worktree();
+            let mut command = descriptor("check");
+            command.environment_names = vec!["DB_LEASE".into()];
+            let mut input = identity_input(vec![command], Vec::new());
+            input.input_manifest.environment_names = vec!["DB_LEASE".into()];
+            let mut request = request(worktree.path(), input.clone(), static_resolver(input));
+            request.service_provisioners = vec![Arc::new(FreshStateProvisioner {
+                nonce: format!("run-{run}"),
+                store: Arc::clone(&store),
+                created: Arc::clone(&created),
+            })];
+            let store_for_launch = Arc::clone(&store);
+            let observed = Arc::clone(&observed_rows);
+            let evidence = execute_with_fake_provisioners(request, move |launch, _| {
+                let lease = launch
+                    .environment
+                    .get("DB_LEASE")
+                    .cloned()
+                    .expect("attempt command receives its fresh service lease");
+                let mut store = store_for_launch.lock().unwrap();
+                let rows = store.entry(lease).or_default();
+                // Observe the state BEFORE this attempt mutates it.
+                observed.lock().unwrap().push(rows.len());
+                rows.push("attempt-row".into());
+                Ok(succeeded())
+            })
+            .await;
+            assert!(evidence.eligible(), "run {run} must be a reusable pass");
+        }
+
+        assert_eq!(
+            *observed_rows.lock().unwrap(),
+            vec![0, 0],
+            "each forced execution must observe fresh, empty attempt-scoped state"
+        );
+        let created = created.lock().unwrap();
+        assert_eq!(created.len(), 2);
+        assert_ne!(
+            created[0], created[1],
+            "each attempt is provisioned with a distinct fresh lease"
+        );
+        assert!(
+            store.lock().unwrap().is_empty(),
+            "every attempt-scoped service lease is torn down after execution"
+        );
+    }
+
+    /// A provisioner that fails at a chosen lifecycle phase, used to prove a
+    /// service lifecycle failure is a typed infrastructure outcome that runs no
+    /// command and computes no fingerprint or identity.
+    struct PhaseFailingProvisioner {
+        phase: ServiceProvisioningPhase,
+    }
+
+    impl CatalogServiceProvisioner for PhaseFailingProvisioner {
+        fn preset_id(&self) -> &str {
+            "preset-postgres-18"
+        }
+        fn create<'a>(
+            &'a self,
+            _: &'a str,
+        ) -> Pin<Box<dyn Future<Output = Result<ServiceLease, ServiceProvisioningError>> + Send + 'a>>
+        {
+            let phase = self.phase;
+            Box::pin(async move {
+                if phase == ServiceProvisioningPhase::Create {
+                    Err(ServiceProvisioningError {
+                        phase: ServiceProvisioningPhase::Create,
+                        code: ServiceProvisioningCode::Rejected,
+                    })
+                } else {
+                    Ok(ServiceLease {
+                        lease_id: "lease".into(),
+                        environment: BTreeMap::new(),
+                    })
+                }
+            })
+        }
+        fn ready<'a>(
+            &'a self,
+            _: &'a str,
+        ) -> Pin<Box<dyn Future<Output = Result<(), ServiceProvisioningError>> + Send + 'a>>
+        {
+            let phase = self.phase;
+            Box::pin(async move {
+                if phase == ServiceProvisioningPhase::Readiness {
+                    Err(ServiceProvisioningError {
+                        phase: ServiceProvisioningPhase::Readiness,
+                        code: ServiceProvisioningCode::Timeout,
+                    })
+                } else {
+                    Ok(())
+                }
+            })
+        }
+        fn delete<'a>(
+            &'a self,
+            _: &'a str,
+        ) -> Pin<Box<dyn Future<Output = Result<(), ServiceProvisioningError>> + Send + 'a>>
+        {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    #[tokio::test]
+    async fn service_create_and_readiness_failures_are_typed_infrastructure_outcomes() {
+        for (phase, expected_code) in [
+            (
+                ServiceProvisioningPhase::Create,
+                ServiceProvisioningCode::Rejected,
+            ),
+            (
+                ServiceProvisioningPhase::Readiness,
+                ServiceProvisioningCode::Timeout,
+            ),
+        ] {
+            let worktree = git_worktree();
+            let input = identity_input(vec![descriptor("check")], Vec::new());
+            let mut request = request(worktree.path(), input.clone(), static_resolver(input));
+            request.service_provisioners = vec![Arc::new(PhaseFailingProvisioner { phase })];
+
+            // `execute_final_verification` provisions before it computes any
+            // fingerprint or launches any command, so a create/readiness failure
+            // short-circuits with a typed service outcome and no evidence.
+            let evidence = execute_final_verification(request).await;
+
+            assert_eq!(
+                evidence.eligibility_reason,
+                Some(FinalVerificationIneligibilityReason::ServiceProvisioning {
+                    phase,
+                    code: expected_code,
+                }),
+                "a {phase:?} failure must surface as a typed service-provisioning outcome"
+            );
+            assert!(
+                evidence.commands.is_empty(),
+                "no command runs when provisioning fails"
+            );
+            assert!(
+                evidence.fingerprint_f0.is_none() && evidence.pre_environment_identity.is_none(),
+                "provisioning failure computes no fingerprint or identity"
+            );
+            assert!(!evidence.eligible());
+        }
+    }
 }

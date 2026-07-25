@@ -196,6 +196,9 @@ async fn runtime_and_serialized_surfaces_reject_project_local_djinn_paths() {
         ci_blocking_directive: None,
         worker_resume_note: None,
         arbiter_directive: None,
+        // Exercise the configured-plan surface so the guard also scans the
+        // rendered `run_verification` guidance for path leakage.
+        final_verification_configured: true,
     };
     for agent_type in AGENT_TYPES {
         let rendered = render_prompt_for_role(agent_type.role_config(), &task, &task_context);

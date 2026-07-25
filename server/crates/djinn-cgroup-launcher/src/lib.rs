@@ -1,7 +1,7 @@
 //! Fail-closed, cgroup-v2 leaf lifecycle primitives.
 //!
 //! This crate intentionally has no lease transport or process protocol.  The
-//! caller supplies an invocation-local fence and an injectable clone syscall;
+//! caller supplies an invocation-local fence and an injectable spawn syscall;
 //! this boundary only creates and controls one direct child of a validated
 //! delegated cgroup root.
 
@@ -9,12 +9,23 @@ use std::{collections::BTreeSet, ffi::CString, fs, io, os::fd::RawFd, path::Path
 
 use thiserror::Error;
 
+pub mod bootstrap;
 pub mod broker;
 pub mod child;
+pub mod env;
+pub mod spawn;
 pub mod transport;
+
+pub use env::is_allowed_environment_key;
+pub use spawn::{DenySpawn, NativeCgroupSpawn};
 
 const DEFAULT_PERIOD_US: u64 = 100_000;
 
+/// CPU quota an invocation leaf runs at before a lease lifts it.
+///
+/// Deliberately small: an unleased command is throttled hard enough that a
+/// genuinely CPU-hungry one is detectable within a few scheduling periods, and
+/// cheap enough that a light one is unaffected.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct UnleasedQuota(u16);
 
@@ -33,11 +44,7 @@ impl UnleasedQuota {
     }
 
     fn cpu_max(self) -> String {
-        // cpu.max quota is in microseconds per period.  1000m is one CPU.
-        format!(
-            "{} {DEFAULT_PERIOD_US}",
-            u64::from(self.0) * DEFAULT_PERIOD_US / 1000
-        )
+        cpu_max_for(u32::from(self.0))
     }
 }
 
@@ -47,18 +54,92 @@ impl Default for UnleasedQuota {
     }
 }
 
+/// CPU quota an invocation leaf is lifted to when a lease is granted.
+///
+/// # Why a lift is a quota and not `max` (task 7deu, defect 1)
+///
+/// The lift used to write `max`, i.e. remove the leaf's quota entirely, which
+/// was harmless only because an ancestor still clamped it: the launcher
+/// container carried a 250m CPU limit, and under `nsdelegate` the delegated root
+/// IS that container's cgroup. Every build was therefore permanently capped at
+/// 250m no matter what the leaf said — measured at 0.25 core against a leaf set
+/// to four — and `nr_throttled` read 0 in the leaf because the throttling
+/// happened at the parent, which made throttle-based heavy detection
+/// structurally blind.
+///
+/// Removing the container's CPU limit fixes that, but it also removes the only
+/// remaining ceiling. So the ceiling moves to where the work actually is: the
+/// lease grants an explicit quota equal to the pod's own CPU budget. One lifted
+/// build gets exactly the budget the pod declares, and N concurrent lifted
+/// builds are bounded by N × budget — which is what makes the admission cap a
+/// real semaphore instead of an advisory number.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LeasedQuota(u32);
+
+impl LeasedQuota {
+    /// Four cores: the task-run pod's declared CPU limit in production.
+    pub const DEFAULT_MILLICORES: u32 = 4_000;
+    /// Below this a "lease" would not be a lift at all.
+    pub const MIN_MILLICORES: u32 = 1_000;
+    /// A single leaf may never be granted more than one large node's worth.
+    pub const MAX_MILLICORES: u32 = 64_000;
+
+    pub fn new(millicores: u32) -> Result<Self, Error> {
+        if !(Self::MIN_MILLICORES..=Self::MAX_MILLICORES).contains(&millicores) {
+            return Err(Error::InvalidLeasedQuota(millicores));
+        }
+        Ok(Self(millicores))
+    }
+
+    pub fn millicores(self) -> u32 {
+        self.0
+    }
+
+    fn cpu_max(self) -> String {
+        cpu_max_for(self.0)
+    }
+}
+
+impl Default for LeasedQuota {
+    fn default() -> Self {
+        Self(Self::DEFAULT_MILLICORES)
+    }
+}
+
+/// `cpu.max` line for `millicores` over the default 100ms period.
+fn cpu_max_for(millicores: u32) -> String {
+    format!(
+        "{} {DEFAULT_PERIOD_US}",
+        u64::from(millicores) * DEFAULT_PERIOD_US / 1000
+    )
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LauncherConfig {
     pub unleased_quota: UnleasedQuota,
+    pub leased_quota: LeasedQuota,
     pub expected_uid: u32,
 }
 
 impl LauncherConfig {
-    pub fn new(unleased_millicores: Option<u16>, expected_uid: u32) -> Result<Self, Error> {
+    pub fn new(
+        unleased_millicores: Option<u16>,
+        leased_millicores: Option<u32>,
+        expected_uid: u32,
+    ) -> Result<Self, Error> {
+        let unleased =
+            UnleasedQuota::new(unleased_millicores.unwrap_or(UnleasedQuota::DEFAULT_MILLICORES))?;
+        let leased =
+            LeasedQuota::new(leased_millicores.unwrap_or(LeasedQuota::DEFAULT_MILLICORES))?;
+        if u32::from(unleased.millicores()) >= leased.millicores() {
+            return Err(Error::LeaseIsNotALift {
+                unleased: unleased.millicores(),
+                leased: leased.millicores(),
+            });
+        }
         Ok(Self {
-            unleased_quota: UnleasedQuota::new(
-                unleased_millicores.unwrap_or(UnleasedQuota::DEFAULT_MILLICORES),
-            )?,
+            unleased_quota: unleased,
+            leased_quota: leased,
             expected_uid,
         })
     }
@@ -121,13 +202,17 @@ pub struct CommandSpec {
 
 impl CommandSpec {
     pub const MAX_ARGUMENTS: usize = 128;
-    pub const MAX_BYTES: usize = 16 * 1024;
+    /// A task-run Pod renders a real build environment (cargo target dir, mold
+    /// flags, rustup home, sccache, the language toolchains) plus the launcher's
+    /// own pins. The former six-entry ceiling could not carry it.
+    pub const MAX_ENVIRONMENT: usize = 96;
+    pub const MAX_BYTES: usize = 32 * 1024;
 
     pub fn validate(&self) -> Result<(), Error> {
         if !safe_command_path(&self.program, false)
             || !safe_command_path(&self.cwd, true)
             || self.argv.len() > Self::MAX_ARGUMENTS
-            || self.environment.len() > 32
+            || self.environment.len() > Self::MAX_ENVIRONMENT
         {
             return Err(Error::InvalidCommand);
         }
@@ -142,7 +227,8 @@ impl CommandSpec {
             // `execve` receives each entry as `key=value`; accepting either
             // separator or NUL in the key would make that representation
             // malformed or change the key observed by the child.
-            if !allowed_environment(key) || key.contains(['\0', '=']) || value.contains('\0') {
+            if !is_allowed_environment_key(key) || key.contains(['\0', '=']) || value.contains('\0')
+            {
                 return Err(Error::InvalidCommand);
             }
             bytes = bytes.saturating_add(key.len() + value.len());
@@ -164,11 +250,6 @@ fn safe_command_path(path: &str, cwd: bool) -> bool {
                 || path.starts_with("/usr/bin/")
                 || path.starts_with("/workspace/")
         }
-}
-fn allowed_environment(key: &str) -> bool {
-    matches!(key, "HOME" | "PATH" | "TERM" | "LANG" | "TZ" | "CI")
-        || key.starts_with("LC_")
-        || key.starts_with("DJINN_")
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -216,10 +297,14 @@ pub trait CgroupFs {
     fn remove_leaf(&mut self, fd: RawFd, name: &str) -> Result<(), Error>;
 }
 
-pub trait CloneIntoCgroup {
-    /// This is the only child-spawn seam. Implementations must use
-    /// `clone3(CLONE_INTO_CGROUP)` with `target_cgroup_fd` before exec.
-    fn clone_into_cgroup(
+/// The only child-spawn seam.
+///
+/// Implementations must place the child inside `target_cgroup_fd` **and verify
+/// the placement** before the child is allowed to `execve`; see
+/// [`spawn::NativeCgroupSpawn`] for the production `fork` + pipe-handshake +
+/// `cgroup.procs` implementation and why it replaced `clone3`.
+pub trait SpawnIntoCgroup {
+    fn spawn_into_cgroup(
         &mut self,
         target_cgroup_fd: RawFd,
         invocation: &Invocation,
@@ -233,7 +318,7 @@ pub struct Launcher<F, S> {
     config: LauncherConfig,
 }
 
-impl<F: CgroupFs, S: CloneIntoCgroup> Launcher<F, S> {
+impl<F: CgroupFs, S: SpawnIntoCgroup> Launcher<F, S> {
     pub fn new(fs: F, syscall: S, config: LauncherConfig) -> Result<Self, Error> {
         fs.readiness()?.validate(config.expected_uid)?;
         Ok(Self {
@@ -241,6 +326,11 @@ impl<F: CgroupFs, S: CloneIntoCgroup> Launcher<F, S> {
             syscall,
             config,
         })
+    }
+
+    /// The quota a lease lifts an invocation leaf to.
+    pub fn leased_quota(&self) -> LeasedQuota {
+        self.config.leased_quota
     }
 
     pub fn create_command(
@@ -251,16 +341,30 @@ impl<F: CgroupFs, S: CloneIntoCgroup> Launcher<F, S> {
     ) -> Result<(Leaf, ChildProcess), Error> {
         validate_leaf_name(name)?;
         command.validate()?;
+
+        // Pin build parallelism from the LEASED quota, not the quota the child
+        // is born at. `available_parallelism()` is sampled once at process
+        // start and never re-read, so a pin taken from the 250m unleased lane
+        // would leave every lifted build stuck at `-j1`. See
+        // `env::parallelism_pins` for the full argument.
+        let mut command = command.clone();
+        env::apply_parallelism_pins(
+            &mut command.environment,
+            self.config.leased_quota.millicores(),
+        );
+        command.validate()?;
+
         let fd = self.fs.create_direct_child(name)?;
         self.fs
             .write_leaf(fd, "cpu.max", &self.config.unleased_quota.cpu_max())?;
-        // Clone is deliberately last: all readiness and leaf setup failures
+        // Spawn is deliberately last: all readiness and leaf setup failures
         // occur before the child can execute.
-        let child = match self.syscall.clone_into_cgroup(fd, &invocation, command) {
+        let child = match self.syscall.spawn_into_cgroup(fd, &invocation, &command) {
             Ok(child) => child,
             Err(error) => {
-                // clone3 failed before a child existed, so this direct child is
-                // necessarily empty. Do not leak a delegated cgroup on refusal.
+                // The spawn seam stands the child down before `execve` on every
+                // failure path, so this direct child is necessarily empty. Do
+                // not leak a delegated cgroup on refusal.
                 let _ = self.fs.remove_leaf(fd, name);
                 return Err(error);
             }
@@ -292,7 +396,7 @@ impl<F: CgroupFs, S: CloneIntoCgroup> Launcher<F, S> {
             return Err(Error::FenceMismatch);
         }
         self.fs
-            .write_leaf(leaf.fd, "cpu.max", &format!("max {DEFAULT_PERIOD_US}"))?;
+            .write_leaf(leaf.fd, "cpu.max", &self.config.leased_quota.cpu_max())?;
         leaf.lifted = true;
         Ok(())
     }
@@ -373,8 +477,44 @@ fn populated_zero(input: &str) -> Result<bool, Error> {
 pub enum Error {
     #[error("unleased CPU quota {0}m is outside 50m..=1000m")]
     InvalidQuota(u16),
+    #[error("leased CPU quota {0}m is outside 1000m..=64000m")]
+    InvalidLeasedQuota(u32),
+    #[error(
+        "the leased quota {leased}m does not lift the unleased quota {unleased}m; a lease that \
+         does not raise the ceiling is not a lease"
+    )]
+    LeaseIsNotALift { unleased: u16, leased: u32 },
     #[error("cgroup v2 is required (v1 and hybrid mounts are unsupported)")]
     NotCgroupV2,
+    #[error(
+        "delegated cgroup root {path} is not a cgroup2 filesystem (statfs f_type {actual:#x}, \
+         expected {expected:#x}); nothing mounted a delegated cgroup v2 subtree there"
+    )]
+    DelegatedRootIsNotCgroupFs {
+        path: String,
+        actual: i64,
+        expected: i64,
+    },
+    #[error(
+        "could not mount a private cgroup2 filesystem at {path} (errno {errno}); the launcher \
+         establishes its own delegated root and needs CAP_SYS_ADMIN plus a writable mountpoint \
+         to do so"
+    )]
+    CgroupMountFailed { path: String, errno: i32 },
+    #[error("could not {detail} on the delegated cgroup root (errno {errno})")]
+    CgroupDelegationFailed { detail: &'static str, errno: i32 },
+    #[error(
+        "could not drop the bootstrap capabilities after establishing the delegated cgroup root \
+         (errno {errno}); refusing to serve while CAP_SYS_ADMIN is still held"
+    )]
+    CapabilityDropFailed { errno: i32 },
+    #[error("could not place child {pid} into the invocation cgroup (errno {errno})")]
+    CgroupPlacementFailed { pid: i32, errno: i32 },
+    #[error(
+        "child {pid} is not a member of the invocation cgroup after placement; its CPU would not \
+         be governed by the leaf quota, so it was stood down before exec"
+    )]
+    ChildNotInInvocationCgroup { pid: i32 },
     #[error("delegated cgroup root is read-only")]
     ReadOnlyDelegation,
     #[error("delegated cgroup owner {actual} differs from launcher uid {expected}")]
@@ -383,8 +523,8 @@ pub enum Error {
     OverbroadOrMissingCpuDelegation,
     #[error("leaf name is not a safe direct child")]
     UnsafeLeafName,
-    #[error("clone3(CLONE_INTO_CGROUP) was denied or unsupported")]
-    CloneDenied,
+    #[error("the child-spawn seam refused to start a process")]
+    SpawnDenied,
     #[error("command request is malformed, over-budget, or outside the broker allow-list")]
     InvalidCommand,
     #[error("child process operation failed")]
@@ -448,6 +588,14 @@ impl NativeCgroupFs {
         #[cfg(unix)]
         let root_writable = metadata.permissions().mode() & 0o222 != 0
             && metadata.permissions().mode() & 0o022 == 0;
+        // Prove the delegated root IS a cgroup2 tree BEFORE reading any control
+        // file. Without this, a root that is any other filesystem (an emptyDir,
+        // a tmpfs, a plain directory) surfaces only as a bare `ENOENT` from the
+        // `cgroup.subtree_control` read below — an opaque `Io` error that says
+        // nothing about the delegation actually being absent. Task grkq: that
+        // exact opacity is what turned "nothing mounts a cgroup2 tree here" into
+        // an unexplained sidecar CrashLoopBackOff.
+        assert_cgroup2_filesystem(&root_path)?;
         let controllers = fs::read_to_string(root_path.join("cgroup.subtree_control"))?
             .split_ascii_whitespace()
             .map(str::to_owned)
@@ -562,6 +710,57 @@ impl CgroupFs for NativeCgroupFs {
     }
 }
 
+/// `statfs.f_type` of a cgroup v2 hierarchy (`CGROUP2_SUPER_MAGIC`, see
+/// `include/uapi/linux/magic.h`). Hard-coded rather than taken from `libc`
+/// because its type differs per libc target (`__fsword_t` vs `c_ulong`).
+pub const CGROUP2_SUPER_MAGIC: i64 = 0x6367_7270;
+
+/// Is `path` a cgroup v2 filesystem?
+///
+/// Used both by the readiness contract and by [`bootstrap`], which needs to know
+/// whether a previous launcher instance already established the mount.
+pub fn is_cgroup2_filesystem(path: &Path) -> Result<bool, Error> {
+    Ok(statfs_type(path)? == CGROUP2_SUPER_MAGIC)
+}
+
+/// Fail closed unless `path` really is a cgroup v2 filesystem.
+///
+/// This is the first readiness check, deliberately ahead of every control-file
+/// read: a delegated root that is not a cgroup2 mount can never satisfy any
+/// later check, and saying so by name is the difference between a diagnosable
+/// startup failure and an opaque `ENOENT`.
+fn assert_cgroup2_filesystem(path: &Path) -> Result<(), Error> {
+    let actual = statfs_type(path)?;
+    if actual != CGROUP2_SUPER_MAGIC {
+        return Err(Error::DelegatedRootIsNotCgroupFs {
+            path: path.display().to_string(),
+            actual,
+            expected: CGROUP2_SUPER_MAGIC,
+        });
+    }
+    Ok(())
+}
+
+fn statfs_type(path: &Path) -> Result<i64, Error> {
+    use std::os::unix::ffi::OsStrExt;
+
+    let c_path = CString::new(path.as_os_str().as_bytes()).map_err(|_| Error::UnsafeLeafName)?;
+    let mut buf = std::mem::MaybeUninit::<libc::statfs>::uninit();
+    // SAFETY: `c_path` is a NUL-terminated path and `buf` is a live, correctly
+    // sized `statfs` allocation; `statfs` only writes through it on success.
+    if unsafe { libc::statfs(c_path.as_ptr(), buf.as_mut_ptr()) } != 0 {
+        return Err(io::Error::last_os_error().into());
+    }
+    // SAFETY: `statfs` returned 0, so it initialized `buf`.
+    //
+    // The cast is load-bearing even where it is a no-op: `statfs.f_type` is
+    // `__fsword_t` (i64) on 64-bit glibc but `c_ulong` on musl and `i32` on
+    // 32-bit targets, so normalizing to `i64` is what makes this compile
+    // everywhere. Clippy only sees the target it is running on.
+    #[allow(clippy::unnecessary_cast)]
+    Ok(unsafe { buf.assume_init() }.f_type as i64)
+}
+
 fn safe_control_file(file: &str) -> Result<CString, Error> {
     if file.contains('/') || file.contains('\0') {
         return Err(Error::UnsafeLeafName);
@@ -600,179 +799,6 @@ fn inspect_cgroup_mode() -> Result<CgroupMode, Error> {
         (true, true) => CgroupMode::Hybrid,
         _ => CgroupMode::V1,
     })
-}
-
-/// The production broker supplies a real clone3 implementation. This safe
-/// default makes unsupported/denied kernels fail before any child exec.
-pub struct DenyClone3;
-impl CloneIntoCgroup for DenyClone3 {
-    fn clone_into_cgroup(
-        &mut self,
-        _: RawFd,
-        _: &Invocation,
-        _: &CommandSpec,
-    ) -> Result<ChildProcess, Error> {
-        Err(Error::CloneDenied)
-    }
-}
-
-/// Linux production clone/exec implementation. The child is born in the
-/// target cgroup and crosses the credential/isolation boundary before exec.
-pub struct NativeClone3;
-
-/// Close every non-stdio descriptor with one kernel operation. In particular,
-/// do not enumerate `/proc/self/fd`: `read_dir` owns a descriptor which is
-/// reported by that directory and then closed when the iterator is dropped,
-/// leaving a stale fd for `prepare_child` to fail on.
-fn close_inherited_descriptors(
-    close_range: impl FnOnce(u32, u32) -> Result<(), Error>,
-) -> Result<(), Error> {
-    close_range(3, u32::MAX)
-}
-
-fn native_close_inherited_descriptors(first: u32, last: u32) -> Result<(), Error> {
-    let result = unsafe { libc::syscall(libc::SYS_close_range, first, last, 0_u32) };
-    if result == 0 {
-        Ok(())
-    } else {
-        Err(Error::Io(io::Error::last_os_error()))
-    }
-}
-
-impl CloneIntoCgroup for NativeClone3 {
-    fn clone_into_cgroup(
-        &mut self,
-        cgroup: RawFd,
-        _: &Invocation,
-        command: &CommandSpec,
-    ) -> Result<ChildProcess, Error> {
-        command.validate()?;
-        let mut out = [0; 2];
-        let mut err = [0; 2];
-        // Child writes remain blocking; pipe capacity provides backpressure.
-        if unsafe { libc::pipe2(out.as_mut_ptr(), libc::O_CLOEXEC) } != 0
-            || unsafe { libc::pipe2(err.as_mut_ptr(), libc::O_CLOEXEC) } != 0
-        {
-            return Err(Error::Io(io::Error::last_os_error()));
-        }
-        #[repr(C)]
-        struct Args {
-            flags: u64,
-            pidfd: u64,
-            child_tid: u64,
-            parent_tid: u64,
-            exit_signal: u64,
-            stack: u64,
-            stack_size: u64,
-            tls: u64,
-            set_tid: u64,
-            set_tid_size: u64,
-            cgroup: u64,
-        }
-        let args = Args {
-            flags: libc::CLONE_INTO_CGROUP as u64,
-            pidfd: 0,
-            child_tid: 0,
-            parent_tid: 0,
-            exit_signal: libc::SIGCHLD as u64,
-            stack: 0,
-            stack_size: 0,
-            tls: 0,
-            set_tid: 0,
-            set_tid_size: 0,
-            cgroup: cgroup as u64,
-        };
-        let pid = unsafe {
-            libc::syscall(
-                libc::SYS_clone3,
-                &raw const args,
-                std::mem::size_of::<Args>(),
-            )
-        } as i32;
-        if pid < 0 {
-            unsafe {
-                libc::close(out[0]);
-                libc::close(out[1]);
-                libc::close(err[0]);
-                libc::close(err[1]);
-            }
-            return Err(Error::CloneDenied);
-        }
-        if pid == 0 {
-            unsafe {
-                libc::close(out[0]);
-                libc::close(err[0]);
-                let null = CString::new("/dev/null").unwrap();
-                let stdin = libc::open(null.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC);
-                if stdin < 0 || libc::dup2(stdin, 0) < 0 {
-                    libc::_exit(127);
-                }
-                libc::close(stdin);
-                libc::dup2(out[1], 1);
-                libc::dup2(err[1], 2);
-                libc::close(out[1]);
-                libc::close(err[1]);
-            }
-            let mut child = child::NativeChildSyscalls;
-            // A close-range operation is race-safe and leaves no procfs
-            // directory iterator descriptor that could become stale before
-            // the credential boundary. Stdio remains the only child surface.
-            if close_inherited_descriptors(native_close_inherited_descriptors)
-                .and_then(|_| {
-                    child::prepare_child(&mut child, &[], &child::ChildMounts::isolated())
-                })
-                .is_err()
-            {
-                unsafe { libc::_exit(127) };
-            }
-            let cwd = CString::new(command.cwd.as_str()).unwrap();
-            if unsafe { libc::chdir(cwd.as_ptr()) } != 0 {
-                unsafe { libc::_exit(127) };
-            }
-            let program = CString::new(command.program.as_str()).unwrap();
-            let args: Vec<CString> = command
-                .argv
-                .iter()
-                .map(|v| CString::new(v.as_str()).unwrap())
-                .collect();
-            let mut argv = Vec::with_capacity(args.len() + 2);
-            argv.push(program.as_ptr().cast_mut());
-            argv.extend(args.iter().map(|v| v.as_ptr().cast_mut()));
-            argv.push(std::ptr::null_mut());
-            // Pass exactly the validated environment, never the broker's.
-            let environment: Vec<CString> = command
-                .environment
-                .iter()
-                .map(|(key, value)| CString::new(format!("{key}={value}")).unwrap())
-                .collect();
-            let mut envp: Vec<*mut libc::c_char> = environment
-                .iter()
-                .map(|value| value.as_ptr().cast_mut())
-                .collect();
-            envp.push(std::ptr::null_mut());
-            unsafe {
-                libc::execve(program.as_ptr(), argv.as_ptr().cast(), envp.as_ptr().cast());
-                libc::_exit(127)
-            }
-        }
-        unsafe {
-            libc::close(out[1]);
-            libc::close(err[1]);
-            for fd in [out[0], err[0]] {
-                let flags = libc::fcntl(fd, libc::F_GETFL);
-                if flags < 0 || libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) < 0 {
-                    libc::close(out[0]);
-                    libc::close(err[0]);
-                    return Err(Error::Io(io::Error::last_os_error()));
-                }
-            }
-        }
-        Ok(ChildProcess {
-            pid,
-            stdout: out[0],
-            stderr: err[0],
-        })
-    }
 }
 
 #[cfg(test)]
@@ -828,23 +854,25 @@ mod tests {
         }
     }
     #[derive(Default)]
-    struct FakeClone {
+    struct FakeSpawn {
         attempts: Vec<(RawFd, Invocation)>,
         exec_calls: Vec<(RawFd, Invocation)>,
+        environments: Vec<Vec<(String, String)>>,
         deny: bool,
     }
-    impl CloneIntoCgroup for FakeClone {
-        fn clone_into_cgroup(
+    impl SpawnIntoCgroup for FakeSpawn {
+        fn spawn_into_cgroup(
             &mut self,
             fd: RawFd,
             inv: &Invocation,
-            _: &CommandSpec,
+            command: &CommandSpec,
         ) -> Result<ChildProcess, Error> {
             self.attempts.push((fd, inv.clone()));
             if self.deny {
-                return Err(Error::CloneDenied);
+                return Err(Error::SpawnDenied);
             }
             self.exec_calls.push((fd, inv.clone()));
+            self.environments.push(command.environment.clone());
             Ok(ChildProcess {
                 pid: 1,
                 stdout: -1,
@@ -852,13 +880,11 @@ mod tests {
             })
         }
     }
-    fn launcher() -> Launcher<FakeFs, FakeClone> {
-        Launcher::new(
-            FakeFs::ready(),
-            FakeClone::default(),
-            LauncherConfig::new(None, 7).unwrap(),
-        )
-        .unwrap()
+    fn config() -> LauncherConfig {
+        LauncherConfig::new(None, None, 7).unwrap()
+    }
+    fn launcher() -> Launcher<FakeFs, FakeSpawn> {
+        Launcher::new(FakeFs::ready(), FakeSpawn::default(), config()).unwrap()
     }
     fn invocation() -> Invocation {
         Invocation {
@@ -874,20 +900,15 @@ mod tests {
             environment: vec![],
         }
     }
-    fn create(l: &mut Launcher<FakeFs, FakeClone>, name: &str) -> Leaf {
+    fn create(l: &mut Launcher<FakeFs, FakeSpawn>, name: &str) -> Leaf {
         l.create_command(name, invocation(), &command()).unwrap().0
     }
 
     #[test]
     fn quota_configuration_has_a_safe_default_and_closed_bounds() {
         assert_eq!(UnleasedQuota::default().millicores(), 250);
-        assert_eq!(
-            LauncherConfig::new(None, 7)
-                .unwrap()
-                .unleased_quota
-                .millicores(),
-            250
-        );
+        assert_eq!(config().unleased_quota.millicores(), 250);
+        assert_eq!(config().leased_quota.millicores(), 4_000);
         assert_eq!(UnleasedQuota::new(50).unwrap().millicores(), 50);
         assert_eq!(UnleasedQuota::new(1000).unwrap().millicores(), 1000);
         assert!(matches!(
@@ -898,15 +919,95 @@ mod tests {
             UnleasedQuota::new(1001),
             Err(Error::InvalidQuota(1001))
         ));
+        assert!(matches!(
+            LeasedQuota::new(999),
+            Err(Error::InvalidLeasedQuota(999))
+        ));
+        assert!(matches!(
+            LeasedQuota::new(64_001),
+            Err(Error::InvalidLeasedQuota(64_001))
+        ));
+    }
+
+    /// A "lease" that does not raise the ceiling is a configuration error, not
+    /// a quiet no-op: it would leave every detected-heavy build throttled while
+    /// telemetry reported a successful lift.
+    #[test]
+    fn a_lease_that_does_not_lift_is_rejected() {
+        assert!(matches!(
+            LauncherConfig::new(Some(1000), Some(1000), 0),
+            Err(Error::LeaseIsNotALift {
+                unleased: 1000,
+                leased: 1000
+            })
+        ));
+        assert!(LauncherConfig::new(Some(250), Some(1000), 0).is_ok());
+    }
+
+    /// The unleased quota throttles and the lease lifts to the pod budget — as
+    /// `cpu.max` lines, since that is what the kernel reads.
+    #[test]
+    fn quotas_render_as_cpu_max_lines_over_the_default_period() {
+        assert_eq!(UnleasedQuota::default().cpu_max(), "25000 100000");
+        assert_eq!(LeasedQuota::default().cpu_max(), "400000 100000");
+        assert_eq!(
+            LeasedQuota::new(12_000).unwrap().cpu_max(),
+            "1200000 100000"
+        );
     }
 
     #[test]
     fn fresh_invocation_is_passed_with_leaf_fd() {
         let mut l = launcher();
         let leaf = create(&mut l, "invocation-1");
-        let (_, clone) = l.into_parts();
-        assert_eq!(clone.exec_calls, vec![(leaf.fd, invocation())]);
+        let (_, spawn) = l.into_parts();
+        assert_eq!(spawn.exec_calls, vec![(leaf.fd, invocation())]);
     }
+
+    /// The child must be born already knowing the parallelism it will be able
+    /// to use, because nothing re-reads it after the lift.
+    #[test]
+    fn the_child_environment_carries_pins_derived_from_the_leased_quota() {
+        let mut l = Launcher::new(
+            FakeFs::ready(),
+            FakeSpawn::default(),
+            LauncherConfig::new(Some(250), Some(4_000), 7).unwrap(),
+        )
+        .unwrap();
+        create(&mut l, "pinned");
+        let (_, spawn) = l.into_parts();
+        let environment = &spawn.environments[0];
+        let value = |key: &str| {
+            environment
+                .iter()
+                .find(|(name, _)| name == key)
+                .map(|(_, value)| value.as_str())
+                .unwrap_or_else(|| panic!("{key} must be pinned on the child"))
+        };
+        assert_eq!(value("CARGO_BUILD_JOBS"), "4");
+        assert_eq!(value("NEXTEST_TEST_THREADS"), "4");
+        assert_eq!(value("MAKEFLAGS"), "-j4");
+        assert_eq!(value("GOMAXPROCS"), "4");
+    }
+
+    /// A stale pod-level pin must not win over the launcher's derived one: the
+    /// pod cannot know the quota the leaf will actually run at.
+    #[test]
+    fn a_caller_supplied_pin_is_overridden_by_the_launcher() {
+        let mut l = launcher();
+        let mut spec = command();
+        spec.environment = vec![("CARGO_BUILD_JOBS".into(), "12".into())];
+        l.create_command("override", invocation(), &spec).unwrap();
+        let (_, spawn) = l.into_parts();
+        assert_eq!(
+            spawn.environments[0]
+                .iter()
+                .filter(|(key, _)| key == "CARGO_BUILD_JOBS")
+                .collect::<Vec<_>>(),
+            vec![&("CARGO_BUILD_JOBS".to_string(), "4".to_string())]
+        );
+    }
+
     #[test]
     fn lift_is_one_way_and_fenced() {
         let mut l = launcher();
@@ -921,6 +1022,25 @@ mod tests {
             Err(Error::LiftAlreadyApplied)
         ));
     }
+
+    /// The whole point of the lift, asserted on the bytes written to the leaf:
+    /// unleased is a throttling quota, lifted is the pod's full budget, and
+    /// NEITHER is `max` — an unbounded leaf would let one build take the node.
+    #[test]
+    fn the_lift_writes_the_leased_quota_not_an_unbounded_max() {
+        let mut l = launcher();
+        let mut leaf = create(&mut l, "one");
+        let fd = leaf.fd;
+        assert_eq!(l.fs.files[&(fd, "cpu.max".into())], "25000 100000");
+        l.fenced_lift(&mut leaf, 99).unwrap();
+        let lifted = &l.fs.files[&(fd, "cpu.max".into())];
+        assert_eq!(lifted, "400000 100000");
+        assert!(
+            !lifted.starts_with("max"),
+            "an unbounded lift removes the only remaining ceiling"
+        );
+    }
+
     #[test]
     fn remove_requires_descendant_emptiness() {
         let mut l = launcher();
@@ -935,17 +1055,14 @@ mod tests {
         l.remove(&leaf).unwrap();
         assert_eq!(l.fs.removed, vec!["one"]);
     }
+
     #[test]
     fn readiness_rejects_all_unsupported_delegation_profiles() {
         for mode in [CgroupMode::V1, CgroupMode::Hybrid] {
             let mut fs = FakeFs::ready();
             fs.readiness.as_mut().unwrap().mode = mode;
             assert!(matches!(
-                Launcher::new(
-                    fs,
-                    FakeClone::default(),
-                    LauncherConfig::new(None, 7).unwrap()
-                ),
+                Launcher::new(fs, FakeSpawn::default(), config()),
                 Err(Error::NotCgroupV2)
             ));
         }
@@ -957,11 +1074,7 @@ mod tests {
             .delegated_controllers
             .clear();
         assert!(matches!(
-            Launcher::new(
-                missing_cpu,
-                FakeClone::default(),
-                LauncherConfig::new(None, 7).unwrap()
-            ),
+            Launcher::new(missing_cpu, FakeSpawn::default(), config()),
             Err(Error::OverbroadOrMissingCpuDelegation)
         ));
         let mut overbroad = FakeFs::ready();
@@ -972,31 +1085,19 @@ mod tests {
             .delegated_controllers
             .insert("memory".into());
         assert!(matches!(
-            Launcher::new(
-                overbroad,
-                FakeClone::default(),
-                LauncherConfig::new(None, 7).unwrap()
-            ),
+            Launcher::new(overbroad, FakeSpawn::default(), config()),
             Err(Error::OverbroadOrMissingCpuDelegation)
         ));
         let mut read_only = FakeFs::ready();
         read_only.readiness.as_mut().unwrap().root_writable = false;
         assert!(matches!(
-            Launcher::new(
-                read_only,
-                FakeClone::default(),
-                LauncherConfig::new(None, 7).unwrap()
-            ),
+            Launcher::new(read_only, FakeSpawn::default(), config()),
             Err(Error::ReadOnlyDelegation)
         ));
         let mut wrong_owner = FakeFs::ready();
         wrong_owner.readiness.as_mut().unwrap().owner_uid = 8;
         assert!(matches!(
-            Launcher::new(
-                wrong_owner,
-                FakeClone::default(),
-                LauncherConfig::new(None, 7).unwrap()
-            ),
+            Launcher::new(wrong_owner, FakeSpawn::default(), config()),
             Err(Error::IncompatibleOwnership {
                 expected: 7,
                 actual: 8
@@ -1027,7 +1128,7 @@ mod tests {
     }
 
     #[test]
-    fn malformed_command_is_rejected_before_leaf_or_clone() {
+    fn malformed_command_is_rejected_before_leaf_or_spawn() {
         let mut l = launcher();
         let mut malformed = command();
         malformed.program = "/bin/../sh".into();
@@ -1035,10 +1136,10 @@ mod tests {
             l.create_command("one", invocation(), &malformed),
             Err(Error::InvalidCommand)
         ));
-        let (fs, clone) = l.into_parts();
+        let (fs, spawn) = l.into_parts();
         assert!(fs.created.is_empty());
-        assert!(clone.attempts.is_empty());
-        assert!(clone.exec_calls.is_empty());
+        assert!(spawn.attempts.is_empty());
+        assert!(spawn.exec_calls.is_empty());
     }
 
     #[test]
@@ -1050,82 +1151,42 @@ mod tests {
         }
     }
 
-    #[derive(Default)]
-    struct CloseRangePreparedChild {
-        calls: Vec<&'static str>,
-    }
-
-    impl child::ChildSyscalls for CloseRangePreparedChild {
-        fn close(&mut self, _: RawFd) -> Result<(), Error> {
-            Err(Error::ChildPreparation("stale descriptor"))
+    /// The allow-list stays closed: widening it for the build toolchain must
+    /// not have opened it to anything else.
+    #[test]
+    fn command_validation_still_refuses_unlisted_environment_keys() {
+        for key in ["LD_PRELOAD", "ANTHROPIC_API_KEY", "GITHUB_TOKEN"] {
+            let mut malformed = command();
+            malformed.environment = vec![(key.into(), "value".into())];
+            assert!(
+                matches!(malformed.validate(), Err(Error::InvalidCommand)),
+                "{key} must not pass validation"
+            );
         }
-        fn set_groups_empty(&mut self) -> Result<(), Error> {
-            self.calls.push("groups");
-            Ok(())
-        }
-        fn clear_capabilities(&mut self) -> Result<(), Error> {
-            self.calls.push("caps");
-            Ok(())
-        }
-        fn set_gid(&mut self, _: u32) -> Result<(), Error> {
-            self.calls.push("gid");
-            Ok(())
-        }
-        fn set_uid(&mut self, _: u32) -> Result<(), Error> {
-            self.calls.push("uid");
-            Ok(())
-        }
-        fn set_umask(&mut self, _: u32) -> Result<(), Error> {
-            self.calls.push("umask");
-            Ok(())
-        }
-        fn set_no_new_privs(&mut self) -> Result<(), Error> {
-            self.calls.push("nnp");
-            Ok(())
-        }
-        fn install_restricted_seccomp(&mut self) -> Result<(), Error> {
-            self.calls.push("seccomp");
-            Ok(())
-        }
+        let mut build = command();
+        build.environment = vec![("CARGO_TARGET_DIR".into(), "/cache/target".into())];
+        assert!(build.validate().is_ok());
     }
 
     #[test]
-    fn close_range_seam_prepares_child_without_a_stale_procfs_descriptor() {
-        let mut bounds = None;
-        let mut child = CloseRangePreparedChild::default();
-        close_inherited_descriptors(|first, last| {
-            bounds = Some((first, last));
-            Ok(())
-        })
-        .and_then(|_| child::prepare_child(&mut child, &[], &child::ChildMounts::isolated()))
-        .unwrap();
-
-        assert_eq!(bounds, Some((3, u32::MAX)));
-        assert_eq!(
-            child.calls,
-            ["groups", "gid", "uid", "caps", "umask", "nnp", "seccomp"]
-        );
-    }
-
-    #[test]
-    fn denied_clone_never_executes_a_child() {
+    fn denied_spawn_never_executes_a_child() {
         let mut l = Launcher::new(
             FakeFs::ready(),
-            FakeClone {
+            FakeSpawn {
                 deny: true,
-                ..FakeClone::default()
+                ..FakeSpawn::default()
             },
-            LauncherConfig::new(None, 7).unwrap(),
+            config(),
         )
         .unwrap();
         assert!(matches!(
             l.create_command("one", invocation(), &command())
                 .map(|v| v.0),
-            Err(Error::CloneDenied)
+            Err(Error::SpawnDenied)
         ));
-        let (fs, clone) = l.into_parts();
-        assert_eq!(clone.attempts.len(), 1);
-        assert!(clone.exec_calls.is_empty());
+        let (fs, spawn) = l.into_parts();
+        assert_eq!(spawn.attempts.len(), 1);
+        assert!(spawn.exec_calls.is_empty());
         assert_eq!(fs.removed, vec!["one"]);
     }
 }

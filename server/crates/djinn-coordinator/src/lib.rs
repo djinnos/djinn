@@ -50,12 +50,16 @@ pub mod audit_sampler;
 pub mod build_admission;
 pub mod build_admission_handoff;
 pub mod build_admission_inventory;
+/// Operator safe-ordering executor composing the durable epoch primitives into
+/// forward-cutover, kill-switch, and rollback workflows.
+pub mod build_admission_transition;
 /// Durable v1 lease service; v0 admission remains rollout authority.
 pub mod build_lease;
 pub mod cargo_warm_base_gc;
 pub(crate) mod ci_preflight_gate;
 pub mod ci_reproduction;
 pub mod context;
+pub mod disk_admission;
 pub mod dispatch_pause;
 pub mod doctor;
 pub mod environment;
@@ -118,6 +122,7 @@ pub async fn record_supervisor_rework_reopen(
 
 pub mod resource_monitor;
 pub mod roles;
+pub mod run_dir_reconcile;
 pub mod supervisor_impl;
 pub mod task_merge;
 pub(crate) mod tripwires;
@@ -179,9 +184,17 @@ pub use djinn_orchestration_types::coordinator::PR_REVIEW_FEEDBACK_EVENT;
 // ─── Test modules ────────────────────────────────────────────────────────
 
 #[cfg(test)]
+mod build_admission_epoch_disruption_tests;
+#[cfg(test)]
+mod build_admission_epoch_matrix_tests;
+#[cfg(test)]
+mod build_admission_epoch_support;
+#[cfg(test)]
 mod build_admission_integration_tests;
 #[cfg(test)]
 mod build_admission_inventory_tests;
+#[cfg(test)]
+mod build_admission_light_role_tests;
 #[cfg(test)]
 mod build_lease_integration_tests;
 #[cfg(test)]

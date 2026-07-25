@@ -1708,6 +1708,39 @@ impl CoordinatorActor {
         false
     }
 
+    /// Optional warm build-cache freshness probe (proposal ri23 Part 2).
+    ///
+    /// Returns the warm-substrate probe when one is wired. It is `None` today:
+    /// the warm substrate — which owns inventory / warming / freshness /
+    /// eviction / seeding — has not yet exposed a coordinator-facing probe, so
+    /// the pre-allocation gate is a no-op and dispatch proceeds unchanged. When
+    /// the substrate lands a probe, this is the single seam that lights the gate;
+    /// the dispatch loop below already calls it before pod allocation.
+    fn warm_build_cache_probe(
+        &self,
+    ) -> Option<Arc<dyn super::warm_dispatch_gate::WarmBuildCacheProbe>> {
+        None
+    }
+
+    /// Resolved compile-mode for a project's warm build cache. Defaults to
+    /// `Compile`; the gate only runs when a probe is wired, and the substrate's
+    /// probe remains authoritative for freshness and identity. A future
+    /// stack-aware resolver can return `None` for non-compile stacks so the gate
+    /// bypasses entirely.
+    fn warm_compile_mode_for(&self, _project_id: &str) -> super::warm_dispatch_gate::CompileMode {
+        super::warm_dispatch_gate::CompileMode::Compile
+    }
+
+    /// Resolved environment-identity token the warm base must match to be a hit.
+    ///
+    /// The warm substrate owns the canonical identity; this only threads it to
+    /// the probe, which performs the comparison. Empty until a substrate-defined
+    /// resolver is wired (the probe is `None` until then, so the gate never runs
+    /// with a placeholder identity).
+    fn warm_cache_environment_identity(&self, _project_id: &str) -> String {
+        String::new()
+    }
+
     /// Find all ready tasks (open, no unresolved blockers, non-epic) and dispatch
     /// those that don't already have an active session.
     #[tracing::instrument(
@@ -2925,6 +2958,33 @@ impl CoordinatorActor {
                     .await;
             }
 
+            // ri23 Part 2: pre-pod-allocation warm build-cache freshness gate.
+            // Mirrors the architect graph gate above, but for the per-project
+            // warm Cargo build cache. When the warm substrate has wired a
+            // probe, this bounds the wait for a fresh cache and labels the
+            // decision; otherwise it is a best-effort no-op. The task-run pod is
+            // still allocated exactly once below, regardless of the decision.
+            if let Some(warm_probe) = self.warm_build_cache_probe() {
+                let identity = super::warm_dispatch_gate::WarmCacheIdentity {
+                    project_id: task.project_id.clone(),
+                    environment_identity: self.warm_cache_environment_identity(&task.project_id),
+                };
+                let decision = super::warm_dispatch_gate::WarmDispatchGate::default()
+                    .decide_and_record(
+                        self.warm_compile_mode_for(&task.project_id),
+                        warm_probe.as_ref(),
+                        &identity,
+                        &SystemClock::new(),
+                    )
+                    .await;
+                tracing::debug!(
+                    task_id = %task.short_id,
+                    project_id = %task.project_id,
+                    warm_hit = decision.is_warm_hit(),
+                    "CoordinatorActor: warm build-cache dispatch gate decision"
+                );
+            }
+
             let build_admission = match self
                 .begin_task_run_build_admission(
                     role,
@@ -3264,6 +3324,8 @@ mod inflight_ledger_tests {
             ci_head_sha: None,
             ci_pr_number: None,
             ci_blocking_required_check_names: "[]".to_owned(),
+            ci_primary_blocking_check: None,
+            ci_failure_annotations: None,
             ci_failure_fingerprint: None,
             ci_first_seen_at: None,
             ci_last_seen_at: None,
@@ -3424,7 +3486,7 @@ mod inflight_ledger_tests {
 
     pub(super) const WND1_READY_TASK_COUNT: usize = 10;
     pub(super) const WND1_STABLE_MODEL_ID: &str = "test/mock";
-    const WND1_DISPATCH_SETTLE_TIMEOUT: Duration = Duration::from_secs(10);
+    pub(super) const WND1_DISPATCH_SETTLE_TIMEOUT: Duration = Duration::from_secs(10);
     pub(super) const WND1_CONTROLLED_RUNTIME_GUARD: Duration = Duration::from_secs(60);
 
     pub(super) struct Wnd1DispatchFixture {
@@ -3695,6 +3757,7 @@ mod inflight_ledger_tests {
             pr_status_cache: HashMap::new(),
             pr_draft_first_seen: HashMap::new(),
             review_stuck_sha_first_seen: HashMap::new(),
+            ci_inconclusive_retriggered: HashSet::new(),
             merge_fail_count: HashMap::new(),
             auto_approve_attempted: HashMap::new(),
             delegated_to_github: HashMap::new(),
@@ -3784,7 +3847,18 @@ mod inflight_ledger_tests {
             .sum()
     }
 
-    async fn wait_for_pool_to_forget_task(pool: &djinn_slot::SlotPoolHandle, task_id: &str) {
+    /// Block until the pool has released a task's slot mapping.
+    ///
+    /// `SlotPoolHandle::kill_session` only *sends* the kill; the pool actor
+    /// drops `task_to_slot` later, when the slot's own `Killed`/`Free` event
+    /// arrives through `handle_event`. The same asymmetry applies to a runner
+    /// that completes on its own. Any test that asserts "the pool forgot this
+    /// task" therefore has to wait for that event rather than read the mapping
+    /// straight after the command returns.
+    pub(super) async fn wait_for_pool_to_forget_task(
+        pool: &djinn_slot::SlotPoolHandle,
+        task_id: &str,
+    ) {
         let deadline = tokio::time::Instant::now() + WND1_DISPATCH_SETTLE_TIMEOUT;
         loop {
             if !pool
@@ -5047,6 +5121,7 @@ mod failover_chain_tests {
             pr_status_cache: HashMap::new(),
             pr_draft_first_seen: HashMap::new(),
             review_stuck_sha_first_seen: HashMap::new(),
+            ci_inconclusive_retriggered: HashSet::new(),
             merge_fail_count: HashMap::new(),
             auto_approve_attempted: HashMap::new(),
             delegated_to_github: HashMap::new(),
@@ -6063,6 +6138,8 @@ mod failover_chain_tests {
             ci_head_sha: None,
             ci_pr_number: None,
             ci_blocking_required_check_names: "[]".to_owned(),
+            ci_primary_blocking_check: None,
+            ci_failure_annotations: None,
             ci_failure_fingerprint: None,
             ci_first_seen_at: None,
             ci_last_seen_at: None,
@@ -6273,6 +6350,8 @@ mod failover_chain_tests {
             ci_head_sha: None,
             ci_pr_number: None,
             ci_blocking_required_check_names: "[]".to_owned(),
+            ci_primary_blocking_check: None,
+            ci_failure_annotations: None,
             ci_failure_fingerprint: None,
             ci_first_seen_at: None,
             ci_last_seen_at: None,
@@ -6852,6 +6931,8 @@ mod failover_chain_tests {
             ci_head_sha: None,
             ci_pr_number: None,
             ci_blocking_required_check_names: "[]".to_owned(),
+            ci_primary_blocking_check: None,
+            ci_failure_annotations: None,
             ci_failure_fingerprint: None,
             ci_first_seen_at: None,
             ci_last_seen_at: None,
@@ -7602,6 +7683,7 @@ mod monitored_reopen_no_eligible_model_tests {
             pr_status_cache: HashMap::new(),
             pr_draft_first_seen: HashMap::new(),
             review_stuck_sha_first_seen: HashMap::new(),
+            ci_inconclusive_retriggered: HashSet::new(),
             merge_fail_count: HashMap::new(),
             auto_approve_attempted: HashMap::new(),
             delegated_to_github: HashMap::new(),
@@ -7945,6 +8027,7 @@ mod build_admission_route_tests {
     use super::inflight_ledger_tests::{
         WND1_CONTROLLED_RUNTIME_GUARD, WND1_READY_TASK_COUNT, WND1_STABLE_MODEL_ID,
         Wnd1DispatchFixture, configure_wnd1_user_max_sessions, seed_wnd1_ready_worker_tasks,
+        wait_for_pool_to_forget_task,
     };
     use super::*;
     use crate::build_admission::{BuildAdmissionController, BuildAdmissionMode};
@@ -8187,6 +8270,7 @@ mod build_admission_route_tests {
             pr_status_cache: HashMap::new(),
             pr_draft_first_seen: HashMap::new(),
             review_stuck_sha_first_seen: HashMap::new(),
+            ci_inconclusive_retriggered: HashSet::new(),
             merge_fail_count: HashMap::new(),
             auto_approve_attempted: HashMap::new(),
             delegated_to_github: HashMap::new(),
@@ -8541,10 +8625,18 @@ mod build_admission_route_tests {
 
     // ─── AC1: Retry / planner-escalation route ────────────────────────────
 
-    /// Prove the planner-escalation dispatch route records an admission row
-    /// before the pool create.
+    /// Prove the planner-escalation dispatch route goes through build admission
+    /// and dispatches WITHOUT reserving a build slot.
+    ///
+    /// This test previously asserted the opposite (an occupying row before the
+    /// pool create). Task `h1yv` inverted it: a Planner is
+    /// [`djinn_runtime::RoleResourceClass::Light`] — orchestration-only, it
+    /// never runs the project's compile/test toolchain — so it is admitted with
+    /// a zero-slot permit and leaves no journal row. The route invariant that
+    /// still matters is that the escalation dispatches at all while a scarce cap
+    /// is in force, and that it adds nothing to durable occupancy.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn planner_escalation_route_reserves_before_pool_create() {
+    async fn planner_escalation_route_dispatches_without_consuming_a_build_slot() {
         let db = crate::test_helpers::create_test_db();
         let (events_tx, _events_rx) = tokio::sync::broadcast::channel(256);
         let fixture = seed_wnd1_ready_worker_tasks(&db, WND1_READY_TASK_COUNT).await;
@@ -8593,18 +8685,31 @@ mod build_admission_route_tests {
 
         let snapshot = runtime.snapshot(&dispatched_id);
         assert!(
-            snapshot.row_existed,
-            "planner-escalation route must have an admission row before the \
-             pool create fires"
+            !snapshot.row_existed,
+            "a light planner task-run must reserve no admission row"
+        );
+        assert_eq!(
+            snapshot.occupancy, 0,
+            "a light planner task-run must add nothing to build occupancy"
         );
 
-        // The review task's admission history must show exactly one generation.
+        // The review task leaves no admission history at all: nothing was
+        // reserved, so there is nothing to release.
         let history = journal
             .list_history(AdmissionDomain::TaskObservation, &dispatched_id)
             .await
             .expect("read planner admission history");
-        assert_eq!(history.len(), 1);
-        assert_eq!(history[0].state, AdmissionState::CreateUnknown);
+        assert!(
+            history.is_empty(),
+            "a light planner task-run writes no journal rows, got {history:?}"
+        );
+        assert_eq!(
+            journal
+                .count_task_or_warm_occupancy()
+                .await
+                .expect("read occupancy"),
+            0
+        );
 
         runtime.release(&dispatched_id).await;
     }
@@ -8929,10 +9034,15 @@ mod build_admission_route_tests {
         // already have removed the mapping, in which case TaskNotFound is the
         // expected deterministic outcome.
         let _ = actor.pool.kill_session(&task_id).await;
-        assert!(
-            !actor.pool.has_session(&task_id).await.expect("check pool"),
-            "runner completion must remove the first controlled session"
-        );
+        // Runner completion must remove the first controlled session — but that
+        // removal is event-driven, not synchronous with `kill_session`: the
+        // completed-callback fires before the runner future returns, and the
+        // pool drops `task_to_slot` only once the slot's `Killed`/`Free` event
+        // reaches `handle_event`. Reading the mapping immediately therefore
+        // races the pool actor under load. Wait for the event instead — the
+        // retry below also depends on the mapping being gone, since
+        // `dispatch_ready_tasks` skips any task the pool still holds.
+        wait_for_pool_to_forget_task(&actor.pool, &task_id).await;
         actor
             .clear_planned_dispatch_completion(&task_id, "ambiguous retry fixture settlement")
             .await;

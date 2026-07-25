@@ -513,6 +513,8 @@ fn task(id: &str, status: &str) -> Task {
         ci_head_sha: None,
         ci_pr_number: None,
         ci_blocking_required_check_names: "[]".to_string(),
+        ci_primary_blocking_check: None,
+        ci_failure_annotations: None,
         ci_failure_fingerprint: None,
         ci_first_seen_at: None,
         ci_last_seen_at: None,
@@ -601,6 +603,7 @@ fn check(name: &str) -> CheckRun {
         status: "completed".to_string(),
         conclusion: Some("failure".to_string()),
         html_url: "https://github.com/o/r/runs/1".to_string(),
+        ..Default::default()
     }
 }
 
@@ -1257,6 +1260,7 @@ fn check_run(name: &str, run_id: u64) -> CheckRun {
         status: "completed".to_string(),
         conclusion: Some("failure".to_string()),
         html_url: format!("https://github.com/o/r/actions/runs/{run_id}/job/{run_id}9"),
+        ..Default::default()
     }
 }
 
@@ -1593,6 +1597,7 @@ fn compute_ci_failure_fingerprint_normalizes_casing_and_whitespace() {
         status: "completed".to_string(),
         conclusion: Some("failure".to_string()),
         html_url: "https://github.com/o/r/actions/runs/1/job/1".to_string(),
+        ..Default::default()
     };
     let check_lower = CheckRun {
         id: 2,
@@ -1601,6 +1606,7 @@ fn compute_ci_failure_fingerprint_normalizes_casing_and_whitespace() {
         status: "completed".to_string(),
         conclusion: Some("failure".to_string()),
         html_url: "https://github.com/o/r/actions/runs/1/job/2".to_string(),
+        ..Default::default()
     };
     let refs_upper: Vec<&CheckRun> = vec![&check_upper];
     let refs_lower: Vec<&CheckRun> = vec![&check_lower];
@@ -1623,6 +1629,7 @@ fn compute_ci_failure_fingerprint_independent_of_order() {
         status: "completed".to_string(),
         conclusion: Some("failure".to_string()),
         html_url: "https://github.com/o/r/actions/runs/1/job/1".to_string(),
+        ..Default::default()
     };
     let check_b = CheckRun {
         id: 2,
@@ -1631,6 +1638,7 @@ fn compute_ci_failure_fingerprint_independent_of_order() {
         status: "completed".to_string(),
         conclusion: Some("failure".to_string()),
         html_url: "https://github.com/o/r/actions/runs/1/job/2".to_string(),
+        ..Default::default()
     };
     let refs_ab: Vec<&CheckRun> = vec![&check_a, &check_b];
     let refs_ba: Vec<&CheckRun> = vec![&check_b, &check_a];
@@ -2044,6 +2052,8 @@ fn build_failing_snapshot_input(
         head_sha: head_sha.to_owned(),
         ci_status: CiStatus::Failing,
         blocking_required_check_names: blocking_names,
+        primary_blocking_check: None,
+        failure_annotations: None,
         failure_fingerprint: Some(fingerprint.to_owned()),
         same_signature_count: total_consecutive,
         last_remediation_base_sha: Some(head_sha.to_owned()),
@@ -2058,6 +2068,7 @@ fn make_check_run(name: &str, conclusion: &str) -> CheckRun {
         status: "completed".to_string(),
         conclusion: Some(conclusion.to_string()),
         html_url: "https://github.com/owner/repo/actions/runs/123/jobs/456".to_string(),
+        ..Default::default()
     }
 }
 
@@ -2095,6 +2106,8 @@ fn ci_snapshot_passing_input_has_empty_blocking_and_no_fingerprint() {
         head_sha: "sha-green".to_owned(),
         ci_status: CiStatus::Passing,
         blocking_required_check_names: vec![],
+        primary_blocking_check: None,
+        failure_annotations: None,
         failure_fingerprint: None,
         same_signature_count: 0,
         last_remediation_base_sha: None,
@@ -2114,6 +2127,8 @@ fn ci_snapshot_pending_input_has_empty_blocking_and_no_fingerprint() {
         head_sha: "sha-pending".to_owned(),
         ci_status: CiStatus::Pending,
         blocking_required_check_names: vec![],
+        primary_blocking_check: None,
+        failure_annotations: None,
         failure_fingerprint: None,
         same_signature_count: 0,
         last_remediation_base_sha: None,
@@ -2132,6 +2147,8 @@ fn ci_snapshot_unknown_input_has_empty_blocking_and_no_fingerprint() {
         head_sha: "sha-unknown".to_owned(),
         ci_status: CiStatus::Unknown,
         blocking_required_check_names: vec![],
+        primary_blocking_check: None,
+        failure_annotations: None,
         failure_fingerprint: None,
         same_signature_count: 0,
         last_remediation_base_sha: None,
@@ -2185,6 +2202,8 @@ fn ci_snapshot_empty_blocking_names_for_passing_and_pending_states() {
             head_sha: "sha".to_owned(),
             ci_status: status,
             blocking_required_check_names: vec![],
+            primary_blocking_check: None,
+            failure_annotations: None,
             failure_fingerprint: None,
             same_signature_count: 0,
             last_remediation_base_sha: None,
@@ -2219,6 +2238,8 @@ fn ci_snapshot_review_stuck_failing_has_blocking_names_no_fingerprint() {
         head_sha: "stuck-sha".to_owned(),
         ci_status: CiStatus::Failing,
         blocking_required_check_names: blocking_names,
+        primary_blocking_check: None,
+        failure_annotations: None,
         failure_fingerprint: None,
         same_signature_count: 0,
         last_remediation_base_sha: None,
@@ -2252,6 +2273,8 @@ fn ci_snapshot_changes_requested_failing_has_blocking_names_no_fingerprint() {
         head_sha: "changes-req-sha".to_owned(),
         ci_status: CiStatus::Failing,
         blocking_required_check_names: blocking_names,
+        primary_blocking_check: None,
+        failure_annotations: None,
         failure_fingerprint: None,
         same_signature_count: 0,
         last_remediation_base_sha: None,
@@ -2280,6 +2303,8 @@ fn ci_snapshot_new_head_sha_reset_contract_has_clean_fields() {
         head_sha: "brand-new-sha".to_owned(),
         ci_status: CiStatus::Unknown,
         blocking_required_check_names: vec![],
+        primary_blocking_check: None,
+        failure_annotations: None,
         failure_fingerprint: None,
         same_signature_count: 0,
         last_remediation_base_sha: None,
@@ -2316,6 +2341,8 @@ fn ci_snapshot_persist_input_construction_covers_all_statuses() {
         head_sha: "sha".to_owned(),
         ci_status: CiStatus::Failing,
         blocking_required_check_names: vec!["A".to_owned(), "B".to_owned()],
+        primary_blocking_check: None,
+        failure_annotations: None,
         failure_fingerprint: Some("fp".to_owned()),
         same_signature_count: 2,
         last_remediation_base_sha: Some("sha".to_owned()),
@@ -2337,6 +2364,8 @@ fn ci_snapshot_persist_input_construction_covers_all_statuses() {
         head_sha: "sha".to_owned(),
         ci_status: CiStatus::Passing,
         blocking_required_check_names: vec![],
+        primary_blocking_check: None,
+        failure_annotations: None,
         failure_fingerprint: None,
         same_signature_count: 0,
         last_remediation_base_sha: None,
@@ -2353,6 +2382,8 @@ fn ci_snapshot_persist_input_construction_covers_all_statuses() {
         head_sha: "sha".to_owned(),
         ci_status: CiStatus::Pending,
         blocking_required_check_names: vec![],
+        primary_blocking_check: None,
+        failure_annotations: None,
         failure_fingerprint: None,
         same_signature_count: 0,
         last_remediation_base_sha: None,
@@ -2367,6 +2398,8 @@ fn ci_snapshot_persist_input_construction_covers_all_statuses() {
         head_sha: "sha".to_owned(),
         ci_status: CiStatus::Unknown,
         blocking_required_check_names: vec![],
+        primary_blocking_check: None,
+        failure_annotations: None,
         failure_fingerprint: None,
         same_signature_count: 0,
         last_remediation_base_sha: None,
@@ -2396,6 +2429,8 @@ fn ci_snapshot_remediation_base_sha_none_by_default_round_trips_when_set() {
         head_sha: "failing-head-sha".to_owned(),
         ci_status: CiStatus::Failing,
         blocking_required_check_names: vec!["X".to_owned()],
+        primary_blocking_check: None,
+        failure_annotations: None,
         failure_fingerprint: Some("fp".to_owned()),
         same_signature_count: 1,
         last_remediation_base_sha: Some("failing-head-sha".to_owned()),
@@ -2467,6 +2502,7 @@ fn ci_status_classifies_incomplete_checks_as_pending() {
         status: "in_progress".to_string(),
         conclusion: None,
         html_url: "https://github.com/o/r/actions/runs/3/job/3".to_string(),
+        ..Default::default()
     };
     let checks = [&running_check];
     let all_completed = checks.iter().all(|cr| cr.status == "completed");
@@ -2530,6 +2566,8 @@ fn stale_head_reset_produces_pending_with_cleared_fields() {
         head_sha: "new-sha-abc".to_string(),
         ci_status: CiStatus::Unknown, // reset_ci_snapshot_for_head inserts 'unknown' per SQL
         blocking_required_check_names: Vec::new(),
+        primary_blocking_check: None,
+        failure_annotations: None,
         failure_fingerprint: None,
         same_signature_count: 0,
         last_remediation_base_sha: None,
@@ -2570,6 +2608,8 @@ fn unknown_snapshot_preserves_head_sha_and_identity() {
         head_sha: "existing-sha".to_string(),
         ci_status: CiStatus::Unknown,
         blocking_required_check_names: Vec::new(),
+        primary_blocking_check: None,
+        failure_annotations: None,
         failure_fingerprint: None,
         same_signature_count: 0,
         last_remediation_base_sha: None,
@@ -2599,6 +2639,8 @@ fn snapshot_input_for_passing_status_has_no_fingerprint() {
         head_sha: "abc123".to_string(),
         ci_status: CiStatus::Passing,
         blocking_required_check_names: Vec::new(),
+        primary_blocking_check: None,
+        failure_annotations: None,
         failure_fingerprint: None,
         same_signature_count: 0,
         last_remediation_base_sha: None,
@@ -2772,6 +2814,8 @@ fn sa4x_advisory_only_failures_do_not_trigger_guardrails() {
         head_sha: "advisory-head-sha".to_owned(),
         ci_status: CiStatus::Passing, // advisory-only = passing (no blocking failures)
         blocking_required_check_names: vec![],
+        primary_blocking_check: None,
+        failure_annotations: None,
         failure_fingerprint: None,
         same_signature_count: 0,
         last_remediation_base_sha: None,
@@ -2990,6 +3034,8 @@ fn gate_snapshot(task_id: &str, head_sha: &str, ci_status: CiStatus) -> TaskPrCi
         head_sha: head_sha.to_owned(),
         ci_status,
         blocking_required_check_names: Vec::new(),
+        primary_blocking_check: None,
+        failure_annotations: None,
         failure_fingerprint: None,
         first_seen_at: "2026-01-01T00:00:00.000Z".to_owned(),
         last_seen_at: "2026-01-01T00:00:00.000Z".to_owned(),
@@ -3263,6 +3309,38 @@ fn pr_draft_ci_action_failing_routes_to_remediation() {
     );
 }
 
+/// wnqw: an inconclusive run must be retriggered, never remediated. Sending a
+/// worker to fix code that a run-level cancel never proved broken is exactly
+/// what cost six sessions and three reopens on task `tlu1`.
+#[test]
+fn pr_draft_ci_action_inconclusive_retriggers_and_never_remediates() {
+    let action = decide_pr_draft_ci_action(CiStatus::Inconclusive, true);
+    assert_eq!(action, PrDraftCiAction::RetriggerAndHold);
+    assert_ne!(action, PrDraftCiAction::RouteToRemediation);
+    assert_ne!(
+        action,
+        PrDraftCiAction::Proceed {
+            needs_passing_persist: false
+        },
+        "an inconclusive run is not evidence the head is mergeable"
+    );
+}
+
+/// The inconclusive verdict must also not open the merge gate.
+#[test]
+fn ci_merge_gate_holds_on_inconclusive() {
+    let snapshot = djinn_core::models::TaskPrCiSnapshot {
+        head_sha: "head-1".to_string(),
+        ci_status: CiStatus::Inconclusive,
+        ..Default::default()
+    };
+    assert_eq!(
+        ci_merge_gate_verdict(Some(&snapshot), "head-1"),
+        CiMergeGateVerdict::Hold,
+        "no verdict about the code means no permission to merge, and nothing to block on either"
+    );
+}
+
 /// Advisory-only failures are non-blocking: when required checks are passing
 /// the CI status is Passing and the action is Proceed (not RouteToRemediation).
 #[test]
@@ -3404,6 +3482,8 @@ fn advisory_only_failure_produces_no_baseline_mutation() {
         head_sha: "advisory-head-sha".to_owned(),
         ci_status: CiStatus::Passing,
         blocking_required_check_names: vec![],
+        primary_blocking_check: None,
+        failure_annotations: None,
         failure_fingerprint: None,
         same_signature_count: 0,
         last_remediation_base_sha: None,
@@ -3492,6 +3572,8 @@ fn stale_pr_number_change_resets_snapshot_to_clean_fields() {
         head_sha: "new-head-for-pr20".to_owned(),
         ci_status: CiStatus::Unknown,
         blocking_required_check_names: Vec::new(),
+        primary_blocking_check: None,
+        failure_annotations: None,
         failure_fingerprint: None,
         same_signature_count: 0,
         last_remediation_base_sha: None,
@@ -3848,6 +3930,7 @@ fn required_vs_advisory_failures_through_blocking_filter() {
         status: "completed".to_string(),
         conclusion: Some("failure".to_string()),
         html_url: "https://github.com/o/r/actions/runs/10/job/10".to_string(),
+        ..Default::default()
     };
     let vercel = CheckRun {
         id: 200,
@@ -3856,6 +3939,7 @@ fn required_vs_advisory_failures_through_blocking_filter() {
         status: "completed".to_string(),
         conclusion: Some("failure".to_string()),
         html_url: "https://github.com/o/r/actions/runs/20/job/20".to_string(),
+        ..Default::default()
     };
     let all_failed = vec![&quality_gate, &vercel];
     let required = vec!["Quality Gate".to_string()];
@@ -4029,6 +4113,8 @@ fn durable_snapshot(
         head_sha: head_sha.to_owned(),
         ci_status: CiStatus::Failing,
         blocking_required_check_names: vec!["Quality Gate".to_owned()],
+        primary_blocking_check: None,
+        failure_annotations: None,
         failure_fingerprint: failure_fingerprint.map(|s| s.to_owned()),
         first_seen_at: "2026-07-01T00:00:00.000Z".to_owned(),
         last_seen_at: "2026-07-01T00:00:00.000Z".to_owned(),
@@ -4754,6 +4840,8 @@ fn mq_section_task() -> djinn_core::models::Task {
         ci_head_sha: None,
         ci_pr_number: None,
         ci_blocking_required_check_names: "[]".to_string(),
+        ci_primary_blocking_check: None,
+        ci_failure_annotations: None,
         ci_failure_fingerprint: None,
         ci_first_seen_at: None,
         ci_last_seen_at: None,

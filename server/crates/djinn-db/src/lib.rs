@@ -18,10 +18,11 @@ pub mod test_support {
         apply_all_migrations_to_fresh_database, backdate_coordinator_incarnation_lease,
         backdate_task_attempt_created_at, backdate_task_updated_at,
         build_multi_project_housekeeping_fixture, close_task_at,
-        corrupt_credential_encrypted_value, delete_proposal_lint_result_for_revision_for_test,
-        delete_proposal_lint_results_for_test, delete_session_row, drop_table_cascade_for_test,
-        drop_table_for_test, ensure_doctor_findings_schema, event_bus_for,
-        insert_pending_attempt_with_raw_owner, make_coordinator_incarnation_error_after_first_read,
+        corrupt_credential_encrypted_value, corrupt_refinement_task_role_for_test,
+        delete_proposal_lint_result_for_revision_for_test, delete_proposal_lint_results_for_test,
+        delete_session_row, drop_table_cascade_for_test, drop_table_for_test,
+        ensure_doctor_findings_schema, event_bus_for, insert_pending_attempt_with_raw_owner,
+        make_coordinator_incarnation_error_after_first_read,
         make_coordinator_incarnation_vanish_after_first_read, make_project,
         nullify_note_confidence_for_test, override_debate_trail_body_metadata,
         proposal_lint_revision_id_for_test, reject_admission_create_started_for_test,
@@ -57,7 +58,7 @@ pub use repositories::tool_call_metrics::{
 pub use repositories::{
     admission_handoff::{
         AdmissionHandoffAuthority, AdmissionHandoffPhase, AdmissionHandoffRepository,
-        AdmissionHandoffRow,
+        AdmissionHandoffRow, V0Mode, V1Mode,
     },
     admission_journal::{
         AdmissionDomain, AdmissionJournalKey, AdmissionJournalRepository, AdmissionJournalRow,
@@ -221,6 +222,10 @@ pub use repositories::{
         DEFAULT_RETENTION_HISTORY_N, MAX_RETENTION_BATCH, MIN_RETENTION_HISTORY_N,
         RepoGraphRetentionRepository, RetentionMode, RetentionSkipClass, RetentionSweepOutcome,
         RetentionSweepRequest,
+    },
+    run_dirs::{
+        ReconciledRunDirInput, ReserveRunDirInput, RunDirKey, RunDirRepository, RunDirRow,
+        RunDirState, RunDirStateTotals,
     },
     scip_indexer_timing::{
         ScipIndexerTiming, ScipIndexerTimingObservation, ScipIndexerTimingRepository,

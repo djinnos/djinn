@@ -13,7 +13,8 @@ use djinn_core::models::Task;
 /// checks are green can still be dequeued by the merge queue, so the
 /// merge-queue section renders even when the PR-head lane is not failing.
 pub(crate) fn build_ci_blocking_directive(task: &Task) -> Option<String> {
-    let head = build_ci_head_blocking_directive(task);
+    let head =
+        build_ci_head_blocking_directive(task).or_else(|| build_ci_inconclusive_directive(task));
     let merge_queue = build_ci_merge_queue_directive(task);
     match (head, merge_queue) {
         (None, None) => None,
@@ -21,6 +22,41 @@ pub(crate) fn build_ci_blocking_directive(task: &Task) -> Option<String> {
         (None, Some(m)) => Some(m),
         (Some(h), Some(m)) => Some(format!("{h}\n\n{m}")),
     }
+}
+
+/// Inconclusive-run section.
+///
+/// Rendered when the run completed but every blocking required check was
+/// cancelled or never executed. There is nothing to fix, and telling a worker
+/// otherwise is precisely the failure this directive exists to prevent: on task
+/// `tlu1` six sessions were spent remediating code that a run-level cancel had
+/// never shown to be broken.
+fn build_ci_inconclusive_directive(task: &Task) -> Option<String> {
+    if task.ci_status != "inconclusive" {
+        return None;
+    }
+    let head_sha = task.ci_head_sha.as_deref().unwrap_or("unknown");
+    let pr_number = task.ci_pr_number.unwrap_or(0);
+    let check_names: Vec<String> =
+        serde_json::from_str(&task.ci_blocking_required_check_names).unwrap_or_default();
+    let checks_display = if check_names.is_empty() {
+        "unknown".to_string()
+    } else {
+        check_names.join(", ")
+    };
+    Some(format!(
+        "**PR:** #{pr_number}\\\n\
+         **Head SHA:** `{head_sha}`\\\n\
+         **Checks with no verdict:** {checks_display}\n\n\
+         > CI on this PR head is INCONCLUSIVE, not red. Every blocking required \
+         check was cancelled or never executed — the signature of a run-level \
+         abort (a fail-fast watcher cancelling the whole run, or a runner-host \
+         failure), not of broken code. None of the checks above carries any \
+         information about its own health. Do NOT start a remediation attempt \
+         and do NOT change code to \"fix\" these checks; CI is being \
+         retriggered. If the retriggered run fails for a real reason, you will \
+         receive a normal failing-CI directive naming the lane that actually ran."
+    ))
 }
 
 /// PR-head required-CI failure section of the blocking directive.
@@ -42,16 +78,43 @@ fn build_ci_head_blocking_directive(task: &Task) -> Option<String> {
         Some(fp) => format!("**Failure fingerprint:** `{fp}`\n"),
         None => String::new(),
     };
+    // Name the lane to start from. It is the earliest-started blocking check
+    // that actually executed and hard-failed — never a cancelled sibling and
+    // never a `needs:`-dependent aggregator, both of which are symptoms of a
+    // run-level abort and cannot be root causes.
+    let primary_line = match &task.ci_primary_blocking_check {
+        Some(primary) => format!(
+            "**Start here:** `{primary}` — the earliest blocking lane that \
+             actually executed and failed\\\n"
+        ),
+        None => String::new(),
+    };
+    // Annotations are where runner-host failures live (out of disk, runner
+    // crash). They appear in neither the conclusion nor, usually, the job logs.
+    let annotations_block = match &task.ci_failure_annotations {
+        Some(annotations) if !annotations.trim().is_empty() => {
+            format!("\n\n```\n{}\n```", annotations.trim())
+        }
+        _ => String::new(),
+    };
     Some(format!(
         "**PR:** #{pr_number}\\\n\
          **Failing head SHA:** `{head_sha}`\\\n\
-         **Blocking checks:** {checks_display}\\\n\
+         **Blocking checks (ranked, most causal first):** {checks_display}\\\n\
+         {primary_line}\
          {fingerprint_line}\
-         **Remediation baseline SHA:** `{base_sha}`\n\n\
+         **Remediation baseline SHA:** `{base_sha}`{annotations_block}\n\n\
          > REQUIRED CI is failing on the current PR head. You MUST fix the \
          failing required checks listed above before this task can proceed. \
          The task will remain in remediation until all blocking checks pass \
-         on a new commit pushed to the PR branch."
+         on a new commit pushed to the PR branch.\n\
+         >\n\
+         > Blocking checks are listed in causal order. Later entries may be \
+         cancelled siblings or aggregator jobs swept up by a run-level cancel; \
+         fixing the first lane usually clears the rest. If the annotations \
+         above describe a runner-host problem rather than a code problem \
+         (for example `No space left on device`), the correct action is to \
+         retrigger CI and report the infrastructure failure — NOT to change code."
     ))
 }
 

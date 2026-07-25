@@ -333,6 +333,18 @@ assert_output_contains "T12 reports runtime query violation" \
     "::error::Raw sqlx query usage detected outside djinn-db: $RUNTIME_PATH" \
     "$LOG_DIR/t12_runtime_query.log.out"
 
+# ── T13: catalog service wrapper is an approved SQL boundary ──────────
+# Unlike application crates, this wrapper administers an external Postgres
+# service and cannot route tenant CREATE/DROP statements through djinn-db.
+CATALOG_WRAPPER_PATH="server/crates/djinn-catalog-wrapper/src/lib.rs"
+set +e
+run_guard t13_catalog_wrapper_exemption "$CATALOG_WRAPPER_PATH"
+t13_actual=$?
+set -e
+assert_exit "T13 catalog wrapper path exits 0" 0 "$t13_actual" "$LOG_DIR/t13_catalog_wrapper_exemption.log.out"
+assert_output_contains "T13 reports no violations" \
+    "no raw-sqlx boundary violations" "$LOG_DIR/t13_catalog_wrapper_exemption.log.out"
+
 # ── summary ────────────────────────────────────────────────────────────
 printf -- '------------------------------------------\n'
 printf 'passed: %d   failed: %d\n' "$PASS" "$FAIL"

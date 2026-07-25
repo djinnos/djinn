@@ -30,6 +30,15 @@ pub async fn run_commands(
 
         let mut cmd = Command::new("sh");
         cmd.arg("-c").arg(&spec.command).current_dir(working_dir);
+        // jqvg: these hooks are operator-configured, but what they run is the
+        // repository's own build tooling — a `build.rs`, an npm `postinstall`,
+        // a Makefile target — so repository-controlled code executes here just
+        // as it does under the agent shell. This path deliberately does NOT go
+        // through the full sandbox (setup hooks may legitimately write outside
+        // the worktree), so arm only the read-denial layer: it withholds the
+        // credential Secret and the projected ServiceAccount token and changes
+        // nothing else about how the command runs.
+        crate::sandbox::confidential::deny_confidential_reads(&mut cmd);
 
         let output = spawn_command(cmd, duration)
             .await

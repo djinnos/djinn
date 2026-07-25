@@ -14,6 +14,7 @@ ENV PNPM_HOME=/cache/pnpm npm_config_cache=/cache/npm YARN_CACHE_FOLDER=/cache/y
 ENV PIP_CACHE_DIR=/cache/pip UV_CACHE_DIR=/cache/uv
 RUN APT_PACKAGES="postgresql-client" /tmp/djinn-scripts/install-system.sh
 COPY --from=djinn/agent-worker:sha256-golden /usr/local/bin/djinn-agent-worker /opt/djinn/bin/djinn-agent-worker
+COPY --from=djinn/agent-worker:sha256-golden /usr/local/bin/djinn-cgroup-launcher /opt/djinn/bin/djinn-cgroup-launcher
 RUN /tmp/djinn-scripts/install-agent-worker.sh
 RUN TOOLCHAINS="stable 1.85.0" DEFAULT_TOOLCHAIN="stable" COMPONENTS="rust-analyzer clippy rustfmt" /tmp/djinn-scripts/install-rust.sh
 RUN NODE_VERSIONS="22 20" DEFAULT_NODE="22" PACKAGE_MANAGERS="pnpm" SCIP_INDEXER="scip-typescript" SCIP_TYPESCRIPT_VERSION="latest" /tmp/djinn-scripts/install-node.sh

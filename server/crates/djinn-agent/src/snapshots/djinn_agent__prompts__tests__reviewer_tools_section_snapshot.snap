@@ -21,4 +21,5 @@ expression: section
 - `output_list()`
 - `memory_build_context(edge_kinds?, limit?, min_confidence?, query?, task_id?)`
 - `request_planner(id, reason)`
+- `run_verification()`
 - `submit_review(task_id, verdict, acceptance_criteria?, feedback?)`

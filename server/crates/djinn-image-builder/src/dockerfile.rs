@@ -284,6 +284,16 @@ fn emit_agent_worker(df: &mut String, agent_worker: &AgentWorkerImage) {
         agent_worker.full_ref()
     )
     .unwrap();
+    // The mandatory cgroup-launcher sidecar runs from THIS image with a
+    // different entrypoint (`/opt/djinn/bin/djinn-cgroup-launcher`, rendered by
+    // djinn-k8s::launcher). Copy it from the same agent-worker stage so the
+    // launcher command resolves to a real packaged artifact — no separate image.
+    writeln!(
+        df,
+        "COPY --from={} /usr/local/bin/djinn-cgroup-launcher /opt/djinn/bin/djinn-cgroup-launcher",
+        agent_worker.full_ref()
+    )
+    .unwrap();
     writeln!(df, "RUN /tmp/djinn-scripts/install-agent-worker.sh").unwrap();
 }
 
@@ -676,6 +686,15 @@ mod tests {
         assert!(
             df.dockerfile
                 .contains("COPY --from=djinn/agent-worker:sha256-deadbeef")
+        );
+        // The cgroup-launcher binary ships in the SAME per-project image (copied
+        // from the agent-worker stage) so the rendered launcher sidecar command
+        // resolves to a real packaged artifact — no separate/fabricated image.
+        assert!(
+            df.dockerfile.contains(
+                "/usr/local/bin/djinn-cgroup-launcher /opt/djinn/bin/djinn-cgroup-launcher"
+            ),
+            "per-project image must package the cgroup-launcher binary at /opt/djinn/bin"
         );
         assert!(df.dockerfile.contains("install-agent-worker.sh"));
         assert!(!df.dockerfile.contains("install-rust.sh"));

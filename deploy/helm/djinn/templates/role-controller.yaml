@@ -15,9 +15,12 @@ rules:
   # created by the Job controller; djinn only watches + cleans them up).
   # Backing services run as native sidecars inside these Pods, so there are no
   # standalone Pods or ClusterIP Services to manage any more.
+  # `patch` carries the exact-Pod watchdog's confirmation hold: a service-owned
+  # finalizer is added immediately before the UID-fenced DELETE and released
+  # after teardown, so an accepted deletion stays durably observable.
   - apiGroups: [""]
     resources: ["pods"]
-    verbs: ["get", "list", "watch", "delete"]
+    verbs: ["get", "list", "watch", "patch", "delete"]
   - apiGroups: [""]
     resources: ["pods/log"]
     verbs: ["get", "list"]

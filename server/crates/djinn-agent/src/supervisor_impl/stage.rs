@@ -906,6 +906,27 @@ pub(crate) async fn execute_stage(
         .map_err(StageError::SessionCreate)?;
     let session_id = session_record.id.clone();
 
+    // The task-run generation is now healthy under the current admission mode:
+    // acknowledge the durable admission epoch for this generation. This runs
+    // through `SupervisorServices` so it covers BOTH the host in-process
+    // (DirectServices → direct DB) and the pod (WorkerSupervisorServices →
+    // in-pod DB) paths. The generation key is the canonical
+    // `TaskObservation:{task_id}:{generation}` form so it byte-matches the
+    // invocation-primary edge's required-generation set. The write is
+    // idempotent and stale-fenced; a failure is non-fatal to the stage (the
+    // durable edge simply stays blocked until a later ack lands).
+    let generation_key = djinn_coordinator::build_admission::task_run_generation_key(
+        &task.id,
+        task.reopen_count.max(0),
+    );
+    if let Err(error) = services.record_generation_ack(generation_key).await {
+        tracing::warn!(
+            task_id = %task.id,
+            %error,
+            "build admission: generation acknowledgement failed; invocation-primary edge stays blocked"
+        );
+    }
+
     // ── MCP + skills ─────────────────────────────────────────────────────────
     // `runtime_role` drives resolution so specialists can override the base
     // role's MCP/skill defaults.  `role_mcp_servers` carries the DB row's
@@ -955,6 +976,15 @@ pub(crate) async fn execute_stage(
             return Err(StageError::Setup(format!("env_config: {error}")));
         }
     };
+    // Epic 1bnj: resolve whether the project has a non-empty final-verification
+    // plan. Computed once, before `pre_verification` is moved out of the config,
+    // and used both to gate the Worker/Reviewer `run_verification` surface and to
+    // render the configured-vs-legacy prompt guidance.
+    let final_verification_configured = !env_config
+        .lifecycle
+        .final_verification
+        .normalized_commands()
+        .is_empty();
     let SetupContext {
         prompt_setup_commands,
     } = match resolve_setup_context(
@@ -1080,6 +1110,7 @@ pub(crate) async fn execute_stage(
                 .and_then(|metadata| metadata.last_durable_progress_summary.as_deref()),
             planned_note_search: None,
         }),
+        final_verification_configured,
     })
     .await;
 
@@ -1182,6 +1213,15 @@ pub(crate) async fn execute_stage(
     } else {
         crate::roles::tool_schemas_for(agent_type)
     };
+    // Epic 1bnj: the canonical Worker/Reviewer schema sets advertise
+    // `run_verification` unconditionally; strip it from the live per-project
+    // surface when the resolved project has no final-verification plan so the
+    // model never sees a gate tool that would fail at submit. `prepare_build_cache`
+    // is untouched — it renders for the Worker regardless of gate configuration.
+    djinn_roles::prompts::retain_conditional_verification_tools(
+        &mut tools,
+        final_verification_configured,
+    );
     if let Some(ref registry) = mcp_registry {
         tools.extend_from_slice(registry.tool_schemas());
         // Append native MCP resource tools only when at least one connected

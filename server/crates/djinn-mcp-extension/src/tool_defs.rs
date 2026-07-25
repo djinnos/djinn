@@ -72,6 +72,40 @@ pub fn tool_request_planner() -> RmcpTool {
     )
 }
 
+pub fn tool_run_verification() -> RmcpTool {
+    RmcpTool::new(
+        "run_verification".to_string(),
+        "Run the canonical final-verification gate on the current worktree, on demand. It consults first: if an identical tree (same whole-tree fingerprint, manifest, environment, and required coverage) already has a passing run, it returns that evidence instantly WITHOUT executing any commands. Otherwise it runs the required checks hermetically and records the result. Use it to confirm your work passes before you submit — an unchanged tree is never compiled twice, so calling it is cheap on a fresh hit. Returns a typed outcome (hit / ran-pass / ran-fail / rate-limited / error) with per-check results. It does NOT submit your work; call submit_work / submit_review when you are done."
+            .to_string(),
+        object!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
+        }),
+    )
+}
+
+pub fn tool_prepare_build_cache() -> RmcpTool {
+    RmcpTool::new(
+        "prepare_build_cache".to_string(),
+        "Prepare the platform build cache for this task before you start building, on demand. \
+         Stack-neutral: where the platform maintains a warm cache for your stack, this routes \
+         cache preparation through the first-use/admission seam and returns a typed outcome \
+         WITHOUT you running any build yourself. Outcomes: `ready`/`noop` (the cache is prepared \
+         and its path is returned — `noop` means startup already seeded it, so nothing was \
+         re-done), `queued` (preparation was deferred under disk pressure or unknown capacity \
+         and no cache bytes were allocated), or `not_applicable` (your stack has no platform \
+         warm cache). It never intercepts or blocks your shell commands and does not build or \
+         submit anything. Call it once up front; re-calling an already-prepared cache is cheap."
+            .to_string(),
+        object!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
+        }),
+    )
+}
+
 pub fn tool_shell() -> RmcpTool {
     RmcpTool::new(
         "shell".to_string(),
@@ -467,6 +501,26 @@ pub fn tool_schemas_worker() -> Vec<serde_json::Value> {
         mutation(),
     ));
     tool_values.push(serialize_tool(tool_request_planner(), mutation()));
+    // Stack-neutral build-cache preparation. Present for the Worker regardless
+    // of gate configuration — it routes through the worker-side first-use /
+    // admission seam and returns a typed outcome. Idempotent: re-preparing an
+    // already-ready cache only consults.
+    tool_values.push(serialize_tool(
+        tool_prepare_build_cache(),
+        idempotent_mutation(),
+    ));
+    // On-demand canonical final-verification gate (consult-first reuse). Runs
+    // and may record a passing row, but re-running an unchanged tree only
+    // consults, so it is classified idempotent.
+    //
+    // NOTE: the canonical schema set advertises `run_verification`; the live
+    // Worker/Reviewer surface and the rendered prompt strip it when the
+    // resolved `lifecycle.final_verification` plan is empty (see
+    // `djinn_roles::prompts::retain_conditional_verification_tools`).
+    tool_values.push(serialize_tool(
+        tool_run_verification(),
+        idempotent_mutation(),
+    ));
     tool_values.push(serialize_tool(
         crate::finalize_tools::tool_submit_work(),
         mutation(),
@@ -484,6 +538,12 @@ pub fn tool_schemas_reviewer() -> Vec<serde_json::Value> {
     ));
     // request_planner is the intended planner-escalation path for reviewers.
     tool_values.push(serialize_tool(tool_request_planner(), mutation()));
+    // Reviewers consult the same task-scoped final-verification gate on demand;
+    // an unchanged authored tree is reused with no commands executed.
+    tool_values.push(serialize_tool(
+        tool_run_verification(),
+        idempotent_mutation(),
+    ));
     tool_values.push(serialize_tool(
         crate::finalize_tools::tool_submit_review(),
         mutation(),

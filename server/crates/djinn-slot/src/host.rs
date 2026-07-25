@@ -134,6 +134,31 @@ pub trait SlotHostCallbacks: Send + Sync + 'static {
     > {
         Box::pin(async { Err("final verification resolution is not available".to_owned()) })
     }
+    /// Run the agent-facing `run_verification` tool as a pure client of the
+    /// authoritative final-verification coordinator.
+    ///
+    /// The host owns argument parsing, per-session rate limiting (enforced
+    /// before lease acquisition), telemetry rendering, and the JSON tool result.
+    /// It routes the actual consult-or-run through
+    /// [`crate::final_verification::coordinate_final_verification_for_agent`] so
+    /// the coordinator remains the only attempt opener/recorder. The default
+    /// returns a typed error so hosts without the tool wired stay source
+    /// compatible.
+    fn run_agent_verification<'a>(
+        &'a self,
+        _task_id: &'a str,
+        _role_name: &'a str,
+        _arguments: Option<serde_json::Map<String, serde_json::Value>>,
+        _cancellation: tokio_util::sync::CancellationToken,
+        _ctx: &'a SlotContext,
+    ) -> Pin<Box<dyn Future<Output = serde_json::Value> + Send + 'a>> {
+        Box::pin(async {
+            serde_json::json!({
+                "outcome": "error",
+                "detail": "run_verification is not available in this host",
+            })
+        })
+    }
     /// Acquire the ordinary per-invocation verification lease.
     fn acquire_final_verification_lease<'a>(
         &'a self,

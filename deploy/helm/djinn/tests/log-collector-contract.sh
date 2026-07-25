@@ -128,13 +128,16 @@ transforms:
     type: remap
     inputs: [fixture_input]
     source: |
-{vrl}sinks:
+{vrl}
+sinks:
   fixture_output:
     type: console
     inputs: [sanitize]
     encoding:
       codec: json
 '''.format(data_dir=temporary / 'vector-data', vrl=textwrap.indent(vrl, '      '))
+assert config.splitlines()[-7] == textwrap.indent(vrl.splitlines()[-1], '      ')
+assert config.splitlines()[-6] == 'sinks:'
 (temporary / 'vector-fixtures.yaml').write_text(config)
 (temporary / 'vector-input.txt').write_text(''.join(value + '\x1e' for value, _, _ in runtime))
 (temporary / 'vector-expected.json').write_text(json.dumps([

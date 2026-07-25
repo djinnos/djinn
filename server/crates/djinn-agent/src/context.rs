@@ -23,7 +23,10 @@ use tokio::sync::Mutex;
 use crate::actors::coordinator::CoordinatorHandle;
 use crate::file_time::FileTime;
 use crate::lsp::LspManager;
-use crate::process::{LeaseInvocationConfig, LeaseInvocationRunner, UnixBrokerLauncher};
+use crate::process::{
+    InvocationJournal, InvocationRecovery, LeaseInvocationConfig, LeaseInvocationRunner,
+    UnixBrokerLauncher,
+};
 use crate::roles::RoleRegistry;
 use djinn_cgroup_launcher::transport::UnixBrokerClient;
 use djinn_core::clock::{Clock, SystemClock, SystemClock as SystemClockTrait};
@@ -34,10 +37,37 @@ use djinn_orchestration_types::coordinator::BackgroundWorkTracker;
 use djinn_provider::catalog::{CatalogService, HealthTracker};
 use djinn_slot::reply_loop::CompactionCriticalSection;
 use djinn_supervisor::SupervisorServices;
+use djinn_supervisor::services::WatchdogTerminationRequest;
 
 /// Shared tracker for per-task last-activity timestamps (unix seconds).
 /// Used by stall detection to kill sessions that stop producing tokens.
 pub type ActivityTracker = Arc<std::sync::Mutex<HashMap<String, Arc<AtomicU64>>>>;
+
+/// Issue the exact-pod watchdog termination for one grace-expired durable
+/// record. The [`WatchdogTerminationRequest`] carries the task, task-run, and
+/// immutable pod UID read from the durable journal record — never this
+/// process's current identity — so a reconstructed pod terminates exactly the
+/// pod that was recorded.
+///
+/// A failed or transport-unavailable response is logged and deliberately
+/// swallowed: the recovery scan has already persisted `watchdog_notified`
+/// (serialized CAS), so this request is issued at most once and never retried
+/// in a loop; the durable record and its counted lease are retained, and only a
+/// matching durable terminal confirmation clears the record on a later scan.
+async fn terminate_watchdog_pod(
+    services: Arc<dyn SupervisorServices>,
+    request: WatchdogTerminationRequest,
+) {
+    if let Err(error) = services.terminate_watchdog_pod(request.clone()).await {
+        tracing::error!(
+            task_id = %request.task_id,
+            task_run_id = %request.task_run_id,
+            pod_uid = %request.pod_uid,
+            error = %error,
+            "exact-pod watchdog termination failed; retaining durable record and counted lease"
+        );
+    }
+}
 
 /// Immutable broker-backed shell authority composed from trusted task-run inputs.
 #[derive(Clone)]
@@ -49,23 +79,88 @@ pub struct ShellLaunchContext {
 }
 
 impl ShellLaunchContext {
-    pub fn broker_backed(
+    pub async fn broker_backed(
         task_id: String,
         task_run_id: String,
         pod_uid: String,
         services: Arc<dyn SupervisorServices>,
         client: UnixBrokerClient,
-    ) -> Self {
-        Self {
-            runner: Arc::new(LeaseInvocationRunner::new(
-                services,
-                Arc::new(UnixBrokerLauncher::new(client, 0)),
-                Arc::new(SystemClock::new()),
-            )),
+    ) -> std::io::Result<Self> {
+        let journal_dir = std::env::var_os("DJINN_INVOCATION_JOURNAL_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("/var/run/djinn/invocation-journal"));
+        let journal = Arc::new(InvocationJournal::new(journal_dir, pod_uid.clone())?);
+        const WATCHDOG_GRACE: Duration = Duration::from_secs(300);
+        let recovery_clock = SystemClock::new();
+        let startup_watchdog_services = services.clone();
+        InvocationRecovery {
+            journal: journal.as_ref(),
+            services: services.as_ref(),
+            clock: &recovery_clock,
+            watchdog_grace: WATCHDOG_GRACE,
+        }
+        .run(|request| {
+            let services = startup_watchdog_services.clone();
+            terminate_watchdog_pod(services, request)
+        })
+        .await?;
+
+        // Recovery must run again when a startup record reaches grace, rather
+        // than relying on a later process reconstruction or RPC failure.
+        //
+        // This detached sweep MUST hold a `Weak`, never a strong `Arc`, to the
+        // supervisor services. `services` is an `Arc<RpcServices>`, and
+        // `RpcServices` owns the worker's single outbound frame `Sender`; the
+        // worker's orderly shutdown drops every `Arc<RpcServices>` and then
+        // blocks on `background.writer.await`, which only completes once the
+        // last `Sender` clone is gone (the writer loop exits on a closed
+        // channel, not on cancellation). A strong clone parked here across the
+        // `WATCHDOG_GRACE` sleep would keep that `Sender` alive forever and
+        // wedge the worker's exit — the exact 30s cancel-path hang. Upgrade the
+        // `Weak` per iteration and stop once every strong handle is gone (the
+        // worker is tearing down and no further sweep is needed).
+        let recovery_journal = journal.clone();
+        let recovery_services = Arc::downgrade(&services);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(WATCHDOG_GRACE).await;
+                let Some(services) = recovery_services.upgrade() else {
+                    break;
+                };
+                let recovery_clock = SystemClock::new();
+                let sweep_watchdog_services = services.clone();
+                let _ = InvocationRecovery {
+                    journal: recovery_journal.as_ref(),
+                    services: services.as_ref(),
+                    clock: &recovery_clock,
+                    watchdog_grace: WATCHDOG_GRACE,
+                }
+                .run(|request| {
+                    let services = sweep_watchdog_services.clone();
+                    terminate_watchdog_pod(services, request)
+                })
+                .await;
+                // Drop every strong handle before sleeping again so a concurrent
+                // worker shutdown is never blocked while this sweep is idle. The
+                // per-call watchdog clones live only inside the `run` future,
+                // which has already completed here.
+                drop(sweep_watchdog_services);
+                drop(services);
+            }
+        });
+        Ok(Self {
+            runner: Arc::new(
+                LeaseInvocationRunner::new(
+                    services,
+                    Arc::new(UnixBrokerLauncher::new(client, 0)),
+                    Arc::new(SystemClock::new()),
+                )
+                .with_journal(journal),
+            ),
             task_id,
             task_run_id,
             pod_uid,
-        }
+        })
     }
 
     pub(crate) fn invocation(&self, timeout: Duration) -> LeaseInvocationConfig {
@@ -317,7 +412,13 @@ pub struct AgentContext {
     /// variables at `AgentContext` construction time via
     /// [`ReconciliationSweepConfig::from_env`].
     pub reconciliation_sweep: ReconciliationSweepConfig,
-    /// Missing in host/test contexts. Production shell dispatch fails closed.
+    /// The broker-backed, leased shell launch context.
+    ///
+    /// `None` in host/test contexts, and in any worker whose cgroup-launcher
+    /// sidecar is absent or whose handshake failed — which is the default
+    /// rendering since task grkq. `None` does NOT disable shell dispatch: the
+    /// handler then runs commands in-process at the pod's own quota (unleased,
+    /// no cgroup leaf, no lease lift).
     pub shell_launch: Option<ShellLaunchContext>,
     /// Explicitly injected configuration for the optional session-start memory
     /// intent planner. It remains disabled by default, but keeping it on the

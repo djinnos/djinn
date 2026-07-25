@@ -524,3 +524,117 @@ async fn migration_116_adds_nullable_merge_queue_lane_columns_and_constraints() 
     })
     .await;
 }
+
+/// wnqw / migration 152: the triage-evidence columns and the widened
+/// `ci_status` domain that lets a run be recorded as `inconclusive`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn migration_152_adds_triage_evidence_columns_and_inconclusive_status() {
+    with_temp_database("triage_evidence", |db_url| async move {
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&db_url)
+            .await
+            .expect("connect fresh migration database");
+        let operator =
+            djinn_db::test_support::apply_all_migrations_to_fresh_database(&db_url).await;
+
+        // Pre-existing schema is untouched — these columns are additive.
+        assert_schema(&pool).await;
+
+        for column in ["primary_blocking_check", "failure_annotations"] {
+            let (data_type, is_nullable, column_default): (String, String, Option<String>) =
+                sqlx::query_as(
+                    "SELECT data_type, is_nullable, column_default \
+                     FROM information_schema.columns \
+                     WHERE table_name = 'task_pr_ci_snapshots' AND column_name = $1",
+                )
+                .bind(column)
+                .fetch_one(&pool)
+                .await
+                .unwrap_or_else(|e| panic!("inspect column {column}: {e}"));
+            assert_eq!(data_type, "text", "unexpected type for {column}");
+            assert_eq!(is_nullable, "YES", "{column} must be nullable");
+            assert_eq!(column_default, None, "{column} must have no default");
+        }
+
+        sqlx::query(
+            "INSERT INTO projects (id, name, github_owner, github_repo) \
+             VALUES ('project-triage', 'project-triage', 'djinnos', 'djinn-triage')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed triage project");
+        sqlx::query(
+            "INSERT INTO tasks \
+             (id, project_id, short_id, title, description, design, labels, acceptance_criteria, memory_refs, created_by_user_id) \
+             VALUES ('task-triage', 'project-triage', 'trg', 'title', 'description', 'design', \
+                     '[]'::jsonb, '[]'::jsonb, '[]'::jsonb, $1)",
+        )
+        .bind(&operator)
+        .execute(&pool)
+        .await
+        .expect("seed triage task");
+
+        // `inconclusive` is now an accepted ci_status.
+        sqlx::query(
+            "INSERT INTO task_pr_ci_snapshots (task_id, pr_number, ci_status) \
+             VALUES ('task-triage', 1, 'inconclusive')",
+        )
+        .execute(&pool)
+        .await
+        .expect("inconclusive must be an accepted ci_status");
+
+        // The four pre-existing states still round-trip.
+        for (pr, status) in [(2, "passing"), (3, "failing"), (4, "pending"), (5, "unknown")] {
+            sqlx::query(
+                "INSERT INTO task_pr_ci_snapshots (task_id, pr_number, ci_status) \
+                 VALUES ('task-triage', $1, $2)",
+            )
+            .bind(pr as i64)
+            .bind(status)
+            .execute(&pool)
+            .await
+            .unwrap_or_else(|e| panic!("{status} must remain accepted: {e}"));
+        }
+
+        // The CHECK still rejects anything outside the domain — widening the
+        // constraint must not have turned it into a no-op.
+        sqlx::query(
+            "INSERT INTO task_pr_ci_snapshots (task_id, pr_number, ci_status) \
+             VALUES ('task-triage', 6, 'not-a-real-status')",
+        )
+        .execute(&pool)
+        .await
+        .expect_err("the ci_status CHECK must still reject unknown values");
+
+        // Evidence columns accept and return the captured annotation text.
+        sqlx::query(
+            "INSERT INTO task_pr_ci_snapshots \
+             (task_id, pr_number, ci_status, primary_blocking_check, failure_annotations) \
+             VALUES ('task-triage', 7, 'failing', $1, $2)",
+        )
+        .bind("Plan Server Test Shards")
+        .bind("Annotations on `Plan Server Test Shards`:\n- [failure] No space left on device")
+        .execute(&pool)
+        .await
+        .expect("triage evidence must persist");
+
+        let (primary, annotations): (Option<String>, Option<String>) = sqlx::query_as(
+            "SELECT primary_blocking_check, failure_annotations \
+             FROM task_pr_ci_snapshots WHERE task_id = 'task-triage' AND pr_number = 7",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("read back triage evidence");
+        assert_eq!(primary.as_deref(), Some("Plan Server Test Shards"));
+        assert!(
+            annotations
+                .as_deref()
+                .is_some_and(|a| a.contains("No space left on device")),
+            "the runner-host cause must survive a round trip"
+        );
+
+        pool.close().await;
+    })
+    .await;
+}
