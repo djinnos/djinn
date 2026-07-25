@@ -196,6 +196,8 @@ mod build_admission_inventory_tests;
 #[cfg(test)]
 mod build_admission_light_role_tests;
 #[cfg(test)]
+mod build_lease_cap_arming_tests;
+#[cfg(test)]
 mod build_lease_integration_tests;
 #[cfg(test)]
 pub(crate) mod test_helpers;
