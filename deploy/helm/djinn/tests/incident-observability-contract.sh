@@ -52,7 +52,8 @@ def require(value):
 # Single replicas, immutable image references, exact local retention, bounded
 # values, and the externally supplied Secret reference are rendered literally.
 for value in (
-    'name: incident-enabled-prometheus', 'name: incident-enabled-alertmanager',
+    'name: incident-enabled-djinn-prometheus',
+    'name: incident-enabled-djinn-alertmanager',
     'replicas: 1', 'image: "prom/prometheus:v2.54.1"',
     'image: "prom/alertmanager:v0.27.0"',
     '--storage.tsdb.retention.time=7d', 'secretName: "incident-webhook"',
