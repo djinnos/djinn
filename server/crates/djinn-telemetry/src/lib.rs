@@ -332,6 +332,10 @@ const GRAPH_RETENTION_MODES: [&str; 3] = ["off", "dry_run", "delete"];
 const GRAPH_RETENTION_OUTCOMES: [&str; 5] = ["candidate", "delete", "skip", "retry", "error"];
 const GRAPH_RETENTION_REASONS: [&str; 4] =
     ["none", "active_pin", "now_survivor", "removed_concurrently"];
+// Task-run IDs, Job names, and completion details stay in structured events,
+// never in these lifecycle counters.
+const TASKRUN_JOBS_STARTED_TOTAL: &str = "djinn_taskrun_jobs_started_total";
+const WORKER_COMPLETIONS_SUBMITTED_TOTAL: &str = "djinn_worker_completions_submitted_total";
 
 static HANDLE: OnceLock<Result<PrometheusHandle, String>> = OnceLock::new();
 
@@ -342,6 +346,26 @@ static HANDLE: OnceLock<Result<PrometheusHandle, String>> = OnceLock::new();
 /// taking application locks or requiring an async runtime.
 pub fn init() -> Result<(), String> {
     handle().map(|_| ())
+}
+
+/// Unlabelled task-run lifecycle counters (proposal ftsd).
+///
+/// A counter moves only at its durable lifecycle boundary. The worker-completion
+/// helper is defined here for the follow-up acceptance path; this task wires
+/// only [`increment_job_started`].
+pub mod taskrun_lifecycle {
+    pub const JOBS_STARTED_TOTAL: &str = super::TASKRUN_JOBS_STARTED_TOTAL;
+    pub const WORKER_COMPLETIONS_SUBMITTED_TOTAL: &str = super::WORKER_COMPLETIONS_SUBMITTED_TOTAL;
+
+    /// Record a Kubernetes task-run Job whose create request was confirmed.
+    pub fn increment_job_started() {
+        metrics::counter!(super::TASKRUN_JOBS_STARTED_TOTAL).increment(1);
+    }
+
+    /// Record a durably accepted terminal worker completion.
+    pub fn increment_worker_completion_submitted() {
+        metrics::counter!(super::WORKER_COMPLETIONS_SUBMITTED_TOTAL).increment(1);
+    }
 }
 
 pub mod breaker {
@@ -1769,6 +1793,16 @@ fn register_metrics() {
         SLOT_POOL,
         "Slot pool slots aggregated by state and model. Labels are state=free|busy and model only."
     );
+    metrics::describe_counter!(
+        TASKRUN_JOBS_STARTED_TOTAL,
+        "Kubernetes task-run Jobs whose create requests returned confirmed success."
+    );
+    metrics::counter!(TASKRUN_JOBS_STARTED_TOTAL).absolute(0);
+    metrics::describe_counter!(
+        WORKER_COMPLETIONS_SUBMITTED_TOTAL,
+        "Terminal worker completions durably accepted by the coordinator."
+    );
+    metrics::counter!(WORKER_COMPLETIONS_SUBMITTED_TOTAL).absolute(0);
     metrics::describe_counter!(
         BREAKER_TRIPS_TOTAL,
         "Circuit-breaker trips at the authoritative closed-to-open transition."
@@ -3689,6 +3723,19 @@ mod tests {
             assert!(
                 rendered.contains(&format!("verify_run_record_total{{outcome=\"{outcome}\"}}")),
                 "missing verification recording outcome label {outcome} in:\n{rendered}"
+            );
+        }
+        for metric in [
+            TASKRUN_JOBS_STARTED_TOTAL,
+            WORKER_COMPLETIONS_SUBMITTED_TOTAL,
+        ] {
+            assert!(
+                rendered.contains(&format!("{metric} 0")),
+                "missing zero-valued unlabelled lifecycle counter {metric} in:\n{rendered}"
+            );
+            assert!(
+                !rendered.contains(&format!("{metric}{{")),
+                "lifecycle counter {metric} must not have labels in:\n{rendered}"
             );
         }
     }
