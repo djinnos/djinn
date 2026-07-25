@@ -163,14 +163,21 @@ impl ShellLaunchContext {
         })
     }
 
+    /// How long an escalating shell command may wait in the build-lease queue
+    /// before the coordinator gives up on it. These are RELATIVE timeouts; the
+    /// runner converts them to the absolute epoch-millisecond deadlines the
+    /// coordinator compares against its wall clock.
+    const QUEUE_TIMEOUT: Duration = Duration::from_secs(30);
+    const LAUNCH_TIMEOUT: Duration = Duration::from_secs(60);
+
     pub(crate) fn invocation(&self, timeout: Duration) -> LeaseInvocationConfig {
         LeaseInvocationConfig {
             task_id: self.task_id.clone(),
             task_run_id: self.task_run_id.clone(),
             pod_uid: self.pod_uid.clone(),
             cpu_usage_threshold_usec: 250_000,
-            queue_deadline_ms: 30_000,
-            launch_deadline_ms: 60_000,
+            queue_timeout: Self::QUEUE_TIMEOUT,
+            launch_timeout: Self::LAUNCH_TIMEOUT,
             timeout,
         }
     }

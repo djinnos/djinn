@@ -17,9 +17,27 @@ pub enum LeaseIdentity {
     TaskInvocation(TaskInvocationLeaseIdentity),
     GraphWarm(GraphWarmLeaseIdentity),
 }
+/// Wall-clock lease deadlines, in **absolute Unix epoch milliseconds** — never
+/// durations.
+///
+/// The coordinator stores each field verbatim as a timestamp
+/// (`BuildLeaseService::deadline` → `OffsetDateTime::from_unix_timestamp_nanos`)
+/// and `expire_deadlines` compares those timestamps against its own wall clock.
+/// A relative value therefore does not mean "in 30 seconds": `30_000` is
+/// `1970-01-01T00:00:30Z`, permanently in the past, and every lease queued with
+/// it is terminalized as `deadline_expired` the instant it is enqueued. Producers
+/// must compute `now_ms + timeout_ms` (see `K8sGraphWarmer::spawn_warm_job` and
+/// `LeaseInvocationRunner::lease_deadlines`).
+///
+/// A non-positive value means **no deadline**: `deadline()` maps it to `None`
+/// and the durable column stays NULL, so the lease never expires on that edge.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LeaseDeadlines {
+    /// Absolute epoch-millisecond instant after which a still-queued lease is
+    /// terminalized as `deadline_expired`. Non-positive means no deadline.
     pub queue_deadline_ms: i64,
+    /// Absolute epoch-millisecond instant after which a granted-but-unlaunched
+    /// lease is marked `suspect`. Non-positive means no deadline.
     pub launch_deadline_ms: i64,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
