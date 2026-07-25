@@ -162,6 +162,18 @@ exec {bin} warm-graph "{project_id}"
         // invocation failures surface in the Pod log instead of being
         // silently absent.
         env_var("RUST_LOG", "info,djinn=debug"),
+        // Project the Job's own activeDeadlineSeconds (set below from
+        // `warm_job_timeout_seconds`) so the in-Pod warm can size its per-step
+        // cargo budgets against the deadline that will kill it. Without this
+        // the worker would bound a step by a constant that may be larger than
+        // the Job deadline, which does not give the step more time — it just
+        // relocates the truncation from an observable `outcome="timeout"` step
+        // record to an unobservable kubelet kill. Mirrors the task-run path's
+        // DJINN_TASK_RUN_ACTIVE_DEADLINE_SECONDS projection in `job.rs`.
+        env_var(
+            "DJINN_WARM_JOB_DEADLINE_SECONDS",
+            &config.warm_job_timeout_seconds.to_string(),
+        ),
     ];
     // Forward the server's DB connection so `bootstrap_warm_database` in
     // djinn-agent-worker reaches the same Postgres instance as the server.
@@ -628,6 +640,13 @@ mod tests {
             Some(MIRROR_MOUNT_DIR)
         );
         assert_eq!(envs.get("DJINN_WARM_PROJECT_ID").copied(), Some("proj-xyz"));
+        // The in-Pod warm sizes its per-step cargo budgets against the Job's
+        // own activeDeadlineSeconds; the two must be the same number or a step
+        // bound could silently exceed the deadline that kills the Pod.
+        assert_eq!(
+            envs.get("DJINN_WARM_JOB_DEADLINE_SECONDS").copied(),
+            Some(cfg.warm_job_timeout_seconds.to_string().as_str()),
+        );
         // DJINN_SERVER_ADDR is intentionally absent — `warm-graph` lives
         // on a disjoint subcommand whose `WorkerDefaultArgs` are not
         // parsed, so any residual envs would only be noise.
@@ -803,6 +822,29 @@ mod tests {
         // than an accidental assertion of the default timeout.
         assert_eq!(spec.active_deadline_seconds, Some(1_237));
         assert_eq!(spec.backoff_limit, Some(0));
+        {
+            // A non-default deadline must reach the in-Pod warm verbatim: the
+            // per-step cargo budgets clamp against this value, so a stale or
+            // absent projection would let a step outlive the Job.
+            let projected: BTreeMap<&str, &str> = spec
+                .template
+                .spec
+                .as_ref()
+                .expect("pod spec")
+                .containers
+                .first()
+                .expect("warm container")
+                .env
+                .as_ref()
+                .expect("container environment")
+                .iter()
+                .map(|e| (e.name.as_str(), e.value.as_deref().unwrap_or_default()))
+                .collect();
+            assert_eq!(
+                projected.get("DJINN_WARM_JOB_DEADLINE_SECONDS").copied(),
+                Some("1237"),
+            );
+        }
 
         let pod = spec.template.spec.as_ref().expect("pod spec");
         let container = pod.containers.first().expect("warm container");

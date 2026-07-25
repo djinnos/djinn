@@ -54,7 +54,21 @@ const CARGO_SEED_HIT_TOTAL: &str = "djinn_cargo_seed_hit_total";
 const CARGO_SEED_COLD_TOTAL: &str = "djinn_cargo_seed_cold_total";
 const CARGO_WARM_BASE_FRESHNESS_SECONDS: &str = "djinn_cargo_warm_base_freshness_seconds";
 const CARGO_WARM_STEP_TOTAL: &str = "djinn_cargo_warm_step_total";
-const CARGO_WARM_STEP_OUTCOMES: [&str; 3] = ["ok", "failed", "spawn_error"];
+// A warm step that was killed at its own budget is NOT a spawn failure: it ran
+// and left partial progress in the warm base. `timeout` is its own closed label
+// so the convergence signal is not conflated with "could not start cargo".
+const CARGO_WARM_STEP_OUTCOMES: [&str; 4] = ["ok", "failed", "spawn_error", "timeout"];
+const CARGO_WARM_STEP_SECONDS: &str = "djinn_cargo_warm_step_seconds";
+const CARGO_WARM_BASE_UNITS: &str = "djinn_cargo_warm_base_units";
+const CARGO_WARM_BASE_PHASES: [&str; 2] = ["pre_compile", "post_compile"];
+const CARGO_WARM_BASE_UNIT_KINDS: [&str; 3] = ["fingerprint_units", "test_units", "dep_files"];
+const CARGO_WARM_SWEEP_DECISION_TOTAL: &str = "djinn_cargo_warm_sweep_decision_total";
+const CARGO_WARM_SWEEP_DECISIONS: [&str; 4] = [
+    "swept",
+    "skipped_no_stamp",
+    "skipped_no_success",
+    "skipped_truncated",
+];
 const CARGO_WARM_STEP_WORKSPACE_PATH_HASH: &str = "djinn_cargo_warm_step_workspace_path_hash";
 const CARGO_WARM_STEP_FRESH_COUNT: &str = "djinn_cargo_warm_step_fresh_count";
 const CARGO_WARM_STEP_COMPILING_COUNT: &str = "djinn_cargo_warm_step_compiling_count";
@@ -872,6 +886,11 @@ pub mod cargo_warm_step {
     pub const OUTCOME_OK: &str = "ok";
     pub const OUTCOME_FAILED: &str = "failed";
     pub const OUTCOME_SPAWN_ERROR: &str = "spawn_error";
+    /// The step ran and was killed at its configured budget. It is a partial
+    /// result, not a failure to start cargo, and downstream consumers must be
+    /// able to tell the two apart (a truncated step still advanced the warm
+    /// base; a spawn error advanced nothing).
+    pub const OUTCOME_TIMEOUT: &str = "timeout";
 
     /// Stable labels for the cargo warm step. Keep this list closed so the
     /// `step` label cardinality stays bounded.
@@ -881,7 +900,44 @@ pub mod cargo_warm_step {
     pub const STEP_TEST_NO_RUN: &str = "test_no_run";
 
     pub const STEP_TOTAL: &str = super::CARGO_WARM_STEP_TOTAL;
+    pub const STEP_SECONDS: &str = super::CARGO_WARM_STEP_SECONDS;
     pub const WORKSPACE_PATH_HASH: &str = super::CARGO_WARM_STEP_WORKSPACE_PATH_HASH;
+
+    /// Every closed `outcome` label value, for exhaustive enumeration in tests
+    /// and in consumers that must branch on the full space.
+    pub const ALL_OUTCOMES: [&str; 4] = [
+        OUTCOME_OK,
+        OUTCOME_FAILED,
+        OUTCOME_SPAWN_ERROR,
+        OUTCOME_TIMEOUT,
+    ];
+
+    /// Whether the outcome means "cargo ran and left partial progress in the
+    /// warm base" rather than "the step never produced anything". Consumers
+    /// that gate destructive warm-base maintenance on step results must use
+    /// this instead of a bare `outcome == OUTCOME_OK` test.
+    pub fn outcome_left_partial_progress(outcome: &str) -> bool {
+        outcome == OUTCOME_TIMEOUT
+    }
+
+    /// Record the wall-clock a single warm step consumed, partitioned by the
+    /// same bounded `(project_id, step, outcome)` triple as the counter. A
+    /// truncated step's sample is its budget, which is what makes "how much of
+    /// the enclosing deadline did this step burn" answerable from metrics.
+    pub fn record_step_seconds(
+        project_id: &str,
+        step: &'static str,
+        outcome: &'static str,
+        seconds: f64,
+    ) {
+        metrics::histogram!(
+            super::CARGO_WARM_STEP_SECONDS,
+            "project_id" => project_id.to_owned(),
+            "step" => step,
+            "outcome" => outcome,
+        )
+        .record(seconds);
+    }
 
     /// Increment the cargo warm-step counter for a `(project_id, step, outcome)`
     /// bucket. The free-form cargo argv is intentionally NOT a label so metric
@@ -948,6 +1004,71 @@ pub mod cargo_warm_step {
             hash = hash.wrapping_mul(PRIME);
         }
         hash
+    }
+}
+
+/// Bounded telemetry for the *contents* of the Cargo warm base, sampled either
+/// side of the warm compile phase.
+///
+/// This is the convergence instrument: if successive warm cycles accumulate
+/// test-target artifacts, `test_units` at `post_compile` rises cycle over
+/// cycle; if the tail sweep reclaims them faster than a truncated compile step
+/// produces them, it does not. Every label is a closed enum — the census counts
+/// themselves are gauge *values*, never labels.
+pub mod cargo_warm_base {
+    pub const PHASE_PRE_COMPILE: &str = "pre_compile";
+    pub const PHASE_POST_COMPILE: &str = "post_compile";
+    pub const ALL_PHASES: [&str; 2] = [PHASE_PRE_COMPILE, PHASE_POST_COMPILE];
+
+    /// Cargo unit directories under `debug/.fingerprint`.
+    pub const KIND_FINGERPRINT_UNITS: &str = "fingerprint_units";
+    /// Fingerprint units that carry a `test-*.json` fingerprint — i.e. units
+    /// compiled with `--test`, which is exactly what the `--no-run` warm step
+    /// exists to produce.
+    pub const KIND_TEST_UNITS: &str = "test_units";
+    /// Regular files under `debug/deps` (the linked artifacts themselves).
+    pub const KIND_DEP_FILES: &str = "dep_files";
+    pub const ALL_UNIT_KINDS: [&str; 3] = [KIND_FINGERPRINT_UNITS, KIND_TEST_UNITS, KIND_DEP_FILES];
+
+    pub const UNITS: &str = super::CARGO_WARM_BASE_UNITS;
+    pub const SWEEP_DECISION_TOTAL: &str = super::CARGO_WARM_SWEEP_DECISION_TOTAL;
+
+    /// The tail `cargo sweep --file` ran.
+    pub const DECISION_SWEPT: &str = "swept";
+    /// Skipped: the pre-compile `cargo sweep --stamp` never landed.
+    pub const DECISION_SKIPPED_NO_STAMP: &str = "skipped_no_stamp";
+    /// Skipped: no warm step completed successfully.
+    pub const DECISION_SKIPPED_NO_SUCCESS: &str = "skipped_no_success";
+    /// Skipped: at least one warm step was killed at its budget, so artifacts
+    /// older than the stamp are "not yet rebuilt", not "no longer needed".
+    pub const DECISION_SKIPPED_TRUNCATED: &str = "skipped_truncated";
+    pub const ALL_SWEEP_DECISIONS: [&str; 4] = [
+        DECISION_SWEPT,
+        DECISION_SKIPPED_NO_STAMP,
+        DECISION_SKIPPED_NO_SUCCESS,
+        DECISION_SKIPPED_TRUNCATED,
+    ];
+
+    /// Publish one warm-base census count for a `(project_id, phase, kind)`
+    /// bucket.
+    pub fn set_units(project_id: &str, phase: &'static str, kind: &'static str, count: u64) {
+        metrics::gauge!(
+            super::CARGO_WARM_BASE_UNITS,
+            "project_id" => project_id.to_owned(),
+            "phase" => phase,
+            "kind" => kind,
+        )
+        .set(count as f64);
+    }
+
+    /// Record exactly one tail-sweep decision per warm cycle.
+    pub fn increment_sweep_decision(project_id: &str, decision: &'static str) {
+        metrics::counter!(
+            super::CARGO_WARM_SWEEP_DECISION_TOTAL,
+            "project_id" => project_id.to_owned(),
+            "decision" => decision,
+        )
+        .increment(1);
     }
 }
 
@@ -1761,6 +1882,37 @@ fn register_metrics() {
             "project_id" => "",
             "step" => "",
             "outcome" => outcome
+        )
+        .absolute(0);
+    }
+    metrics::describe_histogram!(
+        CARGO_WARM_STEP_SECONDS,
+        "Wall-clock seconds consumed by one cargo warm step, partitioned by the same bounded project_id, step, and outcome labels as djinn_cargo_warm_step_total. A `timeout` sample equals the step's configured budget."
+    );
+    metrics::describe_gauge!(
+        CARGO_WARM_BASE_UNITS,
+        "Census of the cargo warm base sampled either side of the compile phase, partitioned by project_id, the closed phase (pre_compile, post_compile) and the closed kind (fingerprint_units, test_units, dep_files). Rising post_compile test_units across cycles is the warm base converging on test-target artifacts."
+    );
+    for phase in CARGO_WARM_BASE_PHASES {
+        for kind in CARGO_WARM_BASE_UNIT_KINDS {
+            metrics::gauge!(
+                CARGO_WARM_BASE_UNITS,
+                "project_id" => "",
+                "phase" => phase,
+                "kind" => kind
+            )
+            .set(0.0);
+        }
+    }
+    metrics::describe_counter!(
+        CARGO_WARM_SWEEP_DECISION_TOTAL,
+        "Tail `cargo sweep --file` decisions for one warm cycle, partitioned by project_id and the fixed decisions swept, skipped_no_stamp, skipped_no_success, and skipped_truncated."
+    );
+    for decision in CARGO_WARM_SWEEP_DECISIONS {
+        metrics::counter!(
+            CARGO_WARM_SWEEP_DECISION_TOTAL,
+            "project_id" => "",
+            "decision" => decision
         )
         .absolute(0);
     }

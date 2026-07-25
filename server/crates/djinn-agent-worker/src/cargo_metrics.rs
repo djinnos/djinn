@@ -155,9 +155,80 @@ pub fn record_resolved_workspace_dir(project_id: &str, workspace_dir: &str) {
     djinn_telemetry::cargo_warm_step::set_workspace_path(project_id, workspace_dir);
 }
 
+/// Log + metric for a single cargo warm-step's wall clock. Called exactly once
+/// per step alongside [`record_warm_step`], with the same bounded labels.
+pub fn record_warm_step_seconds(
+    project_id: &str,
+    label: &str,
+    outcome: &'static str,
+    elapsed: std::time::Duration,
+) {
+    let step = warm_step_metric_label(label);
+    djinn_telemetry::cargo_warm_step::record_step_seconds(
+        project_id,
+        step,
+        outcome,
+        elapsed.as_secs_f64(),
+    );
+}
+
+/// Log + metric for one warm-base census sample.
+pub fn record_warm_base_census(
+    project_id: &str,
+    phase: &'static str,
+    census: &crate::warm_base_census::WarmBaseCensus,
+) {
+    info!(
+        project_id,
+        phase,
+        fingerprint_units = census.fingerprint_units,
+        test_units = census.test_units,
+        dep_files = census.dep_files,
+        metric = "djinn_cargo_warm_base_units",
+        "cargo_metrics: warm base census"
+    );
+    djinn_telemetry::cargo_warm_base::set_units(
+        project_id,
+        phase,
+        djinn_telemetry::cargo_warm_base::KIND_FINGERPRINT_UNITS,
+        census.fingerprint_units,
+    );
+    djinn_telemetry::cargo_warm_base::set_units(
+        project_id,
+        phase,
+        djinn_telemetry::cargo_warm_base::KIND_TEST_UNITS,
+        census.test_units,
+    );
+    djinn_telemetry::cargo_warm_base::set_units(
+        project_id,
+        phase,
+        djinn_telemetry::cargo_warm_base::KIND_DEP_FILES,
+        census.dep_files,
+    );
+}
+
+/// Log + metric for the single tail-sweep decision of a warm cycle.
+pub fn record_warm_sweep_decision(project_id: &str, decision: &'static str) {
+    info!(
+        project_id,
+        decision,
+        metric = "djinn_cargo_warm_sweep_decision_total",
+        "cargo_metrics: warm tail sweep decision"
+    );
+    djinn_telemetry::cargo_warm_base::increment_sweep_decision(project_id, decision);
+}
+
 /// Map the warm-step call-site label string to the bounded `STEP_*` constant
 /// the metric uses. Unknown labels are coerced to `STEP_BUILD_FALLBACK` so
 /// the metric label cardinality stays bounded.
+///
+/// The test-compile labels are the ones `cargo_cache_policy` actually emits —
+/// `"test (--no-run)"` and `"nextest (--no-run)"`. An earlier arm matched a
+/// `"test --no-run"` spelling that no call site ever produces, so every
+/// test-compile step was silently coerced to `build_fallback` by the catch-all
+/// and the `test_no_run` series stayed dark. Any change to
+/// `cargo_cache_policy::build_test_warm_command`'s labels must be mirrored
+/// here; `warm_step_labels_from_policy_map_to_their_own_step` fails if not.
 fn warm_step_metric_label(label: &str) -> &'static str {
     match label {
         "clippy" => djinn_telemetry::cargo_warm_step::STEP_CLIPPY,
@@ -166,7 +237,9 @@ fn warm_step_metric_label(label: &str) -> &'static str {
             djinn_telemetry::cargo_warm_step::STEP_CLIPPY_DEFAULT_FEATURES
         }
         "build (clippy fallback)" => djinn_telemetry::cargo_warm_step::STEP_BUILD_FALLBACK,
-        "test --no-run" => djinn_telemetry::cargo_warm_step::STEP_TEST_NO_RUN,
+        "test (--no-run)" | "nextest (--no-run)" => {
+            djinn_telemetry::cargo_warm_step::STEP_TEST_NO_RUN
+        }
         _ => djinn_telemetry::cargo_warm_step::STEP_BUILD_FALLBACK,
     }
 }
@@ -314,7 +387,11 @@ mod tests {
             djinn_telemetry::cargo_warm_step::STEP_BUILD_FALLBACK,
         );
         assert_eq!(
-            warm_step_metric_label("test --no-run"),
+            warm_step_metric_label("test (--no-run)"),
+            djinn_telemetry::cargo_warm_step::STEP_TEST_NO_RUN,
+        );
+        assert_eq!(
+            warm_step_metric_label("nextest (--no-run)"),
             djinn_telemetry::cargo_warm_step::STEP_TEST_NO_RUN,
         );
 
@@ -340,13 +417,99 @@ mod tests {
         );
         record_warm_step(
             "project-warm-step-test",
-            "test --no-run",
+            "test (--no-run)",
             djinn_telemetry::cargo_warm_step::OUTCOME_FAILED,
+        );
+        record_warm_step(
+            "project-warm-step-timeout",
+            "nextest (--no-run)",
+            djinn_telemetry::cargo_warm_step::OUTCOME_TIMEOUT,
         );
         record_warm_step(
             "project-warm-step-unknown",
             "novel step label",
             djinn_telemetry::cargo_warm_step::OUTCOME_SPAWN_ERROR,
+        );
+    }
+
+    /// The labels `cargo_cache_policy` actually produces must each map to their
+    /// own bounded step. This is the regression that made every production
+    /// `nextest (--no-run)` step report as `step="build_fallback"`: the mapping
+    /// matched a spelling no call site emits, and the catch-all swallowed it.
+    #[test]
+    fn warm_step_labels_from_policy_map_to_their_own_step() {
+        let _guard = test_guard();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = []\nresolver = \"2\"\n",
+        )
+        .expect("write workspace manifest");
+
+        // Without a nextest config the test step is `cargo test --no-run`.
+        let policy = crate::cargo_cache_policy::resolve_cargo_cache_policy(root, None)
+            .expect("resolve policy");
+        let labels: Vec<&'static str> = policy.warm_commands.iter().map(|c| c.label).collect();
+        assert!(
+            labels.contains(&"test (--no-run)"),
+            "expected the test-compile label in {labels:?}"
+        );
+        assert_eq!(
+            warm_step_metric_label("test (--no-run)"),
+            djinn_telemetry::cargo_warm_step::STEP_TEST_NO_RUN,
+        );
+
+        // With one, it is `cargo nextest run --no-run` — the production shape.
+        std::fs::create_dir_all(root.join(".config")).expect("create .config");
+        std::fs::write(root.join(".config/nextest.toml"), "").expect("write nextest config");
+        let policy = crate::cargo_cache_policy::resolve_cargo_cache_policy(root, None)
+            .expect("resolve policy");
+        let test_label = policy
+            .warm_commands
+            .last()
+            .expect("test-compile warm command")
+            .label;
+        assert_eq!(test_label, "nextest (--no-run)");
+        assert_eq!(
+            warm_step_metric_label(test_label),
+            djinn_telemetry::cargo_warm_step::STEP_TEST_NO_RUN,
+            "the test-compile step must never be reported as build_fallback"
+        );
+
+        // Every clippy/build label the policy emits keeps its own step too.
+        for command in &policy.warm_commands {
+            let step = warm_step_metric_label(command.label);
+            let expected = match command.label {
+                "clippy" => djinn_telemetry::cargo_warm_step::STEP_CLIPPY,
+                "nextest (--no-run)" => djinn_telemetry::cargo_warm_step::STEP_TEST_NO_RUN,
+                _ => djinn_telemetry::cargo_warm_step::STEP_BUILD_FALLBACK,
+            };
+            assert_eq!(step, expected, "label {} mapped wrong", command.label);
+        }
+    }
+
+    #[test]
+    fn record_warm_base_census_and_sweep_decision_do_not_panic() {
+        let _guard = test_guard();
+        record_warm_base_census(
+            "project-warm-census",
+            djinn_telemetry::cargo_warm_base::PHASE_PRE_COMPILE,
+            &crate::warm_base_census::WarmBaseCensus {
+                fingerprint_units: 1593,
+                test_units: 160,
+                dep_files: 3578,
+            },
+        );
+        record_warm_sweep_decision(
+            "project-warm-census",
+            djinn_telemetry::cargo_warm_base::DECISION_SKIPPED_TRUNCATED,
+        );
+        record_warm_step_seconds(
+            "project-warm-census",
+            "nextest (--no-run)",
+            djinn_telemetry::cargo_warm_step::OUTCOME_TIMEOUT,
+            std::time::Duration::from_secs(1800),
         );
     }
 

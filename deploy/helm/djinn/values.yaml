@@ -205,6 +205,14 @@ resources:
     # 3600s (60 min) covers a cold single-pass warm of a ~12-crate workspace
     # (~20-25 min observed) with ample margin. Raise it if a larger workspace
     # consistently hits the deadline.
+    #
+    # This is the ONLY warm wall-clock knob that matters: it is the Job's
+    # activeDeadlineSeconds, it drives the in-process warm watcher deadline
+    # (that value plus a fixed 300s slack), and it is projected into the warm
+    # Pod as DJINN_WARM_JOB_DEADLINE_SECONDS, where the in-Pod per-step cargo
+    # budgets clamp against it. A step can therefore never be given a bound
+    # that outlives the deadline which would kill the Pod anyway; to give the
+    # test-binary compile more room, raise this rather than a per-step override.
     jobTimeoutSeconds: 3600
 
 # -----------------------------------------------------------------------------
