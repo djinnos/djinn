@@ -673,8 +673,8 @@ pub enum RenderValidationError {
         "cgroup launcher mode is `required`, but the launcher container this build renders cannot \
          establish a delegated cgroup v2 subtree: {reason}. Arming enforcement with this render \
          would submit a Pod whose sidecar fails startup readiness, so it is refused before the Job \
-         exists. Run with DJINN_K8S_CGROUP_LAUNCHER_MODE=disabled (the default) until the render \
-         is repaired. See djinn_k8s::launcher::CgroupLauncherMode."
+         exists. Correct the rendered runtime profile; `disabled` is reserved for explicit local/\
+         development compatibility. See djinn_k8s::launcher::CgroupLauncherMode."
     )]
     ArmedRenderCannotDelegate { reason: &'static str },
     #[error(

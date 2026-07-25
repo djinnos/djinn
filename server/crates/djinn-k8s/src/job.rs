@@ -1115,9 +1115,15 @@ mod tests {
         ]
     }
 
+    fn disabled_launcher_config() -> KubernetesConfig {
+        let mut cfg = KubernetesConfig::for_testing();
+        cfg.cgroup_launcher_mode = crate::launcher::CgroupLauncherMode::Disabled;
+        cfg
+    }
+
     fn wrapper_job() -> Job {
         build_task_run_job(
-            &KubernetesConfig::for_testing(),
+            &disabled_launcher_config(),
             &Uuid::now_v7(),
             "proj-wrap",
             "djinn-taskrun-wrap",
@@ -1153,18 +1159,18 @@ mod tests {
         let job = wrapper_job();
         let pod = pod_of(&job);
         let inits = pod.init_containers.as_ref().expect("init containers set");
-        // Task grkq: the cgroup-launcher sidecar is OFF by default, so the init
-        // containers are exactly one wrapper sidecar per service type.
+        // This local compatibility fixture explicitly disables the launcher, so
+        // the init containers are exactly one wrapper sidecar per service type.
         assert_eq!(
             inits.len(),
             3,
-            "one wrapper sidecar per service type (no launcher by default)"
+            "one wrapper sidecar per service type (launcher explicitly disabled)"
         );
         assert!(
             !inits
                 .iter()
                 .any(|c| c.name == crate::launcher::LAUNCHER_CONTAINER_NAME),
-            "the cgroup-launcher sidecar is disabled by default (task grkq)"
+            "the cgroup-launcher sidecar is absent in the explicitly disabled profile"
         );
 
         for (svc, port, socket) in [
@@ -1575,12 +1581,15 @@ mod tests {
             "DJINN_DATABASE_URL must be absent when database_url is None"
         );
 
-        // Volume mounts: 5 from the pre-env-config layout + the
-        // environment-config mount (P4). Task grkq: the launcher IPC mount is
-        // NOT rendered by default — `cgroup_launcher_mode` is `Disabled`.
+        // Production/default rendering adds the worker-private launcher IPC mount
+        // to the six baseline mounts.
         let mounts = container.volume_mounts.as_ref().expect("volume_mounts set");
-        assert_eq!(mounts.len(), 6, "expected 6 volume mounts");
-        let expected_mounts: [(&str, &str, Option<bool>); 6] = [
+        assert_eq!(
+            mounts.len(),
+            7,
+            "expected 7 volume mounts including launcher IPC"
+        );
+        let expected_mounts: [(&str, &str, Option<bool>); 7] = [
             (VOLUME_SPEC, SPEC_MOUNT_DIR, Some(true)),
             (VOLUME_AUTH_TOKEN, TOKEN_MOUNT_DIR, Some(true)),
             (VOLUME_MIRROR, MIRROR_MOUNT_DIR, Some(false)),
@@ -1591,6 +1600,11 @@ mod tests {
                 crate::env_config::ENV_CONFIG_MOUNT_DIR,
                 Some(true),
             ),
+            (
+                crate::launcher::VOLUME_LAUNCHER_IPC,
+                crate::launcher::LAUNCHER_IPC_DIR,
+                None,
+            ),
         ];
         for (mount, (exp_name, exp_path, exp_ro)) in mounts.iter().zip(expected_mounts.iter()) {
             assert_eq!(&mount.name, exp_name);
@@ -1598,11 +1612,14 @@ mod tests {
             assert_eq!(mount.read_only, *exp_ro);
         }
 
-        // Volumes mirror the mount list exactly. Task grkq: neither the launcher
-        // IPC volume nor a `launcher-cgroup` volume is rendered by default (the
-        // latter can never be rendered — no volume source is a cgroup2 tree).
+        // Production/default rendering includes both the IPC volume and the
+        // memory-backed launcher cgroup mountpoint.
         let volumes = pod.volumes.as_ref().expect("volumes set");
-        assert_eq!(volumes.len(), 6, "expected 6 volumes");
+        assert_eq!(
+            volumes.len(),
+            8,
+            "expected 8 volumes including launcher surfaces"
+        );
         let expected_volume_names = [
             VOLUME_SPEC,
             VOLUME_AUTH_TOKEN,
@@ -1610,25 +1627,20 @@ mod tests {
             VOLUME_CACHE,
             VOLUME_WORKSPACE,
             crate::env_config::VOLUME_ENV_CONFIG,
+            crate::launcher::VOLUME_LAUNCHER_IPC,
+            crate::launcher::VOLUME_LAUNCHER_CGROUP,
         ];
         for (volume, expected_name) in volumes.iter().zip(expected_volume_names.iter()) {
             assert_eq!(&volume.name, expected_name);
         }
-        for absent in [
-            crate::launcher::VOLUME_LAUNCHER_IPC,
-            crate::launcher::VOLUME_LAUNCHER_CGROUP,
-        ] {
-            assert!(
-                volumes.iter().all(|v| v.name != absent),
-                "task grkq: {absent} must not be rendered with the launcher disabled"
-            );
-        }
-        // No sidecars at all for a service-less run with the launcher off.
         assert!(
-            pod.init_containers.is_none(),
-            "task grkq: no launcher ⇒ no initContainers for a service-less run"
+            pod.init_containers
+                .iter()
+                .flatten()
+                .any(|c| c.name == crate::launcher::LAUNCHER_CONTAINER_NAME),
+            "default production rendering includes the launcher sidecar"
         );
-        assert_eq!(pod.share_process_namespace, None);
+        assert_eq!(pod.share_process_namespace, Some(true));
 
         // jqvg: nothing in the task-run Pod speaks to the apiserver, and the
         // Pod runs repository-controlled code. The apiserver-capable default
@@ -2545,7 +2557,7 @@ mod tests {
     /// the pre-feature manifest shape (no initContainers, no extra volume).
     #[test]
     fn injects_backing_service_as_native_sidecar() {
-        let cfg = KubernetesConfig::for_testing();
+        let cfg = disabled_launcher_config();
         let postgres = BackingServiceSpec {
             service_type: "postgres".into(),
             image: "postgres:18-alpine".into(),
@@ -2883,7 +2895,7 @@ mod tests {
     /// out so no product DB/queue is started.
     #[test]
     fn evidence_spike_suppresses_backing_service_sidecars() {
-        let cfg = KubernetesConfig::for_testing();
+        let cfg = disabled_launcher_config();
         let postgres = BackingServiceSpec {
             service_type: "postgres".into(),
             image: "postgres:18-alpine".into(),
@@ -2962,7 +2974,7 @@ mod tests {
     /// evidence-spike path must not have altered normal behavior.
     #[test]
     fn normal_job_with_service_unaffected_by_evidence_spike_path() {
-        let cfg = KubernetesConfig::for_testing();
+        let cfg = disabled_launcher_config();
         let postgres = BackingServiceSpec {
             service_type: "postgres".into(),
             image: "postgres:18-alpine".into(),
@@ -2996,8 +3008,8 @@ mod tests {
             .and_then(|s| s.template.spec.as_ref())
             .expect("pod spec set");
 
-        // The backing-service sidecar IS injected for normal runs. Task grkq:
-        // the launcher is off by default, so it is the only init container.
+        // The backing-service sidecar is injected for this explicit disabled
+        // compatibility fixture, so it is the only init container.
         let inits = pod.init_containers.as_ref().expect("init_containers set");
         assert_eq!(inits.len(), 1);
         assert_eq!(inits[0].name, "svc-postgres");
@@ -3464,13 +3476,10 @@ mod tests {
         )
     }
 
-    /// Task grkq: a config with the cgroup-launcher explicitly ARMED. The
-    /// default (`CgroupLauncherMode::Disabled`) renders no sidecar at all, so
-    /// every launcher-shaped render assertion has to opt in through this.
+    /// The production/default config is required; this helper names that profile
+    /// for tests that contrast it with explicit local compatibility mode.
     fn armed_launcher_config() -> KubernetesConfig {
-        let mut cfg = KubernetesConfig::for_testing();
-        cfg.cgroup_launcher_mode = crate::launcher::CgroupLauncherMode::Required;
-        cfg
+        KubernetesConfig::for_testing()
     }
 
     fn worker_cpu_request(job: &Job) -> String {
@@ -3546,14 +3555,14 @@ mod tests {
         );
     }
 
-    /// Task grkq (P0): the cgroup-launcher sidecar is OFF by default and only
-    /// renders when `cgroup_launcher_mode` arms it. The disabled arm proves no
+    /// Production/default rendering requires the cgroup-launcher. The explicit
+    /// disabled local arm proves no
     /// launcher container, volume, mount or env leaks into an ordinary task pod
     /// (and `shareProcessNamespace` stays unset); the armed arm proves the
     /// sidecar still renders correctly — WITHOUT ever re-introducing a
     /// `launcher-cgroup` volume, which is the regression this task removed.
     #[test]
-    fn launcher_sidecar_and_share_process_namespace_are_off_by_default_and_render_when_armed() {
+    fn launcher_sidecar_profiles_render_only_the_explicit_disabled_path_without_launcher() {
         let image = "registry.example/proj:tag";
         let build = |cfg: &KubernetesConfig| {
             build_task_run_job(
@@ -3569,8 +3578,8 @@ mod tests {
             )
         };
 
-        // ---- Disabled (the default) -------------------------------------
-        let default_job = build(&KubernetesConfig::for_testing());
+        // ---- Disabled (explicit local/development compatibility) ---------
+        let default_job = build(&disabled_launcher_config());
         let pod = default_job
             .spec
             .as_ref()
@@ -3584,7 +3593,7 @@ mod tests {
                 .iter()
                 .flatten()
                 .all(|c| c.name != crate::launcher::LAUNCHER_CONTAINER_NAME),
-            "no launcher sidecar by default"
+            "no launcher sidecar in explicit disabled mode"
         );
         for absent in [
             crate::launcher::VOLUME_LAUNCHER_IPC,
@@ -3592,7 +3601,7 @@ mod tests {
         ] {
             assert!(
                 pod.volumes.iter().flatten().all(|v| v.name != absent),
-                "{absent} must not be rendered by default"
+                "{absent} must not be rendered in explicit disabled mode"
             );
         }
         let worker = &pod.containers[0];
@@ -3602,17 +3611,17 @@ mod tests {
                 .iter()
                 .flatten()
                 .all(|m| m.mount_path != crate::launcher::LAUNCHER_IPC_DIR),
-            "worker must not mount the launcher IPC dir by default"
+            "worker must not mount the launcher IPC dir in explicit disabled mode"
         );
         for env_name in ["DJINN_LAUNCHER_SOCKET", "DJINN_LAUNCHER_CREDENTIAL_PATH"] {
             assert!(
                 worker.env.iter().flatten().all(|e| e.name != env_name),
-                "{env_name} must not be exported to the worker by default"
+                "{env_name} must not be exported in explicit disabled mode"
             );
         }
         assert_eq!(
             pod.share_process_namespace, None,
-            "shareProcessNamespace exists only for the launcher; unset by default"
+            "shareProcessNamespace exists only for the launcher; unset in disabled mode"
         );
 
         // ---- Required (explicitly armed) --------------------------------

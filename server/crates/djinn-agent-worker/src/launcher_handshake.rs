@@ -22,26 +22,24 @@
 //! against the file. See `WORKER_PID_FILE` below — it mirrors the launcher's own
 //! constant so the two ends can never drift.
 //!
-//! ## Detection-gated fallback (never block pod startup)
+//! ## Explicit enforcement and local compatibility
 //!
 //! The IPC mount is the parent directory of the credential path. When it is
-//! absent — the launcher is not rendered (the default since task grkq), an old
-//! rendering without the sidecar, or a local/non-pod run — the handshake is
-//! skipped. Any failure AFTER detection (write error, the socket never binds, a
-//! credential/peer rejection, a readiness failure) is a typed, bounded outcome
-//! that folds into the same result. The handshake never returns an unbounded
-//! wait and never propagates an error that would fail pod startup.
+//! absent — an explicitly disabled local/development rendering, an old rendering
+//! without the sidecar, or a local/non-pod run — the handshake reports
+//! [`LauncherHandshake::AbsentMount`]. Any failure AFTER detection (write error,
+//! the socket never binds, a credential/peer rejection, or a readiness failure)
+//! is a typed, bounded [`LauncherHandshake::FailedClosed`] outcome. The caller
+//! uses the separately rendered [`LauncherEnforcement`] intent to reject both
+//! outcomes in required mode; only explicit disabled mode may use direct exec.
 //!
-//! ## What the fallback actually is
+//! ## Direct execution is disabled-only
 //!
-//! Anything other than [`LauncherHandshake::Connected`] leaves
-//! `AgentContext::shell_launch` as `None`, and the shell handler then runs the
-//! command **in-process in the worker** (`process::output_with_kill_cancellable`)
-//! at whatever quota the pod itself has — i.e. unleased, with no cgroup leaf and
-//! no lease lift. There is no "in-process broker": earlier revisions of this
-//! comment said so, and worse, the in-process arm was compiled only under
-//! `#[cfg(test)]`, so in production this "fallback" made every shell command
-//! fail. Both are fixed; if you change the shell handler, keep this accurate.
+//! Only [`LauncherEnforcement::Disabled`] leaves `AgentContext::shell_launch` as
+//! `None`, allowing the local direct worker path
+//! (`process::output_with_kill_cancellable`). Required mode accepts only an
+//! authenticated [`LauncherHandshake::Connected`] broker, so user-controlled
+//! execution cannot bypass the invocation lease and admission-epoch contracts.
 
 use std::fs::File;
 use std::io::Read;
@@ -71,7 +69,10 @@ const CONNECT_ATTEMPTS: u32 = 300;
 
 /// Explicit worker-visible enforcement intent rendered by `djinn-k8s`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum LauncherEnforcement { Disabled, Required }
+pub enum LauncherEnforcement {
+    Disabled,
+    Required,
+}
 
 impl LauncherEnforcement {
     pub fn parse(value: &str) -> Option<Self> {
@@ -373,6 +374,25 @@ mod tests {
     }
 
     #[test]
+    fn enforcement_mode_parses_only_the_rendered_contract_values() {
+        assert_eq!(
+            LauncherEnforcement::parse("required"),
+            Some(LauncherEnforcement::Required)
+        );
+        assert_eq!(
+            LauncherEnforcement::parse(" disabled "),
+            Some(LauncherEnforcement::Disabled)
+        );
+        for invalid in ["", "enabled", "Required", "required-ish"] {
+            assert_eq!(
+                LauncherEnforcement::parse(invalid),
+                None,
+                "{invalid:?} must fail closed"
+            );
+        }
+    }
+
+    #[test]
     fn successful_handshake_authenticates_and_submits_readiness() {
         let dir = tempfile::tempdir().expect("tempdir");
         let (socket_path, credential_path) = ipc_paths(dir.path());
@@ -387,7 +407,10 @@ mod tests {
 
         let outcome = establish(&socket_path, &credential_path, &mut FakeDumpability);
         match outcome {
-            LauncherHandshake::Connected(client) => drop(client),
+            LauncherHandshake::Connected(client) => {
+                let client: Box<UnixBrokerClient> = client;
+                drop(client);
+            }
             other => panic!("expected Connected, got {}", describe(&other)),
         }
         launcher.join().expect("fake launcher thread");
@@ -412,11 +435,11 @@ mod tests {
         let outcome = establish(&socket_path, &credential_path, &mut FakeDumpability);
         assert!(
             matches!(outcome, LauncherHandshake::AbsentMount),
-            "absent mount must fall back to the in-process path"
+            "absent mount must be surfaced for required-mode fail-closed handling"
         );
         assert!(
             !credential_path.exists(),
-            "no credential is written on fallback"
+            "no credential is written when the IPC mount is absent"
         );
     }
 
@@ -440,7 +463,7 @@ mod tests {
                 outcome,
                 LauncherHandshake::FailedClosed(HandshakeError::AuthRejected(_))
             ),
-            "a credential mismatch must fail closed to the in-process path"
+            "a credential mismatch must be surfaced as a fail-closed outcome"
         );
         launcher.join().expect("fake launcher thread");
     }
