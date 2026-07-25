@@ -51,6 +51,12 @@ workspace-hack.workspace = true
 
 [dev-dependencies]
 djinn-agent = { path = "../djinn-agent", features = ["test-support"] }
+# Tests only, and deliberately: `src/rendered_job_env_contract.rs` renders the
+# real task-run/warm Job manifests and checks them against this binary's real
+# clap definition. Already in the graph transitively (djinn-agent depends on it),
+# so this edge costs no extra compilation. NEVER promote it to [dependencies] —
+# the worker must not carry a Kubernetes client into the Pod.
+djinn-k8s = { path = "../djinn-k8s" }
 djinn-db = { path = "../djinn-db", features = ["test-support"] }
 djinn-graph = { path = "../djinn-graph", features = ["test-support"] }
 futures = "0.3"

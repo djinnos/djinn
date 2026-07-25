@@ -10,9 +10,10 @@ use std::collections::BTreeMap;
 
 use k8s_openapi::api::batch::v1::{Job, JobSpec};
 use k8s_openapi::api::core::v1::{
-    Container, EmptyDirVolumeSource, EnvVar, KeyToPath, PersistentVolumeClaimVolumeSource, PodSpec,
-    PodTemplateSpec, ProjectedVolumeSource, SecretVolumeSource, ServiceAccountTokenProjection,
-    Toleration, Volume, VolumeMount, VolumeProjection,
+    Container, EmptyDirVolumeSource, EnvVar, EnvVarSource, KeyToPath, ObjectFieldSelector,
+    PersistentVolumeClaimVolumeSource, PodSpec, PodTemplateSpec, ProjectedVolumeSource,
+    SecretVolumeSource, ServiceAccountTokenProjection, Toleration, Volume, VolumeMount,
+    VolumeProjection,
 };
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use uuid::Uuid;
@@ -703,6 +704,13 @@ fn build_task_run_env(
         env_var("DJINN_CREDENTIALS_PATH", CREDENTIALS_MOUNT_FILE),
         env_var("DJINN_TOKEN_PATH", TOKEN_MOUNT_FILE),
         env_var("DJINN_TASK_RUN_ID", task_run_id_str),
+        // The worker REQUIRES this (clap, no default) and uses it as the
+        // immutable fence for the durable invocation journal and for the
+        // watchdog's exact-Pod termination, which matches it against
+        // `pod.metadata.uid` (see `runtime::exact_taskrun_pod_name`). It is the
+        // POD's own UID, not the Job's, so it can only come from the downward
+        // API at admission — no host-side value exists when the Job is built.
+        downward_api_env_var("DJINN_TASK_RUN_POD_UID", "metadata.uid"),
         // TMPDIR points the supervisor's TempDir::new() (used by
         // mirror.clone_ephemeral) at the writable /workspace emptyDir
         // instead of the container's tmpfs root, which has stricter
@@ -995,6 +1003,23 @@ fn env_var(name: &str, value: &str) -> EnvVar {
     }
 }
 
+/// Env var sourced from the Pod's own object metadata at admission (downward
+/// API). Values that only exist once the apiserver has created the Pod — its
+/// UID above all — cannot be baked into the manifest the dispatcher renders.
+fn downward_api_env_var(name: &str, field_path: &str) -> EnvVar {
+    EnvVar {
+        name: name.to_string(),
+        value_from: Some(EnvVarSource {
+            field_ref: Some(ObjectFieldSelector {
+                field_path: field_path.to_string(),
+                ..ObjectFieldSelector::default()
+            }),
+            ..EnvVarSource::default()
+        }),
+        ..EnvVar::default()
+    }
+}
+
 fn volume_mount(name: &str, mount_path: &str, read_only: Option<bool>) -> VolumeMount {
     VolumeMount {
         name: name.to_string(),
@@ -1249,7 +1274,9 @@ mod tests {
             .as_ref()
             .expect("container.env set")
             .iter()
-            .map(|e| (e.name.as_str(), e.value.as_deref().expect("env value")))
+            // Downward-API vars (DJINN_TASK_RUN_POD_UID) carry `valueFrom`, not
+            // `value`; asserted by djinn-agent-worker's `rendered_job_env_contract`.
+            .map(|e| (e.name.as_str(), e.value.as_deref().unwrap_or_default()))
             .collect()
     }
 
@@ -1427,12 +1454,7 @@ mod tests {
             .as_ref()
             .expect("container.env set")
             .iter()
-            .map(|e| {
-                (
-                    e.name.as_str(),
-                    e.value.as_deref().expect("env value present"),
-                )
-            })
+            .map(|e| (e.name.as_str(), e.value.as_deref().unwrap_or_default()))
             .collect();
         assert_eq!(
             envs.get("DJINN_SERVER_ADDR").copied(),
@@ -1467,6 +1489,34 @@ mod tests {
             envs.get("DJINN_TASK_RUN_DEADLINE_SECONDS").copied(),
             Some(cfg.task_run_active_deadline_seconds.to_string().as_str())
         );
+        // The worker requires the Pod's OWN immutable UID (it fences the durable
+        // invocation journal, and the watchdog matches it against
+        // `pod.metadata.uid`). It cannot be a literal — the UID does not exist
+        // until the apiserver admits the Pod — so it MUST come from the downward
+        // API. Rendering it as anything else (metadata.name, the Job UID) breaks
+        // exact-Pod termination silently. Task opsu: it was missing entirely and
+        // every task-run Pod exited 2 in argv parsing.
+        let pod_uid = container
+            .env
+            .as_ref()
+            .expect("container.env set")
+            .iter()
+            .find(|e| e.name == "DJINN_TASK_RUN_POD_UID")
+            .expect("DJINN_TASK_RUN_POD_UID is required by the worker binary");
+        assert!(
+            pod_uid.value.is_none(),
+            "a Pod UID cannot be known when the manifest is rendered"
+        );
+        assert_eq!(
+            pod_uid
+                .value_from
+                .as_ref()
+                .and_then(|source| source.field_ref.as_ref())
+                .map(|field| field.field_path.as_str()),
+            Some("metadata.uid"),
+            "the worker's Pod UID must come from the downward API"
+        );
+
         // DB env vars are gated on the corresponding config fields being
         // `Some`. `for_testing()` leaves them `None`, so they should be
         // absent here — see `forwards_db_env_vars_when_configured` for
@@ -1665,7 +1715,9 @@ mod tests {
             .as_ref()
             .expect("container.env set")
             .iter()
-            .map(|e| (e.name.as_str(), e.value.as_deref().expect("env value")))
+            // Downward-API vars (DJINN_TASK_RUN_POD_UID) carry `valueFrom`, not
+            // `value`; asserted by djinn-agent-worker's `rendered_job_env_contract`.
+            .map(|e| (e.name.as_str(), e.value.as_deref().unwrap_or_default()))
             .collect();
 
         assert_eq!(
@@ -1707,7 +1759,9 @@ mod tests {
             .as_ref()
             .expect("container.env set")
             .iter()
-            .map(|e| (e.name.as_str(), e.value.as_deref().expect("env value")))
+            // Downward-API vars (DJINN_TASK_RUN_POD_UID) carry `valueFrom`, not
+            // `value`; asserted by djinn-agent-worker's `rendered_job_env_contract`.
+            .map(|e| (e.name.as_str(), e.value.as_deref().unwrap_or_default()))
             .collect();
 
         assert_eq!(envs.get("CARGO_HOME").copied(), Some("/cache/cargo"));

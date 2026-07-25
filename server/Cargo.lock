@@ -1190,6 +1190,7 @@ dependencies = [
  "djinn-db",
  "djinn-git",
  "djinn-graph",
+ "djinn-k8s",
  "djinn-provider",
  "djinn-runtime",
  "djinn-slot",
