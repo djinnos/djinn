@@ -122,6 +122,10 @@ pub async fn record_supervisor_rework_reopen(
 
 pub mod resource_monitor;
 pub mod roles;
+/// Production wiring that arms the observe-only disk dimension at coordinator
+/// startup: run-dir reconciliation, the live capacity adapter, and the quota
+/// probe.
+pub mod run_dir_observe;
 pub mod run_dir_reconcile;
 pub mod supervisor_impl;
 pub mod task_merge;

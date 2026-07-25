@@ -220,13 +220,14 @@ pub enum BuildAdmissionDecision {
 }
 
 /// Observe-only disk-capacity adapter for build admission (proposal nquz,
-/// phase 1 — DARK).
+/// phase 1 — OBSERVE).
 ///
 /// A source, when installed, returns what disk admission WOULD do for a build
-/// request — never denying and never allocating. In this phase no production
-/// path installs a source, so the disk dimension is inert; it exists so the
-/// observe substrate and its tests can measure the future policy. The concrete
-/// decision logic lives in [`crate::disk_admission`].
+/// request — never denying and never allocating. `observe` is consulted only
+/// AFTER a permit has been issued, so an installed source can add telemetry but
+/// can never turn a permit into a denial. The production source is composed by
+/// `crate::run_dir_observe`; the concrete decision logic lives in
+/// [`crate::disk_admission`].
 #[async_trait]
 pub trait DiskCapacitySource: Send + Sync {
     /// Return the observed disk decision for a build request, or `None` when no
@@ -346,8 +347,7 @@ pub struct BuildAdmissionController {
     would_defer_observations: Mutex<u64>,
     /// Bounded observe-only disk would-defer signal (proposal nquz, phase 1).
     ///
-    /// DARK by default: it only advances when a [`DiskCapacitySource`] has been
-    /// installed, which no production path does in this phase. The disk
+    /// Advances only when a [`DiskCapacitySource`] has been installed. The disk
     /// dimension NEVER changes an admission decision — it records what disk
     /// admission WOULD do.
     disk_would_defer_observations: Mutex<u64>,
@@ -630,8 +630,8 @@ impl BuildAdmissionController {
 
     /// Install the observe-only disk-capacity source (proposal nquz).
     ///
-    /// Phase-1 production never calls this; it exists so the dark disk dimension
-    /// and its tests can run. Installing a source can only add telemetry — it
+    /// Called by the coordinator's startup composition in
+    /// `crate::run_dir_observe`. Installing a source can only add telemetry — it
     /// can never turn a permit into a denial.
     pub fn set_disk_capacity_source(&self, source: Arc<dyn DiskCapacitySource>) {
         *self
@@ -759,8 +759,8 @@ impl BuildAdmissionController {
             });
         }
         // Capture an observe-only copy before any field of `request` is moved.
-        // Only cloned when the dark disk dimension is armed (never in phase-1
-        // production), so the default path pays nothing.
+        // Only cloned when the disk dimension is armed, so a controller with
+        // no source installed pays nothing.
         let disk_observe_request = self
             .disk_capacity_source()
             .is_some()

@@ -102,12 +102,16 @@ pub struct DiskObservation {
     pub projected_reservation_bytes: u64,
 }
 
-/// Per-volume disk-admission configuration. Phase-1 defaults are inert
-/// placeholders: nothing consumes them for a live decision yet.
+/// Per-volume disk-admission configuration. Observe mode consumes these to
+/// classify samples and to compute what enforce WOULD reserve; nothing here
+/// changes a grant.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DiskAdmissionConfig {
     pub cache_budget_bytes: u64,
     pub critical_free_bytes: u64,
+    /// The warning floor used by [`DiskCapacityState::classify`]. Must be at
+    /// least `critical_free_bytes`; a smaller configured value is raised to it.
+    pub warning_free_bytes: u64,
     pub emergency_headroom_bytes: u64,
     pub per_lease_growth_bytes: u64,
     pub max_sample_age: Duration,
@@ -118,24 +122,68 @@ pub const DEFAULT_EMERGENCY_HEADROOM_BYTES: u64 = 10 * 1024 * 1024 * 1024;
 /// 90 seconds, the proposal's freshness bound for a capacity sample.
 pub const DEFAULT_MAX_SAMPLE_AGE: Duration = Duration::from_secs(90);
 
+const GIB: u64 = 1024 * 1024 * 1024;
+
+/// Environment overrides. Every value is optional; a malformed value keeps the
+/// default rather than failing coordinator startup (observe must never be a
+/// boot hazard).
+pub const CACHE_BUDGET_BYTES_ENV: &str = "DJINN_RUN_DIR_CACHE_BUDGET_BYTES";
+pub const CRITICAL_FREE_BYTES_ENV: &str = "DJINN_RUN_DIR_CRITICAL_FREE_BYTES";
+pub const WARNING_FREE_BYTES_ENV: &str = "DJINN_RUN_DIR_WARNING_FREE_BYTES";
+pub const EMERGENCY_HEADROOM_BYTES_ENV: &str = "DJINN_RUN_DIR_EMERGENCY_HEADROOM_BYTES";
+pub const PER_LEASE_GROWTH_BYTES_ENV: &str = "DJINN_RUN_DIR_PER_LEASE_GROWTH_BYTES";
+pub const MAX_SAMPLE_AGE_SECS_ENV: &str = "DJINN_RUN_DIR_MAX_SAMPLE_AGE_SECS";
+
 impl Default for DiskAdmissionConfig {
     fn default() -> Self {
         Self {
-            cache_budget_bytes: 200 * 1024 * 1024 * 1024,
-            critical_free_bytes: 20 * 1024 * 1024 * 1024,
+            cache_budget_bytes: 200 * GIB,
+            critical_free_bytes: 20 * GIB,
+            warning_free_bytes: 40 * GIB,
             emergency_headroom_bytes: DEFAULT_EMERGENCY_HEADROOM_BYTES,
-            per_lease_growth_bytes: 4 * 1024 * 1024 * 1024,
+            per_lease_growth_bytes: 4 * GIB,
             max_sample_age: DEFAULT_MAX_SAMPLE_AGE,
         }
     }
 }
 
+fn env_u64(name: &str) -> Option<u64> {
+    std::env::var(name).ok()?.trim().parse::<u64>().ok()
+}
+
 impl DiskAdmissionConfig {
+    /// Read the per-volume observe configuration from the environment,
+    /// defaulting every unset or malformed value.
+    #[must_use]
+    pub fn from_env() -> Self {
+        let defaults = Self::default();
+        Self {
+            cache_budget_bytes: env_u64(CACHE_BUDGET_BYTES_ENV)
+                .unwrap_or(defaults.cache_budget_bytes),
+            critical_free_bytes: env_u64(CRITICAL_FREE_BYTES_ENV)
+                .unwrap_or(defaults.critical_free_bytes),
+            warning_free_bytes: env_u64(WARNING_FREE_BYTES_ENV)
+                .unwrap_or(defaults.warning_free_bytes),
+            emergency_headroom_bytes: env_u64(EMERGENCY_HEADROOM_BYTES_ENV)
+                .unwrap_or(defaults.emergency_headroom_bytes),
+            per_lease_growth_bytes: env_u64(PER_LEASE_GROWTH_BYTES_ENV)
+                .unwrap_or(defaults.per_lease_growth_bytes),
+            max_sample_age: env_u64(MAX_SAMPLE_AGE_SECS_ENV)
+                .map_or(defaults.max_sample_age, Duration::from_secs),
+        }
+    }
+
     /// The effective emergency headroom for a volume: at least the configured
     /// value, and never less than 5% of filesystem capacity.
     #[must_use]
     pub fn effective_emergency_headroom(&self, total_bytes: u64) -> u64 {
         self.emergency_headroom_bytes.max(total_bytes / 20)
+    }
+
+    /// The warning floor, never below the critical floor.
+    #[must_use]
+    pub fn effective_warning_free_bytes(&self) -> u64 {
+        self.warning_free_bytes.max(self.critical_free_bytes)
     }
 }
 

@@ -44,8 +44,8 @@ fn fixture_resolver() -> MapResolver {
         ResolvedOwnership {
             pod_uid: "pod-live".to_owned(),
             task_run_id: "run-live".to_owned(),
-            project_id: "proj-1".to_owned(),
-            base_fingerprint: "fp-1".to_owned(),
+            project_id: Some("proj-1".to_owned()),
+            base_fingerprint: Some("fp-1".to_owned()),
             state: RunDirState::ReadyActive,
         },
     );
@@ -54,8 +54,8 @@ fn fixture_resolver() -> MapResolver {
         ResolvedOwnership {
             pod_uid: "pod-terminal".to_owned(),
             task_run_id: "run-terminal".to_owned(),
-            project_id: "proj-1".to_owned(),
-            base_fingerprint: "fp-1".to_owned(),
+            project_id: Some("proj-1".to_owned()),
+            base_fingerprint: Some("fp-1".to_owned()),
             state: RunDirState::Reclaimable,
         },
     );
@@ -123,8 +123,8 @@ fn malformed_entry_is_quarantined_even_if_resolvable() {
         ResolvedOwnership {
             pod_uid: "pod-x".to_owned(),
             task_run_id: "run-x".to_owned(),
-            project_id: "proj-1".to_owned(),
-            base_fingerprint: "fp-1".to_owned(),
+            project_id: Some("proj-1".to_owned()),
+            base_fingerprint: Some("fp-1".to_owned()),
             state: RunDirState::ReadyActive,
         },
     );
@@ -145,8 +145,8 @@ fn non_authoritative_resolved_state_is_quarantined() {
         ResolvedOwnership {
             pod_uid: "pod-live".to_owned(),
             task_run_id: "run-live".to_owned(),
-            project_id: "proj-1".to_owned(),
-            base_fingerprint: "fp-1".to_owned(),
+            project_id: Some("proj-1".to_owned()),
+            base_fingerprint: Some("fp-1".to_owned()),
             state: RunDirState::Seeding,
         },
     );
