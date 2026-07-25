@@ -1237,7 +1237,17 @@ async fn advocate_proposal_and_progress_failures_leave_durable_source_retryable(
                 .is_none(),
             "{point:?} is retryable before publishing a candidate"
         );
-        assert_eq!(snapshot(&f).await, before);
+        let mut after = snapshot(&f).await;
+        // `observed_at` stamps the wall clock of the read itself, not durable
+        // state, so two reads of an unchanged run differ whenever they land in
+        // different milliseconds. Adopt the earlier stamp so the comparison
+        // below asserts the invariant this matrix owns — every durable field is
+        // untouched — instead of failing on read timing.
+        after.observed_at = before.observed_at;
+        assert_eq!(
+            after, before,
+            "{point:?} must leave durable run state untouched"
+        );
         assert_eq!(f.actor.refinement_sessions[&f.run_id].task_id, f.task_id);
         reset_outcome_test_seam(&f.fixture.proposal_id);
     }

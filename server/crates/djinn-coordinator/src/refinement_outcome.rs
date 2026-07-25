@@ -104,7 +104,17 @@ fn outcome_test_seam(target: &str, point: OutcomeTestSeamPoint) -> bool {
         OutcomeTestSeamPoint::DurableProgress => counts.progress_writes += 1,
         OutcomeTestSeamPoint::ParkPersistence | OutcomeTestSeamPoint::TerminalPersistence => {}
     }
-    failure.take() == Some(point)
+    // Disarm only on a match. Several probes share one target key and are
+    // crossed in a fixed order (a proposal is read before its durable progress
+    // is written), so an unconditional `take()` lets the earliest probe consume
+    // an injection aimed at a later one — the later point then never fires and
+    // the call under test wrongly succeeds.
+    if *failure == Some(point) {
+        *failure = None;
+        true
+    } else {
+        false
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
