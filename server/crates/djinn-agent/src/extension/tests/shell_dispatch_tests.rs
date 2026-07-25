@@ -29,8 +29,18 @@ struct BrokerShellLauncher {
 struct BrokerShellState {
     stdout: Vec<u8>,
     stderr: Vec<u8>,
-    status: ExitStatus,
+    /// `None` while the remote child is still running.
+    status: Option<ExitStatus>,
+    /// The child finishes on its own once it has been sampled this many times.
+    exit_after_samples: usize,
+    exit_code: i32,
+    samples: usize,
+    /// Reported CPU usage: above the runner's escalation threshold this child
+    /// is build-shaped and reaches the lease authority.
+    cpu_usage_usec: u64,
     identities: Vec<TaskInvocationLeaseIdentity>,
+    lifts: usize,
+    killed_while_running: usize,
     empties: usize,
     cleanups: usize,
 }
@@ -43,8 +53,35 @@ impl BrokerShellLauncher {
             state: Arc::new(Mutex::new(BrokerShellState {
                 stdout: stdout.to_vec(),
                 stderr: stderr.to_vec(),
-                status: ExitStatus::from_raw(code << 8),
+                status: Some(ExitStatus::from_raw(code << 8)),
+                exit_after_samples: 0,
+                exit_code: code,
+                samples: 0,
+                cpu_usage_usec: 0,
                 identities: Vec::new(),
+                lifts: 0,
+                killed_while_running: 0,
+                empties: 0,
+                cleanups: 0,
+            })),
+        }
+    }
+
+    /// A still-running, CPU-heavy child: the runner escalates it to the lease
+    /// authority and it finishes on its own a few polls later.
+    fn escalating(stdout: &[u8], stderr: &[u8], code: i32) -> Self {
+        Self {
+            state: Arc::new(Mutex::new(BrokerShellState {
+                stdout: stdout.to_vec(),
+                stderr: stderr.to_vec(),
+                status: None,
+                exit_after_samples: 3,
+                exit_code: code,
+                samples: 0,
+                cpu_usage_usec: 1_000_000,
+                identities: Vec::new(),
+                lifts: 0,
+                killed_while_running: 0,
                 empties: 0,
                 cleanups: 0,
             })),
@@ -79,22 +116,47 @@ impl ProcessHandle for BrokerShellHandle {
     }
 
     fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
-        Ok(Some(self.state.lock().unwrap().status))
-    }
-
-    fn wait(&mut self) -> io::Result<ExitStatus> {
         Ok(self.state.lock().unwrap().status)
     }
 
+    fn wait(&mut self) -> io::Result<ExitStatus> {
+        self.state
+            .lock()
+            .unwrap()
+            .status
+            .ok_or_else(|| io::Error::other("remote child is still running"))
+    }
+
     fn sample_cpu(&mut self) -> io::Result<CpuStat> {
-        Ok(CpuStat::default())
+        use std::os::unix::process::ExitStatusExt;
+
+        let mut state = self.state.lock().unwrap();
+        state.samples += 1;
+        if state.exit_after_samples > 0 && state.samples >= state.exit_after_samples {
+            let code = state.exit_code;
+            state
+                .status
+                .get_or_insert_with(|| ExitStatus::from_raw(code << 8));
+        }
+        Ok(CpuStat {
+            usage_usec: state.cpu_usage_usec,
+            ..CpuStat::default()
+        })
     }
 
     fn fenced_lift(&mut self, _: &LeaseFencingToken) -> io::Result<()> {
+        self.state.lock().unwrap().lifts += 1;
         Ok(())
     }
 
     fn kill(&mut self) -> io::Result<()> {
+        use std::os::unix::process::ExitStatusExt;
+
+        let mut state = self.state.lock().unwrap();
+        if state.status.is_none() {
+            state.killed_while_running += 1;
+            state.status = Some(ExitStatus::from_raw(9));
+        }
         Ok(())
     }
 
@@ -340,6 +402,60 @@ async fn shell_dispatch_broker_backed_cargo_records_exactly_one_observation() {
     assert_eq!(broker.identities[0].task_id, "trusted-task");
     assert_eq!(broker.identities[0].task_run_id, "trusted-task-run");
     assert!(!broker.identities[0].invocation_id.is_empty());
+    assert_eq!((broker.empties, broker.cleanups), (1, 1));
+}
+
+/// Workspace composition: a shell command that loses the build-lease queue must
+/// come back as an ordinary shell result, not as
+/// "failed to run shell command: lease invocation failed: ...".
+///
+/// This drives the whole production seam - `call_shell` -> `ShellLaunchContext`
+/// -> `LeaseInvocationRunner` -> the real `DirectServices` lease authority over
+/// a real durable repository - with the deadlines
+/// `ShellLaunchContext::invocation` actually renders. Contention makes the
+/// command slow (it stays at the broker's unleased quota, never lifted), never
+/// dead.
+#[tokio::test]
+async fn shell_dispatch_lease_queue_timeout_returns_the_command_result_not_an_error() {
+    let (worktree, mut state) = setup("shell-lease-degrade-");
+    let launcher = BrokerShellLauncher::escalating(b"degraded stdout\n", b"", 0);
+    let runner = Arc::new(LeaseInvocationRunner::new(
+        Arc::new(crate::direct_services::DirectServices::new(
+            state.clone(),
+            CancellationToken::new(),
+        )),
+        Arc::new(launcher.clone()),
+        Arc::new(SystemClock::new()),
+    ));
+    state.shell_launch = Some(crate::context::ShellLaunchContext::for_test(
+        runner,
+        "degrade-task".into(),
+        "degrade-task-run".into(),
+        "degrade-pod-uid".into(),
+    ));
+
+    let response = call_shell(
+        &state,
+        &shell_args("cargo build"),
+        worktree.path(),
+        None,
+        &crate::extension::ToolCancellation::never(),
+    )
+    .await
+    .expect("a lost lease queue must not fail the shell tool call");
+
+    assert_eq!(response["ok"], serde_json::json!(true));
+    assert_eq!(response["exit_code"], serde_json::json!(0));
+    assert_eq!(response["stdout"], serde_json::json!("degraded stdout\n"));
+    let broker = launcher.state.lock().unwrap();
+    assert_eq!(
+        broker.killed_while_running, 0,
+        "the queued command must keep running, not be killed"
+    );
+    assert_eq!(
+        broker.lifts, 0,
+        "a degraded command stays at the unleased quota"
+    );
     assert_eq!((broker.empties, broker.cleanups), (1, 1));
 }
 
