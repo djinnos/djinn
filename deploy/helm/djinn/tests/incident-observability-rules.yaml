@@ -7,7 +7,7 @@ groups:
         labels: {severity: critical}
         annotations: {runbook: server/docs/runbooks/incident-observability.md}
       - alert: DjinnServerMemoryPressure
-        expr: process_resident_memory_bytes / djinn_server_memory_limit_bytes > 0.85
+        expr: djinn_process_rss_bytes / djinn_server_memory_limit_bytes > 0.85
         for: 10m
         labels: {severity: warning}
         annotations: {runbook: server/docs/runbooks/incident-observability.md}
