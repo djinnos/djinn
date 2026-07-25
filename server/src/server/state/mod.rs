@@ -590,11 +590,22 @@ impl AppState {
             )),
         });
         let build_lease = Arc::new(
-            BuildLeaseService::new(Arc::new(djinn_db::BuildLeaseRepository::new(db.clone())), 0)
-                // The v1 lease service reads the durable admission epoch (and its
-                // reference cap) on recovery, so a restart observes the current
-                // epoch before admitting or spawning.
-                .with_handoff_epoch(Arc::new(AdmissionHandoffRepository::new(db.clone()))),
+            // Hand the v1 FIFO the SAME configured build-slot cap the v0
+            // journal controller gets. `graph_warmer` wires the v1 lease
+            // unconditionally and gives it precedence over v0, so this is the
+            // only cap that governs whether a warm Job may ever be created.
+            // Passing `0` here left the service resolving to the migration
+            // -seeded durable `build_lease_caps.cap = 0`, which denied every
+            // graph-warm lease for the life of the deployment.
+            BuildLeaseService::new(
+                Arc::new(djinn_db::BuildLeaseRepository::new(db.clone())),
+                admission_config.cap,
+            )
+            // The v1 lease service reads the durable admission epoch (and its
+            // reference cap) on recovery, so a restart observes the current
+            // epoch before admitting or spawning. An armed epoch cap still
+            // wins over the configured value above.
+            .with_handoff_epoch(Arc::new(AdmissionHandoffRepository::new(db.clone()))),
         );
         Self {
             inner: Arc::new(Inner {
@@ -1232,10 +1243,26 @@ impl AppState {
                     // lease result by the adapter.
                     let _ = self.inner.build_lease.recover().await;
                     let warmer = K8sGraphWarmer::new(client, config, self.db().clone())
-                        .with_completion_sink(Arc::new(CanonicalGraphInvalidationSink))
-                        .with_graph_warm_lease(Arc::new(BuildLeaseGraphWarmAdapter::new(
+                        .with_completion_sink(Arc::new(CanonicalGraphInvalidationSink));
+                    // A zero cap is a gate that can never open: `grant_next`
+                    // short-circuits on `occupied >= cap` before it reads the
+                    // queue, so wiring the lease here would silently deny every
+                    // warm Job forever (the production failure this guards).
+                    // The operator expresses "no build admission" with
+                    // DJINN_MAX_BUILD_TASKRUNS=0, which must mean unrestricted
+                    // warming, not permanently blocked warming.
+                    let lease_cap = self.inner.build_lease.cap();
+                    let warmer = if lease_cap > 0 {
+                        warmer.with_graph_warm_lease(Arc::new(BuildLeaseGraphWarmAdapter::new(
                             self.inner.build_lease.clone(),
-                        )));
+                        )))
+                    } else {
+                        tracing::warn!(
+                            "graph_warmer: v1 build lease resolved to cap 0; leaving graph warming \
+                             ungated rather than denying every warm Job"
+                        );
+                        warmer
+                    };
                     let warmer = match self.inner.build_admission.clone() {
                         Some(admission) => warmer.with_warm_admission(admission),
                         None => warmer,
@@ -3836,6 +3863,67 @@ mod build_admission_config_tests {
     fn state_for_admission_config(config: BuildAdmissionConfig) -> AppState {
         let db = Database::open_in_memory().expect("test database");
         state_for_admission_config_with_db(db, config)
+    }
+
+    /// The v1 lease is the ONLY authority that governs whether a graph-warm Job
+    /// may be created: `initialize_graph_warmer` wires it unconditionally and
+    /// `WarmDispatch` gives it precedence over the v0 journal controller. So the
+    /// cap this composition hands it decides whether warming can run at all.
+    ///
+    /// Against a fresh database this reproduces production exactly — migration
+    /// 139 seeds `build_lease_caps.cap = 0` and `admission_handoff` is empty —
+    /// and drives the real adapter over the real repository. Composing with a
+    /// zero cap left `grant_next` short-circuiting on `occupied >= cap` before
+    /// it read the queue, denying every warm Job while occupancy read 0.
+    #[tokio::test]
+    async fn composition_arms_the_v1_lease_from_the_configured_build_slot_cap() {
+        use djinn_k8s::GraphWarmLease;
+        use djinn_supervisor::services::{GraphWarmLeaseIdentity, LeaseDeadlines};
+
+        let db = Database::open_in_memory().expect("test database");
+        db.ensure_initialized().await.expect("migrations");
+        assert_eq!(
+            djinn_db::BuildLeaseRepository::new(db.clone())
+                .snapshot()
+                .await
+                .expect("snapshot")
+                .cap,
+            0,
+            "precondition: the durable lease cap starts unarmed, as in production"
+        );
+
+        let state = state_for_admission_config_with_db(
+            db,
+            BuildAdmissionConfig {
+                mode: BuildAdmissionMode::Observe,
+                cap: 3,
+            },
+        );
+        assert!(matches!(
+            state.inner.build_lease.recover().await,
+            djinn_supervisor::services::LeaseResult::Status(_)
+        ));
+        assert_eq!(
+            state.inner.build_lease.cap(),
+            3,
+            "the composed lease must adopt the configured build-slot cap"
+        );
+
+        let adapter = BuildLeaseGraphWarmAdapter::new(state.inner.build_lease.clone());
+        adapter
+            .acquire(
+                GraphWarmLeaseIdentity {
+                    project_id: "project-id".into(),
+                    warm_request_id: "warm-request".into(),
+                    graph_revision: "graph-revision".into(),
+                },
+                LeaseDeadlines {
+                    queue_deadline_ms: 0,
+                    launch_deadline_ms: 0,
+                },
+            )
+            .await
+            .expect("the composed lease must authorize a graph-warm Job POST");
     }
 
     fn state_for_admission_config_with_db(db: Database, config: BuildAdmissionConfig) -> AppState {

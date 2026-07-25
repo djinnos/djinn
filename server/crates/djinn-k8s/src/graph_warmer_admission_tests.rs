@@ -126,3 +126,34 @@ fn admission_transition_variants_preserve_uids_and_diagnostics() {
         }
     );
 }
+
+/// A refused warm cycle re-runs the full dispatch attempt: a mirror tip
+/// discovery plus an advisory-locked lease transaction. A flat interval turned
+/// a permanently closed gate into an unbounded hot loop (thousands of identical
+/// refusals per day in production), so the delay must grow and then saturate.
+#[test]
+fn admission_retry_delay_backs_off_and_saturates() {
+    assert_eq!(admission_retry_delay(1), Duration::from_secs(1));
+    assert_eq!(admission_retry_delay(2), Duration::from_secs(2));
+    assert_eq!(admission_retry_delay(3), Duration::from_secs(4));
+    assert_eq!(admission_retry_delay(7), Duration::from_secs(60));
+
+    let mut previous = Duration::ZERO;
+    for attempt in 1..=64 {
+        let delay = admission_retry_delay(attempt);
+        assert!(
+            delay >= previous,
+            "the backoff must never shrink (attempt {attempt})"
+        );
+        assert!(
+            delay <= Duration::from_secs(60),
+            "the backoff must stay bounded (attempt {attempt})"
+        );
+        previous = delay;
+    }
+    assert_eq!(
+        admission_retry_delay(u32::MAX),
+        Duration::from_secs(60),
+        "an unbounded refusal streak must not overflow into a shorter delay"
+    );
+}
