@@ -30,6 +30,10 @@ pub struct TaskrunJobRef {
     /// timestamp (shouldn't happen for live Jobs); callers treat `None` as
     /// old/eligible so the backstop's cleanup guarantee is preserved.
     pub created_at: Option<std::time::SystemTime>,
+    /// Kubernetes `status.completionTime`, when terminal.
+    pub completed_at: Option<std::time::SystemTime>,
+    /// Terminal Kubernetes condition type (`Complete` or `Failed`).
+    pub terminal_condition: Option<String>,
 }
 
 /// Server-wide canonical-graph warmer.

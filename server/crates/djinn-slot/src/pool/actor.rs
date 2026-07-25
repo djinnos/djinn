@@ -2,6 +2,7 @@
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
+use djinn_core::job_retention::{JobRetentionEvidence, SessionEvidence};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -624,7 +625,7 @@ impl SlotPool {
             }
         };
         let mut task_run_ids = HashSet::new();
-        for session in sessions {
+        for session in &sessions {
             if session.status != djinn_core::models::SessionStatus::Running.as_str() {
                 continue;
             }
@@ -634,7 +635,65 @@ impl SlotPool {
                 task_run_ids.insert(task_run_id.to_string());
             }
         }
+        let jobs = match runtime_ops.list_taskrun_jobs().await {
+            Ok(jobs) => jobs,
+            Err(e) => {
+                tracing::warn!(task_id = %task_id, reason = %reason, error = %e,
+                    "SlotPool: failed to inventory task-run Jobs for common retention policy");
+                return;
+            }
+        };
+        let task_run_repo = djinn_db::TaskRunRepository::new(self.ctx.db.clone());
+        let now = self.ctx.clock.now();
         for task_run_id in task_run_ids {
+            let Some(job) = jobs
+                .iter()
+                .find(|job| job.task_run_id.trim() == task_run_id)
+            else {
+                continue;
+            };
+            let task_run = match task_run_repo.get(&task_run_id).await {
+                Ok(run) => run,
+                Err(e) => {
+                    tracing::warn!(task_id = %task_id, task_run_id = %task_run_id, reason = %reason, error = %e,
+                        "SlotPool: failed to load task-run for common Job retention policy");
+                    continue;
+                }
+            };
+            let task_run_sessions = match session_repo.list_for_task_run(&task_run_id).await {
+                Ok(sessions) => sessions,
+                Err(e) => {
+                    tracing::warn!(task_id = %task_id, task_run_id = %task_run_id, reason = %reason, error = %e,
+                        "SlotPool: failed to load task-run sessions for common Job retention policy");
+                    continue;
+                }
+            };
+            let session_evidence: Vec<_> = task_run_sessions
+                .iter()
+                .map(|session| SessionEvidence {
+                    status: &session.status,
+                    ended_at: Self::parse_retention_timestamp(session.ended_at.as_deref()),
+                })
+                .collect();
+            let decision = djinn_core::job_retention::classify_taskrun_job(
+                now,
+                JobRetentionEvidence {
+                    created_at: job.created_at,
+                    completed_at: job.completed_at,
+                    terminal_condition: job.terminal_condition.as_deref(),
+                    task_run_status: task_run.as_ref().map(|run| run.status.as_str()),
+                    task_run_ended_at: task_run
+                        .as_ref()
+                        .and_then(|run| Self::parse_retention_timestamp(run.ended_at.as_deref())),
+                    sessions: &session_evidence,
+                },
+            );
+            if !decision.should_delete(now) {
+                tracing::debug!(task_id = %task_id, task_run_id = %task_run_id, reason = %reason,
+                    outcome = ?decision.outcome, delete_after = ?decision.delete_after,
+                    "SlotPool: task-run Job retained by common retention policy");
+                continue;
+            }
             if let Err(e) = runtime_ops.teardown_taskrun_job(&task_run_id).await {
                 tracing::warn!(
                     task_id = %task_id,
@@ -646,6 +705,17 @@ impl SlotPool {
             }
         }
     }
+    fn parse_retention_timestamp(raw: Option<&str>) -> Option<std::time::SystemTime> {
+        use time::format_description::well_known::{Iso8601, Rfc3339};
+
+        raw.and_then(|value| {
+            time::OffsetDateTime::parse(value, &Iso8601::DEFAULT)
+                .or_else(|_| time::OffsetDateTime::parse(value, &Rfc3339))
+                .ok()
+        })
+        .map(std::time::SystemTime::from)
+    }
+
     async fn reconfigure(&mut self, config: SlotPoolConfig) -> Result<(), PoolError> {
         self.role_priorities = config.role_priorities.clone();
         self.model_roles = Self::roles_by_model(&config.models);

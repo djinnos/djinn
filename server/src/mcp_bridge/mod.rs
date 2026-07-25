@@ -89,6 +89,8 @@ impl RuntimeOps for AppState {
                 job_name: job.job_name,
                 task_run_id: job.task_run_id,
                 created_at: job.created_at,
+                completed_at: job.completed_at,
+                terminal_condition: job.terminal_condition,
             })
             .collect())
     }

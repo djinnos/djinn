@@ -119,10 +119,34 @@ pub fn taskrun_job_ref_from_job(job: &Job) -> Option<djinn_runtime::TaskrunJobRe
         .as_ref()
         .map(|time| std::time::SystemTime::from(time.0));
 
+    let completed_at = job
+        .status
+        .as_ref()
+        .and_then(|status| status.completion_time.as_ref())
+        .map(|time| std::time::SystemTime::from(time.0));
+    let terminal_condition = job.status.as_ref().and_then(|status| {
+        let conditions = status.conditions.as_ref()?;
+        if conditions
+            .iter()
+            .any(|condition| condition.type_ == "Failed")
+        {
+            Some("Failed".to_string())
+        } else if conditions
+            .iter()
+            .any(|condition| condition.type_ == "Complete")
+        {
+            Some("Complete".to_string())
+        } else {
+            None
+        }
+    });
+
     Some(djinn_runtime::TaskrunJobRef {
         job_name,
         task_run_id,
         created_at,
+        completed_at,
+        terminal_condition,
     })
 }
 
@@ -175,7 +199,7 @@ pub const VOLUME_WORKSPACE: &str = "workspace";
 ///
 /// The Job runs exactly one Pod (`restartPolicy: Never`, `backoffLimit: 0`);
 /// Djinn's supervisor owns retry policy at the task level. Completed Jobs
-/// are GC'd after `config.ttl_seconds_after_finished`.
+/// are GC'd by the static 3600-second Kubernetes safety-net TTL.
 ///
 /// `task_run_id` supplies both the resource name suffix and the label value;
 /// `secret_name` is the name of the Secret produced by
@@ -523,7 +547,10 @@ pub fn build_task_run_job(
         spec: Some(JobSpec {
             template,
             backoff_limit: Some(0),
-            ttl_seconds_after_finished: Some(config.ttl_seconds_after_finished),
+            // Static failed-job safety net. The coordinator may delete known
+            // successes earlier, but this must never become a configurable
+            // short retention policy for unknown or failed outcomes.
+            ttl_seconds_after_finished: Some(3600),
             // Cap total Pod wall-clock so a stuck RPC connection or
             // runaway LLM stream can't keep the worker alive forever
             // (TTL doesn't fire until the Pod exits). `i64` per the
@@ -1278,7 +1305,7 @@ mod tests {
         // Job-level knobs.
         let spec = job.spec.as_ref().expect("job.spec set");
         assert_eq!(spec.backoff_limit, Some(0));
-        assert_eq!(spec.ttl_seconds_after_finished, Some(300));
+        assert_eq!(spec.ttl_seconds_after_finished, Some(3600));
         // activeDeadlineSeconds caps total Pod wall-clock — see Gap 4 in
         // the Phase 7 worker-functionality audit.
         assert_eq!(
