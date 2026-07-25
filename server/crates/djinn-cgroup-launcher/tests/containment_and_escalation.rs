@@ -128,7 +128,9 @@ impl CgroupFs for FakeCgroup {
 }
 
 /// The only child-spawn seam. It never runs a real process; it records that a
-/// single clone3-into-cgroup attempt occurred for the whole invocation tree.
+/// single already-placed child was admitted for each invocation leaf. Native
+/// production spawning is separately covered by `spawn.rs`: fork, placement
+/// write/readback, then GO before credential drop or exec.
 #[derive(Clone)]
 struct FakeClone(Rc<RefCell<CloneState>>);
 struct CloneState {
@@ -233,6 +235,86 @@ fn authenticated_ready(
 // cancellation/timeout kills all descendants; release/cleanup is impossible
 // until fake `cgroup.events` reports `populated 0`.
 
+/// Drive two commands through the authenticated broker boundary, rather than
+/// calling `Launcher::create_command` directly. Every command gets its own
+/// leaf and starts at 250m; the only accepted matching fence lifts exactly once
+/// to the explicit pod quota, never to `max`.
+#[test]
+fn authenticated_broker_gives_each_command_a_fresh_250m_leaf_and_one_explicit_lift() {
+    let fs = FakeCgroup::with_owner(7);
+    let clone = FakeClone::allow();
+    let launcher = Launcher::new(
+        fs.clone(),
+        clone.clone(),
+        LauncherConfig::new(None, Some(4_000), 7).expect("launcher config"),
+    )
+    .expect("ready launcher");
+    let mut broker = Broker::new(
+        launcher,
+        BrokerConfig::worker(42, POD_CREDENTIAL.to_vec()).expect("broker config"),
+        OsNonceSource,
+    )
+    .expect("broker");
+    let connection = authenticated_ready(&mut broker);
+
+    let first = Invocation {
+        id: "first-command".to_owned(),
+        fence: 41,
+    };
+    let first_nonce = broker
+        .begin_invocation(connection, first)
+        .expect("begin first command");
+    let first_nonce = broker
+        .create(
+            connection,
+            "first-command",
+            first_nonce,
+            "first-leaf",
+            &command(),
+        )
+        .expect("create first command");
+    assert!(matches!(
+        broker.lift(connection, "first-command", first_nonce, 40),
+        Err(Error::FenceMismatch)
+    ));
+    let first_nonce = broker
+        .lift(connection, "first-command", first_nonce, 41)
+        .expect("matching fence lifts first leaf");
+    assert!(matches!(
+        broker.lift(connection, "first-command", first_nonce, 41),
+        Err(Error::LiftAlreadyApplied)
+    ));
+
+    let second = Invocation {
+        id: "second-command".to_owned(),
+        fence: 42,
+    };
+    let second_nonce = broker
+        .begin_invocation(connection, second)
+        .expect("begin second command");
+    broker
+        .create(
+            connection,
+            "second-command",
+            second_nonce,
+            "second-leaf",
+            &command(),
+        )
+        .expect("create second command");
+
+    assert_eq!(fs.creates(), 2, "commands cannot reuse an invocation leaf");
+    assert_eq!(clone.0.borrow().attempts, 2, "one spawn per command leaf");
+    assert_eq!(
+        fs.writes_to("cpu.max"),
+        vec![
+            "25000 100000".to_owned(),
+            "400000 100000".to_owned(),
+            "25000 100000".to_owned(),
+        ],
+        "a matching durable fence is the sole path from the fresh 250m leaf to the explicit pod quota"
+    );
+}
+
 /// A daemon or double-forked grandchild reparents to init and escapes any
 /// pid-tree reaper, but it is born inside the single invocation cgroup and is
 /// still counted by `cgroup.events`. Release therefore stays impossible until
@@ -257,7 +339,7 @@ fn ac2_daemon_and_double_fork_stay_in_one_cgroup_and_release_gates_on_populated_
         .expect("create invocation");
     assert_eq!(child.pid, 4242);
 
-    // Exactly one delegated cgroup and one clone3 attempt back the whole tree.
+    // Exactly one delegated cgroup and one spawn attempt back the whole tree.
     assert_eq!(
         fs.creates(),
         1,
@@ -266,7 +348,7 @@ fn ac2_daemon_and_double_fork_stay_in_one_cgroup_and_release_gates_on_populated_
     assert_eq!(
         clone.0.borrow().attempts,
         1,
-        "one clone3-into-cgroup attempt"
+        "one placed-child spawn attempt"
     );
 
     // The unleased quota is applied to the leaf before any lift.
