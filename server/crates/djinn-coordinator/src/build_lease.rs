@@ -188,6 +188,21 @@ pub struct BuildLeaseService {
     pause: Arc<dyn LeaseTransactionPause>,
     telemetry: Arc<dyn LeaseTelemetry>,
     cap: AtomicI64,
+    /// The cap this process was configured with (`DJINN_MAX_BUILD_TASKRUNS` in
+    /// production). It is the LAST fallback in the cap-resolution chain, used
+    /// only when the durable lease table has never been armed.
+    ///
+    /// `build_lease_caps` is seeded to `0` by migration 139 and is written only
+    /// by `grant_next`/`set_cap`, so a deployment that never ran the operator
+    /// arming sequence keeps a durable cap of `0` forever. A cap of `0` with a
+    /// wired consumer is not a policy — it is an unarmed gate that denies every
+    /// request for the life of the deployment (verified in production: the
+    /// graph-warm FIFO held only queued/expired rows, occupancy 0, cap 0). So
+    /// `0` is read as "never armed" and resolves to this configured value.
+    /// Draining is expressed by `is_ready()`, not by a zero cap, and the only
+    /// production writer of a durable cap (`admin epoch set-cap`) is guarded by
+    /// `admission_handoff_cap_positive_check` and cannot store `0`.
+    configured_cap: i64,
     recovered: AtomicBool,
     /// Durable admission-handoff epoch reader. When present, [`Self::recover`]
     /// and [`Self::recovery_snapshot`] read the epoch (and its reference cap)
@@ -229,6 +244,7 @@ impl BuildLeaseService {
             pause,
             telemetry,
             cap: AtomicI64::new(cap.max(0)),
+            configured_cap: cap.max(0),
             recovered: AtomicBool::new(false),
             handoff: None,
             observed_epoch: AtomicI64::new(-1),
@@ -257,6 +273,37 @@ impl BuildLeaseService {
         (epoch >= 0).then_some(epoch)
     }
 
+    /// The reference cap this service is currently enforcing.
+    ///
+    /// Meaningful only after [`Self::recover`]; before that it is the
+    /// constructor's configured value. A zero cap denies every consumer
+    /// unconditionally, so composition uses this to refuse to wire a consumer
+    /// behind a gate that can never open.
+    #[must_use]
+    pub fn cap(&self) -> i64 {
+        self.cap.load(Ordering::Acquire)
+    }
+
+    /// Resolve the durable lease-table cap against the process configuration.
+    ///
+    /// A positive durable cap has been armed by a real writer (`set_cap`, or a
+    /// previous `grant_next` converging the table on this process's cap) and is
+    /// kept verbatim. A durable `0` is the migration-seeded, never-armed state
+    /// and yields to [`Self::configured_cap`]; see that field for why `0` can
+    /// never be a deliberate durable policy on the production path.
+    fn armed_fallback(&self, durable: i64) -> i64 {
+        if durable > 0 {
+            return durable;
+        }
+        if self.configured_cap > 0 {
+            tracing::info!(
+                configured_cap = self.configured_cap,
+                "build lease: durable cap is unarmed (0); adopting the configured build-slot cap"
+            );
+        }
+        self.configured_cap
+    }
+
     /// Read the durable admission-handoff epoch and apply its reference cap.
     ///
     /// Returns the reference cap to enforce, defaulting to `fallback` (the
@@ -266,6 +313,7 @@ impl BuildLeaseService {
     /// the v1 authority when set, so a restart converges on the epoch's cap
     /// rather than a stale lease-table value.
     async fn read_handoff_epoch(&self, fallback: i64) -> i64 {
+        let fallback = self.armed_fallback(fallback);
         let Some(handoff) = self.handoff.as_ref() else {
             return fallback;
         };
@@ -300,6 +348,19 @@ impl BuildLeaseService {
                 // without having observed the current epoch. The handoff
                 // reference cap is authoritative when set.
                 let cap = self.read_handoff_epoch(snapshot.cap).await;
+                if cap == 0 {
+                    // Not a warning about capacity pressure: with a cap of zero
+                    // `grant_next` short-circuits on `occupied >= cap` before it
+                    // ever looks at the queue, so EVERY consumer is denied for
+                    // the life of the process while occupancy reads 0. This is
+                    // the signature of the production outage this branch fixes.
+                    tracing::warn!(
+                        durable_cap = snapshot.cap,
+                        configured_cap = self.configured_cap,
+                        "build lease: opening with a cap of 0; every queued build will be denied \
+                         indefinitely and no Job will be created"
+                    );
+                }
                 self.cap.store(cap, Ordering::Release);
                 self.publish(&snapshot.rows);
                 self.recovered.store(true, Ordering::Release);

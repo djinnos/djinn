@@ -486,6 +486,14 @@ struct WarmDispatch {
     /// wiring; production sets it via [`K8sGraphWarmer::with_completion_sink`].
     completion_sink: Option<Arc<dyn WarmCompletionSink>>,
     in_flight: Arc<Mutex<HashMap<String, Arc<Notify>>>>,
+    /// Consecutive admission/lease refusals per project, driving the retry
+    /// backoff in [`WarmDispatch::schedule_admission_retry`].
+    ///
+    /// A flat retry interval turns a persistently closed gate into an unbounded
+    /// hot loop: production logged thousands of identical refusals per day, each
+    /// one a git tip discovery plus an advisory-locked lease transaction. The
+    /// counter is cleared as soon as a cycle reaches Job dispatch.
+    admission_retries: Arc<Mutex<HashMap<String, u32>>>,
 }
 
 /// Object-safe candidate-control boundary used by dispatch and restart
@@ -855,6 +863,9 @@ impl WarmDispatch {
             },
             (None, None) => None,
         };
+        // Every gate this cycle had to clear is behind us: capacity was granted,
+        // so the refusal backoff for this project starts fresh.
+        self.clear_admission_backoff(project_id).await;
         let job_name = match self.dispatcher.dispatch(&namespace, job).await {
             Ok(name) => name,
             Err(e) => {
@@ -1061,7 +1072,13 @@ impl WarmDispatch {
         let dispatch = self.clone();
         let project_id = project_id.to_string();
         tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_secs(1)).await;
+            let delay = {
+                let mut guard = dispatch.admission_retries.lock().await;
+                let attempt = guard.entry(project_id.clone()).or_insert(0);
+                *attempt = attempt.saturating_add(1);
+                admission_retry_delay(*attempt)
+            };
+            tokio::time::sleep(delay).await;
             let removed = {
                 let mut guard = dispatch.in_flight.lock().await;
                 match guard.get(&project_id) {
@@ -1075,6 +1092,26 @@ impl WarmDispatch {
             }
         });
     }
+
+    /// Clear the admission backoff for a project that reached Job dispatch.
+    async fn clear_admission_backoff(&self, project_id: &str) {
+        self.admission_retries.lock().await.remove(project_id);
+    }
+}
+
+/// Backoff for a warm cycle refused by admission or the v1 lease.
+///
+/// Doubles from one second and saturates at [`MAX_ADMISSION_RETRY`]. A refusal
+/// is normal under contention and pathological when the gate is closed for
+/// good; the ceiling bounds the cost of the pathological case (repeated git tip
+/// discovery plus an advisory-locked lease transaction) without meaningfully
+/// delaying the contended case.
+fn admission_retry_delay(attempt: u32) -> Duration {
+    const MAX_ADMISSION_RETRY: Duration = Duration::from_secs(60);
+    let seconds = 1_u64
+        .checked_shl(attempt.saturating_sub(1).min(63))
+        .unwrap_or(u64::MAX);
+    Duration::from_secs(seconds).min(MAX_ADMISSION_RETRY)
 }
 
 /// With the legacy string-only dispatcher contract, classify only explicit
@@ -1172,6 +1209,7 @@ impl K8sGraphWarmer {
                 lister,
                 completion_sink: None,
                 in_flight: Arc::new(Mutex::new(HashMap::new())),
+                admission_retries: Arc::new(Mutex::new(HashMap::new())),
             },
             client: None,
             debounce: WarmDebounceConfig::DISABLED,
