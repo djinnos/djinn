@@ -414,10 +414,15 @@ pub fn seed_cargo_target_dir_with_options(
 
     let entries = match pool.install(|| scan_entries(base_dir)) {
         Ok(entries) => entries,
+        // The only scan error that reaches here is an unreadable base ROOT;
+        // every deeper failure now costs at most its own subtree.
         Err(err) => {
             return Ok(fallback_result(
                 start,
-                CargoTargetSeedFallback::ScanFailed(err.to_string()),
+                CargoTargetSeedFallback::ScanFailed(format!(
+                    "read_dir {}: {err}",
+                    base_dir.display()
+                )),
             ));
         }
     };
@@ -789,6 +794,11 @@ fn apply_entry(
             create_parent_dir(&destination, entry)?;
             match fs::copy(&source, &destination) {
                 Ok(copied) => {
+                    // Everything classified `Copy` is copied precisely because
+                    // the run must be able to REWRITE it. `fs::copy` reproduces
+                    // the source mode, so a read-only base entry (a symlinked
+                    // vendored payload, say) would arrive unwritable.
+                    ensure_owner_writable(&destination);
                     metrics.copied_file_count.fetch_add(1, Ordering::Relaxed);
                     metrics.copied_bytes.fetch_add(copied, Ordering::Relaxed);
                     Ok(())

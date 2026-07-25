@@ -434,6 +434,41 @@ fn symlinks_are_materialised_privately_and_never_hardlinked() {
     assert!(!run.join("debug/build/foo-abc/out/loop").exists());
 }
 
+/// Everything classified `Copy` is copied precisely so the run can rewrite it,
+/// so a read-only base entry must not arrive unwritable.
+#[test]
+fn copied_entries_are_writable_even_when_the_base_entry_is_read_only() {
+    let _guard = metric_test_guard();
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let base = tmp.path().join("mold-jobs-4");
+    let run = tmp.path().join("run-target");
+    fs::create_dir_all(base.join("debug/build/vendored-abc/out")).expect("create base");
+    let payload = base.join("debug/build/vendored-abc/out/libvendored.so.1");
+    fs::write(&payload, b"vendored payload").expect("write payload");
+    std::os::unix::fs::symlink(
+        &payload,
+        base.join("debug/build/vendored-abc/out/libvendored.so"),
+    )
+    .expect("symlink");
+    let fingerprint = base.join("debug/.fingerprint/vendored-abc/lib-vendored.json");
+    fs::create_dir_all(fingerprint.parent().expect("parent")).expect("create fingerprint dir");
+    fs::write(&fingerprint, b"{}").expect("write fingerprint");
+    fs::set_permissions(&payload, fs::Permissions::from_mode(0o444)).expect("read-only payload");
+    fs::set_permissions(&fingerprint, fs::Permissions::from_mode(0o444))
+        .expect("read-only fingerprint");
+
+    seed_cargo_target_dir_with_options(&base, &run, &emulating_options(2)).expect("seed");
+
+    for relative in [
+        "debug/build/vendored-abc/out/libvendored.so",
+        "debug/.fingerprint/vendored-abc/lib-vendored.json",
+    ] {
+        let seeded = run.join(relative);
+        fs::write(&seeded, b"rewritten by cargo")
+            .unwrap_or_else(|err| panic!("seeded {relative} must be rewritable: {err}"));
+    }
+}
+
 /// The emulated backend is only trustworthy if it agrees with the kernel. This
 /// asserts the rule it encodes against the modes measured on a real 6.x kernel
 /// with a base owned by `10001:1000` and a process running `1000:1000`.
