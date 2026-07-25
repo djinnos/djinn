@@ -12,6 +12,9 @@ pub mod dispatch_pause;
 pub mod doctor;
 pub(crate) mod events;
 pub(crate) mod process;
+#[cfg(test)]
+#[path = "role_agnostic_lease_tests.rs"]
+mod role_agnostic_lease_tests;
 pub(crate) mod rollout;
 
 // ─── Agent module (was src/agent/) ───────────────────────────────────────────

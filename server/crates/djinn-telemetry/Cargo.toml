@@ -15,6 +15,7 @@ chrono = "0.4"
 metrics = "=0.24.6"
 metrics-exporter-prometheus = { version = "=0.18.3", default-features = false }
 serde_json = "1"
+tracing = "0.1"
 workspace-hack.workspace = true
 
 [lints]

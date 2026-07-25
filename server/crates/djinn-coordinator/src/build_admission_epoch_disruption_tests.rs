@@ -508,7 +508,7 @@ fn epoch_and_admission_telemetry_labels_stay_bounded_and_carry_no_identifiers() 
         BTreeSet::from(["unexpected_overlap", "stale_epoch", "epoch_unreadable"])
     );
 
-    let bounded: [(&str, &[&str]); 9] = [
+    let bounded: [(&str, &[&str]); 10] = [
         (
             "reason",
             &[
@@ -521,6 +521,11 @@ fn epoch_and_admission_telemetry_labels_stay_bounded_and_carry_no_identifiers() 
         ),
         ("effective_mode", &["enforce", "observe", "off"]),
         ("decision", &["would_escalate", "would_throttle"]),
+        // The dispatch resource class of the role that produced the
+        // observation. Two values, forever — see
+        // `djinn_telemetry::role_class::ALL_CLASSES` and
+        // `djinn_runtime::RoleResourceClass`.
+        ("class", &["light", "build-capable"]),
         (
             "outcome",
             &["admitted", "cancelled", "shutdown", "seeded", "reseeded"],

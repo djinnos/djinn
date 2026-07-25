@@ -51,6 +51,7 @@ mod jit_pitfalls;
 // Retained for test coverage; production dispatch goes through djinn-mcp-extension.
 #[allow(dead_code)]
 mod memory_agent;
+mod shell_exec;
 // Retained for test coverage; production dispatch goes through djinn-mcp-extension.
 #[allow(dead_code)]
 mod task_admin;

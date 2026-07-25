@@ -358,9 +358,9 @@ fn task_run_role_classification_matches_runtime_resource_class() {
             role.as_str()
         );
         assert_eq!(
-            role.resource_class().consumes_build_slot(),
+            role.resource_class().gated_at_dispatch(),
             expected == RoleResourceClass::BuildCapable,
-            "{} slot consumption must follow its class",
+            "{} dispatch gating must follow its class",
             role.as_str()
         );
     }
