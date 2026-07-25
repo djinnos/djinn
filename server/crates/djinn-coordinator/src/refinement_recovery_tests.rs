@@ -8,7 +8,8 @@ use djinn_core::{
     events::{DjinnEventEnvelope, EventBus},
     models::TaskRefinementCorrelation,
     refinement_liveness::{
-        RefinementParkKind, RefinementPhase as DurablePhase, RefinementRole, RefinementStopReason,
+        RefinementIntentState, RefinementParkKind, RefinementPhase as DurablePhase, RefinementRole,
+        RefinementStopReason,
     },
 };
 use djinn_db::{
@@ -235,6 +236,185 @@ async fn materialize_intent(
         .expect("acknowledge recovery task")
     );
     task_id
+}
+
+/// Verify every durable coordinate rather than a project-wide task count. This
+/// catches an uncorrelated legacy role task left beside the original task.
+async fn assert_original_materialization_once(
+    repo: &ProposalRepository,
+    db: &djinn_db::Database,
+    fixture: &super::refinement_cap_tests::RefinementFixture,
+    run_id: &str,
+    generation: i32,
+    intent_id: &str,
+) -> String {
+    let exact = exact_snapshot(repo, run_id).await;
+    let intent = exact
+        .snapshot
+        .intents
+        .iter()
+        .find(|intent| intent.intent_id == intent_id)
+        .expect("original durable intent exists");
+    assert_eq!(intent.state, RefinementIntentState::Materialized);
+    assert_eq!(intent.run_id, run_id);
+    assert_eq!(intent.round, 1);
+    assert_eq!(intent.phase, DurablePhase::AdversaryAttack);
+    assert_eq!(intent.role, RefinementRole::Adversary);
+    assert_eq!(
+        exact.snapshot.intents.len(),
+        1,
+        "one current intent lineage"
+    );
+
+    let tasks = TaskRepository::new(db.clone(), EventBus::noop())
+        .list_by_project(&fixture.project_id)
+        .await
+        .expect("list refinement tasks")
+        .into_iter()
+        .filter(|task| task.issue_type == "refinement")
+        .collect::<Vec<_>>();
+    assert_eq!(tasks.len(), 1, "one role task for exact intent coordinates");
+    let task = &tasks[0];
+    assert_eq!(task.refinement_run_id.as_deref(), Some(run_id));
+    assert_eq!(task.refinement_generation, Some(i64::from(generation)));
+    assert_eq!(task.refinement_intent_id.as_deref(), Some(intent_id));
+    assert_eq!(task.refinement_round, Some(1));
+    assert_eq!(task.refinement_phase.as_deref(), Some("adversary_attack"));
+    assert_eq!(task.refinement_role.as_deref(), Some("adversary"));
+    task.id.clone()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn recovery_replays_claim_before_task_after_projection_loss_exactly_once() {
+    let db = crate::test_helpers::create_test_db();
+    let fixture = seed_refinement_fixture(&db).await;
+    let (events_tx, _events_rx) = tokio::sync::broadcast::channel::<DjinnEventEnvelope>(16);
+    let mut actor = build_refinement_actor(&db, &events_tx, spawn_test_pool(&db, 1));
+    let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+    let (run_id, generation, intent_id) =
+        admit(&repo, &fixture.proposal_id, "claim-before-task-matrix").await;
+
+    // Crash after the durable claim but before task insertion. Recovery may
+    // hydrate the claim but cannot steal its unexpired foreign lease.
+    repo.claim_refinement_intent(ClaimRefinementIntentRequest {
+        run_id: run_id.clone(),
+        intent_id: intent_id.clone(),
+        generation,
+        owner: "crashed-before-task".into(),
+        lease_millis: 60_000,
+    })
+    .await
+    .expect("claim original intent")
+    .expect("foreign lease acquired");
+    assert_eq!(
+        exact_snapshot(&repo, &run_id).await.snapshot.intents[0].state,
+        RefinementIntentState::Claimed
+    );
+    actor.recover_interrupted_refinements().await;
+    actor.drive_active_refinements().await;
+    assert!(
+        TaskRepository::new(db.clone(), EventBus::noop())
+            .find_by_refinement_intent_id(&intent_id)
+            .await
+            .expect("read task under foreign lease")
+            .is_none()
+    );
+
+    // Releasing models lease expiry. Repeated recovery after projection loss
+    // must replay the original intent and retain the same task identity.
+    repo.release_refinement_intent_claim(ReleaseRefinementIntentClaimRequest {
+        run_id: run_id.clone(),
+        intent_id: intent_id.clone(),
+        generation,
+        owner: "crashed-before-task".into(),
+    })
+    .await
+    .expect("release expired crash lease");
+    actor.active_refinements.clear();
+    actor.refinement_sessions.clear();
+    actor.recover_interrupted_refinements().await;
+    actor.drive_active_refinements().await;
+    let original_task_id =
+        assert_original_materialization_once(&repo, &db, &fixture, &run_id, generation, &intent_id)
+            .await;
+    actor.active_refinements.clear();
+    actor.refinement_sessions.clear();
+    actor.recover_interrupted_refinements().await;
+    actor.drive_active_refinements().await;
+    assert_eq!(
+        assert_original_materialization_once(&repo, &db, &fixture, &run_id, generation, &intent_id)
+            .await,
+        original_task_id
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn recovery_acknowledges_task_before_materialized_ack_without_replacement() {
+    let db = crate::test_helpers::create_test_db();
+    let fixture = seed_refinement_fixture(&db).await;
+    let (events_tx, _events_rx) = tokio::sync::broadcast::channel::<DjinnEventEnvelope>(16);
+    let mut actor = build_refinement_actor(&db, &events_tx, spawn_test_pool(&db, 1));
+    let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+    let (run_id, generation, intent_id) =
+        admit(&repo, &fixture.proposal_id, "task-before-ack-matrix").await;
+    let owner = "crashed-after-task".to_owned();
+    let lease = repo
+        .claim_refinement_intent(ClaimRefinementIntentRequest {
+            run_id: run_id.clone(),
+            intent_id: intent_id.clone(),
+            generation,
+            owner: owner.clone(),
+            lease_millis: 60_000,
+        })
+        .await
+        .expect("claim intent")
+        .expect("lease acquired");
+    let correlation = TaskRefinementCorrelation::new(
+        run_id.clone(),
+        intent_id.clone(),
+        i64::from(generation),
+        i64::from(lease.round),
+        lease.phase,
+        lease.role,
+    )
+    .expect("valid original correlation");
+    let original_task_id = actor
+        .create_refinement_task_with_context_and_correlation(
+            &fixture.proposal_id,
+            "adversary",
+            lease.round,
+            0,
+            "task-before-ack fault",
+            None,
+            Some(&fixture.user_id),
+            Some(&correlation),
+        )
+        .await
+        .expect("durably accept task before acknowledgement");
+    assert_eq!(
+        exact_snapshot(&repo, &run_id).await.snapshot.intents[0].state,
+        RefinementIntentState::Claimed,
+        "task is durable while acknowledgement is interrupted"
+    );
+    repo.release_refinement_intent_claim(ReleaseRefinementIntentClaimRequest {
+        run_id: run_id.clone(),
+        intent_id: intent_id.clone(),
+        generation,
+        owner,
+    })
+    .await
+    .expect("release crashed lease");
+
+    actor.active_refinements.clear();
+    actor.refinement_sessions.clear();
+    actor.recover_interrupted_refinements().await;
+    actor.drive_active_refinements().await;
+    assert_eq!(
+        assert_original_materialization_once(&repo, &db, &fixture, &run_id, generation, &intent_id)
+            .await,
+        original_task_id,
+        "replay acknowledges the accepted task rather than creating another role task"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
