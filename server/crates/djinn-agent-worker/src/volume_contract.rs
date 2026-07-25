@@ -52,6 +52,35 @@
 //!   the volume *root* would be worthless here: the production near-miss had a
 //!   hand-fixed root over a broken subtree — which is also precisely the state
 //!   that makes kubelet's `OnRootMismatch` heuristic skip its recursive pass.
+//!
+//! ## `$HOME` (task 9jrg)
+//!
+//! The contract above covers the *mounted* surfaces and deliberately left one
+//! writable surface out: the container's own `$HOME`. `qut0` moved the pod to
+//! uid 1000 while the image still owned `/home/djinn` as uid 10001 mode `0775`,
+//! so the pod matched "other" (`r-x`) and could not create a single entry
+//! beneath its own home. Nothing checked it, and the first consumer to notice
+//! was the durable output stash resolving `$HOME/.cache/djinn/output_stash` —
+//! which surfaced hours later as `create durable blobs: Permission denied`
+//! inside the reply loop, killing every worker and planner session.
+//!
+//! [`check_home_writable`] closes that gap: a pod that cannot create entries in
+//! its own `$HOME` fails readiness with the path, the observed ownership/mode
+//! and the running identity, instead of degrading into an opaque `EACCES` in
+//! whichever feature touches `$HOME` first (`fnm`'s multishell state, `gopls`,
+//! `npm`, `git config --global`, `rustup`, and the stash all do).
+//!
+//! It is deliberately NOT expressed as a [`VolumeRoot`]: `$HOME` lives in the
+//! image layer, not on a shared volume, so the artifact-gid/setgid rules do not
+//! apply to it and it is *correct* for it to stay owned by the image's uid
+//! 10001 (the server-side path runs as that uid and writes the same directory).
+//! The only invariant that matters is the effective one — "can the identity
+//! that is actually running create something here" — so the check asks the
+//! kernel (`access(W_OK|X_OK)`) rather than re-deriving permission from mode
+//! bits. The image satisfies it for every identity at once by group-owning
+//! `/home/djinn` to [`ARTIFACT_GID`] with `2775`: uid 10001 writes as owner,
+//! the worker (uid/gid 1000) and the launcher-spawned child (uid 1001, group
+//! 1000) write through the group.
 
 use std::collections::VecDeque;
 use std::fs;
@@ -83,6 +112,11 @@ pub const CACHE_MOUNT_ROOT: &str = "/cache";
 pub const MIRROR_MOUNT_ROOT: &str = "/mirror";
 /// Contractual workspace mount path.
 pub const WORKSPACE_MOUNT_ROOT: &str = "/workspace";
+
+/// The process's home directory. Set as an explicit image `ENV` (see
+/// `djinn-image-builder`'s `emit_path`) precisely because a pod with no home
+/// inherits `HOME="/"`.
+pub const HOME_ENV: &str = "HOME";
 
 /// Env var selecting the enforcement mode (`enforce` | `audit`).
 pub const MODE_ENV: &str = "DJINN_VOLUME_CONTRACT_MODE";
@@ -276,6 +310,10 @@ pub struct VolumeContract {
     pub stat_budget: usize,
     /// Also assert the process is a member of `required_gid`.
     pub require_process_membership: bool,
+    /// Also assert the running identity can create entries in its own `$HOME`
+    /// (task 9jrg). Independent of `required_gid`: `$HOME` is an image path, not
+    /// a mounted volume, and only its *effective* writability is contractual.
+    pub require_writable_home: bool,
 }
 
 impl Default for VolumeContract {
@@ -286,6 +324,7 @@ impl Default for VolumeContract {
             entries_per_dir: 32,
             stat_budget: 512,
             require_process_membership: true,
+            require_writable_home: true,
         }
     }
 }
@@ -366,6 +405,35 @@ pub enum VolumeContractError {
         supplementary: Vec<u32>,
         required_gid: u32,
     },
+
+    #[error(
+        "volume contract [home]: {HOME_ENV} is unset or empty, so every \
+         $HOME-relative path resolves against \"/\" — which no non-root identity \
+         can write"
+    )]
+    HomeUnset,
+
+    #[error("volume contract [home]: {HOME_ENV}={path} is not a directory")]
+    HomeNotADirectory { path: PathBuf },
+
+    #[error(
+        "volume contract [home]: {path} is owned by {observed_uid}:{observed_gid} \
+         mode {observed_mode:o} and the running identity (uid {process_uid}, gid \
+         {process_gid}, supplementary {supplementary:?}) cannot create entries in \
+         it; every $HOME-relative path this pod writes (the durable output stash, \
+         fnm/npm/rustup/git state) fails with EACCES. Group-own $HOME to a gid \
+         this identity holds with mode 2775 instead of changing its owner — the \
+         server-side path runs as the owning uid and writes the same directory"
+    )]
+    HomeNotWritable {
+        path: PathBuf,
+        observed_uid: u32,
+        observed_gid: u32,
+        observed_mode: u32,
+        process_uid: u32,
+        process_gid: u32,
+        supplementary: Vec<u32>,
+    },
 }
 
 impl VolumeContractError {
@@ -379,6 +447,9 @@ impl VolumeContractError {
             Self::GroupWrite { .. } => "group_write",
             Self::Setgid { .. } => "setgid",
             Self::ProcessGroupMembership { .. } => "process_group_membership",
+            Self::HomeUnset { .. } => "home_unset",
+            Self::HomeNotADirectory { .. } => "home_not_a_directory",
+            Self::HomeNotWritable { .. } => "home_not_writable",
         }
     }
 
@@ -390,8 +461,10 @@ impl VolumeContractError {
             | Self::Stat { path, .. }
             | Self::GroupOwner { path, .. }
             | Self::GroupWrite { path, .. }
-            | Self::Setgid { path, .. } => Some(path.as_path()),
-            Self::ProcessGroupMembership { .. } => None,
+            | Self::Setgid { path, .. }
+            | Self::HomeNotADirectory { path }
+            | Self::HomeNotWritable { path, .. } => Some(path.as_path()),
+            Self::ProcessGroupMembership { .. } | Self::HomeUnset => None,
         }
     }
 }
@@ -593,6 +666,74 @@ fn check_process_membership(required_gid: u32) -> Result<(), VolumeContractError
     })
 }
 
+/// `$HOME` as the running process sees it, `None` when unset or empty.
+pub fn home_from_env() -> Option<PathBuf> {
+    std::env::var_os(HOME_ENV)
+        .map(PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty())
+}
+
+/// Assert the running identity can create entries in `home` (task 9jrg).
+///
+/// The question is effective, not declarative, so it is answered by the kernel:
+/// `access(W_OK|X_OK)` on the directory is exactly the permission `mkdir` and
+/// `create_dir_all` need, and it accounts for the owner/group/other selection,
+/// supplementary groups, POSIX ACLs and a read-only mount — none of which mode
+/// bits alone can settle. Mode and ownership are read only to *report* the
+/// violation. Nothing is created: a probe file would have to be written into a
+/// directory whose writability is exactly what is in doubt, and on the passing
+/// path it would litter `$HOME` on every pod start.
+pub fn check_home_writable(home: Option<&Path>) -> Result<(), VolumeContractError> {
+    let Some(home) = home else {
+        return Err(VolumeContractError::HomeUnset);
+    };
+
+    let meta = fs::metadata(home).map_err(|source| VolumeContractError::Stat {
+        label: "home".to_string(),
+        path: home.to_path_buf(),
+        source,
+    })?;
+    if !meta.is_dir() {
+        return Err(VolumeContractError::HomeNotADirectory {
+            path: home.to_path_buf(),
+        });
+    }
+
+    if can_create_entries_in(home) {
+        return Ok(());
+    }
+
+    Err(VolumeContractError::HomeNotWritable {
+        path: home.to_path_buf(),
+        observed_uid: meta.uid(),
+        observed_gid: meta.gid(),
+        observed_mode: meta.mode() & MODE_MASK,
+        process_uid: current_uid(),
+        process_gid: current_gid(),
+        supplementary: supplementary_groups(),
+    })
+}
+
+/// `access(dir, W_OK | X_OK)` — the kernel's own answer to "may this identity
+/// create, rename and unlink entries here".
+fn can_create_entries_in(dir: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+
+    let Ok(c_path) = std::ffi::CString::new(dir.as_os_str().as_bytes()) else {
+        // A path with an interior NUL cannot name a real directory.
+        return false;
+    };
+    // SAFETY: `access` reads the NUL-terminated path we just built and returns a
+    // status code; it mutates nothing and the CString outlives the call.
+    unsafe { libc::access(c_path.as_ptr(), libc::W_OK | libc::X_OK) == 0 }
+}
+
+/// Effective uid of this process.
+pub fn current_uid() -> u32 {
+    // SAFETY: `geteuid` takes no arguments, cannot fail, and touches no memory.
+    unsafe { libc::geteuid() }
+}
+
 /// Effective gid of this process.
 pub fn current_gid() -> u32 {
     // SAFETY: `getegid` takes no arguments, cannot fail, and touches no memory.
@@ -733,7 +874,14 @@ pub fn enforce_with(
     }
 
     let started = Instant::now();
-    let outcome = validate(contract, roots);
+    // `$HOME` first: it is a single `stat` + `access`, it is the surface the pod
+    // needs before it can do anything at all, and a violation there explains
+    // failures the volume walk cannot (task 9jrg).
+    let outcome = if contract.require_writable_home {
+        check_home_writable(home_from_env().as_deref()).and_then(|()| validate(contract, roots))
+    } else {
+        validate(contract, roots)
+    };
     let elapsed = started.elapsed();
 
     match outcome {

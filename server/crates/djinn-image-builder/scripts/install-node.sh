@@ -117,4 +117,11 @@ if [ -d /home/djinn ]; then
     rm -rf /home/djinn/.local/state/fnm_multishells 2>/dev/null || true
     mkdir -p /home/djinn/.local/state
     chown -R --reference=/home/djinn /home/djinn/.local
+    # ...and the MODE, not just the owner (9jrg). `mkdir` under the build umask
+    # leaves these 0755, and since `qut0` the runtime identity (uid/gid 1000) is
+    # NOT the owner of /home/djinn — it reaches these dirs through the artifact
+    # group. Without g+w this block no longer achieves the thing it exists for:
+    # fnm cannot create its multishell dir and `fnm env` fails on every login.
+    # setgid to match /home/djinn so anything created keeps the shared gid.
+    chmod 2775 /home/djinn/.local /home/djinn/.local/state
 fi
