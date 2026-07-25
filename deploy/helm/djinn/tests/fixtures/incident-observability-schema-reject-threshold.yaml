@@ -1,0 +1,4 @@
+monitoring:
+  alerts:
+    dispatchStarts: 101
+    memoryPressureThreshold: 1

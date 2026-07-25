@@ -1,0 +1,29 @@
+# Positive schema/render fixture for helm_contract::incident_observability.
+monitoring:
+  enabled: true
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    retention: 7d
+    resources:
+      requests: {cpu: 100m, memory: 256Mi}
+      limits: {cpu: "1", memory: 2Gi}
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    webhookSecret: {name: incident-webhook, key: url}
+    resources:
+      requests: {cpu: 50m, memory: 128Mi}
+      limits: {cpu: 500m, memory: 512Mi}
+  alerts: {dispatchStarts: 3, memoryPressureThreshold: 0.85}
+logCollector:
+  enabled: true
+  vectorImage: timberio/vector:0.43.1-debian
+  rotatorImage: ghcr.io/djinnos/djinn-log-rotator:0.1.0
+  storePath: /var/lib/djinn-observability
+  bufferMiB: 64
+  resources:
+    vector:
+      requests: {cpu: 100m, memory: 128Mi}
+      limits: {cpu: 500m, memory: 256Mi}
+    rotator:
+      requests: {cpu: 100m, memory: 128Mi}
+      limits: {cpu: 500m, memory: 256Mi}

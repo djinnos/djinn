@@ -1,0 +1,3 @@
+monitoring:
+  prometheus:
+    retention: 8d

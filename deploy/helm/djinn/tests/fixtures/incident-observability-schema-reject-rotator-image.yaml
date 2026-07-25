@@ -1,0 +1,2 @@
+logCollector:
+  rotatorImage: ghcr.io/djinnos/djinn-log-rotator:latest

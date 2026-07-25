@@ -1,0 +1,9 @@
+# Retention, capacity, and threshold values outside the contract are forbidden.
+monitoring:
+  prometheus:
+    retention: 8d
+  alerts:
+    dispatchStarts: 101
+    memoryPressureThreshold: 1
+logCollector:
+  bufferMiB: 65
