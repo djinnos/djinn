@@ -20,10 +20,35 @@ GUARD="$SCRIPT_DIR/check-raw-sql-boundary.sh"
 FIXTURE_BASE="server/crates/djinn_sqlx_guard_fixture"
 
 cleanup() {
+    if [ -n "${LINKED_WORKTREE:-}" ] && [ -d "$LINKED_WORKTREE" ]; then
+        git -C "$REPO_ROOT" worktree remove --force "$LINKED_WORKTREE" 2>/dev/null || rm -rf -- "$LINKED_WORKTREE"
+    fi
     rm -rf -- "$REPO_ROOT/$FIXTURE_BASE" 2>/dev/null || true
     if [ -n "${LOG_DIR:-}" ] && [ -d "$LOG_DIR" ]; then
         rm -rf -- "$LOG_DIR"
     fi
+}
+
+# Run the guard from a linked worktree, which shares remote-tracking refs with
+# the caller's common Git directory. This catches regressions where a guard
+# fetch mutates origin/main for every worktree.
+run_linked_worktree_diff_guard() {
+    LINKED_WORKTREE="$LOG_DIR/linked-worktree"
+    git -C "$REPO_ROOT" worktree add --detach "$LINKED_WORKTREE" HEAD > "$LOG_DIR/t14_worktree_setup.log" 2>&1
+    cp "$GUARD" "$LINKED_WORKTREE/scripts/check-raw-sql-boundary.sh"
+
+    ORIGIN_MAIN_BEFORE=$(git -C "$REPO_ROOT" rev-parse --verify origin/main^{commit})
+    SHALLOW_BEFORE=$(git -C "$REPO_ROOT" rev-parse --is-shallow-repository)
+    LINKED_GIT_DIR=$(git -C "$LINKED_WORKTREE" rev-parse --git-dir)
+    LINKED_COMMON_DIR=$(git -C "$LINKED_WORKTREE" rev-parse --git-common-dir)
+
+    set +e
+    (cd "$LINKED_WORKTREE" && unset BASE_SHA && sh scripts/check-raw-sql-boundary.sh) > "$LOG_DIR/t14_linked_worktree.log.out" 2>&1
+    T14_ACTUAL=$?
+    set -e
+
+    ORIGIN_MAIN_AFTER=$(git -C "$REPO_ROOT" rev-parse --verify origin/main^{commit})
+    SHALLOW_AFTER=$(git -C "$REPO_ROOT" rev-parse --is-shallow-repository)
 }
 trap cleanup EXIT INT TERM
 
@@ -344,6 +369,25 @@ set -e
 assert_exit "T13 catalog wrapper path exits 0" 0 "$t13_actual" "$LOG_DIR/t13_catalog_wrapper_exemption.log.out"
 assert_output_contains "T13 reports no violations" \
     "no raw-sqlx boundary violations" "$LOG_DIR/t13_catalog_wrapper_exemption.log.out"
+
+# ── T14: default diff mode does not mutate shared origin/main ──────────
+run_linked_worktree_diff_guard
+assert_exit "T14 linked-worktree default diff exits 0" 0 "$T14_ACTUAL" "$LOG_DIR/t14_linked_worktree.log.out"
+if [ "$LINKED_GIT_DIR" != "$LINKED_COMMON_DIR" ]; then
+    pass "T14 executes from a linked worktree with a shared Git directory"
+else
+    fail "T14 executes from a linked worktree with a shared Git directory" "git-dir and git-common-dir were both $LINKED_GIT_DIR"
+fi
+if [ "$ORIGIN_MAIN_BEFORE" = "$ORIGIN_MAIN_AFTER" ]; then
+    pass "T14 preserves shared origin/main"
+else
+    fail "T14 preserves shared origin/main" "before=$ORIGIN_MAIN_BEFORE after=$ORIGIN_MAIN_AFTER"
+fi
+if [ "$SHALLOW_BEFORE" = "$SHALLOW_AFTER" ]; then
+    pass "T14 preserves shared repository shallow state"
+else
+    fail "T14 preserves shared repository shallow state" "before=$SHALLOW_BEFORE after=$SHALLOW_AFTER"
+fi
 
 # ── summary ────────────────────────────────────────────────────────────
 printf -- '------------------------------------------\n'
