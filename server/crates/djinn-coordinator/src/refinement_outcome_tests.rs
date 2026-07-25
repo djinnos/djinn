@@ -1,3 +1,4 @@
+// djinn:allow-oversize
 use super::*;
 
 // ---- is_already_closed_refinement_close_error ----
