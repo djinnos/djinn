@@ -372,10 +372,46 @@ fn rendered_security_context_matches_the_adversarial_proof_fixture() {
         })
         .collect();
 
-    let worker = worker_security_context();
-    let launcher = launcher_security_context();
-    let pod = pod_security_context();
     let config = KubernetesConfig::for_testing();
+    // Use the production/default Job builder rather than a parallel security
+    // context fixture. The privileged cpu.stat lane consumes this file, so a
+    // manifest change cannot leave it measuring a stale approximation.
+    let job = crate::job::build_task_run_job(
+        &config,
+        &uuid::Uuid::now_v7(),
+        "rendered-contract-project",
+        "djinn-taskrun-rendered-contract",
+        "registry.example/djinn-project:contract",
+        &[],
+        None,
+        false,
+        Some(RoleKind::Worker),
+    );
+    let pod = job
+        .spec
+        .as_ref()
+        .and_then(|spec| spec.template.spec.as_ref())
+        .expect("production Job has a pod spec");
+    let worker = pod
+        .containers
+        .iter()
+        .find(|container| container.name == "worker")
+        .and_then(|container| container.security_context.as_ref())
+        .expect("production Job worker security context");
+    let launcher_container = pod
+        .init_containers
+        .iter()
+        .flatten()
+        .find(|container| container.name == LAUNCHER_CONTAINER_NAME)
+        .expect("production required Job launcher container");
+    let launcher = launcher_container
+        .security_context
+        .as_ref()
+        .expect("production Job launcher security context");
+    let pod_security = pod
+        .security_context
+        .as_ref()
+        .expect("production Job pod security context");
     let capabilities = |sc: &SecurityContext, take_added: bool| {
         let caps = sc.capabilities.as_ref().expect("capabilities");
         let list = if take_added {
@@ -402,7 +438,7 @@ fn rendered_security_context_matches_the_adversarial_proof_fixture() {
             "worker_allow_privilege_escalation",
             worker.allow_privilege_escalation.unwrap().to_string(),
         ),
-        ("worker_capabilities_drop", capabilities(&worker, false)),
+        ("worker_capabilities_drop", capabilities(worker, false)),
         (
             "launcher_run_as_user",
             launcher.run_as_user.unwrap().to_string(),
@@ -419,25 +455,25 @@ fn rendered_security_context_matches_the_adversarial_proof_fixture() {
             "launcher_read_only_root_filesystem",
             launcher.read_only_root_filesystem.unwrap().to_string(),
         ),
-        ("launcher_capabilities_drop", capabilities(&launcher, false)),
-        ("launcher_capabilities_add", capabilities(&launcher, true)),
+        ("launcher_capabilities_drop", capabilities(launcher, false)),
+        ("launcher_capabilities_add", capabilities(launcher, true)),
         (
             "launcher_bootstrap_only_capabilities",
             LAUNCHER_BOOTSTRAP_ONLY_CAPABILITIES.join(","),
         ),
         (
             "launcher_host_users",
-            pod_host_users(CgroupLauncherMode::Required)
-                .expect("the armed render sets hostUsers")
+            pod.host_users
+                .expect("the required render sets hostUsers")
                 .to_string(),
         ),
         ("child_run_as_user", CHILD_UID.to_string()),
         ("child_run_as_group", ARTIFACT_GID.to_string()),
         ("child_umask", "0002".to_string()),
-        ("pod_fs_group", pod.fs_group.unwrap().to_string()),
+        ("pod_fs_group", pod_security.fs_group.unwrap().to_string()),
         (
             "pod_fs_group_change_policy",
-            pod.fs_group_change_policy.clone().unwrap(),
+            pod_security.fs_group_change_policy.clone().unwrap(),
         ),
         (
             "seccomp_profile",
@@ -459,6 +495,60 @@ fn rendered_security_context_matches_the_adversarial_proof_fixture() {
         (
             "volume_ownership_mode",
             config.volume_ownership_mode.clone(),
+        ),
+        (
+            "launcher_cpu_limit",
+            launcher_container
+                .resources
+                .as_ref()
+                .and_then(|resources| resources.limits.as_ref())
+                .and_then(|limits| limits.get("cpu"))
+                .map_or_else(|| "none".to_owned(), |quantity| quantity.0.clone()),
+        ),
+        (
+            "launcher_cpu_request",
+            launcher_container
+                .resources
+                .as_ref()
+                .and_then(|resources| resources.requests.as_ref())
+                .and_then(|requests| requests.get("cpu"))
+                .expect("production launcher CPU request")
+                .0
+                .clone(),
+        ),
+        (
+            "launcher_memory_request",
+            launcher_container
+                .resources
+                .as_ref()
+                .and_then(|resources| resources.requests.as_ref())
+                .and_then(|requests| requests.get("memory"))
+                .expect("production launcher memory request")
+                .0
+                .clone(),
+        ),
+        (
+            "launcher_memory_limit",
+            launcher_container
+                .resources
+                .as_ref()
+                .and_then(|resources| resources.limits.as_ref())
+                .and_then(|limits| limits.get("memory"))
+                .expect("production launcher memory limit")
+                .0
+                .clone(),
+        ),
+        (
+            "launcher_lease_quota_millicores",
+            launcher_container
+                .env
+                .as_ref()
+                .and_then(|env| {
+                    env.iter()
+                        .find(|entry| entry.name == "DJINN_LAUNCHER_LEASED_MILLICORES")
+                })
+                .and_then(|entry| entry.value.clone())
+                .expect("production launcher explicit lease quota"),
         ),
     ]);
 

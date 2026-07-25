@@ -274,7 +274,8 @@ fn a_uid1001_launched_child_is_denied_on_every_kernel_boundary_path() {
         "an unauthorized cgroup was created under the delegated root"
     );
 
-    // 7. POSITIVE CONTROL: only a matching durable fencing token lifts quota.
+    // 7. POSITIVE CONTROL: a matching durable fencing token lifts quota exactly
+    // once. This is the real broker/socket path, not the fake-seam replay test.
     worker.send("controls");
     assert_eq!(
         worker.expect_line(),
@@ -292,11 +293,22 @@ fn a_uid1001_launched_child_is_denied_on_every_kernel_boundary_path() {
         "matching-fence-lifted true",
         "the matching durable fencing token must lift the quota"
     );
-    assert_eq!(worker.expect_line(), "controls-done");
     assert_eq!(
         environment.quota("legit"),
         LIFTED_CPU_MAX,
         "the matching fence must actually write the lifted cpu.max"
+    );
+    worker.send("replay");
+    assert_eq!(
+        worker.expect_line(),
+        "replayed-matching-fence-rejected true",
+        "a replayed matching fencing token must not apply a second lift"
+    );
+    assert_eq!(worker.expect_line(), "controls-done");
+    assert_eq!(
+        environment.quota("legit"),
+        LIFTED_CPU_MAX,
+        "a rejected matching-fence replay must preserve the rendered explicit 4-CPU quota"
     );
     assert!(
         worker.is_alive(),
