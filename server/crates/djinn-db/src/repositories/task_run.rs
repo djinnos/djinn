@@ -22,6 +22,18 @@ pub struct CreateTaskRunParams<'a> {
     pub dispatch_group_id: Option<&'a str>,
 }
 
+/// Result of attempting to durably accept a terminal worker report.
+///
+/// Only the transition from a live task-run row is an acceptance. This makes
+/// retries and late reports explicit at the repository boundary rather than
+/// asking callers to infer acceptance from a successful SQL round trip.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TerminalStatusAcceptance {
+    Accepted,
+    AlreadyTerminal,
+    Rejected,
+}
+
 impl TaskRunRepository {
     pub fn new(db: Database) -> Self {
         Self { db }
@@ -157,6 +169,51 @@ impl TaskRunRepository {
         }
 
         Ok(())
+    }
+
+    /// Atomically accept one terminal report for a live task run.
+    ///
+    /// A report is newly accepted only when it transitions a `starting` or
+    /// `running` row. Repeated reports for an already-terminal row and reports
+    /// for an unknown row are deliberately non-acceptances. Database errors are
+    /// returned separately, so telemetry can move only after durable success.
+    pub async fn accept_terminal_status(
+        &self,
+        id: &str,
+        status: TaskRunStatus,
+    ) -> Result<TerminalStatusAcceptance> {
+        if !status.is_terminal() {
+            return Ok(TerminalStatusAcceptance::Rejected);
+        }
+        self.db.ensure_initialized().await?;
+
+        let result = sqlx::query(
+            "UPDATE task_runs
+             SET status = $1,
+                 ended_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"')
+             WHERE id = $2
+               AND status IN ('starting', 'running')
+               AND ended_at IS NULL",
+        )
+        .bind(status.as_str())
+        .bind(id)
+        .execute(self.db.pool())
+        .await?;
+        if result.rows_affected() == 1 {
+            return Ok(TerminalStatusAcceptance::Accepted);
+        }
+
+        let existing_status: Option<String> =
+            sqlx::query_scalar("SELECT status FROM task_runs WHERE id = $1")
+                .bind(id)
+                .fetch_optional(self.db.pool())
+                .await?;
+        Ok(match existing_status {
+            Some(status) if matches!(status.as_str(), "completed" | "failed" | "interrupted") => {
+                TerminalStatusAcceptance::AlreadyTerminal
+            }
+            _ => TerminalStatusAcceptance::Rejected,
+        })
     }
 
     /// Record the workspace path for a run once it is known.

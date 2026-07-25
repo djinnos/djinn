@@ -26,7 +26,7 @@ use djinn_db::repositories::llm_call_attempt::{
     LlmCallOutcome,
 };
 use djinn_db::repositories::session::CreateSessionParams;
-use djinn_db::repositories::task_run::CreateTaskRunParams;
+use djinn_db::repositories::task_run::{CreateTaskRunParams, TerminalStatusAcceptance};
 use djinn_db::repositories::task_run_outcome::TaskRunOutcomeRepository;
 use djinn_db::{BuildLeaseRepository, TaskRunRepository};
 use djinn_db::{EffectiveCreatorProvenance, SessionRepository};
@@ -1129,10 +1129,23 @@ impl SupervisorServices for DirectServices {
         run_id: String,
         status: TaskRunStatus,
     ) -> Result<(), String> {
-        self.task_runs
-            .update_status(&run_id, status)
+        match self
+            .task_runs
+            .accept_terminal_status(&run_id, status)
             .await
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.to_string())?
+        {
+            TerminalStatusAcceptance::Accepted => {
+                djinn_telemetry::taskrun_lifecycle::increment_worker_completion_submitted();
+                Ok(())
+            }
+            TerminalStatusAcceptance::AlreadyTerminal => Err(format!(
+                "terminal report already accepted for task run {run_id}"
+            )),
+            TerminalStatusAcceptance::Rejected => {
+                Err(format!("terminal report rejected for task run {run_id}"))
+            }
+        }
     }
 
     async fn get_model_context_window(&self, model_id: String) -> Result<i64, String> {
