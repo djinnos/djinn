@@ -247,6 +247,8 @@ const BUILD_ADMISSION_JOURNAL_DEGRADED: &str = "djinn_build_admission_journal_de
 const BUILD_ADMISSION_CREATE_UNKNOWN_HEALTH: &str = "djinn_build_admission_create_unknown_health";
 const BUILD_ADMISSION_SHADOW_INVOCATION_TOTAL: &str =
     "djinn_build_admission_shadow_invocation_total";
+const BUILD_ADMISSION_TRANSITION_TOTAL: &str = "djinn_build_admission_transition_total";
+const BUILD_ADMISSION_TRANSITION_OUTCOMES: [&str; 2] = ["accepted", "rejected"];
 const BUILD_ADMISSION_HANDOFF_WARNING: &str = "djinn_build_admission_handoff_warning";
 const BUILD_ADMISSION_HANDOFF_WARNING_REASONS: [&str; 3] =
     ["unexpected_overlap", "stale_epoch", "epoch_unreadable"];
@@ -2263,6 +2265,12 @@ fn register_metrics() {
         BUILD_ADMISSION_SHADOW_INVOCATION_TOTAL,
         "Shadow-mode v1 invocation decisions the launcher observed but did not act on."
     );
+    metrics::describe_counter!(
+        BUILD_ADMISSION_TRANSITION_TOTAL,
+        "Durable admission-journal lifecycle transitions by outcome. A rejected \
+         share near one means the journal is refusing every observation and \
+         cannot be trusted as a grant authority."
+    );
     for metric in [
         BUILD_ADMISSION_INVENTORY_DEGRADED,
         BUILD_ADMISSION_JOURNAL_DEGRADED,
@@ -3390,6 +3398,23 @@ pub mod build_admission {
     pub fn increment_would_defer(effective_mode: &'static str, effective_cap: i64) {
         metrics::counter!(super::BUILD_ADMISSION_WOULD_DEFER_TOTAL, "effective_mode" => effective_mode, "effective_cap" => effective_cap.to_string()).increment(1);
     }
+    /// Record the outcome of one durable admission-journal lifecycle transition.
+    ///
+    /// `outcome` is a two-valued closed enumeration (`accepted` / `rejected`),
+    /// so a fleet running Observe can be checked for a 100% rejection rate —
+    /// the shape that makes the journal unsafe to arm as a grant authority —
+    /// without reading a single log line.
+    pub fn record_transition(effective_mode: &'static str, effective_cap: i64, accepted: bool) {
+        let cap = effective_cap.to_string();
+        let outcome = if accepted { "accepted" } else { "rejected" };
+        // Both series exist as soon as either is written, so a zero-rejection
+        // process is distinguishable from an unreported one.
+        for candidate in super::BUILD_ADMISSION_TRANSITION_OUTCOMES {
+            metrics::counter!(super::BUILD_ADMISSION_TRANSITION_TOTAL, "effective_mode" => effective_mode, "effective_cap" => cap.clone(), "outcome" => candidate)
+                .increment(u64::from(candidate == outcome));
+        }
+    }
+
     /// Record one bounded unknown-classification event.
     pub fn increment_unknown_classification(effective_mode: &'static str, effective_cap: i64) {
         metrics::counter!(super::BUILD_ADMISSION_UNKNOWN_CLASSIFICATION_TOTAL, "effective_mode" => effective_mode, "effective_cap" => effective_cap.to_string()).increment(1);

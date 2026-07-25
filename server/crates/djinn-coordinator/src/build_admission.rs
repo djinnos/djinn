@@ -323,9 +323,25 @@ pub struct BuildAdmissionController {
     creator_server_epoch: String,
     permits: Mutex<HashMap<WarmAdmissionPermit, PermitState>>,
     permits_by_key: Mutex<HashMap<String, WarmAdmissionPermit>>,
+    /// The permit for each work item's CURRENT admission generation.
+    ///
+    /// A journal generation is one object lifecycle, so a second dispatch
+    /// attempt for the same work reserves a new generation whose number the
+    /// caller does not know. Lifecycle callbacks that only carry the work
+    /// identity — a session start that has just learned its runtime UID —
+    /// resolve their permit here rather than recomputing a generation from a
+    /// caller-side counter that no longer identifies the attempt.
+    permits_by_work: Mutex<HashMap<String, WarmAdmissionPermit>>,
     /// Runtime task-run IDs are learned when a session starts. This binding
     /// prevents a delayed terminal callback from selecting a later generation.
     permits_by_task_run: Mutex<HashMap<String, WarmAdmissionPermit>>,
+    /// Durable lifecycle transitions the journal accepted / rejected. Exposed
+    /// as bounded telemetry so a fleet-wide rejection rate is observable
+    /// without log scraping, and retained in-process so the readiness surface
+    /// can report the last rejection reason verbatim.
+    accepted_transitions: AtomicU64,
+    rejected_transitions: AtomicU64,
+    last_transition_rejection: Mutex<Option<String>>,
     unclassified_observations: Mutex<u64>,
     would_defer_observations: Mutex<u64>,
     /// Bounded observe-only disk would-defer signal (proposal nquz, phase 1).
@@ -394,7 +410,11 @@ impl BuildAdmissionController {
             creator_server_epoch: creator_server_epoch.into(),
             permits: Mutex::new(HashMap::new()),
             permits_by_key: Mutex::new(HashMap::new()),
+            permits_by_work: Mutex::new(HashMap::new()),
             permits_by_task_run: Mutex::new(HashMap::new()),
+            accepted_transitions: AtomicU64::new(0),
+            rejected_transitions: AtomicU64::new(0),
+            last_transition_rejection: Mutex::new(None),
             unclassified_observations: Mutex::new(0),
             would_defer_observations: Mutex::new(0),
             disk_would_defer_observations: Mutex::new(0),
@@ -798,13 +818,41 @@ impl BuildAdmissionController {
                 return Ok(BuildAdmissionDecision::Unclassified);
             }
         };
-        let key = AdmissionJournalKey {
+        let mut key = AdmissionJournalKey {
             domain: request.domain,
             work_id: request.work_id,
             generation: request.generation,
         };
-        let permit_key = permit_key(&key);
         let durable = self.mode() != BuildAdmissionMode::Off;
+        // The caller's generation is a floor, not the identity. A second
+        // dispatch attempt for the same work is a second object with its own
+        // Kubernetes UID and terminal release, so the journal — not the
+        // caller's counter — decides which generation this attempt reserves.
+        // Resolving BEFORE the in-memory permit lookup is what stops a retired
+        // generation's permit from being replayed as an idempotent hit and
+        // then colliding with that generation's recorded UID.
+        if durable {
+            match self
+                .journal
+                .resolve_dispatch_generation(key.domain, &key.work_id, key.generation)
+                .await
+            {
+                Ok(generation) => key.generation = generation,
+                Err(error) => {
+                    if self.mode() != BuildAdmissionMode::Observe {
+                        return Err(unavailable(error));
+                    }
+                    tracing::warn!(%error, "build admission generation resolution unavailable; permitting without journal telemetry");
+                    self.mark_journal_unhealthy();
+                    self.publish_metrics().await;
+                    let permit_key = permit_key(&key);
+                    return self
+                        .permit_without_reservation(key, permit_key, request.object_name)
+                        .await;
+                }
+            }
+        }
+        let permit_key = permit_key(&key);
         let idempotent_permit = self.permits_by_key.lock().await.get(&permit_key).cloned();
         if let Some(permit) = idempotent_permit {
             return Ok(BuildAdmissionDecision::Permitted {
@@ -906,6 +954,7 @@ impl BuildAdmissionController {
             }
         }
         let permit = WarmAdmissionPermit::new();
+        let work_key = work_key(&key);
         let state = PermitState {
             key: key.clone(),
             creator_server_epoch: self.creator_server_epoch.clone(),
@@ -919,6 +968,10 @@ impl BuildAdmissionController {
             .lock()
             .await
             .insert(permit_key, permit.clone());
+        self.permits_by_work
+            .lock()
+            .await
+            .insert(work_key, permit.clone());
         // A durable Reserved row occupies immediately; do not wait for a
         // later cap denial or terminal release to refresh the gauge.
         self.publish_metrics().await;
@@ -937,6 +990,7 @@ impl BuildAdmissionController {
         object_name: String,
     ) -> Result<BuildAdmissionDecision, WarmAdmissionError> {
         let permit = WarmAdmissionPermit::new();
+        let work_key = work_key(&key);
         self.permits.lock().await.insert(
             permit.clone(),
             PermitState {
@@ -952,10 +1006,60 @@ impl BuildAdmissionController {
             .lock()
             .await
             .insert(permit_key, permit.clone());
+        self.permits_by_work
+            .lock()
+            .await
+            .insert(work_key, permit.clone());
         Ok(BuildAdmissionDecision::Permitted {
             permit,
             idempotent: false,
         })
+    }
+
+    /// The permit for a work item's current admission generation, in any state.
+    ///
+    /// This is the lookup for lifecycle callbacks that carry only the work
+    /// identity. It is deliberately generation-free: after a retry the current
+    /// generation is a journal fact, not a caller-side counter.
+    pub async fn current_permit_for_work(
+        &self,
+        domain: AdmissionDomain,
+        work_id: &str,
+    ) -> Option<WarmAdmissionPermit> {
+        self.permits_by_work
+            .lock()
+            .await
+            .get(&work_key(&AdmissionJournalKey {
+                domain,
+                work_id: work_id.to_owned(),
+                generation: 0,
+            }))
+            .cloned()
+    }
+
+    /// The permit for this task's current admission generation.
+    pub async fn current_task_run_permit(&self, task_id: &str) -> Option<WarmAdmissionPermit> {
+        self.current_permit_for_work(AdmissionDomain::TaskObservation, task_id)
+            .await
+    }
+
+    /// Durable lifecycle transitions the journal accepted since process start.
+    #[must_use]
+    pub fn accepted_transition_count(&self) -> u64 {
+        self.accepted_transitions.load(Ordering::Acquire)
+    }
+
+    /// Durable lifecycle transitions the journal rejected since process start.
+    /// A rate approaching the accepted count means the journal is refusing the
+    /// observations it would have to trust when the mode is armed to Enforce.
+    #[must_use]
+    pub fn rejected_transition_count(&self) -> u64 {
+        self.rejected_transitions.load(Ordering::Acquire)
+    }
+
+    /// The most recent rejection diagnostic, verbatim.
+    pub async fn last_transition_rejection(&self) -> Option<String> {
+        self.last_transition_rejection.lock().await.clone()
     }
 
     /// A missing or unknown task role is a fail-closed classification result.
@@ -1189,6 +1293,31 @@ impl BuildAdmissionController {
         }
     }
 
+    /// Count one durable lifecycle transition by outcome.
+    ///
+    /// The WARN stays exactly as loud as it was; this makes the SAME fact
+    /// countable. A process whose rejected series equals its total is a
+    /// journal that would mis-account every grant if the mode were armed, and
+    /// that is now visible as a ratio rather than only as log volume.
+    async fn record_transition_outcome(&self, accepted: bool, error: Option<&WarmAdmissionError>) {
+        if accepted {
+            self.accepted_transitions.fetch_add(1, Ordering::AcqRel);
+        } else {
+            self.rejected_transitions.fetch_add(1, Ordering::AcqRel);
+            if let Some(error) = error {
+                *self.last_transition_rejection.lock().await = Some(error.to_string());
+            }
+        }
+        if self.process_metrics_enabled() {
+            let mode = match self.mode() {
+                BuildAdmissionMode::Off => "off",
+                BuildAdmissionMode::Observe => "observe",
+                BuildAdmissionMode::Enforce => "enforce",
+            };
+            djinn_telemetry::build_admission::record_transition(mode, self.cap, accepted);
+        }
+    }
+
     async fn transition_permit(
         &self,
         permit: &WarmAdmissionPermit,
@@ -1250,6 +1379,8 @@ impl BuildAdmissionController {
                 .map_err(unavailable),
         };
         let transition_durable = result.is_ok();
+        self.record_transition_outcome(transition_durable, result.as_ref().err())
+            .await;
         if let Err(error) = result {
             if self.mode() != BuildAdmissionMode::Observe {
                 return Err(error);
@@ -1427,6 +1558,7 @@ impl BuildAdmissionController {
         {
             let mut permits = self.permits.lock().await;
             let mut by_key = self.permits_by_key.lock().await;
+            let mut by_work = self.permits_by_work.lock().await;
             for row in &recovery.active_rows {
                 if !seed_filter(row) {
                     continue;
@@ -1442,6 +1574,10 @@ impl BuildAdmissionController {
                         permit
                     }
                 };
+                // A recovered row is the work item's current generation, so a
+                // lifecycle callback that arrives after restart resolves to it
+                // exactly as it would have before the restart.
+                by_work.insert(work_key(&row.key), permit.clone());
                 permits.insert(
                     permit,
                     PermitState {
@@ -1508,6 +1644,13 @@ fn permit_key(key: &AdmissionJournalKey) -> String {
     admission_generation_key(key)
 }
 
+/// Generation-free identity for one work item. Shares the `{domain:?}:{work_id}:`
+/// prefix with [`admission_generation_key`] so the deferred-queue prefix scans
+/// and this map agree on what "the same work" means.
+fn work_key(key: &AdmissionJournalKey) -> String {
+    format!("{:?}:{}", key.domain, key.work_id)
+}
+
 /// Canonical string identity for one admission generation.
 ///
 /// This is the single source of truth for the `generation_key` used by the
@@ -1518,6 +1661,12 @@ fn permit_key(key: &AdmissionJournalKey) -> String {
 /// MUST format their key through this function so the two byte-match. It is the
 /// same `{domain:?}:{work_id}:{generation}` form used for in-memory permit
 /// bookkeeping.
+///
+/// The generation component is a JOURNAL fact. A producer that formats a key
+/// from a caller-side counter (a task's `reopen_count`) only byte-matches while
+/// that task has had one dispatch attempt per reopen; a retried attempt reserves
+/// its own generation. Any producer of the required set must read the generation
+/// from the journal row rather than recompute it.
 #[must_use]
 pub fn admission_generation_key(key: &AdmissionJournalKey) -> String {
     format!("{:?}:{}:{}", key.domain, key.work_id, key.generation)
@@ -1721,6 +1870,245 @@ mod tests {
         async fn job_uid(&self, _namespace: &str, _job_name: &str) -> Option<String> {
             Some("warm-uid".into())
         }
+    }
+
+    /// Kubernetes assigns a fresh UID to every Job object it creates, even when
+    /// the deterministic object name is identical. This watcher reproduces that:
+    /// each observed warm lifecycle reports its own immutable UID.
+    struct FreshUidPerJobWatcher {
+        observed: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl WarmJobWatcher for FreshUidPerJobWatcher {
+        async fn wait_terminal(&self, _namespace: &str, _job_name: &str) -> WarmTerminalOutcome {
+            WarmTerminalOutcome::Succeeded
+        }
+
+        async fn job_uid(&self, _namespace: &str, _job_name: &str) -> Option<String> {
+            let n = self.observed.fetch_add(1, Ordering::SeqCst) + 1;
+            Some(format!("warm-uid-{n}"))
+        }
+    }
+
+    struct CountingWarmDispatcher {
+        posts: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl WarmJobDispatcher for CountingWarmDispatcher {
+        async fn dispatch(
+            &self,
+            _namespace: &str,
+            _job: WarmJobManifest,
+        ) -> Result<String, String> {
+            self.posts.fetch_add(1, Ordering::SeqCst);
+            Ok("warm-job".into())
+        }
+    }
+
+    async fn await_terminal_generations(
+        journal: &AdmissionJournalRepository,
+        work_id: &str,
+        expected: usize,
+    ) -> Vec<AdmissionJournalRow> {
+        for _ in 0..600 {
+            let history = journal
+                .list_history(AdmissionDomain::WarmBuild, work_id)
+                .await
+                .unwrap();
+            if history.len() >= expected
+                && history
+                    .iter()
+                    .all(|row| row.state == AdmissionState::Terminal)
+            {
+                return history;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        journal
+            .list_history(AdmissionDomain::WarmBuild, work_id)
+            .await
+            .unwrap()
+    }
+
+    /// Regression (ymx9): two real graph-warm Job lifecycles for the same
+    /// project revision must each own a journal generation carrying that Job's
+    /// own Kubernetes UID.
+    ///
+    /// This drives the production `K8sGraphWarmer` create → observe → terminal
+    /// sequence through the production `BuildAdmissionController` and the
+    /// production `AdmissionJournalRepository` in the mode production actually
+    /// runs (`Observe`). Before the fix, the second lifecycle reused the first
+    /// lifecycle's retired row, so every observation transition was rejected —
+    /// `cannot mark create started from Terminal` followed by two
+    /// `Kubernetes UID does not match admission row` rejections.
+    #[tokio::test]
+    async fn repeated_warm_lifecycles_record_one_generation_per_kubernetes_uid() {
+        let db = Database::open_in_memory().unwrap();
+        let journal = Arc::new(AdmissionJournalRepository::new(db.clone()));
+        let controller = Arc::new(BuildAdmissionController::new(
+            Arc::clone(&journal),
+            BuildAdmissionMode::Observe,
+            4,
+            "epoch",
+        ));
+        let project_id = seed_project_with_ready_image(&db, "warm-uid-regression").await;
+        let work_id = djinn_k8s::warm_work_id(&project_id, "unknown");
+        let posts = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::new(AtomicUsize::new(0));
+        let warmer = K8sGraphWarmer::with_dispatcher(
+            KubernetesConfig::for_testing(),
+            db,
+            Arc::new(CountingWarmDispatcher {
+                posts: Arc::clone(&posts),
+            }),
+            Arc::new(FreshUidPerJobWatcher {
+                observed: Arc::clone(&observed),
+            }),
+        )
+        .with_warm_admission(controller.clone());
+
+        warmer.trigger(&project_id).await;
+        let history = await_terminal_generations(&journal, &work_id, 1).await;
+        assert_eq!(history.len(), 1, "the first warm records one generation");
+
+        warmer.trigger(&project_id).await;
+        let history = await_terminal_generations(&journal, &work_id, 2).await;
+
+        assert_eq!(posts.load(Ordering::SeqCst), 2, "both warm lifecycles POST");
+        assert_eq!(
+            history.len(),
+            2,
+            "a second warm Job is a second object lifecycle and must own its own \
+             admission generation instead of reusing the retired row"
+        );
+        let uids: Vec<Option<&str>> = history
+            .iter()
+            .map(|row| row.object_uid.as_deref())
+            .collect();
+        assert_eq!(
+            uids,
+            vec![Some("warm-uid-1"), Some("warm-uid-2")],
+            "every generation persists the exact Kubernetes UID its own Live and \
+             Terminal observations supplied"
+        );
+        assert!(
+            history
+                .iter()
+                .all(|row| row.state == AdmissionState::Terminal),
+            "both generations reach Terminal through the observed UID"
+        );
+        assert_eq!(
+            controller.rejected_transition_count(),
+            0,
+            "Observe mode must emit successful journal observations, not a 100% \
+             rejection rate; last rejection: {:?}",
+            controller.last_transition_rejection().await
+        );
+        assert!(
+            controller.accepted_transition_count() >= 6,
+            "each warm lifecycle records CreateStarted, Live and Terminal"
+        );
+        assert_eq!(controller.last_transition_rejection().await, None);
+    }
+
+    /// Regression (ymx9): the create observation and the terminal observation
+    /// are independent messages, so a create report can arrive after the
+    /// generation is already retired. That has a defined idempotent outcome —
+    /// the terminal row is retained, occupancy is not resurrected — while a
+    /// transition addressed to a superseded generation is still rejected.
+    #[tokio::test]
+    async fn late_create_observation_is_idempotent_while_stale_generations_stay_rejected() {
+        let controller = controller(BuildAdmissionMode::Enforce, 4);
+        controller.mark_ready();
+        let first = WarmAdmission::admit(&controller, warm("late-create"))
+            .await
+            .unwrap();
+        controller
+            .transition(&first, WarmAdmissionTransition::CreateStarted)
+            .await
+            .unwrap();
+        controller
+            .transition(
+                &first,
+                WarmAdmissionTransition::Live {
+                    uid: "uid-one".into(),
+                },
+            )
+            .await
+            .unwrap();
+        controller
+            .transition(
+                &first,
+                WarmAdmissionTransition::Terminal {
+                    uid: "uid-one".into(),
+                },
+            )
+            .await
+            .unwrap();
+
+        // The create outcome finally lands, after the terminal one.
+        controller
+            .transition(
+                &first,
+                WarmAdmissionTransition::CreateUnknown {
+                    diagnostic: "create response arrived after the job terminated".into(),
+                },
+            )
+            .await
+            .expect("a late create observation resolves idempotently");
+        let history = controller
+            .journal()
+            .list_history(AdmissionDomain::WarmBuild, "late-create")
+            .await
+            .unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(
+            history[0].state,
+            AdmissionState::Terminal,
+            "a late create observation must not resurrect a retired generation"
+        );
+        assert_eq!(
+            controller
+                .journal()
+                .count_task_or_warm_occupancy()
+                .await
+                .unwrap(),
+            0,
+            "a late create observation must not re-occupy capacity"
+        );
+
+        // A second attempt supersedes the retired generation. Every transition
+        // still addressed to the old one is rejected, loudly.
+        let second = WarmAdmission::admit(&controller, warm("late-create"))
+            .await
+            .unwrap();
+        assert_ne!(first, second, "a new attempt gets a new permit");
+        controller
+            .transition(&second, WarmAdmissionTransition::CreateStarted)
+            .await
+            .unwrap();
+        let stale = controller
+            .transition(
+                &first,
+                WarmAdmissionTransition::Terminal {
+                    uid: "uid-one".into(),
+                },
+            )
+            .await
+            .expect_err("a superseded generation cannot transition");
+        assert!(
+            stale.to_string().contains("stale admission generation"),
+            "unexpected diagnostic: {stale}"
+        );
+        assert!(controller.rejected_transition_count() >= 1);
+        assert!(
+            controller
+                .last_transition_rejection()
+                .await
+                .is_some_and(|reason| reason.contains("stale admission generation"))
+        );
     }
 
     #[tokio::test]
@@ -2920,6 +3308,65 @@ mod tests {
         assert_no_identity_labels(
             &rendered,
             "djinn_build_admission_unknown_classification_total",
+        );
+    }
+
+    /// AC4 (ymx9): accepted and rejected journal transitions are separate
+    /// bounded series, so a 100% rejection rate is a ratio an alert can read
+    /// instead of a log volume an operator has to notice.
+    #[tokio::test]
+    async fn telemetry_transition_counter_separates_accepted_from_rejected() {
+        let _guard = telemetry_guard();
+        djinn_telemetry::init().unwrap();
+
+        let c = controller(BuildAdmissionMode::Observe, 4);
+        c.enable_process_metrics_for_test();
+        let permit = WarmAdmission::admit(&c, warm("counted")).await.unwrap();
+        c.transition(&permit, WarmAdmissionTransition::CreateStarted)
+            .await
+            .unwrap();
+        c.transition(&permit, WarmAdmissionTransition::Live { uid: "uid".into() })
+            .await
+            .unwrap();
+        // Observe never denies dispatch, so this rejection is only visible as
+        // a counter and a WARN — never as a changed decision.
+        c.transition(
+            &permit,
+            WarmAdmissionTransition::Terminal {
+                uid: "other-uid".into(),
+            },
+        )
+        .await
+        .expect("Observe does not turn a rejected transition into a denial");
+
+        let rendered = djinn_telemetry::render().unwrap();
+        let labels = |outcome| {
+            [
+                ("effective_mode", "observe"),
+                ("effective_cap", "4"),
+                ("outcome", outcome),
+            ]
+        };
+        assert!(
+            sample_value(
+                &rendered,
+                "djinn_build_admission_transition_total",
+                &labels("accepted")
+            ) >= 2.0
+        );
+        assert!(
+            sample_value(
+                &rendered,
+                "djinn_build_admission_transition_total",
+                &labels("rejected")
+            ) >= 1.0
+        );
+        assert_no_identity_labels(&rendered, "djinn_build_admission_transition_total");
+        assert_eq!(c.rejected_transition_count(), 1);
+        assert!(
+            c.last_transition_rejection()
+                .await
+                .is_some_and(|reason| reason.contains("Kubernetes UID does not match"))
         );
     }
 
