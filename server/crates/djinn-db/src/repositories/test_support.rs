@@ -8,8 +8,7 @@ use crate::database::Database;
 use crate::repositories::note::NoteRepository;
 use djinn_memory::Note;
 
-/// Durable refinement fields used to assert recovery side effects in external
-/// integration tests without leaking raw SQL outside the database crate.
+/// Durable refinement fields for recovery integration assertions.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RefinementRunAuditForTest {
     pub generation: i32,
@@ -20,9 +19,7 @@ pub struct RefinementRunAuditForTest {
     pub typed_reap_count: i64,
 }
 
-/// Read the exact durable run row and its typed phantom-reap audit count.
-///
-/// **Not for production use.** Panics on SQL errors.
+/// Read a durable run and its typed phantom-reap audit count for tests.
 pub async fn refinement_run_audit_for_test(
     db: &Database,
     run_id: &str,
@@ -55,10 +52,7 @@ pub async fn refinement_run_audit_for_test(
     }
 }
 
-/// Corrupt a task's durable refinement role to model legacy or externally
-/// malformed correlation evidence that typed task writers refuse to create.
-///
-/// **Not for production use.** Panics on SQL errors.
+/// Corrupt a task role to model malformed legacy correlation evidence.
 pub async fn corrupt_refinement_task_role_for_test(db: &Database, task_id: &str, role: &str) {
     db.ensure_initialized().await.unwrap();
     sqlx::query("UPDATE tasks SET refinement_role = $1 WHERE id = $2")
@@ -91,14 +85,7 @@ pub async fn make_refinement_run_phantom_for_test(db: &Database, run_id: &str) {
     transaction.commit().await.unwrap();
 }
 
-/// Replace a material proposal head without its normal write-time validation.
-///
-/// This is exclusively for legacy-data fixtures: it keeps the current sequence
-/// while changing both the live proposal and its immutable `spec_revision`
-/// snapshot. Lifecycle audit rows at the same sequence are deliberately left
-/// untouched.
-///
-/// **Not for production use.** Panics on SQL errors.
+/// Replace a legacy proposal head and its current spec snapshot for tests.
 pub async fn replace_legacy_proposal_head_for_test(
     db: &Database,
     proposal_id: &str,
