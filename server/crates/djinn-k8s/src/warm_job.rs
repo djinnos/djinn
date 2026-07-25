@@ -156,7 +156,12 @@ exec {bin} warm-graph "{project_id}"
         project_id = project_id,
     );
 
+    let warm_home = crate::job::task_run_home(project_id);
     let mut env = vec![
+        // The same catalog image runs uid 1000 here. Keep its home on the
+        // fsGroup-owned persistent cache PVC, matching task-run Pods.
+        env_var("HOME", &warm_home),
+        env_var("XDG_CACHE_HOME", &format!("{warm_home}/.cache")),
         env_var("DJINN_MIRROR_ROOT", MIRROR_MOUNT_DIR),
         env_var("DJINN_WARM_PROJECT_ID", project_id),
         // run_warm_graph_command picks this up when set and uses it as
@@ -693,6 +698,14 @@ mod tests {
         // warm-owned seed with INCREMENTAL compilation enabled (warm == verify ==
         // worker parity) while task-run Pods use private run target dirs.
         assert_eq!(envs.get("CARGO_HOME").copied(), Some("/cache/cargo"));
+        assert_eq!(
+            envs.get("HOME").copied(),
+            Some("/cache/djinn-home/proj-xyz")
+        );
+        assert_eq!(
+            envs.get("XDG_CACHE_HOME").copied(),
+            Some("/cache/djinn-home/proj-xyz/.cache")
+        );
         assert_eq!(
             envs.get("CARGO_TARGET_DIR").copied(),
             Some("/cache/cargo-target/proj-xyz/mold-jobs-4"),

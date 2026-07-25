@@ -170,6 +170,11 @@ pub const TOKEN_MOUNT_FILE: &str = "/var/run/secrets/tokens/djinn";
 pub const MIRROR_MOUNT_DIR: &str = "/mirror";
 /// Mount path for the writeable shared cache PVC.
 pub const CACHE_MOUNT_DIR: &str = "/cache";
+/// Per-project HOME roots on the shared cache PVC.
+///
+/// Task-run images are also used by server-side paths under uid 10001, so the
+/// uid-1000 task-run home is rendered here rather than baked into the image.
+pub const TASK_RUN_HOME_ROOT: &str = "/cache/djinn-home";
 /// Mount path of the ephemeral workspace emptyDir.
 pub const WORKSPACE_MOUNT_DIR: &str = "/workspace";
 /// Audience advertised on the projected ServiceAccount token.
@@ -697,6 +702,7 @@ fn build_task_run_env(
     project_id: &str,
     policy: Option<&djinn_stack::environment::CargoCachePolicy>,
 ) -> Vec<EnvVar> {
+    let task_run_home = task_run_home(project_id);
     let mut env = vec![
         env_var("RUST_BACKTRACE", "1"),
         env_var("DJINN_SERVER_ADDR", &config.server_addr),
@@ -716,6 +722,15 @@ fn build_task_run_env(
         // instead of the container's tmpfs root, which has stricter
         // size limits.
         env_var("TMPDIR", WORKSPACE_MOUNT_DIR),
+        // The catalog image's /home/djinn belongs to its uid-10001 user, while
+        // task-run workers deliberately execute as uid/gid 1000. Render both
+        // HOME and XDG_CACHE_HOME onto the fsGroup-owned cache PVC instead of
+        // changing the image: this preserves its server-side uid-10001 use,
+        // gives HOME-relative tools a writable home, and keeps durable output
+        // stash blobs across retries. Per-project namespacing prevents one
+        // project's durable agent output from sharing a home with another.
+        env_var("HOME", &task_run_home),
+        env_var("XDG_CACHE_HOME", &format!("{task_run_home}/.cache")),
         // DJINN_MIRROR_ROOT is read by the in-Pod MirrorManager so the
         // worker clones from /mirror without a hard-coded path.
         env_var("DJINN_MIRROR_ROOT", MIRROR_MOUNT_DIR),
@@ -771,6 +786,14 @@ fn build_task_run_env(
         policy,
     ));
     env
+}
+
+/// Writable, persistent HOME rendered for one project's task-run Pods.
+///
+/// The durable stash resolves below `XDG_CACHE_HOME/djinn/output_stash`, so
+/// this must remain project-scoped on the common cache PVC.
+pub fn task_run_home(project_id: &str) -> String {
+    format!("{TASK_RUN_HOME_ROOT}/{project_id}")
 }
 
 /// Runtime env vars routing the shared Rust toolchain caches to the persistent
@@ -1765,6 +1788,15 @@ mod tests {
             .collect();
 
         assert_eq!(envs.get("CARGO_HOME").copied(), Some("/cache/cargo"));
+        assert_eq!(
+            envs.get("HOME").copied(),
+            Some("/cache/djinn-home/proj-xyz")
+        );
+        assert_eq!(
+            envs.get("XDG_CACHE_HOME").copied(),
+            Some("/cache/djinn-home/proj-xyz/.cache"),
+            "the durable output stash must use persistent project-scoped cache storage"
+        );
         assert_eq!(
             envs.get("CARGO_TARGET_DIR").copied(),
             Some(expected_target_dir.as_str()),

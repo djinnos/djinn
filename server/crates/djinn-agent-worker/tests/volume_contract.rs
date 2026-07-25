@@ -6,13 +6,15 @@
 //! real `chmod`s on a tempdir, so every assertion runs against the same code the
 //! worker and warm Job execute at startup.
 
+use std::ffi::CString;
 use std::fs;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 use djinn_agent_worker::volume_contract::{
     ContractMode, VolumeContract, VolumeContractError, VolumeRoot, current_gid, enforce_with,
-    validate,
+    ensure_directory_writable, validate,
 };
 use tempfile::TempDir;
 
@@ -355,4 +357,77 @@ fn the_check_never_mutates_the_volume() {
         before, after,
         "startup validation must never repair the volume"
     );
+}
+
+/// This is deliberately privileged: changing identity inside a test process is
+/// only safe after fork. CI's uid-boundary lane runs it as root; normal unit-test
+/// lanes leave it ignored rather than pretending an owner-uid test covers this.
+#[ignore = "privileged: forks and drops from uid 0 to the task-run uid 1000"]
+#[test]
+fn uid_1000_rejects_legacy_home_and_writes_persistent_output_stash() {
+    assert_eq!(
+        unsafe { libc::geteuid() },
+        0,
+        "privileged lane must run as root"
+    );
+    let dir = TempDir::new().expect("tempdir");
+
+    let legacy_home = dir.path().join("legacy-home");
+    fs::create_dir(&legacy_home).expect("mkdir legacy home");
+    chown(&legacy_home, 10_001, 10_001);
+    chmod(&legacy_home, 0o775);
+    run_as_task_worker(|| {
+        matches!(
+            ensure_directory_writable(&legacy_home),
+            Err(VolumeContractError::HomeUnwritable { .. })
+        )
+    });
+
+    // The rendered HOME/XDG_CACHE_HOME parent is on the fsGroup-owned cache
+    // PVC. Its mode and group let uid/gid 1000 create the exact durable-stash
+    // directory that both worker and planner sessions use.
+    let cache = dir.path().join("cache");
+    fs::create_dir(&cache).expect("mkdir cache");
+    chown(&cache, 10_001, 1000);
+    chmod(&cache, 0o2775);
+    let stash = cache.join("djinn-home/project/.cache/djinn/output_stash");
+    run_as_task_worker(|| {
+        ensure_directory_writable(&stash).is_ok()
+            && fs::write(stash.join("worker-and-planner-probe"), b"durable").is_ok()
+    });
+}
+
+fn chown(path: &Path, uid: u32, gid: u32) {
+    let path = CString::new(path.as_os_str().as_bytes()).expect("path has no NUL");
+    // SAFETY: path is NUL-terminated and the privileged test owns this tempdir.
+    assert_eq!(unsafe { libc::chown(path.as_ptr(), uid, gid) }, 0, "chown");
+}
+
+fn run_as_task_worker(f: impl FnOnce() -> bool) {
+    // SAFETY: fork has no Rust-level preconditions. The child exits directly,
+    // avoiding shared test-harness state after it changes uid/gid.
+    let pid = unsafe { libc::fork() };
+    assert!(pid >= 0, "fork");
+    if pid == 0 {
+        // SAFETY: the child is root in this privileged test and drops all group
+        // membership before permanently becoming the task-run identity.
+        let setup_ok = unsafe {
+            libc::setgroups(0, std::ptr::null()) == 0
+                && libc::setresgid(1000, 1000, 1000) == 0
+                && libc::setresuid(1000, 1000, 1000) == 0
+        };
+        let exit_code = if setup_ok && f() { 0 } else { 1 };
+        // SAFETY: direct child termination is required after fork in a test
+        // harness that may have worker threads.
+        unsafe { libc::_exit(exit_code) };
+    }
+
+    let mut status = 0;
+    // SAFETY: pid came from fork above and status points to valid initialized memory.
+    assert_eq!(
+        unsafe { libc::waitpid(pid, &mut status, 0) },
+        pid,
+        "waitpid"
+    );
+    assert_eq!(status, 0, "uid-1000 child must pass its assertion");
 }

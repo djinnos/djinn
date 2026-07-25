@@ -289,6 +289,13 @@ pub enum VolumeContractError {
         supplementary: Vec<u32>,
         required_gid: u32,
     },
+
+    #[error("HOME is not writable at {path}: {source}")]
+    HomeUnwritable {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
 }
 
 impl VolumeContractError {
@@ -302,6 +309,7 @@ impl VolumeContractError {
             Self::GroupWrite { .. } => "group_write",
             Self::Setgid { .. } => "setgid",
             Self::ProcessGroupMembership { .. } => "process_group_membership",
+            Self::HomeUnwritable { .. } => "home_unwritable",
         }
     }
 
@@ -313,7 +321,8 @@ impl VolumeContractError {
             | Self::Stat { path, .. }
             | Self::GroupOwner { path, .. }
             | Self::GroupWrite { path, .. }
-            | Self::Setgid { path, .. } => Some(path.as_path()),
+            | Self::Setgid { path, .. }
+            | Self::HomeUnwritable { path, .. } => Some(path.as_path()),
             Self::ProcessGroupMembership { .. } => None,
         }
     }
@@ -611,6 +620,47 @@ fn cache_roots() -> Vec<VolumeRoot> {
         }
     }
     roots
+}
+
+/// Prove that the HOME rendered for this worker can create files.
+///
+/// This is intentionally an actual create-and-remove probe rather than metadata
+/// inspection: effective uid, supplementary groups, ACLs, and read-only mounts
+/// are all part of whether a process can use HOME. The probe is run before the
+/// worker takes work, so an identity/image mismatch fails as a named readiness
+/// error rather than an opaque durable-output-stash EACCES in a reply loop.
+pub fn ensure_home_writable() -> Result<(), VolumeContractError> {
+    let home = std::env::var_os("HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .ok_or_else(|| VolumeContractError::HomeUnwritable {
+            path: PathBuf::from("$HOME"),
+            source: io::Error::new(io::ErrorKind::NotFound, "HOME is unset or empty"),
+        })?;
+    ensure_directory_writable(&home)
+}
+
+/// Create and remove a private probe in `path`, creating the directory when its
+/// writable parent permits it. Exposed for the privileged uid-boundary test.
+pub fn ensure_directory_writable(path: &Path) -> Result<(), VolumeContractError> {
+    fs::create_dir_all(path).map_err(|source| VolumeContractError::HomeUnwritable {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let probe = path.join(format!(".djinn-home-write-probe-{}", std::process::id()));
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&probe)
+        .map_err(|source| VolumeContractError::HomeUnwritable {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    drop(file);
+    fs::remove_file(&probe).map_err(|source| VolumeContractError::HomeUnwritable {
+        path: path.to_path_buf(),
+        source,
+    })
 }
 
 /// Run the check at startup for `context` (`task-run` / `warm-graph`), honouring

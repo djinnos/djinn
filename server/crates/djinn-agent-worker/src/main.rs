@@ -2053,6 +2053,7 @@ async fn run_task_run(args: WorkerDefaultArgs) -> Result<()> {
         "task-run",
         &volume_contract::task_run_roots(&args.workspace_path),
     )?;
+    volume_contract::ensure_home_writable()?;
 
     // 1. Slurp the TaskRunSpec off the mounted Secret file.
     let spec_bytes = tokio::fs::read(&args.spec_path)
@@ -3066,6 +3067,7 @@ async fn run_warm_graph_body(project_id: &str) -> Result<()> {
         "warm-graph",
         &volume_contract::warm_roots(&warm_project_root, project_id),
     )?;
+    volume_contract::ensure_home_writable()?;
 
     let db = bootstrap_warm_database().await?;
     let ctx = WorkerWarmContext {
