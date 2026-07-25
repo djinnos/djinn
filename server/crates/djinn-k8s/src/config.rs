@@ -56,8 +56,6 @@ pub struct KubernetesConfig {
     /// Memory limit shared by both role classes. v1 leases default: `"4Gi"`.
     /// Overridable via `DJINN_K8S_MEMORY_LIMIT`.
     pub memory_limit: String,
-    /// TTL (seconds) applied to completed Jobs for auto-GC.
-    pub ttl_seconds_after_finished: i32,
     /// RWX PVC backing the task-run mirror (mounted read-only at `/mirror`).
     pub mirror_pvc: String,
     /// RWX PVC holding canonical project roots. Task-run Pods mount only an
@@ -218,7 +216,6 @@ impl KubernetesConfig {
             cpu_limit: "4".into(),
             memory_request: "2Gi".into(),
             memory_limit: "4Gi".into(),
-            ttl_seconds_after_finished: 300,
             mirror_pvc: "djinn-mirror".into(),
             projects_pvc: "djinn-projects".into(),
             cache_pvc: "djinn-cache".into(),
@@ -276,7 +273,6 @@ impl KubernetesConfig {
     /// | `DJINN_K8S_CPU_LIMIT` | `cpu_limit` (shared) | `4` |
     /// | `DJINN_K8S_MEMORY_REQUEST` | `memory_request` (shared) | `2Gi` |
     /// | `DJINN_K8S_MEMORY_LIMIT` | `memory_limit` (shared) | `4Gi` |
-    /// | `DJINN_K8S_TTL_SECONDS` | `ttl_seconds_after_finished` | `300` (parsed as `i32`) |
     /// | `DJINN_K8S_MIRROR_PVC` | `mirror_pvc` | `djinn-mirror` |
     /// | `DJINN_K8S_CACHE_PVC` | `cache_pvc` | `djinn-cache` |
     /// | `DJINN_K8S_SERVER_ADDR` | `server_addr` | `djinn.djinn.svc.cluster.local:8443` |
@@ -302,8 +298,6 @@ impl KubernetesConfig {
     /// Postgres instance and helpers like `resolve_role_overrides` /
     /// `build_prompt_context` succeed mid-run).
     ///
-    /// A malformed `DJINN_K8S_TTL_SECONDS` is logged at `warn` and falls
-    /// back to the default — the runtime still boots.
     pub fn from_env() -> Self {
         let mut cfg = Self::for_testing();
         if let Ok(v) = std::env::var("DJINN_K8S_NAMESPACE") {
@@ -332,16 +326,6 @@ impl KubernetesConfig {
         }
         if let Ok(v) = std::env::var("DJINN_K8S_MEMORY_LIMIT") {
             cfg.memory_limit = v;
-        }
-        if let Ok(v) = std::env::var("DJINN_K8S_TTL_SECONDS") {
-            match v.parse::<i32>() {
-                Ok(n) => cfg.ttl_seconds_after_finished = n,
-                Err(e) => tracing::warn!(
-                    value = %v,
-                    error = %e,
-                    "DJINN_K8S_TTL_SECONDS not a valid i32 — keeping default"
-                ),
-            }
         }
         if let Ok(v) = std::env::var("DJINN_K8S_MIRROR_PVC") {
             cfg.mirror_pvc = v;
@@ -460,10 +444,6 @@ impl KubernetesConfig {
 mod tests {
     use super::*;
 
-    // Both tests in this module mutate the same `DJINN_K8S_TTL_SECONDS`
-    // env var. `cargo test` runs tests in parallel threads within one
-    // process, so without a lock the two races: one test's set_var/
-    // remove_var can clobber the other's between set and from_env().
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     /// `from_env()` honors the env vars it documents.  This is a sanity
@@ -479,7 +459,6 @@ mod tests {
             std::env::set_var("DJINN_K8S_IMAGE", "repo/img:tag");
             std::env::set_var("DJINN_K8S_SERVER_ADDR", "djinn:9000");
             std::env::set_var("DJINN_K8S_PROJECTS_PVC", "owner-cache-projects-pvc");
-            std::env::set_var("DJINN_K8S_TTL_SECONDS", "600");
             std::env::set_var(
                 "DJINN_DATABASE_URL",
                 "postgres://djinn:djinn@djinn-postgres:5432/djinn",
@@ -490,7 +469,6 @@ mod tests {
         assert_eq!(cfg.image, "repo/img:tag");
         assert_eq!(cfg.server_addr, "djinn:9000");
         assert_eq!(cfg.projects_pvc, "owner-cache-projects-pvc");
-        assert_eq!(cfg.ttl_seconds_after_finished, 600);
         // Unset vars fall back to `for_testing` defaults.
         assert_eq!(cfg.service_account, "djinn-taskrun");
         // DB URL forwarded as-is for warm Pod env projection.
@@ -506,7 +484,6 @@ mod tests {
             std::env::remove_var("DJINN_K8S_IMAGE");
             std::env::remove_var("DJINN_K8S_SERVER_ADDR");
             std::env::remove_var("DJINN_K8S_PROJECTS_PVC");
-            std::env::remove_var("DJINN_K8S_TTL_SECONDS");
             std::env::remove_var("DJINN_DATABASE_URL");
         }
     }
@@ -545,32 +522,6 @@ mod tests {
             match saved_tol {
                 Some(prev) => std::env::set_var("DJINN_K8S_TOLERATIONS", prev),
                 None => std::env::remove_var("DJINN_K8S_TOLERATIONS"),
-            }
-        }
-    }
-
-    /// A malformed `DJINN_K8S_TTL_SECONDS` falls back to the default —
-    /// the runtime should still boot instead of crashing the Helm rollout
-    /// if an operator typos the value.
-    #[test]
-    fn from_env_ttl_parse_error_falls_back_to_default() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        // SAFETY: serialized against sibling test via ENV_LOCK; we save +
-        // restore the key so a concurrent `cargo test` run can't observe
-        // the transient `not-a-number` state.
-        let saved = std::env::var("DJINN_K8S_TTL_SECONDS").ok();
-        unsafe {
-            std::env::set_var("DJINN_K8S_TTL_SECONDS", "not-a-number");
-        }
-        let cfg = KubernetesConfig::from_env();
-        assert_eq!(
-            cfg.ttl_seconds_after_finished,
-            KubernetesConfig::for_testing().ttl_seconds_after_finished
-        );
-        unsafe {
-            match saved {
-                Some(prev) => std::env::set_var("DJINN_K8S_TTL_SECONDS", prev),
-                None => std::env::remove_var("DJINN_K8S_TTL_SECONDS"),
             }
         }
     }

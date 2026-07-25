@@ -17,6 +17,10 @@ pub struct TaskrunJobRef {
     /// may simply not exist yet (the worker creates them from inside the pod
     /// after boot). `None` is treated as old/eligible for reaping.
     pub created_at: Option<std::time::SystemTime>,
+    /// Mirrors Kubernetes Job `status.completionTime`.
+    pub completed_at: Option<std::time::SystemTime>,
+    /// Terminal Kubernetes condition type without leaking Kubernetes types.
+    pub terminal_condition: Option<String>,
 }
 
 /// Structured error returned from runtime dispatch calls so callers can

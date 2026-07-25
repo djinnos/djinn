@@ -621,6 +621,7 @@ impl RealPoolKillHarness {
                 })
                 .await
                 .expect("session create should succeed");
+        self.runtime.publish_reapable_taskrun_job(task_run_id);
 
         SeededRun {
             task_id: task.id,
@@ -878,6 +879,7 @@ fn test_slot_factory(
 #[derive(Clone, Default)]
 struct RecordingRuntimeOps {
     teardown_calls: Arc<Mutex<Vec<String>>>,
+    taskrun_jobs: Arc<Mutex<Vec<djinn_control_plane::bridge::TaskrunJobRef>>>,
 }
 
 impl RecordingRuntimeOps {
@@ -886,6 +888,23 @@ impl RecordingRuntimeOps {
             .lock()
             .expect("teardown calls mutex")
             .clone()
+    }
+
+    /// Publish a Job whose terminal evidence sits at the Unix epoch, so the
+    /// shared `djinn_core::job_retention` classifier has long since passed the
+    /// failure retention window under the real clock. Without an inventory
+    /// entry the cleanup paths fail closed and preserve the Job, which would
+    /// make every teardown assertion below vacuous.
+    fn publish_reapable_taskrun_job(&self, task_run_id: &str) {
+        self.taskrun_jobs.lock().expect("runtime jobs mutex").push(
+            djinn_control_plane::bridge::TaskrunJobRef {
+                job_name: format!("djinn-taskrun-{task_run_id}"),
+                task_run_id: task_run_id.to_string(),
+                created_at: Some(std::time::SystemTime::UNIX_EPOCH),
+                completed_at: Some(std::time::SystemTime::UNIX_EPOCH),
+                terminal_condition: Some("Failed".to_string()),
+            },
+        );
     }
 }
 
@@ -935,7 +954,11 @@ impl RuntimeOps for RecordingRuntimeOps {
     async fn list_taskrun_jobs(
         &self,
     ) -> Result<Vec<djinn_control_plane::bridge::TaskrunJobRef>, String> {
-        Ok(Vec::new())
+        Ok(self
+            .taskrun_jobs
+            .lock()
+            .expect("runtime jobs mutex")
+            .clone())
     }
 
     async fn cleanup_task_branches(&self, _task_id: &str) {}

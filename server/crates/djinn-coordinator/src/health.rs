@@ -11,7 +11,8 @@ use regex::Regex;
 /// How long a `task_run` may stay in `running` without an `ended_at` before
 /// the periodic sweep flips it to `interrupted`. Must comfortably exceed the
 /// K8s Job `activeDeadlineSeconds` (10800s) + `terminationGracePeriodSeconds`
-/// (60s) + `ttlSecondsAfterFinished` (300s) so we never reap a still-live run
+/// (60s) + the static `ttlSecondsAfterFinished` safety net (3600s) so we never
+/// reap a still-live run
 /// whose pod is mid-termination. Bumped to 4h alongside the deadline raise
 /// (3600→10800): a 3h-budget run that legitimately uses most of its window
 /// must not be reaped out from under itself.
@@ -2318,33 +2319,24 @@ async fn protected_cargo_target_run_ids(
         .collect())
 }
 
-fn session_status_classification(sessions: &[djinn_core::models::SessionRecord]) -> &'static str {
-    if sessions
-        .iter()
-        .any(|session| session.status == "interrupted")
-    {
-        "session_interrupted"
-    } else if sessions.iter().any(|session| session.status == "completed") {
-        "session_completed"
-    } else if sessions.iter().any(|session| session.status == "failed") {
-        "session_failed"
-    } else if sessions.is_empty() {
-        "task_run_running_without_session"
-    } else {
-        "task_run_running_without_live_session"
-    }
-}
-
 // ─── K8s task-run Job backstop ───────────────────────────────────────────────
 
 /// Reconcile runtime task-run Jobs against DB truth and foreground-delete Jobs
-/// for task-runs that are absent or already finalized.
+/// whose retention window has elapsed.
 ///
 /// This is intentionally a runtime-bridge policy, not a Kubernetes policy: the
 /// coordinator sees only [`djinn_control_plane::bridge::TaskrunJobRef`] values
 /// and calls [`djinn_control_plane::bridge::RuntimeOps::teardown_taskrun_job`].
-/// Inline teardown, stall reaping, and zombie recovery own currently-running
-/// rows; this backstop only cleans Jobs with no live DB owner.
+///
+/// The retain/delete decision itself is *not* made here. Every cleanup path
+/// (this backstop, inline zombie recovery, and the slot pool) funnels the same
+/// evidence through [`djinn_core::job_retention::classify_taskrun_job`], so
+/// there is exactly one outcome-aware retention authority. The old
+/// classification + boot-race grace window that used to live in this module was
+/// removed by that cutover: a Job whose worker has not yet inserted its DB owner
+/// rows classifies as `Failure` with no terminal timestamp, and is therefore
+/// preserved from `created_at` for the full failure retention window — a
+/// strictly wider boot-race guard than the 10-minute grace it replaced.
 pub(super) async fn reap_orphaned_taskrun_jobs(
     db: &djinn_db::Database,
     app_state: &crate::context::CoordinatorContext,
@@ -2407,38 +2399,11 @@ pub(super) async fn reap_orphaned_taskrun_jobs(
             }
         };
 
-        let classification = classify_taskrun_job_owner(task_run.as_ref(), &sessions);
-        if classification.keep_job {
-            tracing::debug!(
-                job_name = %job.job_name,
-                task_run_id = %task_run_id,
-                db_classification = classification.db_classification,
-                reason,
-                "CoordinatorActor: task-run Job backstop preserved live task-run Job"
-            );
-            continue;
-        }
-
-        // Boot-race grace: the worker inserts the task_runs row (and later the
-        // session row) from INSIDE the pod via the create_task_run RPC, i.e.
-        // only after pod scheduling + image pull + worker boot — which can take
-        // minutes. Every new Job therefore has a legitimate window where its DB
-        // owner rows are still "absent" (or the run row exists but no session
-        // yet). Reaping in that window kills sessions before they start, so we
-        // skip young Jobs in the boot-race classes. Terminal task_run statuses
-        // and interrupted/completed sessions are genuinely dead and reaped
-        // regardless of age (handled by the eligibility check below).
-        if is_boot_race_classification(classification.db_classification)
-            && job_within_reap_grace(job.created_at, now, TASKRUN_JOB_REAP_GRACE)
-        {
-            tracing::debug!(
-                job_name = %job.job_name,
-                task_run_id = %task_run_id,
-                db_classification = "young_job_grace",
-                original_classification = classification.db_classification,
-                reason,
-                "CoordinatorActor: task-run Job backstop skipped young Job within boot-race grace window"
-            );
+        let decision = taskrun_job_retention_decision(&job, task_run.as_ref(), &sessions, now);
+        if !decision.should_delete(now) {
+            tracing::debug!(job_name = %job.job_name, task_run_id = %task_run_id,
+                outcome = ?decision.outcome, delete_after = ?decision.delete_after, reason,
+                "CoordinatorActor: task-run Job retained by common retention policy");
             continue;
         }
 
@@ -2446,7 +2411,7 @@ pub(super) async fn reap_orphaned_taskrun_jobs(
             tracing::warn!(
                 job_name = %job.job_name,
                 task_run_id = %task_run_id,
-                db_classification = classification.db_classification,
+                outcome = ?decision.outcome,
                 error = %e,
                 reason,
                 "CoordinatorActor: task-run Job backstop teardown failed; continuing sweep"
@@ -2467,11 +2432,51 @@ pub(super) async fn reap_orphaned_taskrun_jobs(
         tracing::info!(
             job_name = %job.job_name,
             task_run_id = %task_run_id,
-            db_classification = classification.db_classification,
+            outcome = ?decision.outcome,
             reason,
+            // Marker text is operator-facing: scripts/taskrun-backstop-e2e-evidence.sh
+            // and docs/TASKRUN_BACKSTOP_VERIFICATION.md grep for it verbatim.
             "CoordinatorActor: backstop reaped orphaned task-run Job"
         );
     }
+}
+
+fn taskrun_job_retention_decision(
+    job: &djinn_control_plane::bridge::TaskrunJobRef,
+    task_run: Option<&djinn_core::models::TaskRunRecord>,
+    sessions: &[djinn_core::models::SessionRecord],
+    now: std::time::SystemTime,
+) -> djinn_core::job_retention::RetentionDecision {
+    use djinn_core::job_retention::{JobRetentionEvidence, SessionEvidence};
+    let session_evidence: Vec<_> = sessions
+        .iter()
+        .map(|session| SessionEvidence {
+            status: &session.status,
+            ended_at: parse_retention_timestamp(session.ended_at.as_deref()),
+        })
+        .collect();
+    djinn_core::job_retention::classify_taskrun_job(
+        now,
+        JobRetentionEvidence {
+            created_at: job.created_at,
+            completed_at: job.completed_at,
+            terminal_condition: job.terminal_condition.as_deref(),
+            task_run_status: task_run.map(|run| run.status.as_str()),
+            task_run_ended_at: task_run
+                .and_then(|run| parse_retention_timestamp(run.ended_at.as_deref())),
+            sessions: &session_evidence,
+        },
+    )
+}
+
+fn parse_retention_timestamp(raw: Option<&str>) -> Option<std::time::SystemTime> {
+    use time::format_description::well_known::{Iso8601, Rfc3339};
+    raw.and_then(|value| {
+        time::OffsetDateTime::parse(value, &Iso8601::DEFAULT)
+            .or_else(|_| time::OffsetDateTime::parse(value, &Rfc3339))
+            .ok()
+    })
+    .map(std::time::SystemTime::from)
 }
 
 async fn list_sessions_for_task_run(
@@ -2487,215 +2492,15 @@ async fn list_sessions_for_task_run(
 /// previously-running sessions interrupted via `interrupt_stale_sessions_on_startup`;
 /// the coordinator then runs this immediate reconcile before waiting for the
 /// normal stale-resource interval. The helper is idempotent and safe if startup
-/// ordering changes: if the session row is still running, the Job is preserved;
-/// if the row was interrupted/finalized or is absent, the Job is deleted.
+/// ordering changes: it applies the same shared retention policy as the periodic
+/// pass, so a still-running owner keeps its Job and a finalized or absent owner
+/// only loses it once the outcome's retention window has elapsed.
 pub(super) async fn reap_orphaned_taskrun_jobs_for_startup(
     db: &djinn_db::Database,
     app_state: &crate::context::CoordinatorContext,
 ) {
     tracing::info!("CoordinatorActor: running startup task-run Job backstop reconcile");
     reap_orphaned_taskrun_jobs(db, app_state, "startup").await;
-}
-
-struct TaskrunJobClassification {
-    keep_job: bool,
-    db_classification: &'static str,
-}
-
-fn classify_taskrun_job_owner(
-    task_run: Option<&djinn_core::models::TaskRunRecord>,
-    sessions: &[djinn_core::models::SessionRecord],
-) -> TaskrunJobClassification {
-    let has_live_session = sessions
-        .iter()
-        .any(|session| session.status == "running" && session.ended_at.is_none());
-
-    if let Some(task_run) = task_run {
-        if task_run.status == "running" && task_run.ended_at.is_none() && has_live_session {
-            return TaskrunJobClassification {
-                keep_job: true,
-                db_classification: "live_running",
-            };
-        }
-
-        if task_run.status == "running" {
-            return TaskrunJobClassification {
-                keep_job: false,
-                db_classification: session_status_classification(sessions),
-            };
-        }
-
-        return TaskrunJobClassification {
-            keep_job: false,
-            db_classification: taskrun_status_classification(&task_run.status),
-        };
-    }
-
-    TaskrunJobClassification {
-        keep_job: has_live_session,
-        db_classification: if has_live_session {
-            "live_session_without_task_run"
-        } else {
-            "absent"
-        },
-    }
-}
-
-/// Grace window before the backstop will reap a task-run Job whose DB owner
-/// rows are still absent. Sized generously (pod scheduling + image pull +
-/// worker boot can take minutes) because the worker only inserts the
-/// `task_runs` row from inside the pod after boot; reaping sooner races the
-/// worker and kills the session before it starts.
-const TASKRUN_JOB_REAP_GRACE: std::time::Duration = std::time::Duration::from_secs(10 * 60);
-
-/// The classifications that can legitimately appear during pod boot, before the
-/// worker has inserted its DB owner rows: no `task_runs` row at all
-/// (`"absent"`), or a running `task_runs` row whose session row hasn't been
-/// created yet (`"task_run_running_without_session"`). Only these classes are
-/// age-gated; every other non-`keep_job` class is a genuinely dead owner.
-fn is_boot_race_classification(db_classification: &str) -> bool {
-    matches!(
-        db_classification,
-        "absent" | "task_run_running_without_session"
-    )
-}
-
-/// True when a Job is younger than `grace` and therefore still inside the
-/// boot-race window. A missing `created_at` is treated as old (not within
-/// grace) so the backstop still reaps Jobs it cannot age — preserving the
-/// cleanup guarantee. A `created_at` in the future (clock skew) is treated as
-/// within grace, since such a Job cannot yet have aged out.
-fn job_within_reap_grace(
-    created_at: Option<std::time::SystemTime>,
-    now: std::time::SystemTime,
-    grace: std::time::Duration,
-) -> bool {
-    match created_at {
-        Some(created) => match now.duration_since(created) {
-            Ok(age) => age < grace,
-            Err(_) => true,
-        },
-        None => false,
-    }
-}
-
-fn taskrun_status_classification(status: &str) -> &'static str {
-    match status {
-        "completed" => "task_run_completed",
-        "failed" => "task_run_failed",
-        "interrupted" => "task_run_interrupted",
-        "running" => "task_run_running_without_live_session",
-        _ => "task_run_unknown_status",
-    }
-}
-
-#[cfg(test)]
-mod taskrun_backstop_grace_tests {
-    use super::*;
-    use std::time::{Duration, SystemTime};
-
-    /// Mirror of the loop's skip decision: a Job is spared only when its DB
-    /// classification is a boot-race class AND it is still within the grace
-    /// window.
-    fn would_skip_reap(
-        db_classification: &str,
-        created_at: Option<SystemTime>,
-        now: SystemTime,
-        grace: Duration,
-    ) -> bool {
-        is_boot_race_classification(db_classification)
-            && job_within_reap_grace(created_at, now, grace)
-    }
-
-    fn base() -> SystemTime {
-        SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000)
-    }
-
-    #[test]
-    fn young_absent_job_is_kept() {
-        let now = base();
-        let created = now - Duration::from_secs(30);
-        assert!(
-            would_skip_reap("absent", Some(created), now, TASKRUN_JOB_REAP_GRACE),
-            "a 30s-old Job with no task_runs row must be spared during boot"
-        );
-    }
-
-    #[test]
-    fn young_running_without_session_job_is_kept() {
-        let now = base();
-        let created = now - Duration::from_secs(60);
-        assert!(
-            would_skip_reap(
-                "task_run_running_without_session",
-                Some(created),
-                now,
-                TASKRUN_JOB_REAP_GRACE
-            ),
-            "a running task_run whose session row is not yet inserted must be spared during boot"
-        );
-    }
-
-    #[test]
-    fn old_absent_job_is_reaped() {
-        let now = base();
-        let created = now - (TASKRUN_JOB_REAP_GRACE + Duration::from_secs(1));
-        assert!(
-            !would_skip_reap("absent", Some(created), now, TASKRUN_JOB_REAP_GRACE),
-            "an aged-out Job with no DB owner is genuinely orphaned and must be reaped"
-        );
-    }
-
-    #[test]
-    fn young_terminal_task_run_job_is_reaped() {
-        let now = base();
-        let created = now - Duration::from_secs(5);
-        // Terminal task_run statuses are dead regardless of age.
-        for class in [
-            "task_run_completed",
-            "task_run_failed",
-            "task_run_interrupted",
-            "session_interrupted",
-            "session_completed",
-        ] {
-            assert!(
-                !would_skip_reap(class, Some(created), now, TASKRUN_JOB_REAP_GRACE),
-                "terminal classification {class} must be reaped even for a young Job"
-            );
-        }
-    }
-
-    #[test]
-    fn missing_timestamp_is_treated_as_old() {
-        let now = base();
-        assert!(
-            !job_within_reap_grace(None, now, TASKRUN_JOB_REAP_GRACE),
-            "a Job with no creation timestamp must be eligible for reaping"
-        );
-    }
-
-    #[test]
-    fn future_timestamp_is_treated_as_young() {
-        let now = base();
-        let created = now + Duration::from_secs(120);
-        assert!(
-            job_within_reap_grace(Some(created), now, TASKRUN_JOB_REAP_GRACE),
-            "clock skew (future creation time) must not make a Job eligible for reaping"
-        );
-    }
-
-    #[test]
-    fn boot_race_classification_membership() {
-        assert!(is_boot_race_classification("absent"));
-        assert!(is_boot_race_classification(
-            "task_run_running_without_session"
-        ));
-        assert!(!is_boot_race_classification("task_run_completed"));
-        assert!(!is_boot_race_classification(
-            "task_run_running_without_live_session"
-        ));
-        assert!(!is_boot_race_classification("live_running"));
-    }
 }
 
 // ─── Note association pruning ────────────────────────────────────────────────

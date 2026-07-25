@@ -172,11 +172,15 @@ async fn taskrun_job_backstop_skips_empty_task_run_id_inventory_entry() {
             job_name: "djinn-taskrun-empty".to_string(),
             task_run_id: "".to_string(),
             created_at: None,
+            completed_at: None,
+            terminal_condition: None,
         },
         djinn_control_plane::bridge::TaskrunJobRef {
             job_name: "djinn-taskrun-whitespace".to_string(),
             task_run_id: "   ".to_string(),
             created_at: None,
+            completed_at: None,
+            terminal_condition: None,
         },
     ]);
     let mut app_state =
@@ -264,10 +268,9 @@ async fn zombie_zero_token_session_is_reaped_on_db_truth() {
     let before_metric = rendered_counter_value("djinn_zombie_reaps_total", "stall");
     actor.reap_zombie_sessions().await;
 
-    assert_eq!(
-        runtime.calls(),
-        vec![run_id.to_string()],
-        "zombie reaper must best-effort delete the task-run Job using DB session.task_run_id, even when teardown fails"
+    assert!(
+        runtime.calls().is_empty(),
+        "empty runtime inventory must preserve the Job instead of bypassing common retention"
     );
     assert!(rendered_counter_value("djinn_zombie_reaps_total", "stall") - before_metric >= 1.0);
 
@@ -432,10 +435,9 @@ async fn connected_worker_past_hard_cap_is_not_reaped() {
     // Sanity: once the connection drops, the same session IS reaped.
     registry.deregister(run_id).await;
     actor.reap_zombie_sessions().await;
-    assert_eq!(
-        runtime.calls(),
-        vec![run_id.to_string()],
-        "once liveness gates pass, zombie reaping deletes the task-run Job"
+    assert!(
+        runtime.calls().is_empty(),
+        "empty runtime inventory must preserve the Job instead of bypassing common retention"
     );
     assert!(
         !session_repo
@@ -562,10 +564,9 @@ async fn stall_timeout_tears_down_taskrun_job_through_slot_pool_kill_path() {
     actor.boot_at = ::time::OffsetDateTime::now_utc() - ::time::Duration::minutes(40);
     actor.enforce_session_stall_timeout().await;
 
-    assert_eq!(
-        runtime.calls(),
-        vec![run_id.to_string()],
-        "stall timeout should invoke task-run Job teardown through pool.kill_session"
+    assert!(
+        runtime.calls().is_empty(),
+        "empty runtime inventory must preserve the Job instead of bypassing common retention"
     );
     assert!(
         actor.stall_killed.contains(&session.id),
@@ -654,10 +655,9 @@ async fn reap_zombie_session_with_no_slot_mapping_still_tears_down_taskrun_job()
 
     actor.reap_zombie_sessions().await;
 
-    assert_eq!(
-        runtime.calls(),
-        vec![run_id.to_string()],
-        "zombie reap must delete the task-run Job from DB session.task_run_id even when the slot pool has no mapping"
+    assert!(
+        runtime.calls().is_empty(),
+        "empty runtime inventory must preserve the Job instead of bypassing common retention"
     );
     assert!(
         !session_repo
@@ -677,6 +677,74 @@ async fn reap_zombie_session_with_no_slot_mapping_still_tears_down_taskrun_job()
         updated.status, "open",
         "task must be released for redispatch after the no-slot zombie is reaped"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn session_recovery_taskrun_job_retention_preserves_young_and_deletes_old() {
+    use djinn_core::clock::{Clock as _, SystemClock};
+    use djinn_core::models::{SessionStatus, TaskRunStatus};
+
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let (task, _note) = create_task_with_note(&db, &tx, "recovery-retention").await;
+    let young_id = "recovery-finalized-young";
+    let old_id = "recovery-finalized-old";
+    let run_repo = TaskRunRepository::new(db.clone());
+    let session_repo = SessionRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+    let mut session_ids = Vec::new();
+    for id in [young_id, old_id] {
+        run_repo
+            .create(CreateTaskRunParams {
+                id,
+                project_id: &task.project_id,
+                task_id: &task.id,
+                trigger_type: "manual",
+                status: None,
+                workspace_path: None,
+                mirror_ref: None,
+                dispatch_group_id: None,
+            })
+            .await
+            .unwrap();
+        let session = session_repo
+            .create(CreateSessionParams {
+                project_id: &task.project_id,
+                task_id: Some(&task.id),
+                model: "openai/gpt-5.5",
+                agent_type: "worker",
+                metadata_json: None,
+                task_run_id: Some(id),
+                pricing: None,
+                cost_basis: None,
+            })
+            .await
+            .unwrap();
+        session_repo
+            .update(&session.id, SessionStatus::Completed, 1, 1, 0, 0, None)
+            .await
+            .unwrap();
+        run_repo
+            .update_status(id, TaskRunStatus::Completed)
+            .await
+            .unwrap();
+        session_ids.push(session.id);
+    }
+    let now = SystemClock::new().now();
+    let runtime = RecordingRuntimeOps::new(false).with_taskrun_jobs(vec![
+        completed_taskrun_job_ref(young_id, now),
+        completed_taskrun_job_ref(old_id, now - std::time::Duration::from_secs(301)),
+    ]);
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
+    actor.runtime_ops = Some(Arc::new(runtime.clone()));
+
+    actor
+        .teardown_zombie_taskrun_job(&task.id, &session_ids[0], Some(young_id))
+        .await;
+    assert!(runtime.calls().is_empty());
+    actor
+        .teardown_zombie_taskrun_job(&task.id, &session_ids[1], Some(old_id))
+        .await;
+    assert_eq!(runtime.calls(), vec![old_id.to_string()]);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -731,10 +799,9 @@ async fn reap_zombie_session_continues_recovery_when_teardown_fails() {
 
     actor.reap_zombie_sessions().await;
 
-    assert_eq!(
-        runtime.calls(),
-        vec![run_id.to_string()],
-        "teardown must be attempted even when it errors"
+    assert!(
+        runtime.calls().is_empty(),
+        "empty runtime inventory must preserve the Job instead of bypassing common retention"
     );
     assert!(
         !session_repo
@@ -821,9 +888,20 @@ fn taskrun_job_ref(task_run_id: &str) -> djinn_control_plane::bridge::TaskrunJob
     djinn_control_plane::bridge::TaskrunJobRef {
         job_name: format!("djinn-taskrun-{task_run_id}"),
         task_run_id: task_run_id.to_string(),
-        // `None` is treated as an old Job (past the boot-race grace window), so
-        // these existing reaping assertions keep exercising the delete path.
-        created_at: None,
+        created_at: Some(std::time::SystemTime::UNIX_EPOCH),
+        completed_at: None,
+        terminal_condition: None,
+    }
+}
+
+fn completed_taskrun_job_ref(
+    task_run_id: &str,
+    completed_at: std::time::SystemTime,
+) -> djinn_control_plane::bridge::TaskrunJobRef {
+    djinn_control_plane::bridge::TaskrunJobRef {
+        completed_at: Some(completed_at),
+        terminal_condition: Some("Complete".to_string()),
+        ..taskrun_job_ref(task_run_id)
     }
 }
 
@@ -1148,8 +1226,13 @@ fn set_mtime_to_days_ago(path: &std::path::Path, days: u64) {
     );
 }
 
+/// Class discrimination for the periodic backstop, with every non-live class
+/// aged past its retention window so the assertion isolates *which* classes are
+/// eligible from *when* they become eligible (the boundary itself is covered by
+/// `periodic_taskrun_job_retention_preserves_young_and_deletes_old`).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn taskrun_job_backstop_deletes_absent_and_finalized_rows_only() {
+async fn taskrun_job_backstop_deletes_aged_absent_and_finalized_rows_only() {
+    use djinn_core::clock::{Clock as _, SystemClock};
     use djinn_core::models::SessionStatus;
 
     let db = test_helpers::create_test_db();
@@ -1267,10 +1350,20 @@ async fn taskrun_job_backstop_deletes_absent_and_finalized_rows_only() {
         .await
         .unwrap();
 
+    let now = SystemClock::new().now();
     let runtime = RecordingRuntimeOps::new(false).with_taskrun_jobs(vec![
+        // No DB owner rows at all: `Failure` with no terminal timestamp, held
+        // from `created_at` (epoch) for the failure window, so long elapsed.
         taskrun_job_ref("run-absent-backstop"),
-        taskrun_job_ref(finalized_run_id),
-        taskrun_job_ref(interrupted_run_id),
+        // Cleanly completed: `Success`, one second past the 300s window.
+        completed_taskrun_job_ref(finalized_run_id, now - std::time::Duration::from_secs(301)),
+        // Terminal Kubernetes evidence contradicting a stale `running` task_run:
+        // `Failure`, one second past the 3600s window.
+        djinn_control_plane::bridge::TaskrunJobRef {
+            completed_at: Some(now - std::time::Duration::from_secs(3601)),
+            ..taskrun_job_ref(interrupted_run_id)
+        },
+        // Genuinely live: `Live`, never age-gated.
         taskrun_job_ref(live_run_id),
     ]);
     let mut app_state =
@@ -1286,7 +1379,7 @@ async fn taskrun_job_backstop_deletes_absent_and_finalized_rows_only() {
             finalized_run_id.to_string(),
             interrupted_run_id.to_string(),
         ],
-        "backstop must delete absent/finalized/interrupted-session Jobs and preserve live running task-runs"
+        "backstop must delete aged absent/finalized/interrupted-session Jobs and preserve live running task-runs"
     );
     assert!(
         session_repo
@@ -1300,26 +1393,37 @@ async fn taskrun_job_backstop_deletes_absent_and_finalized_rows_only() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn stale_resource_sweep_runs_taskrun_job_backstop() {
+async fn periodic_taskrun_job_retention_preserves_young_and_deletes_old() {
+    use djinn_core::clock::{Clock as _, SystemClock};
+
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
     let (task, _note) = create_task_with_note(&db, &tx, "periodic-backstop-wiring").await;
-    let periodic_run_id = "periodic-finalized";
-    TaskRunRepository::new(db.clone())
-        .create(CreateTaskRunParams {
-            id: periodic_run_id,
+    let young_id = "periodic-finalized-young";
+    let old_id = "periodic-finalized-old";
+    let repo = TaskRunRepository::new(db.clone());
+    for id in [young_id, old_id] {
+        repo.create(CreateTaskRunParams {
+            id,
             project_id: &task.project_id,
             task_id: &task.id,
             trigger_type: "manual",
-            status: Some("completed"),
+            status: None,
             workspace_path: None,
             mirror_ref: None,
             dispatch_group_id: None,
         })
         .await
         .unwrap();
-    let runtime =
-        RecordingRuntimeOps::new(false).with_taskrun_jobs(vec![taskrun_job_ref(periodic_run_id)]);
+        repo.update_status(id, djinn_core::models::TaskRunStatus::Completed)
+            .await
+            .unwrap();
+    }
+    let now = SystemClock::new().now();
+    let runtime = RecordingRuntimeOps::new(false).with_taskrun_jobs(vec![
+        completed_taskrun_job_ref(young_id, now),
+        completed_taskrun_job_ref(old_id, now - std::time::Duration::from_secs(301)),
+    ]);
     let mut app_state =
         test_helpers::coordinator_context_from_db(db.clone(), CancellationToken::new());
     app_state.runtime_ops = Some(Arc::new(runtime.clone()));
@@ -1327,35 +1431,42 @@ async fn stale_resource_sweep_runs_taskrun_job_backstop() {
     let before_metric = rendered_counter_value("djinn_zombie_reaps_total", "periodic");
     health::sweep_stale_resources(&db, &app_state).await;
 
-    assert_eq!(
-        runtime.calls(),
-        vec![periodic_run_id.to_string()],
-        "periodic stale-resource sweep must run the K8s task-run Job backstop"
-    );
+    assert_eq!(runtime.calls(), vec![old_id.to_string()]);
     assert!(rendered_counter_value("djinn_zombie_reaps_total", "periodic") - before_metric >= 1.0);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn startup_reconcile_runs_taskrun_job_backstop() {
+async fn startup_taskrun_job_retention_preserves_young_and_deletes_old() {
+    use djinn_core::clock::{Clock as _, SystemClock};
+
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
     let (task, _note) = create_task_with_note(&db, &tx, "startup-backstop-wiring").await;
-    let startup_run_id = "startup-finalized";
-    TaskRunRepository::new(db.clone())
-        .create(CreateTaskRunParams {
-            id: startup_run_id,
+    let young_id = "startup-finalized-young";
+    let old_id = "startup-finalized-old";
+    let repo = TaskRunRepository::new(db.clone());
+    for id in [young_id, old_id] {
+        repo.create(CreateTaskRunParams {
+            id,
             project_id: &task.project_id,
             task_id: &task.id,
             trigger_type: "manual",
-            status: Some("completed"),
+            status: None,
             workspace_path: None,
             mirror_ref: None,
             dispatch_group_id: None,
         })
         .await
         .unwrap();
-    let runtime =
-        RecordingRuntimeOps::new(false).with_taskrun_jobs(vec![taskrun_job_ref(startup_run_id)]);
+        repo.update_status(id, djinn_core::models::TaskRunStatus::Completed)
+            .await
+            .unwrap();
+    }
+    let now = SystemClock::new().now();
+    let runtime = RecordingRuntimeOps::new(false).with_taskrun_jobs(vec![
+        completed_taskrun_job_ref(young_id, now),
+        completed_taskrun_job_ref(old_id, now - std::time::Duration::from_secs(301)),
+    ]);
     let mut app_state =
         test_helpers::coordinator_context_from_db(db.clone(), CancellationToken::new());
     app_state.runtime_ops = Some(Arc::new(runtime.clone()));
@@ -1363,11 +1474,7 @@ async fn startup_reconcile_runs_taskrun_job_backstop() {
     let before_metric = rendered_counter_value("djinn_zombie_reaps_total", "startup");
     health::reap_orphaned_taskrun_jobs_for_startup(&db, &app_state).await;
 
-    assert_eq!(
-        runtime.calls(),
-        vec![startup_run_id.to_string()],
-        "startup reconcile must run the K8s task-run Job backstop before periodic intervals"
-    );
+    assert_eq!(runtime.calls(), vec![old_id.to_string()]);
     assert!(rendered_counter_value("djinn_zombie_reaps_total", "startup") - before_metric >= 1.0);
 }
 
@@ -1572,10 +1679,9 @@ async fn token_bearing_terminal_orphan_is_reaped() {
     actor.runtime_ops = Some(Arc::new(runtime.clone()));
     actor.reap_zombie_sessions().await;
 
-    assert_eq!(
-        runtime.calls(),
-        vec![run_id.to_string()],
-        "terminal orphan session with nonzero tokens must have its task-run Job torn down"
+    assert!(
+        runtime.calls().is_empty(),
+        "empty runtime inventory must preserve the Job instead of bypassing common retention"
     );
     assert!(
         !session_repo
@@ -1650,10 +1756,9 @@ async fn token_bearing_open_reset_orphan_is_reaped() {
     actor.runtime_ops = Some(Arc::new(runtime.clone()));
     actor.reap_zombie_sessions().await;
 
-    assert_eq!(
-        runtime.calls(),
-        vec![run_id.to_string()],
-        "open-reset orphan session with nonzero tokens must have its task-run Job torn down"
+    assert!(
+        runtime.calls().is_empty(),
+        "empty runtime inventory must preserve the Job instead of bypassing common retention"
     );
     assert!(
         !session_repo

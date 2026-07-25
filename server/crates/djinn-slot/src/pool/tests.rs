@@ -35,6 +35,7 @@ fn test_app_state() -> (
 #[derive(Clone)]
 struct RecordingRuntimeOps {
     calls: Arc<Mutex<Vec<String>>>,
+    taskrun_jobs: Arc<Mutex<Vec<djinn_control_plane::bridge::TaskrunJobRef>>>,
     fail_teardown: bool,
 }
 
@@ -42,8 +43,13 @@ impl RecordingRuntimeOps {
     fn new(fail_teardown: bool) -> Self {
         Self {
             calls: Arc::new(Mutex::new(Vec::new())),
+            taskrun_jobs: Arc::new(Mutex::new(Vec::new())),
             fail_teardown,
         }
+    }
+    fn with_taskrun_jobs(self, jobs: Vec<djinn_control_plane::bridge::TaskrunJobRef>) -> Self {
+        *self.taskrun_jobs.lock().expect("runtime jobs mutex") = jobs;
+        self
     }
     fn calls(&self) -> Vec<String> {
         self.calls.lock().expect("calls mutex").clone()
@@ -90,8 +96,11 @@ impl djinn_control_plane::bridge::RuntimeOps for RecordingRuntimeOps {
     async fn list_taskrun_jobs(
         &self,
     ) -> Result<Vec<djinn_control_plane::bridge::TaskrunJobRef>, String> {
-        // Agent-internal test fakes don't track a kube inventory.
-        Ok(Vec::new())
+        Ok(self
+            .taskrun_jobs
+            .lock()
+            .expect("runtime jobs mutex")
+            .clone())
     }
     async fn cleanup_task_branches(&self, _: &str) {}
 }
@@ -1186,7 +1195,7 @@ async fn kill_and_pause_are_routed_to_the_correct_task_slot() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn kill_session_tears_down_taskrun_job_and_ignores_teardown_errors() {
+async fn kill_session_preserves_live_taskrun_job() {
     let (mut app_state, cancel, _temp) = test_app_state();
     let runtime = RecordingRuntimeOps::new(true);
     app_state.runtime_ops = Some(Arc::new(runtime.clone()));
@@ -1209,14 +1218,14 @@ async fn kill_session_tears_down_taskrun_job_and_ignores_teardown_errors() {
         .await
         .expect("teardown failure must not fail kill_session");
     assert!(
-        runtime.calls().iter().any(|call| call == "run-kill"),
-        "kill_session should attempt task-run Job teardown"
+        runtime.calls().is_empty(),
+        "live task-run Job must be preserved"
     );
     wait_until_no_sessions(&pool, &[task_id]).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn evict_session_tears_down_taskrun_job_before_reclaiming_slot() {
+async fn evict_session_preserves_taskrun_job_missing_from_inventory() {
     let (mut app_state, cancel, _temp) = test_app_state();
     let runtime = RecordingRuntimeOps::new(false);
     app_state.runtime_ops = Some(Arc::new(runtime.clone()));
@@ -1240,8 +1249,8 @@ async fn evict_session_tears_down_taskrun_job_before_reclaiming_slot() {
         .await
         .expect("evict_session should succeed");
     assert!(
-        runtime.calls().iter().any(|call| call == "run-evict"),
-        "evict_session should attempt task-run Job teardown"
+        runtime.calls().is_empty(),
+        "missing inventory evidence must fail closed and preserve the Job"
     );
     assert!(
         !pool
@@ -1249,6 +1258,86 @@ async fn evict_session_tears_down_taskrun_job_before_reclaiming_slot() {
             .await
             .expect("has_session should succeed"),
         "evict_session should still reclaim the task mapping"
+    );
+}
+
+/// Inventory entry carrying terminal Kubernetes evidence at epoch+1000s. Paired
+/// with [`reaped_clock`] it sits exactly one second past the shared classifier's
+/// failure retention window, so teardown is authorized. Tests that assert the
+/// slot pool *reaches* the teardown path for each affected run use this so the
+/// retention gate does not silently make them vacuous.
+fn reapable_taskrun_job_ref(run_id: &str) -> djinn_control_plane::bridge::TaskrunJobRef {
+    djinn_control_plane::bridge::TaskrunJobRef {
+        job_name: format!("djinn-taskrun-{run_id}"),
+        task_run_id: run_id.to_string(),
+        created_at: Some(std::time::SystemTime::UNIX_EPOCH),
+        completed_at: Some(std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_000)),
+        terminal_condition: Some("Failed".to_string()),
+    }
+}
+
+/// Clock at epoch+4600s: `reapable_taskrun_job_ref`'s terminal evidence plus the
+/// 3600s failure retention window.
+fn reaped_clock() -> Arc<djinn_core::clock::TestClock> {
+    Arc::new(djinn_core::clock::TestClock::new(
+        std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(4_600),
+        Instant::now(),
+    ))
+}
+
+async fn run_inline_taskrun_job_retention_case(now_secs: u64, run_id: &str) -> Vec<String> {
+    let (mut app_state, cancel, _temp) = test_app_state();
+    app_state.clock = Arc::new(djinn_core::clock::TestClock::new(
+        std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(now_secs),
+        Instant::now(),
+    ));
+    let runtime = RecordingRuntimeOps::new(false).with_taskrun_jobs(vec![
+        djinn_control_plane::bridge::TaskrunJobRef {
+            job_name: format!("djinn-taskrun-{run_id}"),
+            task_run_id: run_id.to_string(),
+            created_at: Some(std::time::SystemTime::UNIX_EPOCH),
+            completed_at: Some(std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_000)),
+            terminal_condition: Some("Failed".to_string()),
+        },
+    ]);
+    app_state.runtime_ops = Some(Arc::new(runtime.clone()));
+    let task_id = seed_running_session_with_task_run(&app_state, "retention", run_id).await;
+    djinn_db::TaskRunRepository::new(app_state.db.clone())
+        .update_status(run_id, djinn_core::models::TaskRunStatus::Failed)
+        .await
+        .unwrap();
+    let (signal_tx, _signal_rx) = mpsc::unbounded_channel();
+    let pool = SlotPoolHandle::spawn_with_factory(
+        app_state,
+        cancel,
+        make_config(
+            vec![model("model-a", 1, &["worker"])],
+            &[("worker", vec!["model-a"])],
+        ),
+        test_slot_factory(Duration::from_secs(10), signal_tx),
+    );
+    pool.dispatch(&task_id, "/tmp/project", "model-a")
+        .await
+        .unwrap();
+    pool.kill_session(&task_id).await.unwrap();
+    wait_until_no_sessions(&pool, &[task_id]).await;
+    runtime.calls()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn inline_taskrun_job_retention_preserves_before_failure_boundary() {
+    assert!(
+        run_inline_taskrun_job_retention_case(4_599, "run-inline-young")
+            .await
+            .is_empty()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn inline_taskrun_job_retention_deletes_at_failure_boundary() {
+    assert_eq!(
+        run_inline_taskrun_job_retention_case(4_600, "run-inline-old").await,
+        vec!["run-inline-old".to_string()]
     );
 }
 
@@ -1305,11 +1394,8 @@ async fn actor_handle_evict_then_late_killed_event_preserves_reclaimed_mapping()
     )
     .await;
     assert!(
-        runtime
-            .calls()
-            .iter()
-            .any(|call| call == "run-actor-evict-race"),
-        "evict_session must attempt task-run Job teardown before reclaim"
+        runtime.calls().is_empty(),
+        "missing inventory evidence must preserve the task-run Job"
     );
     assert!(
         !pool
@@ -1378,7 +1464,11 @@ async fn actor_handle_evict_then_late_killed_event_preserves_reclaimed_mapping()
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn interrupt_all_tears_down_each_running_taskrun_job() {
     let (mut app_state, cancel, _temp) = test_app_state();
-    let runtime = RecordingRuntimeOps::new(false);
+    app_state.clock = reaped_clock();
+    let runtime = RecordingRuntimeOps::new(false).with_taskrun_jobs(vec![
+        reapable_taskrun_job_ref("run-int-a"),
+        reapable_taskrun_job_ref("run-int-b"),
+    ]);
     app_state.runtime_ops = Some(Arc::new(runtime.clone()));
     let task_a = seed_running_session_with_task_run(&app_state, "interrupt a", "run-int-a").await;
     let task_b = seed_running_session_with_task_run(&app_state, "interrupt b", "run-int-b").await;
@@ -1615,7 +1705,14 @@ async fn mark_slot_free_is_idempotent_and_skips_retired() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn interrupt_project_tears_down_each_affected_taskrun_job() {
     let (mut app_state, cancel, _temp) = test_app_state();
-    let runtime = RecordingRuntimeOps::new(false);
+    app_state.clock = reaped_clock();
+    // All three are reap-eligible on retention grounds, so the untouched
+    // project's survival proves project scoping rather than a missing entry.
+    let runtime = RecordingRuntimeOps::new(false).with_taskrun_jobs(vec![
+        reapable_taskrun_job_ref("run-proj-a"),
+        reapable_taskrun_job_ref("run-proj-b"),
+        reapable_taskrun_job_ref("run-other"),
+    ]);
     app_state.runtime_ops = Some(Arc::new(runtime.clone()));
     let project = test_helpers::create_test_project(&app_state.db).await;
     let other_project = test_helpers::create_test_project(&app_state.db).await;
@@ -1826,7 +1923,9 @@ async fn interrupt_all_is_idempotent_and_skips_already_removed_sessions() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn slot_event_killed_tears_down_taskrun_job() {
     let (mut app_state, cancel, _temp) = test_app_state();
-    let runtime = RecordingRuntimeOps::new(false);
+    app_state.clock = reaped_clock();
+    let runtime = RecordingRuntimeOps::new(false)
+        .with_taskrun_jobs(vec![reapable_taskrun_job_ref("run-killed")]);
     app_state.runtime_ops = Some(Arc::new(runtime.clone()));
     let task_id =
         seed_running_session_with_task_run(&app_state, "killed event teardown", "run-killed").await;
@@ -1874,7 +1973,9 @@ async fn slot_event_killed_tears_down_taskrun_job() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn terminate_session_synchronously_reclaims_mapping_activity_and_session_row() {
     let (mut app_state, cancel, _temp) = test_app_state();
-    let runtime = RecordingRuntimeOps::new(false);
+    app_state.clock = reaped_clock();
+    let runtime = RecordingRuntimeOps::new(false)
+        .with_taskrun_jobs(vec![reapable_taskrun_job_ref("run-terminate-reclaim")]);
     app_state.runtime_ops = Some(Arc::new(runtime.clone()));
     let task_id = seed_running_session_with_task_run(
         &app_state,

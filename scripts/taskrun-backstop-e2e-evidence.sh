@@ -444,9 +444,9 @@ capture_server_logs() {
 The expected backstop log markers are described in
 \`docs/TASKRUN_BACKSTOP_VERIFICATION.md\` and include \`reason\`
 (\`startup\` / \`periodic\` / explicit backstop test reason),
-\`job_name\`, \`task_run_id\`, and \`db_classification\`
-(\`absent\` / \`session_interrupted\` / \`task_run_completed\` /
-\`task_run_interrupted\` / etc.).
+\`job_name\`, \`task_run_id\`, and \`outcome\`
+(\`Live\` / \`Success\` / \`Failure\`, from the shared
+\`djinn_core::job_retention\` classifier).
 EOF
 
     if ! command -v kubectl >/dev/null 2>&1; then
