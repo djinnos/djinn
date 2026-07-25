@@ -911,9 +911,14 @@ mod output_stash_gc_tests {
 
 // ─── Cargo cache health sweep ──────────────────────────────────────────────
 
-/// Filesystem convention for the warm, per-project Cargo target base.
-/// Matches `djinn_agent_worker::cargo_target_seed::WARM_BASE_ROOT`.
-const WARM_BASE_ROOT: &str = "/cache/cargo-target";
+/// Beyond this age a warm base has stopped re-converging.
+///
+/// The base is rewritten by every successful warm Job, and warm Jobs are
+/// triggered by head advances, so on an active project the age is normally
+/// minutes. A full day without a rewrite means warming is not running at all —
+/// the failure mode that went unnoticed for 3.5 days while every task pod kept
+/// seeding happily from the stale base.
+const WARM_BASE_STALE_AFTER_SECONDS: u64 = 24 * 60 * 60;
 
 /// Per-variant cargo cache health summary.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -926,7 +931,11 @@ struct CargoCacheProjectHealth {
 }
 
 async fn sweep_cargo_health() {
-    sweep_cargo_health_under(Path::new(WARM_BASE_ROOT)).await;
+    // Resolve the host's own mount, never the Job-pod convention. The cache PVC
+    // is mounted at `/cache` in Job pods and at `$DJINN_HOME/cache` here, so a
+    // hardcoded `/cache/cargo-target` made this sweep return `NotFound` on its
+    // first statement and emit nothing — for the entire life of the deployment.
+    sweep_cargo_health_under(&djinn_core::paths::cargo_target_root()).await;
 }
 
 async fn sweep_cargo_health_under(warm_base_root: &Path) {
@@ -953,7 +962,26 @@ async fn sweep_cargo_health_under(warm_base_root: &Path) {
         let seed_hit_rate =
             compute_seed_hit_rate(health.seed_hit_count, health.cold_fallback_count);
         tracing::info!(project_id = %health.project_id, mold_jobs = health.mold_jobs, seed_hit_rate, cold_fallback_count = health.cold_fallback_count, warm_base_age_seconds = ?health.warm_base_age_seconds, "cargo cache health");
+        // A stale base is invisible from every other signal: seeding still
+        // reports `hit`, disk usage is unchanged, and no warm Job fails —
+        // warming simply stops happening. This is the only alarm for it.
+        if warm_base_is_stale(health.warm_base_age_seconds) {
+            tracing::warn!(
+                project_id = %health.project_id,
+                mold_jobs = health.mold_jobs,
+                warm_base_age_seconds = ?health.warm_base_age_seconds,
+                stale_after_seconds = WARM_BASE_STALE_AFTER_SECONDS,
+                "cargo cache health: warm base has stopped re-converging; task compiles are \
+                 seeding from a stale base"
+            );
+        }
     }
+}
+
+/// Whether an observed warm-base age has crossed the re-convergence bound.
+/// An unknown age is never reported as stale: absent evidence is not a finding.
+fn warm_base_is_stale(age_seconds: Option<u64>) -> bool {
+    age_seconds.is_some_and(|age| age > WARM_BASE_STALE_AFTER_SECONDS)
 }
 
 /// Inventory only direct canonical `UUID/mold-jobs-N` directories. Legacy,
@@ -1240,6 +1268,42 @@ mod cargo_cache_health_tests {
         let rendered = "some_other_metric{label=\"x\"} 42\n";
         let metrics = parse_seed_metrics_from_text(rendered);
         assert!(metrics.is_empty());
+    }
+
+    /// The sweep resolves the server pod's own cache mount. A hardcoded
+    /// `/cache/cargo-target` (the Job-pod convention) does not exist in the
+    /// server pod, so the sweep short-circuited on `NotFound` and never emitted
+    /// a single line in production — the same defect `cache_root` already
+    /// documents for `cargo-target-runs`.
+    #[test]
+    fn cargo_health_sweep_resolves_the_host_cache_mount_not_the_job_pod_path() {
+        let root = djinn_core::paths::cargo_target_root();
+        assert_ne!(
+            root,
+            std::path::Path::new("/cache/cargo-target"),
+            "the host sweep must not resolve to the Job-pod cache path"
+        );
+        assert!(
+            root.ends_with("cache/cargo-target"),
+            "the host sweep must resolve under the host cache root: {}",
+            root.display()
+        );
+    }
+
+    /// Staleness is the only observable symptom of warming having stopped:
+    /// seeding still reports `hit`, no Job fails, and disk usage is unchanged.
+    #[test]
+    fn warm_base_staleness_alarm_fires_only_past_the_bound() {
+        assert!(!warm_base_is_stale(None), "unknown age is not a finding");
+        assert!(!warm_base_is_stale(Some(0)));
+        assert!(!warm_base_is_stale(Some(WARM_BASE_STALE_AFTER_SECONDS - 1)));
+        assert!(
+            !warm_base_is_stale(Some(WARM_BASE_STALE_AFTER_SECONDS)),
+            "exactly at the bound is not yet stale"
+        );
+        assert!(warm_base_is_stale(Some(WARM_BASE_STALE_AFTER_SECONDS + 1)));
+        // The production observation that went unreported for 3.5 days.
+        assert!(warm_base_is_stale(Some(3 * WARM_BASE_STALE_AFTER_SECONDS)));
     }
 
     #[test]

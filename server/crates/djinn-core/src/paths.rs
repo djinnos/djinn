@@ -71,6 +71,17 @@ pub fn cargo_target_runs_root() -> PathBuf {
     cache_root().join("cargo-target-runs")
 }
 
+/// Host-side directory holding the warm, per-project Cargo target bases.
+///
+/// The server/coordinator pod's view of the directory Job pods know as
+/// `/cache/cargo-target` (`djinn_agent_worker::cargo_target_seed::WARM_BASE_ROOT`).
+/// Host-side inspection MUST resolve through here for the same reason
+/// [`cargo_target_runs_root`] does: the Job-pod path does not exist in the
+/// server pod, so a hardcoded `/cache/cargo-target` silently reports nothing.
+pub fn cargo_target_root() -> PathBuf {
+    cache_root().join("cargo-target")
+}
+
 /// Per-project clone directory: `{projects_root}/{owner}/{repo}`.
 ///
 /// Every consumer of a project's filesystem location — git fetch,
