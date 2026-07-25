@@ -73,6 +73,8 @@ mod checkpoint;
 mod checkpoint_safety;
 mod launcher_handshake;
 mod lifecycle;
+pub mod warm_base_census;
+pub mod warm_step_budget;
 mod worker_services;
 
 // Startup volume-permission validation lives in this package's library target
@@ -933,6 +935,39 @@ async fn warm_cargo_target_base(
         workspace_dir.to_string_lossy().as_ref(),
     );
 
+    // Per-step budgets for this cycle, anchored now and reconciled against the
+    // warm Job's activeDeadlineSeconds (projected as
+    // `DJINN_WARM_JOB_DEADLINE_SECONDS`). Resolved once so every step's clamp
+    // is measured from the same anchor.
+    let budgets = resolve_warm_step_budgets();
+    info!(
+        project_id,
+        job_deadline_secs = budgets.job_deadline().as_secs(),
+        tail_reserve_secs = budgets.tail_reserve().as_secs(),
+        clippy_budget_secs = budgets
+            .nominal(warm_step_budget::WarmStepKind::Clippy)
+            .as_secs(),
+        build_budget_secs = budgets
+            .nominal(warm_step_budget::WarmStepKind::Build)
+            .as_secs(),
+        test_budget_secs = budgets
+            .nominal(warm_step_budget::WarmStepKind::TestNoRun)
+            .as_secs(),
+        "cargo warm: resolved per-step budgets against the warm Job deadline"
+    );
+
+    // Census the base BEFORE anything compiles. Paired with the post-compile
+    // sample this is what makes convergence answerable: whether test-target
+    // units survive and accumulate across cycles, or whether the tail sweep
+    // reclaims them faster than a truncated compile step produces them.
+    let base_dir = PathBuf::from(&target_dir);
+    let pre_compile_census = warm_base_census::census(&base_dir);
+    cargo_metrics::record_warm_base_census(
+        project_id,
+        djinn_telemetry::cargo_warm_base::PHASE_PRE_COMPILE,
+        &pre_compile_census,
+    );
+
     // Stamp the warm base BEFORE compiling. The compile refreshes the mtime of
     // every artifact it actually uses, so a post-compile `cargo sweep --file`
     // can safely delete everything older than this stamp — stale crate versions
@@ -940,8 +975,14 @@ async fn warm_cargo_target_base(
     // `incremental/` sessions. Best-effort: on images without cargo-sweep the
     // stamp fails, `sweep_stamped` stays false, and the whole prune no-ops.
     warm_cargo_test_phase("stamp");
-    let sweep_stamped =
-        run_cargo_sweep_step(project_id, &workspace_dir, &["--stamp"], "sweep-stamp").await;
+    let sweep_stamped = run_cargo_sweep_step(
+        project_id,
+        &workspace_dir,
+        &["--stamp"],
+        "sweep-stamp",
+        &budgets,
+    )
+    .await;
 
     let started = djinn_core::clock::Clock::now_instant(&djinn_core::clock::SystemClock::new());
 
@@ -966,18 +1007,25 @@ async fn warm_cargo_target_base(
         .chain(commands[0].feature_args.iter().cloned())
         .collect();
     warm_cargo_test_phase("compile");
-    let clippy_ok = run_cargo_warm_step(
+    let clippy_result = run_cargo_warm_step(
         project_id,
         &workspace_dir,
         &clippy_args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
         commands[0].label,
+        &budgets,
     )
     .await;
+    let clippy_ok = clippy_result.succeeded();
     // Track whether ANY warm step compiled successfully. The post-compile
     // `--file` sweep only runs when at least one step succeeded, so a fully-red
     // branch (nothing compiles → nothing refreshed) never prunes a still-good
     // base down to a cold rebuild.
     let mut any_step_ok = clippy_ok;
+    // …and whether ANY step was truncated at its budget. A truncated step did
+    // not get to touch every artifact it would have refreshed, so the artifacts
+    // it never reached are "not rebuilt yet", not "no longer needed" — which is
+    // the only thing `cargo sweep --file` can distinguish them by.
+    let mut any_step_truncated = clippy_result.truncated();
 
     // Run remaining warm commands (all-features clippy, default-features
     // clippy, build fallback, test --no-run, etc.), skipping the first
@@ -1002,32 +1050,90 @@ async fn warm_cargo_target_base(
             .chain(cmd.feature_args.iter().cloned())
             .collect();
         warm_cargo_test_phase("compile");
-        any_step_ok |= run_cargo_warm_step(
+        let step_result = run_cargo_warm_step(
             project_id,
             &workspace_dir,
             &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
             cmd.label,
+            &budgets,
         )
         .await;
+        any_step_ok |= step_result.succeeded();
+        any_step_truncated |= step_result.truncated();
     }
 
     let elapsed = started.elapsed();
     cargo_metrics::record_warm_base_freshness(project_id, elapsed.as_millis() as u64);
 
+    // Post-compile census, before the tail sweep can remove anything: this is
+    // the number that must rise across cycles for the base to be converging.
+    let post_compile_census = warm_base_census::census(&base_dir);
+    cargo_metrics::record_warm_base_census(
+        project_id,
+        djinn_telemetry::cargo_warm_base::PHASE_POST_COMPILE,
+        &post_compile_census,
+    );
+    info!(
+        project_id,
+        pre_test_units = pre_compile_census.test_units,
+        post_test_units = post_compile_census.test_units,
+        test_unit_delta =
+            post_compile_census.test_units as i64 - pre_compile_census.test_units as i64,
+        pre_fingerprint_units = pre_compile_census.fingerprint_units,
+        post_fingerprint_units = post_compile_census.fingerprint_units,
+        pre_dep_files = pre_compile_census.dep_files,
+        post_dep_files = post_compile_census.dep_files,
+        any_step_truncated,
+        "cargo warm: warm-base convergence delta for this cycle"
+    );
+
     // Prune the warm base of everything the compile above did not touch. Safe by
-    // construction: cargo-sweep only removes whole artifact files older than the
-    // stamp, and cargo transparently rebuilds anything genuinely needed on the
-    // next warm — it can never leave a corrupt/half cache. Gated on a successful
-    // stamp AND at least one green step so a broken branch keeps its warm base.
-    if sweep_stamped && any_step_ok {
+    // construction *only when the compile phase actually ran to completion*:
+    // cargo-sweep removes whole artifact files older than the stamp, and its
+    // sole notion of "no longer needed" is "this compile did not touch it".
+    //
+    // A step killed at its budget breaks that assumption. It never reached the
+    // artifacts it would have refreshed, so sweeping deletes exactly the
+    // previously-built artifacts the truncated step had not got to yet — the
+    // test binaries that `--no-run` exists to accumulate. Since one green
+    // clippy is enough to satisfy `any_step_ok`, the old gate fired precisely in
+    // the failure mode this task was opened for, and the base ping-ponged
+    // instead of converging. Truncation therefore skips the sweep: the base
+    // keeps last cycle's artifacts and the next cycle resumes from more
+    // progress. Disk is still bounded by the incremental prune above and by the
+    // cache-cleanup sweep outside this Pod.
+    // Truncation is checked before "nothing succeeded" because it is the more
+    // specific and more actionable explanation: a cycle whose only compile step
+    // was killed at its budget satisfies both predicates, and reporting it as
+    // `skipped_no_success` would hide the very signal this task is about.
+    let sweep_decision = if !sweep_stamped {
+        djinn_telemetry::cargo_warm_base::DECISION_SKIPPED_NO_STAMP
+    } else if any_step_truncated {
+        djinn_telemetry::cargo_warm_base::DECISION_SKIPPED_TRUNCATED
+    } else if !any_step_ok {
+        djinn_telemetry::cargo_warm_base::DECISION_SKIPPED_NO_SUCCESS
+    } else {
+        djinn_telemetry::cargo_warm_base::DECISION_SWEPT
+    };
+    cargo_metrics::record_warm_sweep_decision(project_id, sweep_decision);
+    if sweep_decision == djinn_telemetry::cargo_warm_base::DECISION_SWEPT {
         warm_cargo_test_phase("end-sweep");
-        run_cargo_sweep_step(project_id, &workspace_dir, &["--file"], "sweep-file").await;
+        run_cargo_sweep_step(
+            project_id,
+            &workspace_dir,
+            &["--file"],
+            "sweep-file",
+            &budgets,
+        )
+        .await;
     } else {
         info!(
             project_id,
             sweep_stamped,
             any_step_ok,
-            "cargo warm: skipping warm-base sweep (no stamp or no successful compile step)"
+            any_step_truncated,
+            sweep_decision,
+            "cargo warm: skipping warm-base sweep"
         );
     }
 
@@ -1053,6 +1159,62 @@ static WARM_CARGO_INJECTED_LOCK_FAILURE: std::sync::Mutex<
 #[cfg(test)]
 static WARM_CARGO_TEST_ROOT: std::sync::Mutex<Option<std::path::PathBuf>> =
     std::sync::Mutex::new(None);
+
+/// Injected budgets for the warm orchestration tests. Production always
+/// resolves from the environment; the seam exists so a test can shorten a step
+/// bound without a process-global env var that would leak into the sibling
+/// tests spawning their own cargo stubs in the same binary.
+#[cfg(test)]
+static WARM_CARGO_TEST_BUDGETS: std::sync::Mutex<Option<warm_step_budget::WarmStepBudgets>> =
+    std::sync::Mutex::new(None);
+
+fn resolve_warm_step_budgets() -> warm_step_budget::WarmStepBudgets {
+    #[cfg(test)]
+    if let Some(injected) = *WARM_CARGO_TEST_BUDGETS
+        .lock()
+        .expect("warm budgets poisoned")
+    {
+        return injected;
+    }
+    warm_step_budget::WarmStepBudgets::now_from_env()
+}
+
+/// Forced terminal outcome for warm steps, for the orchestration tests.
+///
+/// The real truncation path cannot be driven deterministically from inside this
+/// test binary: the child reaper is process-wide, so a sibling test's group
+/// shutdown can `SIGTERM` a deliberately-hung stub before its own budget
+/// elapses, and the step then classifies as an external-signal death rather
+/// than a timeout. The timeout-versus-spawn-failure discrimination itself is
+/// covered directly by
+/// `warm_step_error_outcome_separates_truncation_from_spawn_failure` and by
+/// `djinn_graph::process`'s own tests; this seam only lets the orchestration
+/// around it — sweep suppression and convergence logging — be asserted without
+/// a racing subprocess.
+///
+/// Keyed by project id so the injection can never leak into a sibling test
+/// running concurrently in this binary — the warm-step tests each use their own
+/// project id, and only the injecting test's own warm sees a forced outcome.
+#[cfg(test)]
+static WARM_CARGO_TEST_STEP_OUTCOME: std::sync::Mutex<Option<(String, &'static str)>> =
+    std::sync::Mutex::new(None);
+
+fn forced_warm_step_outcome(project_id: &str) -> Option<&'static str> {
+    #[cfg(test)]
+    {
+        WARM_CARGO_TEST_STEP_OUTCOME
+            .lock()
+            .expect("warm step outcome injection poisoned")
+            .as_ref()
+            .filter(|(injected_project, _)| injected_project == project_id)
+            .map(|(_, outcome)| *outcome)
+    }
+    #[cfg(not(test))]
+    {
+        let _ = project_id;
+        None
+    }
+}
 
 #[cfg(test)]
 fn warm_cargo_test_phase(phase: &'static str) {
@@ -1178,22 +1340,24 @@ fn record_warm_incremental_prune_failure(
 }
 
 /// Run one `cargo <args>` step inside `workspace_dir` for the warm base.
-/// Returns `true` on success. Never panics; logs failures as warnings so a
-/// compile error can't abort the graph warm.
+/// Never panics; logs failures as warnings so a compile error can't abort the
+/// graph warm.
 ///
 /// Emits a structured tracing event with the resolved absolute
-/// `workspace_dir`, the full `cargo_command` argv, the `step_label`, and the
-/// terminal `seed_outcome` ("ok" / "failed" / "spawn_error") so the
-/// coordinator health sweep can correlate warm-step outcomes with workspace
-/// paths and command shapes. The metric `djinn_cargo_warm_step_total` is
-/// incremented with bounded `project_id`, `step`, and `outcome` labels.
+/// `workspace_dir`, the full `cargo_command` argv, the `step_label`, the
+/// resolved budget, and the terminal `seed_outcome` ("ok" / "failed" /
+/// "timeout" / "spawn_error") so the coordinator health sweep can correlate
+/// warm-step outcomes with workspace paths and command shapes. The metric
+/// `djinn_cargo_warm_step_total` is incremented with bounded `project_id`,
+/// `step`, and `outcome` labels.
 async fn run_cargo_warm_step(
     project_id: &str,
     workspace_dir: &Path,
     args: &[&str],
     label: &str,
-) -> bool {
-    run_cargo_warm_step_with_cargo("cargo", project_id, workspace_dir, args, label).await
+    budgets: &warm_step_budget::WarmStepBudgets,
+) -> WarmStepResult {
+    run_cargo_warm_step_with_cargo("cargo", project_id, workspace_dir, args, label, budgets).await
 }
 
 /// Run `cargo sweep <args>` inside `workspace_dir` to prune the warm target
@@ -1208,8 +1372,12 @@ async fn run_cargo_sweep_step(
     workspace_dir: &Path,
     args: &[&str],
     label: &str,
+    budgets: &warm_step_budget::WarmStepBudgets,
 ) -> bool {
-    run_cargo_sweep_step_with_cargo("cargo", project_id, workspace_dir, args, label).await
+    let budget = budgets
+        .resolve(warm_step_budget::WarmStepKind::Sweep)
+        .budget;
+    run_cargo_sweep_step_with_cargo("cargo", project_id, workspace_dir, args, label, budget).await
 }
 
 async fn run_cargo_sweep_step_with_cargo(
@@ -1218,12 +1386,13 @@ async fn run_cargo_sweep_step_with_cargo(
     workspace_dir: &Path,
     args: &[&str],
     label: &str,
+    budget: Duration,
 ) -> bool {
     let sweep_command = format!("cargo sweep {}", args.join(" "));
     let workspace_dir_display = workspace_dir.display().to_string();
     let mut command = std::process::Command::new(cargo_bin.as_ref());
     command.arg("sweep").args(args).current_dir(workspace_dir);
-    match warm_command_status(command).await {
+    match warm_command_status(command, budget).await {
         Ok(status) if status.success() => {
             info!(
                 project_id,
@@ -1253,10 +1422,11 @@ async fn run_cargo_sweep_step_with_cargo(
                 workspace_dir = %workspace_dir_display,
                 sweep_command = %sweep_command,
                 step_label = label,
-                sweep_outcome = "spawn_error",
+                sweep_outcome = warm_step_error_outcome(&e),
+                budget_secs = budget.as_secs(),
                 error = %e,
-                "cargo warm: could not spawn cargo-sweep (absent on this image?); \
-                 warm base left unpruned"
+                "cargo warm: cargo-sweep did not complete (absent on this image, \
+                 or killed at its budget); warm base left unpruned"
             );
             false
         }
@@ -1269,74 +1439,41 @@ async fn run_cargo_warm_step_with_cargo(
     workspace_dir: &Path,
     args: &[&str],
     label: &str,
-) -> bool {
+    budgets: &warm_step_budget::WarmStepBudgets,
+) -> WarmStepResult {
     let cargo_instrumented = cargo_instrument_enabled();
     let plan = cargo_warm_execution_plan(args, cargo_instrumented);
     let cargo_command = format!("cargo {}", plan.args.join(" "));
     let workspace_dir_display = workspace_dir.display().to_string();
+    // Classify from the ORIGINAL args, not the instrumented plan: the plan may
+    // prepend flags but never changes which cargo subcommand runs.
+    let kind = warm_step_budget::WarmStepKind::from_args(args);
+    let resolved = budgets.resolve(kind);
+    let started = djinn_core::clock::Clock::now_instant(&djinn_core::clock::SystemClock::new());
 
-    if !cargo_instrumented {
+    let outcome = if let Some(forced) = forced_warm_step_outcome(project_id) {
+        forced
+    } else if !cargo_instrumented {
         let mut command = std::process::Command::new(cargo_bin.as_ref());
         command.args(&plan.args).current_dir(workspace_dir);
-        return match warm_command_status(command).await {
-            Ok(status) if status.success() => {
-                info!(
-                    project_id,
-                    workspace_dir = %workspace_dir_display,
-                    cargo_command = %cargo_command,
-                    step_label = label,
-                    seed_outcome = "ok",
-                    "cargo warm: step succeeded"
-                );
-                cargo_metrics::record_warm_step(
-                    project_id,
-                    label,
-                    djinn_telemetry::cargo_warm_step::OUTCOME_OK,
-                );
-                true
-            }
-            Ok(status) => {
-                warn!(
-                    project_id,
-                    workspace_dir = %workspace_dir_display,
-                    cargo_command = %cargo_command,
-                    step_label = label,
-                    seed_outcome = "failed",
-                    code = ?status.code(),
-                    "cargo warm: step failed (non-fatal; continuing warm)"
-                );
-                cargo_metrics::record_warm_step(
-                    project_id,
-                    label,
-                    djinn_telemetry::cargo_warm_step::OUTCOME_FAILED,
-                );
-                false
-            }
+        match warm_command_status(command, resolved.budget).await {
+            Ok(status) if status.success() => djinn_telemetry::cargo_warm_step::OUTCOME_OK,
+            Ok(_) => djinn_telemetry::cargo_warm_step::OUTCOME_FAILED,
             Err(err) => {
                 warn!(
                     project_id,
-                    workspace_dir = %workspace_dir_display,
-                    cargo_command = %cargo_command,
                     step_label = label,
-                    seed_outcome = "spawn_error",
                     error = %err,
-                    "cargo warm: failed to spawn `cargo` (non-fatal; continuing warm)"
+                    "cargo warm: step did not run to completion"
                 );
-                cargo_metrics::record_warm_step(
-                    project_id,
-                    label,
-                    djinn_telemetry::cargo_warm_step::OUTCOME_SPAWN_ERROR,
-                );
-                false
+                warm_step_error_outcome(&err)
             }
-        };
-    }
-
-    let mut command = std::process::Command::new(cargo_bin.as_ref());
-    command.args(&plan.args).current_dir(workspace_dir);
-    match warm_command_output(command).await {
-        Ok(output) => {
-            if cargo_instrumented {
+        }
+    } else {
+        let mut command = std::process::Command::new(cargo_bin.as_ref());
+        command.args(&plan.args).current_dir(workspace_dir);
+        match warm_command_output(command, resolved.budget).await {
+            Ok(output) => {
                 let (stdout_fresh_count, stdout_compiling_count) =
                     cargo_fresh_compiling_counts(&output.stdout);
                 let (stderr_fresh_count, stderr_compiling_count) =
@@ -1363,59 +1500,64 @@ async fn run_cargo_warm_step_with_cargo(
                     label,
                     compiling_count,
                 );
-            }
 
-            if output.status.success() {
-                info!(
-                    project_id,
-                    workspace_dir = %workspace_dir_display,
-                    cargo_command = %cargo_command,
-                    step_label = label,
-                    seed_outcome = "ok",
-                    "cargo warm: step succeeded"
-                );
-                cargo_metrics::record_warm_step(
-                    project_id,
-                    label,
-                    djinn_telemetry::cargo_warm_step::OUTCOME_OK,
-                );
-                true
-            } else {
+                if output.status.success() {
+                    djinn_telemetry::cargo_warm_step::OUTCOME_OK
+                } else {
+                    djinn_telemetry::cargo_warm_step::OUTCOME_FAILED
+                }
+            }
+            Err(err) => {
                 warn!(
                     project_id,
-                    workspace_dir = %workspace_dir_display,
-                    cargo_command = %cargo_command,
                     step_label = label,
-                    seed_outcome = "failed",
-                    code = ?output.status.code(),
-                    "cargo warm: step failed (non-fatal; continuing warm)"
+                    error = %err,
+                    "cargo warm: step did not run to completion"
                 );
-                cargo_metrics::record_warm_step(
-                    project_id,
-                    label,
-                    djinn_telemetry::cargo_warm_step::OUTCOME_FAILED,
-                );
-                false
+                warm_step_error_outcome(&err)
             }
         }
-        Err(err) => {
-            warn!(
-                project_id,
-                workspace_dir = %workspace_dir_display,
-                cargo_command = %cargo_command,
-                step_label = label,
-                seed_outcome = "spawn_error",
-                error = %err,
-                "cargo warm: failed to spawn `cargo` (non-fatal; continuing warm)"
-            );
-            cargo_metrics::record_warm_step(
-                project_id,
-                label,
-                djinn_telemetry::cargo_warm_step::OUTCOME_SPAWN_ERROR,
-            );
-            false
-        }
+    };
+
+    let elapsed = started.elapsed();
+    let result = WarmStepResult::new(outcome);
+    // Exactly one terminal event and one metric pair per step, carrying the
+    // budget that bounded it and whether that budget came from the step's own
+    // configuration or from the enclosing warm-Job deadline. A truncated step is
+    // reported as `timeout`, never as `spawn_error`: it left partial progress in
+    // the warm base, which is what the convergence question turns on.
+    if result.succeeded() {
+        info!(
+            project_id,
+            workspace_dir = %workspace_dir_display,
+            cargo_command = %cargo_command,
+            step_label = label,
+            seed_outcome = outcome,
+            ran_to_completion = true,
+            budget_secs = resolved.budget.as_secs(),
+            budget_clamped_by_job_deadline = resolved.clamped_by_deadline,
+            elapsed_ms = elapsed.as_millis() as u64,
+            "cargo warm: step succeeded"
+        );
+    } else {
+        warn!(
+            project_id,
+            workspace_dir = %workspace_dir_display,
+            cargo_command = %cargo_command,
+            step_label = label,
+            seed_outcome = outcome,
+            ran_to_completion = false,
+            truncated = result.truncated(),
+            budget_secs = resolved.budget.as_secs(),
+            budget_clamped_by_job_deadline = resolved.clamped_by_deadline,
+            job_deadline_secs = budgets.job_deadline().as_secs(),
+            elapsed_ms = elapsed.as_millis() as u64,
+            "cargo warm: step did not succeed (non-fatal; continuing warm)"
+        );
     }
+    cargo_metrics::record_warm_step(project_id, label, outcome);
+    cargo_metrics::record_warm_step_seconds(project_id, label, outcome, elapsed);
+    result
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1424,35 +1566,82 @@ enum CargoWarmOutputMode {
     CaptureForInstrumentation,
 }
 
-#[cfg(target_os = "linux")]
-const WARM_COMMAND_TIMEOUT: Duration = Duration::from_secs(30 * 60);
-
 async fn warm_command_status(
     command: std::process::Command,
+    budget: Duration,
 ) -> std::io::Result<std::process::ExitStatus> {
     #[cfg(target_os = "linux")]
     {
-        djinn_graph::process::output_with_timeout(command, WARM_COMMAND_TIMEOUT)
+        djinn_graph::process::output_with_timeout(command, budget)
             .await
             .map(|output| output.status)
     }
     #[cfg(not(target_os = "linux"))]
-    tokio::task::spawn_blocking(move || command.status())
-        .await
-        .map_err(std::io::Error::other)?
+    {
+        // Only Linux has the process-group timeout/kill implementation; the
+        // non-Linux path is developer-workstation only and stays unbounded.
+        let _ = budget;
+        tokio::task::spawn_blocking(move || command.status())
+            .await
+            .map_err(std::io::Error::other)?
+    }
 }
 
 async fn warm_command_output(
     command: std::process::Command,
+    budget: Duration,
 ) -> std::io::Result<std::process::Output> {
     #[cfg(target_os = "linux")]
     {
-        djinn_graph::process::output_with_timeout(command, WARM_COMMAND_TIMEOUT).await
+        djinn_graph::process::output_with_timeout(command, budget).await
     }
     #[cfg(not(target_os = "linux"))]
-    tokio::task::spawn_blocking(move || command.output())
-        .await
-        .map_err(std::io::Error::other)?
+    {
+        let _ = budget;
+        tokio::task::spawn_blocking(move || command.output())
+            .await
+            .map_err(std::io::Error::other)?
+    }
+}
+
+/// Classify a warm-step process error into its bounded outcome label.
+///
+/// `output_with_timeout` returns `io::ErrorKind::TimedOut` **only** when our own
+/// deadline fired (an externally-signalled child surfaces as a distinct
+/// non-timeout failure), so this is an exact discrimination between "cargo ran
+/// and was killed at its budget, leaving partial progress in the warm base" and
+/// "cargo never started". Conflating the two is what made every production warm
+/// cycle report `spawn_error` for a step that had compiled for thirty minutes.
+fn warm_step_error_outcome(err: &std::io::Error) -> &'static str {
+    if err.kind() == std::io::ErrorKind::TimedOut {
+        djinn_telemetry::cargo_warm_step::OUTCOME_TIMEOUT
+    } else {
+        djinn_telemetry::cargo_warm_step::OUTCOME_SPAWN_ERROR
+    }
+}
+
+/// Terminal result of one warm step, retaining whether the step was truncated.
+///
+/// `succeeded` alone is not enough for the caller: a truncated step neither
+/// succeeded nor left the base in the "everything needed was rebuilt" state the
+/// tail `cargo sweep --file` assumes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WarmStepResult {
+    outcome: &'static str,
+}
+
+impl WarmStepResult {
+    const fn new(outcome: &'static str) -> Self {
+        Self { outcome }
+    }
+
+    fn succeeded(self) -> bool {
+        self.outcome == djinn_telemetry::cargo_warm_step::OUTCOME_OK
+    }
+
+    fn truncated(self) -> bool {
+        djinn_telemetry::cargo_warm_step::outcome_left_partial_progress(self.outcome)
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -3959,13 +4148,15 @@ warning: something
                     tmp.path(),
                     &["check"],
                     "check",
+                    &warm_step_budget::WarmStepBudgets::now_from_env(),
                 ))
         });
 
         // SAFETY: guarded test-only env mutation.
         unsafe { std::env::remove_var("DJINN_CARGO_INSTRUMENT") };
 
-        assert!(ok, "mock cargo should succeed");
+        assert!(ok.succeeded(), "mock cargo should succeed");
+        assert!(!ok.truncated(), "a zero-exit step is not truncated");
         let logs = logs.take();
         assert!(
             logs.contains("cargo warm: instrumented Fresh/Compiling counts"),
@@ -4010,6 +4201,7 @@ warning: something
                 workspace,
                 args,
                 "sweep-file",
+                warm_step_budget::DEFAULT_SWEEP_BUDGET,
             ))
     }
 
@@ -4093,10 +4285,11 @@ warning: something
                     tmp.path(),
                     &["check"],
                     "check",
+                    &warm_step_budget::WarmStepBudgets::now_from_env(),
                 ))
         });
 
-        assert!(ok, "mock cargo should succeed");
+        assert!(ok.succeeded(), "mock cargo should succeed");
         let logs = logs.take();
         assert!(
             !logs.contains("instrumented Fresh/Compiling counts"),
@@ -4670,6 +4863,198 @@ warning: something
             ["lock", "pruned", "stamp", "compile", "end-sweep"]
         );
         let _ = std::fs::remove_dir_all(target);
+    }
+
+    /// The convergence fix, end to end.
+    ///
+    /// A compile step killed at its budget must (a) be recorded as `timeout`,
+    /// not `spawn_error`, and (b) suppress the tail `cargo sweep --file`.
+    /// Sweeping after a truncated step deletes exactly the previously-built
+    /// artifacts the step never reached — for the production warm that is the
+    /// test binaries `--no-run` exists to accumulate — so the base loses ground
+    /// every cycle instead of converging.
+    ///
+    /// Unix-only for the `chmod`ed stub `cargo` the stamp step invokes.
+    #[cfg(unix)]
+    #[test]
+    fn truncated_warm_step_records_timeout_and_suppresses_the_tail_sweep() {
+        use std::os::unix::fs::PermissionsExt;
+        let _serial = WARM_CARGO_ORDERING_MUTEX.lock().expect("ordering mutex");
+        let fixture = tempfile::tempdir().expect("workspace fixture");
+        std::fs::write(
+            fixture.path().join("Cargo.toml"),
+            "[package]\nname=\"ordering-truncated\"\nversion=\"0.1.0\"\nedition=\"2024\"\n",
+        )
+        .expect("manifest");
+        // Only the stamp/sweep steps actually spawn here; the compile step's
+        // terminal outcome is injected (see WARM_CARGO_TEST_STEP_OUTCOME).
+        let cargo = fixture.path().join("cargo");
+        std::fs::write(&cargo, "#!/bin/sh\nexit 0\n").expect("fake cargo");
+        let mut permissions = std::fs::metadata(&cargo)
+            .expect("cargo metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&cargo, permissions).expect("fake cargo executable");
+
+        let project = format!("warm-truncated-{}", std::process::id());
+        let warm_root = fixture.path().join("warm-base");
+        let target = warm_root.join(&project);
+        std::fs::create_dir_all(target.join("debug/incremental")).expect("warm target");
+        let previous_target = std::env::var_os(CARGO_TARGET_DIR_ENV);
+        let previous_path = std::env::var("PATH").expect("PATH");
+        unsafe {
+            std::env::set_var(CARGO_TARGET_DIR_ENV, &target);
+            std::env::set_var(
+                "PATH",
+                format!("{}:{previous_path}", fixture.path().display()),
+            );
+        }
+        *WARM_CARGO_TEST_ROOT.lock().expect("warm test root") = Some(warm_root);
+        // Injected rather than env-driven: a process-global budget override
+        // would change the bound for the sibling warm-step tests running in
+        // parallel in this same binary.
+        *WARM_CARGO_TEST_BUDGETS.lock().expect("warm budgets") =
+            Some(warm_step_budget::WarmStepBudgets::for_testing(
+                Duration::from_secs(1_234),
+                Duration::from_secs(120),
+            ));
+        *WARM_CARGO_TEST_STEP_OUTCOME
+            .lock()
+            .expect("warm step outcome injection") = Some((
+            project.clone(),
+            djinn_telemetry::cargo_warm_step::OUTCOME_TIMEOUT,
+        ));
+        WARM_CARGO_PHASES.lock().expect("recorder").clear();
+
+        let policy = cargo_cache_policy::CargoCachePolicy {
+            workspace: false,
+            features: Vec::new(),
+            all_features: false,
+            warm_commands: vec![cargo_cache_policy::CargoWarmCommand {
+                label: "clippy",
+                args: vec!["clippy".to_string()],
+                feature_args: Vec::new(),
+            }],
+        };
+        // Assert through the thread-local tracing subscriber rather than the
+        // process-global metric registry: the recorder is shared with every
+        // other test in this binary, while `with_default` is scoped to this
+        // thread and therefore deterministic under `--test-threads=N`.
+        let logs = CapturedLogs::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::INFO)
+            .with_writer(logs.clone())
+            .with_span_events(tracing_subscriber::fmt::format::FmtSpan::NONE)
+            .with_target(false)
+            .with_ansi(false)
+            .finish();
+        let dispatch = Dispatch::new(subscriber);
+        tracing::dispatcher::with_default(&dispatch, || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime")
+                .block_on(warm_cargo_target_base(&project, fixture.path(), &policy));
+        });
+
+        *WARM_CARGO_TEST_ROOT.lock().expect("warm test root") = None;
+        *WARM_CARGO_TEST_BUDGETS.lock().expect("warm budgets") = None;
+        *WARM_CARGO_TEST_STEP_OUTCOME
+            .lock()
+            .expect("warm step outcome injection") = None;
+        unsafe {
+            std::env::set_var("PATH", previous_path);
+            match previous_target {
+                Some(value) => std::env::set_var(CARGO_TARGET_DIR_ENV, value),
+                None => std::env::remove_var(CARGO_TARGET_DIR_ENV),
+            }
+        }
+
+        assert_eq!(
+            *WARM_CARGO_PHASES.lock().expect("recorder"),
+            ["lock", "pruned", "stamp", "compile"],
+            "a truncated compile step must not reach the tail sweep"
+        );
+
+        let logs = logs.take();
+        // The resolved budget is logged so a truncation is always attributable
+        // to a specific bound rather than to an anonymous constant.
+        assert!(
+            logs.contains("clippy_budget_secs=1234"),
+            "the resolved per-step budget must be reported: {logs}"
+        );
+        assert!(
+            logs.contains("budget_secs=1234"),
+            "the terminal step event must carry the budget that bounded it: {logs}"
+        );
+        assert!(
+            logs.contains(&format!(
+                "seed_outcome=\"{}\"",
+                djinn_telemetry::cargo_warm_step::OUTCOME_TIMEOUT
+            )),
+            "the truncated step must be recorded as a timeout: {logs}"
+        );
+        assert!(
+            !logs.contains(&format!(
+                "seed_outcome=\"{}\"",
+                djinn_telemetry::cargo_warm_step::OUTCOME_SPAWN_ERROR
+            )),
+            "a step killed at its budget must never be reported as a spawn error: {logs}"
+        );
+        assert!(
+            logs.contains("truncated=true"),
+            "truncation must be explicit in the terminal step event: {logs}"
+        );
+        assert!(
+            logs.contains(&format!(
+                "decision=\"{}\"",
+                djinn_telemetry::cargo_warm_base::DECISION_SKIPPED_TRUNCATED
+            )),
+            "the suppressed sweep must be attributable to truncation: {logs}"
+        );
+
+        let _ = std::fs::remove_dir_all(target);
+    }
+
+    /// The exact discrimination the fix rests on: `output_with_timeout` reports
+    /// `TimedOut` only when our own deadline fired, so a truncated step and a
+    /// cargo that could not be started are distinguishable without heuristics.
+    #[test]
+    fn warm_step_error_outcome_separates_truncation_from_spawn_failure() {
+        assert_eq!(
+            warm_step_error_outcome(&std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "process timed out"
+            )),
+            djinn_telemetry::cargo_warm_step::OUTCOME_TIMEOUT,
+        );
+        assert_eq!(
+            warm_step_error_outcome(&std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "No such file or directory"
+            )),
+            djinn_telemetry::cargo_warm_step::OUTCOME_SPAWN_ERROR,
+        );
+        assert_eq!(
+            warm_step_error_outcome(&std::io::Error::other("boom")),
+            djinn_telemetry::cargo_warm_step::OUTCOME_SPAWN_ERROR,
+        );
+        // The two labels must remain distinct members of the closed space.
+        assert!(
+            djinn_telemetry::cargo_warm_step::outcome_left_partial_progress(
+                djinn_telemetry::cargo_warm_step::OUTCOME_TIMEOUT
+            )
+        );
+        for other in [
+            djinn_telemetry::cargo_warm_step::OUTCOME_OK,
+            djinn_telemetry::cargo_warm_step::OUTCOME_FAILED,
+            djinn_telemetry::cargo_warm_step::OUTCOME_SPAWN_ERROR,
+        ] {
+            assert!(
+                !djinn_telemetry::cargo_warm_step::outcome_left_partial_progress(other),
+                "{other} must not claim partial progress"
+            );
+        }
     }
 
     #[test]
