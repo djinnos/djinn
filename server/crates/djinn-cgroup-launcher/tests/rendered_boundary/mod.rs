@@ -485,14 +485,20 @@ fn worker_main(
     say!("execed-done");
 
     wait_for!("controls", 20);
-    // POSITIVE CONTROL 2: only a matching durable fencing token lifts quota.
-    // The two lifts are separated by a parent round-trip so the parent can read
-    // `cpu.max` between them without racing the second write.
+    // POSITIVE CONTROL 2: only one matching durable fencing token lifts quota.
+    // Every control is separated by a parent round-trip so it can read `cpu.max`
+    // after the real lift and again after the replay without racing either call.
     let mismatched = client.lift(LEGIT_INVOCATION, LEGIT_FENCE ^ 1);
     say!("mismatched-fence-rejected {}", mismatched.is_err());
     wait_for!("lift", 21);
     let matching = client.lift(LEGIT_INVOCATION, LEGIT_FENCE);
     say!("matching-fence-lifted {}", matching.is_ok());
+    wait_for!("replay", 22);
+    let replayed_matching = client.lift(LEGIT_INVOCATION, LEGIT_FENCE);
+    say!(
+        "replayed-matching-fence-rejected {}",
+        replayed_matching.is_err()
+    );
     say!("controls-done");
 
     wait_for!("exit", 0);
