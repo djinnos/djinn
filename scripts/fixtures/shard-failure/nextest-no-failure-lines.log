@@ -1,0 +1,6 @@
+   Compiling djinn-server v0.6.0 (/home/runner/work/djinn/djinn/server/crates/djinn-server)
+error: linking with `cc` failed: exit status: 1
+  = note: /usr/bin/ld: final link failed: No space left on device
+
+error: could not compile `djinn-server` (lib test) due to 1 previous error
+[31;1merror[0m: command [1mcargo test --no-run[0m exited with code 101
