@@ -49,14 +49,46 @@ matching group. Therefore mirror ownership is not a readiness requirement and
 operators must not recursively `chown /mirror` to uid `1000` merely to satisfy
 Git.
 
-Every Djinn-managed git process injects `safe.directory=*` through
-`GIT_CONFIG_COUNT=1`, `GIT_CONFIG_KEY_0=safe.directory`, and
-`GIT_CONFIG_VALUE_0=*`. Environment variables are required rather than a
-`git -c` flag because the inner process spawned by `git clone --local` inherits
-the environment but not its parent's command-line flags. This makes the
-2026-07-25 operational `chown /mirror/<project>.git` mitigation unnecessary
-for newly created, restored, and freshly provisioned mirrors; retain the group,
-mode, setgid, and umask contract above instead.
+Every Djinn-managed git process injects `safe.directory=*` through a **config
+file** in protected (system) scope: `djinn_git::git_command` writes
+`$TMPDIR/djinn-git-<euid>/gitconfig` once per process and exports
+`GIT_CONFIG_SYSTEM` pointing at it. The warm Job's shell wrapper does the same
+with its own file. This makes the 2026-07-25 operational
+`chown /mirror/<project>.git` mitigation unnecessary for newly created,
+restored, and freshly provisioned mirrors; retain the group, mode, setgid, and
+umask contract above instead.
+
+**Do not** switch this back to `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_0`/
+`GIT_CONFIG_VALUE_0`, and not to `git -c` either. Both are *command* scope, and
+`git clone --local` does ref discovery through an inner `git-upload-pack` child
+that git spawns with those variables **stripped** — visible in `GIT_TRACE` as
+`trace: run_command: unset GIT_CONFIG_COUNT GIT_DIR; git-upload-pack '<src>'`.
+Measured on git 2.47.3 (the deployed server image) with uid 10001 cloning a
+root-owned repository, `git clone --local --shared` fails with "detected dubious
+ownership" under both command-scope forms and succeeds with `GIT_CONFIG_SYSTEM`.
+The command-scope form is honoured by a git process that reads it *directly*,
+which is why it looked correct, and it had in fact never worked for a mirror
+clone in any released version — the check simply never fired while the server
+owned the mirror.
+
+`GIT_CONFIG_SYSTEM` rather than `GIT_CONFIG_GLOBAL`: `configure_private_dep_access`
+stores the GitHub installation token as a `url.<...>.insteadOf` rewrite with
+`git config --global`, and the agent's build tools (cargo, go, pnpm) read it back
+from `$HOME/.gitconfig` with Djinn nowhere in the loop. Redirecting global scope
+would send that write to a file nothing else reads and silently break
+private-dependency fetches. System scope is additive, so `$HOME/.gitconfig` and
+the XDG config keep being read exactly as before.
+
+**Stopgap that is no longer needed.** On 2026-07-25, with v0.7.3 deployed,
+`git config --global --add safe.directory "*"` was run by hand inside the running
+server pod to unwedge PR creation (120 dubious-ownership errors and 40
+`supervisor_pr_open failed` in 20 minutes). That was ephemeral — lost on every
+pod restart, which is how the outage resurfaced after the rollout replaced the
+pod — and it widened trust for every process sharing that uid, permanently, in a
+file on disk. The generated file above replaces it: it is process-scoped, and it
+is re-created on every start. Do not re-apply the manual command; if dubious
+ownership reappears, the config file is missing or unwritable, and the server
+logs `could not materialize the system-scope safe.directory config` at `WARN`.
 
 Violating it does not produce a crash. It produces a **silent freeze**: the warm
 Job's cargo phase is best-effort (lock-unavailable, step failure and timeout only
@@ -203,3 +235,10 @@ gap loud instead of silent.
 - `deploy/helm/djinn/tests/volume-ownership-render.sh` — the render contract.
 - `server/crates/djinn-k8s/src/launcher.rs` — `pod_security_context()` and the
   worker/child/launcher uid contract.
+- `server/crates/djinn-git/src/lib.rs` — the generated protected-scope
+  `safe.directory` config, with the measurements behind it.
+- `server/crates/djinn-git/src/lib_tests.rs` — regression tests that assert which
+  scope git resolves the rule in and what the inner child of
+  `git clone --local` sees. "A clone of a foreign-owned repo succeeds" is not
+  sufficient: git >= 2.48 accepts it either way, so that assertion passes on a
+  modern developer/CI git while production is wedged.

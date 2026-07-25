@@ -52,27 +52,282 @@ fn lower_process_priority(cmd: &mut tokio::process::Command) {
     }
 }
 
-/// Set GIT_CONFIG_COUNT=1 + GIT_CONFIG_KEY_0/VALUE_0 on a `std::process::Command`
-/// so git accepts any repo regardless of cross-UID ownership. Env vars (not
-/// `-c` flag) so that inner git subprocesses spawned by `git clone --local`
-/// also inherit the rule.
+// ─── safe.directory: protected-scope trust for cross-UID repositories ───────
+//
+// git refuses to operate on a repository owned by a different uid ("detected
+// dubious ownership") unless `safe.directory` lists it. djinn shares
+// repositories across two identities on purpose — the server (uid 10001) and
+// the worker / warm Job (uid 1000) both clone the same `/mirror` PVC — so
+// whichever identity does not own the mirror needs that exception.
+//
+// The exception has to arrive as a config **file** pointed at by
+// `GIT_CONFIG_SYSTEM`. Injecting it as `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_0`
+// (or as `git -c`) does not work. Measured on git 2.47.3 — the version in the
+// deployed server image — with uid 10001 cloning a root-owned repository:
+//
+//     git clone --local --shared <foreign-owned repo> <dst>
+//       GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.directory GIT_CONFIG_VALUE_0=*
+//                                                     -> dubious ownership, FAILS
+//       git -c safe.directory='*'                     -> dubious ownership, FAILS
+//       GIT_CONFIG_SYSTEM=<file holding safe.directory> -> clone succeeds
+//
+// The reason is visible in `GIT_TRACE`: `git clone --local` does ref discovery
+// through an inner `git-upload-pack` child, and git *strips* the command-scope
+// variables from that child's environment —
+//
+//     trace: run_command: unset GIT_CONFIG_COUNT GIT_DIR; git-upload-pack '<src>'
+//
+// — so the outer process is trusted while the child that actually opens the
+// repository is not. `GIT_CONFIG_SYSTEM` is not in that stripped set and system
+// scope is protected configuration, so the rule survives into the child.
+//
+// This is why the env form had never worked in any released version (nurw): it
+// only appeared to work while the server owned the mirror and no check fired,
+// and it broke the instant the mirror was chowned to uid 1000 for the workers.
+// Note that a test which only asserts "a clone of a foreign-owned repo
+// succeeds" does not pin this down — on git >= 2.48 that clone succeeds either
+// way. The regression tests therefore assert what the *inner child* resolves;
+// see `lib_tests.rs`.
+//
+// SYSTEM rather than GLOBAL scope, deliberately: `configure_private_dep_access`
+// stores the GitHub installation token as a `url.<...>.insteadOf` rewrite with
+// `git config --global`, and the agent's own build tools (cargo, go, pnpm) read
+// it back out of `$HOME/.gitconfig` with djinn nowhere in the loop. Pointing
+// `GIT_CONFIG_GLOBAL` at a djinn-owned file would redirect that write into a
+// file those tools never read and would silently break private-dependency
+// fetches. System scope is purely additive: `$HOME/.gitconfig` and the XDG
+// config keep being read exactly as before, and `git config --global` keeps
+// writing where it always did.
+
+/// Basename of the generated config inside [`generated_config_dir`].
+const GENERATED_CONFIG_BASENAME: &str = "gitconfig";
+
+/// The `safe.directory` value djinn writes.
+///
+/// `*` (trust every repository) rather than an explicit list of mirror roots.
+/// The reasoning:
+///
+/// * The check only fires for repositories owned by *another* uid. Everything
+///   djinn creates for itself — task workspaces, ephemeral clones, read-source
+///   caches — is owned by the creating process, so `*` grants nothing there.
+///   The only foreign-owned repositories in play are the mirror / cache volumes
+///   that djinn deliberately shares between its two service identities.
+/// * The generated file is exported only to git subprocesses djinn spawns. It is
+///   never written into `/etc/gitconfig` or any `$HOME/.gitconfig`, so unlike
+///   the `git config --global --add safe.directory "*"` that was applied by hand
+///   inside the running pod, it does not widen trust for other processes sharing
+///   that uid, and it disappears with the process.
+/// * An explicit list would have to name paths this crate cannot see: mirror and
+///   cache roots are deployment-configured, and tests and local development use
+///   per-run temporary directories. Threading that configuration into the lowest
+///   git seam would leave a path that fails closed — a wedged mirror clone —
+///   every time a new shared location appears, which is precisely the silent
+///   failure mode this whole change exists to remove.
+const SAFE_DIRECTORY_VALUE: &str = "*";
+
+/// Effective uid of this process.
+fn effective_uid() -> u32 {
+    // SAFETY: `geteuid` is always successful and takes no arguments.
+    unsafe { libc::geteuid() }
+}
+
+/// `{TMPDIR}/djinn-git-{euid}`, created private to this uid.
+///
+/// `TMPDIR` rather than `$HOME`: the server pod's home directory is not
+/// guaranteed writable, while a writable temp dir is a precondition for git
+/// itself. An existing directory is accepted only when it is a real directory
+/// owned by us that no other user can write, so a pre-planted path in a shared
+/// `/tmp` cannot be used to feed arbitrary git configuration into djinn.
+fn generated_config_dir() -> std::io::Result<PathBuf> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+
+    let dir = std::env::temp_dir().join(format!("djinn-git-{}", effective_uid()));
+    match std::fs::DirBuilder::new().mode(0o755).create(&dir) {
+        Ok(()) => return Ok(dir),
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(err) => return Err(err),
+    }
+    // `symlink_metadata`: never follow a symlink another user may have planted.
+    let metadata = std::fs::symlink_metadata(&dir)?;
+    if !metadata.is_dir() || metadata.uid() != effective_uid() || metadata.mode() & 0o022 != 0 {
+        return Err(std::io::Error::other(format!(
+            "{} is not a directory owned by uid {} and writable only by it",
+            dir.display(),
+            effective_uid()
+        )));
+    }
+    Ok(dir)
+}
+
+/// Is `GIT_CONFIG_NOSYSTEM` asking git to ignore system configuration?
+///
+/// Mirrors git's own boolean env handling closely enough for this purpose:
+/// present and not an explicit false.
+fn system_config_suppressed() -> bool {
+    match std::env::var("GIT_CONFIG_NOSYSTEM") {
+        Ok(value) => !matches!(value.trim(), "" | "0" | "false" | "no" | "off"),
+        Err(_) => false,
+    }
+}
+
+/// The system config the generated file must chain to, so that pointing
+/// `GIT_CONFIG_SYSTEM` at our file does not silently drop real system settings.
+///
+/// Returns `None` when the caller asked for no system config at all, so that
+/// intent is preserved and only `safe.directory` is added on top. Never returns
+/// `generated` itself, which would be a self-include loop.
+fn system_config_to_chain(generated: &Path) -> Option<PathBuf> {
+    if system_config_suppressed() {
+        return None;
+    }
+    let inherited = std::env::var_os("GIT_CONFIG_SYSTEM").map(PathBuf::from);
+    let candidate = match inherited {
+        Some(path) if path != generated => path,
+        // Either unset, or already pointing at our own generated file because a
+        // parent djinn process exported it; chain to the real system config.
+        _ => PathBuf::from("/etc/gitconfig"),
+    };
+    candidate.is_file().then_some(candidate)
+}
+
+/// Quote a path as a git config value (git unescapes `\\` and `\"` inside `"`).
+fn quote_config_value(path: &Path) -> String {
+    let mut quoted = String::from("\"");
+    for ch in path.to_string_lossy().chars() {
+        if ch == '\\' || ch == '"' {
+            quoted.push('\\');
+        }
+        quoted.push(ch);
+    }
+    quoted.push('"');
+    quoted
+}
+
+/// Body of the generated system-scope config, chaining to `chain` when present.
+fn generated_config_contents(chain: Option<&Path>) -> String {
+    let mut contents = String::from(
+        "# Generated by djinn-git. Do not edit; rewritten on every process start.\n\
+         #\n\
+         # Exists so `safe.directory` lands in protected (system) configuration,\n\
+         # which is the only scope git honours for it in the inner `git-upload-pack`\n\
+         # child of `git clone --local`. See the comment in djinn-git/src/lib.rs.\n",
+    );
+    if let Some(chain) = chain {
+        contents.push_str("[include]\n\tpath = ");
+        contents.push_str(&quote_config_value(chain));
+        contents.push('\n');
+    }
+    contents.push_str("[safe]\n\tdirectory = ");
+    contents.push_str(SAFE_DIRECTORY_VALUE);
+    contents.push('\n');
+    contents
+}
+
+/// Write `contents` to `path` atomically, world-readable.
+///
+/// World-readable because the pointer is inherited by descendants that may run
+/// under a different uid (the launcher-spawned child); the file holds only a
+/// `safe.directory` rule and an include path, never a secret.
+fn write_generated_config(path: &Path, contents: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let staging = path.with_file_name(format!(
+        "{GENERATED_CONFIG_BASENAME}.{}.tmp",
+        std::process::id()
+    ));
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o644)
+        .open(&staging)?;
+    file.write_all(contents.as_bytes())?;
+    drop(file);
+    std::fs::rename(&staging, path)
+}
+
+fn materialize_generated_config() -> std::io::Result<PathBuf> {
+    let path = generated_config_dir()?.join(GENERATED_CONFIG_BASENAME);
+    let contents = generated_config_contents(system_config_to_chain(&path).as_deref());
+    write_generated_config(&path, &contents)?;
+    Ok(path)
+}
+
+static GENERATED_CONFIG: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+
+/// Path of djinn's generated system-scope git config, materialized on first use.
+///
+/// `None` only when no writable location could be found, in which case callers
+/// fall back to the weaker command-scope injection.
+pub fn safe_directory_config_path() -> Option<&'static Path> {
+    GENERATED_CONFIG
+        .get_or_init(|| match materialize_generated_config() {
+            Ok(path) => Some(path),
+            Err(err) => {
+                tracing::warn!(
+                    %err,
+                    "could not materialize the system-scope safe.directory config; \
+                     falling back to command-scope injection, which git strips from \
+                     the inner child of `git clone --local` — clones of a mirror owned \
+                     by another uid will fail"
+                );
+                None
+            }
+        })
+        .as_deref()
+}
+
+/// Environment that makes git trust repositories shared across djinn's uids.
+///
+/// `(key, value)` pairs to set, plus keys to remove. `GIT_CONFIG_NOSYSTEM` has
+/// to go: it would make git ignore the very file we are pointing it at, and the
+/// generated file already honours that intent by not chaining to
+/// `/etc/gitconfig` when it was set.
+fn safe_directory_env() -> (Vec<(&'static str, String)>, &'static [&'static str]) {
+    match safe_directory_config_path() {
+        Some(path) => (
+            vec![("GIT_CONFIG_SYSTEM", path.display().to_string())],
+            &["GIT_CONFIG_NOSYSTEM"],
+        ),
+        None => (
+            vec![
+                ("GIT_CONFIG_COUNT", "1".to_string()),
+                ("GIT_CONFIG_KEY_0", "safe.directory".to_string()),
+                ("GIT_CONFIG_VALUE_0", SAFE_DIRECTORY_VALUE.to_string()),
+            ],
+            &[],
+        ),
+    }
+}
+
+/// Apply [`safe_directory_env`] to a `std::process::Command`.
 fn apply_safe_directory_env_std(cmd: &mut std::process::Command) {
-    cmd.env("GIT_CONFIG_COUNT", "1");
-    cmd.env("GIT_CONFIG_KEY_0", "safe.directory");
-    cmd.env("GIT_CONFIG_VALUE_0", "*");
+    let (set, remove) = safe_directory_env();
+    for (key, value) in set {
+        cmd.env(key, value);
+    }
+    for key in remove {
+        cmd.env_remove(key);
+    }
 }
 
 /// Build a git command that trusts repositories shared by the server and worker.
 ///
-/// The configuration is deliberately injected through environment variables,
-/// rather than a `-c` flag, because `git clone --local` starts an inner git
-/// process that inherits its environment but not the outer command's flags.
+/// The trust rule is injected as a `GIT_CONFIG_SYSTEM` config *file* rather than
+/// a `-c` flag or `GIT_CONFIG_*` entry, because `git clone --local` starts an
+/// inner git process that inherits the environment with the command-scope
+/// variables stripped. See the module comment above for the measurements.
 /// All production git subprocesses must start at this constructor.
 pub fn git_command() -> tokio::process::Command {
     let mut cmd = tokio::process::Command::new("git");
-    cmd.env("GIT_CONFIG_COUNT", "1");
-    cmd.env("GIT_CONFIG_KEY_0", "safe.directory");
-    cmd.env("GIT_CONFIG_VALUE_0", "*");
+    let (set, remove) = safe_directory_env();
+    for (key, value) in set {
+        cmd.env(key, value);
+    }
+    for key in remove {
+        cmd.env_remove(key);
+    }
     cmd
 }
 
