@@ -27,7 +27,7 @@ use std::collections::HashSet;
 use std::time::{Duration, Instant as StdInstant};
 
 use super::evidence_lifecycle_state::EvidenceLifecycleState;
-use super::refinement::{RefinementPhase, StopReason};
+use super::refinement::{RefinementPhase, StopReason, role_for_phase};
 
 use super::actor::CoordinatorActor;
 use super::refinement_outcome::RefinementOutcomeApplication;
@@ -478,8 +478,9 @@ impl CoordinatorActor {
                             self.terminate_refinement(
                                 run_id,
                                 StopReason::AgentFailure {
-                                    role: format!("{:?}", session.phase),
-                                    error: "session timeout".into(),
+                                    role: role_for_phase(session.phase),
+                                    error_code: "agent_failure".into(),
+                                    message: "session timeout".into(),
                                 },
                             )
                             .await;
@@ -655,8 +656,9 @@ impl CoordinatorActor {
             self.terminate_refinement(
                 run_id,
                 StopReason::AgentFailure {
-                    role: format!("{:?}", session.phase),
-                    error: over_cap_error,
+                    role: role_for_phase(session.phase),
+                    error_code: "agent_start_failed".into(),
+                    message: over_cap_error,
                 },
             )
             .await;
@@ -811,8 +813,9 @@ impl CoordinatorActor {
             self.terminate_refinement(
                 run_id,
                 StopReason::AgentFailure {
-                    role: format!("{:?}", phase),
-                    error: "attribution unresolvable: no user identity for refinement dispatch"
+                    role: role_for_phase(phase),
+                    error_code: "agent_failure".into(),
+                    message: "attribution unresolvable: no user identity for refinement dispatch"
                         .into(),
                 },
             )
@@ -831,8 +834,9 @@ impl CoordinatorActor {
             self.terminate_refinement(
                 run_id,
                 StopReason::AgentFailure {
-                    role: format!("{:?}", phase),
-                    error: "attributed user is empty".into(),
+                    role: role_for_phase(phase),
+                    error_code: "agent_failure".into(),
+                    message: "attributed user is empty".into(),
                 },
             )
             .await;
@@ -855,8 +859,9 @@ impl CoordinatorActor {
                 self.terminate_refinement(
                     run_id,
                     StopReason::AgentFailure {
-                        role: format!("{:?}", phase),
-                        error: format!("attributed user {user_id} not found in users table"),
+                        role: role_for_phase(phase),
+                        error_code: "agent_failure".into(),
+                        message: format!("attributed user {user_id} not found in users table"),
                     },
                 )
                 .await;
@@ -873,8 +878,9 @@ impl CoordinatorActor {
                 self.terminate_refinement(
                     run_id,
                     StopReason::AgentFailure {
-                        role: format!("{:?}", phase),
-                        error: format!("failed to resolve attributed user: {e}"),
+                        role: role_for_phase(phase),
+                        error_code: "agent_failure".into(),
+                        message: format!("failed to resolve attributed user: {e}"),
                     },
                 )
                 .await;
@@ -911,8 +917,9 @@ impl CoordinatorActor {
             self.terminate_refinement(
                 run_id,
                 StopReason::AgentFailure {
-                    role: format!("{:?}", phase),
-                    error: "no eligible credential-backed model for refinement owner".into(),
+                    role: role_for_phase(phase),
+                    error_code: "agent_failure".into(),
+                    message: "no eligible credential-backed model for refinement owner".into(),
                 },
             )
             .await;
@@ -1046,8 +1053,9 @@ impl CoordinatorActor {
                 self.terminate_refinement(
                     run_id,
                     StopReason::AgentFailure {
-                        role: format!("{:?}", phase),
-                        error: "task creation failed".into(),
+                        role: role_for_phase(phase),
+                        error_code: "agent_failure".into(),
+                        message: "task creation failed".into(),
                     },
                 )
                 .await;
@@ -1161,8 +1169,9 @@ impl CoordinatorActor {
                 self.terminate_refinement(
                     run_id,
                     StopReason::AgentFailure {
-                        role: format!("{:?}", phase),
-                        error: format!("dispatch failed: {e}"),
+                        role: role_for_phase(phase),
+                        error_code: "agent_failure".into(),
+                        message: format!("dispatch failed: {e}"),
                     },
                 )
                 .await;

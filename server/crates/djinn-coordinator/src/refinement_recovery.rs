@@ -216,15 +216,10 @@ impl CoordinatorActor {
             if self.try_resume_mid_flight(&proposal_id).await {
                 continue;
             }
-            // Only genuinely ambiguous/contradictory runs are stamped
-            // interrupted (restartable) — never guess into a corrupt tribunal.
-            self.persist_refinement_stop(&proposal_id, &StopReason::Interrupted)
-                .await;
-            tracing::info!(
-                proposal_id = %proposal_id,
-                "Stopped interrupted refinement (could not reconstruct a coherent \
-                 round/phase across restart); proposal is restartable"
-            );
+            // Legacy proposal-scoped lifecycle rows cannot establish an exact
+            // durable run/generation. Do not manufacture a stop for an
+            // uncorrelated recovery observation.
+            tracing::warn!(proposal_id = %proposal_id, "Skipping uncorrelated legacy refinement recovery");
         }
     }
 
@@ -558,7 +553,13 @@ impl CoordinatorActor {
             }
         };
 
-        let stop_reason = park.stop_reason.as_deref().and_then(StopReason::from_tag);
+        let stop_reason = park
+            .stop_reason
+            .as_deref()
+            .map(|tag| StopReason::UnknownLegacy {
+                original_value: tag.to_owned(),
+                source_row: "proposal lifecycle awaiting-review park".into(),
+            });
 
         let state = RefinementLoopState::restored_awaiting_review(
             proposal_id,

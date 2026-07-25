@@ -329,8 +329,8 @@ fn repeated_lint_rejections_are_bounded_by_existing_spawn_cap() {
     }
     assert!(matches!(
         state.record_spawn(),
-        Err(super::super::refinement::StopReason::AgentFailure { ref role, ref error })
-            if role == "advocate" && error.contains("SPEC_LINT_REJECTED")
+        Err(super::super::refinement::StopReason::AgentFailure { role: djinn_core::refinement_liveness::RefinementRole::Advocate, ref message, .. })
+            if message.contains("SPEC_LINT_REJECTED")
     ));
     assert!(
         state.is_complete(),
