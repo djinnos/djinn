@@ -169,8 +169,6 @@ pub const CONDITIONAL_VERIFICATION_TOOL: &str = "run_verification";
 ///
 /// Single source of truth shared by the live MCP tool surface (supervisor
 /// stage) and the rendered prompt tools section so the two cannot drift.
-/// `prepare_build_cache` is intentionally never touched here — it renders for
-/// the Worker unconditionally.
 pub fn retain_conditional_verification_tools(
     schemas: &mut Vec<serde_json::Value>,
     final_verification_configured: bool,

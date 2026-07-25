@@ -19,7 +19,7 @@
 //! [`WarmBuildCacheProbe`] trait, decides whether to wait, labels the decision,
 //! and lets the caller allocate exactly once afterwards. It never mutates warm
 //! state. This is a distinct pre-allocation seam from the worker-runtime
-//! `prepare_build_cache` seeding path (sibling `1bnj`).
+//! cache seeding path.
 
 use std::time::Duration;
 

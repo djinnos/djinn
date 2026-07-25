@@ -1216,8 +1216,7 @@ pub(crate) async fn execute_stage(
     // Epic 1bnj: the canonical Worker/Reviewer schema sets advertise
     // `run_verification` unconditionally; strip it from the live per-project
     // surface when the resolved project has no final-verification plan so the
-    // model never sees a gate tool that would fail at submit. `prepare_build_cache`
-    // is untouched — it renders for the Worker regardless of gate configuration.
+    // model never sees a gate tool that would fail at submit.
     djinn_roles::prompts::retain_conditional_verification_tools(
         &mut tools,
         final_verification_configured,

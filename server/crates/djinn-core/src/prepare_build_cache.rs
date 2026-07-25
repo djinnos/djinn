@@ -1,5 +1,22 @@
-//! Stack-neutral admission/classification core for the `prepare_build_cache`
-//! worker tool (epic 1bnj, proposal jvpm).
+//! Stack-neutral admission/classification core for build-cache preparation
+//! (epic 1bnj, proposal jvpm).
+//!
+//! # Status: retained policy core, no agent-facing tool
+//!
+//! The agent-facing `prepare_build_cache` worker tool that used to call this
+//! module was removed. Measured over ~100 production sessions it returned
+//! `not_applicable` on 39/39 invocations: its environment resolver compared the
+//! pod's `CARGO_TARGET_DIR` against the HOST-side cache root
+//! ([`crate::paths::cargo_target_runs_root`], which resolves under `$DJINN_HOME`
+//! / `$HOME`), and inside the task-run pod those two paths never match. Even
+//! with that resolver fixed the tool would have been an honest no-op, because
+//! its real backend — the nquz first-use / disk-lease client — does not exist
+//! yet.
+//!
+//! This classifier is deliberately KEPT: it is pure (no I/O, no runtime cost)
+//! and it is proposal nquz's admission policy. Re-exposing a tool on top of it
+//! is a small additive commit once the lease backend lands; the resolver must
+//! then read the pod's configured cache root rather than the host helper.
 //!
 //! This module owns the pure decision logic that maps a resolved platform
 //! warm-cache descriptor plus the current admission signals onto a single
@@ -33,8 +50,8 @@
 /// enum, here in `djinn-core`. Consumer crates MUST NOT introduce their own
 /// language or toolchain branches to describe a cache — they only `match` on
 /// the variants declared here, and each arm maps a variant onto an
-/// already-generic value. The intended shape is the total match in the
-/// `prepare_build_cache` handler in `djinn-agent`:
+/// already-generic value. The intended shape is a total match that maps each
+/// variant onto a generic stack label:
 ///
 /// ```ignore
 /// let stack = match cache {
