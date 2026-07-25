@@ -13,8 +13,9 @@ use djinn_core::{
 };
 use djinn_db::{
     AcknowledgeRefinementTaskMaterializationRequest, AdmitRefinementRunRequest,
-    ClaimRefinementIntentRequest, CompleteRefinementIntentRequest, ParkRefinementRunRequest,
-    ProposalRepository, RefinementAdmissionOutcome, RefinementAdmissionSource, SessionRepository,
+    ClaimRefinementIntentRequest, CompleteRefinementIntentRequest,
+    LoadRefinementRunSnapshotRequest, ParkRefinementRunRequest, ProposalRepository,
+    RefinementAdmissionOutcome, RefinementAdmissionSource, SessionRepository, TaskRepository,
     TerminalRefinementRunRequest,
 };
 
@@ -90,14 +91,12 @@ async fn recovery_hydrates_materialized_open_task_run_by_exact_run_id() {
     assert_eq!(state.generation, generation);
     assert_eq!(state.phase, RefinementPhase::AdversaryAttack);
     assert_eq!(state.current_round, 1);
-    assert_eq!(
-        sqlx::query_scalar::<_, String>("SELECT id FROM tasks WHERE id = $1 AND status = 'open'",)
-            .bind(&task_id)
-            .fetch_one(db.pool())
-            .await
-            .expect("materialized task remains open"),
-        task_id
-    );
+    let task = TaskRepository::new(db.clone(), EventBus::noop())
+        .get(&task_id)
+        .await
+        .expect("read materialized task")
+        .expect("materialized task exists");
+    assert_eq!(task.status, "open");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -247,14 +246,14 @@ async fn recovery_hydrates_pending_run_by_exact_run_id_without_writes_and_replay
     let repo = ProposalRepository::new(db.clone(), EventBus::noop());
     let (run_id, generation, intent_id) =
         admit(&repo, &fixture.proposal_id, "pending-recovery").await;
-    let before: (i64, i64) = sqlx::query_as(
-        "SELECT (SELECT count(*) FROM refinement_dispatch_intents WHERE run_id = $1), \
-         (SELECT count(*) FROM proposal_revisions WHERE refinement_run_id = $1)",
-    )
-    .bind(&run_id)
-    .fetch_one(db.pool())
-    .await
-    .expect("count durable rows");
+    let before = exact_snapshot(&repo, &run_id).await;
+    let revision_ids_before = repo
+        .revisions(&fixture.proposal_id)
+        .await
+        .expect("read lifecycle rows before recovery")
+        .into_iter()
+        .map(|revision| revision.id)
+        .collect::<Vec<_>>();
 
     actor.recover_interrupted_refinements().await;
     let state = actor
@@ -265,29 +264,46 @@ async fn recovery_hydrates_pending_run_by_exact_run_id_without_writes_and_replay
     assert_eq!(state.generation, generation);
     assert_eq!(state.phase, RefinementPhase::AdversaryAttack);
     assert_eq!(state.current_round, 1);
-    assert_eq!(
-        sqlx::query_scalar::<_, String>("SELECT id FROM refinement_dispatch_intents WHERE id = $1")
-            .bind(&intent_id)
-            .fetch_one(db.pool())
-            .await
-            .expect("intent identity survives recovery"),
-        intent_id,
+    assert!(
+        before
+            .snapshot
+            .intents
+            .iter()
+            .any(|intent| intent.intent_id == intent_id),
+        "exact snapshot retains the admitted intent identity"
     );
     actor.active_refinements.clear();
     actor.recover_interrupted_refinements().await;
     assert!(actor.active_refinements.contains_key(&run_id));
-    let after: (i64, i64) = sqlx::query_as(
-        "SELECT (SELECT count(*) FROM refinement_dispatch_intents WHERE run_id = $1), \
-         (SELECT count(*) FROM proposal_revisions WHERE refinement_run_id = $1)",
-    )
-    .bind(&run_id)
-    .fetch_one(db.pool())
-    .await
-    .expect("count durable rows after replay");
+    let after = exact_snapshot(&repo, &run_id).await;
+    let revision_ids_after = repo
+        .revisions(&fixture.proposal_id)
+        .await
+        .expect("read lifecycle rows after recovery")
+        .into_iter()
+        .map(|revision| revision.id)
+        .collect::<Vec<_>>();
     assert_eq!(
-        after, before,
+        after.snapshot.intents, before.snapshot.intents,
+        "rehydration must not create or mutate durable intents"
+    );
+    assert_eq!(
+        revision_ids_after, revision_ids_before,
         "rehydration is a disposable projection rebuild"
     );
+}
+
+async fn exact_snapshot(
+    repo: &ProposalRepository,
+    run_id: &str,
+) -> djinn_db::RefinementRunSnapshotResult {
+    repo.load_refinement_run_snapshot(LoadRefinementRunSnapshotRequest {
+        run_id: run_id.into(),
+        heartbeat_grace_millis: 60_000,
+    })
+    .await
+    .expect("load exact durable recovery snapshot")
+    .expect("admitted run exists")
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
