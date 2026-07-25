@@ -43,9 +43,8 @@ async fn an_unarmed_durable_cap_denies_every_graph_warm_lease_forever() {
     // The composition as it shipped: the configured build-slot cap was never
     // handed to the lease service, so the resolution chain bottomed out at the
     // unarmed durable 0.
-    let service = Arc::new(
-        BuildLeaseService::new(Arc::clone(&repository), 0).with_handoff_epoch(handoff),
-    );
+    let service =
+        Arc::new(BuildLeaseService::new(Arc::clone(&repository), 0).with_handoff_epoch(handoff));
     assert!(matches!(service.recover().await, LeaseResult::Status(_)));
     assert_eq!(service.cap(), 0);
 
@@ -86,9 +85,8 @@ async fn an_unarmed_durable_cap_adopts_the_configured_build_slot_cap() {
     let handoff = Arc::new(AdmissionHandoffRepository::new(database.clone()));
     // The fixed composition: the same configured cap the v0 journal controller
     // receives from DJINN_MAX_BUILD_TASKRUNS.
-    let service = Arc::new(
-        BuildLeaseService::new(Arc::clone(&repository), 3).with_handoff_epoch(handoff),
-    );
+    let service =
+        Arc::new(BuildLeaseService::new(Arc::clone(&repository), 3).with_handoff_epoch(handoff));
     assert!(matches!(service.recover().await, LeaseResult::Status(_)));
     assert_eq!(service.cap(), 3);
 
@@ -131,16 +129,18 @@ async fn re_seeding_the_handoff_row_alone_does_not_arm_the_lease() {
     let unconfigured = Arc::new(
         BuildLeaseService::new(Arc::clone(&repository), 0).with_handoff_epoch(Arc::clone(&handoff)),
     );
-    assert!(matches!(unconfigured.recover().await, LeaseResult::Status(_)));
+    assert!(matches!(
+        unconfigured.recover().await,
+        LeaseResult::Status(_)
+    ));
     assert_eq!(
         unconfigured.cap(),
         0,
         "seeding the handoff row is not sufficient to arm the lease"
     );
 
-    let configured = Arc::new(
-        BuildLeaseService::new(Arc::clone(&repository), 3).with_handoff_epoch(handoff),
-    );
+    let configured =
+        Arc::new(BuildLeaseService::new(Arc::clone(&repository), 3).with_handoff_epoch(handoff));
     assert!(matches!(configured.recover().await, LeaseResult::Status(_)));
     assert_eq!(
         configured.cap(),
@@ -170,9 +170,11 @@ async fn an_armed_cap_is_never_overridden_by_the_configured_fallback() {
         .set_modes_and_cap(0, V0Mode::Enforce, V1Mode::Shadow, Some(5))
         .await
         .unwrap();
-    let epoch_armed = Arc::new(
-        BuildLeaseService::new(Arc::clone(&repository), 9).with_handoff_epoch(handoff),
-    );
-    assert!(matches!(epoch_armed.recover().await, LeaseResult::Status(_)));
+    let epoch_armed =
+        Arc::new(BuildLeaseService::new(Arc::clone(&repository), 9).with_handoff_epoch(handoff));
+    assert!(matches!(
+        epoch_armed.recover().await,
+        LeaseResult::Status(_)
+    ));
     assert_eq!(epoch_armed.cap(), 5, "the epoch reference cap wins");
 }

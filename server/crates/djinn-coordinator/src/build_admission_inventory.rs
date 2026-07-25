@@ -129,6 +129,18 @@ fn classify(r: &WorkloadRecord) -> Result<Option<ClassifiedWorkload>, String> {
             object: r.clone(),
         }));
     }
+    // Image builds share the namespace but are not project compiles under the
+    // shared task/warm cap: the image controller dispatches them, they execute
+    // on buildkitd, and they have never carried an admission identity. They
+    // must be RECOGNISED here rather than falling through to the
+    // unclassifiable catch-all below, which marks the inventory gate pending
+    // and would keep Enforce fail-closed for as long as any image is building.
+    if l.get("djinn.app/component")
+        .is_some_and(|value| value == "image-build")
+        || r.name.starts_with("djinn-build-")
+    {
+        return Ok(None);
+    }
     if (r.name.starts_with("djinn-") || l.keys().any(|k| k.starts_with("djinn.app/")))
         && !r.terminal
         && !r.images.is_empty()

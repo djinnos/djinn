@@ -355,6 +355,43 @@ async fn authoritative_uid_not_found_releases_and_emits_wakeup() {
     );
 }
 
+/// An image build shares the namespace with admission workloads. It is not a
+/// project compile under the shared cap, and it must never be mistaken for an
+/// unclassifiable build workload — that marks the inventory gate pending and
+/// keeps Enforce fail-closed for as long as any image is building.
+#[tokio::test]
+async fn image_build_jobs_are_recognised_and_never_block_the_inventory_gate() {
+    let mut image_build = record(
+        "djinn-build-project-abc123",
+        Some("uid-image-build"),
+        &[
+            ("djinn.app/component", "image-build"),
+            ("djinn.app/build", "true"),
+        ],
+    );
+    image_build.commands = vec!["buildctl".into()];
+    let inventory = Arc::new(FakeInventory::new(vec![
+        image_build,
+        labeled("real-work", "uid-work", "work", "0"),
+    ]));
+    let controller = controller(BuildAdmissionMode::Enforce, 3);
+    let report = BuildAdmissionReconciler::new(controller.clone(), inventory)
+        .reconcile()
+        .await;
+
+    assert!(
+        report.blockers.is_empty(),
+        "an image build must not block the gate: {:?}",
+        report.blockers
+    );
+    assert_eq!(report.adopted, 1, "only the admission workload is adopted");
+    assert_ne!(
+        controller.readiness(),
+        BuildAdmissionReadiness::InventoryPending,
+        "the inventory gate must complete while an image is building"
+    );
+}
+
 /// A degraded API server answers `Uncertain`, which is not evidence. The row
 /// keeps occupying until a probe can actually answer.
 #[tokio::test]
