@@ -13,8 +13,11 @@
 //      round/phase can be derived) fall back to the historical behavior:
 //      stamped `refinement_stop`/`Interrupted` and left restartable.
 
-use djinn_core::models::ProposalDebateTrail;
-use djinn_db::{ProposalRepository, TaskRepository};
+use djinn_core::{
+    models::ProposalDebateTrail,
+    refinement_liveness::{RefinementLivenessResult, RefinementStopReason},
+};
+use djinn_db::{ProposalRepository, TaskRepository, TerminalRefinementRunRequest};
 
 use super::actor::CoordinatorActor;
 use super::refinement::{RefinementConfig, RefinementLoopState, RefinementPhase, StopReason};
@@ -180,9 +183,8 @@ impl CoordinatorActor {
     ///   converged park is a valid, human-actionable result; stamping it
     ///   `Interrupted` on every deploy would silently destroy the judge's work
     ///   and force a full re-run; or
-    /// - is stamped `refinement_stop` with [`StopReason::Interrupted`] — for a
-    ///   refinement genuinely lost mid-tribunal (no awaiting-review park after
-    ///   the latest start), leaving the proposal restartable.
+    /// - terminalizes a genuinely stale durable run using its exact id and
+    ///   generation. Legacy lifecycle rows alone never manufacture a stop.
     pub(super) async fn recover_interrupted_refinements(&mut self) {
         let event_bus = crate::events::event_bus_for(&self.events_tx);
         let proposal_repo = ProposalRepository::new(self.db.clone(), event_bus);
@@ -216,10 +218,66 @@ impl CoordinatorActor {
             if self.try_resume_mid_flight(&proposal_id).await {
                 continue;
             }
+            // A lifecycle row is only a legacy hint. It may identify a proposal
+            // whose current durable run can be evaluated exactly. Only that
+            // exact run/generation observation may be terminalized.
+            if self.try_reap_exact_stale_run(&proposal_id).await {
+                continue;
+            }
             // Legacy proposal-scoped lifecycle rows cannot establish an exact
             // durable run/generation. Do not manufacture a stop for an
             // uncorrelated recovery observation.
             tracing::warn!(proposal_id = %proposal_id, "Skipping uncorrelated legacy refinement recovery");
+        }
+    }
+
+    /// Reap a phantom only after the shared liveness evaluator has declared the
+    /// exact current run stale. The terminal CAS fences recovery replays.
+    async fn try_reap_exact_stale_run(&self, proposal_id: &str) -> bool {
+        const HEARTBEAT_GRACE_MILLIS: i64 = 60_000;
+        let repo = ProposalRepository::new(
+            self.db.clone(),
+            crate::events::event_bus_for(&self.events_tx),
+        );
+        let exact = match repo
+            .load_current_refinement_run_snapshot(proposal_id, HEARTBEAT_GRACE_MILLIS)
+            .await
+        {
+            Ok(Some(snapshot)) => snapshot,
+            Ok(None) => return false,
+            Err(error) => {
+                tracing::warn!(proposal_id = %proposal_id, %error, "Failed to load exact run for recovery");
+                return false;
+            }
+        };
+        if !matches!(exact.liveness, RefinementLivenessResult::Stale { .. }) {
+            return false;
+        }
+        let run_id = exact.snapshot.run.run_id.clone();
+        let reason = RefinementStopReason::ReapedPhantom {
+            prior_run_id: run_id.clone(),
+            generation: exact.generation as u64,
+            evidence_summary: "startup recovery found no live exact-run evidence".into(),
+        };
+        match repo
+            .terminal_refinement_run(TerminalRefinementRunRequest {
+                run_id: run_id.clone(),
+                generation: exact.generation,
+                reason,
+            })
+            .await
+        {
+            Ok(true) => {
+                tracing::warn!(proposal_id = %proposal_id, %run_id, generation = exact.generation, "Reaped exactly correlated stale refinement run");
+                true
+            }
+            // A concurrent terminalization is handled recovery, not a reason to
+            // fall through into proposal-scoped compatibility persistence.
+            Ok(false) => true,
+            Err(error) => {
+                tracing::warn!(proposal_id = %proposal_id, %run_id, %error, "Exact stale refinement recovery terminal CAS failed");
+                false
+            }
         }
     }
 

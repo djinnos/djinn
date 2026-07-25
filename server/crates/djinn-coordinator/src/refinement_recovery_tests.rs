@@ -9,8 +9,14 @@ use super::refinement_cap_tests::{
     TEST_MODEL, build_refinement_actor, seed_refinement_fixture, spawn_test_pool,
 };
 use crate::refinement::{RefinementPhase, StopReason};
-use djinn_core::events::{DjinnEventEnvelope, EventBus};
-use djinn_db::{ProposalDebateTrailCreateInput, ProposalRepository, TaskRepository};
+use djinn_core::{
+    events::{DjinnEventEnvelope, EventBus},
+    refinement_liveness::{RefinementRunState, RefinementStopReason},
+};
+use djinn_db::{
+    AdmitRefinementRunRequest, LoadRefinementRunSnapshotRequest, ProposalDebateTrailCreateInput,
+    ProposalRepository, RefinementAdmissionOutcome, RefinementAdmissionSource, TaskRepository,
+};
 
 /// Record a `refinement_start` boundary, then sleep so subsequent debate/task
 /// `created_at` timestamps strictly advance past it (current-run scoping uses a
@@ -490,5 +496,123 @@ async fn recover_skips_uncorrelated_stale_park() {
         interrupted_stop_count(&db, &fixture.proposal_id).await,
         0,
         "a stale legacy park must not manufacture a proposal-scoped stop"
+    );
+}
+
+/// A stale run is only terminalized when recovery can load its exact run id and
+/// generation. Replaying recovery fences at the typed terminal CAS and never
+/// appends a proposal-scoped lifecycle stop.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn recover_reaps_exactly_correlated_phantom_once() {
+    let db = crate::test_helpers::create_test_db();
+    let fixture = seed_refinement_fixture(&db).await;
+    let (events_tx, _events_rx) = tokio::sync::broadcast::channel::<DjinnEventEnvelope>(256);
+    let pool = spawn_test_pool(&db, 4);
+    let mut actor = build_refinement_actor(&db, &events_tx, pool);
+    let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+    let admitted = repo
+        .admit_refinement_run(AdmitRefinementRunRequest {
+            proposal_id: fixture.proposal_id.clone(),
+            idempotency_key: "exact-recovery-phantom".into(),
+            source: RefinementAdmissionSource::ExplicitStart {
+                actor: fixture.user_id.clone(),
+            },
+            heartbeat_grace_millis: 60_000,
+        })
+        .await
+        .expect("admit exact recovery fixture");
+    let (run_id, generation) = match admitted {
+        RefinementAdmissionOutcome::Admitted {
+            run_id, generation, ..
+        }
+        | RefinementAdmissionOutcome::Existing {
+            run_id, generation, ..
+        } => (run_id, generation),
+    };
+
+    // Remove the initial intent and age its heartbeat: the shared evaluator now
+    // has no exact-run live evidence. A stale legacy park blocks the old
+    // proposal-only resume path, leaving only the exact recovery branch.
+    sqlx::query("DELETE FROM refinement_dispatch_intents WHERE run_id = $1")
+        .bind(&run_id)
+        .execute(db.pool())
+        .await
+        .expect("remove phantom intent evidence");
+    sqlx::query(
+        "UPDATE refinement_runs SET heartbeat_at = '2000-01-01T00:00:00.000Z' WHERE id = $1",
+    )
+    .bind(&run_id)
+    .execute(db.pool())
+    .await
+    .expect("age phantom heartbeat");
+    let original = repo.get(&fixture.proposal_id).await.unwrap().unwrap();
+    seed_awaiting_review_park(
+        &db,
+        &fixture.proposal_id,
+        original.latest_revision_seq,
+        original.latest_revision_seq,
+        None,
+    )
+    .await;
+    repo.update(
+        &fixture.proposal_id,
+        djinn_db::ProposalUpdateInput {
+            title: &original.title,
+            body: "advance stale park before exact recovery",
+            acceptance_criteria: &original.acceptance_criteria,
+            status: &original.status,
+            superseded_by: original.superseded_by.as_deref(),
+            body_format: Some(&original.body_format),
+            event_metadata: None,
+        },
+    )
+    .await
+    .expect("make legacy park stale");
+    let lifecycle_before = repo
+        .revisions(&fixture.proposal_id)
+        .await
+        .expect("read lifecycle before recovery")
+        .len();
+
+    actor.recover_interrupted_refinements().await;
+    let recovered = repo
+        .load_refinement_run_snapshot(LoadRefinementRunSnapshotRequest {
+            run_id: run_id.clone(),
+            heartbeat_grace_millis: 60_000,
+        })
+        .await
+        .expect("read reaped exact run")
+        .expect("exact run retained");
+    assert_eq!(recovered.snapshot.run.state, RefinementRunState::Terminal);
+    assert_eq!(
+        recovered.snapshot.run.terminal_reason,
+        Some(RefinementStopReason::ReapedPhantom {
+            prior_run_id: run_id.clone(),
+            generation: generation as u64,
+            evidence_summary: "startup recovery found no live exact-run evidence".into(),
+        })
+    );
+    assert_eq!(
+        repo.revisions(&fixture.proposal_id)
+            .await
+            .expect("read lifecycle after recovery")
+            .len(),
+        lifecycle_before,
+        "exact terminal persistence must not append proposal lifecycle stops"
+    );
+
+    actor.recover_interrupted_refinements().await;
+    let replay = repo
+        .load_refinement_run_snapshot(LoadRefinementRunSnapshotRequest {
+            run_id,
+            heartbeat_grace_millis: 60_000,
+        })
+        .await
+        .expect("read replayed exact run")
+        .expect("exact run retained after replay");
+    assert_eq!(replay.snapshot.run.state, RefinementRunState::Terminal);
+    assert_eq!(
+        replay.snapshot.run.terminal_reason,
+        recovered.snapshot.run.terminal_reason
     );
 }
