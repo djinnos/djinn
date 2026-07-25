@@ -1,0 +1,4 @@
+    Starting 2842 tests across 118 binaries
+        PASS [   0.008s] (1/2) djinn-runtime spec::tests::task_run_spec_roundtrips
+     Summary [   0.010s] 1 test run: 1 passed, 0 failed, 0 skipped
+error: test run failed

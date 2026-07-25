@@ -1,0 +1,3 @@
+[31;1m  TRY 3 FAIL[0m [   0.483s] (2477/2842) [35;1mdjinn-provider[0m [36mstream_event_consumer_audit[0m[36m::[0m[34;1mchecked_in_classification_covers_every_production_stream_event_match[0m
+     Summary [ 196.905s] 2842 tests run: 2841 passed, 1 failed, 0 skipped
+  TRY 3 FAIL [   0.483s] (2477/2842) djinn-provider stream_event_consumer_audit::checked_in_classification_covers_every_production_stream_event_match

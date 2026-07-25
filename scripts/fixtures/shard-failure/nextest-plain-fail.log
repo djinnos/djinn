@@ -1,0 +1,5 @@
+        FAIL [   0.012s] (1/2) djinn-db repositories::note::tests::rrf_orders_by_fused_rank
+        FAIL [   0.483s] (2/2) djinn-provider stream_event_consumer_audit::checked_in_classification_covers_every_production_stream_event_match
+     Summary [   0.500s] 2 tests run: 0 passed, 2 failed, 0 skipped
+        FAIL [   0.012s] (1/2) djinn-db repositories::note::tests::rrf_orders_by_fused_rank
+        FAIL [   0.483s] (2/2) djinn-provider stream_event_consumer_audit::checked_in_classification_covers_every_production_stream_event_match

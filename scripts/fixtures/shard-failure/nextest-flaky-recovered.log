@@ -1,0 +1,3 @@
+  TRY 1 FAIL [   0.100s] (1/1) djinn-provider stream_event_consumer_audit::flaky_test
+  TRY 2 PASS [   0.050s] (1/1) djinn-provider stream_event_consumer_audit::flaky_test
+     Summary [   0.150s] 1 test run: 1 passed, 0 failed, 0 skipped
