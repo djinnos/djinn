@@ -1,4 +1,4 @@
-// djinn:allow-oversize
+// djinn:allow-oversize — repository-backed outcome and coordinator-fault invariants share exact-run fixtures.
 use super::*;
 
 // ---- is_already_closed_refinement_close_error ----
