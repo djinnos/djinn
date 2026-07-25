@@ -29,7 +29,7 @@ use serde::{Deserialize, Serialize};
 use djinn_stack::resources::{BuildResourceOverrides, Quantity};
 
 use crate::config::KubernetesConfig;
-use crate::launcher::RoleResourceClass;
+use crate::launcher::{RoleResourceClass, class_cpu_request};
 
 /// Administrator-configured per-kind hard bounds for a Pod kind's CPU and
 /// memory. Every bound is optional; `None` leaves that axis unbounded. Bounds
@@ -122,7 +122,7 @@ pub fn resolve_task_run_resources(
     bounds: &ResourceBounds,
 ) -> Result<ResourceRequirements, ResolveError> {
     resolve(
-        pick(cpu_request_of(overrides), class.cpu_request(config)),
+        pick(cpu_request_of(overrides), class_cpu_request(class, config)),
         pick(cpu_limit_of(overrides), &config.cpu_limit),
         pick(memory_request_of(overrides), &config.memory_request),
         pick(memory_limit_of(overrides), &config.memory_limit),
@@ -150,12 +150,32 @@ pub fn resolve_warm_resources(
 /// resolved requirements. Targets the `worker` (task-run) or `warmer` (warm)
 /// container.
 pub fn apply_resolved_resources(job: &mut Job, resources: ResourceRequirements) {
-    if let Some(spec) = job.spec.as_mut()
-        && let Some(pod) = spec.template.spec.as_mut()
-        && let Some(container) = pod
-            .containers
-            .iter_mut()
-            .find(|c| c.name == "worker" || c.name == "warmer")
+    let Some(pod) = job
+        .spec
+        .as_mut()
+        .and_then(|spec| spec.template.spec.as_mut())
+    else {
+        return;
+    };
+    // The lease ceiling must equal the CPU limit that was actually resolved,
+    // not the deployment default the sidecar was rendered from. A per-project
+    // `build_resources.task.cpu_limit` override lands HERE, after the render,
+    // so without this a project raising its limit to 8 would get a worker
+    // limit of 8 and a lease of 4 — the lease being the only ceiling that
+    // governs a build once the launcher container has no CPU limit of its own.
+    // Doing it at the same point as the override is what makes drift
+    // impossible (task 7deu).
+    if let Some(limit) = resources
+        .limits
+        .as_ref()
+        .and_then(|limits| limits.get("cpu"))
+    {
+        crate::launcher::retune_launcher_lease(pod, &limit.0);
+    }
+    if let Some(container) = pod
+        .containers
+        .iter_mut()
+        .find(|c| c.name == "worker" || c.name == "warmer")
     {
         container.resources = Some(resources);
     }

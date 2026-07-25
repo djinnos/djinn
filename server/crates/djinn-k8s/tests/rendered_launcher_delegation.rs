@@ -26,11 +26,22 @@
 //!
 //! # Why it is not `#[ignore]`d and needs no privileges
 //!
-//! It runs the REAL `djinn_cgroup_launcher::NativeCgroupFs::open` and the REAL
-//! `NativeClone3::preflight` against a REAL kernel — no fakes — but every check
-//! is a `statfs`/`openat`/`clone3`-argument-validation on a directory this test
-//! owns. There is nothing to gate, so it runs in the ordinary
+//! It runs the REAL `djinn_cgroup_launcher::NativeCgroupFs::open` against a REAL
+//! kernel — no fakes — but every check is a `statfs`/`openat` on a directory
+//! this test owns. There is nothing to gate, so it runs in the ordinary
 //! `cargo test -p djinn-k8s` lane where a human sees it, on every PR.
+//!
+//! # What changed for task 7deu
+//!
+//! The volume rendered at `/run/djinn-cgroup` is back — but as a writable
+//! MOUNTPOINT, not as a delegated root. That distinction is the whole lesson of
+//! the P0, so it is asserted in both directions:
+//! [`the_rendered_cgroup_root_is_a_mountpoint_and_never_a_delegated_root`]
+//! requires the volume to materialize AND requires `NativeCgroupFs::open` on it
+//! to FAIL. The delegation is established by the launcher's own `mount(2)`; that
+//! end-to-end chain — mount, delegate, throttle, lift, measured on `cpu.stat` —
+//! is proven in `djinn-cgroup-launcher`'s privileged lane, which is the only
+//! place a real cgroup2 hierarchy exists.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -144,53 +155,65 @@ fn materialize(volume: &Volume, scratch: &Path) -> Option<PathBuf> {
     None
 }
 
-/// **The contract.** For the manifest this crate actually renders: either the
-/// launcher is not rendered at all, or the delegated cgroup root it mounts
-/// materializes into a filesystem the real launcher accepts.
+/// **The contract.** The volume rendered at [`LAUNCHER_CGROUP_ROOT`] is a
+/// writable MOUNTPOINT, and it must never be mistaken for the delegation.
 ///
-/// Run against BOTH modes, so arming the launcher in the future cannot quietly
-/// reintroduce a root that is not a cgroup2 tree.
+/// Both halves matter, and both are asserted against the real launcher code on
+/// a real kernel:
+///
+/// * it must materialize into a directory at all (a source that cannot be
+///   materialized locally cannot be mounted onto in a pod either), and
+/// * `NativeCgroupFs::open` on it must **FAIL**, by name. That failure is the
+///   proof that the launcher's own `mount(2)` is load-bearing. If this ever
+///   started passing, someone would have handed the launcher a "delegated root"
+///   that is not one — which is exactly the P0 that CrashLoopBackOffed the
+///   sidecar on every task-run Pod.
 #[test]
-fn every_rendered_delegated_cgroup_root_is_a_real_cgroup2_tree() {
+fn the_rendered_cgroup_root_is_a_mountpoint_and_never_a_delegated_root() {
     let scratch = Scratch::new("delegated-root");
+    let job = render(CgroupLauncherMode::Required);
+    let pod = pod_of(&job);
 
-    for mode in [CgroupLauncherMode::Disabled, CgroupLauncherMode::Required] {
-        let job = render(mode);
-        let pod = pod_of(&job);
+    let mounted = volumes_mounted_at(pod, LAUNCHER_CGROUP_ROOT);
+    assert_eq!(
+        mounted.len(),
+        1,
+        "exactly one container mounts the cgroup root, and it is the launcher"
+    );
+    let (container, volume) = mounted[0];
+    assert_eq!(container, LAUNCHER_CONTAINER_NAME);
 
-        for (container, volume) in volumes_mounted_at(pod, LAUNCHER_CGROUP_ROOT) {
-            let root = materialize(volume, scratch.path()).unwrap_or_else(|| {
-                panic!(
-                    "{mode:?}: container {container} mounts a delegated cgroup root at \
-                     {LAUNCHER_CGROUP_ROOT} from volume {} whose source cannot be a cgroup2 \
-                     hierarchy",
-                    volume.name
-                )
-            });
+    let root = materialize(volume, scratch.path()).unwrap_or_else(|| {
+        panic!(
+            "the cgroup mountpoint is rendered from volume {}, whose source cannot be \
+             materialized into a directory the launcher could mount onto",
+            volume.name
+        )
+    });
 
-            // The real launcher code, on a real kernel, against the volume this
-            // crate really renders. No fake, no fixture, no ignore gate.
-            if let Err(error) = NativeCgroupFs::open(&root, LAUNCHER_UID as u32) {
-                panic!(
-                    "{mode:?}: the rendered delegated cgroup root for container {container} \
-                     (volume {}) is not usable by the launcher: {error}. A task-run Pod with \
-                     this rendering CrashLoopBackOffs its cgroup-launcher sidecar on startup.",
-                    volume.name
-                );
-            }
+    let error = NativeCgroupFs::open(&root, LAUNCHER_UID as u32)
+        .err()
+        .expect(
+            "the rendered volume must NOT satisfy the delegated-root contract on its own; if it \
+         does, the launcher's own mount(2) is not what establishes the delegation and the \
+         readiness check proves nothing",
+        );
+    match error {
+        LauncherError::DelegatedRootIsNotCgroupFs {
+            expected, actual, ..
+        } => {
+            assert_eq!(expected, CGROUP2_SUPER_MAGIC);
+            assert_ne!(actual, CGROUP2_SUPER_MAGIC);
         }
+        other => panic!("expected a named non-cgroup2 readiness failure, got: {other}"),
     }
 }
 
 /// Prove the check above has teeth: the exact volume source that shipped the P0
-/// is rejected, by name, by the same code path the contract test runs.
-///
-/// Without this, `every_rendered_delegated_cgroup_root_is_a_real_cgroup2_tree`
-/// could pass vacuously (it does pass vacuously today — nothing mounts that path
-/// any more) and nobody would know whether it can fail at all.
+/// is rejected, by name, by the same code path.
 #[test]
 fn the_emptydir_delegated_root_that_shipped_the_p0_is_rejected_by_name() {
-    let scratch = Scratch::new("delegated-root");
+    let scratch = Scratch::new("shipped-p0");
     // Byte-for-byte the volume `launcher_cgroup_volume()` used to return.
     let shipped = Volume {
         name: VOLUME_LAUNCHER_CGROUP.to_string(),
@@ -246,36 +269,43 @@ fn the_default_rendering_has_no_launcher_surface() {
             .iter()
             .flatten()
             .any(|volume| volume.name == VOLUME_LAUNCHER_CGROUP),
-        "the delegated cgroup volume must not be declared by default"
+        "the cgroup mountpoint volume must not be declared by default"
+    );
+    assert_eq!(
+        pod.host_users, None,
+        "user namespaces are only requested when there is a capability to confine"
     );
 }
 
-/// Even when the mode is armed, no `launcher-cgroup` volume is rendered.
+/// A `hostPath` is still not the route, armed or not.
 ///
-/// A delegated cgroup v2 subtree is not something a *volume source* can supply
-/// at all: in the goxi design the launcher establishes its own cgroup2 mount
-/// inside its own cgroup namespace (which needs `CAP_SYS_ADMIN`, not a volume).
-/// This is the guard against "fix" attempts that re-add an emptyDir, or reach
-/// for a hostPath — which `nsdelegate` refuses across the pod's private cgroup
-/// namespace anyway.
+/// The pod's private cgroup namespace is mounted `nsdelegate`, so a target
+/// outside that namespace root is unreachable no matter what the manifest says.
+/// This is the guard against "fix" attempts that reach for one.
 #[test]
-fn arming_the_launcher_still_renders_no_bogus_cgroup_volume() {
-    let pod = render(CgroupLauncherMode::Required);
-    let pod = pod_of(&pod);
-    assert!(
-        !pod.volumes
-            .iter()
-            .flatten()
-            .any(|volume| volume.name == VOLUME_LAUNCHER_CGROUP),
-        "no volume source can supply a delegated cgroup v2 subtree in this topology"
-    );
+fn no_host_path_is_ever_rendered_for_the_cgroup_root() {
+    for mode in [CgroupLauncherMode::Disabled, CgroupLauncherMode::Required] {
+        let job = render(mode);
+        let pod = pod_of(&job);
+        for (container, volume) in volumes_mounted_at(pod, LAUNCHER_CGROUP_ROOT) {
+            assert!(
+                volume.host_path.is_none(),
+                "{mode:?}: container {container} mounts a hostPath at the cgroup root; \
+                 nsdelegate refuses a target outside the pod's cgroup namespace"
+            );
+        }
+    }
 }
 
-/// The render-time half of the readiness contract: arming the launcher fails
-/// closed at dispatch, before a Job is submitted, rather than after a pod has
-/// come up with a sidecar that cannot start.
+/// The armed render is dispatchable — that is the deliverable — and the
+/// preconditions that make it dispatchable are individually load-bearing.
+///
+/// This replaces a gate that unconditionally refused the armed mode while the
+/// runtime profile did not exist. The refusal has not been deleted, it has been
+/// made specific: each check rejects a render that would produce a sidecar which
+/// cannot start, and does so BEFORE the Job is submitted.
 #[test]
-fn arming_the_launcher_fails_render_validation_before_any_job_is_submitted() {
+fn the_armed_render_is_dispatchable_and_every_precondition_still_fails_closed() {
     let mut config = KubernetesConfig::for_testing();
     assert!(
         validate_enforcement_render(&config).is_ok(),
@@ -283,24 +313,106 @@ fn arming_the_launcher_fails_render_validation_before_any_job_is_submitted() {
     );
 
     config.cgroup_launcher_mode = CgroupLauncherMode::Required;
-    let error = validate_enforcement_render(&config)
-        .expect_err("an unsatisfiable delegation must fail closed");
+    validate_enforcement_render(&config)
+        .expect("the armed render is the shipped enforcement path and must dispatch");
+
+    // The lease is the only ceiling left once the launcher container carries no
+    // CPU limit, so a pod CPU limit that cannot become one is refused.
+    let mut unusable = config.clone();
+    unusable.cpu_limit = "500m".to_string();
+    let error = validate_enforcement_render(&unusable)
+        .expect_err("a lease quota below the launcher crate's floor must fail closed");
     assert!(
-        matches!(error, RenderValidationError::CgroupDelegationUnavailable),
-        "expected CgroupDelegationUnavailable, got: {error}"
+        matches!(error, RenderValidationError::UnsupportedLeaseQuota { .. }),
+        "expected UnsupportedLeaseQuota, got: {error}"
     );
-    // The operator has to be told what to do, not just that it failed — and the
-    // message must not misrepresent an unbuilt runtime profile as a platform
-    // limit, because that is how a solvable gap gets remembered as impossible.
     let message = error.to_string();
-    for expected in [
-        "CAP_SYS_ADMIN",
-        "not a platform limit",
-        "DJINN_K8S_CGROUP_LAUNCHER_MODE=disabled",
-    ] {
+    assert!(
+        message.contains("bounded only by the node"),
+        "the operator must be told what is at stake: {message}"
+    );
+
+    // Disarmed, the same config still dispatches: the lease ceiling only
+    // matters when something is actually leasing.
+    unusable.cgroup_launcher_mode = CgroupLauncherMode::Disabled;
+    assert!(validate_enforcement_render(&unusable).is_ok());
+}
+
+/// Defect 1, on the manifest the API server would receive: the launcher
+/// container must declare NO CPU limit.
+///
+/// Under `nsdelegate` the delegated root IS the launcher's container cgroup, so
+/// a limit here is an ancestor clamp on every invocation leaf. Measured with the
+/// leaf at four cores and a 250m container limit: `usage_usec 1252296` over a 5s
+/// window — 0.25 core — with `nr_throttled` reading 0 in the leaf because the
+/// throttling happened at the parent. Removing it took the same pod to
+/// `nr_throttled 40/40` unleased and 1.995 measured cores after the lift.
+#[test]
+fn the_armed_launcher_container_has_no_cpu_limit_and_a_real_memory_limit() {
+    let config = KubernetesConfig::for_testing();
+    let job = render(CgroupLauncherMode::Required);
+    let pod = pod_of(&job);
+    let launcher = pod
+        .init_containers
+        .iter()
+        .flatten()
+        .find(|container| container.name == LAUNCHER_CONTAINER_NAME)
+        .expect("the armed render includes the launcher sidecar");
+
+    let limits = launcher
+        .resources
+        .as_ref()
+        .and_then(|resources| resources.limits.as_ref())
+        .expect("the launcher declares limits");
+    assert!(
+        !limits.contains_key("cpu"),
+        "a CPU limit on the launcher clamps every invocation leaf to it: {limits:?}"
+    );
+    // Every command now runs in this container's cgroup, so the build's memory
+    // peak lands here — a sidecar-sized memory limit would OOM-kill the first
+    // `cargo build`.
+    assert_eq!(limits.get("memory").unwrap().0, config.memory_limit);
+}
+
+/// The armed pod runs in a user namespace, and the launcher's capabilities are
+/// spelled the way the API server accepts.
+#[test]
+fn the_armed_pod_confines_the_bootstrap_capability() {
+    let job = render(CgroupLauncherMode::Required);
+    let pod = pod_of(&job);
+    assert_eq!(
+        pod.host_users,
+        Some(false),
+        "hostUsers: false maps the launcher's bootstrap CAP_SYS_ADMIN into a user namespace, \
+         where the non-namespaced sysctls that make it an escape primitive are unreachable"
+    );
+
+    let launcher = pod
+        .init_containers
+        .iter()
+        .flatten()
+        .find(|container| container.name == LAUNCHER_CONTAINER_NAME)
+        .expect("the armed render includes the launcher sidecar");
+    let security = launcher
+        .security_context
+        .as_ref()
+        .expect("launcher securityContext");
+    assert_eq!(security.allow_privilege_escalation, Some(false));
+    assert_eq!(security.privileged, None);
+    let added = security
+        .capabilities
+        .as_ref()
+        .and_then(|caps| caps.add.as_deref())
+        .unwrap_or_default();
+    assert!(
+        added.iter().any(|capability| capability == "SYS_ADMIN"),
+        "the launcher cannot mount its delegated root without SYS_ADMIN: {added:?}"
+    );
+    for capability in added {
         assert!(
-            message.contains(expected),
-            "the rejection must explain {expected}: {message}"
+            !capability.starts_with("CAP_"),
+            "{capability} uses the spelling the API server rejects alongside \
+             allowPrivilegeEscalation: false"
         );
     }
 }

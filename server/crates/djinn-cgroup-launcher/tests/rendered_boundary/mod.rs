@@ -7,8 +7,9 @@
 //!                           UnixBrokerServer over a real Unix socket
 //!   forked worker (1000)  = the trusted, non-dumpable worker: real
 //!                           SO_PEERCRED authentication, real controls
-//!   launched child (1001) = born by clone3(CLONE_INTO_CGROUP) into the
-//!                           invocation cgroup, then through the production
+//!   launched child (1001) = forked, placed in the invocation cgroup by a
+//!                           `cgroup.procs` write and released only once the
+//!                           placement holds, then through the production
 //!                           close_range + `child::prepare_child` boundary
 //! ```
 //!
@@ -29,8 +30,8 @@ use djinn_cgroup_launcher::child::{
 };
 use djinn_cgroup_launcher::transport::{UnixBrokerClient, UnixBrokerServer};
 use djinn_cgroup_launcher::{
-    ChildProcess, CloneIntoCgroup, CommandSpec, Error, Invocation, Launcher, LauncherConfig,
-    NativeCgroupFs, NativeClone3,
+    ChildProcess, CommandSpec, Error, Invocation, Launcher, LauncherConfig, NativeCgroupFs,
+    NativeCgroupSpawn, SpawnIntoCgroup,
 };
 
 /// Invocation whose child is the in-cgroup adversary rather than an exec.
@@ -44,7 +45,13 @@ pub const LEGIT_FENCE: u64 = 0x5a5a_f13d;
 /// `cpu.max` an unleased invocation must carry (250m of a 100ms period).
 pub const UNLEASED_CPU_MAX: &str = "25000 100000";
 /// `cpu.max` after a matching fencing token lifts the quota.
-pub const LIFTED_CPU_MAX: &str = "max 100000";
+///
+/// Task 7deu: this used to be `"max 100000"`, i.e. no quota at all. That was
+/// only ever harmless because an ancestor still clamped it — the launcher
+/// container's own 250m CPU limit. With that limit removed (it was what made the
+/// whole feature a no-op) an unbounded lift would let one build take the entire
+/// node, so the lift now writes the pod's declared CPU budget.
+pub const LIFTED_CPU_MAX: &str = "400000 100000";
 
 // ───────────────────────────── rendered context ─────────────────────────────
 
@@ -542,10 +549,10 @@ struct Probes {
 
 /// Clone seam that births a real UID-1001 adversary inside the invocation
 /// cgroup. Every other invocation is delegated to the production
-/// `NativeClone3`, so the legitimate and exec'd children take the shipped path.
+/// `NativeCgroupSpawn`, so the legitimate and exec'd children take the shipped path.
 pub struct AdversaryClone {
     report: RawFd,
-    delegate: NativeClone3,
+    delegate: NativeCgroupSpawn,
     probes: Probes,
 }
 
@@ -581,7 +588,7 @@ impl AdversaryClone {
         ];
         Self {
             report,
-            delegate: NativeClone3,
+            delegate: NativeCgroupSpawn,
             probes: Probes {
                 worker_pid,
                 proc_paths,
@@ -596,20 +603,43 @@ impl AdversaryClone {
     }
 }
 
-impl CloneIntoCgroup for AdversaryClone {
-    fn clone_into_cgroup(
+impl SpawnIntoCgroup for AdversaryClone {
+    fn spawn_into_cgroup(
         &mut self,
         cgroup: RawFd,
         invocation: &Invocation,
         command: &CommandSpec,
     ) -> Result<ChildProcess, Error> {
         if invocation.id != ATTACK_INVOCATION {
-            return self.delegate.clone_into_cgroup(cgroup, invocation, command);
+            return self.delegate.spawn_into_cgroup(cgroup, invocation, command);
         }
-        let pid = clone3_into_cgroup(cgroup)?;
+        let (go_read, go_write) = pipe();
+        let pid = unsafe { libc::fork() };
+        if pid < 0 {
+            return Err(Error::SpawnDenied);
+        }
         if pid == 0 {
+            unsafe { libc::close(go_write) };
+            // Stand at the gate exactly as the production child does: no work
+            // whatsoever until the parent has placed us in the invocation
+            // cgroup and said so.
+            let mut byte = [0_u8; 1];
+            let read = unsafe { libc::read(go_read, byte.as_mut_ptr().cast(), 1) };
+            if read != 1 {
+                unsafe { libc::_exit(91) };
+            }
+            unsafe { libc::close(go_read) };
             attack(&self.probes, self.report, cgroup);
         }
+        unsafe { libc::close(go_read) };
+        place_in_cgroup(cgroup, pid).expect("place the adversary in the invocation cgroup");
+        let go = [b'G'];
+        assert_eq!(
+            unsafe { libc::write(go_write, go.as_ptr().cast(), 1) },
+            1,
+            "release the adversary once it is inside the invocation cgroup"
+        );
+        unsafe { libc::close(go_write) };
         Ok(ChildProcess {
             pid,
             stdout: -1,
@@ -619,7 +649,7 @@ impl CloneIntoCgroup for AdversaryClone {
 }
 
 /// Runs in the freshly cloned child. It crosses the production isolation and
-/// credential boundary exactly as `NativeClone3` does — `close_range` over
+/// credential boundary exactly as `NativeCgroupSpawn` does — `close_range` over
 /// every inherited descriptor (sparing only stdio and the report pipe) then
 /// `prepare_child` — and only then attacks the worker.
 fn attack(probes: &Probes, report: RawFd, cgroup: RawFd) -> ! {
@@ -801,47 +831,29 @@ fn connect_unix(path: &CString) -> i64 {
     i64::from(rc)
 }
 
-/// `clone3(CLONE_INTO_CGROUP)` — the same birth the production seam performs,
-/// so the adversary really is a direct child of the invocation cgroup.
-fn clone3_into_cgroup(cgroup: RawFd) -> Result<i32, Error> {
-    #[repr(C)]
-    struct Args {
-        flags: u64,
-        pidfd: u64,
-        child_tid: u64,
-        parent_tid: u64,
-        exit_signal: u64,
-        stack: u64,
-        stack_size: u64,
-        tls: u64,
-        set_tid: u64,
-        set_tid_size: u64,
-        cgroup: u64,
+/// Place `pid` in the invocation cgroup by writing `cgroup.procs` — the same
+/// placement the production seam performs, so the adversary really is a member
+/// of the invocation cgroup and the boundary being proven is the shipped one.
+///
+/// Task 7deu: this used to be `clone3(CLONE_INTO_CGROUP)`. Proving a boundary
+/// with a spawn mechanism production does not use proves the wrong thing, and
+/// the `clone3` flag constant this harness took from `libc` was the one that
+/// silently truncated to zero.
+fn place_in_cgroup(cgroup: RawFd, pid: i32) -> std::io::Result<()> {
+    let name = CString::new("cgroup.procs").expect("literal");
+    let fd = unsafe { libc::openat(cgroup, name.as_ptr(), libc::O_WRONLY | libc::O_CLOEXEC) };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
     }
-    let args = Args {
-        flags: libc::CLONE_INTO_CGROUP as u64,
-        pidfd: 0,
-        child_tid: 0,
-        parent_tid: 0,
-        exit_signal: libc::SIGCHLD as u64,
-        stack: 0,
-        stack_size: 0,
-        tls: 0,
-        set_tid: 0,
-        set_tid_size: 0,
-        cgroup: cgroup as u64,
-    };
-    let pid = unsafe {
-        libc::syscall(
-            libc::SYS_clone3,
-            &raw const args,
-            std::mem::size_of::<Args>(),
-        )
-    } as i32;
-    if pid < 0 {
-        return Err(Error::CloneDenied);
+    let text = pid.to_string();
+    let written = unsafe { libc::write(fd, text.as_ptr().cast(), text.len()) };
+    let error = std::io::Error::last_os_error();
+    unsafe { libc::close(fd) };
+    if written == text.len() as isize {
+        Ok(())
+    } else {
+        Err(error)
     }
-    Ok(pid)
 }
 
 // ───────────────────────────── broker plumbing ──────────────────────────────
@@ -859,12 +871,16 @@ pub fn serve_broker(
         .get("unleased_millicores")
         .parse()
         .expect("rendered unleased millicores");
+    let leased: u32 = context
+        .get("leased_millicores")
+        .parse()
+        .expect("rendered leased millicores");
     let fs = NativeCgroupFs::open(&environment.root, expected_uid)
         .unwrap_or_else(|e| panic!("delegated cgroup readiness: {e}"));
     let launcher = Launcher::new(
         fs,
         AdversaryClone::new(environment, worker_pid, report),
-        LauncherConfig::new(Some(unleased), expected_uid).expect("launcher config"),
+        LauncherConfig::new(Some(unleased), Some(leased), expected_uid).expect("launcher config"),
     )
     .expect("launcher");
     let broker = Broker::new(

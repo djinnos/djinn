@@ -42,8 +42,8 @@ use std::path::Path;
 use djinn_cgroup_launcher::broker::{WORKER_GID, WORKER_UID};
 use djinn_cgroup_launcher::child::{ARTIFACT_GID, CHILD_UID};
 use djinn_cgroup_launcher::{
-    ChildProcess, CloneIntoCgroup, CommandSpec, Error, Invocation, Launcher, LauncherConfig,
-    NativeCgroupFs, UnleasedQuota,
+    ChildProcess, CommandSpec, Error, Invocation, Launcher, LauncherConfig, NativeCgroupFs,
+    SpawnIntoCgroup, UnleasedQuota,
 };
 
 use rendered_boundary::{
@@ -390,8 +390,8 @@ fn an_incompatible_volume_ownership_mode_rejects_the_spawn_before_exec() {
 
     /// A clone seam that must never be reached.
     struct NeverClone;
-    impl CloneIntoCgroup for NeverClone {
-        fn clone_into_cgroup(
+    impl SpawnIntoCgroup for NeverClone {
+        fn spawn_into_cgroup(
             &mut self,
             _: std::os::fd::RawFd,
             _: &Invocation,
@@ -421,7 +421,7 @@ fn an_incompatible_volume_ownership_mode_rejects_the_spawn_before_exec() {
     let error = Launcher::new(
         fs,
         NeverClone,
-        LauncherConfig::new(None, foreign_uid).expect("launcher config"),
+        LauncherConfig::new(None, None, foreign_uid).expect("launcher config"),
     )
     .err()
     .expect("an incompatible ownership mode must reject the launcher");

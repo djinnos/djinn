@@ -24,6 +24,7 @@ use djinn_k8s::{
     WarmAdmission, WarmAdmissionError, WarmAdmissionPermit, WarmAdmissionRequest,
     WarmAdmissionTransition,
 };
+use djinn_runtime::RoleResourceClass;
 use tokio::sync::{Mutex, Notify};
 
 /// Policy applied at the coordinator admission boundary.
@@ -88,20 +89,41 @@ pub fn validate_admission_config(v0: V0Mode, v1: V1Mode, cap: i64) -> Result<(),
     Ok(())
 }
 
-/// Typed classification captured before dispatch; only the audited bypass weighs zero.
+/// Typed classification captured before dispatch. Two classes weigh zero: the
+/// explicitly audited [`BuildWorkloadKind::NonBuild`] bypass, and a task-run
+/// whose role is [`RoleResourceClass::Light`] (see [`TaskRunRole`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BuildWorkloadKind {
     TaskRun {
         role: TaskRunRole,
     },
     GraphWarmJob,
-    /// Explicit, auditable non-build work. This is the only zero-slot class.
+    /// Explicit, auditable non-build work.
     NonBuild {
         audit_reason: &'static str,
     },
 }
 
-/// All currently dispatchable task-run roles are build-producing work.
+/// Audit reason recorded when a Light (orchestration-only) task-run is admitted
+/// without reserving a build slot.
+///
+/// Distinct and greppable on purpose: it is the single string that explains why
+/// an admitted task-run left no journal row behind.
+pub const LIGHT_ROLE_AUDIT_REASON: &str =
+    "light role: orchestration-only, never runs the project toolchain";
+
+/// Every task-run role the coordinator can dispatch.
+///
+/// These roles are NOT uniformly build-producing. Only Worker and Architect
+/// (and Verifier, which is an in-pod stage — see [`TaskRunRole::parse`]) run the
+/// project's compile/test toolchain; Planner, Reviewer, Lead and the refinement
+/// tribunal (Advocate/Adversary/Judge) are orchestration-only. The distinction
+/// is owned by [`djinn_runtime::RoleResourceClass`] — the single classifier
+/// shared with `djinn-k8s` pod sizing — and reached here through
+/// [`TaskRunRole::resource_class`]. Admission consumes a build slot only for
+/// [`RoleResourceClass::BuildCapable`]: with a production cap of 3 on a 12-vCPU
+/// node, charging a Planner or a tribunal round a slot would queue it behind
+/// builds it never competes with and collapse throughput.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TaskRunRole {
     Worker,
@@ -116,6 +138,20 @@ pub enum TaskRunRole {
 
 impl TaskRunRole {
     /// Classify a known coordinator role. Unknown and missing values fail closed.
+    ///
+    /// There is deliberately no `"verifier"` arm. `djinn_runtime::RoleKind`
+    /// carries a `Verifier`, but it is an IN-POD supervisor stage, not a
+    /// coordinator dispatch role: `djinn_roles::AgentType` has no `Verifier`
+    /// variant, `RoleRegistry::new` registers none, and the agent maps
+    /// `RoleKind::Verifier` back onto `AgentType::Worker`
+    /// (`djinn-agent/src/actors/slot/lifecycle/role_overrides.rs`,
+    /// `djinn-agent/src/supervisor_impl/stage.rs`). Every production caller of
+    /// `admit_task_run` passes either a `RoleRegistry` dispatch role, the literal
+    /// `"planner"` (`dispatch/retry.rs`), or a refinement `agent_type`
+    /// (`advocate`/`adversary`/`judge`) — never `"verifier"`. A verifier's
+    /// compile therefore runs inside a Worker task-run that already holds a slot.
+    /// If a verifier ever becomes separately dispatchable it must be added here
+    /// as build-capable; until then adding it would be dead classification.
     #[must_use]
     pub fn parse(value: Option<&str>) -> Option<Self> {
         match value {
@@ -129,6 +165,32 @@ impl TaskRunRole {
             Some("judge") => Some(Self::Judge),
             _ => None,
         }
+    }
+
+    /// Canonical lowercase dispatch-role string; the exact inverse of
+    /// [`Self::parse`], which the round-trip test locks.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Worker => "worker",
+            Self::Reviewer => "reviewer",
+            Self::Lead => "lead",
+            Self::Planner => "planner",
+            Self::Architect => "architect",
+            Self::Advocate => "advocate",
+            Self::Adversary => "adversary",
+            Self::Judge => "judge",
+        }
+    }
+
+    /// Whether this role's task-run may run the project's compile/test toolchain.
+    ///
+    /// Delegates to [`djinn_runtime::RoleResourceClass`] rather than keeping a
+    /// second table here: pod sizing and build admission must never disagree
+    /// about what "light" means.
+    #[must_use]
+    pub fn resource_class(self) -> RoleResourceClass {
+        RoleResourceClass::for_role_name(self.as_str())
     }
 }
 
@@ -683,7 +745,42 @@ impl BuildAdmissionController {
             .disk_capacity_source()
             .is_some()
             .then(|| request.clone());
-        let workload_kind = match request.kind {
+        let kind = request.kind;
+        let workload_kind = match kind {
+            // A Light task-run is orchestration-only: it never runs the
+            // project's compile/test toolchain, so it weighs zero slots. It is
+            // admitted the same way the audited NonBuild bypass is — a permit
+            // with no journal reservation, via `permit_without_reservation` —
+            // which means it can never be Denied at the cap and its terminal
+            // transition is a no-op that cannot touch occupancy (the permit is
+            // recorded `durable: false`, and occupancy is always derived from
+            // the journal, never from in-memory permits). Warm builds and every
+            // build-capable role fall through and reserve normally; an unknown
+            // role never reaches here at all (`admit_task_run` rejects it as
+            // Unclassified before constructing the request).
+            BuildWorkloadKind::TaskRun { role } if !role.resource_class().consumes_build_slot() => {
+                let key = AdmissionJournalKey {
+                    domain: request.domain,
+                    work_id: request.work_id,
+                    generation: request.generation,
+                };
+                let permit_key = permit_key(&key);
+                if let Some(permit) = self.permits_by_key.lock().await.get(&permit_key).cloned() {
+                    return Ok(BuildAdmissionDecision::Permitted {
+                        permit,
+                        idempotent: true,
+                    });
+                }
+                tracing::debug!(
+                    role = role.as_str(),
+                    resource_class = role.resource_class().as_str(),
+                    audit_reason = LIGHT_ROLE_AUDIT_REASON,
+                    "build admission: zero-slot task-run permitted without reservation"
+                );
+                return self
+                    .permit_without_reservation(key, permit_key, request.object_name)
+                    .await;
+            }
             BuildWorkloadKind::TaskRun { .. } => match request.domain {
                 AdmissionDomain::TaskObservation => AdmissionWorkloadKind::Task,
                 AdmissionDomain::InvocationBuild => AdmissionWorkloadKind::Invocation,

@@ -1,7 +1,7 @@
 //! Packaged entrypoint for the mandatory cgroup-launcher sidecar.
 //!
 //! This binary is deliberately thin: it only *composes* the crate's existing,
-//! separately-tested primitives (`NativeCgroupFs`, `NativeClone3`, `Launcher`,
+//! separately-tested primitives (`NativeCgroupFs`, `NativeCgroupSpawn`, `Launcher`,
 //! `Broker`, `UnixBrokerServer`) into a fail-closed serve loop. It adds no lease
 //! policy and no new syscall surface — the crate's runtime behavior is unchanged;
 //! this file is the packaging seam so the launcher ships as a real binary
@@ -11,9 +11,9 @@
 //! Configuration is read from the environment the Job renders
 //! (`djinn-k8s::launcher`): the delegated cgroup root, control socket path, the
 //! worker-private credential path, the expected delegated-root owner uid, and the
-//! unleased broker quota. Anything missing/invalid, a sandbox that denies the
-//! `clone3(CLONE_INTO_CGROUP)` child-spawn seam, or a delegated cgroup that
-//! fails the [`Readiness`](djinn_cgroup_launcher::Readiness) contract, exits
+//! unleased/leased broker quotas. Anything missing/invalid, a cgroup2 mount the
+//! launcher cannot establish, a capability it cannot drop, or a delegated cgroup
+//! that fails the [`Readiness`](djinn_cgroup_launcher::Readiness) contract, exits
 //! non-zero with a NAMED error BEFORE the broker accepts a single connection.
 //! Every one of those conditions is a readiness failure, never a per-command
 //! error discovered after the pod has taken work (task grkq).
@@ -23,10 +23,11 @@ use std::path::Path;
 use std::process::ExitCode;
 use std::time::Duration;
 
+use djinn_cgroup_launcher::bootstrap::{self, Bootstrap};
 use djinn_cgroup_launcher::broker::{Broker, BrokerConfig, OsNonceSource};
 use djinn_cgroup_launcher::transport::UnixBrokerServer;
 use djinn_cgroup_launcher::{
-    Error as LauncherError, Launcher, LauncherConfig, NativeCgroupFs, NativeClone3,
+    Error as LauncherError, Launcher, LauncherConfig, NativeCgroupFs, NativeCgroupSpawn,
 };
 
 /// Worker→launcher handshake filename (holds the worker PID) written by the
@@ -63,24 +64,38 @@ fn run() -> Result<(), MainError> {
     let unleased: u16 = env_required("DJINN_LAUNCHER_UNLEASED_MILLICORES")?
         .parse()
         .map_err(|_| MainError::InvalidEnv("DJINN_LAUNCHER_UNLEASED_MILLICORES"))?;
+    let leased: u32 = env_required("DJINN_LAUNCHER_LEASED_MILLICORES")?
+        .parse()
+        .map_err(|_| MainError::InvalidEnv("DJINN_LAUNCHER_LEASED_MILLICORES"))?;
 
-    // Readiness gate 1 — the child-spawn seam. `clone3(CLONE_INTO_CGROUP)` is
-    // the launcher's ONLY way to start a command; a sandbox that denies it (a
-    // seccomp profile answering `clone3` with ENOSYS, or a kernel without
-    // CLONE_INTO_CGROUP) can never run anything. Probe it here so that failure
-    // is a loud, named startup failure instead of an opaque per-command spawn
-    // error surfacing after the pod has already accepted work (task grkq).
-    NativeClone3::preflight()?;
+    // Readiness gate 1 — establish the delegated cgroup v2 root, then give up
+    // the capability that allowed it. `Bootstrap::run` mounts cgroup2 inside the
+    // launcher's own cgroup namespace, vacates the mount root into `init/` so
+    // the "no internal process" rule permits delegation, enables exactly `+cpu`,
+    // and finally drops CAP_SYS_ADMIN/CAP_SYS_RESOURCE irreversibly. Everything
+    // here runs before the broker binds, so the capability window contains no
+    // user-controlled code at all (task 7deu, defect 4).
+    Bootstrap::new(&cgroup_root).run()?;
 
-    // Readiness gate 2 — the delegated cgroup root. `NativeCgroupFs::open` runs
+    // Readiness gate 2 — prove the capability really is gone. A launcher that
+    // kept CAP_SYS_ADMIN would hand every task-run pod a node-wide escape
+    // primitive (`/proc/sys/kernel/core_pattern` is not namespaced), so this is
+    // fail-closed rather than advisory.
+    if bootstrap::holds_any_bootstrap_capability()? {
+        return Err(MainError::Launcher(LauncherError::CapabilityDropFailed {
+            errno: 0,
+        }));
+    }
+
+    // Readiness gate 3 — the delegated cgroup root. `NativeCgroupFs::open` runs
     // the full readiness contract (really a cgroup2 filesystem, cgroup-v2 mode,
     // root writable and not group/other-writable, owner == expected uid, exactly
     // the cpu controller delegated) and fails closed, by name, otherwise.
     let fs = NativeCgroupFs::open(&cgroup_root, expected_uid)?;
     let launcher = Launcher::new(
         fs,
-        NativeClone3,
-        LauncherConfig::new(Some(unleased), expected_uid)?,
+        NativeCgroupSpawn,
+        LauncherConfig::new(Some(unleased), Some(leased), expected_uid)?,
     )?;
 
     // Read the worker handshake (private credential + PID) the worker writes into

@@ -90,6 +90,84 @@ impl RoleKind {
     }
 }
 
+/// Whether a role's task-run may run the project's compile/test toolchain.
+///
+/// # Why this lives in `djinn-runtime` and not where it is used
+///
+/// Two layers need the same answer and must never disagree:
+///
+/// * `djinn-k8s` sizes the pod — a Light role gets a fractional-core CPU
+///   request because it will never compile.
+/// * `djinn-coordinator` admits the task-run — a Light role must NOT consume one
+///   of the scarce build slots, or the cap starves Planners and Refinement
+///   tribunals behind builds they were never going to compete with.
+///
+/// Before this existed, `build_admission.rs` recorded the assumption in a
+/// comment ("All currently dispatchable task-run roles are build-producing
+/// work") and `djinn-k8s` recorded the opposite in code. `djinn-core`'s
+/// `is_test_path` is the precedent: one classifier, one home, no drift.
+///
+/// `djinn-core` would also have worked as a home, but `RoleKind` already lives
+/// here and both consumers already depend on this crate.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum RoleResourceClass {
+    /// Orchestration-only roles that never run the project's compile/test
+    /// toolchain: Planner, Reviewer, Lead, every Refinement sub-role, and
+    /// grooming (a Planner-driven flow). Fractional-core CPU request, and no
+    /// build-admission slot.
+    Light,
+    /// Roles that may compile/build/test: Worker, Verifier, Architect, and any
+    /// retry/resume of those. Full-core CPU request, and one build slot. Also
+    /// the FAIL-SAFE default for a missing/unknown/newly-added role.
+    BuildCapable,
+}
+
+impl RoleResourceClass {
+    /// Classify the role that executes a task-run.
+    ///
+    /// Deliberately a catch-all (`_ => BuildCapable`) rather than an exhaustive
+    /// match: an unrecognized, missing (`None`), or newly-introduced role must
+    /// **fail safe to build-capable** so a pod that might compile is never
+    /// under-provisioned and never escapes the admission cap. Only the
+    /// explicitly-listed light roles are ever classed light.
+    pub fn for_role(role: Option<RoleKind>) -> Self {
+        match role {
+            Some(
+                RoleKind::Planner | RoleKind::Reviewer | RoleKind::Lead | RoleKind::Refinement,
+            ) => Self::Light,
+            _ => Self::BuildCapable,
+        }
+    }
+
+    /// Classify by role NAME, for the layers that carry a role as a string.
+    ///
+    /// The coordinator's dispatch path names the concrete refinement sub-roles
+    /// (`advocate`, `adversary`, `judge`) that [`RoleKind`] collapses into
+    /// `Refinement`, so they are listed here explicitly. Matching is
+    /// case-insensitive and, like [`Self::for_role`], anything unrecognized
+    /// fails safe to build-capable.
+    pub fn for_role_name(role: &str) -> Self {
+        match role.trim().to_ascii_lowercase().as_str() {
+            "planner" | "reviewer" | "lead" | "refinement" | "advocate" | "adversary" | "judge"
+            | "grooming" => Self::Light,
+            _ => Self::BuildCapable,
+        }
+    }
+
+    /// Does a task-run of this class consume a build-admission slot?
+    pub fn consumes_build_slot(self) -> bool {
+        matches!(self, Self::BuildCapable)
+    }
+
+    /// Stable telemetry/label string.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Light => "light",
+            Self::BuildCapable => "build-capable",
+        }
+    }
+}
+
 /// Template for a task-run's role sequence.
 ///
 /// `NewTask` is the canonical "work" flow: plan, execute, review, verify,

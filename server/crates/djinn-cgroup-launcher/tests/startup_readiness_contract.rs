@@ -1,20 +1,25 @@
 //! Startup readiness contract, on a real kernel, with no fakes and no gate.
 //!
-//! Task grkq: the launcher's two hard startup preconditions — a delegated root
-//! that really is a cgroup v2 tree, and a reachable `clone3(CLONE_INTO_CGROUP)`
-//! — must fail LOUDLY and BEFORE the broker binds its control socket, rather
-//! than surfacing later as an opaque per-command spawn error.
+//! Task grkq/7deu: the launcher's hard startup preconditions — a delegated root
+//! it can establish, a capability set it can shed, and a spawn seam that really
+//! places a child in the leaf — must fail LOUDLY and BEFORE the broker binds its
+//! control socket, rather than surfacing later as an opaque per-command error.
 //!
 //! The containment suite next door drives a `FakeCgroup`, so it can prove what
 //! the launcher does with a readiness value but never whether the launcher can
 //! *derive* a truthful one from an actual directory. That gap is what let a
 //! non-cgroup "delegated root" ship. These tests close it using the real
-//! `NativeCgroupFs`/`NativeClone3` against real filesystem objects, which needs
-//! no privileges and therefore runs in the ordinary test lane.
+//! `NativeCgroupFs`/`Bootstrap`/`NativeCgroupSpawn` against real filesystem
+//! objects, which needs no privileges and therefore runs in the ordinary test
+//! lane.
 
 use std::path::PathBuf;
 
-use djinn_cgroup_launcher::{CGROUP2_SUPER_MAGIC, Error, NativeCgroupFs, NativeClone3};
+use djinn_cgroup_launcher::bootstrap::Bootstrap;
+use djinn_cgroup_launcher::{
+    CGROUP2_SUPER_MAGIC, CommandSpec, Error, Invocation, NativeCgroupFs, NativeCgroupSpawn,
+    SpawnIntoCgroup,
+};
 
 /// Per-test scratch directory under the crate's test tmpdir.
 struct Scratch(PathBuf);
@@ -93,40 +98,84 @@ fn the_filesystem_type_check_precedes_the_controller_check() {
     );
 }
 
-/// The child-spawn seam is probed at startup. On an ordinary test host `clone3`
-/// is reachable, so the preflight passes — and, critically, it does so WITHOUT
-/// forking: a preflight that leaked a process would be worse than no preflight.
+/// The startup bootstrap is what turns the rendered mountpoint into a delegated
+/// cgroup2 root. Unprivileged, `mount(2)` is denied — and that has to surface as
+/// a NAMED readiness failure naming the path and the errno, not as an opaque
+/// EPERM discovered per-command after the pod has taken work.
+///
+/// Task 7deu: this replaces the `clone3` preflight. The launcher no longer has a
+/// syscall-availability dependency to probe — `fork(2)` and `write(2)` are not
+/// intercepted by any profile in use — so the only startup precondition left is
+/// whether the delegated root can be established at all.
 #[test]
-fn the_clone3_preflight_passes_on_a_reachable_kernel_without_forking() {
-    let before = std::process::id();
-    NativeClone3::preflight().expect(
-        "clone3(CLONE_INTO_CGROUP) must be reachable on the test host; if this fails the \
-         sandbox running the tests denies clone3, which is exactly the condition the \
-         preflight exists to report",
-    );
-    assert_eq!(
-        std::process::id(),
-        before,
-        "the preflight must never fork; a returning child would corrupt the test process"
-    );
+fn an_unprivileged_bootstrap_is_a_named_readiness_failure_carrying_the_errno() {
+    if unsafe { libc::geteuid() } == 0 {
+        // The privileged lane proves the succeeding path; here there is nothing
+        // to assert about a root that is allowed to mount.
+        return;
+    }
+    let scratch = Scratch::new("bootstrap");
+    let root = scratch.0.join("delegated");
+
+    let error = Bootstrap::new(&root)
+        .run()
+        .expect_err("an unprivileged process cannot mount cgroup2");
+
+    match error {
+        Error::CgroupMountFailed { path, errno } => {
+            assert_eq!(path, root.display().to_string());
+            assert_eq!(errno, libc::EPERM);
+            let rendered = Error::CgroupMountFailed { path, errno }.to_string();
+            assert!(
+                rendered.contains("CAP_SYS_ADMIN"),
+                "the operator must be told which capability is missing: {rendered}"
+            );
+        }
+        other => panic!("expected a named mount failure, got: {other}"),
+    }
 }
 
-/// A denied seam is reported as its own named error carrying the errno, so the
-/// operator sees "clone3 is blocked" rather than a generic launch failure. This
-/// is the shape a `seccompProfile: RuntimeDefault` sandbox produces (that
-/// profile answers `clone3` with `ENOSYS`).
+/// The spawn seam verifies cgroup membership instead of assuming it, and a
+/// child it cannot place never reaches `execve`.
+///
+/// This is the always-on, unprivileged half of the no-unthrottled-interval
+/// proof: the privileged lane measures `cpu.stat` on a real leaf, and this
+/// asserts that a failed placement is refused by name rather than producing a
+/// running child whose CPU nothing governs. The shipped `clone3` seam could not
+/// fail this way — it passed a flag that truncated to zero, so every child was
+/// an ordinary fork that silently stayed in the launcher's own cgroup.
 #[test]
-fn a_denied_clone3_is_a_named_readiness_failure_carrying_the_errno() {
-    let denied = Error::Clone3Unavailable {
-        errno: libc::ENOSYS,
+fn a_child_that_cannot_be_placed_is_refused_by_name_and_never_execs() {
+    let scratch = Scratch::new("placement");
+    let raw = std::ffi::CString::new(scratch.0.to_string_lossy().as_bytes()).expect("path");
+    let not_a_cgroup = unsafe {
+        libc::open(
+            raw.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+        )
     };
-    let message = denied.to_string();
-    assert!(
-        message.contains("clone3") && message.contains(&libc::ENOSYS.to_string()),
-        "a denied child-spawn seam must name itself and its errno: {message}"
-    );
-    assert!(
-        message.contains("child-spawn"),
-        "the message must say why it is fatal: {message}"
-    );
+    assert!(not_a_cgroup >= 0, "open the scratch directory");
+
+    let command = CommandSpec {
+        // Would exit 0 instantly if it ever ran.
+        program: "/bin/true".to_owned(),
+        argv: vec![],
+        cwd: "/workspace".to_owned(),
+        environment: vec![],
+    };
+    let invocation = Invocation {
+        id: "readiness".to_owned(),
+        fence: 1,
+    };
+    let result = NativeCgroupSpawn.spawn_into_cgroup(not_a_cgroup, &invocation, &command);
+    unsafe { libc::close(not_a_cgroup) };
+
+    match result {
+        Err(Error::CgroupPlacementFailed { errno, .. }) => assert_eq!(errno, libc::ENOENT),
+        Err(other) => panic!("expected a named placement failure, got: {other}"),
+        Ok(_) => panic!(
+            "a child was started into a directory that is not a cgroup; its CPU would be \
+             governed by nothing at all"
+        ),
+    }
 }

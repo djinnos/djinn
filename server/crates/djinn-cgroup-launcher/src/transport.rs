@@ -1,6 +1,6 @@
 //! Bounded Unix socket transport for authenticated broker controls.
 use crate::{
-    CgroupFs, CloneIntoCgroup, CommandSpec, CpuStat, Error, Invocation,
+    CgroupFs, CommandSpec, CpuStat, Error, Invocation, SpawnIntoCgroup,
     broker::{Broker, ConnectionId, ControlNonce, NonceSource, SocketPeer, WORKER_GID, WORKER_UID},
     child::WorkerReadinessAssertion,
 };
@@ -34,7 +34,7 @@ pub struct UnixBrokerServer<F, S, N = crate::broker::OsNonceSource> {
     listener: Option<UnixListener>,
     socket_path: Option<PathBuf>,
 }
-impl<F: CgroupFs, S: CloneIntoCgroup, N: NonceSource> UnixBrokerServer<F, S, N> {
+impl<F: CgroupFs, S: SpawnIntoCgroup, N: NonceSource> UnixBrokerServer<F, S, N> {
     pub fn new(broker: Broker<F, S, N>) -> Self {
         Self {
             broker,
@@ -536,7 +536,7 @@ fn cpu_in(x: &[u8]) -> Result<CpuStat, Error> {
 mod tests {
     use super::*;
     use crate::{
-        CgroupMode, ChildProcess, CloneIntoCgroup, Invocation, Launcher, LauncherConfig, Readiness,
+        CgroupMode, ChildProcess, Invocation, Launcher, LauncherConfig, Readiness, SpawnIntoCgroup,
         broker::{BrokerConfig, NonceSource},
     };
     use std::{
@@ -603,8 +603,8 @@ mod tests {
         counts: Counts,
         outcome: Outcome,
     }
-    impl CloneIntoCgroup for ForkClone {
-        fn clone_into_cgroup(
+    impl SpawnIntoCgroup for ForkClone {
+        fn spawn_into_cgroup(
             &mut self,
             _: RawFd,
             _: &Invocation,
@@ -704,15 +704,15 @@ mod tests {
         }
     }
     struct NoClone(Counts);
-    impl CloneIntoCgroup for NoClone {
-        fn clone_into_cgroup(
+    impl SpawnIntoCgroup for NoClone {
+        fn spawn_into_cgroup(
             &mut self,
             _: RawFd,
             _: &Invocation,
             _: &CommandSpec,
         ) -> Result<ChildProcess, Error> {
             self.0.clones.fetch_add(1, Ordering::SeqCst);
-            Err(Error::CloneDenied)
+            Err(Error::SpawnDenied)
         }
     }
     struct TestNonces(u8);
@@ -722,11 +722,11 @@ mod tests {
             Ok(crate::broker::ControlNonce::from_bytes([self.0; 32]))
         }
     }
-    fn broker<S: CloneIntoCgroup>(counts: Counts, clone: S) -> Broker<FakeFs, S, TestNonces> {
+    fn broker<S: SpawnIntoCgroup>(counts: Counts, clone: S) -> Broker<FakeFs, S, TestNonces> {
         let launcher = Launcher::new(
             FakeFs(counts),
             clone,
-            LauncherConfig::new(None, unsafe { libc::geteuid() }).unwrap(),
+            LauncherConfig::new(None, None, unsafe { libc::geteuid() }).unwrap(),
         )
         .unwrap();
         Broker::new(

@@ -10,8 +10,8 @@ use crate::types::{
 use djinn_core::events::{DjinnEventEnvelope, EventBus};
 use djinn_core::models::{Model, Pricing, Provider};
 use djinn_db::{
-    AdmissionDomain, AdmissionJournalRepository, AdmissionState, ProposalCreateInput,
-    ProposalRepository, SessionRepository, TaskRepository, UserRepository, UserSettingsRepository,
+    AdmissionDomain, AdmissionJournalRepository, ProposalCreateInput, ProposalRepository,
+    SessionRepository, TaskRepository, UserRepository, UserSettingsRepository,
 };
 use djinn_provider::catalog::CatalogService;
 use djinn_provider::catalog::health::HealthTracker;
@@ -545,22 +545,21 @@ async fn capacity_free_retry_dispatches_exactly_one_refinement() {
         .recv()
         .await
         .expect("controlled refinement create callback must execute");
-    assert_eq!(
-        create_time_history.len(),
-        1,
-        "one durable generation at create time"
-    );
-    assert_eq!(create_time_history[0].key.work_id, created_task_id);
+    // Task `h1yv`: the tribunal roles (advocate/adversary/judge) are
+    // `djinn_runtime::RoleResourceClass::Light` — orchestration-only, they never
+    // run the project's compile/test toolchain — so build admission grants a
+    // zero-slot permit and writes NO journal row. This assertion previously
+    // demanded one durable generation; the invariant that survives is that a
+    // tribunal round reserves nothing and occupies nothing. The user-model cap
+    // exercised by this test (AC#3) is a separate, still-enforced gate.
     assert!(
-        matches!(
-            create_time_history[0].state,
-            AdmissionState::CreateInFlight | AdmissionState::CreateUnknown
-        ),
-        "CreateStarted must be durable before the refinement pool create callback"
+        create_time_history.is_empty(),
+        "a light tribunal task-run must reserve no admission generation, got {create_time_history:?}"
     );
+    assert!(!created_task_id.is_empty(), "a refinement task was created");
     assert_eq!(
-        create_time_occupancy, 1,
-        "reservation occupies capacity at create time"
+        create_time_occupancy, 0,
+        "a light tribunal task-run occupies no build capacity at create time"
     );
 
     assert!(
@@ -593,17 +592,24 @@ async fn capacity_free_retry_dispatches_exactly_one_refinement() {
         "exactly one refinement task should exist"
     );
 
-    // The durable journal must be CreateStarted before the pool accepts the request.
+    // The durable journal stays empty: a light tribunal round never reserves,
+    // so there is nothing to make CreateStarted and nothing to release.
     let journal_rows = journal
         .list_history(AdmissionDomain::TaskObservation, &refinement_tasks[0].id)
         .await
         .expect("read refinement admission history");
-    assert_eq!(
-        journal_rows.len(),
-        1,
-        "refinement route reserves exactly one generation"
+    assert!(
+        journal_rows.is_empty(),
+        "a light refinement route writes no admission generation, got {journal_rows:?}"
     );
-    assert_eq!(journal_rows[0].state, AdmissionState::CreateUnknown);
+    assert_eq!(
+        journal
+            .count_task_or_warm_occupancy()
+            .await
+            .expect("count admission occupancy"),
+        0,
+        "a light refinement round consumes no build slot",
+    );
 
     // The state machine should have recorded one spawn.
     let state = &actor.active_refinements[&fixture.proposal_id];
