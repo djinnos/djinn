@@ -1,0 +1,25 @@
+{{- /*
+ij6g: catalog wrapper image manifest.
+
+Rendered ONLY when `serviceWrappers.imageManifest` is set. The file is mounted
+read-only into the server container and named by DJINN_WRAPPER_IMAGE_MANIFEST
+(see deployment-server.yaml); the image controller's boot reconcile records the
+identities into `service_presets`. Absent value => no ConfigMap, no env var,
+and strict service verification stays fail-closed rather than resolving a
+wrapper image with no verified digest.
+
+The value may be the manifest JSON as a string (what
+`server/docker/build-wrapper-images.sh` writes) or the equivalent YAML mapping;
+a mapping is re-encoded with `toJson` so the on-disk file is always JSON.
+*/ -}}
+{{- if .Values.serviceWrappers.imageManifest }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "djinn.fullname" . }}-wrapper-manifest
+  namespace: {{ include "djinn.namespace" . }}
+  labels:
+    {{- include "djinn.server.labels" . | nindent 4 }}
+data:
+  wrapper-image-manifest.json: {{ include "djinn.wrapperImageManifest.json" . | quote }}
+{{- end }}

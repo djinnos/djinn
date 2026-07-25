@@ -37,6 +37,19 @@ preset-rabbitmq-4|djinn-rabbitmq-wrapper|djinn-rabbitmq-wrapper|djinn-rabbitmq-w
 echo ">> building catalog wrapper binaries"
 ( cd "$REPO_ROOT/server" && cargo build --release --locked -p djinn-catalog-wrapper )
 
+# The build context is the tracked `server/docker/` directory, so each binary
+# is staged INTO the working tree. A failed `docker buildx build` (e.g. a push
+# denied for a token missing `write:packages`) aborts under `set -e` before the
+# per-iteration cleanup, leaving a multi-megabyte untracked binary behind and
+# the repo dirty. Clean up on ANY exit instead.
+staged=""
+metafile=""
+cleanup() {
+    [ -z "$staged" ] || rm -f "$staged"
+    [ -z "$metafile" ] || rm -f "$metafile"
+}
+trap cleanup EXIT
+
 entries=""
 for row in $WRAPPERS; do
     [ -n "$row" ] || continue
@@ -48,7 +61,8 @@ for row in $WRAPPERS; do
     ref="$wrapper_image:$TAG"
 
     echo ">> staging $bin"
-    cp "$REPO_ROOT/server/target/release/$bin" "$SCRIPT_DIR/$bin"
+    staged="$SCRIPT_DIR/$bin"
+    cp "$REPO_ROOT/server/target/release/$bin" "$staged"
 
     metafile=$(mktemp)
     if [ "$PUSH" = "1" ]; then
@@ -71,7 +85,9 @@ for row in $WRAPPERS; do
         echo ">> building (no push) $ref"
         docker build --file "$SCRIPT_DIR/$dockerfile" --tag "$ref" "$SCRIPT_DIR"
     fi
-    rm -f "$metafile" "$SCRIPT_DIR/$bin"
+    rm -f "$metafile" "$staged"
+    staged=""
+    metafile=""
 done
 
 if [ "$PUSH" = "1" ]; then

@@ -295,3 +295,21 @@ the PVC template and point the Deployment volume at the caller-provided name.
 {{- printf "%s-projects" (include "djinn.fullname" .) | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 {{- end -}}
+
+{{/*
+ij6g: the catalog wrapper image manifest, normalized to JSON.
+
+`serviceWrappers.imageManifest` accepts either the JSON string that
+`server/docker/build-wrapper-images.sh` writes or the equivalent YAML mapping.
+A mapping is re-encoded so the file the server reads is always JSON; a string
+is emitted verbatim (surrounding whitespace trimmed) so the operator-supplied
+bytes — the digests above all — reach the server unaltered.
+*/}}
+{{- define "djinn.wrapperImageManifest.json" -}}
+{{- $manifest := .Values.serviceWrappers.imageManifest -}}
+{{- if kindIs "string" $manifest -}}
+{{- trim $manifest -}}
+{{- else -}}
+{{- toJson $manifest -}}
+{{- end -}}
+{{- end -}}

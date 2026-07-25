@@ -63,6 +63,7 @@ spec:
         checksum/configmap: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
         checksum/secret-github-app: {{ include (print $.Template.BasePath "/secret-github-app.yaml") . | sha256sum }}
         checksum/secret-vault-key: {{ include (print $.Template.BasePath "/secret-vault-key.yaml") . | sha256sum }}
+        checksum/configmap-wrapper-manifest: {{ include (print $.Template.BasePath "/configmap-wrapper-manifest.yaml") . | sha256sum }}
       labels:
         {{- include "djinn.server.selectorLabels" . | nindent 8 }}
     spec:
@@ -442,6 +443,16 @@ spec:
             {{- end }}
             - name: DJINN_VAULT_KEY_PATH
               value: /var/run/secrets/djinn/vault.key
+            {{- if .Values.serviceWrappers.imageManifest }}
+            # ij6g: path of the projected catalog wrapper image manifest. The
+            # image controller reads it once at boot and records each
+            # `{wrapper_image}@{digest}` into `service_presets`. Omitted (with
+            # its ConfigMap + volume) when no manifest is configured, so strict
+            # service verification stays fail-closed instead of resolving a
+            # wrapper image with no verified digest.
+            - name: DJINN_WRAPPER_IMAGE_MANIFEST
+              value: /var/run/djinn/wrapper/wrapper-image-manifest.json
+            {{- end }}
             {{- if $githubAppConfigAttempted }}
             - name: GITHUB_APP_PRIVATE_KEY_PATH
               value: /var/run/secrets/djinn/github-app/private-key.pem
@@ -544,6 +555,11 @@ spec:
               mountPath: /var/run/secrets/djinn/github-app
               readOnly: true
             {{- end }}
+            {{- if .Values.serviceWrappers.imageManifest }}
+            - name: wrapper-manifest
+              mountPath: /var/run/djinn/wrapper
+              readOnly: true
+            {{- end }}
           resources:
             {{- toYaml .Values.resources.server | nindent 12 }}
           lifecycle:
@@ -609,5 +625,13 @@ spec:
             # can read the file. The Secret is namespace-scoped + only
             # mounted into this Pod, so "world-readable" inside the
             # container is fine.
+            defaultMode: 0444
+        {{- end }}
+        {{- if .Values.serviceWrappers.imageManifest }}
+        - name: wrapper-manifest
+          configMap:
+            name: {{ include "djinn.fullname" . }}-wrapper-manifest
+            # 0444 so the non-root djinn user can read it regardless of which
+            # uid the image runs as.
             defaultMode: 0444
         {{- end }}
