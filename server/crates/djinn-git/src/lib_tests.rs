@@ -369,6 +369,32 @@ fn generated_config_chains_to_the_real_system_config() {
     );
 }
 
+/// git ignores a `GIT_CONFIG_SYSTEM` pointing at a missing file silently, so a
+/// temp reaper deleting the generated config would resurrect the outage days into
+/// a server's uptime with nothing in the logs. Writing it must be repeatable and
+/// must restore a deleted file.
+#[test]
+fn generated_config_is_rewritten_when_it_disappears() {
+    let dir = tempfile::tempdir().expect("create config dir");
+    let path = dir.path().join("gitconfig");
+
+    crate::materialize_generated_config_at(&path).expect("first write");
+    let first = std::fs::read_to_string(&path).expect("config must exist after the first write");
+
+    std::fs::remove_file(&path).expect("simulate a temp-directory reaper");
+    crate::materialize_generated_config_at(&path).expect("rewrite after deletion");
+
+    let second = std::fs::read_to_string(&path).expect("config must be restored");
+    assert_eq!(
+        first, second,
+        "the rewrite must reproduce the same trust configuration"
+    );
+    assert!(
+        second.contains("[safe]\n\tdirectory = *\n"),
+        "the restored file must carry the trust rule, got {second:?}"
+    );
+}
+
 // ── run_git_command_with_timeout: Timeout ───────────────────────────────────
 
 /// Verifies that `run_git_command_with_timeout` returns `GitError::Timeout`

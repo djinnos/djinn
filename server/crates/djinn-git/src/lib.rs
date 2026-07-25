@@ -247,10 +247,15 @@ fn write_generated_config(path: &Path, contents: &str) -> std::io::Result<()> {
     std::fs::rename(&staging, path)
 }
 
+/// (Re-)write the generated config at exactly `path`.
+fn materialize_generated_config_at(path: &Path) -> std::io::Result<()> {
+    let contents = generated_config_contents(system_config_to_chain(path).as_deref());
+    write_generated_config(path, &contents)
+}
+
 fn materialize_generated_config() -> std::io::Result<PathBuf> {
     let path = generated_config_dir()?.join(GENERATED_CONFIG_BASENAME);
-    let contents = generated_config_contents(system_config_to_chain(&path).as_deref());
-    write_generated_config(&path, &contents)?;
+    materialize_generated_config_at(&path)?;
     Ok(path)
 }
 
@@ -261,7 +266,7 @@ static GENERATED_CONFIG: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceL
 /// `None` only when no writable location could be found, in which case callers
 /// fall back to the weaker command-scope injection.
 pub fn safe_directory_config_path() -> Option<&'static Path> {
-    GENERATED_CONFIG
+    let path = GENERATED_CONFIG
         .get_or_init(|| match materialize_generated_config() {
             Ok(path) => Some(path),
             Err(err) => {
@@ -275,7 +280,28 @@ pub fn safe_directory_config_path() -> Option<&'static Path> {
                 None
             }
         })
-        .as_deref()
+        .as_deref()?;
+
+    // Self-heal. A temp-directory reaper (`systemd-tmpfiles-clean` ages `/tmp`
+    // out from under long-lived processes) can delete the file, and git ignores a
+    // `GIT_CONFIG_SYSTEM` that does not exist *silently* — which would bring the
+    // dubious-ownership failure back days into a server's uptime with nothing in
+    // the logs. One `stat` per git spawn is free next to the fork/exec.
+    if !path.is_file() {
+        match materialize_generated_config_at(path) {
+            Ok(()) => tracing::info!(
+                config = %path.display(),
+                "re-created the system-scope safe.directory config after it disappeared"
+            ),
+            Err(err) => tracing::warn!(
+                %err,
+                config = %path.display(),
+                "the system-scope safe.directory config disappeared and could not be \
+                 re-created; clones of a mirror owned by another uid will fail"
+            ),
+        }
+    }
+    Some(path)
 }
 
 /// Environment that makes git trust repositories shared across djinn's uids.
