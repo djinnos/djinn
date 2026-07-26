@@ -335,6 +335,7 @@ mod tests {
             refinement_round: None,
             refinement_phase: None,
             refinement_role: None,
+            execution_context: None,
         }
     }
 

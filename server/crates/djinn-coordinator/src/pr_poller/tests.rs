@@ -539,6 +539,7 @@ fn task(id: &str, status: &str) -> Task {
         refinement_round: None,
         refinement_phase: None,
         refinement_role: None,
+        execution_context: None,
     }
 }
 
@@ -4866,6 +4867,7 @@ fn mq_section_task() -> djinn_core::models::Task {
         refinement_round: None,
         refinement_phase: None,
         refinement_role: None,
+        execution_context: None,
     }
 }
 
