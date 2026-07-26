@@ -561,7 +561,7 @@ jobs:
       # Number of `#[ignore]`d proofs the suite declares. The run below fails if
       # fewer than this many actually execute, so a lane that quietly runs zero
       # tests can never be mistaken for a proven kernel boundary.
-      ZF13_EXPECTED_PROOFS: "3"
+      ZF13_EXPECTED_PROOFS: "4"
       # Number of `#[ignore]`d proofs `delegated_cpu_lease_lifecycle.rs`
       # declares. That suite is the ONLY place the CPU lease is proven to
       # actually govern CPU — measured on `cpu.stat` over a wall-clock window

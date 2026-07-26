@@ -150,7 +150,7 @@ fn assert_rendered_required_job_contract() {
         ("launcher_capabilities_drop", "ALL"),
         (
             "launcher_capabilities_add",
-            "SETUID,SETGID,SETPCAP,SYS_ADMIN,SYS_RESOURCE",
+            "CHOWN,SETGID,SETUID,SETPCAP,SYS_ADMIN,SYS_RESOURCE",
         ),
         ("launcher_cpu_limit", "none"),
         ("launcher_cpu_request", "50m"),
