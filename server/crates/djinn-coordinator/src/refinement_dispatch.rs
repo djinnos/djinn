@@ -197,29 +197,23 @@ impl CoordinatorActor {
                                 Ok(Some(proposal)) => proposal,
                                 Ok(None) | Err(_) => continue,
                             };
-                            // Register the in-flight projection BEFORE any gate
-                            // that can `continue`. The outcome path is the only
-                            // writer of the successor intent, and it is only
-                            // reachable through this projection — a materialized
-                            // intent whose role already ran must be observable
-                            // even when attribution or admission would deny a
-                            // fresh enqueue. Skipping this is what left every
-                            // durable run stuck at `materialized` forever.
-                            let role_ran = self
-                                .register_durable_refinement_inflight(DurableInflightRegistration {
-                                    run_id: &run.run_id,
-                                    generation: run.generation,
-                                    proposal: &proposal,
-                                    phase: intent.phase,
-                                    round: intent.round,
-                                    task_id: &task.id,
-                                })
-                                .await;
+                            // A previously successful enqueue may have completed
+                            // before this coordinator rebuilt its disposable
+                            // projection. Recover that outcome without sending a
+                            // closed role task through the pool again.
+                            let role_ran = self.refinement_session_has_started(&task.id).await;
                             if role_ran {
-                                // The role already produced a session. What the
-                                // run is owed now is its OUTCOME, not another
-                                // dispatch; re-enqueueing a finished (and by now
-                                // closed) role task would loop forever.
+                                self.register_durable_refinement_inflight(
+                                    DurableInflightRegistration {
+                                        run_id: &run.run_id,
+                                        generation: run.generation,
+                                        proposal: &proposal,
+                                        phase: intent.phase,
+                                        round: intent.round,
+                                        task_id: &task.id,
+                                    },
+                                )
+                                .await;
                                 continue;
                             }
                             let Some(owner) = proposal.refinement_owner_user_id.as_deref() else {
@@ -238,10 +232,34 @@ impl CoordinatorActor {
                             };
                             let project_path =
                                 self.resolve_refinement_project_path(&run.proposal_id).await;
-                            if let Err(error) =
-                                self.pool.dispatch(&task.id, &project_path, &model_id).await
-                            {
-                                tracing::warn!(task_id = %task.id, %error, "materialized refinement enqueue failed; retrying on next durable poll");
+                            match self.pool.dispatch(&task.id, &project_path, &model_id).await {
+                                Ok(()) => {
+                                    // Do not manufacture the outcome projection
+                                    // until this retry enqueue has succeeded.
+                                    self.register_durable_refinement_inflight(
+                                        DurableInflightRegistration {
+                                            run_id: &run.run_id,
+                                            generation: run.generation,
+                                            proposal: &proposal,
+                                            phase: intent.phase,
+                                            round: intent.round,
+                                            task_id: &task.id,
+                                        },
+                                    )
+                                    .await;
+                                    if let Some(session) =
+                                        self.refinement_sessions.get_mut(&run.run_id)
+                                        && session.run_id == run.run_id
+                                        && session.generation == run.generation
+                                        && session.task_id == task.id
+                                    {
+                                        session.model_id = model_id;
+                                        session.session_started_at = None;
+                                    }
+                                }
+                                Err(error) => {
+                                    tracing::warn!(task_id = %task.id, %error, "materialized refinement enqueue failed; retrying on next durable poll")
+                                }
                             }
                         }
                         Ok(None) => {
@@ -353,22 +371,32 @@ impl CoordinatorActor {
                 {
                     continue;
                 }
-                // Track the freshly materialized role as in-flight in the same
-                // pass that enqueues it, so its very first exit is observed and
-                // its outcome applied. Registering only on a later poll would
-                // leave a one-tick hole with no watcher.
-                self.register_durable_refinement_inflight(DurableInflightRegistration {
-                    run_id: &lease.run_id,
-                    generation: lease.generation,
-                    proposal: &proposal,
-                    phase: lease.phase,
-                    round: lease.round,
-                    task_id: &task_id,
-                })
-                .await;
                 let project_path = self.resolve_refinement_project_path(&run.proposal_id).await;
-                if let Err(error) = self.pool.dispatch(&task_id, &project_path, &model_id).await {
-                    tracing::warn!(task_id = %task_id, %error, "durable refinement enqueue failed; task remains retryable");
+                match self.pool.dispatch(&task_id, &project_path, &model_id).await {
+                    Ok(()) => {
+                        // Register only after the pool accepted this exact task.
+                        // This is the run-keyed bridge to outcome completion.
+                        self.register_durable_refinement_inflight(DurableInflightRegistration {
+                            run_id: &lease.run_id,
+                            generation: lease.generation,
+                            proposal: &proposal,
+                            phase: lease.phase,
+                            round: lease.round,
+                            task_id: &task_id,
+                        })
+                        .await;
+                        if let Some(session) = self.refinement_sessions.get_mut(&lease.run_id)
+                            && session.run_id == lease.run_id
+                            && session.generation == lease.generation
+                            && session.task_id == task_id
+                        {
+                            session.model_id = model_id;
+                            session.session_started_at = None;
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(task_id = %task_id, %error, "durable refinement enqueue failed; task remains retryable")
+                    }
                 }
             }
         }
