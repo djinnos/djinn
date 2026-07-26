@@ -53,6 +53,7 @@
             (RefinementLivenessEvidence::AwaitingEvidencePark, "awaiting_evidence_park"),
             (RefinementLivenessEvidence::PendingIntent { intent_id: "i".into() }, "pending_intent"),
             (RefinementLivenessEvidence::ClaimedIntent { intent_id: "i".into() }, "claimed_intent"),
+            (RefinementLivenessEvidence::MaterializedIntent { intent_id: "i".into() }, "materialized_intent"),
             (RefinementLivenessEvidence::OpenTask { task_id: "t".into() }, "open_task"),
             (RefinementLivenessEvidence::QueuedTask { task_id: "t".into() }, "queued_task"),
             (RefinementLivenessEvidence::RunningTask { task_id: "t".into() }, "running_task"),
