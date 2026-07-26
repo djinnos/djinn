@@ -89,6 +89,26 @@ async fn run(db: &Database, proposal_id: &str, generation: i32) -> String {
     id
 }
 
+async fn terminal_run_with_typed_stop(
+    repo: &ProposalRepository,
+    run_id: String,
+    generation: i32,
+    actor: &str,
+) {
+    assert!(
+        repo.terminal_refinement_run(TerminalRefinementRunRequest {
+            run_id,
+            generation,
+            reason: RefinementStopReason::OperatorStop {
+                actor: actor.into(),
+                reason: Some("create terminal history without a phantom reap".into()),
+            },
+        })
+        .await
+        .unwrap()
+    );
+}
+
 async fn intent(db: &Database, run_id: &str, state: &str, expiry: Option<&str>) -> String {
     let id = uuid::Uuid::now_v7().to_string();
     let (owner, claimed_at) = if state == "claimed" {
@@ -844,18 +864,7 @@ async fn board_aggregate_covers_clean_stale_repeated_reaps_and_window_boundary()
     // A later admission after terminal history is generation four, but it has
     // no current run to reap. This is the path that must not emit reap
     // telemetry merely because the successor generation exceeds one.
-    assert!(
-        repo.terminal_refinement_run(TerminalRefinementRunRequest {
-            run_id: active,
-            generation: 3,
-            reason: RefinementStopReason::OperatorStop {
-                actor: "board-aggregate-fixture".into(),
-                reason: Some("create terminal history without a phantom reap".into()),
-            },
-        })
-        .await
-        .unwrap()
-    );
+    terminal_run_with_typed_stop(&repo, active, 3, "board-aggregate-fixture").await;
     repo.reap_and_admit(admission(proposal_id.clone(), "terminal-history-no-reap"))
         .await
         .unwrap();
@@ -897,18 +906,7 @@ fn reap_and_admit_emits_once_only_for_the_committed_reap() {
             .fetch_one(db.pool())
             .await
             .unwrap();
-            assert!(
-                repo.terminal_refinement_run(TerminalRefinementRunRequest {
-                    run_id: active_run_id,
-                    generation: 2,
-                    reason: RefinementStopReason::OperatorStop {
-                        actor: "reap-telemetry-fixture".into(),
-                        reason: Some("create terminal history without a phantom reap".into()),
-                    },
-                })
-                .await
-                .unwrap()
-            );
+            terminal_run_with_typed_stop(&repo, active_run_id, 2, "reap-telemetry-fixture").await;
             repo.reap_and_admit(admission(proposal_id.clone(), "metric-no-current-reap"))
                 .await
                 .unwrap();
