@@ -370,6 +370,7 @@ impl SlotPool {
                             task_id: String::new(),
                             started_at: now_unix_string(self.ctx.clock.as_ref()),
                             agent_type: "worker".to_string(),
+            execution_context: None,
                         },
                     );
                     tracing::warn!(
@@ -400,6 +401,7 @@ impl SlotPool {
                     task_id: task_owned.clone(),
                     started_at: now_unix_string(self.ctx.clock.as_ref()),
                     agent_type: String::new(),
+            execution_context: None,
                 },
             );
             self.ctx.register_activity(&task_owned);
@@ -1056,6 +1058,7 @@ impl SlotPool {
                 task_id: task_id.to_owned(),
                 started_at: now_unix_string(self.ctx.clock.as_ref()),
                 agent_type: "worker".to_owned(),
+            execution_context: None,
             },
         );
     }

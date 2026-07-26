@@ -499,6 +499,33 @@ impl<'de> Deserialize<'de> for TaskExecutionContext {
     }
 }
 
+#[cfg(feature = "sqlx")]
+impl sqlx::Type<sqlx::Postgres> for TaskExecutionContext {
+    fn type_info() -> sqlx::postgres::PgTypeInfo {
+        <sqlx::types::Json<serde_json::Value> as sqlx::Type<sqlx::Postgres>>::type_info()
+    }
+
+    fn compatible(ty: &sqlx::postgres::PgTypeInfo) -> bool {
+        <sqlx::types::Json<serde_json::Value> as sqlx::Type<sqlx::Postgres>>::compatible(ty)
+    }
+}
+
+#[cfg(feature = "sqlx")]
+impl<'r> sqlx::Decode<'r, sqlx::Postgres> for TaskExecutionContext {
+    fn decode(
+        value: sqlx::postgres::PgValueRef<'r>,
+    ) -> std::result::Result<Self, sqlx::error::BoxDynError> {
+        let value = <sqlx::types::Json<serde_json::Value> as sqlx::Decode<sqlx::Postgres>>::decode(value)?.0;
+        serde_json::from_value(value).map_err(|error| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("invalid tasks.execution_context: {error}"),
+            )
+            .into()
+        })
+    }
+}
+
 /// Task board work item, always scoped under an epic.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "sqlx", derive(sqlx::FromRow))]
@@ -541,6 +568,10 @@ pub struct Task {
     /// When set, the slot lifecycle loads this Agent instead of the project default.
     #[cfg_attr(feature = "sqlx", sqlx(default))]
     pub agent_type: Option<String>,
+    /// Explicit typed execution eligibility metadata. `None` preserves legacy
+    /// task rows that predate structured execution context.
+    #[cfg_attr(feature = "sqlx", sqlx(default))]
+    pub execution_context: Option<TaskExecutionContext>,
     /// Stable `users.id` of whoever created this task. Stamped from the
     /// session user at the MCP dispatch root; background/agent callers resolve
     /// provenance through the parent epic or proposal before persistence. The
@@ -2891,4 +2922,29 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn readiness_execution_context_has_stable_validated_json() {
+        let context = TaskExecutionContext::readiness_guardrail_analysis(
+            "agent-readiness-guardrails",
+            "1.0.0",
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(&context).unwrap(),
+            serde_json::json!({
+                "kind": "readiness_guardrail_analysis",
+                "skill_name": "agent-readiness-guardrails",
+                "skill_version": "1.0.0",
+            })
+        );
+        assert_eq!(serde_json::from_value::<TaskExecutionContext>(serde_json::to_value(&context).unwrap()).unwrap(), context);
+        for malformed in [
+            serde_json::json!({"kind": "readiness_guardrail_analysis", "skill_name": "", "skill_version": "1.0.0"}),
+            serde_json::json!({"kind": "readiness_guardrail_analysis", "skill_name": "skill", "skill_version": " "}),
+            serde_json::json!({"kind": "unknown", "skill_name": "skill", "skill_version": "1.0.0"}),
+        ] {
+            assert!(serde_json::from_value::<TaskExecutionContext>(malformed).is_err());
+        }
+    }
+
 }

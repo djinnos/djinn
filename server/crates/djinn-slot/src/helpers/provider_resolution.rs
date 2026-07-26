@@ -149,6 +149,7 @@ pub(crate) fn build_telemetry_meta_with_attribution(
     djinn_provider::provider::TelemetryMeta {
         task_id: Some(task_id.to_owned()),
         agent_type: Some(agent_type_str.to_owned()),
+            execution_context: None,
         session_id: Some(task_id.to_owned()),
         operation: operation.map(str::to_owned),
         user_id: user_id.map(str::to_owned),
@@ -535,6 +536,7 @@ mod tests {
         let telemetry = TelemetryMeta {
             task_id: Some("task-42".to_string()),
             agent_type: Some("worker".to_string()),
+            execution_context: None,
             session_id: Some("session-7".to_string()),
             operation: Some("completion".to_string()),
             user_id: Some("user-1".to_string()),
@@ -633,6 +635,7 @@ mod tests {
             cfg.telemetry = Some(TelemetryMeta {
                 task_id: Some("task-99".to_string()),
                 agent_type: Some("reviewer".to_string()),
+            execution_context: None,
                 session_id: Some("sess-99".to_string()),
                 operation: None,
                 user_id: None,

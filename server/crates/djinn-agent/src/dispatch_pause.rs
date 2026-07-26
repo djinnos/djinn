@@ -121,6 +121,7 @@ mod tests {
             pr_url: None,
             merge_conflict_metadata: None,
             agent_type: None,
+            execution_context: None,
             ci_status: "unknown".to_owned(),
             ci_head_sha: None,
             ci_pr_number: None,

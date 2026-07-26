@@ -157,6 +157,7 @@ mod tests {
             task_id: Some("task-1".to_owned()),
             model_id: "model".to_owned(),
             agent_type: "worker".to_owned(),
+            execution_context: None,
             started_at: "2026-01-02T03:04:05.000Z".to_owned(),
             ended_at: None,
             status: "completed".to_owned(),

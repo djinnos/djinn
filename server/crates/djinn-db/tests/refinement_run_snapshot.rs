@@ -139,6 +139,7 @@ async fn live_session(db: &Database, task_id: &str) -> String {
             project_id: &project_id,
             model_id: "test",
             agent_type: "worker",
+            execution_context: None,
             started_at: OLD,
             tokens_in: 0,
             tokens_out: 0,

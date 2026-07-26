@@ -577,6 +577,7 @@ impl SupervisorServices for WorkerSupervisorServices {
         session_id: String,
         task_id: String,
         agent_type: String,
+            execution_context: None,
         message: serde_json::Value,
     ) -> Result<(), String> {
         self.rpc

@@ -26,6 +26,7 @@ impl LlmMemoryWriteProviderRuntime {
             user_id: self.user_id.clone(),
             task_id: None,
             agent_type: Some("memory_write_dedup".to_string()),
+            execution_context: None,
             session_id: None,
         }
     }

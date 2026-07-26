@@ -60,6 +60,7 @@ async fn make_context() -> (
             task_id: Some(&task.id),
             model: "synthetic/test-model",
             agent_type: "worker",
+            execution_context: None,
             metadata_json: None,
             task_run_id: Some(&task_run_id),
             pricing: None,

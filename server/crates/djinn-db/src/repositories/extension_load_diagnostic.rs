@@ -280,6 +280,7 @@ mod tests {
                 project_id: &project_id,
                 model_id: "test-model",
                 agent_type: "worker",
+            execution_context: None,
                 started_at: "2026-07-13T10:00:00.000Z",
                 tokens_in: 0,
                 tokens_out: 0,

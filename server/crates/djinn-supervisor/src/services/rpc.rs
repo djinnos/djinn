@@ -677,6 +677,7 @@ impl SupervisorServices for RpcServices {
         session_id: String,
         task_id: String,
         agent_type: String,
+            execution_context: None,
         message: serde_json::Value,
     ) -> Result<(), String> {
         // Opaque JSON encode for bincode safety — `serde_json::Value`'s
@@ -1962,6 +1963,7 @@ mod tests {
                         task_id: params.task_id.clone(),
                         model_id: params.model.clone(),
                         agent_type: params.agent_type.clone(),
+            execution_context: None,
                         started_at: "now".into(),
                         ended_at: None,
                         status: "running".into(),
@@ -1997,6 +1999,7 @@ mod tests {
             task_id: Some("t1".into()),
             model: "anthropic/claude-opus-4-7".into(),
             agent_type: "planner".into(),
+            execution_context: None,
             metadata_json: None,
             task_run_id: Some("run-1".into()),
             cost_basis_hint: None,
@@ -2230,6 +2233,7 @@ mod tests {
             merge_conflict_metadata: None,
             memory_refs: "[]".into(),
             agent_type: None,
+            execution_context: None,
             created_by_user_id: "fixture-user".into(),
             ci_status: "unknown".into(),
             ci_head_sha: None,

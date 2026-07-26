@@ -54,6 +54,7 @@ struct UsageQuery {
     /// Model identifier filter.
     model: Option<String>,
     agent_type: Option<String>,
+    execution_context: None,
     /// User identifier filter (session creator, falling back to task creator).
     user_id: Option<String>,
 }
@@ -176,6 +177,7 @@ fn previous_window_query(
         project_id: query.project_id.clone(),
         model_id: query.model_id.clone(),
         agent_type: query.agent_type.clone(),
+        execution_context: None,
         user_id: query.user_id.clone(),
     })
 }
@@ -228,6 +230,7 @@ impl UsageQuery {
                 project_id: self.project_id.filter(|s| !s.is_empty()),
                 model_id: self.model.filter(|s| !s.is_empty()),
                 agent_type: self.agent_type.filter(|s| !s.is_empty()),
+                execution_context: None,
                 user_id: self.user_id.filter(|s| !s.is_empty()),
             },
             granularity,
@@ -306,6 +309,7 @@ struct SeriesPointDto {
     project_id: String,
     project_name: String,
     agent_type: String,
+    execution_context: None,
     /// Count of unpriced sessions in this bucket.
     unpriced_session_count: i64,
 }

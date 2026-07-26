@@ -9,6 +9,7 @@ fn empty_query() -> UsageQuery {
         project_id: None,
         model: None,
         agent_type: None,
+        execution_context: None,
         user_id: None,
     }
 }
@@ -115,6 +116,7 @@ fn previous_window_matches_requested_day_span() {
         project_id: Some("proj-1".into()),
         model_id: Some("model-1".into()),
         agent_type: Some("worker".into()),
+        execution_context: None,
         user_id: Some("user-1".into()),
     };
     let previous = previous_window_query(&query).unwrap();
@@ -265,6 +267,7 @@ fn series_row(
         project_id: "p1".into(),
         project_name: "Proj One".into(),
         agent_type: "worker".into(),
+        execution_context: None,
         session_count: 1,
         tokens_in: 10,
         tokens_out: 5,

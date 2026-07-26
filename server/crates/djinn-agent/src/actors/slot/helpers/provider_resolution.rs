@@ -332,6 +332,7 @@ pub(crate) fn build_telemetry_meta_with_attribution(
     djinn_provider::provider::TelemetryMeta {
         task_id: Some(task_id.to_owned()),
         agent_type: Some(agent_type_str.to_owned()),
+            execution_context: None,
         session_id: Some(task_id.to_owned()),
         operation: operation.map(str::to_owned),
         user_id: user_id.map(str::to_owned),

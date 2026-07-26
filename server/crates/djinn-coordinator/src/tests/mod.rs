@@ -1297,6 +1297,7 @@ async fn seed_terminated_post_intervention_sessions(
                 task_id: Some(task_id),
                 model,
                 agent_type: "worker",
+            execution_context: None,
                 metadata_json: None,
                 task_run_id: None,
                 pricing: None,

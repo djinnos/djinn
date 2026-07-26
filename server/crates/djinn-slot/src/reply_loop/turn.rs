@@ -686,6 +686,7 @@ pub async fn run_reply_loop(
             task_short_id,
             task_id,
             agent_type: role_name,
+            execution_context: None,
             session_id,
         });
         session.record_skills(active_skill_names);
@@ -2465,6 +2466,7 @@ mod tests {
                 task_id: Some(&task.id),
                 model: "test-model",
                 agent_type: "worker",
+            execution_context: None,
                 metadata_json: None,
                 task_run_id: None,
                 pricing: None,

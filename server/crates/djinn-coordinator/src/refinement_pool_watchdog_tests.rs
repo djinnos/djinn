@@ -304,6 +304,7 @@ async fn late_starting_session_gets_full_budget_from_start() {
             task_id: Some(&task_id),
             model: TEST_MODEL,
             agent_type: "adversary",
+            execution_context: None,
             metadata_json: None,
             task_run_id: None,
             pricing: None,

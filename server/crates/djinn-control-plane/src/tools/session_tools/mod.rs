@@ -103,6 +103,7 @@ impl From<SessionRecord> for SessionToolSession {
             task_id: value.task_id,
             model_id: value.model_id,
             agent_type: value.agent_type,
+            execution_context: None,
             started_at: value.started_at,
             ended_at: value.ended_at,
             status: value.status,
@@ -138,6 +139,7 @@ impl SessionToolSession {
             task_id: value.task_id,
             model_id: value.model_id,
             agent_type: value.agent_type,
+            execution_context: None,
             started_at: value.started_at,
             ended_at: value.ended_at,
             status: value.status,
@@ -579,6 +581,7 @@ impl DjinnMcpServer {
             Json(SessionMessagesResponse {
                 session_id: None,
                 agent_type: None,
+            execution_context: None,
                 model_id: None,
                 messages: None,
                 error: Some(e),
@@ -605,6 +608,7 @@ impl DjinnMcpServer {
                 return Json(SessionMessagesResponse {
                     session_id: Some(session.id),
                     agent_type: Some(session.agent_type),
+            execution_context: None,
                     model_id: Some(session.model_id),
                     messages: None,
                     error: Some(format!("failed to load messages: {e}")),
@@ -636,6 +640,7 @@ impl DjinnMcpServer {
         Json(SessionMessagesResponse {
             session_id: Some(session.id),
             agent_type: Some(session.agent_type),
+            execution_context: None,
             model_id: Some(session.model_id),
             messages: Some(messages),
             error: None,
@@ -781,6 +786,7 @@ impl DjinnMcpServer {
                     role,
                     content,
                     agent_type: agent_type.to_owned(),
+            execution_context: None,
                     model_id: model_id.to_owned(),
                     timestamp: created_at,
                 }

@@ -700,6 +700,7 @@ fn session_record(
     task_id: Option<&str>,
     model_id: &str,
     agent_type: &str,
+            execution_context: None,
     started_at: &str,
 ) -> SessionRecord {
     SessionRecord {
@@ -708,6 +709,7 @@ fn session_record(
         task_id: task_id.map(str::to_owned),
         model_id: model_id.into(),
         agent_type: agent_type.into(),
+            execution_context: None,
         started_at: started_at.into(),
         ended_at: None,
         status: "completed".into(),
@@ -799,6 +801,7 @@ fn build_candidate_session(
     task_id: &str,
     model_id: &str,
     agent_type: &str,
+            execution_context: None,
 ) -> PersistedTranscript {
     let mut messages = Vec::new();
     let edit_path = "src/lib.rs";
@@ -874,6 +877,7 @@ fn build_baseline_session(
     task_id: &str,
     model_id: &str,
     agent_type: &str,
+            execution_context: None,
 ) -> PersistedTranscript {
     let mut messages = Vec::new();
     let edit_path = "src/lib.rs";
@@ -933,6 +937,7 @@ fn build_candidate_as_baseline(
     task_id: &str,
     model_id: &str,
     agent_type: &str,
+            execution_context: None,
 ) -> PersistedTranscript {
     let mut t = build_baseline_session(session_id, task_id, model_id, agent_type);
     t.dimensions = codex_dimensions();

@@ -826,6 +826,7 @@ pub(super) async fn completions_handler_impl(
     let telemetry_meta = TelemetryMeta {
         task_id: None,
         agent_type: Some("chat".to_owned()),
+        execution_context: None,
         session_id: Some(session_id.clone()),
         ..Default::default()
     };
@@ -1722,6 +1723,7 @@ async fn generate_chat_title(
     let telemetry_meta = TelemetryMeta {
         task_id: None,
         agent_type: Some("chat_title".to_owned()),
+        execution_context: None,
         session_id: Some(session_id.to_owned()),
         ..Default::default()
     };
