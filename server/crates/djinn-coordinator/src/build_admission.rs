@@ -71,8 +71,15 @@ pub const MAX_ADMISSION_CAP: i64 = 4096;
 /// durable handoff row:
 ///
 /// - The illegal mode combination in which neither authority enforces
-///   (`v0 ∈ {observe, disabled} ∧ v1 ∈ {off, shadow}`) is rejected: something
-///   must actually enforce the cap.
+///   (`v0 ∈ {observe, disabled} ∧ v1 ∈ {off, shadow}`) is rejected.
+///
+///   The rule is retained but its MEANING changed when capacity accounting was
+///   unified onto the v1 lease. `V0Mode::Enforce` no longer means "enforces the
+///   cap" -- v0 has no cap -- it means the durable lifecycle LEDGER is
+///   authoritative and fails closed. So this now rejects an epoch in which
+///   neither the ledger nor the capacity authority is authoritative, which is
+///   still a fail-closed misconfiguration and still the thing worth refusing.
+///   Only `V1Mode::Enforce` arms the actual build-slot cap.
 /// - The reference cap must be within `[MIN_ADMISSION_CAP, MAX_ADMISSION_CAP]`.
 pub fn validate_admission_config(v0: V0Mode, v1: V1Mode, cap: i64) -> Result<(), String> {
     if !v0.is_enforcing() && !v1.is_enforcing() {
@@ -1924,14 +1931,14 @@ impl BuildAdmissionController {
                 seeded = seeded.saturating_add(1);
             }
         }
-        // Occupancy is always read from the journal; it is not derived from the
-        // in-memory permit count. This keeps the cap invariant durable across a
-        // process loss that leaves permits uncommitted in memory.
-        let occupancy = self
-            .journal
-            .count_task_or_warm_occupancy()
-            .await
-            .map_err(unavailable)?;
+        // There is deliberately no journal occupancy read here any more.
+        //
+        // Recovery used to count occupying journal rows and compare that count
+        // against the build-slot cap. Capacity is not derived from the journal:
+        // it is the weighted sum of occupying `build_leases` rows, read below
+        // from the one authority. Keeping a journal count here would be both a
+        // pointless startup round-trip and a standing invitation to compare it
+        // to a cap again.
         if self.mode() != BuildAdmissionMode::Off {
             // Journal recovery succeeded. Only the journal-derived gates are
             // updated here: the inventory and topology gates are deliberately
@@ -1942,7 +1949,36 @@ impl BuildAdmissionController {
             self.journal_healthy.store(true, Ordering::Release);
             self.create_unknown_pending
                 .store(create_unknown_rows, Ordering::Release);
-            self.over_cap.store(occupancy > self.cap, Ordering::Release);
+            // Compare BUILD SLOTS to a build-slot cap.
+            //
+            // This used to compare `count_task_or_warm_occupancy()` -- a count
+            // of occupying JOURNAL rows -- against `self.cap`, which is a count
+            // of build slots. Those were already two different units, and once
+            // the journal became the lifecycle ledger rather than the capacity
+            // authority the comparison stopped being meaningful entirely: a
+            // journal row records an object lifecycle, it does not reserve CPU.
+            //
+            // The distinction is not academic. It is exactly the production
+            // wedge observed on v0.7.5: 59 occupying journal rows (58 of them
+            // stale, left by a predecessor whose objects are long gone) against
+            // a cap of 3 latched `over_cap`, which `readiness()` reports as
+            // `SeededOccupancyAboveCap`, which fails Enforce closed for every
+            // admission. Stale LIFECYCLE rows must be retired by reconciliation
+            // (#2597) -- they must never have been able to deny capacity that
+            // they were not holding.
+            //
+            // No authority installed means this controller is not capacity
+            // gated at all (the Off shape), so there is no cap to exceed. An
+            // authority that IS installed but unreadable leaves the gate CLOSED:
+            // unknown occupancy is not proof of headroom.
+            let over_cap = match self.slot_authority.as_ref() {
+                None => false,
+                Some(authority) => authority
+                    .occupancy()
+                    .await
+                    .is_none_or(|slots| slots > authority.cap()),
+            };
+            self.over_cap.store(over_cap, Ordering::Release);
         }
         let readiness = self.readiness();
         // Recovery changes active durable rows, including predecessor

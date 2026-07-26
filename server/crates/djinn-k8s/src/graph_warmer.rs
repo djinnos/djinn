@@ -1705,3 +1705,6 @@ mod recovery_tests;
 #[cfg(test)]
 #[path = "graph_warmer_tests.rs"]
 mod tests;
+#[cfg(test)]
+#[path = "graph_warmer_ledger_tests.rs"]
+mod ledger_tests;
