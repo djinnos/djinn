@@ -86,6 +86,16 @@ impl ShellLaunchContext {
         services: Arc<dyn SupervisorServices>,
         client: UnixBrokerClient,
     ) -> std::io::Result<Self> {
+        // The journal directory must be a WRITABLE mount. `/var/run/djinn` in a
+        // rendered task-run Pod is the `spec` Secret volume mounted
+        // `readOnly: true`, so this directory only works because
+        // `djinn_k8s::invocation_journal` renders a dedicated emptyDir over it
+        // and passes the path back in `DJINN_INVOCATION_JOURNAL_DIR`. Without
+        // that volume `create_dir_all` returns EROFS and the armed worker aborts
+        // before any session exists — measured in production, launcher blocker
+        // 4. The fallback below is kept identical to the rendered path so an
+        // older worker image paired with a newer render still lands on the
+        // mount; do not change one without the other.
         let journal_dir = std::env::var_os("DJINN_INVOCATION_JOURNAL_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("/var/run/djinn/invocation-journal"));

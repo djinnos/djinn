@@ -12,6 +12,7 @@ pub mod graph_warmer;
 pub mod graph_warmer_candidates;
 pub mod graph_warmer_identity;
 pub mod infra_death_log_tail;
+pub mod invocation_journal;
 pub mod job;
 pub mod label_value;
 pub mod launcher;
