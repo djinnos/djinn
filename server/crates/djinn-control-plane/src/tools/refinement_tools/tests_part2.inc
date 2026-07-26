@@ -444,6 +444,12 @@
             ) -> Result<(), String> {
                 Err("unexpected start call".into())
             }
+            async fn demand_proposal_refinement_round(
+                &self,
+                _: ProposalRefinementStartRequest,
+            ) -> Result<(), String> {
+                Err("unexpected demand call".into())
+            }
             async fn wake_refinement_run(&self, _: String) -> Result<(), String> {
                 self.demand_calls.fetch_add(1, Ordering::SeqCst);
                 Ok(())
