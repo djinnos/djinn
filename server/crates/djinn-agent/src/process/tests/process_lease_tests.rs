@@ -21,7 +21,7 @@ use tokio_util::sync::CancellationToken;
 #[derive(Default)]
 struct ScriptedLauncher {
     pid: Arc<Mutex<Option<u32>>>,
-    lifts: Arc<Mutex<Vec<LeaseFencingToken>>>,
+    lifts: Arc<Mutex<usize>>,
     kills: Arc<AtomicUsize>,
     empties: Arc<AtomicUsize>,
     /// The birth authority the runner handed each `launch`.
@@ -60,7 +60,7 @@ impl ScriptedLauncher {
 }
 struct ScriptedHandle {
     child: std::process::Child,
-    lifts: Arc<Mutex<Vec<LeaseFencingToken>>>,
+    lifts: Arc<Mutex<usize>>,
     kills: Arc<AtomicUsize>,
     empties: Arc<AtomicUsize>,
 }
@@ -83,8 +83,8 @@ impl ProcessHandle for ScriptedHandle {
             ..CpuStat::default()
         })
     }
-    fn fenced_lift(&mut self, token: &LeaseFencingToken) -> io::Result<()> {
-        self.lifts.lock().unwrap().push(token.clone());
+    fn fenced_lift(&mut self) -> io::Result<()> {
+        *self.lifts.lock().unwrap() += 1;
         Ok(())
     }
     fn kill(&mut self) -> io::Result<()> {
@@ -205,7 +205,7 @@ impl ProcessHandle for BrokerBackedHandle {
             ..CpuStat::default()
         })
     }
-    fn fenced_lift(&mut self, _: &LeaseFencingToken) -> io::Result<()> {
+    fn fenced_lift(&mut self) -> io::Result<()> {
         Ok(())
     }
     fn kill(&mut self) -> io::Result<()> {
@@ -576,7 +576,7 @@ async fn repeated_active_statuses_queue_and_lift_exactly_once() {
     assert_eq!(output.process.termination, ProcessTermination::Cancelled);
     assert_eq!(services.queue_calls.load(Ordering::SeqCst), 1);
     assert_eq!(services.grant_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(*launcher.lifts.lock().unwrap(), vec![LeaseFencingToken(7)]);
+    assert_eq!(*launcher.lifts.lock().unwrap(), 1);
     assert_eq!(launcher.kills.load(Ordering::SeqCst), 1);
     assert_eq!(launcher.empties.load(Ordering::SeqCst), 1);
     assert!(services.release_calls.load(Ordering::SeqCst) <= 1);
@@ -611,7 +611,7 @@ async fn terminal_intent_while_grant_paused_permanently_prevents_lift() {
     cancel.cancel();
     let output = run.await.unwrap().unwrap();
     assert_eq!(output.process.termination, ProcessTermination::Cancelled);
-    assert!(launcher.lifts.lock().unwrap().is_empty());
+    assert_eq!(*launcher.lifts.lock().unwrap(), 0);
     assert_eq!(launcher.kills.load(Ordering::SeqCst), 1);
     assert_eq!(launcher.empties.load(Ordering::SeqCst), 1);
     assert!(services.release_calls.load(Ordering::SeqCst) <= 1);
@@ -653,7 +653,7 @@ async fn transient_queue_grant_status_and_release_are_reconciled() {
     wait_for(&services.status_calls, 4).await;
     cancel.cancel();
     run.await.unwrap().unwrap();
-    assert_eq!(*launcher.lifts.lock().unwrap(), vec![LeaseFencingToken(11)]);
+    assert_eq!(*launcher.lifts.lock().unwrap(), 1);
     assert_eq!(services.queue_calls.load(Ordering::SeqCst), 1);
     assert_eq!(services.grant_calls.load(Ordering::SeqCst), 2);
     assert_eq!(services.release_calls.load(Ordering::SeqCst), 2);
@@ -692,7 +692,7 @@ async fn transient_status_and_abandon_are_reconciled_without_capacity_double_ret
     wait_for(&services.queue_calls, 1).await;
     cancel.cancel();
     run.await.unwrap().unwrap();
-    assert!(launcher.lifts.lock().unwrap().is_empty());
+    assert_eq!(*launcher.lifts.lock().unwrap(), 0);
     assert_eq!(services.abandon_calls.load(Ordering::SeqCst), 2);
     assert_eq!(services.release_calls.load(Ordering::SeqCst), 0);
     assert_eq!(launcher.kills.load(Ordering::SeqCst), 1);
@@ -811,7 +811,7 @@ struct FixtureState {
     wait_polls: usize,
     killed: bool,
     samples: usize,
-    lifts: Vec<LeaseFencingToken>,
+    lifts: usize,
     kills: usize,
     empties: usize,
     cleanups: usize,
@@ -827,7 +827,7 @@ impl FixtureLauncher {
                 wait_polls: 0,
                 killed: false,
                 samples: 0,
-                lifts: Vec::new(),
+                lifts: 0,
                 kills: 0,
                 empties: 0,
                 cleanups: 0,
@@ -840,8 +840,8 @@ impl FixtureLauncher {
     fn samples(&self) -> usize {
         self.state.lock().unwrap().samples
     }
-    fn lifts(&self) -> Vec<LeaseFencingToken> {
-        self.state.lock().unwrap().lifts.clone()
+    fn lifts(&self) -> usize {
+        self.state.lock().unwrap().lifts
     }
 }
 
@@ -901,8 +901,8 @@ impl ProcessHandle for FixtureHandle {
             ..CpuStat::default()
         })
     }
-    fn fenced_lift(&mut self, token: &LeaseFencingToken) -> io::Result<()> {
-        self.state.lock().unwrap().lifts.push(token.clone());
+    fn fenced_lift(&mut self) -> io::Result<()> {
+        self.state.lock().unwrap().lifts += 1;
         Ok(())
     }
     fn kill(&mut self) -> io::Result<()> {
@@ -995,7 +995,7 @@ async fn ac1_light_fixtures_finish_unleased_with_zero_lease_calls() {
             "light fixture {fixture:?} is measured at the unleased quota"
         );
         assert!(
-            launcher.lifts().is_empty(),
+            launcher.lifts() == 0,
             "light fixture {fixture:?} never lifts its quota"
         );
         assert_eq!(
@@ -1154,7 +1154,7 @@ async fn ac4_natural_exit_while_grant_paused_prevents_lift() {
         "the grant stage is reached before the child's natural exit wins"
     );
     assert!(
-        launcher.lifts().is_empty(),
+        launcher.lifts() == 0,
         "a natural exit before grant resolution can never lift the quota"
     );
 }
@@ -1190,7 +1190,7 @@ async fn ac4_fallback_timeout_on_paused_response_terminates_without_lift() {
 
     assert_eq!(output.process.termination, ProcessTermination::TimedOut);
     assert_eq!(services.queue_calls.load(Ordering::SeqCst), 1);
-    assert!(launcher.lifts().is_empty(), "a timed-out queue never lifts");
+    assert!(launcher.lifts() == 0, "a timed-out queue never lifts");
 }
 
 /// Cancellation before a grant is issued: the queue response is paused, cancel
@@ -1223,7 +1223,7 @@ async fn ac4_cancellation_before_grant_prevents_lift() {
     let output = run.await.expect("join").expect("cancelled cleanly");
 
     assert_eq!(output.process.termination, ProcessTermination::Cancelled);
-    assert!(launcher.lifts().is_empty());
+    assert!(launcher.lifts() == 0);
     let state = launcher.state.lock().unwrap();
     assert_eq!((state.kills, state.empties, state.cleanups), (1, 1, 1));
 }
@@ -1258,7 +1258,7 @@ async fn ac4_unresolved_state_releases_with_exact_fence_at_most_once() {
     cancel.cancel();
     run.await.unwrap().unwrap();
 
-    assert_eq!(*launcher.lifts.lock().unwrap(), vec![LeaseFencingToken(11)]);
+    assert_eq!(*launcher.lifts.lock().unwrap(), 1);
     assert_eq!(
         *services.release_fences.lock().unwrap(),
         vec![LeaseFencingToken(11)],
@@ -1302,7 +1302,7 @@ async fn ac4_unresolved_state_without_fence_abandons_at_most_once() {
     cancel.cancel();
     run.await.unwrap().unwrap();
 
-    assert!(launcher.lifts.lock().unwrap().is_empty());
+    assert_eq!(*launcher.lifts.lock().unwrap(), 0);
     assert_eq!(
         services.abandon_calls.load(Ordering::SeqCst),
         1,
@@ -1317,6 +1317,8 @@ mod shadow_tests;
 
 #[path = "process_lease_admission_tests.rs"]
 mod admission_composition_tests;
+#[path = "process_lease_broker_lift_tests.rs"]
+mod broker_lift_tests;
 #[path = "process_lease_degrade_tests.rs"]
 mod lease_degrade_tests;
 #[path = "process_lease_recovery_tests.rs"]

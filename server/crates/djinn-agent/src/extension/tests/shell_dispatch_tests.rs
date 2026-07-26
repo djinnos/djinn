@@ -12,9 +12,7 @@ use crate::file_time::destructive_class::WORKTREE_LOCAL_FILE_MUTATION;
 use crate::process::{CgroupLauncherClient, LeaseInvocationRunner, ProcessHandle};
 use djinn_cgroup_launcher::CpuStat;
 use djinn_core::clock::SystemClock;
-use djinn_supervisor::services::{
-    DurableInvocationLiftAuthority, LeaseFencingToken, TaskInvocationLeaseIdentity,
-};
+use djinn_supervisor::services::{DurableInvocationLiftAuthority, TaskInvocationLeaseIdentity};
 use std::io;
 use std::process::{Command, ExitStatus};
 use std::sync::{Arc, Mutex};
@@ -153,7 +151,7 @@ impl ProcessHandle for BrokerShellHandle {
         })
     }
 
-    fn fenced_lift(&mut self, _: &LeaseFencingToken) -> io::Result<()> {
+    fn fenced_lift(&mut self) -> io::Result<()> {
         self.state.lock().unwrap().lifts += 1;
         Ok(())
     }

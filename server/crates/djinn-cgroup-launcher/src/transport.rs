@@ -1,6 +1,7 @@
 //! Bounded Unix socket transport for authenticated broker controls.
 use crate::{
-    CgroupFs, CommandSpec, CpuStat, Error, Invocation, LeaseAuthority, SpawnIntoCgroup,
+    CgroupFs, CommandSpec, ControlRejection, CpuStat, Error, Invocation, LeaseAuthority,
+    SpawnIntoCgroup,
     broker::{Broker, ConnectionId, ControlNonce, NonceSource, SocketPeer, WORKER_GID, WORKER_UID},
     child::WorkerReadinessAssertion,
 };
@@ -480,6 +481,9 @@ fn write(s: &mut UnixStream, x: &[u8]) -> Result<(), Error> {
     s.write_all(x)?;
     Ok(())
 }
+/// Answer one control. A refusal carries its bounded [`ControlRejection`]
+/// category and nothing else — never the error's message, path, errno or the
+/// rejected bytes.
 fn reply(s: &mut UnixStream, r: Result<Vec<u8>, Error>) -> Result<(), Error> {
     match r {
         Ok(x) => {
@@ -487,14 +491,19 @@ fn reply(s: &mut UnixStream, r: Result<Vec<u8>, Error>) -> Result<(), Error> {
             y.extend(x);
             write(s, &y)
         }
-        Err(_) => write(s, &[1]),
+        Err(error) => write(s, &[1, ControlRejection::of(&error).code()]),
     }
 }
 fn response(s: &mut UnixStream) -> Result<Vec<u8>, Error> {
     let x = read(s)?;
     match x.split_first() {
         Some((0, x)) => Ok(x.to_vec()),
-        Some((1, _)) => Err(Error::InvalidControl),
+        // A refusal from a peer that predates the reason byte still decodes, as
+        // `Unspecified`: a rolling update must not turn a legible refusal into
+        // an illegible frame error.
+        Some((1, reason)) => Err(Error::ControlRejected(ControlRejection::from_code(
+            reason.first().copied().unwrap_or_default(),
+        ))),
         _ => Err(Error::InvalidTransportFrame),
     }
 }
@@ -835,19 +844,28 @@ mod tests {
 
     #[test]
     fn unix_rejections_never_create_a_leaf_or_call_the_clone_seam() {
-        let cases: Vec<(&str, Vec<u8>)> = vec![
-            ("malformed", vec![0]),
+        // Each case pins WHY it was refused, not merely that it was. Until goxi
+        // blocker 14 gave refusals a category these all asserted the same
+        // indistinct error — and `create_wire` was omitting the authority byte,
+        // so every "policy" case here was actually being refused as a malformed
+        // frame before `CommandSpec::validate` ever saw the command. The
+        // allow-list assertions were vacuous and nothing could tell.
+        let cases: Vec<(&str, Vec<u8>, ControlRejection)> = vec![
+            ("malformed", vec![0], ControlRejection::Malformed),
             (
                 "unsafe-program",
                 create_wire("/bin/../sh", "/workspace", &[]),
+                ControlRejection::Command,
             ),
             (
                 "unsafe-cwd",
                 create_wire("/bin/true", "/workspace/../escape", &[]),
+                ControlRejection::Command,
             ),
             (
                 "forbidden-env",
                 create_wire("/bin/true", "/workspace", &[("LD_PRELOAD", "x")]),
+                ControlRejection::Command,
             ),
             (
                 "over-budget",
@@ -856,14 +874,19 @@ mod tests {
                     "/workspace",
                     &[("DJINN_VALUE", &"x".repeat(CommandSpec::MAX_BYTES))],
                 ),
+                ControlRejection::Command,
             ),
-            ("descriptor-shape", {
-                let mut x = create_wire("/bin/true", "/workspace", &[]);
-                x.extend([0, 1, 2]);
-                x
-            }),
+            (
+                "descriptor-shape",
+                {
+                    let mut x = create_wire("/bin/true", "/workspace", &[]);
+                    x.extend([0, 1, 2]);
+                    x
+                },
+                ControlRejection::Malformed,
+            ),
         ];
-        for (name, wire) in cases {
+        for (name, wire, expected) in cases {
             let counts = Counts::new();
             let (client_stream, server_stream) = UnixStream::pair().unwrap();
             thread::scope(|scope| {
@@ -881,10 +904,13 @@ mod tests {
                     .unwrap();
                 let mut payload = client.control(name).unwrap();
                 payload.extend(wire);
-                assert!(matches!(
-                    client.call(CREATE, &payload),
-                    Err(Error::InvalidControl)
-                ));
+                let refused = client
+                    .call(CREATE, &payload)
+                    .expect_err("a rejected CREATE must not succeed");
+                assert!(
+                    matches!(refused, Error::ControlRejected(actual) if actual == expected),
+                    "{name} must be refused as {expected:?}, got {refused:?}"
+                );
                 drop(client);
                 task.join().unwrap().unwrap();
             });
@@ -901,16 +927,20 @@ mod tests {
             let mut server = UnixBrokerServer::new(broker(counts.clone(), NoClone(counts.clone())));
             let task = scope.spawn(move || server.serve_connection(server_stream));
             let mut client = UnixBrokerClient::connect(client_stream, b"test-credential").unwrap();
+            // The categories are pinned, not just "some refusal": before goxi
+            // blocker 14 every one of these arrived as the single indistinct
+            // , and a fence mismatch wearing that name is what
+            // sent the investigation in the wrong direction.
             assert!(matches!(
                 client.call(READY, &[0; 16]),
-                Err(Error::InvalidControl)
+                Err(Error::ControlRejected(ControlRejection::Worker))
             ));
             assert!(matches!(
                 client.begin(Invocation {
                     id: "unready".into(),
                     fence: 1
                 }),
-                Err(Error::InvalidControl)
+                Err(Error::ControlRejected(ControlRejection::Worker))
             ));
             ready(&mut client);
             client
@@ -925,20 +955,20 @@ mod tests {
             wrong_id.extend(create_wire("/bin/true", "/workspace", &[]));
             assert!(matches!(
                 client.call(CREATE, &wrong_id),
-                Err(Error::InvalidControl)
+                Err(Error::ControlRejected(ControlRejection::Binding))
             ));
             let mut stale = client.control("bound").unwrap();
             stale[2 + "bound".len()] ^= 1;
             stale.extend(create_wire("/bin/true", "/workspace", &[]));
             assert!(matches!(
                 client.call(CREATE, &stale),
-                Err(Error::InvalidControl)
+                Err(Error::ControlRejected(ControlRejection::Nonce))
             ));
             let mut descriptor = client.control("bound").unwrap();
             descriptor.push(9);
             assert!(matches!(
                 client.call(STDOUT, &descriptor),
-                Err(Error::InvalidControl)
+                Err(Error::ControlRejected(_))
             ));
             drop(client);
             task.join().unwrap().unwrap();
@@ -1066,8 +1096,15 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// A well-formed `CREATE` payload, in the exact field order `command_in`
+    /// parses: leaf, **authority byte**, program, cwd, argc, argv, envc, env.
+    ///
+    /// The authority byte used to be missing here, which made every case above
+    /// fail at `take_string` on a shifted frame rather than at the check it
+    /// claimed to exercise.
     fn create_wire(program: &str, cwd: &str, environment: &[(&str, &str)]) -> Vec<u8> {
         let mut wire = enc("leaf").unwrap();
+        wire.push(LeaseAuthority::Armed.wire());
         wire.extend(enc(program).unwrap());
         wire.extend(enc(cwd).unwrap());
         wire.push(0);

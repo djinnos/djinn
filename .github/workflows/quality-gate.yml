@@ -577,6 +577,15 @@ jobs:
       # rather than by reading `cpu.max` back — so a run that executes zero of
       # its proofs must fail rather than look green (task 7deu).
       LEASE_LIFECYCLE_EXPECTED_PROOFS: "1"
+      # Number of `#[ignore]`d proofs `brokered_lease_lift_boundary.rs` declares.
+      # `delegated_cpu_lease_lifecycle` calls `Launcher::fenced_lift` directly;
+      # production does not — it sends a `LIFT` control frame that the privileged
+      # broker validates first. That gap is exactly how goxi blocker 14 shipped:
+      # #2627's test proved `fenced_lift` was CALLED, the broker then REFUSED the
+      # control on a fence mismatch, and every armed invocation ran its whole life
+      # pinned at `cpu.max=[25000 100000]`. This suite drives the real broker
+      # protocol end to end and asserts the kernel transition.
+      BROKERED_LIFT_EXPECTED_PROOFS: "1"
     steps:
       - uses: actions/checkout@v4
       - run: rustup toolchain install
@@ -622,6 +631,7 @@ jobs:
           cargo test -p djinn-cgroup-launcher \
             --test kernel_boundary_under_rendered_context \
             --test delegated_cpu_lease_lifecycle \
+            --test brokered_lease_lift_boundary \
             --test brokered_git_trust \
             --no-run --message-format=json > "$RUNNER_TEMP/build.json"
           binary=$(jq -r 'select(.executable != null and .target.name == "kernel_boundary_under_rendered_context") | .executable' "$RUNNER_TEMP/build.json" | tail -1)
@@ -636,6 +646,12 @@ jobs:
             exit 1
           fi
           echo "lease=$lease" >> "$GITHUB_OUTPUT"
+          brokered_lift=$(jq -r 'select(.executable != null and .target.name == "brokered_lease_lift_boundary") | .executable' "$RUNNER_TEMP/build.json" | tail -1)
+          if [ -z "$brokered_lift" ] || [ ! -x "$brokered_lift" ]; then
+            echo "::error::could not locate the built brokered lift-boundary proof binary"
+            exit 1
+          fi
+          echo "brokered_lift=$brokered_lift" >> "$GITHUB_OUTPUT"
           git_trust=$(jq -r 'select(.executable != null and .target.name == "brokered_git_trust") | .executable' "$RUNNER_TEMP/build.json" | tail -1)
           if [ -z "$git_trust" ] || [ ! -x "$git_trust" ]; then
             echo "::error::could not locate the built brokered git-trust proof binary"
@@ -693,6 +709,33 @@ jobs:
             exit 1
           fi
           echo "::notice::per-invocation CPU lease proven: $passed/$LEASE_LIFECYCLE_EXPECTED_PROOFS privileged proofs executed"
+      - name: Prove the BROKER accepts the lift and the kernel honours it
+        run: |
+          set -euo pipefail
+          # goxi launcher blocker 14. The step above calls
+          # `Launcher::fenced_lift` directly; a task-run Pod never can — the
+          # worker holds a `UnixBrokerClient` and the lift is a `LIFT` control
+          # frame the privileged broker validates before it touches cgroupfs.
+          # This suite drives the real `UnixBrokerServer`/`UnixBrokerClient`
+          # protocol over a real socket against a real delegated cgroup2 root,
+          # refuses a wrong fence (so the accepted one proves something), and
+          # then reads `cpu.max` back FROM THE KERNEL either side of the
+          # accepted lift, asserting `25000 100000` -> `400000 100000` plus the
+          # measured throughput multiple on `cpu.stat`.
+          #
+          # --test-threads 1 because the proof's capability drop is irreversible
+          # and process-wide.
+          docker run --rm --privileged --cgroupns=private \
+            -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" \
+            ubuntu:24.04 \
+            bash -c 'mkdir -p /workspace && exec "$0" --ignored --test-threads 1 --nocapture' \
+            "${{ steps.build.outputs.brokered_lift }}" 2>&1 | tee "$RUNNER_TEMP/brokered-lift.log"
+          passed=$(sed -n 's/^test result: ok\. \([0-9]*\) passed.*/\1/p' "$RUNNER_TEMP/brokered-lift.log" | tail -1)
+          if [ "${passed:-0}" != "$BROKERED_LIFT_EXPECTED_PROOFS" ]; then
+            echo "::error::the brokered lift lane executed ${passed:-0} proofs but $BROKERED_LIFT_EXPECTED_PROOFS are declared; the broker is NOT proven to accept the lift control by this run"
+            exit 1
+          fi
+          echo "::notice::brokered cgroup lift proven: $passed/$BROKERED_LIFT_EXPECTED_PROOFS privileged proofs executed"
       - name: Prove a brokered child can run git in a worker-owned worktree
         run: |
           set -euo pipefail

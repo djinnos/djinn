@@ -13,6 +13,7 @@ pub mod bootstrap;
 pub mod broker;
 pub mod child;
 pub mod command_path;
+pub mod control_rejection;
 pub mod env;
 pub mod git_trust;
 pub mod lease_authority;
@@ -20,6 +21,7 @@ pub mod spawn;
 pub mod transport;
 
 pub use command_path::safe_command_path;
+pub use control_rejection::ControlRejection;
 pub use env::{is_allowed_environment_entry, is_allowed_environment_key};
 pub use lease_authority::{LeaseAuthority, unrestricted_cpu_max};
 pub use spawn::{DenySpawn, NativeCgroupSpawn};
@@ -599,6 +601,16 @@ pub enum Error {
     InvalidNonce,
     #[error("control does not match the active invocation state")]
     InvalidControl,
+    /// The privileged broker refused a control, as observed by the CLIENT.
+    ///
+    /// This is the only error a transport client can synthesise from a refusal
+    /// reply, and it is deliberately distinct from [`Self::InvalidControl`]:
+    /// before goxi blocker 14 the client reported every server-side refusal —
+    /// fence mismatch, stale nonce, unarmed leaf, terminal intent — as
+    /// `InvalidControl`, which is also a real and *different* broker error. See
+    /// [`crate::control_rejection`].
+    #[error("the privileged broker refused the control ({0})")]
+    ControlRejected(ControlRejection),
     #[error("invalid or oversized launcher transport frame")]
     InvalidTransportFrame,
     #[error("broker socket path is unsafe or already owned by another process")]
