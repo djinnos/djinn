@@ -174,36 +174,25 @@ impl ProposalRepositoryRefinementPhantomActiveSource {
             self.db.clone(),
             crate::events::event_bus_for(&self.events_tx),
         );
-        let runs = match repository.load_recoverable_refinement_runs().await {
-            Ok(runs) => runs,
+        let exact_runs = match repository
+            .load_recoverable_refinement_run_snapshots(HEARTBEAT_GRACE_MILLIS)
+            .await
+        {
+            Ok(exact_runs) => exact_runs,
             Err(error) => {
                 warn!(%error, "refinement_phantom_active doctor: failed to enumerate active runs");
                 return;
             }
         };
-        let mut snapshots = Vec::with_capacity(runs.len());
-        for run in runs {
-            match repository
-                .load_refinement_run_snapshot(djinn_db::LoadRefinementRunSnapshotRequest {
-                    run_id: run.run_id,
-                    heartbeat_grace_millis: HEARTBEAT_GRACE_MILLIS,
-                })
-                .await
-            {
-                Ok(Some(exact)) if exact.generation == run.generation => {
-                    snapshots.push(RefinementPhantomActiveSnapshot {
-                        proposal_id: exact.proposal_id,
-                        generation: exact.generation,
-                        snapshot: exact.snapshot,
-                        observed_at: exact.observed_at,
-                    })
-                }
-                Ok(_) => {}
-                Err(error) => {
-                    warn!(%error, "refinement_phantom_active doctor: failed exact-run observation")
-                }
-            }
-        }
+        let snapshots = exact_runs
+            .into_iter()
+            .map(|exact| RefinementPhantomActiveSnapshot {
+                proposal_id: exact.proposal_id,
+                generation: exact.generation,
+                snapshot: exact.snapshot,
+                observed_at: exact.observed_at,
+            })
+            .collect();
         *self.cache.write().await = snapshots;
     }
 

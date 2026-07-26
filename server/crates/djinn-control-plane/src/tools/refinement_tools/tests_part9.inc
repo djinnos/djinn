@@ -46,25 +46,29 @@
         session_id
     }
 
-    /// Observe the exact repository snapshots consumed by the phantom doctor.
-    /// The shared evaluator, not this test helper, owns evidence precedence.
+    /// Observe through the same fenced repository adapter as the registered
+    /// phantom doctor. The shared evaluator, not this assertion helper, owns
+    /// evidence precedence.
     async fn doctor_stale_run_ids(repo: &ProposalRepository) -> Vec<String> {
-        let mut stale = Vec::new();
-        for run in repo.load_recoverable_refinement_runs().await.unwrap() {
-            let exact = repo.load_refinement_run_snapshot(djinn_db::LoadRefinementRunSnapshotRequest {
-                run_id: run.run_id,
-                heartbeat_grace_millis: 60_000,
-            }).await.unwrap().unwrap();
-            if matches!(
-                djinn_core::refinement_liveness::evaluate_refinement_liveness(
-                    &exact.snapshot,
-                    exact.observed_at,
-                ),
-                RefinementLivenessResult::Stale { .. }
-            ) {
-                stale.push(exact.snapshot.run.run_id);
-            }
-        }
+        let mut stale = repo
+            .load_recoverable_refinement_run_snapshots(60_000)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter_map(|exact| {
+                if matches!(
+                    djinn_core::refinement_liveness::evaluate_refinement_liveness(
+                        &exact.snapshot,
+                        exact.observed_at,
+                    ),
+                    RefinementLivenessResult::Stale { .. }
+                ) {
+                    Some(exact.snapshot.run.run_id)
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
         stale.sort();
         stale
     }
