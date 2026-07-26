@@ -15,6 +15,7 @@ pub mod infra_death_log_tail;
 pub mod job;
 pub mod label_value;
 pub mod launcher;
+mod launcher_cpu;
 pub mod runtime;
 pub mod secret;
 pub mod sidecar;
