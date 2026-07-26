@@ -272,22 +272,49 @@ impl EpochWorld {
     /// a later, lower cap starts from a clean ledger.
     async fn assert_v0_cap_holds_at_full_speed(&self, label: &str, cap: i64) {
         let burst = next_burst();
-        let controller = Arc::new(BuildAdmissionController::new(
-            Arc::clone(&self.journal),
-            BuildAdmissionMode::Enforce,
+        // The cap is enforced by the ONE capacity authority (the v1 lease), not
+        // by the journal -- the journal is the lifecycle ledger and cannot deny.
+        // This harness therefore composes the controller exactly as production
+        // does, with a recovered, armed lease behind it. Before capacity was
+        // unified, this burst measured the journal's own cap; measuring that
+        // now would be measuring a cap that no longer exists.
+        let lease = Arc::new(crate::build_lease::BuildLeaseService::new(
+            Arc::clone(&self.leases),
             cap,
-            format!("ujvz-burst-{burst}"),
         ));
+        assert!(matches!(
+            lease.recover().await,
+            djinn_supervisor::services::LeaseResult::Status(_)
+        ));
+        assert!(matches!(
+            lease.set_cap(cap).await,
+            djinn_supervisor::services::LeaseResult::Status(_)
+        ));
+        lease.set_dispatch_enforcing_for_test(true);
+        let authority: Arc<dyn crate::build_admission::BuildSlotAuthority> = Arc::new(
+            crate::build_slot_authority::BuildLeaseDispatchAuthority::new(Arc::clone(&lease)),
+        );
+        let controller = Arc::new(
+            BuildAdmissionController::new(
+                Arc::clone(&self.journal),
+                BuildAdmissionMode::Enforce,
+                cap,
+                format!("ujvz-burst-{burst}"),
+            )
+            .with_slot_authority(authority),
+        );
         let contenders = usize::try_from(cap).unwrap() + 2;
         let barrier = Arc::new(Barrier::new(contenders + 1));
         let mut attempts = Vec::new();
         for index in 0..contenders {
             let controller = Arc::clone(&controller);
             let barrier = Arc::clone(&barrier);
+            let lease = Arc::clone(&lease);
             attempts.push(tokio::spawn(async move {
                 barrier.wait().await;
                 if index % 2 == 0 {
                     let work_id = format!("burst-{burst}-task-{index}");
+                    let denied_work_id = work_id.clone();
                     match controller
                         .admit_task_run(
                             Some("worker"),
@@ -299,14 +326,63 @@ impl EpochWorld {
                         .await
                         .unwrap()
                     {
-                        BuildAdmissionDecision::Permitted { permit, .. } => Some(permit),
-                        BuildAdmissionDecision::Denied { .. } => None,
+                        BuildAdmissionDecision::Permitted { permit, .. } => (Some(permit), None),
+                        // A denied dispatch keeps its FIFO position as a queued
+                        // row. Nothing in this burst will ever come back for
+                        // it, so surrender it exactly as production does when a
+                        // task closes -- otherwise releasing a peer's slot at
+                        // teardown drains the FIFO, GRANTS this orphan, and
+                        // leaks a slot with no permit left to release it.
+                        BuildAdmissionDecision::Denied { .. } => {
+                            controller.cancel_deferred_task(&denied_work_id).await;
+                            (None, None)
+                        }
                         BuildAdmissionDecision::Unclassified => {
                             panic!("classified worker role must not be unclassified")
                         }
                     }
                 } else {
-                    WarmAdmission::admit(
+                    // Production order: the warmer takes its graph-warm lease
+                    // BEFORE it reaches admission, and the admission call is a
+                    // capacity-neutral ledger append. A contender that skipped
+                    // the lease would present `HeldByLease` while holding
+                    // nothing and would never be capacity-checked at all.
+                    let identity = djinn_supervisor::services::LeaseIdentity::GraphWarm(
+                        djinn_supervisor::services::GraphWarmLeaseIdentity {
+                            project_id: format!("burst-{burst}"),
+                            warm_request_id: format!("burst-{burst}-warm-{index}"),
+                            graph_revision: "burst-revision".into(),
+                        },
+                    );
+                    let grant = match lease
+                        .queue(djinn_supervisor::services::LeaseQueueRequest {
+                            identity: identity.clone(),
+                            deadlines: djinn_supervisor::services::LeaseDeadlines {
+                                queue_deadline_ms: 0,
+                                launch_deadline_ms: 0,
+                            },
+                        })
+                        .await
+                    {
+                        djinn_supervisor::services::LeaseResult::Granted(grant) => grant,
+                        // Lost the race for capacity. Surrender the queue
+                        // position rather than leaving it queued: releasing a
+                        // peer's slot at teardown drains the FIFO, which would
+                        // GRANT this abandoned row and leak the slot with
+                        // nobody left to release it. Production's warmer
+                        // retries from scratch on its own backoff for the same
+                        // reason.
+                        _ => {
+                            let _ = lease
+                                .abandon(djinn_supervisor::services::LeaseAbandonRequest {
+                                    identity,
+                                    candidate_cleanup: false,
+                                })
+                                .await;
+                            return (None, None);
+                        }
+                    };
+                    let permit = WarmAdmission::admit(
                         controller.as_ref(),
                         WarmAdmissionRequest {
                             domain: "ignored".into(),
@@ -316,31 +392,41 @@ impl EpochWorld {
                         },
                     )
                     .await
-                    .ok()
+                    .ok();
+                    (permit, Some((identity, grant.fencing_token)))
                 }
             }));
         }
         barrier.wait().await;
         let mut permits = Vec::new();
+        let mut warm_leases = Vec::new();
         for attempt in attempts {
-            if let Some(permit) = attempt.await.unwrap() {
+            let (permit, warm_lease) = attempt.await.unwrap();
+            if let Some(permit) = permit {
                 permits.push(permit);
             }
+            if let Some(warm_lease) = warm_lease {
+                warm_leases.push(warm_lease);
+            }
         }
-        let occupancy = self.journal.count_task_or_warm_occupancy().await.unwrap();
+        // Occupancy is the weighted sum over `build_leases` -- the single
+        // capacity ledger -- not a count of journal rows. Those are different
+        // units: a journal row records an object lifecycle, it does not reserve
+        // CPU.
+        let occupancy = self.leases.snapshot().await.unwrap().occupied;
         assert!(
             occupancy <= cap,
-            "{label}: v0 admitted {occupancy} above the epoch cap {cap}"
+            "{label}: admitted {occupancy} above the epoch cap {cap}"
         );
         assert_eq!(
             occupancy, cap,
             "{label}: the burst exceeded the cap in contenders, so a healthy \
-             enforcing v0 must fill it exactly — never fewer, never more"
+             enforcing authority must fill it exactly — never fewer, never more"
         );
         assert_eq!(
             i64::try_from(permits.len()).unwrap(),
             occupancy,
-            "{label}: every v0 permit is durably accounted"
+            "{label}: every admitted permit is durably accounted"
         );
 
         // A below-the-lease invocation child never counts against the parent's
@@ -376,10 +462,28 @@ impl EpochWorld {
                 .await
                 .unwrap();
         }
+        for (identity, fencing_token) in warm_leases {
+            let _ = lease
+                .release(djinn_supervisor::services::LeaseReleaseRequest {
+                    identity,
+                    fencing_token,
+                    candidate_cleanup: false,
+                })
+                .await;
+        }
         assert_eq!(
             self.journal.count_task_or_warm_occupancy().await.unwrap(),
             0,
-            "{label}: the burst released every slot it took"
+            "{label}: the burst released every ledger row it took"
+        );
+        // Capacity is the thing that actually runs out, so assert the burst
+        // returned it. A leaked lease row occupies silently and starves every
+        // later burst in this world -- which is exactly how this harness first
+        // went red.
+        assert_eq!(
+            self.leases.snapshot().await.unwrap().occupied,
+            0,
+            "{label}: the burst released every build slot it took"
         );
     }
 

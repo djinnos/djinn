@@ -1379,14 +1379,32 @@ impl BuildAdmissionController {
             self.observe_unclassified().await;
             return Ok(BuildAdmissionDecision::Unclassified);
         };
-        // Layer 1 in one expression: a role certain enough to compile
-        // pre-charges a dispatch slot; a Light role does not, and contends
-        // later (if at all) through the measured invocation lease.
-        let capacity = if role.resource_class().gated_at_dispatch() {
-            CapacitySource::AcquireDispatchSlot
-        } else {
-            CapacitySource::ZeroWeight {
-                audit_reason: LIGHT_ROLE_AUDIT_REASON,
+        // Capacity depends on the DOMAIN first, then the role. Getting this
+        // ordering wrong is how an invocation ends up charged a dispatch slot.
+        let capacity = match domain {
+            // Layer 1. A role certain enough to compile pre-charges a dispatch
+            // slot; a Light role does not, and contends later (if at all)
+            // through the measured invocation lease.
+            AdmissionDomain::TaskObservation => {
+                if role.resource_class().gated_at_dispatch() {
+                    CapacitySource::AcquireDispatchSlot
+                } else {
+                    CapacitySource::ZeroWeight {
+                        audit_reason: LIGHT_ROLE_AUDIT_REASON,
+                    }
+                }
+            }
+            // Layer 2, and warm. Neither takes a DISPATCH slot: an invocation
+            // is governed by its own invocation lease -- weight 0 when its
+            // task-run already holds a dispatch slot, full weight when it does
+            // not -- and a warm Job is governed by the graph-warm lease its
+            // warmer acquired before ever reaching admission. Charging either a
+            // dispatch slot here would double-charge one physical compile,
+            // which is the whole defect this design removes. The role is
+            // deliberately not consulted: below the dispatch boundary,
+            // capacity is measured, not predicted.
+            AdmissionDomain::InvocationBuild | AdmissionDomain::WarmBuild => {
+                CapacitySource::HeldByLease
             }
         };
         self.admit(BuildAdmissionRequest {
@@ -3851,14 +3869,65 @@ mod tests {
         let _guard = telemetry_guard();
         djinn_telemetry::init().unwrap();
 
-        let c = controller(BuildAdmissionMode::Enforce, 1);
+        // A denial now comes from the ONE capacity authority, so this drives a
+        // real recovered lease behind the controller. Denying through the
+        // journal is no longer possible -- it is the lifecycle ledger and has
+        // no cap -- and a controller with no authority is simply not capacity
+        // gated, which is why this test must compose one to observe a denial.
+        let db = Database::open_in_memory().unwrap();
+        let leases = Arc::new(djinn_db::BuildLeaseRepository::new(db.clone()));
+        let lease = Arc::new(crate::build_lease::BuildLeaseService::new(
+            Arc::clone(&leases),
+            1,
+        ));
+        assert!(matches!(
+            lease.recover().await,
+            djinn_supervisor::services::LeaseResult::Status(_)
+        ));
+        assert!(matches!(
+            lease.set_cap(1).await,
+            djinn_supervisor::services::LeaseResult::Status(_)
+        ));
+        lease.set_dispatch_enforcing_for_test(true);
+        let authority: Arc<dyn BuildSlotAuthority> = Arc::new(
+            crate::build_slot_authority::BuildLeaseDispatchAuthority::new(Arc::clone(&lease)),
+        );
+        let c = BuildAdmissionController::new(
+            Arc::new(AdmissionJournalRepository::new(db)),
+            BuildAdmissionMode::Enforce,
+            1,
+            "epoch",
+        )
+        .with_slot_authority(authority);
         c.enable_process_metrics_for_test();
         c.mark_ready();
-        // Fill the cap.
-        let _ = WarmAdmission::admit(&c, warm("queued-a")).await.unwrap();
-        // The second warm is denied — it becomes a deferred Enforce identity.
-        let denied = WarmAdmission::admit(&c, warm("queued-b")).await;
-        assert!(denied.is_err(), "second warm must be denied at cap 1");
+        // Fill the single slot with a real dispatch reservation.
+        let filled = c
+            .admit_task_run(
+                Some("worker"),
+                AdmissionDomain::TaskObservation,
+                "queued-a".into(),
+                0,
+                "djinn-taskrun-queued-a".into(),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(filled, BuildAdmissionDecision::Permitted { .. }));
+        // The second is denied — it becomes a deferred Enforce identity.
+        let denied = c
+            .admit_task_run(
+                Some("worker"),
+                AdmissionDomain::TaskObservation,
+                "queued-b".into(),
+                0,
+                "djinn-taskrun-queued-b".into(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            matches!(denied, BuildAdmissionDecision::Denied { .. }),
+            "the second build-capable dispatch must be denied at cap 1"
+        );
 
         let rendered = djinn_telemetry::render().unwrap();
         let queued = sample_value(
