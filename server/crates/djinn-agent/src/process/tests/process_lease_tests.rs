@@ -346,9 +346,6 @@ impl SupervisorServices for ScriptedServices {
             .push(request.fencing_token);
         Self::pop(&self.release)
     }
-    async fn invocation_lift_decision(&self) -> djinn_supervisor::services::InvocationLiftDecision {
-        *self.lift_decision.lock().unwrap()
-    }
     async fn load_task(&self, _: String) -> Result<djinn_core::models::Task, String> {
         unimplemented!()
     }
@@ -483,6 +480,22 @@ impl SupervisorServices for ScriptedServices {
     }
 }
 
+/// The scripted double is also the scripted admission authority.
+///
+/// Note that this is a SEPARATE trait from `SupervisorServices` on purpose, and
+/// that every runner in this suite is handed it explicitly. When the decision was
+/// a defaulted `SupervisorServices` method, this suite passed while production was
+/// inert: the double overrode the default, and the real composition
+/// (`RpcServices`) did not (goxi launcher blocker 13). The doubles can no longer
+/// stand in for a wiring that does not exist — a runner without an authority does
+/// not compile.
+#[async_trait]
+impl djinn_supervisor::services::InvocationLiftAuthority for ScriptedServices {
+    async fn invocation_lift_decision(&self) -> djinn_supervisor::services::InvocationLiftDecision {
+        *self.lift_decision.lock().unwrap()
+    }
+}
+
 fn deadlines() -> LeaseDeadlines {
     LeaseDeadlines {
         queue_deadline_ms: 100,
@@ -549,7 +562,12 @@ async fn repeated_active_statuses_queue_and_lift_exactly_once() {
         });
     let launcher = Arc::new(ScriptedLauncher::default());
     let cancel = CancellationToken::new();
-    let runner = LeaseInvocationRunner::new(services.clone(), launcher.clone(), clock());
+    let runner = LeaseInvocationRunner::new(
+        services.clone(),
+        services.clone(),
+        launcher.clone(),
+        clock(),
+    );
     let run_cancel = cancel.clone();
     let run = tokio::spawn(async move { runner.output(command(), config(), run_cancel).await });
     wait_for(&services.status_calls, 3).await;
@@ -583,7 +601,12 @@ async fn shadow_epoch_binds_but_never_lifts() {
         });
     let launcher = Arc::new(ScriptedLauncher::default());
     let cancel = CancellationToken::new();
-    let runner = LeaseInvocationRunner::new(services.clone(), launcher.clone(), clock());
+    let runner = LeaseInvocationRunner::new(
+        services.clone(),
+        services.clone(),
+        launcher.clone(),
+        clock(),
+    );
     let run_cancel = cancel.clone();
     let run = tokio::spawn(async move { runner.output(command(), config(), run_cancel).await });
     wait_for(&services.status_calls, 3).await;
@@ -643,7 +666,12 @@ async fn unleased_epoch_is_born_unclamped_because_no_grant_can_ever_lift_it() {
         });
     let launcher = Arc::new(ScriptedLauncher::default());
     let cancel = CancellationToken::new();
-    let runner = LeaseInvocationRunner::new(services.clone(), launcher.clone(), clock());
+    let runner = LeaseInvocationRunner::new(
+        services.clone(),
+        services.clone(),
+        launcher.clone(),
+        clock(),
+    );
     let run_cancel = cancel.clone();
     let run = tokio::spawn(async move { runner.output(command(), config(), run_cancel).await });
     wait_for(&services.status_calls, 3).await;
@@ -729,7 +757,12 @@ async fn terminal_intent_while_grant_paused_permanently_prevents_lift() {
         });
     let launcher = Arc::new(ScriptedLauncher::default());
     let cancel = CancellationToken::new();
-    let runner = LeaseInvocationRunner::new(services.clone(), launcher.clone(), clock());
+    let runner = LeaseInvocationRunner::new(
+        services.clone(),
+        services.clone(),
+        launcher.clone(),
+        clock(),
+    );
     let run_cancel = cancel.clone();
     let run = tokio::spawn(async move { runner.output(command(), config(), run_cancel).await });
     wait_for(&services.grant_calls, 1).await;
@@ -767,7 +800,12 @@ async fn transient_queue_grant_status_and_release_are_reconciled() {
     ]);
     let launcher = Arc::new(ScriptedLauncher::default());
     let cancel = CancellationToken::new();
-    let runner = LeaseInvocationRunner::new(services.clone(), launcher.clone(), clock());
+    let runner = LeaseInvocationRunner::new(
+        services.clone(),
+        services.clone(),
+        launcher.clone(),
+        clock(),
+    );
     let run_cancel = cancel.clone();
     let run = tokio::spawn(async move { runner.output(command(), config(), run_cancel).await });
     wait_for(&services.status_calls, 4).await;
@@ -801,7 +839,12 @@ async fn transient_status_and_abandon_are_reconciled_without_capacity_double_ret
     ]);
     let launcher = Arc::new(ScriptedLauncher::default());
     let cancel = CancellationToken::new();
-    let runner = LeaseInvocationRunner::new(services.clone(), launcher.clone(), clock());
+    let runner = LeaseInvocationRunner::new(
+        services.clone(),
+        services.clone(),
+        launcher.clone(),
+        clock(),
+    );
     let run_cancel = cancel.clone();
     let run = tokio::spawn(async move { runner.output(command(), config(), run_cancel).await });
     wait_for(&services.queue_calls, 1).await;
@@ -822,7 +865,12 @@ async fn broker_backed_shell_preserves_streams_exit_and_immutable_identity() {
         b"broker stderr\n",
         17,
     ));
-    let runner = LeaseInvocationRunner::new(services.clone(), launcher.clone(), clock());
+    let runner = LeaseInvocationRunner::new(
+        services.clone(),
+        services.clone(),
+        launcher.clone(),
+        clock(),
+    );
     let output = runner
         .output(command(), config(), CancellationToken::new())
         .await
@@ -845,7 +893,12 @@ async fn broker_backed_shell_preserves_streams_exit_and_immutable_identity() {
 async fn broker_backed_shell_cancellation_kills_waits_empty_and_cleans_up() {
     let services = Arc::new(ScriptedServices::new(vec![], vec![], vec![]));
     let launcher = Arc::new(BrokerBackedLauncher::running(0));
-    let runner = LeaseInvocationRunner::new(services.clone(), launcher.clone(), clock());
+    let runner = LeaseInvocationRunner::new(
+        services.clone(),
+        services.clone(),
+        launcher.clone(),
+        clock(),
+    );
     let cancel = CancellationToken::new();
     cancel.cancel();
     let output = runner
@@ -864,6 +917,7 @@ async fn below_threshold_broker_backed_shell_never_contacts_supervisor() {
     let services = Arc::new(ScriptedServices::new(vec![], vec![], vec![]));
     let launcher = Arc::new(BrokerBackedLauncher::running(0));
     let runner = Arc::new(LeaseInvocationRunner::new(
+        services.clone(),
         services.clone(),
         launcher.clone(),
         clock(),
@@ -1074,7 +1128,12 @@ async fn ac1_light_fixtures_finish_unleased_with_zero_lease_calls() {
         let services = Arc::new(ScriptedServices::new(vec![], vec![], vec![]));
         // Consumption stays at zero; the child exits on its own after a few polls.
         let launcher = Arc::new(FixtureLauncher::new(0, Some(4)));
-        let runner = LeaseInvocationRunner::new(services.clone(), launcher.clone(), clock());
+        let runner = LeaseInvocationRunner::new(
+            services.clone(),
+            services.clone(),
+            launcher.clone(),
+            clock(),
+        );
         let output = runner
             .output(
                 cmd_from(fixture),
@@ -1127,6 +1186,7 @@ async fn ac1_heavy_fixtures_queue_exactly_once_after_cpu_threshold() {
         // Starts below threshold and never exits on its own.
         let launcher = Arc::new(FixtureLauncher::new(0, None));
         let runner = Arc::new(LeaseInvocationRunner::new(
+            services.clone(),
             services.clone(),
             launcher.clone(),
             clock(),
@@ -1189,6 +1249,7 @@ async fn ac1_queue_decision_is_identical_for_wellformed_and_malformed_commands()
         let launcher = Arc::new(FixtureLauncher::new(5_000, None));
         let runner = Arc::new(LeaseInvocationRunner::new(
             services.clone(),
+            services.clone(),
             launcher.clone(),
             clock(),
         ));
@@ -1229,7 +1290,12 @@ async fn ac4_natural_exit_while_grant_paused_prevents_lift() {
     services.pause_grant.store(true, Ordering::SeqCst);
     // The child exits while the grant future is still left pending.
     let launcher = Arc::new(FixtureLauncher::new(5_000, Some(6)));
-    let runner = LeaseInvocationRunner::new(services.clone(), launcher.clone(), clock());
+    let runner = LeaseInvocationRunner::new(
+        services.clone(),
+        services.clone(),
+        launcher.clone(),
+        clock(),
+    );
     let output = runner
         .output(
             cmd_from("cargo build"),
@@ -1259,7 +1325,12 @@ async fn ac4_fallback_timeout_on_paused_response_terminates_without_lift() {
     services.pause_queue.store(true, Ordering::SeqCst);
     let launcher = Arc::new(FixtureLauncher::new(5_000, None));
     let test_clock = clock();
-    let runner = LeaseInvocationRunner::new(services.clone(), launcher.clone(), test_clock.clone());
+    let runner = LeaseInvocationRunner::new(
+        services.clone(),
+        services.clone(),
+        launcher.clone(),
+        test_clock.clone(),
+    );
     let run_services = services.clone();
     let run = tokio::spawn(async move {
         runner
@@ -1288,6 +1359,7 @@ async fn ac4_cancellation_before_grant_prevents_lift() {
     services.pause_queue.store(true, Ordering::SeqCst);
     let launcher = Arc::new(FixtureLauncher::new(5_000, None));
     let runner = Arc::new(LeaseInvocationRunner::new(
+        services.clone(),
         services.clone(),
         launcher.clone(),
         clock(),
@@ -1332,7 +1404,12 @@ async fn ac4_unresolved_state_releases_with_exact_fence_at_most_once() {
         });
     let launcher = Arc::new(ScriptedLauncher::default());
     let cancel = CancellationToken::new();
-    let runner = LeaseInvocationRunner::new(services.clone(), launcher.clone(), clock());
+    let runner = LeaseInvocationRunner::new(
+        services.clone(),
+        services.clone(),
+        launcher.clone(),
+        clock(),
+    );
     let run_cancel = cancel.clone();
     let run = tokio::spawn(async move { runner.output(command(), config(), run_cancel).await });
     wait_for(&services.status_calls, 3).await;
@@ -1371,7 +1448,12 @@ async fn ac4_unresolved_state_without_fence_abandons_at_most_once() {
         });
     let launcher = Arc::new(ScriptedLauncher::default());
     let cancel = CancellationToken::new();
-    let runner = LeaseInvocationRunner::new(services.clone(), launcher.clone(), clock());
+    let runner = LeaseInvocationRunner::new(
+        services.clone(),
+        services.clone(),
+        launcher.clone(),
+        clock(),
+    );
     let run_cancel = cancel.clone();
     let run = tokio::spawn(async move { runner.output(command(), config(), run_cancel).await });
     wait_for(&services.queue_calls, 1).await;
@@ -1391,6 +1473,8 @@ async fn ac4_unresolved_state_without_fence_abandons_at_most_once() {
 #[path = "process_lease_shadow_tests.rs"]
 mod shadow_tests;
 
+#[path = "process_lease_admission_tests.rs"]
+mod admission_composition_tests;
 #[path = "process_lease_degrade_tests.rs"]
 mod lease_degrade_tests;
 #[path = "process_lease_recovery_tests.rs"]

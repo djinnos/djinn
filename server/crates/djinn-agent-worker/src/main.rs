@@ -2338,6 +2338,22 @@ async fn run_task_run(args: WorkerDefaultArgs) -> Result<()> {
     .with_context(|| format!("dial djinn-server at {server_addr}"))?;
     info!(server = %server_addr, "tcp connection up, RPC handshake accepted");
 
+    // Bootstrap the in-Pod PLATFORM database connection.
+    //
+    // This is deliberately the FIRST thing after the RPC handshake, ahead of the
+    // launcher handshake below, because the broker-backed shell authority the
+    // launcher path composes needs it: the durable `admission_handoff` epoch that
+    // governs build-lease escalation lives in this database, and the launcher's
+    // per-invocation lift decision is read from it. `bootstrap_warm_database`
+    // resolves `DJINN_DATABASE_URL` and hard-errors when it is absent, so this
+    // handle is never the project's `DATABASE_URL` catalog-service sidecar (which
+    // has no `admission_handoff` table). It is reused by the pre-task activity
+    // sink and by `WorkerSupervisorServices` (via `AgentContext`) below — one
+    // connection, one database, for every in-pod platform read and write.
+    let in_pod_db = bootstrap_warm_database()
+        .await
+        .context("bootstrap in-Pod database for pre-task activity")?;
+
     // The explicit mode, not mount detection, controls whether direct execution
     // is permitted. Required mode authenticates before AgentContext exists.
     let launcher_enforcement = launcher_handshake::LauncherEnforcement::parse(
@@ -2378,6 +2394,12 @@ async fn run_task_run(args: WorkerDefaultArgs) -> Result<()> {
                 spec.task_run_id.clone(),
                 args.task_run_pod_uid.clone(),
                 rpc.clone(),
+                // The platform database, so the launcher's per-invocation lift
+                // decision reads the durable admission epoch. `rpc` above stays
+                // the lease authority (queue/grant/bind remain host-owned); it is
+                // NOT the admission authority, which is exactly the confusion
+                // that made goxi blocker 13 invisible.
+                in_pod_db.clone(),
                 *broker_client,
             )
             .await
@@ -2390,14 +2412,12 @@ async fn run_task_run(args: WorkerDefaultArgs) -> Result<()> {
         .context("attach workspace")?;
     info!(path = %workspace.path().display(), branch = %workspace.branch(), "workspace attached");
 
-    // 4a. Bootstrap the in-Pod database.  The pre-task boundary emits one
-    //     `task_run_pretask_ran` activity event per started command into the
-    //     same `activity_log` table the host-side runtime writes to, so the
-    //     DB handle must be ready BEFORE the boundary runs.  The handle is
-    //     reused below for `WorkerSupervisorServices` (via `AgentContext`).
-    let in_pod_db = bootstrap_warm_database()
-        .await
-        .context("bootstrap in-Pod database for pre-task activity")?;
+    // 4a. The pre-task boundary emits one `task_run_pretask_ran` activity event
+    //     per started command into the same `activity_log` table the host-side
+    //     runtime writes to, so the in-Pod DB handle must be ready BEFORE the
+    //     boundary runs. It is opened above (ahead of the launcher handshake,
+    //     which also needs it) and reused here and by
+    //     `WorkerSupervisorServices` (via `AgentContext`).
     let pretask_activity_sink =
         lifecycle::TaskRepositoryActivitySink::from_database(in_pod_db.clone());
 
