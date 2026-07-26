@@ -19,7 +19,10 @@ mod reads;
 mod status;
 mod writes;
 pub use writes::EffectiveCreatorProvenance;
-pub(crate) use writes::{incoming_task_creator, resolve_effective_creator};
+pub(crate) use writes::{
+    ReadinessIdentificationTask, create_readiness_identification_task_in_transaction,
+    incoming_task_creator, load_task_in_transaction, resolve_effective_creator,
+};
 
 // Re-export parent-disposition types so `EpicRepository::close` can
 // construct the scope and inspect the classification plan.
