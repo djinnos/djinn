@@ -24,18 +24,20 @@ const DURABLE_MODEL: &str = "durableobserver/configured-model";
 
 fn spawn_model_observing_pool(
     db: &djinn_db::Database,
+    model_id: &str,
 ) -> (
     djinn_slot::SlotPoolHandle,
     tokio::sync::mpsc::UnboundedReceiver<(String, String)>,
 ) {
     let cancel = CancellationToken::new();
     let (observed_tx, observed_rx) = tokio::sync::mpsc::unbounded_channel();
+    let model_id = model_id.to_owned();
     let pool = djinn_slot::SlotPoolHandle::spawn_with_factory(
         crate::test_helpers::agent_context_from_db(db.clone(), cancel.clone()),
         cancel,
         djinn_slot::SlotPoolConfig {
             models: vec![djinn_slot::ModelSlotConfig {
-                model_id: DURABLE_MODEL.to_owned(),
+                model_id: model_id.clone(),
                 max_slots: 1,
                 roles: ["advocate", "adversary", "judge", "worker"]
                     .into_iter()
@@ -137,7 +139,7 @@ async fn durable_driver_replays_claim_before_task_and_cache_loss_once_without_po
         )
         .await
         .expect("seed durable dispatch credential");
-    let (pool, mut observed_dispatches) = spawn_model_observing_pool(&db);
+    let (pool, mut observed_dispatches) = spawn_model_observing_pool(&db, DURABLE_MODEL);
     let mut actor = refinement_cap_tests::build_refinement_actor(&db, &events_tx, pool);
     actor.test_use_live_credential_resolution = true;
     actor.catalog.add_custom_provider(
@@ -458,8 +460,35 @@ async fn materialized_enqueue_failure_is_retried_with_the_same_task() {
         "pool failure must not append a proposal-scoped lifecycle stop"
     );
 
-    actor.pool = refinement_cap_tests::spawn_test_pool(&db, 1);
-    actor.drive_active_refinements().await;
+    // Model a coordinator crash after the materialization acknowledgement but
+    // before a successful pool enqueue. Neither the projection nor its
+    // in-memory retry bookkeeping is authoritative: a fresh actor must rebuild
+    // from the exact durable run and enqueue the already-created task.
+    drop(actor);
+    let (live_pool, mut restarted_dispatches) =
+        spawn_model_observing_pool(&db, refinement_cap_tests::TEST_MODEL);
+    let mut restarted = refinement_cap_tests::build_refinement_actor(&db, &events_tx, live_pool);
+    restarted.recover_interrupted_refinements().await;
+    let rebuilt = restarted
+        .active_refinements
+        .get(&run_id)
+        .expect("restart rebuilds the exact current run projection");
+    assert_eq!(rebuilt.run_id, run_id);
+    assert_eq!(rebuilt.generation, generation);
+    assert_eq!(
+        rebuilt.phase,
+        super::super::refinement::RefinementPhase::AdversaryAttack
+    );
+    assert_eq!(rebuilt.current_round, 1);
+
+    restarted.drive_active_refinements().await;
+    let (restarted_task_id, restarted_model_id) =
+        tokio::time::timeout(Duration::from_secs(1), restarted_dispatches.recv())
+            .await
+            .expect("the materialized task is eventually enqueued after restart")
+            .expect("restarted durable enqueue observation");
+    assert_eq!(restarted_task_id, task_id);
+    assert_eq!(restarted_model_id, refinement_cap_tests::TEST_MODEL);
     assert_eq!(
         task_repo
             .find_by_refinement_intent_id(&intent_id)
