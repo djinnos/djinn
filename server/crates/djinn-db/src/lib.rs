@@ -81,7 +81,7 @@ pub use repositories::{
     build_lease::{
         BuildLeaseConsumerKind, BuildLeaseKey, BuildLeaseRepository, BuildLeaseRow,
         BuildLeaseSnapshot, BuildLeaseState, GrantNextBuildLeaseResult, QueueBuildLeaseInput,
-        QueueBuildLeaseResult,
+        QueueBuildLeaseResult, ReclaimAbsentBuildLeaseInput, ReclaimAbsentBuildLeaseOutcome,
     },
     chat_interruption_notice::{
         ChatInterruptionNotice, ChatInterruptionNoticeRepository, CreateChatInterruptionNotice,

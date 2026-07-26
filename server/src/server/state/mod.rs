@@ -25,6 +25,7 @@ use djinn_agent::lsp::LspManager;
 use djinn_agent::roles::RoleRegistry;
 use djinn_agent::runtime_bridge::{K8sTokenReviewValidator, RuntimeKind, runtime_kind};
 use djinn_coordinator::build_lease::BuildLeaseService;
+use djinn_coordinator::build_lease_reclaim::BuildLeaseReclaimer;
 use djinn_coordinator::graph_warm_lease::BuildLeaseGraphWarmAdapter;
 use djinn_coordinator::run_dir_observe::{RunDirObserveSeams, arm_disk_observation};
 use djinn_core::clock::{Clock, SystemClock as SystemClockTrait};
@@ -1130,12 +1131,20 @@ impl AppState {
                     reclaimed = report.reclaimed,
                     stale = report.stale,
                     fenced = report.fenced,
+                    // A per-row reclaim failure leaves that row occupying,
+                    // which only ever over-counts capacity, so it does not
+                    // fail the pass. It still has to be visible: this is the
+                    // count of rows the next pass will have to try again.
+                    reclaim_failures = report.reclaim_failure_count,
+                    named_reclaim_failures = ?report.reclaim_failures,
                     readiness = ?admission.readiness(),
                     "build_admission: Kubernetes inventory reconciliation complete"
                 );
             } else {
                 tracing::error!(
                     mode = ?admission.mode(),
+                    reclaim_failures = report.reclaim_failure_count,
+                    named_reclaim_failures = ?report.reclaim_failures,
                     blockers = ?report.blockers,
                     "build_admission: Kubernetes inventory reconciliation blocked; Enforce remains fail-closed"
                 );
@@ -1313,12 +1322,45 @@ impl AppState {
                     // UID-preconditioned deletion acknowledgements are not
                     // terminal evidence and must be revisited after startup.
                     let recovery_warmer = warmer.clone();
+                    // Warm-lease reconciliation inventories retained *identities*
+                    // and its recovery view drops `granted` rows outright, so
+                    // nothing there can retire a lease whose Kubernetes object
+                    // never existed or is already gone. That is what let three
+                    // phantom `granted` rows hold a cap of three and freeze the
+                    // warm base for four days. The reclaimer rides the same
+                    // period against the same authoritative inventory.
+                    let lease_reclaimer = warmer.workload_inventory().map(|inventory| {
+                        Arc::new(BuildLeaseReclaimer::new(
+                            Arc::new(djinn_db::BuildLeaseRepository::new(self.db().clone())),
+                            inventory,
+                        ))
+                    });
                     tokio::spawn(async move {
                         let mut tick = tokio::time::interval(Duration::from_secs(30));
                         tick.tick().await;
                         loop {
                             tick.tick().await;
                             recovery_warmer.reconcile_durable_warm_leases().await;
+                            let Some(reclaimer) = lease_reclaimer.as_ref() else {
+                                continue;
+                            };
+                            let report = reclaimer.reclaim().await;
+                            if report.reclaimed > 0
+                                || report.fenced > 0
+                                || report.failure_count > 0
+                                || !report.blockers.is_empty()
+                            {
+                                tracing::warn!(
+                                    occupying = report.occupying,
+                                    absent = report.absent,
+                                    reclaimed = report.reclaimed,
+                                    fenced = report.fenced,
+                                    failures = report.failure_count,
+                                    named_failures = ?report.failures,
+                                    blockers = ?report.blockers,
+                                    "build_lease: reclamation pass over occupying leases"
+                                );
+                            }
                         }
                     });
                     warmer as Arc<dyn GraphWarmerService>
