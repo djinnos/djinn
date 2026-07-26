@@ -211,7 +211,11 @@ mod build_admission_stale_reclaim_tests;
 #[cfg(test)]
 mod build_lease_cap_arming_tests;
 #[cfg(test)]
+mod build_lease_cap_refresh_tests;
+#[cfg(test)]
 mod build_lease_deadline_echo_tests;
+#[cfg(test)]
+mod build_lease_dispatch_reclaim_tests;
 #[cfg(test)]
 mod build_lease_integration_tests;
 #[cfg(test)]

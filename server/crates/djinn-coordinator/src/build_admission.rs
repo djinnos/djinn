@@ -919,7 +919,7 @@ impl BuildAdmissionController {
         if over_cap {
             tracing::error!(
                 ledger_rows = occupancy,
-                cap = self.cap,
+                cap = self.effective_cap(),
                 mode = ?self.mode(),
                 "build_admission: occupied build slots exceed the cap; every enforced \
                  admission will be denied until the excess is released. Run the \
@@ -928,7 +928,7 @@ impl BuildAdmissionController {
         } else {
             tracing::info!(
                 ledger_rows = occupancy,
-                cap = self.cap,
+                cap = self.effective_cap(),
                 "build_admission: occupied build slots are back within the cap"
             );
         }
@@ -941,16 +941,20 @@ impl BuildAdmissionController {
     /// size of the problem rather than the size of the fix.
     pub fn publish_reconciliation(&self, stale_rows: usize, reclaimed: usize, fenced: usize) {
         if stale_rows > 0 || reclaimed > 0 {
-            let level_is_alarm = i64::try_from(stale_rows).unwrap_or(i64::MAX) > self.cap;
+            // Compared against the cap actually in force, not the configured
+            // fallback: an epoch `set-cap` changes what "more stale rows than
+            // the cap" means the moment it is adopted.
+            let effective_cap = self.effective_cap();
+            let level_is_alarm = i64::try_from(stale_rows).unwrap_or(i64::MAX) > effective_cap;
             if level_is_alarm {
                 tracing::error!(
                     stale_rows,
                     reclaimed,
                     fenced,
-                    cap = self.cap,
+                    cap = effective_cap,
                     mode = ?self.mode(),
                     "build_admission: reconciliation found more occupying rows with absent \
-                     Kubernetes objects than the configured cap; this is the population that \
+                     Kubernetes objects than the cap in force; this is the population that \
                      wedges the board when the cap is armed"
                 );
             } else {
@@ -958,7 +962,7 @@ impl BuildAdmissionController {
                     stale_rows,
                     reclaimed,
                     fenced,
-                    cap = self.cap,
+                    cap = effective_cap,
                     "build_admission: reconciliation released stale durable occupancy"
                 );
             }
@@ -993,9 +997,13 @@ impl BuildAdmissionController {
         request: BuildAdmissionRequest,
     ) -> Result<BuildAdmissionDecision, WarmAdmissionError> {
         if self.mode() == BuildAdmissionMode::Enforce && (!self.is_ready() || self.is_draining()) {
+            // The cap reported with a denial is the one that WOULD have been
+            // enforced, resolved from the single capacity authority. Reporting
+            // the constructor's configured value here made v0 and v1 disagree
+            // in the operator's log about which number was in force.
             return Ok(BuildAdmissionDecision::Denied {
                 occupancy: 0,
-                cap: self.cap,
+                cap: self.effective_cap(),
             });
         }
         // Capture an observe-only copy before any field of `request` is moved.
@@ -1156,7 +1164,7 @@ impl BuildAdmissionController {
                     if self.mode() != BuildAdmissionMode::Observe {
                         return Ok(BuildAdmissionDecision::Denied {
                             occupancy: 0,
-                            cap: self.cap,
+                            cap: self.effective_cap(),
                         });
                     }
                     tracing::warn!(

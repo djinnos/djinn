@@ -21,8 +21,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use djinn_db::{
-    BuildLeaseConsumerKind, BuildLeaseKey, BuildLeaseRepository, BuildLeaseState, Database,
-    ReclaimAbsentBuildLeaseInput, ReclaimAbsentBuildLeaseOutcome,
+    AdmissionJournalRepository, BuildLeaseConsumerKind, BuildLeaseKey, BuildLeaseRepository,
+    BuildLeaseState, Database, ReclaimAbsentBuildLeaseInput, ReclaimAbsentBuildLeaseOutcome,
 };
 use djinn_k8s::{
     LeasedWarmJobIdentity, ObjectPresence, UidGetResult, WorkloadInventory, WorkloadObjectKind,
@@ -233,6 +233,13 @@ fn reclaimer(
 ) -> BuildLeaseReclaimer {
     BuildLeaseReclaimer::with_settle_window(
         Arc::clone(repository),
+        // Warm and invocation reclamation prove absence from Kubernetes and
+        // ask the admission ledger nothing at all, so an empty ledger is the
+        // honest fixture: if either path ever starts consulting it, these
+        // tests change behaviour rather than passing quietly.
+        Arc::new(AdmissionJournalRepository::new(
+            Database::open_in_memory().unwrap(),
+        )),
         Arc::new(inventory),
         Duration::ZERO,
     )
@@ -437,6 +444,9 @@ async fn an_unusable_listing_blocks_the_pass_and_retires_nothing() {
     wedge(&service).await;
     let report = BuildLeaseReclaimer::with_settle_window(
         Arc::clone(&repository),
+        Arc::new(AdmissionJournalRepository::new(
+            Database::open_in_memory().unwrap(),
+        )),
         Arc::new(Unlistable),
         Duration::ZERO,
     )
@@ -464,6 +474,9 @@ async fn an_unsettled_lease_is_not_judged_by_a_listing_it_could_predate() {
 
     let report = BuildLeaseReclaimer::with_settle_window(
         Arc::clone(&repository),
+        Arc::new(AdmissionJournalRepository::new(
+            Database::open_in_memory().unwrap(),
+        )),
         Arc::new(NamespaceInventory::empty()),
         Duration::from_secs(3600),
     )
