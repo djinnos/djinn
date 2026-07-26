@@ -33,7 +33,11 @@ struct DegradeState {
     samples: usize,
     stdout: Vec<u8>,
     status: Option<std::process::ExitStatus>,
-    lifts: Vec<LeaseFencingToken>,
+    lifts: usize,
+    /// When set, `fenced_lift` fails the way the privileged broker failed in
+    /// production. It still counts the attempt, so a test can tell "the runner
+    /// tried and the broker refused" from "the runner never tried".
+    lift_error: Option<&'static str>,
     kills: usize,
     killed_while_running: usize,
     empties: usize,
@@ -48,7 +52,8 @@ impl DegradeLauncher {
                 samples: 0,
                 stdout: b"degraded command output\n".to_vec(),
                 status: None,
-                lifts: Vec::new(),
+                lifts: 0,
+                lift_error: None,
                 kills: 0,
                 killed_while_running: 0,
                 empties: 0,
@@ -64,8 +69,16 @@ impl DegradeLauncher {
     fn running() -> Self {
         Self::new(None)
     }
-    fn lifts(&self) -> Vec<LeaseFencingToken> {
-        self.state.lock().unwrap().lifts.clone()
+    /// A child whose lift the privileged broker REFUSES — goxi blocker 14. The
+    /// message is the one production actually produced.
+    fn lift_refused() -> Self {
+        let launcher = Self::new(Some(3));
+        launcher.state.lock().unwrap().lift_error =
+            Some("lease invocation failed: Launcher(ControlRejected(Fence))");
+        launcher
+    }
+    fn lifts(&self) -> usize {
+        self.state.lock().unwrap().lifts
     }
     fn killed_while_running(&self) -> usize {
         self.state.lock().unwrap().killed_while_running
@@ -128,9 +141,13 @@ impl ProcessHandle for DegradeHandle {
             ..CpuStat::default()
         })
     }
-    fn fenced_lift(&mut self, token: &LeaseFencingToken) -> io::Result<()> {
-        self.state.lock().unwrap().lifts.push(token.clone());
-        Ok(())
+    fn fenced_lift(&mut self) -> io::Result<()> {
+        let mut state = self.state.lock().unwrap();
+        state.lifts += 1;
+        match state.lift_error {
+            Some(message) => Err(io::Error::other(message)),
+            None => Ok(()),
+        }
     }
     fn kill(&mut self) -> io::Result<()> {
         use std::os::unix::process::ExitStatusExt;
@@ -197,7 +214,7 @@ async fn lease_wait_timeout_degrades_to_unleased_not_error() {
     // Slow, not unconstrained: nothing lifted the leaf off the broker's
     // unleased quota, and the runner never tried to escalate again.
     assert!(
-        launcher.lifts().is_empty(),
+        launcher.lifts() == 0,
         "a degraded invocation must keep the unleased quota"
     );
     assert_eq!(services.queue_calls.load(Ordering::SeqCst), 1);
@@ -247,7 +264,7 @@ async fn credited_timeout_retries_once_then_degrades() {
     assert_eq!(output.process.termination, ProcessTermination::Exited);
     assert_eq!(output.process.output.status.code(), Some(0));
     assert_eq!(launcher.killed_while_running(), 0);
-    assert!(launcher.lifts().is_empty());
+    assert!(launcher.lifts() == 0);
     assert!(services.status_calls.load(Ordering::SeqCst) >= 1);
 }
 
@@ -286,7 +303,7 @@ async fn terminal_record_before_any_grant_degrades_and_stops_polling() {
     assert_eq!(output.process.termination, ProcessTermination::Exited);
     assert_eq!(output.process.output.status.code(), Some(0));
     assert_eq!(launcher.killed_while_running(), 0);
-    assert!(launcher.lifts().is_empty());
+    assert!(launcher.lifts() == 0);
     assert_eq!(services.grant_calls.load(Ordering::SeqCst), 0);
 }
 
@@ -330,7 +347,7 @@ async fn cancellation_after_degrade_still_terminates_the_child() {
         1,
         "cancellation must still kill the degraded child"
     );
-    assert!(launcher.lifts().is_empty());
+    assert!(launcher.lifts() == 0);
 }
 
 /// The degrade is scoped to a lost queue. An identity conflict means the lease
@@ -362,7 +379,7 @@ async fn lease_identity_conflict_still_fails() {
         .expect_err("an identity conflict is not contention");
 
     assert!(matches!(error, LeaseInvocationError::LeaseIdentityConflict));
-    assert!(launcher.lifts().is_empty());
+    assert!(launcher.lifts() == 0);
 }
 
 /// Repeated unavailability is a broken authority, not a queue: it must still
@@ -388,7 +405,7 @@ async fn repeated_unavailability_still_fails() {
         .expect_err("an unusable lease authority is not contention");
 
     assert!(matches!(error, LeaseInvocationError::LeaseUnavailable));
-    assert!(launcher.lifts().is_empty());
+    assert!(launcher.lifts() == 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -561,7 +578,7 @@ async fn rendered_invocation_deadlines_are_granted_and_reach_the_fenced_lift() {
     // The whole point: the lease was actually granted, bound, and lifted off the
     // unleased 250m quota. Under the defect this list was always empty.
     assert_eq!(
-        launcher.lifts().len(),
+        launcher.lifts(),
         1,
         "a lease queued with the rendered deadlines must reach the fenced lift"
     );
@@ -664,7 +681,7 @@ async fn real_lease_authority_queue_timeout_degrades_to_a_successful_command() {
         "the real timeout path must never kill a running child"
     );
     assert!(
-        launcher.lifts().is_empty(),
+        launcher.lifts() == 0,
         "a degraded invocation never lifts the unleased quota"
     );
 
@@ -700,5 +717,99 @@ fn timeouts_render_as_absolute_epoch_deadlines() {
     assert_eq!(
         epoch_ms(std::time::UNIX_EPOCH + Duration::from_millis(1_234)),
         1_234
+    );
+}
+
+/// A REFUSED LIFT MUST DEGRADE, NOT FAIL THE COMMAND (goxi blocker 14).
+///
+/// The lift used to propagate with `?`, so any refusal from the privileged
+/// broker became `LeaseInvocationError::Launcher` and failed the whole shell
+/// tool call. Production measured 5 such failures against 10 launches in one
+/// pod and the agent's `shell` tool errored repeatedly:
+///
+/// ```text
+/// ReplyLoop: tool call returned error tool=shell
+///   error=failed to run shell command: lease invocation failed: …
+/// ```
+///
+/// That converts a defect in a *throttling optimisation* into total loss of the
+/// agent's ability to run commands, when the fallback it denied itself — keep
+/// running at the unleased quota — is strictly better than dying. It also
+/// contradicted the precedent every test above pins: a lost lease QUEUE degrades
+/// to continued unleased execution because contention must make a command slow,
+/// never dead. A rejected lift is the same class of event.
+///
+/// This drives the REAL runner over the REAL durable lease services against an
+/// armed epoch, so the invocation genuinely reaches the `Lift` arm — the lift is
+/// attempted and refused, not skipped.
+#[tokio::test]
+async fn a_refused_lift_degrades_the_command_instead_of_failing_it() {
+    let db = crate::test_helpers::create_test_db();
+    arm_invocation_lift(&db).await;
+    let services = real_lease_services(
+        &db,
+        Arc::new(djinn_coordinator::build_lease::SystemLeaseClock),
+    )
+    .await;
+    let launcher = Arc::new(DegradeLauncher::lift_refused());
+    let now_ms = wall_clock_ms();
+    let runner = Arc::new(LeaseInvocationRunner::new(
+        services.clone(),
+        Arc::new(
+            djinn_supervisor::services::DurableInvocationLiftAuthority::new(
+                db.clone(),
+                "degrade-test",
+            ),
+        ),
+        launcher.clone(),
+        clock_pinned_at(now_ms),
+    ));
+    let context = crate::context::ShellLaunchContext::for_test(
+        Arc::clone(&runner),
+        "task".into(),
+        "run".into(),
+        "pod".into(),
+    );
+
+    let output = runner
+        .output(
+            command(),
+            context.invocation(Duration::from_secs(60)),
+            CancellationToken::new(),
+        )
+        .await
+        .expect(
+            "a refused cgroup lift must NOT fail the command. This is the assertion that would \
+             have caught goxi blocker 14 turning a lease-subsystem defect into a dead `shell` \
+             tool",
+        );
+
+    // The command completed normally, output intact, child never killed.
+    assert_eq!(output.process.termination, ProcessTermination::Exited);
+    assert_eq!(output.process.output.status.code(), Some(0));
+    assert_eq!(output.process.output.stdout, b"degraded command output\n");
+    assert_eq!(
+        launcher.killed_while_running(),
+        0,
+        "a refused lift must never kill a running child"
+    );
+
+    // The lift was genuinely ATTEMPTED and refused — not skipped. Without this
+    // the test would also pass on a runner that never reached the `Lift` arm at
+    // all, which is a different (and equally shipped) defect. It is also the
+    // one-way assertion: the runner must not retry a refused one-way lift.
+    assert_eq!(
+        launcher.lifts(),
+        1,
+        "the invocation must have reached the lift exactly once and had it refused"
+    );
+
+    // And the durable lease is still reconciled to terminal, so a refused lift
+    // never leaks a counted build slot.
+    let row = durable_row(&db, &output.identity.invocation_id).await;
+    assert_eq!(
+        row.state,
+        djinn_db::BuildLeaseState::Terminal,
+        "a degraded invocation must still reconcile its durable lease to terminal"
     );
 }

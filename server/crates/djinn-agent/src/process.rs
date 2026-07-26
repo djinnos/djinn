@@ -87,6 +87,11 @@ mod broker;
 /// ignored the `Command` it was handed.
 #[cfg(test)]
 pub(crate) use broker::command_spec;
+/// The SINGLE source of an invocation's broker fence. Exported so a proof reads
+/// the same function the `BEGIN` control does instead of restating the rule —
+/// a second statement of it is exactly how blocker 14 shipped.
+#[cfg(test)]
+pub(crate) use broker::invocation_fence as broker_invocation_fence;
 #[allow(unused_imports)] // constructed by the pending workspace broker composition
 pub(crate) use broker::{CgroupLauncherClient, ProcessHandle, UnixBrokerLauncher, birth_authority};
 
@@ -570,11 +575,16 @@ impl LeaseInvocationRunner {
         let mut deadline = self.clock.now_instant() + config.timeout;
         let (mut queued, mut fence, mut credit_used, mut lease_error) = (false, None, false, None);
         let mut unavailable_responses = 0_u8;
-        // Set once the durable queue ends without capacity for this invocation.
-        // From then on the child runs to its own terminal state at the
-        // launcher's unleased quota and the lease authority is never contacted
-        // again for a grant. See `lease_failure` for why the degrade is
-        // one-way.
+        // Set when this invocation can no longer be escalated: either the
+        // durable queue ended without capacity for it (`lease_failure`), or the
+        // privileged launcher broker REFUSED the one-way cgroup lift. From then
+        // on the child runs to its own terminal state at the launcher's unleased
+        // quota and the lease authority is never contacted again for a grant.
+        // See `lease_failure` for why the degrade is one-way.
+        //
+        // Both causes share one rule: contention or a lease-subsystem defect
+        // makes a command SLOW, never dead. Nothing here kills the child, and
+        // the durable record is still reconciled to terminal after the loop.
         let mut unleased_degrade = false;
         // This variable is assigned only by `terminal_now` or by a service
         // wait that observed terminal intent. Consequently no later response
@@ -765,14 +775,75 @@ impl LeaseInvocationRunner {
                                                 )
                                                 .map_err(LeaseInvocationError::Launcher)?;
                                         }
-                                        child
-                                            .fenced_lift(&token)
-                                            .map_err(LeaseInvocationError::Launcher)?;
-                                        tracing::info!(
-                                            invocation_id = %identity.invocation_id,
-                                            observed_usage_usec = cpu.usage_usec,
-                                            "lease invocation escalated: cgroup quota lifted"
-                                        );
+                                        // A REFUSED LIFT DEGRADES; IT DOES NOT
+                                        // FAIL THE COMMAND.
+                                        //
+                                        // This used to be `?`, so any refusal
+                                        // from the privileged broker became
+                                        // `LeaseInvocationError::Launcher` and
+                                        // failed the whole shell tool call:
+                                        //
+                                        //   ReplyLoop: tool call returned error
+                                        //   tool=shell error=failed to run shell
+                                        //   command: lease invocation failed: …
+                                        //
+                                        // measured in production at 5 failures
+                                        // per 10 launches. That is the worst
+                                        // available coupling: a defect in a
+                                        // *throttling optimisation* took out the
+                                        // agent's ability to run commands at
+                                        // all, and the fallback it denied itself
+                                        // — keep running clamped — is strictly
+                                        // better than dying.
+                                        //
+                                        // It also contradicted the precedent
+                                        // this very runner already sets one arm
+                                        // up: a lost lease QUEUE degrades to
+                                        // continued unleased execution
+                                        // (`lease_failure` → `unleased_degrade`)
+                                        // precisely because contention must make
+                                        // a command slow, never dead. A rejected
+                                        // lift is the same class of event and is
+                                        // now handled the same way.
+                                        //
+                                        // Nothing is swallowed. The child keeps
+                                        // running at the 250m unleased quota it
+                                        // was born at (containment is
+                                        // unaffected: the leaf, its kill path
+                                        // and its cpu.stat are all intact), the
+                                        // failure is logged at ERROR with the
+                                        // broker's refusal category, a telemetry
+                                        // counter records it, and the durable
+                                        // lease is still reconciled to terminal
+                                        // because `fence` is recorded below.
+                                        match child.fenced_lift() {
+                                            Ok(()) => tracing::info!(
+                                                invocation_id = %identity.invocation_id,
+                                                observed_usage_usec = cpu.usage_usec,
+                                                "lease invocation escalated: cgroup quota lifted"
+                                            ),
+                                            Err(error) => {
+                                                djinn_telemetry::build_admission::record_lift_rejected();
+                                                tracing::error!(
+                                                    invocation_id = %identity.invocation_id,
+                                                    task_run_id = %identity.task_run_id,
+                                                    observed_usage_usec = cpu.usage_usec,
+                                                    error = %error,
+                                                    "lease invocation lift REFUSED by the launcher \
+                                                     broker; the command keeps running CLAMPED at \
+                                                     the unleased quota instead of failing. This \
+                                                     is a lease-subsystem defect: the invocation \
+                                                     held a matching durable grant and the epoch \
+                                                     authorized a lift"
+                                                );
+                                                // One-way, exactly like the lost
+                                                // queue: do not re-enter the
+                                                // grant/lift path for an
+                                                // invocation whose one-way lift
+                                                // has already been refused.
+                                                unleased_degrade = true;
+                                            }
+                                        }
                                     }
                                     InvocationLiftDecision::Shadow => {
                                         // Reaching a valid bind means v1 would

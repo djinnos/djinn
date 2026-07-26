@@ -183,7 +183,7 @@ impl ShellLaunchContext {
                         admission_db,
                         "in-pod worker",
                     )),
-                    Arc::new(UnixBrokerLauncher::new(client, 0)),
+                    Arc::new(UnixBrokerLauncher::new(client)),
                     Arc::new(SystemClock::new()),
                 )
                 .with_journal(journal),

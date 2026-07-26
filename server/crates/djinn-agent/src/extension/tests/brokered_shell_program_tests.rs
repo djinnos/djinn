@@ -61,7 +61,7 @@ use super::{agent_context_from_db, create_test_db};
 use crate::process::{CgroupLauncherClient, LeaseInvocationRunner, ProcessHandle, command_spec};
 use djinn_cgroup_launcher::{CommandSpec, CpuStat};
 use djinn_core::clock::SystemClock;
-use djinn_supervisor::services::{LeaseFencingToken, TaskInvocationLeaseIdentity};
+use djinn_supervisor::services::TaskInvocationLeaseIdentity;
 use std::io;
 use std::path::Path;
 use std::process::{Command, ExitStatus, Stdio};
@@ -229,7 +229,7 @@ impl ProcessHandle for ProofChild {
     fn sample_cpu(&mut self) -> io::Result<CpuStat> {
         Ok(CpuStat::default())
     }
-    fn fenced_lift(&mut self, _: &LeaseFencingToken) -> io::Result<()> {
+    fn fenced_lift(&mut self) -> io::Result<()> {
         Ok(())
     }
     fn kill(&mut self) -> io::Result<()> {

@@ -60,7 +60,7 @@ fn shadow_epoch_emits_both_would_throttle_arms_from_production_paths() {
             run.await.unwrap().unwrap();
             assert_eq!(services.grant_calls.load(Ordering::SeqCst), 1);
             assert!(
-                launcher.lifts.lock().unwrap().is_empty(),
+                *launcher.lifts.lock().unwrap() == 0,
                 "the escalating shadow arm must still never lift cpu.max"
             );
 
