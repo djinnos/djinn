@@ -273,9 +273,10 @@ fn the_default_rendering_has_the_mandatory_launcher_surface() {
         "the mandatory launcher cgroup mountpoint volume must be declared"
     );
     assert_eq!(
-        pod.host_users,
-        Some(false),
-        "the mandatory launcher bootstrap must be user-namespaced"
+        pod.host_users, None,
+        "the mandatory launcher must NOT be user-namespaced: hostUsers: false leaves its own \
+         cgroup owned by an uid unmapped inside the namespace, so the init leaf cannot be \
+         created and the +cpu delegation never happens"
     );
 }
 
@@ -385,17 +386,26 @@ fn the_armed_launcher_container_has_no_cpu_limit_and_a_real_memory_limit() {
     );
 }
 
-/// The armed pod runs in a user namespace, and the launcher's capabilities are
-/// spelled the way the API server accepts.
+/// The launcher opts out of the AppArmor profile that denies `mount(2)`, keeps
+/// the runtime-default seccomp profile, is not user-namespaced, and spells its
+/// capabilities the way the API server accepts.
+///
+/// The AppArmor assertion is the rendered-contract half of the v0.7.5 rollback:
+/// the runtime's default profile carries a flat `deny mount,` and denies with
+/// `EACCES`, which is what failed the very first armed task pod while
+/// `CAP_SYS_ADMIN` was demonstrably present. Measured one variable at a time on
+/// the production node, `seccompProfile: Unconfined` does NOT unblock the mount
+/// and `appArmorProfile: Unconfined` does — so this test pins both: the AppArmor
+/// opt-out must be present AND seccomp must stay `RuntimeDefault`, so a future
+/// change cannot "fix" the wrong axis and quietly relax seccomp too.
 #[test]
 fn the_armed_pod_confines_the_bootstrap_capability() {
     let job = render();
     let pod = pod_of(&job);
     assert_eq!(
-        pod.host_users,
-        Some(false),
-        "hostUsers: false maps the launcher's bootstrap CAP_SYS_ADMIN into a user namespace, \
-         where the non-namespaced sysctls that make it an escape primitive are unreachable"
+        pod.host_users, None,
+        "hostUsers: false leaves the launcher's own cgroup owned by an uid unmapped inside the \
+         user namespace, so the delegated root cannot be written"
     );
 
     let launcher = pod
@@ -415,7 +425,26 @@ fn the_armed_pod_confines_the_bootstrap_capability() {
             .seccomp_profile
             .as_ref()
             .map(|profile| profile.type_.as_str()),
-        Some("RuntimeDefault")
+        Some("RuntimeDefault"),
+        "seccomp is NOT the axis that blocked the mount; relaxing it too would give up \
+         confinement for nothing"
+    );
+    assert_eq!(
+        security
+            .app_armor_profile
+            .as_ref()
+            .map(|profile| profile.type_.as_str()),
+        Some("Unconfined"),
+        "the runtime's default AppArmor profile denies mount(2) with EACCES, so without this \
+         opt-out the launcher fails on its first syscall and the armed pod fails closed"
+    );
+    assert!(
+        security
+            .app_armor_profile
+            .as_ref()
+            .is_none_or(|profile| profile.localhost_profile.is_none()),
+        "localhostProfile must be unset for type Unconfined, and no node-preloaded profile is \
+         shipped by the deploy repo"
     );
     let added = security
         .capabilities
@@ -446,6 +475,29 @@ fn the_armed_pod_confines_the_bootstrap_capability() {
             );
         }
     }
+
+    // The AppArmor opt-out is a real reduction in confinement, so it must be
+    // scoped to the one container that actually needs to call mount(2). Nothing
+    // else in the pod — the worker above all, which is where user-controlled
+    // code runs — may inherit it.
+    let unconfined: Vec<&str> = pod
+        .containers
+        .iter()
+        .chain(pod.init_containers.iter().flatten())
+        .filter(|container| container.name != LAUNCHER_CONTAINER_NAME)
+        .filter(|container| {
+            container
+                .security_context
+                .as_ref()
+                .and_then(|context| context.app_armor_profile.as_ref())
+                .is_some_and(|profile| profile.type_ == "Unconfined")
+        })
+        .map(|container| container.name.as_str())
+        .collect();
+    assert!(
+        unconfined.is_empty(),
+        "only the launcher may opt out of AppArmor confinement, but {unconfined:?} also did"
+    );
 }
 
 /// The launcher mode round-trips through its config string and refuses typos, so

@@ -207,12 +207,17 @@ fn the_lease_quota_is_derived_from_the_declared_pod_cpu_limit() {
     );
 }
 
-/// `hostUsers: false` only when the launcher is armed — it is the second
-/// layer under the launcher's own capability drop, and it has a real cost.
+/// A user namespace is never requested, armed or not.
+///
+/// `hostUsers: false` leaves the launcher's own cgroup owned by a uid that is
+/// unmapped inside the namespace, so the `init` holding leaf cannot be created
+/// and the `+cpu` delegation never happens — measured on the production node,
+/// see [`pod_host_users`]. This is the guard against restoring it for the
+/// confinement argument, which is sound but unimplementable here.
 #[test]
-fn user_namespaces_are_requested_exactly_when_the_launcher_is_armed() {
+fn user_namespaces_are_never_requested_because_they_break_the_delegation() {
     assert_eq!(pod_host_users(CgroupLauncherMode::Disabled), None);
-    assert_eq!(pod_host_users(CgroupLauncherMode::Required), Some(false));
+    assert_eq!(pod_host_users(CgroupLauncherMode::Required), None);
 }
 
 /// The armed sidecar mounts a writable directory at the cgroup root path.
@@ -462,10 +467,13 @@ fn rendered_security_context_matches_the_adversarial_proof_fixture() {
             LAUNCHER_BOOTSTRAP_ONLY_CAPABILITIES.join(","),
         ),
         (
-            "launcher_host_users",
-            pod.host_users
-                .expect("the required render sets hostUsers")
-                .to_string(),
+            "launcher_apparmor_profile",
+            launcher
+                .app_armor_profile
+                .as_ref()
+                .expect("the required render pins the launcher's AppArmor profile")
+                .type_
+                .clone(),
         ),
         ("child_run_as_user", CHILD_UID.to_string()),
         ("child_run_as_group", ARTIFACT_GID.to_string()),

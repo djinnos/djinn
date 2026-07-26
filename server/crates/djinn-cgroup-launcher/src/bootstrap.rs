@@ -32,8 +32,16 @@
 //! **and bounding** sets — irreversibly, before the broker binds its socket and
 //! therefore before the pod can accept a single unit of work. No user-controlled
 //! code ever executes while the capability is held: the only thing running in
-//! that window is this function. `hostUsers: false` on the Pod is the second
-//! layer, confining even that window to a user namespace.
+//! that window is this function.
+//!
+//! That drop is the ONLY layer under the capability, and it therefore has to
+//! hold on its own. `hostUsers: false` was once rendered as a second layer, on
+//! the reasoning that a user namespace puts the non-namespaced sysctls out of
+//! reach; it was removed because it does not work. Kubernetes user namespaces do
+//! not delegate the container's cgroup to the mapped user, so the launcher's own
+//! root stays owned by an unmapped uid and [`Bootstrap::vacate_root`] cannot
+//! create the holding leaf — the mount succeeds and the delegation then fails
+//! with `EACCES`. See `djinn_k8s::launcher::pod_host_users` for the measurement.
 //!
 //! This is also the honest implementation of goxi's "allowPrivilegeEscalation
 //! false AFTER INITIALIZATION", which is not expressible as a Pod field — a
