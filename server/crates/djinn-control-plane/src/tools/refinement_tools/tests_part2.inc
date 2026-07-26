@@ -533,7 +533,12 @@
         let revisions = repo.revisions(&proposal.id).await.unwrap();
         let demand_starts: Vec<_> = revisions
             .iter()
-            .filter(|r| r.event_kind == "refinement_start")
+            .filter(|r| {
+                r.event_kind == "refinement_start"
+                    && r.event_metadata
+                        .as_deref()
+                        .is_some_and(|m| m.contains("\"kind\":\"demand\""))
+            })
             .collect();
         assert_eq!(demand_starts.len(), 1, "fresh demand start exactly once");
         let meta: serde_json::Value = serde_json::from_str(
