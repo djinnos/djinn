@@ -237,15 +237,18 @@ pub(crate) async fn persist_load_diagnostics(
 
 /// Merge native skills for `role_name` with project-resolved skills.
 ///
-/// When `authoring_trigger` is `Some`, native skills recommended for the role
-/// are prepended to the project list. Any project skill whose name matches a
-/// native skill name is filtered out to prevent shadowing.
+/// The existing proposal-authoring trigger delivers role-recommended native
+/// skills only to its established Planner/Advocate roles. Architect readiness
+/// recommendations are discovery metadata; their delivery requires the typed
+/// readiness context and exact version pin handled by the readiness resolver.
+/// Any project skill whose name matches a delivered native skill is filtered out
+/// to prevent shadowing.
 pub(crate) fn merge_native_skills(
     role_name: &str,
     project_skills: Vec<ResolvedSkill>,
     authoring_trigger: Option<NativeSkillTrigger>,
 ) -> (Vec<ResolvedSkill>, Vec<String>) {
-    if authoring_trigger.is_none() {
+    if authoring_trigger.is_none() || !matches!(role_name, "planner" | "advocate") {
         return (project_skills, Vec::new());
     }
     let native = native_skills::resolved_native_skills_for_role(role_name);
