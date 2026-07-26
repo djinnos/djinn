@@ -458,8 +458,35 @@ async fn materialized_enqueue_failure_is_retried_with_the_same_task() {
         "pool failure must not append a proposal-scoped lifecycle stop"
     );
 
-    actor.pool = refinement_cap_tests::spawn_test_pool(&db, 1);
-    actor.drive_active_refinements().await;
+    // Model a coordinator crash after the materialization acknowledgement but
+    // before a successful pool enqueue. Neither the projection nor its
+    // in-memory retry bookkeeping is authoritative: a fresh actor must rebuild
+    // from the exact durable run and enqueue the already-created task.
+    drop(actor);
+    let live_pool = refinement_cap_tests::spawn_test_pool(&db, 1);
+    let mut restarted = refinement_cap_tests::build_refinement_actor(&db, &events_tx, live_pool);
+    restarted.recover_interrupted_refinements().await;
+    let rebuilt = restarted
+        .active_refinements
+        .get(&run_id)
+        .expect("restart rebuilds the exact current run projection");
+    assert_eq!(rebuilt.run_id, run_id);
+    assert_eq!(rebuilt.generation, generation);
+    assert_eq!(
+        rebuilt.phase,
+        super::super::refinement::RefinementPhase::AdversaryAttack
+    );
+    assert_eq!(rebuilt.current_round, 1);
+
+    restarted.drive_active_refinements().await;
+    assert!(
+        restarted
+            .pool
+            .has_session(&task_id)
+            .await
+            .expect("query successful restarted enqueue"),
+        "the materialized task is eventually enqueued after restart"
+    );
     assert_eq!(
         task_repo
             .find_by_refinement_intent_id(&intent_id)
