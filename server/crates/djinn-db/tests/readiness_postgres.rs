@@ -187,7 +187,7 @@ async fn migration_constraints_reject_identity_correlation_and_lifecycle_violati
 
         run(&mut conn, "run-b", "project-b", "key-b").await;
         area(&mut conn, "area-b", "run-b", "backend").await;
-        assert_rejected(&mut conn, "INSERT INTO readiness_area_attempts (id,run_id,area_id,attempt_number,correlation_key) VALUES ('cross-attempt','run-b','area-a',1,'cross')", "readiness_attempts_area_run_fk").await;
+        assert_rejected(&mut conn, "INSERT INTO readiness_area_attempts (id,run_id,area_id,attempt_number,correlation_key) VALUES ('cross-attempt','run-b','area-a',3,'cross-run-correlation')", "readiness_attempts_area_run_fk").await;
         sqlx::query("INSERT INTO readiness_guardrail_findings (id,run_id,area_id,attempt_id,guardrail_key,severity,accepted) VALUES ('finding-a','run-a','area-a','attempt-a','guardrail','high',true)").execute(&mut conn).await.expect("insert finding");
         assert_rejected(&mut conn, "INSERT INTO readiness_guardrail_findings (id,run_id,area_id,attempt_id,guardrail_key,severity) VALUES ('finding-duplicate','run-a','area-a','attempt-a','guardrail','high')", "readiness_findings_attempt_guardrail").await;
         assert_rejected(&mut conn, "INSERT INTO readiness_guardrail_findings (id,run_id,area_id,attempt_id,guardrail_key,severity) VALUES ('finding-cross','run-b','area-b','attempt-a','other','high')", "readiness_findings_attempt_correlation_fk").await;
