@@ -3361,6 +3361,7 @@ mod inflight_ledger_tests {
             refinement_round: None,
             refinement_phase: None,
             refinement_role: None,
+            execution_context: None,
         }
     }
 
@@ -6181,6 +6182,7 @@ mod failover_chain_tests {
             refinement_round: None,
             refinement_phase: None,
             refinement_role: None,
+            execution_context: None,
         };
 
         let attempted_models: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
@@ -6393,6 +6395,7 @@ mod failover_chain_tests {
             refinement_round: None,
             refinement_phase: None,
             refinement_role: None,
+            execution_context: None,
         };
 
         // Run 2 chain exhaustions — breaker threshold is 3, so breaker should
@@ -6974,6 +6977,7 @@ mod failover_chain_tests {
             refinement_round: None,
             refinement_phase: None,
             refinement_role: None,
+            execution_context: None,
         };
 
         // ── Step 1: Two model-a failures, each rescued by model-b ─────────

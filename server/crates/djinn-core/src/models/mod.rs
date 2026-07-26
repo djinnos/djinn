@@ -37,9 +37,9 @@ pub use settings::{
 };
 pub use task::{
     ActivityEntry, CiStatus, IssueType, MergeQueueLane, PRIORITY_CRITICAL, ReopenClass,
-    ReopenLedgerEntry, Task, TaskPrCiSnapshot, TaskPrCiSnapshotInput, TaskPrCiSnapshotMqLaneInput,
-    TaskRefinementCorrelation, TaskStatus, TransitionAction, TransitionApply, compute_transition,
-    compute_transition_for_issue_type,
+    ReopenLedgerEntry, Task, TaskExecutionContext, TaskPrCiSnapshot, TaskPrCiSnapshotInput,
+    TaskPrCiSnapshotMqLaneInput, TaskRefinementCorrelation, TaskStatus, TransitionAction,
+    TransitionApply, compute_transition, compute_transition_for_issue_type,
 };
 pub use task_attempt::{
     GuardDecision, GuardReason, LogTailMeta, TASK_ATTEMPT_DISPATCH_KEY_MAX_LEN,

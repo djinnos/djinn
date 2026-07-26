@@ -531,6 +531,7 @@ mod tests {
             total_reopen_count: 0,
             intervention_count: 0,
             last_intervention_at: None,
+            execution_context: None,
         }
     }
 

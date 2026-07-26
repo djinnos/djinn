@@ -100,6 +100,7 @@ fn fixture_task(task_id: &str, project_id: &str) -> Task {
         refinement_round: None,
         refinement_phase: None,
         refinement_role: None,
+        execution_context: None,
     }
 }
 

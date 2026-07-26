@@ -61,6 +61,7 @@ fn task_with_merge_commit_sha(merge_commit_sha: Option<&str>) -> Task {
         refinement_round: None,
         refinement_phase: None,
         refinement_role: None,
+        execution_context: None,
     }
 }
 

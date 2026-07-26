@@ -124,6 +124,7 @@ fn test_task(short_id: &str) -> Task {
         refinement_round: None,
         refinement_phase: None,
         refinement_role: None,
+        execution_context: None,
     }
 }
 
