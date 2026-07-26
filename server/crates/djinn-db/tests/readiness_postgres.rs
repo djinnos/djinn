@@ -7,8 +7,7 @@
 use std::path::{Path, PathBuf};
 
 use djinn_db::{
-    Database,
-    UserRepository,
+    Database, UserRepository,
     repositories::readiness::{
         CreateReadinessRun, MaterializeReadinessKickoff, ReadinessRepository,
     },
@@ -32,8 +31,10 @@ async fn materialized_kickoff_redelivery_and_racing_keys_converge_on_one_task() 
         .expect("open postgres test database");
     let redelivery_project_id = "materialized-readiness-redelivery";
     let racing_project_id = "materialized-readiness-race";
-    djinn_db::test_support::seed_project(&db, redelivery_project_id, "readiness").await;
-    djinn_db::test_support::seed_project(&db, racing_project_id, "readiness").await;
+    // Project names are globally unique, so each fixture project needs its own
+    // name even though they share this test database.
+    djinn_db::test_support::seed_project(&db, redelivery_project_id, "readiness-redelivery").await;
+    djinn_db::test_support::seed_project(&db, racing_project_id, "readiness-race").await;
     let creator_user_id = seed_user(&db, 155_001, "readiness-kickoff-creator").await;
     let repo = ReadinessRepository::new(db.clone());
 
@@ -54,7 +55,10 @@ async fn materialized_kickoff_redelivery_and_racing_keys_converge_on_one_task() 
         .await
         .expect("materialize same-key redelivery");
     assert_eq!(redelivery.run.id, first.run.id);
-    assert_eq!(redelivery.identification_task.id, first.identification_task.id);
+    assert_eq!(
+        redelivery.identification_task.id,
+        first.identification_task.id
+    );
     assert_eq!(kickoff_counts(&db, redelivery_project_id).await, (1, 1));
 
     let left_repo = ReadinessRepository::new(db.clone());
@@ -93,7 +97,12 @@ async fn materialized_kickoff_validation_failures_leave_no_run_or_task() {
     let creator_user_id = seed_user(&db, 155_002, "readiness-validation-creator").await;
     let repo = ReadinessRepository::new(db.clone());
 
-    for field in ["idempotency_key", "repository_snapshot", "skill_name", "skill_version"] {
+    for field in [
+        "idempotency_key",
+        "repository_snapshot",
+        "skill_name",
+        "skill_version",
+    ] {
         let mut input = kickoff_input(project_id, &creator_user_id, "validation-key");
         match field {
             "idempotency_key" => input.idempotency_key = " \t ".into(),
@@ -150,13 +159,12 @@ fn kickoff_input(
 }
 
 async fn kickoff_counts(db: &Database, project_id: &str) -> (i64, i64) {
-    let runs = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM readiness_runs WHERE project_id = $1",
-    )
-    .bind(project_id)
-    .fetch_one(db.pool())
-    .await
-    .expect("count readiness runs");
+    let runs =
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM readiness_runs WHERE project_id = $1")
+            .bind(project_id)
+            .fetch_one(db.pool())
+            .await
+            .expect("count readiness runs");
     let identification_tasks = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*) FROM tasks
          WHERE project_id = $1
