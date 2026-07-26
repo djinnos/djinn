@@ -400,7 +400,14 @@ async fn light_roles_are_admitted_against_a_saturated_pool() {
     assert!(acquire_warm_lease(&h.lease, "saturate").await);
     assert_eq!(occupancy(&h.leases).await, CAP);
 
-    for role in ["planner", "reviewer", "lead", "advocate", "adversary", "judge"] {
+    for role in [
+        "planner",
+        "reviewer",
+        "lead",
+        "advocate",
+        "adversary",
+        "judge",
+    ] {
         assert_eq!(
             RoleResourceClass::for_role_name(role),
             RoleResourceClass::Light,
@@ -700,7 +707,6 @@ async fn unarmed_dispatch_admission_observes_without_denying_or_occupying() {
          is what the operator reads before arming the epoch"
     );
 }
-
 
 /// A queue position must not outlive the task that wanted it.
 ///

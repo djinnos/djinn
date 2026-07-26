@@ -242,9 +242,12 @@ async fn cap_exceeding_seed_stays_closed_and_off_does_not_inventory() {
         BuildAdmissionReadiness::SeededOccupancyAboveCap
     );
 
-    BuildAdmissionReconciler::new(controller(BuildAdmissionMode::Off, 1).await, inventory.clone())
-        .reconcile()
-        .await;
+    BuildAdmissionReconciler::new(
+        controller(BuildAdmissionMode::Off, 1).await,
+        inventory.clone(),
+    )
+    .reconcile()
+    .await;
     assert_eq!(
         inventory
             .list_calls
@@ -263,14 +266,12 @@ async fn absence_retains_create_unknown_then_late_same_name_create_is_adopted() 
     };
     controller
         .journal()
-        .reserve(
-            &ReserveAdmissionInput {
-                key: key.clone(),
-                workload_kind: AdmissionWorkloadKind::Task,
-                creator_server_epoch: "old".into(),
-                object_name: "late-job".into(),
-            },
-        )
+        .reserve(&ReserveAdmissionInput {
+            key: key.clone(),
+            workload_kind: AdmissionWorkloadKind::Task,
+            creator_server_epoch: "old".into(),
+            object_name: "late-job".into(),
+        })
         .await
         .unwrap();
     controller
@@ -416,14 +417,12 @@ async fn uncertain_presence_never_reclaims_a_create_unknown_row() {
     };
     controller
         .journal()
-        .reserve(
-            &ReserveAdmissionInput {
-                key: key.clone(),
-                workload_kind: AdmissionWorkloadKind::Task,
-                creator_server_epoch: "old".into(),
-                object_name: "uncertain-job".into(),
-            },
-        )
+        .reserve(&ReserveAdmissionInput {
+            key: key.clone(),
+            workload_kind: AdmissionWorkloadKind::Task,
+            creator_server_epoch: "old".into(),
+            object_name: "uncertain-job".into(),
+        })
         .await
         .unwrap();
     controller

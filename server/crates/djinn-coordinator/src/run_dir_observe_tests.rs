@@ -19,9 +19,8 @@ use djinn_db::{
 
 use super::*;
 use crate::build_admission::{
-    CapacitySource,
     BuildAdmissionController, BuildAdmissionDecision, BuildAdmissionMode, BuildAdmissionRequest,
-    BuildWorkloadKind, LIGHT_ROLE_AUDIT_REASON, TaskRunRole,
+    BuildWorkloadKind, CapacitySource, LIGHT_ROLE_AUDIT_REASON, TaskRunRole,
 };
 
 const GIB: u64 = 1024 * 1024 * 1024;

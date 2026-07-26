@@ -860,17 +860,16 @@ async fn forced_loss_safety_depends_on_durable_pre_post_state_not_cooperative_sh
     // shutdown, no POST result, no CreateUnknown transition from the
     // predecessor itself). Only the durable pre-POST state survives.
     journal
-        .reserve(
-            &ReserveAdmissionInput {
-                key: AdmissionJournalKey {
-                    domain: AdmissionDomain::WarmBuild,
-                    work_id: work_id.into(),
-                    generation: 0,
-                },
-                workload_kind: AdmissionWorkloadKind::Warm,
-                creator_server_epoch: predecessor_epoch.into(),
-                object_name: format!("warm-{work_id}-0"),
-            })
+        .reserve(&ReserveAdmissionInput {
+            key: AdmissionJournalKey {
+                domain: AdmissionDomain::WarmBuild,
+                work_id: work_id.into(),
+                generation: 0,
+            },
+            workload_kind: AdmissionWorkloadKind::Warm,
+            creator_server_epoch: predecessor_epoch.into(),
+            object_name: format!("warm-{work_id}-0"),
+        })
         .await
         .unwrap();
     journal
@@ -914,7 +913,6 @@ async fn forced_loss_safety_depends_on_durable_pre_post_state_not_cooperative_sh
         "safety depends on durable state, not cooperative shutdown"
     );
 }
-
 
 #[tokio::test]
 async fn concurrent_invocation_children_share_parent_observation_without_v0_occupancy() {

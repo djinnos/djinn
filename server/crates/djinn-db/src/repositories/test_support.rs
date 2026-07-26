@@ -25,15 +25,20 @@ pub async fn refinement_run_audit_for_test(
     run_id: &str,
 ) -> RefinementRunAuditForTest {
     db.ensure_initialized().await.unwrap();
-    let row: (i32, String, Option<String>, Option<String>, Option<serde_json::Value>) =
-        sqlx::query_as(
-            "SELECT generation, state, park_kind, stop_tag, stop_context \
+    let row: (
+        i32,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<serde_json::Value>,
+    ) = sqlx::query_as(
+        "SELECT generation, state, park_kind, stop_tag, stop_context \
              FROM refinement_runs WHERE id = $1",
-        )
-        .bind(run_id)
-        .fetch_one(db.pool())
-        .await
-        .expect("failed to read refinement run audit row");
+    )
+    .bind(run_id)
+    .fetch_one(db.pool())
+    .await
+    .expect("failed to read refinement run audit row");
     let typed_reap_count = sqlx::query_scalar(
         "SELECT COUNT(*) FROM refinement_runs \
          WHERE id = $1 AND stop_tag = 'reaped_phantom'",

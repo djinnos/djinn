@@ -43,7 +43,6 @@ use crate::build_slot_authority::BuildLeaseDispatchAuthority;
 /// A controller wired to the single capacity authority, plus every ledger the
 /// assertions need to read.
 pub(crate) struct CapacityHarness {
-    pub(crate) db: Database,
     pub(crate) journal: Arc<AdmissionJournalRepository>,
     pub(crate) leases: Arc<BuildLeaseRepository>,
     pub(crate) lease: Arc<BuildLeaseService>,
@@ -128,7 +127,10 @@ impl CapacityHarness {
                     .expect("the widened pool must grant every predecessor slot"),
             );
         }
-        assert!(matches!(self.lease.set_cap(cap).await, LeaseResult::Status(_)));
+        assert!(matches!(
+            self.lease.set_cap(cap).await,
+            LeaseResult::Status(_)
+        ));
         held
     }
 
@@ -161,7 +163,8 @@ pub(crate) async fn armed_lease_service(
     cap: i64,
 ) -> Arc<BuildLeaseService> {
     let lease = Arc::new(
-        BuildLeaseService::new(Arc::clone(leases), cap).with_slot_weights(BuildSlotWeights::default()),
+        BuildLeaseService::new(Arc::clone(leases), cap)
+            .with_slot_weights(BuildSlotWeights::default()),
     );
     assert!(
         matches!(lease.recover().await, LeaseResult::Status(_)),
@@ -193,7 +196,6 @@ pub(crate) async fn attach_capacity(
     let authority: Arc<dyn BuildSlotAuthority> =
         Arc::new(BuildLeaseDispatchAuthority::new(Arc::clone(&lease)));
     CapacityHarness {
-        db: db.clone(),
         journal,
         leases,
         lease,

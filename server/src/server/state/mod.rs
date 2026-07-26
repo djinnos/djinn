@@ -26,8 +26,8 @@ use djinn_agent::roles::RoleRegistry;
 use djinn_agent::runtime_bridge::{K8sTokenReviewValidator, RuntimeKind, runtime_kind};
 use djinn_coordinator::build_lease::BuildLeaseService;
 use djinn_coordinator::build_lease_reclaim::BuildLeaseReclaimer;
-use djinn_coordinator::graph_warm_lease::BuildLeaseGraphWarmAdapter;
 use djinn_coordinator::build_slot_authority::BuildLeaseDispatchAuthority;
+use djinn_coordinator::graph_warm_lease::BuildLeaseGraphWarmAdapter;
 use djinn_coordinator::run_dir_observe::{RunDirObserveSeams, arm_disk_observation};
 use djinn_core::clock::{Clock, SystemClock as SystemClockTrait};
 use djinn_core::models::KnowledgeInjectionConfig;
@@ -573,7 +573,8 @@ impl AppState {
             std::env::var("HOSTNAME").unwrap_or_else(|_| "coordinator".to_owned()),
             djinn_agent::actors::coordinator::allocate_server_epoch()
         );
-        let build_admission_journal = Arc::new(djinn_db::AdmissionJournalRepository::new(db.clone()));
+        let build_admission_journal =
+            Arc::new(djinn_db::AdmissionJournalRepository::new(db.clone()));
         // The ONE build-slot capacity authority. Every population that can
         // occupy a build slot -- graph warming, layer-1 task dispatch, and the
         // layer-2 invocation escalation -- draws from this single FIFO under

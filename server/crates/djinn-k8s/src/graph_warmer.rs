@@ -1700,11 +1700,11 @@ impl GraphWarmerService for K8sGraphWarmer {
 #[path = "graph_warmer_admission_tests.rs"]
 mod admission_tests;
 #[cfg(test)]
+#[path = "graph_warmer_ledger_tests.rs"]
+mod ledger_tests;
+#[cfg(test)]
 #[path = "graph_warmer_recovery_tests.rs"]
 mod recovery_tests;
 #[cfg(test)]
 #[path = "graph_warmer_tests.rs"]
 mod tests;
-#[cfg(test)]
-#[path = "graph_warmer_ledger_tests.rs"]
-mod ledger_tests;

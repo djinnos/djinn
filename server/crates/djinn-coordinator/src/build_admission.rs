@@ -17,8 +17,7 @@ use djinn_core::clock::{Clock, SystemClock};
 use djinn_db::{
     AdmissionDomain, AdmissionJournalKey, AdmissionJournalRepository, AdmissionJournalRow,
     AdmissionRecoveryResult, AdmissionState, AdmissionWorkloadKind, CreateStartedInput,
-    ReserveAdmissionInput, TerminalAdmissionInput, UidFencedAdmissionInput,
-    V0Mode, V1Mode,
+    ReserveAdmissionInput, TerminalAdmissionInput, UidFencedAdmissionInput, V0Mode, V1Mode,
 };
 use djinn_k8s::{
     WarmAdmission, WarmAdmissionError, WarmAdmissionPermit, WarmAdmissionRequest,
@@ -1491,20 +1490,6 @@ impl BuildAdmissionController {
         );
     }
 
-    /// Cancel a deferred request. Duplicate signals are idempotent:
-    /// [`Self::finish_queued_wait`] atomically removes the lifecycle record
-    /// (membership + timestamp) under one lock and observes exactly once, so
-    /// a duplicate cancel finds the key absent and emits no observation.
-    pub async fn cancel_deferred(&self, domain: AdmissionDomain, work_id: &str, generation: i64) {
-        let key = permit_key(&AdmissionJournalKey {
-            domain,
-            work_id: work_id.to_owned(),
-            generation,
-        });
-        self.finish_queued_wait(&key, djinn_telemetry::build_slot_queue::OUTCOME_CANCELLED);
-        self.publish_metrics().await;
-    }
-
     /// Cancel every deferred generation for a task that has become terminal.
     /// Each matching key is terminated atomically by [`Self::finish_queued_wait`],
     /// which removes membership and extracts the timestamp under one lock, so no
@@ -1951,9 +1936,7 @@ impl BuildAdmissionController {
                         // terminalizes, while warm/invocation rows are owned by
                         // consumers that release their own leases.
                         capacity: match row.key.domain {
-                            AdmissionDomain::TaskObservation => {
-                                CapacitySource::AcquireDispatchSlot
-                            }
+                            AdmissionDomain::TaskObservation => CapacitySource::AcquireDispatchSlot,
                             AdmissionDomain::WarmBuild | AdmissionDomain::InvocationBuild => {
                                 CapacitySource::HeldByLease
                             }
@@ -2165,6 +2148,8 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::Notify;
 
+    use crate::build_admission_capacity_support::CapacityHarness;
+
     #[test]
     fn validate_admission_config_rejects_illegal_combo_and_out_of_range_cap() {
         // At least one enforcing authority is legal across the cap range.
@@ -2196,7 +2181,16 @@ mod tests {
         );
     }
 
-    fn controller(mode: BuildAdmissionMode, cap: i64) -> BuildAdmissionController {
+    /// A controller with NO capacity authority attached.
+    ///
+    /// This is a real production shape — the Off / local-dev composition, where
+    /// nothing is capacity gated — and it is the right fixture for the lifecycle,
+    /// fencing, readiness and telemetry properties below, none of which are
+    /// about a cap. It must never be used to assert that something is DENIED at
+    /// a cap: with no authority there is nothing to deny with, and the
+    /// assertion would pass for the wrong reason. Those tests use
+    /// [`capacity_harness`].
+    fn ungated_controller(mode: BuildAdmissionMode, cap: i64) -> BuildAdmissionController {
         BuildAdmissionController::new(
             Arc::new(AdmissionJournalRepository::new(
                 Database::open_in_memory().unwrap(),
@@ -2204,6 +2198,58 @@ mod tests {
             mode,
             cap,
             "epoch",
+        )
+    }
+
+    /// The production composition: one controller reaching capacity through the
+    /// ONE armed lease authority, over one database.
+    async fn capacity_harness(mode: BuildAdmissionMode, cap: i64) -> CapacityHarness {
+        crate::build_admission_capacity_support::controller_with_capacity(mode, cap, "epoch").await
+    }
+
+    /// The deferred population is TASK dispatch.
+    ///
+    /// It used to be graph warming, because the journal capped both. It no
+    /// longer caps either: a warm Job's capacity is its graph-warm lease, taken
+    /// before it reaches admission, so a warm admission is a ledger append that
+    /// cannot be denied and therefore never enters the deferred queue. Task
+    /// dispatch is the population that IS refused at layer 1, so it is the one
+    /// whose queue lifecycle these gauges describe. The properties asserted —
+    /// first-denial timing, unique-waiter cardinality, exactly-once terminal
+    /// observations — are unchanged; only the population that exhibits them is.
+    async fn dispatch_permit(
+        controller: &BuildAdmissionController,
+        work_id: &str,
+    ) -> WarmAdmissionPermit {
+        match controller
+            .admit_task_run(
+                Some("worker"),
+                AdmissionDomain::TaskObservation,
+                work_id.to_owned(),
+                0,
+                format!("task-run-{work_id}"),
+            )
+            .await
+            .unwrap()
+        {
+            BuildAdmissionDecision::Permitted { permit, .. } => permit,
+            other => panic!("{work_id} must be permitted, got {other:?}"),
+        }
+    }
+
+    async fn dispatch_denied(controller: &BuildAdmissionController, work_id: &str) -> bool {
+        matches!(
+            controller
+                .admit_task_run(
+                    Some("worker"),
+                    AdmissionDomain::TaskObservation,
+                    work_id.to_owned(),
+                    0,
+                    format!("task-run-{work_id}"),
+                )
+                .await
+                .unwrap(),
+            BuildAdmissionDecision::Denied { .. }
         )
     }
     fn warm(id: &str) -> WarmAdmissionRequest {
@@ -2427,7 +2473,7 @@ mod tests {
     /// transition addressed to a superseded generation is still rejected.
     #[tokio::test]
     async fn late_create_observation_is_idempotent_while_stale_generations_stay_rejected() {
-        let controller = controller(BuildAdmissionMode::Enforce, 4);
+        let controller = ungated_controller(BuildAdmissionMode::Enforce, 4);
         controller.mark_ready();
         let first = WarmAdmission::admit(&controller, warm("late-create"))
             .await
@@ -2518,23 +2564,44 @@ mod tests {
         );
     }
 
+    /// The concrete warmer draws from the SAME pool as task dispatch, and a
+    /// warm refused by a full pool retries when capacity is handed back.
+    ///
+    /// Composed the way production composes it, which is the point: the warmer
+    /// holds a graph-warm lease from the one `BuildLeaseService`, and that lease
+    /// — not the admission call — is where its capacity is decided. Without the
+    /// lease adapter, `initialize_graph_warmer` leaves warming ungated and says
+    /// so; admission deliberately does not fall back to a second cap.
     #[tokio::test]
     async fn concrete_k8s_warmer_shares_task_cap_and_retries_after_fenced_release() {
         let db = Database::open_in_memory().unwrap();
+        db.ensure_initialized().await.unwrap();
         let journal = Arc::new(AdmissionJournalRepository::new(db.clone()));
-        let controller = Arc::new(BuildAdmissionController::new(
-            Arc::clone(&journal),
-            BuildAdmissionMode::Enforce,
+        let h = crate::build_admission_capacity_support::attach_capacity(
+            &db,
+            BuildAdmissionController::new(
+                Arc::clone(&journal),
+                BuildAdmissionMode::Enforce,
+                1,
+                "epoch",
+            ),
             1,
-            "epoch",
-        ));
+        )
+        .await;
+        let controller = Arc::clone(&h.controller);
         let project_id = seed_project_with_ready_image(&db, "shared-cap").await;
         let work_id = djinn_k8s::warm_work_id(&project_id, "unknown");
         let posts = Arc::new(AtomicUsize::new(0));
         let posted = Arc::new(Notify::new());
+        // A leased warm Job waits for its Kubernetes candidate up to
+        // `warm_job_timeout_seconds`; this harness stubs the dispatcher, not the
+        // candidate inventory, so the 3600s default would park the retry task
+        // forever. Every ledger write this test asserts happens BEFORE the POST.
+        let mut config = KubernetesConfig::for_testing();
+        config.warm_job_timeout_seconds = 1;
         let warmer = K8sGraphWarmer::with_dispatcher(
-            KubernetesConfig::for_testing(),
-            db,
+            config,
+            db.clone(),
             Arc::new(AdmissionStateRecordingDispatcher {
                 journal: Arc::clone(&journal),
                 work_id: work_id.clone(),
@@ -2543,7 +2610,10 @@ mod tests {
             }),
             Arc::new(FencedTerminalWatcher),
         )
-        .with_warm_admission(controller.clone());
+        .with_warm_admission(controller.clone())
+        .with_graph_warm_lease(Arc::new(
+            crate::graph_warm_lease::BuildLeaseGraphWarmAdapter::new(Arc::clone(&h.lease)),
+        ));
 
         let task = controller
             .admit_task_run(
@@ -2558,6 +2628,8 @@ mod tests {
         let BuildAdmissionDecision::Permitted { permit: task, .. } = task else {
             panic!("the task must win the cap-one reservation");
         };
+
+        assert_eq!(h.occupancy().await, 1, "the task holds the only build slot");
 
         warmer.trigger(&project_id).await;
         assert_eq!(posts.load(Ordering::SeqCst), 0, "denied warm must not POST");
@@ -2694,7 +2766,7 @@ mod tests {
 
     #[tokio::test]
     async fn off_is_noop_and_unknown_is_bounded() {
-        let controller = controller(BuildAdmissionMode::Off, 0);
+        let controller = ungated_controller(BuildAdmissionMode::Off, 0);
         let permit = WarmAdmission::admit(&controller, warm("off"))
             .await
             .unwrap();
@@ -2744,31 +2816,67 @@ mod tests {
         );
     }
 
+    /// A shadow authority records what enforcement WOULD have done, per probe,
+    /// and denies nothing; an armed one draws both domains from one pool.
+    ///
+    /// The would-defer signal is the operator's evidence before arming the
+    /// epoch, so it is emitted by the shadow path and only there. A shadow probe
+    /// deliberately inserts NO row -- a shadow reservation would occupy real
+    /// capacity and start denying graph warming, which is the silent behaviour
+    /// change the rollout exists to avoid. That is why the observation is one
+    /// per probe rather than "the loser of a race": with nothing inserted, there
+    /// is no race to lose, and occupancy comes entirely from the warm Job that
+    /// really is holding the slot.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn observe_records_serialized_would_defer_without_denial_and_enforce_combines_domains() {
-        let observed = Arc::new(controller(BuildAdmissionMode::Observe, 1));
+    async fn shadow_records_would_defer_without_denial_and_enforce_combines_domains() {
+        let shadow = capacity_harness(BuildAdmissionMode::Observe, 1).await;
+        shadow.controller.mark_ready();
+        let _held = shadow
+            .hold_warm_lease("shadow-occupant")
+            .await
+            .expect("the warm Job takes the only slot");
+        shadow.lease.set_dispatch_enforcing_for_test(false);
+
         let barrier = Arc::new(tokio::sync::Barrier::new(2));
-        let first = {
-            let observed = Arc::clone(&observed);
+        let mut probes = Vec::new();
+        for name in ["a", "b"] {
+            let controller = Arc::clone(&shadow.controller);
             let barrier = Arc::clone(&barrier);
-            tokio::spawn(async move {
+            probes.push(tokio::spawn(async move {
                 barrier.wait().await;
-                WarmAdmission::admit(observed.as_ref(), warm("a")).await
-            })
-        };
-        let second = {
-            let observed = Arc::clone(&observed);
-            let barrier = Arc::clone(&barrier);
-            tokio::spawn(async move {
-                barrier.wait().await;
-                WarmAdmission::admit(observed.as_ref(), warm("b")).await
-            })
-        };
-        assert!(first.await.unwrap().is_ok());
-        assert!(second.await.unwrap().is_ok());
-        assert_eq!(observed.would_defer_observation_count().await, 1);
-        let enforced = controller(BuildAdmissionMode::Enforce, 1);
+                controller
+                    .admit_task_run(
+                        Some("worker"),
+                        AdmissionDomain::TaskObservation,
+                        name.to_owned(),
+                        0,
+                        format!("task-job-{name}"),
+                    )
+                    .await
+            }));
+        }
+        for probe in probes {
+            assert!(
+                matches!(
+                    probe.await.unwrap().unwrap(),
+                    BuildAdmissionDecision::Permitted { .. }
+                ),
+                "a shadow authority never denies"
+            );
+        }
+        assert_eq!(shadow.controller.would_defer_observation_count().await, 2);
+        assert_eq!(
+            shadow.occupancy().await,
+            1,
+            "and never acquires: the warm Job is still the only occupant"
+        );
+
+        // Armed, the same pool serves both domains: the task-run's dispatch slot
+        // is the warm Job's slot.
+        let enforced = capacity_harness(BuildAdmissionMode::Enforce, 1).await;
+        enforced.controller.mark_ready();
         let _ = enforced
+            .controller
             .admit_task_run(
                 Some("worker"),
                 AdmissionDomain::TaskObservation,
@@ -2778,15 +2886,15 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(matches!(
-            WarmAdmission::admit(&enforced, warm("warm")).await,
-            Err(WarmAdmissionError::Denied { .. })
-        ));
+        assert!(
+            enforced.hold_warm_lease("warm").await.is_none(),
+            "the task-run's slot denies the warm Job"
+        );
     }
 
     #[tokio::test]
     async fn permits_are_idempotent_and_terminal_notifies_and_is_uid_fenced() {
-        let controller = controller(BuildAdmissionMode::Enforce, 2);
+        let controller = ungated_controller(BuildAdmissionMode::Enforce, 2);
         let first = WarmAdmission::admit(&controller, warm("same"))
             .await
             .unwrap();
@@ -2835,7 +2943,7 @@ mod tests {
 
     #[tokio::test]
     async fn task_generations_and_runtime_uids_fence_terminal_release() {
-        let controller = controller(BuildAdmissionMode::Enforce, 3);
+        let controller = ungated_controller(BuildAdmissionMode::Enforce, 3);
         let first = controller
             .admit_task_run(
                 Some("worker"),
@@ -3355,11 +3463,19 @@ mod tests {
         );
     }
 
+    /// A recovered process that finds MORE capacity occupied than its cap
+    /// allows must fail closed until the excess is handed back.
+    ///
+    /// The gate is fed BUILD SLOTS. It used to be fed a count of occupying
+    /// journal rows compared against a build-slot cap — two different units,
+    /// and the exact shape of the v0.7.5 wedge where 58 stale lifecycle rows
+    /// latched `over_cap` while holding no CPU at all. The assertions below are
+    /// unchanged; only the measurement is now real capacity.
     #[tokio::test]
     async fn seeded_occupancy_above_cap_gates_readiness_fail_closed() {
-        let journal = Arc::new(AdmissionJournalRepository::new(
-            Database::open_in_memory().unwrap(),
-        ));
+        let db = Database::open_in_memory().unwrap();
+        db.ensure_initialized().await.unwrap();
+        let journal = Arc::new(AdmissionJournalRepository::new(db.clone()));
         // Two predecessor Live rows under a cap of one.
         for work in ["over-a", "over-b"] {
             journal
@@ -3390,8 +3506,18 @@ mod tests {
                 .await
                 .unwrap();
         }
-        let controller =
-            BuildAdmissionController::new_closed(Arc::clone(&journal), 1, "replacement-epoch");
+        let h = crate::build_admission_capacity_support::attach_capacity(
+            &db,
+            BuildAdmissionController::new_closed(Arc::clone(&journal), 1, "replacement-epoch"),
+            1,
+        )
+        .await;
+        let controller = Arc::clone(&h.controller);
+        // The predecessor's two warm Jobs each held a graph-warm lease. Those
+        // rows live in `build_leases` and survive the restart, which is what
+        // makes recovered occupancy exceed the cap of one.
+        let predecessor_slots = h.occupy_slots_beyond_cap(2).await;
+        assert_eq!(h.occupancy().await, 2);
         let report = controller
             .recover_all_predecessors_and_seed()
             .await
@@ -3404,13 +3530,18 @@ mod tests {
         );
         assert!(!controller.is_ready());
         assert!(matches!(
-            WarmAdmission::admit(&controller, warm("denied-over-cap")).await,
+            WarmAdmission::admit(controller.as_ref(), warm("denied-over-cap")).await,
             Err(WarmAdmissionError::Denied { .. })
         ));
 
-        // Terminal releases bring durable occupancy back within the cap; the
-        // over-cap gate clears from the journal count and readiness falls
-        // through to the still-pending inventory gate.
+        // The predecessor's Jobs end. Slot and ledger row are retired by their
+        // own owners: the warmer hands back the lease, the terminal transition
+        // closes the journal row. Handing back the capacity is what brings
+        // occupancy within the cap; the terminal transition is what re-reads the
+        // gate.
+        for slot in predecessor_slots {
+            h.release_warm_lease(slot).await;
+        }
         for (work, uid) in [("over-a", "uid-over-a"), ("over-b", "uid-over-b")] {
             let permit = controller
                 .permit_for_key(AdmissionDomain::WarmBuild, work, 0)
@@ -3424,6 +3555,7 @@ mod tests {
                 .await
                 .unwrap();
         }
+        assert_eq!(h.occupancy().await, 0);
         assert_eq!(journal.count_task_or_warm_occupancy().await.unwrap(), 0);
         assert_eq!(
             controller.readiness(),
@@ -3434,7 +3566,7 @@ mod tests {
         controller.mark_topology_ready();
         assert_eq!(controller.readiness(), BuildAdmissionReadiness::Healthy);
         assert!(
-            WarmAdmission::admit(&controller, warm("after-drain"))
+            WarmAdmission::admit(controller.as_ref(), warm("after-drain"))
                 .await
                 .is_ok(),
             "admission opens once occupancy is within the cap and all gates complete"
@@ -3445,7 +3577,7 @@ mod tests {
     async fn observe_and_off_do_not_gate_admission_on_readiness() {
         // Observe records degradation but never denies; the readiness value is
         // inspectable for telemetry.
-        let observe = controller(BuildAdmissionMode::Observe, 1);
+        let observe = ungated_controller(BuildAdmissionMode::Observe, 1);
         observe.mark_journal_unhealthy();
         assert_eq!(
             observe.readiness(),
@@ -3459,7 +3591,7 @@ mod tests {
         );
 
         // Off has no readiness coupling and never touches the journal.
-        let off = controller(BuildAdmissionMode::Off, 0);
+        let off = ungated_controller(BuildAdmissionMode::Off, 0);
         off.mark_inventory_pending();
         assert!(
             WarmAdmission::admit(&off, warm("off-uncoupled"))
@@ -3471,7 +3603,7 @@ mod tests {
 
     #[tokio::test]
     async fn shutdown_draining_blocks_new_enforce_reservations() {
-        let controller = controller(BuildAdmissionMode::Enforce, 1);
+        let controller = ungated_controller(BuildAdmissionMode::Enforce, 1);
         // A ready controller that begins draining must block every new
         // reservation, regardless of prior occupancy. The drain gate is checked
         // before any journal reservation, so this is independent of DB state.
@@ -3557,7 +3689,7 @@ mod tests {
         // Starting from zero: the first successfully reserved task must
         // immediately refresh the occupied gauge — it must not wait for a
         // later cap denial or terminal release.
-        let c = controller(BuildAdmissionMode::Enforce, 3);
+        let c = ungated_controller(BuildAdmissionMode::Enforce, 3);
         c.enable_process_metrics_for_test();
         c.mark_ready();
         c.admit_task_run(
@@ -3661,7 +3793,7 @@ mod tests {
         let _guard = telemetry_guard();
         djinn_telemetry::init().unwrap();
 
-        let c = controller(BuildAdmissionMode::Off, 0);
+        let c = ungated_controller(BuildAdmissionMode::Off, 0);
         c.enable_process_metrics_for_test();
         c.publish_metrics().await;
 
@@ -3685,7 +3817,7 @@ mod tests {
         let _guard = telemetry_guard();
         djinn_telemetry::init().unwrap();
 
-        let c = controller(BuildAdmissionMode::Enforce, 3);
+        let c = ungated_controller(BuildAdmissionMode::Enforce, 3);
         c.enable_process_metrics_for_test();
         c.mark_ready();
         // A NonBuild request with an empty audit reason triggers unknown
@@ -3729,7 +3861,7 @@ mod tests {
         let _guard = telemetry_guard();
         djinn_telemetry::init().unwrap();
 
-        let c = controller(BuildAdmissionMode::Observe, 4);
+        let c = ungated_controller(BuildAdmissionMode::Observe, 4);
         c.enable_process_metrics_for_test();
         let permit = WarmAdmission::admit(&c, warm("counted")).await.unwrap();
         c.transition(&permit, WarmAdmissionTransition::CreateStarted)
@@ -3785,12 +3917,25 @@ mod tests {
         let _guard = telemetry_guard();
         djinn_telemetry::init().unwrap();
 
-        let c = controller(BuildAdmissionMode::Observe, 1);
-        c.enable_process_metrics_for_test();
-        // First admission succeeds.
-        let _ = WarmAdmission::admit(&c, warm("first")).await.unwrap();
-        // Second admission would exceed the cap (but Observe permits anyway).
-        let _ = WarmAdmission::admit(&c, warm("second")).await.unwrap();
+        let h = capacity_harness(BuildAdmissionMode::Observe, 1).await;
+        h.controller.mark_ready();
+        h.controller.enable_process_metrics_for_test();
+        // A warm Job holds the only slot, and layer-1 dispatch is still in
+        // shadow: the pool is genuinely full, so the probe reports what
+        // enforcement WOULD have done while permitting anyway.
+        let _held = h.hold_warm_lease("observe-occupant").await.unwrap();
+        h.lease.set_dispatch_enforcing_for_test(false);
+        let _ = h
+            .controller
+            .admit_task_run(
+                Some("worker"),
+                AdmissionDomain::TaskObservation,
+                "would-defer".into(),
+                0,
+                "would-defer-job".into(),
+            )
+            .await
+            .unwrap();
 
         let rendered = djinn_telemetry::render().unwrap();
         let value = sample_value(
@@ -3821,7 +3966,7 @@ mod tests {
     #[tokio::test]
     async fn disk_dimension_records_would_defer_without_denial() {
         use crate::disk_admission::{DiskObservation, DiskQueueReason};
-        let c = controller(BuildAdmissionMode::Observe, 4);
+        let c = ungated_controller(BuildAdmissionMode::Observe, 4);
         c.set_disk_capacity_source(Arc::new(StubDiskSource {
             observation: Some(DiskObservation {
                 would_defer: Some(DiskQueueReason::DiskPressure),
@@ -3837,7 +3982,7 @@ mod tests {
     #[tokio::test]
     async fn disk_dimension_silent_when_source_grants_or_has_no_sample() {
         use crate::disk_admission::DiskObservation;
-        let granting = controller(BuildAdmissionMode::Observe, 4);
+        let granting = ungated_controller(BuildAdmissionMode::Observe, 4);
         granting.set_disk_capacity_source(Arc::new(StubDiskSource {
             observation: Some(DiskObservation {
                 would_defer: None,
@@ -3849,7 +3994,7 @@ mod tests {
             .unwrap();
         assert_eq!(granting.disk_would_defer_observation_count().await, 0);
 
-        let no_sample = controller(BuildAdmissionMode::Observe, 4);
+        let no_sample = ungated_controller(BuildAdmissionMode::Observe, 4);
         no_sample.set_disk_capacity_source(Arc::new(StubDiskSource { observation: None }));
         WarmAdmission::admit(&no_sample, warm("disk-none"))
             .await
@@ -3859,7 +4004,7 @@ mod tests {
 
     #[tokio::test]
     async fn disk_dimension_is_dark_without_a_source() {
-        let c = controller(BuildAdmissionMode::Observe, 4);
+        let c = ungated_controller(BuildAdmissionMode::Observe, 4);
         WarmAdmission::admit(&c, warm("dark")).await.unwrap();
         assert_eq!(c.disk_would_defer_observation_count().await, 0);
     }
@@ -3951,22 +4096,28 @@ mod tests {
         // asserting exact histogram sums.
         let db = Database::open_in_memory().unwrap();
         db.ensure_initialized().await.unwrap();
-        let c = BuildAdmissionController::new_with_queue_clock(
-            Arc::new(AdmissionJournalRepository::new(db)),
-            BuildAdmissionMode::Enforce,
+        let h = crate::build_admission_capacity_support::attach_capacity(
+            &db,
+            BuildAdmissionController::new_with_queue_clock(
+                Arc::new(AdmissionJournalRepository::new(db.clone())),
+                BuildAdmissionMode::Enforce,
+                1,
+                "queue-tracks",
+                Arc::new(FakeQueueClock {
+                    base: Instant::now(),
+                    elapsed_seconds: AtomicU64::new(0),
+                }),
+            ),
             1,
-            "queue-tracks",
-            Arc::new(FakeQueueClock {
-                base: Instant::now(),
-                elapsed_seconds: AtomicU64::new(0),
-            }),
-        );
+        )
+        .await;
+        let c = Arc::clone(&h.controller);
         c.enable_process_metrics_for_test();
         c.mark_ready();
-        let first = WarmAdmission::admit(&c, warm("release-a")).await.unwrap();
-        assert!(WarmAdmission::admit(&c, warm("release-b")).await.is_err());
-        assert!(WarmAdmission::admit(&c, warm("release-b")).await.is_err());
-        assert!(WarmAdmission::admit(&c, warm("release-c")).await.is_err());
+        let first = dispatch_permit(&c, "release-a").await;
+        assert!(dispatch_denied(&c, "release-b").await);
+        assert!(dispatch_denied(&c, "release-b").await);
+        assert!(dispatch_denied(&c, "release-c").await);
         assert_eq!(
             sample_value(
                 &djinn_telemetry::render().unwrap(),
@@ -3995,7 +4146,9 @@ mod tests {
             ),
             2.0
         );
-        WarmAdmission::admit(&c, warm("release-b")).await.unwrap();
+        // The released slot went to the FIFO head, which is `release-b`; its
+        // retry observes the grant it already holds and leaves the queue.
+        let _ = dispatch_permit(&c, "release-b").await;
         assert_eq!(
             sample_value(
                 &djinn_telemetry::render().unwrap(),
@@ -4087,7 +4240,7 @@ mod tests {
 
         // Use a non-closed controller (journal is healthy by default) and
         // simulate the post-recovery state where inventory is still pending.
-        let c = controller(BuildAdmissionMode::Enforce, 3);
+        let c = ungated_controller(BuildAdmissionMode::Enforce, 3);
         c.enable_process_metrics_for_test();
         c.mark_ready();
         c.mark_inventory_pending();
@@ -4124,7 +4277,7 @@ mod tests {
         let _guard = telemetry_guard();
         djinn_telemetry::init().unwrap();
 
-        let c = controller(BuildAdmissionMode::Enforce, 3);
+        let c = ungated_controller(BuildAdmissionMode::Enforce, 3);
         c.enable_process_metrics_for_test();
         c.mark_journal_unhealthy();
         c.publish_metrics().await;
@@ -4147,7 +4300,7 @@ mod tests {
         let _guard = telemetry_guard();
         djinn_telemetry::init().unwrap();
 
-        let c = controller(BuildAdmissionMode::Enforce, 3);
+        let c = ungated_controller(BuildAdmissionMode::Enforce, 3);
         c.enable_process_metrics_for_test();
         c.mark_ready();
         // Reserve an InvocationBuild row — it must not appear in occupied.
@@ -4183,7 +4336,8 @@ mod tests {
         let _guard = telemetry_guard();
         djinn_telemetry::init().unwrap();
 
-        let c = controller(BuildAdmissionMode::Enforce, 1);
+        let h = capacity_harness(BuildAdmissionMode::Enforce, 1).await;
+        let c = Arc::clone(&h.controller);
         c.enable_process_metrics_for_test();
         c.mark_ready();
         // Reserve a task — occupies 1.
@@ -4200,11 +4354,12 @@ mod tests {
         let BuildAdmissionDecision::Permitted { permit: task, .. } = task else {
             panic!("task must win the cap-one reservation");
         };
-        // Warm must be denied — the combined cap is exhausted by the task.
-        let warm_result = WarmAdmission::admit(&c, warm("warm-cap")).await;
+        // Warm must be refused — the combined cap is exhausted by the task. The
+        // refusal is at the graph-warm lease, which is where a warm Job's
+        // capacity is decided; its admission call is a ledger append.
         assert!(
-            warm_result.is_err(),
-            "warm must be denied when the task consumes the combined cap"
+            h.hold_warm_lease("warm-cap").await.is_none(),
+            "warm must be refused when the task consumes the combined cap"
         );
 
         let rendered = djinn_telemetry::render().unwrap();
@@ -4322,7 +4477,7 @@ mod tests {
         let _guard = telemetry_guard();
         djinn_telemetry::init().unwrap();
 
-        let c = controller(BuildAdmissionMode::Enforce, 5);
+        let c = ungated_controller(BuildAdmissionMode::Enforce, 5);
         c.enable_process_metrics_for_test();
         c.mark_ready();
         c.publish_metrics().await;
@@ -4349,7 +4504,7 @@ mod tests {
         let _guard = telemetry_guard();
         djinn_telemetry::init().unwrap();
 
-        let controller = controller(BuildAdmissionMode::Enforce, 2);
+        let controller = ungated_controller(BuildAdmissionMode::Enforce, 2);
         controller.enable_process_metrics_for_test();
         controller.mark_ready();
         let labels = [("effective_mode", "enforce"), ("effective_cap", "2")];
@@ -4469,33 +4624,29 @@ mod tests {
         });
         let db = Database::open_in_memory().unwrap();
         db.ensure_initialized().await.unwrap();
-        let controller = BuildAdmissionController::new_with_queue_clock(
-            Arc::new(AdmissionJournalRepository::new(db)),
-            BuildAdmissionMode::Enforce,
+        let h = crate::build_admission_capacity_support::attach_capacity(
+            &db,
+            BuildAdmissionController::new_with_queue_clock(
+                Arc::new(AdmissionJournalRepository::new(db.clone())),
+                BuildAdmissionMode::Enforce,
+                1,
+                "fake-clock",
+                clock.clone(),
+            ),
             1,
-            "fake-clock",
-            clock.clone(),
-        );
+        )
+        .await;
+        let controller = Arc::clone(&h.controller);
         controller.enable_process_metrics_for_test();
         controller.mark_ready();
-        let occupied = WarmAdmission::admit(&controller, warm("occupied"))
-            .await
-            .unwrap();
+        let occupied = dispatch_permit(&controller, "occupied").await;
         let before_admitted_count =
             queue_histogram_value(&djinn_telemetry::render().unwrap(), "admitted", "count");
         let before_admitted_sum =
             queue_histogram_value(&djinn_telemetry::render().unwrap(), "admitted", "sum");
-        assert!(
-            WarmAdmission::admit(&controller, warm("admitted"))
-                .await
-                .is_err()
-        );
+        assert!(dispatch_denied(&controller, "admitted").await);
         clock.advance(7);
-        assert!(
-            WarmAdmission::admit(&controller, warm("admitted"))
-                .await
-                .is_err()
-        );
+        assert!(dispatch_denied(&controller, "admitted").await);
         controller
             .transition(
                 &occupied,
@@ -4505,9 +4656,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let _replacement = WarmAdmission::admit(&controller, warm("admitted"))
-            .await
-            .unwrap();
+        let _replacement = dispatch_permit(&controller, "admitted").await;
         let rendered = djinn_telemetry::render().unwrap();
         assert_eq!(
             queue_histogram_value(&rendered, "admitted", "count") - before_admitted_count,
@@ -4519,18 +4668,10 @@ mod tests {
         );
         let before_cancelled_count = queue_histogram_value(&rendered, "cancelled", "count");
         let before_cancelled_sum = queue_histogram_value(&rendered, "cancelled", "sum");
-        assert!(
-            WarmAdmission::admit(&controller, warm("cancelled"))
-                .await
-                .is_err()
-        );
+        assert!(dispatch_denied(&controller, "cancelled").await);
         clock.advance(18);
-        controller
-            .cancel_deferred(AdmissionDomain::WarmBuild, "cancelled", 0)
-            .await;
-        controller
-            .cancel_deferred(AdmissionDomain::WarmBuild, "cancelled", 0)
-            .await;
+        controller.cancel_deferred_task("cancelled").await;
+        controller.cancel_deferred_task("cancelled").await;
         let rendered = djinn_telemetry::render().unwrap();
         assert_eq!(
             queue_histogram_value(&rendered, "cancelled", "count") - before_cancelled_count,
@@ -4542,11 +4683,7 @@ mod tests {
         );
         let before_shutdown_count = queue_histogram_value(&rendered, "shutdown", "count");
         let before_shutdown_sum = queue_histogram_value(&rendered, "shutdown", "sum");
-        assert!(
-            WarmAdmission::admit(&controller, warm("shutdown"))
-                .await
-                .is_err()
-        );
+        assert!(dispatch_denied(&controller, "shutdown").await);
         clock.advance(31);
         controller.begin_draining();
         controller.begin_draining();
@@ -4577,20 +4714,24 @@ mod tests {
         });
         let db = Database::open_in_memory().unwrap();
         db.ensure_initialized().await.unwrap();
-        let controller = BuildAdmissionController::new_with_queue_clock(
-            Arc::new(AdmissionJournalRepository::new(db)),
-            BuildAdmissionMode::Enforce,
+        let h = crate::build_admission_capacity_support::attach_capacity(
+            &db,
+            BuildAdmissionController::new_with_queue_clock(
+                Arc::new(AdmissionJournalRepository::new(db.clone())),
+                BuildAdmissionMode::Enforce,
+                1,
+                "gauge-test",
+                clock.clone(),
+            ),
             1,
-            "gauge-test",
-            clock.clone(),
-        );
+        )
+        .await;
+        let controller = Arc::clone(&h.controller);
         controller.enable_process_metrics_for_test();
         controller.mark_ready();
 
         // One slot occupied → in_use=1, queued=0.
-        let occupied = WarmAdmission::admit(&controller, warm("occupied"))
-            .await
-            .unwrap();
+        let occupied = dispatch_permit(&controller, "occupied").await;
         let rendered = djinn_telemetry::render().unwrap();
         assert_eq!(
             sample_value(&rendered, "djinn_build_slots_in_use", &[]),
@@ -4604,11 +4745,7 @@ mod tests {
         );
 
         // Deny "queued-a": one identity enters deferred state.
-        assert!(
-            WarmAdmission::admit(&controller, warm("queued-a"))
-                .await
-                .is_err()
-        );
+        assert!(dispatch_denied(&controller, "queued-a").await);
         let rendered = djinn_telemetry::render().unwrap();
         assert_eq!(
             sample_value(&rendered, "djinn_build_slots_queued", &[]),
@@ -4617,11 +4754,7 @@ mod tests {
         );
 
         // Deny "queued-b": second unique identity enters deferred state.
-        assert!(
-            WarmAdmission::admit(&controller, warm("queued-b"))
-                .await
-                .is_err()
-        );
+        assert!(dispatch_denied(&controller, "queued-b").await);
         let rendered = djinn_telemetry::render().unwrap();
         assert_eq!(
             sample_value(&rendered, "djinn_build_slots_queued", &[]),
@@ -4630,11 +4763,7 @@ mod tests {
         );
 
         // Retry "queued-a" (still denied): gauge stays 2 (reuses the record).
-        assert!(
-            WarmAdmission::admit(&controller, warm("queued-a"))
-                .await
-                .is_err()
-        );
+        assert!(dispatch_denied(&controller, "queued-a").await);
         let rendered = djinn_telemetry::render().unwrap();
         assert_eq!(
             sample_value(&rendered, "djinn_build_slots_queued", &[]),
@@ -4642,10 +4771,11 @@ mod tests {
             "retry must not double-count a queued identity"
         );
 
-        // Cancel "queued-a": gauge drops to 1.
-        controller
-            .cancel_deferred(AdmissionDomain::WarmBuild, "queued-a", 0)
-            .await;
+        // Cancel "queued-a": gauge drops to 1. This is the production hook, and
+        // it also surrenders the durable FIFO position — without that, freeing
+        // the occupied slot below would GRANT the cancelled identity and leak
+        // the slot with nobody left to release it.
+        controller.cancel_deferred_task("queued-a").await;
         let rendered = djinn_telemetry::render().unwrap();
         assert_eq!(
             sample_value(&rendered, "djinn_build_slots_queued", &[]),
@@ -4654,9 +4784,7 @@ mod tests {
         );
 
         // Duplicate cancel of "queued-a": gauge stays 1 (idempotent no-op).
-        controller
-            .cancel_deferred(AdmissionDomain::WarmBuild, "queued-a", 0)
-            .await;
+        controller.cancel_deferred_task("queued-a").await;
         let rendered = djinn_telemetry::render().unwrap();
         assert_eq!(
             sample_value(&rendered, "djinn_build_slots_queued", &[]),
@@ -4674,9 +4802,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let _admitted = WarmAdmission::admit(&controller, warm("queued-b"))
-            .await
-            .unwrap();
+        let _admitted = dispatch_permit(&controller, "queued-b").await;
         let rendered = djinn_telemetry::render().unwrap();
         assert_eq!(
             sample_value(&rendered, "djinn_build_slots_queued", &[]),
@@ -4711,18 +4837,22 @@ mod tests {
         });
         let db = Database::open_in_memory().unwrap();
         db.ensure_initialized().await.unwrap();
-        let controller = BuildAdmissionController::new_with_queue_clock(
-            Arc::new(AdmissionJournalRepository::new(db)),
-            BuildAdmissionMode::Enforce,
+        let h = crate::build_admission_capacity_support::attach_capacity(
+            &db,
+            BuildAdmissionController::new_with_queue_clock(
+                Arc::new(AdmissionJournalRepository::new(db.clone())),
+                BuildAdmissionMode::Enforce,
+                1,
+                "cancel-task-test",
+                clock.clone(),
+            ),
             1,
-            "cancel-task-test",
-            clock.clone(),
-        );
+        )
+        .await;
+        let controller = Arc::clone(&h.controller);
         controller.enable_process_metrics_for_test();
         controller.mark_ready();
-        let _occupied = WarmAdmission::admit(&controller, warm("occupied"))
-            .await
-            .unwrap();
+        let _occupied = dispatch_permit(&controller, "occupied").await;
 
         // Queue two generations of the same task (task-id "gen-task").
         let gen0 = controller

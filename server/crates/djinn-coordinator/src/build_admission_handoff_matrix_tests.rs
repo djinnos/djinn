@@ -4,7 +4,9 @@
 //! the same suite and shares its intent: deterministic, barrier-driven, and
 //! asserted against durable state rather than wall-clock ordering.
 
-use djinn_db::{AdmissionHandoffAuthority, AdmissionHandoffPhase, AdmissionHandoffRepository, Database};
+use djinn_db::{
+    AdmissionHandoffAuthority, AdmissionHandoffPhase, AdmissionHandoffRepository, Database,
+};
 
 use crate::build_admission::{BuildAdmissionMode, BuildAdmissionReadiness};
 use crate::build_admission_handoff::{

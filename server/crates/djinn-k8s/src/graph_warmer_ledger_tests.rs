@@ -90,8 +90,25 @@ async fn a_lease_granted_warm_job_is_still_recorded_in_the_lifecycle_ledger() {
     }));
 
     warmer.trigger(&project_id).await;
-    tokio::task::yield_now().await;
-    tokio::time::sleep(Duration::from_millis(2_500)).await;
+    // Poll for the two ledger writes rather than sleeping a fixed span: the
+    // warm cycle runs on its own task, so a fixed sleep is either slower than
+    // it needs to be or flaky under load. The deadline exists only to fail with
+    // the observed events instead of hanging.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        {
+            let observed = events.lock().await;
+            if observed.iter().any(|event| event.starts_with("reserve:"))
+                && observed.iter().any(|event| event == "CreateStarted")
+            {
+                break;
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
 
     let events = events.lock().await;
     assert!(

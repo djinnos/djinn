@@ -203,8 +203,6 @@ mod build_admission_handoff_matrix_tests;
 #[cfg(test)]
 mod build_admission_integration_tests;
 #[cfg(test)]
-mod unified_capacity_tests;
-#[cfg(test)]
 mod build_admission_inventory_tests;
 #[cfg(test)]
 mod build_admission_light_role_tests;
@@ -220,3 +218,5 @@ mod build_lease_integration_tests;
 pub(crate) mod test_helpers;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod unified_capacity_tests;
