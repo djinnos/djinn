@@ -360,6 +360,73 @@ mod tests {
         assert!(clean.run().unwrap().is_empty(), "clean/no-run fixture");
     }
 
+    #[test]
+    fn each_non_stale_fixture_is_suppressed_by_the_doctor_check() {
+        let mut live_session = stale("run-live-session");
+        live_session.snapshot.tasks.push(RefinementTaskEvidence {
+            task_id: "session-task".into(),
+            run_id: "run-live-session".into(),
+            intent_id: None,
+            state: RefinementTaskState::Closed,
+        });
+        live_session
+            .snapshot
+            .sessions
+            .push(RefinementSessionEvidence {
+                session_id: "session-live".into(),
+                task_id: "session-task".into(),
+                run_id: "run-live-session".into(),
+                state: RefinementSessionState::Live,
+            });
+        let mut queued_task = stale("run-queued-task");
+        queued_task.snapshot.tasks.push(RefinementTaskEvidence {
+            task_id: "queued-task".into(),
+            run_id: "run-queued-task".into(),
+            intent_id: None,
+            state: RefinementTaskState::Queued,
+        });
+        let mut open_task = stale("run-open-task");
+        open_task.snapshot.tasks.push(RefinementTaskEvidence {
+            task_id: "open-task".into(),
+            run_id: "run-open-task".into(),
+            intent_id: None,
+            state: RefinementTaskState::Open,
+        });
+        let mut between_phase = stale("run-between-phase");
+        between_phase.snapshot.between_phase = Some(RefinementBetweenPhaseSnapshot {
+            run_id: "run-between-phase".into(),
+            next_intent: pending_intent("run-between-phase"),
+        });
+        let mut awaiting_review = stale("run-awaiting-review");
+        awaiting_review.snapshot.park = Some(RefinementParkSnapshot {
+            run_id: "run-awaiting-review".into(),
+            kind: RefinementParkKind::AwaitingReview,
+        });
+        let mut awaiting_evidence = stale("run-awaiting-evidence");
+        awaiting_evidence.snapshot.park = Some(RefinementParkSnapshot {
+            run_id: "run-awaiting-evidence".into(),
+            kind: RefinementParkKind::AwaitingEvidence,
+        });
+        let fixtures = vec![
+            ("clean/no-run", None),
+            ("live session", Some(live_session)),
+            ("queued task", Some(queued_task)),
+            ("open task", Some(open_task)),
+            ("between phase", Some(between_phase)),
+            ("awaiting review", Some(awaiting_review)),
+            ("awaiting evidence", Some(awaiting_evidence)),
+        ];
+        for (name, fixture) in fixtures {
+            let check = RefinementPhantomActiveCheck::new(Arc::new(
+                MemoryRefinementPhantomActiveSource::new(fixture.into_iter().collect()),
+            ));
+            assert!(
+                check.run().expect("run doctor check").is_empty(),
+                "{name} must be live"
+            );
+        }
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn repository_backed_check_is_repeatedly_read_only_and_never_reaps() {
         use crate::refinement_dispatch::refinement_cap_tests::seed_refinement_fixture;
@@ -404,7 +471,25 @@ mod tests {
                 .fetch_one(db.pool())
                 .await
                 .expect("read heartbeat");
-        let lifecycle_before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM proposal_revisions WHERE proposal_id = $1 AND refinement_run_id = $2").bind(&fixture.proposal_id).bind(&run_id).fetch_one(db.pool()).await.expect("count lifecycle rows");
+        let lifecycle_before: Vec<(String, String, Option<String>, Option<serde_json::Value>)> =
+            sqlx::query_as(
+                "SELECT id, event_kind, refinement_stop_tag, refinement_stop_context \
+                 FROM proposal_revisions WHERE proposal_id = $1 AND refinement_run_id = $2 \
+                 ORDER BY id",
+            )
+            .bind(&fixture.proposal_id)
+            .bind(&run_id)
+            .fetch_all(db.pool())
+            .await
+            .expect("read lifecycle rows");
+        let reaps_before: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM proposal_revisions \
+             WHERE proposal_id = $1 AND refinement_stop_tag = 'reaped_phantom'",
+        )
+        .bind(&fixture.proposal_id)
+        .fetch_one(db.pool())
+        .await
+        .expect("count durable phantom reaps");
         for _ in 0..2 {
             let findings = check.run().expect("run repository-backed doctor check");
             assert_eq!(findings.len(), 1);
@@ -422,14 +507,36 @@ mod tests {
                 .fetch_one(db.pool())
                 .await
                 .expect("read heartbeat");
-        let lifecycle_after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM proposal_revisions WHERE proposal_id = $1 AND refinement_run_id = $2").bind(&fixture.proposal_id).bind(&run_id).fetch_one(db.pool()).await.expect("count lifecycle rows");
+        let lifecycle_after: Vec<(String, String, Option<String>, Option<serde_json::Value>)> =
+            sqlx::query_as(
+                "SELECT id, event_kind, refinement_stop_tag, refinement_stop_context \
+                 FROM proposal_revisions WHERE proposal_id = $1 AND refinement_run_id = $2 \
+                 ORDER BY id",
+            )
+            .bind(&fixture.proposal_id)
+            .bind(&run_id)
+            .fetch_all(db.pool())
+            .await
+            .expect("read lifecycle rows");
+        let reaps_after: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM proposal_revisions \
+             WHERE proposal_id = $1 AND refinement_stop_tag = 'reaped_phantom'",
+        )
+        .bind(&fixture.proposal_id)
+        .fetch_one(db.pool())
+        .await
+        .expect("count durable phantom reaps");
         assert_eq!(
             heartbeat_after, heartbeat_before,
             "doctor must not touch heartbeat"
         );
         assert_eq!(
             lifecycle_after, lifecycle_before,
-            "doctor must not write lifecycle rows"
+            "doctor must not write or alter lifecycle/audit rows"
+        );
+        assert_eq!(
+            reaps_after, reaps_before,
+            "doctor must not increment reap counters"
         );
     }
 }
