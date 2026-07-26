@@ -447,10 +447,7 @@
             ) -> Result<(), String> {
                 Err("unexpected start call".into())
             }
-            async fn demand_proposal_refinement_round(
-                &self,
-                _: ProposalRefinementStartRequest,
-            ) -> Result<(), String> {
+            async fn wake_refinement_run(&self, _: String) -> Result<(), String> {
                 self.demand_calls.fetch_add(1, Ordering::SeqCst);
                 Ok(())
             }
@@ -579,6 +576,58 @@
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn demand_round_reaps_stale_nonterminal_run_and_admits_one_successor() {
+        let (server, db) = test_server().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let proposal = repo.create(ProposalCreateInput {
+            title: "Stale repository run", body: "body", acceptance_criteria: Some("[]"),
+            status: Some("draft"), body_format: None,
+        }).await.unwrap();
+        link_proposal_to_project(&db, &repo, &proposal.id).await;
+
+        let old_run_id = match repo.reap_and_admit(djinn_db::AdmitRefinementRunRequest {
+            proposal_id: proposal.id.clone(),
+            idempotency_key: "stale-phantom-seed".to_owned(),
+            source: djinn_db::RefinementAdmissionSource::Demand {
+                demand_id: "stale-phantom-seed".to_owned(),
+            },
+            heartbeat_grace_millis: 60_000,
+        }).await.unwrap() {
+            djinn_db::RefinementAdmissionOutcome::Admitted { run_id, .. } => run_id,
+            djinn_db::RefinementAdmissionOutcome::Existing { .. } => unreachable!(),
+        };
+        djinn_db::test_support::make_refinement_run_phantom_for_test(&db, &old_run_id).await;
+
+        let response = server.dispatch_tool("proposal_refinement_demand_round", serde_json::json!({
+            "proposal_id": proposal.id, "reason": "replace stale phantom",
+            "request_id": "replace-stale-phantom-019f"
+        })).await.unwrap();
+        assert_eq!(response["accepted"], true);
+        assert_ne!(response["error"], "AlreadyActive");
+
+        let runs = repo.load_refinement_run_aggregates(&proposal.id, 60_000).await.unwrap();
+        assert_eq!(runs.len(), 2, "one old run and exactly one successor");
+        let old = djinn_db::test_support::refinement_run_audit_for_test(&db, &old_run_id).await;
+        assert_eq!(old.state, "terminal");
+        assert_eq!(old.stop_tag.as_deref(), Some("reaped_phantom"));
+        assert_eq!(old.typed_reap_count, 1);
+        let successor = runs.iter().find(|run| run.run_id != old_run_id).unwrap();
+        assert_eq!(successor.generation, 2);
+        let successor_snapshot = repo.load_refinement_run_snapshot(
+            djinn_db::LoadRefinementRunSnapshotRequest {
+                run_id: successor.run_id.clone(), heartbeat_grace_millis: 60_000,
+            }
+        ).await.unwrap().unwrap();
+        assert_eq!(successor_snapshot.snapshot.intents.len(), 1, "one successor intent");
+        let revisions = repo.revisions(&proposal.id).await.unwrap();
+        assert_eq!(revisions.iter().filter(|r| r.event_kind == "refinement_start").count(), 2);
+        assert_eq!(revisions.iter().filter(|r| {
+            r.event_kind == "refinement_stop"
+                && r.event_metadata.as_deref().is_some_and(|metadata| metadata.contains("reaped_phantom"))
+        }).count(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn demand_round_rejects_true_duplicate_active_refinement() {
         let (server, db) = test_server().await;
         let repo = ProposalRepository::new(db.clone(), EventBus::noop());
@@ -614,7 +663,7 @@
 
         assert_eq!(resp.get("accepted").and_then(|v| v.as_bool()), Some(false));
         let error = resp.get("error").and_then(|v| v.as_str()).unwrap();
-        assert!(error.contains("already active"), "unexpected error: {error}");
+        assert_eq!(error, "AlreadyActive");
 
         let revisions = repo.revisions(&proposal.id).await.unwrap();
         assert_eq!(

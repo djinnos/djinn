@@ -1723,15 +1723,23 @@ impl ProposalRepository {
             .bind(owner_user_id)
             .execute(&mut *tx)
             .await?;
-        let event_metadata = serde_json::json!({ "refinement_owner_user_id": owner_user_id });
-        self.insert_lightweight_lifecycle_event_in_tx(
-            &mut tx,
-            proposal_id,
-            revision_seq,
-            "refinement_start",
-            Some(&event_metadata),
+        let has_repository_run = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM refinement_runs WHERE proposal_id = $1)",
         )
+        .bind(proposal_id)
+        .fetch_one(&mut *tx)
         .await?;
+        if !has_repository_run {
+            let event_metadata = serde_json::json!({ "refinement_owner_user_id": owner_user_id });
+            self.insert_lightweight_lifecycle_event_in_tx(
+                &mut tx,
+                proposal_id,
+                revision_seq,
+                "refinement_start",
+                Some(&event_metadata),
+            )
+            .await?;
+        }
         tx.commit().await?;
         Ok(())
     }

@@ -55,6 +55,7 @@ pub(crate) async fn admit_refinement_run(
     repo: &ProposalRepository,
     proposal_id: &str,
     source: RefinementAdmissionSource,
+    owner_user_id: Option<Option<&str>>,
 ) -> Result<bool, String> {
     let identity = match &source {
         RefinementAdmissionSource::ExplicitStart { actor } => format!("explicit:{actor}"),
@@ -85,6 +86,11 @@ pub(crate) async fn admit_refinement_run(
         RefinementAdmissionOutcome::Admitted { run_id, .. }
         | RefinementAdmissionOutcome::Existing { run_id, .. } => run_id,
     };
+    if let Some(owner_user_id) = owner_user_id {
+        repo.start_refinement_with_owner(proposal_id, owner_user_id)
+            .await
+            .map_err(|_| "Persistence".to_owned())?;
+    }
     Ok(match server.state.coordinator().await {
         Some(coordinator) => coordinator.wake_refinement_run(run_id).await.is_err(),
         None => true,
@@ -243,6 +249,7 @@ impl DjinnMcpServer {
                         .unwrap_or_else(|| "proposal-author".to_owned())
                 ),
             },
+            Some(refinement_owner_user_id.as_deref()),
         )
         .await
         {
@@ -399,6 +406,7 @@ impl DjinnMcpServer {
             &repo,
             &proposal.id,
             RefinementAdmissionSource::Demand { demand_id },
+            None,
         )
         .await
         {

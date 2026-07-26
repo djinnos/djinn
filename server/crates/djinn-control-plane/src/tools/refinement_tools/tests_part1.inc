@@ -243,10 +243,15 @@
         link_proposal_to_project(&db, &repo, &proposal.id).await;
         for _ in 0..2 {
             let response = server.dispatch_tool("proposal_refinement_start", serde_json::json!({
-                "proposal_id": proposal.id, "request_id": "start-request-019f"
+                "proposal_id": proposal.id, "owner_user_id": "durable-owner-019f",
+                "request_id": "start-request-019f"
             })).await.unwrap();
             assert_eq!(response["error"], "accepted; dispatch pending");
         }
+        assert_eq!(
+            repo.get(&proposal.id).await.unwrap().unwrap().refinement_owner_user_id.as_deref(),
+            Some("durable-owner-019f")
+        );
         assert_eq!(repo.load_refinement_run_aggregates(&proposal.id, 60_000).await.unwrap().len(), 1);
         assert_eq!(repo.revisions(&proposal.id).await.unwrap().iter()
             .filter(|revision| revision.event_kind == "refinement_stop").count(), 0);

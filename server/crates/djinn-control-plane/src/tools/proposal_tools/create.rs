@@ -146,6 +146,7 @@ async fn admit_committed_revision_resume(
         repo,
         &updated.id,
         RefinementAdmissionSource::Revision { revision_id },
+        None,
     )
     .await?;
     if pending_dispatch {
