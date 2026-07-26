@@ -46,7 +46,7 @@ use std::process::Command;
 use djinn_cgroup_launcher::child::{ARTIFACT_GID, CHILD_UID};
 use djinn_cgroup_launcher::{
     CgroupFs, CgroupMode, ChildProcess, CommandSpec, Error, Invocation, Launcher, LauncherConfig,
-    Readiness, SpawnIntoCgroup, git_trust, is_allowed_environment_entry,
+    LeaseAuthority, Readiness, SpawnIntoCgroup, git_trust, is_allowed_environment_entry,
     is_allowed_environment_key,
 };
 
@@ -142,7 +142,7 @@ fn brokered_environment(workspace: &Path, caller: &[(&str, &str)]) -> Vec<(Strin
             .collect(),
     };
     launcher
-        .create_command("git-trust", invocation(), &spec)
+        .create_command("git-trust", invocation(), LeaseAuthority::Armed, &spec)
         .expect("the launcher must accept a conforming spec");
     let (_, spawn) = launcher.into_parts();
     let mut environment = spawn.environments.into_iter().next().expect("one spawn");
@@ -613,7 +613,7 @@ fn brokered_spec_error(caller: &[(&str, &str)]) -> Error {
             .collect(),
     };
     launcher
-        .create_command("hostile", invocation(), &spec)
+        .create_command("hostile", invocation(), LeaseAuthority::Armed, &spec)
         .expect_err("a hostile spec must be refused")
 }
 

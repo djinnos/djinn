@@ -88,7 +88,7 @@ mod broker;
 #[cfg(test)]
 pub(crate) use broker::command_spec;
 #[allow(unused_imports)] // constructed by the pending workspace broker composition
-pub(crate) use broker::{CgroupLauncherClient, ProcessHandle, UnixBrokerLauncher};
+pub(crate) use broker::{CgroupLauncherClient, ProcessHandle, UnixBrokerLauncher, birth_authority};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct UnresolvedInvocation {
@@ -511,10 +511,42 @@ impl LeaseInvocationRunner {
                 .record_at(&identity, None, false, self.clock.now())
                 .map_err(LeaseInvocationError::Launcher)?;
         }
+        // Resolve the durable admission decision ONCE, before the leaf exists.
+        //
+        // This read used to happen only after a successful bind, which made it
+        // unable to influence the one thing it actually governs: the quota the
+        // leaf is born at. `Unleased` was then implemented as `{}` — and because
+        // the leaf had already been pinned to the 250m unleased quota, that
+        // "no-op" clamped every command for its whole life. Production ran with
+        // the `admission_handoff` row ABSENT, so `Unleased` was the decision for
+        // EVERY invocation: a measured leaf reached 21.1 CPU-seconds (84x the
+        // 0.25 CPU-s escalation threshold) while `cpu.max` never left
+        // `25000 100000`. Reading it here, and deriving the birth authority from
+        // it, is what makes an unarmed authority mean "do not clamp" instead of
+        // "clamp forever".
+        //
+        // One read per invocation is also the coherent choice: the birth quota is
+        // committed from this value and cannot be revised, so a mid-invocation
+        // epoch change must not be acted on by the bind arm below.
+        let lift_decision = self.services.invocation_lift_decision().await;
+        let authority = birth_authority(lift_decision);
         let mut child = self
             .launcher
-            .launch(cmd, &identity)
+            .launch(cmd, &identity, authority)
             .map_err(LeaseInvocationError::Launcher)?;
+        // The path reported nothing at all across four armed production
+        // rollouts: the entire diagnosis had to be done by reading cgroupfs by
+        // hand on the node. One line per invocation, naming the decision and the
+        // quota actually committed, is the difference between "the escalation
+        // never fired" and knowing why.
+        tracing::info!(
+            invocation_id = %identity.invocation_id,
+            task_run_id = %identity.task_run_id,
+            decision = ?lift_decision,
+            authority = ?authority,
+            threshold_usec = config.cpu_usage_threshold_usec,
+            "lease invocation launched into a cgroup leaf"
+        );
         let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
         let mut deadline = self.clock.now_instant() + config.timeout;
         let (mut queued, mut fence, mut credit_used, mut lease_error) = (false, None, false, None);
@@ -689,7 +721,13 @@ impl LeaseInvocationRunner {
                                 // keeps the quota unleased. The durable lease is
                                 // still held and reconciled to terminal below in
                                 // all three cases, so `fence` is always recorded.
-                                match self.services.invocation_lift_decision().await {
+                                // The decision resolved before launch, NOT a
+                                // fresh read: the birth quota was already
+                                // committed from it, so a re-read could ask for a
+                                // lift on a leaf the broker created unarmed (the
+                                // launcher rejects that with
+                                // `LiftWithoutAuthority`).
+                                match lift_decision {
                                     InvocationLiftDecision::Lift => {
                                         // The validated fence must survive before
                                         // the irreversible cgroup lift. A failed
@@ -708,6 +746,11 @@ impl LeaseInvocationRunner {
                                         child
                                             .fenced_lift(&token)
                                             .map_err(LeaseInvocationError::Launcher)?;
+                                        tracing::info!(
+                                            invocation_id = %identity.invocation_id,
+                                            observed_usage_usec = cpu.usage_usec,
+                                            "lease invocation escalated: cgroup quota lifted"
+                                        );
                                     }
                                     InvocationLiftDecision::Shadow => {
                                         // Reaching a valid bind means v1 would
@@ -814,12 +857,11 @@ impl LeaseInvocationRunner {
         // and the durable lease is reconciled, and a read failure projects to
         // `Unleased` — nothing here can lift cpu.max, mint a fence, or move
         // lease state.
-        if !queued
-            && matches!(
-                self.services.invocation_lift_decision().await,
-                InvocationLiftDecision::Shadow
-            )
-        {
+        // The epoch is the one resolved before launch, for the same reason the
+        // bind arm above uses it: this invocation's whole life was governed by
+        // that decision, so the shadow denominator must describe the same epoch
+        // the numerator does.
+        if !queued && matches!(lift_decision, InvocationLiftDecision::Shadow) {
             djinn_telemetry::build_admission::record_shadow_invocation(false);
         }
         if let Some(error) = lease_error {
@@ -1432,6 +1474,7 @@ mod tests {
             &self,
             mut command: Command,
             _: &TaskInvocationLeaseIdentity,
+            _authority: djinn_cgroup_launcher::LeaseAuthority,
         ) -> io::Result<Box<dyn ProcessHandle>> {
             let child = command.spawn()?;
             *self.child_pid.lock().unwrap() = Some(child.id());
