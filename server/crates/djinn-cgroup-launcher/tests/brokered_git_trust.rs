@@ -182,6 +182,12 @@ struct Fixture {
     root: PathBuf,
     repo: PathBuf,
     home: PathBuf,
+    /// Stand-in for the launcher container's `/etc/gitconfig`, which was
+    /// measured on the production node to **not exist**. See
+    /// [`Fixture::baseline`].
+    empty_system: PathBuf,
+    /// Private root for anchors this fixture materializes.
+    anchor_root: PathBuf,
 }
 
 impl Fixture {
@@ -194,8 +200,14 @@ impl Fixture {
         let _ = std::fs::remove_dir_all(&root);
         let repo = root.join("wt");
         let home = root.join("home");
+        let anchor_root = root.join("anchor-root");
         std::fs::create_dir_all(&repo).expect("create worktree");
         std::fs::create_dir_all(&home).expect("create home");
+        std::fs::create_dir_all(&anchor_root).expect("create anchor root");
+        let empty_system = root.join("etc-gitconfig");
+        std::fs::write(&empty_system, "").expect("write the empty system baseline");
+        std::fs::set_permissions(&empty_system, std::fs::Permissions::from_mode(0o644))
+            .expect("chmod baseline");
         // A real repository, not a fixture directory: the ownership check runs
         // during repository discovery and nowhere else.
         let init = Command::new("git")
@@ -207,7 +219,13 @@ impl Fixture {
             .output()
             .expect("git must be installed to prove the git contract");
         assert!(init.status.success(), "git init failed: {init:?}");
-        Self { root, repo, home }
+        Self {
+            root,
+            repo,
+            home,
+            empty_system,
+            anchor_root,
+        }
     }
 
     /// Run `git <args>` in the worktree with exactly `environment`, plus the
@@ -223,6 +241,52 @@ impl Fixture {
             command.env(key, value);
         }
         command.output().expect("run git")
+    }
+
+    /// The system-scope baseline every behavioural arm below starts from.
+    ///
+    /// **This is not the fix being disabled — it is the HOST being excluded.**
+    /// A GitHub Actions runner ships `/etc/gitconfig` containing
+    /// `[safe] directory = *`, which trusts every repository for every process
+    /// on the machine. Inherit it and the non-vacuity control passes with exit
+    /// 0 and empty stderr while the blocker is fully present, and the positive
+    /// control succeeds for a reason the launcher had no part in — which is
+    /// exactly what happened on this change's first CI run.
+    ///
+    /// An empty file is the faithful model: measured inside a rendered launcher
+    /// container on the production node, `/etc/gitconfig` **does not exist**, so
+    /// the only system-scope configuration a brokered child can ever see is the
+    /// one the launcher hands it.
+    fn baseline(&self, home_only: &[(&str, &str)]) -> Vec<(String, String)> {
+        let mut environment: Vec<(String, String)> = home_only
+            .iter()
+            .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+            .collect();
+        environment.push((
+            git_trust::GIT_TRUST_ANCHOR_KEY.to_owned(),
+            self.empty_system.display().to_string(),
+        ));
+        environment
+    }
+
+    /// An anchor written by the production writer, chained to this fixture's
+    /// controlled baseline instead of the host's `/etc/gitconfig`.
+    fn hermetic_anchor(&self) -> PathBuf {
+        git_trust::materialize_in_with_system(&self.anchor_root, Some(&self.empty_system))
+            .expect("materialize a hermetic anchor")
+    }
+
+    /// [`Self::baseline`] with the anchor swapped in for the empty file — the
+    /// single-variable difference the behavioural arms turn on.
+    fn anchored(&self, home_only: &[(&str, &str)]) -> Vec<(String, String)> {
+        let anchor = self.hermetic_anchor();
+        let mut environment = self.baseline(home_only);
+        for entry in &mut environment {
+            if entry.0 == git_trust::GIT_TRUST_ANCHOR_KEY {
+                entry.1 = anchor.display().to_string();
+            }
+        }
+        environment
     }
 
     fn environment(&self, caller: &[(&str, &str)]) -> Vec<(String, String)> {
@@ -242,20 +306,27 @@ fn stderr(output: &std::process::Output) -> String {
 
 // ═════════ always-on: the real failure, and the real fix, with real git ══════
 
-/// NON-VACUITY. With the fix reverted — i.e. the environment the pod renders,
-/// filtered through the broker's key predicate exactly as it is today — real
-/// git reproduces the production failure BY NAME.
+/// NON-VACUITY. With the fix reverted, real git reproduces the production
+/// failure BY NAME.
+///
+/// "Reverted" is not a mock: `pod_environment` is what `job.rs` renders put
+/// through the broker's own key predicate, and the first assertion is that the
+/// predicate drops every `GIT_` variable — that IS the blocker. The system-scope
+/// baseline is [`Fixture::baseline`]'s empty file, modelling the launcher
+/// container's measured absence of `/etc/gitconfig`; without it a CI runner's
+/// machine-wide `[safe] directory = *` masks the failure entirely.
 #[test]
 fn without_the_launchers_anchor_real_git_reproduces_the_production_failure() {
     let fixture = Fixture::new("reverted");
-    let reverted = pod_environment(&fixture.home);
-
+    let pod = pod_environment(&fixture.home);
     assert!(
-        !reverted.iter().any(|(key, _)| key.starts_with("GIT_")),
+        !pod.iter().any(|(key, _)| key.starts_with("GIT_")),
         "the blocker itself: the broker's key predicate drops every GIT_ variable \
          the pod renders, so a brokered child gets no trust rule at all"
     );
 
+    let mut reverted = fixture.baseline(&[("HOME", &fixture.home.display().to_string())]);
+    reverted.extend(pod);
     let output = fixture.git(&reverted, &["status", "--porcelain"]);
     assert!(
         !output.status.success() && stderr(&output).contains(PRODUCTION_FAILURE),
@@ -266,12 +337,13 @@ fn without_the_launchers_anchor_real_git_reproduces_the_production_failure() {
     );
 }
 
-/// THE FIX. The environment the real `Launcher::create_command` produces lets
-/// real git operate on a worktree it does not own.
+/// THE FIX. The anchor the production writer produces lets real git operate on
+/// a worktree the process does not own — the single-variable flip against the
+/// non-vacuity control above.
 #[test]
-fn the_brokered_child_environment_lets_real_git_work_in_a_foreign_worktree() {
+fn the_launchers_anchor_lets_real_git_work_in_a_foreign_worktree() {
     let fixture = Fixture::new("fixed");
-    let environment = fixture.environment(&[
+    let environment = fixture.anchored(&[
         ("PATH", "/usr/local/bin:/usr/bin:/bin"),
         ("HOME", &fixture.home.display().to_string()),
     ]);
@@ -279,13 +351,13 @@ fn the_brokered_child_environment_lets_real_git_work_in_a_foreign_worktree() {
     let output = fixture.git(&environment, &["status", "--porcelain"]);
     assert!(
         output.status.success(),
-        "the brokered environment must let git run: status={:?} stderr={:?}",
+        "the anchor must let git run: status={:?} stderr={:?}",
         output.status,
         stderr(&output)
     );
 
-    // And it is the launcher's anchor doing it, in protected scope, rather than
-    // something the developer's own machine happened to have.
+    // And it is OUR rule doing it, in protected scope — the baseline it chains
+    // to is empty, so nothing here can come from the host.
     let scopes = fixture.git(&environment, &["config", "--list", "--show-scope"]);
     let scopes = String::from_utf8_lossy(&scopes.stdout).into_owned();
     assert!(
@@ -298,6 +370,34 @@ fn the_brokered_child_environment_lets_real_git_work_in_a_foreign_worktree() {
     );
 }
 
+/// COMPOSITION. The environment the real `Launcher::create_command` produces
+/// names that anchor, and carries no other git configuration at all.
+///
+/// Separated from the behavioural arm above on purpose: this is the half that
+/// must speak about the *production* anchor path, and it needs no git run.
+#[test]
+fn the_brokered_child_environment_names_the_launchers_own_anchor() {
+    let fixture = Fixture::new("composition");
+    let environment = fixture.environment(&[
+        ("PATH", "/usr/local/bin:/usr/bin:/bin"),
+        ("HOME", &fixture.home.display().to_string()),
+    ]);
+    let anchor = git_trust::anchor_path()
+        .expect("anchor")
+        .display()
+        .to_string();
+    let git_entries: Vec<&(String, String)> = environment
+        .iter()
+        .filter(|(key, _)| key.starts_with("GIT"))
+        .collect();
+    assert_eq!(
+        git_entries,
+        vec![&(git_trust::GIT_TRUST_ANCHOR_KEY.to_string(), anchor)],
+        "exactly one git variable may reach a brokered child, and it must be the \
+         launcher's own anchor"
+    );
+}
+
 /// git ignores a `GIT_CONFIG_SYSTEM` that points at a missing file **silently**.
 /// A temp reaper would therefore bring the blocker back days into a pod's life
 /// with nothing in the logs, which is why the launcher re-materializes.
@@ -306,28 +406,15 @@ fn a_reaped_anchor_fails_silently_and_is_re_materialized() {
     let fixture = Fixture::new("reaper");
     // A private anchor root: the process-global one is shared with every other
     // test in this binary, and this proof deletes the file out from under it.
-    let root = fixture.root.join("anchor-root");
-    std::fs::create_dir(&root).expect("create anchor root");
-    let anchor = git_trust::materialize_in(&root).expect("materialize");
-    let environment = |anchor: &Path| {
-        vec![
-            ("HOME".to_owned(), fixture.home.display().to_string()),
-            (
-                git_trust::GIT_TRUST_ANCHOR_KEY.to_owned(),
-                anchor.display().to_string(),
-            ),
-        ]
-    };
+    let environment = fixture.anchored(&[("HOME", &fixture.home.display().to_string())]);
+    let anchor = fixture.hermetic_anchor();
     assert!(
-        fixture
-            .git(&environment(&anchor), &["status"])
-            .status
-            .success(),
+        fixture.git(&environment, &["status"]).status.success(),
         "control: the anchor works before it is reaped"
     );
 
     std::fs::remove_file(&anchor).expect("simulate a temp-directory reaper");
-    let reaped = fixture.git(&environment(&anchor), &["status", "--porcelain"]);
+    let reaped = fixture.git(&environment, &["status", "--porcelain"]);
     assert!(
         !reaped.status.success() && stderr(&reaped).contains(PRODUCTION_FAILURE),
         "git ignores a GIT_CONFIG_SYSTEM pointing at a missing file SILENTLY, so the \
@@ -336,9 +423,9 @@ fn a_reaped_anchor_fails_silently_and_is_re_materialized() {
     );
 
     // Which is why every call re-establishes it, with no operator action.
-    let healed = git_trust::materialize_in(&root).expect("re-materialize");
+    let healed = fixture.hermetic_anchor();
     assert_eq!(healed, anchor);
-    let after = fixture.git(&environment(&anchor), &["status", "--porcelain"]);
+    let after = fixture.git(&environment, &["status", "--porcelain"]);
     assert!(
         after.status.success(),
         "the launcher must heal its own anchor: {:?}",
@@ -351,7 +438,7 @@ fn a_reaped_anchor_fails_silently_and_is_re_materialized() {
 #[test]
 fn nosystem_defeats_the_anchor_which_is_why_it_is_not_forwardable() {
     let fixture = Fixture::new("nosystem");
-    let mut environment = fixture.environment(&[("HOME", &fixture.home.display().to_string())]);
+    let mut environment = fixture.anchored(&[("HOME", &fixture.home.display().to_string())]);
     assert!(fixture.git(&environment, &["status"]).status.success());
 
     environment.push(("GIT_CONFIG_NOSYSTEM".to_owned(), "1".to_owned()));
@@ -413,9 +500,9 @@ fn a_command_execution_config_key_cannot_reach_a_brokered_child() {
          it wrote; that is arbitrary command execution"
     );
 
-    // 3. Behaviourally: under the environment the launcher really produces, the
-    //    hostile file is inert even though it exists and is readable.
-    let environment = fixture.environment(&[
+    // 3. Behaviourally: under the anchor the launcher really writes, the hostile
+    //    file is inert even though it exists and is readable.
+    let environment = fixture.anchored(&[
         ("PATH", "/usr/local/bin:/usr/bin:/bin"),
         ("HOME", &fixture.home.display().to_string()),
     ]);
@@ -446,31 +533,26 @@ fn a_command_execution_config_key_cannot_reach_a_brokered_child() {
 #[test]
 fn the_anchor_grants_safe_directory_and_no_other_protected_setting() {
     let fixture = Fixture::new("scope");
-    let environment = fixture.environment(&[("HOME", &fixture.home.display().to_string())]);
+    let environment = fixture.anchored(&[("HOME", &fixture.home.display().to_string())]);
     let listed = fixture.git(&environment, &["config", "--list", "--show-scope"]);
     let system: Vec<String> = String::from_utf8_lossy(&listed.stdout)
         .lines()
         .filter_map(|line| line.strip_prefix("system\t").map(str::to_owned))
         .collect();
-    // Whatever the host's own /etc/gitconfig contributes is chained through on
-    // purpose (a bare anchor would DROP it), so the assertion is that the
-    // launcher adds exactly one setting to it.
-    assert!(
-        system.contains(&"safe.directory=*".to_owned()),
-        "system scope must carry the trust rule: {system:?}"
+    // The chained baseline is empty, so every SYSTEM entry here is the
+    // launcher's own contribution. `include.path` is the chain directive itself
+    // — the mechanism by which the real /etc/gitconfig is preserved — not a
+    // setting the anchor introduces; everything else must be the trust rule.
+    let settings: Vec<&String> = system
+        .iter()
+        .filter(|entry| !entry.starts_with("include.path="))
+        .collect();
+    assert_eq!(
+        settings,
+        vec![&"safe.directory=*".to_owned()],
+        "the anchor must add the trust rule and NOTHING else to protected scope; \
+         saw {system:?}"
     );
-    for dangerous in [
-        "core.sshcommand",
-        "core.pager",
-        "core.editor",
-        "diff.external",
-        "credential.helper",
-    ] {
-        assert!(
-            !system.iter().any(|entry| entry.starts_with(dangerous)),
-            "the anchor must not introduce {dangerous}: {system:?}"
-        );
-    }
 }
 
 /// `GIT_CONFIG_SYSTEM` REPLACES `/etc/gitconfig` rather than adding to it, so
@@ -577,13 +659,20 @@ fn the_privileged_git_proofs_are_wired_and_cannot_silently_skip() {
 fn a_real_child_uid_runs_git_in_a_worker_owned_worktree_only_with_the_anchor() {
     require_root();
     let fixture = Fixture::new("cross-uid");
-    // The worker's identity, exactly as `job.rs` renders it, and the mode the
-    // artifact umask produces.
+
+    // The anchor is written before the tree is handed to the worker uid, and it
+    // lives outside it, exactly as the launcher's does.
+    let anchored = fixture.anchored(&[
+        ("PATH", "/usr/local/bin:/usr/bin:/bin"),
+        ("HOME", &fixture.home.display().to_string()),
+    ]);
+    let mut reverted = fixture.baseline(&[("HOME", &fixture.home.display().to_string())]);
+    reverted.extend(pod_environment(&fixture.home));
+
     chown_tree(&fixture.root, WORKER_UID, ARTIFACT_GID);
     set_mode_tree(&fixture.root, 0o2775);
     chown_tree(&fixture.home, CHILD_UID, ARTIFACT_GID);
 
-    let reverted = pod_environment(&fixture.home);
     let failed = run_git_as_child(&fixture, &reverted);
     assert!(
         failed.1.contains(PRODUCTION_FAILURE),
@@ -593,11 +682,7 @@ fn a_real_child_uid_runs_git_in_a_worker_owned_worktree_only_with_the_anchor() {
         failed.1
     );
 
-    let brokered = fixture.environment(&[
-        ("PATH", "/usr/local/bin:/usr/bin:/bin"),
-        ("HOME", &fixture.home.display().to_string()),
-    ]);
-    let succeeded = run_git_as_child(&fixture, &brokered);
+    let succeeded = run_git_as_child(&fixture, &anchored);
     assert_eq!(
         succeeded.0, 0,
         "the launcher's anchor must let a real uid-{CHILD_UID} child run git in a \

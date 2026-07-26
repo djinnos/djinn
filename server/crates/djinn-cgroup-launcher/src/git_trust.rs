@@ -325,10 +325,36 @@ fn anchor_is_intact(path: &Path) -> bool {
 /// through [`anchor_path`].
 pub fn materialize_in(root: &Path) -> io::Result<PathBuf> {
     let path = anchor_dir_in(root)?.join(ANCHOR_BASENAME);
-    write_anchor(
-        &path,
-        &anchor_contents(system_config_to_chain(&path).as_deref()),
-    )?;
+    let chain = system_config_to_chain(&path);
+    materialize_in_with_system(root, chain.as_deref())
+}
+
+/// [`materialize_in`], but chaining to `system_config` instead of discovering
+/// `/etc/gitconfig`.
+///
+/// Exists so a behavioural test can be hermetic against the HOST's system
+/// config. That is not hypothetical: a GitHub Actions runner ships
+///
+/// ```text
+/// /etc/gitconfig:  [safe]  directory = *
+/// ```
+///
+/// which trusts every repository for every process on the machine. A suite that
+/// inherited it would see its non-vacuity control — "with the fix reverted, real
+/// git must fail" — pass with exit 0 and empty stderr, and its positive control
+/// succeed for a reason that has nothing to do with the launcher. It did exactly
+/// that on the first CI run of this change. Pointing the chain at a controlled,
+/// empty file models the launcher container, which was measured on the
+/// production node to have **no** `/etc/gitconfig` at all.
+///
+/// The bytes are still produced by [`anchor_contents`] and still written by
+/// [`write_anchor`], so what a test exercises is the production writer.
+pub fn materialize_in_with_system(
+    root: &Path,
+    system_config: Option<&Path>,
+) -> io::Result<PathBuf> {
+    let path = anchor_dir_in(root)?.join(ANCHOR_BASENAME);
+    write_anchor(&path, &anchor_contents(system_config))?;
     Ok(path)
 }
 
