@@ -3,6 +3,7 @@
 pub mod bridge;
 pub mod dispatch;
 pub mod process;
+pub mod readiness_kickoff;
 pub mod server;
 pub mod state;
 pub mod toolchain_versions;
