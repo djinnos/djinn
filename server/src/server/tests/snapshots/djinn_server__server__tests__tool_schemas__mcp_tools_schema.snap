@@ -20570,6 +20570,14 @@ expression: signatures
             "string",
             "null"
           ]
+        },
+        "request_id": {
+          "default": null,
+          "description": "Stable caller-generated identity for this demand. Reuse it when\nretrying the same request; omit it for a new independent demand.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
@@ -20931,6 +20939,14 @@ expression: signatures
         "proposal_id": {
           "description": "Proposal UUID or short_id.",
           "type": "string"
+        },
+        "request_id": {
+          "default": null,
+          "description": "Stable caller-generated identity for this start request. Reuse it when\nretrying the same request; omit it for a new independent start.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [

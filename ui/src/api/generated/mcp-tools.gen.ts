@@ -9540,6 +9540,11 @@ export namespace ProposalRefinementDemandRoundInputSchema {
    * Why another round is being demanded. Recorded in proposal history.
    */
   reason?: string
+  /**
+   * Stable caller-generated identity for this demand. Reuse it when
+   * retrying the same request; omit it for a new independent demand.
+   */
+  request_id?: string
   [k: string]: any
   }
 
@@ -9749,6 +9754,11 @@ export namespace ProposalRefinementStartInputSchema {
    * Proposal UUID or short_id.
    */
   proposal_id: string
+  /**
+   * Stable caller-generated identity for this start request. Reuse it when
+   * retrying the same request; omit it for a new independent start.
+   */
+  request_id?: string
   [k: string]: any
   }
 
