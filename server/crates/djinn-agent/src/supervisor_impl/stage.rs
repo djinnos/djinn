@@ -932,11 +932,9 @@ pub(crate) async fn execute_stage(
     // role's MCP/skill defaults.  `role_mcp_servers` carries the DB row's
     // parsed array (or `None` when no DB row exists).
     //
-    // The authoring trigger gates native-skill loading: only proposal-authoring
-    // planner sessions (epic_breakdown) receive platform-owned skills like
-    // `visual-spec`.  Non-authoring planner sessions (wave planning, dispatch)
-    // skip native skills to avoid paying the context cost.
-    let authoring_trigger = classify_native_skill_trigger(runtime_role.config().name, task);
+    // The typed trigger gates platform-native skills. A marked Architect task
+    // carries an exact readiness pin that must resolve or block launch.
+    let native_skill_trigger = classify_native_skill_trigger(runtime_role.config().name, task);
 
     let McpAndSkills {
         effective_mcp_servers,
@@ -946,7 +944,7 @@ pub(crate) async fn execute_stage(
         native_skill_names: _native_skill_names,
         mcp_server_instructions,
         extension_diagnostics,
-    } = resolve_mcp_and_skills(
+    } = match resolve_mcp_and_skills(
         worktree_path,
         runtime_role.as_ref(),
         &task.project_id,
@@ -955,12 +953,19 @@ pub(crate) async fn execute_stage(
         &task.short_id,
         role_mcp_servers.as_deref(),
         &role_skills,
-        authoring_trigger,
+        native_skill_trigger,
         #[cfg(test)]
         None,
         agent_context,
     )
-    .await;
+    .await
+    {
+        Ok(resolved) => resolved,
+        Err(error) => {
+            mark_session_failed(services, &session_id).await;
+            return Err(StageError::Setup(error.to_string()));
+        }
+    };
 
     // ── Setup commands ───────────────────────────────────────────────────────
     // Pre-verification hooks come from `lifecycle.pre_verification` (via the

@@ -1,6 +1,7 @@
 //! Resolves effective MCP servers and skills from `environment_config`, connects
 //! to servers, loads skill markdown files, and merges native skills for authoring
-//! planner sessions. All failures are non-fatal and logged.
+//! planner sessions. Project-extension failures are non-fatal and logged; a
+//! persisted readiness pin is a launch-blocking contract.
 
 use std::path::Path;
 
@@ -19,6 +20,17 @@ use crate::roles::AgentRole;
 use crate::skills::ResolvedSkill;
 
 use super::task_classifier::NativeSkillTrigger;
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum NativeSkillResolutionError {
+    #[error("readiness native skill pin `{name}` version `{version}` cannot be resolved: {source}")]
+    ReadinessPin {
+        name: String,
+        version: String,
+        #[source]
+        source: native_skills::NativeSkillLookupError,
+    },
+}
 
 /// Resolved MCP + skills bundle for the upcoming session.
 pub(crate) struct McpAndSkills {
@@ -48,10 +60,10 @@ pub(crate) async fn resolve_mcp_and_skills(
     task_short_id: &str,
     role_mcp_servers: Option<&[String]>,
     role_skills: &[String],
-    authoring_trigger: Option<NativeSkillTrigger>,
+    native_skill_trigger: Option<NativeSkillTrigger>,
     #[cfg(test)] mcp_registry_override: Option<McpToolRegistry>,
     app_state: &AgentContext,
-) -> McpAndSkills {
+) -> Result<McpAndSkills, NativeSkillResolutionError> {
     let role_name = runtime_role.config().name;
     let env_cfg = environment_config_for_path(&app_state.db, worktree_path).await;
     let effective_mcp_servers =
@@ -80,15 +92,18 @@ pub(crate) async fn resolve_mcp_and_skills(
         .unwrap_or_default();
     let project_skills =
         load_project_skills(worktree_path, task_short_id, role_name, &effective_skills).await;
-    let (resolved_skills, native_skill_names) =
-        merge_native_skills(role_name, project_skills.skills, authoring_trigger);
+    let (resolved_skills, native_skill_names) = merge_native_skills(
+        role_name,
+        project_skills.skills,
+        native_skill_trigger.clone(),
+    )?;
     if !native_skill_names.is_empty() {
         tracing::info!(
             task_id = %task_short_id,
             role = %role_name,
             native_count = native_skill_names.len(),
             native_names = %native_skill_names.join(", "),
-            ?authoring_trigger,
+            ?native_skill_trigger,
             "Lifecycle: merged native skills for role"
         );
     }
@@ -103,7 +118,7 @@ pub(crate) async fn resolve_mcp_and_skills(
         app_state,
     )
     .await;
-    McpAndSkills {
+    Ok(McpAndSkills {
         effective_mcp_servers,
         effective_skills,
         mcp_registry: mcp_result.registry,
@@ -111,7 +126,7 @@ pub(crate) async fn resolve_mcp_and_skills(
         native_skill_names,
         mcp_server_instructions,
         extension_diagnostics,
-    }
+    })
 }
 
 /// Resolve role-level MCP server entries from the project registry.
@@ -246,22 +261,40 @@ pub(crate) async fn persist_load_diagnostics(
 pub(crate) fn merge_native_skills(
     role_name: &str,
     project_skills: Vec<ResolvedSkill>,
-    authoring_trigger: Option<NativeSkillTrigger>,
-) -> (Vec<ResolvedSkill>, Vec<String>) {
-    if authoring_trigger.is_none() || !matches!(role_name, "planner" | "advocate") {
-        return (project_skills, Vec::new());
-    }
-    let native = native_skills::resolved_native_skills_for_role(role_name);
+    native_skill_trigger: Option<NativeSkillTrigger>,
+) -> Result<(Vec<ResolvedSkill>, Vec<String>), NativeSkillResolutionError> {
+    let native = match native_skill_trigger {
+        Some(NativeSkillTrigger::ProposalAuthoring)
+            if matches!(role_name, "planner" | "advocate") =>
+        {
+            native_skills::resolved_native_skills_for_role(role_name)
+        }
+        Some(NativeSkillTrigger::ReadinessGuardrail {
+            skill_name,
+            skill_version,
+        }) if role_name == "architect" => {
+            vec![
+                native_skills::native_skill_exact(&skill_name, &skill_version)
+                    .map_err(|source| NativeSkillResolutionError::ReadinessPin {
+                        name: skill_name,
+                        version: skill_version,
+                        source,
+                    })?
+                    .to_resolved(),
+            ]
+        }
+        _ => return Ok((project_skills, Vec::new())),
+    };
     let native_names: Vec<String> = native.iter().map(|s| s.name.clone()).collect();
     if native.is_empty() {
-        return (project_skills, native_names);
+        return Ok((project_skills, native_names));
     }
     let filtered: Vec<ResolvedSkill> = project_skills
         .into_iter()
         .filter(|s| !native_names.contains(&s.name))
         .collect();
     let merged: Vec<ResolvedSkill> = native.into_iter().chain(filtered).collect();
-    (merged, native_names)
+    Ok((merged, native_names))
 }
 
 #[cfg(test)]
@@ -281,7 +314,7 @@ mod tests {
     }
     #[test]
     fn authoring_planner_receives_visual_spec_native_skill() {
-        let (merged, native_names) = merge_native_skills("planner", Vec::new(), AUTHORING);
+        let (merged, native_names) = merge_native_skills("planner", Vec::new(), AUTHORING).unwrap();
         assert!(native_names.contains(&"visual-spec".to_string()));
         assert_eq!(merged.len(), 1);
         assert_eq!(merged[0].name, "visual-spec");
@@ -291,7 +324,7 @@ mod tests {
     #[test]
     fn native_skills_prepended_before_project_skills() {
         let project = vec![project_skill("git"), project_skill("testing")];
-        let (merged, native_names) = merge_native_skills("planner", project, AUTHORING);
+        let (merged, native_names) = merge_native_skills("planner", project, AUTHORING).unwrap();
         assert_eq!(native_names, vec!["visual-spec"]);
         assert_eq!(merged.len(), 3);
         assert_eq!(merged[0].name, "visual-spec");
@@ -301,21 +334,21 @@ mod tests {
     }
     #[test]
     fn empty_project_skills_with_authoring_planner() {
-        let (merged, native_names) = merge_native_skills("planner", Vec::new(), AUTHORING);
+        let (merged, native_names) = merge_native_skills("planner", Vec::new(), AUTHORING).unwrap();
         assert_eq!(native_names, vec!["visual-spec"]);
         assert_eq!(merged.len(), 1);
         assert_eq!(merged[0].name, "visual-spec");
     }
     #[test]
     fn non_authoring_planner_does_not_load_native_skills() {
-        let (merged, native_names) = merge_native_skills("planner", Vec::new(), None);
+        let (merged, native_names) = merge_native_skills("planner", Vec::new(), None).unwrap();
         assert!(native_names.is_empty());
         assert!(merged.is_empty());
     }
     #[test]
     fn non_authoring_planner_preserves_project_skills() {
         let project = vec![project_skill("git"), project_skill("testing")];
-        let (merged, native_names) = merge_native_skills("planner", project, None);
+        let (merged, native_names) = merge_native_skills("planner", project, None).unwrap();
         assert!(native_names.is_empty());
         assert_eq!(merged.len(), 2);
         assert_eq!(merged[0].name, "git");
@@ -324,7 +357,7 @@ mod tests {
     #[test]
     fn non_authoring_planner_project_visual_spec_kept_as_project() {
         let project = vec![project_skill("git"), project_skill("visual-spec")];
-        let (merged, native_names) = merge_native_skills("planner", project, None);
+        let (merged, native_names) = merge_native_skills("planner", project, None).unwrap();
         assert!(native_names.is_empty());
         assert_eq!(merged.len(), 2);
         assert_eq!(merged[0].name, "git");
@@ -338,7 +371,7 @@ mod tests {
             project_skill("visual-spec"),
             project_skill("testing"),
         ];
-        let (merged, native_names) = merge_native_skills("planner", project, AUTHORING);
+        let (merged, native_names) = merge_native_skills("planner", project, AUTHORING).unwrap();
         assert_eq!(native_names, vec!["visual-spec"]);
         assert_eq!(merged.len(), 3);
         assert_eq!(merged[0].name, "visual-spec");
@@ -353,7 +386,7 @@ mod tests {
     #[test]
     fn non_planner_roles_do_not_receive_native_skills() {
         for role in ["worker", "reviewer", "lead", "architect"] {
-            let (merged, native_names) = merge_native_skills(role, Vec::new(), AUTHORING);
+            let (merged, native_names) = merge_native_skills(role, Vec::new(), AUTHORING).unwrap();
             assert!(
                 native_names.is_empty(),
                 "{role} should have no native skills even with authoring trigger"
@@ -364,7 +397,7 @@ mod tests {
     #[test]
     fn non_planner_roles_with_project_skills_are_unchanged() {
         let project = vec![project_skill("git"), project_skill("visual-spec")];
-        let (merged, native_names) = merge_native_skills("worker", project, None);
+        let (merged, native_names) = merge_native_skills("worker", project, None).unwrap();
         assert!(native_names.is_empty());
         assert_eq!(merged.len(), 2);
         assert_eq!(merged[0].name, "git");
@@ -378,7 +411,7 @@ mod tests {
         let effective = crate::mcp_settings::effective_skill_names(&globals, &role);
         assert_eq!(effective, vec!["git", "visual-spec"]);
         let project = vec![project_skill("git"), project_skill("visual-spec")];
-        let (merged, native_names) = merge_native_skills("planner", project, AUTHORING);
+        let (merged, native_names) = merge_native_skills("planner", project, AUTHORING).unwrap();
         assert_eq!(native_names, vec!["visual-spec"]);
         assert_eq!(merged.len(), 2);
         assert_eq!(merged[0].name, "visual-spec");
@@ -387,17 +420,54 @@ mod tests {
     }
     #[test]
     fn no_authoring_trigger_means_no_native_skills() {
-        let (merged, native_names) = merge_native_skills("planner", Vec::new(), None);
+        let (merged, native_names) = merge_native_skills("planner", Vec::new(), None).unwrap();
         assert!(native_names.is_empty());
         assert!(merged.is_empty());
     }
     #[test]
     fn no_trigger_preserves_project_skills() {
         let project = vec![project_skill("git"), project_skill("testing")];
-        let (merged, native_names) = merge_native_skills("planner", project, None);
+        let (merged, native_names) = merge_native_skills("planner", project, None).unwrap();
         assert!(native_names.is_empty());
         assert_eq!(merged.len(), 2);
         assert_eq!(merged[0].name, "git");
         assert_eq!(merged[1].name, "testing");
+    }
+
+    fn readiness_trigger(name: &str, version: &str) -> Option<NativeSkillTrigger> {
+        Some(NativeSkillTrigger::ReadinessGuardrail {
+            skill_name: name.into(),
+            skill_version: version.into(),
+        })
+    }
+
+    #[test]
+    fn readiness_pin_prepends_platform_skill_and_filters_project_shadow() {
+        let project = vec![
+            project_skill("agent-readiness-guardrails"),
+            project_skill("git"),
+        ];
+        let (merged, names) = merge_native_skills(
+            "architect",
+            project,
+            readiness_trigger("agent-readiness-guardrails", "1.0.0"),
+        )
+        .unwrap();
+        assert_eq!(names, vec!["agent-readiness-guardrails"]);
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0].name, "agent-readiness-guardrails");
+        assert_eq!(merged[0].trust_level, "platform");
+        assert!(!merged[0].content.contains("from worktree"));
+        assert_eq!(merged[1].name, "git");
+    }
+
+    #[test]
+    fn readiness_unknown_name_and_version_are_launch_blocking_errors() {
+        for trigger in [
+            readiness_trigger("not-registered", "1.0.0"),
+            readiness_trigger("agent-readiness-guardrails", "9.9.9"),
+        ] {
+            assert!(merge_native_skills("architect", Vec::new(), trigger).is_err());
+        }
     }
 }
