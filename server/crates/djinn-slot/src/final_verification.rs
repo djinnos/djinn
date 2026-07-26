@@ -25,7 +25,12 @@ use djinn_sandbox::service_provisioning::{ServiceProvisioningCode, ServiceProvis
 use time::format_description::well_known::Rfc3339;
 use tokio_util::sync::CancellationToken;
 
+mod outcome_telemetry;
 mod provisioning_gate;
+use outcome_telemetry::{
+    emit_error, emit_ineligible, emit_lookup_outcome_with_test_observation, emit_outcome,
+    error_outcome, ineligible_outcome, lookup_none,
+};
 use provisioning_gate::{
     emit_service_provisioning_outcome, provisioning_outcome_label, provisioning_phase_label,
     service_provisioning_failure,
@@ -55,6 +60,14 @@ pub struct FinalVerificationResolvedMaterial {
     pub verify_source: VerifySource,
     /// Required check IDs from the same canonical plan used by the request.
     pub required_checks: Vec<String>,
+    /// The plan's `hermeticity.reusable`. Carried on the material (rather than
+    /// re-read from the identity resolver) so the completion-intent path adds
+    /// no resolver call. Before this existed, `reusable` influenced nothing but
+    /// the identity digest and was not a reuse kill-switch at all: setting it
+    /// false silently still permitted a cache hit.
+    pub reusable: bool,
+    /// The plan's declared evidence tier, as a bounded audit label.
+    pub evidence_tier: &'static str,
     /// Legacy audit fingerprint. It is not used for final-verification reuse.
     pub diff_fingerprint: String,
 }
@@ -409,6 +422,16 @@ pub(crate) async fn coordinate_final_verification_core(
             ));
         }
     };
+    // One bounded audit line naming what this project's plan actually promises.
+    // Deliberately not a metric label: the tier is a per-project constant, so a
+    // label would add cardinality without adding information.
+    tracing::info!(
+        evidence_tier = material.evidence_tier,
+        reusable = material.reusable,
+        task_id = %request.task_id, task_run_id = %request.task_run_id,
+        verification_attempt_id = %verification_attempt_id,
+        "final verification plan resolved"
+    );
     // Record the bounded full/subset selection surface for the agent tool
     // telemetry as soon as the configured material is resolved. Best-effort:
     // an identity-resolution error leaves the selection unset. Gated so the
@@ -576,6 +599,19 @@ async fn consult_reusable_final_verification(
             return lookup_none("error", request, attempt_id, "task_context", &error, ctx);
         }
     };
+    // A plan that declares itself non-reusable must not be reused. This is
+    // checked before the settings gate so the audit reason names the plan, not
+    // the rollout switch.
+    if !material.reusable {
+        return lookup_none(
+            "disabled",
+            request,
+            attempt_id,
+            "plan_not_reusable",
+            "",
+            ctx,
+        );
+    }
     let key = format!("project.{}.verify_run_reuse_enabled", task.project_id);
     if injected_consultation_failure(
         ctx,
@@ -800,51 +836,6 @@ fn coverage_equals_required(coverage: Option<&serde_json::Value>, required: &[St
     actual == expected
 }
 
-fn lookup_none<T>(
-    outcome: &'static str,
-    request: &FinalVerificationCoordinatorRequest,
-    attempt_id: &str,
-    reason: &'static str,
-    detail: &str,
-    ctx: &SlotContext,
-) -> Option<T> {
-    emit_lookup_outcome_with_test_observation(outcome, request, attempt_id, reason, detail, ctx);
-    None
-}
-
-fn emit_lookup_outcome(
-    outcome: &'static str,
-    request: &FinalVerificationCoordinatorRequest,
-    attempt_id: &str,
-    reason: &str,
-    detail: &str,
-) {
-    // The metric has only the bounded outcome label. Rich identifiers and
-    // diagnostics are emitted in the structured audit event below.
-    if djinn_telemetry::final_verification::increment_lookup(outcome).is_err() {
-        tracing::warn!(verify_run_lookup_outcome = outcome, task_id = %request.task_id,
-            task_run_id = %request.task_run_id, verification_attempt_id = %attempt_id,
-            audit_reason = reason, audit_detail = detail,
-            "final verification reuse telemetry emission failed");
-    }
-    tracing::info!(verify_run_lookup_outcome = outcome, task_id = %request.task_id,
-        task_run_id = %request.task_run_id, verification_attempt_id = %attempt_id,
-        audit_reason = reason, audit_detail = detail, "final verification reuse consultation");
-}
-
-fn emit_lookup_outcome_with_test_observation(
-    outcome: &'static str,
-    request: &FinalVerificationCoordinatorRequest,
-    attempt_id: &str,
-    reason: &'static str,
-    detail: &str,
-    ctx: &SlotContext,
-) {
-    emit_lookup_outcome(outcome, request, attempt_id, reason, detail);
-    ctx.callbacks
-        .record_final_verification_consultation_outcome_for_test(outcome, reason);
-}
-
 /// Release before any durable write. This is the commit protocol boundary: the
 /// repository insert is permitted only after the normal invocation lease has
 /// successfully released.
@@ -1019,129 +1010,6 @@ fn format_evidence_reason(evidence: &FinalVerificationExecutionEvidence) -> Stri
         || "malformed final-verification evidence".to_owned(),
         |reason| format!("{reason:?}"),
     )
-}
-
-fn ineligible_outcome(attempt_id: &str, reason: &str) -> FinalVerificationRecordingOutcome {
-    FinalVerificationRecordingOutcome::Ineligible {
-        verification_attempt_id: attempt_id.to_owned(),
-        reason: reason.to_owned(),
-    }
-}
-fn error_outcome(attempt_id: &str, detail: &str) -> FinalVerificationRecordingOutcome {
-    FinalVerificationRecordingOutcome::Error {
-        verification_attempt_id: attempt_id.to_owned(),
-        detail: detail.to_owned(),
-    }
-}
-fn emit_ineligible(
-    request: &FinalVerificationCoordinatorRequest,
-    attempt_id: &str,
-    reason: &str,
-) -> FinalVerificationRecordingOutcome {
-    emit_outcome(request, ineligible_outcome(attempt_id, reason))
-}
-fn emit_error(
-    request: &FinalVerificationCoordinatorRequest,
-    attempt_id: &str,
-    detail: &str,
-) -> FinalVerificationRecordingOutcome {
-    emit_outcome(request, error_outcome(attempt_id, detail))
-}
-fn emit_outcome(
-    request: &FinalVerificationCoordinatorRequest,
-    outcome: FinalVerificationRecordingOutcome,
-) -> FinalVerificationRecordingOutcome {
-    match &outcome {
-        FinalVerificationRecordingOutcome::Stored {
-            verification_attempt_id,
-            verify_run_id,
-            evidence,
-        } => {
-            let _ = djinn_telemetry::final_verification::increment_record(
-                djinn_telemetry::final_verification::RECORD_STORED,
-            );
-            tracing::info!(
-                recording_outcome = "stored", task_id = %request.task_id, task_run_id = %request.task_run_id,
-                verification_attempt_id = %verification_attempt_id, verify_run_id = %verify_run_id,
-                persisted_run_id = %evidence.persisted_run_id,
-                ordered_commands = %evidence.ordered_commands,
-                covered_checks = %evidence.covered_checks,
-                required_checks = ?evidence.required_checks,
-                verification_input_fingerprint = %evidence.verification_input_fingerprint,
-                manifest_version = %evidence.manifest_version,
-                environment_identity_digest = %evidence.environment_identity_digest,
-                "final verification recording completed"
-            )
-        }
-        FinalVerificationRecordingOutcome::Reused {
-            verification_attempt_id,
-            evidence,
-        } => tracing::info!(
-            recording_outcome = "reused", task_id = %request.task_id, task_run_id = %request.task_run_id,
-            verification_attempt_id = %verification_attempt_id, verify_run_id = %evidence.persisted_run_id,
-            ordered_commands = %evidence.ordered_commands,
-            covered_checks = %evidence.covered_checks,
-            required_checks = ?evidence.required_checks,
-            verification_input_fingerprint = %evidence.verification_input_fingerprint,
-            manifest_version = %evidence.manifest_version,
-            environment_identity_digest = %evidence.environment_identity_digest,
-            "final verification recording completed"
-        ),
-        FinalVerificationRecordingOutcome::Ineligible {
-            verification_attempt_id,
-            reason,
-        } => {
-            let _ = djinn_telemetry::final_verification::increment_record(
-                djinn_telemetry::final_verification::RECORD_INELIGIBLE,
-            );
-            tracing::info!(
-                recording_outcome = "ineligible", task_id = %request.task_id, task_run_id = %request.task_run_id,
-                verification_attempt_id = %verification_attempt_id, reason = %reason,
-                "final verification recording completed"
-            )
-        }
-        FinalVerificationRecordingOutcome::InfrastructureIneligible {
-            verification_attempt_id,
-            phase,
-            code,
-        } => {
-            // Infrastructure ineligibility records no passing row, so it counts
-            // as an ineligible writer outcome; the bounded provisioning phase/code
-            // ride the structured audit fields, never the record metric labels.
-            let _ = djinn_telemetry::final_verification::increment_record(
-                djinn_telemetry::final_verification::RECORD_INELIGIBLE,
-            );
-            tracing::info!(
-                recording_outcome = "infrastructure_ineligible",
-                task_id = %request.task_id, task_run_id = %request.task_run_id,
-                verification_attempt_id = %verification_attempt_id,
-                provisioning_phase = provisioning_phase_label(*phase),
-                provisioning_outcome = provisioning_outcome_label(*code),
-                "final verification recording completed"
-            )
-        }
-        FinalVerificationRecordingOutcome::Error {
-            verification_attempt_id,
-            detail,
-        } => {
-            let _ = djinn_telemetry::final_verification::increment_record(
-                djinn_telemetry::final_verification::RECORD_ERROR,
-            );
-            tracing::error!(
-                recording_outcome = "error", task_id = %request.task_id, task_run_id = %request.task_run_id,
-                verification_attempt_id = %verification_attempt_id, detail = %detail,
-                "final verification recording completed"
-            )
-        }
-        FinalVerificationRecordingOutcome::NotConfigured {
-            verification_attempt_id,
-        } => tracing::info!(
-            recording_outcome = "not_configured", task_id = %request.task_id, task_run_id = %request.task_run_id,
-            verification_attempt_id = %verification_attempt_id,
-            "final verification recording completed"
-        ),
-    }
-    outcome
 }
 
 #[cfg(test)]

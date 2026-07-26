@@ -4960,7 +4960,8 @@
                   "input_manifest": {
                     "version": 1,
                     "repo_paths": [],
-                    "environment_names": []
+                    "environment_names": [],
+                    "volatile_environment_names": []
                   },
                   "read_only_external_inputs": [],
                   "output_only_globs": [],
@@ -4968,7 +4969,8 @@
                     "hermetic": false,
                     "reusable": false,
                     "network_access": false
-                  }
+                  },
+                  "evidence_tier": "attested"
                 }
               }
             },
@@ -5320,7 +5322,8 @@
                 "input_manifest": {
                   "version": 1,
                   "repo_paths": [],
-                  "environment_names": []
+                  "environment_names": [],
+                  "volatile_environment_names": []
                 },
                 "read_only_external_inputs": [],
                 "output_only_globs": [],
@@ -5328,7 +5331,8 @@
                   "hermetic": false,
                   "reusable": false,
                   "network_access": false
-                }
+                },
+                "evidence_tier": "attested"
               }
             }
           }
@@ -5442,7 +5446,8 @@
               "default": {
                 "version": 1,
                 "repo_paths": [],
-                "environment_names": []
+                "environment_names": [],
+                "volatile_environment_names": []
               }
             },
             "read_only_external_inputs": {
@@ -5466,6 +5471,11 @@
                 "reusable": false,
                 "network_access": false
               }
+            },
+            "evidence_tier": {
+              "description": "What a recorded pass of this plan is worth. See\n[`VerificationEvidenceTier`]; the tier is identity material, so an\nattested pass and a recorded pass can never share a cache entry.",
+              "$ref": "#/$defs/VerificationEvidenceTier",
+              "default": "attested"
             }
           },
           "additionalProperties": false
@@ -5573,6 +5583,15 @@
               "default": []
             },
             "environment_names": {
+              "description": "Environment names whose **values** are identity material: the resolved\nvalue is hashed into the environment identity digest, so a change to it\ninvalidates every reusable pass. Use this for anything whose value\ngenuinely changes what the commands do (`PATH`, `CARGO_HOME`,\n`CARGO_BUILD_RUSTFLAGS`).",
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": []
+            },
+            "volatile_environment_names": {
+              "description": "Environment names that are declared and passed to commands, but whose\n**values** are deliberately NOT identity material — only the name is\n(via this manifest). The resolved value never reaches the identity\ndigest, so a per-run value does not fracture reuse across task runs.\n\nThis is the same contract catalog services already have: a declared\nname with an attempt-scoped value. It exists because the production\npod renders `CARGO_TARGET_DIR=/cache/cargo-target-runs/<task_run_id>`\n(a fresh path per run) and `RUSTC_WRAPPER=\"\"` (an empty value, which\nidentity material forbids). Hashing either would mean a worker run and\nthe reviewer run of the same task could never share a pass — which is\nthe entire point of the recorded tier.\n\nRejected unless `evidence_tier` is `recorded`: an unhashed input would\nvoid the attested tier's guarantee.",
               "type": "array",
               "items": {
                 "type": "string"
@@ -5615,6 +5634,21 @@
             }
           },
           "additionalProperties": false
+        },
+        "VerificationEvidenceTier": {
+          "description": "The guarantee a persisted final-verification pass carries.\n\nThis is deliberately an enum rather than the absence of a flag: the two\ntiers promise materially different things, and a reader of a plan must be\nable to see which one is in force without reconstructing it from three\nbooleans.",
+          "oneOf": [
+            {
+              "description": "Commands ran under the strict launcher: fresh network namespace,\nLandlock ABI-V3, read-only worktree, and output-only directories that\nwere absent at launch. A pass certifies the commands succeeded in an\nisolated environment fully described by the identity digest.",
+              "type": "string",
+              "const": "attested"
+            },
+            {
+              "description": "Commands ran as an ordinary warm, incremental build in the task-run Pod:\nno namespace, no Landlock, no output-directory precondition, and the\npre-existing build outputs left by earlier compiles are visible.\n\nA pass certifies only that (a) the whole-tree fingerprint was identical\nbefore and after, (b) the environment identity was identical before and\nafter, and (c) every configured command exited zero in that window. It\ndoes NOT certify independence from leftover build state — a poisoned\nincremental cache can produce a green recorded pass. That is the same\nexposure every task compile already accepts; this tier makes accepting\nit a deliberate, named choice rather than an implied one.",
+              "type": "string",
+              "const": "recorded"
+            }
+          ]
         },
         "CargoCachePolicy": {
           "description": "Per-project Cargo target-cache strategy override.\n\nThe default [`AutoDetected`](Self::AutoDetected) mode is detection-driven:\nconsumers resolve the policy by reading the project shape (Cargo workspace\nlayout, `.cargo/config.toml`, and configured setup command\npatterns) instead of hardcoding one universal compile set. That resolver is\nintentionally non-mutating. It may observe a project's `.cargo/config.toml`,\nincluding `rustc-wrapper = \"sccache\"` and feature-related settings, but it\nmust never create or modify `.cargo/config.toml`.",
@@ -5986,7 +6020,8 @@
                   "input_manifest": {
                     "version": 1,
                     "repo_paths": [],
-                    "environment_names": []
+                    "environment_names": [],
+                    "volatile_environment_names": []
                   },
                   "read_only_external_inputs": [],
                   "output_only_globs": [],
@@ -5994,7 +6029,8 @@
                     "hermetic": false,
                     "reusable": false,
                     "network_access": false
-                  }
+                  },
+                  "evidence_tier": "attested"
                 }
               }
             },
@@ -6346,7 +6382,8 @@
                 "input_manifest": {
                   "version": 1,
                   "repo_paths": [],
-                  "environment_names": []
+                  "environment_names": [],
+                  "volatile_environment_names": []
                 },
                 "read_only_external_inputs": [],
                 "output_only_globs": [],
@@ -6354,7 +6391,8 @@
                   "hermetic": false,
                   "reusable": false,
                   "network_access": false
-                }
+                },
+                "evidence_tier": "attested"
               }
             }
           }
@@ -6468,7 +6506,8 @@
               "default": {
                 "version": 1,
                 "repo_paths": [],
-                "environment_names": []
+                "environment_names": [],
+                "volatile_environment_names": []
               }
             },
             "read_only_external_inputs": {
@@ -6492,6 +6531,11 @@
                 "reusable": false,
                 "network_access": false
               }
+            },
+            "evidence_tier": {
+              "description": "What a recorded pass of this plan is worth. See\n[`VerificationEvidenceTier`]; the tier is identity material, so an\nattested pass and a recorded pass can never share a cache entry.",
+              "$ref": "#/$defs/VerificationEvidenceTier",
+              "default": "attested"
             }
           },
           "additionalProperties": false
@@ -6599,6 +6643,15 @@
               "default": []
             },
             "environment_names": {
+              "description": "Environment names whose **values** are identity material: the resolved\nvalue is hashed into the environment identity digest, so a change to it\ninvalidates every reusable pass. Use this for anything whose value\ngenuinely changes what the commands do (`PATH`, `CARGO_HOME`,\n`CARGO_BUILD_RUSTFLAGS`).",
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": []
+            },
+            "volatile_environment_names": {
+              "description": "Environment names that are declared and passed to commands, but whose\n**values** are deliberately NOT identity material — only the name is\n(via this manifest). The resolved value never reaches the identity\ndigest, so a per-run value does not fracture reuse across task runs.\n\nThis is the same contract catalog services already have: a declared\nname with an attempt-scoped value. It exists because the production\npod renders `CARGO_TARGET_DIR=/cache/cargo-target-runs/<task_run_id>`\n(a fresh path per run) and `RUSTC_WRAPPER=\"\"` (an empty value, which\nidentity material forbids). Hashing either would mean a worker run and\nthe reviewer run of the same task could never share a pass — which is\nthe entire point of the recorded tier.\n\nRejected unless `evidence_tier` is `recorded`: an unhashed input would\nvoid the attested tier's guarantee.",
               "type": "array",
               "items": {
                 "type": "string"
@@ -6641,6 +6694,21 @@
             }
           },
           "additionalProperties": false
+        },
+        "VerificationEvidenceTier": {
+          "description": "The guarantee a persisted final-verification pass carries.\n\nThis is deliberately an enum rather than the absence of a flag: the two\ntiers promise materially different things, and a reader of a plan must be\nable to see which one is in force without reconstructing it from three\nbooleans.",
+          "oneOf": [
+            {
+              "description": "Commands ran under the strict launcher: fresh network namespace,\nLandlock ABI-V3, read-only worktree, and output-only directories that\nwere absent at launch. A pass certifies the commands succeeded in an\nisolated environment fully described by the identity digest.",
+              "type": "string",
+              "const": "attested"
+            },
+            {
+              "description": "Commands ran as an ordinary warm, incremental build in the task-run Pod:\nno namespace, no Landlock, no output-directory precondition, and the\npre-existing build outputs left by earlier compiles are visible.\n\nA pass certifies only that (a) the whole-tree fingerprint was identical\nbefore and after, (b) the environment identity was identical before and\nafter, and (c) every configured command exited zero in that window. It\ndoes NOT certify independence from leftover build state — a poisoned\nincremental cache can produce a green recorded pass. That is the same\nexposure every task compile already accepts; this tier makes accepting\nit a deliberate, named choice rather than an implied one.",
+              "type": "string",
+              "const": "recorded"
+            }
+          ]
         },
         "CargoCachePolicy": {
           "description": "Per-project Cargo target-cache strategy override.\n\nThe default [`AutoDetected`](Self::AutoDetected) mode is detection-driven:\nconsumers resolve the policy by reading the project shape (Cargo workspace\nlayout, `.cargo/config.toml`, and configured setup command\npatterns) instead of hardcoding one universal compile set. That resolver is\nintentionally non-mutating. It may observe a project's `.cargo/config.toml`,\nincluding `rustc-wrapper = \"sccache\"` and feature-related settings, but it\nmust never create or modify `.cargo/config.toml`.",
@@ -6954,7 +7022,8 @@
                   "input_manifest": {
                     "version": 1,
                     "repo_paths": [],
-                    "environment_names": []
+                    "environment_names": [],
+                    "volatile_environment_names": []
                   },
                   "read_only_external_inputs": [],
                   "output_only_globs": [],
@@ -6962,7 +7031,8 @@
                     "hermetic": false,
                     "reusable": false,
                     "network_access": false
-                  }
+                  },
+                  "evidence_tier": "attested"
                 }
               }
             },
@@ -7314,7 +7384,8 @@
                 "input_manifest": {
                   "version": 1,
                   "repo_paths": [],
-                  "environment_names": []
+                  "environment_names": [],
+                  "volatile_environment_names": []
                 },
                 "read_only_external_inputs": [],
                 "output_only_globs": [],
@@ -7322,7 +7393,8 @@
                   "hermetic": false,
                   "reusable": false,
                   "network_access": false
-                }
+                },
+                "evidence_tier": "attested"
               }
             }
           }
@@ -7436,7 +7508,8 @@
               "default": {
                 "version": 1,
                 "repo_paths": [],
-                "environment_names": []
+                "environment_names": [],
+                "volatile_environment_names": []
               }
             },
             "read_only_external_inputs": {
@@ -7460,6 +7533,11 @@
                 "reusable": false,
                 "network_access": false
               }
+            },
+            "evidence_tier": {
+              "description": "What a recorded pass of this plan is worth. See\n[`VerificationEvidenceTier`]; the tier is identity material, so an\nattested pass and a recorded pass can never share a cache entry.",
+              "$ref": "#/$defs/VerificationEvidenceTier",
+              "default": "attested"
             }
           },
           "additionalProperties": false
@@ -7567,6 +7645,15 @@
               "default": []
             },
             "environment_names": {
+              "description": "Environment names whose **values** are identity material: the resolved\nvalue is hashed into the environment identity digest, so a change to it\ninvalidates every reusable pass. Use this for anything whose value\ngenuinely changes what the commands do (`PATH`, `CARGO_HOME`,\n`CARGO_BUILD_RUSTFLAGS`).",
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": []
+            },
+            "volatile_environment_names": {
+              "description": "Environment names that are declared and passed to commands, but whose\n**values** are deliberately NOT identity material — only the name is\n(via this manifest). The resolved value never reaches the identity\ndigest, so a per-run value does not fracture reuse across task runs.\n\nThis is the same contract catalog services already have: a declared\nname with an attempt-scoped value. It exists because the production\npod renders `CARGO_TARGET_DIR=/cache/cargo-target-runs/<task_run_id>`\n(a fresh path per run) and `RUSTC_WRAPPER=\"\"` (an empty value, which\nidentity material forbids). Hashing either would mean a worker run and\nthe reviewer run of the same task could never share a pass — which is\nthe entire point of the recorded tier.\n\nRejected unless `evidence_tier` is `recorded`: an unhashed input would\nvoid the attested tier's guarantee.",
               "type": "array",
               "items": {
                 "type": "string"
@@ -7609,6 +7696,21 @@
             }
           },
           "additionalProperties": false
+        },
+        "VerificationEvidenceTier": {
+          "description": "The guarantee a persisted final-verification pass carries.\n\nThis is deliberately an enum rather than the absence of a flag: the two\ntiers promise materially different things, and a reader of a plan must be\nable to see which one is in force without reconstructing it from three\nbooleans.",
+          "oneOf": [
+            {
+              "description": "Commands ran under the strict launcher: fresh network namespace,\nLandlock ABI-V3, read-only worktree, and output-only directories that\nwere absent at launch. A pass certifies the commands succeeded in an\nisolated environment fully described by the identity digest.",
+              "type": "string",
+              "const": "attested"
+            },
+            {
+              "description": "Commands ran as an ordinary warm, incremental build in the task-run Pod:\nno namespace, no Landlock, no output-directory precondition, and the\npre-existing build outputs left by earlier compiles are visible.\n\nA pass certifies only that (a) the whole-tree fingerprint was identical\nbefore and after, (b) the environment identity was identical before and\nafter, and (c) every configured command exited zero in that window. It\ndoes NOT certify independence from leftover build state — a poisoned\nincremental cache can produce a green recorded pass. That is the same\nexposure every task compile already accepts; this tier makes accepting\nit a deliberate, named choice rather than an implied one.",
+              "type": "string",
+              "const": "recorded"
+            }
+          ]
         },
         "CargoCachePolicy": {
           "description": "Per-project Cargo target-cache strategy override.\n\nThe default [`AutoDetected`](Self::AutoDetected) mode is detection-driven:\nconsumers resolve the policy by reading the project shape (Cargo workspace\nlayout, `.cargo/config.toml`, and configured setup command\npatterns) instead of hardcoding one universal compile set. That resolver is\nintentionally non-mutating. It may observe a project's `.cargo/config.toml`,\nincluding `rustc-wrapper = \"sccache\"` and feature-related settings, but it\nmust never create or modify `.cargo/config.toml`.",
@@ -13451,7 +13553,8 @@
                   "input_manifest": {
                     "version": 1,
                     "repo_paths": [],
-                    "environment_names": []
+                    "environment_names": [],
+                    "volatile_environment_names": []
                   },
                   "read_only_external_inputs": [],
                   "output_only_globs": [],
@@ -13459,7 +13562,8 @@
                     "hermetic": false,
                     "reusable": false,
                     "network_access": false
-                  }
+                  },
+                  "evidence_tier": "attested"
                 }
               }
             },
@@ -13811,7 +13915,8 @@
                 "input_manifest": {
                   "version": 1,
                   "repo_paths": [],
-                  "environment_names": []
+                  "environment_names": [],
+                  "volatile_environment_names": []
                 },
                 "read_only_external_inputs": [],
                 "output_only_globs": [],
@@ -13819,7 +13924,8 @@
                   "hermetic": false,
                   "reusable": false,
                   "network_access": false
-                }
+                },
+                "evidence_tier": "attested"
               }
             }
           }
@@ -13933,7 +14039,8 @@
               "default": {
                 "version": 1,
                 "repo_paths": [],
-                "environment_names": []
+                "environment_names": [],
+                "volatile_environment_names": []
               }
             },
             "read_only_external_inputs": {
@@ -13957,6 +14064,11 @@
                 "reusable": false,
                 "network_access": false
               }
+            },
+            "evidence_tier": {
+              "description": "What a recorded pass of this plan is worth. See\n[`VerificationEvidenceTier`]; the tier is identity material, so an\nattested pass and a recorded pass can never share a cache entry.",
+              "$ref": "#/$defs/VerificationEvidenceTier",
+              "default": "attested"
             }
           },
           "additionalProperties": false
@@ -14064,6 +14176,15 @@
               "default": []
             },
             "environment_names": {
+              "description": "Environment names whose **values** are identity material: the resolved\nvalue is hashed into the environment identity digest, so a change to it\ninvalidates every reusable pass. Use this for anything whose value\ngenuinely changes what the commands do (`PATH`, `CARGO_HOME`,\n`CARGO_BUILD_RUSTFLAGS`).",
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": []
+            },
+            "volatile_environment_names": {
+              "description": "Environment names that are declared and passed to commands, but whose\n**values** are deliberately NOT identity material — only the name is\n(via this manifest). The resolved value never reaches the identity\ndigest, so a per-run value does not fracture reuse across task runs.\n\nThis is the same contract catalog services already have: a declared\nname with an attempt-scoped value. It exists because the production\npod renders `CARGO_TARGET_DIR=/cache/cargo-target-runs/<task_run_id>`\n(a fresh path per run) and `RUSTC_WRAPPER=\"\"` (an empty value, which\nidentity material forbids). Hashing either would mean a worker run and\nthe reviewer run of the same task could never share a pass — which is\nthe entire point of the recorded tier.\n\nRejected unless `evidence_tier` is `recorded`: an unhashed input would\nvoid the attested tier's guarantee.",
               "type": "array",
               "items": {
                 "type": "string"
@@ -14106,6 +14227,21 @@
             }
           },
           "additionalProperties": false
+        },
+        "VerificationEvidenceTier": {
+          "description": "The guarantee a persisted final-verification pass carries.\n\nThis is deliberately an enum rather than the absence of a flag: the two\ntiers promise materially different things, and a reader of a plan must be\nable to see which one is in force without reconstructing it from three\nbooleans.",
+          "oneOf": [
+            {
+              "description": "Commands ran under the strict launcher: fresh network namespace,\nLandlock ABI-V3, read-only worktree, and output-only directories that\nwere absent at launch. A pass certifies the commands succeeded in an\nisolated environment fully described by the identity digest.",
+              "type": "string",
+              "const": "attested"
+            },
+            {
+              "description": "Commands ran as an ordinary warm, incremental build in the task-run Pod:\nno namespace, no Landlock, no output-directory precondition, and the\npre-existing build outputs left by earlier compiles are visible.\n\nA pass certifies only that (a) the whole-tree fingerprint was identical\nbefore and after, (b) the environment identity was identical before and\nafter, and (c) every configured command exited zero in that window. It\ndoes NOT certify independence from leftover build state — a poisoned\nincremental cache can produce a green recorded pass. That is the same\nexposure every task compile already accepts; this tier makes accepting\nit a deliberate, named choice rather than an implied one.",
+              "type": "string",
+              "const": "recorded"
+            }
+          ]
         },
         "CargoCachePolicy": {
           "description": "Per-project Cargo target-cache strategy override.\n\nThe default [`AutoDetected`](Self::AutoDetected) mode is detection-driven:\nconsumers resolve the policy by reading the project shape (Cargo workspace\nlayout, `.cargo/config.toml`, and configured setup command\npatterns) instead of hardcoding one universal compile set. That resolver is\nintentionally non-mutating. It may observe a project's `.cargo/config.toml`,\nincluding `rustc-wrapper = \"sccache\"` and feature-related settings, but it\nmust never create or modify `.cargo/config.toml`.",
@@ -14395,7 +14531,8 @@
                   "input_manifest": {
                     "version": 1,
                     "repo_paths": [],
-                    "environment_names": []
+                    "environment_names": [],
+                    "volatile_environment_names": []
                   },
                   "read_only_external_inputs": [],
                   "output_only_globs": [],
@@ -14403,7 +14540,8 @@
                     "hermetic": false,
                     "reusable": false,
                     "network_access": false
-                  }
+                  },
+                  "evidence_tier": "attested"
                 }
               }
             },
@@ -14755,7 +14893,8 @@
                 "input_manifest": {
                   "version": 1,
                   "repo_paths": [],
-                  "environment_names": []
+                  "environment_names": [],
+                  "volatile_environment_names": []
                 },
                 "read_only_external_inputs": [],
                 "output_only_globs": [],
@@ -14763,7 +14902,8 @@
                   "hermetic": false,
                   "reusable": false,
                   "network_access": false
-                }
+                },
+                "evidence_tier": "attested"
               }
             }
           }
@@ -14877,7 +15017,8 @@
               "default": {
                 "version": 1,
                 "repo_paths": [],
-                "environment_names": []
+                "environment_names": [],
+                "volatile_environment_names": []
               }
             },
             "read_only_external_inputs": {
@@ -14901,6 +15042,11 @@
                 "reusable": false,
                 "network_access": false
               }
+            },
+            "evidence_tier": {
+              "description": "What a recorded pass of this plan is worth. See\n[`VerificationEvidenceTier`]; the tier is identity material, so an\nattested pass and a recorded pass can never share a cache entry.",
+              "$ref": "#/$defs/VerificationEvidenceTier",
+              "default": "attested"
             }
           },
           "additionalProperties": false
@@ -15008,6 +15154,15 @@
               "default": []
             },
             "environment_names": {
+              "description": "Environment names whose **values** are identity material: the resolved\nvalue is hashed into the environment identity digest, so a change to it\ninvalidates every reusable pass. Use this for anything whose value\ngenuinely changes what the commands do (`PATH`, `CARGO_HOME`,\n`CARGO_BUILD_RUSTFLAGS`).",
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": []
+            },
+            "volatile_environment_names": {
+              "description": "Environment names that are declared and passed to commands, but whose\n**values** are deliberately NOT identity material — only the name is\n(via this manifest). The resolved value never reaches the identity\ndigest, so a per-run value does not fracture reuse across task runs.\n\nThis is the same contract catalog services already have: a declared\nname with an attempt-scoped value. It exists because the production\npod renders `CARGO_TARGET_DIR=/cache/cargo-target-runs/<task_run_id>`\n(a fresh path per run) and `RUSTC_WRAPPER=\"\"` (an empty value, which\nidentity material forbids). Hashing either would mean a worker run and\nthe reviewer run of the same task could never share a pass — which is\nthe entire point of the recorded tier.\n\nRejected unless `evidence_tier` is `recorded`: an unhashed input would\nvoid the attested tier's guarantee.",
               "type": "array",
               "items": {
                 "type": "string"
@@ -15050,6 +15205,21 @@
             }
           },
           "additionalProperties": false
+        },
+        "VerificationEvidenceTier": {
+          "description": "The guarantee a persisted final-verification pass carries.\n\nThis is deliberately an enum rather than the absence of a flag: the two\ntiers promise materially different things, and a reader of a plan must be\nable to see which one is in force without reconstructing it from three\nbooleans.",
+          "oneOf": [
+            {
+              "description": "Commands ran under the strict launcher: fresh network namespace,\nLandlock ABI-V3, read-only worktree, and output-only directories that\nwere absent at launch. A pass certifies the commands succeeded in an\nisolated environment fully described by the identity digest.",
+              "type": "string",
+              "const": "attested"
+            },
+            {
+              "description": "Commands ran as an ordinary warm, incremental build in the task-run Pod:\nno namespace, no Landlock, no output-directory precondition, and the\npre-existing build outputs left by earlier compiles are visible.\n\nA pass certifies only that (a) the whole-tree fingerprint was identical\nbefore and after, (b) the environment identity was identical before and\nafter, and (c) every configured command exited zero in that window. It\ndoes NOT certify independence from leftover build state — a poisoned\nincremental cache can produce a green recorded pass. That is the same\nexposure every task compile already accepts; this tier makes accepting\nit a deliberate, named choice rather than an implied one.",
+              "type": "string",
+              "const": "recorded"
+            }
+          ]
         },
         "CargoCachePolicy": {
           "description": "Per-project Cargo target-cache strategy override.\n\nThe default [`AutoDetected`](Self::AutoDetected) mode is detection-driven:\nconsumers resolve the policy by reading the project shape (Cargo workspace\nlayout, `.cargo/config.toml`, and configured setup command\npatterns) instead of hardcoding one universal compile set. That resolver is\nintentionally non-mutating. It may observe a project's `.cargo/config.toml`,\nincluding `rustc-wrapper = \"sccache\"` and feature-related settings, but it\nmust never create or modify `.cargo/config.toml`.",
@@ -15313,7 +15483,8 @@
                   "input_manifest": {
                     "version": 1,
                     "repo_paths": [],
-                    "environment_names": []
+                    "environment_names": [],
+                    "volatile_environment_names": []
                   },
                   "read_only_external_inputs": [],
                   "output_only_globs": [],
@@ -15321,7 +15492,8 @@
                     "hermetic": false,
                     "reusable": false,
                     "network_access": false
-                  }
+                  },
+                  "evidence_tier": "attested"
                 }
               }
             },
@@ -15673,7 +15845,8 @@
                 "input_manifest": {
                   "version": 1,
                   "repo_paths": [],
-                  "environment_names": []
+                  "environment_names": [],
+                  "volatile_environment_names": []
                 },
                 "read_only_external_inputs": [],
                 "output_only_globs": [],
@@ -15681,7 +15854,8 @@
                   "hermetic": false,
                   "reusable": false,
                   "network_access": false
-                }
+                },
+                "evidence_tier": "attested"
               }
             }
           }
@@ -15795,7 +15969,8 @@
               "default": {
                 "version": 1,
                 "repo_paths": [],
-                "environment_names": []
+                "environment_names": [],
+                "volatile_environment_names": []
               }
             },
             "read_only_external_inputs": {
@@ -15819,6 +15994,11 @@
                 "reusable": false,
                 "network_access": false
               }
+            },
+            "evidence_tier": {
+              "description": "What a recorded pass of this plan is worth. See\n[`VerificationEvidenceTier`]; the tier is identity material, so an\nattested pass and a recorded pass can never share a cache entry.",
+              "$ref": "#/$defs/VerificationEvidenceTier",
+              "default": "attested"
             }
           },
           "additionalProperties": false
@@ -15926,6 +16106,15 @@
               "default": []
             },
             "environment_names": {
+              "description": "Environment names whose **values** are identity material: the resolved\nvalue is hashed into the environment identity digest, so a change to it\ninvalidates every reusable pass. Use this for anything whose value\ngenuinely changes what the commands do (`PATH`, `CARGO_HOME`,\n`CARGO_BUILD_RUSTFLAGS`).",
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": []
+            },
+            "volatile_environment_names": {
+              "description": "Environment names that are declared and passed to commands, but whose\n**values** are deliberately NOT identity material — only the name is\n(via this manifest). The resolved value never reaches the identity\ndigest, so a per-run value does not fracture reuse across task runs.\n\nThis is the same contract catalog services already have: a declared\nname with an attempt-scoped value. It exists because the production\npod renders `CARGO_TARGET_DIR=/cache/cargo-target-runs/<task_run_id>`\n(a fresh path per run) and `RUSTC_WRAPPER=\"\"` (an empty value, which\nidentity material forbids). Hashing either would mean a worker run and\nthe reviewer run of the same task could never share a pass — which is\nthe entire point of the recorded tier.\n\nRejected unless `evidence_tier` is `recorded`: an unhashed input would\nvoid the attested tier's guarantee.",
               "type": "array",
               "items": {
                 "type": "string"
@@ -15968,6 +16157,21 @@
             }
           },
           "additionalProperties": false
+        },
+        "VerificationEvidenceTier": {
+          "description": "The guarantee a persisted final-verification pass carries.\n\nThis is deliberately an enum rather than the absence of a flag: the two\ntiers promise materially different things, and a reader of a plan must be\nable to see which one is in force without reconstructing it from three\nbooleans.",
+          "oneOf": [
+            {
+              "description": "Commands ran under the strict launcher: fresh network namespace,\nLandlock ABI-V3, read-only worktree, and output-only directories that\nwere absent at launch. A pass certifies the commands succeeded in an\nisolated environment fully described by the identity digest.",
+              "type": "string",
+              "const": "attested"
+            },
+            {
+              "description": "Commands ran as an ordinary warm, incremental build in the task-run Pod:\nno namespace, no Landlock, no output-directory precondition, and the\npre-existing build outputs left by earlier compiles are visible.\n\nA pass certifies only that (a) the whole-tree fingerprint was identical\nbefore and after, (b) the environment identity was identical before and\nafter, and (c) every configured command exited zero in that window. It\ndoes NOT certify independence from leftover build state — a poisoned\nincremental cache can produce a green recorded pass. That is the same\nexposure every task compile already accepts; this tier makes accepting\nit a deliberate, named choice rather than an implied one.",
+              "type": "string",
+              "const": "recorded"
+            }
+          ]
         },
         "CargoCachePolicy": {
           "description": "Per-project Cargo target-cache strategy override.\n\nThe default [`AutoDetected`](Self::AutoDetected) mode is detection-driven:\nconsumers resolve the policy by reading the project shape (Cargo workspace\nlayout, `.cargo/config.toml`, and configured setup command\npatterns) instead of hardcoding one universal compile set. That resolver is\nintentionally non-mutating. It may observe a project's `.cargo/config.toml`,\nincluding `rustc-wrapper = \"sccache\"` and feature-related settings, but it\nmust never create or modify `.cargo/config.toml`.",

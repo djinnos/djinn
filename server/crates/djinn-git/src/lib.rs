@@ -503,8 +503,9 @@ pub use submission_diff::{
 };
 
 pub mod verification_input;
+pub mod verification_input_outputs;
 pub use verification_input::{
-    DEFAULT_VERIFICATION_BASE_REF, ResolvedExternalInputV1,
+    DEFAULT_VERIFICATION_BASE_REF, OutputOnlyPolicy, ResolvedExternalInputV1,
     VERIFICATION_INPUT_FINGERPRINT_VERSION_V1, VerificationInputDigestV1, VerificationInputError,
     VerificationInputFingerprint, VerificationInputFingerprintConfig, VerificationInputUnavailable,
     collect_verification_changed_paths, compute_verification_input_fingerprint,
