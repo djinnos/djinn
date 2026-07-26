@@ -8,7 +8,10 @@ use std::path::{Path, PathBuf};
 
 use djinn_db::{
     Database,
-    repositories::readiness::{CreateReadinessRun, ReadinessRepository},
+    UserRepository,
+    repositories::readiness::{
+        CreateReadinessRun, MaterializeReadinessKickoff, ReadinessRepository,
+    },
 };
 use sqlx::postgres::PgConnection;
 use sqlx::{Connection, Executor};
@@ -19,6 +22,152 @@ const DESIGNATED_OPERATOR_ID: &str = "00000000-0000-7000-8000-000000000155";
 
 fn migrations_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("migrations_postgres")
+}
+
+#[tokio::test]
+async fn materialized_kickoff_redelivery_and_racing_keys_converge_on_one_task() {
+    // Database::ephemeral is a template-cloned, real Postgres database.
+    let db = Database::ephemeral()
+        .await
+        .expect("open postgres test database");
+    let redelivery_project_id = "materialized-readiness-redelivery";
+    let racing_project_id = "materialized-readiness-race";
+    djinn_db::test_support::seed_project(&db, redelivery_project_id, "readiness").await;
+    djinn_db::test_support::seed_project(&db, racing_project_id, "readiness").await;
+    let creator_user_id = seed_user(&db, 155_001, "readiness-kickoff-creator").await;
+    let repo = ReadinessRepository::new(db.clone());
+
+    let first = repo
+        .materialize_kickoff(kickoff_input(
+            redelivery_project_id,
+            &creator_user_id,
+            "same-key",
+        ))
+        .await
+        .expect("materialize first kickoff");
+    let redelivery = repo
+        .materialize_kickoff(kickoff_input(
+            redelivery_project_id,
+            &creator_user_id,
+            "same-key",
+        ))
+        .await
+        .expect("materialize same-key redelivery");
+    assert_eq!(redelivery.run.id, first.run.id);
+    assert_eq!(redelivery.identification_task.id, first.identification_task.id);
+    assert_eq!(kickoff_counts(&db, redelivery_project_id).await, (1, 1));
+
+    let left_repo = ReadinessRepository::new(db.clone());
+    let right_repo = ReadinessRepository::new(db.clone());
+    let (left, right) = tokio::join!(
+        left_repo.materialize_kickoff(kickoff_input(
+            racing_project_id,
+            &creator_user_id,
+            "race-left",
+        )),
+        right_repo.materialize_kickoff(kickoff_input(
+            racing_project_id,
+            &creator_user_id,
+            "race-right",
+        )),
+    );
+    let left = left.expect("materialize first racing key");
+    let right = right.expect("materialize second racing key");
+    assert_eq!(left.run.id, right.run.id);
+    assert_eq!(left.identification_task.id, right.identification_task.id);
+    assert_eq!(
+        kickoff_counts(&db, racing_project_id).await,
+        (1, 1),
+        "racing keys leave one run and identification task"
+    );
+}
+
+#[tokio::test]
+async fn materialized_kickoff_validation_failures_leave_no_run_or_task() {
+    // Database::ephemeral is a template-cloned, real Postgres database.
+    let db = Database::ephemeral()
+        .await
+        .expect("open postgres test database");
+    let project_id = "materialized-readiness-validation";
+    djinn_db::test_support::seed_project(&db, project_id, "readiness").await;
+    let creator_user_id = seed_user(&db, 155_002, "readiness-validation-creator").await;
+    let repo = ReadinessRepository::new(db.clone());
+
+    for field in ["idempotency_key", "repository_snapshot", "skill_name", "skill_version"] {
+        let mut input = kickoff_input(project_id, &creator_user_id, "validation-key");
+        match field {
+            "idempotency_key" => input.idempotency_key = " \t ".into(),
+            "repository_snapshot" => input.repository_snapshot = " \t ".into(),
+            "skill_name" => input.skill_name = " \t ".into(),
+            "skill_version" => input.skill_version = " \t ".into(),
+            _ => unreachable!("known fixture field"),
+        }
+        repo.materialize_kickoff(input)
+            .await
+            .expect_err("blank validated kickoff field must fail");
+        assert_eq!(
+            kickoff_counts(&db, project_id).await,
+            (0, 0),
+            "blank {field} must not persist readiness state"
+        );
+    }
+
+    repo.materialize_kickoff(kickoff_input(
+        project_id,
+        "nonexistent-readiness-creator",
+        "invalid-creator-key",
+    ))
+    .await
+    .expect_err("invalid explicit creator identity must fail");
+    assert_eq!(
+        kickoff_counts(&db, project_id).await,
+        (0, 0),
+        "invalid creator must not persist readiness state"
+    );
+}
+
+async fn seed_user(db: &Database, github_id: i64, login: &str) -> String {
+    UserRepository::new(db.clone())
+        .upsert_from_github(github_id, login, Some(login), None)
+        .await
+        .expect("seed readiness creator")
+        .id
+}
+
+fn kickoff_input(
+    project_id: &str,
+    creator_user_id: &str,
+    idempotency_key: &str,
+) -> MaterializeReadinessKickoff {
+    MaterializeReadinessKickoff {
+        project_id: project_id.into(),
+        creator_user_id: creator_user_id.into(),
+        idempotency_key: idempotency_key.into(),
+        repository_snapshot: "sha256:readiness-fixture".into(),
+        skill_name: "agent-readiness-guardrails".into(),
+        skill_version: "1.0.0".into(),
+    }
+}
+
+async fn kickoff_counts(db: &Database, project_id: &str) -> (i64, i64) {
+    let runs = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM readiness_runs WHERE project_id = $1",
+    )
+    .bind(project_id)
+    .fetch_one(db.pool())
+    .await
+    .expect("count readiness runs");
+    let identification_tasks = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM tasks
+         WHERE project_id = $1
+           AND (CASE WHEN description LIKE '{%' THEN description::jsonb ELSE '{}'::jsonb END)
+               ->> 'kind' = 'readiness_identification'",
+    )
+    .bind(project_id)
+    .fetch_one(db.pool())
+    .await
+    .expect("count identification tasks");
+    (runs, identification_tasks)
 }
 
 fn migration_entries(dir: &Path) -> Vec<(u64, PathBuf)> {
