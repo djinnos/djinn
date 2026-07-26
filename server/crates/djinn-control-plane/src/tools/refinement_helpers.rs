@@ -647,7 +647,7 @@ pub async fn build_refinement_status(
     // as display-only compatibility data; it never affects `active`.
     let legacy_stop_reason = revisions.iter().rev().find_map(|revision| {
         (revision.event_kind == "refinement_stop")
-            .then(|| revision.event_metadata.as_ref())
+            .then_some(revision.event_metadata.as_ref())
             .flatten()
             .and_then(|metadata| serde_json::from_str::<serde_json::Value>(metadata).ok())
             .and_then(|metadata| {
