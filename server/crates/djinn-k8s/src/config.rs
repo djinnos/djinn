@@ -37,9 +37,12 @@ pub struct KubernetesConfig {
     pub cpu_request: String,
     /// CPU **request** for a *light* task-run Pod (Planner / Reviewer / Lead /
     /// every Refinement sub-role / grooming). These pods orchestrate an agent
-    /// session and never run the project's compile/test toolchain, so they get
-    /// a fractional-core request. v1 leases default: `"300m"`. Overridable via
-    /// `DJINN_K8S_LIGHT_CPU_REQUEST`.
+    /// session and are *unlikely* to run the project's compile/test toolchain
+    /// (measured at 5.5% of light sessions), so they get a fractional-core
+    /// request. They are not incapable of compiling — the minority that do are
+    /// governed by the measured, role-agnostic invocation lease, which is why
+    /// the CPU **limit** below is deliberately not role-classed. v1 leases
+    /// default: `"300m"`. Overridable via `DJINN_K8S_LIGHT_CPU_REQUEST`.
     ///
     /// Only the CPU REQUEST is role-classed: the CPU **limit**
     /// ([`Self::cpu_limit`]) and both memory bounds are identical for light and

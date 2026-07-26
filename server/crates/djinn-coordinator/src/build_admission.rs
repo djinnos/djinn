@@ -104,13 +104,22 @@ pub enum BuildWorkloadKind {
     },
 }
 
-/// Audit reason recorded when a Light (orchestration-only) task-run is admitted
-/// without reserving a build slot.
+/// Audit reason recorded when a Light task-run is admitted without reserving a
+/// build slot.
 ///
 /// Distinct and greppable on purpose: it is the single string that explains why
 /// an admitted task-run left no journal row behind.
-pub const LIGHT_ROLE_AUDIT_REASON: &str =
-    "light role: orchestration-only, never runs the project toolchain";
+///
+/// It states a dispatch-admission prior, NOT a capability boundary. Light roles
+/// are *unlikely* to run the project's compile/test toolchain — measured at 5.5%
+/// of light sessions on 2026-07-25, 8.1% for reviewers alone — which is why
+/// pre-charging them a scarce slot is the wrong trade, not because they cannot
+/// compile. The ones that do compile are governed by the measured, role-agnostic
+/// invocation lease. See [`djinn_runtime::RoleResourceClass`], whose earlier
+/// claim that these roles "never run the project's compile/test toolchain" was
+/// false when written and took 34 days to be caught.
+pub const LIGHT_ROLE_AUDIT_REASON: &str = "light role: not pre-charged a build slot at dispatch (unlikely to compile); \
+     any compile it does run is governed by the invocation lease";
 
 /// Every task-run role the coordinator can dispatch.
 ///

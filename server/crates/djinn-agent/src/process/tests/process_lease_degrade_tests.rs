@@ -560,16 +560,15 @@ async fn rendered_invocation_deadlines_are_granted_and_reach_the_fenced_lift() {
     );
 }
 
-/// Parse a durable deadline column back to epoch milliseconds. `COLS` selects
-/// `queue_deadline::text`, so the value arrives in Postgres' text rendering of
-/// `timestamptz` (`2026-07-25 20:30:00.123456+00`), whose fractional part is
-/// omitted when it is zero.
+/// Parse a durable deadline column back to epoch milliseconds.
+///
+/// `BuildLeaseRepository`'s shared column list renders every `timestamptz` as
+/// RFC3339 in UTC with millisecond precision, which is the same representation
+/// callers bind on the way in. That is deliberately the only timestamp format
+/// this repository speaks, so this helper is the well-known parser and not a
+/// second, format-specific one.
 fn durable_deadline_ms(value: &str) -> i64 {
-    const FORMAT: &[time::format_description::BorrowedFormatItem<'_>] = time::macros::format_description!(
-        version = 2,
-        "[year]-[month]-[day] [hour]:[minute]:[second][optional [.[subsecond]]][offset_hour sign:mandatory]"
-    );
-    (time::OffsetDateTime::parse(value, FORMAT)
+    (time::OffsetDateTime::parse(value, &time::format_description::well_known::Rfc3339)
         .unwrap_or_else(|error| panic!("durable deadline `{value}` is not parseable: {error}"))
         .unix_timestamp_nanos()
         / 1_000_000) as i64
