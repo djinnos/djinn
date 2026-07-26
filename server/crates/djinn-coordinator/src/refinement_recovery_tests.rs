@@ -199,7 +199,6 @@ async fn recovery_hydrates_materialized_run_with_active_session_by_exact_run_id(
             task_id: Some(&task_id),
             model: "test/mock",
             agent_type: "adversary",
-            execution_context: None,
             metadata_json: None,
             task_run_id: None,
             pricing: None,

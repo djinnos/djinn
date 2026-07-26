@@ -740,7 +740,6 @@ pub async fn run_offline_fixture_replay(
                 task_id: Some(&task.id),
                 model: "offline/injected-fixture",
                 agent_type: "worker",
-                execution_context: None,
                 metadata_json: Some(&metadata),
                 task_run_id: None,
                 pricing: None,

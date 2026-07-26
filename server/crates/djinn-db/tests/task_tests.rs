@@ -5,7 +5,7 @@
 //! instance (see `djinn_db::Database::open_in_memory`).
 
 pub(crate) use djinn_core::events::EventBus;
-pub(crate) use djinn_core::models::{Task, TaskStatus, TransitionAction};
+pub(crate) use djinn_core::models::{Task, TaskExecutionContext, TaskStatus, TransitionAction};
 pub(crate) use djinn_db::Database;
 pub(crate) use djinn_db::EpicRepository;
 pub(crate) use djinn_db::Error;
@@ -191,7 +191,6 @@ pub(crate) async fn create_test_session(
         task_id: Some(task_id),
         model: "test-model",
         agent_type: "worker",
-        execution_context: None,
         metadata_json: None,
         task_run_id: None,
         pricing: None,

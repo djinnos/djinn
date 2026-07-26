@@ -896,7 +896,6 @@ pub(crate) async fn execute_stage(
                 task_id: Some(task.id.clone()),
                 model: model_id.clone(),
                 agent_type: runtime_role_name.to_string(),
-                execution_context: None,
                 metadata_json: None,
                 task_run_id: Some(task_run_id.to_string()),
                 cost_basis_hint: billing_signal.map(|(hint, _)| hint),

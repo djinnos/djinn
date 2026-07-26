@@ -313,7 +313,6 @@ async fn materialize_running_session(
             task_id: Some(task_id),
             model: model_id,
             agent_type: "worker",
-            execution_context: None,
             metadata_json: None,
             task_run_id: None,
             pricing: None,

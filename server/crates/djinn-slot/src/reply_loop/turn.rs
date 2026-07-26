@@ -2466,7 +2466,6 @@ mod tests {
                 task_id: Some(&task.id),
                 model: "test-model",
                 agent_type: "worker",
-                execution_context: None,
                 metadata_json: None,
                 task_run_id: None,
                 pricing: None,

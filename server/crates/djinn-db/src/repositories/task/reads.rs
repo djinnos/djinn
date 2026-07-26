@@ -552,6 +552,12 @@ impl TaskRepository {
 
         // Clone task for mutation if we need to extend short_id
         let mut task = task.clone();
+        let execution_context = task
+            .execution_context
+            .as_ref()
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(|e| Error::InvalidData(format!("invalid task execution context: {e}")))?;
         let mut retry_count = 0;
         const MAX_RETRIES: usize = 3;
 
@@ -566,10 +572,10 @@ impl TaskRepository {
                     total_reopen_count,
                     intervention_count, last_intervention_at,
                     created_at, updated_at, closed_at,
-                    close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs, created_by_user_id, refinement_run_id, refinement_intent_id, refinement_generation, refinement_round, refinement_phase, refinement_role
+                    close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs, execution_context, created_by_user_id, refinement_run_id, refinement_intent_id, refinement_generation, refinement_round, refinement_phase, refinement_role
                  ) VALUES (
                     $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb,
-                    $13::jsonb, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26::jsonb, $27, $28, $29, $30, $31, $32, $33
+                    $13::jsonb, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26::jsonb, $27::jsonb, $28, $29, $30, $31, $32, $33, $34
                  )
                  ON CONFLICT (id) DO UPDATE SET
                     project_id          = EXCLUDED.project_id,
@@ -593,6 +599,7 @@ impl TaskRepository {
                     pr_url              = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN EXCLUDED.pr_url ELSE tasks.pr_url END,
                     merge_conflict_metadata = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN EXCLUDED.merge_conflict_metadata ELSE tasks.merge_conflict_metadata END,
                     memory_refs         = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN EXCLUDED.memory_refs ELSE tasks.memory_refs END,
+                    execution_context   = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN COALESCE(EXCLUDED.execution_context, tasks.execution_context) ELSE tasks.execution_context END,
                     created_by_user_id  = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN EXCLUDED.created_by_user_id ELSE tasks.created_by_user_id END,
                     refinement_run_id = CASE WHEN EXCLUDED.updated_at > tasks.updated_at THEN EXCLUDED.refinement_run_id ELSE tasks.refinement_run_id END,
                     refinement_intent_id = CASE WHEN EXCLUDED.updated_at > tasks.updated_at THEN EXCLUDED.refinement_intent_id ELSE tasks.refinement_intent_id END,
@@ -628,6 +635,7 @@ impl TaskRepository {
             .bind(&task.pr_url)
             .bind(&task.merge_conflict_metadata)
             .bind(&task.memory_refs)
+            .bind(&execution_context)
             .bind(&created_by_user_id)
             .bind(&task.refinement_run_id).bind(&task.refinement_intent_id).bind(task.refinement_generation).bind(task.refinement_round).bind(&task.refinement_phase).bind(&task.refinement_role)
             .execute(&mut *tx)
@@ -746,6 +754,12 @@ impl TaskRepository {
 
         // Clone task for mutation if we need to extend short_id
         let mut task = task.clone();
+        let execution_context = task
+            .execution_context
+            .as_ref()
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(|e| Error::InvalidData(format!("invalid task execution context: {e}")))?;
         let mut retry_count = 0;
         const MAX_RETRIES: usize = 3;
 
@@ -758,10 +772,10 @@ impl TaskRepository {
                     total_reopen_count,
                     intervention_count, last_intervention_at,
                     created_at, updated_at, closed_at,
-                    close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs, created_by_user_id, refinement_run_id, refinement_intent_id, refinement_generation, refinement_round, refinement_phase, refinement_role
+                    close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs, execution_context, created_by_user_id, refinement_run_id, refinement_intent_id, refinement_generation, refinement_round, refinement_phase, refinement_role
                  ) VALUES (
                     $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb,
-                    $13::jsonb, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26::jsonb, $27, $28, $29, $30, $31, $32, $33
+                    $13::jsonb, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26::jsonb, $27::jsonb, $28, $29, $30, $31, $32, $33, $34
                  )
                  ON CONFLICT (id) DO UPDATE SET
                     project_id          = EXCLUDED.project_id,
@@ -783,6 +797,7 @@ impl TaskRepository {
                     close_reason        = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN EXCLUDED.close_reason ELSE tasks.close_reason END,
                     merge_commit_sha    = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN EXCLUDED.merge_commit_sha ELSE tasks.merge_commit_sha END,
                     pr_url              = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN EXCLUDED.pr_url ELSE tasks.pr_url END,
+                    execution_context   = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN COALESCE(EXCLUDED.execution_context, tasks.execution_context) ELSE tasks.execution_context END,
                     created_by_user_id  = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN EXCLUDED.created_by_user_id ELSE tasks.created_by_user_id END,
                     refinement_run_id = CASE WHEN EXCLUDED.updated_at > tasks.updated_at THEN EXCLUDED.refinement_run_id ELSE tasks.refinement_run_id END,
                     refinement_intent_id = CASE WHEN EXCLUDED.updated_at > tasks.updated_at THEN EXCLUDED.refinement_intent_id ELSE tasks.refinement_intent_id END,
@@ -820,6 +835,7 @@ impl TaskRepository {
             .bind(&task.pr_url)
             .bind(&task.merge_conflict_metadata)
             .bind(&task.memory_refs)
+            .bind(&execution_context)
             .bind(&created_by_user_id)
             .bind(&task.refinement_run_id)
             .bind(&task.refinement_intent_id)

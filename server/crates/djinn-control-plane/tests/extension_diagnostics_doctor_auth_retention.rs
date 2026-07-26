@@ -234,7 +234,6 @@ async fn extension_diagnostics_doctor_auth_retention() {
             task_id: Some(&task.id),
             model: "test",
             agent_type: "worker",
-            execution_context: None,
             metadata_json: None,
             task_run_id: None,
             pricing: None,

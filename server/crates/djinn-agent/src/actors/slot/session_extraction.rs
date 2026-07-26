@@ -75,7 +75,6 @@ mod tests {
                 task_id: Some(&task.id),
                 model: "anthropic/claude-sonnet-4-20250514",
                 agent_type: "worker",
-                execution_context: None,
                 metadata_json: None,
                 task_run_id: Some(&task_run_id),
                 pricing: None,

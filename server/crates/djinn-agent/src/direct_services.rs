@@ -1211,7 +1211,6 @@ impl SupervisorServices for DirectServices {
                 task_id: params.task_id.as_deref(),
                 model: params.model.as_str(),
                 agent_type: params.agent_type.as_str(),
-                execution_context: None,
                 metadata_json: params.metadata_json.as_deref(),
                 task_run_id: params.task_run_id.as_deref(),
                 pricing: pricing.as_ref(),
@@ -1239,7 +1238,6 @@ impl SupervisorServices for DirectServices {
         session_id: String,
         task_id: String,
         agent_type: String,
-        execution_context: None,
         message: serde_json::Value,
     ) -> Result<(), String> {
         self.callbacks

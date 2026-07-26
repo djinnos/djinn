@@ -709,7 +709,6 @@ fn session_record(
         task_id: task_id.map(str::to_owned),
         model_id: model_id.into(),
         agent_type: agent_type.into(),
-        execution_context: None,
         started_at: started_at.into(),
         ended_at: None,
         status: "completed".into(),

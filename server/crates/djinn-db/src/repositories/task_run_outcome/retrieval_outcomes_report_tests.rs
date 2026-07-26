@@ -102,7 +102,6 @@ impl ReportFixture {
                 task_id: Some(&self.task_id),
                 model: "test-model",
                 agent_type: "worker",
-                execution_context: None,
                 metadata_json: None,
                 task_run_id: Some(run_id),
                 pricing: None,

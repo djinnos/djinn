@@ -99,7 +99,6 @@ async fn terminal_gate_latest_pr_removal_overrides_stale_pr_caller() {
             task_id: Some(&task.id),
             model: "openai/gpt-5.5",
             agent_type: "worker",
-            execution_context: None,
             metadata_json: None,
             task_run_id: None,
             pricing: None,

@@ -80,7 +80,6 @@ async fn list_sessions_filters_to_chat_agent_type() {
             task_id: Some(&task.id),
             model: "openai/gpt-4o-mini",
             agent_type: "worker",
-            execution_context: None,
             metadata_json: None,
             task_run_id: None,
             pricing: None,
