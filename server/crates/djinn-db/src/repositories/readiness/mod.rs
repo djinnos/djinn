@@ -3,8 +3,9 @@ use crate::{
     Error, Result,
     database::Database,
     repositories::task::{
-        ReadinessIdentificationTask, create_readiness_identification_task_in_transaction,
-        load_task_in_transaction,
+        ReadinessAreaAnalysisTask, ReadinessIdentificationTask,
+        create_readiness_area_analysis_task_in_transaction,
+        create_readiness_identification_task_in_transaction, load_task_in_transaction,
     },
 };
 use djinn_core::models::Task;
@@ -24,6 +25,104 @@ pub struct ReadinessRunRow {
     pub expected_area_count: Option<i32>,
     pub created_at: String,
     pub completed_at: Option<String>,
+}
+
+/// Complete untrusted output from the identification Architect task.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ReadinessIdentificationOutput {
+    pub areas: Vec<ReadinessIdentifiedArea>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ReadinessIdentifiedArea {
+    pub area_key: String,
+    pub path_scopes: Vec<String>,
+    pub languages: Vec<String>,
+    pub roles: Vec<String>,
+    pub frameworks: Vec<String>,
+    pub key_libraries: Vec<String>,
+    pub confidence: f64,
+    pub evidence: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ReadinessAreaFanout {
+    pub area: ReadinessCompositionAreaRow,
+    pub attempt: ReadinessAreaAttemptRow,
+    pub task: Task,
+}
+
+/// Pure validation rejects rather than silently normalizing output, preserving
+/// exact reproducible frozen composition.
+pub fn validate_identification_output(
+    output: ReadinessIdentificationOutput,
+) -> std::result::Result<Vec<ReadinessIdentifiedArea>, String> {
+    if output.areas.is_empty() {
+        return Err("identification output must contain at least one area".into());
+    }
+    let mut keys = std::collections::HashSet::new();
+    for area in &output.areas {
+        let key = area.area_key.as_bytes();
+        if key.is_empty()
+            || !key[0].is_ascii_lowercase()
+            || !key
+                .iter()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'_' || *b == b'-')
+            || !keys.insert(&area.area_key)
+        {
+            return Err(format!(
+                "invalid or duplicate stable area_key: {}",
+                area.area_key
+            ));
+        }
+        if area.path_scopes.is_empty()
+            || area
+                .path_scopes
+                .iter()
+                .any(|scope| !valid_repo_relative_scope(scope))
+        {
+            return Err(format!("area {} has an invalid path scope", area.area_key));
+        }
+        for (name, values) in [
+            ("languages", &area.languages),
+            ("roles", &area.roles),
+            ("frameworks", &area.frameworks),
+            ("key_libraries", &area.key_libraries),
+        ] {
+            if !normalized_unique(values) {
+                return Err(format!(
+                    "area {} has unnormalized or duplicate {name}",
+                    area.area_key
+                ));
+            }
+        }
+        if !area.confidence.is_finite() || !(0.0..=1.0).contains(&area.confidence) {
+            return Err(format!("area {} has invalid confidence", area.area_key));
+        }
+        if area.evidence.is_empty() || area.evidence.iter().any(|value| value.trim().is_empty()) {
+            return Err(format!("area {} must include evidence", area.area_key));
+        }
+    }
+    Ok(output.areas)
+}
+
+fn normalized_unique(values: &[String]) -> bool {
+    let mut seen = std::collections::HashSet::new();
+    values
+        .iter()
+        .all(|value| !value.is_empty() && value.trim() == value && seen.insert(value))
+}
+fn valid_repo_relative_scope(scope: &str) -> bool {
+    let bytes = scope.as_bytes();
+    !scope.trim().is_empty()
+        && scope.trim() == scope
+        && !scope.starts_with('/')
+        && !scope.starts_with('\\')
+        && !(bytes.len() >= 3
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && (bytes[2] == b'/' || bytes[2] == b'\\'))
+        && !scope.split(['/', '\\']).any(|segment| segment == "..")
 }
 #[derive(Clone, Debug)]
 pub struct MaterializeReadinessKickoff {
@@ -196,6 +295,99 @@ impl ReadinessRepository {
             run,
             identification_task,
         })
+    }
+    pub async fn complete_identification(
+        &self,
+        run_id: &str,
+        creator_user_id: &str,
+        output: ReadinessIdentificationOutput,
+    ) -> Result<Vec<ReadinessAreaFanout>> {
+        self.db.ensure_initialized().await?;
+        let validated = validate_identification_output(output);
+        let mut tx = self.db.pool().begin().await?;
+        let run: ReadinessRunRow = sqlx::query_as("SELECT id,project_id,idempotency_key,status,repository_snapshot,skill_name,skill_version,expected_area_count,created_at,completed_at FROM readiness_runs WHERE id=$1 FOR UPDATE").bind(run_id).fetch_optional(&mut *tx).await?.ok_or_else(|| Error::InvalidData("readiness run not found".into()))?;
+        if run.status != "identifying" {
+            return Err(Error::InvalidTransition(
+                "readiness run is not identifying".into(),
+            ));
+        }
+        let areas = match validated {
+            Ok(areas) => areas,
+            Err(reason) => {
+                Self::fail_identification_tx(&mut tx, &run.id, &reason).await?;
+                tx.commit().await?;
+                return Err(Error::InvalidData(reason));
+            }
+        };
+        let count = i32::try_from(areas.len())
+            .map_err(|_| Error::InvalidData("too many readiness areas".into()))?;
+        let mut fanout = Vec::with_capacity(areas.len());
+        for identified in areas {
+            let composition = serde_json::json!({"languages":identified.languages,"roles":identified.roles,"frameworks":identified.frameworks,"key_libraries":identified.key_libraries,"confidence":identified.confidence,"evidence":identified.evidence});
+            let scopes = serde_json::to_value(&identified.path_scopes)
+                .map_err(|error| Error::InvalidData(error.to_string()))?;
+            let area: ReadinessCompositionAreaRow = sqlx::query_as("INSERT INTO readiness_composition_areas (id,run_id,area_key,composition,path_scopes) VALUES ($1,$2,$3,$4,$5) RETURNING id,run_id,area_key,composition,path_scopes,frozen_at,status").bind(Uuid::now_v7().to_string()).bind(&run.id).bind(&identified.area_key).bind(&composition).bind(&scopes).fetch_one(&mut *tx).await?;
+            let attempt: ReadinessAreaAttemptRow = sqlx::query_as("INSERT INTO readiness_area_attempts (id,run_id,area_id,attempt_number,correlation_key) VALUES ($1,$2,$3,1,$4) RETURNING id,run_id,area_id,attempt_number,correlation_key,status,payload_digest,created_at,terminal_at").bind(Uuid::now_v7().to_string()).bind(&run.id).bind(&area.id).bind(Uuid::now_v7().to_string()).fetch_one(&mut *tx).await?;
+            let task = create_readiness_area_analysis_task_in_transaction(
+                &mut tx,
+                ReadinessAreaAnalysisTask {
+                    project_id: &run.project_id,
+                    creator_user_id,
+                    run_id: &run.id,
+                    area_id: &area.id,
+                    area_key: &area.area_key,
+                    attempt_id: &attempt.id,
+                    attempt_number: 1,
+                    correlation_key: &attempt.correlation_key,
+                    repository_snapshot: &run.repository_snapshot,
+                    skill_name: &run.skill_name,
+                    skill_version: &run.skill_version,
+                    composition: &area.composition,
+                    path_scopes: &area.path_scopes,
+                },
+            )
+            .await?;
+            fanout.push(ReadinessAreaFanout {
+                area,
+                attempt,
+                task,
+            });
+        }
+        sqlx::query(
+            "UPDATE readiness_runs SET status='analyzing',expected_area_count=$1 WHERE id=$2",
+        )
+        .bind(count)
+        .bind(&run.id)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query("INSERT INTO readiness_run_events (id,run_id,event_kind,payload) VALUES ($1,$2,'identification_completed',$3)").bind(Uuid::now_v7().to_string()).bind(&run.id).bind(serde_json::json!({"expected_area_count":count})).execute(&mut *tx).await?;
+        tx.commit().await?;
+        Ok(fanout)
+    }
+    pub async fn fail_identification(&self, run_id: &str, reason: &str) -> Result<()> {
+        self.db.ensure_initialized().await?;
+        let mut tx = self.db.pool().begin().await?;
+        let status: Option<String> =
+            sqlx::query_scalar("SELECT status FROM readiness_runs WHERE id=$1 FOR UPDATE")
+                .bind(run_id)
+                .fetch_optional(&mut *tx)
+                .await?;
+        if status.as_deref() != Some("identifying") {
+            return Err(Error::InvalidTransition(
+                "readiness run is not identifying".into(),
+            ));
+        }
+        Self::fail_identification_tx(&mut tx, run_id, reason).await?;
+        tx.commit().await
+    }
+    async fn fail_identification_tx(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        run_id: &str,
+        reason: &str,
+    ) -> Result<()> {
+        sqlx::query("UPDATE readiness_runs SET status='failed',completed_at=to_char(now() AT TIME ZONE 'utc','YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') WHERE id=$1").bind(run_id).execute(&mut **tx).await?;
+        sqlx::query("INSERT INTO readiness_run_events (id,run_id,event_kind,payload) VALUES ($1,$2,'identification_failed',$3)").bind(Uuid::now_v7().to_string()).bind(run_id).bind(serde_json::json!({"reason":reason})).execute(&mut **tx).await?;
+        Ok(())
     }
     pub async fn create_run(&self, i: CreateReadinessRun) -> Result<ReadinessRunRow> {
         self.db.ensure_initialized().await?;
