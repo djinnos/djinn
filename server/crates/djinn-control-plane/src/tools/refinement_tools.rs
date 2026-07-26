@@ -20,10 +20,10 @@ use crate::tools::proposal_ops::{
     ProposalRefinementStartResponse, ProposalRefinementStatusModel,
     ProposalRefinementStatusResponse, VerdictOverrideResponse,
 };
+use crate::tools::refinement_helpers::validate_demand_evidence;
 pub use crate::tools::refinement_helpers::{
     ProposalRefinementDemandEvidenceParams, build_refinement_status,
 };
-use crate::tools::refinement_helpers::validate_demand_evidence;
 use djinn_core::models::{NeedsEvidenceClaim, TaskStatus, TransitionAction};
 use djinn_db::{
     AdmitRefinementRunRequest, EffectiveCreatorProvenance, NeedsEvidenceClaimLink,
@@ -102,6 +102,10 @@ pub struct ProposalRefinementStartParams {
     /// resolution. Omit to attribute the run to the proposal author.
     #[serde(default)]
     pub owner_user_id: Option<String>,
+    /// Stable caller-generated identity for this start request. Reuse it when
+    /// retrying the same request; omit it for a new independent start.
+    #[serde(default)]
+    pub request_id: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -116,6 +120,10 @@ pub struct ProposalRefinementDemandRoundParams {
     pub proposal_id: String,
     /// Why another round is being demanded. Recorded in proposal history.
     pub reason: Option<String>,
+    /// Stable caller-generated identity for this demand. Reuse it when
+    /// retrying the same request; omit it for a new independent demand.
+    #[serde(default)]
+    pub request_id: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -217,14 +225,23 @@ impl DjinnMcpServer {
             .owner_user_id
             .clone()
             .or_else(|| proposal.author_user_id.clone());
+        // Preserve caller retries while giving each independently submitted start
+        // a distinct durable key, even when attributed to the same actor.
+        let request_id = p
+            .request_id
+            .clone()
+            .unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
         let pending_dispatch = match admit_refinement_run(
             self,
             &repo,
             &proposal.id,
             RefinementAdmissionSource::ExplicitStart {
-                actor: refinement_owner_user_id
-                    .clone()
-                    .unwrap_or_else(|| "proposal-author".to_owned()),
+                actor: format!(
+                    "{}:request:{request_id}",
+                    refinement_owner_user_id
+                        .clone()
+                        .unwrap_or_else(|| "proposal-author".to_owned())
+                ),
             },
         )
         .await
@@ -339,24 +356,12 @@ impl DjinnMcpServer {
             });
         }
 
-        // Protect against true duplicate active loops. Parked awaiting-review
-        // refinements are intentionally allowed: the fresh refinement_start
-        // below transitions the lifecycle back into an active rerun and the
-        // coordinator demand path is invoked exactly once.
-        if current_refinement.active && !current_refinement.awaiting_review {
-            return Json(DemandRoundResponse {
-                proposal_id: Some(proposal.id),
-                accepted: false,
-                refinement: Some(current_refinement),
-                error: Some("refinement is already active for this proposal".to_string()),
-            });
-        }
+        // The repository is the sole live/stale authority. Do not derive an
+        // admission rejection from legacy lifecycle rows here.
 
         // Same missing-target blind spot as refinement_start: a demanded round
         // dispatches a fresh tribunal task, which needs a target project. Reject
-        // fast here rather than terminating with an opaque agent_failure. Checked
-        // after the duplicate-active guard so a genuinely-active proposal still
-        // reports "already active" first.
+        // fast here rather than terminating with an opaque agent_failure.
         match repo.targets(&proposal.id).await {
             Ok(targets) if !targets.is_empty() => {}
             Ok(_) => {
@@ -381,10 +386,14 @@ impl DjinnMcpServer {
             }
         }
 
-        let demand_id = p
-            .reason
+        let request_id = p
+            .request_id
             .clone()
-            .unwrap_or_else(|| "unspecified-demand".to_owned());
+            .unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
+        let demand_id = format!(
+            "reason:{}:request:{request_id}",
+            p.reason.as_deref().unwrap_or("unspecified-demand")
+        );
         let pending_dispatch = match admit_refinement_run(
             self,
             &repo,

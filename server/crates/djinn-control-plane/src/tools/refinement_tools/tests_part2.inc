@@ -558,6 +558,27 @@
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn demand_round_uses_repository_and_replays_same_request() {
+        let (server, db) = test_server().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let proposal = repo.create(ProposalCreateInput {
+            title: "Repository demand", body: "body", acceptance_criteria: Some("[]"),
+            status: Some("draft"), body_format: None,
+        }).await.unwrap();
+        link_proposal_to_project(&db, &repo, &proposal.id).await;
+        // A legacy active row must not short-circuit repository admission.
+        repo.record_refinement_lifecycle(&proposal.id, "refinement_start", None).await.unwrap();
+        for _ in 0..2 {
+            let response = server.dispatch_tool("proposal_refinement_demand_round", serde_json::json!({
+                "proposal_id": proposal.id, "reason": "fresh durable demand",
+                "request_id": "demand-request-019f"
+            })).await.unwrap();
+            assert_eq!(response["accepted"], true);
+        }
+        assert_eq!(repo.load_refinement_run_aggregates(&proposal.id, 60_000).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn demand_round_rejects_true_duplicate_active_refinement() {
         let (server, db) = test_server().await;
         let repo = ProposalRepository::new(db.clone(), EventBus::noop());
@@ -572,9 +593,13 @@
             .await
             .unwrap();
 
-        repo.record_refinement_lifecycle(&proposal.id, "refinement_start", None)
-            .await
-            .unwrap();
+        link_proposal_to_project(&db, &repo, &proposal.id).await;
+        repo.reap_and_admit(djinn_db::AdmitRefinementRunRequest {
+            proposal_id: proposal.id.clone(),
+            idempotency_key: "existing-live-demand".to_owned(),
+            source: djinn_db::RefinementAdmissionSource::Demand { demand_id: "already-running".to_owned() },
+            heartbeat_grace_millis: 60_000,
+        }).await.unwrap();
 
         let resp = server
             .dispatch_tool(

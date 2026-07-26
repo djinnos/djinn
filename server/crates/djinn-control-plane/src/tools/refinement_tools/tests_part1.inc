@@ -217,190 +217,39 @@
         );
     }
 
-    /// Test that when the coordinator rejects the refinement start (e.g.
-    /// duplicate active run), the error is propagated through the response
-    /// and a `refinement_stop` lifecycle entry is recorded.
+    /// A failed post-commit wake remains a successful durable admission and
+    /// never fabricates a lifecycle stop. Replaying the same request id returns
+    /// the existing run rather than creating a second generation.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn refinement_start_propagates_coordinator_error_and_records_stop() {
-        use crate::bridge::CoordinatorOps;
-        use async_trait::async_trait;
-
-        /// Coordinator stub that always rejects refinement starts.
-        struct RejectingCoordinator;
-        #[async_trait]
-        impl CoordinatorOps for RejectingCoordinator {
-            fn get_status(&self) -> Result<crate::bridge::CoordinatorStatus, String> {
-                Err("not initialized".into())
-            }
-            async fn trigger_dispatch_for_project(&self, _: &str) -> Result<(), String> {
-                Err("not initialized".into())
-            }
-            async fn start_proposal_refinement(
-                &self,
-                _: crate::bridge::ProposalRefinementStartRequest,
-            ) -> Result<(), String> {
-                Err("duplicate refinement active".to_string())
-            }
-            async fn demand_proposal_refinement_round(
-                &self,
-                _: crate::bridge::ProposalRefinementStartRequest,
-            ) -> Result<(), String> {
-                Err("refinement still active".to_string())
-            }
-            async fn resolve_refinement_review(
-                &self,
-                _: String,
-                _: bool,
-                _: Option<String>,
-            ) -> Result<(), String> {
-                Err("no refinement awaiting review".to_string())
-            }
-            async fn record_supervisor_rework_reopen(
-                &self,
-                _: &str,
-                _: &djinn_core::models::TransitionAction,
-                _: Option<&str>,
-            ) {
-            }
-        }
-
+    async fn refinement_start_wake_failure_is_pending_and_same_request_is_idempotent() {
         let db = Database::open_in_memory().unwrap();
         db.ensure_initialized().await.unwrap();
-        let state = crate::state::stubs::test_mcp_state(db.clone());
-        // Override the coordinator to one that rejects.
-        let state = crate::state::McpState::with_enrichment(
-            db.clone(),
-            state.event_bus(),
-            state.catalog().clone(),
-            state.health_tracker().clone(),
-            state.retrieval_config(),
-            state.retrieval_metrics(),
-            Some(Arc::new(RejectingCoordinator) as Arc<dyn CoordinatorOps>),
-            None,
-            None,
-            None,
-            state.lsp().clone(),
-            Arc::new(crate::state::stubs::StubRuntimeOps),
-            Arc::new(crate::state::stubs::StubGitOps),
-            Arc::new(crate::state::stubs::StubRepoGraphOps),
-            None,
-        );
-        let server = DjinnMcpServer::new(state);
-
-        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
-        let proposal = repo
-            .create(ProposalCreateInput {
-                title: "Reject Test",
-                body: "body",
-                acceptance_criteria: Some("[]"),
-                status: None,
-                body_format: None,
-            })
-            .await
-            .unwrap();
-        link_proposal_to_project(&db, &repo, &proposal.id).await;
-
-        let resp = server
-            .dispatch_tool(
-                "proposal_refinement_start",
-                serde_json::json!({ "proposal_id": proposal.id }),
-            )
-            .await
-            .expect("tool should be registered");
-
-        let error = resp.get("error").and_then(|v| v.as_str()).unwrap();
-        assert!(
-            error.contains("coordinator rejected refinement start"),
-            "should mention coordinator rejection: {error}"
-        );
-        assert!(
-            error.contains("duplicate refinement active"),
-            "should include the coordinator error message: {error}"
-        );
-
-        // Verify a refinement_stop lifecycle entry was recorded.
-        let revisions = repo.revisions(&proposal.id).await.unwrap();
-        let starts: Vec<_> = revisions
-            .iter()
-            .filter(|r| r.event_kind == "refinement_start")
-            .collect();
-        let stops: Vec<_> = revisions
-            .iter()
-            .filter(|r| r.event_kind == "refinement_stop")
-            .collect();
-        assert_eq!(starts.len(), 1, "expected one refinement_start");
-        assert_eq!(stops.len(), 1, "expected one refinement_stop");
-        // The stop metadata should include the error reason.
-        let stop_meta: serde_json::Value =
-            serde_json::from_str(stops[0].event_metadata.as_deref().unwrap_or("{}")).unwrap();
-        assert_eq!(
-            stop_meta.get("source").and_then(|v| v.as_str()),
-            Some("coordinator_start_failure")
-        );
-    }
-
-    /// Test that when the coordinator is not wired (None), the tool records
-    /// a refinement_stop and returns an error rather than leaving a dangling
-    /// lifecycle entry.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn refinement_start_records_stop_when_coordinator_unavailable() {
-        let db = Database::open_in_memory().unwrap();
-        db.ensure_initialized().await.unwrap();
-        // Build McpState with no coordinator (None).
         let state = crate::state::McpState::new(
-            db.clone(),
-            EventBus::noop(),
-            crate::state::stubs::test_mcp_state(db.clone())
-                .catalog()
-                .clone(),
-            crate::state::stubs::test_mcp_state(db.clone())
-                .health_tracker()
-                .clone(),
-            None, // no coordinator
-            None,
-            None,
-            None,
+            db.clone(), EventBus::noop(),
+            crate::state::stubs::test_mcp_state(db.clone()).catalog().clone(),
+            crate::state::stubs::test_mcp_state(db.clone()).health_tracker().clone(),
+            None, None, None, None,
             Arc::new(crate::state::stubs::StubLspOps),
             Arc::new(crate::state::stubs::StubRuntimeOps),
             Arc::new(crate::state::stubs::StubGitOps),
             Arc::new(crate::state::stubs::StubRepoGraphOps),
         );
         let server = DjinnMcpServer::new(state);
-
         let repo = ProposalRepository::new(db.clone(), EventBus::noop());
-        let proposal = repo
-            .create(ProposalCreateInput {
-                title: "No Coordinator Test",
-                body: "body",
-                acceptance_criteria: Some("[]"),
-                status: None,
-                body_format: None,
-            })
-            .await
-            .unwrap();
+        let proposal = repo.create(ProposalCreateInput {
+            title: "Wake pending", body: "body", acceptance_criteria: Some("[]"),
+            status: None, body_format: None,
+        }).await.unwrap();
         link_proposal_to_project(&db, &repo, &proposal.id).await;
-
-        let resp = server
-            .dispatch_tool(
-                "proposal_refinement_start",
-                serde_json::json!({ "proposal_id": proposal.id }),
-            )
-            .await
-            .expect("tool should be registered");
-
-        let error = resp.get("error").and_then(|v| v.as_str()).unwrap();
-        assert!(
-            error.contains("coordinator not available"),
-            "should mention coordinator unavailable: {error}"
-        );
-
-        // Verify the lifecycle was cleaned up.
-        let revisions = repo.revisions(&proposal.id).await.unwrap();
-        let stops: Vec<_> = revisions
-            .iter()
-            .filter(|r| r.event_kind == "refinement_stop")
-            .collect();
-        assert_eq!(stops.len(), 1, "expected one refinement_stop");
+        for _ in 0..2 {
+            let response = server.dispatch_tool("proposal_refinement_start", serde_json::json!({
+                "proposal_id": proposal.id, "request_id": "start-request-019f"
+            })).await.unwrap();
+            assert_eq!(response["error"], "accepted; dispatch pending");
+        }
+        assert_eq!(repo.load_refinement_run_aggregates(&proposal.id, 60_000).await.unwrap().len(), 1);
+        assert_eq!(repo.revisions(&proposal.id).await.unwrap().iter()
+            .filter(|revision| revision.event_kind == "refinement_stop").count(), 0);
     }
 
     // ── Full refinement happy path ────────────────────────────────────────────

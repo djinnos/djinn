@@ -226,3 +226,32 @@
             "error was: {err}"
         );
     }
+
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn revision_mutations_admit_without_extra_proposal_revisions() {
+        let (server, db) = test_server().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        for (id, tool, args, expected_body) in [
+            ("update", "proposal_update", serde_json::json!({ "body": "after update" }), "after update"),
+            ("patch", "proposal_block_patch", serde_json::json!({
+                "selector": { "exact_text": "before patch" }, "operation": "replace", "block_mdx": "after patch"
+            }), "after patch"),
+        ] {
+            let body = if id == "update" { "before update" } else { "before patch" };
+            let proposal = repo.create(ProposalCreateInput {
+                title: "Revision resume", body, acceptance_criteria: Some("[]"),
+                status: None, body_format: Some("markdown"),
+            }).await.unwrap();
+            let mut args = args;
+            args["id"] = serde_json::json!(proposal.id);
+            let response = server.dispatch_tool(tool, args).await.unwrap();
+            assert!(response["error"].is_null(), "{response:?}");
+            let stored = repo.get(&proposal.id).await.unwrap().unwrap();
+            assert_eq!(stored.body, expected_body);
+            assert_eq!(stored.latest_revision_seq, proposal.latest_revision_seq + 1);
+            assert_eq!(repo.revisions(&proposal.id).await.unwrap().iter()
+                .filter(|revision| revision.event_kind == "spec_revision").count(), 2);
+            assert_eq!(repo.load_refinement_run_aggregates(&proposal.id, 60_000).await.unwrap().len(), 1);
+        }
+    }
