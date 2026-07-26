@@ -246,11 +246,14 @@ fn command_spec(command: Command) -> io::Result<CommandSpec> {
 ///
 /// The fix keeps the allow-list closed and forwards through it:
 /// `djinn_cgroup_launcher::is_allowed_environment_key` is the single predicate,
-/// applied here as a convenience and re-applied inside the privileged broker by
-/// `CommandSpec::validate`, which is the actual control. Explicit per-command
-/// values win over inherited ones; the launcher then overrides the parallelism
-/// pins with values derived from the quota the leaf will really run at, because
-/// only it knows that.
+/// applied here as a convenience. The actual control is inside the privileged
+/// broker, in `CommandSpec::validate`, and it is the strictly stronger
+/// `is_allowed_environment_entry`: one forwardable name (`GIT_CONFIG_SYSTEM`)
+/// points at a *configuration file*, so it is judged by its value and not its
+/// key. Explicit per-command values win over inherited ones; the launcher then
+/// overrides the parallelism pins — and the git trust anchor — with values it
+/// derives itself, because only it knows the quota the leaf will really run at
+/// and only it owns a git config file that is safe to point a child at.
 fn child_environment(command: &Command) -> io::Result<Vec<(String, String)>> {
     use std::collections::BTreeMap;
 

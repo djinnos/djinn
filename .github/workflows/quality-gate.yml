@@ -562,6 +562,15 @@ jobs:
       # fewer than this many actually execute, so a lane that quietly runs zero
       # tests can never be mistaken for a proven kernel boundary.
       ZF13_EXPECTED_PROOFS: "4"
+      # Number of `#[ignore]`d proofs `brokered_git_trust.rs` declares. They are
+      # the only place the cross-UID git contract is proven for real — a
+      # worktree owned by the WORKER uid and `git status` run by a process that
+      # has `setresuid`'d to CHILD_UID, with no test hook standing in for the
+      # uid mismatch. The suite's always-on
+      # `the_privileged_git_proofs_are_wired_and_cannot_silently_skip` reads
+      # this file back and fails if this declaration or the run below
+      # disappears (task goxi, sixth launcher blocker).
+      GIT_TRUST_EXPECTED_PROOFS: "2"
       # Number of `#[ignore]`d proofs `delegated_cpu_lease_lifecycle.rs`
       # declares. That suite is the ONLY place the CPU lease is proven to
       # actually govern CPU — measured on `cpu.stat` over a wall-clock window
@@ -613,6 +622,7 @@ jobs:
           cargo test -p djinn-cgroup-launcher \
             --test kernel_boundary_under_rendered_context \
             --test delegated_cpu_lease_lifecycle \
+            --test brokered_git_trust \
             --no-run --message-format=json > "$RUNNER_TEMP/build.json"
           binary=$(jq -r 'select(.executable != null and .target.name == "kernel_boundary_under_rendered_context") | .executable' "$RUNNER_TEMP/build.json" | tail -1)
           if [ -z "$binary" ] || [ ! -x "$binary" ]; then
@@ -626,6 +636,12 @@ jobs:
             exit 1
           fi
           echo "lease=$lease" >> "$GITHUB_OUTPUT"
+          git_trust=$(jq -r 'select(.executable != null and .target.name == "brokered_git_trust") | .executable' "$RUNNER_TEMP/build.json" | tail -1)
+          if [ -z "$git_trust" ] || [ ! -x "$git_trust" ]; then
+            echo "::error::could not locate the built brokered git-trust proof binary"
+            exit 1
+          fi
+          echo "git_trust=$git_trust" >> "$GITHUB_OUTPUT"
       - name: Prove the kernel boundary under the rendered security context
         run: |
           set -euo pipefail
@@ -677,6 +693,31 @@ jobs:
             exit 1
           fi
           echo "::notice::per-invocation CPU lease proven: $passed/$LEASE_LIFECYCLE_EXPECTED_PROOFS privileged proofs executed"
+      - name: Prove a brokered child can run git in a worker-owned worktree
+        run: |
+          set -euo pipefail
+          # goxi's sixth launcher blocker. The always-on half of this suite uses
+          # git's own GIT_TEST_ASSUME_DIFFERENT_OWNER hook so it runs in every
+          # shard; the `#[ignore]`d half below needs uid 0 to make the mismatch
+          # REAL — a worktree chowned to the worker uid, and `git status` run by
+          # a process that has setgroups(0)/setresgid/setresuid'd to CHILD_UID,
+          # exactly as `child::prepare_child` does. It also measures the umask
+          # dependency: at the container default 022 the worktree renders 2755
+          # and the child cannot write it at all.
+          #
+          # git is not in the base image; the proofs assert its presence rather
+          # than degrading, so install it before handing over.
+          docker run --rm --privileged --cgroupns=private \
+            -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" \
+            ubuntu:24.04 \
+            bash -c 'set -e; apt-get update -qq; DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git >/dev/null; mkdir -p /workspace; exec "$0" --ignored --test-threads 1 --nocapture' \
+            "${{ steps.build.outputs.git_trust }}" 2>&1 | tee "$RUNNER_TEMP/git-trust.log"
+          passed=$(sed -n 's/^test result: ok\. \([0-9]*\) passed.*/\1/p' "$RUNNER_TEMP/git-trust.log" | tail -1)
+          if [ "${passed:-0}" != "$GIT_TRUST_EXPECTED_PROOFS" ]; then
+            echo "::error::the brokered git-trust lane executed ${passed:-0} proofs but $GIT_TRUST_EXPECTED_PROOFS are declared; the cross-UID git contract is NOT proven by this run"
+            exit 1
+          fi
+          echo "::notice::brokered git trust proven: $passed/$GIT_TRUST_EXPECTED_PROOFS privileged proofs executed"
   server-aarch64-check:
     name: Server aarch64 Check
     needs: preflight

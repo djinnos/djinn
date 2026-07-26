@@ -789,6 +789,16 @@ fn build_task_run_env(
     // trusted by `djinn_git::git_command`, which exports a protected
     // system-scope config file that survives into the child; see the
     // measurements in djinn-git/src/lib.rs.
+    //
+    // They do not cover a BROKERED command either. The launcher's environment
+    // allow-list refuses every `GIT_CONFIG_*` key deliberately: `GIT_CONFIG_KEY_n`
+    // /`VALUE_n` sets ARBITRARY configuration and several git keys
+    // (`core.sshCommand`, `core.pager`, …) are arbitrary command execution, so
+    // forwarding them would hand every brokered child a way out of the boundary
+    // the broker exists to establish. A brokered child gets `safe.directory`
+    // from a launcher-OWNED config file instead, exported as `GIT_CONFIG_SYSTEM`
+    // and admitted only at that exact path; see
+    // `djinn_cgroup_launcher::git_trust` (goxi, sixth launcher blocker).
     env.push(env_var("GIT_CONFIG_COUNT", "1"));
     env.push(env_var("GIT_CONFIG_KEY_0", "safe.directory"));
     env.push(env_var("GIT_CONFIG_VALUE_0", "*"));
