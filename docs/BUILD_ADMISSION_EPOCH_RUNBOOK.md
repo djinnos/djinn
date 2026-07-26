@@ -41,6 +41,8 @@ djinn-server epoch seed                  # create the row when it is ABSENT (ide
 djinn-server epoch advance --cap N       # perform the next safe FORWARD step
 djinn-server epoch set-cap --cap N        # change the reference cap (epoch-fenced)
 djinn-server epoch rollback --cap N        # perform the next safe ROLLBACK step
+                                           #   (defined from EVERY phase; see
+                                           #    "Aborting a forward overlap")
 djinn-server epoch kill-switch --cap N      # rollback from invocation-primary, urgent
 ```
 
@@ -239,12 +241,86 @@ task-run Pod**. Verify the pod, not the row.
 
 ## Aborting a forward overlap
 
-The phase machine is a strict forward cycle, so you cannot advance
-`forward_overlap` backward. If you must abort a cutover **before**
-`invocation_primary`, use `epoch set-cap`/mode change to set `v1 = off` while
-`v0` stays `enforce`: v0 remains the sole enforcing authority (safe, fail-closed)
-and no v1 quota is lifted. Re-arm shadow/overlap later to resume. A full reverse
-rollback (`rollback_overlap`) is only defined from `invocation_primary`.
+`djinn-server epoch rollback` handles this. It used to answer
+
+```
+no rollback step is defined from phase ForwardOverlap
+```
+
+which left an armed rollout with **no reverse gear**: the operator's only
+mitigation was setting `cgroupLauncher.mode: disabled` in Helm and redeploying
+while the durable row stayed at `forward_overlap` / `v1 enforce` (goxi launcher
+blocker 14, second defect). The workaround this section used to prescribe —
+"use `epoch set-cap`/mode change to set `v1 = off`" — named a command that does
+not exist: `set-cap` deliberately **preserves** the current modes, and there is
+no mode-setting subcommand.
+
+`rollback` now takes the correct step from every phase:
+
+| phase | `epoch rollback` does |
+| --- | --- |
+| `emergency_primary`, `v1 = off` | nothing — already at baseline |
+| `emergency_primary`, `v1 = shadow`/`enforce` | `abort_v1_arming`: set `v1 = off` |
+| `forward_overlap` | `abort_v1_arming`: set `v1 = off` |
+| `invocation_primary` | `arm_rollback`, then `enter_rollback_overlap` |
+| `rollback_overlap` | `complete_rollback` |
+
+### Why aborting the overlap is a mode change, not a phase move
+
+`AdmissionHandoffPhase` is a strict forward **ring** (`legal_next`:
+`emergency_primary → forward_overlap → invocation_primary → rollback_overlap →
+emergency_primary`) with no backward edge at the storage layer, so there is no
+"advance backward" to take.
+
+There does not need to be. Entering `forward_overlap` changes nothing but the
+phase, the epoch and the acks — `arm_overlap` already committed
+`v0 = enforce, v1 = enforce` while still in `emergency_primary`. The overlap's
+only semantic delta is that **v1 begins lifting quota**; v0 never stops
+enforcing. So the exact reverse of that delta is `v1 → off`, committed in place
+at the same phase. After it, `evaluate_invocation_lift` refuses to lift and the
+ring is left free to be driven forward again later (re-arm shadow/overlap to
+resume).
+
+Safety: `abort_v1_arming` requires `v0 = enforce` durably before it will touch
+v1, so the "at least one enforcing authority" invariant holds at every committed
+point. The write is the same epoch-fenced CAS as every other change and clears
+both acks, so the row is `IncompleteEpoch` — v0 `RequiredFailClosed`, v1
+`Unleased` — until the leader re-acknowledges. Fail-closed on both sides
+throughout. Re-running it is a no-op, so a retried rollback step converges.
+
+Unlike `complete_rollback` it does **not** wait for a v0 acknowledgement: it
+never releases an authority, only removes the one that is not primary, and an
+operator reaching for it is by definition aborting a cutover — blocking on an ack
+would withhold the reverse gear in exactly the incident it exists for.
+
+It is deliberately **refused** from `invocation_primary` and `rollback_overlap`
+(`InvalidTransition`): v0 may already be `observe` there, so disabling v1 in
+place could leave zero enforcing authorities. Those phases keep the three-step
+reverse ordering that re-confirms v0 first.
+
+## Alarm: refused cgroup lifts
+
+`djinn_build_admission_lift_rejected_total` counts authorized lifts the
+privileged launcher broker **refused**. Any non-zero value means armed
+invocations are running permanently clamped at the 250m unleased quota (a ~16x
+slowdown): the epoch authorized the escalation, the invocation held a matching
+durable grant, and the kernel-boundary control still came back refused.
+
+The runner **degrades** rather than failing the command — the child keeps running
+clamped — so this counter and its accompanying `tracing::error!`
+(`lease invocation lift REFUSED by the launcher broker`) are the only signal that
+the escalation path is broken. `djinn-agent-worker` exposes no `/metrics`
+endpoint, so in a task-run Pod the log line is what escapes; grep for it.
+
+The error carries a `ControlRejection` category naming *why* the broker refused
+(`Fence`, `Unarmed`, `AlreadyLifted`, `Terminal`, `Nonce`, …). Before goxi
+blocker 14 every refusal was reported as `InvalidControl` — which is a real and
+*different* broker error — and the misattribution cost the whole investigation.
+
+If the category is `Fence`, the worker's `BEGIN` and `LIFT` controls disagree
+about the invocation fence; see `djinn-agent/src/process_broker.rs`. If it is
+`Unarmed`, the leaf was born under an `Unleased` decision and no lift was ever
+possible for it, which points back at the epoch, not the launcher.
 
 ## Reading the shadow window
 

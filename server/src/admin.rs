@@ -23,6 +23,8 @@ use std::fmt::Write as _;
 use std::sync::Arc;
 
 use djinn_coordinator::build_admission_transition::{AdmissionTransitionExecutor, TransitionError};
+#[cfg(test)]
+use djinn_db::AdmissionHandoffAuthority;
 use djinn_db::{
     AdmissionHandoffPhase, AdmissionHandoffRepository, AdmissionHandoffRow, Database, V0Mode,
     V1Mode,
@@ -61,14 +63,18 @@ pub enum EpochAction {
         #[arg(long)]
         cap: i64,
     },
-    /// Perform the next safe ROLLBACK step from invocation-primary.
+    /// Perform the next safe ROLLBACK step. Defined from EVERY phase: from
+    /// invocation-primary/rollback-overlap it drives the three-step reverse
+    /// ordering that re-confirms v0 before releasing it; from an armed
+    /// emergency-primary or a forward-overlap — where v0 never stopped
+    /// enforcing — it aborts the cutover by setting v1 off in place.
     Rollback {
         /// Same-or-lower cap for the rollback arm; defaults to the current cap.
         #[arg(long)]
         cap: Option<i64>,
     },
-    /// Urgent rollback from invocation-primary — the same safe ordering as
-    /// `rollback`, initiated while v0 is still enforcing from the overlap.
+    /// Urgent rollback — the same safe ordering as `rollback`, initiated while
+    /// v0 is still enforcing from the overlap.
     KillSwitch {
         /// Same-or-lower cap for the rollback arm; defaults to the current cap.
         #[arg(long)]
@@ -188,7 +194,23 @@ async fn advance_rollback(
         AdmissionHandoffPhase::EmergencyPrimary if row.v1_mode == V1Mode::Off => {
             Ok("rollback complete: emergency-primary baseline (v0 enforce, v1 off)".to_string())
         }
-        phase => Err(format!("no rollback step is defined from phase {phase:?}")),
+        // A cutover that has NOT yet released v0 is aborted by disabling v1 in
+        // place, not by a phase move — the phase machine is a strict forward
+        // ring with no backward edge. This covers `forward_overlap` (where the
+        // only committed delta is "v1 lifts quota") and an `emergency_primary`
+        // row still carrying an armed shadow/overlap v1.
+        //
+        // Before this arm existed both fell through to
+        // `no rollback step is defined from phase ForwardOverlap`, so an
+        // operator who had advanced into the overlap had no epoch-level reverse
+        // gear at all: the documented workaround ("set v1 = off") named a
+        // command that did not exist, `set-cap` deliberately preserves modes,
+        // and the only remaining mitigation was disabling the launcher in Helm
+        // and redeploying while the durable row stayed armed. See
+        // `AdmissionTransitionExecutor::abort_v1_arming` for why this is safe.
+        AdmissionHandoffPhase::EmergencyPrimary | AdmissionHandoffPhase::ForwardOverlap => {
+            fold(exec.abort_v1_arming(epoch).await, "abort-v1-arming")
+        }
     }
 }
 
@@ -290,6 +312,90 @@ mod tests {
         .await
         .expect("arm shadow");
         assert!(rendered.starts_with("arm-shadow: applied"), "{rendered}");
+    }
+
+    /// goxi launcher blocker 14, second defect: `epoch rollback` must have a
+    /// step from **every** phase.
+    ///
+    /// It used to answer `no rollback step is defined from phase ForwardOverlap`,
+    /// so an operator who had advanced into the overlap had no epoch-level
+    /// reverse gear and had to disable the launcher in Helm and redeploy while
+    /// the durable row stayed armed. This drives the whole thing through the
+    /// **CLI dispatch** — `advance_rollback`'s phase table — which had no test at
+    /// all.
+    #[tokio::test]
+    async fn rollback_has_a_step_from_every_phase_including_the_forward_overlap() {
+        let db = Database::open_in_memory().expect("test database");
+        let repo = Arc::new(AdmissionHandoffRepository::new(db));
+        repo.read().await.expect("initialize fixture");
+
+        let advance = || EpochAction::Advance {
+            cap: Some(3),
+            generations: Vec::new(),
+        };
+        let rollback = || EpochAction::Rollback { cap: Some(3) };
+
+        // A rollback from an armed shadow (still emergency_primary) disables v1
+        // rather than erroring.
+        run_admin_command_with(&repo, advance())
+            .await
+            .expect("arm shadow");
+        let rendered = run_admin_command_with(&repo, rollback())
+            .await
+            .expect("an armed shadow must be abortable");
+        assert!(
+            rendered.starts_with("abort-v1-arming: applied"),
+            "{rendered}"
+        );
+        assert_eq!(
+            repo.read().await.expect("read").expect("row").v1_mode,
+            V1Mode::Off
+        );
+
+        // Drive forward into the overlap: shadow -> overlap modes -> the phase
+        // advance (which needs the leader's v0 ack).
+        for _ in 0..2 {
+            run_admin_command_with(&repo, advance())
+                .await
+                .expect("arm forward");
+        }
+        let epoch = repo.read().await.expect("read").expect("row").epoch;
+        repo.acknowledge(AdmissionHandoffAuthority::Emergency, epoch)
+            .await
+            .expect("leader acks v0");
+        let rendered = run_admin_command_with(&repo, advance())
+            .await
+            .expect("enter the forward overlap");
+        assert!(
+            rendered.starts_with("enter-forward-overlap: applied"),
+            "{rendered}"
+        );
+        let overlap = repo.read().await.expect("read").expect("row");
+        assert_eq!(overlap.phase, AdmissionHandoffPhase::ForwardOverlap);
+        assert_eq!(overlap.v1_mode, V1Mode::Enforce);
+
+        // THE regression: this returned
+        // `no rollback step is defined from phase ForwardOverlap`.
+        let rendered = run_admin_command_with(&repo, rollback())
+            .await
+            .expect("a forward overlap must be abortable; an armed rollout needs a reverse gear");
+        assert!(
+            rendered.starts_with("abort-v1-arming: applied"),
+            "{rendered}"
+        );
+        let aborted = repo.read().await.expect("read").expect("row");
+        assert_eq!(aborted.v1_mode, V1Mode::Off, "v1 must stop lifting");
+        assert_eq!(
+            aborted.v0_mode,
+            V0Mode::Enforce,
+            "v0 must still be enforcing, so an authority survives the abort"
+        );
+
+        // And the terminal answer is still reported rather than looping.
+        let rendered = run_admin_command_with(&repo, rollback())
+            .await
+            .expect("the baseline reports completion");
+        assert!(rendered.starts_with("abort-v1-arming"), "{rendered}");
     }
 
     async fn run_admin_command_with(

@@ -38,6 +38,14 @@
 //! replica ack, leaving both authorities enforcing and v1 un-disabled) →
 //! `complete_rollback` (disable v1 only after the overlap confirms v0 again).
 //! No transaction lifts or disables v1 quota before v0 is confirmed.
+//!
+//! That ordering starts at [`AdmissionHandoffPhase::InvocationPrimary`], because
+//! it exists to re-confirm v0 *before* releasing it. A cutover that has not got
+//! that far — `emergency_primary` with v1 armed, or `forward_overlap` — has
+//! nothing to re-confirm: v0 is still enforcing, and the only committed delta is
+//! that v1 lifts quota. [`AdmissionTransitionExecutor::abort_v1_arming`] reverses
+//! exactly that delta in place. The phase ring has no backward edge and does not
+//! need one.
 
 use std::sync::Arc;
 
@@ -374,6 +382,77 @@ impl AdmissionTransitionExecutor {
             .map_err(map_db)
     }
 
+    /// Abort a v1 arming that has not yet released v0, by setting v1 `Off`
+    /// **without a phase transition**.
+    ///
+    /// # Why this exists (goxi launcher blocker 14, second defect)
+    ///
+    /// `AdmissionHandoffPhase` is a strict forward ring
+    /// ([`AdmissionHandoffPhase::legal_next`]), so there is no backward edge to
+    /// take out of [`AdmissionHandoffPhase::ForwardOverlap`]. `epoch rollback`
+    /// only knew the three-step reverse ordering that starts at
+    /// `InvocationPrimary`, so an operator who had advanced into the forward
+    /// overlap got:
+    ///
+    /// ```text
+    /// no rollback step is defined from phase ForwardOverlap
+    /// ```
+    ///
+    /// An armed rollout with no reverse gear. The only mitigation left was to
+    /// disable the launcher in Helm and redeploy — which is exactly what
+    /// happened, while the durable row stayed at `ForwardOverlap`/`v1 Enforce`.
+    ///
+    /// # Why it is safe, and why it is not a phase transition
+    ///
+    /// Reaching `ForwardOverlap` changes nothing but the phase, the epoch and
+    /// the acks: `arm_overlap` already committed `v0 Enforce, v1 Enforce` while
+    /// still in `EmergencyPrimary`. The overlap's ONLY semantic delta is that v1
+    /// begins lifting quota; v0 never stops enforcing. So the reverse of that
+    /// delta is not a phase move at all — it is `v1 -> Off`, after which
+    /// `evaluate_invocation_lift` refuses to lift and the ring is left free to
+    /// be re-driven forward later. `v0` is required to be durably `Enforce`
+    /// first, so the "at least one enforcing authority" invariant holds at every
+    /// committed point; the write itself bumps the epoch and clears both acks,
+    /// so the row is `IncompleteEpoch` (v0 fail-closed, v1 unleased) until the
+    /// leader re-acknowledges — fail-closed on both sides throughout.
+    ///
+    /// Unlike [`Self::complete_rollback`] this does **not** wait for a v0
+    /// acknowledgement. It never releases an authority — it only removes the
+    /// one that is not primary — and the operator reaching for it is by
+    /// definition aborting a cutover, so blocking on an ack would withhold the
+    /// reverse gear in exactly the incident it exists for.
+    ///
+    /// Refused from `InvocationPrimary` and `RollbackOverlap`: v0 may already be
+    /// `Observe` there, so disabling v1 could leave zero enforcing authorities.
+    /// Those phases keep the three-step reverse ordering below.
+    pub async fn abort_v1_arming(
+        &self,
+        expected_epoch: i64,
+    ) -> Result<AdmissionHandoffRow, TransitionError> {
+        let row = self.current(expected_epoch).await?;
+        if !matches!(
+            row.phase,
+            AdmissionHandoffPhase::EmergencyPrimary | AdmissionHandoffPhase::ForwardOverlap
+        ) {
+            return Err(TransitionError::InvalidTransition(format!(
+                "v1 arming can only be aborted while v0 is still primary (emergency_primary or \
+                 forward_overlap); phase is {:?}, which requires the reverse rollback ordering",
+                row.phase
+            )));
+        }
+        if row.v0_mode != V0Mode::Enforce {
+            return Err(TransitionError::HaltedV0Unconfirmed { epoch: row.epoch });
+        }
+        if row.v1_mode == V1Mode::Off {
+            return Ok(row);
+        }
+        validate_config(V0Mode::Enforce, V1Mode::Off, row.cap)?;
+        self.repo
+            .set_modes_and_cap(expected_epoch, V0Mode::Enforce, V1Mode::Off, row.cap)
+            .await
+            .map_err(map_db)
+    }
+
     /// Advance `InvocationPrimary` → `RollbackOverlap` **only** after confirming
     /// v0 is enforcing with a controller-replica acknowledgement at the current
     /// epoch. If v0 is not confirmed this returns
@@ -659,6 +738,97 @@ mod tests {
             V1Mode::Off,
             "v1 disabled only after v0 confirmed"
         );
+    }
+
+    /// goxi blocker 14, second defect: a cutover that has reached
+    /// `ForwardOverlap` must have a reverse gear.
+    ///
+    /// `epoch rollback` answered `no rollback step is defined from phase
+    /// ForwardOverlap`, so an operator who had advanced into the overlap had no
+    /// epoch-level way back and had to disable the launcher in Helm and
+    /// redeploy while the durable row stayed armed. The reverse of the overlap
+    /// is not a phase move — the ring has no backward edge — it is `v1 -> Off`
+    /// in place.
+    #[tokio::test]
+    async fn a_forward_overlap_can_be_aborted_by_disabling_v1_in_place() {
+        let exec = executor().await;
+        let shadow = exec.arm_shadow(0, 3).await.unwrap();
+        let overlap_modes = exec.arm_overlap(shadow.epoch, 3).await.unwrap();
+        leader_acks_emergency(&exec).await;
+        let overlap = exec
+            .enter_forward_overlap(overlap_modes.epoch)
+            .await
+            .unwrap();
+        assert_eq!(overlap.phase, AdmissionHandoffPhase::ForwardOverlap);
+        assert_eq!(overlap.v1_mode, V1Mode::Enforce);
+
+        let aborted = exec.abort_v1_arming(overlap.epoch).await.unwrap();
+        assert_eq!(
+            aborted.v1_mode,
+            V1Mode::Off,
+            "the abort must stop v1 from lifting quota"
+        );
+        assert_eq!(
+            aborted.v0_mode,
+            V0Mode::Enforce,
+            "v0 never stops enforcing, so an enforcing authority survives the abort"
+        );
+        assert_eq!(
+            aborted.phase,
+            AdmissionHandoffPhase::ForwardOverlap,
+            "the phase ring is forward-only; the abort is a mode change, not a backward edge"
+        );
+        assert_eq!(aborted.cap, Some(3), "an abort must not change the cap");
+        assert!(
+            aborted.epoch > overlap.epoch,
+            "the abort is epoch-fenced like every other committed change"
+        );
+        // Re-running it is a no-op rather than an error, so a retried rollback
+        // step converges instead of failing an operator mid-incident.
+        let again = exec.abort_v1_arming(aborted.epoch).await.unwrap();
+        assert_eq!(again.epoch, aborted.epoch);
+        assert_eq!(again.v1_mode, V1Mode::Off);
+    }
+
+    /// The same abort covers an `emergency_primary` row still carrying an armed
+    /// shadow or overlap v1 — the other phase that fell into the
+    /// `no rollback step is defined` catch-all.
+    #[tokio::test]
+    async fn an_armed_shadow_can_be_aborted_before_the_overlap() {
+        let exec = executor().await;
+        let shadow = exec.arm_shadow(0, 3).await.unwrap();
+        assert_eq!(shadow.v1_mode, V1Mode::Shadow);
+        let aborted = exec.abort_v1_arming(shadow.epoch).await.unwrap();
+        assert_eq!(aborted.v1_mode, V1Mode::Off);
+        assert_eq!(aborted.v0_mode, V0Mode::Enforce);
+        assert_eq!(aborted.phase, AdmissionHandoffPhase::EmergencyPrimary);
+    }
+
+    /// The abort must NOT be reachable once v0 has been released: from
+    /// `InvocationPrimary`/`RollbackOverlap` v0 may already be observing, so
+    /// disabling v1 in place could leave zero enforcing authorities. Those
+    /// phases keep the three-step reverse ordering that re-confirms v0 first.
+    #[tokio::test]
+    async fn the_abort_is_refused_once_v0_has_been_released() {
+        let exec = executor().await;
+        let primary = cutover(&exec, 3, &[]).await;
+        assert!(matches!(
+            exec.abort_v1_arming(primary.epoch).await,
+            Err(TransitionError::InvalidTransition(_))
+        ));
+        let observed = exec.observe_v0(primary.epoch).await.unwrap();
+        assert_eq!(observed.v0_mode, V0Mode::Observe);
+        assert!(
+            matches!(
+                exec.abort_v1_arming(observed.epoch).await,
+                Err(TransitionError::InvalidTransition(_))
+            ),
+            "disabling v1 while v0 observes would leave no enforcing authority"
+        );
+        // And the row is untouched by the refusal.
+        let after = exec.show().await.unwrap().unwrap();
+        assert_eq!(after.epoch, observed.epoch);
+        assert_eq!(after.v1_mode, V1Mode::Enforce);
     }
 
     /// AC2 cap guard: a rollback must not raise the cap.
