@@ -1,0 +1,8 @@
+{
+  "name": "agent-readiness-guardrails",
+  "version": "1.0.0",
+  "trust_level": "platform",
+  "recommended_for_roles": ["architect"],
+  "required": true,
+  "runtime_delivery": "requires_typed_readiness_context_and_exact_version_pin"
+}
