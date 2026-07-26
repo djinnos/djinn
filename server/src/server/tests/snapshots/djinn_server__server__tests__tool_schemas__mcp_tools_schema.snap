@@ -26644,6 +26644,31 @@ expression: signatures
             "criterion"
           ],
           "type": "object"
+        },
+        "TaskExecutionContext": {
+          "description": "Explicit, durable execution metadata for a task. This is separate from the\nprompt-rendering `djinn_roles::prompts::TaskContext` and is never inferred\nfrom task text, labels, roles, or issue type.",
+          "oneOf": [
+            {
+              "properties": {
+                "kind": {
+                  "const": "readiness_guardrail_analysis",
+                  "type": "string"
+                },
+                "skill_name": {
+                  "type": "string"
+                },
+                "skill_version": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "skill_name",
+                "skill_version"
+              ],
+              "type": "object"
+            }
+          ]
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -26692,6 +26717,17 @@ expression: signatures
             "string",
             "null"
           ]
+        },
+        "execution_context": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TaskExecutionContext"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Explicit typed execution eligibility metadata. This is never inferred\nfrom task text, labels, roles, or issue type."
         },
         "issue_type": {
           "description": "Task type: \"task\" (default), \"feature\", \"bug\", \"spike\", \"research\", \"planning\", or \"review\".\nSpike, research, planning, and review use a simple lifecycle: open → in_progress → closed.\nPlanning tasks are routed to the Planner; spike and review tasks are routed to the Architect.",
@@ -27113,6 +27149,31 @@ expression: signatures
             }
           ]
         },
+        "TaskExecutionContext": {
+          "description": "Explicit, durable execution metadata for a task. This is separate from the\nprompt-rendering `djinn_roles::prompts::TaskContext` and is never inferred\nfrom task text, labels, roles, or issue type.",
+          "oneOf": [
+            {
+              "properties": {
+                "kind": {
+                  "const": "readiness_guardrail_analysis",
+                  "type": "string"
+                },
+                "skill_name": {
+                  "type": "string"
+                },
+                "skill_version": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "skill_name",
+                "skill_version"
+              ],
+              "type": "object"
+            }
+          ]
+        },
         "TaskListItem": {
           "properties": {
             "acceptance_criteria": {
@@ -27242,6 +27303,16 @@ expression: signatures
               "type": [
                 "string",
                 "null"
+              ]
+            },
+            "execution_context": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/TaskExecutionContext"
+                },
+                {
+                  "type": "null"
+                }
               ]
             },
             "id": {
@@ -27984,6 +28055,31 @@ expression: signatures
             "criterion"
           ],
           "type": "object"
+        },
+        "TaskExecutionContext": {
+          "description": "Explicit, durable execution metadata for a task. This is separate from the\nprompt-rendering `djinn_roles::prompts::TaskContext` and is never inferred\nfrom task text, labels, roles, or issue type.",
+          "oneOf": [
+            {
+              "properties": {
+                "kind": {
+                  "const": "readiness_guardrail_analysis",
+                  "type": "string"
+                },
+                "skill_name": {
+                  "type": "string"
+                },
+                "skill_version": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "skill_name",
+                "skill_version"
+              ],
+              "type": "object"
+            }
+          ]
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -28043,6 +28139,17 @@ expression: signatures
             "string",
             "null"
           ]
+        },
+        "execution_context": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TaskExecutionContext"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Complete replacement for explicit typed execution eligibility metadata.\nPartial JSON updates are not supported."
         },
         "id": {
           "description": "Task UUID or short_id.",

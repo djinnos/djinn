@@ -98,6 +98,17 @@ fn run() -> Result<(), MainError> {
         LauncherConfig::new(Some(unleased), Some(leased), expected_uid)?,
     )?;
 
+    // Readiness gate 4 — the git trust anchor. A brokered child runs as a uid
+    // that owns none of the pod's volumes, so without a protected-scope
+    // `safe.directory` rule EVERY git command it runs dies "detected dubious
+    // ownership". The rule has to be a launcher-owned config file, both because
+    // the environment form is an arbitrary-config injection primitive and
+    // because git strips it from the inner child of `git clone --local` (nurw).
+    // Establishing it here means a launcher that cannot write its own anchor
+    // fails readiness instead of taking work and then failing every git command
+    // in it (task grkq). See `djinn_cgroup_launcher::git_trust`.
+    djinn_cgroup_launcher::git_trust::anchor_path()?;
+
     // Read the worker handshake (private credential + PID) the worker writes into
     // the shared IPC mount at startup. The broker binds every control to that
     // authenticated (pid, credential) pair.

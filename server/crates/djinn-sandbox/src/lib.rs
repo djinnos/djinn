@@ -35,6 +35,26 @@ pub mod chat_shell;
 #[allow(unused_imports)]
 pub use chat_shell::{ChatShellError, ChatShellRequest, ChatShellResult, ChatShellSandbox};
 
+/// The `TMPDIR` every sandboxed shell command is given, overriding whatever the
+/// pod inherited.
+///
+/// Named here rather than spelled inline in the Linux backend because it is a
+/// **cross-boundary** fact, not a private detail. Two consumers depend on it:
+///
+/// * [`linux::LandlockSandbox`] sets it on the command AND grants it in the
+///   Landlock ruleset — the two must not drift, or every sandboxed `mktemp`
+///   writes somewhere the policy denies;
+/// * the task-run Pod renderer has to make it **writable in the cgroup-launcher
+///   container**, because a brokered command inherits this override through the
+///   broker (`TMPDIR` is on the forward allow-list) but executes in the
+///   launcher's mount namespace, where `readOnlyRootFilesystem: true` makes the
+///   image's `/var/tmp` unwritable. `djinn_k8s::launcher_child_fs` carries the
+///   matching mount and a guard asserts the two values are identical.
+///
+/// This is a spawn-time injection: it never appears in the rendered Pod
+/// manifest, which is exactly why a manifest-only guard could not see it.
+pub const SANDBOX_TMPDIR: &str = "/var/tmp";
+
 // ─── Trait ────────────────────────────────────────────────────────────────────
 
 /// Policy enforcement interface for agent shell calls.

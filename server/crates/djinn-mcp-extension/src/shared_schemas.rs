@@ -1,3 +1,7 @@
+// djinn:allow-oversize
+// This module centralizes the shared JSON-schema builders consumed by every
+// role-specific MCP tool surface; splitting those builders would duplicate
+// schema fragments and risk their generated golden snapshots drifting.
 use rmcp::model::Tool as RmcpTool;
 use rmcp::object;
 
@@ -861,7 +865,8 @@ pub fn tool_task_create() -> RmcpTool {
                 "status": {"type": "string"},
                 "parent_id": {"type": "string"},
                 "labels": {"type": "array", "items": {"type": "string"}},
-                "blocked_by": {"type": "array", "items": {"type": "string"}, "description": "Task IDs (UUID or short_id) that must complete before this task can be dispatched."}
+                "blocked_by": {"type": "array", "items": {"type": "string"}, "description": "Task IDs (UUID or short_id) that must complete before this task can be dispatched."},
+                "execution_context": {"type": "object", "description": "Optional explicit execution eligibility metadata. Only the complete readiness_guardrail_analysis context is accepted; it is never inferred from task text, labels, roles, or issue type.", "required": ["kind", "skill_name", "skill_version"], "properties": {"kind": {"type": "string", "const": "readiness_guardrail_analysis"}, "skill_name": {"type": "string", "minLength": 1}, "skill_version": {"type": "string", "minLength": 1}}, "additionalProperties": false}
             }
         }),
     )
@@ -888,7 +893,8 @@ pub fn tool_task_update() -> RmcpTool {
                 "memory_refs_add": {"type": "array", "items": {"type": "string"}},
                 "memory_refs_remove": {"type": "array", "items": {"type": "string"}},
                 "blocked_by_add": {"type": "array", "items": {"type": "string"}, "description": "Task IDs (UUID or short_id) to add as blockers. Task will not be dispatched until all blockers are resolved."},
-                "blocked_by_remove": {"type": "array", "items": {"type": "string"}, "description": "Task IDs (UUID or short_id) to remove as blockers."}
+                "blocked_by_remove": {"type": "array", "items": {"type": "string"}, "description": "Task IDs (UUID or short_id) to remove as blockers."},
+                "execution_context": {"type": "object", "description": "Complete replacement for explicit execution eligibility metadata. Partial JSON updates are not supported.", "required": ["kind", "skill_name", "skill_version"], "properties": {"kind": {"type": "string", "const": "readiness_guardrail_analysis"}, "skill_name": {"type": "string", "minLength": 1}, "skill_version": {"type": "string", "minLength": 1}}, "additionalProperties": false}
             }
         }),
     )

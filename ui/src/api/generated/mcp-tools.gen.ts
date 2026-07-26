@@ -12570,6 +12570,17 @@ export namespace TaskCountOutputSchema {
 export type TaskCountOutput = TaskCountOutputSchema.TaskCountOutput;
 export namespace TaskCreateInputSchema {
   export type AcceptanceCriterionItem = (string | AcceptanceCriterionStatus)
+  /**
+   * Explicit, durable execution metadata for a task. This is separate from the
+   * prompt-rendering `djinn_roles::prompts::TaskContext` and is never inferred
+   * from task text, labels, roles, or issue type.
+   */
+  export type TaskExecutionContext = {
+  kind: "readiness_guardrail_analysis"
+  skill_name: string
+  skill_version: string
+  [k: string]: any
+  }
 
   export interface TaskCreateInput {
   acceptance_criteria?: AcceptanceCriterionItem[]
@@ -12587,6 +12598,11 @@ export namespace TaskCreateInputSchema {
    * Parent epic ID - UUID or short_id (required).
    */
   epic_id?: string
+  /**
+   * Explicit typed execution eligibility metadata. This is never inferred
+   * from task text, labels, roles, or issue type.
+   */
+  execution_context?: (TaskExecutionContext | null)
   /**
    * Task type: "task" (default), "feature", "bug", "spike", "research", "planning", or "review".
    * Spike, research, planning, and review use a simple lifecycle: open → in_progress → closed.
@@ -12667,6 +12683,17 @@ export namespace TaskListInputSchema {
 export type TaskListInput = TaskListInputSchema.TaskListInput;
 export namespace TaskListOutputSchema {
   export type AcceptanceCriterionItem = (string | AcceptanceCriterionStatus)
+  /**
+   * Explicit, durable execution metadata for a task. This is separate from the
+   * prompt-rendering `djinn_roles::prompts::TaskContext` and is never inferred
+   * from task text, labels, roles, or issue type.
+   */
+  export type TaskExecutionContext = {
+  kind: "readiness_guardrail_analysis"
+  skill_name: string
+  skill_version: string
+  [k: string]: any
+  }
 
   export interface TaskListOutput {
   has_more: boolean
@@ -12743,6 +12770,7 @@ export namespace TaskListOutputSchema {
   description: string
   design: string
   epic_id?: string
+  execution_context?: (TaskExecutionContext | null)
   id: string
   intervention_count: number
   issue_type: string
@@ -13238,6 +13266,17 @@ export namespace TaskTransitionOutputSchema {
 export type TaskTransitionOutput = TaskTransitionOutputSchema.TaskTransitionOutput;
 export namespace TaskUpdateInputSchema {
   export type AcceptanceCriterionItem = (string | AcceptanceCriterionStatus)
+  /**
+   * Explicit, durable execution metadata for a task. This is separate from the
+   * prompt-rendering `djinn_roles::prompts::TaskContext` and is never inferred
+   * from task text, labels, roles, or issue type.
+   */
+  export type TaskExecutionContext = {
+  kind: "readiness_guardrail_analysis"
+  skill_name: string
+  skill_version: string
+  [k: string]: any
+  }
 
   export interface TaskUpdateInput {
   /**
@@ -13262,6 +13301,11 @@ export namespace TaskUpdateInputSchema {
    * New parent epic UUID or short_id.
    */
   epic_id?: string
+  /**
+   * Complete replacement for explicit typed execution eligibility metadata.
+   * Partial JSON updates are not supported.
+   */
+  execution_context?: (TaskExecutionContext | null)
   /**
    * Task UUID or short_id.
    */

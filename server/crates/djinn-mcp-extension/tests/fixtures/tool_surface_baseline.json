@@ -2659,6 +2659,30 @@
           "description": "Parent epic UUID or short ID",
           "type": "string"
         },
+        "execution_context": {
+          "additionalProperties": false,
+          "description": "Optional explicit execution eligibility metadata. Only the complete readiness_guardrail_analysis context is accepted; it is never inferred from task text, labels, roles, or issue type.",
+          "properties": {
+            "kind": {
+              "const": "readiness_guardrail_analysis",
+              "type": "string"
+            },
+            "skill_name": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "skill_version": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "skill_name",
+            "skill_version"
+          ],
+          "type": "object"
+        },
         "issue_type": {
           "description": "Task type: 'task' (default for worker-routed code work), 'planning' for epic metadata operations (epic_update, epic_close, memory_refs management, roadmap/AC changes, or other metadata-only maintenance), 'spike' for research, 'review' for code review. Use 'planning' when the work requires epic management tools or primarily updates epic metadata instead of code.",
           "type": "string"
@@ -2896,6 +2920,30 @@
         },
         "epic_id": {
           "type": "string"
+        },
+        "execution_context": {
+          "additionalProperties": false,
+          "description": "Complete replacement for explicit execution eligibility metadata. Partial JSON updates are not supported.",
+          "properties": {
+            "kind": {
+              "const": "readiness_guardrail_analysis",
+              "type": "string"
+            },
+            "skill_name": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "skill_version": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "skill_name",
+            "skill_version"
+          ],
+          "type": "object"
         },
         "id": {
           "description": "Task UUID or short ID",

@@ -18,6 +18,25 @@ pub(super) async fn board_health_impl(
     match repo.board_health(stale_hours).await {
         Ok(report) => match serde_json::from_value::<BoardHealthResponse>(report) {
             Ok(mut parsed) => {
+                // The refinement repository owns durable evidence reads and the
+                // shared evaluator; board health only attaches its projection.
+                let refinement_repo = djinn_db::ProposalRepository::new(
+                    server.state.db().clone(),
+                    server.state.event_bus(),
+                );
+                match refinement_repo
+                    .load_board_refinement_lifecycle_aggregate(60_000)
+                    .await
+                {
+                    Ok(aggregate) => {
+                        parsed.refinement_phantom_active_count = aggregate.stale_run_count;
+                        parsed.refinement_phantom_reaps_24h = aggregate.reaped_phantom_last_24h;
+                    }
+                    Err(error) => {
+                        return Json(ErrorOr::Error(ErrorResponse::new(error.to_string())));
+                    }
+                }
+
                 // Surface aggregate coordinator metrics (throughput + PR errors).
                 if let Some(coordinator) = server.state.coordinator().await
                     && let Ok(status) = coordinator.get_status()

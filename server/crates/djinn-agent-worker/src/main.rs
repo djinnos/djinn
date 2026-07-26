@@ -434,6 +434,32 @@ async fn run() -> Result<()> {
 /// Best-effort: failures are logged (never the token) and never fatal — public
 /// deps still resolve. The token is short-lived (~1h) and lives only in the
 /// Pod's HOME/go env for the run.
+///
+/// # Crossing the launcher boundary (goxi, ninth blocker)
+///
+/// Both writes below land in the **worker container**: `git config --global` in
+/// its `$HOME/.gitconfig`, `go env -w` in its `$HOME/.config/go/env`. When the
+/// cgroup launcher is armed, cargo/go/pnpm do not run in this container — they
+/// are born in the launcher's mount namespace, where `$HOME` is a different
+/// volume — so both were invisible to the very processes they exist for, and
+/// every private-dependency fetch went out unauthenticated and silently.
+///
+/// So each write is mirrored onto a channel the child can actually see:
+///
+/// * the git rewrite is ALSO written to [`CHILD_GIT_CONFIG_PATH_ENV`], an
+///   `emptyDir` file this container mounts read-write and the launcher mounts
+///   read-only, which `djinn_cgroup_launcher::git_trust` `[include]`s into the
+///   system-scope trust anchor it exports to every child;
+/// * `GOPRIVATE` is ALSO set on this process's own environment, which is how it
+///   reaches a brokered child: `process_broker::child_environment` forwards the
+///   inherited environment through `is_allowed_environment_key`, and `GOPRIVATE`
+///   is on that list. The OS environment beats the `go env` file, so this is
+///   what a brokered `go` actually reads.
+///
+/// The `--global` and `go env -w` writes are kept as-is: they serve this
+/// container's own git and the unbrokered path, and `#2617` deliberately left
+/// `$HOME/.gitconfig` as the token's home rather than redirecting
+/// `GIT_CONFIG_GLOBAL`.
 async fn configure_private_dep_access(spec: &TaskRunSpec) {
     let (Some(owner), Some(token)) = (
         spec.github_owner.as_deref(),
@@ -442,16 +468,13 @@ async fn configure_private_dep_access(spec: &TaskRunSpec) {
         return;
     };
 
-    // Global git credential rewrite. NOTE: never log `key` — it embeds the token.
+    // Global git credential rewrite. NOTE: never log `key` — it embeds the token,
+    // and neither does the ERROR: `GitError::CommandFailed` renders the argv, so
+    // both writes go through `djinn_git::exported_config`, which scrubs it.
     let key = format!("url.https://x-access-token:{token}@github.com/{owner}/.insteadOf");
     let value = format!("https://github.com/{owner}/");
-    match djinn_git::run_git_command_in(
-        std::path::Path::new("/"),
-        vec!["config".into(), "--global".into(), key, value],
-    )
-    .await
-    {
-        Ok(_) => {
+    match djinn_git::exported_config::publish_global(key.clone(), value.clone()).await {
+        Ok(()) => {
             info!(
                 owner,
                 "configure_private_dep_access: git insteadOf set for private deps"
@@ -462,10 +485,20 @@ async fn configure_private_dep_access(spec: &TaskRunSpec) {
         }
     }
 
+    write_child_git_config(owner, key, value).await;
+
     // GOPRIVATE for Go projects (no-op when `go` isn't installed — best-effort).
-    let goprivate = format!("GOPRIVATE=github.com/{owner}/*");
+    let goprivate = format!("github.com/{owner}/*");
+    // Forwarded to a brokered child through the broker's allow-list. Set BEFORE
+    // the `go env -w` attempt so a missing `go` binary cannot skip it.
+    //
+    // SAFETY: this worker mutates the process environment only during task-run
+    // startup, before it installs its signal/deadline/push background tasks or
+    // starts supervisor-driven command execution — the same window and the same
+    // reasoning as `set_cargo_target_dir_for_children`.
+    unsafe { std::env::set_var("GOPRIVATE", &goprivate) };
     match tokio::process::Command::new("go")
-        .args(["env", "-w", &goprivate])
+        .args(["env", "-w", &format!("GOPRIVATE={goprivate}")])
         .status()
         .await
     {
@@ -475,6 +508,41 @@ async fn configure_private_dep_access(spec: &TaskRunSpec) {
             owner,
             "configure_private_dep_access: `go env -w` skipped (go absent?)"
         ),
+    }
+}
+
+/// Env var naming the worker→child git config channel.
+///
+/// Imported from the launcher rather than duplicated: the launcher is the other
+/// end of this channel (its git trust anchor `[include]`s the file), and one
+/// shared constant is one fewer place for the two ends to drift. The RENDERER's
+/// copy (`djinn_k8s::private_dep_config`) is asserted equal to this one in
+/// `djinn-k8s/tests/launcher_child_runtime_handoff.rs`; djinn-k8s is only a
+/// dev-dependency here.
+use djinn_cgroup_launcher::git_trust::CHILD_GIT_CONFIG_PATH_ENV;
+
+/// Mirror the `url.insteadOf` rewrite onto the launcher-visible channel.
+///
+/// A pod rendered without the channel (launcher disabled) simply has no env var
+/// and skips this. The write itself — real `git config --file`, the parent
+/// directory, and the explicit mode a different-uid reader needs — lives in
+/// `djinn_git::exported_config` so it is exercised by tests that drive the
+/// production writer rather than a harness copy of it.
+async fn write_child_git_config(owner: &str, key: String, value: String) {
+    let Some(path) = std::env::var_os(CHILD_GIT_CONFIG_PATH_ENV) else {
+        return;
+    };
+    let path = std::path::PathBuf::from(path);
+    // NOTE: never log `key` — it embeds the token.
+    match djinn_git::exported_config::publish(&path, key, value).await {
+        Ok(()) => info!(
+            owner,
+            path = %path.display(),
+            "configure_private_dep_access: git insteadOf published to the brokered child"
+        ),
+        Err(e) => {
+            warn!(owner, error = %e, "configure_private_dep_access: child git config publish failed; brokered private deps will be unauthenticated")
+        }
     }
 }
 

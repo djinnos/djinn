@@ -452,6 +452,90 @@ pub const CLOSE_REASON_SUPERSEDED: &str = "superseded";
 /// Auto-dispatch of a new planning wave is suppressed on this reason.
 pub const CLOSE_REASON_DUPLICATE: &str = "duplicate";
 
+/// Explicit, durable execution metadata for a task. This is separate from the
+/// prompt-rendering `djinn_roles::prompts::TaskContext` and is never inferred
+/// from task text, labels, roles, or issue type.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, schemars::JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TaskExecutionContext {
+    ReadinessGuardrailAnalysis {
+        skill_name: String,
+        skill_version: String,
+    },
+}
+
+impl TaskExecutionContext {
+    pub fn readiness_guardrail_analysis(
+        skill_name: impl Into<String>,
+        skill_version: impl Into<String>,
+    ) -> Result<Self> {
+        let skill_name = skill_name.into();
+        let skill_version = skill_version.into();
+        if skill_name.trim().is_empty() || skill_version.trim().is_empty() {
+            return Err(Error::Internal(
+                "readiness guardrail skill_name and skill_version must be non-empty".into(),
+            ));
+        }
+        Ok(Self::ReadinessGuardrailAnalysis {
+            skill_name,
+            skill_version,
+        })
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum RawTaskExecutionContext {
+    ReadinessGuardrailAnalysis {
+        skill_name: String,
+        skill_version: String,
+    },
+}
+
+impl<'de> Deserialize<'de> for TaskExecutionContext {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        match RawTaskExecutionContext::deserialize(deserializer)? {
+            RawTaskExecutionContext::ReadinessGuardrailAnalysis {
+                skill_name,
+                skill_version,
+            } => Self::readiness_guardrail_analysis(skill_name, skill_version)
+                .map_err(serde::de::Error::custom),
+        }
+    }
+}
+
+#[cfg(feature = "sqlx")]
+impl sqlx::Type<sqlx::Postgres> for TaskExecutionContext {
+    fn type_info() -> sqlx::postgres::PgTypeInfo {
+        <sqlx::types::Json<serde_json::Value> as sqlx::Type<sqlx::Postgres>>::type_info()
+    }
+
+    fn compatible(ty: &sqlx::postgres::PgTypeInfo) -> bool {
+        <sqlx::types::Json<serde_json::Value> as sqlx::Type<sqlx::Postgres>>::compatible(ty)
+    }
+}
+
+#[cfg(feature = "sqlx")]
+impl<'r> sqlx::Decode<'r, sqlx::Postgres> for TaskExecutionContext {
+    fn decode(
+        value: sqlx::postgres::PgValueRef<'r>,
+    ) -> std::result::Result<Self, sqlx::error::BoxDynError> {
+        let value =
+            <sqlx::types::Json<serde_json::Value> as sqlx::Decode<sqlx::Postgres>>::decode(value)?
+                .0;
+        serde_json::from_value(value).map_err(|error| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("invalid tasks.execution_context: {error}"),
+            )
+            .into()
+        })
+    }
+}
+
 /// Task board work item, always scoped under an epic.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "sqlx", derive(sqlx::FromRow))]
@@ -494,6 +578,10 @@ pub struct Task {
     /// When set, the slot lifecycle loads this Agent instead of the project default.
     #[cfg_attr(feature = "sqlx", sqlx(default))]
     pub agent_type: Option<String>,
+    /// Explicit typed execution eligibility metadata. `None` preserves legacy
+    /// task rows that predate structured execution context.
+    #[cfg_attr(feature = "sqlx", sqlx(default))]
+    pub execution_context: Option<TaskExecutionContext>,
     /// Stable `users.id` of whoever created this task. Stamped from the
     /// session user at the MCP dispatch root; background/agent callers resolve
     /// provenance through the parent epic or proposal before persistence. The
@@ -2842,6 +2930,34 @@ mod tests {
                 "UserOverride must NOT target InLeadIntervention from {from:?}; \
                  LeadInterventionStart from NeedsLeadIntervention is the only entry"
             );
+        }
+    }
+    #[test]
+    fn readiness_execution_context_has_stable_validated_json() {
+        let context = TaskExecutionContext::readiness_guardrail_analysis(
+            "agent-readiness-guardrails",
+            "1.0.0",
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(&context).unwrap(),
+            serde_json::json!({
+                "kind": "readiness_guardrail_analysis",
+                "skill_name": "agent-readiness-guardrails",
+                "skill_version": "1.0.0",
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<TaskExecutionContext>(serde_json::to_value(&context).unwrap())
+                .unwrap(),
+            context
+        );
+        for malformed in [
+            serde_json::json!({"kind": "readiness_guardrail_analysis", "skill_name": "", "skill_version": "1.0.0"}),
+            serde_json::json!({"kind": "readiness_guardrail_analysis", "skill_name": "skill", "skill_version": " "}),
+            serde_json::json!({"kind": "unknown", "skill_name": "skill", "skill_version": "1.0.0"}),
+        ] {
+            assert!(serde_json::from_value::<TaskExecutionContext>(malformed).is_err());
         }
     }
 }

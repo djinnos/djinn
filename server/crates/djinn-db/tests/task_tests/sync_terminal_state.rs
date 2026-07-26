@@ -89,6 +89,93 @@ async fn upsert_peer_non_terminal_lww_works() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn peer_upserts_preserve_readiness_context_when_incoming_context_is_absent() {
+    let context =
+        TaskExecutionContext::readiness_guardrail_analysis("agent-readiness-guardrails", "1.0.0")
+            .unwrap();
+
+    for transactional in [false, true] {
+        let db = create_test_db();
+        let (events, _rx) = broadcast::channel(64);
+        let epic = make_epic(&db, event_bus_for(&events)).await;
+        let repo = TaskRepository::new(db.clone(), event_bus_for(&events));
+        let task = open_task(&repo, &epic.id).await;
+        repo.set_execution_context(&task.id, Some(&context))
+            .await
+            .unwrap();
+
+        let mut peer = make_peer_task(
+            &task.id,
+            &epic.project_id,
+            &epic.id,
+            "in_progress",
+            "2099-01-01T00:00:00.000Z",
+        );
+        peer.created_by_user_id = task.created_by_user_id;
+        assert_eq!(peer.execution_context, None);
+
+        if transactional {
+            let mut tx = db.pool().begin().await.unwrap();
+            assert!(
+                TaskRepository::upsert_peer_in_tx(&mut tx, &peer)
+                    .await
+                    .unwrap()
+            );
+            tx.commit().await.unwrap();
+        } else {
+            assert!(repo.upsert_peer(&peer).await.unwrap());
+        }
+
+        assert_eq!(
+            repo.get(&task.id).await.unwrap().unwrap().execution_context,
+            Some(context.clone())
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn peer_upserts_round_trip_readiness_and_absent_context_on_insert() {
+    let context =
+        TaskExecutionContext::readiness_guardrail_analysis("agent-readiness-guardrails", "1.0.0")
+            .unwrap();
+
+    for (transactional, expected) in [(false, Some(context)), (true, None)] {
+        let db = create_test_db();
+        let (events, _rx) = broadcast::channel(64);
+        let epic = make_epic(&db, event_bus_for(&events)).await;
+        let repo = TaskRepository::new(db.clone(), event_bus_for(&events));
+        let id = uuid::Uuid::now_v7().to_string();
+        let mut peer = make_peer_task(
+            &id,
+            &epic.project_id,
+            &epic.id,
+            "open",
+            "2099-01-01T00:00:00.000Z",
+        );
+        peer.short_id = format!("peer-{}", &id[..8]);
+        peer.created_by_user_id = djinn_db::repositories::test_support::seed_test_user(&db).await;
+        peer.execution_context = expected.clone();
+
+        if transactional {
+            let mut tx = db.pool().begin().await.unwrap();
+            assert!(
+                TaskRepository::upsert_peer_in_tx(&mut tx, &peer)
+                    .await
+                    .unwrap()
+            );
+            tx.commit().await.unwrap();
+        } else {
+            assert!(repo.upsert_peer(&peer).await.unwrap());
+        }
+
+        assert_eq!(
+            repo.get(&id).await.unwrap().unwrap().execution_context,
+            expected
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn transactional_peer_upsert_round_trips_distinct_refinement_correlations() {
     let db = create_test_db();
     let (events, _rx) = broadcast::channel(64);

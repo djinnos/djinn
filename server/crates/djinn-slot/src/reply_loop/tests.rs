@@ -5174,6 +5174,7 @@ async fn rendered_worker_prompt_uses_signature_only_tool_section() {
         refinement_round: None,
         refinement_phase: None,
         refinement_role: None,
+        execution_context: None,
     };
     let task_ctx = djinn_roles::prompts::TaskContext {
         project_path: "/tmp/project".to_string(),

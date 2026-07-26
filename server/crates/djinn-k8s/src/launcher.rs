@@ -663,6 +663,12 @@ pub fn launcher_sidecar_container(
                 "DJINN_LAUNCHER_LEASED_MILLICORES",
                 &launcher_leased_millicores(config).to_string(),
             ),
+            // The worker-written, launcher-read-only git config the trust anchor
+            // `[include]`s, so a brokered cargo/go/pnpm fetch of a private
+            // dependency carries the installation token. Named by the render
+            // rather than compiled in, exactly like the journal directory; see
+            // `crate::private_dep_config` (goxi, ninth launcher blocker).
+            crate::private_dep_config::child_git_config_env(),
         ]),
         // The launcher's own IPC + cgroup-mountpoint surfaces AND the data
         // mounts a brokered child needs; see [`crate::launcher_child_fs`].

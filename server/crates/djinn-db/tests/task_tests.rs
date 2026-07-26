@@ -5,7 +5,7 @@
 //! instance (see `djinn_db::Database::open_in_memory`).
 
 pub(crate) use djinn_core::events::EventBus;
-pub(crate) use djinn_core::models::{Task, TaskStatus, TransitionAction};
+pub(crate) use djinn_core::models::{Task, TaskExecutionContext, TaskStatus, TransitionAction};
 pub(crate) use djinn_db::Database;
 pub(crate) use djinn_db::EpicRepository;
 pub(crate) use djinn_db::Error;
@@ -105,6 +105,7 @@ pub(crate) fn make_peer_task(
         merge_conflict_metadata: None,
         memory_refs: "[]".to_string(),
         agent_type: None,
+        execution_context: None,
         created_by_user_id: "fixture-user".into(),
         ci_status: "unknown".to_string(),
         ci_head_sha: None,
