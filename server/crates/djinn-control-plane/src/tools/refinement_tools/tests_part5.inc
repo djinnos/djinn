@@ -168,10 +168,26 @@
             .await
             .unwrap();
 
-        // Start refinement so demand_evidence doesn't reject on inactive.
+        // Keep the legacy lifecycle row for display compatibility, and admit
+        // the exact run that is now the sole activity authority for status.
         repo.record_refinement_lifecycle(&p.id, "refinement_start", None)
             .await
             .unwrap();
+        let outcome = repo
+            .reap_and_admit(djinn_db::AdmitRefinementRunRequest {
+                proposal_id: p.id.clone(),
+                idempotency_key: format!("demand-validation/{}", p.id),
+                source: djinn_db::RefinementAdmissionSource::Demand {
+                    demand_id: format!("demand-validation/{}", p.id),
+                },
+                heartbeat_grace_millis: 60_000,
+            })
+            .await
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            djinn_db::RefinementAdmissionOutcome::Admitted { .. }
+        ));
 
         // Create user, project, and Judge task for authorization.
         let user_id = create_test_user(&db, "judge-user").await;

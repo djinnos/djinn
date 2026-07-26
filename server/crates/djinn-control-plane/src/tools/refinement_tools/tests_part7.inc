@@ -38,7 +38,11 @@
             .unwrap();
 
         let status = build_refinement_status(&repo, &p.id).await.unwrap();
-        assert!(status.active, "refinement must be active");
+        assert!(!status.active, "lifecycle-only starts have no exact live run");
+        assert!(status.run_id.is_none());
+        assert!(status.run_state.is_none());
+        assert!(status.liveness.is_none());
+        assert!(status.liveness_evidence.is_none());
         assert_eq!(
             status.evidence_lifecycle_state,
             EvidenceLifecycleState::Active,
@@ -168,7 +172,11 @@
         repo.set_frozen(&p.id, true).await.unwrap();
 
         let status = build_refinement_status(&repo, &p.id).await.unwrap();
-        assert!(status.active, "refinement is technically still active");
+        assert!(!status.active, "lifecycle-only starts have no exact live run");
+        assert!(status.run_id.is_none());
+        assert!(status.run_state.is_none());
+        assert!(status.liveness.is_none());
+        assert!(status.liveness_evidence.is_none());
         assert_eq!(
             status.evidence_lifecycle_state,
             EvidenceLifecycleState::PausedOrFrozen,
