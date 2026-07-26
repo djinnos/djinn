@@ -313,10 +313,7 @@
             .await
             .unwrap();
         let error = resp2.get("error").and_then(|v| v.as_str()).unwrap();
-        assert!(
-            error.contains("already active"),
-            "should reject duplicate start: {error}"
-        );
+        assert_eq!(error, "AlreadyActive");
     }
 
     // ── DoR readiness findings available in refinement status ─────────────────
@@ -384,6 +381,7 @@
                     "proposal_id": proposal.id,
                     "reason": "Need another round after judge feedback",
                     "update_authority": "checkpoint",
+                    "request_id": "demand-action-019f",
                 }),
             )
             .await
@@ -415,12 +413,11 @@
         );
         let meta: serde_json::Value =
             serde_json::from_str(start.event_metadata.as_deref().expect("metadata")).unwrap();
-        assert_eq!(meta["source"], "human_demand_round");
+        assert_eq!(meta["source"]["kind"], "demand");
         assert_eq!(
-            meta["reviewer_feedback"],
-            "Need another round after judge feedback"
+            meta["source"]["demand_id"],
+            "reason:Need another round after judge feedback:request:demand-action-019f"
         );
-        assert_eq!(meta["reason"], "Need another round after judge feedback");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -451,6 +448,9 @@
                 &self,
                 _: ProposalRefinementStartRequest,
             ) -> Result<(), String> {
+                Err("unexpected demand call".into())
+            }
+            async fn wake_refinement_run(&self, _: String) -> Result<(), String> {
                 self.demand_calls.fetch_add(1, Ordering::SeqCst);
                 Ok(())
             }
@@ -526,6 +526,7 @@
                 serde_json::json!({
                     "proposal_id": proposal.id,
                     "reason": feedback,
+                    "request_id": "parked-demand-019f",
                 }),
             )
             .await
@@ -536,13 +537,16 @@
         assert_eq!(demand_calls.load(Ordering::SeqCst), 1);
 
         let revisions = repo.revisions(&proposal.id).await.unwrap();
+        // Postgres renders stored json with a space after each colon, so match
+        // on the parsed source tag rather than on raw serialized bytes.
         let demand_starts: Vec<_> = revisions
             .iter()
             .filter(|r| {
                 r.event_kind == "refinement_start"
                     && r.event_metadata
                         .as_deref()
-                        .is_some_and(|m| m.contains("human_demand_round"))
+                        .and_then(|m| serde_json::from_str::<serde_json::Value>(m).ok())
+                        .is_some_and(|m| m["source"]["kind"] == "demand")
             })
             .collect();
         assert_eq!(demand_starts.len(), 1, "fresh demand start exactly once");
@@ -553,8 +557,86 @@
                 .expect("demand metadata"),
         )
         .unwrap();
-        assert_eq!(meta["source"], "human_demand_round");
-        assert_eq!(meta["reviewer_feedback"], feedback);
+        assert_eq!(meta["source"]["kind"], "demand");
+        assert_eq!(
+            meta["source"]["demand_id"],
+            format!("reason:{feedback}:request:parked-demand-019f")
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn demand_round_uses_repository_and_replays_same_request() {
+        let (server, db) = test_server().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let proposal = repo.create(ProposalCreateInput {
+            title: "Repository demand", body: "body", acceptance_criteria: Some("[]"),
+            status: Some("draft"), body_format: None,
+        }).await.unwrap();
+        link_proposal_to_project(&db, &repo, &proposal.id).await;
+        // A legacy active row must not short-circuit repository admission.
+        repo.record_refinement_lifecycle(&proposal.id, "refinement_start", None).await.unwrap();
+        for _ in 0..2 {
+            let response = server.dispatch_tool("proposal_refinement_demand_round", serde_json::json!({
+                "proposal_id": proposal.id, "reason": "fresh durable demand",
+                "request_id": "demand-request-019f"
+            })).await.unwrap();
+            assert_eq!(response["accepted"], true);
+        }
+        assert_eq!(repo.load_refinement_run_aggregates(&proposal.id, 60_000).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn demand_round_reaps_stale_nonterminal_run_and_admits_one_successor() {
+        let (server, db) = test_server().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let proposal = repo.create(ProposalCreateInput {
+            title: "Stale repository run", body: "body", acceptance_criteria: Some("[]"),
+            status: Some("draft"), body_format: None,
+        }).await.unwrap();
+        link_proposal_to_project(&db, &repo, &proposal.id).await;
+
+        let old_run_id = match repo.reap_and_admit(djinn_db::AdmitRefinementRunRequest {
+            proposal_id: proposal.id.clone(),
+            idempotency_key: "stale-phantom-seed".to_owned(),
+            source: djinn_db::RefinementAdmissionSource::Demand {
+                demand_id: "stale-phantom-seed".to_owned(),
+            },
+            heartbeat_grace_millis: 60_000,
+        }).await.unwrap() {
+            djinn_db::RefinementAdmissionOutcome::Admitted { run_id, .. } => run_id,
+            djinn_db::RefinementAdmissionOutcome::Existing { .. } => unreachable!(),
+        };
+        djinn_db::test_support::make_refinement_run_phantom_for_test(&db, &old_run_id).await;
+
+        for _ in 0..2 {
+            let response = server.dispatch_tool("proposal_refinement_demand_round", serde_json::json!({
+                "proposal_id": proposal.id, "reason": "replace stale phantom",
+                "request_id": "replace-stale-phantom-019f"
+            })).await.unwrap();
+            assert_eq!(response["accepted"], true);
+            assert_ne!(response["error"], "AlreadyActive");
+        }
+
+        let runs = repo.load_refinement_run_aggregates(&proposal.id, 60_000).await.unwrap();
+        assert_eq!(runs.len(), 2, "one old run and exactly one successor");
+        let old = djinn_db::test_support::refinement_run_audit_for_test(&db, &old_run_id).await;
+        assert_eq!(old.state, "terminal");
+        assert_eq!(old.stop_tag.as_deref(), Some("reaped_phantom"));
+        assert_eq!(old.typed_reap_count, 1);
+        let successor = runs.iter().find(|run| run.run_id != old_run_id).unwrap();
+        assert_eq!(successor.generation, 2);
+        let successor_snapshot = repo.load_refinement_run_snapshot(
+            djinn_db::LoadRefinementRunSnapshotRequest {
+                run_id: successor.run_id.clone(), heartbeat_grace_millis: 60_000,
+            }
+        ).await.unwrap().unwrap();
+        assert_eq!(successor_snapshot.snapshot.intents.len(), 1, "one successor intent");
+        let revisions = repo.revisions(&proposal.id).await.unwrap();
+        assert_eq!(revisions.iter().filter(|r| r.event_kind == "refinement_start").count(), 2);
+        assert_eq!(revisions.iter().filter(|r| {
+            r.event_kind == "refinement_stop"
+                && r.event_metadata.as_deref().is_some_and(|metadata| metadata.contains("reaped_phantom"))
+        }).count(), 1);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -572,9 +654,13 @@
             .await
             .unwrap();
 
-        repo.record_refinement_lifecycle(&proposal.id, "refinement_start", None)
-            .await
-            .unwrap();
+        link_proposal_to_project(&db, &repo, &proposal.id).await;
+        repo.reap_and_admit(djinn_db::AdmitRefinementRunRequest {
+            proposal_id: proposal.id.clone(),
+            idempotency_key: "existing-live-demand".to_owned(),
+            source: djinn_db::RefinementAdmissionSource::Demand { demand_id: "already-running".to_owned() },
+            heartbeat_grace_millis: 60_000,
+        }).await.unwrap();
 
         let resp = server
             .dispatch_tool(
@@ -589,7 +675,7 @@
 
         assert_eq!(resp.get("accepted").and_then(|v| v.as_bool()), Some(false));
         let error = resp.get("error").and_then(|v| v.as_str()).unwrap();
-        assert!(error.contains("already active"), "unexpected error: {error}");
+        assert_eq!(error, "AlreadyActive");
 
         let revisions = repo.revisions(&proposal.id).await.unwrap();
         assert_eq!(

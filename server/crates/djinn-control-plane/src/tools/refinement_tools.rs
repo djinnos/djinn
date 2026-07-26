@@ -12,23 +12,22 @@
 
 use rmcp::{Json, handler::server::wrapper::Parameters, schemars, tool, tool_router};
 use serde::Deserialize;
-use serde_json::json;
 
-use crate::bridge::ProposalRefinementStartRequest;
 use crate::server::DjinnMcpServer;
 use crate::tools::proposal_ops::{
     DemandRoundResponse, NeedsEvidenceDemandResponse, NeedsEvidenceDemandResult,
     ProposalRefinementStartResponse, ProposalRefinementStatusModel,
     ProposalRefinementStatusResponse, VerdictOverrideResponse,
 };
+use crate::tools::refinement_helpers::validate_demand_evidence;
 pub use crate::tools::refinement_helpers::{
     ProposalRefinementDemandEvidenceParams, build_refinement_status,
 };
-use crate::tools::refinement_helpers::{refinement_is_active, validate_demand_evidence};
 use djinn_core::models::{NeedsEvidenceClaim, TaskStatus, TransitionAction};
 use djinn_db::{
-    EffectiveCreatorProvenance, NeedsEvidenceClaimLink, ProposalDebateTrailCreateInput,
-    ProposalRepository, TaskRepository,
+    AdmitRefinementRunRequest, EffectiveCreatorProvenance, NeedsEvidenceClaimLink,
+    ProposalDebateTrailCreateInput, ProposalRepository, RefinementAdmissionError,
+    RefinementAdmissionOutcome, RefinementAdmissionSource, TaskRepository,
 };
 
 fn err_refinement_start(error: impl Into<String>) -> ProposalRefinementStartResponse {
@@ -47,6 +46,56 @@ fn err_refinement_status(error: impl Into<String>) -> ProposalRefinementStatusRe
     }
 }
 
+/// The sole control-plane admission path. The repository serializes liveness,
+/// stale reaping, generation replacement, and the first durable dispatch intent;
+/// coordinator delivery is only a post-commit hint.
+pub(crate) async fn admit_refinement_run(
+    server: &DjinnMcpServer,
+    repo: &ProposalRepository,
+    proposal_id: &str,
+    source: RefinementAdmissionSource,
+    owner_user_id: Option<Option<&str>>,
+) -> Result<bool, String> {
+    let identity = match &source {
+        RefinementAdmissionSource::ExplicitStart { actor } => format!("explicit:{actor}"),
+        RefinementAdmissionSource::Demand { demand_id } => format!("demand:{demand_id}"),
+        RefinementAdmissionSource::Revision { revision_id } => format!("revision:{revision_id}"),
+    };
+    // FNV-1a gives a bounded deterministic key even for unbounded demand text.
+    let hash = identity.bytes().fold(0xcbf29ce484222325u64, |h, byte| {
+        (h ^ u64::from(byte)).wrapping_mul(0x100000001b3)
+    });
+    let outcome = repo
+        .reap_and_admit(AdmitRefinementRunRequest {
+            proposal_id: proposal_id.to_owned(),
+            idempotency_key: format!("refinement-admission/v1/{hash:016x}"),
+            source,
+            heartbeat_grace_millis: 60_000,
+        })
+        .await
+        .map_err(|error| match error {
+            RefinementAdmissionError::AlreadyActive { .. } => "AlreadyActive".to_owned(),
+            RefinementAdmissionError::AdmissionConflict
+            | RefinementAdmissionError::GenerationConflict { .. } => "AdmissionConflict".to_owned(),
+            RefinementAdmissionError::Database(_) => "Persistence".to_owned(),
+            RefinementAdmissionError::InvalidRequest(_)
+            | RefinementAdmissionError::ProposalNotFound { .. } => "InvalidState".to_owned(),
+        })?;
+    let run_id = match outcome {
+        RefinementAdmissionOutcome::Admitted { run_id, .. }
+        | RefinementAdmissionOutcome::Existing { run_id, .. } => run_id,
+    };
+    if let Some(owner_user_id) = owner_user_id {
+        repo.start_refinement_with_owner(proposal_id, owner_user_id)
+            .await
+            .map_err(|_| "Persistence".to_owned())?;
+    }
+    Ok(match server.state.coordinator().await {
+        Some(coordinator) => coordinator.wake_refinement_run(run_id).await.is_err(),
+        None => true,
+    })
+}
+
 // ── Param structs ────────────────────────────────────────────────────────────
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -58,6 +107,10 @@ pub struct ProposalRefinementStartParams {
     /// resolution. Omit to attribute the run to the proposal author.
     #[serde(default)]
     pub owner_user_id: Option<String>,
+    /// Stable caller-generated identity for this start request. Reuse it when
+    /// retrying the same request; omit it for a new independent start.
+    #[serde(default)]
+    pub request_id: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -72,6 +125,10 @@ pub struct ProposalRefinementDemandRoundParams {
     pub proposal_id: String,
     /// Why another round is being demanded. Recorded in proposal history.
     pub reason: Option<String>,
+    /// Stable caller-generated identity for this demand. Reuse it when
+    /// retrying the same request; omit it for a new independent demand.
+    #[serde(default)]
+    pub request_id: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -169,87 +226,35 @@ impl DjinnMcpServer {
             }
         }
 
-        // Lifecycle-level duplicate check — fast-path early return before
-        // hitting the coordinator channel.
-        if refinement_is_active(&repo, &proposal.id).await {
-            return Json(err_refinement_start(
-                "refinement is already active for this proposal".to_string(),
-            ));
-        }
-
-        // Persist the exact selected owner with the refinement_start boundary.
-        // Recovery and runtime attribution consume this durable value rather
-        // than proposal-author or tribunal-task fallbacks.
         let refinement_owner_user_id = p
             .owner_user_id
             .clone()
             .or_else(|| proposal.author_user_id.clone());
-        match repo
-            .start_refinement_with_owner(&proposal.id, refinement_owner_user_id.as_deref())
-            .await
+        // Preserve caller retries while giving each independently submitted start
+        // a distinct durable key, even when attributed to the same actor.
+        let request_id = p
+            .request_id
+            .clone()
+            .unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
+        let pending_dispatch = match admit_refinement_run(
+            self,
+            &repo,
+            &proposal.id,
+            RefinementAdmissionSource::ExplicitStart {
+                actor: format!(
+                    "{}:request:{request_id}",
+                    refinement_owner_user_id
+                        .clone()
+                        .unwrap_or_else(|| "proposal-author".to_owned())
+                ),
+            },
+            Some(refinement_owner_user_id.as_deref()),
+        )
+        .await
         {
-            Ok(_) => {}
-            Err(e) => {
-                return Json(err_refinement_start(format!(
-                    "failed to record refinement_start: {e}"
-                )));
-            }
-        }
-
-        // Delegate to the coordinator to start the runtime refinement loop.
-        // The coordinator is authoritative for duplicate-start rejection — if
-        // the coordinator has a live run for this proposal (e.g. race between
-        // two MCP tool calls), it rejects the start and we record a
-        // refinement_stop lifecycle entry to close the dangling start.
-        let coordinator = self.state.coordinator().await;
-        match coordinator {
-            Some(coordinator_handle) => {
-                let request = ProposalRefinementStartRequest {
-                    proposal_id: proposal.id.clone(),
-                    current_revision_seq: proposal.latest_revision_seq,
-                    // Attribute to the explicitly-chosen user, else the proposal
-                    // author. This owns the tribunal tasks and scopes per-user
-                    // model resolution (so refinement uses the attributed user's
-                    // Plan-role models instead of a hardcoded fallback).
-                    owner_user_id: refinement_owner_user_id,
-                };
-                if let Err(e) = coordinator_handle.start_proposal_refinement(request).await {
-                    let stop_metadata = json!({
-                        "stop_reason": e,
-                        "source": "coordinator_start_failure",
-                    });
-                    let _ = repo
-                        .record_refinement_lifecycle(
-                            &proposal.id,
-                            "refinement_stop",
-                            Some(&stop_metadata),
-                        )
-                        .await;
-                    return Json(err_refinement_start(format!(
-                        "coordinator rejected refinement start: {e}"
-                    )));
-                }
-            }
-            None => {
-                // No coordinator wired — record the failure and return an
-                // error.  This keeps the lifecycle entry from dangling without
-                // runtime ownership.
-                let stop_metadata = json!({
-                    "stop_reason": "coordinator not available",
-                    "source": "coordinator_start_failure",
-                });
-                let _ = repo
-                    .record_refinement_lifecycle(
-                        &proposal.id,
-                        "refinement_stop",
-                        Some(&stop_metadata),
-                    )
-                    .await;
-                return Json(err_refinement_start(
-                    "coordinator not available".to_string(),
-                ));
-            }
-        }
+            Ok(pending) => pending,
+            Err(error) => return Json(err_refinement_start(error)),
+        };
 
         let refinement = ProposalRefinementStatusModel {
             active: true,
@@ -273,7 +278,7 @@ impl DjinnMcpServer {
         Json(ProposalRefinementStartResponse {
             proposal_id: Some(proposal.id),
             refinement: Some(refinement),
-            error: None,
+            error: pending_dispatch.then(|| "accepted; dispatch pending".to_owned()),
         })
     }
 
@@ -363,24 +368,12 @@ impl DjinnMcpServer {
             });
         }
 
-        // Protect against true duplicate active loops. Parked awaiting-review
-        // refinements are intentionally allowed: the fresh refinement_start
-        // below transitions the lifecycle back into an active rerun and the
-        // coordinator demand path is invoked exactly once.
-        if current_refinement.active && !current_refinement.awaiting_review {
-            return Json(DemandRoundResponse {
-                proposal_id: Some(proposal.id),
-                accepted: false,
-                refinement: Some(current_refinement),
-                error: Some("refinement is already active for this proposal".to_string()),
-            });
-        }
+        // The repository is the sole live/stale authority. Do not derive an
+        // admission rejection from legacy lifecycle rows here.
 
         // Same missing-target blind spot as refinement_start: a demanded round
         // dispatches a fresh tribunal task, which needs a target project. Reject
-        // fast here rather than terminating with an opaque agent_failure. Checked
-        // after the duplicate-active guard so a genuinely-active proposal still
-        // reports "already active" first.
+        // fast here rather than terminating with an opaque agent_failure.
         match repo.targets(&proposal.id).await {
             Ok(targets) if !targets.is_empty() => {}
             Ok(_) => {
@@ -405,76 +398,33 @@ impl DjinnMcpServer {
             }
         }
 
-        // Record the demand-round action as a lifecycle event.
-        let reviewer_feedback = p.reason.clone();
-        let demand_metadata = serde_json::json!({
-            "source": "human_demand_round",
-            "reason": reviewer_feedback,
-            "reviewer_feedback": reviewer_feedback,
-        });
-        if let Err(e) = repo
-            .record_refinement_lifecycle(&proposal.id, "refinement_start", Some(&demand_metadata))
-            .await
+        let request_id = p
+            .request_id
+            .clone()
+            .unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
+        let demand_id = format!(
+            "reason:{}:request:{request_id}",
+            p.reason.as_deref().unwrap_or("unspecified-demand")
+        );
+        let pending_dispatch = match admit_refinement_run(
+            self,
+            &repo,
+            &proposal.id,
+            RefinementAdmissionSource::Demand { demand_id },
+            None,
+        )
+        .await
         {
-            return Json(DemandRoundResponse {
-                proposal_id: Some(proposal.id),
-                accepted: false,
-                refinement: None,
-                error: Some(format!("failed to record demand-round event: {e}")),
-            });
-        }
-
-        // Delegate to the coordinator.
-        let coordinator = self.state.coordinator().await;
-        match coordinator {
-            Some(coordinator_handle) => {
-                let request = ProposalRefinementStartRequest {
-                    proposal_id: proposal.id.clone(),
-                    current_revision_seq: proposal.latest_revision_seq,
-                    // Demand-round reuses the proposal author for attribution.
-                    owner_user_id: proposal.author_user_id.clone(),
-                };
-                if let Err(e) = coordinator_handle
-                    .demand_proposal_refinement_round(request)
-                    .await
-                {
-                    let _ = repo
-                        .record_refinement_lifecycle(
-                            &proposal.id,
-                            "refinement_stop",
-                            Some(&serde_json::json!({
-                                "stop_reason": e,
-                                "source": "demand_round_failure",
-                            })),
-                        )
-                        .await;
-                    return Json(DemandRoundResponse {
-                        proposal_id: Some(proposal.id),
-                        accepted: false,
-                        refinement: None,
-                        error: Some(format!("coordinator rejected demand: {e}")),
-                    });
-                }
-            }
-            None => {
-                let _ = repo
-                    .record_refinement_lifecycle(
-                        &proposal.id,
-                        "refinement_stop",
-                        Some(&serde_json::json!({
-                            "stop_reason": "coordinator not available",
-                            "source": "demand_round_failure",
-                        })),
-                    )
-                    .await;
+            Ok(pending) => pending,
+            Err(error) => {
                 return Json(DemandRoundResponse {
                     proposal_id: Some(proposal.id),
                     accepted: false,
-                    refinement: None,
-                    error: Some("coordinator not available".to_string()),
+                    refinement: Some(current_refinement),
+                    error: Some(error),
                 });
             }
-        }
+        };
 
         let refinement = ProposalRefinementStatusModel {
             active: true,
@@ -499,7 +449,7 @@ impl DjinnMcpServer {
             proposal_id: Some(proposal.id),
             accepted: true,
             refinement: Some(refinement),
-            error: None,
+            error: pending_dispatch.then(|| "accepted; dispatch pending".to_owned()),
         })
     }
 

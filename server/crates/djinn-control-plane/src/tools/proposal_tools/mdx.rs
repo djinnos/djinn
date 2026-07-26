@@ -1208,8 +1208,18 @@ mod block_patch_tests {
             .await
             .unwrap();
 
-        let revisions = repo.revisions(&proposal.id).await.unwrap();
-        // Revision 1 is the create seed; revision 2 is the block patch.
+        // A committed revision also admits refinement, which independently
+        // authors a `refinement_start` lifecycle row. Select the ordinary spec
+        // history so this test keeps asserting the patch primitive's own
+        // metadata rather than the total row count.
+        let revisions: Vec<_> = repo
+            .revisions(&proposal.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|revision| revision.event_kind == "spec_revision")
+            .collect();
+        // Spec revision 1 is the create seed; spec revision 2 is the block patch.
         assert_eq!(revisions.len(), 2);
         let patch_rev = &revisions[1];
         let metadata: serde_json::Value =
@@ -1803,16 +1813,23 @@ The open-questions section collects uncertainty.
             .dispatch_tool("proposal_show", serde_json::json!({ "id": proposal.id }))
             .await
             .unwrap();
-        let revisions = shown
+        // A committed revision also admits refinement, which independently
+        // authors a `refinement_start` lifecycle row into the same history.
+        // Select the ordinary spec revisions so the patch-attribution contract
+        // below is asserted against the rows the patch primitive authored.
+        let revisions: Vec<&serde_json::Value> = shown
             .get("revisions")
             .and_then(|v| v.as_array())
-            .expect("proposal_show.revisions must be a JSON array");
+            .expect("proposal_show.revisions must be a JSON array")
+            .iter()
+            .filter(|rev| rev.get("event_kind").and_then(|v| v.as_str()) == Some("spec_revision"))
+            .collect();
 
-        // 1 create seed + 2 targeted patches = 3 revisions.
+        // 1 create seed + 2 targeted patches = 3 spec revisions.
         assert_eq!(
             revisions.len(),
             3,
-            "expected 3 revisions (1 seed + 2 targeted patches); got {}",
+            "expected 3 spec revisions (1 seed + 2 targeted patches); got {}",
             revisions.len()
         );
 

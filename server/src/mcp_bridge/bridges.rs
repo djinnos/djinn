@@ -40,6 +40,13 @@ impl CoordinatorOps for CoordinatorBridge {
             .map_err(|e| e.to_string())
     }
 
+    async fn wake_refinement_run(&self, run_id: String) -> Result<(), String> {
+        self.handle
+            .wake_refinement_run(run_id)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
     async fn run_retrieval_health_checks(
         &self,
         check_names: Vec<String>,

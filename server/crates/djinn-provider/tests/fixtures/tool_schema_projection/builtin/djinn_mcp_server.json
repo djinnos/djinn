@@ -20693,6 +20693,14 @@
             "string",
             "null"
           ]
+        },
+        "request_id": {
+          "description": "Stable caller-generated identity for this demand. Reuse it when\nretrying the same request; omit it for a new independent demand.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
         }
       }
     },
@@ -21077,6 +21085,14 @@
         },
         "owner_user_id": {
           "description": "User the refinement run is attributed to: owner of the spawned\nrefinement (tribunal) tasks and the scope for per-user role-model\nresolution. Omit to attribute the run to the proposal author.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "request_id": {
+          "description": "Stable caller-generated identity for this start request. Reuse it when\nretrying the same request; omit it for a new independent start.",
           "type": [
             "string",
             "null"

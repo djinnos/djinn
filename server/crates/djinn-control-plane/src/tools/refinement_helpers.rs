@@ -674,14 +674,6 @@ pub async fn build_refinement_status(
     })
 }
 
-/// Check if refinement is currently active for a proposal.
-pub(crate) async fn refinement_is_active(repo: &ProposalRepository, proposal_id: &str) -> bool {
-    build_refinement_status(repo, proposal_id)
-        .await
-        .map(|s| s.active)
-        .unwrap_or(false)
-}
-
 /// Inspect the current needs-evidence cap status for a proposal.
 ///
 /// Returns the cap status reconstructed from persisted debate/lifecycle
