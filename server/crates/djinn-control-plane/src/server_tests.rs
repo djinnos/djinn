@@ -654,12 +654,15 @@ mod tests {
                     && rev.get("title").and_then(|v| v.as_str()) == Some("Metadata Compat")
             })
             .expect("create seed revision at seq 1");
+        // `proposal_show` exposes revision bodies as `body_excerpt`; "v2 body"
+        // is short enough to be carried whole (`body_truncated == false`).
         let material_update = revisions
             .iter()
             .find(|rev| {
                 rev.get("seq").and_then(|v| v.as_i64()) == Some(2)
                     && rev.get("title").and_then(|v| v.as_str()) == Some("Metadata Compat v2")
-                    && rev.get("body").and_then(|v| v.as_str()) == Some("v2 body")
+                    && rev.get("body_excerpt").and_then(|v| v.as_str()) == Some("v2 body")
+                    && rev.get("body_truncated").and_then(|v| v.as_bool()) == Some(false)
             })
             .expect("material ordinary update revision at seq 2");
 

@@ -537,13 +537,16 @@
         assert_eq!(demand_calls.load(Ordering::SeqCst), 1);
 
         let revisions = repo.revisions(&proposal.id).await.unwrap();
+        // Postgres renders stored json with a space after each colon, so match
+        // on the parsed source tag rather than on raw serialized bytes.
         let demand_starts: Vec<_> = revisions
             .iter()
             .filter(|r| {
                 r.event_kind == "refinement_start"
                     && r.event_metadata
                         .as_deref()
-                        .is_some_and(|m| m.contains("\"kind\":\"demand\""))
+                        .and_then(|m| serde_json::from_str::<serde_json::Value>(m).ok())
+                        .is_some_and(|m| m["source"]["kind"] == "demand")
             })
             .collect();
         assert_eq!(demand_starts.len(), 1, "fresh demand start exactly once");
