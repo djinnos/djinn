@@ -463,80 +463,24 @@ mod tests {
         let check = RefinementPhantomActiveCheck::new(Arc::new(
             ProposalRepositoryRefinementPhantomActiveSource::new(db.clone(), events_tx),
         ));
-        let audit_before =
-            djinn_db::test_support::refinement_run_audit_for_test(&db, &run_id).await;
-        let heartbeat_before: String =
-            sqlx::query_scalar("SELECT heartbeat_at FROM refinement_runs WHERE id = $1")
-                .bind(&run_id)
-                .fetch_one(db.pool())
-                .await
-                .expect("read heartbeat");
-        let lifecycle_before: Vec<(String, String, Option<String>, Option<serde_json::Value>)> =
-            sqlx::query_as(
-                "SELECT id, event_kind, refinement_stop_tag, refinement_stop_context \
-                 FROM proposal_revisions WHERE proposal_id = $1 AND refinement_run_id = $2 \
-                 ORDER BY id",
-            )
-            .bind(&fixture.proposal_id)
-            .bind(&run_id)
-            .fetch_all(db.pool())
-            .await
-            .expect("read lifecycle rows");
-        let reaps_before: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM proposal_revisions \
-             WHERE proposal_id = $1 AND refinement_stop_tag = 'reaped_phantom'",
+        let before = djinn_db::test_support::refinement_run_read_only_snapshot_for_test(
+            &db,
+            &fixture.proposal_id,
+            &run_id,
         )
-        .bind(&fixture.proposal_id)
-        .fetch_one(db.pool())
-        .await
-        .expect("count durable phantom reaps");
+        .await;
         for _ in 0..2 {
             let findings = check.run().expect("run repository-backed doctor check");
             assert_eq!(findings.len(), 1);
             assert_eq!(findings[0].evidence["run_id"], run_id);
             assert_eq!(findings[0].evidence["generation"], generation);
         }
-        assert_eq!(
-            djinn_db::test_support::refinement_run_audit_for_test(&db, &run_id).await,
-            audit_before,
-            "run state and reap counter remain unchanged"
-        );
-        let heartbeat_after: String =
-            sqlx::query_scalar("SELECT heartbeat_at FROM refinement_runs WHERE id = $1")
-                .bind(&run_id)
-                .fetch_one(db.pool())
-                .await
-                .expect("read heartbeat");
-        let lifecycle_after: Vec<(String, String, Option<String>, Option<serde_json::Value>)> =
-            sqlx::query_as(
-                "SELECT id, event_kind, refinement_stop_tag, refinement_stop_context \
-                 FROM proposal_revisions WHERE proposal_id = $1 AND refinement_run_id = $2 \
-                 ORDER BY id",
-            )
-            .bind(&fixture.proposal_id)
-            .bind(&run_id)
-            .fetch_all(db.pool())
-            .await
-            .expect("read lifecycle rows");
-        let reaps_after: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM proposal_revisions \
-             WHERE proposal_id = $1 AND refinement_stop_tag = 'reaped_phantom'",
+        let after = djinn_db::test_support::refinement_run_read_only_snapshot_for_test(
+            &db,
+            &fixture.proposal_id,
+            &run_id,
         )
-        .bind(&fixture.proposal_id)
-        .fetch_one(db.pool())
-        .await
-        .expect("count durable phantom reaps");
-        assert_eq!(
-            heartbeat_after, heartbeat_before,
-            "doctor must not touch heartbeat"
-        );
-        assert_eq!(
-            lifecycle_after, lifecycle_before,
-            "doctor must not write or alter lifecycle/audit rows"
-        );
-        assert_eq!(
-            reaps_after, reaps_before,
-            "doctor must not increment reap counters"
-        );
+        .await;
+        assert_eq!(after, before, "doctor must not mutate durable run state");
     }
 }
