@@ -410,7 +410,8 @@ impl ProposalRepository {
         Ok(result)
     }
 
-    /// Load the current nonterminal run for a proposal, if present.
+    /// Load the latest exact run for a proposal, including its terminal
+    /// disposition when no later generation has replaced it.
     pub async fn load_current_refinement_run_snapshot(
         &self,
         proposal_id: &str,
@@ -423,7 +424,7 @@ impl ProposalRepository {
             .await?;
         let run_id = sqlx::query_scalar::<_, String>(
             "SELECT id FROM refinement_runs WHERE proposal_id = $1 \
-             AND state IN ('running', 'parked') ORDER BY generation DESC LIMIT 1",
+             ORDER BY generation DESC LIMIT 1",
         )
         .bind(proposal_id)
         .fetch_optional(&mut *tx)

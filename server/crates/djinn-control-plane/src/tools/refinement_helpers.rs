@@ -326,7 +326,7 @@ pub(crate) async fn validate_demand_evidence(
 const REFINEMENT_HEARTBEAT_GRACE_MILLIS: i64 = 60_000;
 
 /// Keep the response bounded while exposing which shared-evaluator branch won.
-fn liveness_fields(result: &RefinementLivenessResult) -> (&'static str, Option<String>) {
+pub(crate) fn liveness_fields(result: &RefinementLivenessResult) -> (&'static str, Option<String>) {
     match result {
         RefinementLivenessResult::Terminal { .. } => ("terminal", None),
         RefinementLivenessResult::Stale { .. } => ("stale", None),
@@ -360,7 +360,8 @@ fn run_state_name(state: RefinementRunState) -> &'static str {
     }
 }
 
-/// Derive the current refinement status from lifecycle events and debate trail.
+/// Derive the current refinement status from an exact-run snapshot plus
+/// compatible display-only lifecycle and debate content.
 pub async fn build_refinement_status(
     repo: &ProposalRepository,
     proposal_id: &str,
@@ -371,27 +372,6 @@ pub async fn build_refinement_status(
         .load_current_refinement_run_snapshot(proposal_id, REFINEMENT_HEARTBEAT_GRACE_MILLIS)
         .await
         .map_err(|e| format!("failed to load current refinement run snapshot: {e}"))?;
-    let Some(exact) = exact else {
-        return Ok(ProposalRefinementStatusModel {
-            active: false,
-            run_id: None,
-            generation: None,
-            run_state: None,
-            liveness: None,
-            liveness_evidence: None,
-            last_heartbeat_at: None,
-            current_round: None,
-            dry_rounds: 0,
-            total_entries: 0,
-            stop_reason: None,
-            awaiting_review: false,
-            judge_summary: None,
-            snapshot_revision_seq: None,
-            needs_evidence: None,
-            evidence_lifecycle_state: EvidenceLifecycleState::Active,
-        });
-    };
-
     // Legacy rows below supply compatible display-only content; they never
     // decide whether an exact run is live, stale, parked, or terminal.
     let revisions = repo
@@ -626,38 +606,51 @@ pub async fn build_refinement_status(
             // have been written yet.  Still awaiting.
             None => EvidenceLifecycleState::AwaitingEvidence,
         }
-    } else if matches!(exact.liveness, RefinementLivenessResult::Live { .. }) {
+    } else if exact
+        .as_ref()
+        .is_some_and(|exact| matches!(exact.liveness, RefinementLivenessResult::Live { .. }))
+    {
         EvidenceLifecycleState::Active
     } else {
         // Refinement stopped but proposal is not terminal.
         EvidenceLifecycleState::Active
     };
 
-    let (liveness, liveness_evidence) = liveness_fields(&exact.liveness);
-    let active = matches!(exact.liveness, RefinementLivenessResult::Live { .. });
-    let awaiting_review = matches!(
-        exact.snapshot.park.as_ref().map(|park| park.kind),
-        Some(RefinementParkKind::AwaitingReview)
-    );
-    let stop_reason = match &exact.liveness {
+    let liveness = exact.as_ref().map(|exact| liveness_fields(&exact.liveness));
+    let active = exact
+        .as_ref()
+        .is_some_and(|exact| matches!(exact.liveness, RefinementLivenessResult::Live { .. }));
+    let awaiting_review = exact.as_ref().is_some_and(|exact| {
+        matches!(
+            exact.snapshot.park.as_ref().map(|park| park.kind),
+            Some(RefinementParkKind::AwaitingReview)
+        )
+    });
+    let stop_reason = exact.as_ref().and_then(|exact| match &exact.liveness {
         RefinementLivenessResult::Terminal { reason } => {
             reason.as_ref().map(|reason| reason.tag().to_string())
         }
         _ => None,
-    };
+    });
 
     Ok(ProposalRefinementStatusModel {
         active,
-        run_id: Some(exact.snapshot.run.run_id.clone()),
-        generation: Some(exact.generation),
-        run_state: Some(run_state_name(exact.snapshot.run.state).to_string()),
-        liveness: Some(liveness.to_string()),
-        liveness_evidence,
-        last_heartbeat_at: exact
-            .snapshot
-            .heartbeat
+        run_id: exact
             .as_ref()
-            .map(|heartbeat| heartbeat.heartbeat_at.0),
+            .map(|exact| exact.snapshot.run.run_id.clone()),
+        generation: exact.as_ref().map(|exact| exact.generation),
+        run_state: exact
+            .as_ref()
+            .map(|exact| run_state_name(exact.snapshot.run.state).to_string()),
+        liveness: liveness.as_ref().map(|(state, _)| (*state).to_string()),
+        liveness_evidence: liveness.and_then(|(_, evidence)| evidence),
+        last_heartbeat_at: exact.as_ref().and_then(|exact| {
+            exact
+                .snapshot
+                .heartbeat
+                .as_ref()
+                .map(|heartbeat| heartbeat.heartbeat_at.0)
+        }),
         current_round: Some(current_round),
         dry_rounds,
         total_entries,
