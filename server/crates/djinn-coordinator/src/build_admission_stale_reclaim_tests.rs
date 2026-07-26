@@ -17,8 +17,9 @@ use std::time::Duration;
 use async_trait::async_trait;
 use djinn_core::events::EventBus;
 use djinn_db::{
-    AdmissionDomain, AdmissionJournalRepository, AdmissionState, Database, ImageRepository,
-    ProjectRepository,
+    AdmissionDomain, AdmissionJournalKey, AdmissionJournalRepository, AdmissionState,
+    AdmissionWorkloadKind, CreateStartedInput, Database, ImageRepository, ProjectRepository,
+    ReserveAdmissionInput, ReserveAdmissionResult, TerminalAdmissionInput, UidFencedAdmissionInput,
 };
 use djinn_k8s::{
     K8sGraphWarmer, KubernetesConfig, ObjectPresence, UidGetResult, WarmAdmission,
@@ -497,4 +498,229 @@ async fn current_epoch_and_unsettled_rows_are_never_reclaimed() {
         "an unsettled row is not yet safe to judge by a listing"
     );
     assert_eq!(journal.count_task_or_warm_occupancy().await.unwrap(), 1);
+}
+
+/// One task's durable generation history, written through the journal
+/// primitives a pre-`ymx9` server called.
+///
+/// Before `ymx9` the caller supplied the generation (a task's `reopen_count`)
+/// and the journal trusted it, so a dispatch could open generation N+1 while
+/// generation N was still `live`. Post-`ymx9` resolution cannot produce that
+/// shape any more, but production is full of rows that predate it: at the time
+/// of writing, 58 `live` `task_observation` rows, every one of them superseded
+/// by a later generation. `reserve` with an explicit generation IS the
+/// pre-`ymx9` call, so this is the production writer, not a fixture.
+async fn pre_ymx9_generation_history(
+    journal: &AdmissionJournalRepository,
+    work_id: &str,
+    generations: &[(i64, bool)],
+) {
+    for (generation, terminal) in generations {
+        let key = AdmissionJournalKey {
+            domain: AdmissionDomain::TaskObservation,
+            work_id: work_id.into(),
+            generation: *generation,
+        };
+        let object_name = format!("task-run-{work_id}-{generation}");
+        let object_uid = format!("uid-{work_id}-{generation}");
+        let reserved = journal
+            .reserve(
+                &ReserveAdmissionInput {
+                    key: key.clone(),
+                    workload_kind: AdmissionWorkloadKind::Task,
+                    creator_server_epoch: PREDECESSOR_EPOCH.into(),
+                    object_name: object_name.clone(),
+                },
+                64,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(reserved, ReserveAdmissionResult::Reserved { .. }));
+        journal
+            .mark_create_started(&CreateStartedInput {
+                key: key.clone(),
+                creator_server_epoch: PREDECESSOR_EPOCH.into(),
+                object_name,
+            })
+            .await
+            .unwrap();
+        journal
+            .mark_live(&UidFencedAdmissionInput {
+                key: key.clone(),
+                object_uid: object_uid.clone(),
+            })
+            .await
+            .unwrap();
+        if *terminal {
+            journal
+                .mark_terminal(&TerminalAdmissionInput {
+                    key,
+                    object_uid: Some(object_uid),
+                })
+                .await
+                .unwrap();
+        }
+    }
+}
+
+/// The exact production shape behind
+/// `invalid transition: stale admission generation 1 for 019f6f04-…`.
+///
+/// A `live` generation that a later generation superseded is the population
+/// most in need of reclaiming, and requiring it to be the latest generation
+/// vetoes precisely its own reclamation. Absence still has to be proven — the
+/// namespace listing and the direct GET both answer that the object is gone —
+/// but a stale generation is not a reason to occupy the cap forever.
+#[tokio::test]
+async fn superseded_live_generations_are_reclaimed_once_their_object_is_proven_absent() {
+    let db = Database::open_in_memory().unwrap();
+    let journal = Arc::new(AdmissionJournalRepository::new(db.clone()));
+    // The three work ids blocking production reconciliation, generation for
+    // generation: a terminal predecessor, an orphaned `live` middle, and a
+    // terminal successor that makes the middle row stale.
+    for work_id in [
+        "019f6f04-b477-7851-8be9-ce2e41453d46",
+        "019f6fed-d0c9-7441-bf25-502e6d9e6e2e",
+    ] {
+        pre_ymx9_generation_history(&journal, work_id, &[(0, true), (1, false), (2, true)]).await;
+    }
+    // The remaining production row: generation 0 orphaned, 1 and 2 terminal.
+    pre_ymx9_generation_history(
+        &journal,
+        "019f6fec-f41c-7da0-9e14-34cea42b7dd5",
+        &[(0, false), (1, true), (2, true)],
+    )
+    .await;
+    assert_eq!(
+        journal.count_task_or_warm_occupancy().await.unwrap(),
+        3,
+        "three superseded live generations occupy the cap"
+    );
+
+    let controller = replacement(&journal, 3);
+    controller
+        .recover_all_predecessors_and_seed()
+        .await
+        .unwrap();
+    controller.mark_topology_ready();
+
+    let report = BuildAdmissionReconciler::with_settle_window(
+        Arc::clone(&controller),
+        Arc::new(NamespaceInventory::empty()),
+        Duration::ZERO,
+    )
+    .reconcile()
+    .await;
+
+    assert!(
+        report.blockers.is_empty(),
+        "a stale generation must not veto its own reclamation: {:?}",
+        report.blockers
+    );
+    assert_eq!(report.reclaim_failure_count, 0);
+    assert_eq!(report.stale, 3);
+    assert_eq!(report.released, 3);
+    assert_eq!(report.fenced, 0);
+    assert_eq!(
+        journal.count_task_or_warm_occupancy().await.unwrap(),
+        0,
+        "the whole superseded population must be retired"
+    );
+    assert_eq!(
+        controller.readiness(),
+        BuildAdmissionReadiness::Healthy,
+        "Enforce must arm on the namespace's current state, not its history"
+    );
+}
+
+/// One unreclaimable row must cost one row, not the whole pass.
+///
+/// The unreclaimable row here is a superseded `live` generation whose Job still
+/// exists and has completed: the object is present, so the ordinary
+/// `mark_terminal` callback applies and its latest-generation fence rejects the
+/// write. That rejection is a fact about one row. While it failed the pass, a
+/// namespace holding one such object denied every other row's reclamation and
+/// left Enforce fail-closed on history rather than current state.
+#[tokio::test]
+async fn one_unreclaimable_row_costs_one_row_and_the_sweep_continues() {
+    let db = Database::open_in_memory().unwrap();
+    let journal = Arc::new(AdmissionJournalRepository::new(db.clone()));
+    pre_ymx9_generation_history(&journal, "completed-object", &[(0, false), (1, true)]).await;
+    for index in 0..3 {
+        pre_ymx9_generation_history(
+            &journal,
+            &format!("absent-object-{index}"),
+            &[(0, false), (1, true)],
+        )
+        .await;
+    }
+    assert_eq!(journal.count_task_or_warm_occupancy().await.unwrap(), 4);
+
+    // The superseded row's Job is still in the namespace, carries the admission
+    // identity the dispatch path stamps on it, and has completed. The object is
+    // present, so its ordinary lifecycle callback applies — and that callback
+    // is the one whose latest-generation fence rejects a superseded row.
+    let completed = WorkloadRecord {
+        kind: WorkloadObjectKind::Job,
+        name: "task-run-completed-object-0".into(),
+        uid: Some("uid-completed-object-0".into()),
+        labels: [
+            (
+                djinn_k8s::LABEL_ADMISSION_DOMAIN.to_string(),
+                "task_observation".to_string(),
+            ),
+            (
+                djinn_k8s::LABEL_ADMISSION_WORK_ID.to_string(),
+                "completed-object".to_string(),
+            ),
+            (
+                djinn_k8s::LABEL_ADMISSION_GENERATION.to_string(),
+                "0".to_string(),
+            ),
+        ]
+        .into_iter()
+        .collect(),
+        terminal: true,
+        images: vec!["djinn:test".into()],
+        commands: vec!["djinn-agent-worker".into()],
+    };
+
+    let controller = replacement(&journal, 3);
+    controller
+        .recover_all_predecessors_and_seed()
+        .await
+        .unwrap();
+    let report = BuildAdmissionReconciler::with_settle_window(
+        Arc::clone(&controller),
+        Arc::new(NamespaceInventory::holding(vec![completed])),
+        Duration::ZERO,
+    )
+    .reconcile()
+    .await;
+
+    assert!(
+        report.blockers.is_empty(),
+        "a per-row reclaim failure is not a pass-level blocker: {:?}",
+        report.blockers
+    );
+    assert_eq!(
+        report.reclaim_failure_count, 1,
+        "exactly one row could not be retired"
+    );
+    assert_eq!(report.reclaim_failures.len(), 1);
+    assert!(
+        report.reclaim_failures[0].contains("completed-object")
+            && report.reclaim_failures[0].contains("stale admission generation"),
+        "the failure must name the row and its cause: {:?}",
+        report.reclaim_failures
+    );
+    assert_eq!(
+        report.released, 3,
+        "the three rows whose objects are absent must still be retired"
+    );
+    assert_eq!(
+        journal.count_task_or_warm_occupancy().await.unwrap(),
+        1,
+        "only the unreclaimable row keeps occupying"
+    );
 }
