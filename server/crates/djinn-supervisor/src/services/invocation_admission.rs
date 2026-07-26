@@ -183,7 +183,7 @@ impl InvocationLiftAuthority for DurableInvocationLiftAuthority {
 /// slower, not faster: it is an observation mode whose entire purpose is to
 /// measure what enforcement *would* do. This is correct by design and asserted by
 /// `shadow_epoch_binds_but_never_lifts` in `djinn-agent`'s
-/// `process/tests/process_lease_tests.rs` — do not "fix" it. Only `v1 = enforce`
+/// `process/tests/process_lease_admission_tests.rs` — do not "fix" it. Only `v1 = enforce`
 /// with a fully acknowledged
 /// `ForwardOverlap`/`InvocationPrimary`/`RollbackOverlap` phase lifts the quota.
 ///
@@ -210,7 +210,8 @@ impl InvocationLiftAuthority for DurableInvocationLiftAuthority {
 /// a real cgroup2 hierarchy by step 7 of
 /// `djinn-cgroup-launcher/tests/delegated_cpu_lease_lifecycle.rs`, and on the
 /// production composition by
-/// `unleased_epoch_is_born_unclamped_because_no_grant_can_ever_lift_it`.
+/// `unleased_epoch_is_born_unclamped_because_no_grant_can_ever_lift_it`, in
+/// `djinn-agent`'s `process/tests/process_lease_admission_tests.rs`.
 #[must_use]
 pub fn evaluate_invocation_lift(
     row: Result<Option<AdmissionHandoffRow>, ()>,
