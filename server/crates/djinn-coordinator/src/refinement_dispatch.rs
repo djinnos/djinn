@@ -104,12 +104,11 @@ fn durable_role_name(role: RefinementRole) -> &'static str {
 impl CoordinatorActor {
     /// Drive all active refinement loops. Called from `run_tick()`.
     pub(super) async fn drive_active_refinements(&mut self) {
-        // The durable intent ledger is the dispatch authority. This pass happens
-        // even when the recoverable projection has been dropped.
-        self.drive_durable_refinement_intents().await;
-
         let run_ids: Vec<String> = self.active_refinements.keys().cloned().collect();
         if run_ids.is_empty() {
+            // The durable ledger remains dispatch authority when no disposable
+            // projection survived to this tick.
+            self.drive_durable_refinement_intents().await;
             return;
         }
 
@@ -152,6 +151,12 @@ impl CoordinatorActor {
             self.drive_one_refinement(&run_id, running_tasks.as_ref())
                 .await;
         }
+
+        // The durable intent ledger is the dispatch authority. Run it after
+        // monitoring the projections that existed at tick entry: a successful
+        // enqueue must leave its newly-created outcome projection intact until
+        // the next tick can observe its real session/outcome evidence.
+        self.drive_durable_refinement_intents().await;
 
         // Clean up completed refinements.
         self.active_refinements
