@@ -22,6 +22,9 @@ use djinn_runtime::RoleKind;
 use djinn_supervisor::cargo_target_run_dir;
 
 use crate::config::KubernetesConfig;
+use crate::invocation_journal::{
+    invocation_journal_volume, worker_invocation_journal_env, worker_invocation_journal_mount,
+};
 use crate::launcher::{
     RoleResourceClass, launcher_cgroup_mountpoint_volume, launcher_ipc_volume,
     launcher_sidecar_container, pod_host_users, pod_security_context, worker_launcher_env,
@@ -276,6 +279,12 @@ pub fn build_task_run_job(
     let renders_launcher = config.cgroup_launcher_mode.renders_sidecar();
     if renders_launcher {
         worker_env.extend(worker_launcher_env());
+        // The broker-backed shell path opens a durable invocation journal
+        // BEFORE any session exists, and the worker's compiled-in default for
+        // it lands inside the read-only `spec` Secret mount (EROFS). Name the
+        // directory explicitly and mount it below; see
+        // `crate::invocation_journal` for the measured failure.
+        worker_env.push(worker_invocation_journal_env());
     }
 
     // The private control emptyDir is added only when a wrapper sidecar is
@@ -310,6 +319,10 @@ pub fn build_task_run_job(
         // with the cgroup-launcher sidecar only; never mounted into a backing
         // sidecar, and closed off from the launcher-spawned child.
         worker_volume_mounts.push(worker_launcher_ipc_mount());
+        // Writable home for the durable invocation journal. Worker-only, and
+        // nested under the read-only `spec` mount exactly the way the launcher
+        // IPC volume already is.
+        worker_volume_mounts.push(worker_invocation_journal_mount());
     }
     if any_wrapper {
         worker_volume_mounts.push(control_volume_mount());
@@ -458,6 +471,13 @@ pub fn build_task_run_job(
         //     mountpoint has to come from a volume at all.
         volumes.push(launcher_ipc_volume());
         volumes.push(launcher_cgroup_mountpoint_volume());
+        //   * `invocation-journal` — Memory emptyDir the worker opens its
+        //     durable invocation journal in. `ShellLaunchContext::broker_backed`
+        //     runs `create_dir_all` on it before the supervisor starts, and its
+        //     default path is inside the READ-ONLY `spec` Secret mount, so
+        //     without this volume every armed pod dies `EROFS` with zero
+        //     sessions. See `crate::invocation_journal`.
+        volumes.push(invocation_journal_volume());
     }
     // Backing-service sidecars share a Memory /dev/shm (Postgres needs more than
     // the 64Mi default). Added only when services are injected so the manifest
@@ -1581,15 +1601,16 @@ mod tests {
             "DJINN_DATABASE_URL must be absent when database_url is None"
         );
 
-        // Production/default rendering adds the worker-private launcher IPC mount
-        // to the six baseline mounts.
+        // Production/default rendering adds the worker-private launcher IPC
+        // mount and the writable invocation-journal mount to the six baseline
+        // mounts.
         let mounts = container.volume_mounts.as_ref().expect("volume_mounts set");
         assert_eq!(
             mounts.len(),
-            7,
-            "expected 7 volume mounts including launcher IPC"
+            8,
+            "expected 8 volume mounts including launcher IPC and the invocation journal"
         );
-        let expected_mounts: [(&str, &str, Option<bool>); 7] = [
+        let expected_mounts: [(&str, &str, Option<bool>); 8] = [
             (VOLUME_SPEC, SPEC_MOUNT_DIR, Some(true)),
             (VOLUME_AUTH_TOKEN, TOKEN_MOUNT_DIR, Some(true)),
             (VOLUME_MIRROR, MIRROR_MOUNT_DIR, Some(false)),
@@ -1605,6 +1626,15 @@ mod tests {
                 crate::launcher::LAUNCHER_IPC_DIR,
                 None,
             ),
+            // Writable, and nested under the READ-ONLY spec mount at
+            // /var/run/djinn. Without it the worker's `create_dir_all` on the
+            // journal returns EROFS and the armed pod dies before any session
+            // exists — see `crate::invocation_journal`.
+            (
+                crate::invocation_journal::VOLUME_INVOCATION_JOURNAL,
+                crate::invocation_journal::INVOCATION_JOURNAL_DIR,
+                None,
+            ),
         ];
         for (mount, (exp_name, exp_path, exp_ro)) in mounts.iter().zip(expected_mounts.iter()) {
             assert_eq!(&mount.name, exp_name);
@@ -1617,8 +1647,8 @@ mod tests {
         let volumes = pod.volumes.as_ref().expect("volumes set");
         assert_eq!(
             volumes.len(),
-            8,
-            "expected 8 volumes including launcher surfaces"
+            9,
+            "expected 9 volumes including launcher surfaces and the invocation journal"
         );
         let expected_volume_names = [
             VOLUME_SPEC,
@@ -1629,6 +1659,7 @@ mod tests {
             crate::env_config::VOLUME_ENV_CONFIG,
             crate::launcher::VOLUME_LAUNCHER_IPC,
             crate::launcher::VOLUME_LAUNCHER_CGROUP,
+            crate::invocation_journal::VOLUME_INVOCATION_JOURNAL,
         ];
         for (volume, expected_name) in volumes.iter().zip(expected_volume_names.iter()) {
             assert_eq!(&volume.name, expected_name);

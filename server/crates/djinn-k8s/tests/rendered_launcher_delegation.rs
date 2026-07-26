@@ -52,6 +52,7 @@ use uuid::Uuid;
 
 use djinn_cgroup_launcher::{CGROUP2_SUPER_MAGIC, Error as LauncherError, NativeCgroupFs};
 use djinn_k8s::config::KubernetesConfig;
+use djinn_k8s::invocation_journal::VOLUME_INVOCATION_JOURNAL;
 use djinn_k8s::job::build_task_run_job;
 use djinn_k8s::launcher::{
     CgroupLauncherMode, LAUNCHER_CGROUP_ROOT, LAUNCHER_CONTAINER_NAME, LAUNCHER_UID,
@@ -518,4 +519,133 @@ fn launcher_mode_parses_exactly_its_two_documented_values() {
             "{typo:?} must not parse"
         );
     }
+}
+
+/// **Launcher blocker 4.** Every directory the armed worker is *told* to write
+/// must be backed by a mount it can actually write.
+///
+/// # The failure this exists for
+///
+/// `ShellLaunchContext::broker_backed` — reached only in `required` mode, and
+/// reached BEFORE any session exists — opens a durable invocation journal with
+/// `fs::create_dir_all`. Its compiled-in default directory is
+/// `/var/run/djinn/invocation-journal`, and `/var/run/djinn` in this very
+/// manifest is the `spec` Secret volume mounted `readOnly: true`. Measured in a
+/// production task-run worker container:
+///
+/// ```text
+/// mkdir: cannot create directory '/var/run/djinn/invocation-journal':
+///        Read-only file system
+/// ```
+///
+/// So the sidecar came up healthy, the worker↔broker handshake completed, and
+/// every armed Job then died `EROFS` with zero sessions and no lease error
+/// anywhere — because the lease path was never reached. Nothing caught it: the
+/// journal's own tests hand it a `tempfile::tempdir()`, which is always
+/// writable, and the manifest tests assert struct shape, and an absent volume is
+/// a perfectly well-formed absence.
+///
+/// The invariant asserted here is the general one, not the single instance: a
+/// directory named to the worker through the environment may not sit under a
+/// `readOnly` mount unless a writable mount covers it directly.
+#[test]
+fn every_writable_directory_named_to_the_armed_worker_is_backed_by_a_writable_mount() {
+    let job = render();
+    let pod = pod_of(&job);
+    let worker = pod
+        .containers
+        .iter()
+        .find(|container| container.name == "worker")
+        .expect("rendered pod has a worker container");
+    let env = worker.env.as_deref().unwrap_or_default();
+    let mounts = worker.volume_mounts.as_deref().unwrap_or_default();
+
+    let journal = env
+        .iter()
+        .find(|var| var.name == "DJINN_INVOCATION_JOURNAL_DIR")
+        .and_then(|var| var.value.as_deref())
+        .expect(
+            "the armed render must name the invocation journal directory explicitly rather than \
+             leaving the worker to fall back on a compiled-in default the render cannot see",
+        );
+
+    // Directories the worker is handed and then writes into. Add to this list
+    // whenever the render starts naming another writable path.
+    let writable_directories: &[&str] = &[journal];
+    for &directory in writable_directories {
+        let covering_writable = mounts
+            .iter()
+            .any(|mount| mount.mount_path == directory && mount.read_only != Some(true));
+        let read_only_parent = mounts.iter().find(|mount| {
+            mount.read_only == Some(true)
+                && directory.starts_with(&format!("{}/", mount.mount_path))
+        });
+        assert!(
+            covering_writable,
+            "the worker is told to write {directory}, but no writable volumeMount covers it{}",
+            read_only_parent.map_or(String::new(), |mount| format!(
+                " — and the readOnly mount at {} does, so create_dir_all returns EROFS",
+                mount.mount_path
+            ))
+        );
+        let volumes = pod.volumes.as_deref().unwrap_or_default();
+        let name = &mounts
+            .iter()
+            .find(|mount| mount.mount_path == directory)
+            .expect("checked above")
+            .name;
+        assert!(
+            volumes.iter().any(|volume| &volume.name == name),
+            "worker mounts volume {name} at {directory}, which the pod does not declare"
+        );
+    }
+}
+
+/// The journal surface is armed-mode only: the explicit `disabled` profile never
+/// constructs a broker-backed shell path, so it must keep its exact manifest
+/// shape — no env, no mount, no volume.
+#[test]
+fn the_disabled_profile_renders_no_invocation_journal_surface() {
+    let mut config = KubernetesConfig::for_testing();
+    config.cgroup_launcher_mode = CgroupLauncherMode::Disabled;
+    let job = build_task_run_job(
+        &config,
+        &Uuid::now_v7(),
+        "proj-grkq",
+        "djinn-taskrun-grkq",
+        "registry.example/djinn-project:grkq",
+        &[],
+        None,
+        false,
+        None,
+    );
+    let pod = pod_of(&job);
+    let worker = pod
+        .containers
+        .iter()
+        .find(|container| container.name == "worker")
+        .expect("rendered pod has a worker container");
+    assert!(
+        !worker
+            .env
+            .iter()
+            .flatten()
+            .any(|var| var.name == "DJINN_INVOCATION_JOURNAL_DIR"),
+        "disabled mode never opens a journal, so it must not name one"
+    );
+    assert!(
+        !worker
+            .volume_mounts
+            .iter()
+            .flatten()
+            .any(|mount| mount.name == VOLUME_INVOCATION_JOURNAL),
+        "disabled mode must keep the pre-enforcement mount shape"
+    );
+    assert!(
+        !pod.volumes
+            .iter()
+            .flatten()
+            .any(|volume| volume.name == VOLUME_INVOCATION_JOURNAL),
+        "disabled mode must keep the pre-enforcement volume shape"
+    );
 }
