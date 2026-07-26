@@ -768,6 +768,100 @@ async fn lifecycle_aggregate_uses_shared_evaluator_and_only_reads_durable_state(
 }
 
 #[tokio::test]
+async fn board_aggregate_covers_clean_stale_repeated_reaps_and_window_boundary() {
+    let db = Database::open_in_memory().unwrap();
+    db.ensure_initialized().await.unwrap();
+    let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+    assert_eq!(
+        repo.load_board_refinement_lifecycle_aggregate(GRACE)
+            .await
+            .unwrap(),
+        djinn_db::RefinementLifecycleAggregate {
+            stale_run_count: 0,
+            reaped_phantom_last_24h: 0,
+        }
+    );
+
+    let proposal_id = proposal(&db).await;
+    let first = run(&db, &proposal_id, 1).await;
+    repo.reap_and_admit(admission(proposal_id.clone(), "board-first-reap"))
+        .await
+        .unwrap();
+    let second: String = sqlx::query_scalar(
+        "SELECT id FROM refinement_runs WHERE proposal_id = $1 AND generation = 2",
+    )
+    .bind(&proposal_id)
+    .fetch_one(db.pool())
+    .await
+    .unwrap();
+    for run_id in [&second] {
+        sqlx::query("UPDATE refinement_dispatch_intents SET state = 'cancelled', terminal_at = $2 WHERE run_id = $1")
+            .bind(run_id).bind(OLD).execute(db.pool()).await.unwrap();
+        sqlx::query("UPDATE refinement_runs SET heartbeat_at = $2 WHERE id = $1")
+            .bind(run_id)
+            .bind(OLD)
+            .execute(db.pool())
+            .await
+            .unwrap();
+    }
+    repo.reap_and_admit(admission(proposal_id.clone(), "board-second-reap"))
+        .await
+        .unwrap();
+    let active: String = sqlx::query_scalar(
+        "SELECT id FROM refinement_runs WHERE proposal_id = $1 AND state = 'running'",
+    )
+    .bind(&proposal_id)
+    .fetch_one(db.pool())
+    .await
+    .unwrap();
+    sqlx::query("UPDATE refinement_dispatch_intents SET state = 'cancelled', terminal_at = $2 WHERE run_id = $1")
+        .bind(&active).bind(OLD).execute(db.pool()).await.unwrap();
+    sqlx::query("UPDATE refinement_runs SET heartbeat_at = $2 WHERE id = $1")
+        .bind(&active)
+        .bind(OLD)
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+    let outside = proposal(&db).await;
+    sqlx::query("INSERT INTO proposal_revisions (id, proposal_id, seq, title, body, body_format, acceptance_criteria, event_kind, refinement_stop_tag, created_at) VALUES ($1, $2, 2, '', '', 'markdown', '[]', 'refinement_stop', 'reaped_phantom', to_char(transaction_timestamp() - interval '24 hours 1 second' AT TIME ZONE 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'))")
+        .bind(uuid::Uuid::now_v7().to_string()).bind(outside).execute(db.pool()).await.unwrap();
+
+    let aggregate = repo
+        .load_board_refinement_lifecycle_aggregate(GRACE)
+        .await
+        .unwrap();
+    assert_eq!(
+        aggregate.stale_run_count, 1,
+        "shared evaluator sees active phantom"
+    );
+    assert_eq!(
+        aggregate.reaped_phantom_last_24h, 2,
+        "two committed reaps are inside; boundary row is outside"
+    );
+    assert_eq!(sqlx::query_scalar::<_, i64>("SELECT count(*) FROM proposal_revisions WHERE refinement_run_id = $1 AND refinement_stop_tag = 'reaped_phantom'").bind(&first).fetch_one(db.pool()).await.unwrap(), 1);
+
+    // A later admission after terminal history is generation four, but it has
+    // no current run to reap. This is the path that must not emit reap
+    // telemetry merely because the successor generation exceeds one.
+    sqlx::query("UPDATE refinement_runs SET state = 'terminal', terminal_at = $2 WHERE id = $1")
+        .bind(&active)
+        .bind(OLD)
+        .execute(db.pool())
+        .await
+        .unwrap();
+    repo.reap_and_admit(admission(proposal_id.clone(), "terminal-history-no-reap"))
+        .await
+        .unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM proposal_revisions WHERE proposal_id = $1 AND refinement_stop_tag = 'reaped_phantom'")
+            .bind(&proposal_id).fetch_one(db.pool()).await.unwrap(),
+        2,
+        "a no-current-run admission must not create a third reap event"
+    );
+}
+
+#[tokio::test]
 async fn materialization_and_completion_are_idempotent_durable_boundaries() {
     let db = Database::open_in_memory().unwrap();
     db.ensure_initialized().await.unwrap();

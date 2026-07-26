@@ -4022,6 +4022,30 @@ mod tests {
     }
 
     #[test]
+    fn phantom_reap_counter_has_one_bounded_reason_series() {
+        let (_, rendered) = render_isolated(refinement_run::increment_reaped_phantom);
+
+        assert_eq!(
+            labeled_sample_value(
+                &rendered,
+                REFINEMENT_RUN_REAPED_TOTAL,
+                &[("reason", refinement_run::REASON_PHANTOM)],
+            ),
+            1.0
+        );
+        let samples: Vec<_> = rendered
+            .lines()
+            .filter(|line| line.starts_with("refinement_run_reaped_total{"))
+            .collect();
+        assert_eq!(samples.len(), 1, "only one bounded reap series is allowed");
+        assert!(
+            !samples[0].contains("proposal_id=") && !samples[0].contains("run_id="),
+            "phantom reap metrics must not carry proposal/run labels: {}",
+            samples[0]
+        );
+    }
+
+    #[test]
     fn jit_pitfall_rollout_decision_outcomes_render_separately() {
         let _guard = test_guard();
         init().unwrap();

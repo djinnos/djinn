@@ -32,7 +32,9 @@ pub(super) async fn board_health_impl(
                         parsed.refinement_phantom_active_count = aggregate.stale_run_count;
                         parsed.refinement_phantom_reaps_24h = aggregate.reaped_phantom_last_24h;
                     }
-                    Err(error) => return Json(ErrorOr::Error(ErrorResponse::new(error.to_string()))),
+                    Err(error) => {
+                        return Json(ErrorOr::Error(ErrorResponse::new(error.to_string())));
+                    }
                 }
 
                 // Surface aggregate coordinator metrics (throughput + PR errors).
