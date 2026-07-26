@@ -12,7 +12,13 @@ use crate::tools::proposal_ops::{
     EvidenceLifecyclePhase, EvidenceLifecycleState, NeedsEvidenceStatus,
     ProposalRefinementStatusModel,
 };
-use djinn_core::models::NeedsEvidenceClaim;
+use djinn_core::{
+    models::NeedsEvidenceClaim,
+    refinement_liveness::{
+        RefinementLivenessEvidence, RefinementLivenessResult, RefinementParkKind,
+        RefinementRunState,
+    },
+};
 use djinn_db::{ProposalRepository, TaskRepository};
 
 // ── Param struct ─────────────────────────────────────────────────────────────
@@ -317,26 +323,63 @@ pub(crate) async fn validate_demand_evidence(
 
 // ── Refinement status derivation ─────────────────────────────────────────────
 
+const REFINEMENT_HEARTBEAT_GRACE_MILLIS: i64 = 60_000;
+
+/// Keep the response bounded while exposing which shared-evaluator branch won.
+fn liveness_fields(result: &RefinementLivenessResult) -> (&'static str, Option<String>) {
+    match result {
+        RefinementLivenessResult::Terminal { .. } => ("terminal", None),
+        RefinementLivenessResult::Stale { .. } => ("stale", None),
+        RefinementLivenessResult::Live { evidence } => (
+            "live",
+            Some(
+                match evidence {
+                    RefinementLivenessEvidence::AwaitingReviewPark => "awaiting_review_park",
+                    RefinementLivenessEvidence::AwaitingEvidencePark => "awaiting_evidence_park",
+                    RefinementLivenessEvidence::PendingIntent { .. } => "pending_intent",
+                    RefinementLivenessEvidence::ClaimedIntent { .. } => "claimed_intent",
+                    RefinementLivenessEvidence::OpenTask { .. } => "open_task",
+                    RefinementLivenessEvidence::QueuedTask { .. } => "queued_task",
+                    RefinementLivenessEvidence::RunningTask { .. } => "running_task",
+                    RefinementLivenessEvidence::PoolPausedTask { .. } => "pool_paused_task",
+                    RefinementLivenessEvidence::LiveSession { .. } => "live_session",
+                    RefinementLivenessEvidence::BetweenPhase { .. } => "between_phase",
+                    RefinementLivenessEvidence::FreshHeartbeat { .. } => "fresh_heartbeat",
+                }
+                .to_string(),
+            ),
+        ),
+    }
+}
+
+fn run_state_name(state: RefinementRunState) -> &'static str {
+    match state {
+        RefinementRunState::Active => "active",
+        RefinementRunState::Parked => "parked",
+        RefinementRunState::Terminal => "terminal",
+    }
+}
+
 /// Derive the current refinement status from lifecycle events and debate trail.
 pub async fn build_refinement_status(
     repo: &ProposalRepository,
     proposal_id: &str,
 ) -> Result<ProposalRefinementStatusModel, String> {
-    // Find the latest refinement_start entry.
-    let revisions = repo
-        .revisions(proposal_id)
+    // This is the only liveness authority for status. The repository loads the
+    // exact run and evaluates it in one read-only repeatable-read observation.
+    let exact = repo
+        .load_current_refinement_run_snapshot(proposal_id, REFINEMENT_HEARTBEAT_GRACE_MILLIS)
         .await
-        .map_err(|e| format!("failed to read revisions: {e}"))?;
-
-    let latest_start = revisions
-        .iter()
-        .rev()
-        .find(|r| r.event_kind == "refinement_start");
-
-    let Some(_start_rev) = latest_start else {
-        // No refinement started.
+        .map_err(|e| format!("failed to load current refinement run snapshot: {e}"))?;
+    let Some(exact) = exact else {
         return Ok(ProposalRefinementStatusModel {
             active: false,
+            run_id: None,
+            generation: None,
+            run_state: None,
+            liveness: None,
+            liveness_evidence: None,
+            last_heartbeat_at: None,
             current_round: None,
             dry_rounds: 0,
             total_entries: 0,
@@ -349,49 +392,23 @@ pub async fn build_refinement_status(
         });
     };
 
-    // Check if there's a refinement_stop after this start.
-    let stop_after = revisions
-        .iter()
-        .rev()
-        .find(|r| r.event_kind == "refinement_stop");
+    // Legacy rows below supply compatible display-only content; they never
+    // decide whether an exact run is live, stale, parked, or terminal.
+    let revisions = repo
+        .revisions(proposal_id)
+        .await
+        .map_err(|e| format!("failed to read revisions: {e}"))?;
 
-    let is_active = match (&stop_after, &latest_start) {
-        (Some(stop), Some(start)) => stop.created_at <= start.created_at,
-        _ => true,
-    };
-
-    // Read stop reason from stop metadata (if stopped).
-    // The coordinator's persist_refinement_stop writes `reason_tag`, while
-    // the refinement_start error handler may write `reason`. Try both.
-    let stop_reason = if !is_active {
-        stop_after
-            .and_then(|s| s.event_metadata.as_ref())
-            .and_then(|m| serde_json::from_str::<serde_json::Value>(m).ok())
-            .and_then(|v| {
-                v.get("reason_tag")
-                    .or_else(|| v.get("stop_reason"))
-                    .or_else(|| v.get("reason"))
-                    .and_then(|r| r.as_str().map(String::from))
-            })
-    } else {
-        None
-    };
-
-    // Detect the parked "awaiting human review" state: the autonomous tribunal
+    // Read legacy display-only review content. Exact park evidence below is
+    // authoritative for whether review is actually awaited.
     // records a `refinement_awaiting_review` lifecycle event when it converges,
     // and the human's resolve records a `refinement_stop` after it.
     let latest_awaiting = revisions
         .iter()
         .rev()
         .find(|r| r.event_kind == "refinement_awaiting_review");
-    let awaiting_review = match (&latest_awaiting, &stop_after, &latest_start) {
-        (Some(aw), Some(stop), Some(start)) => {
-            start.created_at <= aw.created_at && stop.created_at < aw.created_at
-        }
-        (Some(aw), None, Some(start)) => start.created_at <= aw.created_at,
-        _ => false,
-    };
-    let (judge_summary, snapshot_revision_seq) = if awaiting_review {
+    let legacy_awaiting_review = latest_awaiting.is_some();
+    let (judge_summary, snapshot_revision_seq) = if legacy_awaiting_review {
         let meta = latest_awaiting
             .and_then(|r| r.event_metadata.as_ref())
             .and_then(|m| serde_json::from_str::<serde_json::Value>(m).ok());
@@ -609,22 +626,49 @@ pub async fn build_refinement_status(
             // have been written yet.  Still awaiting.
             None => EvidenceLifecycleState::AwaitingEvidence,
         }
-    } else if is_active {
+    } else if matches!(exact.liveness, RefinementLivenessResult::Live { .. }) {
         EvidenceLifecycleState::Active
     } else {
         // Refinement stopped but proposal is not terminal.
         EvidenceLifecycleState::Active
     };
 
+    let (liveness, liveness_evidence) = liveness_fields(&exact.liveness);
+    let active = matches!(exact.liveness, RefinementLivenessResult::Live { .. });
+    let awaiting_review = matches!(
+        exact.snapshot.park.as_ref().map(|park| park.kind),
+        Some(RefinementParkKind::AwaitingReview)
+    );
+    let stop_reason = match &exact.liveness {
+        RefinementLivenessResult::Terminal { reason } => {
+            reason.as_ref().map(|reason| reason.tag().to_string())
+        }
+        _ => None,
+    };
+
     Ok(ProposalRefinementStatusModel {
-        active: is_active,
+        active,
+        run_id: Some(exact.snapshot.run.run_id.clone()),
+        generation: Some(exact.generation),
+        run_state: Some(run_state_name(exact.snapshot.run.state).to_string()),
+        liveness: Some(liveness.to_string()),
+        liveness_evidence,
+        last_heartbeat_at: exact
+            .snapshot
+            .heartbeat
+            .as_ref()
+            .map(|heartbeat| heartbeat.heartbeat_at.0),
         current_round: Some(current_round),
         dry_rounds,
         total_entries,
         stop_reason,
         awaiting_review,
-        judge_summary,
-        snapshot_revision_seq,
+        judge_summary: if awaiting_review { judge_summary } else { None },
+        snapshot_revision_seq: if awaiting_review {
+            snapshot_revision_seq
+        } else {
+            None
+        },
         needs_evidence,
         evidence_lifecycle_state,
     })
