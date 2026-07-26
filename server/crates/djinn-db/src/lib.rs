@@ -14,7 +14,7 @@ mod template_bootstrap;
 pub mod test_support {
     pub use crate::repositories::test_support::{
         HousekeepingFixture, HousekeepingFixtureExpectedCounts, HousekeepingFixtureProject,
-        UsageTestSessionSeed, UsageTestTaskSeed, add_blocker_edge,
+        RefinementRunAuditForTest, UsageTestSessionSeed, UsageTestTaskSeed, add_blocker_edge,
         apply_all_migrations_to_fresh_database, backdate_coordinator_incarnation_lease,
         backdate_task_attempt_created_at, backdate_task_updated_at,
         build_multi_project_housekeeping_fixture, close_task_at,
@@ -25,13 +25,12 @@ pub mod test_support {
         make_coordinator_incarnation_error_after_first_read,
         make_coordinator_incarnation_vanish_after_first_read, make_project,
         make_refinement_run_phantom_for_test, nullify_note_confidence_for_test,
-        refinement_run_audit_for_test, RefinementRunAuditForTest,
         override_debate_trail_body_metadata, proposal_lint_revision_id_for_test,
-        reject_admission_create_started_for_test, reject_new_task_arbitrations_for_test,
-        reject_refinement_successor_for_test, rename_note_confidence_column_for_test,
-        replace_legacy_proposal_head_for_test, seed_board_health_mismatch_candidate,
-        seed_chat_session_row, seed_project, seed_session_row, seed_session_row_with_id,
-        seed_task_row,
+        refinement_run_audit_for_test, reject_admission_create_started_for_test,
+        reject_new_task_arbitrations_for_test, reject_refinement_successor_for_test,
+        rename_note_confidence_column_for_test, replace_legacy_proposal_head_for_test,
+        seed_board_health_mismatch_candidate, seed_chat_session_row, seed_project,
+        seed_session_row, seed_session_row_with_id, seed_task_row,
     };
 }
 
@@ -65,9 +64,8 @@ pub use repositories::{
     admission_journal::{
         AdmissionDomain, AdmissionJournalKey, AdmissionJournalRepository, AdmissionJournalRow,
         AdmissionRecoveryResult, AdmissionState, AdmissionWorkloadKind, AdoptLiveAdmissionInput,
-        CreateStartedInput, ObserveAdmissionResult, ReclaimAbsentInput, ReclaimAbsentOutcome,
-        ReserveAdmissionInput, ReserveAdmissionResult, TerminalAdmissionInput,
-        UidFencedAdmissionInput,
+        CreateStartedInput, ReclaimAbsentInput, ReclaimAbsentOutcome, ReserveAdmissionInput,
+        ReservedAdmission, TerminalAdmissionInput, UidFencedAdmissionInput,
     },
     agent::{
         AgentCreateInput, AgentListQuery, AgentListResult, AgentMetrics, AgentRepository,

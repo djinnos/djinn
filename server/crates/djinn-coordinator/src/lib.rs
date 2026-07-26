@@ -57,6 +57,7 @@ pub mod build_admission_transition;
 pub mod build_lease;
 /// Retirement of occupying build leases whose Kubernetes object is provably gone.
 pub mod build_lease_reclaim;
+pub mod build_slot_authority;
 pub mod cargo_warm_base_gc;
 pub(crate) mod ci_preflight_gate;
 pub mod ci_reproduction;
@@ -190,11 +191,15 @@ pub use djinn_orchestration_types::coordinator::PR_REVIEW_FEEDBACK_EVENT;
 // ─── Test modules ────────────────────────────────────────────────────────
 
 #[cfg(test)]
+pub(crate) mod build_admission_capacity_support;
+#[cfg(test)]
 mod build_admission_epoch_disruption_tests;
 #[cfg(test)]
 mod build_admission_epoch_matrix_tests;
 #[cfg(test)]
 mod build_admission_epoch_support;
+#[cfg(test)]
+mod build_admission_handoff_matrix_tests;
 #[cfg(test)]
 mod build_admission_integration_tests;
 #[cfg(test)]
@@ -213,3 +218,5 @@ mod build_lease_integration_tests;
 pub(crate) mod test_helpers;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod unified_capacity_tests;

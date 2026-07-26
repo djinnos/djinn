@@ -537,6 +537,9 @@ fn lease_object_names_come_from_the_durable_identity_or_nowhere() {
         bound_pod_uid: None,
         candidate_cleanup: None,
         terminal_reason: None,
+        // One full build slot: the weight a granted lease is charged, which is
+        // what makes this row occupying rather than a free re-entry.
+        weight: 1,
         timeout_credit_consumed: false,
         created_at: "now".into(),
         updated_at: "now".into(),
