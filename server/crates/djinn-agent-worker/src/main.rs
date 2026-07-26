@@ -3457,7 +3457,11 @@ mod tests {
         for handshake in [
             Some(LauncherHandshake::AbsentMount),
             Some(LauncherHandshake::FailedClosed(
-                HandshakeError::ConnectTimeout,
+                HandshakeError::ConnectTimeout {
+                    path: "/var/run/djinn/launcher/broker.sock".to_string(),
+                    attempts: 300,
+                    poll_ms: 100,
+                },
             )),
             None,
         ] {
@@ -3475,6 +3479,54 @@ mod tests {
                 "required-mode error must preserve enforcement context: {error}"
             );
         }
+    }
+
+    /// Four production deploy cycles were spent attributing armed-launcher
+    /// failures whose only log line named neither the operation nor the path.
+    /// Every fail-closed handshake variant must carry both, plus an errno where
+    /// one exists, so the next failure is readable from a single line.
+    #[test]
+    fn required_launcher_failures_name_the_failing_operation_and_path() {
+        use launcher_handshake::HandshakeError;
+
+        let cases = [
+            HandshakeError::Io {
+                operation: "write handshake temp",
+                path: "/var/run/djinn/launcher/credential.tmp".to_string(),
+                errno: 30,
+                source: std::io::Error::from_raw_os_error(30),
+            },
+            HandshakeError::Connect {
+                path: "/var/run/djinn/launcher/broker.sock".to_string(),
+                errno: 13,
+                source: std::io::Error::from_raw_os_error(13),
+            },
+            HandshakeError::ConnectTimeout {
+                path: "/var/run/djinn/launcher/broker.sock".to_string(),
+                attempts: 300,
+                poll_ms: 100,
+            },
+        ];
+        for case in cases {
+            let rendered = case.to_string();
+            assert!(
+                rendered.contains("/var/run/djinn/launcher/"),
+                "handshake failure must name the path it touched: {rendered}"
+            );
+            assert!(
+                rendered.len() > 40,
+                "handshake failure must be more than a bare errno string: {rendered}"
+            );
+        }
+        let io = HandshakeError::Io {
+            operation: "rename handshake temp into place",
+            path: "/var/run/djinn/launcher/worker.pid".to_string(),
+            errno: 13,
+            source: std::io::Error::from_raw_os_error(13),
+        }
+        .to_string();
+        assert!(io.contains("rename handshake temp into place"), "{io}");
+        assert!(io.contains("errno 13"), "{io}");
     }
 
     #[tokio::test]
