@@ -114,6 +114,37 @@ impl DbTaskStatus {
     pub fn is_terminal(&self) -> bool {
         matches!(self, Self::Closed)
     }
+
+    /// Whether this status is a **recorded handoff**: the task has moved to a
+    /// boundary that some other actor now owns (review, PR, lead intervention)
+    /// or has finished outright.
+    ///
+    /// This is deliberately wider than [`Self::is_terminal`] and exists only for
+    /// protocol-violation detection. A session that exits with its task parked
+    /// at a handoff boundary did its job and handed the task on — that is the
+    /// normal shape of a worker or reviewer turn, not a structural
+    /// inconsistency. Treating every non-`closed` status as "nonterminal" made
+    /// the violation branch fire on 74.8% of ALL session exits in production
+    /// (2133/2852 over seven days), including 741 clean reviewer exits at
+    /// `in_task_review` and 950 handoff exits in total, which drowned the signal
+    /// the check exists to raise.
+    ///
+    /// `Open` and `InProgress` are NOT settled: a pod that exits while the task
+    /// is still queued or still claimed left nothing behind, which is the
+    /// genuine inconsistency this detector is for.
+    pub fn is_settled(&self) -> bool {
+        matches!(
+            self,
+            Self::NeedsTaskReview
+                | Self::InTaskReview
+                | Self::Approved
+                | Self::PrDraft
+                | Self::PrReview
+                | Self::NeedsLeadIntervention
+                | Self::InLeadIntervention
+                | Self::Closed
+        )
+    }
 }
 
 // ─── Classification evidence ────────────────────────────────────────────────
@@ -307,8 +338,9 @@ pub struct ClassificationResult {
 /// 1. **Terminal task state** → noop/idempotent outcome
 /// 2. **Hard runtime cap exceeded** → `Dead` with `Timeout` outcome (forbids
 ///    extension)
-/// 3. **Protocol violation** → inconsistent clean/nonzero exit on non-terminal
-///    task
+/// 3. **Protocol violation** → inconsistent clean/nonzero exit on a task that
+///    is positively known to be unsettled (still `open`/`in_progress`) with a
+///    session row positively known to still be running
 /// 4. **Dead** → absent/failed pod with no recent activity
 /// 5. **Slow** → activity signal absent/idle, pod running, below hard cap
 /// 6. **Live** → default when other conditions don't match
@@ -340,9 +372,22 @@ pub fn classify(evidence: &LivenessEvidence) -> ClassificationResult {
     }
 
     // ── 3. Protocol violation detection ─────────────────────────────────
-    // A protocol violation occurs when we see structurally inconsistent
-    // signals: a pod that exited (succeeded/failed) while the task is still
-    // non-terminal and the session is not in a terminal DB state.
+    // A protocol violation is a STRUCTURAL INCONSISTENCY, so every term must be
+    // POSITIVE evidence. Absence is not guilt.
+    //
+    // The previous rule mixed one positive guard with one fail-open one:
+    // precedence 1 needed `db_task_status.is_some_and(is_terminal)` to hold to
+    // exonerate, while this branch used `db_session_status.is_none_or(...)` to
+    // convict. Missing evidence therefore fell through precedence 1 AND
+    // satisfied this branch — an absent task row or session row convicted
+    // deterministically. Both terms are now `is_some_and`, so an unknown state
+    // is fail-safe: it produces no violation, and no destructive action either
+    // (the reaping paths are precedence 2/4, which are untouched).
+    //
+    // The task term is also tightened from "not closed" to "not settled": see
+    // [`DbTaskStatus::is_settled`]. A session that exits with its task at a
+    // review/PR/intervention boundary handed off; only a task still `open` or
+    // `in_progress` was genuinely left stranded.
     let pod_exited = matches!(
         evidence.pod_phase,
         Some(PodPhase::Succeeded) | Some(PodPhase::Failed)
@@ -350,9 +395,13 @@ pub fn classify(evidence: &LivenessEvidence) -> ClassificationResult {
     let session_nonterminal = evidence
         .db_session_status
         .as_ref()
-        .is_none_or(|s| !s.is_terminal());
+        .is_some_and(|s| !s.is_terminal());
+    let task_unsettled = evidence
+        .db_task_status
+        .as_ref()
+        .is_some_and(|s| !s.is_settled());
 
-    if pod_exited && session_nonterminal {
+    if pod_exited && session_nonterminal && task_unsettled {
         // Classify the type of protocol violation based on exit code
         let reason = match evidence.exit_code {
             Some(0) => LivenessReason::CleanExitNonterminal,
@@ -760,16 +809,90 @@ mod tests {
         assert_ne!(result.outcome, Some(LivenessOutcome::KillNoop));
     }
 
+    /// Absence is not guilt. A violation needs POSITIVE evidence on both axes,
+    /// so a missing session row can no longer convict an exited pod — the
+    /// asymmetry that made unknown evidence land in `ProtocolViolation`
+    /// deterministically.
     #[test]
-    fn no_session_status_with_exited_pod_is_protocol_violation() {
-        // No session row + pod exited = structural inconsistency
+    fn no_session_status_with_exited_pod_is_not_a_protocol_violation() {
         let mut ev = live_evidence();
         ev.pod_phase = Some(PodPhase::Succeeded);
         ev.exit_code = Some(0);
         ev.db_session_status = None; // no session row
 
         let result = classify(&ev);
-        assert_eq!(result.verdict, Verdict::ProtocolViolation);
+        assert_ne!(result.verdict, Verdict::ProtocolViolation);
+        assert_ne!(result.outcome, Some(LivenessOutcome::ProtocolViolation));
+    }
+
+    /// The mirror image: a missing task row must not convict either. Before
+    /// this, `db_task_status = None` failed precedence 1's `is_some_and` guard
+    /// AND satisfied this branch, so it was a guaranteed violation.
+    #[test]
+    fn no_task_status_with_exited_pod_is_not_a_protocol_violation() {
+        let mut ev = live_evidence();
+        ev.pod_phase = Some(PodPhase::Succeeded);
+        ev.exit_code = Some(0);
+        ev.db_session_status = Some(DbSessionStatus::Running);
+        ev.db_task_status = None; // no task row
+
+        let result = classify(&ev);
+        assert_ne!(result.verdict, Verdict::ProtocolViolation);
+    }
+
+    /// A session that exits with its task parked at a recorded handoff did its
+    /// job. Every `is_settled` status must be exonerated, on both a clean and a
+    /// crashing exit.
+    #[test]
+    fn exit_at_a_recorded_handoff_is_not_a_protocol_violation() {
+        for status in [
+            DbTaskStatus::NeedsTaskReview,
+            DbTaskStatus::InTaskReview,
+            DbTaskStatus::Approved,
+            DbTaskStatus::PrDraft,
+            DbTaskStatus::PrReview,
+            DbTaskStatus::NeedsLeadIntervention,
+            DbTaskStatus::InLeadIntervention,
+        ] {
+            for (phase, code) in [(PodPhase::Succeeded, 0), (PodPhase::Failed, 1)] {
+                let mut ev = live_evidence();
+                ev.pod_phase = Some(phase);
+                ev.exit_code = Some(code);
+                ev.db_session_status = Some(DbSessionStatus::Running);
+                ev.db_task_status = Some(status);
+
+                let result = classify(&ev);
+                assert_ne!(
+                    result.verdict,
+                    Verdict::ProtocolViolation,
+                    "{status:?} is a recorded handoff, not a structural inconsistency"
+                );
+            }
+        }
+    }
+
+    /// The detector must keep firing on the shape it exists for: a pod that
+    /// exited leaving its task still claimed or still queued, with the session
+    /// row never settled.
+    #[test]
+    fn exit_leaving_the_task_unsettled_is_still_a_protocol_violation() {
+        for status in [DbTaskStatus::Open, DbTaskStatus::InProgress] {
+            let mut clean = live_evidence();
+            clean.pod_phase = Some(PodPhase::Succeeded);
+            clean.exit_code = Some(0);
+            clean.db_session_status = Some(DbSessionStatus::Running);
+            clean.db_task_status = Some(status);
+            let result = classify(&clean);
+            assert_eq!(result.verdict, Verdict::ProtocolViolation, "{status:?}");
+            assert_eq!(result.reason, Some(LivenessReason::CleanExitNonterminal));
+
+            let mut crashed = clean.clone();
+            crashed.pod_phase = Some(PodPhase::Failed);
+            crashed.exit_code = Some(1);
+            let result = classify(&crashed);
+            assert_eq!(result.verdict, Verdict::ProtocolViolation, "{status:?}");
+            assert_eq!(result.outcome, Some(LivenessOutcome::Crash));
+        }
     }
 
     #[test]

@@ -227,18 +227,39 @@ pub struct RefinementLivenessSnapshot {
 pub enum RefinementLivenessEvidence {
     AwaitingReviewPark,
     AwaitingEvidencePark,
-    PendingIntent { intent_id: String },
-    ClaimedIntent { intent_id: String },
-    /// A durably accepted task insert remains recoverable dispatch work even
-    /// after the correlated role task closes.
-    MaterializedIntent { intent_id: String },
-    OpenTask { task_id: String },
-    QueuedTask { task_id: String },
-    RunningTask { task_id: String },
-    PoolPausedTask { task_id: String },
-    LiveSession { session_id: String, task_id: String },
-    BetweenPhase { intent_id: String },
-    FreshHeartbeat { heartbeat_at: DbTimestamp },
+    PendingIntent {
+        intent_id: String,
+    },
+    ClaimedIntent {
+        intent_id: String,
+    },
+    /// Durable dispatch work that remains recoverable after role execution
+    /// records have ended or are not projected into the snapshot.
+    MaterializedIntent {
+        intent_id: String,
+    },
+    OpenTask {
+        task_id: String,
+    },
+    QueuedTask {
+        task_id: String,
+    },
+    RunningTask {
+        task_id: String,
+    },
+    PoolPausedTask {
+        task_id: String,
+    },
+    LiveSession {
+        session_id: String,
+        task_id: String,
+    },
+    BetweenPhase {
+        intent_id: String,
+    },
+    FreshHeartbeat {
+        heartbeat_at: DbTimestamp,
+    },
 }
 
 /// Why a nonterminal run has no live evidence.
@@ -473,6 +494,60 @@ mod tests {
             evaluate_refinement_liveness(&current, NOW),
             RefinementLivenessResult::Stale { .. }
         ));
+    }
+
+    /// A materialized intent whose correlated role task exists is durable
+    /// in-flight work: the coordinator still owes it an outcome. That must
+    /// remain true after the role agent exits and its task closes, which is the
+    /// exact window in which the admission reaper used to terminalize a run
+    /// whose adversary had genuinely run (`stop_tag = reaped_phantom`) and mint
+    /// a fresh generation that repeated the loop.
+    #[test]
+    fn materialized_intent_with_its_role_task_is_live_even_after_the_task_closes() {
+        for task_state in [
+            RefinementTaskState::Running,
+            RefinementTaskState::Closed,
+            RefinementTaskState::Cancelled,
+        ] {
+            let mut value = snapshot();
+            value
+                .intents
+                .push(intent(RefinementIntentState::Materialized));
+            value.tasks.push(task(task_state));
+            assert_eq!(
+                evaluate_refinement_liveness(&value, NOW),
+                RefinementLivenessResult::Live {
+                    evidence: RefinementLivenessEvidence::MaterializedIntent {
+                        intent_id: "intent-1".into(),
+                    },
+                },
+                "{task_state:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn materialized_intent_is_exact_run_evidence_without_task_or_session_projection() {
+        let mut value = snapshot();
+        value
+            .intents
+            .push(intent(RefinementIntentState::Materialized));
+        assert_eq!(
+            evaluate_refinement_liveness(&value, NOW),
+            RefinementLivenessResult::Live {
+                evidence: RefinementLivenessEvidence::MaterializedIntent {
+                    intent_id: "intent-1".into(),
+                },
+            }
+        );
+
+        value.intents[0].run_id = "run-prior".into();
+        assert_eq!(
+            evaluate_refinement_liveness(&value, NOW),
+            RefinementLivenessResult::Stale {
+                reason: RefinementStaleReason::NoLiveEvidence,
+            }
+        );
     }
 
     #[test]
