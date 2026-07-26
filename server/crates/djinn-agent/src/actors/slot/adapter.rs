@@ -9,22 +9,24 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use djinn_core::canonical_verify::{
-    CanonicalCommandDescriptorV1, CanonicalFinalVerificationPlanV1, CanonicalHermeticityV1,
-    DeclaredExternalInputV1, ImmutableImageV1, ResolvedEnvironmentIdentityInputV1, ToolProbeStatus,
-    ToolProbeV1, VerificationInputManifestV1,
+    CanonicalCommandDescriptorV1, CanonicalEvidenceTierV1, CanonicalFinalVerificationPlanV1,
+    CanonicalHermeticityV1, DeclaredExternalInputV1, ImmutableImageV1,
+    ResolvedEnvironmentIdentityInputV1, ToolProbeStatus, ToolProbeV1, VerificationInputManifestV1,
 };
 use djinn_core::clock::SystemClock;
 use djinn_core::models::VerifySource;
 use djinn_db::advisory_lock;
 use djinn_db::{ImageRepository, TaskRunRepository};
 use djinn_git::verification_input::{
-    ResolvedExternalInputV1, VerificationInputFingerprintConfig, collect_verification_changed_paths,
+    OutputOnlyPolicy, ResolvedExternalInputV1, VerificationInputFingerprintConfig,
+    collect_verification_changed_paths,
 };
 use djinn_k8s::sidecar::resolve_image_services_strict;
 use djinn_sandbox::final_verification_execution::{
     EnvironmentIdentityResolver, FinalVerificationExecutionRequest,
 };
 use djinn_sandbox::service_provisioning::{ServiceProvisioners, UnixCatalogServiceProvisioner};
+use djinn_stack::environment::VerificationEvidenceTier as StackEvidenceTier;
 use djinn_supervisor::SupervisorServices;
 use globset::{Glob, GlobSetBuilder};
 
@@ -117,6 +119,40 @@ fn output_directories(globs: &[String]) -> Result<Vec<PathBuf>, String> {
         directories.insert(prefix);
     }
     Ok(directories.into_iter().collect())
+}
+
+/// Resolve declared environment names from the host process environment.
+///
+/// Production previously hardcoded an empty allowlist, so `command_environment`
+/// rejected every name a catalog service did not export — `PATH`, `HOME`,
+/// `CARGO_HOME`, and `CARGO_TARGET_DIR` could not be passed at all, and the
+/// config schema advertised an `environment_names` list that production could
+/// not satisfy.
+///
+/// Names exported by a catalog service are excluded: those values are minted
+/// per attempt by the lease and must not be frozen into identity. A declared
+/// name that is unset, or set to an empty value where a value is required, is
+/// omitted so the command fails closed with `UndeclaredCommandEnvironment`
+/// rather than silently running without it.
+///
+/// `require_value` distinguishes the two buckets: identity-bearing values are
+/// hashed and must be non-empty (canonicalization rejects an empty value),
+/// while volatile values are not hashed and may legitimately be empty — the
+/// production pod renders `RUSTC_WRAPPER=""` to clear a repo-level sccache
+/// setting, and dropping it would silently change how the build compiles.
+fn resolve_declared_environment(
+    names: &[String],
+    service_exported: &std::collections::BTreeSet<String>,
+    require_value: bool,
+) -> BTreeMap<String, String> {
+    names
+        .iter()
+        .filter(|name| !service_exported.contains(*name))
+        .filter_map(|name| {
+            let value = std::env::var(name).ok()?;
+            (!require_value || !value.is_empty()).then(|| (name.clone(), value))
+        })
+        .collect()
 }
 
 /// Canonical host runtime directories that the strict Landlock launcher must
@@ -337,7 +373,7 @@ impl AgentHostCallbacks {
     /// traversed exactly once and no consultation/lease/execution/persistence
     /// boundary is reached. Production code never calls this.
     #[cfg(test)]
-    fn dispatch_with_final_verification_probe(
+    pub(super) fn dispatch_with_final_verification_probe(
         agent: &AgentContext,
     ) -> (Self, Arc<FinalVerificationProbe>) {
         let probe = Arc::new(FinalVerificationProbe::default());
@@ -411,6 +447,10 @@ pub async fn resolve_final_verification_for_task_run(
         .await
         .map_err(|e| format!("strict catalog resolution failed: {e}"))?;
     let catalog_loopback_endpoints = catalog_loopback_endpoints(&services)?;
+    let service_exported_environment: std::collections::BTreeSet<String> = services
+        .iter()
+        .flat_map(|service| service.exported_environment_names.iter().cloned())
+        .collect();
     let service_provisioners: ServiceProvisioners = services
         .iter()
         .map(|service| {
@@ -438,7 +478,9 @@ pub async fn resolve_final_verification_for_task_run(
             })
             .collect(),
         output_only_globs: plan.output_only_globs.clone(),
+        volatile_environment_names: plan.input_manifest.volatile_environment_names.clone(),
     };
+    let recorded = plan.evidence_tier == StackEvidenceTier::Recorded;
     let external_inputs: Vec<_> = plan
         .read_only_external_inputs
         .iter()
@@ -453,6 +495,13 @@ pub async fn resolve_final_verification_for_task_run(
         base_ref: "main".into(),
         manifest: manifest.clone(),
         external_inputs: external_inputs.clone(),
+        // A recorded run excludes its warm build outputs from the fingerprint
+        // but must never delete them — they are the cache it exists to reuse.
+        output_policy: if recorded {
+            OutputOnlyPolicy::ExcludeOnly
+        } else {
+            OutputOnlyPolicy::PurgeBeforeFingerprint
+        },
     };
     let changed_paths = collect_verification_changed_paths(&worktree, &fingerprint_config)
         .await
@@ -475,6 +524,11 @@ pub async fn resolve_final_verification_for_task_run(
                 hermetic: plan.hermeticity.hermetic,
                 reusable: plan.hermeticity.reusable,
                 network_access: plan.hermeticity.network_access,
+            },
+            evidence_tier: if recorded {
+                CanonicalEvidenceTierV1::Recorded
+            } else {
+                CanonicalEvidenceTierV1::Attested
             },
         },
         selection: if plan.command_groups.is_empty() {
@@ -518,7 +572,11 @@ pub async fn resolve_final_verification_for_task_run(
         lockfile_digests: Vec::new(),
         target: std::env::consts::ARCH.into(),
         features: Vec::new(),
-        allowlisted_environment: BTreeMap::new(),
+        allowlisted_environment: resolve_declared_environment(
+            &plan.input_manifest.environment_names,
+            &service_exported_environment,
+            true,
+        ),
         services: services
             .into_iter()
             .map(
@@ -536,7 +594,14 @@ pub async fn resolve_final_verification_for_task_run(
             .collect(),
     };
     let resolver: EnvironmentIdentityResolver = Arc::new(move || Ok(identity.clone()));
-    let output_directories = output_directories(&manifest.output_only_globs)?;
+    // A recorded run applies no sandbox, so it holds no write grant and its
+    // globs are pure exclusions. Deriving directories would also reject globs
+    // that are perfectly valid as exclusions but lack a literal prefix.
+    let output_directories = if recorded {
+        Vec::new()
+    } else {
+        output_directories(&manifest.output_only_globs)?
+    };
     Ok(Some(
         djinn_slot::final_verification::FinalVerificationResolvedMaterial {
             execution_request: FinalVerificationExecutionRequest {
@@ -548,10 +613,17 @@ pub async fn resolve_final_verification_for_task_run(
                 output_directories,
                 catalog_loopback_endpoints,
                 service_provisioners,
+                volatile_environment: resolve_declared_environment(
+                    &plan.input_manifest.volatile_environment_names,
+                    &service_exported_environment,
+                    false,
+                ),
             },
             verify_source: VerifySource::Worker,
             required_checks,
             diff_fingerprint: String::new(),
+            reusable: plan.hermeticity.reusable,
+            evidence_tier: if recorded { "recorded" } else { "attested" },
         },
     ))
 }

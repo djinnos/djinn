@@ -1047,6 +1047,40 @@ pub struct FinalVerificationPlan {
     pub output_only_globs: Vec<String>,
     #[serde(default)]
     pub hermeticity: HermeticityDeclaration,
+    /// What a recorded pass of this plan is worth. See
+    /// [`VerificationEvidenceTier`]; the tier is identity material, so an
+    /// attested pass and a recorded pass can never share a cache entry.
+    #[serde(default)]
+    pub evidence_tier: VerificationEvidenceTier,
+}
+
+/// The guarantee a persisted final-verification pass carries.
+///
+/// This is deliberately an enum rather than the absence of a flag: the two
+/// tiers promise materially different things, and a reader of a plan must be
+/// able to see which one is in force without reconstructing it from three
+/// booleans.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum VerificationEvidenceTier {
+    /// Commands ran under the strict launcher: fresh network namespace,
+    /// Landlock ABI-V3, read-only worktree, and output-only directories that
+    /// were absent at launch. A pass certifies the commands succeeded in an
+    /// isolated environment fully described by the identity digest.
+    #[default]
+    Attested,
+    /// Commands ran as an ordinary warm, incremental build in the task-run Pod:
+    /// no namespace, no Landlock, no output-directory precondition, and the
+    /// pre-existing build outputs left by earlier compiles are visible.
+    ///
+    /// A pass certifies only that (a) the whole-tree fingerprint was identical
+    /// before and after, (b) the environment identity was identical before and
+    /// after, and (c) every configured command exited zero in that window. It
+    /// does NOT certify independence from leftover build state — a poisoned
+    /// incremental cache can produce a green recorded pass. That is the same
+    /// exposure every task compile already accepts; this tier makes accepting
+    /// it a deliberate, named choice rather than an implied one.
+    Recorded,
 }
 
 /// Manual `Default` so that `version` matches the serde default (1) rather
@@ -1066,6 +1100,7 @@ impl Default for FinalVerificationPlan {
             read_only_external_inputs: Vec::new(),
             output_only_globs: Vec::new(),
             hermeticity: HermeticityDeclaration::default(),
+            evidence_tier: VerificationEvidenceTier::Attested,
         }
     }
 }
@@ -1119,8 +1154,30 @@ pub struct VerificationInputManifest {
     pub version: u32,
     #[serde(default)]
     pub repo_paths: Vec<String>,
+    /// Environment names whose **values** are identity material: the resolved
+    /// value is hashed into the environment identity digest, so a change to it
+    /// invalidates every reusable pass. Use this for anything whose value
+    /// genuinely changes what the commands do (`PATH`, `CARGO_HOME`,
+    /// `CARGO_BUILD_RUSTFLAGS`).
     #[serde(default)]
     pub environment_names: Vec<String>,
+    /// Environment names that are declared and passed to commands, but whose
+    /// **values** are deliberately NOT identity material — only the name is
+    /// (via this manifest). The resolved value never reaches the identity
+    /// digest, so a per-run value does not fracture reuse across task runs.
+    ///
+    /// This is the same contract catalog services already have: a declared
+    /// name with an attempt-scoped value. It exists because the production
+    /// pod renders `CARGO_TARGET_DIR=/cache/cargo-target-runs/<task_run_id>`
+    /// (a fresh path per run) and `RUSTC_WRAPPER=""` (an empty value, which
+    /// identity material forbids). Hashing either would mean a worker run and
+    /// the reviewer run of the same task could never share a pass — which is
+    /// the entire point of the recorded tier.
+    ///
+    /// Rejected unless `evidence_tier` is `recorded`: an unhashed input would
+    /// void the attested tier's guarantee.
+    #[serde(default)]
+    pub volatile_environment_names: Vec<String>,
 }
 
 /// Manual `Default` so that `version` matches the serde default (1).
@@ -1130,6 +1187,7 @@ impl Default for VerificationInputManifest {
             version: FINAL_VERIFICATION_VERSION,
             repo_paths: Vec::new(),
             environment_names: Vec::new(),
+            volatile_environment_names: Vec::new(),
         }
     }
 }
@@ -1311,6 +1369,7 @@ impl FinalVerificationPlan {
                 env_name,
             )?;
         }
+        self.validate_volatile_environment_names()?;
         // Bounded external inputs list with uniqueness checks.
         if self.read_only_external_inputs.len() > MAX_FINAL_VERIFICATION_INPUTS {
             return Err(EnvironmentConfigError::ListTooLong {
@@ -1349,14 +1408,88 @@ impl FinalVerificationPlan {
         for glob in &self.output_only_globs {
             validate_glob("lifecycle.final_verification.output_only_globs", glob)?;
         }
-        if self.hermeticity.reusable
-            && (!self.hermeticity.hermetic || self.hermeticity.network_access)
-        {
+        self.validate_evidence_tier()
+    }
+
+    /// Bind the declared tier to the isolation it actually gets. Each tier has
+    /// exactly one legal hermeticity shape, so the plan JSON states the
+    /// guarantee rather than leaving it to be inferred from three booleans.
+    fn validate_evidence_tier(&self) -> EnvResult<()> {
+        match self.evidence_tier {
+            // Unchanged pre-existing rule: an attested pass is only reusable
+            // because the strict launcher isolated it.
+            VerificationEvidenceTier::Attested => {
+                if self.hermeticity.reusable
+                    && (!self.hermeticity.hermetic || self.hermeticity.network_access)
+                {
+                    return Err(EnvironmentConfigError::UnsafeIdentifier {
+                        field: "lifecycle.final_verification.hermeticity.reusable".into(),
+                        value: "reusable attested plans must be hermetic and deny network access"
+                            .into(),
+                    });
+                }
+            }
+            // A recorded plan runs as an ordinary Pod process. Requiring the
+            // truthful declaration (not isolated, has network) keeps the config
+            // from reading like a weaker attestation.
+            VerificationEvidenceTier::Recorded => {
+                if self.hermeticity.hermetic || !self.hermeticity.network_access {
+                    return Err(EnvironmentConfigError::UnsafeIdentifier {
+                        field: "lifecycle.final_verification.evidence_tier".into(),
+                        value: "recorded plans must declare hermetic=false and network_access=true"
+                            .into(),
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_volatile_environment_names(&self) -> EnvResult<()> {
+        let field = "lifecycle.final_verification.input_manifest.volatile_environment_names";
+        let volatile = &self.input_manifest.volatile_environment_names;
+        if volatile.is_empty() {
+            return Ok(());
+        }
+        // A value that never reaches the identity digest is an undeclared input
+        // to an attested result, which is exactly what attestation rules out.
+        if self.evidence_tier != VerificationEvidenceTier::Recorded {
             return Err(EnvironmentConfigError::UnsafeIdentifier {
-                field: "lifecycle.final_verification.hermeticity.reusable".into(),
-                value: "reusable plans must be hermetic and deny network access".into(),
+                field: field.into(),
+                value: "volatile environment names require evidence_tier=recorded".into(),
             });
-        };
+        }
+        if volatile.len() > MAX_ENV_ENTRIES {
+            return Err(EnvironmentConfigError::ListTooLong {
+                field: field.into(),
+                len: volatile.len(),
+                max: MAX_ENV_ENTRIES,
+            });
+        }
+        let identity_bearing: HashSet<&str> = self
+            .input_manifest
+            .environment_names
+            .iter()
+            .map(String::as_str)
+            .collect();
+        let mut seen = HashSet::new();
+        for env_name in volatile {
+            validate_identifier(field, env_name)?;
+            if !seen.insert(env_name.as_str()) {
+                return Err(EnvironmentConfigError::DuplicateName {
+                    field: field.into(),
+                    name: env_name.clone(),
+                });
+            }
+            // One name cannot be both hashed and not hashed; the ambiguity
+            // would decide silently at resolution time.
+            if identity_bearing.contains(env_name.as_str()) {
+                return Err(EnvironmentConfigError::DuplicateName {
+                    field: field.into(),
+                    name: env_name.clone(),
+                });
+            }
+        }
         Ok(())
     }
 }
@@ -3219,11 +3352,13 @@ mod tests {
                 version: 1,
                 repo_paths: vec!["server".into()],
                 environment_names: vec!["CI".into()],
+                volatile_environment_names: vec![],
             },
             read_only_external_inputs: vec![ExternalInputDeclaration {
                 id: "base-image".into(),
                 locator: "docker://ghcr.io/djinn/base:latest".into(),
             }],
+            evidence_tier: VerificationEvidenceTier::Attested,
             output_only_globs: vec!["target/**/*.d".into()],
             hermeticity: HermeticityDeclaration {
                 hermetic: true,
@@ -3602,6 +3737,86 @@ mod tests {
         ));
     }
 
+    /// Each tier has exactly one legal isolation shape. The point of the enum
+    /// is that a reader sees the guarantee instead of reconstructing it from
+    /// three booleans, so the boolean/tier pairing must be enforced, not
+    /// merely documented.
+    #[test]
+    fn evidence_tier_binds_to_exactly_one_hermeticity_shape() {
+        let recorded = |hermetic, reusable, network_access| {
+            let mut plan = valid_final_verification_plan();
+            plan.evidence_tier = VerificationEvidenceTier::Recorded;
+            plan.hermeticity = HermeticityDeclaration {
+                hermetic,
+                reusable,
+                network_access,
+            };
+            plan.validate()
+        };
+        // Recorded is honest about being unisolated and networked. `reusable`
+        // stays free: false is a legitimate "run and record, never reuse".
+        assert!(recorded(false, true, true).is_ok());
+        assert!(recorded(false, false, true).is_ok());
+        // Claiming isolation, or claiming the network is denied, is not.
+        assert!(recorded(true, true, true).is_err());
+        assert!(recorded(false, true, false).is_err());
+
+        let attested = |hermetic, reusable, network_access| {
+            let mut plan = valid_final_verification_plan();
+            plan.evidence_tier = VerificationEvidenceTier::Attested;
+            plan.hermeticity = HermeticityDeclaration {
+                hermetic,
+                reusable,
+                network_access,
+            };
+            plan.validate()
+        };
+        assert!(attested(true, true, false).is_ok());
+        // The pre-existing rule is unchanged: attested reuse requires isolation.
+        assert!(attested(false, true, false).is_err());
+        assert!(attested(true, true, true).is_err());
+    }
+
+    /// A volatile value is by definition not described by the identity digest,
+    /// which is exactly what an attested result promises it has none of.
+    #[test]
+    fn volatile_environment_names_require_the_recorded_tier() {
+        let mut plan = valid_final_verification_plan();
+        plan.input_manifest.volatile_environment_names = vec!["CARGO_TARGET_DIR".into()];
+        assert!(
+            plan.validate().is_err(),
+            "attested plans must reject unhashed environment inputs"
+        );
+
+        plan.evidence_tier = VerificationEvidenceTier::Recorded;
+        plan.hermeticity = HermeticityDeclaration {
+            hermetic: false,
+            reusable: true,
+            network_access: true,
+        };
+        plan.validate()
+            .expect("recorded plans may declare volatile names");
+    }
+
+    /// A name in both buckets would have to be hashed and not hashed at once;
+    /// resolution would silently pick one.
+    #[test]
+    fn a_name_cannot_be_both_identity_bearing_and_volatile() {
+        let mut plan = valid_final_verification_plan();
+        plan.evidence_tier = VerificationEvidenceTier::Recorded;
+        plan.hermeticity = HermeticityDeclaration {
+            hermetic: false,
+            reusable: true,
+            network_access: true,
+        };
+        plan.input_manifest.environment_names = vec!["CI".into(), "CARGO_HOME".into()];
+        plan.input_manifest.volatile_environment_names = vec!["CARGO_HOME".into()];
+        assert!(matches!(
+            plan.validate().unwrap_err(),
+            EnvironmentConfigError::DuplicateName { .. }
+        ));
+    }
+
     #[test]
     fn final_verification_absolute_glob_rejected() {
         let mut plan = valid_final_verification_plan();
@@ -3785,6 +4000,97 @@ mod tests {
         assert!(
             serde_json::from_str::<EnvironmentConfig>(raw_fv).is_err(),
             "array shape must not deserialize into final_verification plan object"
+        );
+    }
+
+    /// A complete, realistic recorded plan must survive JSON round-trip and
+    /// validation exactly as an operator would paste it.
+    ///
+    /// The unit tests above each poke one field; this asserts the whole shape
+    /// an operator actually writes is applicable. It is the cheap guard against
+    /// shipping a documented plan that cannot be applied — the failure mode
+    /// where a descriptor names an environment variable production cannot
+    /// supply, and the plan is accepted but every run fails closed with
+    /// `UndeclaredCommandEnvironment`.
+    #[test]
+    fn a_complete_recorded_plan_round_trips_and_validates() {
+        let json = serde_json::json!({
+            "version": 1,
+            "profile_id": "warm-recorded",
+            "profile_revision": 1,
+            "evidence_tier": "recorded",
+            "hermeticity": { "hermetic": false, "reusable": true, "network_access": true },
+            "command_groups": [{
+                "name": "server",
+                "commands": [{
+                    "check_id": "server-check",
+                    "executable": "/usr/local/cargo/bin/cargo",
+                    "argv": ["check", "--workspace", "--all-targets"],
+                    "working_directory": "server",
+                    "environment_names": [
+                        "PATH", "HOME", "CARGO_HOME", "RUSTUP_HOME", "CARGO_TARGET_DIR",
+                        "CARGO_BUILD_JOBS", "CARGO_BUILD_RUSTFLAGS", "CARGO_INCREMENTAL",
+                        "RUSTC_WRAPPER", "SQLX_OFFLINE", "TMPDIR"
+                    ],
+                    "timeout_seconds": 2700,
+                    "descriptor_revision": 1
+                }]
+            }],
+            "selection_rules": [
+                { "match": ["server/**"], "command_groups": ["server"] },
+                { "match": ["**"], "command_groups": ["server"] }
+            ],
+            "required_checks": ["server-check"],
+            "input_manifest": {
+                "version": 1,
+                "repo_paths": [],
+                "environment_names": [
+                    "PATH", "HOME", "CARGO_HOME", "RUSTUP_HOME", "CARGO_BUILD_JOBS",
+                    "CARGO_BUILD_RUSTFLAGS", "CARGO_INCREMENTAL", "SQLX_OFFLINE", "TMPDIR"
+                ],
+                // Per-task-run and empty-valued respectively: hashing either
+                // would stop a reviewer ever reusing a worker's pass.
+                "volatile_environment_names": ["CARGO_TARGET_DIR", "RUSTC_WRAPPER"]
+            },
+            // Exactly one `**`-leading glob is permitted, because
+            // `output_globs_may_overlap` treats any two of them as overlapping.
+            "output_only_globs": [
+                "server/target/**", "ui/node_modules/**", "node_modules/**", "ui/dist/**",
+                ".cache/**", ".task-runtime/**", ".claude/**", ".tmp/**", "tmp/**"
+            ],
+            "read_only_external_inputs": []
+        });
+
+        let plan: FinalVerificationPlan =
+            serde_json::from_value(json.clone()).expect("recorded plan must deserialize");
+        plan.validate().expect("recorded plan must validate");
+
+        // Every name the command reads must be declared in one bucket or the
+        // other, or production fails closed at `command_environment`.
+        let declared: HashSet<&str> = plan
+            .input_manifest
+            .environment_names
+            .iter()
+            .chain(&plan.input_manifest.volatile_environment_names)
+            .map(String::as_str)
+            .collect();
+        for command in plan.normalized_commands() {
+            for name in &command.environment_names {
+                assert!(
+                    declared.contains(name.as_str()),
+                    "{name} is read by a command but declared in neither manifest bucket"
+                );
+            }
+        }
+
+        // Re-serializing must not lose the tier or the volatile bucket.
+        let round_tripped: FinalVerificationPlan =
+            serde_json::from_str(&serde_json::to_string(&plan).expect("serialize"))
+                .expect("re-deserialize");
+        assert_eq!(round_tripped, plan);
+        assert_eq!(
+            round_tripped.evidence_tier,
+            VerificationEvidenceTier::Recorded
         );
     }
 
