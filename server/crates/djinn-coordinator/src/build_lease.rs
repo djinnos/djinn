@@ -402,73 +402,6 @@ impl BuildLeaseService {
         self.dispatch_enforcing.store(enforcing, Ordering::Release);
     }
 
-    /// The reference cap this service is currently enforcing.
-    ///
-    /// Meaningful only after [`Self::recover`]; before that it is the
-    /// constructor's configured value. A zero cap denies every consumer
-    /// unconditionally, so composition uses this to refuse to wire a consumer
-    /// behind a gate that can never open.
-    #[must_use]
-    pub fn cap(&self) -> i64 {
-        self.cap.load(Ordering::Acquire)
-    }
-
-    /// Resolve the durable lease-table cap against the process configuration.
-    ///
-    /// A positive durable cap has been armed by a real writer (`set_cap`, or a
-    /// previous `grant_next` converging the table on this process's cap) and is
-    /// kept verbatim. A durable `0` is the migration-seeded, never-armed state
-    /// and yields to [`Self::configured_cap`]; see that field for why `0` can
-    /// never be a deliberate durable policy on the production path.
-    fn armed_fallback(&self, durable: i64) -> i64 {
-        if durable > 0 {
-            return durable;
-        }
-        if self.configured_cap > 0 {
-            tracing::info!(
-                configured_cap = self.configured_cap,
-                "build lease: durable cap is unarmed (0); adopting the configured build-slot cap"
-            );
-        }
-        self.configured_cap
-    }
-
-    /// Read the durable admission-handoff epoch and apply its reference cap.
-    ///
-    /// Returns the reference cap to enforce, defaulting to `fallback` (the
-    /// lease-table cap) when no handoff reader is installed or the row carries
-    /// no cap. An unreadable epoch clears the observed epoch (fail closed) and
-    /// retains the fallback cap. The handoff reference cap is authoritative for
-    /// the v1 authority when set, so a restart converges on the epoch's cap
-    /// rather than a stale lease-table value.
-    async fn read_handoff_epoch(&self, fallback: i64) -> i64 {
-        let fallback = self.armed_fallback(fallback);
-        let Some(handoff) = self.handoff.as_ref() else {
-            return fallback;
-        };
-        match handoff.read().await {
-            Ok(Some(row)) => {
-                self.observed_epoch.store(row.epoch, Ordering::Release);
-                self.dispatch_enforcing
-                    .store(row.v1_mode.is_enforcing(), Ordering::Release);
-                row.cap.unwrap_or(fallback)
-            }
-            Ok(None) => {
-                // No durable epoch row: nothing to observe, keep the fallback.
-                self.observed_epoch.store(-1, Ordering::Release);
-                self.dispatch_enforcing.store(false, Ordering::Release);
-                fallback
-            }
-            Err(_) => {
-                // Unreadable epoch: fail closed on the observed epoch, and do
-                // NOT enforce a cap we could not confirm was armed.
-                self.observed_epoch.store(-1, Ordering::Release);
-                self.dispatch_enforcing.store(false, Ordering::Release);
-                fallback
-            }
-        }
-    }
-
     /// Recover queued and all occupied rows before opening the service.
     pub async fn recover(&self) -> LeaseResult {
         let _guard = self.operation.lock().await;
@@ -1081,6 +1014,11 @@ fn status(row: &BuildLeaseRow) -> LeaseStatus {
         candidate_cleanup: row.candidate_cleanup.is_some(),
     }
 }
+
+/// Cap resolution. A child module so it still reaches this service's private
+/// state, split into its own file only for the source-size guard.
+#[path = "build_lease_cap.rs"]
+mod cap;
 
 #[cfg(test)]
 mod tests {
