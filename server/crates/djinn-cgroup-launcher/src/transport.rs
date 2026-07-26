@@ -56,8 +56,18 @@ impl<F: CgroupFs, S: SpawnIntoCgroup, N: NonceSource> UnixBrokerServer<F, S, N> 
             }
             fs::remove_file(&path)?;
         }
-        let listener = UnixListener::bind(&path)?;
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+        let listener = UnixListener::bind(&path).map_err(|error| Error::SocketSetupFailed {
+            operation: "bind(broker control socket)",
+            path: path.display().to_string(),
+            errno: error.raw_os_error().unwrap_or_default(),
+        })?;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).map_err(|error| {
+            Error::SocketSetupFailed {
+                operation: "chmod(broker socket to 0600)",
+                path: path.display().to_string(),
+                errno: error.raw_os_error().unwrap_or_default(),
+            }
+        })?;
         restrict_socket_to_worker(&path)?;
         Ok(Self {
             broker,
@@ -204,6 +214,18 @@ impl<F, S, N> Drop for UnixBrokerServer<F, S, N> {
 ///
 /// Unprivileged embeddings (tests, local runs) already own the socket they just
 /// created, so there is nothing to hand over and this is a no-op.
+/// Hand the bound control socket to the worker.
+///
+/// Mode `0600` plus `WORKER_UID` ownership is what excludes the
+/// launcher-spawned child (uid 1001) from the broker at the filesystem layer,
+/// ahead of credential authentication.
+///
+/// `chown(2)` needs `CAP_CHOWN` even at euid 0 — the kernel checks the
+/// capability, not the uid — so the launcher retains it past bootstrap
+/// (`bootstrap::RETAINED_CAPABILITIES`). When that capability was missing this
+/// returned a bare `EPERM` with no operation or path attached, and the resulting
+/// "filesystem operation failed: Operation not permitted" was the entire
+/// diagnostic available for a failed production rollout. It is named now.
 fn restrict_socket_to_worker(path: &Path) -> Result<(), Error> {
     if unsafe { libc::geteuid() } != 0 {
         return Ok(());
@@ -211,7 +233,13 @@ fn restrict_socket_to_worker(path: &Path) -> Result<(), Error> {
     let raw = std::ffi::CString::new(path.as_os_str().as_encoded_bytes())
         .map_err(|_| Error::UnsafeSocketPath)?;
     if unsafe { libc::chown(raw.as_ptr(), WORKER_UID, WORKER_GID) } != 0 {
-        return Err(Error::Io(std::io::Error::last_os_error()));
+        return Err(Error::SocketSetupFailed {
+            operation: "chown(broker socket to the worker uid/gid)",
+            path: path.display().to_string(),
+            errno: std::io::Error::last_os_error()
+                .raw_os_error()
+                .unwrap_or_default(),
+        });
     }
     Ok(())
 }

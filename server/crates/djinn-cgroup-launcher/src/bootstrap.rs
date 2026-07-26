@@ -54,19 +54,57 @@ use std::path::{Path, PathBuf};
 use crate::Error;
 
 /// Capability numbers (`include/uapi/linux/capability.h`).
+const CAP_CHOWN: u32 = 0;
 const CAP_SETGID: u32 = 6;
 const CAP_SETUID: u32 = 7;
 const CAP_SETPCAP: u32 = 8;
 const CAP_SYS_ADMIN: u32 = 21;
 const CAP_SYS_RESOURCE: u32 = 24;
 
-/// The only capabilities the launcher keeps once bootstrap is complete: exactly
-/// what `child::prepare_child` needs to move a child across the credential
-/// boundary before `execve`.
-const RETAINED_CAPABILITIES: &[u32] = &[CAP_SETGID, CAP_SETUID, CAP_SETPCAP];
+/// The only capabilities the launcher keeps once bootstrap is complete: what
+/// `child::prepare_child` needs to move a child across the credential boundary
+/// before `execve`, plus `CAP_CHOWN`.
+///
+/// # Why `CAP_CHOWN` is here (third v0.7.x rollback)
+///
+/// `transport::UnixBrokerServer::bind` hands the control socket to the worker
+/// with `chown(path, WORKER_UID, WORKER_GID)`, so that mode `0600` admits the
+/// worker (uid 1000) and excludes the launcher-spawned child (uid 1001) at the
+/// filesystem layer, ahead of credential authentication. `chown(2)` to change an
+/// owner requires `CAP_CHOWN` — being euid 0 is NOT sufficient inside a
+/// capability-bounded container, because the kernel checks the capability rather
+/// than the uid. Without it the bind fails `EPERM` and the launcher exits before
+/// serving, which is what failed the second armed production rollout.
+///
+/// It has to be in *this* list, not only in the rendered manifest: the `capset`
+/// below sets permitted and effective to exactly this mask, so a capability
+/// granted by the Pod spec but missing here is destroyed microseconds before the
+/// socket is bound — which is exactly what happened, and why granting `CHOWN` in
+/// the manifest alone did not fix it. `djinn-k8s` now renders the Pod grant FROM
+/// [`RETAINED_CAPABILITY_NAMES`], and the privileged proof
+/// `the_retained_capabilities_still_hand_the_broker_socket_to_the_worker`
+/// performs the real drop and then the real handoff, so neither the list nor the
+/// render can drift again without a red build.
+///
+/// Blast radius: the rootfs is read-only and the only writable mounts are the
+/// 1Mi memory-backed IPC emptyDir and the cgroup mountpoint, so this authorizes
+/// re-owning files on two small dedicated tmpfs volumes and nothing else.
+const RETAINED_CAPABILITIES: &[u32] = &[CAP_CHOWN, CAP_SETGID, CAP_SETUID, CAP_SETPCAP];
 
 /// The capabilities bootstrap needs and then destroys.
 const BOOTSTRAP_ONLY_CAPABILITIES: &[u32] = &[CAP_SYS_ADMIN, CAP_SYS_RESOURCE];
+
+/// Linux capability names, without the `CAP_` prefix, for the capabilities the
+/// launcher keeps for the pod's lifetime. The Pod `securityContext` must grant
+/// every one of these; the API server rejects the `CAP_` spelling alongside
+/// `allowPrivilegeEscalation: false`, hence the bare names.
+///
+/// Exported so `djinn-k8s` renders from this list instead of a second hand-kept
+/// copy — the duplication that let the manifest and the runtime disagree.
+pub const RETAINED_CAPABILITY_NAMES: &[&str] = &["CHOWN", "SETGID", "SETUID", "SETPCAP"];
+
+/// Capability names the launcher holds only during bootstrap and then drops.
+pub const BOOTSTRAP_ONLY_CAPABILITY_NAMES: &[&str] = &["SYS_ADMIN", "SYS_RESOURCE"];
 
 /// `_LINUX_CAPABILITY_VERSION_3`.
 const CAPABILITY_VERSION_3: u32 = 0x2008_0522;
@@ -329,12 +367,61 @@ mod tests {
     fn the_retained_set_is_exactly_what_the_credential_boundary_needs() {
         assert_eq!(
             RETAINED_CAPABILITIES,
-            &[CAP_SETGID, CAP_SETUID, CAP_SETPCAP]
+            &[CAP_CHOWN, CAP_SETGID, CAP_SETUID, CAP_SETPCAP]
         );
         assert_eq!(
             capability_mask(RETAINED_CAPABILITIES),
-            (1 << 6) | (1 << 7) | (1 << 8)
+            1 | (1 << 6) | (1 << 7) | (1 << 8)
         );
+    }
+
+    /// `CAP_CHOWN` is retained because the broker socket is handed to the worker
+    /// with `chown(2)`, which needs the capability even at euid 0. Losing it
+    /// fails the bind with `EPERM` after bootstrap has already succeeded — the
+    /// third distinct blocker found by arming this on a real kernel.
+    #[test]
+    fn chown_is_retained_so_the_broker_socket_can_be_handed_to_the_worker() {
+        assert!(RETAINED_CAPABILITIES.contains(&CAP_CHOWN));
+        assert_eq!(CAP_CHOWN, 0, "CAP_CHOWN is capability number 0");
+        assert_ne!(
+            capability_mask(RETAINED_CAPABILITIES) & 1,
+            0,
+            "bit 0 must survive the post-bootstrap capset"
+        );
+    }
+
+    /// The numeric list the `capset` uses and the name list the Pod render
+    /// consumes must describe the same capabilities. They are separate constants
+    /// in separate crates, and a capability present in one but not the other is
+    /// invisible until a real kernel refuses the syscall: granted-but-not-retained
+    /// is destroyed by the capset, retained-but-not-granted never arrives.
+    #[test]
+    fn the_retained_numbers_and_names_describe_the_same_capabilities() {
+        let expected: Vec<&str> = RETAINED_CAPABILITIES
+            .iter()
+            .map(|capability| match *capability {
+                CAP_CHOWN => "CHOWN",
+                CAP_SETGID => "SETGID",
+                CAP_SETUID => "SETUID",
+                CAP_SETPCAP => "SETPCAP",
+                other => panic!("capability {other} has no name mapping"),
+            })
+            .collect();
+        assert_eq!(expected, RETAINED_CAPABILITY_NAMES);
+        assert_eq!(
+            BOOTSTRAP_ONLY_CAPABILITY_NAMES,
+            &["SYS_ADMIN", "SYS_RESOURCE"]
+        );
+        for name in RETAINED_CAPABILITY_NAMES
+            .iter()
+            .chain(BOOTSTRAP_ONLY_CAPABILITY_NAMES)
+        {
+            assert!(
+                !name.starts_with("CAP_"),
+                "{name} uses the spelling the API server rejects alongside \
+                 allowPrivilegeEscalation: false"
+            );
+        }
     }
 
     /// `CAP_SYS_ADMIN` is the escape primitive; it must never be retained, and
