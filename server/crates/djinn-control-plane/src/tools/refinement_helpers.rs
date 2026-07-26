@@ -379,15 +379,30 @@ pub async fn build_refinement_status(
         .await
         .map_err(|e| format!("failed to read revisions: {e}"))?;
 
-    // Read legacy display-only review content. Exact park evidence below is
-    // authoritative for whether review is actually awaited.
-    // records a `refinement_awaiting_review` lifecycle event when it converges,
-    // and the human's resolve records a `refinement_stop` after it.
+    // Read legacy display-only review content. Older proposals record a
+    // `refinement_awaiting_review` lifecycle event when they converge, and the
+    // human's resolve records a `refinement_stop` after it. Preserve the
+    // historical latest-start/awaiting/stop ordering for display fields only;
+    // exact-run liveness below remains the sole authority for `active`.
+    let latest_start = revisions
+        .iter()
+        .rev()
+        .find(|r| r.event_kind == "refinement_start");
     let latest_awaiting = revisions
         .iter()
         .rev()
         .find(|r| r.event_kind == "refinement_awaiting_review");
-    let legacy_awaiting_review = latest_awaiting.is_some();
+    let latest_stop = revisions
+        .iter()
+        .rev()
+        .find(|r| r.event_kind == "refinement_stop");
+    let legacy_awaiting_review = match (latest_start, latest_awaiting, latest_stop) {
+        (Some(start), Some(awaiting), Some(stop)) => {
+            start.created_at <= awaiting.created_at && stop.created_at < awaiting.created_at
+        }
+        (Some(start), Some(awaiting), None) => start.created_at <= awaiting.created_at,
+        _ => false,
+    };
     let (judge_summary, snapshot_revision_seq) = if legacy_awaiting_review {
         let meta = latest_awaiting
             .and_then(|r| r.event_metadata.as_ref())
@@ -620,12 +635,13 @@ pub async fn build_refinement_status(
     let active = exact
         .as_ref()
         .is_some_and(|exact| matches!(exact.liveness, RefinementLivenessResult::Live { .. }));
-    let awaiting_review = exact.as_ref().is_some_and(|exact| {
+    let exact_awaiting_review = exact.as_ref().is_some_and(|exact| {
         matches!(
             exact.snapshot.park.as_ref().map(|park| park.kind),
             Some(RefinementParkKind::AwaitingReview)
         )
     });
+    let awaiting_review = exact_awaiting_review || legacy_awaiting_review;
     // A run snapshot is authoritative whenever one exists. For older
     // proposals which predate durable runs, retain the historical stop label
     // as display-only compatibility data; it never affects `active`.
