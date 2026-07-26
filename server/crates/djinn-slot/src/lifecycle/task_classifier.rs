@@ -25,17 +25,16 @@ pub fn classify_native_skill_trigger_by_type(
 }
 
 pub fn classify_native_skill_trigger(role_name: &str, task: &Task) -> Option<NativeSkillTrigger> {
-    if role_name == "architect" {
-        if let Some(TaskExecutionContext::ReadinessGuardrailAnalysis {
+    if role_name == "architect"
+        && let Some(TaskExecutionContext::ReadinessGuardrailAnalysis {
             skill_name,
             skill_version,
         }) = &task.execution_context
-        {
-            return Some(NativeSkillTrigger::ReadinessGuardrail {
-                skill_name: skill_name.clone(),
-                skill_version: skill_version.clone(),
-            });
-        }
+    {
+        return Some(NativeSkillTrigger::ReadinessGuardrail {
+            skill_name: skill_name.clone(),
+            skill_version: skill_version.clone(),
+        });
     }
     classify_native_skill_trigger_by_type(role_name, task.issue_type.as_str())
 }
