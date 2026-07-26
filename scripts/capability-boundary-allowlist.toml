@@ -92,6 +92,14 @@ capability = "git"
 
 [[entries]]
 capability = "git"
+	path = "server/crates/djinn-k8s/tests/launcher_child_runtime_handoff.rs"
+	matcher = "Command::new(\"git\")"
+	owner = "team/launcher"
+	rationale = "Proves goxi launcher blocker 9 -- that the private-dependency installation token reaches a brokered child whose $HOME is NOT the worker's -- by running REAL git on both sides of the container boundary. It cannot go through djinn-git: djinn-git's wrapper exports the SERVER's own trust anchor and inherits the ambient configuration, which would launder the very controls this test depends on (#2617's first control was vacuous against a runner's /etc/gitconfig). The test pins GIT_CONFIG_SYSTEM, GIT_CONFIG_GLOBAL and HOME per invocation to model the child's environment exactly. The production writer it exercises does go through djinn-git (djinn_git::exported_config::publish). Test-only."
+	cleanup_issue = "epic/kh95"
+
+[[entries]]
+capability = "git"
 	path = "server/crates/djinn-coordinator/src/tests/mod.rs"
 	matcher = "Command::new(\"git\")"
 	owner = "team/coordinator"

@@ -565,8 +565,11 @@ fn the_anchor_chains_the_real_system_config_instead_of_shadowing_it() {
     std::fs::write(&real_system, "[core]\n\tabbrev = 12\n")
         .expect("write a stand-in system config");
     let chained = fixture.root.join("chained-gitconfig");
-    std::fs::write(&chained, git_trust::anchor_contents(Some(&real_system)))
-        .expect("write the chained anchor");
+    std::fs::write(
+        &chained,
+        git_trust::anchor_contents(std::slice::from_ref(&real_system)),
+    )
+    .expect("write the chained anchor");
     std::fs::set_permissions(&chained, std::fs::Permissions::from_mode(0o644)).expect("chmod");
 
     let environment = vec![
