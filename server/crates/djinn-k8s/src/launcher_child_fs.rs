@@ -70,10 +70,10 @@
 //! same pod), so arming the launcher without this would be a *regression*
 //! against the unbrokered path rather than a new constraint.
 //!
-//! * **`/tmp`** — `TMPDIR` is rendered to the workspace and is honoured
-//!   (`mktemp -d` returned `/workspace/tmp.5EPDKA83CI` in the launcher's
-//!   namespace once the workspace was mounted), but a build is a tree of
-//!   third-party tools and the ones that hardcode `/tmp` do not consult it.
+//! * **`/tmp`** — a build is a tree of third-party tools and the ones that
+//!   hardcode `/tmp` do not consult `TMPDIR` at all.
+//! * **`/var/tmp`** — the eighth blocker, and the reason the render can no
+//!   longer be derived from the manifest alone. See below.
 //! * **`$HOME`** — `git config --global`, `rustup`, `npm`, `fnm` and `gopls`
 //!   all write there; `djinn_agent_worker::volume_contract` fails worker
 //!   readiness when `$HOME` is not writable *for exactly this reason*, and its
@@ -108,6 +108,46 @@
 //! so gid 1000 must be the child's PRIMARY group, not a supplementary one — it
 //! is. `fsGroupChangePolicy: OnRootMismatch` is a no-op here because both PVC
 //! roots already carry gid 1000, so no recursive re-own is triggered.
+//!
+//! # The eighth blocker: the child's `TMPDIR` is not the Pod's `TMPDIR`
+//!
+//! Everything above derives the launcher's mount set from paths **the Pod
+//! renders**. That is not the whole set, and the gap is not theoretical: it is
+//! the eighth blocker in this chain.
+//!
+//! `djinn_sandbox`'s Linux backend sets `djinn_sandbox::SANDBOX_TMPDIR`
+//! (`/var/tmp`) on **every** shell command, overriding the pod's
+//! `TMPDIR=/workspace`, so that a sandboxed tool's scratch lands inside the
+//! Landlock writable set. `TMPDIR` is on the broker's forward allow-list and
+//! `process_broker::child_environment` overlays `Command::get_envs()` *over* the
+//! inherited environment — so the value a brokered child is actually born with
+//! is the sandbox's, injected at spawn time, appearing nowhere in the manifest.
+//!
+//! `/var/tmp` lives in the image layer, which `readOnlyRootFilesystem: true`
+//! takes away. Measured on the production node, in a launcher-shaped container
+//! with the real child credentials:
+//!
+//! ```text
+//! # launcher (readOnlyRootFilesystem, setpriv --reuid=1001 --regid=1000)
+//! TMPDIR=/var/tmp mktemp -d
+//!   mktemp: failed to create directory via template '/var/tmp/tmp.XXXXXXXXXX':
+//!           Read-only file system                                      (rc 1)
+//! findmnt /var/tmp -> (nothing: it is the image layer)
+//!
+//! # worker container, same pod, same image
+//! TMPDIR=/var/tmp mktemp -d -> /var/tmp/tmp.vtramIerJV                 (rc 0)
+//! ```
+//!
+//! So arming the launcher without [`LAUNCHER_VAR_TMP_DIR`] is a strict
+//! regression against the unbrokered path for cargo, `cc`, Go and git — every
+//! toolchain that honours `$TMPDIR`.
+//!
+//! It is **launcher-private**, like `/tmp`, and deliberately not shared with the
+//! worker. A surface both containers can write is how a child that holds no
+//! privilege reaches into the worker's uid, and nothing hands work off through
+//! `/var/tmp`: the worker's own `TempDir` follows the pod's `TMPDIR=/workspace`.
+//! The one-way worker→child handoff that genuinely exists gets its own channel;
+//! see [`crate::private_dep_config`].
 
 use k8s_openapi::api::core::v1::{EmptyDirVolumeSource, Volume, VolumeMount};
 
@@ -121,9 +161,22 @@ use crate::launcher::{launcher_cgroup_mount, worker_launcher_ipc_mount};
 pub const VOLUME_LAUNCHER_TMP: &str = "launcher-tmp";
 /// Volume supplying the launcher container a writable `$HOME`.
 pub const VOLUME_LAUNCHER_HOME: &str = "launcher-home";
+/// Volume supplying the launcher container a writable [`LAUNCHER_VAR_TMP_DIR`].
+pub const VOLUME_LAUNCHER_VAR_TMP: &str = "launcher-var-tmp";
 
 /// Scratch directory a brokered child gets even when it ignores `TMPDIR`.
 pub const LAUNCHER_TMP_DIR: &str = "/tmp";
+
+/// The directory the sandbox pins `TMPDIR` to on every shell command.
+///
+/// Duplicated as a literal rather than imported because `djinn-k8s` does not
+/// depend on `djinn-sandbox` outside dev — the same arrangement
+/// [`LAUNCHER_HOME_DIR`] uses for the image's `$HOME`. It is not left to drift:
+/// `spawn_time_injected_paths` in
+/// `tests/launcher_child_filesystem_reachability.rs` derives the required value
+/// by applying the REAL sandbox to a real `Command` and reading the environment
+/// back off it, so a change on either side fails the guard rather than the pod.
+pub const LAUNCHER_VAR_TMP_DIR: &str = "/var/tmp";
 
 /// `$HOME` inside every djinn devcontainer image, set by
 /// `djinn_image_builder::dockerfile` (`ENV HOME=/home/djinn`). Duplicated as a
@@ -168,23 +221,32 @@ pub fn launcher_data_mounts(mirror_read_only: bool, cache_read_only: bool) -> Ve
         data_mount(VOLUME_WORKSPACE, WORKSPACE_MOUNT_DIR, None),
         data_mount(VOLUME_LAUNCHER_TMP, LAUNCHER_TMP_DIR, None),
         data_mount(VOLUME_LAUNCHER_HOME, LAUNCHER_HOME_DIR, None),
+        data_mount(VOLUME_LAUNCHER_VAR_TMP, LAUNCHER_VAR_TMP_DIR, None),
+        // Read-only on purpose: this is the worker→child direction of the
+        // private-dependency handoff and the child must not be able to rewrite
+        // it. See [`crate::private_dep_config`].
+        crate::private_dep_config::launcher_child_git_mount(),
     ]
 }
 
 /// The launcher-private scratch volumes. The shared data volumes are declared
-/// by `job.rs` for the worker already; only these two are new to the pod.
+/// by `job.rs` for the worker already; only these are new to the pod.
 pub fn launcher_scratch_volumes() -> Vec<Volume> {
-    [VOLUME_LAUNCHER_TMP, VOLUME_LAUNCHER_HOME]
-        .into_iter()
-        .map(|name| Volume {
-            name: name.to_string(),
-            // Disk-backed on purpose: a Memory emptyDir is charged to the pod's
-            // memory limit, and the launcher container's limit is the *build's*
-            // memory ceiling. A cargo build's scratch would eat it.
-            empty_dir: Some(EmptyDirVolumeSource::default()),
-            ..Volume::default()
-        })
-        .collect()
+    [
+        VOLUME_LAUNCHER_TMP,
+        VOLUME_LAUNCHER_HOME,
+        VOLUME_LAUNCHER_VAR_TMP,
+    ]
+    .into_iter()
+    .map(|name| Volume {
+        name: name.to_string(),
+        // Disk-backed on purpose: a Memory emptyDir is charged to the pod's
+        // memory limit, and the launcher container's limit is the *build's*
+        // memory ceiling. A cargo build's scratch would eat it.
+        empty_dir: Some(EmptyDirVolumeSource::default()),
+        ..Volume::default()
+    })
+    .collect()
 }
 
 fn data_mount(name: &str, mount_path: &str, read_only: Option<bool>) -> VolumeMount {
@@ -240,9 +302,36 @@ mod tests {
         // `readOnlyRootFilesystem` already took the image's copies away.
         assert_eq!(flag(&spike, VOLUME_LAUNCHER_TMP), None);
         assert_eq!(flag(&spike, VOLUME_LAUNCHER_HOME), None);
+        // Including the one an evidence spike would most plausibly be argued
+        // into: a build's TMPDIR is not a durable resource, and a read-only
+        // /var/tmp is the EROFS that blocker 8 was.
+        assert_eq!(flag(&spike, VOLUME_LAUNCHER_VAR_TMP), None);
+        // The private-dependency channel is the one mount that IS read-only for
+        // the launcher, in both regimes — that is its security property, not a
+        // spike concession.
+        assert_eq!(
+            flag(&normal, crate::private_dep_config::VOLUME_CHILD_GIT_CONFIG),
+            Some(true)
+        );
+        assert_eq!(
+            flag(&spike, crate::private_dep_config::VOLUME_CHILD_GIT_CONFIG),
+            Some(true)
+        );
         // Workspace is an ephemeral per-Pod emptyDir; it is writable even for
         // an evidence-spike run, exactly as it is for the worker.
         assert_eq!(flag(&spike, VOLUME_WORKSPACE), None);
+    }
+
+    /// The render must mount exactly what the sandbox pins, or blocker 8 is back
+    /// under a different path. `djinn-sandbox` is a dev-dependency, so this is
+    /// where the duplicated literal is reconciled with its source.
+    #[test]
+    fn the_var_tmp_mount_is_exactly_the_path_the_sandbox_pins() {
+        assert_eq!(
+            LAUNCHER_VAR_TMP_DIR,
+            djinn_sandbox::SANDBOX_TMPDIR,
+            "the launcher mounts one path and every sandboxed command writes to another"
+        );
     }
 
     #[test]

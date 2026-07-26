@@ -285,6 +285,12 @@ pub fn build_task_run_job(
         // directory explicitly and mount it below; see
         // `crate::invocation_journal` for the measured failure.
         worker_env.push(worker_invocation_journal_env());
+        // Where `configure_private_dep_access` must ALSO store the installation
+        // token's `url.insteadOf` rewrite. Its `git config --global` write lands
+        // in the WORKER's `$HOME`, which a brokered child never sees, so every
+        // private-dependency fetch would go out unauthenticated and silently.
+        // See `crate::private_dep_config` (goxi, ninth launcher blocker).
+        worker_env.push(crate::private_dep_config::child_git_config_env());
     }
 
     // The private control emptyDir is added only when a wrapper sidecar is
@@ -323,6 +329,10 @@ pub fn build_task_run_job(
         // nested under the read-only `spec` mount exactly the way the launcher
         // IPC volume already is.
         worker_volume_mounts.push(worker_invocation_journal_mount());
+        // The WRITE end of the one-way private-dependency git config channel.
+        // The launcher mounts the same volume `readOnly: true`, so the direction
+        // is enforced by the kubelet rather than by convention.
+        worker_volume_mounts.push(crate::private_dep_config::worker_child_git_mount());
     }
     if any_wrapper {
         worker_volume_mounts.push(control_volume_mount());
@@ -478,13 +488,21 @@ pub fn build_task_run_job(
         //     without this volume every armed pod dies `EROFS` with zero
         //     sessions. See `crate::invocation_journal`.
         volumes.push(invocation_journal_volume());
-        //   * `launcher-tmp` / `launcher-home` — writable `/tmp` and `$HOME`
-        //     for a brokered child. `readOnlyRootFilesystem: true` takes the
-        //     image's copies away, and the worker container (which has neither
-        //     flag) keeps them, so arming would otherwise REGRESS the
-        //     unbrokered path. Measured: `git config --global` fails
-        //     `Read-only file system` without these. See `launcher_child_fs`.
+        //   * `launcher-tmp` / `launcher-home` / `launcher-var-tmp` — writable
+        //     `/tmp`, `$HOME` and `/var/tmp` for a brokered child.
+        //     `readOnlyRootFilesystem: true` takes the image's copies away, and
+        //     the worker container (which has neither flag) keeps them, so
+        //     arming would otherwise REGRESS the unbrokered path. Measured:
+        //     `git config --global` fails `Read-only file system` without the
+        //     home volume, and `TMPDIR=/var/tmp mktemp -d` fails the same way
+        //     without the var-tmp one — and `/var/tmp` is what the SANDBOX pins
+        //     `TMPDIR` to at spawn time, which no manifest names. See
+        //     `launcher_child_fs`.
         volumes.extend(crate::launcher_child_fs::launcher_scratch_volumes());
+        //   * `child-git-config` — the one-way worker→child channel carrying
+        //     the private-dependency installation token. RW in the worker, RO in
+        //     the launcher. See `crate::private_dep_config`.
+        volumes.push(crate::private_dep_config::child_git_config_volume());
     }
     // Backing-service sidecars share a Memory /dev/shm (Postgres needs more than
     // the 64Mi default). Added only when services are injected so the manifest
@@ -1629,10 +1647,11 @@ mod tests {
         let mounts = container.volume_mounts.as_ref().expect("volume_mounts set");
         assert_eq!(
             mounts.len(),
-            8,
-            "expected 8 volume mounts including launcher IPC and the invocation journal"
+            9,
+            "expected 9 volume mounts including launcher IPC, the invocation journal and the \
+             one-way private-dependency git config channel"
         );
-        let expected_mounts: [(&str, &str, Option<bool>); 8] = [
+        let expected_mounts: [(&str, &str, Option<bool>); 9] = [
             (VOLUME_SPEC, SPEC_MOUNT_DIR, Some(true)),
             (VOLUME_AUTH_TOKEN, TOKEN_MOUNT_DIR, Some(true)),
             (VOLUME_MIRROR, MIRROR_MOUNT_DIR, Some(false)),
@@ -1657,6 +1676,15 @@ mod tests {
                 crate::invocation_journal::INVOCATION_JOURNAL_DIR,
                 None,
             ),
+            // The WRITE end of the private-dependency git config channel. The
+            // launcher mounts the same volume `readOnly: true`; without the
+            // channel a brokered fetch of a private transitive dependency goes
+            // out unauthenticated, silently. See `crate::private_dep_config`.
+            (
+                crate::private_dep_config::VOLUME_CHILD_GIT_CONFIG,
+                crate::private_dep_config::CHILD_GIT_CONFIG_DIR,
+                None,
+            ),
         ];
         for (mount, (exp_name, exp_path, exp_ro)) in mounts.iter().zip(expected_mounts.iter()) {
             assert_eq!(&mount.name, exp_name);
@@ -1669,9 +1697,9 @@ mod tests {
         let volumes = pod.volumes.as_ref().expect("volumes set");
         assert_eq!(
             volumes.len(),
-            11,
-            "expected 11 volumes: launcher surfaces, the invocation journal and \
-             the launcher's own /tmp + $HOME"
+            13,
+            "expected 13 volumes: launcher surfaces, the invocation journal, the launcher's own \
+             /tmp + $HOME + /var/tmp, and the private-dependency git config channel"
         );
         let expected_volume_names = [
             VOLUME_SPEC,
@@ -1683,10 +1711,14 @@ mod tests {
             crate::launcher::VOLUME_LAUNCHER_IPC,
             crate::launcher::VOLUME_LAUNCHER_CGROUP,
             crate::invocation_journal::VOLUME_INVOCATION_JOURNAL,
-            // The launcher's writable /tmp and $HOME: `readOnlyRootFilesystem`
-            // takes the image's copies away from a brokered child.
+            // The launcher's writable /tmp, $HOME and /var/tmp:
+            // `readOnlyRootFilesystem` takes the image's copies away from a
+            // brokered child. /var/tmp is what the SANDBOX pins TMPDIR to at
+            // spawn time, which no manifest names (goxi blocker 8).
             crate::launcher_child_fs::VOLUME_LAUNCHER_TMP,
             crate::launcher_child_fs::VOLUME_LAUNCHER_HOME,
+            crate::launcher_child_fs::VOLUME_LAUNCHER_VAR_TMP,
+            crate::private_dep_config::VOLUME_CHILD_GIT_CONFIG,
         ];
         for (volume, expected_name) in volumes.iter().zip(expected_volume_names.iter()) {
             assert_eq!(&volume.name, expected_name);
@@ -3706,6 +3738,14 @@ mod tests {
         for absent in [
             crate::launcher::VOLUME_LAUNCHER_IPC,
             crate::launcher::VOLUME_LAUNCHER_CGROUP,
+            // The brokered child's scratch surfaces and the one-way
+            // private-dependency channel exist only because a command runs in
+            // the launcher's mount namespace. With no launcher, the pod keeps
+            // its pre-enforcement shape exactly.
+            crate::launcher_child_fs::VOLUME_LAUNCHER_TMP,
+            crate::launcher_child_fs::VOLUME_LAUNCHER_HOME,
+            crate::launcher_child_fs::VOLUME_LAUNCHER_VAR_TMP,
+            crate::private_dep_config::VOLUME_CHILD_GIT_CONFIG,
         ] {
             assert!(
                 pod.volumes.iter().flatten().all(|v| v.name != absent),
@@ -3721,7 +3761,14 @@ mod tests {
                 .all(|m| m.mount_path != crate::launcher::LAUNCHER_IPC_DIR),
             "worker must not mount the launcher IPC dir in explicit disabled mode"
         );
-        for env_name in ["DJINN_LAUNCHER_SOCKET", "DJINN_LAUNCHER_CREDENTIAL_PATH"] {
+        for env_name in [
+            "DJINN_LAUNCHER_SOCKET",
+            "DJINN_LAUNCHER_CREDENTIAL_PATH",
+            // Naming the channel to a worker with no launcher would have
+            // `configure_private_dep_access` publish a live installation token
+            // onto a volume nothing mounts.
+            crate::private_dep_config::CHILD_GIT_CONFIG_PATH_ENV,
+        ] {
             assert!(
                 worker.env.iter().flatten().all(|e| e.name != env_name),
                 "{env_name} must not be exported in explicit disabled mode"

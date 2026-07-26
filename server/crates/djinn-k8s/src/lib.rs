@@ -18,6 +18,7 @@ pub mod label_value;
 pub mod launcher;
 pub mod launcher_child_fs;
 mod launcher_cpu;
+pub mod private_dep_config;
 pub mod runtime;
 pub mod secret;
 pub mod sidecar;
