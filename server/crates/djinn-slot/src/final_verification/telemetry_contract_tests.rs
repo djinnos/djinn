@@ -1,3 +1,4 @@
+use super::outcome_telemetry::emit_lookup_outcome;
 use super::*;
 use std::io::Write;
 use std::sync::{Arc, Mutex};

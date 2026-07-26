@@ -107,6 +107,8 @@ fn tracking_material(
 /// service provisioners. Mirrors `recording_tests::material`.
 fn bare_material(checks: &[&str]) -> FinalVerificationResolvedMaterial {
     FinalVerificationResolvedMaterial {
+        reusable: true,
+        evidence_tier: "attested",
         execution_request: FinalVerificationExecutionRequest {
             worktree: std::path::PathBuf::new(),
             resolve_environment_identity: Arc::new(|| panic!("injected evidence only")),
@@ -114,6 +116,7 @@ fn bare_material(checks: &[&str]) -> FinalVerificationResolvedMaterial {
             tool_runtime: vec![],
             read_only_external_mounts: vec![],
             output_directories: vec![],
+            volatile_environment: Default::default(),
             catalog_loopback_endpoints: vec![],
             service_provisioners: vec![],
         },

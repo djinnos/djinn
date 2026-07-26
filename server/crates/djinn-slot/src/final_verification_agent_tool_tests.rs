@@ -58,6 +58,7 @@ fn agent_tool_material(worktree: std::path::PathBuf) -> FinalVerificationResolve
         environment_names: vec![],
         read_only_external_inputs: vec![],
         output_only_globs: vec![],
+        volatile_environment_names: Vec::new(),
     };
     let commands = required_checks
         .iter()
@@ -85,6 +86,7 @@ fn agent_tool_material(worktree: std::path::PathBuf) -> FinalVerificationResolve
                 reusable: true,
                 network_access: false,
             },
+            evidence_tier: Default::default(),
         },
         selection: ResolvedVerificationSelectionV1::legacy_flat_plan(),
         input_manifest: manifest.clone(),
@@ -120,16 +122,20 @@ fn agent_tool_material(worktree: std::path::PathBuf) -> FinalVerificationResolve
                 base_ref: "main".into(),
                 manifest,
                 external_inputs: vec![],
+                output_policy: Default::default(),
             },
             tool_runtime: vec![],
             read_only_external_mounts: vec![],
             output_directories: vec![],
             catalog_loopback_endpoints: vec![],
             service_provisioners: vec![],
+            volatile_environment: Default::default(),
         },
         verify_source: VerifySource::Worker,
         required_checks,
         diff_fingerprint: "agent-tool-audit-diff".into(),
+        reusable: true,
+        evidence_tier: "attested",
     }
 }
 

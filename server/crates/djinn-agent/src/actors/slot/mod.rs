@@ -24,6 +24,8 @@ pub mod helpers; // HOST-ONLY: provider resolution, feedback, code-context
 pub(crate) mod host_callbacks; // HOST-ONLY: dispatch callback adapter
 pub(crate) mod lifecycle; // HOST-ONLY: per-stage lifecycle helpers
 mod pool; // HOST-ONLY: slot pool, handle, factory
+#[cfg(test)]
+mod recorded_verification_tests; // Recorded evidence tier, end to end
 pub(crate) mod reply_loop; // THIN SHIM: reply-loop facade adapter
 pub(crate) mod session_extraction; // THIN SHIM: extraction backfill adapter
 mod supervisor_runner; // HOST-ONLY: host-side dispatch logic
