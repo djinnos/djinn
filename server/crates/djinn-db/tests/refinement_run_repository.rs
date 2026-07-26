@@ -204,12 +204,53 @@ async fn human_review_acceptance_and_rejection_failures_are_atomic_and_retryable
     assert_eq!(durable_shape(&db, &proposal_id).await, before);
 }
 
+#[tokio::test]
+async fn distinct_revisions_resume_one_live_run_without_new_durable_rows() {
+    let (db, repo, proposal_id) = fixture().await;
+    let admitted = repo
+        .reap_and_admit(demand(proposal_id.clone(), "initial-run"))
+        .await
+        .unwrap();
+    let run_id = match admitted {
+        RefinementAdmissionOutcome::Admitted { run_id, .. } => run_id,
+        other => panic!("expected initial admission, got {other:?}"),
+    };
+    let before = durable_shape(&db, &proposal_id).await;
+
+    for revision_id in ["revision-one", "revision-two", "revision-two"] {
+        let resumed = repo
+            .reap_and_admit(revision(proposal_id.clone(), revision_id))
+            .await
+            .unwrap();
+        assert!(matches!(
+            resumed,
+            RefinementAdmissionOutcome::Existing {
+                run_id: ref resumed_run_id,
+                generation: 1,
+                ..
+            } if resumed_run_id == &run_id
+        ));
+        assert_eq!(durable_shape(&db, &proposal_id).await, before);
+    }
+}
+
 fn demand(proposal_id: String, key: impl Into<String>) -> AdmitRefinementRunRequest {
     AdmitRefinementRunRequest {
         proposal_id,
         idempotency_key: key.into(),
         source: RefinementAdmissionSource::Demand {
             demand_id: "repository-regression".into(),
+        },
+        heartbeat_grace_millis: GRACE,
+    }
+}
+
+fn revision(proposal_id: String, revision_id: &str) -> AdmitRefinementRunRequest {
+    AdmitRefinementRunRequest {
+        proposal_id,
+        idempotency_key: format!("revision-{revision_id}"),
+        source: RefinementAdmissionSource::Revision {
+            revision_id: revision_id.to_owned(),
         },
         heartbeat_grace_millis: GRACE,
     }

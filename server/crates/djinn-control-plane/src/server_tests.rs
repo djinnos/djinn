@@ -643,9 +643,30 @@ mod tests {
             .get("revisions")
             .and_then(|v| v.as_array())
             .expect("revisions array");
-        // create seed + material update = 2 revisions, all spec_revision kind
-        assert_eq!(revisions.len(), 2);
-        for rev in revisions {
+        // Revision admission may independently author a refinement revision
+        // before this read. Select the two ordinary writes by the content and
+        // sequence each call above is responsible for rather than assuming
+        // they are the only rows in the history.
+        let create_seed = revisions
+            .iter()
+            .find(|rev| {
+                rev.get("seq").and_then(|v| v.as_i64()) == Some(1)
+                    && rev.get("title").and_then(|v| v.as_str()) == Some("Metadata Compat")
+            })
+            .expect("create seed revision at seq 1");
+        // `proposal_show` exposes revision bodies as `body_excerpt`; "v2 body"
+        // is short enough to be carried whole (`body_truncated == false`).
+        let material_update = revisions
+            .iter()
+            .find(|rev| {
+                rev.get("seq").and_then(|v| v.as_i64()) == Some(2)
+                    && rev.get("title").and_then(|v| v.as_str()) == Some("Metadata Compat v2")
+                    && rev.get("body_excerpt").and_then(|v| v.as_str()) == Some("v2 body")
+                    && rev.get("body_truncated").and_then(|v| v.as_bool()) == Some(false)
+            })
+            .expect("material ordinary update revision at seq 2");
+
+        for rev in [create_seed, material_update] {
             assert_eq!(
                 rev.get("event_kind").and_then(|v| v.as_str()),
                 Some("spec_revision")
