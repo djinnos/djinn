@@ -28,6 +28,9 @@ pub struct TaskCreateParams {
     pub status: Option<String>,
     /// Specialist role name to route this task (e.g. "rust-expert").
     pub agent_type: Option<String>,
+    /// Explicit typed execution eligibility metadata. This is never inferred
+    /// from task text, labels, roles, or issue type.
+    pub execution_context: Option<djinn_core::models::TaskExecutionContext>,
 }
 
 /// Parse the promoted current-head CI status from the task model, preserving
@@ -71,6 +74,9 @@ pub struct TaskUpdateParams {
     pub blocked_by_remove: Option<Vec<String>>,
     /// Specialist role name to assign (set None/"" to clear).
     pub agent_type: Option<String>,
+    /// Complete replacement for explicit typed execution eligibility metadata.
+    /// Partial JSON updates are not supported.
+    pub execution_context: Option<djinn_core::models::TaskExecutionContext>,
 }
 
 #[derive(Serialize, Clone, schemars::JsonSchema)]
@@ -693,6 +699,8 @@ pub struct TaskResponse {
     /// Specialist role name assigned to this task, if any.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution_context: Option<djinn_core::models::TaskExecutionContext>,
     /// Stable `users.id` of whoever this task belongs to (session creator, or
     /// the parent epic's creator for Planner-spawned tasks). `None` for tasks
     /// with no human owner. Resolve to a display name via the org user list.
@@ -1264,6 +1272,8 @@ pub struct TaskListItem {
     /// Specialist role name assigned to this task, if any.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution_context: Option<djinn_core::models::TaskExecutionContext>,
     /// Stable `users.id` of whoever this task belongs to (session creator, or
     /// the parent epic's creator for Planner-spawned tasks). `None` for tasks
     /// with no human owner. Resolve to a display name via the org user list.
@@ -1360,6 +1370,7 @@ pub fn task_to_response(t: &Task) -> TaskResponse {
             .map(AnyJson),
         pr_url: t.pr_url.clone(),
         agent_type: t.agent_type.clone(),
+        execution_context: t.execution_context.clone(),
         created_by_user_id: Some(t.created_by_user_id.clone()),
         warning: None,
         ci_status: task_ci_status(t),
@@ -1406,6 +1417,7 @@ pub fn task_to_list_item(
         pr_url: base.pr_url,
         unresolved_blocker_count: t.unresolved_blocker_count,
         agent_type: t.agent_type.clone(),
+        execution_context: base.execution_context,
         created_by_user_id: base.created_by_user_id,
         active_session,
         session_count,

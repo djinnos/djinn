@@ -28,7 +28,7 @@ use crate::tools::task_tools::types::{
     ActivityEntryResponse, ErrorOr, ErrorResponse, TaskResponse, task_ci_gate_snapshot,
     task_ci_gate_state, task_ci_status,
 };
-use djinn_core::models::{ActivityEntry, Task, TaskStatus, TransitionAction};
+use djinn_core::models::{ActivityEntry, Task, TaskExecutionContext, TaskStatus, TransitionAction};
 use djinn_db::{EffectiveCreatorProvenance, EpicRepository, TaskRepository};
 
 const IMPACT_CHECK_WARNING: &str = "This task appears to involve a removal or rename. Consider calling `impact_check` before proceeding to avoid breaking compile-time consumers in other crates. See the planner prompt contract for details.";
@@ -72,6 +72,7 @@ pub(crate) fn task_to_response(task: &Task) -> TaskResponse {
         intervention_count: task.intervention_count,
         last_intervention_at: task.last_intervention_at.clone(),
         agent_type: task.agent_type.clone(),
+        execution_context: task.execution_context.clone(),
         created_by_user_id: Some(task.created_by_user_id.clone()),
         created_at: task.created_at.clone(),
         updated_at: task.updated_at.clone(),
@@ -348,6 +349,13 @@ pub async fn create_task(
         }
     }
 
+    if let Some(context) = request.execution_context.as_ref() {
+        if let Err(e) = repo.set_execution_context(&task.id, Some(context)).await {
+            return Json(ErrorOr::Error(ErrorResponse::new(e.to_string())));
+        }
+        task.execution_context = Some(context.clone());
+    }
+
     let mut response = task_to_response(&task);
     response.warning = warning;
     Json(ErrorOr::Ok(response))
@@ -483,6 +491,13 @@ pub async fn update_task(
         }
     }
 
+    if let Some(context) = request.execution_context.as_ref() {
+        if let Err(e) = repo.set_execution_context(&updated.id, Some(context)).await {
+            return Json(ErrorOr::Error(ErrorResponse::new(e.to_string())));
+        }
+        updated.execution_context = Some(context.clone());
+    }
+
     Json(ErrorOr::Ok(task_to_response(&updated)))
 }
 
@@ -595,6 +610,7 @@ pub struct CreateTaskRequest {
     pub memory_refs: Vec<String>,
     pub blocked_by_refs: Vec<String>,
     pub agent_type: Option<String>,
+    pub execution_context: Option<TaskExecutionContext>,
     pub epic_ref: Option<String>,
 }
 
@@ -614,6 +630,7 @@ pub struct UpdateTaskRequest {
     pub blocked_by_add_refs: Vec<String>,
     pub blocked_by_remove_refs: Vec<String>,
     pub agent_type: Option<String>,
+    pub execution_context: Option<TaskExecutionContext>,
     pub epic_ref: Option<String>,
 }
 
@@ -675,6 +692,7 @@ mod tests {
             memory_refs: Vec::new(),
             blocked_by_refs: Vec::new(),
             agent_type: None,
+            execution_context: None,
             epic_ref: Some(epic_ref.to_owned()),
         }
     }

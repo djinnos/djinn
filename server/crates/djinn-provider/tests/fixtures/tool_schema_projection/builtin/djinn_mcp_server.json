@@ -20693,6 +20693,14 @@
             "string",
             "null"
           ]
+        },
+        "request_id": {
+          "description": "Stable caller-generated identity for this demand. Reuse it when\nretrying the same request; omit it for a new independent demand.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
         }
       }
     },
@@ -21051,6 +21059,14 @@
         },
         "owner_user_id": {
           "description": "User the refinement run is attributed to: owner of the spawned\nrefinement (tribunal) tasks and the scope for per-user role-model\nresolution. Omit to attribute the run to the proposal author.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "request_id": {
+          "description": "Stable caller-generated identity for this start request. Reuse it when\nretrying the same request; omit it for a new independent start.",
           "type": [
             "string",
             "null"
@@ -26784,6 +26800,31 @@
           "required": [
             "criterion"
           ]
+        },
+        "TaskExecutionContext": {
+          "description": "Explicit, durable execution metadata for a task. This is separate from the\nprompt-rendering `djinn_roles::prompts::TaskContext` and is never inferred\nfrom task text, labels, roles, or issue type.",
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "skill_name": {
+                  "type": "string"
+                },
+                "skill_version": {
+                  "type": "string"
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "readiness_guardrail_analysis"
+                }
+              },
+              "required": [
+                "kind",
+                "skill_name",
+                "skill_version"
+              ]
+            }
+          ]
         }
       },
       "type": "object",
@@ -26884,6 +26925,17 @@
           "type": [
             "string",
             "null"
+          ]
+        },
+        "execution_context": {
+          "description": "Explicit typed execution eligibility metadata. This is never inferred\nfrom task text, labels, roles, or issue type.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TaskExecutionContext"
+            },
+            {
+              "type": "null"
+            }
           ]
         }
       },
@@ -27105,6 +27157,16 @@
                 "null"
               ]
             },
+            "execution_context": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/TaskExecutionContext"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "created_by_user_id": {
               "description": "Stable `users.id` of whoever this task belongs to (session creator, or\nthe parent epic's creator for Planner-spawned tasks). `None` for tasks\nwith no human owner. Resolve to a display name via the org user list.",
               "type": [
@@ -27244,6 +27306,31 @@
           },
           "required": [
             "criterion"
+          ]
+        },
+        "TaskExecutionContext": {
+          "description": "Explicit, durable execution metadata for a task. This is separate from the\nprompt-rendering `djinn_roles::prompts::TaskContext` and is never inferred\nfrom task text, labels, roles, or issue type.",
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "skill_name": {
+                  "type": "string"
+                },
+                "skill_version": {
+                  "type": "string"
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "readiness_guardrail_analysis"
+                }
+              },
+              "required": [
+                "kind",
+                "skill_name",
+                "skill_version"
+              ]
+            }
           ]
         },
         "CiGateSnapshot": {
@@ -28131,6 +28218,31 @@
           "required": [
             "criterion"
           ]
+        },
+        "TaskExecutionContext": {
+          "description": "Explicit, durable execution metadata for a task. This is separate from the\nprompt-rendering `djinn_roles::prompts::TaskContext` and is never inferred\nfrom task text, labels, roles, or issue type.",
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "skill_name": {
+                  "type": "string"
+                },
+                "skill_version": {
+                  "type": "string"
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "readiness_guardrail_analysis"
+                }
+              },
+              "required": [
+                "kind",
+                "skill_name",
+                "skill_version"
+              ]
+            }
+          ]
         }
       },
       "type": "object",
@@ -28256,6 +28368,17 @@
           "type": [
             "string",
             "null"
+          ]
+        },
+        "execution_context": {
+          "description": "Complete replacement for explicit typed execution eligibility metadata.\nPartial JSON updates are not supported.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TaskExecutionContext"
+            },
+            {
+              "type": "null"
+            }
           ]
         }
       },

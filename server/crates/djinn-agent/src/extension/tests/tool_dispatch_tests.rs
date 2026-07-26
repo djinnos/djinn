@@ -190,7 +190,8 @@ async fn call_tool_dispatches_task_create_with_public_response_shape() {
                         "owner": "planner",
                         "acceptance_criteria": ["first criterion"],
                         "memory_refs": ["decisions/adr-041-unified-tool-service-layer-in-djinn-mcp"],
-                        "agent_type": "rust-expert"
+                        "agent_type": "rust-expert",
+                        "execution_context": {"kind": "readiness_guardrail_analysis", "skill_name": "agent-readiness-guardrails", "skill_version": "1.0.0"}
                     })
                     .as_object()
                     .expect("task_create args object")
@@ -230,6 +231,11 @@ async fn call_tool_dispatches_task_create_with_public_response_shape() {
         response.get("agent_type").and_then(|v| v.as_str()),
         Some("rust-expert")
     );
+    assert_eq!(
+        response["execution_context"]["skill_name"],
+        "agent-readiness-guardrails"
+    );
+    assert_eq!(response["execution_context"]["skill_version"], "1.0.0");
     assert_eq!(
         response
             .get("acceptance_criteria")

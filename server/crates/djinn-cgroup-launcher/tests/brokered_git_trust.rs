@@ -46,7 +46,7 @@ use std::process::Command;
 use djinn_cgroup_launcher::child::{ARTIFACT_GID, CHILD_UID};
 use djinn_cgroup_launcher::{
     CgroupFs, CgroupMode, ChildProcess, CommandSpec, Error, Invocation, Launcher, LauncherConfig,
-    Readiness, SpawnIntoCgroup, git_trust, is_allowed_environment_entry,
+    LeaseAuthority, Readiness, SpawnIntoCgroup, git_trust, is_allowed_environment_entry,
     is_allowed_environment_key,
 };
 
@@ -142,7 +142,7 @@ fn brokered_environment(workspace: &Path, caller: &[(&str, &str)]) -> Vec<(Strin
             .collect(),
     };
     launcher
-        .create_command("git-trust", invocation(), &spec)
+        .create_command("git-trust", invocation(), LeaseAuthority::Armed, &spec)
         .expect("the launcher must accept a conforming spec");
     let (_, spawn) = launcher.into_parts();
     let mut environment = spawn.environments.into_iter().next().expect("one spawn");
@@ -565,8 +565,11 @@ fn the_anchor_chains_the_real_system_config_instead_of_shadowing_it() {
     std::fs::write(&real_system, "[core]\n\tabbrev = 12\n")
         .expect("write a stand-in system config");
     let chained = fixture.root.join("chained-gitconfig");
-    std::fs::write(&chained, git_trust::anchor_contents(Some(&real_system)))
-        .expect("write the chained anchor");
+    std::fs::write(
+        &chained,
+        git_trust::anchor_contents(std::slice::from_ref(&real_system)),
+    )
+    .expect("write the chained anchor");
     std::fs::set_permissions(&chained, std::fs::Permissions::from_mode(0o644)).expect("chmod");
 
     let environment = vec![
@@ -610,7 +613,7 @@ fn brokered_spec_error(caller: &[(&str, &str)]) -> Error {
             .collect(),
     };
     launcher
-        .create_command("hostile", invocation(), &spec)
+        .create_command("hostile", invocation(), LeaseAuthority::Armed, &spec)
         .expect_err("a hostile spec must be refused")
 }
 

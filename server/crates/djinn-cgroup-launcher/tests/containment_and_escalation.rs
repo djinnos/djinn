@@ -24,7 +24,7 @@ use std::rc::Rc;
 
 use djinn_cgroup_launcher::{
     CgroupFs, CgroupMode, ChildProcess, CommandSpec, Error, Invocation, Launcher, LauncherConfig,
-    Readiness, SpawnIntoCgroup,
+    LeaseAuthority, Readiness, SpawnIntoCgroup,
     broker::{
         Broker, BrokerConfig, OsNonceSource, PeerCredentials, UnixPeer, WORKER_GID, WORKER_UID,
     },
@@ -270,6 +270,7 @@ fn authenticated_broker_gives_each_command_a_fresh_250m_leaf_and_one_explicit_li
             "first-command",
             first_nonce,
             "first-leaf",
+            LeaseAuthority::Armed,
             &command(),
         )
         .expect("create first command");
@@ -298,6 +299,7 @@ fn authenticated_broker_gives_each_command_a_fresh_250m_leaf_and_one_explicit_li
             "second-command",
             second_nonce,
             "second-leaf",
+            LeaseAuthority::Armed,
             &command(),
         )
         .expect("create second command");
@@ -335,7 +337,7 @@ fn ac2_daemon_and_double_fork_stay_in_one_cgroup_and_release_gates_on_populated_
         fence: 5,
     };
     let (mut leaf, child) = launcher
-        .create_command("daemon-tree", invocation, &command())
+        .create_command("daemon-tree", invocation, LeaseAuthority::Armed, &command())
         .expect("create invocation");
     assert_eq!(child.pid, 4242);
 
@@ -408,6 +410,7 @@ fn ac2_cleanup_after_kill_still_requires_empty_before_unlink() {
                 id: "cancelled".to_owned(),
                 fence: 1,
             },
+            LeaseAuthority::Armed,
             &command(),
         )
         .expect("create");
@@ -492,13 +495,27 @@ fn ac3_forged_own_or_sibling_controls_and_nonce_replay_are_rejected() {
     // drive an invocation bound to another connection.
     let connection_b = authenticated_ready(&mut broker);
     assert!(matches!(
-        broker.create(connection_b, "one", nonce0, "leaf", &command()),
+        broker.create(
+            connection_b,
+            "one",
+            nonce0,
+            "leaf",
+            LeaseAuthority::Armed,
+            &command()
+        ),
         Err(Error::InvalidInvocationBinding)
     ));
 
     // The owning connection with the live nonce succeeds and rotates the nonce.
     let nonce1 = broker
-        .create(connection_a, "one", nonce0, "leaf", &command())
+        .create(
+            connection_a,
+            "one",
+            nonce0,
+            "leaf",
+            LeaseAuthority::Armed,
+            &command(),
+        )
         .expect("owning create");
 
     // Replaying the now-consumed nonce is a forged own-control: rejected.

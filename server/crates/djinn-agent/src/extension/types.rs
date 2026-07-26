@@ -53,6 +53,7 @@ pub(super) struct TaskUpdateParams {
     pub blocked_by_add: Vec<String>,
     #[serde(default)]
     pub blocked_by_remove: Vec<String>,
+    pub execution_context: Option<djinn_core::models::TaskExecutionContext>,
 }
 
 #[derive(Deserialize)]
@@ -76,6 +77,7 @@ pub(super) struct TaskCreateParams {
     pub memory_refs: Option<Vec<String>>,
     /// Specialist role name to route this task (e.g. "rust-expert").
     pub agent_type: Option<String>,
+    pub execution_context: Option<djinn_core::models::TaskExecutionContext>,
 }
 
 #[derive(Deserialize)]

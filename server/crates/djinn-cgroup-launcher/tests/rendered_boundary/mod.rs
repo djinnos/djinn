@@ -30,8 +30,8 @@ use djinn_cgroup_launcher::child::{
 };
 use djinn_cgroup_launcher::transport::{UnixBrokerClient, UnixBrokerServer};
 use djinn_cgroup_launcher::{
-    ChildProcess, CommandSpec, Error, Invocation, Launcher, LauncherConfig, NativeCgroupFs,
-    NativeCgroupSpawn, SpawnIntoCgroup,
+    ChildProcess, CommandSpec, Error, Invocation, Launcher, LauncherConfig, LeaseAuthority,
+    NativeCgroupFs, NativeCgroupSpawn, SpawnIntoCgroup,
 };
 
 /// Invocation whose child is the in-cgroup adversary rather than an exec.
@@ -452,7 +452,7 @@ fn worker_main(
             say!("fail:begin {id}: {error}");
             unsafe { libc::_exit(17) };
         }
-        if let Err(error) = client.create(id, leaf, &command) {
+        if let Err(error) = client.create(id, leaf, LeaseAuthority::Armed, &command) {
             say!("fail:create {id}: {error}");
             unsafe { libc::_exit(18) };
         }

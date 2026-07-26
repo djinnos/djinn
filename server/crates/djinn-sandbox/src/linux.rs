@@ -76,7 +76,15 @@ impl LandlockSandbox {
         // Go-specific knob. The supervisor's own TempDir is unaffected: it is not
         // spawned through this sandbox, so it keeps using the `/workspace`
         // emptyDir for large mirror clones.
-        cmd.env("TMPDIR", "/var/tmp");
+        //
+        // This override also crosses the broker: `TMPDIR` is on
+        // `djinn_cgroup_launcher::is_allowed_environment_key`'s forward list and
+        // `process_broker::child_environment` overlays `Command::get_envs()`
+        // onto the inherited set, so the value set HERE — not the pod's
+        // `TMPDIR=/workspace` — is what a brokered child is born with. The
+        // launcher container must therefore make it writable; see
+        // [`crate::SANDBOX_TMPDIR`].
+        cmd.env("TMPDIR", crate::SANDBOX_TMPDIR);
 
         let (writable_worktree, git_meta) = match scope {
             SandboxScope::Worktree(path) => (Some(path.to_path_buf()), git_metadata_dir(path)),
@@ -182,7 +190,10 @@ fn apply_policy(
         // Full access to /var/tmp (disk-backed) and /dev/null et al.
         // /tmp is intentionally excluded: on Linux it's typically tmpfs and
         // writes there can silently consume RAM.
-        .add_rule(PathBeneath::new(PathFd::new("/var/tmp")?, full_access))?
+        .add_rule(PathBeneath::new(
+            PathFd::new(crate::SANDBOX_TMPDIR)?,
+            full_access,
+        ))?
         .add_rule(PathBeneath::new(PathFd::new("/dev/null")?, full_access))?
         .add_rule(PathBeneath::new(PathFd::new("/dev/zero")?, full_access))?
         .add_rule(PathBeneath::new(PathFd::new("/dev/urandom")?, full_access))?;
@@ -311,8 +322,34 @@ mod tests {
             .map(|v| v.to_owned());
         assert_eq!(
             tmpdir,
-            Some(OsString::from("/var/tmp")),
+            Some(OsString::from(crate::SANDBOX_TMPDIR)),
             "sandboxed commands must use a Landlock-writable TMPDIR, not the inherited /workspace"
+        );
+    }
+
+    /// The override is not a private detail of this backend: it rides the broker
+    /// into the launcher's mount namespace, so the Pod renderer has to mount it.
+    /// Assert the exported constant is what `apply` actually sets, since that
+    /// constant is what `djinn-k8s` renders against.
+    #[test]
+    fn the_exported_tmpdir_constant_is_the_value_apply_sets() {
+        let mut cmd = std::process::Command::new("true");
+        LandlockSandbox
+            .apply(SandboxScope::Worktree(Path::new("/tmp")), &mut cmd)
+            .expect("apply should succeed");
+        let injected: Vec<(String, String)> = cmd
+            .get_envs()
+            .filter_map(|(key, value)| {
+                Some((key.to_str()?.to_owned(), value?.to_str()?.to_owned()))
+            })
+            .collect();
+        assert!(
+            injected.contains(&("TMPDIR".to_owned(), crate::SANDBOX_TMPDIR.to_owned())),
+            "the spawn-time injection set must carry the exported constant; got {injected:?}"
+        );
+        assert!(
+            Path::new(crate::SANDBOX_TMPDIR).is_absolute(),
+            "the renderer treats this as a mount path"
         );
     }
 

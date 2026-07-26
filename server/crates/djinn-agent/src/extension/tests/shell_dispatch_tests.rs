@@ -39,6 +39,7 @@ struct BrokerShellState {
     /// is build-shaped and reaches the lease authority.
     cpu_usage_usec: u64,
     identities: Vec<TaskInvocationLeaseIdentity>,
+    authorities: Vec<djinn_cgroup_launcher::LeaseAuthority>,
     lifts: usize,
     killed_while_running: usize,
     empties: usize,
@@ -59,6 +60,7 @@ impl BrokerShellLauncher {
                 samples: 0,
                 cpu_usage_usec: 0,
                 identities: Vec::new(),
+                authorities: Vec::new(),
                 lifts: 0,
                 killed_while_running: 0,
                 empties: 0,
@@ -80,6 +82,7 @@ impl BrokerShellLauncher {
                 samples: 0,
                 cpu_usage_usec: 1_000_000,
                 identities: Vec::new(),
+                authorities: Vec::new(),
                 lifts: 0,
                 killed_while_running: 0,
                 empties: 0,
@@ -94,8 +97,12 @@ impl CgroupLauncherClient for BrokerShellLauncher {
         &self,
         _: Command,
         identity: &TaskInvocationLeaseIdentity,
+        authority: djinn_cgroup_launcher::LeaseAuthority,
     ) -> io::Result<Box<dyn ProcessHandle>> {
-        self.state.lock().unwrap().identities.push(identity.clone());
+        let mut state = self.state.lock().unwrap();
+        state.identities.push(identity.clone());
+        state.authorities.push(authority);
+        drop(state);
         Ok(Box::new(BrokerShellHandle {
             state: self.state.clone(),
         }))
@@ -514,9 +521,22 @@ async fn shell_dispatch_lease_queue_timeout_returns_the_command_result_not_an_er
         broker.killed_while_running, 0,
         "the queued command must keep running, not be killed"
     );
+    assert_eq!(broker.lifts, 0, "a degraded command is never lifted");
+    // …and because this composition runs against the real durable authority in
+    // the state a normal deployment is actually in — no `admission_handoff` row,
+    // which `evaluate_invocation_lift` maps to `Unleased` — the leaf must have
+    // been born WITHOUT a quota of its own.
+    //
+    // This is the assertion the production path was missing (goxi launcher
+    // blocker 11). `lifts == 0` alone was satisfied by the defect: the leaf was
+    // pinned to the broker's 250m unleased quota for the whole command, so an
+    // armed launcher made every build ~16x slower than a disabled one.
+    // `djinn-server epoch show` on the production node reported
+    // `admission handoff row: <absent>` during the armed window.
     assert_eq!(
-        broker.lifts, 0,
-        "a degraded command stays at the unleased quota"
+        broker.authorities,
+        vec![djinn_cgroup_launcher::LeaseAuthority::Unarmed],
+        "an authority that can never grant a lift must not clamp the leaf either"
     );
     assert_eq!((broker.empties, broker.cleanups), (1, 1));
 }

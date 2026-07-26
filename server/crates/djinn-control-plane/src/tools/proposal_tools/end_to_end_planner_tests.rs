@@ -333,16 +333,25 @@ The open-questions section collects uncertainties for the team.
             .dispatch_tool("proposal_show", serde_json::json!({ "id": proposal.id }))
             .await
             .unwrap();
-        let revisions = shown
+        // A committed revision also admits refinement, which independently
+        // authors a `refinement_start` lifecycle row into the same history.
+        // Select the ordinary spec revisions so the per-patch attribution
+        // contract below is asserted against the rows the patches authored.
+        let revisions: Vec<&Value> = shown
             .get("revisions")
             .and_then(|v| v.as_array())
-            .expect("proposal_show.revisions must be a JSON array");
+            .expect("proposal_show.revisions must be a JSON array")
+            .iter()
+            .filter(|rev| {
+                rev.get("event_kind").and_then(|v| v.as_str()) == Some("spec_revision")
+            })
+            .collect();
 
-        // 1 seed + 2 patches = 3 revisions.
+        // 1 seed + 2 patches = 3 spec revisions.
         assert_eq!(
             revisions.len(),
             3,
-            "expected 3 revisions (1 seed + 2 patches); got {}",
+            "expected 3 spec revisions (1 seed + 2 patches); got {}",
             revisions.len()
         );
 
@@ -677,11 +686,22 @@ The open-questions section collects uncertainties for the team.
             .dispatch_tool("proposal_show", serde_json::json!({ "id": proposal.id }))
             .await
             .unwrap();
-        let revisions = shown
+        // A committed revision also admits refinement, which independently
+        // authors a `refinement_start` lifecycle row into the same history.
+        let revisions: Vec<&Value> = shown
             .get("revisions")
             .and_then(|v| v.as_array())
-            .expect("proposal_show.revisions must be a JSON array");
-        assert_eq!(revisions.len(), 4, "1 seed + 3 patches = 4 revisions");
+            .expect("proposal_show.revisions must be a JSON array")
+            .iter()
+            .filter(|rev| {
+                rev.get("event_kind").and_then(|v| v.as_str()) == Some("spec_revision")
+            })
+            .collect();
+        assert_eq!(
+            revisions.len(),
+            4,
+            "1 seed + 3 patches = 4 spec revisions"
+        );
         for (idx, rev) in revisions.iter().enumerate().skip(1) {
             let meta: Value = serde_json::from_str(
                 rev.get("event_metadata")
