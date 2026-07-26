@@ -709,17 +709,64 @@ impl CoordinatorActor {
     /// Terminate a refinement loop keyed by its exact durable run. Lifecycle
     /// persistence retains the proposal ID carried in the projection.
     pub(super) async fn terminate_refinement(&mut self, run_id: &str, reason: StopReason) {
-        let Some(proposal_id) = self
-            .active_refinements
-            .get(run_id)
-            .map(|state| state.proposal_id.clone())
+        let Some((proposal_id, durable_run_id, generation)) =
+            self.active_refinements.get(run_id).map(|state| {
+                (
+                    state.proposal_id.clone(),
+                    state.run_id.clone(),
+                    state.generation,
+                )
+            })
         else {
             return;
         };
         if let Some(state) = self.active_refinements.get_mut(run_id) {
             state.terminate(reason.clone());
         }
-        self.persist_refinement_stop(&proposal_id, &reason).await;
+        // Terminalize the exact durable run under its `(run_id, generation)`
+        // CAS fence. Without this the coordinator's own stop decisions —
+        // execution watchdog, dispatch-retry cap, spawn cap — moved only the
+        // disposable projection: the row stayed `running` with a NULL stop tag
+        // and the loop was silently abandoned. Only the outcome-commit and reap
+        // paths ever wrote a stop tag, so a run that died any other way was
+        // unreapable and invisible.
+        if !durable_run_id.is_empty() && generation > 0 {
+            let repo = ProposalRepository::new(
+                self.db.clone(),
+                crate::events::event_bus_for(&self.events_tx),
+            );
+            match repo
+                .terminal_refinement_run(djinn_db::TerminalRefinementRunRequest {
+                    run_id: durable_run_id.clone(),
+                    generation,
+                    reason: durable_stop_reason(Some(&reason)),
+                })
+                .await
+            {
+                Ok(true) => tracing::info!(
+                    proposal_id,
+                    run_id = %durable_run_id,
+                    generation,
+                    reason = reason.tag(),
+                    "terminalized durable refinement run"
+                ),
+                Ok(false) => tracing::warn!(
+                    proposal_id,
+                    run_id = %durable_run_id,
+                    generation,
+                    "durable refinement run was already terminal at stop"
+                ),
+                Err(error) => tracing::warn!(
+                    proposal_id,
+                    run_id = %durable_run_id,
+                    generation,
+                    %error,
+                    "failed to terminalize durable refinement run; retrying on a later stop"
+                ),
+            }
+        } else {
+            self.persist_refinement_stop(&proposal_id, &reason).await;
+        }
         self.refinement_sessions.remove(run_id);
     }
 

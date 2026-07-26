@@ -19,9 +19,10 @@ use tracing::warn;
 
 pub const REFINEMENT_PHANTOM_ACTIVE_CHECK_NAME: &str = "refinement_phantom_active";
 const HEARTBEAT_GRACE_MILLIS: i64 = 60_000;
-const MISSING_EVIDENCE_CLASSES: [&str; 6] = [
+const MISSING_EVIDENCE_CLASSES: [&str; 7] = [
     "explicit_park",
     "pending_or_claimed_intent",
+    "materialized_intent",
     "active_task",
     "live_session",
     "between_phase_handoff",
