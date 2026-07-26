@@ -452,6 +452,53 @@ pub const CLOSE_REASON_SUPERSEDED: &str = "superseded";
 /// Auto-dispatch of a new planning wave is suppressed on this reason.
 pub const CLOSE_REASON_DUPLICATE: &str = "duplicate";
 
+
+/// Explicit, durable execution metadata for a task. This is separate from the
+/// prompt-rendering `djinn_roles::prompts::TaskContext` and is never inferred
+/// from task text, labels, roles, or issue type.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TaskExecutionContext {
+    ReadinessGuardrailAnalysis {
+        skill_name: String,
+        skill_version: String,
+    },
+}
+
+impl TaskExecutionContext {
+    pub fn readiness_guardrail_analysis(
+        skill_name: impl Into<String>,
+        skill_version: impl Into<String>,
+    ) -> Result<Self> {
+        let skill_name = skill_name.into();
+        let skill_version = skill_version.into();
+        if skill_name.trim().is_empty() || skill_version.trim().is_empty() {
+            return Err(Error::Internal(
+                "readiness guardrail skill_name and skill_version must be non-empty".into(),
+            ));
+        }
+        Ok(Self::ReadinessGuardrailAnalysis { skill_name, skill_version })
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum RawTaskExecutionContext {
+    ReadinessGuardrailAnalysis { skill_name: String, skill_version: String },
+}
+
+impl<'de> Deserialize<'de> for TaskExecutionContext {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where D: serde::Deserializer<'de> {
+        match RawTaskExecutionContext::deserialize(deserializer)? {
+            RawTaskExecutionContext::ReadinessGuardrailAnalysis { skill_name, skill_version } => {
+                Self::readiness_guardrail_analysis(skill_name, skill_version)
+                    .map_err(serde::de::Error::custom)
+            }
+        }
+    }
+}
+
 /// Task board work item, always scoped under an epic.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "sqlx", derive(sqlx::FromRow))]

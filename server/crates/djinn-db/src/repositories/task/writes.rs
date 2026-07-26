@@ -166,6 +166,37 @@ pub(crate) async fn incoming_task_creator(
 }
 
 impl TaskRepository {
+    /// Persist explicit execution eligibility metadata. The typed core model
+    /// validates values before they reach JSONB; `None` preserves legacy rows.
+    pub async fn set_execution_context(
+        &self,
+        id: &str,
+        context: Option<&djinn_core::models::TaskExecutionContext>,
+    ) -> Result<()> {
+        self.db.ensure_initialized().await?;
+        let context = context.map(serde_json::to_value).transpose().map_err(|e| {
+            Error::InvalidData(format!("invalid task execution context: {e}"))
+        })?;
+        sqlx::query("UPDATE tasks SET execution_context = $1 WHERE id = $2")
+            .bind(context).bind(id).execute(self.db.pool()).await?;
+        Ok(())
+    }
+
+    /// Fetch durable execution metadata and reject malformed stored JSON at this
+    /// repository boundary rather than interpreting any legacy task fields.
+    pub async fn execution_context(
+        &self,
+        id: &str,
+    ) -> Result<Option<djinn_core::models::TaskExecutionContext>> {
+        self.db.ensure_initialized().await?;
+        let value: Option<serde_json::Value> = sqlx::query_scalar(
+            "SELECT execution_context FROM tasks WHERE id = $1",
+        ).bind(id).fetch_optional(self.db.pool()).await?.flatten();
+        value.map(serde_json::from_value).transpose().map_err(|e| {
+            Error::InvalidData(format!("invalid tasks.execution_context: {e}"))
+        })
+    }
+
     /// Test-support helper for fixtures that need to establish source-task
     /// provenance without using a production post-insert attribution path.
     #[cfg(any(test, feature = "test-support"))]
@@ -1388,5 +1419,35 @@ mod created_by_tests {
             !ready.iter().any(|t| t.id == blocked.id),
             "the blocked task must NOT be ready until its blocker closes"
         );
+    }
+}
+
+#[cfg(test)]
+mod execution_context_tests {
+    use super::*;
+    use djinn_core::events::EventBus;
+    use djinn_core::models::TaskExecutionContext;
+
+    #[tokio::test]
+    async fn execution_context_round_trips_and_rejects_malformed_stored_json() {
+        let db = Database::open_in_memory().unwrap();
+        db.ensure_initialized().await.unwrap();
+        let project_id = uuid::Uuid::now_v7().to_string();
+        sqlx::query("INSERT INTO projects (id, name, github_owner, github_repo) VALUES ($1, 'p', 'o', 'r')")
+            .bind(&project_id).execute(db.pool()).await.unwrap();
+        let epic_id = uuid::Uuid::now_v7().to_string();
+        sqlx::query("INSERT INTO epics (id, project_id, short_id, title, description, emoji, color, owner, memory_refs) VALUES ($1, $2, 'ep01', '', '', '', '', '', '[]'::jsonb)")
+            .bind(&epic_id).bind(&project_id).execute(db.pool()).await.unwrap();
+        let repo = TaskRepository::new(db.clone(), EventBus::noop());
+        let task = repo.create_fixture_in_project(&project_id, Some(&epic_id), "task", "", "", "task", 0, "", None, None).await.unwrap();
+
+        assert_eq!(repo.execution_context(&task.id).await.unwrap(), None);
+        let context = TaskExecutionContext::readiness_guardrail_analysis("agent-readiness-guardrails", "1.0.0").unwrap();
+        repo.set_execution_context(&task.id, Some(&context)).await.unwrap();
+        assert_eq!(repo.execution_context(&task.id).await.unwrap(), Some(context));
+
+        sqlx::query("UPDATE tasks SET execution_context = '{\"kind\":\"readiness_guardrail_analysis\",\"skill_name\":\"x\",\"skill_version\":\" \"}'::jsonb WHERE id = $1")
+            .bind(&task.id).execute(db.pool()).await.unwrap();
+        assert!(repo.execution_context(&task.id).await.is_err());
     }
 }
