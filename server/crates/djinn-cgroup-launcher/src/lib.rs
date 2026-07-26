@@ -12,11 +12,13 @@ use thiserror::Error;
 pub mod bootstrap;
 pub mod broker;
 pub mod child;
+pub mod command_path;
 pub mod env;
 pub mod git_trust;
 pub mod spawn;
 pub mod transport;
 
+pub use command_path::safe_command_path;
 pub use env::{is_allowed_environment_entry, is_allowed_environment_key};
 pub use spawn::{DenySpawn, NativeCgroupSpawn};
 
@@ -245,19 +247,6 @@ impl CommandSpec {
             .then_some(())
             .ok_or(Error::InvalidCommand)
     }
-}
-
-fn safe_command_path(path: &str, cwd: bool) -> bool {
-    !path.contains('\0')
-        && !path.contains("//")
-        && !path.split('/').any(|part| part == "..")
-        && if cwd {
-            path == "/workspace" || path.starts_with("/workspace/")
-        } else {
-            path.starts_with("/bin/")
-                || path.starts_with("/usr/bin/")
-                || path.starts_with("/workspace/")
-        }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
