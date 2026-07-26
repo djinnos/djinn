@@ -337,6 +337,19 @@ impl ProposalRepository {
                 snapshot.map(|snapshot| snapshot.liveness),
                 Some(RefinementLivenessResult::Stale { .. })
             ) {
+                // A committed proposal revision is new work for the current
+                // exact run, not a competing attempt to start another run.
+                // Return that run so the caller can issue its wake hint.
+                if matches!(&request.source, RefinementAdmissionSource::Revision { .. }) {
+                    let intent_id = first_intent_id(&mut tx, &run_id).await?;
+                    let outcome = RefinementAdmissionOutcome::Existing {
+                        run_id,
+                        intent_id,
+                        generation,
+                    };
+                    tx.commit().await?;
+                    return Ok(outcome);
+                }
                 return Err(RefinementAdmissionError::AlreadyActive {
                     proposal_id: request.proposal_id,
                     run_id,
