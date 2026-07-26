@@ -89,6 +89,26 @@ async fn run(db: &Database, proposal_id: &str, generation: i32) -> String {
     id
 }
 
+async fn terminal_run_with_typed_stop(
+    repo: &ProposalRepository,
+    run_id: String,
+    generation: i32,
+    actor: &str,
+) {
+    assert!(
+        repo.terminal_refinement_run(TerminalRefinementRunRequest {
+            run_id,
+            generation,
+            reason: RefinementStopReason::OperatorStop {
+                actor: actor.into(),
+                reason: Some("create terminal history without a phantom reap".into()),
+            },
+        })
+        .await
+        .unwrap()
+    );
+}
+
 async fn intent(db: &Database, run_id: &str, state: &str, expiry: Option<&str>) -> String {
     let id = uuid::Uuid::now_v7().to_string();
     let (owner, claimed_at) = if state == "claimed" {
@@ -765,6 +785,152 @@ async fn lifecycle_aggregate_uses_shared_evaluator_and_only_reads_durable_state(
             .await
             .unwrap();
     assert_eq!(stale_before_read, stale_after_read);
+}
+
+#[tokio::test]
+async fn board_aggregate_covers_clean_stale_repeated_reaps_and_window_boundary() {
+    let db = Database::open_in_memory().unwrap();
+    db.ensure_initialized().await.unwrap();
+    let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+    assert_eq!(
+        repo.load_board_refinement_lifecycle_aggregate(GRACE)
+            .await
+            .unwrap(),
+        djinn_db::RefinementLifecycleAggregate {
+            stale_run_count: 0,
+            reaped_phantom_last_24h: 0,
+        }
+    );
+
+    let proposal_id = proposal(&db).await;
+    let first = run(&db, &proposal_id, 1).await;
+    repo.reap_and_admit(admission(proposal_id.clone(), "board-first-reap"))
+        .await
+        .unwrap();
+    let second: String = sqlx::query_scalar(
+        "SELECT id FROM refinement_runs WHERE proposal_id = $1 AND generation = 2",
+    )
+    .bind(&proposal_id)
+    .fetch_one(db.pool())
+    .await
+    .unwrap();
+    for run_id in [&second] {
+        sqlx::query("UPDATE refinement_dispatch_intents SET state = 'cancelled', terminal_at = $2 WHERE run_id = $1")
+            .bind(run_id).bind(OLD).execute(db.pool()).await.unwrap();
+        sqlx::query("UPDATE refinement_runs SET heartbeat_at = $2 WHERE id = $1")
+            .bind(run_id)
+            .bind(OLD)
+            .execute(db.pool())
+            .await
+            .unwrap();
+    }
+    repo.reap_and_admit(admission(proposal_id.clone(), "board-second-reap"))
+        .await
+        .unwrap();
+    let active: String = sqlx::query_scalar(
+        "SELECT id FROM refinement_runs WHERE proposal_id = $1 AND state = 'running'",
+    )
+    .bind(&proposal_id)
+    .fetch_one(db.pool())
+    .await
+    .unwrap();
+    sqlx::query("UPDATE refinement_dispatch_intents SET state = 'cancelled', terminal_at = $2 WHERE run_id = $1")
+        .bind(&active).bind(OLD).execute(db.pool()).await.unwrap();
+    sqlx::query("UPDATE refinement_runs SET heartbeat_at = $2 WHERE id = $1")
+        .bind(&active)
+        .bind(OLD)
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+    let outside = proposal(&db).await;
+    sqlx::query("INSERT INTO proposal_revisions (id, proposal_id, seq, title, body, body_format, acceptance_criteria, event_kind, refinement_stop_tag, created_at) VALUES ($1, $2, 2, '', '', 'markdown', '[]', 'refinement_stop', 'reaped_phantom', to_char((transaction_timestamp() - interval '24 hours 1 second') AT TIME ZONE 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'))")
+        .bind(uuid::Uuid::now_v7().to_string()).bind(outside).execute(db.pool()).await.unwrap();
+
+    let aggregate = repo
+        .load_board_refinement_lifecycle_aggregate(GRACE)
+        .await
+        .unwrap();
+    assert_eq!(
+        aggregate.stale_run_count, 1,
+        "shared evaluator sees active phantom"
+    );
+    assert_eq!(
+        aggregate.reaped_phantom_last_24h, 2,
+        "two committed reaps are inside; boundary row is outside"
+    );
+    assert_eq!(sqlx::query_scalar::<_, i64>("SELECT count(*) FROM proposal_revisions WHERE refinement_run_id = $1 AND refinement_stop_tag = 'reaped_phantom'").bind(&first).fetch_one(db.pool()).await.unwrap(), 1);
+
+    // A later admission after terminal history is generation four, but it has
+    // no current run to reap. This is the path that must not emit reap
+    // telemetry merely because the successor generation exceeds one.
+    terminal_run_with_typed_stop(&repo, active, 3, "board-aggregate-fixture").await;
+    repo.reap_and_admit(admission(proposal_id.clone(), "terminal-history-no-reap"))
+        .await
+        .unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM proposal_revisions WHERE proposal_id = $1 AND refinement_stop_tag = 'reaped_phantom'")
+            .bind(&proposal_id).fetch_one(db.pool()).await.unwrap(),
+        2,
+        "a no-current-run admission must not create a third reap event"
+    );
+}
+
+#[test]
+fn reap_and_admit_emits_once_only_for_the_committed_reap() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let (_, rendered) = djinn_telemetry::render_isolated(|| {
+        runtime.block_on(async {
+            let db = Database::open_in_memory().unwrap();
+            db.ensure_initialized().await.unwrap();
+            let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+            let proposal_id = proposal(&db).await;
+            run(&db, &proposal_id, 1).await;
+
+            repo.reap_and_admit(admission(proposal_id.clone(), "metric-reap"))
+                .await
+                .unwrap();
+            // A caller retry resolves the committed idempotency key and must not count.
+            repo.reap_and_admit(admission(proposal_id.clone(), "metric-reap"))
+                .await
+                .unwrap();
+
+            // Terminal history raises the next generation without creating a reap.
+            let active_run_id: String = sqlx::query_scalar(
+                "SELECT id FROM refinement_runs WHERE proposal_id = $1 AND state = 'running'",
+            )
+            .bind(&proposal_id)
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+            terminal_run_with_typed_stop(&repo, active_run_id, 2, "reap-telemetry-fixture").await;
+            repo.reap_and_admit(admission(proposal_id.clone(), "metric-no-current-reap"))
+                .await
+                .unwrap();
+
+            // Rejected attempts never cross a durable commit boundary and must
+            // therefore leave the committed-reap counter unchanged.
+            let mut invalid = admission(proposal_id, "metric-failed-attempt");
+            invalid.heartbeat_grace_millis = -1;
+            assert!(matches!(
+                repo.reap_and_admit(invalid).await,
+                Err(RefinementAdmissionError::InvalidRequest(_))
+            ));
+        });
+    });
+
+    let samples: Vec<_> = rendered
+        .lines()
+        .filter(|line| line.starts_with("refinement_run_reaped_total{"))
+        .collect();
+    assert_eq!(
+        samples,
+        ["refinement_run_reaped_total{reason=\"phantom\"} 1"]
+    );
+    assert!(!rendered.contains("proposal_id=") && !rendered.contains("run_id="));
 }
 
 #[tokio::test]

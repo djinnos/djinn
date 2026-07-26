@@ -438,6 +438,51 @@ impl ProposalRepository {
 }
 
 impl ProposalRepository {
+    /// Read the board-wide phantom projection using durable snapshots and the
+    /// shared evaluator. This transaction is read-only by construction.
+    pub async fn load_board_refinement_lifecycle_aggregate(
+        &self,
+        heartbeat_grace_millis: i64,
+    ) -> IntentMutationResult<RefinementLifecycleAggregate> {
+        if heartbeat_grace_millis < 0 {
+            return Err(RefinementIntentMutationError::InvalidRequest(
+                "heartbeat grace must not be negative".into(),
+            ));
+        }
+        self.db().ensure_initialized().await?;
+        let mut tx = self.db().pool().begin().await?;
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+            .execute(&mut *tx)
+            .await?;
+        let run_ids = sqlx::query_scalar::<_, String>(
+            "SELECT id FROM refinement_runs WHERE state IN ('running', 'parked') ORDER BY id",
+        )
+        .fetch_all(&mut *tx)
+        .await?;
+        let mut stale = 0;
+        for run_id in run_ids {
+            let snapshot = load_snapshot_in_transaction(&mut tx, &run_id, heartbeat_grace_millis)
+                .await
+                .map_err(snapshot_to_mutation)?;
+            if matches!(
+                snapshot.map(|snapshot| snapshot.liveness),
+                Some(RefinementLivenessResult::Stale { .. })
+            ) {
+                stale += 1;
+            }
+        }
+        let reaped = sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM proposal_revisions WHERE refinement_stop_tag = 'reaped_phantom' AND created_at::timestamptz >= transaction_timestamp() - interval '24 hours'",
+        )
+        .fetch_one(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(RefinementLifecycleAggregate {
+            stale_run_count: stale,
+            reaped_phantom_last_24h: reaped,
+        })
+    }
+
     pub async fn park_refinement_run(
         &self,
         request: ParkRefinementRunRequest,

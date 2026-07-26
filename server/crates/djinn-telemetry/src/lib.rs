@@ -31,6 +31,7 @@ const DISPATCH_STRIKE_SOURCES: [&str; 4] = [
 const BREAKER_TRIPS_TOTAL: &str = "djinn_breaker_trips_total";
 const BREAKER_STATE: &str = "djinn_breaker_state";
 const ZOMBIE_REAPS_TOTAL: &str = "djinn_zombie_reaps_total";
+const REFINEMENT_RUN_REAPED_TOTAL: &str = "refinement_run_reaped_total";
 const ZOMBIE_REAP_KINDS: [&str; 3] = ["startup", "periodic", "stall"];
 const TASK_REOPENS_TOTAL: &str = "djinn_task_reopens_total";
 const TASKS_PARKED_TOTAL: &str = "djinn_tasks_parked_total";
@@ -398,6 +399,16 @@ pub mod zombie {
     /// Increment the zombie-reap counter for one of the stable kind labels.
     pub fn increment_reap(kind: &'static str) {
         metrics::counter!(super::ZOMBIE_REAPS_TOTAL, "kind" => kind).increment(1);
+    }
+}
+
+pub mod refinement_run {
+    pub const REASON_PHANTOM: &str = "phantom";
+
+    /// Record one committed phantom reap with no proposal/run labels.
+    pub fn increment_reaped_phantom() {
+        metrics::counter!(super::REFINEMENT_RUN_REAPED_TOTAL, "reason" => REASON_PHANTOM)
+            .increment(1);
     }
 }
 
@@ -1814,6 +1825,12 @@ fn register_metrics() {
     for kind in ZOMBIE_REAP_KINDS {
         metrics::counter!(ZOMBIE_REAPS_TOTAL, "kind" => kind).absolute(0);
     }
+    metrics::describe_counter!(
+        REFINEMENT_RUN_REAPED_TOTAL,
+        "Durably committed refinement-run reaps by bounded reason only."
+    );
+    metrics::counter!(REFINEMENT_RUN_REAPED_TOTAL, "reason" => refinement_run::REASON_PHANTOM)
+        .absolute(0);
     metrics::describe_counter!(TASK_REOPENS_TOTAL, "Tasks reopened for another work cycle.");
     metrics::counter!(TASK_REOPENS_TOTAL).absolute(0);
     metrics::describe_counter!(
@@ -4001,6 +4018,33 @@ mod tests {
                 .count(),
             2,
             "the two evaluations must create exactly one bounded sample each"
+        );
+    }
+
+    #[test]
+    fn phantom_reap_counter_counts_each_committed_event_in_one_bounded_series() {
+        let (_, rendered) = render_isolated(|| {
+            refinement_run::increment_reaped_phantom();
+            refinement_run::increment_reaped_phantom();
+        });
+
+        assert_eq!(
+            labeled_sample_value(
+                &rendered,
+                REFINEMENT_RUN_REAPED_TOTAL,
+                &[("reason", refinement_run::REASON_PHANTOM)],
+            ),
+            2.0
+        );
+        let samples: Vec<_> = rendered
+            .lines()
+            .filter(|line| line.starts_with("refinement_run_reaped_total{"))
+            .collect();
+        assert_eq!(samples.len(), 1, "only one bounded reap series is allowed");
+        assert!(
+            !samples[0].contains("proposal_id=") && !samples[0].contains("run_id="),
+            "phantom reap metrics must not carry proposal/run labels: {}",
+            samples[0]
         );
     }
 
