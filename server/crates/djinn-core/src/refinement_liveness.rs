@@ -227,16 +227,39 @@ pub struct RefinementLivenessSnapshot {
 pub enum RefinementLivenessEvidence {
     AwaitingReviewPark,
     AwaitingEvidencePark,
-    PendingIntent { intent_id: String },
-    ClaimedIntent { intent_id: String },
-    MaterializedIntent { intent_id: String },
-    OpenTask { task_id: String },
-    QueuedTask { task_id: String },
-    RunningTask { task_id: String },
-    PoolPausedTask { task_id: String },
-    LiveSession { session_id: String, task_id: String },
-    BetweenPhase { intent_id: String },
-    FreshHeartbeat { heartbeat_at: DbTimestamp },
+    PendingIntent {
+        intent_id: String,
+    },
+    ClaimedIntent {
+        intent_id: String,
+    },
+    /// Durable dispatch work that remains recoverable after role execution
+    /// records have ended or are not projected into the snapshot.
+    MaterializedIntent {
+        intent_id: String,
+    },
+    OpenTask {
+        task_id: String,
+    },
+    QueuedTask {
+        task_id: String,
+    },
+    RunningTask {
+        task_id: String,
+    },
+    PoolPausedTask {
+        task_id: String,
+    },
+    LiveSession {
+        session_id: String,
+        task_id: String,
+    },
+    BetweenPhase {
+        intent_id: String,
+    },
+    FreshHeartbeat {
+        heartbeat_at: DbTimestamp,
+    },
 }
 
 /// Why a nonterminal run has no live evidence.
@@ -264,8 +287,9 @@ pub enum RefinementLivenessResult {
 /// Evaluate a refinement run from a durable snapshot and injected DB time.
 ///
 /// The ordering is deliberate: terminal state wins globally; then explicit
-/// parks, intents, active tasks, exact-run sessions, between-phase handoffs,
-/// and heartbeat grace. No wall clock is read here.
+/// parks, pending/claimed/materialized intents, active tasks, exact-run
+/// sessions, between-phase handoffs, and heartbeat grace. No wall clock is
+/// read here.
 pub fn evaluate_refinement_liveness(
     snapshot: &RefinementLivenessSnapshot,
     now: DbTimestamp,
@@ -312,23 +336,8 @@ pub fn evaluate_refinement_liveness(
         };
     }
 
-    // A materialized intent has already produced its correlated role task, so
-    // the run holds durable in-flight work whose outcome the coordinator still
-    // owes it. That stays true after the role agent exits and its task closes:
-    // the successor intent is written by the outcome path, not by the agent.
-    // Without this class the window between "role finished" and "outcome
-    // applied" reads as a phantom, and the admission reaper terminalizes a run
-    // whose adversary genuinely ran — destroying the round and minting a fresh
-    // generation that repeats the loop (21 `reaped_phantom` runs in one week).
-    // The window is bounded on the other side by the coordinator's execution
-    // watchdog, which terminalizes an unsettled role with a durable stop tag.
     if let Some(intent) = snapshot.intents.iter().find(|intent| {
-        &intent.run_id == run_id
-            && intent.state == RefinementIntentState::Materialized
-            && snapshot.tasks.iter().any(|task| {
-                &task.run_id == run_id
-                    && task.intent_id.as_deref() == Some(intent.intent_id.as_str())
-            })
+        &intent.run_id == run_id && intent.state == RefinementIntentState::Materialized
     }) {
         return RefinementLivenessResult::Live {
             evidence: RefinementLivenessEvidence::MaterializedIntent {
@@ -517,35 +526,28 @@ mod tests {
         }
     }
 
-    /// The class stays narrow: a materialized intent with NO correlated task is
-    /// not evidence of anything, and neither is one whose task belongs to a
-    /// different run.
     #[test]
-    fn materialized_intent_without_its_own_role_task_is_not_live() {
+    fn materialized_intent_is_exact_run_evidence_without_task_or_session_projection() {
         let mut value = snapshot();
         value
             .intents
             .push(intent(RefinementIntentState::Materialized));
-        assert!(matches!(
+        assert_eq!(
             evaluate_refinement_liveness(&value, NOW),
-            RefinementLivenessResult::Stale { .. }
-        ));
+            RefinementLivenessResult::Live {
+                evidence: RefinementLivenessEvidence::MaterializedIntent {
+                    intent_id: "intent-1".into(),
+                },
+            }
+        );
 
-        let mut foreign = task(RefinementTaskState::Closed);
-        foreign.run_id = "run-prior".into();
-        value.tasks.push(foreign);
-        assert!(matches!(
+        value.intents[0].run_id = "run-prior".into();
+        assert_eq!(
             evaluate_refinement_liveness(&value, NOW),
-            RefinementLivenessResult::Stale { .. }
-        ));
-
-        let mut unlinked = task(RefinementTaskState::Closed);
-        unlinked.intent_id = None;
-        value.tasks.push(unlinked);
-        assert!(matches!(
-            evaluate_refinement_liveness(&value, NOW),
-            RefinementLivenessResult::Stale { .. }
-        ));
+            RefinementLivenessResult::Stale {
+                reason: RefinementStaleReason::NoLiveEvidence,
+            }
+        );
     }
 
     #[test]
@@ -616,6 +618,38 @@ mod tests {
             evaluate_refinement_liveness(&value, NOW),
             RefinementLivenessResult::Stale {
                 reason: RefinementStaleReason::NoLiveEvidence
+            }
+        );
+    }
+
+    #[test]
+    fn exact_run_materialized_intent_is_live_after_its_task_closes() {
+        let mut value = snapshot();
+        value
+            .intents
+            .push(intent(RefinementIntentState::Materialized));
+        value.tasks.push(task(RefinementTaskState::Closed));
+        assert_eq!(
+            evaluate_refinement_liveness(&value, NOW),
+            RefinementLivenessResult::Live {
+                evidence: RefinementLivenessEvidence::MaterializedIntent {
+                    intent_id: "intent-1".into(),
+                },
+            }
+        );
+
+        value.run.state = RefinementRunState::Terminal;
+        assert!(matches!(
+            evaluate_refinement_liveness(&value, NOW),
+            RefinementLivenessResult::Terminal { .. }
+        ));
+
+        value.run.state = RefinementRunState::Active;
+        value.intents[0].run_id = "run-prior".into();
+        assert_eq!(
+            evaluate_refinement_liveness(&value, NOW),
+            RefinementLivenessResult::Stale {
+                reason: RefinementStaleReason::NoLiveEvidence,
             }
         );
     }
