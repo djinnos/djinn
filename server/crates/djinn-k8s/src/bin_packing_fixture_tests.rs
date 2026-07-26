@@ -165,7 +165,7 @@ impl Rendered {
         let light = worker_resources(&cfg, RoleResourceClass::Light);
         let build = worker_resources(&cfg, RoleResourceClass::BuildCapable);
 
-        let launcher = launcher_sidecar_container(&cfg, IMAGE);
+        let launcher = launcher_sidecar_container(&cfg, IMAGE, false, false);
         let launcher_res = launcher.resources.as_ref().expect("launcher resources");
 
         let sidecar = sidecar_container(&cfg, &default_backing_sidecar_spec());
