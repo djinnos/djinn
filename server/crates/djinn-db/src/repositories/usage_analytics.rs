@@ -506,7 +506,7 @@ impl UsageAnalyticsRepository {
                 project_id: r.get("project_id"),
                 project_name: r.get("project_name"),
                 agent_type: r.get("agent_type"),
-            execution_context: None,
+                execution_context: None,
                 session_count: r.get("session_count"),
                 tokens_in: r.get("tokens_in"),
                 tokens_out: r.get("tokens_out"),

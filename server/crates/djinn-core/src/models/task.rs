@@ -452,7 +452,6 @@ pub const CLOSE_REASON_SUPERSEDED: &str = "superseded";
 /// Auto-dispatch of a new planning wave is suppressed on this reason.
 pub const CLOSE_REASON_DUPLICATE: &str = "duplicate";
 
-
 /// Explicit, durable execution metadata for a task. This is separate from the
 /// prompt-rendering `djinn_roles::prompts::TaskContext` and is never inferred
 /// from task text, labels, roles, or issue type.
@@ -477,24 +476,33 @@ impl TaskExecutionContext {
                 "readiness guardrail skill_name and skill_version must be non-empty".into(),
             ));
         }
-        Ok(Self::ReadinessGuardrailAnalysis { skill_name, skill_version })
+        Ok(Self::ReadinessGuardrailAnalysis {
+            skill_name,
+            skill_version,
+        })
     }
 }
 
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum RawTaskExecutionContext {
-    ReadinessGuardrailAnalysis { skill_name: String, skill_version: String },
+    ReadinessGuardrailAnalysis {
+        skill_name: String,
+        skill_version: String,
+    },
 }
 
 impl<'de> Deserialize<'de> for TaskExecutionContext {
     fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where D: serde::Deserializer<'de> {
+    where
+        D: serde::Deserializer<'de>,
+    {
         match RawTaskExecutionContext::deserialize(deserializer)? {
-            RawTaskExecutionContext::ReadinessGuardrailAnalysis { skill_name, skill_version } => {
-                Self::readiness_guardrail_analysis(skill_name, skill_version)
-                    .map_err(serde::de::Error::custom)
-            }
+            RawTaskExecutionContext::ReadinessGuardrailAnalysis {
+                skill_name,
+                skill_version,
+            } => Self::readiness_guardrail_analysis(skill_name, skill_version)
+                .map_err(serde::de::Error::custom),
         }
     }
 }
@@ -515,7 +523,9 @@ impl<'r> sqlx::Decode<'r, sqlx::Postgres> for TaskExecutionContext {
     fn decode(
         value: sqlx::postgres::PgValueRef<'r>,
     ) -> std::result::Result<Self, sqlx::error::BoxDynError> {
-        let value = <sqlx::types::Json<serde_json::Value> as sqlx::Decode<sqlx::Postgres>>::decode(value)?.0;
+        let value =
+            <sqlx::types::Json<serde_json::Value> as sqlx::Decode<sqlx::Postgres>>::decode(value)?
+                .0;
         serde_json::from_value(value).map_err(|error| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -2937,7 +2947,11 @@ mod tests {
                 "skill_version": "1.0.0",
             })
         );
-        assert_eq!(serde_json::from_value::<TaskExecutionContext>(serde_json::to_value(&context).unwrap()).unwrap(), context);
+        assert_eq!(
+            serde_json::from_value::<TaskExecutionContext>(serde_json::to_value(&context).unwrap())
+                .unwrap(),
+            context
+        );
         for malformed in [
             serde_json::json!({"kind": "readiness_guardrail_analysis", "skill_name": "", "skill_version": "1.0.0"}),
             serde_json::json!({"kind": "readiness_guardrail_analysis", "skill_name": "skill", "skill_version": " "}),
@@ -2946,5 +2960,4 @@ mod tests {
             assert!(serde_json::from_value::<TaskExecutionContext>(malformed).is_err());
         }
     }
-
 }

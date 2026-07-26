@@ -677,7 +677,7 @@ impl SupervisorServices for RpcServices {
         session_id: String,
         task_id: String,
         agent_type: String,
-            execution_context: None,
+        execution_context: None,
         message: serde_json::Value,
     ) -> Result<(), String> {
         // Opaque JSON encode for bincode safety — `serde_json::Value`'s
@@ -1963,7 +1963,7 @@ mod tests {
                         task_id: params.task_id.clone(),
                         model_id: params.model.clone(),
                         agent_type: params.agent_type.clone(),
-            execution_context: None,
+                        execution_context: None,
                         started_at: "now".into(),
                         ended_at: None,
                         status: "running".into(),

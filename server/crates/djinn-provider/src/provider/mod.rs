@@ -717,7 +717,7 @@ mod restamp_tests {
             telemetry: Some(TelemetryMeta {
                 task_id: Some("task-42".to_string()),
                 agent_type: Some("worker".to_string()),
-            execution_context: None,
+                execution_context: None,
                 session_id: Some("sess-99".to_string()),
                 operation: Some("complete".to_string()),
                 user_id: Some("user-7".to_string()),

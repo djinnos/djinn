@@ -302,7 +302,7 @@ async fn reply_loop_reuse_rejection_matrix_writes_fresh_authoritative_evidence()
                 task_id: Some(&task.id),
                 model: "synthetic/test-model",
                 agent_type: "worker",
-            execution_context: None,
+                execution_context: None,
                 metadata_json: None,
                 task_run_id: Some(&run_id),
                 pricing: None,

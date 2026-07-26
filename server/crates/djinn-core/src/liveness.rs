@@ -308,7 +308,6 @@ impl SessionInterruptReason {
 #[allow(clippy::too_many_arguments)]
 pub fn classify_session_interruption(
     agent_type: &str,
-            execution_context: None,
     model_id: &str,
     started_at: &str,
     last_message_at: Option<&str>,

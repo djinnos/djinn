@@ -614,7 +614,7 @@ impl RealPoolKillHarness {
                     task_id: Some(&task.id),
                     model: "model-a",
                     agent_type: "worker",
-            execution_context: None,
+                    execution_context: None,
                     metadata_json: None,
                     task_run_id: Some(task_run_id),
                     pricing: None,

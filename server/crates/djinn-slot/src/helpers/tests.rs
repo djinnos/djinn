@@ -351,7 +351,7 @@ fn worker_task(project_id: &str) -> Task {
         merge_conflict_metadata: None,
         memory_refs: "[]".to_string(),
         agent_type: None,
-            execution_context: None,
+        execution_context: None,
         created_by_user_id: "fixture-user".into(),
         ci_status: "unknown".to_string(),
         ci_head_sha: None,

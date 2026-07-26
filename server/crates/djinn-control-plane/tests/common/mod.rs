@@ -156,7 +156,7 @@ pub async fn create_test_session(db: &Database, project_id: &str, task_id: &str)
         task_id: Some(task_id),
         model: "test-model",
         agent_type: "worker",
-            execution_context: None,
+        execution_context: None,
         metadata_json: None,
         task_run_id: None,
         pricing: None,

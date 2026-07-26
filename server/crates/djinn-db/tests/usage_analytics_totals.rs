@@ -29,7 +29,7 @@ fn effectiveness_params() -> UsageAnalyticsQuery {
         project_id: None,
         model_id: None,
         agent_type: None,
-            execution_context: None,
+        execution_context: None,
         user_id: None,
     }
 }
@@ -229,7 +229,7 @@ async fn usage_totals_decodes_i64_from_sum() {
         project_id: None,
         model_id: None,
         agent_type: None,
-            execution_context: None,
+        execution_context: None,
         user_id: None,
     };
 
@@ -273,7 +273,7 @@ async fn usage_totals_reports_priced_subtotal_and_unpriced_count() {
         project_id: None,
         model_id: None,
         agent_type: None,
-            execution_context: None,
+        execution_context: None,
         user_id: None,
     };
 
@@ -312,7 +312,7 @@ async fn usage_totals_all_unpriced_yields_none_subtotal() {
         project_id: None,
         model_id: None,
         agent_type: None,
-            execution_context: None,
+        execution_context: None,
         user_id: None,
     };
 
@@ -342,7 +342,7 @@ async fn breakdown_decodes_i64_from_sum() {
         project_id: None,
         model_id: None,
         agent_type: None,
-            execution_context: None,
+        execution_context: None,
         user_id: None,
     };
 
@@ -709,7 +709,7 @@ async fn totals_split_actual_projected_and_unpriced() {
         project_id: None,
         model_id: None,
         agent_type: None,
-            execution_context: None,
+        execution_context: None,
         user_id: None,
     };
 

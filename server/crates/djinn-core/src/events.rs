@@ -386,7 +386,6 @@ impl DjinnEventEnvelope {
         task_id: &str,
         model_id: &str,
         agent_type: &str,
-            execution_context: None,
     ) -> Self {
         Self { entity_type: "session", action: "dispatched", payload: serde_json::to_value(serde_json::json!({"project_id": project_id, "task_id": task_id, "model_id": model_id, "agent_type": agent_type})).unwrap(), id: None, project_id: Some(project_id.to_string()), from_sync: false }
     }
@@ -408,7 +407,6 @@ impl DjinnEventEnvelope {
         session_id: &str,
         task_id: &str,
         agent_type: &str,
-            execution_context: None,
         message: &serde_json::Value,
     ) -> Self {
         Self { entity_type: "session", action: "message", payload: serde_json::to_value(serde_json::json!({"session_id": session_id, "task_id": task_id, "agent_type": agent_type, "message": message})).unwrap(), id: None, project_id: None, from_sync: false }

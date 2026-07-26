@@ -254,7 +254,7 @@ impl DjinnMcpServer {
                             task_id: s.task_id.unwrap_or_default(),
                             model_id: s.model_id,
                             agent_type: s.agent_type,
-            execution_context: None,
+                            execution_context: None,
                             started_at: s.started_at,
                             ended_at: s.ended_at,
                             status: s.status,
@@ -283,7 +283,7 @@ impl DjinnMcpServer {
                             task_id: run.task_id,
                             model_id: String::new(),
                             agent_type: String::new(),
-            execution_context: None,
+                            execution_context: None,
                             started_at: run.started_at,
                             ended_at: None,
                             status: djinn_core::models::TaskRunStatus::Starting
@@ -427,7 +427,7 @@ impl DjinnMcpServer {
                             Some(s) => Some(ActiveSessionSummary {
                                 session_id: s.id,
                                 agent_type: s.agent_type,
-            execution_context: None,
+                                execution_context: None,
                                 model_id: s.model_id,
                                 started_at: s.started_at,
                                 status: s.status,
@@ -438,7 +438,7 @@ impl DjinnMcpServer {
                                     .map(|run| ActiveSessionSummary {
                                         session_id: run.id,
                                         agent_type: String::new(),
-            execution_context: None,
+                                        execution_context: None,
                                         model_id: String::new(),
                                         started_at: run.started_at,
                                         status: djinn_core::models::TaskRunStatus::Starting

@@ -41,7 +41,7 @@ pub fn render_prompt_for_role(
 #[cfg(test)]
 pub fn render_prompt(
     agent_type: crate::AgentType,
-            execution_context: None,
+    execution_context: None,
     task: &djinn_core::models::Task,
     ctx: &TaskContext,
 ) -> String {

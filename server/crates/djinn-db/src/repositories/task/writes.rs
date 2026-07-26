@@ -174,11 +174,15 @@ impl TaskRepository {
         context: Option<&djinn_core::models::TaskExecutionContext>,
     ) -> Result<()> {
         self.db.ensure_initialized().await?;
-        let context = context.map(serde_json::to_value).transpose().map_err(|e| {
-            Error::InvalidData(format!("invalid task execution context: {e}"))
-        })?;
+        let context = context
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(|e| Error::InvalidData(format!("invalid task execution context: {e}")))?;
         sqlx::query("UPDATE tasks SET execution_context = $1 WHERE id = $2")
-            .bind(context).bind(id).execute(self.db.pool()).await?;
+            .bind(context)
+            .bind(id)
+            .execute(self.db.pool())
+            .await?;
         Ok(())
     }
 
@@ -189,12 +193,16 @@ impl TaskRepository {
         id: &str,
     ) -> Result<Option<djinn_core::models::TaskExecutionContext>> {
         self.db.ensure_initialized().await?;
-        let value: Option<serde_json::Value> = sqlx::query_scalar(
-            "SELECT execution_context FROM tasks WHERE id = $1",
-        ).bind(id).fetch_optional(self.db.pool()).await?.flatten();
-        value.map(serde_json::from_value).transpose().map_err(|e| {
-            Error::InvalidData(format!("invalid tasks.execution_context: {e}"))
-        })
+        let value: Option<serde_json::Value> =
+            sqlx::query_scalar("SELECT execution_context FROM tasks WHERE id = $1")
+                .bind(id)
+                .fetch_optional(self.db.pool())
+                .await?
+                .flatten();
+        value
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(|e| Error::InvalidData(format!("invalid tasks.execution_context: {e}")))
     }
 
     /// Test-support helper for fixtures that need to establish source-task
@@ -646,9 +654,22 @@ impl TaskRepository {
         execution_context: Option<&djinn_core::models::TaskExecutionContext>,
     ) -> Result<Task> {
         self.create_in_project_with_blockers_and_refinement_correlation(
-            project_id, epic_id, provenance, title, description, design, issue_type,
-            priority, owner, status, acceptance_criteria, &[], None, execution_context,
-        ).await
+            project_id,
+            epic_id,
+            provenance,
+            title,
+            description,
+            design,
+            issue_type,
+            priority,
+            owner,
+            status,
+            acceptance_criteria,
+            &[],
+            None,
+            execution_context,
+        )
+        .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1465,21 +1486,87 @@ mod execution_context_tests {
         let db = Database::open_in_memory().unwrap();
         db.ensure_initialized().await.unwrap();
         let project_id = uuid::Uuid::now_v7().to_string();
-        sqlx::query("INSERT INTO projects (id, name, github_owner, github_repo) VALUES ($1, 'p', 'o', 'r')")
-            .bind(&project_id).execute(db.pool()).await.unwrap();
+        sqlx::query(
+            "INSERT INTO projects (id, name, github_owner, github_repo) VALUES ($1, 'p', 'o', 'r')",
+        )
+        .bind(&project_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
         let epic_id = uuid::Uuid::now_v7().to_string();
         sqlx::query("INSERT INTO epics (id, project_id, short_id, title, description, emoji, color, owner, memory_refs) VALUES ($1, $2, 'ep01', '', '', '', '', '', '[]'::jsonb)")
             .bind(&epic_id).bind(&project_id).execute(db.pool()).await.unwrap();
-        let user = UserRepository::new(db.clone()).upsert_from_github(991, "context-test", None, None).await.unwrap();
+        let user = UserRepository::new(db.clone())
+            .upsert_from_github(991, "context-test", None, None)
+            .await
+            .unwrap();
         let repo = TaskRepository::new(db.clone(), EventBus::noop());
-        let provenance = EffectiveCreatorProvenance { explicit_user_id: Some(&user.id), source_task_id: None, proposal_id: None };
-        let context = TaskExecutionContext::readiness_guardrail_analysis("agent-readiness-guardrails", "1.0.0").unwrap();
-        let marked = repo.create_in_project_with_provenance_and_execution_context(&project_id, Some(&epic_id), provenance, "marked", "", "", "task", 0, "", None, None, Some(&context)).await.unwrap();
+        let provenance = EffectiveCreatorProvenance {
+            explicit_user_id: Some(&user.id),
+            source_task_id: None,
+            proposal_id: None,
+        };
+        let context = TaskExecutionContext::readiness_guardrail_analysis(
+            "agent-readiness-guardrails",
+            "1.0.0",
+        )
+        .unwrap();
+        let marked = repo
+            .create_in_project_with_provenance_and_execution_context(
+                &project_id,
+                Some(&epic_id),
+                provenance,
+                "marked",
+                "",
+                "",
+                "task",
+                0,
+                "",
+                None,
+                None,
+                Some(&context),
+            )
+            .await
+            .unwrap();
         assert_eq!(marked.execution_context, Some(context.clone()));
-        assert_eq!(repo.get(&marked.id).await.unwrap().unwrap().execution_context, Some(context));
+        assert_eq!(
+            repo.get(&marked.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .execution_context,
+            Some(context)
+        );
 
-        let unmarked = repo.create_in_project_with_provenance_and_execution_context(&project_id, Some(&epic_id), EffectiveCreatorProvenance { explicit_user_id: Some(&user.id), source_task_id: None, proposal_id: None }, "unmarked", "", "", "task", 0, "", None, None, None).await.unwrap();
-        assert_eq!(repo.get(&unmarked.id).await.unwrap().unwrap().execution_context, None);
+        let unmarked = repo
+            .create_in_project_with_provenance_and_execution_context(
+                &project_id,
+                Some(&epic_id),
+                EffectiveCreatorProvenance {
+                    explicit_user_id: Some(&user.id),
+                    source_task_id: None,
+                    proposal_id: None,
+                },
+                "unmarked",
+                "",
+                "",
+                "task",
+                0,
+                "",
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            repo.get(&unmarked.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .execution_context,
+            None
+        );
 
         sqlx::query("UPDATE tasks SET execution_context = '{\"kind\":\"readiness_guardrail_analysis\",\"skill_name\":\"x\",\"skill_version\":\" \"}'::jsonb WHERE id = $1")
             .bind(&marked.id).execute(db.pool()).await.unwrap();

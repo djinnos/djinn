@@ -717,7 +717,7 @@ async fn session_recovery_taskrun_job_retention_preserves_young_and_deletes_old(
                 task_id: Some(&task.id),
                 model: "openai/gpt-5.5",
                 agent_type: "worker",
-            execution_context: None,
+                execution_context: None,
                 metadata_json: None,
                 task_run_id: Some(id),
                 pricing: None,
