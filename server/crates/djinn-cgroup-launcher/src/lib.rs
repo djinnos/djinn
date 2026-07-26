@@ -563,6 +563,21 @@ pub enum Error {
     ChildPreparation(&'static str),
     #[error("restricted seccomp is unavailable")]
     SeccompUnavailable,
+    /// A named filesystem/ownership step that failed, carrying the operation,
+    /// the path it acted on, and the errno.
+    ///
+    /// The bare [`Io`](Error::Io) below renders as "filesystem operation failed:
+    /// Operation not permitted (os error 1)", which names neither the syscall
+    /// nor the path. That message cost a production rollout: it was the only
+    /// evidence that `chown(2)` on the broker socket was failing for want of
+    /// `CAP_CHOWN`, and it was not enough to act on. Any step whose failure is a
+    /// readiness/permission question should use this instead.
+    #[error("{operation} failed on {path} (errno {errno})")]
+    SocketSetupFailed {
+        operation: &'static str,
+        path: String,
+        errno: i32,
+    },
     #[error("filesystem operation failed: {0}")]
     Io(#[from] io::Error),
 }
