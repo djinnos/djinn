@@ -20,10 +20,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use djinn_core::clock::{Clock, SystemClock};
 use djinn_supervisor::services::{
-    InvocationLiftDecision, LeaseAbandonRequest, LeaseBindRequest, LeaseDeadlines,
-    LeaseFencingToken, LeaseGrantRequest, LeaseIdentity, LeaseQueueRequest, LeaseReleaseRequest,
-    LeaseResult, LeaseState, LeaseStatus, LeaseStatusRequest, SupervisorServices,
-    TaskInvocationLeaseIdentity, WatchdogTerminationRequest,
+    InvocationLiftAuthority, InvocationLiftDecision, LeaseAbandonRequest, LeaseBindRequest,
+    LeaseDeadlines, LeaseFencingToken, LeaseGrantRequest, LeaseIdentity, LeaseQueueRequest,
+    LeaseReleaseRequest, LeaseResult, LeaseState, LeaseStatus, LeaseStatusRequest,
+    SupervisorServices, TaskInvocationLeaseIdentity, WatchdogTerminationRequest,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -451,6 +451,15 @@ pub(crate) struct LeaseInvocationOutput {
 #[cfg_attr(not(test), allow(dead_code))] // consumed by the workspace lease wiring task
 pub(crate) struct LeaseInvocationRunner {
     services: Arc<dyn SupervisorServices>,
+    /// The durable admission authority this runner asks before every launch.
+    ///
+    /// Separate from `services` on purpose. This used to be a defaulted
+    /// `SupervisorServices` method, and because the production composition hands
+    /// this runner the worker's `RpcServices` — which never overrode it — every
+    /// invocation took the fail-closed default while the epoch was fully armed
+    /// (goxi launcher blocker 13). A mandatory constructor parameter cannot be
+    /// silently not-implemented.
+    lift: Arc<dyn InvocationLiftAuthority>,
     launcher: Arc<dyn CgroupLauncherClient>,
     clock: Arc<dyn Clock>,
     journal: Option<Arc<InvocationJournal>>,
@@ -459,11 +468,13 @@ pub(crate) struct LeaseInvocationRunner {
 impl LeaseInvocationRunner {
     pub(crate) fn new(
         services: Arc<dyn SupervisorServices>,
+        lift: Arc<dyn InvocationLiftAuthority>,
         launcher: Arc<dyn CgroupLauncherClient>,
         clock: Arc<dyn Clock>,
     ) -> Self {
         Self {
             services,
+            lift,
             launcher,
             clock,
             journal: None,
@@ -528,7 +539,15 @@ impl LeaseInvocationRunner {
         // One read per invocation is also the coherent choice: the birth quota is
         // committed from this value and cannot be revised, so a mid-invocation
         // epoch change must not be acted on by the bind arm below.
-        let lift_decision = self.services.invocation_lift_decision().await;
+        //
+        // Asked of the injected [`InvocationLiftAuthority`], NOT of
+        // `self.services`. The lift decision was a defaulted `SupervisorServices`
+        // method until goxi blocker 13: the pod's runner is composed around
+        // `RpcServices`, which never overrode it, so this line silently returned
+        // `Unleased` for every invocation against a fully armed epoch
+        // (`ForwardOverlap` · epoch 3 · v1 `Enforce` · both acks at 3) and every
+        // leaf was born at `cpu.max=[max 100000]` and never transitioned.
+        let lift_decision = self.lift.invocation_lift_decision().await;
         let authority = birth_authority(lift_decision);
         let mut child = self
             .launcher

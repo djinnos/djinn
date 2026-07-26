@@ -200,6 +200,43 @@ accumulates.
   `occupancy 0 reached cap N` during that window are the ordinary fail-closed
   startup state, not a full ledger.
 
+### 7. `epoch show` is armed but the pods still log `decision=Unleased`
+
+The control plane and the pod can disagree, and `epoch show` cannot detect it: it
+reads the row, while the decision that governs `cpu.max` is made **inside each
+task-run Pod**. Verify the pod, not the row.
+
+- **Detect:** in the `worker` container's log, one line per invocation:
+
+  ```text
+  INFO djinn_agent::process: lease invocation launched into a cgroup leaf
+    invocation_id=… task_run_id=… decision=Lift authority=Armed threshold_usec=250000
+  ```
+
+  With a `forward_overlap`/`invocation_primary`/`rollback_overlap` row at
+  `v1 = enforce` whose required acks are all at the current epoch, `decision` MUST
+  be `Lift`. `decision=Unleased authority=Unarmed` against such a row means the
+  pod is not seeing the epoch you are looking at.
+- **Confirm on the cgroup, not the log:** in the `cgroup-launcher` container, a
+  leased leaf under `/run/djinn-cgroup/` is born at `25000 100000` (250m) and then
+  transitions when it escalates. A leaf born at `max 100000` that never changes is
+  `Unleased`; `nr_throttled` staying 0 across many invocations while builds run at
+  ~1 CPU is the same finding.
+- **Recover:** look for the `ERROR … durable admission_handoff read FAILED` line
+  in the same container. That is a defect, not an unarmed epoch — the pod cannot
+  read `admission_handoff` at all (wrong DSN, missing migration, connectivity).
+  The pod's platform connection comes from `DJINN_DATABASE_URL`; a task-run Pod
+  also carries a project `DATABASE_URL` pointing at its `svc-postgres`
+  catalog-service sidecar, which has no `admission_handoff` table. An
+  `INFO … no durable admission_handoff row` line instead means the row really is
+  absent — see §6.
+- **History:** the decision used to be a defaulted `SupervisorServices` trait
+  method, and the in-pod launcher path resolved it through `RpcServices`, which
+  never overrode it. Every invocation therefore read `Unleased` from a fully armed
+  epoch and no quota was ever lifted, with no log to say so. It is now a mandatory
+  injected authority (`InvocationLiftAuthority`) and both non-lifting reads are
+  logged.
+
 ## Aborting a forward overlap
 
 The phase machine is a strict forward cycle, so you cannot advance

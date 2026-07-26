@@ -174,7 +174,12 @@ async fn lease_wait_timeout_degrades_to_unleased_not_error() {
         vec![cancelled_terminal_status(); 3],
     ));
     let launcher = Arc::new(DegradeLauncher::completing());
-    let runner = LeaseInvocationRunner::new(services.clone(), launcher.clone(), clock());
+    let runner = LeaseInvocationRunner::new(
+        services.clone(),
+        services.clone(),
+        launcher.clone(),
+        clock(),
+    );
     let output = runner
         .output(command(), config(), CancellationToken::new())
         .await
@@ -228,7 +233,12 @@ async fn credited_timeout_retries_once_then_degrades() {
         ],
     ));
     let launcher = Arc::new(DegradeLauncher::completing());
-    let runner = LeaseInvocationRunner::new(services.clone(), launcher.clone(), clock());
+    let runner = LeaseInvocationRunner::new(
+        services.clone(),
+        services.clone(),
+        launcher.clone(),
+        clock(),
+    );
     let output = runner
         .output(command(), config(), CancellationToken::new())
         .await
@@ -262,7 +272,12 @@ async fn terminal_record_before_any_grant_degrades_and_stops_polling() {
         vec![cancelled_terminal_status()],
     ));
     let launcher = Arc::new(DegradeLauncher::completing());
-    let runner = LeaseInvocationRunner::new(services.clone(), launcher.clone(), clock());
+    let runner = LeaseInvocationRunner::new(
+        services.clone(),
+        services.clone(),
+        launcher.clone(),
+        clock(),
+    );
     let output = runner
         .output(command(), config(), CancellationToken::new())
         .await
@@ -289,6 +304,7 @@ async fn cancellation_after_degrade_still_terminates_the_child() {
     let launcher = Arc::new(DegradeLauncher::running());
     let cancel = CancellationToken::new();
     let runner = Arc::new(LeaseInvocationRunner::new(
+        services.clone(),
         services.clone(),
         launcher.clone(),
         clock(),
@@ -334,7 +350,12 @@ async fn lease_identity_conflict_still_fails() {
         vec![],
     ));
     let launcher = Arc::new(DegradeLauncher::running());
-    let runner = LeaseInvocationRunner::new(services.clone(), launcher.clone(), clock());
+    let runner = LeaseInvocationRunner::new(
+        services.clone(),
+        services.clone(),
+        launcher.clone(),
+        clock(),
+    );
     let error = runner
         .output(command(), config(), CancellationToken::new())
         .await
@@ -355,7 +376,12 @@ async fn repeated_unavailability_still_fails() {
         vec![LeaseResult::LeaseUnavailable; 8],
     ));
     let launcher = Arc::new(DegradeLauncher::running());
-    let runner = LeaseInvocationRunner::new(services.clone(), launcher.clone(), clock());
+    let runner = LeaseInvocationRunner::new(
+        services.clone(),
+        services.clone(),
+        launcher.clone(),
+        clock(),
+    );
     let error = runner
         .output(command(), config(), CancellationToken::new())
         .await
@@ -397,7 +423,7 @@ fn clock_pinned_at(now_ms: i64) -> Arc<TestClock> {
 /// enforcing — the only state in which a bound invocation may lift `cpu.max`.
 /// Every write goes through the real repository, so the arming sequence is the
 /// operator sequence.
-async fn arm_invocation_lift(db: &djinn_db::Database) {
+pub(super) async fn arm_invocation_lift(db: &djinn_db::Database) {
     use djinn_db::{AdmissionHandoffAuthority, AdmissionHandoffPhase, V0Mode, V1Mode};
 
     let handoff = djinn_db::AdmissionHandoffRepository::new(db.clone());
@@ -500,7 +526,15 @@ async fn rendered_invocation_deadlines_are_granted_and_reach_the_fenced_lift() {
     // granted at all.
     let now_ms = wall_clock_ms();
     let runner = Arc::new(LeaseInvocationRunner::new(
-        services,
+        services.clone(),
+        // The real durable admission authority over the armed row above. Not a
+        // decision double: this is the read the production launcher performs.
+        Arc::new(
+            djinn_supervisor::services::DurableInvocationLiftAuthority::new(
+                db.clone(),
+                "degrade-test",
+            ),
+        ),
         launcher.clone(),
         clock_pinned_at(now_ms),
     ));
@@ -596,7 +630,13 @@ async fn real_lease_authority_queue_timeout_degrades_to_a_successful_command() {
     let services = real_lease_services(&db, expired_clock).await;
     let launcher = Arc::new(DegradeLauncher::completing());
     let runner = Arc::new(LeaseInvocationRunner::new(
-        services,
+        services.clone(),
+        Arc::new(
+            djinn_supervisor::services::DurableInvocationLiftAuthority::new(
+                db.clone(),
+                "degrade-test",
+            ),
+        ),
         launcher.clone(),
         clock_pinned_at(now_ms),
     ));
