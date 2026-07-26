@@ -4003,6 +4003,97 @@ mod tests {
         );
     }
 
+    /// A complete, realistic recorded plan must survive JSON round-trip and
+    /// validation exactly as an operator would paste it.
+    ///
+    /// The unit tests above each poke one field; this asserts the whole shape
+    /// an operator actually writes is applicable. It is the cheap guard against
+    /// shipping a documented plan that cannot be applied — the failure mode
+    /// where a descriptor names an environment variable production cannot
+    /// supply, and the plan is accepted but every run fails closed with
+    /// `UndeclaredCommandEnvironment`.
+    #[test]
+    fn a_complete_recorded_plan_round_trips_and_validates() {
+        let json = serde_json::json!({
+            "version": 1,
+            "profile_id": "warm-recorded",
+            "profile_revision": 1,
+            "evidence_tier": "recorded",
+            "hermeticity": { "hermetic": false, "reusable": true, "network_access": true },
+            "command_groups": [{
+                "name": "server",
+                "commands": [{
+                    "check_id": "server-check",
+                    "executable": "/usr/local/cargo/bin/cargo",
+                    "argv": ["check", "--workspace", "--all-targets"],
+                    "working_directory": "server",
+                    "environment_names": [
+                        "PATH", "HOME", "CARGO_HOME", "RUSTUP_HOME", "CARGO_TARGET_DIR",
+                        "CARGO_BUILD_JOBS", "CARGO_BUILD_RUSTFLAGS", "CARGO_INCREMENTAL",
+                        "RUSTC_WRAPPER", "SQLX_OFFLINE", "TMPDIR"
+                    ],
+                    "timeout_seconds": 2700,
+                    "descriptor_revision": 1
+                }]
+            }],
+            "selection_rules": [
+                { "match": ["server/**"], "command_groups": ["server"] },
+                { "match": ["**"], "command_groups": ["server"] }
+            ],
+            "required_checks": ["server-check"],
+            "input_manifest": {
+                "version": 1,
+                "repo_paths": [],
+                "environment_names": [
+                    "PATH", "HOME", "CARGO_HOME", "RUSTUP_HOME", "CARGO_BUILD_JOBS",
+                    "CARGO_BUILD_RUSTFLAGS", "CARGO_INCREMENTAL", "SQLX_OFFLINE", "TMPDIR"
+                ],
+                // Per-task-run and empty-valued respectively: hashing either
+                // would stop a reviewer ever reusing a worker's pass.
+                "volatile_environment_names": ["CARGO_TARGET_DIR", "RUSTC_WRAPPER"]
+            },
+            // Exactly one `**`-leading glob is permitted, because
+            // `output_globs_may_overlap` treats any two of them as overlapping.
+            "output_only_globs": [
+                "server/target/**", "ui/node_modules/**", "node_modules/**", "ui/dist/**",
+                ".cache/**", ".task-runtime/**", ".claude/**", ".tmp/**", "tmp/**"
+            ],
+            "read_only_external_inputs": []
+        });
+
+        let plan: FinalVerificationPlan =
+            serde_json::from_value(json.clone()).expect("recorded plan must deserialize");
+        plan.validate().expect("recorded plan must validate");
+
+        // Every name the command reads must be declared in one bucket or the
+        // other, or production fails closed at `command_environment`.
+        let declared: HashSet<&str> = plan
+            .input_manifest
+            .environment_names
+            .iter()
+            .chain(&plan.input_manifest.volatile_environment_names)
+            .map(String::as_str)
+            .collect();
+        for command in plan.normalized_commands() {
+            for name in &command.environment_names {
+                assert!(
+                    declared.contains(name.as_str()),
+                    "{name} is read by a command but declared in neither manifest bucket"
+                );
+            }
+        }
+
+        // Re-serializing must not lose the tier or the volatile bucket.
+        let round_tripped: FinalVerificationPlan =
+            serde_json::from_str(&serde_json::to_string(&plan).expect("serialize"))
+                .expect("re-deserialize");
+        assert_eq!(round_tripped, plan);
+        assert_eq!(
+            round_tripped.evidence_tier,
+            VerificationEvidenceTier::Recorded
+        );
+    }
+
     #[test]
     fn final_verification_json_schema_exposes_all_types() {
         let schema = schemars::schema_for!(EnvironmentConfig);
