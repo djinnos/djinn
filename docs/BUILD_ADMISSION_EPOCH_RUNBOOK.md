@@ -132,6 +132,48 @@ UID leaves a candidate that must be cleaned before its slot frees.
   leases while occupied rows drain naturally. Light (coordinator-free) commands
   stay unaffected. Restore the cap with the same call once drained.
 
+### 3b. `set-cap` takes effect without a restart
+
+`epoch set-cap` changes what the RUNNING coordinator enforces. The durable
+reference cap is re-read and adopted by
+`BuildLeaseService::refresh_epoch_cap()` on the build-lease maintenance tick
+(30s) and again on the handoff tick (5 min), and a raised cap immediately drains
+the FIFO so work refused at the old cap is granted rather than waiting for the
+next dispatch attempt. Lowering the cap stops granting but never revokes an
+occupying row.
+
+This was not always true. Before this fix the resolved cap was only written to
+the enforcing atomic by `recover()`, so a `set-cap` reported success, `epoch
+show` read back the new value, and every denial kept quoting the old one until
+the pods restarted (production, 2026-07-25: `set-cap --cap 12`, denials still
+`occupancy=3 cap=3`). If you see that shape again, the denial's `cap` field —
+not `epoch show` — is the number actually in force.
+
+### 3c. Occupancy that no workload is using
+
+A build slot is a `build_leases` row, NOT an `admission_journal` row. The two
+ledgers have separate reconcilers and can disagree:
+
+- `BuildAdmissionReconciler` (startup + `initialize_build_admission_inventory`)
+  reconciles the v0 lifecycle journal and logs
+  `build_admission: reconciliation released stale durable occupancy`.
+- `BuildLeaseReclaimer`
+  (`server/crates/djinn-coordinator/src/build_lease_reclaim.rs`, every 30s)
+  reconciles the v1 capacity ledger and logs
+  `build_lease: reclamation pass over occupying leases`.
+
+**Only the second one frees a cap.** If admission denies with a non-zero
+`occupancy` while the namespace holds no matching Pods or Jobs, read the
+`build_lease` line: `occupying` is what the cap is compared against,
+`ownerless_dispatch` is the `task_dispatch` share retired on a durable
+ownership proof, and `blockers` means the pass could not be trusted at all
+(usually an unusable Kubernetes LIST). A journal line reporting
+`reclaimed=N` says nothing about whether capacity was freed.
+
+Leases are only retired on proof — a provably absent Kubernetes object, a
+terminal admission generation, or an unclaimed grant — so a degraded API server
+or an unreadable ledger leaves every slot occupied by design.
+
 ### 4. Stale epochs
 
 A stale epoch is any durable row whose current-phase acknowledgements are not at
