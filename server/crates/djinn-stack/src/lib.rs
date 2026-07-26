@@ -51,7 +51,8 @@ pub use environment::{
     FinalVerificationCommand, FinalVerificationCommandGroup, FinalVerificationPlan,
     FinalVerificationSelectionRule, GoLanguage, HermeticityDeclaration, HookCommand, JavaLanguage,
     Languages, LifecycleHooks, NodeLanguage, PreTaskCommand, PreTaskFailurePolicy, PythonLanguage,
-    RubyLanguage, RustLanguage, SCHEMA_VERSION, VerificationInputManifest, Workspace,
+    RubyLanguage, RustLanguage, SCHEMA_VERSION, VerificationEvidenceTier,
+    VerificationInputManifest, Workspace,
 };
 pub use schema::{LanguageStat, ManifestSignals, Runtimes, Stack};
 pub use slug::workspace_slug;

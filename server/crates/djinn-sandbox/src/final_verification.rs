@@ -340,7 +340,7 @@ fn launch_with_backend_and_setup(
         });
     }
 
-    let mut child = command.spawn().map_err(|source| {
+    let child = command.spawn().map_err(|source| {
         if source.raw_os_error() == Some(ISOLATION_SETUP_ERROR) {
             FinalVerificationError::BackendUnavailable {
                 reason: "final-verification isolation setup failed",
@@ -349,6 +349,18 @@ fn launch_with_backend_and_setup(
             FinalVerificationError::Launch(source)
         }
     })?;
+    wait_capturing_output(child, timeout)
+}
+
+/// Poll to completion or the deadline, then capture output.
+///
+/// Shared with the recorded launcher so both tiers report `timed_out`, exit
+/// codes, and captured streams identically — the tiers differ in the isolation
+/// they apply, and must not also differ in how a result is observed.
+pub(crate) fn wait_capturing_output(
+    mut child: std::process::Child,
+    timeout: Option<Duration>,
+) -> Result<FinalVerificationResult, FinalVerificationError> {
     let clock = SystemClock::new();
     let deadline = timeout.map(|duration| clock.now_instant() + duration);
     let timed_out = loop {
