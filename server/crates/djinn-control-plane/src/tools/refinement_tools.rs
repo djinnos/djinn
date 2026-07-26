@@ -258,6 +258,12 @@ impl DjinnMcpServer {
 
         let refinement = ProposalRefinementStatusModel {
             active: true,
+            run_id: None,
+            generation: None,
+            run_state: None,
+            liveness: None,
+            liveness_evidence: None,
+            last_heartbeat_at: None,
             current_round: Some(1),
             dry_rounds: 0,
             total_entries: 0,
@@ -280,10 +286,10 @@ impl DjinnMcpServer {
     /// refinement is active, the current round, dry-round count, total
     /// debate-trail entries, update-authority mode, and stop reason (if any).
     ///
-    /// Status is derived from the refinement lifecycle events and debate trail.
-    /// Returns an empty (inactive) status when refinement has not been started.
+    /// Status is a read-only exact-run repository snapshot. Legacy debate data
+    /// may fill compatible display fields but cannot affect run liveness.
     #[tool(
-        description = "Read proposal refinement status. Returns active flag, current round, dry-round count, total entries, and stop_reason if refinement has ended. Derived from refinement lifecycle events and debate-trail entries."
+        description = "Read a read-only exact-run proposal refinement snapshot. Returns compatible active, round, count, and stop fields plus optional run ID, generation, state, and bounded liveness evidence. Legacy debate data may populate display fields but cannot affect exact-run liveness."
     )]
     pub async fn proposal_refinement_status(
         &self,
@@ -422,6 +428,12 @@ impl DjinnMcpServer {
 
         let refinement = ProposalRefinementStatusModel {
             active: true,
+            run_id: None,
+            generation: None,
+            run_state: None,
+            liveness: None,
+            liveness_evidence: None,
+            last_heartbeat_at: None,
             current_round: Some(1),
             dry_rounds: 0,
             total_entries: 0,

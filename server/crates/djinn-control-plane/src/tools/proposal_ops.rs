@@ -644,6 +644,24 @@ pub struct ProposalDebateTrailListResponse {
 pub struct ProposalRefinementStatusModel {
     /// Whether refinement has been started for this proposal.
     pub active: bool,
+    /// Durable identity of the exact refinement run observed for this status.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    /// Durable generation that fences the observed run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub generation: Option<i32>,
+    /// Durable run state (`active`, `parked`, or `terminal`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_state: Option<String>,
+    /// Shared exact-run liveness result (`live`, `stale`, or `terminal`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub liveness: Option<String>,
+    /// Bounded discriminator for evidence selected by the shared evaluator.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub liveness_evidence: Option<String>,
+    /// Last durable heartbeat in DB Unix milliseconds, when present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_heartbeat_at: Option<i64>,
     /// Current debate round (1-based). `None` when refinement has not started.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub current_round: Option<i32>,
