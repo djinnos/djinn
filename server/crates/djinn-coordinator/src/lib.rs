@@ -55,6 +55,8 @@ pub mod build_admission_inventory;
 pub mod build_admission_transition;
 /// Durable v1 lease service; v0 admission remains rollout authority.
 pub mod build_lease;
+/// Retirement of occupying build leases whose Kubernetes object is provably gone.
+pub mod build_lease_reclaim;
 pub mod cargo_warm_base_gc;
 pub(crate) mod ci_preflight_gate;
 pub mod ci_reproduction;
