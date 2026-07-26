@@ -1,8 +1,11 @@
 //! Durable admission journal reservation primitives.
 //!
-//! This repository owns storage invariants and atomic capacity accounting only.
-//! Admission policy, workload classification, and lifecycle orchestration remain
-//! in higher layers.
+//! This repository owns storage invariants and the durable OBJECT LIFECYCLE:
+//! generation allocation, UID fencing, predecessor-epoch recovery, and
+//! absent-object reclamation. It deliberately owns no capacity accounting --
+//! see [`AdmissionJournalRepository::reserve`] for why that moved wholesale to
+//! `BuildLeaseRepository`. Admission policy, workload classification, and
+//! lifecycle orchestration remain in higher layers.
 
 use serde::{Deserialize, Serialize};
 use sqlx::{Postgres, Transaction};
@@ -131,27 +134,17 @@ pub struct AdmissionJournalRow {
     pub terminal_at: Option<String>,
 }
 
-/// Result of a capacity reservation attempt.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ReserveAdmissionResult {
-    /// A new row was atomically reserved, or the exact journal key already existed.
-    Reserved {
-        row: AdmissionJournalRow,
-        idempotent: bool,
-    },
-    /// The selected task/warm occupancy was already at capacity.
-    Denied { occupancy: i64, cap: i64 },
-}
-
-/// An Observe-mode reservation and its reference-cap decision.
+/// One recorded journal generation.
 ///
-/// The reservation is always admitted, but `would_defer` is calculated while
-/// holding the same capacity lock as the insert so telemetry cannot miss a
-/// concurrent admission.
+/// There is deliberately no `Denied` variant. This ledger has no cap and cannot
+/// refuse; capacity is decided once, by `BuildLeaseRepository`, before a caller
+/// ever reaches here. A denial-shaped result would re-open the door to a second
+/// authority forming around it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ObserveAdmissionResult {
-    pub reservation: ReserveAdmissionResult,
-    pub would_defer: bool,
+pub struct ReservedAdmission {
+    pub row: AdmissionJournalRow,
+    /// The exact journal key already existed and was returned unchanged.
+    pub idempotent: bool,
 }
 
 /// Identity verified and durably recorded before a Kubernetes POST.
@@ -233,22 +226,31 @@ impl AdmissionJournalRepository {
         Self { db }
     }
 
-    /// Atomically reserve a generation under a task/warm occupancy cap.
+    /// Record a generation in the lifecycle ledger. This NEVER denies.
     ///
-    /// A transaction-scoped advisory lock serializes the count-and-insert for a
-    /// shared cap across both task-observation and warm-build domains. Existing
-    /// keys are returned before capacity denial, making retries idempotent and
-    /// preventing a duplicate request from consuming capacity twice.
-    pub async fn reserve(
-        &self,
-        input: &ReserveAdmissionInput,
-        cap: i64,
-    ) -> DbResult<ReserveAdmissionResult> {
-        if cap < 0 {
-            return Err(DbError::InvalidData(
-                "admission cap must be non-negative".into(),
-            ));
-        }
+    /// # This repository is deliberately not a capacity authority
+    ///
+    /// It used to be: `reserve` took a cap, counted occupancy across the
+    /// task-observation and warm-build domains, and denied over it. That was one
+    /// of TWO authorities enforcing `DJINN_MAX_BUILD_TASKRUNS`, and because the
+    /// v1 build lease governed graph warming while this journal governed
+    /// task-runs, the two caps covered disjoint populations and admitted 2x the
+    /// operator's intent. Capacity accounting now lives solely in
+    /// `build_leases` (`BuildLeaseRepository`), which can count every population
+    /// in one transaction because they are rows in one table.
+    ///
+    /// What remains here is what a journal is uniquely good at, and what the
+    /// lease cannot do: durable generation lifecycle
+    /// ([`Self::resolve_dispatch_generation`]), Kubernetes UID fencing, restart
+    /// recovery of a predecessor epoch, and absent-object reclamation
+    /// ([`Self::reclaim_absent_object`]). A row is therefore written for EVERY
+    /// created object regardless of which authority granted its capacity --
+    /// including leased warm Jobs, which previously wrote no row at all and were
+    /// consequently invisible to reclamation.
+    ///
+    /// The advisory lock is retained: it still serializes the fetch-and-insert
+    /// so a duplicate request cannot write two rows for one key.
+    pub async fn reserve(&self, input: &ReserveAdmissionInput) -> DbResult<ReservedAdmission> {
         if input.key.generation < 0 {
             return Err(DbError::InvalidData(
                 "admission generation must be non-negative".into(),
@@ -261,22 +263,12 @@ impl AdmissionJournalRepository {
 
         if let Some(row) = fetch_row(&mut tx, &input.key).await? {
             tx.commit().await?;
-            return Ok(ReserveAdmissionResult::Reserved {
+            return Ok(ReservedAdmission {
                 row,
                 idempotent: true,
             });
         }
 
-        let occupancy = count_occupancy_tx(&mut tx).await?;
-        if matches!(
-            input.key.domain,
-            AdmissionDomain::TaskObservation | AdmissionDomain::WarmBuild
-        ) && occupancy >= cap
-        {
-            tx.commit().await?;
-            return Ok(ReserveAdmissionResult::Denied { occupancy, cap });
-        }
-
         let row = sqlx::query_as::<_, JournalDbRow>(
             "INSERT INTO admission_journal \
              (domain, work_id, generation, workload_kind, state, creator_server_epoch, object_name) \
@@ -294,74 +286,9 @@ impl AdmissionJournalRepository {
         .await?;
         tx.commit().await?;
 
-        Ok(ReserveAdmissionResult::Reserved {
+        Ok(ReservedAdmission {
             row: row.try_into()?,
             idempotent: false,
-        })
-    }
-
-    /// Atomically record an Observe-mode reservation and reference-cap result.
-    ///
-    /// Unlike [`Self::reserve`], this never denies a new task/warm row. The
-    /// reference-cap decision and insert share the advisory-lock transaction.
-    pub async fn reserve_observed(
-        &self,
-        input: &ReserveAdmissionInput,
-        reference_cap: i64,
-    ) -> DbResult<ObserveAdmissionResult> {
-        if reference_cap < 0 {
-            return Err(DbError::InvalidData(
-                "admission cap must be non-negative".into(),
-            ));
-        }
-        if input.key.generation < 0 {
-            return Err(DbError::InvalidData(
-                "admission generation must be non-negative".into(),
-            ));
-        }
-        self.db.ensure_initialized().await?;
-
-        let mut tx = self.db.pool().begin().await?;
-        lock_capacity(&mut tx).await?;
-        if let Some(row) = fetch_row(&mut tx, &input.key).await? {
-            tx.commit().await?;
-            return Ok(ObserveAdmissionResult {
-                reservation: ReserveAdmissionResult::Reserved {
-                    row,
-                    idempotent: true,
-                },
-                would_defer: false,
-            });
-        }
-
-        let occupancy = count_occupancy_tx(&mut tx).await?;
-        let would_defer = matches!(
-            input.key.domain,
-            AdmissionDomain::TaskObservation | AdmissionDomain::WarmBuild
-        ) && occupancy >= reference_cap;
-        let row = sqlx::query_as::<_, JournalDbRow>(
-            "INSERT INTO admission_journal \
-             (domain, work_id, generation, workload_kind, state, creator_server_epoch, object_name) \
-             VALUES ($1, $2, $3, $4, 'reserved', $5, $6) \
-             RETURNING domain, work_id, generation, workload_kind, state, creator_server_epoch, \
-                       object_name, object_uid, created_at::text, updated_at::text, terminal_at::text",
-        )
-        .bind(input.key.domain.as_str())
-        .bind(&input.key.work_id)
-        .bind(input.key.generation)
-        .bind(input.workload_kind.as_str())
-        .bind(&input.creator_server_epoch)
-        .bind(&input.object_name)
-        .fetch_one(&mut *tx)
-        .await?;
-        tx.commit().await?;
-
-        Ok(ObserveAdmissionResult {
-            reservation: ReserveAdmissionResult::Reserved {
-                row: row.try_into()?,
-                idempotent: false,
-            },
-            would_defer,
         })
     }
 
@@ -892,6 +819,12 @@ async fn lock_work(
     Ok(())
 }
 
+/// Rows currently occupying the task-or-warm LIFECYCLE view.
+///
+/// This is no longer a capacity input -- nothing denies on it. It backs the
+/// recovery/readiness surface (how much occupying lifecycle a restart inherited)
+/// and telemetry. Real capacity is `BuildLeaseRepository`'s weighted sum.
+#[allow(dead_code)]
 async fn count_occupancy_tx(tx: &mut Transaction<'_, Postgres>) -> DbResult<i64> {
     sqlx::query_scalar(
         "SELECT COUNT(*)::bigint FROM admission_journal \

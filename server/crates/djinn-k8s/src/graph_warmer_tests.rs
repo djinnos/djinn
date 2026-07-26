@@ -199,7 +199,7 @@ fn watch_deadline_follows_configured_job_timeout_plus_slack() {
 /// columns are no longer consulted. So we create a catalog `images` row,
 /// mark it ready with the expected content-addressed tag (no digest, so
 /// `pull_ref` returns the tag verbatim), and assign it to the project.
-async fn seed_project_with_ready_image(db: &Database, name: &str) -> String {
+pub(super) async fn seed_project_with_ready_image(db: &Database, name: &str) -> String {
     use djinn_db::ImageRepository;
     let repo = ProjectRepository::new(db.clone(), EventBus::noop());
     let project = repo
@@ -228,7 +228,7 @@ async fn seed_project_with_ready_image(db: &Database, name: &str) -> String {
     project.id
 }
 
-fn test_config() -> KubernetesConfig {
+pub(super) fn test_config() -> KubernetesConfig {
     KubernetesConfig::for_testing()
 }
 
@@ -1058,10 +1058,10 @@ async fn trigger_skips_completion_sink_when_job_disappears() {
     );
 }
 
-struct AdmissionRecording {
-    events: Arc<Mutex<Vec<String>>>,
-    admit_error: Option<WarmAdmissionError>,
-    fail_create_started: bool,
+pub(super) struct AdmissionRecording {
+    pub(super) events: Arc<Mutex<Vec<String>>>,
+    pub(super) admit_error: Option<WarmAdmissionError>,
+    pub(super) fail_create_started: bool,
 }
 
 #[async_trait]
@@ -1096,9 +1096,9 @@ impl WarmAdmission for AdmissionRecording {
     }
 }
 
-struct LifecycleRecordingDispatcher {
-    events: Arc<Mutex<Vec<String>>>,
-    result: Result<String, String>,
+pub(super) struct LifecycleRecordingDispatcher {
+    pub(super) events: Arc<Mutex<Vec<String>>>,
+    pub(super) result: Result<String, String>,
 }
 
 #[async_trait]
@@ -1109,7 +1109,7 @@ impl WarmJobDispatcher for LifecycleRecordingDispatcher {
     }
 }
 
-struct UidWatcher;
+pub(super) struct UidWatcher;
 
 #[async_trait]
 impl WarmJobWatcher for UidWatcher {

@@ -3999,12 +3999,18 @@ mod inflight_ledger_tests {
 
         let (runtime, mut started_rx) = Wnd1ControlledRuntime::new();
         let mut actor = wnd1_actor_for_tests(&db, &events_tx, &runtime, 2);
-        let controller = std::sync::Arc::new(BuildAdmissionController::new(
-            std::sync::Arc::new(djinn_db::AdmissionJournalRepository::new(db.clone())),
-            BuildAdmissionMode::Enforce,
+        let h = crate::build_admission_capacity_support::attach_capacity(
+            &db,
+            BuildAdmissionController::new(
+                std::sync::Arc::new(djinn_db::AdmissionJournalRepository::new(db.clone())),
+                BuildAdmissionMode::Enforce,
+                1,
+                "runtime-release-test",
+            ),
             1,
-            "runtime-release-test",
-        ));
+        )
+        .await;
+        let controller = std::sync::Arc::clone(&h.controller);
         actor.build_admission = Some(controller.clone());
 
         let active_task_id = &fixture.task_ids[0];
@@ -8312,17 +8318,22 @@ mod build_admission_route_tests {
         StdArc::new(AdmissionJournalRepository::new(db.clone()))
     }
 
-    fn route_controller(
+    /// The dispatch route under test is layer-1 build admission, so its
+    /// controller must reach the ONE capacity authority exactly as `AppState`
+    /// wires it. A controller with no authority is not capacity gated at all,
+    /// and every cap assertion below would pass for the wrong reason.
+    async fn route_controller(
+        db: &djinn_db::Database,
         journal: &StdArc<AdmissionJournalRepository>,
         mode: BuildAdmissionMode,
         cap: i64,
-    ) -> StdArc<BuildAdmissionController> {
-        StdArc::new(BuildAdmissionController::new(
-            journal.clone(),
-            mode,
+    ) -> crate::build_admission_capacity_support::CapacityHarness {
+        crate::build_admission_capacity_support::attach_capacity(
+            db,
+            BuildAdmissionController::new(journal.clone(), mode, cap, "route-test"),
             cap,
-            "route-test",
-        ))
+        )
+        .await
     }
 
     /// Close every fixture task except `keep`, so only one task is ready for
@@ -8355,7 +8366,8 @@ mod build_admission_route_tests {
             .await;
 
         let journal = route_journal(&db);
-        let controller = route_controller(&journal, BuildAdmissionMode::Enforce, 1);
+        let h = route_controller(&db, &journal, BuildAdmissionMode::Enforce, 1).await;
+        let controller = StdArc::clone(&h.controller);
         let (runtime, mut started_rx, _completed_rx) = AdmissionRouteRuntime::new(journal.clone());
 
         let mut actor = build_route_actor(&db, &events_tx, &runtime, 1);
@@ -8585,7 +8597,8 @@ mod build_admission_route_tests {
             .await;
 
         let journal = route_journal(&db);
-        let controller = route_controller(&journal, BuildAdmissionMode::Enforce, 1);
+        let h = route_controller(&db, &journal, BuildAdmissionMode::Enforce, 1).await;
+        let controller = StdArc::clone(&h.controller);
         let (runtime, mut started_rx, _completed_rx) = AdmissionRouteRuntime::new(journal.clone());
 
         let mut actor = build_route_actor(&db, &events_tx, &runtime, 1);
@@ -8661,7 +8674,8 @@ mod build_admission_route_tests {
             .await;
 
         let journal = route_journal(&db);
-        let controller = route_controller(&journal, BuildAdmissionMode::Enforce, 1);
+        let h = route_controller(&db, &journal, BuildAdmissionMode::Enforce, 1).await;
+        let controller = StdArc::clone(&h.controller);
         let (runtime, mut started_rx, _completed_rx) = AdmissionRouteRuntime::new(journal.clone());
 
         let mut actor = build_route_actor(&db, &events_tx, &runtime, 1);
@@ -8746,7 +8760,8 @@ mod build_admission_route_tests {
 
         let journal = route_journal(&db);
         // cap=0 → first admission is denied.
-        let controller = route_controller(&journal, BuildAdmissionMode::Enforce, 0);
+        let h = route_controller(&db, &journal, BuildAdmissionMode::Enforce, 0).await;
+        let controller = StdArc::clone(&h.controller);
         let (runtime, _started_rx, _completed_rx) = AdmissionRouteRuntime::new(journal.clone());
 
         let mut actor = build_route_actor(&db, &events_tx, &runtime, 5);
@@ -8812,7 +8827,8 @@ mod build_admission_route_tests {
             .await;
 
         let journal = route_journal(&db);
-        let controller = route_controller(&journal, BuildAdmissionMode::Enforce, 3);
+        let h = route_controller(&db, &journal, BuildAdmissionMode::Enforce, 3).await;
+        let controller = StdArc::clone(&h.controller);
         let (runtime, mut started_rx, _completed_rx) = AdmissionRouteRuntime::new(journal.clone());
         let mut actor = build_route_actor(&db, &events_tx, &runtime, 5);
         actor.build_admission = Some(controller);
@@ -8870,6 +8886,14 @@ mod build_admission_route_tests {
 
     /// Prove Observe mode never cap-denies: dispatch proceeds at/over cap and
     /// the would-defer observation is recorded.
+    ///
+    /// The would-defer signal exists only while layer-1 dispatch is in SHADOW —
+    /// it is what the operator reads before arming the epoch. A shadow probe
+    /// deliberately acquires nothing (a shadow reservation would occupy real
+    /// capacity and start denying graph warming), so the occupancy it reports
+    /// against must come from a consumer that genuinely holds a slot. Here that
+    /// is a graph-warm Job, which is exactly the production shape: the pool is
+    /// full, dispatch would have deferred, and Observe dispatches anyway.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn observe_mode_dispatches_and_records_would_defer() {
         let db = crate::test_helpers::create_test_db();
@@ -8881,7 +8905,13 @@ mod build_admission_route_tests {
             .await;
 
         let journal = route_journal(&db);
-        let controller = route_controller(&journal, BuildAdmissionMode::Observe, 1);
+        let h = route_controller(&db, &journal, BuildAdmissionMode::Observe, 1).await;
+        let controller = StdArc::clone(&h.controller);
+        let _warm_slot = h
+            .hold_warm_lease("observe-route-occupant")
+            .await
+            .expect("the warm Job takes the only slot");
+        h.lease.set_dispatch_enforcing_for_test(false);
         let (runtime, mut started_rx, _completed_rx) = AdmissionRouteRuntime::new(journal.clone());
 
         let mut actor = build_route_actor(&db, &events_tx, &runtime, 2);
@@ -8946,6 +8976,14 @@ mod build_admission_route_tests {
 
     /// Prove Off mode dispatches normally while leaving the admission journal
     /// empty (no durable rows, no occupancy).
+    ///
+    /// Off is what the v0 JOURNAL does, not what capacity does. The fixture used
+    /// to say "Off ignores the cap" by setting the cap to zero, which
+    /// `validate_admission_config` rejects and production therefore cannot
+    /// produce; under one authority the cap is the v1 lease's and is stood down
+    /// through the durable epoch, never by the v0 mode. The cap here is a real
+    /// one with room for the single ready task, so what the assertions below
+    /// measure is exactly what Off owns: no ledger row, and no interference.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn off_mode_dispatches_and_leaves_journal_empty() {
         let db = crate::test_helpers::create_test_db();
@@ -8955,7 +8993,8 @@ mod build_admission_route_tests {
             .await;
 
         let journal = route_journal(&db);
-        let controller = route_controller(&journal, BuildAdmissionMode::Off, 0);
+        let h = route_controller(&db, &journal, BuildAdmissionMode::Off, 1).await;
+        let controller = StdArc::clone(&h.controller);
         let (runtime, mut started_rx, _completed_rx) = AdmissionRouteRuntime::new(journal.clone());
 
         let mut actor = build_route_actor(&db, &events_tx, &runtime, 1);
@@ -9011,7 +9050,8 @@ mod build_admission_route_tests {
             .await;
 
         let journal = route_journal(&db);
-        let controller = route_controller(&journal, BuildAdmissionMode::Enforce, 2);
+        let h = route_controller(&db, &journal, BuildAdmissionMode::Enforce, 2).await;
+        let controller = StdArc::clone(&h.controller);
         let (runtime, mut started_rx, mut completed_rx) =
             AdmissionRouteRuntime::new(journal.clone());
 
@@ -9135,7 +9175,8 @@ mod build_admission_route_tests {
             .await;
 
         let journal = route_journal(&db);
-        let controller = route_controller(&journal, BuildAdmissionMode::Enforce, 2);
+        let h = route_controller(&db, &journal, BuildAdmissionMode::Enforce, 2).await;
+        let controller = StdArc::clone(&h.controller);
         let (runtime, mut started_rx, _completed_rx) = AdmissionRouteRuntime::new(journal.clone());
 
         let mut actor = build_route_actor(&db, &events_tx, &runtime, 1);
@@ -9291,7 +9332,8 @@ mod build_admission_route_tests {
             .await;
 
         let journal = route_journal(&db);
-        let controller = route_controller(&journal, BuildAdmissionMode::Enforce, 2);
+        let h = route_controller(&db, &journal, BuildAdmissionMode::Enforce, 2).await;
+        let controller = StdArc::clone(&h.controller);
         let (runtime, mut started_rx, _completed_rx) = AdmissionRouteRuntime::new(journal.clone());
 
         let mut actor = build_route_actor(&db, &events_tx, &runtime, 1);
@@ -9369,7 +9411,8 @@ mod build_admission_route_tests {
         let (events_tx, _events_rx) = tokio::sync::broadcast::channel(256);
         let fixture = seed_wnd1_ready_worker_tasks(&db, WND1_READY_TASK_COUNT).await;
         let journal = route_journal(&db);
-        let controller = route_controller(&journal, BuildAdmissionMode::Enforce, 2);
+        let h = route_controller(&db, &journal, BuildAdmissionMode::Enforce, 2).await;
+        let controller = StdArc::clone(&h.controller);
         let (runtime, _started_rx, _completed_rx) = AdmissionRouteRuntime::new(journal.clone());
         let mut actor = build_route_actor(&db, &events_tx, &runtime, 1);
         actor.build_admission = Some(controller.clone());
@@ -9596,7 +9639,8 @@ mod build_admission_route_tests {
         let (events_tx, _events_rx) = tokio::sync::broadcast::channel(256);
         let fixture = seed_wnd1_ready_worker_tasks(&db, WND1_READY_TASK_COUNT).await;
         let journal = route_journal(&db);
-        let controller = route_controller(&journal, BuildAdmissionMode::Observe, 4);
+        let h = route_controller(&db, &journal, BuildAdmissionMode::Observe, 4).await;
+        let controller = StdArc::clone(&h.controller);
         let (runtime, _started_rx, _completed_rx) = AdmissionRouteRuntime::new(journal.clone());
         let mut actor = build_route_actor(&db, &events_tx, &runtime, 2);
         actor.build_admission = Some(controller.clone());

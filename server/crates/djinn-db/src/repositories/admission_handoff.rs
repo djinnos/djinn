@@ -69,9 +69,18 @@ pub enum AdmissionHandoffAuthority {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum V0Mode {
-    /// Atomically enforce the reference cap.
+    /// The v0 LEDGER is authoritative and fails closed when it is unavailable.
+    ///
+    /// This no longer means "enforces the reference cap". The v0 authority has
+    /// no cap: capacity is decided solely by the v1 build lease, which is the
+    /// only place every population can be counted in one transaction. What v0
+    /// still enforces is the durable LIFECYCLE -- generation resolution, UID
+    /// fencing, restart recovery and absent-object reclamation -- and under
+    /// `Enforce` a journal it cannot write is a dispatch denial rather than a
+    /// warning.
     Enforce,
-    /// Record reservations but never deny.
+    /// Record lifecycle rows, but degrade to a warning when the ledger is
+    /// unavailable rather than denying dispatch.
     Observe,
     /// The v0 authority is released.
     Disabled,
@@ -97,7 +106,9 @@ impl V0Mode {
         }
     }
 
-    /// Only `Enforce` actually denies over the cap; observe/disabled do not.
+    /// Only `Enforce` fails closed on an unavailable ledger; observe/disabled
+    /// degrade to a warning. Note this is LEDGER enforcement, not cap
+    /// enforcement -- see the variant docs.
     #[must_use]
     pub const fn is_enforcing(self) -> bool {
         matches!(self, Self::Enforce)
@@ -105,6 +116,10 @@ impl V0Mode {
 }
 
 /// Mode of the v1 (invocation) admission authority.
+///
+/// This is the ONLY capacity authority. `Enforce` here is what arms the
+/// unified build-slot cap for every population -- graph warming, layer-1 task
+/// dispatch, and the layer-2 invocation escalation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum V1Mode {
