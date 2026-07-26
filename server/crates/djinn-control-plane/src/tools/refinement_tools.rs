@@ -23,7 +23,7 @@ use crate::tools::proposal_ops::{
 pub use crate::tools::refinement_helpers::{
     ProposalRefinementDemandEvidenceParams, build_refinement_status,
 };
-use crate::tools::refinement_helpers::{refinement_is_active, validate_demand_evidence};
+use crate::tools::refinement_helpers::validate_demand_evidence;
 use djinn_core::models::{NeedsEvidenceClaim, TaskStatus, TransitionAction};
 use djinn_db::{
     AdmitRefinementRunRequest, EffectiveCreatorProvenance, NeedsEvidenceClaimLink,
