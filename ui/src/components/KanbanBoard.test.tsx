@@ -1,7 +1,8 @@
 import { beforeEach, describe, it, expect, vi } from "vitest";
-import { render, screen, waitFor, within } from "@/test/test-utils";
+import { act, render, screen, waitFor, within } from "@/test/test-utils";
 import { KanbanBoard } from "@/components/KanbanBoard";
 import { mergedColumnStore } from "@/stores/mergedColumnStore";
+import { taskStore } from "@/stores/taskStore";
 import type { Epic, Task } from "@/api/types";
 
 vi.mock("@/electron/commands", () => ({
@@ -108,6 +109,8 @@ describe("KanbanBoard", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mergedColumnStore.getState().reset();
+    // Store-driven tests below share this singleton; start every case empty.
+    taskStore.getState().setTasks([]);
   });
 
   it("renders status columns with tasks in correct columns and header counts", () => {
@@ -124,11 +127,13 @@ describe("KanbanBoard", () => {
         status: "in_progress",
         epic_id: epicA.id,
       }),
+      // Merged work only stays on the board under a building proposal, so the
+      // column-placement assertion below uses that lane.
       makeTask({
         id: "t-done",
         title: "Done task",
         status: "closed",
-        epic_id: epicA.id,
+        epic_id: epicP1.id,
         merge_commit_sha: "abc123merged",
       }),
     ];
@@ -140,6 +145,7 @@ describe("KanbanBoard", () => {
           new Map([
             [epicA.id, epicA],
             [epicB.id, epicB],
+            [epicP1.id, epicP1],
           ])
         }
       />,
@@ -167,7 +173,7 @@ describe("KanbanBoard", () => {
       ),
     ).toBeInTheDocument();
     expect(
-      within(screen.getByTestId("lane-no-proposal-done")).getByText(
+      within(screen.getByTestId("lane-proposal:prop-1-done")).getByText(
         "Done task",
       ),
     ).toBeInTheDocument();
@@ -273,6 +279,146 @@ describe("KanbanBoard", () => {
     expect(screen.queryByText("Old merged task")).not.toBeInTheDocument();
   });
 
+  it("drops standalone merged tasks from the catch-all lane on first paint", () => {
+    // The reload case: tasks with no epic at all (blockers and findings filed
+    // straight onto the board) used to pile up in the catch-all lane's Merged
+    // column forever, since the age-off rule only covered proposal epics.
+    const tasks: Task[] = [
+      makeTask({
+        id: "t-standalone-open",
+        title: "Standalone open task",
+        status: "open",
+        epic_id: null,
+      }),
+      makeTask({
+        id: "t-standalone-merged",
+        title: "Standalone merged task",
+        status: "closed",
+        epic_id: null,
+        pr_url: "https://github.com/example/repo/pull/11",
+        merge_commit_sha: "sha11landed",
+      }),
+    ];
+
+    render(<KanbanBoard tasks={tasks} epics={new Map()} />);
+
+    expect(screen.getByText("Standalone open task")).toBeInTheDocument();
+    expect(
+      screen.queryByText("Standalone merged task"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByTestId("lane-no-proposal-done"),
+    ).not.toBeInTheDocument();
+    // The lane header counts only what it renders, so no merged badge at all.
+    expect(
+      screen.queryByText(/\d+\/\d+ merged/),
+    ).not.toBeInTheDocument();
+    const doneCol = screen.getByText("Merged").closest(".flex.flex-col");
+    expect(doneCol).toHaveTextContent("0");
+  });
+
+  it("keeps a standalone task visible when it merges during the session", async () => {
+    // Watching your own work land is the one case worth showing, so this drives
+    // the live path: hydration seeds the store, then an SSE-style update flips
+    // the task to merged while the board is mounted.
+    const openTask = makeTask({
+      id: "t-landing",
+      title: "Landing task",
+      status: "in_progress",
+      epic_id: null,
+    });
+
+    render(<KanbanBoard epics={new Map()} />);
+
+    act(() => {
+      taskStore.getState().setTasks([openTask]);
+    });
+    await waitFor(() => {
+      expect(
+        within(screen.getByTestId("lane-no-proposal-in_progress")).getByText(
+          "Landing task",
+        ),
+      ).toBeInTheDocument();
+    });
+
+    act(() => {
+      taskStore.getState().upsertTasks([
+        {
+          ...openTask,
+          status: "closed",
+          close_reason: "completed",
+          pr_url: "https://github.com/example/repo/pull/12",
+          merge_commit_sha: "sha12landed",
+        },
+      ]);
+    });
+
+    await waitFor(() => {
+      expect(
+        within(screen.getByTestId("lane-no-proposal-done")).getByText(
+          "Landing task",
+        ),
+      ).toBeInTheDocument();
+    });
+  });
+
+  it("drops a task that was already merged when the board loaded", async () => {
+    // Same live path, but the task arrives merged (hydration or a reconnect
+    // re-hydration): there was no landing to watch, so it ages off.
+    render(<KanbanBoard epics={new Map()} />);
+
+    act(() => {
+      taskStore.getState().setTasks([
+        makeTask({
+          id: "t-arrived-merged",
+          title: "Arrived merged task",
+          status: "closed",
+          epic_id: null,
+          pr_url: "https://github.com/example/repo/pull/14",
+          merge_commit_sha: "sha14landed",
+        }),
+        makeTask({
+          id: "t-arrived-open",
+          title: "Arrived open task",
+          status: "open",
+          epic_id: null,
+        }),
+      ]);
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText("Arrived open task")).toBeInTheDocument();
+    });
+    expect(screen.queryByText("Arrived merged task")).not.toBeInTheDocument();
+  });
+
+  it("shows standalone merged tasks in the catch-all lane while searching", async () => {
+    // The backend search deliberately loads old merged rows the board never
+    // hydrated, so the age-off rule must stand down while a query is active.
+    const tasks: Task[] = [
+      makeTask({
+        id: "t-searched-merged",
+        title: "Findable merged task",
+        status: "closed",
+        epic_id: null,
+        pr_url: "https://github.com/example/repo/pull/13",
+        merge_commit_sha: "sha13landed",
+      }),
+    ];
+
+    render(<KanbanBoard tasks={tasks} epics={new Map()} />, {
+      wrapperOptions: { routerProps: { initialEntries: ["/tasks?q=findable"] } },
+    });
+
+    await waitFor(() => {
+      expect(
+        within(screen.getByTestId("lane-no-proposal-done")).getByText(
+          "Findable merged task",
+        ),
+      ).toBeInTheDocument();
+    });
+  });
+
   it("applies the text search from the shared filter URL param", async () => {
     // The search box now lives in the shared BoardFilterHeader, which writes
     // the query to the `q` URL param; the board reads it back. Drive filtering
@@ -322,13 +468,14 @@ describe("KanbanBoard", () => {
   });
 
   it("only shows closed tasks with landed merge SHAs in the merged column", () => {
+    // Under a building proposal, where merged work stays on the board.
     const tasks: Task[] = [
       makeTask({
         id: "t-merged-pr",
         title: "Merged PR task",
         status: "closed",
         issue_type: "task",
-        epic_id: epicA.id,
+        epic_id: epicP1.id,
         pr_url: "https://github.com/example/repo/pull/42",
         merge_commit_sha: "abc123merged",
       }),
@@ -337,7 +484,7 @@ describe("KanbanBoard", () => {
         title: "Direct push merged task",
         status: "closed",
         issue_type: "task",
-        epic_id: epicA.id,
+        epic_id: epicP1.id,
         pr_url: null,
         merge_commit_sha: "def456direct",
       }),
@@ -346,28 +493,28 @@ describe("KanbanBoard", () => {
         title: "Closed without merge",
         status: "closed",
         issue_type: "task",
-        epic_id: epicA.id,
+        epic_id: epicP1.id,
       }),
       makeTask({
         id: "t-closed-review",
         title: "Closed review without merge",
         status: "closed",
         issue_type: "review",
-        epic_id: epicA.id,
+        epic_id: epicP1.id,
       }),
       makeTask({
         id: "t-closed-planning",
         title: "Closed planning without merge",
         status: "closed",
         issue_type: "planning",
-        epic_id: epicA.id,
+        epic_id: epicP1.id,
       }),
     ];
 
     render(
       <KanbanBoard
         tasks={tasks}
-        epics={new Map([[epicA.id, epicA]])}
+        epics={new Map([[epicP1.id, epicP1]])}
       />,
     );
 
@@ -391,7 +538,7 @@ describe("KanbanBoard", () => {
         title: "Legacy merged task",
         status: "closed",
         issue_type: "task",
-        epic_id: epicA.id,
+        epic_id: epicP1.id,
         pr_url: "https://github.com/example/repo/pull/7",
         close_reason: "completed",
         // No merge_commit_sha — closed before the SHA was persisted.
@@ -401,14 +548,14 @@ describe("KanbanBoard", () => {
         title: "Force closed unmerged task",
         status: "closed",
         issue_type: "task",
-        epic_id: epicA.id,
+        epic_id: epicP1.id,
         pr_url: "https://github.com/example/repo/pull/8",
         close_reason: "force_closed",
       }),
     ];
 
     render(
-      <KanbanBoard tasks={tasks} epics={new Map([[epicA.id, epicA]])} />,
+      <KanbanBoard tasks={tasks} epics={new Map([[epicP1.id, epicP1]])} />,
     );
 
     const doneCol = screen.getByText("Merged").closest(".flex.flex-col");
@@ -442,12 +589,14 @@ describe("KanbanBoard", () => {
         id: "t-done",
         title: "Merged task",
         status: "closed",
-        epic_id: epicA.id,
+        epic_id: epicP1.id,
         merge_commit_sha: "abc123merged",
       }),
     ];
 
-    render(<KanbanBoard tasks={tasks} epics={new Map([[epicA.id, epicA]])} />);
+    render(
+      <KanbanBoard tasks={tasks} epics={new Map([[epicP1.id, epicP1]])} />,
+    );
 
     expect(
       screen.queryByRole("button", { name: "Load more" }),
