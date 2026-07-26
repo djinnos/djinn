@@ -235,6 +235,36 @@ async fn repository_concurrent_start_has_one_active_run_and_same_key_resolves() 
         active.id, winner.id,
         "active run is preferred by repository query"
     );
+
+    // Once the sole active row becomes terminal, the same repository method
+    // must fall back to the most recently-created terminal run rather than an
+    // arbitrary (or oldest) project run.
+    sqlx::query(
+        "UPDATE readiness_runs SET status='failed', completed_at='2026-01-01T00:00:00.000Z', \
+         created_at='2026-01-01T00:00:00.000Z' WHERE id=$1",
+    )
+    .bind(&winner.id)
+    .execute(db.pool())
+    .await
+    .expect("terminalize active run");
+    sqlx::query(
+        "INSERT INTO readiness_runs \
+         (id,project_id,idempotency_key,status,repository_snapshot,skill_name,skill_version,created_at,completed_at) \
+         VALUES ('older-terminal','readiness-concurrency','older','failed','snapshot','skill','1.0.0', \
+                 '2025-01-01T00:00:00.000Z','2025-01-01T00:00:00.000Z')",
+    )
+    .execute(db.pool())
+    .await
+    .expect("create older terminal run");
+    let latest_terminal = repo
+        .active_or_latest_for_project("readiness-concurrency")
+        .await
+        .expect("load latest terminal run")
+        .expect("terminal run exists");
+    assert_eq!(
+        latest_terminal.id, winner.id,
+        "repository falls back to the newest terminal run when no run is active"
+    );
 }
 
 #[tokio::test]
@@ -251,6 +281,8 @@ async fn active_latest_and_detail_indexes_have_expected_query_paths() {
         assert_eq!(selected, "run-active", "active run wins over a terminal latest candidate");
         conn.execute("SET enable_seqscan = off").await.expect("force index plans");
         for (sql, index) in [
+            ("EXPLAIN SELECT * FROM readiness_runs WHERE project_id='project-index' AND status IN ('identifying','analyzing','aggregating')", "readiness_runs_one_active_project_idx"),
+            ("EXPLAIN SELECT * FROM readiness_runs WHERE project_id='project-index' ORDER BY created_at DESC", "readiness_runs_project_latest_idx"),
             ("EXPLAIN SELECT * FROM readiness_composition_areas WHERE run_id='run-active' ORDER BY area_key", "readiness_areas_run_detail_idx"),
             ("EXPLAIN SELECT * FROM readiness_area_attempts WHERE area_id='area-index' ORDER BY attempt_number DESC", "readiness_attempts_area_idx"),
             ("EXPLAIN SELECT * FROM readiness_run_events WHERE run_id='run-active' ORDER BY created_at,id", "readiness_events_run_detail_idx"),
@@ -277,6 +309,7 @@ async fn frozen_and_completed_readiness_data_is_immutable() {
         sqlx::query("INSERT INTO readiness_guardrail_findings (id,run_id,area_id,attempt_id,guardrail_key,severity,accepted) VALUES ('finding-immutable','run-immutable','area-immutable','attempt-immutable','guardrail','high',true)").execute(&mut conn).await.expect("accepted finding");
         assert_rejected(&mut conn, "UPDATE readiness_guardrail_findings SET severity='low' WHERE id='finding-immutable'", "accepted readiness finding is immutable").await;
         assert_rejected(&mut conn, "DELETE FROM readiness_guardrail_findings WHERE id='finding-immutable'", "accepted readiness finding is immutable").await;
+        sqlx::query("INSERT INTO readiness_guardrail_findings (id,run_id,area_id,attempt_id,guardrail_key,severity) VALUES ('finding-unaccepted','run-immutable','area-immutable','attempt-immutable','unaccepted','low')").execute(&mut conn).await.expect("unaccepted finding");
         sqlx::query("INSERT INTO readiness_remediation_suggestions (id,run_id,dedupe_key,suggestion) VALUES ('suggestion-immutable','run-immutable','dedupe','{}')").execute(&mut conn).await.expect("suggestion");
         sqlx::query("INSERT INTO readiness_run_events (id,run_id,event_kind,payload) VALUES ('event-immutable','run-immutable','created','{}')").execute(&mut conn).await.expect("event");
         assert_rejected(&mut conn, "UPDATE readiness_run_events SET event_kind='changed' WHERE id='event-immutable'", "readiness run events are append-only").await;
@@ -290,11 +323,16 @@ async fn frozen_and_completed_readiness_data_is_immutable() {
             "INSERT INTO readiness_area_attempts (id,run_id,area_id,attempt_number,correlation_key) VALUES ('after-attempt','run-immutable','area-immutable',2,'after')",
             "UPDATE readiness_area_attempts SET payload_digest='changed' WHERE id='attempt-immutable'",
             "DELETE FROM readiness_area_attempts WHERE id='attempt-immutable'",
+            "INSERT INTO readiness_guardrail_findings (id,run_id,area_id,attempt_id,guardrail_key,severity) VALUES ('after-finding','run-immutable','area-immutable','attempt-immutable','after','low')",
+            "UPDATE readiness_guardrail_findings SET severity='high' WHERE id='finding-unaccepted'",
             "INSERT INTO readiness_remediation_suggestions (id,run_id,dedupe_key,suggestion) VALUES ('after-suggestion','run-immutable','after','{}')",
             "DELETE FROM readiness_remediation_suggestions WHERE id='suggestion-immutable'",
             "INSERT INTO readiness_run_events (id,run_id,event_kind,payload) VALUES ('after-event','run-immutable','after','{}')",
             "DELETE FROM readiness_run_events WHERE id='event-immutable'",
         ] { assert_rejected(&mut conn, sql, "readiness run is terminal").await; }
+        // The immutable-finding delete guard independently rejects all
+        // deletes, including unaccepted findings after terminalization.
+        assert_rejected(&mut conn, "DELETE FROM readiness_guardrail_findings WHERE id='finding-unaccepted'", "accepted readiness finding is immutable").await;
         assert_rejected(&mut conn, "UPDATE readiness_runs SET status='failed' WHERE id='run-immutable'", "completed readiness run is immutable").await;
     }).await;
 }
