@@ -385,8 +385,8 @@ impl ReadinessRepository {
         run_id: &str,
         reason: &str,
     ) -> Result<()> {
-        sqlx::query("UPDATE readiness_runs SET status='failed',completed_at=to_char(now() AT TIME ZONE 'utc','YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') WHERE id=$1").bind(run_id).execute(&mut **tx).await?;
         sqlx::query("INSERT INTO readiness_run_events (id,run_id,event_kind,payload) VALUES ($1,$2,'identification_failed',$3)").bind(Uuid::now_v7().to_string()).bind(run_id).bind(serde_json::json!({"reason":reason})).execute(&mut **tx).await?;
+        sqlx::query("UPDATE readiness_runs SET status='failed',completed_at=to_char(now() AT TIME ZONE 'utc','YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') WHERE id=$1").bind(run_id).execute(&mut **tx).await?;
         Ok(())
     }
     pub async fn create_run(&self, i: CreateReadinessRun) -> Result<ReadinessRunRow> {
