@@ -682,6 +682,55 @@ mod resolve_final_verification_tests {
         }
     }
 
+    /// Seed the same shape, but insert the `task_run` row through
+    /// `TaskRunOutcomeRepository::create_run_for_attempt` — the per-attempt
+    /// insert every real dispatch takes (worker → `create_task_run` RPC →
+    /// `DirectServices`). `fixture` above uses `TaskRunRepository::create`,
+    /// which binds `catalog_image_id`; that divergence between the two insert
+    /// paths is exactly why the production NULL-binding defect shipped green.
+    async fn fixture_via_attempt_dispatch(workspace_path: Option<&str>) -> Fixture {
+        let db = create_test_db();
+        let project = create_test_project(&db).await;
+        let epic = create_test_epic(&db, &project.id).await;
+        let task = create_test_task(&db, &project.id, &epic.id).await;
+        let attempt = djinn_db::TaskAttemptRepository::new(db.clone())
+            .create_or_get_pending(djinn_db::CreateTaskAttemptParams {
+                id: &uuid::Uuid::now_v7().to_string(),
+                task_id: &task.id,
+                role: "worker",
+                dispatch_key: "final-verification-attempt-dispatch",
+                session_id: None,
+                attempt_seq: None,
+                dispatch_owner_incarnation_id: None,
+                dispatch_group_id: None,
+            })
+            .await
+            .expect("allocate the exact attempt dispatch allocates");
+        let task_run_id = uuid::Uuid::now_v7().to_string();
+        djinn_db::repositories::task_run_outcome::TaskRunOutcomeRepository::new(db.clone())
+            .create_run_for_attempt(
+                CreateTaskRunParams {
+                    id: &task_run_id,
+                    project_id: &project.id,
+                    task_id: &task.id,
+                    trigger_type: "dispatch",
+                    status: Some("starting"),
+                    workspace_path,
+                    mirror_ref: None,
+                    dispatch_group_id: None,
+                },
+                &attempt.id,
+            )
+            .await
+            .expect("per-attempt dispatch insert");
+        Fixture {
+            agent: agent_context_from_db(db, CancellationToken::new()),
+            project_id: project.id,
+            task_id: task.id,
+            task_run_id,
+        }
+    }
+
     async fn run_git(worktree: &std::path::Path, args: &[&str]) {
         djinn_git::run_git_command_in(worktree, args.iter().map(|arg| (*arg).to_owned()).collect())
             .await
@@ -931,6 +980,55 @@ mod resolve_final_verification_tests {
                 panic!("verification must never substitute a project image selected after dispatch")
             }
         }
+    }
+
+    /// Production-incident regression: every real dispatch inserts its
+    /// `task_runs` row through the per-attempt path, which omitted
+    /// `catalog_image_id`. With a non-empty `final_verification` plan applied,
+    /// that NULL binding made this gate unsatisfiable — it returned
+    /// `task run has no bound catalog image`, `submit_work` was hard-blocked by
+    /// the same error, and djinn escalated instead of submitting finished work.
+    /// A run created the way dispatch creates it must reach the gate and
+    /// resolve material against the image bound at dispatch.
+    #[tokio::test]
+    async fn attempt_dispatched_run_reaches_verification_with_its_bound_catalog_image() {
+        let worktree = initialized_worktree().await;
+        let fx = fixture_via_attempt_dispatch(Some(
+            worktree.path().to_str().expect("worktree path is UTF-8"),
+        ))
+        .await;
+        configure_final_verification_plan(&fx).await;
+
+        // Assert the consequence first: an unbound run reproduces the exact
+        // production failure here, so a regression names the observed symptom
+        // rather than only the missing column.
+        let material = match resolve(&fx).await {
+            Ok(material) => material,
+            Err(detail) => panic!(
+                "a dispatched run with a configured plan must reach verification, got {detail}"
+            ),
+        }
+        .expect("a configured plan must not be a typed skip");
+        assert_eq!(material.execution_request.worktree, worktree.path());
+        assert_eq!(material.required_checks, vec!["lint"]);
+
+        // The bound value is the project's selection snapshotted at dispatch —
+        // not a read-time substitution, which is why the mismatch check inside
+        // the resolver stays satisfiable rather than bypassed.
+        let bound = TaskRunRepository::new(fx.agent.db.clone())
+            .catalog_image_id(&fx.task_run_id)
+            .await
+            .expect("read dispatch-bound catalog image");
+        let selected = ImageRepository::new(fx.agent.db.clone())
+            .resolve_for_project(&fx.project_id)
+            .await
+            .expect("resolve the project catalog selection")
+            .expect("the fixture project selects a catalog image");
+        assert_eq!(
+            bound.as_deref(),
+            Some(selected.id.as_str()),
+            "the per-attempt dispatch insert must bind the project's selected catalog image"
+        );
     }
 
     /// A configured plan reads the path persisted onto a pod-shaped NULL row.
