@@ -19,8 +19,8 @@ expression: section
 - `output_view(tool_use_id, limit?, offset?)`
 - `output_grep(pattern, tool_use_id, context_lines?)`
 - `output_list()`
-- `task_create(acceptance_criteria, epic_id, title, blocked_by?, description?, design?, issue_type?, labels?, owner?, parent_id?, priority?, status?)`
-- `task_update(id, acceptance_criteria?, blocked_by_add?, blocked_by_remove?, description?, design?, epic_id?, memory_refs_add?, memory_refs_remove?, owner?, priority?, status?, title?)`
+- `task_create(acceptance_criteria, epic_id, title, blocked_by?, description?, design?, execution_context?, issue_type?, labels?, owner?, parent_id?, priority?, status?)`
+- `task_update(id, acceptance_criteria?, blocked_by_add?, blocked_by_remove?, description?, design?, epic_id?, execution_context?, memory_refs_add?, memory_refs_remove?, owner?, priority?, status?, title?)`
 - `task_blocked_list(id)`
 - `epic_show(id)`
 - `epic_update(id, blocked_by_add?, blocked_by_remove?, description?, memory_refs_add?, memory_refs_remove?, status?, title?)`
