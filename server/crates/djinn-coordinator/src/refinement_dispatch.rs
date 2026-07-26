@@ -30,6 +30,7 @@ use super::evidence_lifecycle_state::EvidenceLifecycleState;
 use super::refinement::{RefinementPhase, StopReason, role_for_phase};
 
 use super::actor::CoordinatorActor;
+use super::refinement_inflight::DurableInflightRegistration;
 use super::refinement_outcome::RefinementOutcomeApplication;
 use super::types::InflightDispatch;
 use djinn_core::clock::{Clock, SystemClock};
@@ -196,6 +197,31 @@ impl CoordinatorActor {
                                 Ok(Some(proposal)) => proposal,
                                 Ok(None) | Err(_) => continue,
                             };
+                            // Register the in-flight projection BEFORE any gate
+                            // that can `continue`. The outcome path is the only
+                            // writer of the successor intent, and it is only
+                            // reachable through this projection — a materialized
+                            // intent whose role already ran must be observable
+                            // even when attribution or admission would deny a
+                            // fresh enqueue. Skipping this is what left every
+                            // durable run stuck at `materialized` forever.
+                            let role_ran = self
+                                .register_durable_refinement_inflight(DurableInflightRegistration {
+                                    run_id: &run.run_id,
+                                    generation: run.generation,
+                                    proposal: &proposal,
+                                    phase: intent.phase,
+                                    round: intent.round,
+                                    task_id: &task.id,
+                                })
+                                .await;
+                            if role_ran {
+                                // The role already produced a session. What the
+                                // run is owed now is its OUTCOME, not another
+                                // dispatch; re-enqueueing a finished (and by now
+                                // closed) role task would loop forever.
+                                continue;
+                            }
                             let Some(owner) = proposal.refinement_owner_user_id.as_deref() else {
                                 tracing::debug!(intent_id = %intent.intent_id, "awaiting durable refinement attribution");
                                 continue;
@@ -327,6 +353,19 @@ impl CoordinatorActor {
                 {
                     continue;
                 }
+                // Track the freshly materialized role as in-flight in the same
+                // pass that enqueues it, so its very first exit is observed and
+                // its outcome applied. Registering only on a later poll would
+                // leave a one-tick hole with no watcher.
+                self.register_durable_refinement_inflight(DurableInflightRegistration {
+                    run_id: &lease.run_id,
+                    generation: lease.generation,
+                    proposal: &proposal,
+                    phase: lease.phase,
+                    round: lease.round,
+                    task_id: &task_id,
+                })
+                .await;
                 let project_path = self.resolve_refinement_project_path(&run.proposal_id).await;
                 if let Err(error) = self.pool.dispatch(&task_id, &project_path, &model_id).await {
                     tracing::warn!(task_id = %task_id, %error, "durable refinement enqueue failed; task remains retryable");
@@ -1239,3 +1278,7 @@ mod refinement_wake_tests;
 #[cfg(test)]
 #[path = "refinement_durable_dispatch_tests.rs"]
 mod refinement_durable_dispatch_tests;
+
+#[cfg(test)]
+#[path = "refinement_durable_handoff_tests.rs"]
+mod refinement_durable_handoff_tests;

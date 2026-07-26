@@ -338,6 +338,7 @@ pub(crate) fn liveness_fields(result: &RefinementLivenessResult) -> (&'static st
                     RefinementLivenessEvidence::AwaitingEvidencePark => "awaiting_evidence_park",
                     RefinementLivenessEvidence::PendingIntent { .. } => "pending_intent",
                     RefinementLivenessEvidence::ClaimedIntent { .. } => "claimed_intent",
+                    RefinementLivenessEvidence::MaterializedIntent { .. } => "materialized_intent",
                     RefinementLivenessEvidence::OpenTask { .. } => "open_task",
                     RefinementLivenessEvidence::QueuedTask { .. } => "queued_task",
                     RefinementLivenessEvidence::RunningTask { .. } => "running_task",
