@@ -49,6 +49,15 @@
         assert_eq!(live.run_id.as_deref(), Some(run_id.as_str()));
         assert_eq!(live.liveness_evidence.as_deref(), Some("pending_intent"));
 
+        // Status must evaluate the durable expired lease rather than treating
+        // every claimed intent as live.
+        sqlx::query("UPDATE refinement_dispatch_intents SET state = 'claimed', claimed_by = 'test', claimed_at = '2000-01-01T00:00:00.000Z', claim_expires_at = '2000-01-01T00:00:01.000Z' WHERE run_id = $1")
+            .bind(&run_id).execute(db.pool()).await.unwrap();
+        sqlx::query("UPDATE refinement_runs SET heartbeat_at = '2000-01-01T00:00:00.000Z' WHERE id = $1")
+            .bind(&run_id).execute(db.pool()).await.unwrap();
+        let expired_claim = build_refinement_status(&repo, &proposal.id).await.unwrap();
+        assert_eq!(expired_claim.liveness.as_deref(), Some("stale"));
+
         djinn_db::test_support::make_refinement_run_phantom_for_test(&db, &run_id).await;
         let before = djinn_db::test_support::refinement_run_read_only_snapshot_for_test(&db, &proposal.id, &run_id).await;
         let stale = build_refinement_status(&repo, &proposal.id).await.unwrap();
@@ -61,14 +70,14 @@
         );
         assert_eq!(before, after, "status must not mutate a stale phantom");
 
-        sqlx::query("UPDATE refinement_runs SET state = 'parked', park_kind = 'awaiting_review' WHERE id = $1")
+        sqlx::query("UPDATE refinement_runs SET state = 'parked', park_kind = 'awaiting_review', parked_at = '2026-01-01T00:00:00.000Z' WHERE id = $1")
             .bind(&run_id).execute(db.pool()).await.unwrap();
         let parked = build_refinement_status(&repo, &proposal.id).await.unwrap();
         assert_eq!(parked.run_state.as_deref(), Some("parked"));
         assert_eq!(parked.liveness_evidence.as_deref(), Some("awaiting_review_park"));
         assert!(parked.awaiting_review);
 
-        sqlx::query(r#"UPDATE refinement_runs SET state = 'terminal', stop_tag = 'operator_stop', stop_context = '{"actor": "test", "reason": null}'::jsonb WHERE id = $1"#)
+        sqlx::query(r#"UPDATE refinement_runs SET state = 'terminal', terminal_at = '2026-01-01T00:00:00.000Z', stop_tag = 'operator_stop', stop_context = '{"actor": "test", "reason": null}'::jsonb WHERE id = $1"#)
             .bind(&run_id).execute(db.pool()).await.unwrap();
         let terminal = build_refinement_status(&repo, &proposal.id).await.unwrap();
         assert_eq!(terminal.run_state.as_deref(), Some("terminal"));

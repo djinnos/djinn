@@ -626,12 +626,30 @@ pub async fn build_refinement_status(
             Some(RefinementParkKind::AwaitingReview)
         )
     });
-    let stop_reason = exact.as_ref().and_then(|exact| match &exact.liveness {
-        RefinementLivenessResult::Terminal { reason } => {
-            reason.as_ref().map(|reason| reason.tag().to_string())
-        }
-        _ => None,
+    // A run snapshot is authoritative whenever one exists. For older
+    // proposals which predate durable runs, retain the historical stop label
+    // as display-only compatibility data; it never affects `active`.
+    let legacy_stop_reason = revisions.iter().rev().find_map(|revision| {
+        (revision.event_kind == "refinement_stop")
+            .then(|| revision.event_metadata.as_ref())
+            .flatten()
+            .and_then(|metadata| serde_json::from_str::<serde_json::Value>(metadata).ok())
+            .and_then(|metadata| {
+                ["reason_tag", "stop_reason", "reason"]
+                    .iter()
+                    .find_map(|key| metadata.get(key).and_then(|value| value.as_str()))
+            })
+            .map(str::to_owned)
     });
+    let stop_reason = exact
+        .as_ref()
+        .and_then(|exact| match &exact.liveness {
+            RefinementLivenessResult::Terminal { reason } => {
+                reason.as_ref().map(|reason| reason.tag().to_string())
+            }
+            _ => None,
+        })
+        .or_else(|| exact.is_none().then_some(legacy_stop_reason).flatten());
 
     Ok(ProposalRefinementStatusModel {
         active,
@@ -651,7 +669,10 @@ pub async fn build_refinement_status(
                 .as_ref()
                 .map(|heartbeat| heartbeat.heartbeat_at.0)
         }),
-        current_round: Some(current_round),
+        // Preserve the inactive no-run wire shape: an empty debate trail did
+        // not historically expose a synthetic first round. Exact runs do
+        // expose their current snapshot even before the first trail entry.
+        current_round: (!trail.is_empty() || exact.is_some()).then_some(current_round),
         dry_rounds,
         total_entries,
         stop_reason,
