@@ -718,9 +718,12 @@ impl LeaseInvocationRunner {
                                 // invocation-primary epoch (v1 enforcing) lifts;
                                 // shadow observes without lifting; every other
                                 // epoch (baseline, missing, unreadable, stale)
-                                // keeps the quota unleased. The durable lease is
-                                // still held and reconciled to terminal below in
-                                // all three cases, so `fence` is always recorded.
+                                // never lifts — and, because it can never lift,
+                                // the leaf it governs was already born WITHOUT a
+                                // quota, so there is nothing here to raise. The
+                                // durable lease is still held and reconciled to
+                                // terminal below in all three cases, so `fence` is
+                                // always recorded.
                                 // The decision resolved before launch, NOT a
                                 // fresh read: the birth quota was already
                                 // committed from it, so a re-read could ask for a
