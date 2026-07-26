@@ -1,3 +1,7 @@
+// djinn:allow-oversize
+// This module centralizes the shared JSON-schema builders consumed by every
+// role-specific MCP tool surface; splitting those builders would duplicate
+// schema fragments and risk their generated golden snapshots drifting.
 use rmcp::model::Tool as RmcpTool;
 use rmcp::object;
 
