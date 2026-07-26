@@ -642,9 +642,9 @@ pub async fn build_refinement_status(
         )
     });
     let awaiting_review = exact_awaiting_review || legacy_awaiting_review;
-    // A run snapshot is authoritative whenever one exists. For older
-    // proposals which predate durable runs, retain the historical stop label
-    // as display-only compatibility data; it never affects `active`.
+    // Retain the historical stop label as display-only compatibility data
+    // when the exact run has no terminal reason. It never affects `active`,
+    // run state, or liveness; those remain exact-snapshot-only.
     let legacy_stop_reason = revisions.iter().rev().find_map(|revision| {
         (revision.event_kind == "refinement_stop")
             .then_some(revision.event_metadata.as_ref())
@@ -665,7 +665,7 @@ pub async fn build_refinement_status(
             }
             _ => None,
         })
-        .or_else(|| exact.is_none().then_some(legacy_stop_reason).flatten());
+        .or(legacy_stop_reason);
 
     Ok(ProposalRefinementStatusModel {
         active,
