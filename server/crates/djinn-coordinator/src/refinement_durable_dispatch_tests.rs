@@ -508,3 +508,110 @@ async fn materialized_enqueue_failure_is_retried_with_the_same_task() {
         task_id
     );
 }
+
+/// Regression (proposal bzpt, 2026-07-26): the durable intent ledger is the
+/// ONLY dispatch path for a run with a `run_id` — `drive_one_refinement`
+/// returns early before the legacy `dispatch_next_refinement_phase` for any
+/// durable run. That ledger path used to inject the fixed literal
+/// `"Durable refinement intent dispatch."` as the readiness context and pass
+/// `None` for reviewer feedback, so every live tribunal role was dispatched
+/// blind:
+///
+/// * the Advocate never learned which DoR checks were failing, and
+/// * the Judge — whose prompt makes any injected `Current DoR status` other
+///   than the exact clean message a mandatory blocking reject — could never
+///   approve, regardless of spec quality.
+///
+/// On bzpt this produced advocate task pw4v whose entire description was
+/// "Current DoR status: Durable refinement intent dispatch." and a judge
+/// verdict that rejected a spec it had otherwise found complete.
+///
+/// This drives the real durable driver and asserts the materialized task
+/// carries the head-derived DoR failures, the lint summary, and the current
+/// reviewer feedback.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn durable_dispatch_injects_real_dor_findings_not_a_placeholder() {
+    let db = crate::test_helpers::create_test_db();
+    let fixture = refinement_cap_tests::seed_refinement_fixture(&db).await;
+    let (events_tx, _events_rx) = tokio::sync::broadcast::channel::<DjinnEventEnvelope>(256);
+    let pool = refinement_cap_tests::spawn_test_pool(&db, 4);
+    let mut actor = refinement_cap_tests::build_refinement_actor(&db, &events_tx, pool);
+
+    let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+
+    // Human demand-round feedback recorded against the current revision. The
+    // durable path used to drop this on the floor.
+    let reviewer_feedback = "REVIEWER-FEEDBACK-durable-path-bzpt";
+    repo.record_refinement_lifecycle(
+        &fixture.proposal_id,
+        "refinement_start",
+        Some(&serde_json::json!({
+            "source": "human_demand_round",
+            "reviewer_feedback": reviewer_feedback,
+            "reason": reviewer_feedback,
+        })),
+    )
+    .await
+    .expect("record demand-round reviewer feedback");
+
+    let (run_id, generation) = admit_run(&repo, &fixture.proposal_id, "durable-dor-injection").await;
+    let intent_id = only_intent(&repo, &run_id, generation).await;
+    actor.active_refinements.insert(
+        run_id.clone(),
+        super::super::refinement::RefinementLoopState::new(fixture.proposal_id.clone(), 0)
+            .with_run_identity(run_id.clone(), generation)
+            .with_attributed_user(Some(fixture.user_id.clone())),
+    );
+
+    // Independently establish what the shared evaluator says about this head,
+    // so the assertions below are pinned to real findings rather than to any
+    // string the dispatcher happens to emit.
+    let readiness = actor
+        .evaluate_proposal_readiness(&fixture.proposal_id)
+        .await
+        .expect("fixture readiness resolves");
+    assert!(
+        !readiness.ready,
+        "fixture head (one-line body, empty ACs) must fail DoR for this test to be non-vacuous"
+    );
+    let expected_failures = readiness
+        .to_error_string()
+        .expect("failing head must render failure text");
+
+    actor.drive_active_refinements().await;
+
+    let task = TaskRepository::new(db.clone(), EventBus::noop())
+        .find_by_refinement_intent_id(&intent_id)
+        .await
+        .expect("read materialized task")
+        .expect("durable driver materialized a task");
+
+    assert!(
+        !task.description.contains("Durable refinement intent dispatch"),
+        "durable dispatch must not inject a placeholder readiness context:\n{}",
+        task.description
+    );
+    assert!(
+        task.description.contains(&expected_failures),
+        "durable dispatch must inject the head-derived DoR failures ({expected_failures}):\n{}",
+        task.description
+    );
+    assert!(
+        task.description
+            .contains("Latest SpecLintResultV1 summary (errors and warnings):"),
+        "durable dispatch must inject the shared lint summary:\n{}",
+        task.description
+    );
+    assert!(
+        !task
+            .description
+            .contains("Proposal currently meets all DoR checks."),
+        "a failing head must never render the clean DoR message the Judge treats as pass:\n{}",
+        task.description
+    );
+    assert!(
+        task.description.contains(reviewer_feedback),
+        "durable dispatch must inject current-revision reviewer feedback:\n{}",
+        task.description
+    );
+}
