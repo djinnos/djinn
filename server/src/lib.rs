@@ -12,6 +12,7 @@ pub mod leadership;
 pub mod logging;
 mod mcp_bridge;
 pub mod mirror_fetcher;
+pub mod readiness_pin_resolver;
 pub mod server;
 pub mod server_memory;
 pub mod sse;
