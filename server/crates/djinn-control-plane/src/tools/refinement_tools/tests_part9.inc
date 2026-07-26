@@ -107,16 +107,15 @@
         sqlx::query("UPDATE refinement_runs SET heartbeat_at = '2000-01-01T00:00:00.000Z' WHERE id = $1")
             .bind(&run_id).execute(db.pool()).await.unwrap();
         let (project_id, task_id) = seed_status_task(&db, &run_id, "open").await;
-        for (task_status, evidence) in [
-            ("open", "open_task"), ("queued", "queued_task"),
-            ("in_progress", "running_task"), ("pool_paused", "pool_paused_task"),
-        ] {
+        // A materialized exact-run intent precedes all task, session, and
+        // heartbeat fallbacks in the shared evaluator.
+        for task_status in ["open", "queued", "in_progress", "pool_paused"] {
             sqlx::query("UPDATE tasks SET status = $1 WHERE id = $2")
                 .bind(task_status).bind(&task_id).execute(db.pool()).await.unwrap();
             let status = build_refinement_status(&repo, &proposal.id).await.unwrap();
             assert_eq!(status.run_id.as_deref(), Some(run_id.as_str()));
             assert_eq!(status.liveness.as_deref(), Some("live"));
-            assert_eq!(status.liveness_evidence.as_deref(), Some(evidence));
+            assert_eq!(status.liveness_evidence.as_deref(), Some("materialized_intent"));
             assert!(status.active);
         }
 
@@ -126,7 +125,7 @@
         let session = build_refinement_status(&repo, &proposal.id).await.unwrap();
         assert_eq!(session.run_id.as_deref(), Some(run_id.as_str()));
         assert_eq!(session.liveness.as_deref(), Some("live"));
-        assert_eq!(session.liveness_evidence.as_deref(), Some("live_session"));
+        assert_eq!(session.liveness_evidence.as_deref(), Some("materialized_intent"));
         assert!(session.active);
         sqlx::query("UPDATE sessions SET status = 'completed' WHERE id = $1")
             .bind(&session_id).execute(db.pool()).await.unwrap();
@@ -135,7 +134,7 @@
         let heartbeat = build_refinement_status(&repo, &proposal.id).await.unwrap();
         assert_eq!(heartbeat.run_id.as_deref(), Some(run_id.as_str()));
         assert_eq!(heartbeat.liveness.as_deref(), Some("live"));
-        assert_eq!(heartbeat.liveness_evidence.as_deref(), Some("fresh_heartbeat"));
+        assert_eq!(heartbeat.liveness_evidence.as_deref(), Some("materialized_intent"));
         assert!(heartbeat.active);
     }
 
