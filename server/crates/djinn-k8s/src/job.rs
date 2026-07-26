@@ -478,6 +478,13 @@ pub fn build_task_run_job(
         //     without this volume every armed pod dies `EROFS` with zero
         //     sessions. See `crate::invocation_journal`.
         volumes.push(invocation_journal_volume());
+        //   * `launcher-tmp` / `launcher-home` — writable `/tmp` and `$HOME`
+        //     for a brokered child. `readOnlyRootFilesystem: true` takes the
+        //     image's copies away, and the worker container (which has neither
+        //     flag) keeps them, so arming would otherwise REGRESS the
+        //     unbrokered path. Measured: `git config --global` fails
+        //     `Read-only file system` without these. See `launcher_child_fs`.
+        volumes.extend(crate::launcher_child_fs::launcher_scratch_volumes());
     }
     // Backing-service sidecars share a Memory /dev/shm (Postgres needs more than
     // the 64Mi default). Added only when services are injected so the manifest
@@ -509,7 +516,12 @@ pub fn build_task_run_job(
     // empty so no product databases start.
     let mut init_container_vec = Vec::new();
     if renders_launcher {
-        init_container_vec.push(launcher_sidecar_container(config, project_image_tag));
+        init_container_vec.push(launcher_sidecar_container(
+            config,
+            project_image_tag,
+            mirror_read_only,
+            cache_read_only,
+        ));
     }
     init_container_vec.extend(
         effective_services
@@ -1647,8 +1659,9 @@ mod tests {
         let volumes = pod.volumes.as_ref().expect("volumes set");
         assert_eq!(
             volumes.len(),
-            9,
-            "expected 9 volumes including launcher surfaces and the invocation journal"
+            11,
+            "expected 11 volumes: launcher surfaces, the invocation journal and \
+             the launcher's own /tmp + $HOME"
         );
         let expected_volume_names = [
             VOLUME_SPEC,
@@ -1660,6 +1673,10 @@ mod tests {
             crate::launcher::VOLUME_LAUNCHER_IPC,
             crate::launcher::VOLUME_LAUNCHER_CGROUP,
             crate::invocation_journal::VOLUME_INVOCATION_JOURNAL,
+            // The launcher's writable /tmp and $HOME: `readOnlyRootFilesystem`
+            // takes the image's copies away from a brokered child.
+            crate::launcher_child_fs::VOLUME_LAUNCHER_TMP,
+            crate::launcher_child_fs::VOLUME_LAUNCHER_HOME,
         ];
         for (volume, expected_name) in volumes.iter().zip(expected_volume_names.iter()) {
             assert_eq!(&volume.name, expected_name);

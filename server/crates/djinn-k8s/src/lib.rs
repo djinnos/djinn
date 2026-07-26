@@ -16,6 +16,7 @@ pub mod invocation_journal;
 pub mod job;
 pub mod label_value;
 pub mod launcher;
+pub mod launcher_child_fs;
 mod launcher_cpu;
 pub mod runtime;
 pub mod secret;
