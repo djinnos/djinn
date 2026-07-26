@@ -11,6 +11,95 @@ pub struct EffectiveCreatorProvenance<'a> {
     pub proposal_id: Option<&'a str>,
 }
 
+/// Facts for the one Architect task that identifies readiness composition.
+pub(crate) struct ReadinessIdentificationTask<'a> {
+    pub project_id: &'a str,
+    pub creator_user_id: &'a str,
+    pub run_id: &'a str,
+    pub repository_snapshot: &'a str,
+    pub skill_name: &'a str,
+    pub skill_version: &'a str,
+}
+
+/// Load a task using the canonical task projection while a caller-owned
+/// transaction remains open.
+pub(crate) async fn load_task_in_transaction(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    id: &str,
+) -> Result<Task> {
+    task_select_where_id!(id)
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(Into::into)
+}
+
+/// Insert the identification task in the caller's transaction. This retains
+/// task creator validation and durable task conventions while preventing a
+/// readiness run from committing without its first task.
+pub(crate) async fn create_readiness_identification_task_in_transaction(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    input: ReadinessIdentificationTask<'_>,
+) -> Result<Task> {
+    let created_by_user_id = resolve_effective_creator(
+        tx,
+        EffectiveCreatorProvenance::explicit_user_id(input.creator_user_id),
+        None,
+    )
+    .await?;
+    let execution_context = serde_json::to_value(
+        djinn_core::models::TaskExecutionContext::readiness_guardrail_analysis(
+            input.skill_name,
+            input.skill_version,
+        )?,
+    )
+    .map_err(|error| Error::InvalidData(format!("invalid task execution context: {error}")))?;
+    let description = serde_json::json!({
+        "kind": "readiness_identification",
+        "run_id": input.run_id,
+        "project_id": input.project_id,
+        "owner": input.creator_user_id,
+        "repository_snapshot": input.repository_snapshot,
+        "skill_name": input.skill_name,
+        "skill_version": input.skill_version,
+    })
+    .to_string();
+    for _ in 0..16 {
+        let id = uuid::Uuid::now_v7().to_string();
+        let seed =
+            uuid::Uuid::parse_str(&id).map_err(|error| Error::Internal(error.to_string()))?;
+        let short_id = short_id_from_uuid(&seed);
+        let exists: Option<i32> = sqlx::query_scalar("SELECT 1 FROM tasks WHERE short_id = $1")
+            .bind(&short_id)
+            .fetch_optional(&mut **tx)
+            .await?;
+        if exists.is_some() {
+            continue;
+        }
+        sqlx::query(
+            "INSERT INTO tasks
+                (id, project_id, short_id, title, description, design, issue_type,
+                 priority, owner, status, acceptance_criteria, agent_type,
+                 execution_context, created_by_user_id)
+             VALUES ($1, $2, $3, $4, $5, '', 'task', 0, $6, 'open', '[]'::jsonb,
+                     'architect', $7, $8)",
+        )
+        .bind(&id)
+        .bind(input.project_id)
+        .bind(&short_id)
+        .bind("Identify readiness composition areas")
+        .bind(&description)
+        .bind(input.creator_user_id)
+        .bind(execution_context)
+        .bind(created_by_user_id)
+        .execute(&mut **tx)
+        .await?;
+        return load_task_in_transaction(tx, &id).await;
+    }
+    Err(Error::Internal(
+        "short_id collision after 16 retries".into(),
+    ))
+}
+
 impl<'a> EffectiveCreatorProvenance<'a> {
     /// Provenance for a producer that already has a concrete persisted user.
     pub fn explicit_user_id(user_id: &'a str) -> Self {

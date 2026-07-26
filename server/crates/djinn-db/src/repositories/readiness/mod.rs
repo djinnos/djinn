@@ -1,5 +1,13 @@
 //! Typed, transactional persistence for Agent Readiness runs.
-use crate::{Error, Result, database::Database};
+use crate::{
+    Error, Result,
+    database::Database,
+    repositories::task::{
+        ReadinessIdentificationTask, create_readiness_identification_task_in_transaction,
+        load_task_in_transaction,
+    },
+};
+use djinn_core::models::Task;
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 use uuid::Uuid;
@@ -16,6 +24,20 @@ pub struct ReadinessRunRow {
     pub expected_area_count: Option<i32>,
     pub created_at: String,
     pub completed_at: Option<String>,
+}
+#[derive(Clone, Debug)]
+pub struct MaterializeReadinessKickoff {
+    pub project_id: String,
+    pub creator_user_id: String,
+    pub idempotency_key: String,
+    pub repository_snapshot: String,
+    pub skill_name: String,
+    pub skill_version: String,
+}
+#[derive(Clone, Debug)]
+pub struct ReadinessKickoffMaterialization {
+    pub run: ReadinessRunRow,
+    pub identification_task: Task,
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, FromRow)]
 pub struct ReadinessCompositionAreaRow {
@@ -120,6 +142,60 @@ pub struct ReadinessRepository {
 impl ReadinessRepository {
     pub fn new(db: Database) -> Self {
         Self { db }
+    }
+    pub async fn materialize_kickoff(
+        &self,
+        input: MaterializeReadinessKickoff,
+    ) -> Result<ReadinessKickoffMaterialization> {
+        for (field, value) in [
+            ("project_id", &input.project_id),
+            ("creator_user_id", &input.creator_user_id),
+            ("idempotency_key", &input.idempotency_key),
+            ("repository_snapshot", &input.repository_snapshot),
+            ("skill_name", &input.skill_name),
+            ("skill_version", &input.skill_version),
+        ] {
+            if value.trim().is_empty() {
+                return Err(Error::InvalidData(format!(
+                    "readiness kickoff {field} must be non-empty"
+                )));
+            }
+        }
+        self.db.ensure_initialized().await?;
+        let mut tx = self.db.pool().begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(&input.project_id)
+            .execute(&mut *tx)
+            .await?;
+        let active: Option<ReadinessRunRow> = sqlx::query_as("SELECT id,project_id,idempotency_key,status,repository_snapshot,skill_name,skill_version,expected_area_count,created_at,completed_at FROM readiness_runs WHERE project_id=$1 AND status IN ('identifying','analyzing','aggregating') FOR UPDATE").bind(&input.project_id).fetch_optional(&mut *tx).await?;
+        let run = match active {
+            Some(run) => run,
+            None => sqlx::query_as("INSERT INTO readiness_runs (id,project_id,idempotency_key,repository_snapshot,skill_name,skill_version) VALUES ($1,$2,$3,$4,$5,$6) RETURNING id,project_id,idempotency_key,status,repository_snapshot,skill_name,skill_version,expected_area_count,created_at,completed_at")
+                .bind(Uuid::now_v7().to_string()).bind(&input.project_id).bind(&input.idempotency_key).bind(&input.repository_snapshot).bind(&input.skill_name).bind(&input.skill_version).fetch_one(&mut *tx).await?,
+        };
+        let task_id: Option<String> = sqlx::query_scalar("SELECT id FROM tasks WHERE project_id=$1 AND (CASE WHEN description LIKE '{%' THEN description::jsonb ELSE '{}'::jsonb END) ->> 'kind' = 'readiness_identification' AND (CASE WHEN description LIKE '{%' THEN description::jsonb ELSE '{}'::jsonb END) ->> 'run_id' = $2 FOR UPDATE").bind(&run.project_id).bind(&run.id).fetch_optional(&mut *tx).await?;
+        let identification_task = match task_id {
+            Some(id) => load_task_in_transaction(&mut tx, &id).await?,
+            None => {
+                create_readiness_identification_task_in_transaction(
+                    &mut tx,
+                    ReadinessIdentificationTask {
+                        project_id: &run.project_id,
+                        creator_user_id: &input.creator_user_id,
+                        run_id: &run.id,
+                        repository_snapshot: &run.repository_snapshot,
+                        skill_name: &run.skill_name,
+                        skill_version: &run.skill_version,
+                    },
+                )
+                .await?
+            }
+        };
+        tx.commit().await?;
+        Ok(ReadinessKickoffMaterialization {
+            run,
+            identification_task,
+        })
     }
     pub async fn create_run(&self, i: CreateReadinessRun) -> Result<ReadinessRunRow> {
         self.db.ensure_initialized().await?;

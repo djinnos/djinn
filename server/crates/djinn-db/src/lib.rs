@@ -198,8 +198,9 @@ pub use repositories::{
     },
     readiness::{
         CreateReadinessAreaAttempt, CreateReadinessCompositionArea, CreateReadinessRun,
-        NewReadinessEvent, NewReadinessFinding, NewReadinessSuggestion, ReadinessAreaAttemptRow,
-        ReadinessCompositionAreaRow, ReadinessGuardrailFindingRow,
+        MaterializeReadinessKickoff, NewReadinessEvent, NewReadinessFinding,
+        NewReadinessSuggestion, ReadinessAreaAttemptRow, ReadinessCompositionAreaRow,
+        ReadinessGuardrailFindingRow, ReadinessKickoffMaterialization,
         ReadinessRemediationSuggestionRow, ReadinessRepository, ReadinessRunDetail,
         ReadinessRunEventRow, ReadinessRunRow,
     },
