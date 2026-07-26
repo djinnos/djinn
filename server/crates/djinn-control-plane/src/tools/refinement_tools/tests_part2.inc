@@ -599,12 +599,14 @@
         };
         djinn_db::test_support::make_refinement_run_phantom_for_test(&db, &old_run_id).await;
 
-        let response = server.dispatch_tool("proposal_refinement_demand_round", serde_json::json!({
-            "proposal_id": proposal.id, "reason": "replace stale phantom",
-            "request_id": "replace-stale-phantom-019f"
-        })).await.unwrap();
-        assert_eq!(response["accepted"], true);
-        assert_ne!(response["error"], "AlreadyActive");
+        for _ in 0..2 {
+            let response = server.dispatch_tool("proposal_refinement_demand_round", serde_json::json!({
+                "proposal_id": proposal.id, "reason": "replace stale phantom",
+                "request_id": "replace-stale-phantom-019f"
+            })).await.unwrap();
+            assert_eq!(response["accepted"], true);
+            assert_ne!(response["error"], "AlreadyActive");
+        }
 
         let runs = repo.load_refinement_run_aggregates(&proposal.id, 60_000).await.unwrap();
         assert_eq!(runs.len(), 2, "one old run and exactly one successor");
