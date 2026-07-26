@@ -12,7 +12,9 @@ use crate::file_time::destructive_class::WORKTREE_LOCAL_FILE_MUTATION;
 use crate::process::{CgroupLauncherClient, LeaseInvocationRunner, ProcessHandle};
 use djinn_cgroup_launcher::CpuStat;
 use djinn_core::clock::SystemClock;
-use djinn_supervisor::services::{LeaseFencingToken, TaskInvocationLeaseIdentity};
+use djinn_supervisor::services::{
+    DurableInvocationLiftAuthority, LeaseFencingToken, TaskInvocationLeaseIdentity,
+};
 use std::io;
 use std::process::{Command, ExitStatus};
 use std::sync::{Arc, Mutex};
@@ -380,6 +382,10 @@ async fn shell_dispatch_broker_backed_cargo_records_exactly_one_observation() {
     );
     let runner = Arc::new(LeaseInvocationRunner::new(
         Arc::new(djinn_supervisor::services::rpc::UnimplementedRpcServices::new()),
+        Arc::new(DurableInvocationLiftAuthority::new(
+            state.db.clone(),
+            "shell-dispatch-test",
+        )),
         Arc::new(launcher.clone()),
         Arc::new(SystemClock::new()),
     ));
@@ -489,6 +495,14 @@ async fn shell_dispatch_lease_queue_timeout_returns_the_command_result_not_an_er
         Arc::new(crate::direct_services::DirectServices::new(
             state.clone(),
             CancellationToken::new(),
+        )),
+        // The real durable admission authority over the same real database the
+        // lease authority above uses. The composition under test is
+        // `call_shell` -> `ShellLaunchContext` -> `LeaseInvocationRunner` ->
+        // durable `admission_handoff` read; nothing here fakes the decision.
+        Arc::new(DurableInvocationLiftAuthority::new(
+            state.db.clone(),
+            "shell-dispatch-test",
         )),
         Arc::new(launcher.clone()),
         Arc::new(SystemClock::new()),

@@ -46,7 +46,12 @@ fn shadow_epoch_emits_both_would_throttle_arms_from_production_paths() {
                 });
             let launcher = Arc::new(ScriptedLauncher::default());
             let cancel = CancellationToken::new();
-            let runner = LeaseInvocationRunner::new(services.clone(), launcher.clone(), clock());
+            let runner = LeaseInvocationRunner::new(
+                services.clone(),
+                services.clone(),
+                launcher.clone(),
+                clock(),
+            );
             let run_cancel = cancel.clone();
             let run =
                 tokio::spawn(async move { runner.output(command(), config(), run_cancel).await });
@@ -64,7 +69,12 @@ fn shadow_epoch_emits_both_would_throttle_arms_from_production_paths() {
             let services = Arc::new(ScriptedServices::new(vec![], vec![], vec![]));
             services.set_lift_decision(djinn_supervisor::services::InvocationLiftDecision::Shadow);
             let launcher = Arc::new(BrokerBackedLauncher::running(0));
-            let runner = LeaseInvocationRunner::new(services.clone(), launcher.clone(), clock());
+            let runner = LeaseInvocationRunner::new(
+                services.clone(),
+                services.clone(),
+                launcher.clone(),
+                clock(),
+            );
             let cancel = CancellationToken::new();
             let run_cancel = cancel.clone();
             let run =

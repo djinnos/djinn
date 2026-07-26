@@ -37,7 +37,7 @@ use djinn_orchestration_types::coordinator::BackgroundWorkTracker;
 use djinn_provider::catalog::{CatalogService, HealthTracker};
 use djinn_slot::reply_loop::CompactionCriticalSection;
 use djinn_supervisor::SupervisorServices;
-use djinn_supervisor::services::WatchdogTerminationRequest;
+use djinn_supervisor::services::{DurableInvocationLiftAuthority, WatchdogTerminationRequest};
 
 /// Shared tracker for per-task last-activity timestamps (unix seconds).
 /// Used by stall detection to kill sessions that stop producing tokens.
@@ -79,11 +79,28 @@ pub struct ShellLaunchContext {
 }
 
 impl ShellLaunchContext {
+    /// Compose the broker-backed shell authority.
+    ///
+    /// # `admission_db` is the PLATFORM database, and it is not optional
+    ///
+    /// The build-lease escalation this context arms is governed by the durable
+    /// `admission_handoff` epoch, which lives in the platform database. This
+    /// constructor therefore takes the handle and builds the authority itself,
+    /// rather than accepting a pre-made authority or reading an environment
+    /// variable: goxi launcher blocker 13 was a composition defect, where the
+    /// runner was handed a `SupervisorServices` (`RpcServices`) whose defaulted
+    /// `invocation_lift_decision` returned `Unleased` for every invocation while
+    /// the epoch was fully armed. Nothing here can now opt out of the read, and
+    /// the only `Database` a task-run Pod has is the one
+    /// `bootstrap_warm_database()` opens from `DJINN_DATABASE_URL` — never the
+    /// project's `DATABASE_URL` catalog-service sidecar, which has no
+    /// `admission_handoff` table at all.
     pub async fn broker_backed(
         task_id: String,
         task_run_id: String,
         pod_uid: String,
         services: Arc<dyn SupervisorServices>,
+        admission_db: Database,
         client: UnixBrokerClient,
     ) -> std::io::Result<Self> {
         // The journal directory must be a WRITABLE mount. `/var/run/djinn` in a
@@ -162,6 +179,10 @@ impl ShellLaunchContext {
             runner: Arc::new(
                 LeaseInvocationRunner::new(
                     services,
+                    Arc::new(DurableInvocationLiftAuthority::new(
+                        admission_db,
+                        "in-pod worker",
+                    )),
                     Arc::new(UnixBrokerLauncher::new(client, 0)),
                     Arc::new(SystemClock::new()),
                 )

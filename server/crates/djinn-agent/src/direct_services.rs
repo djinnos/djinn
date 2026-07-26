@@ -33,10 +33,10 @@ use djinn_db::{EffectiveCreatorProvenance, SessionRepository};
 use djinn_stack::environment::EnvironmentConfig;
 use djinn_supervisor::services::wire::{PlannerAttemptResult, PlannerOutcome};
 use djinn_supervisor::services::{
-    CostBasisHint, InvocationLiftDecision, LeaseAbandonRequest, LeaseBindRequest,
-    LeaseCancelRequest, LeaseGrantRequest, LeaseQueueRequest, LeaseReleaseRequest, LeaseResult,
-    LeaseStatusRequest, SerializableCreateSessionParams, SerializableCreateTaskRunParams,
-    SerializableDjinnEvent, WatchdogTerminationRequest, evaluate_invocation_lift,
+    CostBasisHint, LeaseAbandonRequest, LeaseBindRequest, LeaseCancelRequest, LeaseGrantRequest,
+    LeaseQueueRequest, LeaseReleaseRequest, LeaseResult, LeaseStatusRequest,
+    SerializableCreateSessionParams, SerializableCreateTaskRunParams, SerializableDjinnEvent,
+    WatchdogTerminationRequest,
 };
 use djinn_supervisor::{
     BranchPublicationResult, RoleKind, StageError, StageOutcome, SupervisorServices,
@@ -1036,17 +1036,15 @@ impl SupervisorServices for DirectServices {
             .map_err(|e| e.to_string())
     }
 
-    /// Read the durable admission epoch (host in-process path) and project
-    /// whether a bound v1 invocation may lift the launcher quota. Any read
-    /// failure fails closed to [`InvocationLiftDecision::Unleased`].
-    async fn invocation_lift_decision(&self) -> InvocationLiftDecision {
-        let row =
-            djinn_db::AdmissionHandoffRepository::new(self.callbacks.agent_context.db.clone())
-                .read()
-                .await
-                .map_err(|_| ());
-        evaluate_invocation_lift(row)
-    }
+    // The durable lift decision is deliberately NOT implemented here. It was —
+    // as an override of a defaulted `SupervisorServices` method — and the override
+    // was unreachable: no production path composes a `LeaseInvocationRunner` around
+    // `DirectServices`. Meanwhile the path that does (the in-pod worker, around
+    // `RpcServices`) inherited the fail-closed default and never lifted a single
+    // quota against a fully armed epoch (goxi launcher blocker 13). The decision now
+    // travels as `djinn_supervisor::services::DurableInvocationLiftAuthority`,
+    // injected where the runner is built, so an unimplemented authority is a
+    // compile error rather than a silent `Unleased`.
 
     /// Record this live generation's acknowledgement of the current admission
     /// epoch (host in-process path). Idempotent + stale-fenced in the database.

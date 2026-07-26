@@ -23,7 +23,9 @@ pub mod rpc;
 pub mod server;
 pub mod wire;
 
-pub use invocation_admission::evaluate_invocation_lift;
+pub use invocation_admission::{
+    DurableInvocationLiftAuthority, InvocationLiftAuthority, evaluate_invocation_lift,
+};
 pub use lease::*;
 pub use wire::{
     BillingSource, CostBasisHint, SerializableCreateSessionParams, SerializableCreateTaskRunParams,
@@ -95,13 +97,17 @@ pub trait SupervisorServices: Send + Sync + 'static {
         Err("exact-pod watchdog termination is unavailable".to_owned())
     }
 
-    /// Read the current durable admission epoch and project whether a bound v1
-    /// invocation may lift the launcher cpu.max quota. The default fails closed
-    /// ([`InvocationLiftDecision::Unleased`]) so an impl without coordination
-    /// state never authorizes a lift.
-    async fn invocation_lift_decision(&self) -> InvocationLiftDecision {
-        InvocationLiftDecision::Unleased
-    }
+    // There is deliberately no `invocation_lift_decision` here.
+    //
+    // It used to live on this trait with a fail-closed default, and that default
+    // is what shipped: the in-pod launcher path composes its runner around
+    // `RpcServices`, which never overrode it, so every production invocation read
+    // `Unleased` from a fully armed epoch (goxi launcher blocker 13). A defaulted
+    // authority method cannot distinguish "this impl has nothing to say" from "no
+    // admission control exists", and every new impl opts out of the feature by
+    // saying nothing. The decision now travels as its own mandatory dependency —
+    // [`InvocationLiftAuthority`] — injected at the composition root. Do not
+    // re-add it here.
 
     /// Record this live generation's acknowledgement of the current admission
     /// epoch, once the task-run is healthy under the new mode. `generation_key`

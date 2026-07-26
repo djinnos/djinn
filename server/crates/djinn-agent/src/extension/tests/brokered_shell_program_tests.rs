@@ -259,6 +259,14 @@ async fn brokered_shell(command: &str) -> (serde_json::Value, Conversion) {
     let launcher = ProofLauncher::new(worktree.path());
     let runner = Arc::new(LeaseInvocationRunner::new(
         Arc::new(djinn_supervisor::services::rpc::UnimplementedRpcServices::new()),
+        // The real durable authority over this test's real database — the same
+        // composition production runs, not a decision double.
+        Arc::new(
+            djinn_supervisor::services::DurableInvocationLiftAuthority::new(
+                state.db.clone(),
+                "brokered-shell-program-test",
+            ),
+        ),
         Arc::new(launcher.clone()),
         Arc::new(SystemClock::new()),
     ));
