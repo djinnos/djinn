@@ -4022,8 +4022,11 @@ mod tests {
     }
 
     #[test]
-    fn phantom_reap_counter_has_one_bounded_reason_series() {
-        let (_, rendered) = render_isolated(refinement_run::increment_reaped_phantom);
+    fn phantom_reap_counter_counts_each_committed_event_in_one_bounded_series() {
+        let (_, rendered) = render_isolated(|| {
+            refinement_run::increment_reaped_phantom();
+            refinement_run::increment_reaped_phantom();
+        });
 
         assert_eq!(
             labeled_sample_value(
@@ -4031,7 +4034,7 @@ mod tests {
                 REFINEMENT_RUN_REAPED_TOTAL,
                 &[("reason", refinement_run::REASON_PHANTOM)],
             ),
-            1.0
+            2.0
         );
         let samples: Vec<_> = rendered
             .lines()

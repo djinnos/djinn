@@ -1,3 +1,4 @@
+// djinn:allow-oversize
 use std::path::{Path, PathBuf};
 
 use djinn_core::events::{DjinnEventEnvelope, EventBus};
