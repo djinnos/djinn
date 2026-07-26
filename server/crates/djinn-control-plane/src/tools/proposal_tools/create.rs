@@ -111,6 +111,7 @@ async fn successful_mutation_response(
         Err(error) => err_single(error),
     }
 }
+
 // ── Target/show response helpers ─────────────────────────────────────────────
 
 /// List a proposal's targets and resolve each project id to an `owner/repo`
@@ -1084,7 +1085,16 @@ impl DjinnMcpServer {
             )
             .await
         {
-            Ok(updated) => Json(successful_mutation_response(&repo, updated).await),
+            Ok(updated) => {
+                if let Err(error) = super::revision_admission::admit_committed_revision_resume(
+                    self, &repo, &existing, &updated,
+                )
+                .await
+                {
+                    return Json(err_single(error));
+                }
+                Json(successful_mutation_response(&repo, updated).await)
+            }
             Err(e) => Json(proposal_mutation_error(e)),
         }
     }
@@ -1151,7 +1161,16 @@ impl DjinnMcpServer {
             )
             .await
         {
-            Ok(updated) => Json(successful_mutation_response(&repo, updated).await),
+            Ok(updated) => {
+                if let Err(error) = super::revision_admission::admit_committed_revision_resume(
+                    self, &repo, &existing, &updated,
+                )
+                .await
+                {
+                    return Json(err_single(error));
+                }
+                Json(successful_mutation_response(&repo, updated).await)
+            }
             Err(e) => Json(proposal_mutation_error(e)),
         }
     }

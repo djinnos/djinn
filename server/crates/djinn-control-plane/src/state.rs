@@ -524,6 +524,9 @@ pub mod stubs {
         async fn trigger_dispatch_for_project(&self, _: &str) -> Result<(), String> {
             Err("coordinator not initialized".into())
         }
+        async fn wake_refinement_run(&self, _: String) -> Result<(), String> {
+            Ok(())
+        }
         async fn run_retrieval_health_checks(
             &self,
             check_names: Vec<String>,

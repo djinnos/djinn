@@ -33,6 +33,10 @@ pub struct CoordinatorStatus {
 pub trait CoordinatorOps: Send + Sync {
     fn get_status(&self) -> Result<CoordinatorStatus, String>;
     async fn trigger_dispatch_for_project(&self, project_id: &str) -> Result<(), String>;
+    /// Deliver a best-effort post-commit hint for one exact durable run.
+    async fn wake_refinement_run(&self, _run_id: String) -> Result<(), String> {
+        Err("coordinator refinement wake is not available".to_owned())
+    }
     /// Run retrieval checks through the coordinator-owned source and its
     /// production reconciliation contract. MCP cannot reconcile independently.
     async fn run_retrieval_health_checks(
