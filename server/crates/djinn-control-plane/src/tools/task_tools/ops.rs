@@ -675,7 +675,6 @@ mod tests {
             memory_refs: Vec::new(),
             blocked_by_refs: Vec::new(),
             agent_type: None,
-            execution_context: None,
             epic_ref: Some(epic_ref.to_owned()),
         }
     }
