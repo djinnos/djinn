@@ -246,8 +246,10 @@ impl RefinementPhantomActiveSource for ProposalRepositoryRefinementPhantomActive
 mod tests {
     use super::*;
     use djinn_core::refinement_liveness::{
-        RefinementHeartbeatSnapshot, RefinementIntentSnapshot, RefinementIntentState,
-        RefinementPhase, RefinementRole, RefinementRunSnapshot, RefinementRunState,
+        RefinementBetweenPhaseSnapshot, RefinementHeartbeatSnapshot, RefinementIntentSnapshot,
+        RefinementIntentState, RefinementParkKind, RefinementParkSnapshot, RefinementPhase,
+        RefinementRole, RefinementRunSnapshot, RefinementRunState, RefinementSessionEvidence,
+        RefinementSessionState, RefinementTaskEvidence, RefinementTaskState,
     };
 
     fn stale(run_id: &str) -> RefinementPhantomActiveSnapshot {
@@ -289,21 +291,145 @@ mod tests {
         assert!(check.fix(&findings[0]).is_err());
     }
 
-    #[test]
-    fn evaluator_live_intent_produces_no_finding() {
-        let mut live = stale("run-live");
-        live.snapshot.intents.push(RefinementIntentSnapshot {
-            intent_id: "intent".into(),
-            run_id: "run-live".into(),
+    fn pending_intent(run_id: &str) -> RefinementIntentSnapshot {
+        RefinementIntentSnapshot {
+            intent_id: format!("intent-{run_id}"),
+            run_id: run_id.into(),
             round: 1,
             state: RefinementIntentState::Pending,
             phase: RefinementPhase::AdversaryAttack,
             role: RefinementRole::Adversary,
             lease_expires_at: None,
+        }
+    }
+
+    #[test]
+    fn complete_live_evidence_matrix_produces_no_findings() {
+        let mut pending = stale("run-pending");
+        pending.snapshot.intents.push(pending_intent("run-pending"));
+        let mut open = stale("run-open");
+        open.snapshot.tasks.push(RefinementTaskEvidence {
+            task_id: "open-task".into(),
+            run_id: "run-open".into(),
+            intent_id: None,
+            state: RefinementTaskState::Open,
         });
-        let check = RefinementPhantomActiveCheck::new(Arc::new(
-            MemoryRefinementPhantomActiveSource::new(vec![live]),
-        ));
+        let mut queued = stale("run-queued");
+        queued.snapshot.tasks.push(RefinementTaskEvidence {
+            task_id: "queued-task".into(),
+            run_id: "run-queued".into(),
+            intent_id: None,
+            state: RefinementTaskState::Queued,
+        });
+        let mut session = stale("run-session");
+        session.snapshot.tasks.push(RefinementTaskEvidence {
+            task_id: "session-task".into(),
+            run_id: "run-session".into(),
+            intent_id: None,
+            state: RefinementTaskState::Closed,
+        });
+        session.snapshot.sessions.push(RefinementSessionEvidence {
+            session_id: "live-session".into(),
+            task_id: "session-task".into(),
+            run_id: "run-session".into(),
+            state: RefinementSessionState::Live,
+        });
+        let mut handoff = stale("run-handoff");
+        handoff.snapshot.between_phase = Some(RefinementBetweenPhaseSnapshot {
+            run_id: "run-handoff".into(),
+            next_intent: pending_intent("run-handoff"),
+        });
+        let mut review = stale("run-review");
+        review.snapshot.park = Some(RefinementParkSnapshot {
+            run_id: "run-review".into(),
+            kind: RefinementParkKind::AwaitingReview,
+        });
+        let mut evidence = stale("run-evidence");
+        evidence.snapshot.park = Some(RefinementParkSnapshot {
+            run_id: "run-evidence".into(),
+            kind: RefinementParkKind::AwaitingEvidence,
+        });
+        let check =
+            RefinementPhantomActiveCheck::new(Arc::new(MemoryRefinementPhantomActiveSource::new(
+                vec![pending, open, queued, session, handoff, review, evidence],
+            )));
         assert!(check.run().unwrap().is_empty());
+        let clean = RefinementPhantomActiveCheck::new(Arc::new(
+            MemoryRefinementPhantomActiveSource::new(vec![]),
+        ));
+        assert!(clean.run().unwrap().is_empty(), "clean/no-run fixture");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn repository_backed_check_is_repeatedly_read_only_and_never_reaps() {
+        use crate::refinement_dispatch::refinement_cap_tests::seed_refinement_fixture;
+        use djinn_core::events::{DjinnEventEnvelope, EventBus};
+        use djinn_db::{
+            AdmitRefinementRunRequest, ProposalRepository, RefinementAdmissionOutcome,
+            RefinementAdmissionSource,
+        };
+
+        let db = crate::test_helpers::create_test_db();
+        let fixture = seed_refinement_fixture(&db).await;
+        let repository = ProposalRepository::new(db.clone(), EventBus::noop());
+        let (run_id, generation) = match repository
+            .admit_refinement_run(AdmitRefinementRunRequest {
+                proposal_id: fixture.proposal_id.clone(),
+                idempotency_key: "doctor-read-only".into(),
+                source: RefinementAdmissionSource::Demand {
+                    demand_id: "doctor-read-only".into(),
+                },
+                heartbeat_grace_millis: HEARTBEAT_GRACE_MILLIS,
+            })
+            .await
+            .expect("admit stale fixture")
+        {
+            RefinementAdmissionOutcome::Admitted {
+                run_id, generation, ..
+            }
+            | RefinementAdmissionOutcome::Existing {
+                run_id, generation, ..
+            } => (run_id, generation),
+        };
+        djinn_db::test_support::make_refinement_run_phantom_for_test(&db, &run_id).await;
+        let (events_tx, _events_rx) = tokio::sync::broadcast::channel::<DjinnEventEnvelope>(16);
+        let check = RefinementPhantomActiveCheck::new(Arc::new(
+            ProposalRepositoryRefinementPhantomActiveSource::new(db.clone(), events_tx),
+        ));
+        let audit_before =
+            djinn_db::test_support::refinement_run_audit_for_test(&db, &run_id).await;
+        let heartbeat_before: String =
+            sqlx::query_scalar("SELECT heartbeat_at FROM refinement_runs WHERE id = $1")
+                .bind(&run_id)
+                .fetch_one(db.pool())
+                .await
+                .expect("read heartbeat");
+        let lifecycle_before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM proposal_revisions WHERE proposal_id = $1 AND refinement_run_id = $2").bind(&fixture.proposal_id).bind(&run_id).fetch_one(db.pool()).await.expect("count lifecycle rows");
+        for _ in 0..2 {
+            let findings = check.run().expect("run repository-backed doctor check");
+            assert_eq!(findings.len(), 1);
+            assert_eq!(findings[0].evidence["run_id"], run_id);
+            assert_eq!(findings[0].evidence["generation"], generation);
+        }
+        assert_eq!(
+            djinn_db::test_support::refinement_run_audit_for_test(&db, &run_id).await,
+            audit_before,
+            "run state and reap counter remain unchanged"
+        );
+        let heartbeat_after: String =
+            sqlx::query_scalar("SELECT heartbeat_at FROM refinement_runs WHERE id = $1")
+                .bind(&run_id)
+                .fetch_one(db.pool())
+                .await
+                .expect("read heartbeat");
+        let lifecycle_after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM proposal_revisions WHERE proposal_id = $1 AND refinement_run_id = $2").bind(&fixture.proposal_id).bind(&run_id).fetch_one(db.pool()).await.expect("count lifecycle rows");
+        assert_eq!(
+            heartbeat_after, heartbeat_before,
+            "doctor must not touch heartbeat"
+        );
+        assert_eq!(
+            lifecycle_after, lifecycle_before,
+            "doctor must not write lifecycle rows"
+        );
     }
 }
