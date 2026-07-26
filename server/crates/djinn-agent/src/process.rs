@@ -13,7 +13,7 @@
 use std::fs::{self, File, OpenOptions};
 use std::future::Future;
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -93,6 +93,22 @@ struct UnresolvedInvocation {
     recorded_at_ms: u128,
 }
 
+/// Re-wrap an `io::Error` from journal setup so the message carries the failing
+/// operation, the exact directory and the OS errno. The kind is preserved so
+/// callers that match on `ErrorKind` are unaffected.
+fn named_journal_error(operation: &str, directory: &Path, error: io::Error) -> io::Error {
+    let errno = error
+        .raw_os_error()
+        .map_or_else(|| "none".to_string(), |code| code.to_string());
+    io::Error::new(
+        error.kind(),
+        format!(
+            "invocation journal {operation} on {} failed (errno {errno}): {error}",
+            directory.display()
+        ),
+    )
+}
+
 /// Pod-local write-ahead journal. Replacements fsync the file and parent.
 pub struct InvocationJournal {
     directory: PathBuf,
@@ -100,6 +116,19 @@ pub struct InvocationJournal {
     update_lock: Mutex<()>,
 }
 impl InvocationJournal {
+    /// Open (creating if needed) the pod-local journal directory.
+    ///
+    /// # Every failure here names its operation, path and errno
+    ///
+    /// This constructor runs on the worker's REQUIRED startup path, before a
+    /// session exists, and a failure aborts the whole task-run Pod. It used to
+    /// propagate the bare `io::Error`, so an armed production rollout died with
+    /// nothing but `Read-only file system (os error 30)` in the log — no
+    /// operation, no directory — and cost a deploy cycle to attribute. (The
+    /// cause: the compiled-in default directory sits inside the read-only
+    /// `spec` Secret mount; the render now supplies a writable volume, see
+    /// `djinn_k8s::invocation_journal`.) Naming the operation and the path is
+    /// what makes the next such failure readable from one log line.
     pub fn new(directory: PathBuf, pod_uid: String) -> io::Result<Self> {
         if pod_uid.is_empty() || pod_uid.contains('/') || pod_uid.contains('\0') {
             return Err(io::Error::new(
@@ -107,8 +136,11 @@ impl InvocationJournal {
                 "invalid pod UID",
             ));
         }
-        fs::create_dir_all(&directory)?;
-        File::open(&directory)?.sync_all()?;
+        fs::create_dir_all(&directory)
+            .map_err(|error| named_journal_error("create_dir_all", &directory, error))?;
+        File::open(&directory)
+            .and_then(|handle| handle.sync_all())
+            .map_err(|error| named_journal_error("open+fsync", &directory, error))?;
         Ok(Self {
             directory,
             pod_uid,

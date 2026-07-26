@@ -6,6 +6,19 @@ pub struct TaskInvocationLeaseIdentity {
     pub task_run_id: String,
     pub invocation_id: String,
 }
+/// Layer-1 dispatch admission identity: one task-run attempt.
+///
+/// Deliberately generation-scoped rather than task-scoped. A generation is one
+/// object lifecycle (one create, at most one Kubernetes UID, one release), and
+/// the journal -- not the caller -- decides which generation an attempt gets
+/// (`AdmissionJournalRepository::resolve_dispatch_generation`). Keying the
+/// dispatch slot by the RESOLVED generation is what makes a retry of the same
+/// attempt idempotent while a genuinely new attempt buys its own capacity.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskDispatchLeaseIdentity {
+    pub task_id: String,
+    pub generation: i64,
+}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GraphWarmLeaseIdentity {
     pub project_id: String,
@@ -13,8 +26,16 @@ pub struct GraphWarmLeaseIdentity {
     pub graph_revision: String,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// Every population that can occupy a build slot.
+///
+/// All three share ONE cap over ONE FIFO. Before this, dispatch admission was
+/// accounted in a separate table against the same configured number, so the two
+/// authorities together admitted twice the operator's intent.
 pub enum LeaseIdentity {
+    /// Layer 2: measured, role-agnostic per-invocation escalation.
     TaskInvocation(TaskInvocationLeaseIdentity),
+    /// Layer 1: coarse, role-derived pre-spawn reservation.
+    TaskDispatch(TaskDispatchLeaseIdentity),
     GraphWarm(GraphWarmLeaseIdentity),
 }
 /// Wall-clock lease deadlines, in **absolute Unix epoch milliseconds** — never

@@ -98,14 +98,42 @@ pub enum LauncherHandshake {
 
 /// Bounded failure reasons for the post-detection handshake. All fold into
 /// [`LauncherHandshake::FailedClosed`].
+///
+/// # Every variant names the failing operation, its path and its errno
+///
+/// This is the worker half of a fail-closed boundary: in `required` mode any
+/// variant here aborts the Pod outright. A message that says only "write worker
+/// launcher handshake: Permission denied" costs a deploy cycle to attribute, so
+/// each filesystem failure carries the syscall-level operation, the exact path
+/// and the raw errno — the same treatment `Error::SocketSetupFailed` already
+/// gives the launcher's own socket setup.
 #[derive(Debug, thiserror::Error)]
 pub enum HandshakeError {
-    #[error("write worker launcher handshake: {0}")]
-    Io(#[source] std::io::Error),
-    #[error("launcher control socket never bound within the handshake window")]
-    ConnectTimeout,
-    #[error("connect launcher control socket: {0}")]
-    Connect(#[source] std::io::Error),
+    #[error("worker handshake {operation} on {path} failed (errno {errno}): {source}")]
+    Io {
+        operation: &'static str,
+        path: String,
+        errno: i32,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error(
+        "launcher control socket {path} never bound within the handshake window \
+         ({attempts} attempts x {poll_ms}ms); the sidecar is running but never reached \
+         UnixBrokerServer::bind, so check its own stderr for a named readiness failure"
+    )]
+    ConnectTimeout {
+        path: String,
+        attempts: u32,
+        poll_ms: u64,
+    },
+    #[error("connect(2) launcher control socket {path} failed (errno {errno}): {source}")]
+    Connect {
+        path: String,
+        errno: i32,
+        #[source]
+        source: std::io::Error,
+    },
     #[error("launcher rejected the worker handshake (credential or peer mismatch): {0}")]
     AuthRejected(#[source] LauncherError),
     #[error("prepare non-dumpable worker readiness: {0}")]
@@ -180,9 +208,22 @@ fn ensure_credential(credential_path: &Path) -> Result<Vec<u8>, HandshakeError> 
     let mut credential = vec![0_u8; CREDENTIAL_BYTES];
     File::open("/dev/urandom")
         .and_then(|mut file| file.read_exact(&mut credential))
-        .map_err(HandshakeError::Io)?;
+        .map_err(|source| {
+            io_failure("read credential entropy", Path::new("/dev/urandom"), source)
+        })?;
     atomic_publish(credential_path, &credential)?;
     Ok(credential)
+}
+
+/// Build a [`HandshakeError::Io`] that names the operation, the path and the
+/// raw errno. Nothing on this path may surface a bare `io::Error`.
+fn io_failure(operation: &'static str, path: &Path, source: std::io::Error) -> HandshakeError {
+    HandshakeError::Io {
+        operation,
+        path: path.display().to_string(),
+        errno: source.raw_os_error().unwrap_or_default(),
+        source,
+    }
 }
 
 /// Publish the worker PID as a trimmed decimal string, mirroring the launcher's
@@ -196,8 +237,10 @@ fn write_worker_pid(mount_dir: &Path) -> Result<(), HandshakeError> {
 /// launcher poll never observes a half-written file at `path`.
 fn atomic_publish(path: &Path, bytes: &[u8]) -> Result<(), HandshakeError> {
     let temp = path.with_extension("tmp");
-    std::fs::write(&temp, bytes).map_err(HandshakeError::Io)?;
-    std::fs::rename(&temp, path).map_err(HandshakeError::Io)?;
+    std::fs::write(&temp, bytes)
+        .map_err(|source| io_failure("write handshake temp", &temp, source))?;
+    std::fs::rename(&temp, path)
+        .map_err(|source| io_failure("rename handshake temp into place", path, source))?;
     Ok(())
 }
 
@@ -220,10 +263,20 @@ fn connect_with_retry(
                     .map_err(HandshakeError::AuthRejected);
             }
             Err(error) if is_pre_bind_race(&error) => std::thread::sleep(CONNECT_POLL),
-            Err(error) => return Err(HandshakeError::Connect(error)),
+            Err(source) => {
+                return Err(HandshakeError::Connect {
+                    path: socket_path.display().to_string(),
+                    errno: source.raw_os_error().unwrap_or_default(),
+                    source,
+                });
+            }
         }
     }
-    Err(HandshakeError::ConnectTimeout)
+    Err(HandshakeError::ConnectTimeout {
+        path: socket_path.display().to_string(),
+        attempts: CONNECT_ATTEMPTS,
+        poll_ms: CONNECT_POLL.as_millis() as u64,
+    })
 }
 
 /// A not-yet-bound control socket surfaces as `ENOENT` (the launcher has not
