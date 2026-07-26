@@ -635,6 +635,30 @@ expression: tool_schemas_lead()
             "type": "string"
           },
           "description": "Task IDs (UUID or short_id) that must complete before this task can be dispatched."
+        },
+        "execution_context": {
+          "type": "object",
+          "description": "Optional explicit execution eligibility metadata. Only the complete readiness_guardrail_analysis context is accepted; it is never inferred from task text, labels, roles, or issue type.",
+          "required": [
+            "kind",
+            "skill_name",
+            "skill_version"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "readiness_guardrail_analysis"
+            },
+            "skill_name": {
+              "type": "string",
+              "minLength": 1
+            },
+            "skill_version": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "additionalProperties": false
         }
       }
     },
@@ -708,6 +732,30 @@ expression: tool_schemas_lead()
             "type": "string"
           },
           "description": "Task IDs (UUID or short_id) to remove as blockers."
+        },
+        "execution_context": {
+          "type": "object",
+          "description": "Complete replacement for explicit execution eligibility metadata. Partial JSON updates are not supported.",
+          "required": [
+            "kind",
+            "skill_name",
+            "skill_version"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "readiness_guardrail_analysis"
+            },
+            "skill_name": {
+              "type": "string",
+              "minLength": 1
+            },
+            "skill_version": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "additionalProperties": false
         }
       }
     },

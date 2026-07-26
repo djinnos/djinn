@@ -151,6 +151,7 @@ impl DjinnMcpServer {
             memory_refs: p.memory_refs.unwrap_or_default(),
             blocked_by_refs: p.blocked_by.unwrap_or_default(),
             agent_type: p.agent_type,
+            execution_context: p.execution_context,
             epic_ref: p.epic_id,
         };
 
@@ -193,6 +194,7 @@ impl DjinnMcpServer {
             blocked_by_add_refs: p.blocked_by_add.unwrap_or_default(),
             blocked_by_remove_refs: p.blocked_by_remove.unwrap_or_default(),
             agent_type: p.agent_type,
+            execution_context: p.execution_context,
             epic_ref: p.epic_id,
         };
 

@@ -908,6 +908,7 @@ pub(super) async fn call_task_create(
             memory_refs: p.memory_refs.unwrap_or_default(),
             blocked_by_refs: p.blocked_by.unwrap_or_default(),
             agent_type: p.agent_type,
+            execution_context: p.execution_context,
             epic_ref: Some(p.epic_id),
         },
     )
@@ -955,6 +956,7 @@ pub(super) async fn call_task_update(
             blocked_by_add_refs: p.blocked_by_add,
             blocked_by_remove_refs: p.blocked_by_remove,
             agent_type: None,
+            execution_context: p.execution_context,
             epic_ref: None,
         },
     )
