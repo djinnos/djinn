@@ -1822,9 +1822,7 @@ The open-questions section collects uncertainty.
             .and_then(|v| v.as_array())
             .expect("proposal_show.revisions must be a JSON array")
             .iter()
-            .filter(|rev| {
-                rev.get("event_kind").and_then(|v| v.as_str()) == Some("spec_revision")
-            })
+            .filter(|rev| rev.get("event_kind").and_then(|v| v.as_str()) == Some("spec_revision"))
             .collect();
 
         // 1 create seed + 2 targeted patches = 3 spec revisions.
