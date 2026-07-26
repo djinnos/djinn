@@ -455,7 +455,7 @@ pub const CLOSE_REASON_DUPLICATE: &str = "duplicate";
 /// Explicit, durable execution metadata for a task. This is separate from the
 /// prompt-rendering `djinn_roles::prompts::TaskContext` and is never inferred
 /// from task text, labels, roles, or issue type.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum TaskExecutionContext {
     ReadinessGuardrailAnalysis {

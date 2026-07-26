@@ -24,7 +24,7 @@ async fn task_create_success_shape() {
     let payload = harness
         .call_tool(
             "task_create",
-            json!({"project": project.slug(), "epic_id": epic.id, "title": "Create task contract test", "acceptance_criteria": ["task is created successfully"]}),
+            json!({"project": project.slug(), "epic_id": epic.id, "title": "Create task contract test", "acceptance_criteria": ["task is created successfully"], "execution_context": {"kind": "readiness_guardrail_analysis", "skill_name": "agent-readiness-guardrails", "skill_version": "1.0.0"}}),
         )
         .await
         .expect("task_create should dispatch");
@@ -33,6 +33,15 @@ async fn task_create_success_shape() {
     assert_eq!(payload["status"], "open");
     assert_eq!(payload["title"], "Create task contract test");
     assert_eq!(payload["epic_id"], epic.id);
+    assert_eq!(
+        payload["execution_context"]["kind"],
+        "readiness_guardrail_analysis"
+    );
+    assert_eq!(
+        payload["execution_context"]["skill_name"],
+        "agent-readiness-guardrails"
+    );
+    assert_eq!(payload["execution_context"]["skill_version"], "1.0.0");
 
     let repo = TaskRepository::new(db.clone(), EventBus::noop());
     let created = repo
@@ -43,6 +52,10 @@ async fn task_create_success_shape() {
     assert_eq!(created.title, "Create task contract test");
     assert_eq!(created.status, "open");
     assert_eq!(created.epic_id, Some(epic.id));
+    assert_eq!(
+        created.execution_context,
+        serde_json::from_value(payload["execution_context"].clone()).ok()
+    );
 }
 
 #[tokio::test]
