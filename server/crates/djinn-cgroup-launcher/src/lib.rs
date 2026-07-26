@@ -15,14 +15,16 @@ pub mod child;
 pub mod command_path;
 pub mod env;
 pub mod git_trust;
+pub mod lease_authority;
 pub mod spawn;
 pub mod transport;
 
 pub use command_path::safe_command_path;
 pub use env::{is_allowed_environment_entry, is_allowed_environment_key};
+pub use lease_authority::{LeaseAuthority, unrestricted_cpu_max};
 pub use spawn::{DenySpawn, NativeCgroupSpawn};
 
-const DEFAULT_PERIOD_US: u64 = 100_000;
+pub(crate) const DEFAULT_PERIOD_US: u64 = 100_000;
 
 /// CPU quota an invocation leaf runs at before a lease lifts it.
 ///
@@ -261,6 +263,7 @@ pub struct Leaf {
     name: String,
     fd: RawFd,
     invocation: Invocation,
+    authority: LeaseAuthority,
     lifted: bool,
     terminal: bool,
 }
@@ -271,6 +274,11 @@ impl Leaf {
     }
     pub fn cgroup_fd(&self) -> RawFd {
         self.fd
+    }
+    /// The authority this leaf was BORN under. It is immutable for the leaf's
+    /// life: the birth quota was already committed from it.
+    pub fn authority(&self) -> LeaseAuthority {
+        self.authority
     }
 }
 
@@ -330,10 +338,22 @@ impl<F: CgroupFs, S: SpawnIntoCgroup> Launcher<F, S> {
         self.config.leased_quota
     }
 
+    /// The `cpu.max` line a leaf is born at under `authority`.
+    ///
+    /// Exposed so the behavioural proof asserts against the same function the
+    /// production path writes, rather than a literal it maintains by hand.
+    pub fn birth_cpu_max(&self, authority: LeaseAuthority) -> String {
+        match authority {
+            LeaseAuthority::Armed => self.config.unleased_quota.cpu_max(),
+            LeaseAuthority::Unarmed => unrestricted_cpu_max(),
+        }
+    }
+
     pub fn create_command(
         &mut self,
         name: &str,
         invocation: Invocation,
+        authority: LeaseAuthority,
         command: &CommandSpec,
     ) -> Result<(Leaf, ChildProcess), Error> {
         validate_leaf_name(name)?;
@@ -359,8 +379,15 @@ impl<F: CgroupFs, S: SpawnIntoCgroup> Launcher<F, S> {
         command.validate()?;
 
         let fd = self.fs.create_direct_child(name)?;
+        // The birth quota is the ONLY observable effect of the lease authority
+        // for an invocation that is never granted, and it cannot be revised
+        // later: `fenced_lift` is one-way and there is deliberately no unfenced
+        // path back down. An `Unarmed` authority therefore means "no quota at
+        // this level" rather than "the unleased quota forever" — see
+        // [`LeaseAuthority`] for the production incident that distinction
+        // encodes.
         self.fs
-            .write_leaf(fd, "cpu.max", &self.config.unleased_quota.cpu_max())?;
+            .write_leaf(fd, "cpu.max", &self.birth_cpu_max(authority))?;
         // Spawn is deliberately last: all readiness and leaf setup failures
         // occur before the child can execute.
         let child = match self.syscall.spawn_into_cgroup(fd, &invocation, &command) {
@@ -378,6 +405,7 @@ impl<F: CgroupFs, S: SpawnIntoCgroup> Launcher<F, S> {
                 name: name.to_owned(),
                 fd,
                 invocation,
+                authority,
                 lifted: false,
                 terminal: false,
             },
@@ -392,6 +420,12 @@ impl<F: CgroupFs, S: SpawnIntoCgroup> Launcher<F, S> {
     pub fn fenced_lift(&mut self, leaf: &mut Leaf, fence: u64) -> Result<(), Error> {
         if leaf.terminal {
             return Err(Error::TerminalIntent);
+        }
+        // A leaf born unarmed has no quota to lift, and a caller asking to lift
+        // one has contradicted the authority it created the leaf under. Refuse
+        // rather than write a quota that would LOWER the ceiling from `max`.
+        if !leaf.authority.can_lift() {
+            return Err(Error::LiftWithoutAuthority);
         }
         if leaf.lifted {
             return Err(Error::LiftAlreadyApplied);
@@ -543,6 +577,8 @@ pub enum Error {
     FenceMismatch,
     #[error("lift was already applied")]
     LiftAlreadyApplied,
+    #[error("leaf was created under an unarmed lease authority and has no quota to lift")]
+    LiftWithoutAuthority,
     #[error("terminal intent forbids lift")]
     TerminalIntent,
     #[error("cgroup still has descendants")]
@@ -926,7 +962,9 @@ mod tests {
         }
     }
     fn create(l: &mut Launcher<FakeFs, FakeSpawn>, name: &str) -> Leaf {
-        l.create_command(name, invocation(), &command()).unwrap().0
+        l.create_command(name, invocation(), LeaseAuthority::Armed, &command())
+            .unwrap()
+            .0
     }
 
     #[test]
@@ -1022,7 +1060,8 @@ mod tests {
         let mut l = launcher();
         let mut spec = command();
         spec.environment = vec![("CARGO_BUILD_JOBS".into(), "12".into())];
-        l.create_command("override", invocation(), &spec).unwrap();
+        l.create_command("override", invocation(), LeaseAuthority::Armed, &spec)
+            .unwrap();
         let (_, spawn) = l.into_parts();
         assert_eq!(
             spawn.environments[0]
@@ -1074,7 +1113,7 @@ mod tests {
             spec.environment = vec![(key.to_owned(), value.to_owned())];
             assert!(
                 matches!(
-                    l.create_command("hostile", invocation(), &spec),
+                    l.create_command("hostile", invocation(), LeaseAuthority::Armed, &spec),
                     Err(Error::InvalidCommand)
                 ),
                 "{key}={value} must be refused"
@@ -1213,7 +1252,7 @@ mod tests {
         let mut malformed = command();
         malformed.program = "/bin/../sh".into();
         assert!(matches!(
-            l.create_command("one", invocation(), &malformed),
+            l.create_command("one", invocation(), LeaseAuthority::Armed, &malformed),
             Err(Error::InvalidCommand)
         ));
         let (fs, spawn) = l.into_parts();
@@ -1260,7 +1299,7 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(
-            l.create_command("one", invocation(), &command())
+            l.create_command("one", invocation(), LeaseAuthority::Armed, &command())
                 .map(|v| v.0),
             Err(Error::SpawnDenied)
         ));

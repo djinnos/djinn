@@ -134,6 +134,7 @@ impl CgroupLauncherClient for ProofLauncher {
         &self,
         mut command: Command,
         _: &TaskInvocationLeaseIdentity,
+        _authority: djinn_cgroup_launcher::LeaseAuthority,
     ) -> io::Result<Box<dyn ProcessHandle>> {
         let named = command
             .get_program()

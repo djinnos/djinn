@@ -25,7 +25,25 @@
 //! 5. after a fenced lift it burns *multiples more* in the same window and stops
 //!    being throttled;
 //! 6. a sibling leaf with no child accounts for nothing, so the measurement is
-//!    attributing CPU to the right cgroup.
+//!    attributing CPU to the right cgroup;
+//! 7. a leaf created under an UNARMED lease authority is never clamped at all —
+//!    `cpu.max` reads `max 100000` and it measures multiples of the clamped
+//!    leaf, while still containing its child.
+//!
+//! # What step 7 adds (goxi launcher blocker 11)
+//!
+//! Steps 4-5 prove the lease *can* govern CPU. They cannot see whether the lease
+//! is ever *reachable*. Production armed the launcher while the durable
+//! `admission_handoff` row was ABSENT — `djinn-server epoch show` reported
+//! `admission handoff row: <absent>` during the armed window — which
+//! `evaluate_invocation_lift` maps to `Unleased`, and the runner implemented that
+//! as a no-op. The leaf had already been born at 250m, so the "no-op" pinned
+//! every build there: a measured leaf reached 21,130,868 usec of CPU, 84x the
+//! 250,000 usec escalation threshold, with `cpu.max` never leaving
+//! `25000 100000`. Arming was a ~16x slowdown and rolled back four times.
+//!
+//! Step 7 makes that state measurable: containment without a reachable lift must
+//! cost nothing.
 //!
 //! Nothing here can pass vacuously. There is no `FakeCgroup`, no fake clone, no
 //! environment probe that returns "not applicable", and no assertion on a value
@@ -53,8 +71,8 @@ use std::time::{Duration, Instant};
 
 use djinn_cgroup_launcher::bootstrap::{Bootstrap, INIT_LEAF, holds_any_bootstrap_capability};
 use djinn_cgroup_launcher::{
-    CommandSpec, CpuStat, Invocation, Launcher, LauncherConfig, LeasedQuota, NativeCgroupFs,
-    NativeCgroupSpawn, UnleasedQuota,
+    CommandSpec, CpuStat, Invocation, Launcher, LauncherConfig, LeaseAuthority, LeasedQuota,
+    NativeCgroupFs, NativeCgroupSpawn, UnleasedQuota,
 };
 
 /// The workflow job that must execute the `#[ignore]`d proof below.
@@ -180,6 +198,31 @@ fn assert_rendered_required_job_contract() {
     );
 }
 
+/// The exact `cpu.max` lines the privileged proof reads back, pinned here so a
+/// change to a quota default or to the period cannot silently make the kernel
+/// assertions describe different numbers than production writes.
+#[test]
+fn the_asserted_cpu_max_lines_are_the_ones_the_launcher_writes() {
+    assert_eq!(
+        djinn_cgroup_launcher::unrestricted_cpu_max(),
+        "max 100000",
+        "an unarmed leaf's line is what step 7 asserts against the kernel"
+    );
+    // `25000 100000` is the line production measured on a leaf that burned 21.1
+    // CPU-seconds and never escalated; `4000000 100000` is what the lift must
+    // replace it with.
+    assert_eq!(
+        u64::from(UNLEASED_MILLICORES) * 100_000 / 1000,
+        25_000,
+        "the unleased line must be `25000 100000`"
+    );
+    assert_eq!(
+        u64::from(LEASED_MILLICORES) * 100_000 / 1000,
+        400_000,
+        "the leased line must be `400000 100000`"
+    );
+}
+
 /// The quotas this proof measures are the ones the launcher crate ships, so a
 /// change to either default cannot leave the measurement asserting a number
 /// nobody uses.
@@ -270,7 +313,12 @@ fn the_delegated_lease_throttles_and_lifts_measured_on_cpu_stat() {
         fence: 0x7de_u64,
     };
     let (mut leaf, child) = launcher
-        .create_command("leased", invocation, &spinner_command())
+        .create_command(
+            "leased",
+            invocation,
+            LeaseAuthority::Armed,
+            &spinner_command(),
+        )
         .expect("spawn the probe command into an invocation leaf");
 
     // A sibling that never gets a child. It is the control for step 6.
@@ -279,7 +327,12 @@ fn the_delegated_lease_throttles_and_lifts_measured_on_cpu_stat() {
         fence: 1,
     };
     let (idle_leaf, idle_child) = launcher
-        .create_command("idle", idle_invocation, &sleep_command())
+        .create_command(
+            "idle",
+            idle_invocation,
+            LeaseAuthority::Armed,
+            &sleep_command(),
+        )
         .expect("spawn the idle control");
 
     // ── 4. Membership, then the unleased measurement ────────────────────────
@@ -322,9 +375,32 @@ fn the_delegated_lease_throttles_and_lifts_measured_on_cpu_stat() {
     );
 
     // ── 5. The fenced lift, measured the same way ───────────────────────────
+    //
+    // `cpu.max` is read from the KERNEL either side of the lift, not inferred
+    // from the measurement. The production symptom of blocker 11 was precisely a
+    // quota that never changed: an armed launcher whose leaf sat at
+    // `25000 100000` while the child burned 21.1 CPU-seconds, 84x the escalation
+    // threshold. So the transition itself is an assertion.
+    let cpu_max_path = root.join("leased").join("cpu.max");
+    assert_eq!(
+        read_trimmed(&cpu_max_path),
+        launcher.birth_cpu_max(LeaseAuthority::Armed),
+        "an armed leaf must be born at the unleased quota"
+    );
+    assert_eq!(
+        read_trimmed(&cpu_max_path),
+        "25000 100000",
+        "the birth quota must be the 250m line production measured"
+    );
     launcher
         .fenced_lift(&mut leaf, 0x7de_u64)
         .expect("a matching fence must lift the quota");
+    assert_eq!(
+        read_trimmed(&cpu_max_path),
+        "400000 100000",
+        "the fenced lift must move cpu.max off the unleased quota; a lift that \
+         leaves it at `25000 100000` is the production defect (blocker 11)"
+    );
 
     let leased = measure(&mut launcher, &leaf, WINDOW);
     assert!(
@@ -379,7 +455,11 @@ fn the_delegated_lease_throttles_and_lifts_measured_on_cpu_stat() {
         idle.usage_usec
     );
 
-    // ── Teardown: cgroup-wide kill, drain, unlink ───────────────────────────
+    // ── Teardown of the armed leaves, BEFORE the unarmed measurement ────────
+    //
+    // The unarmed leaf has no quota of its own, so it takes whatever the runner
+    // will give it. Leaving the lifted 4-core leaf spinning alongside would make
+    // step 7 measure contention rather than the absence of a clamp.
     for (leaf, pid) in [(&mut leaf, child.pid), (&mut { idle_leaf }, idle_child.pid)] {
         launcher.kill(leaf).expect("cgroup.kill");
         let drained = (0..200).any(|_| {
@@ -393,6 +473,107 @@ fn the_delegated_lease_throttles_and_lifts_measured_on_cpu_stat() {
         launcher.remove(leaf).expect("remove the drained leaf");
         reap(pid);
     }
+
+    // ── 7. An UNARMED authority never clamps (goxi launcher blocker 11) ─────
+    //
+    // Production ran the launcher armed while the durable `admission_handoff`
+    // row was ABSENT. `evaluate_invocation_lift` maps that to `Unleased`, the
+    // runner treated it as a no-op, and because the leaf had already been born
+    // at 250m the "no-op" pinned every build there for its whole life: a
+    // measured leaf reached 21,130,868 usec of CPU — 84x the 250,000 usec
+    // escalation threshold — with `cpu.max` never leaving `25000 100000`.
+    // Arming was a ~16x slowdown, strictly worse than leaving it off.
+    //
+    // Both halves are asserted, because either alone can pass vacuously:
+    //   * the CONFIGURATION, read back from the kernel: no quota at this level;
+    //   * the BEHAVIOUR, measured over a wall-clock window: it actually runs
+    //     multiples faster than the clamped leaf did.
+    let (unarmed_leaf, unarmed_child) = launcher
+        .create_command(
+            "unarmed",
+            Invocation {
+                id: "unarmed".to_owned(),
+                fence: 2,
+            },
+            LeaseAuthority::Unarmed,
+            &spinner_command(),
+        )
+        .expect("spawn a probe under an unarmed lease authority");
+    let unarmed_members = read_trimmed(&root.join("unarmed").join("cgroup.procs"));
+    assert!(
+        unarmed_members
+            .split_ascii_whitespace()
+            .any(|entry| entry.parse::<i32>() == Ok(unarmed_child.pid)),
+        "an unarmed authority must still CONTAIN the child: it is only the quota that is \
+         omitted. Members were {unarmed_members:?}, expected pid {}",
+        unarmed_child.pid
+    );
+    let unarmed_cpu_max = root.join("unarmed").join("cpu.max");
+    assert_eq!(
+        read_trimmed(&unarmed_cpu_max),
+        launcher.birth_cpu_max(LeaseAuthority::Unarmed),
+        "an unarmed leaf must be born at the launcher's own unrestricted line"
+    );
+    assert_eq!(
+        read_trimmed(&unarmed_cpu_max),
+        "max 100000",
+        "an authority that can never grant a lift must leave the leaf with no \
+         quota of its own; `25000 100000` here IS the production defect"
+    );
+    let unarmed = measure(&mut launcher, &unarmed_leaf, WINDOW);
+    assert!(
+        unarmed.usage_usec > unleased.usage_usec * 3,
+        "the unarmed leaf burned {} usec against {} for the clamped leaf over comparable \
+         windows. An unarmed authority must cost nothing: if these are equal, arming the \
+         launcher without an armed epoch is still the ~16x regression that rolled back four \
+         times.",
+        unarmed.usage_usec,
+        unleased.usage_usec
+    );
+    assert_eq!(
+        unarmed.nr_throttled, 0,
+        "a leaf with no quota of its own cannot be throttled at its own level; {} throttled \
+         periods means it was clamped after all",
+        unarmed.nr_throttled
+    );
+    {
+        use std::io::Write;
+        let _ = writeln!(
+            std::io::stdout(),
+            "goxi-11 measured: unarmed {} usec / nr_throttled {} over {:?}; \
+             vs clamped {} usec; ratio {:.2}x (arming without an armed epoch must cost nothing)",
+            unarmed.usage_usec,
+            unarmed.nr_throttled,
+            unarmed.wall,
+            unleased.usage_usec,
+            unarmed.usage_usec as f64 / unleased.usage_usec.max(1) as f64,
+        );
+    }
+    // And the one-way lift contract holds in the other direction: nothing may
+    // lower an unrestricted leaf's ceiling by "lifting" it.
+    let mut unarmed_leaf = unarmed_leaf;
+    assert!(
+        matches!(
+            launcher.fenced_lift(&mut unarmed_leaf, 2),
+            Err(djinn_cgroup_launcher::Error::LiftWithoutAuthority)
+        ),
+        "lifting a leaf born unarmed would WRITE a quota where there was none"
+    );
+
+    // ── Teardown: cgroup-wide kill, drain, unlink ───────────────────────────
+    launcher.kill(&mut unarmed_leaf).expect("cgroup.kill");
+    let drained = (0..200).any(|_| {
+        if launcher.wait_empty(&unarmed_leaf).is_ok() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+        false
+    });
+    assert!(drained, "the unarmed leaf never reached populated 0");
+    launcher
+        .remove(&unarmed_leaf)
+        .expect("remove the drained leaf");
+    reap(unarmed_child.pid);
 }
 
 // ─────────────────────────────── measurement ────────────────────────────────
