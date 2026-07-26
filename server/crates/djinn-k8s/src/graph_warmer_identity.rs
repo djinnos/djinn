@@ -89,7 +89,7 @@ pub fn warm_work_id(project_id: &str, revision: &str) -> String {
 /// Kept within [`LABEL_VALUE_MAX_BYTES`] rather than the 253-byte object-name
 /// budget, for the `job-name` projection described in the module docs.
 /// Determinism is what makes the create idempotent across dispatch retries.
-pub(crate) fn deterministic_warm_job_name(project_id: &str, work_id: &str) -> String {
+pub fn deterministic_warm_job_name(project_id: &str, work_id: &str) -> String {
     let project = warm_id_segment(project_id, WARM_NAME_PROJECT_BUDGET);
     let mut hash = 0xcbf29ce484222325_u64;
     for byte in work_id.bytes() {
