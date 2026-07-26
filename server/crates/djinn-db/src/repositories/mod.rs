@@ -57,6 +57,8 @@ pub mod task_run;
 pub mod task_run_outcome;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support_fixtures;
 pub mod tool_call_evaluator;
 #[cfg(test)]
 pub mod tool_call_evaluator_tests;

@@ -15,6 +15,7 @@ use djinn_db::{
     BuildLeaseRow, BuildLeaseState, GrantNextBuildLeaseResult, QueueBuildLeaseInput,
     QueueBuildLeaseResult,
 };
+use djinn_runtime::BuildSlotWeight;
 use djinn_supervisor::services::{
     LeaseAbandonRequest, LeaseBindRequest, LeaseCancelRequest, LeaseDeadlines, LeaseFencingToken,
     LeaseGrant, LeaseGrantRequest, LeaseIdentity, LeaseQueueRequest, LeaseReleaseRequest,
@@ -141,6 +142,7 @@ impl LeaseOperation {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LeaseTelemetryConsumer {
     TaskInvocation,
+    TaskDispatch,
     GraphWarm,
     System,
 }
@@ -148,6 +150,7 @@ impl LeaseTelemetryConsumer {
     const fn as_label(self) -> &'static str {
         match self {
             Self::TaskInvocation => "task_invocation",
+            Self::TaskDispatch => "task_dispatch",
             Self::GraphWarm => "graph_warm",
             Self::System => "system",
         }
@@ -181,6 +184,66 @@ impl LeaseTelemetry for MetricsLeaseTelemetry {
     }
 }
 
+/// Rendered CPU facts the weight policy is derived from, in millicores.
+///
+/// Supplied by composition from the SAME `KubernetesConfig` that renders the
+/// manifests, so the weight a workload is charged and the CPU it is actually
+/// given can never drift. Deliberately not read from the environment here: the
+/// grant path must have no opinion about where capacity facts come from, which
+/// is what lets a node-derived cap replace the configured one later without
+/// touching this module.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BuildSlotWeights {
+    /// One build slot, in millicores: the quota a granted lease actually runs
+    /// under (`launcher_leased_millicores`, the task-run pod's `cpu_limit`).
+    pub slot_millicores: u32,
+    /// The graph-warm Job's rendered CPU request.
+    pub warm_millicores: u32,
+}
+
+impl Default for BuildSlotWeights {
+    /// The default render: a warm Job and a leased task invocation both request
+    /// 4000m, so both weigh exactly one slot. See [`BuildSlotWeight`] for why
+    /// equal weight is the measured answer rather than an approximation.
+    fn default() -> Self {
+        Self {
+            slot_millicores: 4_000,
+            warm_millicores: 4_000,
+        }
+    }
+}
+
+impl BuildSlotWeights {
+    /// Weight of a graph-warm Job.
+    #[must_use]
+    pub fn warm(&self) -> BuildSlotWeight {
+        BuildSlotWeight::for_millicores(self.warm_millicores, self.slot_millicores)
+    }
+
+    /// Weight of a layer-1 dispatch reservation for a build-capable task-run.
+    /// Light task-runs never reach here: dispatch does not acquire for them.
+    #[must_use]
+    pub fn dispatch(&self) -> BuildSlotWeight {
+        BuildSlotWeight::for_millicores(self.slot_millicores, self.slot_millicores)
+    }
+
+    /// Weight of a layer-2 invocation escalation.
+    ///
+    /// `holds_dispatch_slot` is the durable answer from
+    /// [`djinn_db::BuildLeaseRepository::has_occupying_dispatch`], never
+    /// anything the invocation itself asserted. That matters: weight is the
+    /// difference between occupying capacity and not, so a value the sandboxed
+    /// pod could supply would be a way to escape the cap.
+    #[must_use]
+    pub fn invocation(&self, holds_dispatch_slot: bool) -> BuildSlotWeight {
+        if holds_dispatch_slot {
+            BuildSlotWeight::REENTRANT
+        } else {
+            BuildSlotWeight::for_millicores(self.slot_millicores, self.slot_millicores)
+        }
+    }
+}
+
 /// Coordinator policy owner over the one repository-global FIFO.
 pub struct BuildLeaseService {
     repository: Arc<BuildLeaseRepository>,
@@ -203,6 +266,9 @@ pub struct BuildLeaseService {
     /// production writer of a durable cap (`admin epoch set-cap`) is guarded by
     /// `admission_handoff_cap_positive_check` and cannot store `0`.
     configured_cap: i64,
+    /// Rendered CPU facts the per-row weight is derived from. See
+    /// [`BuildSlotWeights`]; the default matches the default manifest render.
+    weights: BuildSlotWeights,
     recovered: AtomicBool,
     /// Durable admission-handoff epoch reader. When present, [`Self::recover`]
     /// and [`Self::recovery_snapshot`] read the epoch (and its reference cap)
@@ -213,6 +279,14 @@ pub struct BuildLeaseService {
     /// The admission epoch observed by the most recent successful recovery, or
     /// `-1` when none has been observed (unknown/unreadable ⇒ fail closed).
     observed_epoch: AtomicI64,
+    /// Whether the durable epoch puts the v1 authority in `Enforce`.
+    ///
+    /// This is the arming switch for layer-1 dispatch admission. Until the
+    /// operator flips the epoch to invocation-primary, dispatch runs in shadow:
+    /// it probes occupancy and records what enforcement WOULD have done, but
+    /// acquires nothing and denies nothing. Defaults to `false` so a process
+    /// that has not read the epoch cannot start enforcing a cap nobody armed.
+    dispatch_enforcing: AtomicBool,
     /// Keeps queue+local-drain atomic in this process. Database advisory locks
     /// serialize the same decisions across replacement coordinators.
     operation: Mutex<()>,
@@ -245,11 +319,52 @@ impl BuildLeaseService {
             telemetry,
             cap: AtomicI64::new(cap.max(0)),
             configured_cap: cap.max(0),
+            weights: BuildSlotWeights::default(),
             recovered: AtomicBool::new(false),
             handoff: None,
             observed_epoch: AtomicI64::new(-1),
+            dispatch_enforcing: AtomicBool::new(false),
             operation: Mutex::new(()),
         }
+    }
+
+    /// Install the rendered CPU facts that per-row weight is derived from.
+    ///
+    /// Composition passes the same `KubernetesConfig`-derived values used to
+    /// render the manifests, so a warm Job's charged weight and its actual CPU
+    /// request cannot drift apart.
+    #[must_use]
+    pub fn with_slot_weights(mut self, weights: BuildSlotWeights) -> Self {
+        self.weights = weights;
+        self
+    }
+
+    /// The weight policy in force, for telemetry and tests.
+    #[must_use]
+    pub fn slot_weights(&self) -> BuildSlotWeights {
+        self.weights
+    }
+
+    /// Resolve the durable weight for one identity.
+    ///
+    /// Every branch derives from rendered CPU or durable state; nothing here is
+    /// supplied by the requester. The invocation branch is the non-double-charge
+    /// rule: an invocation whose task-run already holds a dispatch slot occupies
+    /// zero, because that capacity was bought at spawn for this exact compile.
+    async fn weight_for(&self, id: &LeaseIdentity) -> Result<i64, ()> {
+        let weight = match id {
+            LeaseIdentity::GraphWarm(_) => self.weights.warm(),
+            LeaseIdentity::TaskDispatch(_) => self.weights.dispatch(),
+            LeaseIdentity::TaskInvocation(v) => {
+                let holds = self
+                    .repository
+                    .has_occupying_dispatch(&v.task_id)
+                    .await
+                    .map_err(|_| ())?;
+                self.weights.invocation(holds)
+            }
+        };
+        Ok(weight.slots())
     }
 
     /// Install the durable admission-handoff epoch reader so recovery reads the
@@ -271,6 +386,20 @@ impl BuildLeaseService {
     pub fn observed_epoch(&self) -> Option<i64> {
         let epoch = self.observed_epoch.load(Ordering::Acquire);
         (epoch >= 0).then_some(epoch)
+    }
+
+    /// Whether the durable epoch arms layer-1 dispatch admission for
+    /// enforcement. False means shadow: observe and report, never deny.
+    #[must_use]
+    pub fn dispatch_enforcing(&self) -> bool {
+        self.dispatch_enforcing.load(Ordering::Acquire)
+    }
+
+    /// Force the dispatch-enforcement arming state. Tests only: production
+    /// arms exclusively through the durable admission epoch.
+    #[doc(hidden)]
+    pub fn set_dispatch_enforcing_for_test(&self, enforcing: bool) {
+        self.dispatch_enforcing.store(enforcing, Ordering::Release);
     }
 
     /// The reference cap this service is currently enforcing.
@@ -320,16 +449,21 @@ impl BuildLeaseService {
         match handoff.read().await {
             Ok(Some(row)) => {
                 self.observed_epoch.store(row.epoch, Ordering::Release);
+                self.dispatch_enforcing
+                    .store(row.v1_mode.is_enforcing(), Ordering::Release);
                 row.cap.unwrap_or(fallback)
             }
             Ok(None) => {
                 // No durable epoch row: nothing to observe, keep the fallback.
                 self.observed_epoch.store(-1, Ordering::Release);
+                self.dispatch_enforcing.store(false, Ordering::Release);
                 fallback
             }
             Err(_) => {
-                // Unreadable epoch: fail closed on the observed epoch.
+                // Unreadable epoch: fail closed on the observed epoch, and do
+                // NOT enforce a cap we could not confirm was armed.
                 self.observed_epoch.store(-1, Ordering::Release);
+                self.dispatch_enforcing.store(false, Ordering::Release);
                 fallback
             }
         }
@@ -384,6 +518,35 @@ impl BuildLeaseService {
         Ok(snapshot)
     }
 
+    /// The service clock, in absolute epoch milliseconds. Callers computing a
+    /// deadline must add to this rather than sending a duration (#2599).
+    #[must_use]
+    pub fn now_ms(&self) -> i64 {
+        self.clock.now_ms()
+    }
+
+    /// Terminalize any still-queued dispatch position for a closed task.
+    pub async fn abandon_queued_dispatch(&self, task_id: &str) {
+        let _guard = self.operation.lock().await;
+        match self.repository.abandon_queued_dispatch(task_id).await {
+            Ok(0) => {}
+            Ok(abandoned) => {
+                tracing::info!(
+                    task_id,
+                    abandoned,
+                    "build lease: surrendered dispatch queue positions for a closed task"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    task_id,
+                    %error,
+                    "build lease: could not surrender dispatch queue position; it will expire on its queue deadline"
+                );
+            }
+        }
+    }
+
     /// Capacity changes never revoke occupied rows. Positive changes drain FIFO.
     pub async fn set_cap(&self, cap: i64) -> LeaseResult {
         let _guard = self.operation.lock().await;
@@ -412,11 +575,18 @@ impl BuildLeaseService {
             .operation(LeaseOperation::Queue, telemetry_consumer(&request.identity));
         self.pause.before_transaction(LeaseOperation::Queue).await;
         let (key, immutable_identity) = identity(&request.identity);
+        let Ok(weight) = self.weight_for(&request.identity).await else {
+            // Weight is a capacity decision. A weight we could not resolve must
+            // never default to zero, which would admit outside the cap; fail
+            // closed and let the caller retry.
+            return self.unavailable();
+        };
         let input = QueueBuildLeaseInput {
             key: key.clone(),
             immutable_identity,
             queue_deadline: deadline(request.deadlines.queue_deadline_ms),
             launch_deadline: deadline(request.deadlines.launch_deadline_ms),
+            weight,
         };
         match self.repository.queue(&input).await {
             Ok(QueueBuildLeaseResult::LeaseIdentityConflict { .. }) => {
@@ -794,6 +964,13 @@ fn identity(id: &LeaseIdentity) -> (BuildLeaseKey, String) {
             },
             format!("task:{}:{}:{}", v.task_id, v.task_run_id, v.invocation_id),
         ),
+        LeaseIdentity::TaskDispatch(v) => (
+            BuildLeaseKey {
+                consumer_kind: BuildLeaseConsumerKind::TaskDispatch,
+                consumer_id: format!("{}:{}", v.task_id, v.generation),
+            },
+            format!("dispatch:{}:{}", v.task_id, v.generation),
+        ),
         LeaseIdentity::GraphWarm(v) => (
             BuildLeaseKey {
                 consumer_kind: BuildLeaseConsumerKind::GraphWarm,
@@ -809,6 +986,7 @@ fn identity(id: &LeaseIdentity) -> (BuildLeaseKey, String) {
 fn telemetry_consumer(id: &LeaseIdentity) -> LeaseTelemetryConsumer {
     match id {
         LeaseIdentity::TaskInvocation(_) => LeaseTelemetryConsumer::TaskInvocation,
+        LeaseIdentity::TaskDispatch(_) => LeaseTelemetryConsumer::TaskDispatch,
         LeaseIdentity::GraphWarm(_) => LeaseTelemetryConsumer::GraphWarm,
     }
 }
@@ -931,6 +1109,7 @@ mod tests {
             )
             .then(|| "pod-a".into()),
             candidate_cleanup: None,
+            weight: 1,
             terminal_reason: terminal_reason.map(str::to_owned),
             timeout_credit_consumed: false,
             created_at: "2026-01-01T00:00:00Z".into(),
