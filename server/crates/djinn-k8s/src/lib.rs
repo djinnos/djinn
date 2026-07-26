@@ -45,8 +45,8 @@ pub use graph_warmer_candidates::{
     WarmCandidateKind, WarmCandidateObject, WarmCandidateSet, WarmCandidateSetState,
     WarmInventoryObservation,
 };
-pub use graph_warmer_identity::{LeasedWarmJobIdentity, warm_work_id};
-pub use runtime::KubernetesRuntime;
+pub use graph_warmer_identity::{LeasedWarmJobIdentity, deterministic_warm_job_name, warm_work_id};
+pub use runtime::{KubernetesRuntime, taskrun_job_name};
 pub use token_review::TokenReviewer;
 pub use warm_job::{build_leased_warm_job, build_warm_job};
 pub use workload_inventory::{

@@ -123,6 +123,31 @@ pub struct BuildLeaseSnapshot {
     pub rows: Vec<BuildLeaseRow>,
 }
 
+/// The full observed identity of one occupying lease, gathered *before* its
+/// Kubernetes object was proven absent.
+///
+/// Every field participates in the compare-and-set performed by
+/// [`BuildLeaseRepository::reclaim_absent_object`]. `observed_updated_at` is
+/// what closes the race against the lease's own holder: any acknowledgement,
+/// bind, or status report between the absence proof and the write bumps
+/// `updated_at`, and the reclamation is fenced instead of retiring live work.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReclaimAbsentBuildLeaseInput {
+    pub key: BuildLeaseKey,
+    pub observed_state: BuildLeaseState,
+    pub observed_immutable_identity: String,
+    pub observed_fencing_token: Option<i64>,
+    pub observed_bound_pod_uid: Option<String>,
+    pub observed_updated_at: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ReclaimAbsentBuildLeaseOutcome {
+    Reclaimed(BuildLeaseRow),
+    AlreadyTerminal(BuildLeaseRow),
+    Fenced { reason: String },
+}
+
 /// Atomic repository for queueing and fencing build units.
 pub struct BuildLeaseRepository {
     db: Database,
@@ -464,6 +489,105 @@ impl BuildLeaseRepository {
             .collect()
     }
 
+    /// Every currently occupying lease, each paired with whether it has been
+    /// untouched for at least `settle_seconds`.
+    ///
+    /// Read-only and lock-free: reclamation gathers evidence from this listing
+    /// and then fences its write on the row's `updated_at`, so a lease that
+    /// moves between the listing and the write is rejected rather than raced.
+    pub async fn list_occupying_with_settlement(
+        &self,
+        settle_seconds: i64,
+    ) -> DbResult<Vec<(BuildLeaseRow, bool)>> {
+        if settle_seconds < 0 {
+            return Err(DbError::InvalidData(
+                "settle window must be non-negative".into(),
+            ));
+        }
+        self.db.ensure_initialized().await?;
+        let rows = sqlx::query_as::<_, SettlementDbRow>(&format!(
+            "SELECT {COLS}, (updated_at <= now() - make_interval(secs => $2)) AS settled \
+             FROM build_leases WHERE state = ANY($1) ORDER BY enqueue_sequence"
+        ))
+        .bind(OCCUPYING.as_slice())
+        .bind(settle_seconds as f64)
+        .fetch_all(self.db.pool())
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                let settled = row.settled.unwrap_or(false);
+                BuildLeaseRow::try_from(row.row).map(|row| (row, settled))
+            })
+            .collect()
+    }
+
+    /// Retire one occupying lease whose Kubernetes object is provably gone.
+    ///
+    /// Nothing else in this ledger can leave an occupying state without a call
+    /// from the process that holds the lease: `release`/`cancel` need the
+    /// fencing token, `abandon_queued` refuses anything past `queued`, and
+    /// `expire_deadlines` only downgrades `granted`/`launching` to the equally
+    /// occupying `suspect`. A lease whose holder died — or, the production
+    /// shape this fixes, a `granted` row whose requester gave up before it was
+    /// ever acknowledged — therefore occupies the shared cap forever and
+    /// starves every later build. This is the durable half of the reconciler
+    /// that retires it; the caller owns the Kubernetes absence evidence.
+    ///
+    /// The write is a compare-and-set on the full observed identity (state,
+    /// immutable identity, fencing token, bound pod UID, and `updated_at`).
+    /// Anything that changed after the proof was gathered yields
+    /// [`ReclaimAbsentBuildLeaseOutcome::Fenced`] and writes nothing, so this
+    /// can never retire a lease that might still correspond to live work.
+    pub async fn reclaim_absent_object(
+        &self,
+        input: &ReclaimAbsentBuildLeaseInput,
+    ) -> DbResult<ReclaimAbsentBuildLeaseOutcome> {
+        if !OCCUPYING.contains(&state_str(input.observed_state)) {
+            return Err(DbError::InvalidData(
+                "reclamation evidence must describe an occupying build lease state".into(),
+            ));
+        }
+        self.db.ensure_initialized().await?;
+        let mut tx = self.db.pool().begin().await?;
+        lock(&mut tx).await?;
+        let Some(row) = fetch(&mut tx, &input.key, true).await? else {
+            tx.commit().await?;
+            return Ok(ReclaimAbsentBuildLeaseOutcome::Fenced {
+                reason: "build lease no longer exists".into(),
+            });
+        };
+        if row.state == BuildLeaseState::Terminal {
+            tx.commit().await?;
+            return Ok(ReclaimAbsentBuildLeaseOutcome::AlreadyTerminal(row));
+        }
+        if row.state != input.observed_state
+            || row.immutable_identity != input.observed_immutable_identity
+            || row.fencing_token != input.observed_fencing_token
+            || row.bound_pod_uid != input.observed_bound_pod_uid
+            || row.updated_at != input.observed_updated_at
+        {
+            let reason = format!(
+                "build lease changed after the absence proof (observed {:?}@{}, found {:?}@{})",
+                input.observed_state, input.observed_updated_at, row.state, row.updated_at
+            );
+            tx.commit().await?;
+            return Ok(ReclaimAbsentBuildLeaseOutcome::Fenced { reason });
+        }
+        let reclaimed = sqlx::query_as::<_, DbRow>(&format!(
+            "UPDATE build_leases SET state='terminal',terminal_reason='reclaimed_absent',\
+             terminal_at=now(),updated_at=now() WHERE consumer_kind=$1 AND consumer_id=$2 \
+             RETURNING {COLS}"
+        ))
+        .bind(input.key.consumer_kind.as_str())
+        .bind(&input.key.consumer_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(ReclaimAbsentBuildLeaseOutcome::Reclaimed(
+            reclaimed.try_into()?,
+        ))
+    }
+
     async fn terminal(
         &self,
         key: &BuildLeaseKey,
@@ -583,6 +707,12 @@ const COLS: &str = "consumer_kind,consumer_id,immutable_identity,enqueue_sequenc
     to_char(granted_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS granted_at,\
     to_char(terminal_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS terminal_at";
 #[derive(sqlx::FromRow)]
+struct SettlementDbRow {
+    #[sqlx(flatten)]
+    row: DbRow,
+    settled: Option<bool>,
+}
+#[derive(sqlx::FromRow)]
 struct DbRow {
     consumer_kind: String,
     consumer_id: String,
@@ -624,6 +754,19 @@ impl TryFrom<DbRow> for BuildLeaseRow {
             granted_at: v.granted_at,
             terminal_at: v.terminal_at,
         })
+    }
+}
+/// Durable column spelling of a lifecycle state, so occupancy membership is
+/// decided against the same [`OCCUPYING`] list the SQL uses.
+fn state_str(state: BuildLeaseState) -> &'static str {
+    match state {
+        BuildLeaseState::Queued => "queued",
+        BuildLeaseState::Granted => "granted",
+        BuildLeaseState::Launching => "launching",
+        BuildLeaseState::Bound => "bound",
+        BuildLeaseState::Active => "active",
+        BuildLeaseState::Suspect => "suspect",
+        BuildLeaseState::Terminal => "terminal",
     }
 }
 async fn lock(tx: &mut Transaction<'_, Postgres>) -> DbResult<()> {

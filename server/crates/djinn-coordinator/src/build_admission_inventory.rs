@@ -45,7 +45,40 @@ pub struct InventoryReport {
     pub stale: usize,
     /// Reclamations refused because the row changed after its absence proof.
     pub fenced: usize,
+    /// Named per-row reclamation failures, bounded by
+    /// [`MAX_NAMED_RECLAIM_FAILURES`]. See `reclaim_failure_count` for the
+    /// exact total.
+    ///
+    /// Deliberately not `blockers`: failing to retire one row leaves that row
+    /// occupying, which over-counts capacity. Over-counting is the conservative
+    /// direction — it can only deny admissions, never over-admit — so it must
+    /// not fail the whole pass and must not gate Enforce on the namespace's
+    /// history instead of its current state.
+    pub reclaim_failures: Vec<String>,
+    /// Exact number of per-row reclamation failures, named or not.
+    pub reclaim_failure_count: usize,
+    /// Pass-level failures. A non-empty `blockers` means the pass could not be
+    /// trusted at all (unusable listing, unreadable journal, failed seeding)
+    /// and Enforce stays fail-closed.
     pub blockers: Vec<String>,
+}
+
+/// Bound on how many individual reclaim failures one pass names. The count is
+/// always exact; the samples exist so an operator can see *which* row without a
+/// log line that grows with the stale population.
+pub const MAX_NAMED_RECLAIM_FAILURES: usize = 5;
+
+impl InventoryReport {
+    /// Record one per-row reclamation failure without failing the pass.
+    fn reclaim_failure(&mut self, row: &AdmissionJournalRow, error: &str) {
+        self.reclaim_failure_count += 1;
+        if self.reclaim_failures.len() < MAX_NAMED_RECLAIM_FAILURES {
+            self.reclaim_failures.push(format!(
+                "{}:{}:{}: {error}",
+                row.key.work_id, row.key.generation, row.object_name
+            ));
+        }
+    }
 }
 fn identity(key: &AdmissionJournalKey) -> String {
     format!("{:?}:{}:{}", key.domain, key.work_id, key.generation)
@@ -215,6 +248,36 @@ impl BuildAdmissionReconciler {
             == ObjectPresence::Absent
     }
 
+    /// Classify one failed retirement of a single occupying row.
+    ///
+    /// A rejected transition is a decision about that one row: its own identity
+    /// no longer permits the write. Costing all 58 rows for one of them is what
+    /// made arming Enforce depend on the namespace's *history* rather than its
+    /// current state, so it is counted, named within a bound, and the sweep
+    /// continues. Anything else — a connection loss, a serialization failure —
+    /// says nothing about the row and everything about the journal, so it stays
+    /// a pass-level blocker and marks the journal unhealthy.
+    fn record_reclaim_failure(
+        &self,
+        out: &mut InventoryReport,
+        row: &AdmissionJournalRow,
+        error: &djinn_db::Error,
+    ) {
+        if matches!(error, djinn_db::Error::InvalidTransition(_)) {
+            out.reclaim_failure(row, &error.to_string());
+            tracing::warn!(
+                work_id = %row.key.work_id,
+                generation = row.key.generation,
+                object = %row.object_name,
+                %error,
+                "build_admission: one occupying row could not be retired; reclamation continues"
+            );
+            return;
+        }
+        self.controller.mark_journal_unhealthy();
+        out.blockers.push(error.to_string());
+    }
+
     pub async fn reconcile(&self) -> InventoryReport {
         let _g = self.serial.lock().await;
         if self.controller.mode() == BuildAdmissionMode::Off {
@@ -302,36 +365,91 @@ impl BuildAdmissionReconciler {
         for row in &active {
             let id = identity(&row.key);
             if row.state == AdmissionState::Live {
-                let proof = if let Some(c) = by.get(&id) {
+                // Two different proofs, and they need two different writes.
+                //
+                // A *completed* object still exists, so its lifecycle callback
+                // is the ordinary one and `mark_terminal`'s latest-generation
+                // fence is meaningful. A *vanished* object has no lifecycle
+                // left to run, and requiring the row to be the latest
+                // generation there is precisely backwards: a Live row that a
+                // later generation has already superseded is the population
+                // most in need of retiring, and `mark_terminal` rejects exactly
+                // it with `stale admission generation`. That rejection is what
+                // left 58 superseded Live rows occupying the cap while every
+                // reconciliation pass reported them as blockers.
+                let completed = by.get(&id).is_some_and(|c| {
                     c.object.terminal && c.object.uid.as_deref() == row.object_uid.as_deref()
-                } else if let Some(uid) = row.object_uid.as_deref() {
-                    self.inventory
-                        .get_uid(WorkloadObjectKind::Job, &row.object_name, uid)
-                        .await
-                        == UidGetResult::NotFound
-                } else {
-                    false
-                };
-                if proof {
-                    out.stale += 1;
+                });
+                // Absence is proven the same way it always was, plus the LIST
+                // fence a pre-Live row already gets: the authoritative listing
+                // holds no object under this name, and a direct GET — which
+                // answers `NotFound` only on an authoritative `Ok(None)`, never
+                // on a transport failure — agrees. A Live row recorded a UID, so
+                // that GET is the same probe `presence` would make; asking twice
+                // would only add a second chance for a transient `Uncertain` to
+                // discard a valid proof.
+                let absent = !completed
+                    && !listed_names.contains(&row.object_name)
+                    && match row.object_uid.as_deref() {
+                        Some(uid) => {
+                            self.inventory
+                                .get_uid(WorkloadObjectKind::Job, &row.object_name, uid)
+                                .await
+                                == UidGetResult::NotFound
+                        }
+                        None => false,
+                    };
+                if !completed && !absent {
+                    continue;
+                }
+                out.stale += 1;
+                let outcome = if absent {
+                    // Generation-agnostic, fenced on the full observed identity.
                     match self
                         .controller
+                        .journal()
+                        .reclaim_absent_object(&ReclaimAbsentInput {
+                            key: row.key.clone(),
+                            observed_state: row.state,
+                            observed_creator_server_epoch: row.creator_server_epoch.clone(),
+                            observed_object_name: row.object_name.clone(),
+                            observed_object_uid: row.object_uid.clone(),
+                        })
+                        .await
+                    {
+                        Ok(ReclaimAbsentOutcome::Reclaimed(_)) => Ok(true),
+                        Ok(ReclaimAbsentOutcome::AlreadyTerminal(_)) => Ok(false),
+                        Ok(ReclaimAbsentOutcome::Fenced { reason }) => {
+                            out.fenced += 1;
+                            tracing::warn!(
+                                work_id = %row.key.work_id,
+                                generation = row.key.generation,
+                                object = %row.object_name,
+                                %reason,
+                                "build_admission: refused to retire a Live admission row that \
+                                 changed after its absence proof"
+                            );
+                            Ok(false)
+                        }
+                        Err(error) => Err(error),
+                    }
+                } else {
+                    self.controller
                         .journal()
                         .mark_terminal(&TerminalAdmissionInput {
                             key: row.key.clone(),
                             object_uid: row.object_uid.clone(),
                         })
                         .await
-                    {
-                        Ok(_) => {
-                            out.released += 1;
-                            self.controller.release_notifier().notify_one();
-                        }
-                        Err(error) => {
-                            self.controller.mark_journal_unhealthy();
-                            out.blockers.push(error.to_string());
-                        }
+                        .map(|_| true)
+                };
+                match outcome {
+                    Ok(true) => {
+                        out.released += 1;
+                        self.controller.release_notifier().notify_one();
                     }
+                    Ok(false) => {}
+                    Err(error) => self.record_reclaim_failure(&mut out, row, &error),
                 }
                 continue;
             }
@@ -378,10 +496,7 @@ impl BuildAdmissionReconciler {
                          after its absence proof"
                     );
                 }
-                Err(error) => {
-                    self.controller.mark_journal_unhealthy();
-                    out.blockers.push(error.to_string());
-                }
+                Err(error) => self.record_reclaim_failure(&mut out, row, &error),
             }
         }
         if out.blockers.is_empty() {
