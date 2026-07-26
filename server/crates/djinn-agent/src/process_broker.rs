@@ -202,13 +202,13 @@ fn remote_exit_status(_: ChildStatus) -> io::Result<ExitStatus> {
     ))
 }
 
-fn command_spec(command: Command) -> io::Result<CommandSpec> {
+pub(crate) fn command_spec(command: Command) -> io::Result<CommandSpec> {
     let text = |value: &std::ffi::OsStr, what| {
         value.to_str().map(str::to_owned).ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidInput, format!("{what} must be UTF-8"))
         })
     };
-    let program = text(command.get_program(), "program")?;
+    let named = text(command.get_program(), "program")?;
     let argv = command
         .get_args()
         .map(|argument| text(argument, "argument"))
@@ -217,14 +217,133 @@ fn command_spec(command: Command) -> io::Result<CommandSpec> {
         .get_current_dir()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "command cwd is required"))?;
     let cwd = text(cwd.as_os_str(), "cwd")?;
+    let environment = child_environment(&command)?;
+    let program = resolve_program(&named, &environment)?;
     let spec = CommandSpec {
         program,
         argv,
         cwd,
-        environment: child_environment(&command)?,
+        environment,
     };
-    spec.validate().map_err(broker_error)?;
+    spec.validate().map_err(|error| {
+        // Name what was rejected. The seventh launcher blocker cost a full
+        // investigation because the only thing production could say was
+        // "lease invocation failed: InvalidCommand", which does not
+        // distinguish the program from the cwd from a single environment
+        // entry — and `InvalidCommand` is deliberately coarse on the wire
+        // (the privileged broker does not describe its refusals to callers).
+        // This is the worker's own copy of the same check, so it can.
+        io::Error::other(format!(
+            "{error:?} ({error}): program {:?} (named {named:?}), cwd {:?}, \
+             {} environment entries",
+            spec.program,
+            spec.cwd,
+            spec.environment.len()
+        ))
+    })?;
     Ok(spec)
+}
+
+/// Resolve what the caller *named* into the absolute path `execve` requires.
+///
+/// # Why the conversion has to do this (task goxi, seventh launcher blocker)
+///
+/// [`std::process::Command`] documents a `PATH` search for a program with no
+/// `/` in it, and every caller in this repo relies on that:
+/// `extension::handlers::workspace` builds `Command::new("bash").arg("-lc")`,
+/// which is the **first thing an armed task pod runs**. [`CommandSpec`] is not a
+/// `Command`; it is an `execve(2)` request, and `execve` performs no search at
+/// all. So this conversion silently dropped a documented promise, twice over:
+///
+/// * `CommandSpec::validate` requires an absolute path from a known directory,
+///   so a bare name was refused before a leaf or a child existed — measured, on
+///   the real launcher, every brokered `run_shell` failed
+///   `lease invocation failed: InvalidCommand`;
+/// * and had it passed, `spawn.rs`'s `execve(prepared.program, …)` would have
+///   returned `ENOENT` and the child would have `_exit`ed 127 without running.
+///
+/// Resolving here rather than at one call site is the point. Fixing
+/// `workspace.rs` to say `/bin/bash` would leave the conversion just as lossy
+/// for the next `Command::new("git")` anyone writes, and that next caller would
+/// be blocker number nine.
+///
+/// # Which `PATH`
+///
+/// The child's, taken from `environment` — which is exactly what `Command` does
+/// on Unix (a `PATH` set on the command wins over the parent's for the search).
+/// The fallback when the child has no `PATH` is `execvp(3)`'s own
+/// `confstr(_CS_PATH)` default, for the same reason.
+///
+/// # Which filesystem
+///
+/// The worker's. A brokered child executes in the *launcher* container's mount
+/// namespace, not the worker's, so in principle the two could disagree — but
+/// both containers run the same image (`/opt/djinn/bin/djinn-agent-worker` and
+/// `/opt/djinn/bin/djinn-cgroup-launcher` are siblings in it), and a
+/// disagreement fails loudly at `execve` with exit 127 rather than silently.
+/// Doing the search inside the privileged broker instead would put a filesystem
+/// walk in the process whose entire design is to accept a bounded data-only
+/// request, and would buy nothing: the control is
+/// `CommandSpec::validate`'s allow-list applied to the resolved path, and that
+/// runs broker-side either way.
+fn resolve_program(named: &str, environment: &[(String, String)]) -> io::Result<String> {
+    // `execvp(3)`: a program containing a slash is a path and is used verbatim.
+    // A *relative* path stays relative here on purpose — resolving it against
+    // the worker's cwd would invent an authority the caller never asked for,
+    // and `CommandSpec::validate` refuses it a moment later.
+    if named.contains('/') {
+        return Ok(named.to_owned());
+    }
+    if named.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "brokered command names no program",
+        ));
+    }
+
+    let path = environment
+        .iter()
+        .find(|(key, _)| key == "PATH")
+        .map(|(_, value)| value.as_str())
+        .unwrap_or(DEFAULT_EXEC_PATH);
+
+    for directory in path.split(':') {
+        // `execvp` treats an empty PATH element as the current directory.
+        let directory = if directory.is_empty() { "." } else { directory };
+        let candidate = format!("{}/{named}", directory.trim_end_matches('/'));
+        if is_executable_file(&candidate) {
+            return Ok(candidate);
+        }
+    }
+
+    Err(io::Error::new(
+        io::ErrorKind::NotFound,
+        format!(
+            "brokered command names program {named:?}, which is on no directory of the child \
+             PATH {path:?}; `execve` performs no PATH search, so this would have exec'd nothing"
+        ),
+    ))
+}
+
+/// `execvp(3)`'s search path when the environment carries none.
+const DEFAULT_EXEC_PATH: &str = "/usr/local/bin:/bin:/usr/bin";
+
+#[cfg(unix)]
+fn is_executable_file(candidate: &str) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+
+    std::fs::metadata(candidate).is_ok_and(|metadata| {
+        // `metadata` follows symlinks, which is required rather than incidental:
+        // the production `bash` is reached through one (`/bin` -> `usr/bin`).
+        // `!is_dir()` rather than `is_file()` so a device or fifo is judged by
+        // its mode, exactly as `execvp` would.
+        !metadata.is_dir() && metadata.permissions().mode() & 0o111 != 0
+    })
+}
+
+#[cfg(not(unix))]
+fn is_executable_file(candidate: &str) -> bool {
+    std::fs::metadata(candidate).is_ok_and(|metadata| !metadata.is_dir())
 }
 
 /// The environment a brokered child is given.
@@ -246,11 +365,14 @@ fn command_spec(command: Command) -> io::Result<CommandSpec> {
 ///
 /// The fix keeps the allow-list closed and forwards through it:
 /// `djinn_cgroup_launcher::is_allowed_environment_key` is the single predicate,
-/// applied here as a convenience and re-applied inside the privileged broker by
-/// `CommandSpec::validate`, which is the actual control. Explicit per-command
-/// values win over inherited ones; the launcher then overrides the parallelism
-/// pins with values derived from the quota the leaf will really run at, because
-/// only it knows that.
+/// applied here as a convenience. The actual control is inside the privileged
+/// broker, in `CommandSpec::validate`, and it is the strictly stronger
+/// `is_allowed_environment_entry`: one forwardable name (`GIT_CONFIG_SYSTEM`)
+/// points at a *configuration file*, so it is judged by its value and not its
+/// key. Explicit per-command values win over inherited ones; the launcher then
+/// overrides the parallelism pins — and the git trust anchor — with values it
+/// derives itself, because only it knows the quota the leaf will really run at
+/// and only it owns a git config file that is safe to point a child at.
 fn child_environment(command: &Command) -> io::Result<Vec<(String, String)>> {
     use std::collections::BTreeMap;
 

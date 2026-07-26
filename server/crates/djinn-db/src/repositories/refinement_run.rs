@@ -288,7 +288,9 @@ impl ProposalRepository {
         &self,
         request: AdmitRefinementRunRequest,
     ) -> std::result::Result<RefinementAdmissionOutcome, RefinementAdmissionError> {
-        self.admit_refinement_run_inner(request, false).await
+        self.admit_refinement_run_inner(request, false)
+            .await
+            .map(|(outcome, _)| outcome)
     }
 
     /// Atomically reap an evaluator-stale generation and create its successor.
@@ -296,14 +298,18 @@ impl ProposalRepository {
         &self,
         request: AdmitRefinementRunRequest,
     ) -> std::result::Result<RefinementAdmissionOutcome, RefinementAdmissionError> {
-        self.admit_refinement_run_inner(request, true).await
+        let (outcome, reaped) = self.admit_refinement_run_inner(request, true).await?;
+        if reaped {
+            djinn_telemetry::refinement_run::increment_reaped_phantom();
+        }
+        Ok(outcome)
     }
 
     async fn admit_refinement_run_inner(
         &self,
         request: AdmitRefinementRunRequest,
         allow_reap: bool,
-    ) -> std::result::Result<RefinementAdmissionOutcome, RefinementAdmissionError> {
+    ) -> std::result::Result<(RefinementAdmissionOutcome, bool), RefinementAdmissionError> {
         validate_admission(&request)?;
         self.db().ensure_initialized().await?;
         let mut tx = self.db().pool().begin().await?;
@@ -322,10 +328,13 @@ impl ProposalRepository {
             let intent_id = first_intent_id(&mut tx, &run_id).await?;
             let outcome = RefinementAdmissionOutcome::Existing { run_id, intent_id, generation: row.get("generation") };
             tx.commit().await?;
-            return Ok(outcome);
+            return Ok((outcome, false));
         }
         let current = sqlx::query("SELECT id, generation FROM refinement_runs WHERE proposal_id = $1 AND state IN ('running', 'parked') ORDER BY generation DESC LIMIT 1")
             .bind(&request.proposal_id).fetch_optional(&mut *tx).await?;
+        // A successor can have generation > 1 solely because terminal history
+        // exists. Telemetry must instead follow the actual durable reap write.
+        let mut did_reap = false;
         let generation = if let Some(row) = current {
             let run_id: String = row.get("id");
             let generation: i32 = row.get("generation");
@@ -349,6 +358,7 @@ impl ProposalRepository {
                 });
             }
             reap_stale_run(&mut tx, &request.proposal_id, seq, &run_id, generation).await?;
+            did_reap = true;
             generation
                 .checked_add(1)
                 .ok_or(RefinementAdmissionError::AdmissionConflict)?
@@ -365,7 +375,7 @@ impl ProposalRepository {
         };
         let outcome = insert_admission(&mut tx, &request, seq, generation).await?;
         tx.commit().await?;
-        Ok(outcome)
+        Ok((outcome, did_reap))
     }
     /// Load one exact run and evaluate it using a repeatable-read database-time
     /// observation. Evidence belonging to any other run is never selected.

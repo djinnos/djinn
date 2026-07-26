@@ -55,6 +55,7 @@ impl ToolCallOutcomeTestExt for djinn_core::tool_call::ToolCallOutcome {
     }
 }
 
+mod brokered_shell_program_tests;
 mod code_graph_tests;
 mod compatibility_fallback_tests;
 mod edit_dispatch_tests;

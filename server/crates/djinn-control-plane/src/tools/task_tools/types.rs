@@ -1161,6 +1161,12 @@ pub struct BoardHealthResponse {
     pub epic_stats: Vec<BoardHealthEpicStat>,
     pub stale_tasks: Vec<BoardHealthTaskItem>,
     pub review_queue: Vec<BoardHealthReviewItem>,
+    /// Current evaluator-classified phantom refinement runs across the board.
+    #[serde(default)]
+    pub refinement_phantom_active_count: i64,
+    /// Durable phantom-reap events committed within the database-time 24-hour window.
+    #[serde(default)]
+    pub refinement_phantom_reaps_24h: i64,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub repeated_reopen_role_tool_mismatches: Vec<BoardHealthRoleToolMismatchItem>,
     pub stale_threshold_hours: i64,

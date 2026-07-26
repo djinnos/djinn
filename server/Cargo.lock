@@ -1381,6 +1381,7 @@ dependencies = [
  "djinn-memory",
  "djinn-spec-lint",
  "djinn-stack",
+ "djinn-telemetry",
  "futures",
  "globset",
  "libc",

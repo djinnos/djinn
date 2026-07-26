@@ -31,6 +31,20 @@ async fn board_health_with_no_pool_returns_response_shape() {
     assert!(response.get("epic_stats").is_some());
     assert!(response.get("review_queue").is_some());
     assert!(response.get("stale_threshold_hours").is_some());
+    assert_eq!(
+        response
+            .get("refinement_phantom_active_count")
+            .and_then(|value| value.as_i64()),
+        Some(0),
+        "a clean board has a deterministic phantom count"
+    );
+    assert_eq!(
+        response
+            .get("refinement_phantom_reaps_24h")
+            .and_then(|value| value.as_i64()),
+        Some(0),
+        "a clean board has a deterministic durable-reap count"
+    );
     // Memory health is no longer embedded in board_health (the planner workflow that consumed it was removed with proposal 1omc); note-health
     // signals live on the dedicated `memory_health` tool.
     assert!(response.get("memory_health").is_none());

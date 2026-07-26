@@ -12,11 +12,14 @@ use thiserror::Error;
 pub mod bootstrap;
 pub mod broker;
 pub mod child;
+pub mod command_path;
 pub mod env;
+pub mod git_trust;
 pub mod spawn;
 pub mod transport;
 
-pub use env::is_allowed_environment_key;
+pub use command_path::safe_command_path;
+pub use env::{is_allowed_environment_entry, is_allowed_environment_key};
 pub use spawn::{DenySpawn, NativeCgroupSpawn};
 
 const DEFAULT_PERIOD_US: u64 = 100_000;
@@ -227,7 +230,14 @@ impl CommandSpec {
             // `execve` receives each entry as `key=value`; accepting either
             // separator or NUL in the key would make that representation
             // malformed or change the key observed by the child.
-            if !is_allowed_environment_key(key) || key.contains(['\0', '=']) || value.contains('\0')
+            //
+            // The predicate is over the whole ENTRY, not the key: one forwarded
+            // name (`GIT_CONFIG_SYSTEM`) is a pointer to a configuration file,
+            // and admitting it by name would let a caller aim the child's git
+            // config at a file it wrote. See `env::is_allowed_environment_entry`.
+            if !is_allowed_environment_entry(key, value)
+                || key.contains(['\0', '='])
+                || value.contains('\0')
             {
                 return Err(Error::InvalidCommand);
             }
@@ -237,19 +247,6 @@ impl CommandSpec {
             .then_some(())
             .ok_or(Error::InvalidCommand)
     }
-}
-
-fn safe_command_path(path: &str, cwd: bool) -> bool {
-    !path.contains('\0')
-        && !path.contains("//")
-        && !path.split('/').any(|part| part == "..")
-        && if cwd {
-            path == "/workspace" || path.starts_with("/workspace/")
-        } else {
-            path.starts_with("/bin/")
-                || path.starts_with("/usr/bin/")
-                || path.starts_with("/workspace/")
-        }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -352,6 +349,13 @@ impl<F: CgroupFs, S: SpawnIntoCgroup> Launcher<F, S> {
             &mut command.environment,
             self.config.leased_quota.millicores(),
         );
+        // Give the child a git trust anchor the LAUNCHER owns. Without it every
+        // brokered `git` command in the worker-created workspace dies "dubious
+        // ownership" — the workspace is owned by the worker uid and the child is
+        // a different one. It is derived here, never accepted from the caller,
+        // for the same reason the parallelism pins are: only this side of the
+        // boundary knows a value that is safe to use. See `crate::git_trust`.
+        env::apply_git_trust_anchor(&mut command.environment, git_trust::anchor_path()?);
         command.validate()?;
 
         let fd = self.fs.create_direct_child(name)?;
@@ -527,6 +531,12 @@ pub enum Error {
     SpawnDenied,
     #[error("command request is malformed, over-budget, or outside the broker allow-list")]
     InvalidCommand,
+    #[error(
+        "could not establish the git trust anchor the child needs; without it every brokered \
+         git command in the worker-owned workspace fails \"detected dubious ownership\". The \
+         launcher needs a writable temp directory it alone owns (see git_trust)"
+    )]
+    GitTrustAnchorUnavailable,
     #[error("child process operation failed")]
     InvalidChild,
     #[error("fencing value does not match this invocation")]
@@ -1021,6 +1031,61 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![&("CARGO_BUILD_JOBS".to_string(), "4".to_string())]
         );
+    }
+
+    /// Every child is born with the launcher's own git trust anchor and no
+    /// other git configuration at all.
+    #[test]
+    fn the_child_environment_carries_the_launchers_git_trust_anchor() {
+        let mut l = launcher();
+        create(&mut l, "trusted");
+        let (_, spawn) = l.into_parts();
+        let anchor = git_trust::anchor_path()
+            .expect("anchor")
+            .display()
+            .to_string();
+        let git_entries: Vec<_> = spawn.environments[0]
+            .iter()
+            .filter(|(key, _)| key.starts_with("GIT"))
+            .collect();
+        assert_eq!(
+            git_entries,
+            vec![&(env::GIT_TRUST_ANCHOR_KEY.to_string(), anchor)],
+            "exactly one git variable reaches the child, and it is the launcher's anchor"
+        );
+    }
+
+    /// A caller aiming the child's SYSTEM git config at a file it controls is
+    /// arbitrary command execution (`core.sshCommand`). It is refused outright
+    /// rather than quietly corrected, and the refusal happens before any leaf or
+    /// child exists.
+    #[test]
+    fn a_caller_cannot_aim_the_childs_git_config_at_its_own_file() {
+        for (key, value) in [
+            (env::GIT_TRUST_ANCHOR_KEY, "/workspace/wt/.evil-gitconfig"),
+            ("GIT_CONFIG_COUNT", "1"),
+            ("GIT_CONFIG_KEY_0", "core.sshCommand"),
+            ("GIT_CONFIG_VALUE_0", "/workspace/wt/pwn.sh"),
+            ("GIT_CONFIG_NOSYSTEM", "1"),
+            ("GIT_CONFIG_GLOBAL", "/workspace/wt/.evil-gitconfig"),
+        ] {
+            let mut l = launcher();
+            let mut spec = command();
+            spec.environment = vec![(key.to_owned(), value.to_owned())];
+            assert!(
+                matches!(
+                    l.create_command("hostile", invocation(), &spec),
+                    Err(Error::InvalidCommand)
+                ),
+                "{key}={value} must be refused"
+            );
+            let (fs, spawn) = l.into_parts();
+            assert!(fs.created.is_empty(), "no leaf may be created for {key}");
+            assert!(
+                spawn.exec_calls.is_empty(),
+                "no child may be spawned for {key}"
+            );
+        }
     }
 
     #[test]
