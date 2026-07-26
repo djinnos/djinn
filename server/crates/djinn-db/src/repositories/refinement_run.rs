@@ -357,7 +357,9 @@ impl ProposalRepository {
                         generation,
                     };
                     tx.commit().await?;
-                    return Ok(outcome);
+                    // No stale generation was reaped on this path, so the
+                    // phantom-reap counter must not advance.
+                    return Ok((outcome, false));
                 }
                 return Err(RefinementAdmissionError::AlreadyActive {
                     proposal_id: request.proposal_id,
