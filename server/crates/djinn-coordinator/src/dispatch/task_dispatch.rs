@@ -3330,6 +3330,7 @@ mod inflight_ledger_tests {
             merge_conflict_metadata: None,
             memory_refs: "[]".to_owned(),
             agent_type: None,
+            execution_context: None,
             created_by_user_id: creator.unwrap_or("fixture-user").to_owned(),
             ci_status: "unknown".to_owned(),
             ci_head_sha: None,
@@ -3361,7 +3362,6 @@ mod inflight_ledger_tests {
             refinement_round: None,
             refinement_phase: None,
             refinement_role: None,
-            execution_context: None,
         }
     }
 
@@ -6151,6 +6151,7 @@ mod failover_chain_tests {
             merge_conflict_metadata: None,
             memory_refs: "[]".to_owned(),
             agent_type: None,
+            execution_context: None,
             created_by_user_id: "fixture-user".into(),
             ci_status: "unknown".to_owned(),
             ci_head_sha: None,
@@ -6182,7 +6183,6 @@ mod failover_chain_tests {
             refinement_round: None,
             refinement_phase: None,
             refinement_role: None,
-            execution_context: None,
         };
 
         let attempted_models: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
@@ -6364,6 +6364,7 @@ mod failover_chain_tests {
             merge_conflict_metadata: None,
             memory_refs: "[]".to_owned(),
             agent_type: None,
+            execution_context: None,
             created_by_user_id: "fixture-user".into(),
             ci_status: "unknown".to_owned(),
             ci_head_sha: None,
@@ -6395,7 +6396,6 @@ mod failover_chain_tests {
             refinement_round: None,
             refinement_phase: None,
             refinement_role: None,
-            execution_context: None,
         };
 
         // Run 2 chain exhaustions — breaker threshold is 3, so breaker should
@@ -6946,6 +6946,7 @@ mod failover_chain_tests {
             merge_conflict_metadata: None,
             memory_refs: "[]".to_owned(),
             agent_type: None,
+            execution_context: None,
             created_by_user_id: "fixture-user".into(),
             ci_status: "unknown".to_owned(),
             ci_head_sha: None,
@@ -6977,7 +6978,6 @@ mod failover_chain_tests {
             refinement_round: None,
             refinement_phase: None,
             refinement_role: None,
-            execution_context: None,
         };
 
         // ── Step 1: Two model-a failures, each rescued by model-b ─────────

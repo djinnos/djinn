@@ -253,6 +253,7 @@ pub(crate) fn task_with_ci(
         merge_conflict_metadata: None,
         memory_refs: "[]".into(),
         agent_type: None,
+        execution_context: None,
         created_by_user_id: "fixture-user".into(),
         ci_status: ci_status.into(),
         ci_head_sha: ci_head_sha.map(Into::into),
@@ -284,7 +285,6 @@ pub(crate) fn task_with_ci(
         refinement_round: None,
         refinement_phase: None,
         refinement_role: None,
-        execution_context: None,
     }
 }
 

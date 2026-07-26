@@ -41,6 +41,7 @@ fn test_task(
         merge_conflict_metadata: None,
         memory_refs: "[]".to_string(),
         agent_type: None,
+        execution_context: None,
         created_by_user_id: "fixture-user".into(),
         ci_status: ci_status.to_string(),
         ci_head_sha: Some("head-sha-3t22".to_string()),
@@ -72,7 +73,6 @@ fn test_task(
         refinement_round: None,
         refinement_phase: None,
         refinement_role: None,
-        execution_context: None,
     }
 }
 
