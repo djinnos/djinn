@@ -462,6 +462,130 @@ fn an_incompatible_volume_ownership_mode_rejects_the_spawn_before_exec() {
     chown(&environment.root, expected_uid, 0);
 }
 
+// ═══ privileged proof 4: the retained caps still hand the socket to the worker ═══
+
+/// After the launcher drops its bootstrap capabilities, it must STILL be able to
+/// hand the broker control socket to the worker.
+///
+/// # Why this proof exists (third v0.7.x production rollback)
+///
+/// `UnixBrokerServer::bind` finishes by `chown`ing the socket to the worker
+/// uid/gid, which is what excludes the uid-1001 child at the filesystem layer
+/// ahead of credential authentication. `chown(2)` requires `CAP_CHOWN` even at
+/// euid 0 — the kernel checks the capability, not the uid — and the retained set
+/// did not include it. The launcher therefore completed its whole bootstrap and
+/// then died `EPERM` on the very last step of startup, on a real node, twice.
+///
+/// Every existing proof in this lane runs with the FULL root capability set, so
+/// all of them passed while production could not start. This one is different:
+/// it performs the real [`drop_bootstrap_capabilities`] first and only then
+/// exercises the handoff, so it fails if the retained set is ever narrowed below
+/// what the shipped startup path needs. It runs in a forked child because the
+/// drop is irreversible.
+#[ignore = "privileged: needs uid 0 holding the rendered bootstrap capabilities \
+            (CI job launcher-kernel-boundary)"]
+#[test]
+fn the_retained_capabilities_still_hand_the_broker_socket_to_the_worker() {
+    let context = RenderedContext::load();
+    // Establishes the same privileged preconditions as the sibling proofs (uid 0
+    // and a real delegated cgroup root), even though the socket itself must live
+    // on an ordinary filesystem: cgroup2 cannot hold a Unix socket inode, which
+    // is why this deliberately does NOT reuse the delegated root as a directory.
+    let _environment = require_privileged_environment(&context);
+    let worker_uid = context.u32("worker_run_as_user");
+    let worker_gid = context.u32("worker_run_as_group");
+
+    let scratch = std::env::var_os("CARGO_TARGET_TMPDIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join(format!("djinn-socket-handoff-{}", std::process::id()));
+    std::fs::create_dir_all(&scratch).expect("create the scratch dir for the control socket");
+    let socket = scratch.join("handoff.sock");
+    let _ = std::fs::remove_file(&socket);
+    let (read_fd, write_fd) = pipe();
+
+    let pid = unsafe { libc::fork() };
+    assert!(pid >= 0, "fork the capability-dropping child");
+    if pid == 0 {
+        // Child: drop exactly as the shipped launcher does, then perform the
+        // shipped handoff. Anything unexpected is reported, never panicked.
+        unsafe { libc::close(read_fd) };
+        let mut report = String::new();
+        match djinn_cgroup_launcher::bootstrap::drop_bootstrap_capabilities() {
+            Ok(()) => report.push_str("dropped=0\n"),
+            Err(error) => report.push_str(&format!("dropped=1 ({error})\n")),
+        }
+        let listener = std::os::unix::net::UnixListener::bind(&socket);
+        match listener {
+            Ok(_) => report.push_str("bind_errno=0\n"),
+            Err(error) => {
+                report.push_str(&format!(
+                    "bind_errno={}\n",
+                    error.raw_os_error().unwrap_or(-1)
+                ));
+            }
+        }
+        let raw = std::ffi::CString::new(socket.to_string_lossy().as_bytes())
+            .expect("socket path has no interior NUL");
+        let rc = unsafe { libc::chown(raw.as_ptr(), worker_uid, worker_gid) };
+        let errno = if rc == 0 {
+            0
+        } else {
+            std::io::Error::last_os_error().raw_os_error().unwrap_or(-1)
+        };
+        report.push_str(&format!("chown_errno={errno}\n"));
+
+        use std::io::Write as _;
+        let mut sink = unsafe { <std::fs::File as std::os::fd::FromRawFd>::from_raw_fd(write_fd) };
+        let _ = sink.write_all(report.as_bytes());
+        let _ = sink.flush();
+        unsafe { libc::_exit(0) };
+    }
+
+    unsafe { libc::close(write_fd) };
+    let mut status = 0;
+    unsafe { libc::waitpid(pid, &raw mut status, 0) };
+    let report = {
+        use std::io::Read as _;
+        let mut source = unsafe { <std::fs::File as std::os::fd::FromRawFd>::from_raw_fd(read_fd) };
+        let mut text = String::new();
+        source.read_to_string(&mut text).expect("read the report");
+        text
+    };
+
+    assert!(
+        report.contains("dropped=0\n"),
+        "the bootstrap capability drop itself must succeed: {report}"
+    );
+    assert!(
+        report.contains("bind_errno=0\n"),
+        "binding the control socket must succeed after the drop: {report}"
+    );
+    assert!(
+        report.contains("chown_errno=0\n"),
+        "handing the control socket to the worker must succeed after the bootstrap drop. \
+         errno 1 (EPERM) means CAP_CHOWN is missing from \
+         `bootstrap::RETAINED_CAPABILITIES` or from the rendered Pod grant — the launcher \
+         would complete bootstrap and then die on the last step of startup: {report}"
+    );
+
+    // The handoff really happened: mode 0600 + worker ownership is what excludes
+    // the uid-1001 child from the broker before authentication is consulted.
+    let metadata = std::fs::metadata(&socket).expect("the bound socket must exist");
+    use std::os::unix::fs::MetadataExt as _;
+    assert_eq!(
+        metadata.uid(),
+        worker_uid,
+        "socket must be owned by the worker"
+    );
+    assert_eq!(
+        metadata.gid(),
+        worker_gid,
+        "socket must be grouped to the worker"
+    );
+    let _ = std::fs::remove_dir_all(&scratch);
+}
+
 /// The privileged lane's own YAML block, isolated from sibling jobs so this
 /// guard asserts the lane's wiring and never trips over unrelated CI edits.
 fn privileged_lane_block() -> String {
