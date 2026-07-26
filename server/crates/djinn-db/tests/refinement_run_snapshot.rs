@@ -351,9 +351,8 @@ async fn snapshot_maps_exact_run_evidence_and_excludes_late_prior_rows() {
     let p = proposal(&db).await;
     let prior = run(&db, &p, 1).await;
     sqlx::query("UPDATE refinement_runs SET state = 'terminal', terminal_at = $2, stop_tag = 'operator_stop' WHERE id = $1").bind(&prior).bind(OLD).execute(db.pool()).await.unwrap();
-    let prior_intent = intent(&db, &prior, "pending", None).await;
-    let prior_task = task(&db, &prior, Some(&prior_intent), "open").await;
-    live_session(&db, &prior_task).await;
+    let prior_intent = intent(&db, &prior, "materialized", None).await;
+    task(&db, &prior, Some(&prior_intent), "closed").await;
     let current = run(&db, &p, 2).await;
     let snapshot = repo
         .load_refinement_run_snapshot(request(current.clone()))
@@ -478,6 +477,37 @@ async fn snapshot_maps_exact_run_evidence_and_excludes_late_prior_rows() {
             evidence: RefinementLivenessEvidence::FreshHeartbeat { .. }
         }
     ));
+}
+
+#[tokio::test]
+async fn snapshot_keeps_exact_run_materialized_intent_live_after_task_closes() {
+    let db = Database::open_in_memory().unwrap();
+    db.ensure_initialized().await.unwrap();
+    let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+    let proposal_id = proposal(&db).await;
+    let run_id = run(&db, &proposal_id, 1).await;
+    let intent_id = intent(&db, &run_id, "materialized", None).await;
+    let task_id = task(&db, &run_id, Some(&intent_id), "closed").await;
+
+    let exact = repo
+        .load_refinement_run_snapshot(request(run_id.clone()))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(exact.snapshot.run.run_id, run_id);
+    assert_eq!(exact.snapshot.intents.len(), 1);
+    assert_eq!(exact.snapshot.intents[0].run_id, run_id);
+    assert_eq!(exact.snapshot.intents[0].intent_id, intent_id);
+    assert_eq!(exact.snapshot.tasks.len(), 1);
+    assert_eq!(exact.snapshot.tasks[0].task_id, task_id);
+    assert_eq!(exact.snapshot.tasks[0].state, RefinementTaskState::Closed);
+    assert!(exact.snapshot.sessions.is_empty());
+    assert_eq!(
+        exact.liveness,
+        RefinementLivenessResult::Live {
+            evidence: RefinementLivenessEvidence::MaterializedIntent { intent_id }
+        }
+    );
 }
 
 /// Post-worker task statuses remain valid exact-run evidence even though the
