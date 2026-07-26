@@ -166,6 +166,45 @@ pub(crate) async fn incoming_task_creator(
 }
 
 impl TaskRepository {
+    /// Persist explicit execution eligibility metadata. The typed core model
+    /// validates values before they reach JSONB; `None` preserves legacy rows.
+    pub async fn set_execution_context(
+        &self,
+        id: &str,
+        context: Option<&djinn_core::models::TaskExecutionContext>,
+    ) -> Result<()> {
+        self.db.ensure_initialized().await?;
+        let context = context
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(|e| Error::InvalidData(format!("invalid task execution context: {e}")))?;
+        sqlx::query("UPDATE tasks SET execution_context = $1 WHERE id = $2")
+            .bind(context)
+            .bind(id)
+            .execute(self.db.pool())
+            .await?;
+        Ok(())
+    }
+
+    /// Fetch durable execution metadata and reject malformed stored JSON at this
+    /// repository boundary rather than interpreting any legacy task fields.
+    pub async fn execution_context(
+        &self,
+        id: &str,
+    ) -> Result<Option<djinn_core::models::TaskExecutionContext>> {
+        self.db.ensure_initialized().await?;
+        let value: Option<serde_json::Value> =
+            sqlx::query_scalar("SELECT execution_context FROM tasks WHERE id = $1")
+                .bind(id)
+                .fetch_optional(self.db.pool())
+                .await?
+                .flatten();
+        value
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(|e| Error::InvalidData(format!("invalid tasks.execution_context: {e}")))
+    }
+
     /// Test-support helper for fixtures that need to establish source-task
     /// provenance without using a production post-insert attribution path.
     #[cfg(any(test, feature = "test-support"))]
@@ -284,6 +323,7 @@ impl TaskRepository {
             acceptance_criteria,
             blocker_ids,
             None,
+            None,
         )
         .await
     }
@@ -319,6 +359,7 @@ impl TaskRepository {
             acceptance_criteria,
             &[],
             Some(correlation),
+            None,
         )
         .await
     }
@@ -339,6 +380,7 @@ impl TaskRepository {
         acceptance_criteria: Option<&str>,
         blocker_ids: &[String],
         correlation: Option<&djinn_core::models::TaskRefinementCorrelation>,
+        execution_context: Option<&djinn_core::models::TaskExecutionContext>,
     ) -> Result<Task> {
         self.db.ensure_initialized().await?;
         let id = uuid::Uuid::now_v7().to_string();
@@ -363,6 +405,10 @@ impl TaskRepository {
         let owner_owned = owner.to_owned();
         let status_owned = status.map(|s| s.to_owned());
         let correlation = correlation.cloned();
+        let execution_context = execution_context
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(|e| Error::InvalidData(format!("invalid task execution context: {e}")))?;
 
         // Retry on Dolt 1213: the INSERT hits the hot `tasks` table; concurrent
         // writers routinely trip serialization failures. Task + blocker rows go
@@ -392,6 +438,7 @@ impl TaskRepository {
                 let proposal_id = proposal_id.clone();
                 let blocker_ids = blocker_ids_owned.clone();
                 let correlation = correlation.clone();
+                let execution_context = execution_context.clone();
                 async move {
                     let mut tx = self.db.pool().begin().await?;
                     let created_by_user_id = resolve_effective_creator(
@@ -423,9 +470,9 @@ impl TaskRepository {
                     sqlx::query(
                         "INSERT INTO tasks
                             (id, project_id, short_id, epic_id, title, description, design,
-                             issue_type, priority, owner, status, acceptance_criteria, created_by_user_id,
+                             issue_type, priority, owner, status, acceptance_criteria, execution_context, created_by_user_id,
                              refinement_run_id, refinement_intent_id, refinement_generation, refinement_round, refinement_phase, refinement_role)
-                         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, COALESCE($11, 'open'), $12, $13, $14, $15, $16, $17, $18, $19)",
+                         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, COALESCE($11, 'open'), $12, $13, $14, $15, $16, $17, $18, $19, $20)",
                     )
                     .bind(&id)
                     .bind(project_id)
@@ -439,6 +486,7 @@ impl TaskRepository {
                     .bind(owner)
                     .bind(status)
                     .bind(ac)
+                    .bind(execution_context)
                     .bind(created_by_user_id)
                     .bind(refinement_run_id)
                     .bind(refinement_intent_id)
@@ -584,6 +632,42 @@ impl TaskRepository {
             status,
             acceptance_criteria,
             &[],
+        )
+        .await
+    }
+
+    /// Create a task and its explicit execution eligibility metadata atomically.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_in_project_with_provenance_and_execution_context(
+        &self,
+        project_id: &str,
+        epic_id: Option<&str>,
+        provenance: EffectiveCreatorProvenance<'_>,
+        title: &str,
+        description: &str,
+        design: &str,
+        issue_type: &str,
+        priority: i64,
+        owner: &str,
+        status: Option<&str>,
+        acceptance_criteria: Option<&str>,
+        execution_context: Option<&djinn_core::models::TaskExecutionContext>,
+    ) -> Result<Task> {
+        self.create_in_project_with_blockers_and_refinement_correlation(
+            project_id,
+            epic_id,
+            provenance,
+            title,
+            description,
+            design,
+            issue_type,
+            priority,
+            owner,
+            status,
+            acceptance_criteria,
+            &[],
+            None,
+            execution_context,
         )
         .await
     }
@@ -1388,5 +1472,106 @@ mod created_by_tests {
             !ready.iter().any(|t| t.id == blocked.id),
             "the blocked task must NOT be ready until its blocker closes"
         );
+    }
+}
+
+#[cfg(test)]
+mod execution_context_tests {
+    use super::*;
+    // Resolve this test-only dependency through the crate's repository re-export.
+    use crate::UserRepository;
+    use djinn_core::events::EventBus;
+    use djinn_core::models::TaskExecutionContext;
+
+    #[tokio::test]
+    async fn execution_context_round_trips_through_create_and_get() {
+        let db = Database::open_in_memory().unwrap();
+        db.ensure_initialized().await.unwrap();
+        let project_id = uuid::Uuid::now_v7().to_string();
+        sqlx::query(
+            "INSERT INTO projects (id, name, github_owner, github_repo) VALUES ($1, 'p', 'o', 'r')",
+        )
+        .bind(&project_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+        let epic_id = uuid::Uuid::now_v7().to_string();
+        sqlx::query("INSERT INTO epics (id, project_id, short_id, title, description, emoji, color, owner, memory_refs) VALUES ($1, $2, 'ep01', '', '', '', '', '', '[]'::jsonb)")
+            .bind(&epic_id).bind(&project_id).execute(db.pool()).await.unwrap();
+        let user = UserRepository::new(db.clone())
+            .upsert_from_github(991, "context-test", None, None)
+            .await
+            .unwrap();
+        let repo = TaskRepository::new(db.clone(), EventBus::noop());
+        let provenance = EffectiveCreatorProvenance {
+            explicit_user_id: Some(&user.id),
+            source_task_id: None,
+            proposal_id: None,
+        };
+        let context = TaskExecutionContext::readiness_guardrail_analysis(
+            "agent-readiness-guardrails",
+            "1.0.0",
+        )
+        .unwrap();
+        let marked = repo
+            .create_in_project_with_provenance_and_execution_context(
+                &project_id,
+                Some(&epic_id),
+                provenance,
+                "marked",
+                "",
+                "",
+                "task",
+                0,
+                "",
+                None,
+                None,
+                Some(&context),
+            )
+            .await
+            .unwrap();
+        assert_eq!(marked.execution_context, Some(context.clone()));
+        assert_eq!(
+            repo.get(&marked.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .execution_context,
+            Some(context)
+        );
+
+        let unmarked = repo
+            .create_in_project_with_provenance_and_execution_context(
+                &project_id,
+                Some(&epic_id),
+                EffectiveCreatorProvenance {
+                    explicit_user_id: Some(&user.id),
+                    source_task_id: None,
+                    proposal_id: None,
+                },
+                "unmarked",
+                "",
+                "",
+                "task",
+                0,
+                "",
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            repo.get(&unmarked.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .execution_context,
+            None
+        );
+
+        sqlx::query("UPDATE tasks SET execution_context = '{\"kind\":\"readiness_guardrail_analysis\",\"skill_name\":\"x\",\"skill_version\":\" \"}'::jsonb WHERE id = $1")
+            .bind(&marked.id).execute(db.pool()).await.unwrap();
+        assert!(repo.get(&marked.id).await.is_err());
     }
 }
