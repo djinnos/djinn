@@ -80,6 +80,7 @@ impl CgroupLauncherClient for DegradeLauncher {
         &self,
         _: Command,
         _: &TaskInvocationLeaseIdentity,
+        _: djinn_cgroup_launcher::LeaseAuthority,
     ) -> io::Result<Box<dyn ProcessHandle>> {
         Ok(Box::new(DegradeHandle {
             state: self.state.clone(),

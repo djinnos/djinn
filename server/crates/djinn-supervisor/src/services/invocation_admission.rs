@@ -38,14 +38,38 @@ use crate::services::lease::InvocationLiftDecision;
 /// invocation and records telemetry (the "would throttle" arms) and then leaves
 /// the leaf pinned at the broker's unleased quota —
 /// `UnleasedQuota::DEFAULT_MILLICORES`, i.e. **250m** — for the whole command.
-/// `Unleased` is a literal no-op with the same effect. So a rollout that seeds
-/// the epoch and arms shadow makes every leased build slower, not faster: it is
-/// an observation mode whose entire purpose is to measure what enforcement
-/// *would* do. This is correct by design and asserted by
-/// `shadow_epoch_binds_but_never_lifts` and `unleased_epoch_binds_but_never_lifts`
-/// in `djinn-agent`'s `process/tests/process_lease_tests.rs` — do not "fix" it.
-/// Only `v1 = enforce` with a fully acknowledged
+/// So a rollout that seeds the epoch and arms shadow makes every leased build
+/// slower, not faster: it is an observation mode whose entire purpose is to
+/// measure what enforcement *would* do. This is correct by design and asserted by
+/// `shadow_epoch_binds_but_never_lifts` in `djinn-agent`'s
+/// `process/tests/process_lease_tests.rs` — do not "fix" it. Only `v1 = enforce`
+/// with a fully acknowledged
 /// `ForwardOverlap`/`InvocationPrimary`/`RollbackOverlap` phase lifts the quota.
+///
+/// # `Unleased` does NOT clamp (goxi launcher blocker 11)
+///
+/// This used to read "`Unleased` is a literal no-op with the same effect [as
+/// shadow]". Both halves of that were wrong in the same way. It was not a no-op:
+/// the leaf had already been born at the 250m unleased quota before this decision
+/// was ever read, so `Unleased` pinned every command there for its whole life.
+/// And it was not "the same effect as shadow" in intent — shadow clamps
+/// deliberately to observe, whereas `Unleased` means *no admission authority
+/// exists for this invocation at all*.
+///
+/// Production ran the launcher armed with the `admission_handoff` row ABSENT
+/// (`djinn-server epoch show` → `admission handoff row: <absent>`), which is this
+/// function's `Ok(None)` arm. A measured leaf reached 21,130,868 usec of CPU —
+/// 84x the 250,000 usec escalation threshold — with `cpu.max` never leaving
+/// `25000 100000`, making an armed launcher ~16x slower than a disabled one.
+///
+/// `Unleased` now selects `LeaseAuthority::Unarmed` at leaf creation (see
+/// `djinn-agent`'s `process_broker::birth_authority`), so the leaf is born with no
+/// quota of its own and inherits the Pod's budget. It is still contained, still
+/// killable, still measurable — it just costs nothing. Asserted behaviourally on
+/// a real cgroup2 hierarchy by step 7 of
+/// `djinn-cgroup-launcher/tests/delegated_cpu_lease_lifecycle.rs`, and on the
+/// production composition by
+/// `unleased_epoch_is_born_unclamped_because_no_grant_can_ever_lift_it`.
 #[must_use]
 pub fn evaluate_invocation_lift(
     row: Result<Option<AdmissionHandoffRow>, ()>,

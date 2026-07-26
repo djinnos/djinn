@@ -7,7 +7,7 @@ use std::{collections::HashMap, fs::File, io::Read, os::fd::RawFd};
 
 use crate::{
     CgroupFs, ChildProcess, CommandSpec, CpuStat, Error, Invocation, Launcher, Leaf,
-    SpawnIntoCgroup, child::WorkerReadinessAssertion,
+    LeaseAuthority, SpawnIntoCgroup, child::WorkerReadinessAssertion,
 };
 
 pub const WORKER_UID: u32 = 1000;
@@ -234,6 +234,7 @@ impl<F: CgroupFs, S: SpawnIntoCgroup, N: NonceSource> Broker<F, S, N> {
         id: &str,
         nonce: ControlNonce,
         leaf_name: &str,
+        authority: LeaseAuthority,
         command: &CommandSpec,
     ) -> Result<ControlNonce, Error> {
         self.validate(connection, id, nonce)?;
@@ -257,7 +258,7 @@ impl<F: CgroupFs, S: SpawnIntoCgroup, N: NonceSource> Broker<F, S, N> {
         command.validate()?;
         let (leaf, child) = self
             .launcher
-            .create_command(leaf_name, invocation, command)?;
+            .create_command(leaf_name, invocation, authority, command)?;
         let active = self
             .active
             .get_mut(id)
@@ -634,12 +635,26 @@ mod tests {
             )
             .unwrap();
         assert!(matches!(
-            broker.create(connection, "other", nonce, "leaf", &command()),
+            broker.create(
+                connection,
+                "other",
+                nonce,
+                "leaf",
+                LeaseAuthority::Armed,
+                &command()
+            ),
             Err(Error::InvalidInvocationBinding)
         ));
         let stale = nonce;
         let nonce = broker
-            .create(connection, "one", nonce, "leaf", &command())
+            .create(
+                connection,
+                "one",
+                nonce,
+                "leaf",
+                LeaseAuthority::Armed,
+                &command(),
+            )
             .unwrap();
         // The old create nonce is now irreversibly stale and cannot replay a control.
         assert!(matches!(
@@ -724,11 +739,25 @@ mod tests {
             )
             .unwrap();
         let nonce = broker
-            .create(connection, "one", nonce, "first", &command())
+            .create(
+                connection,
+                "one",
+                nonce,
+                "first",
+                LeaseAuthority::Armed,
+                &command(),
+            )
             .unwrap();
         assert_eq!(creates.get(), 1);
         assert!(matches!(
-            broker.create(connection, "one", nonce, "second", &command()),
+            broker.create(
+                connection,
+                "one",
+                nonce,
+                "second",
+                LeaseAuthority::Armed,
+                &command()
+            ),
             Err(Error::InvalidControl)
         ));
         assert_eq!(creates.get(), 1);
@@ -772,7 +801,14 @@ mod tests {
             )
             .unwrap();
         let nonce = broker
-            .create(connection, "one", nonce, "leaf", &command())
+            .create(
+                connection,
+                "one",
+                nonce,
+                "leaf",
+                LeaseAuthority::Armed,
+                &command(),
+            )
             .unwrap();
         assert!(matches!(
             broker.cleanup(connection, "one", nonce),

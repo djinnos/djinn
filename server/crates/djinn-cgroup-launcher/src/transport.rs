@@ -1,6 +1,6 @@
 //! Bounded Unix socket transport for authenticated broker controls.
 use crate::{
-    CgroupFs, CommandSpec, CpuStat, Error, Invocation, SpawnIntoCgroup,
+    CgroupFs, CommandSpec, CpuStat, Error, Invocation, LeaseAuthority, SpawnIntoCgroup,
     broker::{Broker, ConnectionId, ControlNonce, NonceSource, SocketPeer, WORKER_GID, WORKER_UID},
     child::WorkerReadinessAssertion,
 };
@@ -124,10 +124,10 @@ impl<F: CgroupFs, S: SpawnIntoCgroup, N: NonceSource> UnixBrokerServer<F, S, N> 
             }
             CREATE => {
                 let (i, n, x) = control(b)?;
-                let (leaf, command) = command_in(x)?;
+                let (leaf, authority, command) = command_in(x)?;
                 Ok(self
                     .broker
-                    .create(c, &i, n, &leaf, &command)?
+                    .create(c, &i, n, &leaf, authority, &command)?
                     .as_bytes()
                     .to_vec())
             }
@@ -273,9 +273,15 @@ impl UnixBrokerClient {
         self.nonces.insert(i.id, n);
         Ok(())
     }
-    pub fn create(&mut self, i: &str, leaf: &str, command: &CommandSpec) -> Result<(), Error> {
+    pub fn create(
+        &mut self,
+        i: &str,
+        leaf: &str,
+        authority: LeaseAuthority,
+        command: &CommandSpec,
+    ) -> Result<(), Error> {
         let mut x = self.control(i)?;
-        x.extend(command_out(leaf, command)?);
+        x.extend(command_out(leaf, authority, command)?);
         let r = self.call(CREATE, &x)?;
         self.rotate(i, &r)
     }
@@ -381,9 +387,17 @@ fn bytes_in(input: &[u8]) -> Result<Vec<u8>, Error> {
     }
     Ok(input[2..].to_vec())
 }
-fn command_out(leaf: &str, command: &CommandSpec) -> Result<Vec<u8>, Error> {
+fn command_out(
+    leaf: &str,
+    authority: LeaseAuthority,
+    command: &CommandSpec,
+) -> Result<Vec<u8>, Error> {
     command.validate()?;
     let mut out = enc(leaf)?;
+    // The authority travels WITH the create, not as a separate control: the
+    // birth quota is chosen inside the same broker call that makes the leaf, so
+    // there is no window in which a leaf exists without a decided ceiling.
+    out.push(authority.wire());
     for item in [&command.program, &command.cwd] {
         out.extend(enc(item)?);
     }
@@ -398,8 +412,10 @@ fn command_out(leaf: &str, command: &CommandSpec) -> Result<Vec<u8>, Error> {
     }
     Ok(out)
 }
-fn command_in(input: &[u8]) -> Result<(String, CommandSpec), Error> {
-    let (leaf, mut rest) = take_string(input)?;
+fn command_in(input: &[u8]) -> Result<(String, LeaseAuthority, CommandSpec), Error> {
+    let (leaf, rest) = take_string(input)?;
+    let (&authority, mut rest) = rest.split_first().ok_or(Error::InvalidTransportFrame)?;
+    let authority = LeaseAuthority::from_wire(authority)?;
     let (program, next) = take_string(rest)?;
     rest = next;
     let (cwd, next) = take_string(rest)?;
@@ -429,7 +445,7 @@ fn command_in(input: &[u8]) -> Result<(String, CommandSpec), Error> {
         environment,
     };
     command.validate()?;
-    Ok((leaf, command))
+    Ok((leaf, authority, command))
 }
 fn take_string(input: &[u8]) -> Result<(String, &[u8]), Error> {
     if input.len() < 2 {
@@ -954,7 +970,9 @@ mod tests {
                         fence: 1,
                     })
                     .unwrap();
-                client.create("child", "leaf", &command()).unwrap();
+                client
+                    .create("child", "leaf", LeaseAuthority::Armed, &command())
+                    .unwrap();
                 let mut stdout = Vec::new();
                 let mut stdout_eof = false;
                 while !stdout_eof {

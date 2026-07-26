@@ -6,9 +6,29 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use djinn_cgroup_launcher::{
-    CommandSpec, CpuStat, Invocation, broker::ChildStatus, transport::UnixBrokerClient,
+    CommandSpec, CpuStat, Invocation, LeaseAuthority, broker::ChildStatus,
+    transport::UnixBrokerClient,
 };
-use djinn_supervisor::services::{LeaseFencingToken, TaskInvocationLeaseIdentity};
+use djinn_supervisor::services::{
+    InvocationLiftDecision, LeaseFencingToken, TaskInvocationLeaseIdentity,
+};
+
+/// Project the durable admission decision onto the authority the leaf is BORN
+/// under.
+///
+/// The two `Armed` arms are deliberately different intents that share one birth
+/// quota: `Lift` will raise it on a matching fenced grant, and `Shadow` observes
+/// without lifting (documented to clamp on purpose). `Unleased` is the arm that
+/// cost four production rollouts — the durable `admission_handoff` row is
+/// absent/baseline/stale, no grant can ever authorize a lift, and clamping such
+/// an invocation to 250m is pure loss. It maps to `Unarmed` so the leaf is born
+/// with no quota of its own.
+pub(crate) fn birth_authority(decision: InvocationLiftDecision) -> LeaseAuthority {
+    match decision {
+        InvocationLiftDecision::Lift | InvocationLiftDecision::Shadow => LeaseAuthority::Armed,
+        InvocationLiftDecision::Unleased => LeaseAuthority::Unarmed,
+    }
+}
 
 #[cfg(unix)]
 use std::os::unix::process::ExitStatusExt;
@@ -28,10 +48,17 @@ pub(crate) trait ProcessHandle: Send {
 
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) trait CgroupLauncherClient: Send + Sync + 'static {
+    /// Create the invocation leaf and spawn the child into it.
+    ///
+    /// `authority` is not advisory: it selects the leaf's birth `cpu.max`, which
+    /// is written before the child may `execve` and cannot be revised
+    /// afterwards. Callers must therefore resolve the durable admission decision
+    /// BEFORE calling this, not after the queue.
     fn launch(
         &self,
         command: Command,
         identity: &TaskInvocationLeaseIdentity,
+        authority: LeaseAuthority,
     ) -> io::Result<Box<dyn ProcessHandle>>;
 }
 
@@ -56,6 +83,7 @@ impl CgroupLauncherClient for UnixBrokerLauncher {
         &self,
         command: Command,
         identity: &TaskInvocationLeaseIdentity,
+        authority: LeaseAuthority,
     ) -> io::Result<Box<dyn ProcessHandle>> {
         let spec = command_spec(command)?;
         let id = identity.invocation_id.clone();
@@ -66,7 +94,7 @@ impl CgroupLauncherClient for UnixBrokerLauncher {
                 fence: self.invocation_fence,
             })
             .map_err(broker_error)?;
-        if let Err(error) = client.create(&id, &id, &spec) {
+        if let Err(error) = client.create(&id, &id, authority, &spec) {
             let _ = client.cleanup(&id);
             return Err(broker_error(error));
         }

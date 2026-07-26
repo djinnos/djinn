@@ -24,6 +24,14 @@ struct ScriptedLauncher {
     lifts: Arc<Mutex<Vec<LeaseFencingToken>>>,
     kills: Arc<AtomicUsize>,
     empties: Arc<AtomicUsize>,
+    /// The birth authority the runner handed each `launch`.
+    ///
+    /// This is the observation the suite was missing. Asserting only "no lift
+    /// happened" cannot distinguish "the leaf ran unclamped because nothing
+    /// could grant it" from "the leaf was pinned to 250m forever" — and it was
+    /// the second one in production for four rollouts. The quota is committed at
+    /// launch, so the launch argument is where it has to be checked.
+    authorities: Arc<Mutex<Vec<djinn_cgroup_launcher::LeaseAuthority>>>,
 }
 
 impl CgroupLauncherClient for ScriptedLauncher {
@@ -31,7 +39,9 @@ impl CgroupLauncherClient for ScriptedLauncher {
         &self,
         mut command: Command,
         _: &TaskInvocationLeaseIdentity,
+        authority: djinn_cgroup_launcher::LeaseAuthority,
     ) -> io::Result<Box<dyn ProcessHandle>> {
+        self.authorities.lock().unwrap().push(authority);
         let child = command.spawn()?;
         *self.pid.lock().unwrap() = Some(child.id());
         Ok(Box::new(ScriptedHandle {
@@ -40,6 +50,12 @@ impl CgroupLauncherClient for ScriptedLauncher {
             kills: self.kills.clone(),
             empties: self.empties.clone(),
         }))
+    }
+}
+
+impl ScriptedLauncher {
+    fn authorities(&self) -> Vec<djinn_cgroup_launcher::LeaseAuthority> {
+        self.authorities.lock().unwrap().clone()
     }
 }
 struct ScriptedHandle {
@@ -95,6 +111,7 @@ struct BrokerBackedLauncher {
 
 struct BrokerBackedState {
     identities: Vec<TaskInvocationLeaseIdentity>,
+    authorities: Vec<djinn_cgroup_launcher::LeaseAuthority>,
     stdout: Vec<u8>,
     stderr: Vec<u8>,
     status: Option<std::process::ExitStatus>,
@@ -110,6 +127,7 @@ impl BrokerBackedLauncher {
         Self {
             state: Arc::new(Mutex::new(BrokerBackedState {
                 identities: Vec::new(),
+                authorities: Vec::new(),
                 stdout: stdout.to_vec(),
                 stderr: stderr.to_vec(),
                 status: Some(std::process::ExitStatus::from_raw(code << 8)),
@@ -126,6 +144,7 @@ impl BrokerBackedLauncher {
         Self {
             state: Arc::new(Mutex::new(BrokerBackedState {
                 identities: Vec::new(),
+                authorities: Vec::new(),
                 stdout: Vec::new(),
                 stderr: Vec::new(),
                 status: None,
@@ -144,8 +163,12 @@ impl CgroupLauncherClient for BrokerBackedLauncher {
         &self,
         _: Command,
         identity: &TaskInvocationLeaseIdentity,
+        authority: djinn_cgroup_launcher::LeaseAuthority,
     ) -> io::Result<Box<dyn ProcessHandle>> {
-        self.state.lock().unwrap().identities.push(identity.clone());
+        let mut state = self.state.lock().unwrap();
+        state.identities.push(identity.clone());
+        state.authorities.push(authority);
+        drop(state);
         Ok(Box::new(BrokerBackedHandle {
             state: self.state.clone(),
             cpu_usage_usec: self.cpu_usage_usec,
@@ -573,15 +596,38 @@ async fn shadow_epoch_binds_but_never_lifts() {
         launcher.lifts.lock().unwrap().is_empty(),
         "shadow epoch must never lift cpu.max"
     );
+    // Shadow is the one decision that clamps ON PURPOSE: it is an observation
+    // mode, so the leaf must still be born at the unleased quota.
+    assert_eq!(
+        launcher.authorities(),
+        vec![djinn_cgroup_launcher::LeaseAuthority::Armed],
+        "shadow observation is only meaningful against a clamped leaf"
+    );
     // The durable lease is still reconciled to terminal (fence recorded).
     assert!(services.release_calls.load(Ordering::SeqCst) <= 1);
     assert_eq!(launcher.kills.load(Ordering::SeqCst), 1);
 }
 
-/// AC3 (agent side): an unknown/stale/baseline epoch keeps the quota unleased —
-/// a matching bind does not lift.
+/// AC3 (agent side): an unknown/stale/baseline/ABSENT epoch cannot lift, so the
+/// leaf must be born WITHOUT a quota of its own — not pinned to the unleased
+/// quota for the whole command.
+///
+/// # The production symptom this now names (goxi launcher blocker 11)
+///
+/// The previous version of this test asserted only `lifts.is_empty()` and
+/// passed, because a no-op lift is exactly what the code did. What it could not
+/// see is that the leaf had *already* been born at 250m, so "never lifts" meant
+/// "clamped at 250m forever". Production ran with the durable
+/// `admission_handoff` row absent — `Unleased` for every invocation — and a
+/// measured leaf reached 21.1 CPU-seconds, 84x the 0.25 CPU-s escalation
+/// threshold, with `cpu.max` still reading `25000 100000`. Builds ran ~16x
+/// slower armed than disabled.
+///
+/// Reverting `birth_authority`'s `Unleased` arm to `Armed` reproduces that:
+/// this assertion fails with `Armed`, i.e. "the leaf was clamped by an authority
+/// that can never lift it".
 #[tokio::test]
-async fn unleased_epoch_binds_but_never_lifts() {
+async fn unleased_epoch_is_born_unclamped_because_no_grant_can_ever_lift_it() {
     let services = Arc::new(ScriptedServices::new(
         vec![granted(7)],
         vec![status(LeaseState::Active, Some(7))],
@@ -608,7 +654,62 @@ async fn unleased_epoch_binds_but_never_lifts() {
         launcher.lifts.lock().unwrap().is_empty(),
         "unleased epoch must never lift cpu.max"
     );
+    assert_eq!(
+        launcher.authorities(),
+        vec![djinn_cgroup_launcher::LeaseAuthority::Unarmed],
+        "an epoch that can never grant a lift must not clamp the leaf either; \
+         `Armed` here IS the production defect (cpu.max pinned at 25000 100000 \
+         while the leaf burned 21.1 CPU-seconds)"
+    );
     assert!(services.release_calls.load(Ordering::SeqCst) <= 1);
+}
+
+/// The mapping itself, enumerated: every decision the durable authority can
+/// produce, and the birth quota it commits.
+///
+/// `Unleased` is what `evaluate_invocation_lift` returns for an ABSENT handoff
+/// row, which is the state production is actually in — see
+/// `absent_handoff_row_is_unleased_and_therefore_unarmed` below for the
+/// composition that ties the two together.
+#[test]
+fn birth_authority_is_armed_only_when_a_lift_is_reachable() {
+    use djinn_cgroup_launcher::LeaseAuthority;
+    use djinn_supervisor::services::InvocationLiftDecision;
+    assert_eq!(
+        crate::process::birth_authority(InvocationLiftDecision::Lift),
+        LeaseAuthority::Armed
+    );
+    assert_eq!(
+        crate::process::birth_authority(InvocationLiftDecision::Shadow),
+        LeaseAuthority::Armed
+    );
+    assert_eq!(
+        crate::process::birth_authority(InvocationLiftDecision::Unleased),
+        LeaseAuthority::Unarmed
+    );
+}
+
+/// The composition that failed in production: the DURABLE row state that
+/// production actually has, projected through the real `evaluate_invocation_lift`
+/// and the real `birth_authority`, must reach the launcher as `Unarmed`.
+///
+/// `djinn-server epoch show` on the production node reported
+/// `admission handoff row: <absent>` while the launcher was armed. That is not a
+/// hypothetical: it is the exact input below.
+#[test]
+fn absent_handoff_row_is_unleased_and_therefore_unarmed() {
+    use djinn_cgroup_launcher::LeaseAuthority;
+    use djinn_supervisor::services::evaluate_invocation_lift;
+    // Absent row (production), and unreadable row (a DB blip) — both fail closed
+    // on the lift, so neither may clamp.
+    for row in [Ok(None), Err(())] {
+        let decision = evaluate_invocation_lift(row);
+        assert_eq!(
+            crate::process::birth_authority(decision),
+            LeaseAuthority::Unarmed,
+            "decision {decision:?} cannot lift, so it must not clamp"
+        );
+    }
 }
 
 #[tokio::test]
@@ -853,6 +954,7 @@ impl CgroupLauncherClient for FixtureLauncher {
         &self,
         _: Command,
         _: &TaskInvocationLeaseIdentity,
+        _: djinn_cgroup_launcher::LeaseAuthority,
     ) -> io::Result<Box<dyn ProcessHandle>> {
         Ok(Box::new(FixtureHandle {
             state: self.state.clone(),
