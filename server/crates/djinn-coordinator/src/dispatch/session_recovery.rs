@@ -2751,15 +2751,27 @@ impl CoordinatorActor {
         }
 
         // ── 5. Log protocol violation prominently ──────────────────────
+        //
+        // The message states the ACTUAL accounting, per exit kind. Only
+        // `failed`/`interrupted` exits terminalize an attempt (step 6 below); a
+        // `completed` exit records evidence and nothing else. The previous text
+        // claimed "counts as failed attempt" for every violation including clean
+        // ones, which read as retry inflation that never happened.
         if result.verdict == Verdict::ProtocolViolation {
+            let attempt_accounting = if matches!(session_status, "failed" | "interrupted") {
+                "terminalizes the live attempt"
+            } else {
+                "evidence only — no attempt accounting"
+            };
             tracing::warn!(
                 task_id = %task_id,
                 session_id = %session_id,
                 session_status = %session_status,
                 reason = ?result.reason,
                 outcome = ?result.outcome,
+                attempt_accounting,
                 "classify_session_exit_liveness: protocol violation detected — \
-                 session exited while task is nonterminal; counts as failed attempt"
+                 session exited while its task was still unsettled"
             );
         }
 
