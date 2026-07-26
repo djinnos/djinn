@@ -86,11 +86,20 @@
             djinn_db::RefinementAdmissionOutcome::Admitted { run_id, .. } => run_id,
             _ => unreachable!(),
         };
-        assert_eq!(build_refinement_status(&repo, &proposal.id).await.unwrap().liveness_evidence.as_deref(), Some("pending_intent"));
+        let pending = build_refinement_status(&repo, &proposal.id).await.unwrap();
+        assert_eq!(pending.run_id.as_deref(), Some(run_id.as_str()));
+        assert_eq!(pending.run_state.as_deref(), Some("active"));
+        assert_eq!(pending.liveness.as_deref(), Some("live"));
+        assert_eq!(pending.liveness_evidence.as_deref(), Some("pending_intent"));
+        assert!(pending.active);
 
         sqlx::query("UPDATE refinement_dispatch_intents SET state = 'claimed', claimed_by = 'test', claimed_at = '2000-01-01T00:00:00.000Z', claim_expires_at = '2999-01-01T00:00:00.000Z' WHERE run_id = $1")
             .bind(&run_id).execute(db.pool()).await.unwrap();
-        assert_eq!(build_refinement_status(&repo, &proposal.id).await.unwrap().liveness_evidence.as_deref(), Some("claimed_intent"));
+        let claimed = build_refinement_status(&repo, &proposal.id).await.unwrap();
+        assert_eq!(claimed.run_id.as_deref(), Some(run_id.as_str()));
+        assert_eq!(claimed.liveness.as_deref(), Some("live"));
+        assert_eq!(claimed.liveness_evidence.as_deref(), Some("claimed_intent"));
+        assert!(claimed.active);
 
         sqlx::query("UPDATE refinement_dispatch_intents SET state = 'materialized', claimed_by = NULL, claimed_at = NULL, claim_expires_at = NULL WHERE run_id = $1")
             .bind(&run_id).execute(db.pool()).await.unwrap();
@@ -103,18 +112,30 @@
         ] {
             sqlx::query("UPDATE tasks SET status = $1 WHERE id = $2")
                 .bind(task_status).bind(&task_id).execute(db.pool()).await.unwrap();
-            assert_eq!(build_refinement_status(&repo, &proposal.id).await.unwrap().liveness_evidence.as_deref(), Some(evidence));
+            let status = build_refinement_status(&repo, &proposal.id).await.unwrap();
+            assert_eq!(status.run_id.as_deref(), Some(run_id.as_str()));
+            assert_eq!(status.liveness.as_deref(), Some("live"));
+            assert_eq!(status.liveness_evidence.as_deref(), Some(evidence));
+            assert!(status.active);
         }
 
         sqlx::query("UPDATE tasks SET status = 'closed' WHERE id = $1")
             .bind(&task_id).execute(db.pool()).await.unwrap();
         let session_id = seed_live_status_session(&db, &project_id, &task_id).await;
-        assert_eq!(build_refinement_status(&repo, &proposal.id).await.unwrap().liveness_evidence.as_deref(), Some("live_session"));
+        let session = build_refinement_status(&repo, &proposal.id).await.unwrap();
+        assert_eq!(session.run_id.as_deref(), Some(run_id.as_str()));
+        assert_eq!(session.liveness.as_deref(), Some("live"));
+        assert_eq!(session.liveness_evidence.as_deref(), Some("live_session"));
+        assert!(session.active);
         sqlx::query("UPDATE sessions SET status = 'completed' WHERE id = $1")
             .bind(&session_id).execute(db.pool()).await.unwrap();
         sqlx::query("UPDATE refinement_runs SET heartbeat_at = to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') WHERE id = $1")
             .bind(&run_id).execute(db.pool()).await.unwrap();
-        assert_eq!(build_refinement_status(&repo, &proposal.id).await.unwrap().liveness_evidence.as_deref(), Some("fresh_heartbeat"));
+        let heartbeat = build_refinement_status(&repo, &proposal.id).await.unwrap();
+        assert_eq!(heartbeat.run_id.as_deref(), Some(run_id.as_str()));
+        assert_eq!(heartbeat.liveness.as_deref(), Some("live"));
+        assert_eq!(heartbeat.liveness_evidence.as_deref(), Some("fresh_heartbeat"));
+        assert!(heartbeat.active);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -133,6 +154,7 @@
         assert!(!status.active);
         assert!(status.run_id.is_none());
         assert!(status.liveness.is_none());
+        assert!(status.current_round.is_none());
         assert!(status.awaiting_review);
         assert_eq!(status.judge_summary.as_deref(), Some("legacy verdict"));
         assert_eq!(status.snapshot_revision_seq, Some(7));
