@@ -630,6 +630,37 @@ impl AdmissionJournalRepository {
         Ok(ReclaimAbsentOutcome::Reclaimed(reclaimed))
     }
 
+    /// The durable state of one exact generation, or `None` when the ledger
+    /// holds no row for that key.
+    ///
+    /// This is the ownership question the v1 capacity ledger cannot answer for
+    /// itself. A `task_dispatch` build lease is bought for one task-run
+    /// generation and handed back when that generation's LIFECYCLE ends, but
+    /// the lease row carries no Kubernetes object name to probe: a task-run
+    /// Job's name is derived from a `task_run_id` that does not exist yet when
+    /// the slot is acquired. The journal generation IS that lease's owner, so
+    /// `Terminal` here is proof that the lease is holding capacity for a
+    /// lifecycle which already ended. See
+    /// `djinn_coordinator::build_lease_reclaim`.
+    pub async fn generation_state(
+        &self,
+        domain: AdmissionDomain,
+        work_id: &str,
+        generation: i64,
+    ) -> DbResult<Option<AdmissionState>> {
+        self.db.ensure_initialized().await?;
+        let state: Option<String> = sqlx::query_scalar(
+            "SELECT state FROM admission_journal \
+             WHERE domain = $1 AND work_id = $2 AND generation = $3",
+        )
+        .bind(domain.as_str())
+        .bind(work_id)
+        .bind(generation)
+        .fetch_optional(self.db.pool())
+        .await?;
+        state.map(|state| AdmissionState::parse(&state)).transpose()
+    }
+
     /// Count rows that currently occupy task-or-warm capacity.
     pub async fn count_task_or_warm_occupancy(&self) -> DbResult<i64> {
         self.db.ensure_initialized().await?;

@@ -1010,6 +1010,18 @@ impl AppState {
                         if let Some(admission) = state.inner.build_admission.clone() {
                             state.finalize_build_admission_handoff(&admission).await;
                         }
+                        // The epoch's REFERENCE CAP is part of the same durable
+                        // row this tick already re-reads for v0/v1 modes, and
+                        // it must be adopted on the same schedule. Without
+                        // this, `djinn-server epoch set-cap` wrote a value the
+                        // running process never read: production 2026-07-25
+                        // reported `set-cap --cap 12` applied, `epoch show`
+                        // confirmed `cap 12`, and every denial that followed
+                        // still said `cap=3` until the pods were restarted.
+                        // This loop runs on every pod including standbys,
+                        // which is safe: adopting a cap is a read of the
+                        // durable row, never a write to it.
+                        state.inner.build_lease.refresh_epoch_cap().await;
                         if let Some(event) = log_state.observe_persistent(
                             SystemClockTrait::new().now_instant(),
                             state.publish_handoff_warning().await,
@@ -1467,14 +1479,29 @@ impl AppState {
                     let lease_reclaimer = warmer.workload_inventory().map(|inventory| {
                         Arc::new(BuildLeaseReclaimer::new(
                             Arc::new(djinn_db::BuildLeaseRepository::new(self.db().clone())),
+                            // The v0 lifecycle ledger. It is the only thing
+                            // that can prove a `task_dispatch` lease has no
+                            // owner: that population commits to no Kubernetes
+                            // object name, so before it was wired here every
+                            // leaked dispatch slot was permanently
+                            // unreclaimable and a leak was a total dispatch
+                            // outage.
+                            Arc::new(djinn_db::AdmissionJournalRepository::new(self.db().clone())),
                             inventory,
                         ))
                     });
+                    let cap_refresh_lease = self.inner.build_lease.clone();
                     tokio::spawn(async move {
                         let mut tick = tokio::time::interval(Duration::from_secs(30));
                         tick.tick().await;
                         loop {
                             tick.tick().await;
+                            // Adopt an operator `epoch set-cap` on the build
+                            // lease's own maintenance cadence rather than
+                            // waiting out the five-minute handoff tick: a cap
+                            // change is an incident control, and the whole
+                            // point of it is that the board unwedges now.
+                            cap_refresh_lease.refresh_epoch_cap().await;
                             recovery_warmer.reconcile_durable_warm_leases().await;
                             let Some(reclaimer) = lease_reclaimer.as_ref() else {
                                 continue;
@@ -1488,6 +1515,7 @@ impl AppState {
                                 tracing::warn!(
                                     occupying = report.occupying,
                                     absent = report.absent,
+                                    ownerless_dispatch = report.ownerless_dispatch,
                                     reclaimed = report.reclaimed,
                                     fenced = report.fenced,
                                     failures = report.failure_count,
