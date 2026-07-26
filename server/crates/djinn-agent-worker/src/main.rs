@@ -468,21 +468,13 @@ async fn configure_private_dep_access(spec: &TaskRunSpec) {
         return;
     };
 
-    // Global git credential rewrite. NOTE: never log `key` — it embeds the token.
+    // Global git credential rewrite. NOTE: never log `key` — it embeds the token,
+    // and neither does the ERROR: `GitError::CommandFailed` renders the argv, so
+    // both writes go through `djinn_git::exported_config`, which scrubs it.
     let key = format!("url.https://x-access-token:{token}@github.com/{owner}/.insteadOf");
     let value = format!("https://github.com/{owner}/");
-    match djinn_git::run_git_command_in(
-        std::path::Path::new("/"),
-        vec![
-            "config".into(),
-            "--global".into(),
-            key.clone(),
-            value.clone(),
-        ],
-    )
-    .await
-    {
-        Ok(_) => {
+    match djinn_git::exported_config::publish_global(key.clone(), value.clone()).await {
+        Ok(()) => {
             info!(
                 owner,
                 "configure_private_dep_access: git insteadOf set for private deps"

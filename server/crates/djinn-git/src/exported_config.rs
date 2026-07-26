@@ -28,6 +28,23 @@
 //! It stays a real `git config` invocation rather than a hand-rolled INI writer:
 //! the value carries a token that may contain characters git escapes, and the
 //! file has to be one git will read back.
+//!
+//! # The errors carry the credential, so they are scrubbed
+//!
+//! `GitError::CommandFailed` renders `command: args.join(" ")`, and for this
+//! family of writes one of those args is
+//! `url.https://x-access-token:<TOKEN>@github.com/<owner>/.insteadOf`. Every
+//! caller logs the error. So an ordinary `git config` failure — a bad owner
+//! string, a full disk — would print a live installation token into the worker's
+//! log stream, which is shipped and retained. `git` can echo the key back on
+//! stderr too (`error: invalid key: …`), so scrubbing the argv alone is not
+//! enough. [`scrub`] covers both, and the token never travels through this module
+//! unredacted in an error.
+//!
+//! Both token-bearing writes therefore live here, [`publish`] for the
+//! launcher-visible channel and [`publish_global`] for the worker's own
+//! `$HOME/.gitconfig`, so the redaction cannot be applied to one and forgotten on
+//! the other.
 
 use std::path::Path;
 
@@ -41,11 +58,64 @@ use crate::GitError;
 /// that would have made it writable if that flag were ever dropped.
 pub const PUBLISHED_MODE: u32 = 0o644;
 
+/// Marker whose value in a rewrite URL is the credential.
+const TOKEN_USER: &str = "x-access-token:";
+
+/// Placeholder substituted for anything that could be the credential.
+const REDACTED: &str = "<redacted>";
+
+/// Remove `key` — and any `x-access-token:…@` credential, however it was
+/// reformatted on the way out — from every rendered field of `error`.
+///
+/// Returns a `CommandFailed` whose `command` names the operation rather than the
+/// argv, because the argv is the leak. `stdout`/`stderr` are kept (they are what
+/// makes a failure diagnosable) with both forms of the credential scrubbed.
+fn scrub(error: GitError, operation: &str, key: &str) -> GitError {
+    let GitError::CommandFailed {
+        code,
+        cwd,
+        stdout,
+        stderr,
+        ..
+    } = error
+    else {
+        // Nothing else in this crate's error set embeds the argv.
+        return error;
+    };
+    GitError::CommandFailed {
+        code,
+        command: operation.to_owned(),
+        cwd,
+        stdout: scrub_text(&stdout, key),
+        stderr: scrub_text(&stderr, key),
+    }
+}
+
+/// [`scrub`] for one string: the whole key, then any surviving
+/// `x-access-token:<...>@` span.
+fn scrub_text(text: &str, key: &str) -> String {
+    let mut out = if key.is_empty() {
+        text.to_owned()
+    } else {
+        text.replace(key, REDACTED)
+    };
+    while let Some(start) = out.find(TOKEN_USER) {
+        let secret = start + TOKEN_USER.len();
+        // Up to the `@` that ends the userinfo, or to the end of the line if git
+        // truncated it. Either way the span cannot be left in.
+        let end = out[secret..]
+            .find(['@', '\n'])
+            .map_or(out.len(), |offset| secret + offset);
+        out.replace_range(start..end, REDACTED);
+    }
+    out
+}
+
 /// Write `key = value` into the git config file at `path`, readable by another
 /// uid in the pod.
 ///
-/// Creates the parent directory if needed. Never logs `key`: callers pass a
-/// token-bearing key.
+/// Creates the parent directory if needed. The returned error is scrubbed:
+/// callers pass a token-bearing `key` and then log what comes back.
 pub async fn publish(path: &Path, key: String, value: String) -> Result<(), GitError> {
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent)
@@ -58,17 +128,39 @@ pub async fn publish(path: &Path, key: String, value: String) -> Result<(), GitE
             "config".into(),
             "--file".into(),
             path.display().to_string(),
-            key,
+            key.clone(),
             value,
         ],
     )
-    .await?;
+    .await
+    .map_err(|e| {
+        scrub(
+            e,
+            &format!("config --file {} <key> <value>", path.display()),
+            &key,
+        )
+    })?;
     tokio::fs::set_permissions(
         path,
         <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(PUBLISHED_MODE),
     )
     .await
     .map_err(|e| io_as_git_error(format!("chmod {PUBLISHED_MODE:o} {}", path.display()), &e))
+}
+
+/// `git config --global key value`, with the same redaction as [`publish`].
+///
+/// This is the pre-existing worker-side write; it lives here so the credential
+/// scrubbing is applied to both token-bearing writes from one place rather than
+/// remembered at each call site.
+pub async fn publish_global(key: String, value: String) -> Result<(), GitError> {
+    crate::run_git_command_in(
+        Path::new("/"),
+        vec!["config".into(), "--global".into(), key.clone(), value],
+    )
+    .await
+    .map(|_| ())
+    .map_err(|e| scrub(e, "config --global <key> <value>", &key))
 }
 
 /// Shape an `io::Error` as the crate's own error type so callers keep one match.
@@ -143,5 +235,81 @@ mod tests {
         .expect("git must read back what git wrote");
         assert_eq!(read.stdout.trim(), "https://github.com/acme/");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    const CANARY: &str = "ghs-EXPORTED-CONFIG-TOKEN-CANARY";
+
+    /// A real `git config` failure must not print the installation token.
+    ///
+    /// `GitError::CommandFailed` renders `command: args.join(" ")` and every
+    /// caller logs the error, so without scrubbing an ordinary failure ships a
+    /// live credential to the log stream. Driven with a REAL failing git
+    /// invocation, not a hand-built error, and the control is the same failure
+    /// through the unscrubbed path — which must leak, or this proves nothing.
+    #[tokio::test]
+    async fn a_failing_publish_does_not_render_the_token() {
+        let key = format!("url.https://{TOKEN_USER}{CANARY}@github.com/acme/.insteadOf");
+        // A path under a plain file: `git config --file` cannot open it, and the
+        // parent `create_dir_all` fails first only if it is a directory — so use
+        // an unwritable location git itself must reject.
+        let root = scratch("leak");
+        std::fs::create_dir_all(&root).expect("create root");
+        let blocker = root.join("blocker");
+        std::fs::write(&blocker, "not a directory").expect("write blocker");
+        let target = blocker.join("nested").join("gitconfig");
+
+        let error = publish(&target, key.clone(), "https://github.com/acme/".into())
+            .await
+            .expect_err("publishing under a regular file must fail");
+        let rendered = error.to_string();
+        assert!(
+            !rendered.contains(CANARY),
+            "the installation token reached a rendered error: {rendered}"
+        );
+
+        // CONTROL: the same failure without scrubbing. If this does not leak, the
+        // assertion above is vacuous — the error simply never carried the key.
+        let unscrubbed = crate::run_git_command_in(
+            Path::new("/"),
+            vec![
+                "config".into(),
+                "--file".into(),
+                target.display().to_string(),
+                key,
+                "https://github.com/acme/".into(),
+            ],
+        )
+        .await
+        .expect_err("the same git invocation must fail");
+        assert!(
+            unscrubbed.to_string().contains(CANARY),
+            "CONTROL FAILED TO FAIL: the unscrubbed error did not carry the token, so the \
+             assertion above proves nothing. Got: {unscrubbed}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The scrubber must also survive git reformatting the key on stderr, where
+    /// the whole-key replacement cannot match.
+    #[test]
+    fn a_reformatted_credential_is_still_removed() {
+        let key = format!("url.https://{TOKEN_USER}{CANARY}@github.com/acme/.insteadOf");
+        for text in [
+            format!("error: invalid key: {key}"),
+            // Quoted, re-cased, or truncated: the userinfo span still goes.
+            format!("fatal: 'https://{TOKEN_USER}{CANARY}@github.com/acme/' rejected"),
+            format!("https://{TOKEN_USER}{CANARY}\nnext line"),
+        ] {
+            let scrubbed = scrub_text(&text, &key);
+            assert!(
+                !scrubbed.contains(CANARY),
+                "credential survived scrubbing: {scrubbed}"
+            );
+        }
+        // And an unrelated message is left alone.
+        assert_eq!(
+            scrub_text("fatal: could not lock config file", &key),
+            "fatal: could not lock config file"
+        );
     }
 }
