@@ -81,7 +81,7 @@ fn lease_authority_without_an_admission_opinion() -> Arc<ScriptedServices> {
 /// Both assertions matter and neither is a status field:
 ///
 /// - `authorities == [Armed]` is the birth quota the broker committed (250m).
-/// - `lifts == [LeaseFencingToken(7)]` is the fenced `cpu.max` raise that the
+/// - `lifts == 1` is the fenced `cpu.max` raise that the
 ///   whole feature exists to perform.
 ///
 /// Asserting only the second would let a regression that never clamps pass;
@@ -114,7 +114,7 @@ async fn armed_epoch_is_born_clamped_and_then_lifted_through_the_in_pod_composit
     );
     assert_eq!(
         *launcher.lifts.lock().unwrap(),
-        vec![LeaseFencingToken(7)],
+        1,
         "the armed epoch reached a matching durable bind, so cpu.max MUST be \
          lifted under the granted fence. An empty vec here is goxi blocker 13: \
          `decision=Unleased authority=Unarmed` against `ForwardOverlap · epoch 3 \
@@ -154,7 +154,7 @@ async fn absent_row_still_fails_closed_through_the_in_pod_composition() {
         launcher.authorities(),
         vec![djinn_cgroup_launcher::LeaseAuthority::Unarmed]
     );
-    assert!(launcher.lifts.lock().unwrap().is_empty());
+    assert_eq!(*launcher.lifts.lock().unwrap(), 0);
 }
 
 /// The wrong-database hazard, end to end.
@@ -206,7 +206,7 @@ async fn a_non_platform_database_fails_closed_instead_of_lifting() {
         "a failed epoch read must never be treated as authorization"
     );
     assert!(
-        launcher.lifts.lock().unwrap().is_empty(),
+        *launcher.lifts.lock().unwrap() == 0,
         "a failed epoch read must never lift cpu.max"
     );
 }
@@ -253,7 +253,7 @@ async fn shadow_epoch_binds_but_never_lifts() {
     assert_eq!(services.queue_calls.load(Ordering::SeqCst), 1);
     assert_eq!(services.grant_calls.load(Ordering::SeqCst), 1);
     assert!(
-        launcher.lifts.lock().unwrap().is_empty(),
+        *launcher.lifts.lock().unwrap() == 0,
         "shadow epoch must never lift cpu.max"
     );
     // Shadow is the one decision that clamps ON PURPOSE: it is an observation
@@ -316,7 +316,7 @@ async fn unleased_epoch_is_born_unclamped_because_no_grant_can_ever_lift_it() {
     run.await.unwrap().unwrap();
     assert_eq!(services.grant_calls.load(Ordering::SeqCst), 1);
     assert!(
-        launcher.lifts.lock().unwrap().is_empty(),
+        *launcher.lifts.lock().unwrap() == 0,
         "unleased epoch must never lift cpu.max"
     );
     assert_eq!(

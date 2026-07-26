@@ -247,6 +247,7 @@ const BUILD_ADMISSION_JOURNAL_DEGRADED: &str = "djinn_build_admission_journal_de
 const BUILD_ADMISSION_CREATE_UNKNOWN_HEALTH: &str = "djinn_build_admission_create_unknown_health";
 const BUILD_ADMISSION_SHADOW_INVOCATION_TOTAL: &str =
     "djinn_build_admission_shadow_invocation_total";
+const BUILD_ADMISSION_LIFT_REJECTED_TOTAL: &str = "djinn_build_admission_lift_rejected_total";
 const BUILD_ADMISSION_TRANSITION_TOTAL: &str = "djinn_build_admission_transition_total";
 // One closed enumeration for every durable journal write attempt: the two
 // lifecycle outcomes plus the two startup-reconciliation outcomes. Extending
@@ -2262,6 +2263,13 @@ fn register_metrics() {
         "Shadow-mode v1 invocation decisions the launcher observed but did not act on."
     );
     metrics::describe_counter!(
+        BUILD_ADMISSION_LIFT_REJECTED_TOTAL,
+        "Authorized cgroup lifts the privileged launcher broker refused. Any \
+         non-zero value means armed invocations are running permanently clamped \
+         at the unleased quota: the epoch authorized an escalation, a matching \
+         durable grant was held, and the kernel boundary still refused it."
+    );
+    metrics::describe_counter!(
         BUILD_ADMISSION_TRANSITION_TOTAL,
         "Durable admission-journal lifecycle transitions by outcome. A rejected \
          share near one means the journal is refusing every observation and \
@@ -3625,6 +3633,24 @@ pub mod build_admission {
         );
         metrics::counter!(super::BUILD_ADMISSION_SHADOW_INVOCATION_TOTAL, "decision" => decision, "class" => class)
             .increment(1);
+    }
+
+    /// Record one authorized cgroup lift that the privileged broker REFUSED.
+    ///
+    /// This is the alarm for goxi launcher blocker 14. The invocation reached a
+    /// matching durable bind under a `Lift` epoch — every control-plane
+    /// precondition held — and the kernel-boundary control still came back
+    /// refused, so the command runs its whole life clamped at the 250m unleased
+    /// quota (a ~16x slowdown). The runner now degrades instead of failing the
+    /// command, which means this counter is the ONLY control-plane signal that
+    /// the escalation path is broken: a silent degrade with no counter is how a
+    /// throttling regression hides for four rollouts.
+    ///
+    /// Emitted with a structured `tracing::error!` at the call site for the same
+    /// reason [`record_shadow_invocation`] logs: `djinn-agent-worker` exposes no
+    /// `/metrics` endpoint, so in a task-run Pod the log line is what escapes.
+    pub fn record_lift_rejected() {
+        metrics::counter!(super::BUILD_ADMISSION_LIFT_REJECTED_TOTAL).increment(1);
     }
 }
 

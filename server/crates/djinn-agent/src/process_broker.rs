@@ -9,9 +9,7 @@ use djinn_cgroup_launcher::{
     CommandSpec, CpuStat, Invocation, LeaseAuthority, broker::ChildStatus,
     transport::UnixBrokerClient,
 };
-use djinn_supervisor::services::{
-    InvocationLiftDecision, LeaseFencingToken, TaskInvocationLeaseIdentity,
-};
+use djinn_supervisor::services::{InvocationLiftDecision, TaskInvocationLeaseIdentity};
 
 /// Project the durable admission decision onto the authority the leaf is BORN
 /// under.
@@ -40,7 +38,35 @@ pub(crate) trait ProcessHandle: Send {
     fn try_wait(&mut self) -> io::Result<Option<ExitStatus>>;
     fn wait(&mut self) -> io::Result<ExitStatus>;
     fn sample_cpu(&mut self) -> io::Result<CpuStat>;
-    fn fenced_lift(&mut self, fence: &LeaseFencingToken) -> io::Result<()>;
+    /// Apply the one-way cgroup lift to the leaf THIS handle owns.
+    ///
+    /// # Why this takes no fencing token (goxi launcher blocker 14)
+    ///
+    /// There are two different fences in this system and they were conflated
+    /// here, which broke every escalation in production:
+    ///
+    /// * the **broker invocation fence** — declared by the worker in the
+    ///   `BEGIN` control, stored on the leaf at birth, and the only value
+    ///   `Launcher::fenced_lift` will accept on a `LIFT`; and
+    /// * the **durable lease fencing token** — minted by the coordinator from
+    ///   `build_lease_fencing_token_seq` at grant time, i.e. long after the leaf
+    ///   exists, and therefore something the birth control cannot possibly have
+    ///   named.
+    ///
+    /// The composition passed a launcher-wide constant `0` to `BEGIN` and the
+    /// coordinator's token to `LIFT`. The sequence starts at 1, so the two could
+    /// never be equal: every lift was refused with `FenceMismatch`, reported to
+    /// the worker as the indistinguishable `InvalidControl`, and (because the
+    /// error failed the command) took the agent's `shell` tool down with it.
+    ///
+    /// The durable token still governs **whether** a lift may happen — the
+    /// runner only reaches this call inside a `LeaseResult::Bound` arm whose
+    /// `fencing_token` matches the grant it validated, and it writes that token
+    /// to the invocation journal first. It just is not the value the cgroup
+    /// boundary is fenced by, so it is not accepted here: an implementation that
+    /// silently ignored an argument would be the same defect wearing a
+    /// signature.
+    fn fenced_lift(&mut self) -> io::Result<()>;
     fn kill(&mut self) -> io::Result<()>;
     fn wait_empty(&mut self) -> io::Result<()>;
     fn cleanup(&mut self) -> io::Result<()>;
@@ -62,18 +88,55 @@ pub(crate) trait CgroupLauncherClient: Send + Sync + 'static {
     ) -> io::Result<Box<dyn ProcessHandle>>;
 }
 
+/// The broker invocation fence for one invocation identity.
+///
+/// # Why it is derived rather than configured (goxi launcher blocker 14)
+///
+/// `Launcher::fenced_lift` accepts exactly the fence the leaf was born with, and
+/// the leaf is born inside `BEGIN`/`CREATE` — before any lease exists. So the
+/// fence has to be a value the *worker* can name at birth and name again,
+/// identically, at lift time. It used to be a launcher-wide constant supplied at
+/// construction (`UnixBrokerLauncher::new(client, 0)`), while the lift presented
+/// the coordinator's durable token; see [`ProcessHandle::fenced_lift`] for the
+/// full account of why those two can never agree.
+///
+/// Deriving it from the invocation identity gives the property the contract
+/// actually needs: **the birth quota and the lift name the same invocation**.
+/// The id is the `uuid::Uuid::now_v7()` the runner mints per invocation and is
+/// also the leaf name the broker binds every control to, so two concurrent
+/// invocations in one pod get two different fences and a lift carrying the wrong
+/// one is refused rather than silently applied to the wrong leaf.
+///
+/// # Why a digest of the whole id
+///
+/// A UUIDv7's high 64 bits are a 48-bit millisecond timestamp plus a short
+/// counter, so invocations minted inside the same millisecond share them —
+/// measured, 64 ids collapsed to 2 values. Folding the ENTIRE id keeps the
+/// distinctness the contract needs. This is a collision-avoidance aid over the
+/// handful of invocations live in one pod at once, not a security primitive:
+/// the broker's actual authority is the authenticated peer, the per-invocation
+/// binding and the rotating control nonce.
+pub(crate) fn invocation_fence(invocation_id: &str) -> u64 {
+    // FNV-1a, 64-bit. Deterministic and dependency-free, so `BEGIN` and `LIFT`
+    // derive the same value from the same identity with no shared state.
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in invocation_id.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100_0000_01b3);
+    }
+    hash
+}
+
 /// Production-only Unix broker adapter; it has no local `Command::spawn` fallback.
 pub(crate) struct UnixBrokerLauncher {
     client: Arc<Mutex<UnixBrokerClient>>,
-    invocation_fence: u64,
 }
 
 impl UnixBrokerLauncher {
     #[allow(dead_code)] // constructed by workspace broker composition
-    pub(crate) fn new(client: UnixBrokerClient, invocation_fence: u64) -> Self {
+    pub(crate) fn new(client: UnixBrokerClient) -> Self {
         Self {
             client: Arc::new(Mutex::new(client)),
-            invocation_fence,
         }
     }
 }
@@ -87,11 +150,16 @@ impl CgroupLauncherClient for UnixBrokerLauncher {
     ) -> io::Result<Box<dyn ProcessHandle>> {
         let spec = command_spec(command)?;
         let id = identity.invocation_id.clone();
+        // ONE source for the fence, read once and carried into the handle. The
+        // `BEGIN` below and the `LIFT` in `fenced_lift` must present the same
+        // value or the privileged broker refuses the lift, so there must be no
+        // second place that decides it.
+        let fence = invocation_fence(&id);
         let mut client = lock_client(&self.client)?;
         client
             .begin(Invocation {
                 id: id.clone(),
-                fence: self.invocation_fence,
+                fence,
             })
             .map_err(broker_error)?;
         if let Err(error) = client.create(&id, &id, authority, &spec) {
@@ -101,6 +169,7 @@ impl CgroupLauncherClient for UnixBrokerLauncher {
         Ok(Box::new(UnixBrokerProcessHandle {
             client: self.client.clone(),
             id,
+            fence,
             status: None,
             stdout: Vec::new(),
         }))
@@ -110,6 +179,9 @@ impl CgroupLauncherClient for UnixBrokerLauncher {
 struct UnixBrokerProcessHandle {
     client: Arc<Mutex<UnixBrokerClient>>,
     id: String,
+    /// The fence this invocation was BEGUN with. Copied from the same value the
+    /// `BEGIN` control carried so the lift cannot disagree with the birth.
+    fence: u64,
     status: Option<ExitStatus>,
     // Status polling uses the broker's stdout operation, which drains its
     // accumulated stream buffer. Preserve those bytes for the next drain.
@@ -176,9 +248,10 @@ impl ProcessHandle for UnixBrokerProcessHandle {
             .map_err(broker_error)
     }
 
-    fn fenced_lift(&mut self, fence: &LeaseFencingToken) -> io::Result<()> {
+    fn fenced_lift(&mut self) -> io::Result<()> {
+        let fence = self.fence;
         lock_client(&self.client)?
-            .lift(&self.id, fence.0)
+            .lift(&self.id, fence)
             .map_err(broker_error)
     }
 
@@ -457,7 +530,7 @@ impl ProcessHandle for std::process::Child {
         })
     }
 
-    fn fenced_lift(&mut self, _: &LeaseFencingToken) -> io::Result<()> {
+    fn fenced_lift(&mut self) -> io::Result<()> {
         Ok(())
     }
 
