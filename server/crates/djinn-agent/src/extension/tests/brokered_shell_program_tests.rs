@@ -347,18 +347,18 @@ async fn a_brokered_shell_command_resolves_its_program_and_really_executes() {
         .expect("the resolved spec must satisfy the broker's own validator");
 }
 
-/// The child really is born with the environment the spec carries and nothing
-/// inherited. `env_clear` in [`execute`] is the launcher's contract: a
-/// `run_shell` that needs an unforwarded variable must fail here the way it
-/// fails in a pod.
+/// The child really is born with the environment the spec carries — the shell
+/// that runs is the one the launcher would have `execve`d, in the environment
+/// the launcher would have handed it, not the worker's.
+///
+/// The negative half is asserted on the SPEC rather than on the child's own
+/// view, deliberately: `env_clear` in [`execute`] is the harness's code, so a
+/// child that could not see a stray variable would prove the harness works.
+/// What has to hold in production is that the forwarded set is closed, and
+/// `CommandSpec::validate` is the thing that enforces it.
 #[tokio::test]
-async fn the_executed_child_sees_the_forwarded_environment_and_not_the_workers() {
-    // SAFETY: single-threaded setup before the dispatch, test-local key, and
-    // the name is deliberately one the broker's allow-list does not carry.
-    unsafe { std::env::set_var("GOXI_NOT_FORWARDABLE", "leaked") };
-    let (response, conversion) =
-        brokered_shell("echo \"home=$HOME leak=${GOXI_NOT_FORWARDABLE:-absent}\"").await;
-    unsafe { std::env::remove_var("GOXI_NOT_FORWARDABLE") };
+async fn the_executed_child_sees_the_forwarded_environment() {
+    let (response, conversion) = brokered_shell("echo \"home=$HOME\"").await;
 
     let home = conversion
         .spec
@@ -369,9 +369,17 @@ async fn the_executed_child_sees_the_forwarded_environment_and_not_the_workers()
         .expect("HOME must survive the broker hop");
     let stdout = response["stdout"].as_str().expect("stdout is a string");
     assert!(
-        stdout.contains(&format!("home={home} leak=absent")),
-        "the child must see the spec's HOME and nothing outside the allow-list, got {stdout:?}"
+        stdout.contains(&format!("home={home}")),
+        "the child must see the spec's HOME, got {stdout:?}"
     );
+
+    for (key, _) in &conversion.spec.environment {
+        assert!(
+            djinn_cgroup_launcher::is_allowed_environment_key(key)
+                || key == djinn_cgroup_launcher::env::GIT_TRUST_ANCHOR_KEY,
+            "{key} reached a brokered child without being on the closed allow-list"
+        );
+    }
 }
 
 /// The harness substitutes exactly one field, and it is the one a CI runner
