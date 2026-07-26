@@ -8,9 +8,9 @@ use std::fmt;
 
 use async_trait::async_trait;
 use djinn_db::{
-    Database, MaterializeReadinessKickoff, ProjectRepository, ReadinessKickoffMaterialization,
-    ReadinessRepository, RepoGraphGenerationRepository, UserRepository,
-    repo_graph_generation::ProjectCurrentGraph,
+    Database, MaterializeReadinessKickoff, ProjectCurrentGraph, ProjectRepository,
+    ReadinessKickoffMaterialization, ReadinessRepository, RepoGraphGenerationRepository,
+    UserRepository,
 };
 
 /// The only native skill a readiness kickoff may use.
