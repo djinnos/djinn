@@ -44,6 +44,12 @@ pub use djinn_cgroup_launcher::broker::{WORKER_GID, WORKER_UID};
 // `CHILD_UID` is applied by the launcher when it spawns the child, not in the
 // pod manifest, so it is only referenced by tests/docs on the render side.
 pub use djinn_cgroup_launcher::child::{ARTIFACT_GID, CHILD_UID};
+// The capability lists the runtime actually `capset`s to. The render derives the
+// container's `capabilities.add` from these so the manifest cannot grant a
+// capability the runtime discards, nor omit one the runtime needs.
+use djinn_cgroup_launcher::bootstrap::{
+    BOOTSTRAP_ONLY_CAPABILITY_NAMES, RETAINED_CAPABILITY_NAMES,
+};
 use djinn_cgroup_launcher::{
     CgroupMode, Error as LauncherError, LeasedQuota, Readiness, UnleasedQuota,
 };
@@ -355,22 +361,32 @@ pub fn worker_security_context() -> SecurityContext {
 /// written is API-invalid. Keeping `allowPrivilegeEscalation: false` is the
 /// stronger posture and it is what the launcher actually needs — it drops
 /// privilege, it never gains any across `execve`.
+/// Every capability the launcher container is granted: the set it keeps for the
+/// pod's lifetime, plus the two it destroys once the delegated root exists.
+///
+/// Both lists come from `djinn_cgroup_launcher::bootstrap`, which is the crate
+/// that actually performs the post-bootstrap `capset`. They used to be a second
+/// hand-kept copy here, and the copies disagreed: the runtime retained
+/// `CAP_CHOWN` nowhere while `UnixBrokerServer::bind` needed it to hand the
+/// control socket to the worker, so the launcher died `EPERM` after a fully
+/// successful bootstrap. Rendering from the runtime's own lists makes that
+/// class of drift unrepresentable rather than merely tested.
 fn launcher_capabilities() -> Capabilities {
+    let add = RETAINED_CAPABILITY_NAMES
+        .iter()
+        .chain(BOOTSTRAP_ONLY_CAPABILITY_NAMES)
+        .map(|capability| (*capability).to_string())
+        .collect();
     Capabilities {
         drop: Some(vec!["ALL".to_string()]),
-        add: Some(vec![
-            "SETUID".to_string(),
-            "SETGID".to_string(),
-            "SETPCAP".to_string(),
-            "SYS_ADMIN".to_string(),
-            "SYS_RESOURCE".to_string(),
-        ]),
+        add: Some(add),
     }
 }
 
 /// Capabilities the launcher holds only during bootstrap and then `capset`s
-/// away. Named here so the render and the runtime drop assert one list.
-pub const LAUNCHER_BOOTSTRAP_ONLY_CAPABILITIES: &[&str] = &["SYS_ADMIN", "SYS_RESOURCE"];
+/// away. Re-exported from the launcher crate so the render and the runtime drop
+/// really are one list rather than two that agree by inspection.
+pub const LAUNCHER_BOOTSTRAP_ONLY_CAPABILITIES: &[&str] = BOOTSTRAP_ONLY_CAPABILITY_NAMES;
 
 /// Container-level security context for the launcher sidecar. Root, minimal
 /// caps, restricted seccomp, read-only rootfs (it only writes the delegated

@@ -9,6 +9,9 @@
 
 use super::*;
 
+use djinn_cgroup_launcher::bootstrap::{
+    BOOTSTRAP_ONLY_CAPABILITY_NAMES, RETAINED_CAPABILITY_NAMES,
+};
 use djinn_runtime::RoleKind;
 
 /// The classifier itself is proven exhaustively in `djinn-runtime` (one
@@ -107,8 +110,11 @@ fn worker_security_context_is_restricted() {
     assert_eq!(sc.seccomp_profile.as_ref().unwrap().type_, "RuntimeDefault");
 }
 
-/// The launcher is granted exactly the five capabilities it needs, spelled
+/// The launcher is granted exactly the six capabilities it needs, spelled
 /// the way the API server accepts, and is never `privileged`.
+///
+/// `CHOWN` is retained past bootstrap because the broker socket is handed to the
+/// worker with `chown(2)`, which requires the capability even at euid 0.
 #[test]
 fn launcher_capabilities_are_exactly_the_designed_set() {
     let caps = launcher_capabilities();
@@ -116,7 +122,14 @@ fn launcher_capabilities_are_exactly_the_designed_set() {
     let add = caps.add.expect("launcher adds capabilities");
     assert_eq!(
         add,
-        vec!["SETUID", "SETGID", "SETPCAP", "SYS_ADMIN", "SYS_RESOURCE"]
+        vec![
+            "CHOWN",
+            "SETGID",
+            "SETUID",
+            "SETPCAP",
+            "SYS_ADMIN",
+            "SYS_RESOURCE"
+        ]
     );
     // `privileged: true` would grant everything and defeat the bootstrap
     // drop entirely; it must never appear.
@@ -162,7 +175,45 @@ fn every_bootstrap_only_capability_is_one_the_launcher_drops_at_runtime() {
         .iter()
         .filter(|granted| !LAUNCHER_BOOTSTRAP_ONLY_CAPABILITIES.contains(&granted.as_str()))
         .collect();
-    assert_eq!(permanent, vec!["SETUID", "SETGID", "SETPCAP"]);
+    assert_eq!(permanent, vec!["CHOWN", "SETGID", "SETUID", "SETPCAP"]);
+}
+
+/// The rendered grant and the runtime `capset` must be the same set.
+///
+/// This is the guard for the third v0.7.x rollback. The launcher retains exactly
+/// `bootstrap::RETAINED_CAPABILITIES` and destroys the rest, so a capability the
+/// manifest grants but the runtime does not retain is gone microseconds later,
+/// and one the runtime retains but the manifest never grants never existed. Both
+/// directions are silent until a real kernel refuses a syscall — which is how
+/// `CAP_CHOWN` came to be missing while `UnixBrokerServer::bind` needed it.
+#[test]
+fn the_rendered_grant_is_exactly_what_the_runtime_retains_plus_bootstrap_only() {
+    let cfg = KubernetesConfig::for_testing();
+    let container = launcher_sidecar_container(&cfg, "registry.example/proj:tag");
+    let add = container
+        .security_context
+        .unwrap()
+        .capabilities
+        .unwrap()
+        .add
+        .unwrap();
+
+    let expected: Vec<String> = RETAINED_CAPABILITY_NAMES
+        .iter()
+        .chain(BOOTSTRAP_ONLY_CAPABILITY_NAMES)
+        .map(|capability| (*capability).to_string())
+        .collect();
+    assert_eq!(
+        add, expected,
+        "the Pod grant must be the runtime's retained set plus its bootstrap-only set"
+    );
+
+    for retained in RETAINED_CAPABILITY_NAMES {
+        assert!(
+            !LAUNCHER_BOOTSTRAP_ONLY_CAPABILITIES.contains(retained),
+            "{retained} cannot be both retained and dropped"
+        );
+    }
 }
 
 /// Defect 1, asserted on the manifest: a CPU limit on the launcher container

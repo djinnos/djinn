@@ -20,11 +20,19 @@ use crate::skills::ResolvedSkill;
 /// embedded in the skill's metadata.
 pub const VISUAL_SPEC_VERSION: &str = "1.2.0";
 
+/// Version of the platform-owned readiness guardrail catalog.
+pub const AGENT_READINESS_GUARDRAILS_VERSION: &str = "1.0.0";
+
 // ─── Embedded asset ─────────────────────────────────────────────────────────
 
 /// Body of the `visual-spec` native skill, embedded at compile time from the
 /// checked-in agent asset path.
 const VISUAL_SPEC_CONTENT: &str = include_str!("native_assets/visual-spec/SKILL.md");
+
+/// Body of the `agent-readiness-guardrails` native skill, embedded from the
+/// checked-in platform catalog rather than a project-provided skill path.
+const AGENT_READINESS_GUARDRAILS_CONTENT: &str =
+    include_str!("native_assets/agent-readiness-guardrails/SKILL.md");
 
 // ─── NativeSkill struct ─────────────────────────────────────────────────────
 
@@ -48,6 +56,24 @@ pub struct NativeSkill {
     pub recommended_for_roles: &'static [&'static str],
     /// Full embedded content (markdown body).
     pub content: &'static str,
+}
+
+/// Failure returned by an exact native-skill pin lookup.
+///
+/// Callers that receive a name and version from persisted task context must use
+/// this instead of falling back to a same-name entry at another version.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum NativeSkillLookupError {
+    #[error("unknown native skill `{name}`")]
+    UnknownName { name: String },
+    #[error(
+        "native skill `{name}` is registered at version `{registered_version}`, not requested version `{requested_version}`"
+    )]
+    VersionMismatch {
+        name: String,
+        requested_version: String,
+        registered_version: String,
+    },
 }
 
 impl NativeSkill {
@@ -82,19 +108,31 @@ impl NativeSkill {
 ///
 /// To add a new native skill, append an entry here and bump the relevant
 /// version constant.  Do **not** load entries from disk at runtime.
-const NATIVE_SKILLS: &[NativeSkill] = &[NativeSkill {
-    name: "visual-spec",
-    version: VISUAL_SPEC_VERSION,
-    description: "Proposal and plan authoring conventions: choosing the right \
-                  MDX block for each kind of content, diagram/block quality, the \
-                  bare-angle backtick constraint, and memory as the learned layer.",
-    trust_level: "platform",
-    // `planner` authors proposals during decomposition; `advocate` authors and
-    // revises the proposal spec during tribunal refinement. Both produce
-    // proposal MDX and need the visual-spec authoring conventions.
-    recommended_for_roles: &["planner", "advocate"],
-    content: VISUAL_SPEC_CONTENT,
-}];
+const NATIVE_SKILLS: &[NativeSkill] = &[
+    NativeSkill {
+        name: "agent-readiness-guardrails",
+        version: AGENT_READINESS_GUARDRAILS_VERSION,
+        description: "Evidence-oriented S0 guardrails for Architect readiness analysis.",
+        trust_level: "platform",
+        // This is discovery metadata only. Runtime eligibility requires the
+        // typed readiness context and an exact version pin.
+        recommended_for_roles: &["architect"],
+        content: AGENT_READINESS_GUARDRAILS_CONTENT,
+    },
+    NativeSkill {
+        name: "visual-spec",
+        version: VISUAL_SPEC_VERSION,
+        description: "Proposal and plan authoring conventions: choosing the right \
+                      MDX block for each kind of content, diagram/block quality, the \
+                      bare-angle backtick constraint, and memory as the learned layer.",
+        trust_level: "platform",
+        // `planner` authors proposals during decomposition; `advocate` authors and
+        // revises the proposal spec during tribunal refinement. Both produce
+        // proposal MDX and need the visual-spec authoring conventions.
+        recommended_for_roles: &["planner", "advocate"],
+        content: VISUAL_SPEC_CONTENT,
+    },
+];
 
 // ─── Lookup helpers ─────────────────────────────────────────────────────────
 
@@ -104,6 +142,27 @@ const NATIVE_SKILLS: &[NativeSkill] = &[NativeSkill {
 /// does **not** consult project skill paths or the skills manifest.
 pub fn native_skill(name: &str) -> Option<&'static NativeSkill> {
     NATIVE_SKILLS.iter().find(|s| s.name == name)
+}
+
+/// Look up a native skill using its exact registered `(name, version)` pin.
+///
+/// This deliberately reports a same-name version mismatch instead of silently
+/// returning a newer or older embedded catalog.
+pub fn native_skill_exact(
+    name: &str,
+    version: &str,
+) -> Result<&'static NativeSkill, NativeSkillLookupError> {
+    let skill = native_skill(name).ok_or_else(|| NativeSkillLookupError::UnknownName {
+        name: name.to_string(),
+    })?;
+    if skill.version != version {
+        return Err(NativeSkillLookupError::VersionMismatch {
+            name: name.to_string(),
+            requested_version: version.to_string(),
+            registered_version: skill.version.to_string(),
+        });
+    }
+    Ok(skill)
 }
 
 /// Return the names of all registered native skills.
@@ -150,6 +209,64 @@ pub fn resolved_native_skills_for_role(role: &str) -> Vec<ResolvedSkill> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn readiness_guardrails_are_registered_as_a_platform_architect_recommendation() {
+        let skill = native_skill_exact("agent-readiness-guardrails", "1.0.0")
+            .expect("registered readiness pin should resolve");
+        assert_eq!(skill.version, AGENT_READINESS_GUARDRAILS_VERSION);
+        assert_eq!(skill.trust_level, "platform");
+        assert_eq!(skill.recommended_for_roles, &["architect"]);
+        assert!(skill.to_resolved().required);
+    }
+
+    #[test]
+    fn exact_lookup_rejects_unknown_names_and_version_substitution() {
+        assert_eq!(
+            native_skill_exact("not-registered", "1.0.0"),
+            Err(NativeSkillLookupError::UnknownName {
+                name: "not-registered".to_string(),
+            })
+        );
+        assert_eq!(
+            native_skill_exact("agent-readiness-guardrails", "1.0.1"),
+            Err(NativeSkillLookupError::VersionMismatch {
+                name: "agent-readiness-guardrails".to_string(),
+                requested_version: "1.0.1".to_string(),
+                registered_version: "1.0.0".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn readiness_catalog_has_exactly_the_eight_s0_guardrails() {
+        let skill = native_skill("agent-readiness-guardrails").unwrap();
+        for id in [
+            "GOV-MIG-001",
+            "EVID-ACCEPTANCE-001",
+            "EVID-SMOKE-001",
+            "EVID-SELECTOR-001",
+            "CONTRACT-API-001",
+            "TEST-DB-001",
+            "OBS-BASELINE-001",
+            "SUPPLY-CHAIN-001",
+        ] {
+            assert!(skill.content.contains(id), "catalog must include {id}");
+        }
+        assert_eq!(skill.content.matches("### Guardrail:").count(), 8);
+        assert!(
+            !skill
+                .content
+                .to_lowercase()
+                .contains("code-graph guardrail")
+        );
+        assert!(
+            !skill
+                .content
+                .to_lowercase()
+                .contains("complexity guardrail")
+        );
+    }
 
     #[test]
     fn native_skill_lookup_returns_visual_spec() {
