@@ -378,7 +378,8 @@ impl ReadinessRepository {
             ));
         }
         Self::fail_identification_tx(&mut tx, run_id, reason).await?;
-        tx.commit().await
+        tx.commit().await?;
+        Ok(())
     }
     async fn fail_identification_tx(
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
