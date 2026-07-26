@@ -178,6 +178,13 @@ export function KanbanBoard({
     {},
   );
   const previousTaskStatusesRef = useRef<Map<string, string>>(new Map());
+  // Tasks seen crossing into the Merged column while this board has been open.
+  // The catch-all lane keeps only these: watching your own work land is useful
+  // feedback, but the board must not accumulate a tail of old merges that no
+  // longer belong to anything being built, so a reload starts empty again.
+  const [sessionMergedIds, setSessionMergedIds] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
 
   useEffect(() => {
     if (tasksProp) return;
@@ -188,6 +195,7 @@ export function KanbanBoard({
         const previousStatuses = previousTaskStatusesRef.current;
         const nextStatuses = new Map<string, string>();
         const changedTaskIds: string[] = [];
+        const landedTaskIds: string[] = [];
 
         nextTasks.forEach((task, id) => {
           nextStatuses.set(id, task.status);
@@ -195,10 +203,22 @@ export function KanbanBoard({
 
           if (previousStatus !== undefined && previousStatus !== task.status) {
             changedTaskIds.push(id);
+            // A task we already knew about has just reached the Merged column.
+            // An unknown previous status means it arrived already merged
+            // (hydration, or a reconnect) — that is not a landing we watched.
+            if (taskToColumnKey(task) === "done") landedTaskIds.push(id);
           }
         });
 
         previousTaskStatusesRef.current = nextStatuses;
+
+        if (landedTaskIds.length > 0) {
+          setSessionMergedIds((prev) => {
+            const updated = new Set(prev);
+            for (const taskId of landedTaskIds) updated.add(taskId);
+            return updated;
+          });
+        }
 
         if (changedTaskIds.length === 0) return;
 
@@ -264,12 +284,15 @@ export function KanbanBoard({
     search,
   ]);
 
+  const hasSearchQuery = search.trim().length > 0;
+
   // Group tasks into swimlanes: one lane per building proposal (Linear
   // "project" rows), plus a single catch-all lane for everything without a
-  // building-proposal linkage. Merged tasks whose proposal is no longer
-  // building are dropped — retired proposals age off the board — while their
-  // *active* stragglers stay visible in the catch-all so live work never
-  // disappears.
+  // building-proposal linkage. The catch-all lane carries no merged tail: a
+  // retired proposal's merged work and standalone (epic-less) merges alike are
+  // dropped, since neither belongs to anything still being built. Their
+  // *active* stragglers stay visible so live work never disappears, and a
+  // merge witnessed during this session sticks around until the next reload.
   const lanes = useMemo<Lane[]>(() => {
     const byLane = new Map<string, Lane>();
 
@@ -322,8 +345,17 @@ export function KanbanBoard({
       if (epic && isBuildingProposalEpic(epic)) {
         lane = proposalLane(epic);
       } else {
-        // Merged work of a retired (non-building) proposal ages off the board.
-        if (epic?.proposal_id && columnKey === "done") continue;
+        // Merged work ages off the catch-all lane. Two exceptions: a merge we
+        // watched happen this session, and anything an explicit search asked
+        // for (the backend search deliberately loads old merged rows, so
+        // hiding them here would make the search look broken).
+        if (
+          columnKey === "done" &&
+          !sessionMergedIds.has(task.id) &&
+          !hasSearchQuery
+        ) {
+          continue;
+        }
         lane = otherLane();
       }
 
@@ -352,7 +384,14 @@ export function KanbanBoard({
       if (a.kind !== b.kind) return a.kind === "proposal" ? -1 : 1;
       return a.title.localeCompare(b.title);
     });
-  }, [filteredTasks, epics, epicFilters, ownerFilters]);
+  }, [
+    filteredTasks,
+    epics,
+    epicFilters,
+    ownerFilters,
+    sessionMergedIds,
+    hasSearchQuery,
+  ]);
 
   const columnCounts = useMemo(() => {
     const counts = new Map<ColumnKey, number>();
