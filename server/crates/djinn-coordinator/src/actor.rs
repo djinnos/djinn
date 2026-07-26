@@ -564,6 +564,15 @@ impl CoordinatorActor {
             Arc::clone(&closed_parent_open_children_source)
                 as Arc<dyn crate::doctor::ClosedParentOpenChildrenRepairSource>,
         );
+        crate::doctor::register_refinement_phantom_active_check(
+            djinn_core::doctor::registry(),
+            Arc::new(
+                crate::doctor::ProposalRepositoryRefinementPhantomActiveSource::new(
+                    db.clone(),
+                    events_tx.clone(),
+                ),
+            ),
+        );
 
         Self {
             receiver,

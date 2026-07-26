@@ -6,8 +6,12 @@ use tokio::sync::broadcast;
 
 use crate::database::Database;
 
-/// Durable refinement fields for recovery integration assertions.
-#[derive(Debug, Clone, PartialEq)]
+mod refinement_read_only;
+
+pub use refinement_read_only::*;
+
+/// Refinement test fields.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RefinementRunAuditForTest {
     pub generation: i32,
     pub state: String,
@@ -17,7 +21,7 @@ pub struct RefinementRunAuditForTest {
     pub typed_reap_count: i64,
 }
 
-/// Read a durable run and its typed phantom-reap audit count for tests.
+/// Read a refinement run for tests.
 pub async fn refinement_run_audit_for_test(
     db: &Database,
     run_id: &str,
