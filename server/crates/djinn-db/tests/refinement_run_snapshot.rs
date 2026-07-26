@@ -844,12 +844,18 @@ async fn board_aggregate_covers_clean_stale_repeated_reaps_and_window_boundary()
     // A later admission after terminal history is generation four, but it has
     // no current run to reap. This is the path that must not emit reap
     // telemetry merely because the successor generation exceeds one.
-    sqlx::query("UPDATE refinement_runs SET state = 'terminal', terminal_at = $2 WHERE id = $1")
-        .bind(&active)
-        .bind(OLD)
-        .execute(db.pool())
+    assert!(
+        repo.terminal_refinement_run(TerminalRefinementRunRequest {
+            run_id: active,
+            generation: 3,
+            reason: RefinementStopReason::OperatorStop {
+                actor: "board-aggregate-fixture".into(),
+                reason: Some("create terminal history without a phantom reap".into()),
+            },
+        })
         .await
-        .unwrap();
+        .unwrap()
+    );
     repo.reap_and_admit(admission(proposal_id.clone(), "terminal-history-no-reap"))
         .await
         .unwrap();
@@ -884,18 +890,28 @@ fn reap_and_admit_emits_once_only_for_the_committed_reap() {
                 .unwrap();
 
             // Terminal history raises the next generation without creating a reap.
-            sqlx::query("UPDATE refinement_runs SET state = 'terminal', terminal_at = $2 WHERE proposal_id = $1 AND state = 'running'")
-                .bind(&proposal_id)
-                .bind(OLD)
-                .execute(db.pool())
-                .await
-                .unwrap();
-            repo.reap_and_admit(admission(
-                proposal_id.clone(),
-                "metric-no-current-reap",
-            ))
+            let active_run_id: String = sqlx::query_scalar(
+                "SELECT id FROM refinement_runs WHERE proposal_id = $1 AND state = 'running'",
+            )
+            .bind(&proposal_id)
+            .fetch_one(db.pool())
             .await
             .unwrap();
+            assert!(
+                repo.terminal_refinement_run(TerminalRefinementRunRequest {
+                    run_id: active_run_id,
+                    generation: 2,
+                    reason: RefinementStopReason::OperatorStop {
+                        actor: "reap-telemetry-fixture".into(),
+                        reason: Some("create terminal history without a phantom reap".into()),
+                    },
+                })
+                .await
+                .unwrap()
+            );
+            repo.reap_and_admit(admission(proposal_id.clone(), "metric-no-current-reap"))
+                .await
+                .unwrap();
 
             // Rejected attempts never cross a durable commit boundary and must
             // therefore leave the committed-reap counter unchanged.
