@@ -63,8 +63,18 @@ async fn a_lease_granted_warm_job_is_still_recorded_in_the_lifecycle_ledger() {
     let db = Database::open_in_memory().expect("in-memory db");
     let project_id = seed_project_with_ready_image(&db, "proj-leased-ledger").await;
     let events = Arc::new(Mutex::new(Vec::new()));
+    // The leased path polls `wait_for_bind_and_open_leased_candidate` for
+    // `warm_job_timeout_seconds` awaiting a Kubernetes candidate this harness
+    // deliberately does not provide (it stubs the dispatcher, not the candidate
+    // inventory). The default 3600s would hang the test. One second is enough:
+    // the ledger writes this test asserts on -- the reservation and
+    // CreateStarted -- both happen BEFORE the POST and therefore before that
+    // wait is ever entered, so shortening the deadline changes nothing about
+    // what is being proven, it just lets the trigger return.
+    let mut config = test_config();
+    config.warm_job_timeout_seconds = 1;
     let warmer = K8sGraphWarmer::with_dispatcher(
-        test_config(),
+        config,
         db,
         Arc::new(LifecycleRecordingDispatcher {
             events: events.clone(),
@@ -81,7 +91,7 @@ async fn a_lease_granted_warm_job_is_still_recorded_in_the_lifecycle_ledger() {
 
     warmer.trigger(&project_id).await;
     tokio::task::yield_now().await;
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    tokio::time::sleep(Duration::from_millis(2_500)).await;
 
     let events = events.lock().await;
     assert!(

@@ -6,9 +6,8 @@
 use std::sync::Arc;
 
 use djinn_db::{
-    AdmissionDomain, AdmissionHandoffAuthority, AdmissionHandoffPhase, AdmissionHandoffRepository,
-    AdmissionJournalKey, AdmissionJournalRepository, AdmissionState, AdmissionWorkloadKind,
-    Database, ReserveAdmissionInput,
+    AdmissionDomain, AdmissionJournalKey, AdmissionJournalRepository, AdmissionState,
+    AdmissionWorkloadKind, Database, ReserveAdmissionInput,
 };
 use djinn_k8s::{
     WarmAdmission, WarmAdmissionError, WarmAdmissionPermit, WarmAdmissionRequest,
@@ -20,20 +19,14 @@ use crate::build_admission::{
     AdmissionSeedReport, BuildAdmissionController, BuildAdmissionDecision, BuildAdmissionMode,
     BuildAdmissionReadiness,
 };
-use crate::build_admission_handoff::{
-    EmergencyAuthorityDecision, HandoffState, HandoffWarningGauges, InvocationAuthorityObservation,
-    evaluate_handoff,
+use crate::build_admission_capacity_support::{
+    CapacityHarness, attach_capacity, controller_with_capacity,
 };
 
-fn controller(mode: BuildAdmissionMode, cap: i64) -> BuildAdmissionController {
-    BuildAdmissionController::new(
-        Arc::new(AdmissionJournalRepository::new(
-            Database::open_in_memory().unwrap(),
-        )),
-        mode,
-        cap,
-        "integration-test-epoch",
-    )
+/// The production composition: one controller reaching capacity through the ONE
+/// lease authority. A bare controller has no authority and denies nothing.
+async fn harness(mode: BuildAdmissionMode, cap: i64) -> CapacityHarness {
+    controller_with_capacity(mode, cap, "integration-test-epoch").await
 }
 
 fn warm(id: &str) -> WarmAdmissionRequest {
@@ -51,7 +44,8 @@ fn warm_generation(id: &str, generation: i64) -> WarmAdmissionRequest {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
 async fn cap_three_six_ready_tasks_admit_three_then_one_per_fenced_release() {
-    let controller = Arc::new(controller(BuildAdmissionMode::Enforce, 3));
+    let h = harness(BuildAdmissionMode::Enforce, 3).await;
+    let controller = Arc::clone(&h.controller);
     let barrier = Arc::new(Barrier::new(7));
     let mut attempts = Vec::new();
     for index in 0..6 {
@@ -86,14 +80,8 @@ async fn cap_three_six_ready_tasks_admit_three_then_one_per_fenced_release() {
     }
     assert_eq!(admitted.len(), 3);
     assert_eq!(denied.len(), 3);
-    assert_eq!(
-        controller
-            .journal()
-            .count_task_or_warm_occupancy()
-            .await
-            .unwrap(),
-        3
-    );
+    assert_eq!(h.occupancy().await, 3, "three build slots, exactly");
+    assert_eq!(h.ledger_rows().await, 3);
 
     for (index, (_, permit)) in admitted.into_iter().enumerate() {
         let uid = format!("uid-{index}");
@@ -109,9 +97,14 @@ async fn cap_three_six_ready_tasks_admit_three_then_one_per_fenced_release() {
             .transition(&permit, WarmAdmissionTransition::Terminal { uid })
             .await
             .unwrap();
-        let next = denied.remove(0);
-        assert!(matches!(
-            controller
+        // The released slot goes to the FIFO head, which is the oldest denied
+        // attempt — not necessarily `denied[0]`, since the six raced. Retry
+        // every remaining denial and require EXACTLY one to be admitted: one
+        // release hands back one slot, to one waiter, never to two.
+        let mut promoted = 0;
+        let mut still_denied = Vec::new();
+        for next in std::mem::take(&mut denied) {
+            match controller
                 .admit_task_run(
                     Some("worker"),
                     AdmissionDomain::TaskObservation,
@@ -120,17 +113,17 @@ async fn cap_three_six_ready_tasks_admit_three_then_one_per_fenced_release() {
                     format!("task-run-{next}"),
                 )
                 .await
-                .unwrap(),
-            BuildAdmissionDecision::Permitted { .. }
-        ));
-        assert_eq!(
-            controller
-                .journal()
-                .count_task_or_warm_occupancy()
-                .await
-                .unwrap(),
-            3
-        );
+                .unwrap()
+            {
+                BuildAdmissionDecision::Permitted { .. } => promoted += 1,
+                BuildAdmissionDecision::Denied { .. } => still_denied.push(next),
+                BuildAdmissionDecision::Unclassified => panic!("worker must classify"),
+            }
+        }
+        denied = still_denied;
+        assert_eq!(promoted, 1, "one fenced release admits exactly one waiter");
+        assert_eq!(h.occupancy().await, 3, "the pool stays exactly full");
+        assert_eq!(h.ledger_rows().await, 3);
     }
     assert!(denied.is_empty());
 }
@@ -138,7 +131,8 @@ async fn cap_three_six_ready_tasks_admit_three_then_one_per_fenced_release() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn task_warm_races_and_cap_matrix_bound_combined_durable_occupancy() {
     for cap in [1_i64, 2, 3, 5] {
-        let controller = Arc::new(controller(BuildAdmissionMode::Enforce, cap));
+        let h = Arc::new(harness(BuildAdmissionMode::Enforce, cap).await);
+        let controller = Arc::clone(&h.controller);
         let barrier = Arc::new(Barrier::new(3));
         let task = {
             let controller = Arc::clone(&controller);
@@ -156,12 +150,22 @@ async fn task_warm_races_and_cap_matrix_bound_combined_durable_occupancy() {
                     .await
             })
         };
+        // Production order: the warmer holds its graph-warm lease BEFORE it
+        // reaches admission, so that lease is what races the task for capacity.
+        // A contender that skipped it would present `HeldByLease` while holding
+        // nothing and would never be capacity-checked at all.
         let warmer = {
-            let controller = Arc::clone(&controller);
+            let h = Arc::clone(&h);
             let barrier = Arc::clone(&barrier);
             tokio::spawn(async move {
                 barrier.wait().await;
-                WarmAdmission::admit(controller.as_ref(), warm("warm-racer")).await
+                let held = h.hold_warm_lease("warm-racer").await;
+                if held.is_some() {
+                    WarmAdmission::admit(h.controller.as_ref(), warm("warm-racer"))
+                        .await
+                        .expect("a leased warm build still writes its ledger row");
+                }
+                held.is_some()
             })
         };
         barrier.wait().await;
@@ -169,7 +173,7 @@ async fn task_warm_races_and_cap_matrix_bound_combined_durable_occupancy() {
             task.await.unwrap().unwrap(),
             BuildAdmissionDecision::Permitted { .. }
         );
-        let warm_won = warmer.await.unwrap().is_ok();
+        let warm_won = warmer.await.unwrap();
         assert!(task_won || warm_won, "one race contender wins cap {cap}");
 
         for index in 0..cap + 2 {
@@ -184,18 +188,17 @@ async fn task_warm_races_and_cap_matrix_bound_combined_durable_occupancy() {
                     )
                     .await
                     .unwrap();
-            } else {
-                let result =
-                    WarmAdmission::admit(controller.as_ref(), warm(&format!("warm-{index}"))).await;
-                assert!(result.is_ok() || matches!(result, Err(WarmAdmissionError::Denied { .. })));
-            }
-            assert!(
-                controller
-                    .journal()
-                    .count_task_or_warm_occupancy()
+            } else if h.hold_warm_lease(&format!("warm-{index}")).await.is_some() {
+                WarmAdmission::admit(controller.as_ref(), warm(&format!("warm-{index}")))
                     .await
-                    .unwrap()
-                    <= cap
+                    .expect("a leased warm build is a ledger append and cannot be denied");
+            }
+            // The bound is on BUILD SLOTS, across both populations. Counting
+            // journal rows here would compare a lifecycle-row count against a
+            // build-slot cap — two different units.
+            assert!(
+                h.occupancy().await <= cap,
+                "combined occupancy exceeded cap {cap}"
             );
         }
     }
@@ -203,7 +206,15 @@ async fn task_warm_races_and_cap_matrix_bound_combined_durable_occupancy() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn paused_post_reconciliation_and_callbacks_keep_fenced_capacity_correct() {
-    let controller = Arc::new(controller(BuildAdmissionMode::Enforce, 1));
+    let h = harness(BuildAdmissionMode::Enforce, 1).await;
+    let controller = Arc::clone(&h.controller);
+    // The warmer's graph-warm lease, taken before admission exactly as
+    // production takes it. It is what holds the single slot for the whole of
+    // this scenario, and what the competitor below is refused by.
+    let held = h
+        .hold_warm_lease("deterministic-name")
+        .await
+        .expect("the warmer takes the single slot");
     let reserved = Arc::new(Barrier::new(2));
     let (allow_post_result, post_result_gate) = tokio::sync::oneshot::channel();
     let posts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -241,10 +252,12 @@ async fn paused_post_reconciliation_and_callbacks_keep_fenced_capacity_correct()
         .recover_predecessor_epoch("other-epoch")
         .await
         .unwrap();
-    assert!(matches!(
-        WarmAdmission::admit(controller.as_ref(), warm("cannot-reconcile-away")).await,
-        Err(WarmAdmissionError::Denied { .. })
-    ));
+    assert!(
+        h.hold_warm_lease("cannot-reconcile-away").await.is_none(),
+        "an in-flight POST keeps its slot; reconciliation of another epoch \
+         cannot hand it to a competitor"
+    );
+    assert_eq!(h.occupancy().await, 1);
     assert_eq!(
         controller
             .journal()
@@ -422,11 +435,16 @@ async fn paused_post_reconciliation_and_callbacks_keep_fenced_capacity_correct()
         0,
         "cancellation and duplicate cancellation release capacity exactly once"
     );
+    // The warmer owns its lease's lifecycle: no admission transition releases
+    // it, so handing back the slot is an explicit act of the warmer's.
+    h.release_warm_lease(held).await;
+    assert_eq!(h.occupancy().await, 0);
 }
 
 #[tokio::test]
 async fn invocation_children_are_durable_but_do_not_self_block_the_parent_cap() {
-    let controller = controller(BuildAdmissionMode::Enforce, 1);
+    let h = harness(BuildAdmissionMode::Enforce, 1).await;
+    let controller = Arc::clone(&h.controller);
     assert!(matches!(
         controller
             .admit_task_run(
@@ -504,10 +522,15 @@ async fn invocation_children_are_durable_but_do_not_self_block_the_parent_cap() 
             1
         );
     }
-    assert!(matches!(
-        WarmAdmission::admit(&controller, warm("real-warm-is-blocked")).await,
-        Err(WarmAdmissionError::Denied { .. })
-    ));
+    // The parent's dispatch slot is real capacity, and warm draws from the same
+    // pool: the warmer cannot get a lease. Its children, below the lease, took
+    // nothing — which is the whole point of `InvocationBuild` not charging a
+    // dispatch slot.
+    assert_eq!(h.occupancy().await, 1, "only the parent occupies");
+    assert!(
+        h.hold_warm_lease("real-warm-is-blocked").await.is_none(),
+        "a warm build is blocked by the parent's slot, not by its children"
+    );
 }
 
 /// Deterministic cap-one forced-restart harness using barriers/channels.
@@ -527,9 +550,9 @@ async fn invocation_children_are_durable_but_do_not_self_block_the_parent_cap() 
 /// Occupancy never exceeds one throughout.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cap_one_forced_restart_denies_competitor_and_adopts_late_create() {
-    let journal = Arc::new(AdmissionJournalRepository::new(
-        Database::open_in_memory().unwrap(),
-    ));
+    let db = Database::open_in_memory().unwrap();
+    db.ensure_initialized().await.unwrap();
+    let journal = Arc::new(AdmissionJournalRepository::new(db.clone()));
     let work_id = "restart-warm";
     let predecessor_epoch = "predecessor-epoch";
     let replacement_epoch = "replacement-epoch";
@@ -541,16 +564,28 @@ async fn cap_one_forced_restart_denies_competitor_and_adopts_late_create() {
     // Kubernetes POST — modelled as a spawned task that signals "CreateInFlight
     // committed, POST issued" on a barrier and then parks on a oneshot gate so
     // the POST result never resolves for the predecessor process.
-    let predecessor = Arc::new(BuildAdmissionController::new(
-        Arc::clone(&journal),
-        BuildAdmissionMode::Enforce,
+    let predecessor = attach_capacity(
+        &db,
+        BuildAdmissionController::new(
+            Arc::clone(&journal),
+            BuildAdmissionMode::Enforce,
+            1,
+            predecessor_epoch,
+        ),
         1,
-        predecessor_epoch,
-    ));
+    )
+    .await;
+    // The predecessor's warm Job holds a graph-warm lease. That row lives in
+    // `build_leases`, so — unlike the process — it SURVIVES the restart, which
+    // is precisely why the replacement finds the slot still taken.
+    let predecessor_slot = predecessor
+        .hold_warm_lease(work_id)
+        .await
+        .expect("the predecessor takes the single slot");
     let create_committed = Arc::new(Barrier::new(2));
     let (post_result, post_result_gate) = tokio::sync::oneshot::channel::<String>();
     let paused_post = {
-        let predecessor = Arc::clone(&predecessor);
+        let predecessor = Arc::clone(&predecessor.controller);
         let create_committed = Arc::clone(&create_committed);
         tokio::spawn(async move {
             let permit = WarmAdmission::admit(predecessor.as_ref(), warm(work_id))
@@ -591,8 +626,13 @@ async fn cap_one_forced_restart_denies_competitor_and_adopts_late_create() {
     // --- Phase 2: replacement starts with EMPTY initial inventory and recovers ---
     // The replacement controller is constructed closed (JournalRecoveryIncomplete)
     // with a fresh, unique epoch. It has not performed any Kubernetes inventory.
-    let replacement =
-        BuildAdmissionController::new_closed(Arc::clone(&journal), 1, replacement_epoch);
+    let replacement_h = attach_capacity(
+        &db,
+        BuildAdmissionController::new_closed(Arc::clone(&journal), 1, replacement_epoch),
+        1,
+    )
+    .await;
+    let replacement = Arc::clone(&replacement_h.controller);
     assert_eq!(
         replacement.readiness(),
         BuildAdmissionReadiness::JournalRecoveryIncomplete,
@@ -635,12 +675,20 @@ async fn cap_one_forced_restart_denies_competitor_and_adopts_late_create() {
     // Even though the replacement's Kubernetes inventory is empty, the durable
     // journal occupancy is one, so a competitor warm cannot reserve.
     let competitor =
-        WarmAdmission::admit(&replacement, warm_generation("competitor-warm", 0)).await;
+        WarmAdmission::admit(replacement.as_ref(), warm_generation("competitor-warm", 0)).await;
     // The controller is not ready (CreateUnknownHealth), so admission fails
-    // closed. Even if it were ready, the durable occupancy would deny.
+    // closed. Independently, the predecessor's lease still occupies the only
+    // slot, so the competitor's warmer could not have got one either.
     assert!(
         matches!(competitor, Err(WarmAdmissionError::Denied { .. })),
         "competitor must be denied while predecessor CreateUnknown occupies the cap-one slot"
+    );
+    assert!(
+        replacement_h
+            .hold_warm_lease("competitor-warm")
+            .await
+            .is_none(),
+        "the predecessor's lease survived the restart and still holds the slot"
     );
     assert_eq!(
         journal.count_task_or_warm_occupancy().await.unwrap(),
@@ -712,7 +760,7 @@ async fn cap_one_forced_restart_denies_competitor_and_adopts_late_create() {
     );
     assert!(matches!(
         WarmAdmission::admit(
-            &replacement,
+            replacement.as_ref(),
             warm_generation("competitor-before-inventory", 0)
         )
         .await,
@@ -728,7 +776,7 @@ async fn cap_one_forced_restart_denies_competitor_and_adopts_late_create() {
     );
     assert!(matches!(
         WarmAdmission::admit(
-            &replacement,
+            replacement.as_ref(),
             warm_generation("competitor-before-topology", 0)
         )
         .await,
@@ -737,19 +785,27 @@ async fn cap_one_forced_restart_denies_competitor_and_adopts_late_create() {
     replacement.mark_topology_ready();
     assert_eq!(replacement.readiness(), BuildAdmissionReadiness::Healthy);
 
-    // Healthy now, the single slot is Live: a competitor is still denied, this
-    // time by the durable cap (occupancy one) rather than by a closed gate.
-    assert!(matches!(
-        WarmAdmission::admit(&replacement, warm_generation("competitor-after-adopt", 0)).await,
-        Err(WarmAdmissionError::Denied { .. })
-    ));
+    // Healthy now, the single slot is Live: a competitor is still refused, this
+    // time by the durable cap rather than by a closed gate. The refusal happens
+    // at the lease, one layer before admission, because that is where a warm
+    // build's capacity is decided.
+    assert!(
+        replacement_h
+            .hold_warm_lease("competitor-after-adopt")
+            .await
+            .is_none(),
+        "the adopted create still holds the only slot"
+    );
+    assert_eq!(replacement_h.occupancy().await, 1, "never above one slot");
     assert_eq!(
         journal.count_task_or_warm_occupancy().await.unwrap(),
         1,
         "occupancy is never above one"
     );
 
-    // Releasing the adopted create frees the slot.
+    // Releasing the adopted create frees the slot. Ledger row and lease are
+    // retired by their own owners: the terminal transition closes the journal
+    // row, and the warmer hands back the lease it took.
     replacement
         .transition(
             &seeded_permit,
@@ -760,14 +816,27 @@ async fn cap_one_forced_restart_denies_competitor_and_adopts_late_create() {
     assert_eq!(
         journal.count_task_or_warm_occupancy().await.unwrap(),
         0,
-        "terminal release frees the single slot"
+        "terminal release frees the single ledger row"
+    );
+    predecessor.release_warm_lease(predecessor_slot).await;
+    assert_eq!(replacement_h.occupancy().await, 0, "and the build slot");
+    assert!(
+        replacement_h
+            .hold_warm_lease("competitor-after-release")
+            .await
+            .is_some(),
+        "the freed slot admits one successor"
     );
     assert!(
-        WarmAdmission::admit(&replacement, warm_generation("competitor-after-release", 0))
-            .await
-            .is_ok(),
+        WarmAdmission::admit(
+            replacement.as_ref(),
+            warm_generation("competitor-after-release", 0)
+        )
+        .await
+        .is_ok(),
         "the freed slot admits at most one successor"
     );
+    assert_eq!(replacement_h.occupancy().await, 1);
     assert_eq!(
         journal.count_task_or_warm_occupancy().await.unwrap(),
         1,
@@ -846,491 +915,11 @@ async fn forced_loss_safety_depends_on_durable_pre_post_state_not_cooperative_sh
     );
 }
 
-#[derive(Clone, Copy, Debug)]
-enum HandoffMatrixAction {
-    Acknowledge(AdmissionHandoffAuthority),
-    Commit(AdmissionHandoffPhase),
-}
-
-#[derive(Clone, Copy, Debug)]
-struct HandoffMatrixExpectation {
-    phase: AdmissionHandoffPhase,
-    state: HandoffState,
-    emergency_acknowledged: bool,
-    invocation_acknowledged: bool,
-    // The scenario table owns each authority's required enforcement.
-    emergency_enforcing: bool,
-    invocation_enforcing: bool,
-    legal_next: AdmissionHandoffPhase,
-    advance_allowed: bool,
-}
-
-#[derive(Clone, Copy, Debug)]
-struct HandoffMatrixScenario {
-    expected: HandoffMatrixExpectation,
-    // A deterministic fake supplied independently of the expected policy result.
-    invocation_observation: InvocationAuthorityObservation,
-}
-
-fn handoff_next(phase: AdmissionHandoffPhase) -> AdmissionHandoffPhase {
-    match phase {
-        AdmissionHandoffPhase::EmergencyPrimary => AdmissionHandoffPhase::ForwardOverlap,
-        AdmissionHandoffPhase::ForwardOverlap => AdmissionHandoffPhase::InvocationPrimary,
-        AdmissionHandoffPhase::InvocationPrimary => AdmissionHandoffPhase::RollbackOverlap,
-        AdmissionHandoffPhase::RollbackOverlap => AdmissionHandoffPhase::EmergencyPrimary,
-    }
-}
-
-async fn assert_handoff_restart_snapshot(
-    repo: &AdmissionHandoffRepository,
-    scenario: HandoffMatrixScenario,
-) {
-    let expected = scenario.expected;
-    let invocation_observation = scenario.invocation_observation;
-    let row = repo.read().await.unwrap().unwrap();
-    assert_eq!(row.phase, expected.phase);
-    assert_eq!(
-        row.emergency_ack_epoch,
-        expected.emergency_acknowledged.then_some(row.epoch)
-    );
-    assert_eq!(
-        row.invocation_ack_epoch,
-        expected.invocation_acknowledged.then_some(row.epoch)
-    );
-    let snapshot = evaluate_handoff(
-        Ok(Some(row.clone())),
-        BuildAdmissionMode::Enforce,
-        expected.emergency_enforcing,
-        BuildAdmissionReadiness::Healthy,
-        invocation_observation,
-    );
-    assert_eq!(snapshot.state, expected.state);
-    assert_eq!(
-        snapshot.emergency == EmergencyAuthorityDecision::RequiredFailClosed,
-        expected.emergency_enforcing,
-        "emergency authority requirement must match the matrix"
-    );
-    assert_eq!(
-        invocation_observation.enforcing, expected.invocation_enforcing,
-        "invocation authority observation must match the matrix"
-    );
-    assert!(
-        snapshot.emergency == EmergencyAuthorityDecision::RequiredFailClosed
-            || invocation_observation.enforcing,
-        "every crash/restart state retains at least one enforcing authority"
-    );
-    assert_eq!(
-        snapshot.emergency_acknowledgement_allowed,
-        expected.emergency_enforcing
-            && !expected.emergency_acknowledged
-            && snapshot.emergency == EmergencyAuthorityDecision::RequiredFailClosed,
-    );
-    assert_eq!(
-        snapshot.emergency == EmergencyAuthorityDecision::MayDisable,
-        !expected.emergency_enforcing,
-    );
-    assert_eq!(
-        snapshot.warning_gauges(expected.emergency_enforcing, invocation_observation),
-        if snapshot.state == HandoffState::IncompleteEpoch {
-            HandoffWarningGauges {
-                stale_epoch: 1,
-                ..HandoffWarningGauges::default()
-            }
-        } else {
-            HandoffWarningGauges::default()
-        },
-    );
-    for authority in [
-        AdmissionHandoffAuthority::Emergency,
-        AdmissionHandoffAuthority::Invocation,
-    ] {
-        assert!(matches!(
-            repo.acknowledge(authority, row.epoch - 1).await,
-            Err(djinn_db::Error::InvalidTransition(_))
-        ));
-    }
-    assert!(matches!(
-        repo.advance(row.epoch, handoff_next(expected.legal_next), &[])
-            .await,
-        Err(djinn_db::Error::InvalidTransition(_))
-    ));
-    if !expected.advance_allowed {
-        assert!(
-            matches!(
-                repo.advance(row.epoch, expected.legal_next, &[]).await,
-                Err(djinn_db::Error::InvalidTransition(_))
-            ),
-            "current-epoch acknowledgement guard rejects phase advance"
-        );
-    }
-}
-
-/// Table-driven crash/restart proof for the complete forward and rollback cycle.
-/// Its invocation authority is a typed observation, never a deployed service.
-#[tokio::test]
-async fn handoff_crash_matrix_preserves_authority_and_epoch_guards() {
-    let repo = AdmissionHandoffRepository::new(Database::open_in_memory().unwrap());
-    // The matrix walks a genuine forward cutover, so the invocation authority is
-    // armed to enforce before any phase advances — exactly as the operator
-    // executor arms it while the row is still emergency-primary. Without it the
-    // invocation-primary rows below would be an out-of-protocol state that can
-    // never release v0, because v1 would not actually be enforcing. Arming
-    // clears both acknowledgements and bumps the epoch, which is precisely the
-    // un-acknowledged state the first expectation asserts.
-    let seeded = repo.read().await.unwrap().unwrap();
-    repo.set_modes_and_cap(
-        seeded.epoch,
-        djinn_db::V0Mode::Enforce,
-        djinn_db::V1Mode::Enforce,
-        None,
-    )
-    .await
-    .unwrap();
-    let expectations = [
-        (
-            AdmissionHandoffPhase::EmergencyPrimary,
-            HandoffState::IncompleteEpoch,
-            false,
-            false,
-            true,
-            false,
-            false,
-            false,
-        ),
-        (
-            AdmissionHandoffPhase::EmergencyPrimary,
-            HandoffState::EmergencyPrimary,
-            true,
-            false,
-            true,
-            false,
-            false,
-            true,
-        ),
-        (
-            AdmissionHandoffPhase::ForwardOverlap,
-            HandoffState::IncompleteEpoch,
-            false,
-            false,
-            true,
-            true,
-            true,
-            false,
-        ),
-        (
-            AdmissionHandoffPhase::ForwardOverlap,
-            HandoffState::IncompleteEpoch,
-            true,
-            false,
-            true,
-            true,
-            true,
-            false,
-        ),
-        (
-            AdmissionHandoffPhase::ForwardOverlap,
-            HandoffState::ForwardOverlap,
-            true,
-            true,
-            true,
-            true,
-            true,
-            true,
-        ),
-        (
-            AdmissionHandoffPhase::InvocationPrimary,
-            HandoffState::IncompleteEpoch,
-            false,
-            false,
-            true,
-            true,
-            true,
-            false,
-        ),
-        (
-            AdmissionHandoffPhase::InvocationPrimary,
-            HandoffState::InvocationPrimary,
-            false,
-            true,
-            false,
-            true,
-            true,
-            true,
-        ),
-        (
-            AdmissionHandoffPhase::RollbackOverlap,
-            HandoffState::IncompleteEpoch,
-            false,
-            false,
-            true,
-            true,
-            true,
-            false,
-        ),
-        (
-            AdmissionHandoffPhase::RollbackOverlap,
-            HandoffState::IncompleteEpoch,
-            true,
-            false,
-            true,
-            true,
-            true,
-            false,
-        ),
-        (
-            AdmissionHandoffPhase::RollbackOverlap,
-            HandoffState::RollbackOverlap,
-            true,
-            true,
-            true,
-            true,
-            true,
-            true,
-        ),
-        (
-            AdmissionHandoffPhase::EmergencyPrimary,
-            HandoffState::IncompleteEpoch,
-            false,
-            false,
-            true,
-            false,
-            false,
-            false,
-        ),
-    ]
-    .map(
-        |(
-            phase,
-            state,
-            emergency_acknowledged,
-            invocation_acknowledged,
-            emergency_enforcing,
-            invocation_observed,
-            invocation_enforcing,
-            advance_allowed,
-        )| HandoffMatrixScenario {
-            expected: HandoffMatrixExpectation {
-                phase,
-                state,
-                emergency_acknowledged,
-                invocation_acknowledged,
-                emergency_enforcing,
-                invocation_enforcing,
-                legal_next: handoff_next(phase),
-                advance_allowed,
-            },
-            invocation_observation: InvocationAuthorityObservation {
-                enforcing: invocation_observed,
-            },
-        },
-    );
-    let actions = [
-        HandoffMatrixAction::Acknowledge(AdmissionHandoffAuthority::Emergency),
-        HandoffMatrixAction::Commit(AdmissionHandoffPhase::ForwardOverlap),
-        HandoffMatrixAction::Acknowledge(AdmissionHandoffAuthority::Emergency),
-        HandoffMatrixAction::Acknowledge(AdmissionHandoffAuthority::Invocation),
-        HandoffMatrixAction::Commit(AdmissionHandoffPhase::InvocationPrimary),
-        HandoffMatrixAction::Acknowledge(AdmissionHandoffAuthority::Invocation),
-        HandoffMatrixAction::Commit(AdmissionHandoffPhase::RollbackOverlap),
-        HandoffMatrixAction::Acknowledge(AdmissionHandoffAuthority::Emergency),
-        HandoffMatrixAction::Acknowledge(AdmissionHandoffAuthority::Invocation),
-        HandoffMatrixAction::Commit(AdmissionHandoffPhase::EmergencyPrimary),
-    ];
-    for (index, scenario) in expectations.into_iter().enumerate() {
-        // Crash/restart before every action and, on the next iteration, after it.
-        assert_handoff_restart_snapshot(&repo, scenario).await;
-        let Some(action) = actions.get(index).copied() else {
-            continue;
-        };
-        let before = repo.read().await.unwrap().unwrap();
-        match action {
-            HandoffMatrixAction::Acknowledge(authority) => {
-                repo.acknowledge(authority, before.epoch).await.unwrap();
-            }
-            HandoffMatrixAction::Commit(next) => {
-                assert_eq!(next, handoff_next(before.phase));
-                repo.advance(before.epoch, next, &[]).await.unwrap();
-            }
-        }
-    }
-
-    let current = repo.read().await.unwrap().unwrap();
-    assert_eq!(current.phase, AdmissionHandoffPhase::EmergencyPrimary);
-    assert!(matches!(
-        repo.acknowledge(AdmissionHandoffAuthority::Emergency, current.epoch - 1)
-            .await,
-        Err(djinn_db::Error::InvalidTransition(_))
-    ));
-    assert!(matches!(
-        repo.advance(current.epoch, AdmissionHandoffPhase::InvocationPrimary, &[])
-            .await,
-        Err(djinn_db::Error::InvalidTransition(_))
-    ));
-    assert!(matches!(
-        repo.advance(
-            current.epoch - 1,
-            AdmissionHandoffPhase::ForwardOverlap,
-            &[]
-        )
-        .await,
-        Err(djinn_db::Error::InvalidTransition(_))
-    ));
-
-    let warning_cases = [
-        (
-            "read failure",
-            Err(()),
-            true,
-            true,
-            HandoffWarningGauges {
-                epoch_unreadable: 1,
-                ..HandoffWarningGauges::default()
-            },
-        ),
-        (
-            "missing row",
-            Ok(None),
-            true,
-            false,
-            HandoffWarningGauges::default(),
-        ),
-        (
-            "steady overlap",
-            Ok(None),
-            true,
-            true,
-            HandoffWarningGauges {
-                unexpected_overlap: 1,
-                ..HandoffWarningGauges::default()
-            },
-        ),
-        (
-            "emergency primary overlap",
-            Ok(Some(djinn_db::AdmissionHandoffRow {
-                phase: AdmissionHandoffPhase::EmergencyPrimary,
-                epoch: 9,
-                emergency_ack_epoch: Some(9),
-                invocation_ack_epoch: None,
-                v0_mode: djinn_db::V0Mode::Enforce,
-                v1_mode: djinn_db::V1Mode::Off,
-                cap: None,
-                updated_at: "test".into(),
-            })),
-            true,
-            true,
-            HandoffWarningGauges {
-                unexpected_overlap: 1,
-                ..HandoffWarningGauges::default()
-            },
-        ),
-        (
-            "invocation primary overlap",
-            Ok(Some(djinn_db::AdmissionHandoffRow {
-                phase: AdmissionHandoffPhase::InvocationPrimary,
-                epoch: 9,
-                emergency_ack_epoch: None,
-                invocation_ack_epoch: Some(9),
-                v0_mode: djinn_db::V0Mode::Enforce,
-                v1_mode: djinn_db::V1Mode::Off,
-                cap: None,
-                updated_at: "test".into(),
-            })),
-            true,
-            true,
-            HandoffWarningGauges {
-                unexpected_overlap: 1,
-                ..HandoffWarningGauges::default()
-            },
-        ),
-        (
-            "recovered emergency primary",
-            Ok(Some(djinn_db::AdmissionHandoffRow {
-                phase: AdmissionHandoffPhase::EmergencyPrimary,
-                epoch: 9,
-                emergency_ack_epoch: Some(9),
-                invocation_ack_epoch: None,
-                v0_mode: djinn_db::V0Mode::Enforce,
-                v1_mode: djinn_db::V1Mode::Off,
-                cap: None,
-                updated_at: "test".into(),
-            })),
-            true,
-            false,
-            HandoffWarningGauges::default(),
-        ),
-        (
-            "valid overlap",
-            Ok(Some(djinn_db::AdmissionHandoffRow {
-                phase: AdmissionHandoffPhase::ForwardOverlap,
-                epoch: 9,
-                emergency_ack_epoch: Some(9),
-                invocation_ack_epoch: Some(9),
-                v0_mode: djinn_db::V0Mode::Enforce,
-                v1_mode: djinn_db::V1Mode::Off,
-                cap: None,
-                updated_at: "test".into(),
-            })),
-            true,
-            true,
-            HandoffWarningGauges::default(),
-        ),
-        (
-            "stale acknowledgement",
-            Ok(Some(djinn_db::AdmissionHandoffRow {
-                phase: AdmissionHandoffPhase::RollbackOverlap,
-                epoch: 9,
-                emergency_ack_epoch: Some(8),
-                invocation_ack_epoch: Some(9),
-                v0_mode: djinn_db::V0Mode::Enforce,
-                v1_mode: djinn_db::V1Mode::Off,
-                cap: None,
-                updated_at: "test".into(),
-            })),
-            true,
-            true,
-            HandoffWarningGauges {
-                stale_epoch: 1,
-                ..HandoffWarningGauges::default()
-            },
-        ),
-    ];
-    for (name, row, emergency, invocation, expected) in warning_cases {
-        let snapshot = evaluate_handoff(
-            row,
-            BuildAdmissionMode::Enforce,
-            emergency,
-            BuildAdmissionReadiness::Healthy,
-            InvocationAuthorityObservation {
-                enforcing: invocation,
-            },
-        );
-        assert_eq!(
-            snapshot.warning_gauges(
-                emergency,
-                InvocationAuthorityObservation {
-                    enforcing: invocation
-                },
-            ),
-            expected,
-            "{name}"
-        );
-    }
-    assert_eq!(
-        evaluate_handoff(
-            Ok(Some(current)),
-            BuildAdmissionMode::Enforce,
-            true,
-            BuildAdmissionReadiness::Healthy,
-            InvocationAuthorityObservation::default(),
-        )
-        .state,
-        HandoffState::IncompleteEpoch,
-    );
-}
 
 #[tokio::test]
 async fn concurrent_invocation_children_share_parent_observation_without_v0_occupancy() {
-    let controller = controller(BuildAdmissionMode::Enforce, 1);
+    let h = harness(BuildAdmissionMode::Enforce, 1).await;
+    let controller = Arc::clone(&h.controller);
     let BuildAdmissionDecision::Permitted { permit: parent, .. } = controller
         .admit_task_run(
             Some("worker"),

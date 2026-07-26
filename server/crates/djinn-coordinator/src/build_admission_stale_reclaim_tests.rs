@@ -19,7 +19,7 @@ use djinn_core::events::EventBus;
 use djinn_db::{
     AdmissionDomain, AdmissionJournalKey, AdmissionJournalRepository, AdmissionState,
     AdmissionWorkloadKind, CreateStartedInput, Database, ImageRepository, ProjectRepository,
-    ReserveAdmissionInput, ReserveAdmissionResult, TerminalAdmissionInput, UidFencedAdmissionInput,
+    ReserveAdmissionInput, TerminalAdmissionInput, UidFencedAdmissionInput,
 };
 use djinn_k8s::{
     K8sGraphWarmer, KubernetesConfig, ObjectPresence, UidGetResult, WarmAdmission,
@@ -33,6 +33,7 @@ use crate::build_admission::{
     BuildAdmissionController, BuildAdmissionDecision, BuildAdmissionMode, BuildAdmissionReadiness,
     BuildAdmissionRequest, BuildWorkloadKind, CapacitySource,
 };
+use crate::build_admission_capacity_support::{CapacityHarness, attach_capacity};
 use crate::build_admission_inventory::BuildAdmissionReconciler;
 
 const PREDECESSOR_EPOCH: &str = "epoch-before-the-restart";
@@ -235,16 +236,23 @@ async fn accumulate_production_stale_population(
     work_ids
 }
 
-fn replacement(
+/// The replacement process, composed the way production composes it: an
+/// Enforce controller reaching capacity through the ONE lease authority over
+/// the same database. Without the authority the controller is not capacity
+/// gated at all, and "the cap still binds after reconciliation" would be a
+/// claim nothing could falsify.
+async fn replacement(
+    db: &Database,
     journal: &Arc<AdmissionJournalRepository>,
     cap: i64,
-) -> Arc<BuildAdmissionController> {
-    Arc::new(BuildAdmissionController::new(
+) -> CapacityHarness {
+    let controller = BuildAdmissionController::new(
         Arc::clone(journal),
         BuildAdmissionMode::Enforce,
         cap,
         REPLACEMENT_EPOCH,
-    ))
+    );
+    attach_capacity(db, controller, cap).await
 }
 
 fn warm_request(id: &str) -> WarmAdmissionRequest {
@@ -286,7 +294,8 @@ async fn production_shaped_stale_population_is_reclaimed_and_enforce_admits_at_c
     );
 
     // The process is replaced. This is the real startup recovery path.
-    let controller = replacement(&journal, 3);
+    let h = replacement(&db, &journal, 3).await;
+    let controller = Arc::clone(&h.controller);
     let report = controller
         .recover_all_predecessors_and_seed()
         .await
@@ -365,7 +374,18 @@ async fn production_shaped_stale_population_is_reclaimed_and_enforce_admits_at_c
         BuildAdmissionReadiness::Healthy,
         "every startup gate must clear once the stale occupancy is gone"
     );
+    // Warm capacity is taken at the graph-warm LEASE the warmer holds before it
+    // reaches admission; the admission call is the ledger append that made this
+    // population reclaimable in the first place. Asserting the denial at
+    // admission would now assert nothing, because `HeldByLease` never consults
+    // a cap. So the three grants are asserted where they are actually decided.
+    let mut held = Vec::new();
     for index in 0..3 {
+        held.push(
+            h.hold_warm_lease(&format!("after-{index}"))
+                .await
+                .unwrap_or_else(|| panic!("slot {index} must be free after reconciliation")),
+        );
         let decision = controller
             .admit(build_request(&format!("after-{index}")))
             .await
@@ -375,7 +395,28 @@ async fn production_shaped_stale_population_is_reclaimed_and_enforce_admits_at_c
             "admission {index} must be granted at cap 3 after reconciliation: {decision:?}"
         );
     }
-    let fourth = controller.admit(build_request("after-3")).await.unwrap();
+    assert_eq!(
+        h.occupancy().await,
+        3,
+        "the reclaimed slots are re-occupied, exactly filling the cap"
+    );
+    assert!(
+        h.hold_warm_lease("after-3").await.is_none(),
+        "the cap must still bind after reconciliation; reclamation is not a bypass"
+    );
+    // Same pool, other population: a build-capable task-run is denied by the
+    // three warm Jobs. This is the unification -- before it, dispatch had its
+    // own three and the node ran six.
+    let fourth = controller
+        .admit_task_run(
+            Some("worker"),
+            AdmissionDomain::TaskObservation,
+            "after-3-task".into(),
+            0,
+            "task-run-after-3".into(),
+        )
+        .await
+        .unwrap();
     assert!(
         matches!(
             fourth,
@@ -386,6 +427,7 @@ async fn production_shaped_stale_population_is_reclaimed_and_enforce_admits_at_c
         ),
         "the cap must still bind after reconciliation; reclamation is not a bypass: {fourth:?}"
     );
+    drop(held);
 }
 
 /// Reclamation must not become a way to release work that is still running.
@@ -411,7 +453,7 @@ async fn reclamation_never_releases_work_that_is_still_fenced() {
         commands: vec!["djinn-warm".into()],
     };
 
-    let controller = replacement(&journal, 3);
+    let controller = Arc::clone(&replacement(&db, &journal, 3).await.controller);
     controller
         .recover_all_predecessors_and_seed()
         .await
@@ -451,7 +493,7 @@ async fn current_epoch_and_unsettled_rows_are_never_reclaimed() {
 
     // A live process holds an in-flight create of its own. Its epoch matches
     // the reconciling controller's, so no Kubernetes evidence can retire it.
-    let controller = replacement(&journal, 3);
+    let controller = Arc::clone(&replacement(&db, &journal, 3).await.controller);
     controller.mark_ready();
     let project_id = seed_project(&db, "in-flight-now").await;
     let warmer = K8sGraphWarmer::with_dispatcher(
@@ -527,18 +569,18 @@ async fn pre_ymx9_generation_history(
         let object_name = format!("task-run-{work_id}-{generation}");
         let object_uid = format!("uid-{work_id}-{generation}");
         let reserved = journal
-            .reserve(
-                &ReserveAdmissionInput {
-                    key: key.clone(),
-                    workload_kind: AdmissionWorkloadKind::Task,
-                    creator_server_epoch: PREDECESSOR_EPOCH.into(),
-                    object_name: object_name.clone(),
-                },
-                64,
-            )
+            .reserve(&ReserveAdmissionInput {
+                key: key.clone(),
+                workload_kind: AdmissionWorkloadKind::Task,
+                creator_server_epoch: PREDECESSOR_EPOCH.into(),
+                object_name: object_name.clone(),
+            })
             .await
             .unwrap();
-        assert!(matches!(reserved, ReserveAdmissionResult::Reserved { .. }));
+        // The ledger append never denies, so a fresh key always yields a
+        // non-idempotent reservation. There is no `AtCapacity` outcome to match
+        // on any more: capacity is decided by the lease, before this call.
+        assert!(!reserved.idempotent);
         journal
             .mark_create_started(&CreateStartedInput {
                 key: key.clone(),
@@ -600,7 +642,7 @@ async fn superseded_live_generations_are_reclaimed_once_their_object_is_proven_a
         "three superseded live generations occupy the cap"
     );
 
-    let controller = replacement(&journal, 3);
+    let controller = Arc::clone(&replacement(&db, &journal, 3).await.controller);
     controller
         .recover_all_predecessors_and_seed()
         .await
@@ -688,7 +730,7 @@ async fn one_unreclaimable_row_costs_one_row_and_the_sweep_continues() {
         commands: vec!["djinn-agent-worker".into()],
     };
 
-    let controller = replacement(&journal, 3);
+    let controller = Arc::clone(&replacement(&db, &journal, 3).await.controller);
     controller
         .recover_all_predecessors_and_seed()
         .await

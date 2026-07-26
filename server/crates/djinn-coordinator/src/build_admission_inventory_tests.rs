@@ -20,6 +20,7 @@ use tokio::sync::RwLock;
 
 use crate::{
     build_admission::{BuildAdmissionController, BuildAdmissionMode, BuildAdmissionReadiness},
+    build_admission_capacity_support::{CapacityHarness, controller_with_capacity},
     build_admission_inventory::BuildAdmissionReconciler,
 };
 
@@ -112,15 +113,16 @@ fn labeled(name: &str, uid: &str, work_id: &str, generation: &str) -> WorkloadRe
     )
 }
 
-fn controller(mode: BuildAdmissionMode, cap: i64) -> Arc<BuildAdmissionController> {
-    Arc::new(BuildAdmissionController::new(
-        Arc::new(AdmissionJournalRepository::new(
-            Database::open_in_memory().unwrap(),
-        )),
-        mode,
-        cap,
-        "inventory-test",
-    ))
+/// The reconciler ends every clean pass in `seed_from_recovery`, which reads
+/// the over-cap gate from the ONE capacity authority. A controller with no
+/// authority is not capacity gated at all and skips that gate silently, so
+/// every reconciler test composes one.
+async fn harness(mode: BuildAdmissionMode, cap: i64) -> CapacityHarness {
+    controller_with_capacity(mode, cap, "inventory-test").await
+}
+
+async fn controller(mode: BuildAdmissionMode, cap: i64) -> Arc<BuildAdmissionController> {
+    Arc::clone(&harness(mode, cap).await.controller)
 }
 
 async fn adopt_live(
@@ -156,7 +158,7 @@ async fn mixed_current_and_unlabeled_legacy_inventory_adopts_stable_identities()
         &[("djinn.app/warm", "true")],
     );
     let inventory = Arc::new(FakeInventory::new(vec![current, legacy_task, legacy_warm]));
-    let controller = controller(BuildAdmissionMode::Enforce, 4);
+    let controller = controller(BuildAdmissionMode::Enforce, 4).await;
     let report = BuildAdmissionReconciler::new(controller.clone(), inventory)
         .reconcile()
         .await;
@@ -190,7 +192,7 @@ async fn duplicate_missing_and_unstable_identities_block_enforce_readiness() {
             &[(LABEL_ADMISSION_DOMAIN, "task_observation")],
         ),
     ]));
-    let controller = controller(BuildAdmissionMode::Enforce, 8);
+    let controller = controller(BuildAdmissionMode::Enforce, 8).await;
     let report = BuildAdmissionReconciler::new(controller.clone(), inventory)
         .reconcile()
         .await;
@@ -220,7 +222,18 @@ async fn cap_exceeding_seed_stays_closed_and_off_does_not_inventory() {
         labeled("one", "uid-one", "one", "0"),
         labeled("two", "uid-two", "two", "0"),
     ]));
-    let enforce = controller(BuildAdmissionMode::Enforce, 1);
+    let h = harness(BuildAdmissionMode::Enforce, 1).await;
+    // The over-cap shape, in the unit that now carries it: two BUILD SLOTS a
+    // predecessor took, surviving in `build_leases` against a cap of one. The
+    // two adopted Kubernetes workloads below are the matching lifecycle rows.
+    //
+    // This is a repointed measurement, not a weakened one. The gate used to be
+    // fed a count of occupying journal rows compared against a build-slot cap —
+    // two different units, which is exactly the production wedge where 59 stale
+    // lifecycle rows latched `over_cap` while holding no CPU at all. The
+    // assertion below is unchanged; only what it measures is now real capacity.
+    let _predecessor_slots = h.occupy_slots_beyond_cap(2).await;
+    let enforce = Arc::clone(&h.controller);
     BuildAdmissionReconciler::new(enforce.clone(), inventory.clone())
         .reconcile()
         .await;
@@ -229,7 +242,7 @@ async fn cap_exceeding_seed_stays_closed_and_off_does_not_inventory() {
         BuildAdmissionReadiness::SeededOccupancyAboveCap
     );
 
-    BuildAdmissionReconciler::new(controller(BuildAdmissionMode::Off, 1), inventory.clone())
+    BuildAdmissionReconciler::new(controller(BuildAdmissionMode::Off, 1).await, inventory.clone())
         .reconcile()
         .await;
     assert_eq!(
@@ -242,7 +255,7 @@ async fn cap_exceeding_seed_stays_closed_and_off_does_not_inventory() {
 
 #[tokio::test]
 async fn absence_retains_create_unknown_then_late_same_name_create_is_adopted() {
-    let controller = controller(BuildAdmissionMode::Enforce, 3);
+    let controller = controller(BuildAdmissionMode::Enforce, 3).await;
     let key = AdmissionJournalKey {
         domain: AdmissionDomain::TaskObservation,
         work_id: "late".into(),
@@ -294,7 +307,7 @@ async fn absence_retains_create_unknown_then_late_same_name_create_is_adopted() 
 
 #[tokio::test]
 async fn uid_and_generation_mismatch_or_uncertain_get_retain_live_occupancy() {
-    let controller = controller(BuildAdmissionMode::Enforce, 4);
+    let controller = controller(BuildAdmissionMode::Enforce, 4).await;
     let key = AdmissionJournalKey {
         domain: AdmissionDomain::TaskObservation,
         work_id: "proof".into(),
@@ -326,7 +339,7 @@ async fn uid_and_generation_mismatch_or_uncertain_get_retain_live_occupancy() {
 
 #[tokio::test]
 async fn authoritative_uid_not_found_releases_and_emits_wakeup() {
-    let controller = controller(BuildAdmissionMode::Enforce, 4);
+    let controller = controller(BuildAdmissionMode::Enforce, 4).await;
     let key = AdmissionJournalKey {
         domain: AdmissionDomain::TaskObservation,
         work_id: "gone".into(),
@@ -373,7 +386,7 @@ async fn image_build_jobs_are_recognised_and_never_block_the_inventory_gate() {
         image_build,
         labeled("real-work", "uid-work", "work", "0"),
     ]));
-    let controller = controller(BuildAdmissionMode::Enforce, 3);
+    let controller = controller(BuildAdmissionMode::Enforce, 3).await;
     let report = BuildAdmissionReconciler::new(controller.clone(), inventory)
         .reconcile()
         .await;
@@ -395,7 +408,7 @@ async fn image_build_jobs_are_recognised_and_never_block_the_inventory_gate() {
 /// keeps occupying until a probe can actually answer.
 #[tokio::test]
 async fn uncertain_presence_never_reclaims_a_create_unknown_row() {
-    let controller = controller(BuildAdmissionMode::Enforce, 3);
+    let controller = controller(BuildAdmissionMode::Enforce, 3).await;
     let key = AdmissionJournalKey {
         domain: AdmissionDomain::TaskObservation,
         work_id: "uncertain".into(),
