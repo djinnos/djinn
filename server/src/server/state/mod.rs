@@ -374,6 +374,14 @@ struct Inner {
     pub provider_catalog_refresh_started: AtomicBool,
     /// Ensures startup creates at most one persistent handoff-warning loop.
     pub handoff_warning_loop_started: AtomicBool,
+    /// Whether THIS process won the coordinator advisory lock and confirmed the
+    /// single-active build-admission topology.
+    ///
+    /// Needed because a live promotion to emergency `Enforce` resets every
+    /// startup gate (see `require_enforcement`), and the topology gate may only
+    /// be re-asserted by a process that actually holds the lock. A standby never
+    /// sets this, so it can never re-open its own topology gate.
+    pub build_admission_topology_confirmed: AtomicBool,
     /// Per-model circuit-breaker health tracker.
     pub health_tracker: HealthTracker,
     /// Immutable retrieval-health config parsed once at startup.
@@ -646,6 +654,7 @@ impl AppState {
                     provider_catalog_refresh::refresh_interval_from_env(),
                 provider_catalog_refresh_started: AtomicBool::new(false),
                 handoff_warning_loop_started: AtomicBool::new(false),
+                build_admission_topology_confirmed: AtomicBool::new(false),
                 health_tracker: HealthTracker::new(),
                 retrieval_config,
                 retrieval_metrics,
@@ -1229,10 +1238,49 @@ impl AppState {
         }
     }
 
+    /// Re-walk the build-admission startup gates after a live promotion reset
+    /// them.
+    ///
+    /// [`BuildAdmissionController::require_enforcement`] clears the journal,
+    /// inventory, and topology gates so a configured Off/Observe process cannot
+    /// weaken a durable emergency epoch on the strength of checks it never ran.
+    /// That is right at startup, where the gates are walked immediately
+    /// afterwards — but the same promotion also happens on the periodic handoff
+    /// tick of an already-running process, and there nothing else reopens them.
+    ///
+    /// The journal and Kubernetes gates are genuinely re-run here, never
+    /// asserted. The topology gate is different: it cannot be re-derived from a
+    /// check, only from the fact that this process holds the coordinator advisory
+    /// lock, so it is re-asserted only when this process already confirmed it. A
+    /// standby leaves `build_admission_topology_confirmed` false and therefore
+    /// stays fail-closed at `TopologyPending`, preserving the single-active
+    /// writer invariant.
+    async fn reestablish_build_admission_gates(&self, admission: &BuildAdmissionController) {
+        self.initialize_build_admission_recovery().await;
+        self.initialize_build_admission_inventory().await;
+        if self
+            .inner
+            .build_admission_topology_confirmed
+            .load(Ordering::Acquire)
+        {
+            admission.mark_topology_ready();
+        }
+        admission.publish_metrics().await;
+        tracing::info!(
+            mode = ?admission.mode(),
+            readiness = ?admission.readiness(),
+            topology_confirmed = self
+                .inner
+                .build_admission_topology_confirmed
+                .load(Ordering::Acquire),
+            "build_admission: startup gates re-established after a live promotion"
+        );
+    }
+
     /// Re-read the durable row after topology has made the emergency controller
     /// healthy Enforce, then acknowledge its exact emergency epoch.
     async fn finalize_build_admission_handoff(&self, admission: &BuildAdmissionController) {
-        let snapshot = evaluate_handoff(
+        let mut snapshot = evaluate_handoff(
             AdmissionHandoffRepository::new(self.db().clone())
                 .read()
                 .await
@@ -1251,10 +1299,37 @@ impl AppState {
             EmergencyAuthorityDecision::RequiredFailClosed
                 if admission.mode() != BuildAdmissionMode::Enforce =>
             {
-                // The durable row changed while this process was completing its
-                // startup gates. Re-close and require a fresh healthy pass.
+                // The durable row requires v0 but this controller is not yet
+                // enforcing. Promote it — which resets every startup gate — and
+                // then re-establish those gates, because this may be a LIVE
+                // process rather than one still walking startup.
+                //
+                // Re-establishing is not optional. `initialize()` and
+                // `become_leader()` are the only other places the gates are
+                // walked, and neither runs again in a live process. On
+                // 2026-07-19 an operator restored the durable row against a
+                // running `mode: observe` deployment; this promotion reset the
+                // gates, nothing reopened them, and the controller denied every
+                // admission with a self-contradictory `occupancy 0 reached cap 3`
+                // until the pods were restarted. Nineteen tasks stalled.
                 admission.require_enforcement();
-                return;
+                self.reestablish_build_admission_gates(admission).await;
+                // The gates moved, so the earlier projection is stale: re-read so
+                // a now-healthy controller can acknowledge in this same pass
+                // instead of waiting for the next tick.
+                snapshot = evaluate_handoff(
+                    AdmissionHandoffRepository::new(self.db().clone())
+                        .read()
+                        .await
+                        .map_err(|_| ()),
+                    admission.mode(),
+                    admission.mode() == BuildAdmissionMode::Enforce,
+                    admission.readiness(),
+                    InvocationAuthorityObservation::default(),
+                );
+                if snapshot.emergency != EmergencyAuthorityDecision::RequiredFailClosed {
+                    return;
+                }
             }
             EmergencyAuthorityDecision::RequiredFailClosed
             | EmergencyAuthorityDecision::ConfiguredStandalone => {}
@@ -1286,6 +1361,11 @@ impl AppState {
     /// its Enforce admission stays fail-closed with `TopologyPending`.
     async fn confirm_build_admission_topology(&self) {
         if let Some(admission) = self.inner.build_admission.clone() {
+            // Record leadership BEFORE marking the gate, so a later live
+            // promotion (which resets the gate) can legitimately re-assert it.
+            self.inner
+                .build_admission_topology_confirmed
+                .store(true, Ordering::Release);
             admission.mark_topology_ready();
             self.finalize_build_admission_handoff(&admission).await;
             admission.publish_metrics().await;

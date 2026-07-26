@@ -500,3 +500,161 @@ async fn absent_row_keeps_configured_mode_and_seed_restores_a_complete_baseline(
         BuildAdmissionDecision::Permitted { .. }
     ));
 }
+
+/// Re-seeding the row into an ALREADY-RUNNING deployment must not re-arm the
+/// 2026-07-19 outage.
+///
+/// Production is configured `mode: observe` with `maxBuildTaskRuns: 3` (the Helm
+/// chart's `buildAdmission`), and its row is currently absent, so its controller
+/// is a benign standalone Observe that never denies. The moment an operator
+/// restores the row, the durable state reads `RequiredFailClosed`, and the
+/// periodic handoff loop promotes the Observe controller through
+/// `require_enforcement()` — which resets EVERY startup gate.
+///
+/// Those gates are otherwise walked only by `initialize()` and by
+/// `become_leader()`, neither of which runs again inside a live process. So
+/// without the re-establishment this test pins, the promoted controller parks
+/// fail-closed forever and denies every admission with the incident's exact
+/// self-contradictory signature, recoverable only by restarting the pod.
+///
+/// This is why the incident happened even though #2264 had already wired
+/// `mark_topology_ready` to leadership the day before: the missing piece was
+/// never the call site, it was that the LIVE promotion path resets the gates with
+/// nothing left to reopen them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn seeding_a_live_observe_deployment_does_not_wedge_admission() {
+    let _telemetry_guard = BUILD_ADMISSION_TELEMETRY_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let db = Database::open_in_memory().expect("test database");
+    let state = state_for_admission_config_with_db(db, observe_config());
+    // Production's current state: the row was deleted by the 2026-07-19
+    // remediation, so the deployment booted and won leadership as Observe.
+    handoff_repository(&state)
+        .delete_for_test()
+        .await
+        .expect("delete the row");
+    boot_through_leadership(&state).await;
+    let controller = admission(&state).clone();
+    assert_eq!(controller.mode(), BuildAdmissionMode::Observe);
+    assert!(matches!(
+        admit(&state, "pre-seed-task").await,
+        BuildAdmissionDecision::Permitted { .. }
+    ));
+
+    // The operator restores the row against the LIVE deployment.
+    let rendered = epoch_cli(&state, EpochAction::Seed).await;
+    assert!(rendered.starts_with("seed: applied"), "{rendered}");
+
+    // The next periodic handoff tick promotes Observe → Enforce. This is the
+    // exact moment the outage began.
+    leader_handoff_tick(&state).await;
+    assert_eq!(
+        controller.mode(),
+        BuildAdmissionMode::Enforce,
+        "a durable emergency-primary row must promote the configured Observe mode"
+    );
+
+    // The promotion must NOT leave the controller parked behind its own reset
+    // gates. Nothing restarts this process, so readiness restored here or never.
+    assert_eq!(
+        controller.readiness(),
+        BuildAdmissionReadiness::Healthy,
+        "promoting a live leader must re-establish the startup gates it reset"
+    );
+    assert_ne!(
+        admit(&state, "post-seed-task").await,
+        BuildAdmissionDecision::Denied {
+            occupancy: 0,
+            cap: 3
+        },
+        "re-seeding must not reproduce the incident's self-contradictory denial"
+    );
+    assert!(
+        matches!(
+            admit(&state, "post-seed-task-2").await,
+            BuildAdmissionDecision::Permitted { .. }
+        ),
+        "the restored deployment must keep admitting work"
+    );
+
+    // A further tick is stable — the promotion is not a flapping loop.
+    leader_handoff_tick(&state).await;
+    assert_eq!(controller.mode(), BuildAdmissionMode::Enforce);
+    assert_eq!(controller.readiness(), BuildAdmissionReadiness::Healthy);
+}
+
+/// A STANDBY must not re-open its own topology gate.
+///
+/// This is the load-bearing half of re-establishing the gates after a live
+/// promotion. The journal and Kubernetes gates are re-derived from real checks,
+/// but the topology gate encodes "this process holds the coordinator advisory
+/// lock" — which cannot be re-checked, only remembered. If re-establishment
+/// asserted it unconditionally, every standby pod would promote itself into a
+/// healthy Enforce writer and the single-active invariant would be gone, which is
+/// precisely the corruption the gate exists to prevent.
+///
+/// So a pod that never won leadership must stay fail-closed at `TopologyPending`
+/// even though it ran the same promotion path.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn a_standby_promotion_never_re_asserts_the_topology_gate() {
+    let _telemetry_guard = BUILD_ADMISSION_TELEMETRY_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let db = Database::open_in_memory().expect("test database");
+    let state = state_for_admission_config_with_db(db, observe_config());
+    handoff_repository(&state)
+        .delete_for_test()
+        .await
+        .expect("delete the row");
+
+    // A standby: every startup gate EXCEPT coordinator leadership.
+    boot_to_topology_gate(&state).await;
+    let controller = admission(&state).clone();
+    assert_eq!(controller.mode(), BuildAdmissionMode::Observe);
+
+    // Restore the row, then run the same promotion path the leader ran.
+    epoch_cli(&state, EpochAction::Seed).await;
+    leader_handoff_tick(&state).await;
+    assert_eq!(
+        controller.mode(),
+        BuildAdmissionMode::Enforce,
+        "the durable row promotes a standby's controller too"
+    );
+
+    // The journal and inventory gates were legitimately re-derived, so the
+    // remaining closed gate must be exactly topology — not an earlier one.
+    assert_eq!(
+        controller.readiness(),
+        BuildAdmissionReadiness::TopologyPending,
+        "a standby must NOT re-assert a topology gate it never held"
+    );
+    assert_eq!(
+        admit(&state, "standby-task").await,
+        BuildAdmissionDecision::Denied {
+            occupancy: 0,
+            cap: 3
+        },
+        "a promoted standby must fail closed"
+    );
+    assert_eq!(
+        handoff_repository(&state)
+            .read()
+            .await
+            .expect("read")
+            .expect("row")
+            .invocation_ack_epoch,
+        None,
+        "a standby writes no authority acknowledgement"
+    );
+
+    // Winning the lock is the only thing that opens it.
+    state.confirm_build_admission_topology().await;
+    assert_eq!(controller.readiness(), BuildAdmissionReadiness::Healthy);
+    assert!(matches!(
+        admit(&state, "promoted-leader-task").await,
+        BuildAdmissionDecision::Permitted { .. }
+    ));
+}
