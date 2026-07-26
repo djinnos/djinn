@@ -3827,9 +3827,18 @@ mod tests {
         // bootstrap phase ONLY — it `capset`s them away before the broker binds
         // its socket, so no user-controlled code ever runs while they are held.
         // See `launcher::launcher_capabilities`.
+        // CHOWN is retained past bootstrap so the broker socket can be handed to
+        // the worker uid; chown(2) needs the capability even at euid 0.
         assert_eq!(
             add,
-            &["SETUID", "SETGID", "SETPCAP", "SYS_ADMIN", "SYS_RESOURCE"]
+            &[
+                "CHOWN",
+                "SETGID",
+                "SETUID",
+                "SETPCAP",
+                "SYS_ADMIN",
+                "SYS_RESOURCE"
+            ]
         );
         // The `CAP_`-prefixed spelling is what the API server rejects alongside
         // `allowPrivilegeEscalation: false`.
