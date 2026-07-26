@@ -12,7 +12,6 @@
 
 use rmcp::{Json, handler::server::wrapper::Parameters, schemars, tool, tool_router};
 use serde::Deserialize;
-use serde_json::json;
 
 use crate::server::DjinnMcpServer;
 use crate::tools::proposal_ops::{
