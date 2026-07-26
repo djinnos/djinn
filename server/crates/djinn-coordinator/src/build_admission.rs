@@ -2005,16 +2005,37 @@ impl BuildAdmissionController {
             // (#2597) -- they must never have been able to deny capacity that
             // they were not holding.
             //
+            // Only a KNOWN occupancy above the cap latches this gate. Unknown
+            // occupancy is not evidence of over-cap, and treating it as such
+            // wedges the node.
+            //
+            // `initialize_build_admission_recovery` runs BEFORE
+            // `initialize_graph_warmer`, and the lease service recovers inside
+            // the latter -- so at this point the authority has never recovered
+            // on ANY startup and reports its occupancy as unknown. Latching on
+            // unknown therefore set `over_cap` on every boot, and `over_cap` is
+            // sticky: it is re-read only when a durable terminal transition
+            // releases a permit, which cannot happen while readiness reports
+            // `SeededOccupancyAboveCap` and denies every admission. Enforce
+            // would have failed closed permanently, for a reason that was not
+            // even true.
+            //
+            // Nothing is lost by not latching. Capacity is already fail-closed
+            // where it matters and without stickiness: an unreachable authority
+            // yields `DispatchSlotOutcome::Unavailable`, which `admit` turns
+            // into a denial for every mode but Observe, and which clears by
+            // itself the moment the authority becomes readable. Enforce also
+            // stays shut behind `InventoryPending`/`TopologyPending` until the
+            // real startup checks pass.
+            //
             // No authority installed means this controller is not capacity
-            // gated at all (the Off shape), so there is no cap to exceed. An
-            // authority that IS installed but unreadable leaves the gate CLOSED:
-            // unknown occupancy is not proof of headroom.
+            // gated at all (the Off shape), so there is no cap to exceed.
             let over_cap = match self.slot_authority.as_ref() {
                 None => false,
                 Some(authority) => authority
                     .occupancy()
                     .await
-                    .is_none_or(|slots| slots > authority.cap()),
+                    .is_some_and(|slots| slots > authority.cap()),
             };
             self.over_cap.store(over_cap, Ordering::Release);
         }

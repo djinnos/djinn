@@ -1010,6 +1010,22 @@ impl AppState {
             // Off: no journal, no controller, no readiness coupling.
             return;
         };
+        // Recover the ONE capacity authority before the controller that asks it
+        // for capacity.
+        //
+        // The lease service used to be recovered only inside
+        // `initialize_graph_warmer`, which runs after this and only on the
+        // Kubernetes path. An unrecovered service reports occupancy as unknown
+        // and answers every acquisition `Unavailable`, which Enforce turns into
+        // a denial -- so admission denied everything in the window before the
+        // warmer was wired, and denied everything FOREVER on any deployment
+        // that never reaches the Kubernetes branch. Capacity readiness is not
+        // the graph warmer's to own as a side effect: it is admission's own
+        // precondition, so it is established here.
+        //
+        // Idempotent. `initialize_graph_warmer` still recovers before handing
+        // the adapter a lease, which keeps that path's guarantee local to it.
+        let _ = self.inner.build_lease.recover().await;
         match admission.recover_all_predecessors_and_seed().await {
             Ok(report) => {
                 tracing::info!(

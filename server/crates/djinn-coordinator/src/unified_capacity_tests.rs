@@ -792,3 +792,91 @@ async fn a_closed_task_surrenders_its_queue_position_instead_of_leaking_a_slot()
         "the surrendered position must not have been granted the freed slot"
     );
 }
+
+/// Recovery must not fail the node closed because the capacity authority has
+/// not recovered YET.
+///
+/// This is the production startup order, not a contrived one:
+/// `initialize_build_admission_recovery` runs before `initialize_graph_warmer`,
+/// and the lease service recovers inside the latter — so on every boot the
+/// authority's occupancy is unknown at the moment recovery seeds the
+/// controller. Latching `over_cap` on unknown occupancy set the gate on every
+/// startup, and the gate is sticky: it is re-read only when a durable terminal
+/// transition releases a permit, which cannot happen while readiness reports
+/// `SeededOccupancyAboveCap` and denies everything. Enforce stayed shut
+/// permanently, for a reason that was not true.
+#[tokio::test]
+async fn an_unrecovered_authority_is_unknown_capacity_not_over_cap() {
+    let db = Database::open_in_memory().unwrap();
+    db.ensure_initialized().await.unwrap();
+    let leases = Arc::new(BuildLeaseRepository::new(db.clone()));
+    let journal = Arc::new(AdmissionJournalRepository::new(db.clone()));
+
+    // Deliberately NOT recovered: exactly what the controller sees at the point
+    // `initialize_build_admission_recovery` runs.
+    let lease = Arc::new(BuildLeaseService::new(Arc::clone(&leases), 3));
+    assert!(!lease.is_ready());
+    let authority: Arc<dyn BuildSlotAuthority> =
+        Arc::new(BuildLeaseDispatchAuthority::new(Arc::clone(&lease)));
+    assert!(
+        authority.occupancy().await.is_none(),
+        "an unrecovered authority reports occupancy as unknown, never as zero"
+    );
+
+    let controller =
+        BuildAdmissionController::new_closed(Arc::clone(&journal), 3, "unrecovered-epoch")
+            .with_slot_authority(authority);
+    let report = controller
+        .recover_all_predecessors_and_seed()
+        .await
+        .unwrap();
+
+    assert_eq!(
+        report.readiness,
+        crate::build_admission::BuildAdmissionReadiness::InventoryPending,
+        "unknown occupancy is not over-cap; the real startup gates keep Enforce closed"
+    );
+
+    // Fail-closed is preserved where it is not sticky: an unreachable authority
+    // denies at admission, and stops denying by itself once it is readable.
+    controller.mark_inventory_ready();
+    controller.mark_topology_ready();
+    assert!(controller.is_ready());
+    assert!(
+        matches!(
+            controller
+                .admit_task_run(
+                    Some("worker"),
+                    AdmissionDomain::TaskObservation,
+                    "before-lease-recovery".into(),
+                    0,
+                    "run-before".into(),
+                )
+                .await
+                .unwrap(),
+            BuildAdmissionDecision::Denied { .. }
+        ),
+        "capacity that cannot be read is never permission"
+    );
+
+    // The warmer's startup phase recovers the lease. Admission opens with no
+    // further intervention — there is no sticky gate left to clear.
+    assert!(matches!(lease.recover().await, LeaseResult::Status(_)));
+    lease.set_dispatch_enforcing_for_test(true);
+    assert!(
+        matches!(
+            controller
+                .admit_task_run(
+                    Some("worker"),
+                    AdmissionDomain::TaskObservation,
+                    "after-lease-recovery".into(),
+                    0,
+                    "run-after".into(),
+                )
+                .await
+                .unwrap(),
+            BuildAdmissionDecision::Permitted { .. }
+        ),
+        "a recovered authority admits without any gate needing to be cleared"
+    );
+}
