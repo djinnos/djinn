@@ -52,6 +52,8 @@ use djinn_runtime::GraphWarmerService;
 use djinn_supervisor::{AllowAllValidator, ConnectionRegistry, ServeHandle, serve_on_tcp};
 use djinn_workspace::{MirrorManager, WorkspaceStore, mirrors_root, workspaces_root};
 
+#[cfg(test)]
+mod admission_epoch_arming_tests;
 mod canonical_graph_refresh_planner;
 mod provider_catalog_refresh;
 mod settings;
@@ -980,9 +982,22 @@ impl AppState {
                         // without a restart: RequiredFailClosed re-closes a
                         // controller that is no longer Enforce, and MayDisable
                         // releases emergency once invocation-primary is
-                        // committed. This runs only on the leader (the loop is
-                        // started inside `become_leader`, after topology is
-                        // confirmed), so it mirrors `finalize` semantics.
+                        // committed. This is what re-acknowledges the emergency
+                        // authority after an operator `epoch advance` bumps the
+                        // epoch and clears both acks, so the rollout progresses
+                        // without a restart.
+                        //
+                        // This loop is started from
+                        // `initialize_build_admission_handoff`, i.e. on EVERY
+                        // pod, not only the leader. That is safe because
+                        // acknowledgement is gated on
+                        // `emergency_acknowledgement_allowed`, which requires
+                        // `readiness().is_healthy()`, and `topology_ready` is set
+                        // only by `confirm_build_admission_topology` inside
+                        // `become_leader`. A standby therefore ticks, observes,
+                        // and publishes telemetry but can never write an
+                        // acknowledgement: the readiness gate — not the spawn
+                        // site — is what keeps a single active admission writer.
                         if let Some(admission) = state.inner.build_admission.clone() {
                             state.finalize_build_admission_handoff(&admission).await;
                         }
@@ -3978,7 +3993,8 @@ mod build_admission_config_tests {
     };
 
     static BUILD_ADMISSION_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    static BUILD_ADMISSION_TELEMETRY_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    pub(super) static BUILD_ADMISSION_TELEMETRY_LOCK: std::sync::Mutex<()> =
+        std::sync::Mutex::new(());
 
     fn state_for_admission_config(config: BuildAdmissionConfig) -> AppState {
         let db = Database::open_in_memory().expect("test database");
@@ -4046,7 +4062,10 @@ mod build_admission_config_tests {
             .expect("the composed lease must authorize a graph-warm Job POST");
     }
 
-    fn state_for_admission_config_with_db(db: Database, config: BuildAdmissionConfig) -> AppState {
+    pub(super) fn state_for_admission_config_with_db(
+        db: Database,
+        config: BuildAdmissionConfig,
+    ) -> AppState {
         let runtime = DatabaseRuntimeManager::new(
             crate::db::runtime::DatabaseRuntimeConfig::postgres(db.bootstrap_info().target.clone()),
         );
@@ -4091,7 +4110,7 @@ mod build_admission_config_tests {
         assert_eq!(state.agent_context().knowledge_injection, resolved);
     }
 
-    fn admission(state: &AppState) -> &Arc<BuildAdmissionController> {
+    pub(super) fn admission(state: &AppState) -> &Arc<BuildAdmissionController> {
         state
             .inner
             .build_admission
@@ -4099,7 +4118,7 @@ mod build_admission_config_tests {
             .expect("handoff controller")
     }
 
-    fn handoff_repository(state: &AppState) -> AdmissionHandoffRepository {
+    pub(super) fn handoff_repository(state: &AppState) -> AdmissionHandoffRepository {
         AdmissionHandoffRepository::new(state.db().clone())
     }
 
