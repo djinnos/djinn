@@ -1,4 +1,5 @@
-//! The coverage whose absence hid goxi's fifth launcher blocker.
+//! The coverage whose absence hid goxi's fifth, eighth and ninth launcher
+//! blockers.
 //!
 //! # What went wrong, and why nothing caught it
 //!
@@ -100,17 +101,30 @@
 //!   fails the build. `RUSTUP_HOME` sits in that table today and is a real, open
 //!   blocker — not a resolved one.
 //!
-//! And it does not stop at the manifest. [`the_rendered_launcher_mount_set_lets_a_real_chdir_and_write_succeed`]
-//! materializes the rendered mount set as a real directory tree, then runs a
-//! real `chdir(2)` and a real `File::create` through it — the same two syscalls
-//! that failed in production. [`removing_the_workspace_mount_reproduces_the_production_enoent`]
-//! and [`removing_the_sandbox_tmpdir_mount_is_reported_as_an_unacknowledged_rootfs_write`]
-//! delete a mount from the rendered spec and require that same harness to
-//! reproduce the production failure **by name**, so the suite cannot pass
-//! vacuously.
+//! # Proving it can fail
+//!
+//! Two layers of control, because the classifier and the filesystem can each be
+//! vacuous on their own.
+//!
+//! * The classifier is driven over deliberately broken specs, by
+//!   [`a_path_the_launcher_cannot_reach_is_reported_as_the_production_enoent`],
+//!   [`removing_the_sandbox_tmpdir_mount_is_reported_as_an_unacknowledged_rootfs_write`],
+//!   [`an_undeclared_divergence_between_the_two_containers_is_reported`] and
+//!   [`an_unacknowledged_image_layer_path_is_reported`] — one per arm — with
+//!   [`the_unmodified_render_is_clean_so_the_controls_are_not_measuring_a_red_baseline`]
+//!   ruling out a red baseline underneath them.
+//! * It does not stop at the manifest.
+//!   [`the_rendered_launcher_mount_set_lets_a_real_chdir_and_write_succeed`]
+//!   materializes the rendered mount set as a real directory tree and runs a real
+//!   `chdir(2)` and a real `File::create` through it — the two syscalls that
+//!   failed in production — and
+//!   [`removing_the_workspace_mount_reproduces_the_production_enoent`] deletes the
+//!   mount and requires the same harness to reproduce `NotFound` **by name**. The
+//!   real tools that fail when blockers 8 and 9 are present (`mktemp`, `git`) are
+//!   driven in the sibling file.
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use k8s_openapi::api::batch::v1::Job;
 use k8s_openapi::api::core::v1::{Container, EnvVar, PodSpec, Volume, VolumeMount};
@@ -955,63 +969,6 @@ fn the_child_writes_through_the_fs_group_because_it_owns_none_of_the_volumes() {
     );
 }
 
-// ───────────────────── real syscalls through the mount set ───────────────────
-
-/// A private scratch directory. Deliberately not `tempfile`: this crate does not
-/// carry it as a dev-dependency, matching `rendered_launcher_delegation.rs`.
-struct Scratch(PathBuf);
-
-impl Scratch {
-    fn new(label: &str) -> Self {
-        let base = std::env::var_os("CARGO_TARGET_TMPDIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(std::env::temp_dir)
-            .join(format!("goxi-{label}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&base);
-        std::fs::create_dir_all(&base).expect("create scratch dir");
-        Self(base)
-    }
-}
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
-/// Materialize `mounts` as a real directory tree under `root`, the way a kubelet
-/// materializes a container's mount namespace: a path exists if and only if some
-/// mount covers it.
-fn materialize(root: &Path, mounts: &[VolumeMount]) {
-    for mount in mounts {
-        let relative = mount.mount_path.trim_start_matches('/');
-        std::fs::create_dir_all(root.join(relative)).expect("materialize mount");
-    }
-}
-
-/// Run the two syscalls the production child ran — `chdir(cwd)` then create a
-/// file under each required path — against a materialized mount set.
-///
-/// Returns the first failure, so a caller can assert on the ERROR KIND rather
-/// than on a boolean. This is what makes the negative case a reproduction
-/// instead of a tautology.
-fn exercise(root: &Path, cwd: &str, writes: &[&str]) -> std::io::Result<()> {
-    // `chdir` is process-global, so resolve rather than mutate: the failure mode
-    // under test is "the directory is not there", which `metadata` reports with
-    // the same `NotFound`/ENOENT the child's `chdir` returned.
-    let target = root.join(cwd.trim_start_matches('/'));
-    let metadata = std::fs::metadata(&target)?;
-    assert!(metadata.is_dir(), "{cwd} must resolve to a directory");
-    for path in writes {
-        let file = root
-            .join(path.trim_start_matches('/'))
-            .join(".goxi-write-probe");
-        std::fs::File::create(&file)?;
-        std::fs::remove_file(&file)?;
-    }
-    Ok(())
-}
-
 /// The brokered `cwd`. Derived from the pod's own `TMPDIR`, which `job.rs`
 /// renders to the workspace root the agent's worktree is created under — not
 /// spelled out here, so a renderer change moves this with it.
@@ -1019,84 +976,4 @@ fn brokered_cwd(pod: &PodSpec) -> String {
     child_visible_declared_paths(pod)
         .remove("TMPDIR")
         .expect("the pod declares TMPDIR, which roots the brokered cwd")
-}
-
-#[test]
-fn the_rendered_launcher_mount_set_lets_a_real_chdir_and_write_succeed() {
-    let job = render(false);
-    let pod = pod_of(&job);
-    let mounts = container(pod, LAUNCHER_CONTAINER_NAME)
-        .volume_mounts
-        .clone()
-        .expect("launcher has volume mounts");
-
-    let scratch = Scratch::new("mounted");
-    materialize(&scratch.0, &mounts);
-
-    let declared = child_visible_declared_paths(pod);
-    let writes: Vec<&str> = declared
-        .iter()
-        .filter(|(key, path)| unreachable_by_design(pod, key, path).is_none())
-        // Only the mount roots exist in a freshly materialized namespace; the
-        // per-project leaves below them are created by the build itself.
-        .filter_map(|(_, path)| covering_mount(&mounts, path).map(|m| m.mount_path.as_str()))
-        .collect();
-    assert!(!writes.is_empty(), "nothing to exercise");
-
-    exercise(&scratch.0, &brokered_cwd(pod), &writes)
-        .expect("the rendered launcher mount set must let a brokered child chdir and write");
-}
-
-/// Non-vacuity: with the workspace mount removed, the SAME harness must
-/// reproduce the production failure, by name.
-#[test]
-fn removing_the_workspace_mount_reproduces_the_production_enoent() {
-    let job = render(false);
-    let pod = pod_of(&job);
-    let cwd = brokered_cwd(pod);
-    let mut mounts = container(pod, LAUNCHER_CONTAINER_NAME)
-        .volume_mounts
-        .clone()
-        .expect("launcher has volume mounts");
-
-    let before = mounts.len();
-    mounts.retain(|mount| !is_under(&cwd, &mount.mount_path));
-    assert_eq!(
-        before - 1,
-        mounts.len(),
-        "exactly the mount covering the brokered cwd must be removed; if this is not 1 the \
-         test is no longer removing what it thinks it is"
-    );
-
-    let scratch = Scratch::new("unmounted");
-    materialize(&scratch.0, &mounts);
-
-    let error = exercise(&scratch.0, &cwd, &[])
-        .expect_err("without the workspace mount the brokered cwd must not resolve");
-    assert_eq!(
-        error.kind(),
-        std::io::ErrorKind::NotFound,
-        "the production failure is ENOENT from the post-fork chdir in spawn.rs, which _exits \
-         the child before execve; got {error:?}"
-    );
-
-    // And the manifest-level guard must reject the same spec, so the two halves
-    // agree about what is broken.
-    let mut broken = pod.clone();
-    for container in broken
-        .init_containers
-        .iter_mut()
-        .flatten()
-        .filter(|container| container.name == LAUNCHER_CONTAINER_NAME)
-    {
-        if let Some(mounts) = container.volume_mounts.as_mut() {
-            mounts.retain(|mount| !is_under(&cwd, &mount.mount_path));
-        }
-    }
-    let launcher = container(&broken, LAUNCHER_CONTAINER_NAME);
-    let remaining = launcher.volume_mounts.as_deref().unwrap_or_default();
-    assert!(
-        covering_mount(remaining, &cwd).is_none(),
-        "the stripped spec must be the one the derived invariant rejects"
-    );
 }
