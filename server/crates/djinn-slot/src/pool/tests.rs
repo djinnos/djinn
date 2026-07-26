@@ -417,7 +417,6 @@ async fn snapshot_reports_free_busy_and_draining_slots() {
             task_id: "task-busy".to_owned(),
             started_at: "12345".to_owned(),
             agent_type: "worker".to_owned(),
-            execution_context: None,
         },
     );
     pool.test_set_slot_state(2, SlotState::Draining);

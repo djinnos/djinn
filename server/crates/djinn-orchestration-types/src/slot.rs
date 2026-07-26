@@ -21,7 +21,6 @@ pub enum SlotState {
         task_id: String,
         started_at: String,
         agent_type: String,
-        execution_context: None,
     },
     Draining,
 }

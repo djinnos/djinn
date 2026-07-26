@@ -18,7 +18,6 @@ use djinn_core::models::Task;
 /// merged skills to the prompt.  Returns the final system prompt string.
 fn render_prompt_with_skills(
     agent_type: AgentType,
-    execution_context: None,
     role_name: &str,
     project_skills: Vec<crate::skills::ResolvedSkill>,
     authoring_trigger: Option<crate::actors::slot::lifecycle::task_classifier::NativeSkillTrigger>,

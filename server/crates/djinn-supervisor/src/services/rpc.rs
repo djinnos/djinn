@@ -677,7 +677,6 @@ impl SupervisorServices for RpcServices {
         session_id: String,
         task_id: String,
         agent_type: String,
-        execution_context: None,
         message: serde_json::Value,
     ) -> Result<(), String> {
         // Opaque JSON encode for bincode safety — `serde_json::Value`'s

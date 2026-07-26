@@ -395,7 +395,6 @@ pub enum ServiceRpcRequest {
         session_id: String,
         task_id: String,
         agent_type: String,
-        execution_context: None,
         message: String,
     },
     /// [`crate::SupervisorServices::get_environment_config`].  Phase 6d —
@@ -1314,7 +1313,6 @@ mod tests {
                 session_id: "s1".into(),
                 task_id: "t1".into(),
                 agent_type: "worker".into(),
-                execution_context: None,
                 message: msg_str.clone(),
             }),
         };

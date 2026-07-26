@@ -203,7 +203,6 @@ pub trait SupervisorServices: Send + Sync + 'static {
         session_id: String,
         task_id: String,
         agent_type: String,
-        execution_context: None,
         message: serde_json::Value,
     ) -> Result<(), String>;
 

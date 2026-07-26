@@ -441,7 +441,6 @@ impl AgentRepository {
         &self,
         project_id: &str,
         agent_type: &str,
-        execution_context: None,
         window_days: i64,
     ) -> Result<AgentMetrics> {
         self.db.ensure_initialized().await?;

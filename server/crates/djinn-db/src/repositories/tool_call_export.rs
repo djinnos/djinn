@@ -326,7 +326,6 @@ mod tests {
         id: &str,
         model_id: &str,
         agent_type: &str,
-        execution_context: None,
         task_id: Option<&str>,
         started_at: &str,
     ) -> SessionRecord {

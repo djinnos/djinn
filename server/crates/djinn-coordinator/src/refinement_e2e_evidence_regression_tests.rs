@@ -164,7 +164,6 @@ async fn count_refinement_tasks(
     task_repo: &TaskRepository,
     project_id: &str,
     agent_type: &str,
-    execution_context: None,
 ) -> usize {
     task_repo
         .list_by_project(project_id)

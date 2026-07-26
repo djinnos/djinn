@@ -40,7 +40,6 @@ async fn seed_full_fixture(db: &Database) -> (String, String, String, String) {
             project_id: &project_id,
             model_id: "test-model",
             agent_type: "worker",
-            execution_context: None,
             started_at: "2025-06-01T00:00:00.000Z",
             tokens_in: 0,
             tokens_out: 0,

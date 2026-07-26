@@ -468,7 +468,6 @@ async fn phantom_09no_96fy_evidence_is_scoped_to_the_exact_run_and_reaped_with_c
             project_id: &project_id,
             model_id: "test",
             agent_type: "worker",
-            execution_context: None,
             started_at: OLD,
             tokens_in: 0,
             tokens_out: 0,
