@@ -214,9 +214,16 @@ async fn recovery_rehydrates_closed_task_materialized_intent_without_reap() {
     assert_eq!(snapshot.snapshot.run.state, RefinementRunState::Active);
     assert_eq!(snapshot.snapshot.run.terminal_reason, None);
     assert_eq!(
-        snapshot.snapshot.intents[0].state,
-        RefinementIntentState::Materialized
+        snapshot
+            .snapshot
+            .intents
+            .iter()
+            .find(|intent| intent.intent_id == intent_id)
+            .expect("correlated materialized intent remains in exact snapshot")
+            .state,
+        RefinementIntentState::Materialized,
     );
+    let intents_before_replay = snapshot.snapshot.intents;
     assert_eq!(
         TaskRepository::new(db.clone(), EventBus::noop())
             .get(&task_id)
@@ -254,6 +261,21 @@ async fn recovery_rehydrates_closed_task_materialized_intent_without_reap() {
     )
     .await;
     assert_eq!(durable_after_replay, durable_before_replay);
+    let snapshot_after_replay = exact_snapshot(&repo, &run_id).await;
+    assert_eq!(
+        snapshot_after_replay.snapshot.intents, intents_before_replay,
+        "recovery replay must preserve the entire exact-run intent set"
+    );
+    assert_eq!(
+        snapshot_after_replay
+            .snapshot
+            .intents
+            .iter()
+            .find(|intent| intent.intent_id == intent_id)
+            .expect("correlated materialized intent remains after replay")
+            .state,
+        RefinementIntentState::Materialized,
+    );
     assert_eq!(
         actor.active_refinements[&run_id].phase,
         RefinementPhase::AdversaryAttack
