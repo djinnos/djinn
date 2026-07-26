@@ -42,6 +42,21 @@ pub struct CanonicalHermeticityV1 {
     pub network_access: bool,
 }
 
+/// Resolved guarantee carried by a pass of this plan. This is identity material
+/// precisely so a warm recorded pass and an isolated attested pass can never
+/// satisfy each other's reuse lookup: the tier changes the digest.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CanonicalEvidenceTierV1 {
+    /// Isolated by the strict launcher; the identity digest describes the whole
+    /// execution environment.
+    #[default]
+    Attested,
+    /// Ordinary warm, incremental execution in the task-run Pod. Pre-existing
+    /// build outputs are visible and are not described by the digest.
+    Recorded,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CanonicalFinalVerificationPlanV1 {
@@ -54,6 +69,11 @@ pub struct CanonicalFinalVerificationPlanV1 {
     pub required_checks: Vec<String>,
     /// Resolved isolation and reuse guarantees for this plan.
     pub hermeticity: CanonicalHermeticityV1,
+    /// What a pass of this plan is worth. Defaulted so persisted V1/V2 rows
+    /// that predate the tier deserialize as `attested`, which is the guarantee
+    /// they were actually produced under.
+    #[serde(default)]
+    pub evidence_tier: CanonicalEvidenceTierV1,
 }
 
 /// One configured selection rule after configuration parsing has completed.
@@ -101,8 +121,15 @@ pub struct VerificationInputManifestV1 {
     pub version: u32,
     /// Set-like declarations of paths included by the resolved input producer.
     pub repo_paths: Vec<String>,
-    /// Set-like declaration of environment names permitted as inputs.
+    /// Set-like declaration of environment names permitted as inputs whose
+    /// resolved values are hashed into this identity.
     pub environment_names: Vec<String>,
+    /// Set-like declaration of environment names permitted as inputs whose
+    /// resolved values are deliberately NOT hashed. Only the names participate
+    /// in identity; the values are attempt-scoped, like catalog service
+    /// exports. Defaulted so persisted rows predating the field still parse.
+    #[serde(default)]
+    pub volatile_environment_names: Vec<String>,
     pub read_only_external_inputs: Vec<DeclaredExternalInputV1>,
     /// Set-like; output-only paths must not ambiguously overlap inputs.
     pub output_only_globs: Vec<String>,
@@ -206,8 +233,14 @@ pub enum EnvironmentIdentityError {
     MalformedDigest { kind: &'static str, value: String },
     #[error("ambiguous declaration: {detail}")]
     AmbiguousDeclaration { detail: String },
-    #[error("reusable final verification must be hermetic and deny network access")]
+    #[error("reusable attested final verification must be hermetic and deny network access")]
     InvalidReusableHermeticity,
+    #[error("recorded final verification must declare hermetic=false and network_access=true")]
+    InvalidRecordedHermeticity,
+    #[error("volatile environment names require the recorded evidence tier")]
+    VolatileEnvironmentNotRecorded,
+    #[error("environment name {name} is both identity-bearing and volatile")]
+    AmbiguousEnvironmentName { name: String },
     #[error("selected command group {group} is not referenced by a selection rule")]
     UnknownSelectedCommandGroup { group: String },
 }
@@ -285,10 +318,24 @@ impl ResolvedEnvironmentIdentityInputV1 {
             self.input_manifest.version,
             VERIFICATION_INPUT_MANIFEST_VERSION_V1,
         )?;
-        if self.plan.hermeticity.reusable
-            && (!self.plan.hermeticity.hermetic || self.plan.hermeticity.network_access)
-        {
-            return Err(EnvironmentIdentityError::InvalidReusableHermeticity);
+        match self.plan.evidence_tier {
+            CanonicalEvidenceTierV1::Attested => {
+                if self.plan.hermeticity.reusable
+                    && (!self.plan.hermeticity.hermetic || self.plan.hermeticity.network_access)
+                {
+                    return Err(EnvironmentIdentityError::InvalidReusableHermeticity);
+                }
+                // Attestation means every input is described by this digest.
+                // An unhashed environment value is by construction not.
+                if !self.input_manifest.volatile_environment_names.is_empty() {
+                    return Err(EnvironmentIdentityError::VolatileEnvironmentNotRecorded);
+                }
+            }
+            CanonicalEvidenceTierV1::Recorded => {
+                if self.plan.hermeticity.hermetic || !self.plan.hermeticity.network_access {
+                    return Err(EnvironmentIdentityError::InvalidRecordedHermeticity);
+                }
+            }
         }
         nonempty("profile_id", &self.plan.profile_id)?;
         if self.plan.profile_revision == 0 {
@@ -336,6 +383,20 @@ impl ResolvedEnvironmentIdentityInputV1 {
             &mut self.input_manifest.environment_names,
             "manifest environment name",
         )?;
+        normalize_strings(
+            &mut self.input_manifest.volatile_environment_names,
+            "manifest volatile environment name",
+        )?;
+        // A name in both buckets would mean "hashed" and "not hashed" at once;
+        // resolution would have to pick one silently.
+        let identity_bearing: BTreeSet<_> = self.input_manifest.environment_names.iter().collect();
+        for name in &self.input_manifest.volatile_environment_names {
+            if identity_bearing.contains(name) {
+                return Err(EnvironmentIdentityError::AmbiguousEnvironmentName {
+                    name: name.clone(),
+                });
+            }
+        }
         normalize_strings(
             &mut self.input_manifest.output_only_globs,
             "output-only glob",
@@ -602,6 +663,7 @@ mod tests {
                     reusable: true,
                     network_access: false,
                 },
+                evidence_tier: Default::default(),
             },
             selection: ResolvedVerificationSelectionV1::legacy_flat_plan(),
             input_manifest: VerificationInputManifestV1 {
@@ -613,6 +675,7 @@ mod tests {
                     locator: "https://registry.example".into(),
                 }],
                 output_only_globs: vec!["target/**".into()],
+                volatile_environment_names: Vec::new(),
             },
             image: ImmutableImageV1 {
                 reference: "rust:1.85".into(),
@@ -978,6 +1041,89 @@ mod tests {
 
     fn alternate_digest(hex: char) -> String {
         format!("sha256:{}", hex.to_string().repeat(64))
+    }
+
+    /// A recorded pass and an attested pass promise different things, so they
+    /// must never satisfy each other's reuse lookup. Making the tier identity
+    /// material is what enforces that in the type system rather than by
+    /// convention — the digest itself separates the two cache spaces.
+    #[test]
+    fn evidence_tier_separates_recorded_and_attested_cache_entries() {
+        let attested = EnvironmentIdentityV1::derive(input()).expect("attested identity");
+
+        let mut recorded_input = input();
+        recorded_input.plan.evidence_tier = CanonicalEvidenceTierV1::Recorded;
+        recorded_input.plan.hermeticity.hermetic = false;
+        recorded_input.plan.hermeticity.network_access = true;
+        let recorded = EnvironmentIdentityV1::derive(recorded_input).expect("recorded identity");
+
+        assert_ne!(
+            attested.digest, recorded.digest,
+            "a recorded pass must not be reusable as an attested one"
+        );
+    }
+
+    /// The reason the volatile bucket exists: production renders
+    /// `CARGO_TARGET_DIR=/cache/cargo-target-runs/<task_run_id>`, a fresh path
+    /// per run. If its value reached the digest, a worker run and the reviewer
+    /// run of the same task could never share a pass and reuse would silently
+    /// never hit. Only the declared NAME is identity material.
+    #[test]
+    fn volatile_environment_names_are_identity_material_but_their_values_are_not() {
+        let recorded = || {
+            let mut input = input();
+            input.plan.evidence_tier = CanonicalEvidenceTierV1::Recorded;
+            input.plan.hermeticity.hermetic = false;
+            input.plan.hermeticity.network_access = true;
+            input
+        };
+        let baseline = EnvironmentIdentityV1::derive(recorded()).expect("baseline");
+
+        let mut declared = recorded();
+        declared
+            .input_manifest
+            .volatile_environment_names
+            .push("CARGO_TARGET_DIR".into());
+        let with_name = EnvironmentIdentityV1::derive(declared).expect("declared name");
+        assert_ne!(
+            baseline.digest, with_name.digest,
+            "declaring a volatile name changes what the plan may read, so it is identity material"
+        );
+
+        // No path exists for a volatile VALUE to enter this input at all — it
+        // rides on the execution request instead. Asserting the shape here
+        // keeps a future refactor from quietly adding one.
+        assert!(
+            !with_name.canonical_json.contains("cargo-target-runs"),
+            "a volatile value must never reach the canonical identity JSON"
+        );
+    }
+
+    /// Attestation means every input is described by the digest, and an
+    /// unhashed environment value is by construction not one.
+    #[test]
+    fn attested_plans_reject_volatile_environment_names() {
+        let mut bad = input();
+        bad.input_manifest
+            .volatile_environment_names
+            .push("CARGO_TARGET_DIR".into());
+        assert_eq!(
+            EnvironmentIdentityV1::derive(bad),
+            Err(EnvironmentIdentityError::VolatileEnvironmentNotRecorded)
+        );
+    }
+
+    /// Each tier has exactly one legal isolation shape at the identity boundary
+    /// too, so a resolver cannot route a plan to a launcher it did not declare.
+    #[test]
+    fn recorded_plans_must_declare_their_lack_of_isolation() {
+        let mut bad = input();
+        bad.plan.evidence_tier = CanonicalEvidenceTierV1::Recorded;
+        // Still claiming hermeticity while asking for the warm launcher.
+        assert_eq!(
+            EnvironmentIdentityV1::derive(bad),
+            Err(EnvironmentIdentityError::InvalidRecordedHermeticity)
+        );
     }
 
     #[test]

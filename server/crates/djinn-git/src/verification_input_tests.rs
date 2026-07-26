@@ -309,6 +309,51 @@ async fn configured_output_only_files_are_removed_and_excluded_from_digest() {
     );
     assert_eq!(first.fingerprint, second.fingerprint);
 }
+/// `ExcludeOnly` must do the exclusion half and NOT the purge half.
+///
+/// The recorded evidence tier depends on this exactly: the directory it excludes
+/// from the fingerprint is the warm build cache it exists to reuse, so purging
+/// would turn every recorded run into a cold build — the failure the tier was
+/// introduced to remove. Note the purge runs on every fingerprint computation,
+/// including the C0/C1/C2 reuse checkpoints, so this is not only about the
+/// moment before execution.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn exclude_only_policy_excludes_output_without_deleting_it() {
+    let fixture = init_repo_with_main_commit();
+    let mut config = VerificationInputFingerprintConfig::default();
+    config.manifest.output_only_globs.push("out/**".to_string());
+    config.output_policy = crate::verification_input::OutputOnlyPolicy::ExcludeOnly;
+    write_str(fixture.path(), "out/result.txt", "warm artifact\n");
+
+    let first = digest(configured_fingerprint(fixture.path(), &config).await);
+    assert!(
+        fixture.path().join("out/result.txt").exists(),
+        "ExcludeOnly must never delete the warm output it excludes"
+    );
+
+    write_str(fixture.path(), "out/result.txt", "recompiled artifact\n");
+    let second = digest(configured_fingerprint(fixture.path(), &config).await);
+    assert_eq!(
+        first.fingerprint, second.fingerprint,
+        "excluded output must not participate in the fingerprint"
+    );
+    assert_eq!(
+        std::fs::read_to_string(fixture.path().join("out/result.txt")).unwrap(),
+        "recompiled artifact\n",
+        "the excluded output must survive verbatim"
+    );
+
+    // The same globs under the default policy still purge, so the two policies
+    // are genuinely distinct rather than one silently winning.
+    config.output_policy = crate::verification_input::OutputOnlyPolicy::PurgeBeforeFingerprint;
+    let purged = digest(configured_fingerprint(fixture.path(), &config).await);
+    assert!(!fixture.path().join("out/result.txt").exists());
+    assert_eq!(
+        purged.fingerprint, first.fingerprint,
+        "both policies must agree on the digest; they differ only on disk"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn configured_overlapping_output_only_globs_fail_before_cleanup() {
     let fixture = init_repo_with_main_commit();

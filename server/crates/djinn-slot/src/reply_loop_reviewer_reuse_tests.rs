@@ -63,6 +63,7 @@ fn reviewer_reuse_material(worktree: std::path::PathBuf) -> FinalVerificationRes
         environment_names: vec![],
         read_only_external_inputs: vec![],
         output_only_globs: vec![],
+        volatile_environment_names: Vec::new(),
     };
     let commands = required_checks
         .iter()
@@ -90,6 +91,7 @@ fn reviewer_reuse_material(worktree: std::path::PathBuf) -> FinalVerificationRes
                 reusable: true,
                 network_access: false,
             },
+            evidence_tier: Default::default(),
         },
         selection: djinn_core::canonical_verify::ResolvedVerificationSelectionV1::legacy_flat_plan(
         ),
@@ -126,16 +128,20 @@ fn reviewer_reuse_material(worktree: std::path::PathBuf) -> FinalVerificationRes
                 base_ref: "main".into(),
                 manifest,
                 external_inputs: vec![],
+                output_policy: Default::default(),
             },
             tool_runtime: vec![],
             read_only_external_mounts: vec![],
             output_directories: vec![],
             catalog_loopback_endpoints: vec![],
             service_provisioners: vec![],
+            volatile_environment: Default::default(),
         },
         verify_source: VerifySource::Worker,
         required_checks,
         diff_fingerprint: "reviewer-reuse-audit-diff".into(),
+        reusable: true,
+        evidence_tier: "attested",
     }
 }
 

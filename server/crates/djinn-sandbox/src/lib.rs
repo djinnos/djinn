@@ -23,6 +23,8 @@ pub mod linux;
 #[cfg(target_os = "macos")]
 pub mod macos;
 #[cfg(target_os = "linux")]
+pub mod recorded_verification;
+#[cfg(target_os = "linux")]
 pub mod service_provisioning;
 
 #[cfg(target_os = "linux")]

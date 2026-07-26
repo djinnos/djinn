@@ -148,6 +148,13 @@ export interface FinalVerificationPlan {
   read_only_external_inputs?: Array<Record<string, string>>;
   output_only_globs?: string[];
   hermeticity?: Record<string, boolean>;
+  /**
+   * `"attested"` (isolated, the default) or `"recorded"` (an ordinary warm,
+   * incremental build). Mirrors
+   * `djinn_stack::environment::VerificationEvidenceTier`; it states what a
+   * persisted pass of this plan is actually worth.
+   */
+  evidence_tier?: "attested" | "recorded";
 }
 
 export interface LifecycleHooks {

@@ -10,8 +10,8 @@ use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 
 use djinn_core::canonical_verify::{
-    CanonicalCommandDescriptorV1, EnvironmentIdentityError, EnvironmentIdentityV1,
-    ResolvedEnvironmentIdentityInputV1,
+    CanonicalCommandDescriptorV1, CanonicalEvidenceTierV1, EnvironmentIdentityError,
+    EnvironmentIdentityV1, ResolvedEnvironmentIdentityInputV1,
 };
 use djinn_core::clock::{Clock, SystemClock};
 use djinn_git::{
@@ -23,6 +23,7 @@ use crate::final_verification::{
     FinalVerificationError, FinalVerificationLoopbackEndpoint, FinalVerificationNetworkSession,
     FinalVerificationRequest, launch_final_verification_in_network_session_with_timeout,
 };
+use crate::recorded_verification::launch_recorded_verification_with_timeout;
 use crate::service_provisioning::{
     ServiceProvisioners, ServiceProvisioningCode, ServiceProvisioningPhase, create_ready_leases,
     delete_leases,
@@ -45,7 +46,16 @@ pub struct FinalVerificationExecutionRequest {
     pub tool_runtime: Vec<PathBuf>,
     pub read_only_external_mounts: Vec<PathBuf>,
     /// Concrete output-only directories resolved from the manifest globs.
+    /// Must be empty for the recorded tier, which grants no sandbox writes
+    /// because it applies no sandbox.
     pub output_directories: Vec<PathBuf>,
+    /// Values for `input_manifest.volatile_environment_names`, resolved from
+    /// the host. Deliberately carried here and NOT on the identity input:
+    /// everything in `ResolvedEnvironmentIdentityInputV1` is serialized into
+    /// the canonical JSON and hashed, and hashing a per-task-run value
+    /// (`CARGO_TARGET_DIR`) would make a worker run and the reviewer run of the
+    /// same task permanently incompatible for reuse.
+    pub volatile_environment: BTreeMap<String, String>,
     /// Strict-catalog ports that the attempt-owned session may expose. This is
     /// resolved before execution and never derived from command input.
     pub catalog_loopback_endpoints: Vec<FinalVerificationLoopbackEndpoint>,
@@ -83,6 +93,9 @@ pub struct FinalVerificationCommandEvidence {
 /// Stable reasons that make a run unsuitable for durable reusable evidence.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FinalVerificationIneligibilityReason {
+    /// The plan's declared tier and its hermeticity declaration disagree.
+    /// Configuration validation and identity derivation both reject this, so
+    /// reaching it means a resolver bypassed them; fail closed.
     NonHermeticPlan,
     ManifestBindingMismatch {
         detail: String,
@@ -161,29 +174,31 @@ pub async fn execute_final_verification(
         Ok(leases) => leases,
         Err(error) => return service_error_evidence(error.phase, error.code),
     };
-    // Proxy setup occurs after leases so it shares the same reverse teardown.
-    let session =
-        match FinalVerificationNetworkSession::create(request.catalog_loopback_endpoints.clone()) {
-            Ok(session) => session,
-            Err(_) => match delete_leases(&leases).await {
-                Ok(()) => {
-                    return service_error_evidence(
-                        ServiceProvisioningPhase::Proxy,
-                        ServiceProvisioningCode::Unavailable,
-                    );
-                }
-                Err(error) => return service_error_evidence(error.phase, error.code),
-            },
-        };
     let service_environment = leases
         .iter()
         .flat_map(|(_, lease)| lease.environment.clone())
         .collect();
+    let endpoints = request.catalog_loopback_endpoints.clone();
+    // The launcher is chosen from the plan's tier, which is only known after
+    // the identity resolver runs. Selecting lazily keeps the resolver call
+    // pattern at exactly two calls (pre and post), which the recompute
+    // discipline and the host-side resolver probe both depend on — and it
+    // means a recorded run never builds the namespace session it would not
+    // use, so a host without usable namespaces cannot block the warm tier.
+    // Proxy setup still happens after leases, sharing the same teardown.
     let mut evidence = execute_final_verification_with_launcher_and_services(
         request,
         service_environment,
-        |request, timeout| {
-            launch_final_verification_in_network_session_with_timeout(request, &session, timeout)
+        |tier| match tier {
+            CanonicalEvidenceTierV1::Attested => FinalVerificationNetworkSession::create(endpoints)
+                .map(AttemptLauncher::Attested)
+                .map_err(
+                    |_| FinalVerificationIneligibilityReason::ServiceProvisioning {
+                        phase: ServiceProvisioningPhase::Proxy,
+                        code: ServiceProvisioningCode::Unavailable,
+                    },
+                ),
+            CanonicalEvidenceTierV1::Recorded => Ok(AttemptLauncher::Recorded),
         },
     )
     .await;
@@ -197,6 +212,40 @@ pub async fn execute_final_verification(
     evidence
 }
 
+/// One attempt's launcher. Implemented by the production tier launchers and by
+/// the in-module test shim, so the command loop is identical for all of them.
+trait LaunchAttempt {
+    fn launch(
+        &self,
+        request: FinalVerificationRequest,
+        timeout: Duration,
+    ) -> Result<crate::final_verification::FinalVerificationResult, FinalVerificationError>;
+}
+
+/// The per-attempt launcher, selected by the plan's evidence tier.
+///
+/// The attested variant owns the attempt's namespace session for the whole
+/// run; the recorded variant owns nothing, because it isolates nothing.
+enum AttemptLauncher {
+    Attested(FinalVerificationNetworkSession),
+    Recorded,
+}
+
+impl LaunchAttempt for AttemptLauncher {
+    fn launch(
+        &self,
+        request: FinalVerificationRequest,
+        timeout: Duration,
+    ) -> Result<crate::final_verification::FinalVerificationResult, FinalVerificationError> {
+        match self {
+            Self::Attested(session) => {
+                launch_final_verification_in_network_session_with_timeout(request, session, timeout)
+            }
+            Self::Recorded => launch_recorded_verification_with_timeout(request, timeout),
+        }
+    }
+}
+
 #[cfg(test)]
 async fn execute_final_verification_with_launcher(
     request: FinalVerificationExecutionRequest,
@@ -208,19 +257,43 @@ async fn execute_final_verification_with_launcher(
         FinalVerificationError,
     >,
 ) -> FinalVerificationExecutionEvidence {
-    execute_final_verification_with_launcher_and_services(request, BTreeMap::new(), launch).await
+    execute_final_verification_with_launcher_and_services(request, BTreeMap::new(), |_| {
+        Ok(TestLauncher(launch))
+    })
+    .await
 }
 
-async fn execute_final_verification_with_launcher_and_services(
-    request: FinalVerificationExecutionRequest,
-    service_environment: BTreeMap<String, String>,
-    launch: impl Fn(
+/// Test shim so in-module tests can inject a launcher without constructing a
+/// namespace session or spawning real processes.
+#[cfg(test)]
+struct TestLauncher<F>(F);
+
+#[cfg(test)]
+impl<F> LaunchAttempt for TestLauncher<F>
+where
+    F: Fn(
         FinalVerificationRequest,
         Duration,
-    ) -> Result<
-        crate::final_verification::FinalVerificationResult,
-        FinalVerificationError,
-    >,
+    )
+        -> Result<crate::final_verification::FinalVerificationResult, FinalVerificationError>,
+{
+    fn launch(
+        &self,
+        request: FinalVerificationRequest,
+        timeout: Duration,
+    ) -> Result<crate::final_verification::FinalVerificationResult, FinalVerificationError> {
+        (self.0)(request, timeout)
+    }
+}
+
+/// `select_launcher` is invoked exactly once, immediately after the plan's tier
+/// is known and before the first command runs.
+async fn execute_final_verification_with_launcher_and_services<L: LaunchAttempt>(
+    request: FinalVerificationExecutionRequest,
+    service_environment: BTreeMap<String, String>,
+    select_launcher: impl FnOnce(
+        CanonicalEvidenceTierV1,
+    ) -> Result<L, FinalVerificationIneligibilityReason>,
 ) -> FinalVerificationExecutionEvidence {
     let initial_input = match (request.resolve_environment_identity)() {
         Ok(input) => input,
@@ -248,12 +321,30 @@ async fn execute_final_verification_with_launcher_and_services(
     };
 
     let plan = initial_input.plan.clone();
-    if !plan.hermeticity.hermetic || !plan.hermeticity.reusable || plan.hermeticity.network_access {
+    // Each tier has exactly one legal isolation shape. Configuration validation
+    // and `ResolvedEnvironmentIdentityInputV1::canonicalized` both enforce this
+    // already; re-checking here means no resolver can route a plan to a
+    // launcher that does not match what the plan claims.
+    let tier_is_coherent = match plan.evidence_tier {
+        CanonicalEvidenceTierV1::Attested => {
+            plan.hermeticity.hermetic
+                && plan.hermeticity.reusable
+                && !plan.hermeticity.network_access
+        }
+        CanonicalEvidenceTierV1::Recorded => {
+            !plan.hermeticity.hermetic && plan.hermeticity.network_access
+        }
+    };
+    if !tier_is_coherent {
         return ineligible(
             evidence,
             FinalVerificationIneligibilityReason::NonHermeticPlan,
         );
     }
+    let launcher = match select_launcher(plan.evidence_tier) {
+        Ok(launcher) => launcher,
+        Err(reason) => return ineligible(evidence, reason),
+    };
     let pre_identity = match EnvironmentIdentityV1::derive(initial_input.clone()) {
         Ok(identity) => identity,
         Err(error) => return ineligible(evidence, identity_reason(error)),
@@ -275,6 +366,7 @@ async fn execute_final_verification_with_launcher_and_services(
         .input_manifest
         .environment_names
         .iter()
+        .chain(&initial_input.input_manifest.volatile_environment_names)
         .cloned()
         .collect();
     for (position, descriptor) in plan.commands.iter().cloned().enumerate() {
@@ -282,20 +374,24 @@ async fn execute_final_verification_with_launcher_and_services(
             &descriptor,
             &declared_environment,
             &initial_input.allowlisted_environment,
+            &request.volatile_environment,
             &service_environment,
         ) {
             Ok(environment) => environment,
             Err(reason) => return ineligible(evidence, reason),
         };
         let started_at_unix_millis = now_millis();
-        // Outputs are created exactly once. Subsequent descriptors retain the
-        // strict read-only worktree and cannot obtain a broader host grant.
+        // Attested: outputs are created exactly once, so subsequent descriptors
+        // retain the strict read-only worktree and cannot obtain a broader host
+        // grant. This is why an attested multi-command plan where every step
+        // compiles is impossible — a known limitation retained deliberately.
+        // Recorded resolves to an empty list and applies no grant at all.
         let command_outputs = if position == 0 {
             output_directories.clone()
         } else {
             Vec::new()
         };
-        let launched = launch(
+        let launched = launcher.launch(
             FinalVerificationRequest {
                 argv: std::iter::once(descriptor.executable.clone())
                     .chain(descriptor.argv.iter().cloned())
@@ -439,6 +535,38 @@ fn bind_manifest(
             "launcher external mounts differ from fingerprint resolved mounts",
         ));
     }
+    // Volatile values never reach the identity digest, so the manifest's
+    // declared NAME SET is the only thing binding them. Check it exactly, in
+    // both directions: an extra resolved name is an undeclared input, and a
+    // missing one is a command that would fail closed later for the wrong
+    // reason.
+    let declared_volatile: BTreeSet<_> = input
+        .input_manifest
+        .volatile_environment_names
+        .iter()
+        .map(String::as_str)
+        .collect();
+    let resolved_volatile: BTreeSet<_> = request
+        .volatile_environment
+        .keys()
+        .map(String::as_str)
+        .collect();
+    if declared_volatile != resolved_volatile {
+        return Err(manifest_binding(
+            "resolved volatile environment differs from manifest declarations",
+        ));
+    }
+    // A recorded run applies no sandbox, so it can hold no sandbox write grant.
+    // Deriving output directories would also reject globs that are perfectly
+    // valid as pure exclusions (anything without a literal directory prefix).
+    if input.plan.evidence_tier == CanonicalEvidenceTierV1::Recorded {
+        if !request.output_directories.is_empty() {
+            return Err(manifest_binding(
+                "recorded plans grant no output directories",
+            ));
+        }
+        return Ok((external_mounts, Vec::new()));
+    }
     let output_directories = output_directories(&input.input_manifest.output_only_globs)?;
     if request.output_directories != output_directories {
         return Err(manifest_binding(
@@ -489,29 +617,41 @@ fn manifest_binding(detail: impl Into<String>) -> FinalVerificationIneligibility
     }
 }
 
+/// Resolve one descriptor's environment from the three declared sources.
+///
+/// `manifest_names` is the union of both manifest buckets: every name a command
+/// references must be declared somewhere, in either tier. The value then comes
+/// from, in order, the attempt's catalog service exports, the identity-bearing
+/// allowlist, or the volatile bucket. Only the middle one is hashed into the
+/// identity digest; the other two are attempt-scoped by design.
 fn command_environment(
     descriptor: &CanonicalCommandDescriptorV1,
     manifest_names: &BTreeSet<String>,
     allowlisted: &BTreeMap<String, String>,
+    volatile: &BTreeMap<String, String>,
     service_environment: &BTreeMap<String, String>,
 ) -> Result<BTreeMap<String, String>, FinalVerificationIneligibilityReason> {
     descriptor
         .environment_names
         .iter()
         .map(|name| {
-            if let Some(value) = service_environment.get(name)
-                && manifest_names.contains(name)
-            {
-                return Ok((name.clone(), value.clone()));
-            }
-            if !manifest_names.contains(name) || !allowlisted.contains_key(name) {
+            if !manifest_names.contains(name) {
                 return Err(
                     FinalVerificationIneligibilityReason::UndeclaredCommandEnvironment {
                         name: name.clone(),
                     },
                 );
             }
-            Ok((name.clone(), allowlisted[name].clone()))
+            for source in [service_environment, allowlisted, volatile] {
+                if let Some(value) = source.get(name) {
+                    return Ok((name.clone(), value.clone()));
+                }
+            }
+            Err(
+                FinalVerificationIneligibilityReason::UndeclaredCommandEnvironment {
+                    name: name.clone(),
+                },
+            )
         })
         .collect()
 }
@@ -631,6 +771,7 @@ mod tests {
                     reusable: true,
                     network_access: false,
                 },
+                evidence_tier: CanonicalEvidenceTierV1::Attested,
             },
             selection:
                 djinn_core::canonical_verify::ResolvedVerificationSelectionV1::legacy_flat_plan(),
@@ -638,6 +779,7 @@ mod tests {
                 version: 1,
                 repo_paths: Vec::new(),
                 environment_names: Vec::new(),
+                volatile_environment_names: Vec::new(),
                 read_only_external_inputs: Vec::new(),
                 output_only_globs,
             },
@@ -696,10 +838,12 @@ mod tests {
                 base_ref: "main".into(),
                 manifest: input.input_manifest,
                 external_inputs: Vec::new(),
+                output_policy: djinn_git::OutputOnlyPolicy::default(),
             },
             tool_runtime: Vec::new(),
             read_only_external_mounts: Vec::new(),
             output_directories,
+            volatile_environment: BTreeMap::new(),
             catalog_loopback_endpoints: Vec::new(),
             service_provisioners: Vec::new(),
         }
@@ -769,7 +913,7 @@ mod tests {
         let evidence = execute_final_verification_with_launcher_and_services(
             request,
             service_environment,
-            launch,
+            |_| Ok(TestLauncher(launch)),
         )
         .await;
         delete_leases(&leases)

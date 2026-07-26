@@ -1,3 +1,5 @@
+pub use crate::verification_input_outputs::OutputOnlyPolicy;
+use crate::verification_input_outputs::cleanup_output_only;
 use crate::{CommandOutput, GitError, run_git_command_allow_failure, run_git_command_binary_in};
 use djinn_core::canonical_verify::{
     VERIFICATION_INPUT_MANIFEST_VERSION_V1, VerificationInputManifestV1,
@@ -23,6 +25,9 @@ pub struct VerificationInputFingerprintConfig {
     pub base_ref: String,
     pub manifest: VerificationInputManifestV1,
     pub external_inputs: Vec<ResolvedExternalInputV1>,
+    /// Whether `output_only_globs` also purge what they exclude. See
+    /// [`OutputOnlyPolicy`].
+    pub output_policy: OutputOnlyPolicy,
 }
 #[cfg(unix)]
 fn path_bytes(path: &Path) -> Vec<u8> {
@@ -43,6 +48,7 @@ fn empty_manifest() -> VerificationInputManifestV1 {
         version: VERIFICATION_INPUT_MANIFEST_VERSION_V1,
         repo_paths: Vec::new(),
         environment_names: Vec::new(),
+        volatile_environment_names: Vec::new(),
         read_only_external_inputs: Vec::new(),
         output_only_globs: Vec::new(),
     }
@@ -53,6 +59,7 @@ impl Default for VerificationInputFingerprintConfig {
             base_ref: DEFAULT_VERIFICATION_BASE_REF.to_string(),
             manifest: empty_manifest(),
             external_inputs: Vec::new(),
+            output_policy: OutputOnlyPolicy::default(),
         }
     }
 }
@@ -291,7 +298,10 @@ pub async fn compute_verification_input_fingerprint_with_config(
         Ok(globs) => globs,
         Err(reason) => return Ok(VerificationInputFingerprint::Unavailable(reason)),
     };
-    if let Err(reason) = cleanup_output_only(worktree, &output_only) {
+    // Exclusion below is unconditional; only the destructive half is gated.
+    if config.output_policy == OutputOnlyPolicy::PurgeBeforeFingerprint
+        && let Err(reason) = cleanup_output_only(worktree, &output_only)
+    {
         return Ok(VerificationInputFingerprint::Unavailable(reason));
     }
     let worktree_anchor = match PermittedRootAnchor::capture(worktree, b".") {
@@ -409,7 +419,7 @@ pub async fn compute_verification_input_fingerprint_with_config(
         },
     ))
 }
-fn unavailable_manifest(detail: impl Into<String>) -> VerificationInputUnavailable {
+pub(crate) fn unavailable_manifest(detail: impl Into<String>) -> VerificationInputUnavailable {
     VerificationInputUnavailable::MalformedManifest {
         detail: detail.into(),
     }
@@ -532,61 +542,6 @@ fn safe_relative(value: &str) -> bool {
         && !value
             .split('/')
             .any(|part| part.is_empty() || part == "." || part == "..")
-}
-fn cleanup_output_only(
-    worktree: &Path,
-    globs: &GlobSet,
-) -> Result<(), VerificationInputUnavailable> {
-    if globs.is_empty() {
-        return Ok(());
-    }
-    let root = std::fs::canonicalize(worktree).map_err(|e| {
-        VerificationInputUnavailable::UnreadableFile {
-            path: ".".into(),
-            error: e.to_string(),
-        }
-    })?;
-    cleanup_output_dir(&root, &root, globs)
-}
-fn cleanup_output_dir(
-    root: &Path,
-    dir: &Path,
-    globs: &GlobSet,
-) -> Result<(), VerificationInputUnavailable> {
-    for entry in
-        std::fs::read_dir(dir).map_err(|e| VerificationInputUnavailable::UnreadableFile {
-            path: dir.display().to_string(),
-            error: e.to_string(),
-        })?
-    {
-        let entry = entry.map_err(|e| VerificationInputUnavailable::UnreadableFile {
-            path: dir.display().to_string(),
-            error: e.to_string(),
-        })?;
-        if entry.file_name() == ".git" {
-            continue;
-        }
-        let path = entry.path();
-        let rel = path
-            .strip_prefix(root)
-            .map_err(|_| unavailable_manifest("output-only path escaped worktree"))?;
-        let meta = std::fs::symlink_metadata(&path)
-            .map_err(|_| unavailable_manifest("output-only traversal changed"))?;
-        if globs.is_match(rel) {
-            if meta.file_type().is_dir() {
-                std::fs::remove_dir_all(&path)
-            } else {
-                std::fs::remove_file(&path)
-            }
-            .map_err(|e| VerificationInputUnavailable::UnreadableFile {
-                path: rel.display().to_string(),
-                error: e.to_string(),
-            })?;
-        } else if meta.file_type().is_dir() {
-            cleanup_output_dir(root, &path, globs)?;
-        }
-    }
-    Ok(())
 }
 struct ExternalState {
     id: Vec<u8>,

@@ -96,6 +96,8 @@ fn passing(value: &str) -> FinalVerificationExecutionEvidence {
 }
 fn material(checks: Vec<String>) -> FinalVerificationResolvedMaterial {
     FinalVerificationResolvedMaterial {
+        reusable: true,
+        evidence_tier: "attested",
         execution_request: FinalVerificationExecutionRequest {
             worktree: PathBuf::new(),
             resolve_environment_identity: Arc::new(|| panic!("injected evidence only")),
@@ -103,6 +105,7 @@ fn material(checks: Vec<String>) -> FinalVerificationResolvedMaterial {
             tool_runtime: vec![],
             read_only_external_mounts: vec![],
             output_directories: vec![],
+            volatile_environment: Default::default(),
             catalog_loopback_endpoints: vec![],
             service_provisioners: vec![],
         },
