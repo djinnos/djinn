@@ -1478,6 +1478,7 @@ mod created_by_tests {
 #[cfg(test)]
 mod execution_context_tests {
     use super::*;
+    // Resolve this test-only dependency through the crate's repository re-export.
     use crate::UserRepository;
     use djinn_core::events::EventBus;
     use djinn_core::models::TaskExecutionContext;
