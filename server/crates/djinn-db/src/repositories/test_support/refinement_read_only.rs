@@ -11,12 +11,26 @@ pub struct RefinementLifecycleAuditRowForTest {
     pub refinement_stop_context: Option<serde_json::Value>,
 }
 
+/// One durable dispatch-intent row retained for a read-only assertion.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RefinementDispatchIntentRowForTest {
+    pub id: String,
+    pub state: String,
+    pub claimed_by: Option<String>,
+    pub claimed_at: Option<String>,
+    pub claim_expires_at: Option<String>,
+    pub task_id: Option<String>,
+    pub next_intent_id: Option<String>,
+    pub terminal_at: Option<String>,
+}
+
 /// Complete durable state used to prove a refinement observation is read-only.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RefinementRunReadOnlySnapshotForTest {
     pub run: RefinementRunAuditForTest,
     pub heartbeat_at: String,
     pub lifecycle_rows: Vec<RefinementLifecycleAuditRowForTest>,
+    pub dispatch_intents: Vec<RefinementDispatchIntentRowForTest>,
     pub durable_typed_phantom_reap_count: i64,
 }
 
@@ -56,6 +70,23 @@ pub async fn refinement_run_read_only_snapshot_for_test(
         .fetch_all(db.pool())
         .await
         .expect("failed to read refinement lifecycle rows");
+    let dispatch_intents: Vec<(
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    )> = sqlx::query_as(
+        "SELECT id, state, claimed_by, claimed_at, claim_expires_at, task_id, next_intent_id, terminal_at \
+         FROM refinement_dispatch_intents WHERE run_id = $1 ORDER BY round, id",
+    )
+    .bind(run_id)
+    .fetch_all(db.pool())
+    .await
+    .expect("failed to read refinement dispatch intents");
     let typed_reap_count = sqlx::query_scalar(
         "SELECT COUNT(*) FROM refinement_runs \
          WHERE id = $1 AND stop_tag = 'reaped_phantom'",
@@ -92,6 +123,32 @@ pub async fn refinement_run_read_only_snapshot_for_test(
                         event_kind,
                         refinement_stop_tag,
                         refinement_stop_context,
+                    }
+                },
+            )
+            .collect(),
+        dispatch_intents: dispatch_intents
+            .into_iter()
+            .map(
+                |(
+                    id,
+                    state,
+                    claimed_by,
+                    claimed_at,
+                    claim_expires_at,
+                    task_id,
+                    next_intent_id,
+                    terminal_at,
+                )| {
+                    RefinementDispatchIntentRowForTest {
+                        id,
+                        state,
+                        claimed_by,
+                        claimed_at,
+                        claim_expires_at,
+                        task_id,
+                        next_intent_id,
+                        terminal_at,
                     }
                 },
             )

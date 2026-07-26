@@ -46,6 +46,29 @@
         session_id
     }
 
+    /// Observe the exact repository snapshots consumed by the phantom doctor.
+    /// The shared evaluator, not this test helper, owns evidence precedence.
+    async fn doctor_stale_run_ids(repo: &ProposalRepository) -> Vec<String> {
+        let mut stale = Vec::new();
+        for run in repo.load_recoverable_refinement_runs().await.unwrap() {
+            let exact = repo.load_refinement_run_snapshot(djinn_db::LoadRefinementRunSnapshotRequest {
+                run_id: run.run_id,
+                heartbeat_grace_millis: 60_000,
+            }).await.unwrap().unwrap();
+            if matches!(
+                djinn_core::refinement_liveness::evaluate_refinement_liveness(
+                    &exact.snapshot,
+                    exact.observed_at,
+                ),
+                RefinementLivenessResult::Stale { .. }
+            ) {
+                stale.push(exact.snapshot.run.run_id);
+            }
+        }
+        stale.sort();
+        stale
+    }
+
     #[test]
     fn exact_status_serializes_every_shared_liveness_evidence_class() {
         let cases = [
@@ -261,4 +284,89 @@
         assert!(!status.active);
         assert_eq!(sqlx::query_scalar::<_, String>("SELECT status FROM sessions WHERE id = $1").bind(&prior_session).fetch_one(db.pool()).await.unwrap(), "running");
         assert_ne!(status.stop_reason.as_deref(), Some("operator_stop"));
+    }
+
+    /// Exercise status, doctor, board health, and both admissions against the historic
+    /// 09no/96fy shape. The live session belongs only to a terminal prior run.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cross_surface_phantom_reads_are_pure_and_admission_reaps_once() {
+        for (name, tool) in [
+            ("start", "proposal_refinement_start"),
+            ("demand", "proposal_refinement_demand_round"),
+        ] {
+            let (server, db) = test_server().await;
+            let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+            let proposal = repo.create(ProposalCreateInput {
+                title: "09no 96fy exact-run phantom", body: "body", acceptance_criteria: Some("[]"),
+                status: Some("draft"), body_format: None,
+            }).await.unwrap();
+            let project_id = link_proposal_to_project(&db, &repo, &proposal.id).await;
+            let admission = |key: String| djinn_db::AdmitRefinementRunRequest {
+                proposal_id: proposal.id.clone(), idempotency_key: key.clone(),
+                source: djinn_db::RefinementAdmissionSource::Demand { demand_id: key },
+                heartbeat_grace_millis: 60_000,
+            };
+
+            let prior = match repo.reap_and_admit(admission(format!("{name}-prior"))).await.unwrap() {
+                djinn_db::RefinementAdmissionOutcome::Admitted { run_id, .. } => run_id,
+                _ => unreachable!(),
+            };
+            let (prior_project, prior_task) = seed_status_task(&db, &prior, "closed").await;
+            let _prior_session = seed_live_status_session(&db, &prior_project, &prior_task).await;
+            sqlx::query("UPDATE refinement_runs SET state = 'terminal', terminal_at = '2000-01-01T00:00:00.000Z', stop_tag = 'operator_stop' WHERE id = $1")
+                .bind(&prior).execute(db.pool()).await.unwrap();
+            let phantom = match repo.reap_and_admit(admission(format!("{name}-phantom"))).await.unwrap() {
+                djinn_db::RefinementAdmissionOutcome::Admitted { run_id, .. } => run_id,
+                _ => unreachable!(),
+            };
+            djinn_db::test_support::make_refinement_run_phantom_for_test(&db, &phantom).await;
+            let before = djinn_db::test_support::refinement_run_read_only_snapshot_for_test(&db, &proposal.id, &phantom).await;
+
+            for _ in 0..2 {
+                let status = server.dispatch_tool("proposal_refinement_status", serde_json::json!({ "proposal_id": proposal.id })).await.unwrap();
+                assert_eq!(status["refinement"]["run_id"], phantom);
+                assert_eq!(status["refinement"]["liveness"], "stale");
+                assert_eq!(doctor_stale_run_ids(&repo).await, vec![phantom.clone()],
+                    "{name} doctor observation must ignore terminal prior-run evidence");
+                let board = server.dispatch_tool("board_health", serde_json::json!({
+                    "project": format!("test-owner/test-repo-{project_id}")
+                })).await.unwrap();
+                assert_eq!(board["refinement_phantom_active_count"], 1, "{name} board count");
+            }
+            assert_eq!(djinn_db::test_support::refinement_run_read_only_snapshot_for_test(&db, &proposal.id, &phantom).await, before,
+                "{name}: reads must not reap or mutate the phantom");
+
+            let args = match tool {
+                "proposal_refinement_start" => serde_json::json!({
+                    "proposal_id": proposal.id, "request_id": format!("09no-96fy-{name}")
+                }),
+                "proposal_refinement_demand_round" => serde_json::json!({
+                    "proposal_id": proposal.id, "reason": "recover exact stale phantom",
+                    "request_id": format!("09no-96fy-{name}")
+                }),
+                _ => unreachable!(),
+            };
+            for _ in 0..2 {
+                let response = server.dispatch_tool(tool, args.clone()).await.unwrap();
+                assert_eq!(response["error"], "accepted; dispatch pending", "{name} post-commit wake failure");
+            }
+
+            let runs = repo.load_refinement_run_aggregates(&proposal.id, 60_000).await.unwrap();
+            assert_eq!(runs.len(), 3, "{name}: prior, phantom, one successor");
+            let successor = runs.iter().find(|run| run.run_id != prior && run.run_id != phantom).unwrap();
+            let snapshot = repo.load_refinement_run_snapshot(djinn_db::LoadRefinementRunSnapshotRequest {
+                run_id: successor.run_id.clone(), heartbeat_grace_millis: 60_000,
+            }).await.unwrap().unwrap();
+            assert_eq!(snapshot.snapshot.intents.len(), 1, "{name}: exactly one pending intent");
+            assert_eq!(snapshot.snapshot.intents[0].state, djinn_core::refinement_liveness::RefinementIntentState::Pending);
+            let revisions = repo.revisions(&proposal.id).await.unwrap();
+            assert_eq!(revisions.iter().filter(|row| row.refinement_stop_tag.as_deref() == Some("reaped_phantom")).count(), 1);
+            assert_eq!(revisions.iter().filter(|row| row.event_kind == "refinement_stop").count(), 1, "{name}: no handler-error stop");
+            assert_eq!(revisions.iter().filter(|row| row.event_kind == "refinement_start").count(), 3, "{name}: retry returns the winner");
+            let board = server.dispatch_tool("board_health", serde_json::json!({
+                "project": format!("test-owner/test-repo-{project_id}")
+            })).await.unwrap();
+            assert_eq!(board["refinement_phantom_active_count"], 0, "{name}: reap clears current stale count");
+            assert_eq!(board["refinement_phantom_reaps_24h"], 1, "{name}: one durable bounded reap increment");
+        }
     }

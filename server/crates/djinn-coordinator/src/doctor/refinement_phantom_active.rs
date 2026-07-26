@@ -361,6 +361,49 @@ mod tests {
     }
 
     #[test]
+    fn shared_snapshot_edge_states_have_the_same_doctor_outcome() {
+        let mut claimed = stale("run-claimed");
+        let mut claimed_intent = pending_intent("run-claimed");
+        claimed_intent.state = RefinementIntentState::Claimed;
+        claimed_intent.lease_expires_at = Some(DbTimestamp(20_000));
+        claimed.snapshot.intents.push(claimed_intent);
+
+        let mut heartbeat_grace = stale("run-heartbeat-grace");
+        heartbeat_grace
+            .snapshot
+            .heartbeat
+            .as_mut()
+            .unwrap()
+            .heartbeat_at = DbTimestamp(9_999);
+
+        let mut expired_claim = stale("run-expired-claim");
+        let mut expired_intent = pending_intent("run-expired-claim");
+        expired_intent.state = RefinementIntentState::Claimed;
+        expired_intent.lease_expires_at = Some(DbTimestamp(2));
+        expired_claim.snapshot.intents.push(expired_intent);
+
+        let mut terminal = stale("run-terminal");
+        terminal.snapshot.run.state = RefinementRunState::Terminal;
+
+        for (name, fixture, expected_findings) in [
+            ("claimed intent", claimed, 0),
+            ("heartbeat grace", heartbeat_grace, 0),
+            ("expired claim", expired_claim, 1),
+            ("terminal", terminal, 0),
+            ("truly stale", stale("run-stale"), 1),
+        ] {
+            let check = RefinementPhantomActiveCheck::new(Arc::new(
+                MemoryRefinementPhantomActiveSource::new(vec![fixture]),
+            ));
+            assert_eq!(
+                check.run().expect("run doctor check").len(),
+                expected_findings,
+                "{name} must follow the shared liveness evaluator"
+            );
+        }
+    }
+
+    #[test]
     fn each_non_stale_fixture_is_suppressed_by_the_doctor_check() {
         let mut live_session = stale("run-live-session");
         live_session.snapshot.tasks.push(RefinementTaskEvidence {
