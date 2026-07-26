@@ -77,7 +77,10 @@ impl BuildSlotAuthority for BuildLeaseDispatchAuthority {
         let identity = Self::identity(task_id, generation);
         let grant = match self
             .service
-            .queue(LeaseQueueRequestShim::build(identity.clone()))
+            .queue(LeaseQueueRequestShim::build(
+                identity.clone(),
+                self.service.now_ms(),
+            ))
             .await
         {
             LeaseResult::Granted(grant) => grant,
@@ -192,6 +195,13 @@ impl BuildSlotAuthority for BuildLeaseDispatchAuthority {
         }
     }
 
+    async fn abandon_queued_dispatch(&self, task_id: &str) {
+        if !self.service.is_ready() {
+            return;
+        }
+        self.service.abandon_queued_dispatch(task_id).await;
+    }
+
     async fn occupancy(&self) -> Option<i64> {
         self.service
             .recovery_snapshot()
@@ -205,22 +215,34 @@ impl BuildSlotAuthority for BuildLeaseDispatchAuthority {
     }
 }
 
-/// A dispatch slot carries no wall-clock deadline of its own.
+/// How long an unclaimed dispatch queue position survives.
 ///
-/// The queue deadline exists to stop a queued row outliving the work that
-/// wanted it; for dispatch that job is already done by the coordinator, which
-/// releases the slot when the task-run terminalizes and reconciles orphans on
-/// restart. Giving it a short queue deadline instead would silently drop a
-/// task's FIFO position while it waited, which is the starvation this design
-/// exists to avoid.
+/// A queued row occupies nothing, but `grant_next` selects the oldest queued
+/// row -- so a position whose task never comes back is eventually GRANTED,
+/// occupies a slot, and is released by nobody. `cancel_deferred_task` closes
+/// that on the path we know about (a task reaching `closed`); this deadline is
+/// the belt-and-braces for every path we do not, so no single missed hook can
+/// leak capacity permanently.
+///
+/// Generous on purpose. The row is idempotent by key, so a task that returns
+/// inside the window keeps its original FIFO position; only a genuinely
+/// abandoned one expires. Too short would silently drop positions under load,
+/// which is the starvation this design exists to avoid.
+const DISPATCH_QUEUE_DEADLINE_MS: i64 = 30 * 60 * 1000;
+
 struct LeaseQueueRequestShim;
 
 impl LeaseQueueRequestShim {
-    fn build(identity: LeaseIdentity) -> djinn_supervisor::services::LeaseQueueRequest {
+    fn build(
+        identity: LeaseIdentity,
+        now_ms: i64,
+    ) -> djinn_supervisor::services::LeaseQueueRequest {
         djinn_supervisor::services::LeaseQueueRequest {
             identity,
             deadlines: LeaseDeadlines {
-                queue_deadline_ms: 0,
+                // Absolute epoch milliseconds, never a duration (#2599): a
+                // relative value lands in 1970 and expires on arrival.
+                queue_deadline_ms: now_ms.saturating_add(DISPATCH_QUEUE_DEADLINE_MS),
                 launch_deadline_ms: 0,
             },
         }

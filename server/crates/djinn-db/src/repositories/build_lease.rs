@@ -305,6 +305,35 @@ impl BuildLeaseRepository {
         Ok(found.is_some())
     }
 
+    /// Terminalize every still-QUEUED dispatch row for a task.
+    ///
+    /// A queued row holds a FIFO position but occupies nothing, so leaving one
+    /// behind looks harmless. It is not: `grant_next` selects the oldest queued
+    /// row, so an orphan whose task is gone is eventually GRANTED, occupies a
+    /// slot, and is never released by anyone -- a permanent capacity leak that
+    /// only shows up as a pool that mysteriously shrinks.
+    ///
+    /// Deliberately restricted to `queued`. An occupying row belongs to a live
+    /// or recovering pod and must be released under its fencing token, never
+    /// swept by task identity.
+    pub async fn abandon_queued_dispatch(&self, task_id: &str) -> DbResult<u64> {
+        self.db.ensure_initialized().await?;
+        let mut tx = self.db.pool().begin().await?;
+        lock(&mut tx).await?;
+        let result = sqlx::query(
+            "UPDATE build_leases \
+             SET state='terminal', terminal_reason='abandoned', terminal_at=now(), updated_at=now() \
+             WHERE consumer_kind='task_dispatch' \
+               AND split_part(consumer_id, ':', 1) = $1 \
+               AND state='queued'",
+        )
+        .bind(task_id)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(result.rows_affected())
+    }
+
     pub async fn set_cap(&self, cap: i64) -> DbResult<BuildLeaseSnapshot> {
         validate_cap(cap)?;
         self.db.ensure_initialized().await?;

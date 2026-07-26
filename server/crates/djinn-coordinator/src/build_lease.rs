@@ -518,6 +518,35 @@ impl BuildLeaseService {
         Ok(snapshot)
     }
 
+    /// The service clock, in absolute epoch milliseconds. Callers computing a
+    /// deadline must add to this rather than sending a duration (#2599).
+    #[must_use]
+    pub fn now_ms(&self) -> i64 {
+        self.clock.now_ms()
+    }
+
+    /// Terminalize any still-queued dispatch position for a closed task.
+    pub async fn abandon_queued_dispatch(&self, task_id: &str) {
+        let _guard = self.operation.lock().await;
+        match self.repository.abandon_queued_dispatch(task_id).await {
+            Ok(0) => {}
+            Ok(abandoned) => {
+                tracing::info!(
+                    task_id,
+                    abandoned,
+                    "build lease: surrendered dispatch queue positions for a closed task"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    task_id,
+                    %error,
+                    "build lease: could not surrender dispatch queue position; it will expire on its queue deadline"
+                );
+            }
+        }
+    }
+
     /// Capacity changes never revoke occupied rows. Positive changes drain FIFO.
     pub async fn set_cap(&self, cap: i64) -> LeaseResult {
         let _guard = self.operation.lock().await;

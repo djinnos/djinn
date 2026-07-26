@@ -282,6 +282,14 @@ pub trait BuildSlotAuthority: Send + Sync {
     /// no-op rather than an error.
     async fn release_dispatch_slot(&self, task_id: &str, generation: i64);
 
+    /// Drop any still-QUEUED dispatch reservation for a closed task.
+    ///
+    /// A queued row occupies nothing, so it is tempting to leave it. But
+    /// `grant_next` selects the oldest queued row, so an orphan whose task is
+    /// gone is eventually granted, occupies a slot, and is released by nobody.
+    /// A closed task must therefore surrender its queue position explicitly.
+    async fn abandon_queued_dispatch(&self, task_id: &str);
+
     /// Currently occupied capacity, in build slots, across EVERY population.
     async fn occupancy(&self) -> Option<i64>;
 
@@ -1484,6 +1492,12 @@ impl BuildAdmissionController {
     /// which removes membership and extracts the timestamp under one lock, so no
     /// cancelled observation is lost and no timestamp is orphaned.
     pub async fn cancel_deferred_task(&self, work_id: &str) {
+        // A closed task must also surrender any queue position it still holds
+        // in the capacity authority. Without this the queued row survives its
+        // task, is eventually granted, and leaks the slot permanently.
+        if let Some(authority) = self.slot_authority.as_ref() {
+            authority.abandon_queued_dispatch(work_id).await;
+        }
         let prefix = format!("{:?}:{work_id}:", AdmissionDomain::TaskObservation);
         let matching: Vec<String> = {
             let lifecycle = self

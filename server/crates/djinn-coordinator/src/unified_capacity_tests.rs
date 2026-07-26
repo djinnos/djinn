@@ -701,3 +701,88 @@ async fn unarmed_dispatch_admission_observes_without_denying_or_occupying() {
     );
 }
 
+
+/// A queue position must not outlive the task that wanted it.
+///
+/// A queued row occupies nothing, which makes an orphan look harmless. It is
+/// not: `grant_next` selects the oldest queued row, so a position whose task is
+/// gone is eventually GRANTED, occupies a slot, and is released by nobody --
+/// a permanent capacity leak that surfaces only as a pool that mysteriously
+/// shrinks. A closed task must surrender its position explicitly.
+#[tokio::test]
+async fn a_closed_task_surrenders_its_queue_position_instead_of_leaking_a_slot() {
+    const CAP: i64 = 1;
+    let h = harness(CAP).await;
+
+    // Saturate, so the next dispatch can only queue.
+    assert!(acquire_warm_lease(&h.lease, "occupy").await);
+
+    let decision = h
+        .controller
+        .admit_task_run(
+            Some("worker"),
+            AdmissionDomain::TaskObservation,
+            "abandoned-task".into(),
+            0,
+            "djinn-taskrun-abandoned".into(),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(decision, BuildAdmissionDecision::Denied { .. }));
+
+    let queued = h
+        .leases
+        .get(&djinn_db::BuildLeaseKey {
+            consumer_kind: BuildLeaseConsumerKind::TaskDispatch,
+            consumer_id: "abandoned-task:0".into(),
+        })
+        .await
+        .unwrap()
+        .expect("a denied dispatch holds a durable FIFO position");
+    assert_eq!(queued.state, BuildLeaseState::Queued);
+    assert!(
+        queued.queue_deadline.is_some(),
+        "a queue position must carry a deadline so no missed hook leaks it forever"
+    );
+
+    // The task closes without ever dispatching.
+    h.controller.cancel_deferred_task("abandoned-task").await;
+
+    let after = h
+        .leases
+        .get(&djinn_db::BuildLeaseKey {
+            consumer_kind: BuildLeaseConsumerKind::TaskDispatch,
+            consumer_id: "abandoned-task:0".into(),
+        })
+        .await
+        .unwrap()
+        .expect("the row is retained for replay");
+    assert_eq!(
+        after.state,
+        BuildLeaseState::Terminal,
+        "a closed task's queue position must be surrendered, not left to be granted later"
+    );
+
+    // Releasing the warm lease must now hand capacity to real work, not to the
+    // orphan. Draining happens on the release itself.
+    let occupied_before_release = occupancy(&h.leases).await;
+    assert_eq!(occupied_before_release, CAP);
+    h.lease
+        .release(djinn_supervisor::services::LeaseReleaseRequest {
+            identity: LeaseIdentity::GraphWarm(
+                djinn_supervisor::services::GraphWarmLeaseIdentity {
+                    project_id: "unified-project".into(),
+                    warm_request_id: "occupy".into(),
+                    graph_revision: "unified-revision".into(),
+                },
+            ),
+            fencing_token: djinn_supervisor::services::LeaseFencingToken(1),
+            candidate_cleanup: false,
+        })
+        .await;
+    assert_eq!(
+        occupancy(&h.leases).await,
+        0,
+        "the surrendered position must not have been granted the freed slot"
+    );
+}
