@@ -30,7 +30,8 @@ fn render_prompt_with_skills(
         role_name,
         project_skills,
         authoring_trigger,
-    );
+    )
+    .unwrap();
     apply_skills(&base, &merged)
 }
 
@@ -381,7 +382,7 @@ fn render_planner_prompt_for_task(task: &Task) -> String {
     let trigger = crate::actors::slot::lifecycle::task_classifier::classify_native_skill_trigger(
         "planner", task,
     );
-    let (merged, _native_names) = merge_native_skills("planner", Vec::new(), trigger);
+    let (merged, _native_names) = merge_native_skills("planner", Vec::new(), trigger).unwrap();
     apply_skills(&base, &merged)
 }
 
@@ -525,7 +526,7 @@ fn wave_planning_with_project_skills_omits_visual_spec_but_keeps_project() {
         recommended_for_roles: vec![],
         tags: vec![],
     }];
-    let (merged, native_names) = merge_native_skills("planner", project_skills, trigger);
+    let (merged, native_names) = merge_native_skills("planner", project_skills, trigger).unwrap();
     let prompt = apply_skills(&base, &merged);
 
     // No native skills merged.
@@ -570,4 +571,65 @@ fn classifier_distinguishes_authoring_from_wave_planning_tasks() {
         None,
         "planning task must not classify as authoring"
     );
+}
+
+/// Production-pipeline regression for S0: otherwise-identical non-authoring
+/// Architect tasks diverge only on persisted execution context. The marked task
+/// receives the exact readiness pin; the unmarked task receives no native skill.
+#[test]
+fn marked_architect_readiness_task_injects_guardrails_and_unmarked_task_does_not() {
+    fn render_architect(task: &Task) -> String {
+        ensure_registry();
+        let base = render_prompt(AgentType::Architect, task, &make_ctx());
+        let trigger =
+            crate::actors::slot::lifecycle::task_classifier::classify_native_skill_trigger(
+                "architect",
+                task,
+            );
+        let (skills, _) = merge_native_skills("architect", Vec::new(), trigger).unwrap();
+        apply_skills(&base, &skills)
+    }
+
+    let mut marked = make_task();
+    marked.title = "Analyze readiness with agent-readiness-guardrails 1.0.0".into();
+    marked.description = "Readiness analysis must use agent-readiness-guardrails 1.0.0.".into();
+    marked.labels = "[\"readiness\"]".into();
+    marked.execution_context = Some(
+        djinn_core::models::TaskExecutionContext::readiness_guardrail_analysis(
+            "agent-readiness-guardrails",
+            "1.0.0",
+        )
+        .unwrap(),
+    );
+    let mut unmarked = make_task();
+    // Matching text, labels, and issue type are deliberately insufficient.
+    unmarked.title = marked.title.clone();
+    unmarked.description = marked.description.clone();
+    unmarked.labels = "[\"readiness\"]".into();
+    unmarked.issue_type = marked.issue_type.clone();
+
+    assert_eq!(
+        crate::actors::slot::lifecycle::task_classifier::classify_native_skill_trigger(
+            "architect",
+            &marked,
+        ),
+        Some(NativeSkillTrigger::ReadinessGuardrail {
+            skill_name: "agent-readiness-guardrails".into(),
+            skill_version: "1.0.0".into(),
+        })
+    );
+    assert_eq!(
+        crate::actors::slot::lifecycle::task_classifier::classify_native_skill_trigger(
+            "architect",
+            &unmarked,
+        ),
+        None
+    );
+
+    let marked_prompt = render_architect(&marked);
+    let unmarked_prompt = render_architect(&unmarked);
+    assert!(marked_prompt.contains("agent-readiness-guardrails"));
+    assert!(marked_prompt.contains("GOV-MIG-001"));
+    assert!(!unmarked_prompt.contains("agent-readiness-guardrails"));
+    assert!(!unmarked_prompt.contains("GOV-MIG-001"));
 }
