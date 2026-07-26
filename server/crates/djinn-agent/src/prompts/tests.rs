@@ -78,6 +78,7 @@ fn make_task() -> Task {
         merge_conflict_metadata: None,
         memory_refs: "[]".into(),
         agent_type: None,
+        execution_context: None,
         created_by_user_id: "fixture-user".into(),
         ci_status: "unknown".into(),
         ci_head_sha: None,
@@ -112,7 +113,6 @@ fn make_task() -> Task {
         total_reopen_count: 0,
         intervention_count: 0,
         last_intervention_at: None,
-        execution_context: None,
     }
 }
 

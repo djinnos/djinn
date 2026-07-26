@@ -5143,6 +5143,7 @@ async fn rendered_worker_prompt_uses_signature_only_tool_section() {
         merge_conflict_metadata: None,
         memory_refs: "[]".to_string(),
         agent_type: None,
+        execution_context: None,
         created_by_user_id: "fixture-user".into(),
         ci_status: "unknown".to_string(),
         ci_head_sha: None,
@@ -5174,7 +5175,6 @@ async fn rendered_worker_prompt_uses_signature_only_tool_section() {
         refinement_round: None,
         refinement_phase: None,
         refinement_role: None,
-        execution_context: None,
     };
     let task_ctx = djinn_roles::prompts::TaskContext {
         project_path: "/tmp/project".to_string(),
