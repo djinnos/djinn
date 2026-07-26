@@ -85,6 +85,28 @@
 //!
 //! What is NOT accepted, and is what the read-only direction buys: the child
 //! being able to *modify* the configuration the token travels in.
+//!
+//! # Measured on the production node, in the rendered shape
+//!
+//! Not "the child can read the file" — that would only prove the mount works.
+//! The rewrite has to be *applied by git's transport*, because that is what
+//! cargo's `git-fetch-with-cli`, `go`'s direct-git mode and pnpm actually depend
+//! on. `GIT_TRACE=1 git ls-remote`, run as the real child uid with the launcher's
+//! own `$HOME`:
+//!
+//! ```text
+//! # worker:   git config --file <channel> url.https://x-access-token:CANARYTOK@… .insteadOf …
+//! # launcher: setpriv --reuid=1001 --regid=1000 --clear-groups \
+//! #             env HOME=/home/djinn GIT_CONFIG_SYSTEM=<anchor including the channel> \
+//! #             GIT_TRACE=1 git ls-remote https://github.com/acme/nope
+//! ...x-access-token:CANARYTOK@github.com/acme...      <- rewritten, authenticated
+//!
+//! # same command, anchor WITHOUT the include (this is today's behaviour):
+//! 0 occurrences of x-access-token                     <- unauthenticated, silent
+//! ```
+//!
+//! And the direction holds: appending to the channel is `Permission denied` for
+//! uid 1001 and `Read-only file system` even for uid 0 inside the launcher.
 
 use k8s_openapi::api::core::v1::{EmptyDirVolumeSource, EnvVar, Volume, VolumeMount};
 
