@@ -229,6 +229,7 @@ pub enum RefinementLivenessEvidence {
     AwaitingEvidencePark,
     PendingIntent { intent_id: String },
     ClaimedIntent { intent_id: String },
+    MaterializedIntent { intent_id: String },
     OpenTask { task_id: String },
     QueuedTask { task_id: String },
     RunningTask { task_id: String },
@@ -306,6 +307,31 @@ pub fn evaluate_refinement_liveness(
     }) {
         return RefinementLivenessResult::Live {
             evidence: RefinementLivenessEvidence::ClaimedIntent {
+                intent_id: intent.intent_id.clone(),
+            },
+        };
+    }
+
+    // A materialized intent has already produced its correlated role task, so
+    // the run holds durable in-flight work whose outcome the coordinator still
+    // owes it. That stays true after the role agent exits and its task closes:
+    // the successor intent is written by the outcome path, not by the agent.
+    // Without this class the window between "role finished" and "outcome
+    // applied" reads as a phantom, and the admission reaper terminalizes a run
+    // whose adversary genuinely ran — destroying the round and minting a fresh
+    // generation that repeats the loop (21 `reaped_phantom` runs in one week).
+    // The window is bounded on the other side by the coordinator's execution
+    // watchdog, which terminalizes an unsettled role with a durable stop tag.
+    if let Some(intent) = snapshot.intents.iter().find(|intent| {
+        &intent.run_id == run_id
+            && intent.state == RefinementIntentState::Materialized
+            && snapshot.tasks.iter().any(|task| {
+                &task.run_id == run_id
+                    && task.intent_id.as_deref() == Some(intent.intent_id.as_str())
+            })
+    }) {
+        return RefinementLivenessResult::Live {
+            evidence: RefinementLivenessEvidence::MaterializedIntent {
                 intent_id: intent.intent_id.clone(),
             },
         };
@@ -457,6 +483,67 @@ mod tests {
         current.sessions[0].run_id = "run-prior".into();
         assert!(matches!(
             evaluate_refinement_liveness(&current, NOW),
+            RefinementLivenessResult::Stale { .. }
+        ));
+    }
+
+    /// A materialized intent whose correlated role task exists is durable
+    /// in-flight work: the coordinator still owes it an outcome. That must
+    /// remain true after the role agent exits and its task closes, which is the
+    /// exact window in which the admission reaper used to terminalize a run
+    /// whose adversary had genuinely run (`stop_tag = reaped_phantom`) and mint
+    /// a fresh generation that repeated the loop.
+    #[test]
+    fn materialized_intent_with_its_role_task_is_live_even_after_the_task_closes() {
+        for task_state in [
+            RefinementTaskState::Running,
+            RefinementTaskState::Closed,
+            RefinementTaskState::Cancelled,
+        ] {
+            let mut value = snapshot();
+            value
+                .intents
+                .push(intent(RefinementIntentState::Materialized));
+            value.tasks.push(task(task_state));
+            assert_eq!(
+                evaluate_refinement_liveness(&value, NOW),
+                RefinementLivenessResult::Live {
+                    evidence: RefinementLivenessEvidence::MaterializedIntent {
+                        intent_id: "intent-1".into(),
+                    },
+                },
+                "{task_state:?}"
+            );
+        }
+    }
+
+    /// The class stays narrow: a materialized intent with NO correlated task is
+    /// not evidence of anything, and neither is one whose task belongs to a
+    /// different run.
+    #[test]
+    fn materialized_intent_without_its_own_role_task_is_not_live() {
+        let mut value = snapshot();
+        value
+            .intents
+            .push(intent(RefinementIntentState::Materialized));
+        assert!(matches!(
+            evaluate_refinement_liveness(&value, NOW),
+            RefinementLivenessResult::Stale { .. }
+        ));
+
+        let mut foreign = task(RefinementTaskState::Closed);
+        foreign.run_id = "run-prior".into();
+        value.tasks.push(foreign);
+        assert!(matches!(
+            evaluate_refinement_liveness(&value, NOW),
+            RefinementLivenessResult::Stale { .. }
+        ));
+
+        let mut unlinked = task(RefinementTaskState::Closed);
+        unlinked.intent_id = None;
+        value.tasks.push(unlinked);
+        assert!(matches!(
+            evaluate_refinement_liveness(&value, NOW),
             RefinementLivenessResult::Stale { .. }
         ));
     }
