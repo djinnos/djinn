@@ -313,10 +313,7 @@
             .await
             .unwrap();
         let error = resp2.get("error").and_then(|v| v.as_str()).unwrap();
-        assert!(
-            error.contains("already active"),
-            "should reject duplicate start: {error}"
-        );
+        assert_eq!(error, "AlreadyActive");
     }
 
     // ── DoR readiness findings available in refinement status ─────────────────
@@ -384,6 +381,7 @@
                     "proposal_id": proposal.id,
                     "reason": "Need another round after judge feedback",
                     "update_authority": "checkpoint",
+                    "request_id": "demand-action-019f",
                 }),
             )
             .await
@@ -415,12 +413,11 @@
         );
         let meta: serde_json::Value =
             serde_json::from_str(start.event_metadata.as_deref().expect("metadata")).unwrap();
-        assert_eq!(meta["source"], "human_demand_round");
+        assert_eq!(meta["source"]["kind"], "demand");
         assert_eq!(
-            meta["reviewer_feedback"],
-            "Need another round after judge feedback"
+            meta["source"]["demand_id"],
+            "reason:Need another round after judge feedback:request:demand-action-019f"
         );
-        assert_eq!(meta["reason"], "Need another round after judge feedback");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -523,6 +520,7 @@
                 serde_json::json!({
                     "proposal_id": proposal.id,
                     "reason": feedback,
+                    "request_id": "parked-demand-019f",
                 }),
             )
             .await
@@ -535,12 +533,7 @@
         let revisions = repo.revisions(&proposal.id).await.unwrap();
         let demand_starts: Vec<_> = revisions
             .iter()
-            .filter(|r| {
-                r.event_kind == "refinement_start"
-                    && r.event_metadata
-                        .as_deref()
-                        .is_some_and(|m| m.contains("human_demand_round"))
-            })
+            .filter(|r| r.event_kind == "refinement_start")
             .collect();
         assert_eq!(demand_starts.len(), 1, "fresh demand start exactly once");
         let meta: serde_json::Value = serde_json::from_str(
@@ -550,8 +543,11 @@
                 .expect("demand metadata"),
         )
         .unwrap();
-        assert_eq!(meta["source"], "human_demand_round");
-        assert_eq!(meta["reviewer_feedback"], feedback);
+        assert_eq!(meta["source"]["kind"], "demand");
+        assert_eq!(
+            meta["source"]["demand_id"],
+            format!("reason:{feedback}:request:parked-demand-019f")
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
