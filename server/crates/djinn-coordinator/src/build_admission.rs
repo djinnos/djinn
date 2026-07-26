@@ -862,13 +862,32 @@ impl BuildAdmissionController {
         } else {
             0
         };
-        // Durable occupancy above the cap is the exact shape that denies every
-        // admission once the cap is armed, and it is invisible in a log stream
-        // that only reports per-transition warnings. Export it as a bounded
-        // gauge and alarm on the edge so it is never something a human has to
-        // discover by reading thousands of warn lines.
-        let over_cap =
-            !journal_snapshot_degraded && i64::try_from(occupied).unwrap_or(i64::MAX) > self.cap;
+        // Occupancy above the cap is the exact shape that denies every
+        // admission, and it is invisible in a log stream that only reports
+        // per-transition warnings. Export it as a bounded gauge and alarm on the
+        // edge so it is never something a human has to discover by reading
+        // thousands of warn lines.
+        //
+        // Read from the ONE capacity authority, in build slots. This used to
+        // compare the journal row count above against `self.cap`, which was
+        // wrong in both directions once capacity moved: stale LIFECYCLE rows
+        // raised an alarm that says "every enforced admission will be denied"
+        // while denying nothing (the v0.7.5 false alarm), and genuinely
+        // exhausted build slots raised no alarm at all whenever the journal
+        // happened to sit within the cap. The gauge must track the thing that
+        // actually runs out.
+        //
+        // No authority installed means this controller is not capacity gated,
+        // so there is no cap to exceed. An authority that IS installed but
+        // unreadable reports false rather than inventing an alarm: the reachable
+        // degradation is already surfaced by the journal/inventory gauges.
+        let over_cap = match self.slot_authority.as_ref() {
+            None => false,
+            Some(authority) => authority
+                .occupancy()
+                .await
+                .is_some_and(|slots| slots > authority.cap()),
+        };
         self.report_over_cap_edge(over_cap, occupied);
         djinn_telemetry::build_slot_occupancy::set_slots_in_use(occupied);
         djinn_telemetry::build_slot_occupancy::set_slots_queued(queued);
@@ -893,20 +912,24 @@ impl BuildAdmissionController {
         {
             return;
         }
+        // `occupancy` is the LIFECYCLE row count, logged as context. The
+        // decision above is build slots against the authority's cap; the two
+        // are different units and the message says which is which, so an
+        // operator reading this line is never left comparing them.
         if over_cap {
             tracing::error!(
-                occupancy,
+                ledger_rows = occupancy,
                 cap = self.cap,
                 mode = ?self.mode(),
-                "build_admission: durable occupancy exceeds the configured cap; every \
-                 enforced admission will be denied until the excess is released. Run the \
+                "build_admission: occupied build slots exceed the cap; every enforced \
+                 admission will be denied until the excess is released. Run the \
                  stale-admission-occupancy runbook."
             );
         } else {
             tracing::info!(
-                occupancy,
+                ledger_rows = occupancy,
                 cap = self.cap,
-                "build_admission: durable occupancy is back within the configured cap"
+                "build_admission: occupied build slots are back within the cap"
             );
         }
     }
@@ -4496,15 +4519,22 @@ mod tests {
         }
     }
 
-    /// Durable occupancy above the cap must be readable as a bounded gauge, and
+    /// Occupancy above the cap must be readable as a bounded gauge, and
     /// reclamation must report through the same `outcome` family the lifecycle
     /// transitions report through — not a parallel metric nobody queries.
+    ///
+    /// The gauge tracks BUILD SLOTS, from the one authority. It used to track
+    /// occupying journal rows against the cap, which was wrong in both
+    /// directions once capacity moved: stale lifecycle rows raised an alarm
+    /// claiming every admission would be denied while denying nothing, and
+    /// exhausted slots raised no alarm whenever the journal sat within the cap.
     #[tokio::test]
     async fn telemetry_reports_over_cap_occupancy_and_reclamation_outcomes() {
         let _guard = telemetry_guard();
         djinn_telemetry::init().unwrap();
 
-        let controller = ungated_controller(BuildAdmissionMode::Enforce, 2);
+        let h = capacity_harness(BuildAdmissionMode::Enforce, 2).await;
+        let controller = Arc::clone(&h.controller);
         controller.enable_process_metrics_for_test();
         controller.mark_ready();
         let labels = [("effective_mode", "enforce"), ("effective_cap", "2")];
@@ -4519,28 +4549,39 @@ mod tests {
             0.0
         );
 
-        for index in 0..2 {
-            WarmAdmission::admit(&controller, warm(&format!("over-cap-{index}")))
+        // A stale lifecycle population alone is NOT over cap: it holds no CPU.
+        // This is the v0.7.5 false alarm, and it must stay silent.
+        for index in 0..3 {
+            controller
+                .journal()
+                .adopt_live(&djinn_db::AdoptLiveAdmissionInput {
+                    key: AdmissionJournalKey {
+                        domain: AdmissionDomain::WarmBuild,
+                        work_id: format!("stale-{index}"),
+                        generation: 0,
+                    },
+                    workload_kind: AdmissionWorkloadKind::Warm,
+                    creator_server_epoch: "predecessor".into(),
+                    object_name: format!("stale-{index}-job"),
+                    object_uid: format!("stale-uid-{index}"),
+                })
                 .await
-                .expect("a fresh controller admits up to the cap");
+                .unwrap();
         }
-        // The cap itself refuses a third reservation, so drive occupancy above
-        // it the way a predecessor epoch does: adopt a durable row directly.
-        controller
-            .journal()
-            .adopt_live(&djinn_db::AdoptLiveAdmissionInput {
-                key: AdmissionJournalKey {
-                    domain: AdmissionDomain::WarmBuild,
-                    work_id: "seeded-over-cap".into(),
-                    generation: 0,
-                },
-                workload_kind: AdmissionWorkloadKind::Warm,
-                creator_server_epoch: "predecessor".into(),
-                object_name: "seeded-over-cap-job".into(),
-                object_uid: "seeded-uid".into(),
-            })
-            .await
-            .unwrap();
+        controller.publish_metrics().await;
+        assert_eq!(
+            sample_value(
+                &djinn_telemetry::render().unwrap(),
+                "djinn_build_admission_occupancy_over_cap",
+                &labels
+            ),
+            0.0,
+            "stale lifecycle rows deny nothing and must not raise the alarm"
+        );
+
+        // Slots a predecessor really took, surviving in `build_leases` past a
+        // cap the operator has since lowered. THIS denies every admission.
+        let _predecessor_slots = h.occupy_slots_beyond_cap(3).await;
         controller.publish_metrics().await;
         let rendered = djinn_telemetry::render().unwrap();
         assert_eq!(

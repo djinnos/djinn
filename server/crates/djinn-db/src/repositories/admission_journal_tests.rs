@@ -50,8 +50,16 @@ async fn set_state(db: &Database, key: &AdmissionJournalKey, state: &str) {
     .unwrap();
 }
 
+/// Two concurrent reservations for different keys both land, exactly once each.
+///
+/// This test used to be `cap_one_concurrent_reservation_has_one_winner`: the
+/// journal ran its own cap, and one of the two racers was refused. It no longer
+/// has a cap to refuse with -- capacity is the build lease's, and this is the
+/// lifecycle ledger, whose append cannot deny. What the advisory lock still
+/// guarantees, and what is worth pinning, is that serialising the two
+/// fetch-and-inserts loses neither row and duplicates neither.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn cap_one_concurrent_reservation_has_one_winner() {
+async fn concurrent_reservations_for_distinct_keys_each_land_exactly_once() {
     let db = Database::open_in_memory().unwrap();
     let repo = Arc::new(AdmissionJournalRepository::new(db));
     let first = {
@@ -71,14 +79,15 @@ async fn cap_one_concurrent_reservation_has_one_winner() {
         })
     };
     let results = [first.await.unwrap(), second.await.unwrap()];
-    assert_eq!(
-        results
-            .iter()
-            .filter(|r| matches!(r, ReservedAdmission { .. }))
-            .count(),
-        1
+    assert!(
+        results.iter().all(|reserved| !reserved.idempotent),
+        "each distinct key is a fresh row, never a replay of the other's"
     );
-    assert_eq!(repo.count_task_or_warm_occupancy().await.unwrap(), 1);
+    assert_ne!(
+        results[0].row.key, results[1].row.key,
+        "the two racers wrote two distinct rows"
+    );
+    assert_eq!(repo.count_task_or_warm_occupancy().await.unwrap(), 2);
 }
 
 #[tokio::test]
