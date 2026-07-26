@@ -189,7 +189,7 @@ fn every_bootstrap_only_capability_is_one_the_launcher_drops_at_runtime() {
 #[test]
 fn the_rendered_grant_is_exactly_what_the_runtime_retains_plus_bootstrap_only() {
     let cfg = KubernetesConfig::for_testing();
-    let container = launcher_sidecar_container(&cfg, "registry.example/proj:tag");
+    let container = launcher_sidecar_container(&cfg, "registry.example/proj:tag", false, false);
     let add = container
         .security_context
         .unwrap()
@@ -223,7 +223,7 @@ fn the_rendered_grant_is_exactly_what_the_runtime_retains_plus_bootstrap_only() 
 #[test]
 fn the_launcher_container_declares_no_cpu_limit() {
     let cfg = KubernetesConfig::for_testing();
-    let c = launcher_sidecar_container(&cfg, "registry.example/proj:tag");
+    let c = launcher_sidecar_container(&cfg, "registry.example/proj:tag", false, false);
     let limits = c.resources.unwrap().limits.unwrap();
     assert!(
         !limits.contains_key("cpu"),
@@ -277,7 +277,7 @@ fn user_namespaces_are_never_requested_because_they_break_the_delegation() {
 #[test]
 fn the_launcher_mounts_a_writable_mountpoint_at_the_cgroup_root() {
     let cfg = KubernetesConfig::for_testing();
-    let c = launcher_sidecar_container(&cfg, "registry.example/proj:tag");
+    let c = launcher_sidecar_container(&cfg, "registry.example/proj:tag", false, false);
     let mount = c
         .volume_mounts
         .unwrap()
@@ -311,7 +311,7 @@ fn pod_security_context_ties_fsgroup_to_artifact_gid_on_root_mismatch() {
 fn launcher_sidecar_reuses_worker_image_with_launcher_entrypoint() {
     let cfg = KubernetesConfig::for_testing();
     let image = "registry.example/proj:tag";
-    let c = launcher_sidecar_container(&cfg, image);
+    let c = launcher_sidecar_container(&cfg, image, false, false);
     assert_eq!(c.name, LAUNCHER_CONTAINER_NAME);
     // Same image as the worker, different entrypoint (real packaged binary).
     assert_eq!(c.image.as_deref(), Some(image));
@@ -660,6 +660,8 @@ fn a_resolved_cpu_limit_override_retunes_the_lease() {
         init_containers: Some(vec![launcher_sidecar_container(
             &cfg,
             "registry.example/proj:tag",
+            false,
+            false,
         )]),
         ..PodSpec::default()
     };
