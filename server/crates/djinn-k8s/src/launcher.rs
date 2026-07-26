@@ -626,7 +626,17 @@ pub fn worker_launcher_env() -> Vec<EnvVar> {
 /// launcher binary as its entrypoint — no fabricated image ref. It is a native
 /// sidecar (`restartPolicy: Always` init container) so it is up before the
 /// worker and torn down when the worker exits.
-pub fn launcher_sidecar_container(config: &KubernetesConfig, project_image_tag: &str) -> Container {
+///
+/// `mirror_read_only`/`cache_read_only` mirror the worker's own flags for the
+/// same run: a brokered command runs in THIS container's mount namespace, so
+/// the two must agree or the isolation contract holds only for commands that
+/// happen not to be brokered.
+pub fn launcher_sidecar_container(
+    config: &KubernetesConfig,
+    project_image_tag: &str,
+    mirror_read_only: bool,
+    cache_read_only: bool,
+) -> Container {
     Container {
         name: LAUNCHER_CONTAINER_NAME.to_string(),
         image: Some(project_image_tag.to_string()),
@@ -654,11 +664,12 @@ pub fn launcher_sidecar_container(config: &KubernetesConfig, project_image_tag: 
                 &launcher_leased_millicores(config).to_string(),
             ),
         ]),
-        // The IPC surface, plus the writable mountpoint the launcher mounts its
-        // delegated cgroup2 root onto. The volume supplies the mountpoint only;
-        // see [`launcher_cgroup_mountpoint_volume`] for why that distinction is
-        // the entire difference between this working and CrashLoopBackOff.
-        volume_mounts: Some(vec![worker_launcher_ipc_mount(), launcher_cgroup_mount()]),
+        // The launcher's own IPC + cgroup-mountpoint surfaces AND the data
+        // mounts a brokered child needs; see [`crate::launcher_child_fs`].
+        volume_mounts: Some(crate::launcher_child_fs::launcher_volume_mounts(
+            mirror_read_only,
+            cache_read_only,
+        )),
         security_context: Some(launcher_security_context()),
         resources: Some(ResourceRequirements {
             requests: Some(BTreeMap::from([
@@ -832,7 +843,7 @@ pub fn validate_enforcement_render(config: &KubernetesConfig) -> Result<(), Rend
     //    enforces the runtime half (`bootstrap::Bootstrap::run`, the capability
     //    drop, and `NativeCgroupFs::open`) before it binds its control socket.
     if config.cgroup_launcher_mode.renders_sidecar() {
-        let container = launcher_sidecar_container(config, "render-validation");
+        let container = launcher_sidecar_container(config, "render-validation", false, false);
         let security = container.security_context.as_ref().ok_or(
             RenderValidationError::ArmedRenderCannotDelegate {
                 reason: "the launcher container has no securityContext at all",
