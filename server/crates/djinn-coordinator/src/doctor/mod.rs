@@ -19,6 +19,7 @@ pub mod closed_parent_open_children;
 pub mod leader_tick;
 pub mod live_mover;
 pub mod mismatch_scan;
+pub mod refinement_phantom_active;
 pub mod retrieval_health;
 pub mod stranded_ready;
 
@@ -32,6 +33,11 @@ pub use closed_parent_open_children::{
     MemoryClosedParentOpenChildrenSource, TaskRepositoryClosedParentOpenChildrenSource,
 };
 pub use live_mover::{ActiveTask, LiveMoverPredicateCheck, LiveMoverSource};
+pub use refinement_phantom_active::{
+    MemoryRefinementPhantomActiveSource, ProposalRepositoryRefinementPhantomActiveSource,
+    REFINEMENT_PHANTOM_ACTIVE_CHECK_NAME, RefinementPhantomActiveCheck,
+    RefinementPhantomActiveSource,
+};
 pub use stranded_ready::{
     MemoryStrandedReadySource, STRANDED_READY_CHECK_NAME, StrandedReadyCandidate,
     StrandedReadyCheck, StrandedReadySource, TaskRepositoryStrandedReadySource,
@@ -108,6 +114,14 @@ pub fn register_closed_parent_open_children_check_with_repair(
     registry.register(Arc::new(
         ClosedParentOpenChildrenCheck::new(source).with_repair_source(repair_source),
     ))
+}
+
+/// Register the read-only exact-run phantom refinement detector.
+pub fn register_refinement_phantom_active_check(
+    registry: &DoctorRegistry,
+    source: Arc<dyn RefinementPhantomActiveSource>,
+) -> Option<String> {
+    registry.register(Arc::new(RefinementPhantomActiveCheck::new(source)))
 }
 
 // ---------------------------------------------------------------------------
