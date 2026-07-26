@@ -535,12 +535,12 @@ pub fn build_task_run_job(
         // then see the worker's `/proc` entries — so it is set only when the
         // launcher is actually rendered (task grkq).
         share_process_namespace: renders_launcher.then_some(true),
-        // User namespaces (GA since k8s 1.33). Set ONLY when the launcher is
-        // armed, because only then does a container in this pod hold
-        // CAP_SYS_ADMIN — and only for the launcher's bootstrap phase. Mapping
-        // it into a user namespace puts the non-namespaced sysctls that make it
-        // a node-wide escape primitive (`/proc/sys/kernel/core_pattern`) out of
-        // reach. See `launcher::pod_host_users`.
+        // Always None. A user namespace would map the launcher's bootstrap
+        // CAP_SYS_ADMIN away from the non-namespaced sysctls that make it a
+        // node-wide escape primitive, which is why this was once Some(false) —
+        // but it also leaves the launcher's own cgroup owned by an unmapped uid,
+        // so the delegation fails one step after the mount. Measured on the real
+        // node; see `launcher::pod_host_users`.
         host_users: pod_host_users(config.cgroup_launcher_mode),
         // v1 leases security contract (qut0). The per-container securityContexts
         // set the UIDs now (worker=1000, launcher=0); the pod context ties
@@ -3756,8 +3756,10 @@ mod tests {
             "only the launcher may see the cgroup mountpoint"
         );
 
-        // User namespaces confine the launcher's bootstrap CAP_SYS_ADMIN.
-        assert_eq!(armed.host_users, Some(false));
+        // NOT user-namespaced: `hostUsers: false` leaves the launcher's own
+        // cgroup owned by an unmapped uid, which breaks the delegation one step
+        // after the mount. See `launcher::pod_host_users`.
+        assert_eq!(armed.host_users, None);
     }
 
     /// AC1: distinct worker/child UIDs, artifact GID, fsGroup/setgid ownership,

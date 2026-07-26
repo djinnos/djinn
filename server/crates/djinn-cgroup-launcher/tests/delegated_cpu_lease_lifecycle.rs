@@ -144,7 +144,7 @@ fn assert_rendered_required_job_contract() {
     let contract = rendered_contract();
     for (key, expected) in [
         ("seccomp_profile", "RuntimeDefault"),
-        ("launcher_host_users", "false"),
+        ("launcher_apparmor_profile", "Unconfined"),
         ("worker_allow_privilege_escalation", "false"),
         ("launcher_allow_privilege_escalation", "false"),
         ("launcher_capabilities_drop", "ALL"),

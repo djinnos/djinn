@@ -64,20 +64,28 @@ buildAdmission:
 #
 #   required  (default) — render the cgroup-launcher sidecar. The launcher
 #                         establishes its own delegated cgroup v2 root at
-#                         startup, which needs `SYS_ADMIN` for the duration of
-#                         that bootstrap; it drops the capability irreversibly
-#                         before the broker accepts any work, and the pod runs
-#                         with `hostUsers: false` so even that window is inside
-#                         a user namespace.
+#                         startup, which needs `SYS_ADMIN` plus an AppArmor
+#                         opt-out for the duration of that bootstrap; it drops
+#                         the capability irreversibly out of its bounding set
+#                         before the broker accepts any work, which is the only
+#                         layer under it and is verified at runtime.
 #   disabled            — explicit local/development compatibility: no sidecar,
 #                         cgroup leaf, or lease; shell commands run in-process
 #                         at the pod's own quota.
 #
 # Requires a cgroup-v2 node whose kubelet offers the `cpu` controller to
-# container cgroups, and (for `hostUsers: false`) a runtime with user-namespace
-# support — Kubernetes 1.33+. Every precondition fails CLOSED: an unusable
-# render is refused at dispatch before a Job is submitted, and a launcher that
-# cannot establish its delegation exits non-zero before binding its socket.
+# container cgroups. The launcher container is rendered with
+# `appArmorProfile: Unconfined`, because the container runtime's default
+# AppArmor profile carries a flat `deny mount,` and denies the launcher's
+# `mount(2)` with EACCES even though CAP_SYS_ADMIN is held — that is what took
+# v0.7.5 down on its first armed task pod. The opt-out is scoped to that one
+# container; seccomp stays RuntimeDefault, and the pod is deliberately NOT
+# user-namespaced (`hostUsers: false` leaves the launcher's own cgroup owned by
+# an unmapped uid, which breaks the delegation one step after the mount).
+#
+# Every precondition fails CLOSED: an unusable render is refused at dispatch
+# before a Job is submitted, and a launcher that cannot establish its delegation
+# exits non-zero before binding its socket.
 cgroupLauncher:
   # Production task-runs must use the brokered invocation-leaf path. Set this
   # explicitly to `disabled` only for local/development environments where the

@@ -29,7 +29,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use k8s_openapi::api::core::v1::{
-    Capabilities, Container, EmptyDirVolumeSource, EnvVar, PodSecurityContext,
+    AppArmorProfile, Capabilities, Container, EmptyDirVolumeSource, EnvVar, PodSecurityContext,
     ResourceRequirements, SeccompProfile, SecurityContext, Volume, VolumeMount,
 };
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
@@ -171,10 +171,18 @@ pub const LAUNCHER_CGROUP_ROOT: &str = "/run/djinn-cgroup";
 ///   placement, and only then releases the child to `execve`. `fork(2)` and
 ///   `write(2)` are not intercepted by any profile in use, so goxi's "allowlist
 ///   for cgroup setup and clone3" needs no `Localhost` profile — which matters,
-///   because no seccomp delivery mechanism exists in the deployment repo.
-/// * [`VOLUME_LAUNCHER_CGROUP`] supplies the writable mountpoint (not the
-///   delegation), and [`pod_host_users`] confines the capability window to a user
-///   namespace.
+///   because no seccomp delivery mechanism exists in the deployment repo. This
+///   was measured, not assumed: `seccompProfile: Unconfined` does **not** unblock
+///   the mount.
+/// * `appArmorProfile: Unconfined` on the launcher container is what does. The
+///   runtime's default AppArmor profile carries a flat `deny mount,` and denies
+///   with `EACCES` — the errno that took v0.7.5 down on its first task pod. See
+///   [`launcher_security_context`] for the one-variable-at-a-time evidence and an
+///   honest account of the confinement this gives up.
+/// * [`VOLUME_LAUNCHER_CGROUP`] supplies the writable mountpoint, not the
+///   delegation. [`pod_host_users`] is deliberately unset: a user namespace
+///   leaves the launcher's own cgroup owned by an unmapped uid, which breaks the
+///   delegation one step after the mount.
 ///
 /// A `hostPath` onto a node subtree is still NOT the route: the pod's private
 /// cgroup namespace is mounted `nsdelegate`, so a target outside that namespace
@@ -371,6 +379,60 @@ pub const LAUNCHER_BOOTSTRAP_ONLY_CAPABILITIES: &[&str] = &["SYS_ADMIN", "SYS_RE
 /// (`child::prepare_child`); `allowPrivilegeEscalation: false` here matches that
 /// intent for the launcher process itself (dropping to the child uid still works
 /// under NNP).
+///
+/// # Why `appArmorProfile: Unconfined` (task 22rj follow-up, v0.7.5 rollback)
+///
+/// Arming the launcher in production failed on the very first task pod with
+/// `mount(2)` returning **errno 13 (EACCES)** while `CAP_SYS_ADMIN` was
+/// demonstrably present (`CapEff: 00000000012001c0`). The capability was never
+/// what was missing.
+///
+/// Measured on the production node (Ubuntu 24.04, k3s v1.35.5, cgroup v2), one
+/// variable at a time, with the rest of this security context held fixed:
+///
+/// | variant                                     | `mount("cgroup2", ...)` |
+/// |---------------------------------------------|-------------------------|
+/// | baseline (RuntimeDefault seccomp, default AppArmor) | `EACCES`        |
+/// | `seccompProfile: Unconfined`                | **still `EACCES`**      |
+/// | `appArmorProfile: Unconfined`               | **succeeds**            |
+///
+/// containerd applies its built-in `cri-containerd.apparmor.d` profile to every
+/// container that does not opt out, and that profile contains a flat
+/// `deny mount,`. AppArmor's `sb_mount` hook denies with `EACCES`, which is
+/// exactly the errno observed; seccomp denies with `EPERM` and in any case the
+/// runtime default permits `mount` once `CAP_SYS_ADMIN` is held. Note that the
+/// denial leaves **no audit record**: AppArmor `deny` rules are silent unless
+/// written `audit deny`, so an empty `dmesg | grep DENIED` is not evidence of
+/// absence — the isolation table above is the evidence.
+///
+/// So goxi's "clone3 seccomp allowlist" was aimed at the wrong axis, and task
+/// 22rj's "RuntimeDefault seccomp" acceptance criterion is not wrong in value —
+/// `RuntimeDefault` genuinely is correct and is retained here — it is simply
+/// irrelevant to the failure. Neither contract mentioned AppArmor at all.
+///
+/// ## What this gives up, honestly
+///
+/// The container runtime's default AppArmor confinement on this one container:
+/// principally `deny mount,` (which is the point) and the profile's write denials
+/// on `/proc/sys/**`, `/sys/**`, `/proc/sysrq-trigger` and
+/// `/proc/kernel/core_pattern`. During the bootstrap window this process
+/// therefore holds a genuinely unconfined `CAP_SYS_ADMIN`.
+///
+/// That window is bounded by construction and the bound is asserted, not
+/// asserted-about: `bootstrap::run` mounts, vacates, delegates and then
+/// `capset`s `CAP_SYS_ADMIN`/`CAP_SYS_RESOURCE` out of the permitted, effective,
+/// inheritable **and bounding** sets before the broker binds its socket. No
+/// user-controlled code executes while the capability is held — the only code
+/// running is that function. Verified on the node against the real launcher
+/// binary: once the container reaches `Running`, `/proc/1/status` reports
+/// `CapEff: 00000000000001c0` and `CapBnd: 00000000000001c0` — `SETUID`,
+/// `SETGID`, `SETPCAP` and nothing more.
+///
+/// A `Localhost` profile allowing only `mount fstype=cgroup2` would be tighter,
+/// but it must be preloaded on every node before the pod starts and the deploy
+/// repo has no mechanism to place one; a missing profile fails the pod closed,
+/// which is precisely the outage this is fixing. That hardening is a follow-up,
+/// not a prerequisite.
 pub fn launcher_security_context() -> SecurityContext {
     SecurityContext {
         run_as_user: Some(LAUNCHER_UID),
@@ -380,7 +442,18 @@ pub fn launcher_security_context() -> SecurityContext {
         read_only_root_filesystem: Some(true),
         capabilities: Some(launcher_capabilities()),
         seccomp_profile: Some(runtime_default_seccomp()),
+        app_armor_profile: Some(unconfined_apparmor()),
         ..SecurityContext::default()
+    }
+}
+
+/// The `Unconfined` AppArmor profile the launcher container needs so `mount(2)`
+/// is reachable at all. See [`launcher_security_context`] for the measurement
+/// that establishes this is the axis that actually blocks the mount.
+fn unconfined_apparmor() -> AppArmorProfile {
+    AppArmorProfile {
+        type_: "Unconfined".to_string(),
+        ..AppArmorProfile::default()
     }
 }
 
@@ -470,26 +543,47 @@ pub fn launcher_cgroup_mount() -> VolumeMount {
     }
 }
 
-/// Whether the Pod runs in a user namespace.
+/// Whether the Pod runs in a user namespace. Always [`None`] — read below
+/// before setting this to `Some(false)` again.
 ///
-/// `hostUsers: false` (user namespaces, GA since Kubernetes 1.33) maps the
-/// launcher's bootstrap `CAP_SYS_ADMIN` into a user namespace, where the
-/// non-namespaced sysctls that make it an escape primitive —
-/// `/proc/sys/kernel/core_pattern` above all — are unreachable. It is the second
-/// layer under the launcher's own `capset` drop, not a replacement for it.
+/// # `hostUsers: false` breaks the delegated cgroup root (v0.7.5 rollback)
 ///
-/// Only meaningful when the launcher is armed: without the sidecar no container
-/// in the pod holds a capability worth confining, and `hostUsers: false` has a
-/// real cost (idmapped volume mounts, a runtime that must support it), so it is
-/// not imposed on the default rendering.
+/// This previously returned `Some(false)` whenever the launcher was armed, on
+/// the reasoning that a user namespace maps the bootstrap `CAP_SYS_ADMIN` away
+/// from the non-namespaced sysctls that make it an escape primitive. That
+/// reasoning is sound, but the setting carried a doc comment reading "NOT
+/// VERIFIED ON A NON-NESTED NODE" — kind-in-docker cannot nest user namespaces,
+/// so it had never once been exercised. It does not work.
 ///
-/// NOT VERIFIED ON A NON-NESTED NODE. kind-in-docker cannot nest user
-/// namespaces — sandbox creation fails mounting sysfs — so this could not be
-/// exercised locally. Both failure modes are fail-closed: a runtime that does
-/// not support it refuses the Pod, and a user namespace that broke the cgroup
-/// chain would fail the launcher's startup readiness before the broker binds.
-pub fn pod_host_users(mode: CgroupLauncherMode) -> Option<bool> {
-    mode.renders_sidecar().then_some(false)
+/// Measured on the production node against the real launcher binary, with
+/// `appArmorProfile: Unconfined` already applied so the mount itself succeeds,
+/// varying only this field:
+///
+/// | `hostUsers` | outcome                                                        |
+/// |-------------|----------------------------------------------------------------|
+/// | `false`     | mount succeeds, then `mkdir` of the `init` leaf fails `EACCES`  |
+/// | unset       | full bootstrap: mount, vacate, `+cpu` delegation, capability drop |
+///
+/// The cause is not fixable from the manifest. Kubernetes user namespaces
+/// (KEP-127) do **not** delegate the container's cgroup to the mapped user: the
+/// cgroup directory stays owned by real host `root`, which is unmapped inside
+/// the pod's user namespace. The launcher's own root therefore appears owned by
+/// an unmapped uid and is unwritable, so `vacate_root` cannot create the `init`
+/// holding leaf and `delegate_cpu` never runs. The container cannot chown its
+/// way out — the inode owner is precisely what is unmapped.
+///
+/// The confinement this gives up is real and is stated plainly in
+/// [`launcher_security_context`]: the bootstrap `CAP_SYS_ADMIN` is a host
+/// capability for the duration of the mount. It is bounded by the launcher's own
+/// irreversible `capset` drop before the broker binds, which is asserted against
+/// `/proc/1/status` on the real node rather than assumed. Note this is not a
+/// regression against the pod as it actually shipped: before goxi was armed the
+/// launcher was `Disabled` and this field was already unset.
+///
+/// Kept as a named function rather than deleted so the reasoning has somewhere
+/// to live and the render guard has one thing to assert.
+pub fn pod_host_users(_mode: CgroupLauncherMode) -> Option<bool> {
+    None
 }
 
 /// Worker-side mount of the IPC volume so the worker can dial the broker socket
@@ -827,10 +921,30 @@ pub fn validate_enforcement_render(config: &KubernetesConfig) -> Result<(), Rend
                          clamps every invocation leaf to it and makes the lease a no-op",
             });
         }
-        if pod_host_users(config.cgroup_launcher_mode) != Some(false) {
+        // A user namespace leaves the launcher's own cgroup owned by an unmapped
+        // uid, so the init leaf cannot be created and the delegation never
+        // happens. Measured on the real node; see `pod_host_users`.
+        if pod_host_users(config.cgroup_launcher_mode) == Some(false) {
             return Err(RenderValidationError::ArmedRenderCannotDelegate {
-                reason: "the pod does not set hostUsers: false, so the launcher's bootstrap \
-                         CAP_SYS_ADMIN would be a host-level capability",
+                reason: "the pod sets hostUsers: false, which leaves the launcher's own cgroup \
+                         owned by an uid unmapped inside the user namespace, so the delegated \
+                         root cannot be written",
+            });
+        }
+        // The container runtime's default AppArmor profile carries a flat
+        // `deny mount,` and denies with EACCES. Without opting out, the
+        // launcher's first syscall fails and the pod fails closed. This is
+        // defect 2, asserted on the render rather than trusted.
+        let apparmor_unconfined = container
+            .security_context
+            .as_ref()
+            .and_then(|context| context.app_armor_profile.as_ref())
+            .is_some_and(|profile| profile.type_ == "Unconfined");
+        if !apparmor_unconfined {
+            return Err(RenderValidationError::ArmedRenderCannotDelegate {
+                reason: "the launcher container does not set appArmorProfile: Unconfined, so the \
+                         runtime's default profile denies mount(2) with EACCES and the delegated \
+                         root is never established",
             });
         }
         // 5. The lease must map onto a quota the launcher crate accepts, or a
