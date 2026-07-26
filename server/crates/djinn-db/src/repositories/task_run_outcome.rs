@@ -118,7 +118,24 @@ impl TaskRunOutcomeRepository {
                 .map_err(|_| DbError::InvalidData("dispatch_group_id must be a UUID".to_owned()))?;
         }
         let mut tx = self.db.pool().begin().await?;
-        sqlx::query("INSERT INTO task_runs (id, project_id, task_id, trigger_type, status, workspace_path, mirror_ref, dispatch_group_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)")
+        // Catalog authorization is bound at dispatch, never re-selected from a
+        // mutable project at read time. This per-attempt insert must therefore
+        // bind `catalog_image_id` with exactly the same semantics as
+        // [`crate::repositories::task_run::TaskRunRepository::create`]: the
+        // project's currently selected image, snapshotted inside this
+        // transaction so a rolled-back run leaves no partial binding. Omitting
+        // it left every real dispatch with a NULL binding, which fails the
+        // final-verification completion boundary closed.
+        //
+        // Runtime query (not the macro): `catalog_image_id` evolves with the
+        // task-run schema and must not require regenerating sqlx offline
+        // metadata.
+        sqlx::query(
+            "INSERT INTO task_runs
+                (id, project_id, task_id, trigger_type, status, workspace_path, mirror_ref, dispatch_group_id, catalog_image_id)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8,
+                (SELECT selected_image_id FROM projects WHERE id = $2))",
+        )
             .bind(params.id).bind(params.project_id).bind(params.task_id).bind(params.trigger_type)
             .bind(status).bind(params.workspace_path).bind(params.mirror_ref).bind(params.dispatch_group_id).execute(&mut *tx).await?;
         let attempt: Option<(String, Option<String>, i32)> = sqlx::query_as(
@@ -637,6 +654,193 @@ mod tests {
             Some("not_applicable")
         );
         assert_eq!(no_review_fact.merge_queue_result.as_deref(), Some("passed"));
+    }
+
+    /// Production-incident regression: `create_run_for_attempt` is the insert
+    /// every real dispatch takes, and it omitted `catalog_image_id`. Every
+    /// dispatched run therefore reached the final-verification completion
+    /// boundary with a NULL binding and hard-failed with `task run has no
+    /// bound catalog image`, so no work could be submitted while a project had
+    /// a non-empty `final_verification` plan. The binding must match
+    /// [`crate::repositories::task_run::TaskRunRepository::create`] exactly:
+    /// the project's currently selected catalog image, snapshotted at insert.
+    #[tokio::test]
+    async fn per_attempt_run_creation_binds_the_projects_selected_catalog_image() {
+        let db = Database::open_in_memory().unwrap();
+        let (project_id, task_id) = create_task(&db).await;
+
+        let images = crate::repositories::image::ImageRepository::new(db.clone());
+        let image_id = format!(
+            "catalog-{}",
+            &uuid::Uuid::now_v7().simple().to_string()[..16]
+        );
+        images
+            .create(&image_id, "rust-node", None, "{}")
+            .await
+            .expect("register catalog image");
+        images
+            .set_project_image(&project_id, Some(&image_id))
+            .await
+            .expect("select catalog image for project");
+
+        let attempt = TaskAttemptRepository::new(db.clone())
+            .create_or_get_pending(CreateTaskAttemptParams {
+                id: &uuid::Uuid::now_v7().to_string(),
+                task_id: &task_id,
+                role: "worker",
+                dispatch_key: "catalog-binding-at-dispatch",
+                session_id: None,
+                attempt_seq: None,
+                dispatch_owner_incarnation_id: None,
+                dispatch_group_id: None,
+            })
+            .await
+            .expect("allocate exact attempt");
+
+        let run_id = uuid::Uuid::now_v7().to_string();
+        TaskRunOutcomeRepository::new(db.clone())
+            .create_run_for_attempt(
+                CreateTaskRunParams {
+                    id: &run_id,
+                    project_id: &project_id,
+                    task_id: &task_id,
+                    trigger_type: TaskRunTrigger::NewTask.as_str(),
+                    status: None,
+                    workspace_path: None,
+                    mirror_ref: None,
+                    dispatch_group_id: None,
+                },
+                &attempt.id,
+            )
+            .await
+            .expect("per-attempt dispatch insert");
+
+        let runs = crate::repositories::task_run::TaskRunRepository::new(db.clone());
+        assert_eq!(
+            runs.catalog_image_id(&run_id)
+                .await
+                .expect("read dispatch-bound catalog image")
+                .as_deref(),
+            Some(image_id.as_str()),
+            "the per-attempt dispatch insert must bind the project's selected catalog image"
+        );
+
+        // Negative control: the value is read from `projects.selected_image_id`
+        // at insert time, not inherited from a sibling run. With the selection
+        // cleared there is nothing to bind and the insert must not invent one —
+        // NULL stays the honest legacy/non-catalog marker the completion
+        // boundary fails closed on.
+        images
+            .set_project_image(&project_id, None)
+            .await
+            .expect("clear catalog selection");
+        let unselected_run_id = {
+            let attempt = TaskAttemptRepository::new(db.clone())
+                .create_or_get_pending(CreateTaskAttemptParams {
+                    id: &uuid::Uuid::now_v7().to_string(),
+                    task_id: &task_id,
+                    role: "worker",
+                    dispatch_key: "catalog-binding-unselected",
+                    session_id: None,
+                    attempt_seq: None,
+                    dispatch_owner_incarnation_id: None,
+                    dispatch_group_id: None,
+                })
+                .await
+                .expect("allocate exact attempt");
+            let run_id = uuid::Uuid::now_v7().to_string();
+            TaskRunOutcomeRepository::new(db.clone())
+                .create_run_for_attempt(
+                    CreateTaskRunParams {
+                        id: &run_id,
+                        project_id: &project_id,
+                        task_id: &task_id,
+                        trigger_type: TaskRunTrigger::NewTask.as_str(),
+                        status: None,
+                        workspace_path: None,
+                        mirror_ref: None,
+                        dispatch_group_id: None,
+                    },
+                    &attempt.id,
+                )
+                .await
+                .expect("per-attempt dispatch insert without a project selection");
+            run_id
+        };
+        assert_eq!(
+            runs.catalog_image_id(&unselected_run_id)
+                .await
+                .expect("read dispatch-bound catalog image"),
+            None,
+            "a project with no catalog selection must bind nothing"
+        );
+    }
+
+    /// The binding is snapshotted inside the same transaction as the attempt
+    /// association, so a rejected association leaves no partially bound run
+    /// behind for a later retry to inherit.
+    #[tokio::test]
+    async fn a_rejected_attempt_association_leaves_no_bound_run_behind() {
+        let db = Database::open_in_memory().unwrap();
+        let (project_id, task_id) = create_task(&db).await;
+        let (_other_project_id, other_task_id) = create_task(&db).await;
+
+        let images = crate::repositories::image::ImageRepository::new(db.clone());
+        let image_id = format!(
+            "catalog-{}",
+            &uuid::Uuid::now_v7().simple().to_string()[..16]
+        );
+        images
+            .create(&image_id, "rollback", None, "{}")
+            .await
+            .unwrap();
+        images
+            .set_project_image(&project_id, Some(&image_id))
+            .await
+            .unwrap();
+
+        // An attempt belonging to a different task contradicts the run's task,
+        // which is rejected after the run row was inserted in this transaction.
+        let foreign_attempt = TaskAttemptRepository::new(db.clone())
+            .create_or_get_pending(CreateTaskAttemptParams {
+                id: &uuid::Uuid::now_v7().to_string(),
+                task_id: &other_task_id,
+                role: "worker",
+                dispatch_key: "catalog-binding-rollback",
+                session_id: None,
+                attempt_seq: None,
+                dispatch_owner_incarnation_id: None,
+                dispatch_group_id: None,
+            })
+            .await
+            .unwrap();
+
+        let run_id = uuid::Uuid::now_v7().to_string();
+        TaskRunOutcomeRepository::new(db.clone())
+            .create_run_for_attempt(
+                CreateTaskRunParams {
+                    id: &run_id,
+                    project_id: &project_id,
+                    task_id: &task_id,
+                    trigger_type: TaskRunTrigger::NewTask.as_str(),
+                    status: None,
+                    workspace_path: None,
+                    mirror_ref: None,
+                    dispatch_group_id: None,
+                },
+                &foreign_attempt.id,
+            )
+            .await
+            .expect_err("a contradictory attempt association must be rejected");
+
+        assert!(
+            crate::repositories::task_run::TaskRunRepository::new(db)
+                .get(&run_id)
+                .await
+                .expect("read rolled-back run")
+                .is_none(),
+            "the rejected transaction must leave no task-run row, bound or otherwise"
+        );
     }
 }
 
