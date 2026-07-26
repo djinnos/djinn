@@ -85,7 +85,11 @@ pub struct BuildLeaseRow {
     pub enqueue_sequence: i64,
     pub fencing_token: Option<i64>,
     pub state: BuildLeaseState,
+    /// RFC3339 UTC with millisecond precision, rendered by the shared column
+    /// list. `None` means the row carries no deadline at all.
     pub queue_deadline: Option<String>,
+    /// RFC3339 UTC with millisecond precision, rendered by the shared column
+    /// list. `None` means the row carries no deadline at all.
     pub launch_deadline: Option<String>,
     pub bound_pod_uid: Option<String>,
     pub candidate_cleanup: Option<serde_json::Value>,
@@ -555,7 +559,29 @@ impl BuildLeaseRepository {
     }
 }
 
-const COLS: &str = "consumer_kind,consumer_id,immutable_identity,enqueue_sequence,fencing_token,state,queue_deadline::text,launch_deadline::text,bound_pod_uid,candidate_cleanup,terminal_reason,timeout_credit_consumed,created_at::text,updated_at::text,granted_at::text,terminal_at::text";
+/// The single projection every read and `RETURNING` clause of this repository
+/// uses.
+///
+/// Every `timestamptz` is rendered as RFC3339 in UTC with millisecond
+/// precision, which is the *only* timestamp representation this repository
+/// emits or accepts: callers bind RFC3339 in (`$n::timestamptz`) and read
+/// RFC3339 back out, so one parser round-trips the values.
+///
+/// A plain `::text` cast would instead yield PostgreSQL's own output format
+/// (`2026-07-25 20:30:00+00`, space-separated, no `T`). That is not RFC3339,
+/// and the coordinator's `build_lease::ms` — the sole reader of the echoed
+/// deadlines — parses RFC3339 and maps a parse failure to `0`. Since `0` is
+/// itself meaningful in that contract ("no deadline"), the cast silently turned
+/// every real deadline into "unbounded" on the way out. Keep the rendering
+/// here; do not add a second parser on the Rust side.
+const COLS: &str = "consumer_kind,consumer_id,immutable_identity,enqueue_sequence,fencing_token,state,\
+    to_char(queue_deadline AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS queue_deadline,\
+    to_char(launch_deadline AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS launch_deadline,\
+    bound_pod_uid,candidate_cleanup,terminal_reason,timeout_credit_consumed,\
+    to_char(created_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS created_at,\
+    to_char(updated_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS updated_at,\
+    to_char(granted_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS granted_at,\
+    to_char(terminal_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS terminal_at";
 #[derive(sqlx::FromRow)]
 struct DbRow {
     consumer_kind: String,

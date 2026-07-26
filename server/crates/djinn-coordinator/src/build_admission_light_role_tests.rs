@@ -1,10 +1,14 @@
-//! Light (orchestration-only) task-run roles must never consume a build slot.
+//! Light task-run roles must never be pre-charged a build slot at dispatch.
 //!
 //! Task `h1yv` (folded into `7deu`). The production cap is 3 concurrent build
 //! task-runs on a 12-vCPU node. Planners, Reviewers, Leads and the refinement
-//! tribunal (Advocate/Adversary/Judge) never run the project's compile/test
-//! toolchain, so charging them a slot would queue them behind builds they never
-//! compete with and collapse throughput.
+//! tribunal (Advocate/Adversary/Judge) are *unlikely* to run the project's
+//! compile/test toolchain — measured at 5.5% of light sessions — so charging
+//! them a slot 100% of the time would queue them behind builds they almost
+//! never compete with and collapse throughput. This is a dispatch-admission
+//! prior, not a capability boundary: the minority that do compile are governed
+//! by the measured, role-agnostic invocation lease. See
+//! [`djinn_runtime::RoleResourceClass`].
 //!
 //! These tests are deterministic: an in-memory journal, an explicit cap, and
 //! durable occupancy read back from the journal rather than inferred.
