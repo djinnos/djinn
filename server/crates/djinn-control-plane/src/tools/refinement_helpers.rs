@@ -654,8 +654,8 @@ pub async fn build_refinement_status(
                 ["reason_tag", "stop_reason", "reason"]
                     .iter()
                     .find_map(|key| metadata.get(key).and_then(|value| value.as_str()))
+                    .map(str::to_owned)
             })
-            .map(str::to_owned)
     });
     let stop_reason = exact
         .as_ref()

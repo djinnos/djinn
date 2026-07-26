@@ -20775,8 +20775,38 @@ expression: signatures
               "$ref": "#/$defs/EvidenceLifecycleState",
               "description": "Top-level evidence lifecycle state derived from durable proposal\nfields, lifecycle events, and linked-spike task status. Lets\ndownstream consumers distinguish Active, AwaitingEvidence,\nEvidenceFailed, PausedOrFrozen, and Terminal without inspecting\nindividual sub-fields."
             },
+            "generation": {
+              "description": "Durable generation that fences the observed run.",
+              "format": "int32",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
             "judge_summary": {
               "description": "The judge's summary shown alongside the accept/reject review.\n`None` unless `awaiting_review` is true.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "last_heartbeat_at": {
+              "description": "Last durable heartbeat in DB Unix milliseconds, when present.",
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "liveness": {
+              "description": "Shared exact-run liveness result (`live`, `stale`, or `terminal`).",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "liveness_evidence": {
+              "description": "Bounded discriminator for evidence selected by the shared evaluator.",
               "type": [
                 "string",
                 "null"
@@ -20792,6 +20822,20 @@ expression: signatures
                 }
               ],
               "description": "When the proposal is parked for a needs-evidence spike, this contains\nthe claim and spike task reference. `None` when not parked."
+            },
+            "run_id": {
+              "description": "Durable identity of the exact refinement run observed for this status.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "run_state": {
+              "description": "Durable run state (`active`, `parked`, or `terminal`).",
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "snapshot_revision_seq": {
               "description": "The pre-refinement snapshot revision seq (the diff baseline) when\n`awaiting_review` is true.",
@@ -21144,8 +21188,38 @@ expression: signatures
               "$ref": "#/$defs/EvidenceLifecycleState",
               "description": "Top-level evidence lifecycle state derived from durable proposal\nfields, lifecycle events, and linked-spike task status. Lets\ndownstream consumers distinguish Active, AwaitingEvidence,\nEvidenceFailed, PausedOrFrozen, and Terminal without inspecting\nindividual sub-fields."
             },
+            "generation": {
+              "description": "Durable generation that fences the observed run.",
+              "format": "int32",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
             "judge_summary": {
               "description": "The judge's summary shown alongside the accept/reject review.\n`None` unless `awaiting_review` is true.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "last_heartbeat_at": {
+              "description": "Last durable heartbeat in DB Unix milliseconds, when present.",
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "liveness": {
+              "description": "Shared exact-run liveness result (`live`, `stale`, or `terminal`).",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "liveness_evidence": {
+              "description": "Bounded discriminator for evidence selected by the shared evaluator.",
               "type": [
                 "string",
                 "null"
@@ -21161,6 +21235,20 @@ expression: signatures
                 }
               ],
               "description": "When the proposal is parked for a needs-evidence spike, this contains\nthe claim and spike task reference. `None` when not parked."
+            },
+            "run_id": {
+              "description": "Durable identity of the exact refinement run observed for this status.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "run_state": {
+              "description": "Durable run state (`active`, `parked`, or `terminal`).",
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "snapshot_revision_seq": {
               "description": "The pre-refinement snapshot revision seq (the diff baseline) when\n`awaiting_review` is true.",
@@ -21431,8 +21519,38 @@ expression: signatures
               "$ref": "#/$defs/EvidenceLifecycleState",
               "description": "Top-level evidence lifecycle state derived from durable proposal\nfields, lifecycle events, and linked-spike task status. Lets\ndownstream consumers distinguish Active, AwaitingEvidence,\nEvidenceFailed, PausedOrFrozen, and Terminal without inspecting\nindividual sub-fields."
             },
+            "generation": {
+              "description": "Durable generation that fences the observed run.",
+              "format": "int32",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
             "judge_summary": {
               "description": "The judge's summary shown alongside the accept/reject review.\n`None` unless `awaiting_review` is true.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "last_heartbeat_at": {
+              "description": "Last durable heartbeat in DB Unix milliseconds, when present.",
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "liveness": {
+              "description": "Shared exact-run liveness result (`live`, `stale`, or `terminal`).",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "liveness_evidence": {
+              "description": "Bounded discriminator for evidence selected by the shared evaluator.",
               "type": [
                 "string",
                 "null"
@@ -21448,6 +21566,20 @@ expression: signatures
                 }
               ],
               "description": "When the proposal is parked for a needs-evidence spike, this contains\nthe claim and spike task reference. `None` when not parked."
+            },
+            "run_id": {
+              "description": "Durable identity of the exact refinement run observed for this status.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "run_state": {
+              "description": "Durable run state (`active`, `parked`, or `terminal`).",
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "snapshot_revision_seq": {
               "description": "The pre-refinement snapshot revision seq (the diff baseline) when\n`awaiting_review` is true.",
@@ -22384,8 +22516,38 @@ expression: signatures
               "$ref": "#/$defs/EvidenceLifecycleState",
               "description": "Top-level evidence lifecycle state derived from durable proposal\nfields, lifecycle events, and linked-spike task status. Lets\ndownstream consumers distinguish Active, AwaitingEvidence,\nEvidenceFailed, PausedOrFrozen, and Terminal without inspecting\nindividual sub-fields."
             },
+            "generation": {
+              "description": "Durable generation that fences the observed run.",
+              "format": "int32",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
             "judge_summary": {
               "description": "The judge's summary shown alongside the accept/reject review.\n`None` unless `awaiting_review` is true.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "last_heartbeat_at": {
+              "description": "Last durable heartbeat in DB Unix milliseconds, when present.",
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "liveness": {
+              "description": "Shared exact-run liveness result (`live`, `stale`, or `terminal`).",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "liveness_evidence": {
+              "description": "Bounded discriminator for evidence selected by the shared evaluator.",
               "type": [
                 "string",
                 "null"
@@ -22401,6 +22563,20 @@ expression: signatures
                 }
               ],
               "description": "When the proposal is parked for a needs-evidence spike, this contains\nthe claim and spike task reference. `None` when not parked."
+            },
+            "run_id": {
+              "description": "Durable identity of the exact refinement run observed for this status.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "run_state": {
+              "description": "Durable run state (`active`, `parked`, or `terminal`).",
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "snapshot_revision_seq": {
               "description": "The pre-refinement snapshot revision seq (the diff baseline) when\n`awaiting_review` is true.",

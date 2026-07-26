@@ -5,6 +5,36 @@
         (DjinnMcpServer::new(test_mcp_state(db.clone())), db)
     }
 
+    /// Terminal status assertions must use the durable run transition, rather
+    /// than a legacy display-only lifecycle stop.
+    async fn terminalize_started_run(
+        repo: &ProposalRepository,
+        proposal_id: &str,
+        reason: djinn_core::refinement_liveness::RefinementStopReason,
+    ) {
+        let runs = repo
+            .load_refinement_run_aggregates(proposal_id, 60_000)
+            .await
+            .unwrap();
+        assert_eq!(runs.len(), 1, "start must admit exactly one exact run");
+        let run = &runs[0];
+        assert!(repo
+            .terminal_refinement_run(djinn_db::TerminalRefinementRunRequest {
+                run_id: run.run_id.clone(),
+                generation: run.generation,
+                reason,
+            })
+            .await
+            .unwrap());
+    }
+
+    fn assert_terminal_refinement(refinement: &serde_json::Value, expected_stop_tag: &str) {
+        assert_eq!(refinement["active"], false);
+        assert_eq!(refinement["run_state"], "terminal");
+        assert_eq!(refinement["liveness"], "terminal");
+        assert_eq!(refinement["stop_reason"], expected_stop_tag);
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn refinement_start_creates_lifecycle_event() {
         let (server, db) = test_server().await;
@@ -361,15 +391,13 @@
             .await
             .unwrap();
 
-        // 6. Record refinement_stop lifecycle to simulate coordinator stop.
-        let stop_metadata = serde_json::json!({
-            "source": "refinement_loop",
-            "event": "refinement_stop",
-            "reason_tag": "adversary_dry",
-        });
-        repo.record_refinement_lifecycle(&proposal.id, "refinement_stop", Some(&stop_metadata))
-            .await
-            .unwrap();
+        // 6. The coordinator terminalizes the exact admitted run.
+        terminalize_started_run(
+            &repo,
+            &proposal.id,
+            djinn_core::refinement_liveness::RefinementStopReason::AdversaryDry,
+        )
+        .await;
 
         // 7. Verify refinement status shows stopped with adversary_dry.
         let status_resp = server
@@ -380,6 +408,7 @@
             .await
             .unwrap();
         let refinement = status_resp.get("refinement").unwrap();
+        assert_terminal_refinement(refinement, "adversary_dry");
         assert_eq!(
             refinement.get("active").and_then(|v| v.as_bool()),
             Some(false)
@@ -435,16 +464,12 @@
             .await
             .unwrap();
 
-        // Simulate coordinator recording a round_cap stop.
-        let stop_metadata = serde_json::json!({
-            "source": "refinement_loop",
-            "event": "refinement_stop",
-            "reason_tag": "round_cap",
-            "reason_detail": "RoundCap",
-        });
-        repo.record_refinement_lifecycle(&proposal.id, "refinement_stop", Some(&stop_metadata))
-            .await
-            .unwrap();
+        terminalize_started_run(
+            &repo,
+            &proposal.id,
+            djinn_core::refinement_liveness::RefinementStopReason::RoundCap,
+        )
+        .await;
 
         let status_resp = server
             .dispatch_tool(
@@ -454,6 +479,7 @@
             .await
             .unwrap();
         let refinement = status_resp.get("refinement").unwrap();
+        assert_terminal_refinement(refinement, "round_cap");
         assert_eq!(
             refinement.get("active").and_then(|v| v.as_bool()),
             Some(false)
@@ -490,14 +516,12 @@
             .await
             .unwrap();
 
-        let stop_metadata = serde_json::json!({
-            "source": "refinement_loop",
-            "event": "refinement_stop",
-            "reason_tag": "spawn_cap",
-        });
-        repo.record_refinement_lifecycle(&proposal.id, "refinement_stop", Some(&stop_metadata))
-            .await
-            .unwrap();
+        terminalize_started_run(
+            &repo,
+            &proposal.id,
+            djinn_core::refinement_liveness::RefinementStopReason::SpawnCap,
+        )
+        .await;
 
         let status_resp = server
             .dispatch_tool(
@@ -507,6 +531,7 @@
             .await
             .unwrap();
         let refinement = status_resp.get("refinement").unwrap();
+        assert_terminal_refinement(refinement, "spawn_cap");
         assert_eq!(
             refinement.get("stop_reason").and_then(|v| v.as_str()),
             Some("spawn_cap")
@@ -539,14 +564,15 @@
             .await
             .unwrap();
 
-        let stop_metadata = serde_json::json!({
-            "source": "refinement_loop",
-            "event": "refinement_stop",
-            "reason_tag": "repeated_objection",
-        });
-        repo.record_refinement_lifecycle(&proposal.id, "refinement_stop", Some(&stop_metadata))
-            .await
-            .unwrap();
+        terminalize_started_run(
+            &repo,
+            &proposal.id,
+            djinn_core::refinement_liveness::RefinementStopReason::RepeatedObjection {
+                signature: "same objection".into(),
+                occurrences: 2,
+            },
+        )
+        .await;
 
         let status_resp = server
             .dispatch_tool(
@@ -556,6 +582,7 @@
             .await
             .unwrap();
         let refinement = status_resp.get("refinement").unwrap();
+        assert_terminal_refinement(refinement, "repeated_objection");
         assert_eq!(
             refinement.get("stop_reason").and_then(|v| v.as_str()),
             Some("repeated_objection")
@@ -588,14 +615,16 @@
             .await
             .unwrap();
 
-        let stop_metadata = serde_json::json!({
-            "source": "refinement_loop",
-            "event": "refinement_stop",
-            "reason_tag": "agent_failure",
-        });
-        repo.record_refinement_lifecycle(&proposal.id, "refinement_stop", Some(&stop_metadata))
-            .await
-            .unwrap();
+        terminalize_started_run(
+            &repo,
+            &proposal.id,
+            djinn_core::refinement_liveness::RefinementStopReason::AgentFailure {
+                role: djinn_core::refinement_liveness::RefinementRole::Adversary,
+                error_code: "test_failure".into(),
+                message: "fixture terminal transition".into(),
+            },
+        )
+        .await;
 
         let status_resp = server
             .dispatch_tool(
@@ -605,9 +634,42 @@
             .await
             .unwrap();
         let refinement = status_resp.get("refinement").unwrap();
+        assert_terminal_refinement(refinement, "agent_failure");
         assert_eq!(
             refinement.get("stop_reason").and_then(|v| v.as_str()),
             Some("agent_failure")
         );
     }
 
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn lifecycle_only_stop_reason_remains_display_only() {
+        let (_server, db) = test_server().await;
+        let repo = ProposalRepository::new(db, EventBus::noop());
+        let proposal = repo
+            .create(ProposalCreateInput {
+                title: "Legacy stop display",
+                body: "body",
+                acceptance_criteria: Some("[]"),
+                status: None,
+                body_format: None,
+            })
+            .await
+            .unwrap();
+        repo.record_refinement_lifecycle(&proposal.id, "refinement_start", None)
+            .await
+            .unwrap();
+        repo.record_refinement_lifecycle(
+            &proposal.id,
+            "refinement_stop",
+            Some(&serde_json::json!({ "reason_tag": "round_cap" })),
+        )
+        .await
+        .unwrap();
+
+        let status = build_refinement_status(&repo, &proposal.id).await.unwrap();
+        assert!(!status.active);
+        assert!(status.run_id.is_none());
+        assert!(status.liveness.is_none());
+        assert_eq!(status.stop_reason.as_deref(), Some("round_cap"));
+    }

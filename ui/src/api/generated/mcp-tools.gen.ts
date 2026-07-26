@@ -9606,15 +9606,39 @@ export namespace ProposalRefinementDemandRoundOutputSchema {
    */
   evidence_lifecycle_state: ("active" | "awaiting_evidence" | "evidence_received" | "evidence_failed" | "paused_or_frozen" | "terminal")
   /**
+   * Durable generation that fences the observed run.
+   */
+  generation?: number
+  /**
    * The judge's summary shown alongside the accept/reject review.
    * `None` unless `awaiting_review` is true.
    */
   judge_summary?: string
   /**
+   * Last durable heartbeat in DB Unix milliseconds, when present.
+   */
+  last_heartbeat_at?: number
+  /**
+   * Shared exact-run liveness result (`live`, `stale`, or `terminal`).
+   */
+  liveness?: string
+  /**
+   * Bounded discriminator for evidence selected by the shared evaluator.
+   */
+  liveness_evidence?: string
+  /**
    * When the proposal is parked for a needs-evidence spike, this contains
    * the claim and spike task reference. `None` when not parked.
    */
   needs_evidence?: (NeedsEvidenceStatus | null)
+  /**
+   * Durable identity of the exact refinement run observed for this status.
+   */
+  run_id?: string
+  /**
+   * Durable run state (`active`, `parked`, or `terminal`).
+   */
+  run_state?: string
   /**
    * The pre-refinement snapshot revision seq (the diff baseline) when
    * `awaiting_review` is true.
@@ -9816,15 +9840,39 @@ export namespace ProposalRefinementStartOutputSchema {
    */
   evidence_lifecycle_state: ("active" | "awaiting_evidence" | "evidence_received" | "evidence_failed" | "paused_or_frozen" | "terminal")
   /**
+   * Durable generation that fences the observed run.
+   */
+  generation?: number
+  /**
    * The judge's summary shown alongside the accept/reject review.
    * `None` unless `awaiting_review` is true.
    */
   judge_summary?: string
   /**
+   * Last durable heartbeat in DB Unix milliseconds, when present.
+   */
+  last_heartbeat_at?: number
+  /**
+   * Shared exact-run liveness result (`live`, `stale`, or `terminal`).
+   */
+  liveness?: string
+  /**
+   * Bounded discriminator for evidence selected by the shared evaluator.
+   */
+  liveness_evidence?: string
+  /**
    * When the proposal is parked for a needs-evidence spike, this contains
    * the claim and spike task reference. `None` when not parked.
    */
   needs_evidence?: (NeedsEvidenceStatus | null)
+  /**
+   * Durable identity of the exact refinement run observed for this status.
+   */
+  run_id?: string
+  /**
+   * Durable run state (`active`, `parked`, or `terminal`).
+   */
+  run_state?: string
   /**
    * The pre-refinement snapshot revision seq (the diff baseline) when
    * `awaiting_review` is true.
@@ -9978,15 +10026,39 @@ export namespace ProposalRefinementStatusOutputSchema {
    */
   evidence_lifecycle_state: ("active" | "awaiting_evidence" | "evidence_received" | "evidence_failed" | "paused_or_frozen" | "terminal")
   /**
+   * Durable generation that fences the observed run.
+   */
+  generation?: number
+  /**
    * The judge's summary shown alongside the accept/reject review.
    * `None` unless `awaiting_review` is true.
    */
   judge_summary?: string
   /**
+   * Last durable heartbeat in DB Unix milliseconds, when present.
+   */
+  last_heartbeat_at?: number
+  /**
+   * Shared exact-run liveness result (`live`, `stale`, or `terminal`).
+   */
+  liveness?: string
+  /**
+   * Bounded discriminator for evidence selected by the shared evaluator.
+   */
+  liveness_evidence?: string
+  /**
    * When the proposal is parked for a needs-evidence spike, this contains
    * the claim and spike task reference. `None` when not parked.
    */
   needs_evidence?: (NeedsEvidenceStatus | null)
+  /**
+   * Durable identity of the exact refinement run observed for this status.
+   */
+  run_id?: string
+  /**
+   * Durable run state (`active`, `parked`, or `terminal`).
+   */
+  run_state?: string
   /**
    * The pre-refinement snapshot revision seq (the diff baseline) when
    * `awaiting_review` is true.
@@ -10640,15 +10712,39 @@ export namespace ProposalShowOutputSchema {
    */
   evidence_lifecycle_state: ("active" | "awaiting_evidence" | "evidence_received" | "evidence_failed" | "paused_or_frozen" | "terminal")
   /**
+   * Durable generation that fences the observed run.
+   */
+  generation?: number
+  /**
    * The judge's summary shown alongside the accept/reject review.
    * `None` unless `awaiting_review` is true.
    */
   judge_summary?: string
   /**
+   * Last durable heartbeat in DB Unix milliseconds, when present.
+   */
+  last_heartbeat_at?: number
+  /**
+   * Shared exact-run liveness result (`live`, `stale`, or `terminal`).
+   */
+  liveness?: string
+  /**
+   * Bounded discriminator for evidence selected by the shared evaluator.
+   */
+  liveness_evidence?: string
+  /**
    * When the proposal is parked for a needs-evidence spike, this contains
    * the claim and spike task reference. `None` when not parked.
    */
   needs_evidence?: (NeedsEvidenceStatus | null)
+  /**
+   * Durable identity of the exact refinement run observed for this status.
+   */
+  run_id?: string
+  /**
+   * Durable run state (`active`, `parked`, or `terminal`).
+   */
+  run_state?: string
   /**
    * The pre-refinement snapshot revision seq (the diff baseline) when
    * `awaiting_review` is true.

@@ -20717,28 +20717,46 @@
             },
             "run_id": {
               "description": "Durable identity of the exact refinement run observed for this status.",
-              "type": ["string", "null"]
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "generation": {
               "description": "Durable generation that fences the observed run.",
-              "type": ["integer", "null"],
+              "type": [
+                "integer",
+                "null"
+              ],
               "format": "int32"
             },
             "run_state": {
               "description": "Durable run state (`active`, `parked`, or `terminal`).",
-              "type": ["string", "null"]
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "liveness": {
               "description": "Shared exact-run liveness result (`live`, `stale`, or `terminal`).",
-              "type": ["string", "null"]
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "liveness_evidence": {
               "description": "Bounded discriminator for evidence selected by the shared evaluator.",
-              "type": ["string", "null"]
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "last_heartbeat_at": {
               "description": "Last durable heartbeat in DB Unix milliseconds, when present.",
-              "type": ["integer", "null"],
+              "type": [
+                "integer",
+                "null"
+              ],
               "format": "int64"
             },
             "current_round": {
@@ -21114,28 +21132,46 @@
             },
             "run_id": {
               "description": "Durable identity of the exact refinement run observed for this status.",
-              "type": ["string", "null"]
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "generation": {
               "description": "Durable generation that fences the observed run.",
-              "type": ["integer", "null"],
+              "type": [
+                "integer",
+                "null"
+              ],
               "format": "int32"
             },
             "run_state": {
               "description": "Durable run state (`active`, `parked`, or `terminal`).",
-              "type": ["string", "null"]
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "liveness": {
               "description": "Shared exact-run liveness result (`live`, `stale`, or `terminal`).",
-              "type": ["string", "null"]
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "liveness_evidence": {
               "description": "Bounded discriminator for evidence selected by the shared evaluator.",
-              "type": ["string", "null"]
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "last_heartbeat_at": {
               "description": "Last durable heartbeat in DB Unix milliseconds, when present.",
-              "type": ["integer", "null"],
+              "type": [
+                "integer",
+                "null"
+              ],
               "format": "int64"
             },
             "current_round": {
@@ -21428,28 +21464,46 @@
             },
             "run_id": {
               "description": "Durable identity of the exact refinement run observed for this status.",
-              "type": ["string", "null"]
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "generation": {
               "description": "Durable generation that fences the observed run.",
-              "type": ["integer", "null"],
+              "type": [
+                "integer",
+                "null"
+              ],
               "format": "int32"
             },
             "run_state": {
               "description": "Durable run state (`active`, `parked`, or `terminal`).",
-              "type": ["string", "null"]
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "liveness": {
               "description": "Shared exact-run liveness result (`live`, `stale`, or `terminal`).",
-              "type": ["string", "null"]
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "liveness_evidence": {
               "description": "Bounded discriminator for evidence selected by the shared evaluator.",
-              "type": ["string", "null"]
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "last_heartbeat_at": {
               "description": "Last durable heartbeat in DB Unix milliseconds, when present.",
-              "type": ["integer", "null"],
+              "type": [
+                "integer",
+                "null"
+              ],
               "format": "int64"
             },
             "current_round": {
@@ -22574,28 +22628,46 @@
             },
             "run_id": {
               "description": "Durable identity of the exact refinement run observed for this status.",
-              "type": ["string", "null"]
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "generation": {
               "description": "Durable generation that fences the observed run.",
-              "type": ["integer", "null"],
+              "type": [
+                "integer",
+                "null"
+              ],
               "format": "int32"
             },
             "run_state": {
               "description": "Durable run state (`active`, `parked`, or `terminal`).",
-              "type": ["string", "null"]
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "liveness": {
               "description": "Shared exact-run liveness result (`live`, `stale`, or `terminal`).",
-              "type": ["string", "null"]
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "liveness_evidence": {
               "description": "Bounded discriminator for evidence selected by the shared evaluator.",
-              "type": ["string", "null"]
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "last_heartbeat_at": {
               "description": "Last durable heartbeat in DB Unix milliseconds, when present.",
-              "type": ["integer", "null"],
+              "type": [
+                "integer",
+                "null"
+              ],
               "format": "int64"
             },
             "current_round": {
