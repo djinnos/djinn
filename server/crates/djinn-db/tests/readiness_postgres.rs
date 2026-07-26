@@ -328,11 +328,18 @@ async fn frozen_and_completed_readiness_data_is_immutable() {
             "INSERT INTO readiness_remediation_suggestions (id,run_id,dedupe_key,suggestion) VALUES ('after-suggestion','run-immutable','after','{}')",
             "DELETE FROM readiness_remediation_suggestions WHERE id='suggestion-immutable'",
             "INSERT INTO readiness_run_events (id,run_id,event_kind,payload) VALUES ('after-event','run-immutable','after','{}')",
-            "DELETE FROM readiness_run_events WHERE id='event-immutable'",
         ] { assert_rejected(&mut conn, sql, "readiness run is terminal").await; }
-        // The immutable-finding delete guard independently rejects all
-        // deletes, including unaccepted findings after terminalization.
-        assert_rejected(&mut conn, "DELETE FROM readiness_guardrail_findings WHERE id='finding-unaccepted'", "accepted readiness finding is immutable").await;
+
+        // The append-only trigger is deliberately stronger than the terminal
+        // child-write trigger for deletes, so assert its stable contract here.
+        assert_rejected(&mut conn, "DELETE FROM readiness_run_events WHERE id='event-immutable'", "readiness run events are append-only").await;
+
+        // Isolate the completed-run finding delete guard from the independent
+        // guard which rejects every finding delete (accepted or otherwise).
+        // The unaccepted update above exercises the normal trigger stack.
+        conn.execute("ALTER TABLE readiness_guardrail_findings DISABLE TRIGGER readiness_findings_immutable_delete").await.expect("disable independent finding delete guard");
+        assert_rejected(&mut conn, "DELETE FROM readiness_guardrail_findings WHERE id='finding-unaccepted'", "readiness run is terminal").await;
+        conn.execute("ALTER TABLE readiness_guardrail_findings ENABLE TRIGGER readiness_findings_immutable_delete").await.expect("restore independent finding delete guard");
         assert_rejected(&mut conn, "UPDATE readiness_runs SET status='failed' WHERE id='run-immutable'", "completed readiness run is immutable").await;
     }).await;
 }
