@@ -199,6 +199,8 @@ mod build_admission_epoch_support;
 #[cfg(test)]
 mod build_admission_integration_tests;
 #[cfg(test)]
+mod unified_capacity_tests;
+#[cfg(test)]
 mod build_admission_inventory_tests;
 #[cfg(test)]
 mod build_admission_light_role_tests;

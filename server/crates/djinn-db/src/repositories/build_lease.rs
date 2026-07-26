@@ -288,8 +288,12 @@ impl BuildLeaseRepository {
     /// dispatch consumer id (`{task_id}:{generation}`).
     pub async fn has_occupying_dispatch(&self, task_id: &str) -> DbResult<bool> {
         self.db.ensure_initialized().await?;
+        // `1::bigint`, not a bare `1`: Postgres types a bare integer literal as
+        // INT4 and decoding it as i64 fails at runtime, which -- because
+        // `weight_for` fails closed -- would have made EVERY invocation lease
+        // permanently unavailable rather than merely mis-weighted.
         let found: Option<i64> = sqlx::query_scalar(
-            "SELECT 1 FROM build_leases \
+            "SELECT 1::bigint FROM build_leases \
              WHERE consumer_kind = 'task_dispatch' \
                AND split_part(consumer_id, ':', 1) = $1 \
                AND state = ANY($2) LIMIT 1",
