@@ -890,9 +890,21 @@ fn reap_and_admit_emits_once_only_for_the_committed_reap() {
                 .execute(db.pool())
                 .await
                 .unwrap();
-            repo.reap_and_admit(admission(proposal_id, "metric-no-current-reap"))
-                .await
-                .unwrap();
+            repo.reap_and_admit(admission(
+                proposal_id.clone(),
+                "metric-no-current-reap",
+            ))
+            .await
+            .unwrap();
+
+            // Rejected attempts never cross a durable commit boundary and must
+            // therefore leave the committed-reap counter unchanged.
+            let mut invalid = admission(proposal_id, "metric-failed-attempt");
+            invalid.heartbeat_grace_millis = -1;
+            assert!(matches!(
+                repo.reap_and_admit(invalid).await,
+                Err(RefinementAdmissionError::InvalidRequest(_))
+            ));
         });
     });
 
