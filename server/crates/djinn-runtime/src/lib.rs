@@ -34,7 +34,7 @@ pub use credentials::{ResolvedCredentials, SerializableCredential};
 pub use handle::RunHandle;
 pub use session_runtime::{InfraDeathLogTailCapture, RuntimeError, SessionRuntime};
 pub use spec::{
-    LoopGuardKind, LoopGuardTrip, ProviderFailureClass, ResumeLifecycleMetadata,
+    BuildSlotWeight, LoopGuardKind, LoopGuardTrip, ProviderFailureClass, ResumeLifecycleMetadata,
     ResumeSelectionReason, ResumeSourceKind, RoleKind, RoleResourceClass, SupervisorFlow,
     TaskRunOutcome, TaskRunReport, TaskRunSpec, role_sequence,
 };

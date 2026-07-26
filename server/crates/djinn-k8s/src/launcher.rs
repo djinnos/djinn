@@ -691,60 +691,12 @@ pub fn launcher_sidecar_container(config: &KubernetesConfig, project_image_tag: 
     }
 }
 
-/// Re-point the rendered launcher's lease ceiling at `cpu_limit`.
-///
-/// The sidecar is rendered from the deployment default, but a per-project
-/// `build_resources.task.cpu_limit` override is applied to the built Job
-/// afterwards. This keeps the lease equal to the CPU limit the pod actually
-/// carries; see [`crate::build_resources::apply_resolved_resources`], which is
-/// the only caller and applies both in one place so they cannot drift.
-///
-/// A limit that does not map onto a usable lease quota leaves the rendered
-/// value in place rather than writing something unbounded: the render-time gate
-/// in [`validate_enforcement_render`] has already refused to arm such a config,
-/// so this is the belt to that braces.
-pub fn retune_launcher_lease(pod: &mut k8s_openapi::api::core::v1::PodSpec, cpu_limit: &str) {
-    let Some(millicores) = parse_cpu_millicores(cpu_limit) else {
-        return;
-    };
-    let value = millicores.to_string();
-    for container in pod.init_containers.iter_mut().flatten() {
-        if container.name != LAUNCHER_CONTAINER_NAME {
-            continue;
-        }
-        for env in container.env.iter_mut().flatten() {
-            if env.name == "DJINN_LAUNCHER_LEASED_MILLICORES" {
-                env.value = Some(value.clone());
-            }
-        }
-    }
-}
-
-/// The CPU quota (millicores) a granted lease lifts an invocation leaf to.
-///
-/// Derived from the pod's declared CPU limit, so the ceiling a build actually
-/// runs under is the ceiling the manifest advertises. Parsing mirrors
-/// `crate::job::cpu_limit_to_jobs`: a bare number is cores, an `m` suffix is
-/// millicores, and anything unparseable falls back to the launcher crate's own
-/// default rather than to something unbounded.
-pub fn launcher_leased_millicores(config: &KubernetesConfig) -> u32 {
-    parse_cpu_millicores(&config.cpu_limit).unwrap_or(LeasedQuota::DEFAULT_MILLICORES)
-}
-
-fn parse_cpu_millicores(quantity: &str) -> Option<u32> {
-    let quantity = quantity.trim();
-    match quantity.strip_suffix('m') {
-        Some(millis) => millis.parse::<u32>().ok(),
-        None => quantity
-            .parse::<f64>()
-            .ok()
-            .filter(|cores| cores.is_finite() && *cores >= 0.0)
-            .map(|cores| (cores * 1000.0) as u32),
-    }
-    .filter(|millicores| {
-        (LeasedQuota::MIN_MILLICORES..=LeasedQuota::MAX_MILLICORES).contains(millicores)
-    })
-}
+// Rendered CPU quantities live beside this module and are re-exported here,
+// so `crate::launcher::*` remains the single import path.
+use crate::launcher_cpu::parse_cpu_millicores;
+pub use crate::launcher_cpu::{
+    launcher_leased_millicores, retune_launcher_lease, warm_job_millicores,
+};
 
 /// Fail-closed render/startup validation for an enforcement task-run.
 ///

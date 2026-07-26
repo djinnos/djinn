@@ -50,14 +50,22 @@ async fn set_state(db: &Database, key: &AdmissionJournalKey, state: &str) {
     .unwrap();
 }
 
+/// Two concurrent reservations for different keys both land, exactly once each.
+///
+/// This test used to be `cap_one_concurrent_reservation_has_one_winner`: the
+/// journal ran its own cap, and one of the two racers was refused. It no longer
+/// has a cap to refuse with -- capacity is the build lease's, and this is the
+/// lifecycle ledger, whose append cannot deny. What the advisory lock still
+/// guarantees, and what is worth pinning, is that serialising the two
+/// fetch-and-inserts loses neither row and duplicates neither.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn cap_one_concurrent_reservation_has_one_winner() {
+async fn concurrent_reservations_for_distinct_keys_each_land_exactly_once() {
     let db = Database::open_in_memory().unwrap();
     let repo = Arc::new(AdmissionJournalRepository::new(db));
     let first = {
         let repo = Arc::clone(&repo);
         tokio::spawn(async move {
-            repo.reserve(&input(AdmissionDomain::TaskObservation, "a", 0), 1)
+            repo.reserve(&input(AdmissionDomain::TaskObservation, "a", 0))
                 .await
                 .unwrap()
         })
@@ -65,20 +73,21 @@ async fn cap_one_concurrent_reservation_has_one_winner() {
     let second = {
         let repo = Arc::clone(&repo);
         tokio::spawn(async move {
-            repo.reserve(&input(AdmissionDomain::WarmBuild, "b", 0), 1)
+            repo.reserve(&input(AdmissionDomain::WarmBuild, "b", 0))
                 .await
                 .unwrap()
         })
     };
     let results = [first.await.unwrap(), second.await.unwrap()];
-    assert_eq!(
-        results
-            .iter()
-            .filter(|r| matches!(r, ReserveAdmissionResult::Reserved { .. }))
-            .count(),
-        1
+    assert!(
+        results.iter().all(|reserved| !reserved.idempotent),
+        "each distinct key is a fresh row, never a replay of the other's"
     );
-    assert_eq!(repo.count_task_or_warm_occupancy().await.unwrap(), 1);
+    assert_ne!(
+        results[0].row.key, results[1].row.key,
+        "the two racers wrote two distinct rows"
+    );
+    assert_eq!(repo.count_task_or_warm_occupancy().await.unwrap(), 2);
 }
 
 #[tokio::test]
@@ -87,15 +96,15 @@ async fn duplicate_reservation_is_idempotent() {
     let repo = AdmissionJournalRepository::new(db);
     let input = input(AdmissionDomain::TaskObservation, "same", 0);
     assert!(matches!(
-        repo.reserve(&input, 1).await.unwrap(),
-        ReserveAdmissionResult::Reserved {
+        repo.reserve(&input).await.unwrap(),
+        ReservedAdmission {
             idempotent: false,
             ..
         }
     ));
     assert!(matches!(
-        repo.reserve(&input, 1).await.unwrap(),
-        ReserveAdmissionResult::Reserved {
+        repo.reserve(&input).await.unwrap(),
+        ReservedAdmission {
             idempotent: true,
             ..
         }
@@ -122,7 +131,7 @@ async fn all_occupying_states_count_but_terminal_history_does_not() {
             &format!("work-{index}"),
             0,
         );
-        repo.reserve(&input, 10).await.unwrap();
+        repo.reserve(&input).await.unwrap();
         set_state(&db, &input.key, state).await;
     }
     assert_eq!(repo.count_task_or_warm_occupancy().await.unwrap(), 4);
@@ -134,27 +143,52 @@ async fn all_occupying_states_count_but_terminal_history_does_not() {
 }
 
 #[tokio::test]
-async fn reservation_domains_are_separate_but_task_warm_share_cap() {
+async fn the_journal_is_a_ledger_and_never_denies_at_a_cap() {
+    // Regression guard for the two-authority defect.
+    //
+    // This repository USED to deny here: it counted occupancy across the
+    // task-observation and warm-build domains and refused over a cap it was
+    // handed. That made it a second capacity authority alongside the v1 build
+    // lease, and because the two governed disjoint populations they together
+    // admitted twice the operator's configured concurrency.
+    //
+    // Capacity now lives solely in `build_leases`. A journal that cannot refuse
+    // cannot grow back into an authority, so this asserts the ABSENCE of a cap
+    // rather than any particular limit: every domain records, unconditionally,
+    // however many rows arrive.
     let db = Database::open_in_memory().unwrap();
     let repo = AdmissionJournalRepository::new(db);
-    assert!(matches!(
-        repo.reserve(&input(AdmissionDomain::InvocationBuild, "same", 0), 0)
+
+    for domain in [
+        AdmissionDomain::InvocationBuild,
+        AdmissionDomain::TaskObservation,
+        AdmissionDomain::WarmBuild,
+    ] {
+        assert!(
+            matches!(
+                repo.reserve(&input(domain, "same", 0)).await.unwrap(),
+                ReservedAdmission { .. }
+            ),
+            "{domain:?} must record without consulting any cap"
+        );
+    }
+
+    // Far beyond any cap the deployment would ever configure (the operator
+    // range is 1..=64): if a capacity check ever returns to this layer, this
+    // loop is what fails.
+    for index in 0..80 {
+        let work = format!("ledger-{index}");
+        let recorded = repo
+            .reserve(&input(AdmissionDomain::TaskObservation, &work, 0))
             .await
-            .unwrap(),
-        ReserveAdmissionResult::Reserved { .. }
-    ));
-    assert!(matches!(
-        repo.reserve(&input(AdmissionDomain::TaskObservation, "same", 0), 1)
-            .await
-            .unwrap(),
-        ReserveAdmissionResult::Reserved { .. }
-    ));
-    assert!(matches!(
-        repo.reserve(&input(AdmissionDomain::WarmBuild, "same", 0), 1)
-            .await
-            .unwrap(),
-        ReserveAdmissionResult::Denied { .. }
-    ));
+            .expect("the lifecycle ledger has no capacity opinion");
+        assert!(!recorded.idempotent);
+    }
+    assert_eq!(
+        repo.count_task_or_warm_occupancy().await.unwrap(),
+        82,
+        "every row must be recorded; occupancy here is a lifecycle view, not a gate"
+    );
 }
 
 #[tokio::test]
@@ -174,7 +208,7 @@ async fn dispatch_generation_resolves_per_object_lifecycle() {
     // A nonterminal generation is resumed, never double-reserved, so a
     // duplicate dispatch or a restart is idempotent.
     let first = input(AdmissionDomain::TaskObservation, "attempts", 0);
-    repo.reserve(&first, 4).await.unwrap();
+    repo.reserve(&first).await.unwrap();
     assert_eq!(resolve(0).await, 0);
     set_state(&db, &first.key, "live").await;
     assert_eq!(resolve(0).await, 0);
@@ -200,7 +234,7 @@ async fn late_create_unknown_after_terminal_retains_the_terminal_row() {
     let db = Database::open_in_memory().unwrap();
     let repo = AdmissionJournalRepository::new(db.clone());
     let input = input(AdmissionDomain::WarmBuild, "late", 0);
-    repo.reserve(&input, 1).await.unwrap();
+    repo.reserve(&input).await.unwrap();
     repo.mark_create_started(&create_started(&input))
         .await
         .unwrap();
@@ -232,7 +266,7 @@ async fn next_generation_requires_terminal_predecessor() {
             .unwrap(),
         0
     );
-    repo.reserve(&input, 1).await.unwrap();
+    repo.reserve(&input).await.unwrap();
     assert!(matches!(
         repo.allocate_next_generation(AdmissionDomain::TaskObservation, "history")
             .await,
@@ -255,7 +289,7 @@ async fn definitive_and_ambiguous_create_failures_have_distinct_occupancy() {
     let in_flight = input(AdmissionDomain::TaskObservation, "definitive-flight", 0);
     let ambiguous = input(AdmissionDomain::TaskObservation, "ambiguous", 0);
     for reservation in [&reserved, &in_flight, &ambiguous] {
-        repo.reserve(reservation, 3).await.unwrap();
+        repo.reserve(reservation).await.unwrap();
     }
 
     assert_eq!(
@@ -325,8 +359,8 @@ async fn cancellation_is_reserved_only_and_idempotent() {
     let repo = AdmissionJournalRepository::new(db);
     let cancelled = input(AdmissionDomain::TaskObservation, "cancelled", 0);
     let posted = input(AdmissionDomain::TaskObservation, "posted", 0);
-    repo.reserve(&cancelled, 2).await.unwrap();
-    repo.reserve(&posted, 2).await.unwrap();
+    repo.reserve(&cancelled).await.unwrap();
+    repo.reserve(&posted).await.unwrap();
     assert_eq!(
         repo.cancel_reserved(&cancelled.key).await.unwrap().state,
         AdmissionState::Terminal
@@ -350,7 +384,7 @@ async fn stale_generations_and_mismatched_uids_cannot_release_current_work() {
     let db = Database::open_in_memory().unwrap();
     let repo = AdmissionJournalRepository::new(db);
     let first = input(AdmissionDomain::TaskObservation, "fenced", 0);
-    repo.reserve(&first, 1).await.unwrap();
+    repo.reserve(&first).await.unwrap();
     repo.mark_create_started(&create_started(&first))
         .await
         .unwrap();
@@ -365,7 +399,7 @@ async fn stale_generations_and_mismatched_uids_cannot_release_current_work() {
     .unwrap();
 
     let second = input(AdmissionDomain::TaskObservation, "fenced", 1);
-    repo.reserve(&second, 1).await.unwrap();
+    repo.reserve(&second).await.unwrap();
     repo.mark_create_started(&create_started(&second))
         .await
         .unwrap();
@@ -418,7 +452,7 @@ async fn predecessor_recovery_retires_only_reserved_and_retains_ambiguous_work()
     let mut successor = input(AdmissionDomain::TaskObservation, "recover-successor", 0);
     successor.creator_server_epoch = "epoch-2".into();
     for reservation in [&reserved, &flight, &unknown, &live, &successor] {
-        repo.reserve(reservation, 5).await.unwrap();
+        repo.reserve(reservation).await.unwrap();
     }
     repo.mark_create_started(&create_started(&flight))
         .await
@@ -465,7 +499,7 @@ async fn recover_all_predecessors_retires_every_predecessor_epoch_atomically() {
     let mut current = input(AdmissionDomain::WarmBuild, "current-reserved", 0);
     current.creator_server_epoch = "replacement-epoch".into();
     for reservation in [&pred_a, &pred_a_flight, &pred_b, &current] {
-        repo.reserve(reservation, 10).await.unwrap();
+        repo.reserve(reservation).await.unwrap();
     }
     repo.mark_create_started(&create_started(&pred_a_flight))
         .await
@@ -503,7 +537,7 @@ async fn recover_all_predecessors_retires_every_predecessor_epoch_atomically() {
 async fn reclaim_absent_object_is_fenced_by_the_full_observed_identity() {
     let repo = AdmissionJournalRepository::new(Database::open_in_memory().unwrap());
     let reserved = input(AdmissionDomain::WarmBuild, "reclaim", 0);
-    repo.reserve(&reserved, 4).await.unwrap();
+    repo.reserve(&reserved).await.unwrap();
     repo.mark_create_started(&create_started(&reserved))
         .await
         .unwrap();
@@ -572,7 +606,7 @@ async fn reclaim_absent_object_is_fenced_by_the_full_observed_identity() {
 async fn settlement_flags_rows_against_the_database_clock() {
     let repo = AdmissionJournalRepository::new(Database::open_in_memory().unwrap());
     let reserved = input(AdmissionDomain::TaskObservation, "settle", 0);
-    repo.reserve(&reserved, 4).await.unwrap();
+    repo.reserve(&reserved).await.unwrap();
 
     let settled_now = repo.list_active_rows_with_settlement(0).await.unwrap();
     assert_eq!(settled_now.len(), 1);

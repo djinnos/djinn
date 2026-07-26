@@ -841,9 +841,24 @@ impl WarmDispatch {
         crate::build_resources::apply_resolved_resources(&mut job, resolved_warm_resources);
         stamp_admission_identity(&mut job, &admission_request);
         let namespace = self.config.namespace.clone();
-        let permit = match (lease_grant.as_ref(), self.admission.as_ref()) {
-            (Some(_), _) => None,
-            (None, Some(admission)) => match admission.admit(admission_request.clone()).await {
+        // Journal the warm Job's lifecycle REGARDLESS of which authority granted
+        // its capacity.
+        //
+        // This used to read `(Some(_), _) => None`: once the v1 lease was armed,
+        // a warm Job wrote no admission-journal row at all. That was not a
+        // harmless optimisation. The journal is the durable lifecycle and
+        // fencing ledger -- it is what records the Kubernetes UID, survives a
+        // coordinator restart, and lets `reclaim_absent_object` (#2597) retire
+        // occupancy whose object is provably gone. A leased warm Job was
+        // therefore invisible to reclamation, and the two authorities could not
+        // observe each other's occupancy even in principle.
+        //
+        // Capacity is settled above by the lease; this admission call is a pure
+        // ledger append that cannot deny at a cap (see `CapacitySource`). So it
+        // runs on both paths, and the lease grant governs only whether the Job
+        // may be created.
+        let permit = match self.admission.as_ref() {
+            Some(admission) => match admission.admit(admission_request.clone()).await {
                 Ok(permit) => {
                     if let Err(error) = admission
                         .transition(&permit, WarmAdmissionTransition::CreateStarted)
@@ -861,7 +876,7 @@ impl WarmDispatch {
                     return;
                 }
             },
-            (None, None) => None,
+            None => None,
         };
         // Every gate this cycle had to clear is behind us: capacity was granted,
         // so the refusal backoff for this project starts fresh.
@@ -1684,6 +1699,9 @@ impl GraphWarmerService for K8sGraphWarmer {
 #[cfg(test)]
 #[path = "graph_warmer_admission_tests.rs"]
 mod admission_tests;
+#[cfg(test)]
+#[path = "graph_warmer_ledger_tests.rs"]
+mod ledger_tests;
 #[cfg(test)]
 #[path = "graph_warmer_recovery_tests.rs"]
 mod recovery_tests;

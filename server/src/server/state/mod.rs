@@ -26,6 +26,7 @@ use djinn_agent::roles::RoleRegistry;
 use djinn_agent::runtime_bridge::{K8sTokenReviewValidator, RuntimeKind, runtime_kind};
 use djinn_coordinator::build_lease::BuildLeaseService;
 use djinn_coordinator::build_lease_reclaim::BuildLeaseReclaimer;
+use djinn_coordinator::build_slot_authority::BuildLeaseDispatchAuthority;
 use djinn_coordinator::graph_warm_lease::BuildLeaseGraphWarmAdapter;
 use djinn_coordinator::run_dir_observe::{RunDirObserveSeams, arm_disk_observation};
 use djinn_core::clock::{Clock, SystemClock as SystemClockTrait};
@@ -572,42 +573,65 @@ impl AppState {
             std::env::var("HOSTNAME").unwrap_or_else(|_| "coordinator".to_owned()),
             djinn_agent::actors::coordinator::allocate_server_epoch()
         );
-        // Retain an Off controller until the durable handoff row has been read.
-        // A row requiring v0 promotes it before recovery; a missing row keeps
-        // the configured standalone mode.
-        let build_admission = Some(match admission_config.mode {
-            BuildAdmissionMode::Off | BuildAdmissionMode::Observe => {
-                Arc::new(BuildAdmissionController::new(
-                    Arc::new(djinn_db::AdmissionJournalRepository::new(db.clone())),
-                    admission_config.mode,
-                    admission_config.cap,
-                    server_epoch,
-                ))
+        let build_admission_journal =
+            Arc::new(djinn_db::AdmissionJournalRepository::new(db.clone()));
+        // The ONE build-slot capacity authority. Every population that can
+        // occupy a build slot -- graph warming, layer-1 task dispatch, and the
+        // layer-2 invocation escalation -- draws from this single FIFO under
+        // this single cap. Before this, task dispatch was capped separately by
+        // the v0 admission journal against the same configured number, so the
+        // two authorities together admitted twice the operator's intent.
+        //
+        // Weights are derived from the SAME rendered manifests the cluster
+        // sees, so the capacity a workload is charged and the CPU it is given
+        // cannot drift apart.
+        let warm_weights = {
+            let k8s = djinn_k8s::KubernetesConfig::from_env();
+            djinn_coordinator::build_lease::BuildSlotWeights {
+                slot_millicores: djinn_k8s::launcher::launcher_leased_millicores(&k8s),
+                warm_millicores: djinn_k8s::launcher::warm_job_millicores(&k8s),
             }
-            BuildAdmissionMode::Enforce => Arc::new(BuildAdmissionController::new_closed(
-                Arc::new(djinn_db::AdmissionJournalRepository::new(db.clone())),
-                admission_config.cap,
-                server_epoch,
-            )),
-        });
+        };
         let build_lease = Arc::new(
-            // Hand the v1 FIFO the SAME configured build-slot cap the v0
-            // journal controller gets. `graph_warmer` wires the v1 lease
-            // unconditionally and gives it precedence over v0, so this is the
-            // only cap that governs whether a warm Job may ever be created.
-            // Passing `0` here left the service resolving to the migration
-            // -seeded durable `build_lease_caps.cap = 0`, which denied every
-            // graph-warm lease for the life of the deployment.
             BuildLeaseService::new(
                 Arc::new(djinn_db::BuildLeaseRepository::new(db.clone())),
                 admission_config.cap,
             )
+            .with_slot_weights(warm_weights)
             // The v1 lease service reads the durable admission epoch (and its
             // reference cap) on recovery, so a restart observes the current
             // epoch before admitting or spawning. An armed epoch cap still
             // wins over the configured value above.
             .with_handoff_epoch(Arc::new(AdmissionHandoffRepository::new(db.clone()))),
         );
+        // Retain an Off controller until the durable handoff row has been read.
+        // A row requiring v0 promotes it before recovery; a missing row keeps
+        // the configured standalone mode.
+        //
+        // The controller is handed the lease as its capacity authority. It has
+        // no cap of its own any more: the journal it owns is the lifecycle and
+        // fencing ledger, and it asks the authority above for capacity. That is
+        // the whole of the single-authority cut-over.
+        let slot_authority: Arc<dyn djinn_coordinator::build_admission::BuildSlotAuthority> =
+            Arc::new(BuildLeaseDispatchAuthority::new(build_lease.clone()));
+        let build_admission = Some(Arc::new(
+            match admission_config.mode {
+                BuildAdmissionMode::Off | BuildAdmissionMode::Observe => {
+                    BuildAdmissionController::new(
+                        build_admission_journal,
+                        admission_config.mode,
+                        admission_config.cap,
+                        server_epoch,
+                    )
+                }
+                BuildAdmissionMode::Enforce => BuildAdmissionController::new_closed(
+                    build_admission_journal,
+                    admission_config.cap,
+                    server_epoch,
+                ),
+            }
+            .with_slot_authority(slot_authority),
+        ));
         Self {
             inner: Arc::new(Inner {
                 db,
@@ -986,6 +1010,22 @@ impl AppState {
             // Off: no journal, no controller, no readiness coupling.
             return;
         };
+        // Recover the ONE capacity authority before the controller that asks it
+        // for capacity.
+        //
+        // The lease service used to be recovered only inside
+        // `initialize_graph_warmer`, which runs after this and only on the
+        // Kubernetes path. An unrecovered service reports occupancy as unknown
+        // and answers every acquisition `Unavailable`, which Enforce turns into
+        // a denial -- so admission denied everything in the window before the
+        // warmer was wired, and denied everything FOREVER on any deployment
+        // that never reaches the Kubernetes branch. Capacity readiness is not
+        // the graph warmer's to own as a side effect: it is admission's own
+        // precondition, so it is established here.
+        //
+        // Idempotent. `initialize_graph_warmer` still recovers before handing
+        // the adapter a lease, which keeps that path's guarantee local to it.
+        let _ = self.inner.build_lease.recover().await;
         match admission.recover_all_predecessors_and_seed().await {
             Ok(report) => {
                 tracing::info!(
@@ -4701,6 +4741,7 @@ mod build_admission_config_tests {
             kind: djinn_coordinator::build_admission::BuildWorkloadKind::TaskRun {
                 role: djinn_coordinator::build_admission::TaskRunRole::Worker,
             },
+            capacity: djinn_coordinator::build_admission::CapacitySource::AcquireDispatchSlot,
         }
     }
 

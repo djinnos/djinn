@@ -66,9 +66,8 @@ pub use repositories::{
     admission_journal::{
         AdmissionDomain, AdmissionJournalKey, AdmissionJournalRepository, AdmissionJournalRow,
         AdmissionRecoveryResult, AdmissionState, AdmissionWorkloadKind, AdoptLiveAdmissionInput,
-        CreateStartedInput, ObserveAdmissionResult, ReclaimAbsentInput, ReclaimAbsentOutcome,
-        ReserveAdmissionInput, ReserveAdmissionResult, TerminalAdmissionInput,
-        UidFencedAdmissionInput,
+        CreateStartedInput, ReclaimAbsentInput, ReclaimAbsentOutcome, ReserveAdmissionInput,
+        ReservedAdmission, TerminalAdmissionInput, UidFencedAdmissionInput,
     },
     agent::{
         AgentCreateInput, AgentListQuery, AgentListResult, AgentMetrics, AgentRepository,
