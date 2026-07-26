@@ -3738,6 +3738,14 @@ mod tests {
         for absent in [
             crate::launcher::VOLUME_LAUNCHER_IPC,
             crate::launcher::VOLUME_LAUNCHER_CGROUP,
+            // The brokered child's scratch surfaces and the one-way
+            // private-dependency channel exist only because a command runs in
+            // the launcher's mount namespace. With no launcher, the pod keeps
+            // its pre-enforcement shape exactly.
+            crate::launcher_child_fs::VOLUME_LAUNCHER_TMP,
+            crate::launcher_child_fs::VOLUME_LAUNCHER_HOME,
+            crate::launcher_child_fs::VOLUME_LAUNCHER_VAR_TMP,
+            crate::private_dep_config::VOLUME_CHILD_GIT_CONFIG,
         ] {
             assert!(
                 pod.volumes.iter().flatten().all(|v| v.name != absent),
@@ -3753,7 +3761,14 @@ mod tests {
                 .all(|m| m.mount_path != crate::launcher::LAUNCHER_IPC_DIR),
             "worker must not mount the launcher IPC dir in explicit disabled mode"
         );
-        for env_name in ["DJINN_LAUNCHER_SOCKET", "DJINN_LAUNCHER_CREDENTIAL_PATH"] {
+        for env_name in [
+            "DJINN_LAUNCHER_SOCKET",
+            "DJINN_LAUNCHER_CREDENTIAL_PATH",
+            // Naming the channel to a worker with no launcher would have
+            // `configure_private_dep_access` publish a live installation token
+            // onto a volume nothing mounts.
+            crate::private_dep_config::CHILD_GIT_CONFIG_PATH_ENV,
+        ] {
             assert!(
                 worker.env.iter().flatten().all(|e| e.name != env_name),
                 "{env_name} must not be exported in explicit disabled mode"
