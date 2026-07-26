@@ -196,6 +196,13 @@ pub use repositories::{
         LintMaterializationOutcome, MAX_PROPOSAL_INTEGRITY_PAGE_SIZE, ProposalIntegrityHead,
         ProposalIntegrityHeadPage, ProposalIntegrityRepository,
     },
+    readiness::{
+        CreateReadinessAreaAttempt, CreateReadinessCompositionArea, CreateReadinessRun,
+        NewReadinessEvent, NewReadinessFinding, NewReadinessSuggestion, ReadinessAreaAttemptRow,
+        ReadinessCompositionAreaRow, ReadinessGuardrailFindingRow,
+        ReadinessRemediationSuggestionRow, ReadinessRepository, ReadinessRunDetail,
+        ReadinessRunEventRow, ReadinessRunRow,
+    },
     refinement_run::{
         AcknowledgeRefinementTaskMaterializationRequest, ActiveRefinementRun,
         AdmitRefinementRunRequest, ClaimRefinementIntentRequest, CompleteRefinementIntentRequest,
