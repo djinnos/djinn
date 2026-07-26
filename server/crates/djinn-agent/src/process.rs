@@ -80,6 +80,13 @@ pub fn isolate_process_group(cmd: &mut Command) {
 
 #[path = "process_broker.rs"]
 mod broker;
+/// The `Command` -> `CommandSpec` conversion the production broker adapter
+/// uses. Exported so a proof can drive the REAL conversion from the REAL
+/// caller instead of hand-assembling a spec — the seventh launcher blocker was
+/// invisible precisely because every broker-backed test used a launcher that
+/// ignored the `Command` it was handed.
+#[cfg(test)]
+pub(crate) use broker::command_spec;
 #[allow(unused_imports)] // constructed by the pending workspace broker composition
 pub(crate) use broker::{CgroupLauncherClient, ProcessHandle, UnixBrokerLauncher};
 
