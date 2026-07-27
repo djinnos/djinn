@@ -2787,6 +2787,8 @@ mod tests {
             toolchain: None,
             version: None,
             package_manager: None,
+            cargo_features: Vec::new(),
+            cargo_all_features: false,
         }
     }
 

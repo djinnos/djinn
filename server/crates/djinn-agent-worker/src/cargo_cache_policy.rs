@@ -65,7 +65,7 @@ pub struct CargoWarmCommand {
 ///
 /// Reads (but never writes):
 /// * `Cargo.toml` — workspace section detection.
-/// * `.cargo/config.toml` — `build.features`.
+/// * the selected Rust workspace — Cargo feature configuration.
 /// * `env_config` — Rust workspace root for workspace directory resolution.
 ///
 /// Returns `None` when no cargo workspace exists (non-Rust repo).
@@ -93,23 +93,17 @@ pub fn resolve_cargo_cache_policy(
         });
     }
 
-    let workspace_dir = resolve_cargo_workspace_dir(project_root, env_config)?;
+    let (workspace_dir, workspace_config) = resolve_cargo_workspace(project_root, env_config)?;
 
     let is_workspace = detect_workspace_layout(&workspace_dir);
-    let cargo_config = read_cargo_config_toml(&workspace_dir);
-    let config_features = cargo_config
-        .as_ref()
-        .map(|c| c.features.clone())
+    let (features, all_features) = workspace_config
+        .map(|workspace| {
+            (
+                workspace.cargo_features.clone(),
+                workspace.cargo_all_features,
+            )
+        })
         .unwrap_or_default();
-    // Only the explicit `.cargo/config.toml` `build.features = "all-features"`
-    // override can opt into an all-features warm.
-    let all_features = config_features.contains(&"all-features".to_string());
-
-    let features = if all_features {
-        Vec::new()
-    } else {
-        config_features
-    };
 
     let nextest = detect_nextest(&workspace_dir);
 
@@ -127,34 +121,6 @@ pub fn resolve_cargo_cache_policy(
 // Internal detection helpers
 // ---------------------------------------------------------------------------
 
-/// Parsed subset of `.cargo/config.toml` relevant to cache policy.
-#[derive(Debug, Default, PartialEq, Eq)]
-struct CargoConfigToml {
-    features: Vec<String>,
-}
-
-fn read_cargo_config_toml(workspace_dir: &Path) -> Option<CargoConfigToml> {
-    let path = workspace_dir.join(".cargo").join("config.toml");
-    let text = std::fs::read_to_string(&path).ok()?;
-    let raw: toml::Table = toml::from_str(&text).ok()?;
-
-    let mut out = CargoConfigToml::default();
-
-    if let Some(build) = raw.get("build").and_then(|v| v.as_table()) {
-        if let Some(features) = build.get("features").and_then(|v| v.as_str()) {
-            out.features = features.split_whitespace().map(|s| s.to_string()).collect();
-        }
-        if let Some(features_arr) = build.get("features").and_then(|v| v.as_array()) {
-            out.features = features_arr
-                .iter()
-                .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                .collect();
-        }
-    }
-
-    Some(out)
-}
-
 fn detect_workspace_layout(workspace_dir: &Path) -> bool {
     let cargo_toml = workspace_dir.join("Cargo.toml");
     let text = match std::fs::read_to_string(&cargo_toml) {
@@ -168,8 +134,6 @@ fn detect_workspace_layout(workspace_dir: &Path) -> bool {
     raw.contains_key("workspace")
 }
 
-// All-features warm is now opt-in only via `.cargo/config.toml`
-// `build.features = "all-features"`.
 /// Detect whether the project uses `cargo-nextest` (a `.config/nextest.toml` or
 /// `nextest.toml` at the cargo workspace root). Drives whether the test-compile
 /// warm step uses `cargo nextest run --no-run` vs `cargo test --no-run`.
@@ -268,33 +232,33 @@ fn build_warm_commands(
 }
 
 // ---------------------------------------------------------------------------
-// resolve_cargo_workspace_dir (mirrors main.rs logic, kept local for purity)
+// Resolve Cargo workspace (mirrors main.rs logic, kept local for purity)
 // ---------------------------------------------------------------------------
 
-fn resolve_cargo_workspace_dir(
+fn resolve_cargo_workspace<'a>(
     project_root: &Path,
-    env_config: Option<&EnvironmentConfig>,
-) -> Option<PathBuf> {
+    env_config: Option<&'a EnvironmentConfig>,
+) -> Option<(PathBuf, Option<&'a djinn_stack::environment::Workspace>)> {
     if let Some(cfg) = env_config {
         for ws in &cfg.workspaces {
             if ws.language.eq_ignore_ascii_case("rust") {
                 let dir = project_root.join(&ws.root);
                 if dir.join("Cargo.toml").is_file() {
-                    return Some(dir);
+                    return Some((dir, Some(ws)));
                 }
             }
         }
     }
 
     if project_root.join("Cargo.toml").is_file() {
-        return Some(project_root.to_path_buf());
+        return Some((project_root.to_path_buf(), None));
     }
 
     if let Ok(entries) = std::fs::read_dir(project_root) {
         for entry in entries.flatten() {
             let dir = entry.path();
             if dir.is_dir() && dir.join("Cargo.toml").is_file() {
-                return Some(dir);
+                return Some((dir, None));
             }
         }
     }
@@ -325,6 +289,8 @@ mod tests {
                 toolchain: None,
                 version: None,
                 package_manager: None,
+                cargo_features: Vec::new(),
+                cargo_all_features: false,
             }],
             system_packages: vec![],
             env: Default::default(),
@@ -501,7 +467,7 @@ version = "0.1.0"
     }
 
     #[test]
-    fn cargo_config_features_array() {
+    fn workspace_config_named_features() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let root = tmp.path();
         fs::write(
@@ -512,16 +478,9 @@ version = "0.1.0"
 "#,
         )
         .expect("write Cargo.toml");
-        fs::create_dir_all(root.join(".cargo")).expect("mkdir .cargo");
-        fs::write(
-            root.join(".cargo/config.toml"),
-            r#"[build]
-features = ["foo", "bar"]
-"#,
-        )
-        .expect("write config.toml");
-
-        let policy = resolve_cargo_cache_policy(root, None).expect("policy");
+        let mut cfg = make_env_config_with_rust_workspace(".");
+        cfg.workspaces[0].cargo_features = vec!["foo".into(), "bar".into()];
+        let policy = resolve_cargo_cache_policy(root, Some(&cfg)).expect("policy");
         assert_eq!(policy.features, vec!["foo", "bar"]);
         assert!(!policy.all_features);
 
@@ -558,7 +517,7 @@ features = ["foo", "bar"]
     }
 
     #[test]
-    fn cargo_config_features_string() {
+    fn cargo_config_custom_features_are_ignored() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let root = tmp.path();
         fs::write(
@@ -579,34 +538,13 @@ features = "foo bar"
         .expect("write config.toml");
 
         let policy = resolve_cargo_cache_policy(root, None).expect("policy");
-        assert_eq!(policy.features, vec!["foo", "bar"]);
+        assert!(policy.features.is_empty());
         assert!(!policy.all_features);
-
-        // Named features: clippy + build + test, features in feature_args, not in args.
-        assert_eq!(policy.warm_commands.len(), 3);
-        assert_eq!(
-            policy.warm_commands[0].args,
-            vec!["clippy", "--all-targets"]
-        );
-        assert_eq!(
-            policy.warm_commands[0].feature_args,
-            vec!["--features", "foo,bar"]
-        );
-        assert_eq!(policy.warm_commands[1].args, vec!["build", "--all-targets"]);
-        assert_eq!(
-            policy.warm_commands[1].feature_args,
-            vec!["--features", "foo,bar"]
-        );
-        assert_eq!(policy.warm_commands[2].label, "test (--no-run)");
-        assert_eq!(
-            policy.warm_commands[2].feature_args,
-            vec!["--features", "foo,bar"]
-        );
-
-        // Verify features() returns the correct CLI args
-        assert_eq!(
-            policy.features(),
-            vec!["--features".to_string(), "foo,bar".to_string()]
+        assert!(
+            policy
+                .warm_commands
+                .iter()
+                .all(|command| command.feature_args.is_empty())
         );
     }
 
@@ -905,8 +843,8 @@ version = "0.1.0"
         )];
 
         let policy = resolve_cargo_cache_policy(root, Some(&cfg)).expect("policy");
-        // Lifecycle hook scanning removed — all_features only comes from
-        // .cargo/config.toml features override now.
+        // Lifecycle hook scanning was removed; all_features only comes from
+        // the selected workspace configuration now.
         assert!(
             !policy.all_features,
             "lifecycle hook should no longer trigger all-features"

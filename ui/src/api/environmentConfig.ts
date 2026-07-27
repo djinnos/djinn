@@ -63,6 +63,8 @@ export interface Workspace {
   toolchain?: string | null;
   version?: string | null;
   package_manager?: string | null;
+  cargo_features?: string[];
+  cargo_all_features?: boolean;
 }
 
 /**

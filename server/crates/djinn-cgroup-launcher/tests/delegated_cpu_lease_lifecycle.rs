@@ -601,16 +601,19 @@ where
     F: djinn_cgroup_launcher::CgroupFs,
     S: djinn_cgroup_launcher::SpawnIntoCgroup,
 {
-    let before: CpuStat = launcher.sample(leaf).expect("sample cpu.stat");
     // Real monotonic time is the point: the whole assertion is CPU consumed per
     // unit of WALL CLOCK. An injected clock would make the measurement describe
     // itself rather than the kernel, which is the failure mode this file exists
-    // to eliminate.
+    // to eliminate. The wall interval deliberately encloses both cpu.stat
+    // samples: the usage delta can include CPU consumed while either sample is
+    // read, so excluding that time creates a tiny, scheduler-dependent false
+    // overrun at the theoretical quota ceiling.
     #[allow(clippy::disallowed_methods)]
     let started = Instant::now();
+    let before: CpuStat = launcher.sample(leaf).expect("sample cpu.stat");
     std::thread::sleep(window);
-    let elapsed = started.elapsed();
     let after: CpuStat = launcher.sample(leaf).expect("sample cpu.stat");
+    let elapsed = started.elapsed();
     Measured {
         usage_usec: after.usage_usec.saturating_sub(before.usage_usec),
         nr_throttled: after.nr_throttled.saturating_sub(before.nr_throttled),
