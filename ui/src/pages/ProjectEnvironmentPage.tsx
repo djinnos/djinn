@@ -290,7 +290,7 @@ function WorkspacesEditor({
         {workspaces.map((ws, idx) => (
           <div
             key={idx}
-            className="flex items-end gap-2 rounded-lg border bg-card/50 px-4 py-3 shadow-sm"
+            className="flex flex-wrap items-end gap-2 rounded-lg border bg-card/50 px-4 py-3 shadow-sm"
           >
             <div className="flex flex-1 flex-col gap-1">
               <Label className="text-xs text-muted-foreground">
@@ -334,6 +334,51 @@ function WorkspacesEditor({
             >
               <HugeiconsIcon icon={Delete02Icon} size={14} />
             </Button>
+            {ws.language === "rust" && (
+              <div className="flex w-full items-end gap-3 border-t pt-3">
+                <div className="flex flex-1 flex-col gap-1">
+                  <Label className="text-xs text-muted-foreground">
+                    Cargo features{" "}
+                    <span className="font-normal text-muted-foreground/70">
+                      (comma separated)
+                    </span>
+                  </Label>
+                  <Input
+                    value={(ws.cargo_features ?? []).join(", ")}
+                    onChange={(e) =>
+                      updateAt(idx, {
+                        cargo_features: e.target.value
+                          .split(",")
+                          .map((feature) => feature.trim())
+                        cargo_all_features: false,
+                      })
+                    }
+                    onBlur={() =>
+                      updateAt(idx, {
+                        cargo_features: (ws.cargo_features ?? []).filter(Boolean),
+                      })
+                    }
+                    placeholder="e.g. qdrant"
+                    disabled={ws.cargo_all_features}
+                    className="font-mono text-xs"
+                  />
+                </div>
+                <Label className="flex h-9 cursor-pointer items-center gap-2 whitespace-nowrap text-xs text-muted-foreground">
+                  <input
+                    type="checkbox"
+                    checked={ws.cargo_all_features ?? false}
+                    onChange={(e) =>
+                      updateAt(idx, {
+                        cargo_all_features: e.target.checked,
+                        cargo_features: e.target.checked ? [] : ws.cargo_features,
+                      })
+                    }
+                    className="h-4 w-4 accent-primary"
+                  />
+                  All features
+                </Label>
+              </div>
+            )}
           </div>
         ))}
         <Button

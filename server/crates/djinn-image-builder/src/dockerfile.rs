@@ -728,6 +728,8 @@ mod tests {
                 toolchain: Some("stable".into()),
                 version: None,
                 package_manager: None,
+                cargo_features: Vec::new(),
+                cargo_all_features: false,
             },
             djinn_stack::environment::Workspace {
                 slug: None,
@@ -738,6 +740,8 @@ mod tests {
                 toolchain: Some("1.85.0".into()),
                 version: None,
                 package_manager: None,
+                cargo_features: Vec::new(),
+                cargo_all_features: false,
             },
         ];
         let df = generate_dockerfile(&cfg, &agent_worker()).unwrap();
@@ -771,6 +775,8 @@ mod tests {
             toolchain: None,
             version: Some("20".into()),
             package_manager: Some("yarn".into()),
+            cargo_features: Vec::new(),
+            cargo_all_features: false,
         }];
         let df = generate_dockerfile(&cfg, &agent_worker()).unwrap();
         assert!(df.dockerfile.contains("NODE_VERSIONS=\"22 20\""));
@@ -833,6 +839,8 @@ mod tests {
             toolchain: None,
             version: None,
             package_manager: None,
+            cargo_features: Vec::new(),
+            cargo_all_features: false,
         }];
         let err = generate_dockerfile(&cfg, &agent_worker()).unwrap_err();
         assert!(matches!(err, DockerfileError::UnknownWorkspaceLanguage(s) if s == "zig"));

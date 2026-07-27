@@ -54,6 +54,16 @@ fn assert_environment_config_workspace_metadata_schema(
         json!({"default": [], "items": {"type": "string"}, "type": "array"}),
         "{context} Workspace.tags schema drifted"
     );
+    assert_eq!(
+        workspace["properties"]["cargo_features"],
+        json!({"default": [], "items": {"type": "string"}, "type": "array"}),
+        "{context} Workspace.cargo_features schema drifted"
+    );
+    assert_eq!(
+        workspace["properties"]["cargo_all_features"],
+        json!({"default": false, "type": "boolean"}),
+        "{context} Workspace.cargo_all_features schema drifted"
+    );
 
     let rendered = serde_json::to_string(schema).expect("schema serializes");
     assert!(
@@ -657,7 +667,13 @@ fn checked_in_mcp_snapshot_exposes_environment_config_workspace_metadata() {
 
             workspace_schema_count += 1;
             let properties = &workspace["properties"];
-            for field in ["slug", "name", "tags"] {
+            for field in [
+                "slug",
+                "name",
+                "tags",
+                "cargo_features",
+                "cargo_all_features",
+            ] {
                 assert!(
                     properties.get(field).is_some(),
                     "checked-in snapshot {tool_name} {schema_key} Workspace missing {field}"
