@@ -54,6 +54,7 @@ pub mod task_arbitration;
 pub mod task_attempt;
 #[cfg(test)]
 pub mod task_attempt_tests;
+pub mod task_rejected_submission_integrity;
 pub mod task_run;
 pub mod task_run_outcome;
 #[cfg(any(test, feature = "test-support"))]

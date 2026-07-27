@@ -8,7 +8,7 @@ use crate::host::SlotContext;
 use crate::output_parser::{AutoSubmitSettlement, CompletionIntent, ParsedAgentOutput};
 use crate::roles_support::AgentRole;
 use djinn_core::events::DjinnEventEnvelope;
-use djinn_db::repositories::verify_run::TaskRejectedSubmissionIntegrityRepository;
+use djinn_db::repositories::task_rejected_submission_integrity::TaskRejectedSubmissionIntegrityRepository;
 use std::sync::Arc;
 
 pub(crate) struct PostSessionParams {
@@ -921,7 +921,7 @@ mod tests {
         assert!(review_records.is_empty());
         // But the task-level rejected integrity entry should be recorded.
         let integrity_repo =
-            djinn_db::repositories::verify_run::TaskRejectedSubmissionIntegrityRepository::new(db);
+            djinn_db::repositories::task_rejected_submission_integrity::TaskRejectedSubmissionIntegrityRepository::new(db);
         let latest = integrity_repo
             .latest_for_task(&task.id)
             .await
@@ -946,7 +946,7 @@ mod tests {
         let outcome = settle_auto_submit_if_eligible(&task.id, &ctx, &output).await;
         assert_eq!(outcome, AutoSubmitSettlementOutcome::Skipped);
         let integrity_repo =
-            djinn_db::repositories::verify_run::TaskRejectedSubmissionIntegrityRepository::new(db);
+            djinn_db::repositories::task_rejected_submission_integrity::TaskRejectedSubmissionIntegrityRepository::new(db);
         let latest = integrity_repo.latest_for_task(&task.id).await.unwrap();
         assert!(
             latest.is_none(),
@@ -1015,13 +1015,13 @@ mod tests {
         // Seed a rejected integrity entry so the settlement can increment the
         // streak.
         let integrity_repo =
-            djinn_db::repositories::verify_run::TaskRejectedSubmissionIntegrityRepository::new(
+            djinn_db::repositories::task_rejected_submission_integrity::TaskRejectedSubmissionIntegrityRepository::new(
                 db.clone(),
             );
         let entry_id = uuid::Uuid::now_v7().to_string();
         integrity_repo
             .record(
-                djinn_db::repositories::verify_run::RecordTaskRejectedSubmissionParams {
+                djinn_db::repositories::task_rejected_submission_integrity::RecordTaskRejectedSubmissionParams {
                     id: &entry_id,
                     task_id: &task.id,
                     task_run_id: None,
@@ -1102,7 +1102,7 @@ mod tests {
         assert_eq!(entries.len(), 1);
         // No rejected integrity entry should be created (nothing to increment).
         let integrity_repo =
-            djinn_db::repositories::verify_run::TaskRejectedSubmissionIntegrityRepository::new(db);
+            djinn_db::repositories::task_rejected_submission_integrity::TaskRejectedSubmissionIntegrityRepository::new(db);
         let latest = integrity_repo.latest_for_task(&task.id).await.unwrap();
         assert!(
             latest.is_none(),
