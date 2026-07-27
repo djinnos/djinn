@@ -585,7 +585,8 @@ async fn durable_dispatch_injects_real_dor_findings_not_a_placeholder() {
     .await
     .expect("record demand-round reviewer feedback");
 
-    let (run_id, generation) = admit_run(&repo, &fixture.proposal_id, "durable-dor-injection").await;
+    let (run_id, generation) =
+        admit_run(&repo, &fixture.proposal_id, "durable-dor-injection").await;
     let intent_id = only_intent(&repo, &run_id, generation).await;
     actor.active_refinements.insert(
         run_id.clone(),
@@ -618,7 +619,9 @@ async fn durable_dispatch_injects_real_dor_findings_not_a_placeholder() {
         .expect("durable driver materialized a task");
 
     assert!(
-        !task.description.contains("Durable refinement intent dispatch"),
+        !task
+            .description
+            .contains("Durable refinement intent dispatch"),
         "durable dispatch must not inject a placeholder readiness context:\n{}",
         task.description
     );
