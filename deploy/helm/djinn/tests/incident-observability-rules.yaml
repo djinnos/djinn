@@ -26,6 +26,11 @@ groups:
         for: 2m
         labels: {severity: warning}
         annotations: {runbook: server/docs/runbooks/incident-observability.md}
+      - alert: DjinnCgroupWritableSandboxFailure
+        expr: increase(kube_event_count{type="Warning", reason="FailedCreatePodSandBox", message=~".*runc-cgroupwritable.*"}[5m]) > 0
+        for: 2m
+        labels: {severity: warning}
+        annotations: {runbook: server/docs/runbooks/incident-observability.md}
       - alert: Watchdog
         expr: vector(1)
         for: 1m
