@@ -44,7 +44,7 @@ async fn identity(db: &Database) -> EvidencePlanIdentity {
 
 #[tokio::test]
 async fn evidence_plan_contract() {
-    let fixture = fixture();
+    let cases = fixture();
     let db = Database::open_in_memory().expect("open database");
     let repository = EvidenceRepository::new(db.clone());
     let identity = identity(&db).await;
@@ -71,14 +71,14 @@ async fn evidence_plan_contract() {
         EvidencePlanError::NoFrozenPlan
     );
 
-    for capture in fixture.invalid_captures {
+    for capture in cases.invalid_captures {
         assert!(matches!(
             capture_evidence_plan(&repository, identity.clone(), capture).await,
             Err(EvidencePlanError::InvalidPlan(_))
         ));
     }
 
-    let plan_id = capture_evidence_plan(&repository, identity.clone(), fixture.valid_capture)
+    let plan_id = capture_evidence_plan(&repository, identity.clone(), cases.valid_capture)
         .await
         .expect("valid plan capture");
     let frozen = require_frozen_plan(&repository, &identity)
