@@ -214,8 +214,14 @@ mod smoke {
                     "manually_paused": false,
                     "rate_limited": false,
                     "credential_available": true,
-                    "gate_verdict": "stranded",
-                    "reasons": []
+                    "gate_verdict": "unexplained",
+                    "reasons": [],
+                    "coverage": {
+                        "scope": "partial",
+                        "evaluated_gates": ["model_health"],
+                        "unevaluated_gates": ["slot_pool_capacity"],
+                        "note": "reasons covers only evaluated_gates"
+                    }
                 }
             }],
         })))
