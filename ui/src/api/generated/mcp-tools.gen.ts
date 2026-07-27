@@ -2604,11 +2604,8 @@ export namespace ImageCreateInputSchema {
    * 
    * The default is [`CargoCachePolicy::AutoDetected`]: djinn detects the
    * cache strategy from the repository it is about to run, including the
-   * Cargo workspace layout, `.cargo/config.toml` settings such as
-   * `rustc-wrapper`, and configured setup command shapes. That
-   * detection is deliberately read-only. djinn may read `.cargo/config.toml`
-   * to keep warm-job and worker behavior consistent with the project, but it
-   * never creates, edits, or rewrites the project's `.cargo/config.toml`.
+   * Cargo workspace layout and the selected Rust workspace's Cargo feature
+   * settings.
    * 
    * Set an explicit policy only when project authors need to override the
    * detected cargo feature set at the environment-config level. `None` is
@@ -2827,6 +2824,16 @@ export namespace ImageCreateInputSchema {
   [k: string]: any
   }
   export interface Workspace {
+  /**
+   * Pass `--all-features` instead of named `cargo_features`. Ignored for
+   * non-Rust workspaces.
+   */
+  cargo_all_features?: boolean
+  /**
+   * Cargo features that every platform-generated Cargo command for this
+   * Rust workspace must enable. Ignored for non-Rust workspaces.
+   */
+  cargo_features?: string[]
   language: string
   name?: string
   package_manager?: string
@@ -2960,11 +2967,8 @@ export namespace ImageListOutputSchema {
    * 
    * The default is [`CargoCachePolicy::AutoDetected`]: djinn detects the
    * cache strategy from the repository it is about to run, including the
-   * Cargo workspace layout, `.cargo/config.toml` settings such as
-   * `rustc-wrapper`, and configured setup command shapes. That
-   * detection is deliberately read-only. djinn may read `.cargo/config.toml`
-   * to keep warm-job and worker behavior consistent with the project, but it
-   * never creates, edits, or rewrites the project's `.cargo/config.toml`.
+   * Cargo workspace layout and the selected Rust workspace's Cargo feature
+   * settings.
    * 
    * Set an explicit policy only when project authors need to override the
    * detected cargo feature set at the environment-config level. `None` is
@@ -3183,6 +3187,16 @@ export namespace ImageListOutputSchema {
   [k: string]: any
   }
   export interface Workspace {
+  /**
+   * Pass `--all-features` instead of named `cargo_features`. Ignored for
+   * non-Rust workspaces.
+   */
+  cargo_all_features?: boolean
+  /**
+   * Cargo features that every platform-generated Cargo command for this
+   * Rust workspace must enable. Ignored for non-Rust workspaces.
+   */
+  cargo_features?: string[]
   language: string
   name?: string
   package_manager?: string
@@ -3292,11 +3306,8 @@ export namespace ImageUpdateInputSchema {
    * 
    * The default is [`CargoCachePolicy::AutoDetected`]: djinn detects the
    * cache strategy from the repository it is about to run, including the
-   * Cargo workspace layout, `.cargo/config.toml` settings such as
-   * `rustc-wrapper`, and configured setup command shapes. That
-   * detection is deliberately read-only. djinn may read `.cargo/config.toml`
-   * to keep warm-job and worker behavior consistent with the project, but it
-   * never creates, edits, or rewrites the project's `.cargo/config.toml`.
+   * Cargo workspace layout and the selected Rust workspace's Cargo feature
+   * settings.
    * 
    * Set an explicit policy only when project authors need to override the
    * detected cargo feature set at the environment-config level. `None` is
@@ -3515,6 +3526,16 @@ export namespace ImageUpdateInputSchema {
   [k: string]: any
   }
   export interface Workspace {
+  /**
+   * Pass `--all-features` instead of named `cargo_features`. Ignored for
+   * non-Rust workspaces.
+   */
+  cargo_all_features?: boolean
+  /**
+   * Cargo features that every platform-generated Cargo command for this
+   * Rust workspace must enable. Ignored for non-Rust workspaces.
+   */
+  cargo_features?: string[]
   language: string
   name?: string
   package_manager?: string
@@ -5880,11 +5901,8 @@ export namespace ProjectEnvironmentConfigGetOutputSchema {
    * 
    * The default is [`CargoCachePolicy::AutoDetected`]: djinn detects the
    * cache strategy from the repository it is about to run, including the
-   * Cargo workspace layout, `.cargo/config.toml` settings such as
-   * `rustc-wrapper`, and configured setup command shapes. That
-   * detection is deliberately read-only. djinn may read `.cargo/config.toml`
-   * to keep warm-job and worker behavior consistent with the project, but it
-   * never creates, edits, or rewrites the project's `.cargo/config.toml`.
+   * Cargo workspace layout and the selected Rust workspace's Cargo feature
+   * settings.
    * 
    * Set an explicit policy only when project authors need to override the
    * detected cargo feature set at the environment-config level. `None` is
@@ -6103,6 +6121,16 @@ export namespace ProjectEnvironmentConfigGetOutputSchema {
   [k: string]: any
   }
   export interface Workspace {
+  /**
+   * Pass `--all-features` instead of named `cargo_features`. Ignored for
+   * non-Rust workspaces.
+   */
+  cargo_all_features?: boolean
+  /**
+   * Cargo features that every platform-generated Cargo command for this
+   * Rust workspace must enable. Ignored for non-Rust workspaces.
+   */
+  cargo_features?: string[]
   language: string
   name?: string
   package_manager?: string
@@ -6196,11 +6224,8 @@ export namespace ProjectEnvironmentConfigResetOutputSchema {
    * 
    * The default is [`CargoCachePolicy::AutoDetected`]: djinn detects the
    * cache strategy from the repository it is about to run, including the
-   * Cargo workspace layout, `.cargo/config.toml` settings such as
-   * `rustc-wrapper`, and configured setup command shapes. That
-   * detection is deliberately read-only. djinn may read `.cargo/config.toml`
-   * to keep warm-job and worker behavior consistent with the project, but it
-   * never creates, edits, or rewrites the project's `.cargo/config.toml`.
+   * Cargo workspace layout and the selected Rust workspace's Cargo feature
+   * settings.
    * 
    * Set an explicit policy only when project authors need to override the
    * detected cargo feature set at the environment-config level. `None` is
@@ -6419,6 +6444,16 @@ export namespace ProjectEnvironmentConfigResetOutputSchema {
   [k: string]: any
   }
   export interface Workspace {
+  /**
+   * Pass `--all-features` instead of named `cargo_features`. Ignored for
+   * non-Rust workspaces.
+   */
+  cargo_all_features?: boolean
+  /**
+   * Cargo features that every platform-generated Cargo command for this
+   * Rust workspace must enable. Ignored for non-Rust workspaces.
+   */
+  cargo_features?: string[]
   language: string
   name?: string
   package_manager?: string
@@ -6505,11 +6540,8 @@ export namespace ProjectEnvironmentConfigSetInputSchema {
    * 
    * The default is [`CargoCachePolicy::AutoDetected`]: djinn detects the
    * cache strategy from the repository it is about to run, including the
-   * Cargo workspace layout, `.cargo/config.toml` settings such as
-   * `rustc-wrapper`, and configured setup command shapes. That
-   * detection is deliberately read-only. djinn may read `.cargo/config.toml`
-   * to keep warm-job and worker behavior consistent with the project, but it
-   * never creates, edits, or rewrites the project's `.cargo/config.toml`.
+   * Cargo workspace layout and the selected Rust workspace's Cargo feature
+   * settings.
    * 
    * Set an explicit policy only when project authors need to override the
    * detected cargo feature set at the environment-config level. `None` is
@@ -6728,6 +6760,16 @@ export namespace ProjectEnvironmentConfigSetInputSchema {
   [k: string]: any
   }
   export interface Workspace {
+  /**
+   * Pass `--all-features` instead of named `cargo_features`. Ignored for
+   * non-Rust workspaces.
+   */
+  cargo_all_features?: boolean
+  /**
+   * Cargo features that every platform-generated Cargo command for this
+   * Rust workspace must enable. Ignored for non-Rust workspaces.
+   */
+  cargo_features?: string[]
   language: string
   name?: string
   package_manager?: string
