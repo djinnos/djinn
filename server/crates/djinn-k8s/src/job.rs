@@ -18,6 +18,7 @@ use k8s_openapi::api::core::v1::{
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use uuid::Uuid;
 
+use djinn_core::paths::CacheRootId;
 use djinn_runtime::RoleKind;
 use djinn_supervisor::cargo_target_run_dir;
 
@@ -172,7 +173,7 @@ pub const TOKEN_MOUNT_FILE: &str = "/var/run/secrets/tokens/djinn";
 /// worker's commits.
 pub const MIRROR_MOUNT_DIR: &str = "/mirror";
 /// Mount path for the writeable shared cache PVC.
-pub const CACHE_MOUNT_DIR: &str = "/cache";
+pub const CACHE_MOUNT_DIR: &str = djinn_core::paths::JOB_POD_CACHE_MOUNT;
 /// Mount path of the ephemeral workspace emptyDir.
 pub const WORKSPACE_MOUNT_DIR: &str = "/workspace";
 /// Audience advertised on the projected ServiceAccount token.
@@ -933,9 +934,9 @@ fn common_cache_env_vars(project_id: &str, cpu_limit: &str) -> Vec<EnvVar> {
         // needs no new volume plumbing.
         env_var(
             "XDG_CACHE_HOME",
-            &format!("{CACHE_MOUNT_DIR}/xdg/{project_id}"),
+            &format!("{}/{project_id}", CacheRootId::Xdg.job_pod_path()),
         ),
-        env_var("CARGO_HOME", &format!("{CACHE_MOUNT_DIR}/cargo")),
+        env_var("CARGO_HOME", CacheRootId::Cargo.job_pod_path()),
         // NOTE: we deliberately do NOT force `RUSTC_WRAPPER=sccache` or
         // `CARGO_INCREMENTAL=0` here. The fast path is incremental compilation
         // over a warm, main-based per-project target base (CI-style, like
@@ -950,7 +951,7 @@ fn common_cache_env_vars(project_id: &str, cpu_limit: &str) -> Vec<EnvVar> {
         // stale contents, so Djinn's build path must not rely on it.
         env_var(
             "SCCACHE_DIR",
-            &format!("{CACHE_MOUNT_DIR}/sccache/{project_id}"),
+            &format!("{}/{project_id}", CacheRootId::Sccache.job_pod_path()),
         ),
         // Default is 10G, which evicts fast on a large workspace; give sccache
         // more headroom on the shared PVC.
@@ -1039,7 +1040,10 @@ pub(crate) fn cache_env_vars(project_id: &str, cpu_limit: &str) -> Vec<EnvVar> {
     let jobs = cpu_limit_to_jobs(cpu_limit);
     env.push(env_var(
         "CARGO_TARGET_DIR",
-        &format!("{CACHE_MOUNT_DIR}/cargo-target/{project_id}/mold-jobs-{jobs}"),
+        &format!(
+            "{}/{project_id}/mold-jobs-{jobs}",
+            CacheRootId::CargoTarget.job_pod_path()
+        ),
     ));
     env
 }

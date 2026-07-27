@@ -21,6 +21,7 @@ pub mod live_mover;
 pub mod mismatch_scan;
 pub mod refinement_phantom_active;
 pub mod retrieval_health;
+pub mod stale_cache_roots;
 pub mod stranded_ready;
 
 use std::sync::Arc;
@@ -37,6 +38,12 @@ pub use refinement_phantom_active::{
     MemoryRefinementPhantomActiveSource, ProposalRepositoryRefinementPhantomActiveSource,
     REFINEMENT_PHANTOM_ACTIVE_CHECK_NAME, RefinementPhantomActiveCheck,
     RefinementPhantomActiveSource,
+};
+pub use stale_cache_roots::{
+    CacheObservation, CacheObservationClass, CacheScanConfig, CacheScanReport, LiveProjectSet,
+    MemoryStaleCacheRootsSource, ProjectRepositoryStaleCacheRootsSource,
+    STALE_CACHE_ROOTS_CHECK_NAME, StaleCacheRootsCheck, StaleCacheRootsSource,
+    scan_cache_roots_under, scan_production_cache_root,
 };
 pub use stranded_ready::{
     MemoryStrandedReadySource, STRANDED_READY_CHECK_NAME, StrandedReadyCandidate,
@@ -114,6 +121,17 @@ pub fn register_closed_parent_open_children_check_with_repair(
     registry.register(Arc::new(
         ClosedParentOpenChildrenCheck::new(source).with_repair_source(repair_source),
     ))
+}
+
+/// Register the read-only cache-root manifest detector.
+///
+/// The check reports; it has no fix path at all, so registering it can never
+/// arm a deletion.
+pub fn register_stale_cache_roots_check(
+    registry: &DoctorRegistry,
+    source: Arc<dyn StaleCacheRootsSource>,
+) -> Option<String> {
+    registry.register(Arc::new(StaleCacheRootsCheck::new(source)))
 }
 
 /// Register the read-only exact-run phantom refinement detector.
