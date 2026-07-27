@@ -19,7 +19,7 @@ use djinn_compaction::{
 };
 use djinn_core::events::DjinnEventEnvelope;
 use djinn_db::SessionMessageRepository;
-use djinn_db::repositories::verify_run::TaskRejectedSubmissionIntegrityRepository;
+use djinn_db::repositories::task_rejected_submission_integrity::TaskRejectedSubmissionIntegrityRepository;
 use djinn_git::{SubmissionDiffFingerprint, compute_submission_diff_fingerprint};
 use djinn_provider::message::{ContentBlock, Conversation, Message, MessageMeta, Role};
 use djinn_provider::provider::LlmProvider;

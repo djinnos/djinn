@@ -1,8 +1,8 @@
 use super::*;
-use djinn_db::repositories::task_run::TaskRunRepository;
-use djinn_db::repositories::verify_run::{
+use djinn_db::repositories::task_rejected_submission_integrity::{
     RecordTaskRejectedSubmissionParams, TaskRejectedSubmissionIntegrityRepository,
 };
+use djinn_db::repositories::task_run::TaskRunRepository;
 
 impl CoordinatorActor {
     /// Record a task-level rejected submission fingerprint when a PR reviewer
