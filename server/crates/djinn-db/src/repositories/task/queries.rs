@@ -655,6 +655,8 @@ impl TaskRepository {
         let stranded_ready = super::board_health::stranded_ready_section(self.db.pool()).await;
         let closed_parent_open_children =
             super::board_health::closed_parent_open_children_section(self.db.pool()).await;
+        let stalled_epics =
+            super::board_health_stalled_epics::stalled_epics_section(self.db.pool()).await;
 
         Ok(serde_json::json!({
             "epic_stats":            epic_stats,
@@ -667,6 +669,7 @@ impl TaskRepository {
             "attribution_findings":  attribution_findings,
             "stranded_ready":        stranded_ready,
             "closed_parent_open_children": closed_parent_open_children,
+            "stalled_epics": stalled_epics,
         }))
     }
 
