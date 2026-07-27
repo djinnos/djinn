@@ -7,8 +7,15 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant as StdInstant};
 
-use djinn_core::events::{DjinnEventEnvelope, EventBus};
-use djinn_db::{CreateSessionParams, SessionRepository, TaskRepository};
+use djinn_core::{
+    events::{DjinnEventEnvelope, EventBus},
+    refinement_liveness::{RefinementRole, RefinementRunState, RefinementStopReason},
+};
+use djinn_db::{
+    AdmitRefinementRunRequest, CreateSessionParams, LoadRefinementRunSnapshotRequest,
+    ProposalRepository, RefinementAdmissionOutcome, RefinementAdmissionSource, SessionRepository,
+    TaskRepository,
+};
 use djinn_slot::{PoolMessage, PoolStatus, RunningTaskInfo, SlotPoolHandle};
 use tokio::sync::mpsc;
 
@@ -25,6 +32,51 @@ struct PoolCallCounts {
     get_status: usize,
     has_session: usize,
     kill_session: usize,
+}
+
+async fn seed_durable_running_refinement_dispatched_at(
+    actor: &mut CoordinatorActor,
+    db: &djinn_db::Database,
+    proposal_id: &str,
+    task_id: &str,
+    dispatched_at: StdInstant,
+) -> (String, i32) {
+    let admitted = ProposalRepository::new(db.clone(), EventBus::noop())
+        .admit_refinement_run(AdmitRefinementRunRequest {
+            proposal_id: proposal_id.to_owned(),
+            idempotency_key: uuid::Uuid::now_v7().to_string(),
+            source: RefinementAdmissionSource::Demand {
+                demand_id: uuid::Uuid::now_v7().to_string(),
+            },
+            heartbeat_grace_millis: 60_000,
+        })
+        .await
+        .expect("admit durable retry-cap run");
+    let (run_id, generation) = match admitted {
+        RefinementAdmissionOutcome::Admitted {
+            run_id, generation, ..
+        }
+        | RefinementAdmissionOutcome::Existing {
+            run_id, generation, ..
+        } => (run_id, generation),
+    };
+    actor.active_refinements.insert(
+        run_id.clone(),
+        RefinementLoopState::new(proposal_id, 1).with_run_identity(run_id.clone(), generation),
+    );
+    actor.refinement_sessions.insert(
+        run_id.clone(),
+        RefinementSession {
+            task_id: task_id.to_string(),
+            phase: RefinementPhase::AdversaryAttack,
+            run_id: run_id.clone(),
+            generation,
+            dispatched_at,
+            session_started_at: None,
+            model_id: TEST_MODEL.to_owned(),
+        },
+    );
+    (run_id, generation)
 }
 
 /// Spawn a stub pool (via `from_raw_sender`) that answers `GetStatus` with the
@@ -398,28 +450,61 @@ async fn pending_start_timeout_escalates_to_termination_at_retry_cap() {
     let (pool, _counts) = spawn_counting_pool(vec![task_id.clone()]);
     let mut actor = build_refinement_actor(&db, &events_tx, pool);
 
-    seed_running_refinement_dispatched_at(
+    let (run_id, generation) = seed_durable_running_refinement_dispatched_at(
         &mut actor,
+        &db,
         &fixture.proposal_id,
         &task_id,
         ago(super::REFINEMENT_PENDING_START_TIMEOUT + Duration::from_secs(60)),
-    );
+    )
+    .await;
     // Pre-load the failure counter to one below the cap so this abandonment
     // reaches it.
     actor
         .active_refinements
-        .get_mut(&fixture.proposal_id)
+        .get_mut(&run_id)
         .expect("seeded refinement")
         .dispatch_failures = super::REFINEMENT_DISPATCH_RETRY_CAP - 1;
 
     actor.drive_active_refinements().await;
 
     assert!(
-        !actor.active_refinements.contains_key(&fixture.proposal_id),
+        !actor.active_refinements.contains_key(&run_id),
         "reaching the retry cap must terminate the refinement (removed after retain)"
     );
     assert!(
-        !actor.refinement_sessions.contains_key(&fixture.proposal_id),
+        !actor.refinement_sessions.contains_key(&run_id),
         "in-flight session must be cleared on terminal escalation"
     );
+    let durable = ProposalRepository::new(db.clone(), EventBus::noop())
+        .load_refinement_run_snapshot(LoadRefinementRunSnapshotRequest {
+            run_id: run_id.clone(),
+            heartbeat_grace_millis: 60_000,
+        })
+        .await
+        .expect("load exact retry-cap run")
+        .expect("admitted retry-cap run exists");
+    assert_eq!(durable.generation, generation, "CAS must use exact generation");
+    assert_eq!(durable.snapshot.run.state, RefinementRunState::Terminal);
+    assert_eq!(
+        durable.snapshot.run.terminal_reason,
+        Some(RefinementStopReason::AgentFailure {
+            role: RefinementRole::Adversary,
+            error_code: "agent_start_failed".into(),
+            message: format!(
+                "role session failed to start {} times (task-run pod stuck Pending in scheduler queue)",
+                super::REFINEMENT_DISPATCH_RETRY_CAP
+            ),
+        })
+    );
+    let stops: Vec<_> = ProposalRepository::new(db, EventBus::noop())
+        .revisions(&fixture.proposal_id)
+        .await
+        .expect("read retry-cap lifecycle")
+        .into_iter()
+        .filter(|row| row.event_kind == "refinement_stop")
+        .collect();
+    assert_eq!(stops.len(), 1, "exact terminal CAS writes one lifecycle stop");
+    assert_eq!(stops[0].refinement_run_id.as_deref(), Some(run_id.as_str()));
+    assert_eq!(stops[0].refinement_stop_tag.as_deref(), Some("agent_failure"));
 }
