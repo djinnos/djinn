@@ -268,8 +268,8 @@ async fn durable_adversary_exit_hands_off_to_a_real_advocate_turn() {
     let advocate_intent = advocate_intents[0];
     assert_eq!(
         advocate_intent.state,
-        RefinementIntentState::Pending,
-        "the exact correlated Advocate successor must be pending before its dispatch"
+        RefinementIntentState::Materialized,
+        "the production tick must immediately dispatch the exact correlated Advocate successor"
     );
     let completed_adversaries = after
         .snapshot
@@ -298,9 +298,8 @@ async fn durable_adversary_exit_hands_off_to_a_real_advocate_turn() {
         "a finished role task must not linger open and keep the run artificially live"
     );
 
-    // The successor intent must produce a real Advocate role task — the
-    // advocate TURN, not merely a ledger row.
-    f.actor.drive_active_refinements().await;
+    // The same production tick must produce a real Advocate role task — the
+    // advocate TURN, not merely a ledger row or an unobservable Pending state.
     let advocate = TaskRepository::new(f.db.clone(), EventBus::noop())
         .find_by_refinement_intent_id(&advocate_intent.intent_id)
         .await
