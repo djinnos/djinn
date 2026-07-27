@@ -1,0 +1,21 @@
+# Djinn managed-k3s containerd template.
+#
+# Source/version pin: k3s-io/k3s v1.31.5+k3s1 embeds containerd
+# v1.7.23-k3s2, whose CRI configuration uses the v2
+# `io.containerd.grpc.v1.cri` plugin namespace.
+# This template is installed on managed nodes as:
+#   /var/lib/rancher/k3s/agent/etc/containerd/config.toml.tmpl
+# K3s renders the live configuration consumed by containerd at:
+#   /var/lib/rancher/k3s/agent/etc/containerd/config.toml
+#
+# Retain the k3s-generated base template so its default `runc` runtime and
+# every unrelated runtime setting remain unchanged. The conformance script
+# must inspect the rendered live file above, rather than this source template.
+{{ template "base" . }}
+
+# Dedicated handler for RuntimeClass/djinn-cgroup-writable. `cgroup_writable`
+# is a CRI runtime property and intentionally belongs on this runtime entry,
+# not in the runc options table.
+[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc-cgroupwritable]
+  runtime_type = "io.containerd.runc.v2"
+  cgroup_writable = true
