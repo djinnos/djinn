@@ -753,6 +753,20 @@ fn tribunal_readiness_uses_only_shared_lint_constructor() {
         !dispatch.contains("lint_for_revision"),
         "dispatch must consume the coordinator's shared readiness result rather than lint directly"
     );
+
+    // Regression (bzpt): no dispatch path may substitute a constant for the
+    // head-derived DoR status. The durable intent ledger shipped the literal
+    // "Durable refinement intent dispatch." into the injected
+    // `Current DoR status`, which left the Advocate unable to see its blockers
+    // and made an approving Judge verdict impossible.
+    assert!(
+        !dispatch.contains("Durable refinement intent dispatch"),
+        "durable dispatch must not inject a placeholder in place of real DoR findings"
+    );
+    assert!(
+        dispatch.contains("build_refinement_role_context"),
+        "both dispatch paths must build the injected role context through the shared helper"
+    );
 }
 
 /// Regression (criterion 4): `resolve_refinement_review` (human acceptance)

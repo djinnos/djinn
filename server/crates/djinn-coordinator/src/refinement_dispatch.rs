@@ -101,6 +101,34 @@ fn durable_role_name(role: RefinementRole) -> &'static str {
     }
 }
 
+/// Project a durable intent phase onto the in-process loop phase. Sole
+/// conversion point, so a new durable phase variant fails to compile here
+/// rather than silently mis-projecting at one of two call sites.
+fn refinement_phase_for_intent(
+    phase: djinn_core::refinement_liveness::RefinementPhase,
+) -> RefinementPhase {
+    match phase {
+        djinn_core::refinement_liveness::RefinementPhase::AdversaryAttack => {
+            RefinementPhase::AdversaryAttack
+        }
+        djinn_core::refinement_liveness::RefinementPhase::AdvocateRevision => {
+            RefinementPhase::AdvocateRevision
+        }
+        djinn_core::refinement_liveness::RefinementPhase::JudgeAdjudication => {
+            RefinementPhase::JudgeAdjudication
+        }
+    }
+}
+
+/// Shared readiness/feedback context injected into every tribunal role task.
+pub(super) struct RefinementRoleContext {
+    /// Rendered current-head DoR failures and `SpecLintResultV1` summary, plus
+    /// any advocate spec-lint correction owed for this same round.
+    pub readiness_context: String,
+    /// Latest human reviewer feedback recorded against the current revision.
+    pub reviewer_feedback: Option<String>,
+}
+
 impl CoordinatorActor {
     /// Drive all active refinement loops. Called from `run_tick()`.
     pub(super) async fn drive_active_refinements(&mut self) {
@@ -316,14 +344,30 @@ impl CoordinatorActor {
                             }
                         };
                         let role = durable_role_name(lease.role);
+                        // The durable ledger is the ONLY dispatch path for a
+                        // run with a `run_id`, so this context is what every
+                        // live tribunal role actually reads. It must carry the
+                        // real DoR/lint findings and reviewer feedback — a
+                        // placeholder here leaves the Advocate unable to fix
+                        // readiness and forces a mandatory Judge reject.
+                        let RefinementRoleContext {
+                            readiness_context,
+                            reviewer_feedback,
+                        } = self
+                            .build_refinement_role_context(
+                                &run.proposal_id,
+                                &run.run_id,
+                                refinement_phase_for_intent(lease.phase),
+                            )
+                            .await;
                         let Some(task_id) = self
                             .create_refinement_task_with_context_and_correlation(
                                 &run.proposal_id,
                                 role,
                                 lease.round,
                                 proposal.latest_revision_seq,
-                                "Durable refinement intent dispatch.",
-                                None,
+                                &readiness_context,
+                                reviewer_feedback.as_deref(),
                                 Some(&attributed_user),
                                 Some(&correlation),
                             )
@@ -397,17 +441,7 @@ impl CoordinatorActor {
             return None;
         }
 
-        let phase = match phase {
-            djinn_core::refinement_liveness::RefinementPhase::AdversaryAttack => {
-                RefinementPhase::AdversaryAttack
-            }
-            djinn_core::refinement_liveness::RefinementPhase::AdvocateRevision => {
-                RefinementPhase::AdvocateRevision
-            }
-            djinn_core::refinement_liveness::RefinementPhase::JudgeAdjudication => {
-                RefinementPhase::JudgeAdjudication
-            }
-        };
+        let phase = refinement_phase_for_intent(phase);
         let diverse_refinement = self.read_diverse_refinement_setting(proposal_id).await;
         let (agent_type, model_id) = self
             .resolve_refinement_dispatch_params(phase, diverse_refinement, Some(owner.as_str()))
@@ -707,6 +741,80 @@ impl CoordinatorActor {
                 phase = ?session.phase,
                 "Refinement role session never started; will re-dispatch (not counted as dry)"
             );
+        }
+    }
+
+    /// Build the shared per-role dispatch context every tribunal task needs:
+    /// the rendered current-head DoR/lint readiness report (plus any advocate
+    /// spec-lint correction for this same round) and the current-revision human
+    /// reviewer feedback.
+    ///
+    /// Both dispatch paths MUST go through this. The durable intent ledger
+    /// previously injected the fixed literal `"Durable refinement intent
+    /// dispatch."` as the readiness context and passed `None` for reviewer
+    /// feedback, so every durable-run role was dispatched blind:
+    ///
+    /// * the Advocate never learned which DoR checks were failing and so could
+    ///   not fix them, and
+    /// * the Judge — whose prompt treats any injected `Current DoR status`
+    ///   other than the exact clean message as a mandatory blocking reject —
+    ///   could never approve, no matter how good the spec was.
+    ///
+    /// Since `drive_one_refinement` returns early for any run with a non-empty
+    /// `run_id` ("durable runs are dispatched exclusively by the leased intent
+    /// ledger"), that placeholder was what every live refinement actually got.
+    async fn build_refinement_role_context(
+        &self,
+        proposal_id: &str,
+        run_id: &str,
+        phase: RefinementPhase,
+    ) -> RefinementRoleContext {
+        let readiness = self.evaluate_proposal_readiness(proposal_id).await;
+        let mut readiness_context = readiness
+            .as_ref()
+            .map(CoordinatorActor::format_readiness_context)
+            .unwrap_or_else(|| {
+                "Current proposal head could not be resolved for shared DoR/lint readiness."
+                    .to_string()
+            });
+
+        if phase == RefinementPhase::AdvocateRevision
+            && let Some(correction_context) =
+                self.active_refinements.get(run_id).and_then(|state| {
+                    super::refinement_outcome::format_advocate_lint_correction_context(
+                        &state.pending_advocate_lint_violations,
+                    )
+                })
+        {
+            readiness_context.push_str("\n\nSpec-lint correction required for this same round:\n");
+            readiness_context.push_str(&correction_context);
+        }
+
+        // Retrieve the latest current-revision human reviewer feedback recorded
+        // by a demand round. The helper filters to the proposal's current
+        // `latest_revision_seq` so stale feedback from a prior revision is
+        // never injected into the next tribunal task.
+        let event_bus = crate::events::event_bus_for(&self.events_tx);
+        let proposal_repo = djinn_db::ProposalRepository::new(self.db.clone(), event_bus);
+        let reviewer_feedback = match proposal_repo
+            .latest_current_revision_reviewer_feedback(proposal_id)
+            .await
+        {
+            Ok(fb) => fb,
+            Err(e) => {
+                tracing::warn!(
+                    proposal_id = %proposal_id,
+                    error = %e,
+                    "Failed to retrieve reviewer feedback for refinement dispatch; \
+                     proceeding without feedback injection"
+                );
+                None
+            }
+        };
+
+        RefinementRoleContext {
+            readiness_context,
+            reviewer_feedback,
         }
     }
 
@@ -1010,51 +1118,12 @@ impl CoordinatorActor {
 
         // Build a readiness-enriched task description so the agent sees
         // current DoR findings.
-        let lint_correction_context = if phase == RefinementPhase::AdvocateRevision {
-            self.active_refinements.get(run_id).and_then(|state| {
-                super::refinement_outcome::format_advocate_lint_correction_context(
-                    &state.pending_advocate_lint_violations,
-                )
-            })
-        } else {
-            None
-        };
-
-        let mut readiness_context = readiness
-            .as_ref()
-            .map(CoordinatorActor::format_readiness_context)
-            .unwrap_or_else(|| {
-                "Current proposal head could not be resolved for shared DoR/lint readiness."
-                    .to_string()
-            });
-        if let Some(correction_context) = lint_correction_context {
-            readiness_context.push_str("\n\nSpec-lint correction required for this same round:\n");
-            readiness_context.push_str(&correction_context);
-        }
-
-        // Retrieve the latest current-revision human reviewer feedback recorded
-        // by a demand round. The helper filters to the proposal's current
-        // `latest_revision_seq` so stale feedback from a prior revision is
-        // never injected into the next tribunal task.
-        let reviewer_feedback = {
-            let event_bus = crate::events::event_bus_for(&self.events_tx);
-            let proposal_repo = djinn_db::ProposalRepository::new(self.db.clone(), event_bus);
-            match proposal_repo
-                .latest_current_revision_reviewer_feedback(&proposal_id)
-                .await
-            {
-                Ok(fb) => fb,
-                Err(e) => {
-                    tracing::warn!(
-                        proposal_id = %proposal_id,
-                        error = %e,
-                        "Failed to retrieve reviewer feedback for refinement dispatch; \
-                         proceeding without feedback injection"
-                    );
-                    None
-                }
-            }
-        };
+        let RefinementRoleContext {
+            readiness_context,
+            reviewer_feedback,
+        } = self
+            .build_refinement_role_context(&proposal_id, run_id, phase)
+            .await;
 
         // ── Step 3: Create the refinement task (first DB side effect) ────────
         //
