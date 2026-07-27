@@ -453,7 +453,7 @@ impl RealPoolKillHarness {
             graph_warmer: None,
             repo_graph_ops: None,
             runtime_ops: Some(Arc::new(runtime.clone())),
-            cargo_target_runs_root: Some(tempfile::tempdir().expect("cargo tempdir").keep()),
+            cargo_target_runs_root: tempfile::tempdir().expect("cargo tempdir").keep(),
             mirror: None,
             rpc_registry: None,
             default_project_id: None,
