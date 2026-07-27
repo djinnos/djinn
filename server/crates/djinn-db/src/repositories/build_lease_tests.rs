@@ -268,3 +268,192 @@ async fn concurrent_terminal_attempts_return_capacity_exactly_once() {
     assert_eq!(next.key, second.key);
     assert_eq!(repo.snapshot().await.unwrap().occupied, 1);
 }
+
+/// A spent `task_dispatch` attempt must be retired, not replayed forever.
+///
+/// This is the 2026-07-27 board wedge, at the ledger. The key
+/// `task_dispatch/{task_id}:{generation}` is a COORDINATE the dispatcher asks
+/// for on every tick, not an attempt. Once a terminal row sat under it,
+/// `queue()` — which had no state filter — returned that row unchanged forever,
+/// and layer-1 admission turned the replay into a denial *before* the journal
+/// write that would have advanced the generation. So the key never changed, the
+/// tombstone was read again next tick, and the loop closed on itself: six
+/// dispatchable tasks, zero sessions, 78 denials in five minutes at occupancy
+/// 0-1 of cap 3.
+///
+/// Every terminal signature a dispatch row can reach is covered, each produced
+/// by the production path that produces it. The load-bearing assertion in each
+/// round is the last one: the fresh attempt is actually GRANTED against a cap
+/// of 1, which the tombstone could never be.
+#[tokio::test]
+async fn a_spent_task_dispatch_attempt_is_retired_rather_than_replayed_forever() {
+    let repo = BuildLeaseRepository::new(Database::open_in_memory().unwrap());
+
+    for (task_id, reason) in [
+        ("expired-task", BuildLeaseTerminalReason::DeadlineExpired),
+        ("reclaimed-task", BuildLeaseTerminalReason::ReclaimedAbsent),
+        ("abandoned-task", BuildLeaseTerminalReason::Abandoned),
+        ("released-task", BuildLeaseTerminalReason::Released),
+        ("cancelled-task", BuildLeaseTerminalReason::Cancelled),
+    ] {
+        let consumer_id = format!("{task_id}:0");
+        let request = input(
+            BuildLeaseConsumerKind::TaskDispatch,
+            &consumer_id,
+            &format!("dispatch:{task_id}:0"),
+        );
+
+        // ── Produce the tombstone, only through production paths ────────────
+        match reason {
+            BuildLeaseTerminalReason::DeadlineExpired => {
+                // The coordinator stamps an absolute queue deadline on every
+                // dispatch attempt; the tick sweep retires it once passed.
+                let stamped = QueueBuildLeaseInput {
+                    queue_deadline: Some(NOW.to_owned()),
+                    ..request.clone()
+                };
+                repo.queue(&stamped).await.unwrap();
+                let expired = repo.expire_deadlines(LATER).await.unwrap();
+                assert_eq!(expired.len(), 1);
+            }
+            BuildLeaseTerminalReason::ReclaimedAbsent => {
+                repo.queue(&request).await.unwrap();
+                let granted = grant(&repo, 1).await;
+                assert!(matches!(
+                    repo.reclaim_absent_object(&ReclaimAbsentBuildLeaseInput {
+                        key: request.key.clone(),
+                        observed_state: granted.state,
+                        observed_immutable_identity: granted.immutable_identity.clone(),
+                        observed_fencing_token: granted.fencing_token,
+                        observed_bound_pod_uid: granted.bound_pod_uid.clone(),
+                        observed_updated_at: granted.updated_at.clone(),
+                    })
+                    .await
+                    .unwrap(),
+                    ReclaimAbsentBuildLeaseOutcome::Reclaimed(_)
+                ));
+            }
+            BuildLeaseTerminalReason::Abandoned => {
+                repo.queue(&request).await.unwrap();
+                assert_eq!(repo.abandon_queued_dispatch(task_id).await.unwrap(), 1);
+            }
+            BuildLeaseTerminalReason::Released => {
+                repo.queue(&request).await.unwrap();
+                let granted = grant(&repo, 1).await;
+                repo.release(&request.key, granted.fencing_token.unwrap(), None)
+                    .await
+                    .unwrap();
+            }
+            BuildLeaseTerminalReason::Cancelled => {
+                repo.queue(&request).await.unwrap();
+                repo.cancel(&request.key, None).await.unwrap();
+            }
+        }
+
+        let tombstone = repo.get(&request.key).await.unwrap().unwrap();
+        assert_eq!(tombstone.state, BuildLeaseState::Terminal, "{task_id}");
+        assert_eq!(
+            tombstone.terminal_reason.as_deref(),
+            Some(reason.as_str()),
+            "{task_id}"
+        );
+        assert_eq!(
+            repo.snapshot().await.unwrap().occupied,
+            0,
+            "a terminal row occupies nothing, so retiring it can free nothing"
+        );
+
+        // ── The tick that used to wedge: the same key, asked for again ──────
+        let fresh = match repo.queue(&request).await.unwrap() {
+            QueueBuildLeaseResult::Queued {
+                row,
+                idempotent,
+                superseded,
+            } => {
+                assert!(
+                    !idempotent,
+                    "{task_id}: a spent attempt must not replay as an idempotent hit"
+                );
+                assert_eq!(
+                    superseded.as_deref(),
+                    Some(reason.as_str()),
+                    "{task_id}: the retirement must be reported, so an operator \
+                     can see a tombstone was cleared"
+                );
+                row
+            }
+            other => panic!("{task_id}: the fresh attempt must queue, got {other:?}"),
+        };
+        assert_eq!(fresh.state, BuildLeaseState::Queued);
+        assert_eq!(fresh.terminal_reason, None);
+        assert_eq!(fresh.fencing_token, None);
+        assert!(
+            fresh.enqueue_sequence > tombstone.enqueue_sequence,
+            "{task_id}: a fresh attempt joins the BACK of the FIFO rather than \
+             inheriting the retired attempt's queue position"
+        );
+
+        // The side effect that is the whole point: capacity is obtainable.
+        let granted = grant(&repo, 1).await;
+        assert_eq!(granted.key, request.key, "{task_id}");
+        assert_ne!(
+            granted.fencing_token, tombstone.fencing_token,
+            "{task_id}: the retired attempt's token must be fenced out"
+        );
+        assert_eq!(repo.snapshot().await.unwrap().occupied, 1);
+
+        // Hand the slot back so the next round starts from an empty pool.
+        repo.release(&request.key, granted.fencing_token.unwrap(), None)
+            .await
+            .unwrap();
+        assert_eq!(repo.snapshot().await.unwrap().occupied, 0);
+    }
+}
+
+/// The retirement above is scoped to `task_dispatch` alone.
+///
+/// Retained terminal replay is load-bearing for the other two populations: a
+/// warm Job whose response was lost must be told it was `Released`, not handed
+/// a fresh grant that re-runs a finished compile. Widening the fix to every
+/// consumer kind would break exactly that, and would break it silently.
+#[tokio::test]
+async fn a_terminal_warm_or_invocation_lease_is_still_replayed_verbatim() {
+    let repo = BuildLeaseRepository::new(Database::open_in_memory().unwrap());
+    for (kind, id) in [
+        (BuildLeaseConsumerKind::GraphWarm, "warm-request"),
+        (BuildLeaseConsumerKind::TaskInvocation, "invocation-id"),
+    ] {
+        let request = input(kind, id, &format!("{id}-v1"));
+        repo.queue(&request).await.unwrap();
+        let granted = grant(&repo, 1).await;
+        repo.release(&request.key, granted.fencing_token.unwrap(), None)
+            .await
+            .unwrap();
+
+        match repo.queue(&request).await.unwrap() {
+            QueueBuildLeaseResult::Queued {
+                row,
+                idempotent,
+                superseded,
+            } => {
+                assert_eq!(
+                    row.state,
+                    BuildLeaseState::Terminal,
+                    "{kind:?} must replay its retained outcome"
+                );
+                assert_eq!(
+                    row.terminal_reason.as_deref(),
+                    Some(BuildLeaseTerminalReason::Released.as_str())
+                );
+                assert!(idempotent, "{kind:?}");
+                assert_eq!(superseded, None, "{kind:?}");
+            }
+            other => panic!("{kind:?} replay must return the retained row, got {other:?}"),
+        }
+        assert_eq!(
+            repo.snapshot().await.unwrap().occupied,
+            0,
+            "and the replay must not re-buy capacity"
+        );
+    }
+}

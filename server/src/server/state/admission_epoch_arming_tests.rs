@@ -40,7 +40,7 @@ use super::build_admission_config_tests::{
 use super::*;
 use crate::admin::{AdminCommand, EpochAction, run_admin_command};
 use djinn_agent::actors::coordinator::BuildAdmissionReadiness;
-use djinn_coordinator::build_admission::BuildAdmissionDecision;
+use djinn_coordinator::build_admission::{BuildAdmissionDecision, DenialCause};
 use djinn_db::{AdmissionDomain, AdmissionHandoffPhase, V0Mode, V1Mode};
 use djinn_supervisor::services::{InvocationLiftDecision, evaluate_invocation_lift};
 
@@ -373,8 +373,9 @@ async fn unconfirmed_topology_still_fails_closed_and_never_lifts() {
     assert_eq!(
         admit(&state, "wedged-task").await,
         BuildAdmissionDecision::Denied {
-            occupancy: 0,
-            cap: 3
+            occupancy: None,
+            cap: 3,
+            cause: DenialCause::ControllerNotAdmitting
         },
         "an unconfirmed topology MUST fail closed"
     );
@@ -566,8 +567,9 @@ async fn seeding_a_live_observe_deployment_does_not_wedge_admission() {
     assert_ne!(
         admit(&state, "post-seed-task").await,
         BuildAdmissionDecision::Denied {
-            occupancy: 0,
-            cap: 3
+            occupancy: None,
+            cap: 3,
+            cause: DenialCause::ControllerNotAdmitting
         },
         "re-seeding must not reproduce the incident's self-contradictory denial"
     );
@@ -634,8 +636,9 @@ async fn a_standby_promotion_never_re_asserts_the_topology_gate() {
     assert_eq!(
         admit(&state, "standby-task").await,
         BuildAdmissionDecision::Denied {
-            occupancy: 0,
-            cap: 3
+            occupancy: None,
+            cap: 3,
+            cause: DenialCause::ControllerNotAdmitting
         },
         "a promoted standby must fail closed"
     );

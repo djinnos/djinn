@@ -258,8 +258,15 @@ pub enum DispatchSlotOutcome {
     /// The authority is not enforcing yet. Nothing was acquired and nothing is
     /// denied; `would_defer` records what enforcement WOULD have done.
     Observed { would_defer: bool },
-    /// The authority could not be reached. Fails closed for Enforce.
-    Unavailable,
+    /// The authority did not return a capacity answer. Fails closed for
+    /// Enforce.
+    ///
+    /// `detail` is the authority's own words -- typically the lease outcome or
+    /// `terminal_reason` that produced this. It exists because the previous
+    /// unit-variant form was indistinguishable, at the operator's log, from a
+    /// pool that was genuinely full: a lease tombstone arrived here and was
+    /// printed as `occupancy=0 cap=3`, a denial no capacity rule can justify.
+    Unavailable { detail: String },
 }
 
 /// The single capacity authority, as the admission controller sees it.
@@ -304,11 +311,49 @@ pub enum BuildAdmissionDecision {
         idempotent: bool,
     },
     Denied {
-        occupancy: i64,
+        /// Occupancy as READ from the capacity authority, or `None` when this
+        /// denial never consulted occupancy at all.
+        ///
+        /// `Option` rather than `i64` on purpose. The old shape forced every
+        /// non-capacity denial to invent a number, and the invented number was
+        /// `0` -- which the only operator-facing log then printed verbatim,
+        /// asserting a capacity figure arithmetically incapable of justifying
+        /// the denial it accompanied. A denial that did not measure occupancy
+        /// must now say so.
+        occupancy: Option<i64>,
         cap: i64,
+        /// Why. Printed alongside the numbers so a tombstoned lease can never
+        /// again be mistaken for a full pool.
+        cause: DenialCause,
     },
     /// Classification was absent or unrecognized. The observation counter is bounded.
     Unclassified,
+}
+
+/// Why one build-admission request was denied.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DenialCause {
+    /// The genuine one: weighted occupancy plus this request's weight exceeds
+    /// the cap. Only this variant carries a measured occupancy.
+    AtCapacity,
+    /// The controller itself is not admitting -- not yet recovered, or
+    /// draining. Nothing was measured and nothing was acquired.
+    ControllerNotAdmitting,
+    /// The build-slot authority answered with something that is not a capacity
+    /// answer. `detail` is its own words.
+    AuthorityUnavailable { detail: String },
+}
+
+impl std::fmt::Display for DenialCause {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::AtCapacity => f.write_str("at_capacity"),
+            Self::ControllerNotAdmitting => f.write_str("controller_not_admitting"),
+            Self::AuthorityUnavailable { detail } => {
+                write!(f, "authority_unavailable: {detail}")
+            }
+        }
+    }
 }
 
 /// Observe-only disk-capacity adapter for build admission (proposal nquz,
@@ -1002,8 +1047,9 @@ impl BuildAdmissionController {
             // the constructor's configured value here made v0 and v1 disagree
             // in the operator's log about which number was in force.
             return Ok(BuildAdmissionDecision::Denied {
-                occupancy: 0,
+                occupancy: None,
                 cap: self.effective_cap(),
+                cause: DenialCause::ControllerNotAdmitting,
             });
         }
         // Capture an observe-only copy before any field of `request` is moved.
@@ -1156,18 +1202,29 @@ impl BuildAdmissionController {
                         }
                     }
                     self.publish_metrics().await;
-                    return Ok(BuildAdmissionDecision::Denied { occupancy, cap });
+                    return Ok(BuildAdmissionDecision::Denied {
+                        occupancy: Some(occupancy),
+                        cap,
+                        cause: DenialCause::AtCapacity,
+                    });
                 }
-                DispatchSlotOutcome::Unavailable => {
+                DispatchSlotOutcome::Unavailable { detail } => {
                     // A capacity authority we cannot reach is not permission.
                     // Observe stays non-denying; anything else fails closed.
+                    //
+                    // No occupancy is reported here because none was read. The
+                    // previous `occupancy: 0` was fabricated at this exact
+                    // line, and it is what made a permanently tombstoned lease
+                    // indistinguishable in the log from a full pool.
                     if self.mode() != BuildAdmissionMode::Observe {
                         return Ok(BuildAdmissionDecision::Denied {
-                            occupancy: 0,
+                            occupancy: None,
                             cap: self.effective_cap(),
+                            cause: DenialCause::AuthorityUnavailable { detail },
                         });
                     }
                     tracing::warn!(
+                        %detail,
                         "build admission: build-slot authority unavailable; \
                          Observe continues without capacity accounting"
                     );
@@ -2143,8 +2200,17 @@ impl WarmAdmission for BuildAdmissionController {
             .await?;
         match decision {
             BuildAdmissionDecision::Permitted { permit, .. } => Ok(permit),
-            BuildAdmissionDecision::Denied { occupancy, cap } => Err(WarmAdmissionError::Denied {
-                diagnostic: format!("occupancy {occupancy} reached cap {cap}"),
+            BuildAdmissionDecision::Denied {
+                occupancy,
+                cap,
+                cause,
+            } => Err(WarmAdmissionError::Denied {
+                diagnostic: match occupancy {
+                    Some(occupancy) => format!("occupancy {occupancy} reached cap {cap} ({cause})"),
+                    None => {
+                        format!("denied without measuring occupancy against cap {cap} ({cause})")
+                    }
+                },
             }),
             BuildAdmissionDecision::Unclassified => Err(WarmAdmissionError::Denied {
                 diagnostic: "unclassified build workload".into(),

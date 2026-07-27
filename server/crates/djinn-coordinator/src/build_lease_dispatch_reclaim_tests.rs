@@ -39,7 +39,7 @@ use djinn_k8s::{
 };
 
 use crate::build_admission::{
-    BuildAdmissionController, BuildAdmissionDecision, BuildAdmissionMode,
+    BuildAdmissionController, BuildAdmissionDecision, BuildAdmissionMode, DenialCause,
 };
 use crate::build_admission_capacity_support::{CapacityHarness, controller_with_capacity_over};
 use crate::build_admission_inventory::BuildAdmissionReconciler;
@@ -225,8 +225,9 @@ async fn dispatch_leak_wedges_every_task_until_it_is_reclaimed() {
         matches!(
             admit(&successor, "next-task").await,
             BuildAdmissionDecision::Denied {
-                occupancy: 1,
-                cap: 1
+                occupancy: Some(1),
+                cap: 1,
+                cause: DenialCause::AtCapacity
             }
         ),
         "the production symptom: every task denied against occupancy it cannot use"

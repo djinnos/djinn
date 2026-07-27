@@ -76,6 +76,52 @@ impl BuildLeaseState {
     }
 }
 
+/// The closed set of reasons a build lease can reach `terminal`.
+///
+/// This exists so the set is a Rust type rather than a scattering of SQL string
+/// literals. Every producer below writes [`Self::as_str`] and every consumer
+/// matches the enum EXHAUSTIVELY, so adding a reason is a compile error at the
+/// mapping sites instead of a silent fall-through.
+///
+/// That fall-through is not hypothetical: `reclaimed_absent` was added by the
+/// dispatch reclaimer with no mapping, landed in a `_ =>` arm that answered
+/// `LeaseUnavailable`, and permanently wedged every task whose dispatch lease
+/// had been reclaimed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BuildLeaseTerminalReason {
+    Abandoned,
+    Cancelled,
+    Released,
+    DeadlineExpired,
+    ReclaimedAbsent,
+}
+impl BuildLeaseTerminalReason {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Abandoned => "abandoned",
+            Self::Cancelled => "cancelled",
+            Self::Released => "released",
+            Self::DeadlineExpired => "deadline_expired",
+            Self::ReclaimedAbsent => "reclaimed_absent",
+        }
+    }
+    /// Parse a stored reason. `None` covers both a NULL column and a value
+    /// written by a future version of this schema.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "abandoned" => Some(Self::Abandoned),
+            "cancelled" => Some(Self::Cancelled),
+            "released" => Some(Self::Released),
+            "deadline_expired" => Some(Self::DeadlineExpired),
+            "reclaimed_absent" => Some(Self::ReclaimedAbsent),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BuildLeaseKey {
     pub consumer_kind: BuildLeaseConsumerKind,
@@ -133,6 +179,11 @@ pub enum QueueBuildLeaseResult {
     Queued {
         row: BuildLeaseRow,
         idempotent: bool,
+        /// `Some(terminal_reason)` when this call retired a spent
+        /// `task_dispatch` attempt to mint `row`. Purely diagnostic, but it is
+        /// the only place the tombstone that used to wedge dispatch is
+        /// observable, so it is carried out to the operator log.
+        superseded: Option<String>,
     },
     LeaseIdentityConflict {
         existing: BuildLeaseRow,
@@ -187,6 +238,46 @@ impl BuildLeaseRepository {
 
     /// Queue a stable identity. Exact replay returns the original row; any
     /// immutable mismatch is a typed result rather than a capacity side effect.
+    ///
+    /// # Terminal rows are replayed -- except for `task_dispatch`
+    ///
+    /// Retaining a terminal row and replaying it is the whole point of this
+    /// ledger for `graph_warm` and `task_invocation`: a lost response must be
+    /// answered with the outcome that actually happened (`Released`,
+    /// `Cancelled`, a timeout credit) and must never silently re-run finished
+    /// work. That behaviour is untouched here.
+    ///
+    /// `task_dispatch` is the one population where it is wrong, and it wedged
+    /// production. Its key is `{task_id}:{generation}` — a *coordinate*, not an
+    /// attempt: the dispatcher asks for that same coordinate on every tick for
+    /// as long as the task is dispatchable. A terminal row under it is a SPENT
+    /// ATTEMPT, occupying nothing, yet replaying it answered `LeaseWaitTimeout`
+    /// / `LeaseUnavailable` forever, which layer-1 admission converted into a
+    /// denial *before* the journal write that would have advanced the
+    /// generation. The key therefore never changed and the denial re-derived
+    /// itself every tick: a closed, self-sustaining wedge that survives every
+    /// restart. Six dispatchable tasks sat behind it at occupancy 0-1 of cap 3.
+    ///
+    /// So a terminal `task_dispatch` row is retired and a fresh attempt minted
+    /// under the same key. Deleting rather than resetting in place is
+    /// deliberate:
+    ///
+    /// * the row's identity, weight and `bound_pod_uid` are trigger-immutable,
+    ///   so a terminal→queued UPDATE would break against the schema the moment
+    ///   the configured dispatch weight changed or the row had ever been bound;
+    /// * a brand new `enqueue_sequence` sends the new attempt to the BACK of
+    ///   the FIFO, where a new arrival belongs — an in-place reset would keep
+    ///   the retired attempt's queue position and let it cut the line;
+    /// * a brand new `fencing_token` (nextval, never reissued) means any actor
+    ///   still holding the retired attempt's token is fenced out, exactly as it
+    ///   would be against any other new row.
+    ///
+    /// No capacity can be double-granted by this: terminal rows are excluded
+    /// from [`OCCUPYING`], so the retired row was buying nothing that the fresh
+    /// attempt could buy twice. The dispatch lifecycle/audit trail lives in
+    /// `admission_journal`, which migration 153 retains for exactly that
+    /// purpose; `build_leases` holds dispatch capacity, and spent capacity is
+    /// not evidence.
     pub async fn queue(&self, input: &QueueBuildLeaseInput) -> DbResult<QueueBuildLeaseResult> {
         if input.key.consumer_id.trim().is_empty() || input.immutable_identity.trim().is_empty() {
             return Err(DbError::InvalidData(
@@ -201,16 +292,37 @@ impl BuildLeaseRepository {
         self.db.ensure_initialized().await?;
         let mut tx = self.db.pool().begin().await?;
         lock(&mut tx).await?;
-        if let Some(row) = fetch(&mut tx, &input.key, false).await? {
-            tx.commit().await?;
-            return Ok(if row.immutable_identity == input.immutable_identity {
-                QueueBuildLeaseResult::Queued {
-                    row,
-                    idempotent: true,
-                }
-            } else {
-                QueueBuildLeaseResult::LeaseIdentityConflict { existing: row }
-            });
+        let mut superseded: Option<String> = None;
+        if let Some(row) = fetch(&mut tx, &input.key, true).await? {
+            let spent_dispatch_attempt = row.state == BuildLeaseState::Terminal
+                && input.key.consumer_kind == BuildLeaseConsumerKind::TaskDispatch;
+            if !spent_dispatch_attempt {
+                tx.commit().await?;
+                return Ok(if row.immutable_identity == input.immutable_identity {
+                    QueueBuildLeaseResult::Queued {
+                        row,
+                        idempotent: true,
+                        superseded: None,
+                    }
+                } else {
+                    QueueBuildLeaseResult::LeaseIdentityConflict { existing: row }
+                });
+            }
+            sqlx::query("DELETE FROM build_leases WHERE consumer_kind=$1 AND consumer_id=$2 AND state='terminal'")
+                .bind(input.key.consumer_kind.as_str())
+                .bind(&input.key.consumer_id)
+                .execute(&mut *tx)
+                .await?;
+            let reason = row
+                .terminal_reason
+                .clone()
+                .unwrap_or_else(|| "unknown".to_owned());
+            tracing::info!(
+                consumer_id = %input.key.consumer_id,
+                terminal_reason = %reason,
+                "retired spent task_dispatch lease attempt; minting a fresh one"
+            );
+            superseded = Some(reason);
         }
         let row = sqlx::query_as::<_, DbRow>(&format!("INSERT INTO build_leases (consumer_kind,consumer_id,immutable_identity,queue_deadline,launch_deadline,weight,state) VALUES ($1,$2,$3,$4::timestamptz,$5::timestamptz,$6,'queued') RETURNING {COLS}"))
             .bind(input.key.consumer_kind.as_str()).bind(&input.key.consumer_id).bind(&input.immutable_identity).bind(&input.queue_deadline).bind(&input.launch_deadline).bind(input.weight).fetch_one(&mut *tx).await?;
@@ -218,6 +330,7 @@ impl BuildLeaseRepository {
         Ok(QueueBuildLeaseResult::Queued {
             row: row.try_into()?,
             idempotent: false,
+            superseded,
         })
     }
 
@@ -322,12 +435,13 @@ impl BuildLeaseRepository {
         lock(&mut tx).await?;
         let result = sqlx::query(
             "UPDATE build_leases \
-             SET state='terminal', terminal_reason='abandoned', terminal_at=now(), updated_at=now() \
+             SET state='terminal', terminal_reason=$2, terminal_at=now(), updated_at=now() \
              WHERE consumer_kind='task_dispatch' \
                AND split_part(consumer_id, ':', 1) = $1 \
                AND state='queued'",
         )
         .bind(task_id)
+        .bind(BuildLeaseTerminalReason::Abandoned.as_str())
         .execute(&mut *tx)
         .await?;
         tx.commit().await?;
@@ -395,11 +509,12 @@ impl BuildLeaseRepository {
         let consumed = sqlx::query_scalar::<_, bool>(
             "UPDATE build_leases SET timeout_credit_consumed=TRUE, updated_at=now() \
              WHERE consumer_kind=$1 AND consumer_id=$2 AND state='terminal' \
-             AND terminal_reason='deadline_expired' AND timeout_credit_consumed=FALSE \
+             AND terminal_reason=$3 AND timeout_credit_consumed=FALSE \
              RETURNING TRUE",
         )
         .bind(key.consumer_kind.as_str())
         .bind(&key.consumer_id)
+        .bind(BuildLeaseTerminalReason::DeadlineExpired.as_str())
         .fetch_optional(&mut *tx)
         .await?
         .unwrap_or(false);
@@ -482,11 +597,12 @@ impl BuildLeaseRepository {
             ));
         }
         let result = sqlx::query_as::<_, DbRow>(&format!(
-            "UPDATE build_leases SET state='terminal',terminal_reason='abandoned',candidate_cleanup=COALESCE($1, candidate_cleanup),terminal_at=now(),updated_at=now() WHERE consumer_kind=$2 AND consumer_id=$3 RETURNING {COLS}"
+            "UPDATE build_leases SET state='terminal',terminal_reason=$4,candidate_cleanup=COALESCE($1, candidate_cleanup),terminal_at=now(),updated_at=now() WHERE consumer_kind=$2 AND consumer_id=$3 RETURNING {COLS}"
         ))
         .bind(cleanup.map(sqlx::types::Json))
         .bind(key.consumer_kind.as_str())
         .bind(&key.consumer_id)
+        .bind(BuildLeaseTerminalReason::Abandoned.as_str())
         .fetch_one(&mut *tx)
         .await?;
         tx.commit().await?;
@@ -497,7 +613,8 @@ impl BuildLeaseRepository {
         key: &BuildLeaseKey,
         cleanup: Option<serde_json::Value>,
     ) -> DbResult<BuildLeaseRow> {
-        self.terminal(key, None, "cancelled", cleanup).await
+        self.terminal(key, None, BuildLeaseTerminalReason::Cancelled, cleanup)
+            .await
     }
     /// Fenced counterpart for a cancel request that carries a grant token.
     pub async fn cancel_fenced(
@@ -506,7 +623,13 @@ impl BuildLeaseRepository {
         token: i64,
         cleanup: Option<serde_json::Value>,
     ) -> DbResult<BuildLeaseRow> {
-        self.terminal(key, Some(token), "cancelled", cleanup).await
+        self.terminal(
+            key,
+            Some(token),
+            BuildLeaseTerminalReason::Cancelled,
+            cleanup,
+        )
+        .await
     }
     pub async fn release(
         &self,
@@ -514,7 +637,13 @@ impl BuildLeaseRepository {
         token: i64,
         cleanup: Option<serde_json::Value>,
     ) -> DbResult<BuildLeaseRow> {
-        self.terminal(key, Some(token), "released", cleanup).await
+        self.terminal(
+            key,
+            Some(token),
+            BuildLeaseTerminalReason::Released,
+            cleanup,
+        )
+        .await
     }
 
     /// Bind is the sole operation which can set a pod UID; the database trigger
@@ -587,7 +716,7 @@ impl BuildLeaseRepository {
         self.db.ensure_initialized().await?;
         let mut tx = self.db.pool().begin().await?;
         lock(&mut tx).await?;
-        let rows=sqlx::query_as::<_,DbRow>(&format!("UPDATE build_leases SET state='terminal', terminal_reason='deadline_expired', terminal_at=$1::timestamptz, updated_at=now() WHERE state='queued' AND queue_deadline <= $1::timestamptz RETURNING {COLS}")).bind(now).fetch_all(&mut *tx).await?;
+        let rows=sqlx::query_as::<_,DbRow>(&format!("UPDATE build_leases SET state='terminal', terminal_reason=$2, terminal_at=$1::timestamptz, updated_at=now() WHERE state='queued' AND queue_deadline <= $1::timestamptz RETURNING {COLS}")).bind(now).bind(BuildLeaseTerminalReason::DeadlineExpired.as_str()).fetch_all(&mut *tx).await?;
         let launch=sqlx::query_as::<_,DbRow>(&format!("UPDATE build_leases SET state='suspect', updated_at=now() WHERE state IN ('granted','launching') AND launch_deadline <= $1::timestamptz RETURNING {COLS}")).bind(now).fetch_all(&mut *tx).await?;
         tx.commit().await?;
         rows.into_iter()
@@ -681,12 +810,13 @@ impl BuildLeaseRepository {
             return Ok(ReclaimAbsentBuildLeaseOutcome::Fenced { reason });
         }
         let reclaimed = sqlx::query_as::<_, DbRow>(&format!(
-            "UPDATE build_leases SET state='terminal',terminal_reason='reclaimed_absent',\
+            "UPDATE build_leases SET state='terminal',terminal_reason=$3,\
              terminal_at=now(),updated_at=now() WHERE consumer_kind=$1 AND consumer_id=$2 \
              RETURNING {COLS}"
         ))
         .bind(input.key.consumer_kind.as_str())
         .bind(&input.key.consumer_id)
+        .bind(BuildLeaseTerminalReason::ReclaimedAbsent.as_str())
         .fetch_one(&mut *tx)
         .await?;
         tx.commit().await?;
@@ -699,7 +829,7 @@ impl BuildLeaseRepository {
         &self,
         key: &BuildLeaseKey,
         token: Option<i64>,
-        reason: &str,
+        reason: BuildLeaseTerminalReason,
         cleanup: Option<serde_json::Value>,
     ) -> DbResult<BuildLeaseRow> {
         self.db.ensure_initialized().await?;
@@ -717,7 +847,7 @@ impl BuildLeaseRepository {
             tx.commit().await?;
             return Ok(row);
         }
-        let result=sqlx::query_as::<_,DbRow>(&format!("UPDATE build_leases SET state='terminal',terminal_reason=$1,candidate_cleanup=COALESCE($2, candidate_cleanup),terminal_at=now(),updated_at=now() WHERE consumer_kind=$3 AND consumer_id=$4 RETURNING {COLS}")).bind(reason).bind(cleanup.map(sqlx::types::Json)).bind(key.consumer_kind.as_str()).bind(&key.consumer_id).fetch_one(&mut *tx).await?;
+        let result=sqlx::query_as::<_,DbRow>(&format!("UPDATE build_leases SET state='terminal',terminal_reason=$1,candidate_cleanup=COALESCE($2, candidate_cleanup),terminal_at=now(),updated_at=now() WHERE consumer_kind=$3 AND consumer_id=$4 RETURNING {COLS}")).bind(reason.as_str()).bind(cleanup.map(sqlx::types::Json)).bind(key.consumer_kind.as_str()).bind(&key.consumer_id).fetch_one(&mut *tx).await?;
         tx.commit().await?;
         result.try_into()
     }
@@ -922,7 +1052,7 @@ async fn set_cap_tx(tx: &mut Transaction<'_, Postgres>, cap: i64) -> DbResult<()
     Ok(())
 }
 async fn expire_queued_tx(tx: &mut Transaction<'_, Postgres>, now: &str) -> DbResult<()> {
-    sqlx::query("UPDATE build_leases SET state='terminal',terminal_reason='deadline_expired',terminal_at=$1::timestamptz,updated_at=now() WHERE state='queued' AND queue_deadline <= $1::timestamptz").bind(now).execute(&mut **tx).await?;
+    sqlx::query("UPDATE build_leases SET state='terminal',terminal_reason=$2,terminal_at=$1::timestamptz,updated_at=now() WHERE state='queued' AND queue_deadline <= $1::timestamptz").bind(now).bind(BuildLeaseTerminalReason::DeadlineExpired.as_str()).execute(&mut **tx).await?;
     Ok(())
 }
 async fn snapshot_tx(tx: &mut Transaction<'_, Postgres>) -> DbResult<BuildLeaseSnapshot> {
