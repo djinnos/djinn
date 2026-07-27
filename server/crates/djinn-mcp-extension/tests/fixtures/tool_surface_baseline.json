@@ -2268,7 +2268,7 @@
           "type": "array"
         },
         "decision": {
-          "description": "The decision: approve (work is complete + correct — the worker just couldn't self-certify; requires evidence citation), approve_conflict (correct but a merge conflict exists — approve then send for conflict retry; requires evidence citation), reopen (send back to a fresh worker with a directive and verification command), park (hold the task for human review with a structured dossier), supersede (you decomposed the work into replacement subtasks that carry it forward — the source task and its PR are force-closed as superseded automatically; requires a non-empty created_tasks array)",
+          "description": "The decision: approve (work is complete + correct — the worker just couldn't self-certify; requires evidence citation), approve_conflict (correct but a merge conflict exists — approve then send for conflict retry; requires evidence citation), reopen (send back to a fresh worker with a directive and verification command), park (hand the task to an AUTONOMOUS Planner escalation with a structured dossier — this does NOT reach a human: a Planner session reads your dossier and owns terminal resolution by decomposing + superseding, closing won't-fix, or re-scoping + reopening), supersede (you decomposed the work into replacement subtasks that carry it forward — the source task and its PR are force-closed as superseded automatically; requires a non-empty created_tasks array)",
           "enum": [
             "approve",
             "approve_conflict",
@@ -2312,7 +2312,7 @@
           "type": "array"
         },
         "park_dossier": {
-          "description": "Required for park. Structured dossier for the human-review hold.",
+          "description": "Required for park. Structured dossier handed to the autonomous Planner escalation. No human reads it — write it for the Planner session that must resolve the task.",
           "properties": {
             "attempted_decisions": {
               "description": "Optional list of decisions attempted before parking",
@@ -2322,15 +2322,15 @@
               "type": "array"
             },
             "failure_analysis": {
-              "description": "Analysis of why the task failed and needs human review",
+              "description": "Analysis of why the task failed and why no arbiter decision can unstick it",
               "type": "string"
             },
             "hold_description": {
-              "description": "Description of the hold for human reviewers",
+              "description": "Description of the hold for the Planner that will resolve it",
               "type": "string"
             },
             "recommended_action": {
-              "description": "Optional recommended action for the human reviewer",
+              "description": "Optional recommended action for the Planner (decompose + supersede, close won't-fix, or re-scope + reopen)",
               "type": "string"
             }
           },

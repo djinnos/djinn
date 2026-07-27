@@ -1019,11 +1019,14 @@ impl CoordinatorActor {
     ) -> String {
         let detail = Self::park_reason_detail(task, history);
         format!(
-            "Auto-parked for human review after {} planner intervention(s) \
+            "Auto-parked to autonomous arbitration after {} planner intervention(s) \
              (intervention_count={}, total_reopen_count={}). {detail} The task is held (open + \
-             blocked on a human-review remediation task) so it frees the dispatch slot for other \
-             ready tasks while its branch and prior work are preserved. A human must resolve the \
-             remediation task to release it, or close this task if the work is no longer wanted.",
+             blocked on an autonomous planner-park escalation) so it frees the dispatch slot for \
+             other ready tasks while its branch and prior work are preserved. NO human hold is \
+             produced and no human is required to release it: the Lead arbiter adjudicates the \
+             hold cycle, and the Planner owns terminal resolution of the escalation (decompose + \
+             supersede, close as won't-fix, or re-scope + reopen). Closing the escalation releases \
+             this source.",
             MAX_PLANNER_INTERVENTIONS, task.intervention_count, task.total_reopen_count,
         )
     }
@@ -1243,10 +1246,32 @@ impl CoordinatorActor {
         quality_strikes: i64,
     ) -> bool {
         tracing::Span::current().record("attempt", quality_strikes);
-        // Second strike: hold on human-review remediation instead of
-        // re-escalating (which just resets and loops). Parked to `open`
-        // so the dispatch slot is freed; human resolves the remediation.
+        // Second strike: hand the task to the autonomous arbiter ladder instead
+        // of re-escalating the Planner (which just resets the counters and
+        // loops). Parked to `open` so the dispatch slot is freed.
         if task.intervention_count >= MAX_PLANNER_INTERVENTIONS {
+            // ── Cumulative cross-cycle bound (gy53) ─────────────────────────
+            //
+            // FIRST, before any per-cycle or per-fingerprint sub-guard below.
+            // Every other guard on this rung declines by RETURNING FALSE (which
+            // redispatches) and resets by incrementing, so a task that declines
+            // via a DIFFERENT sub-guard each round never terminates. gy53
+            // produced a novel CI fingerprint every round and rode the
+            // first-occurrence guard to `hold_cycle` 9 / 65 sessions / 12h of
+            // full dispatch monopoly. Evaluating the ceiling ahead of the
+            // sub-guards is what makes it guard-independent: cycle N terminates
+            // regardless of which guard WOULD have declined.
+            //
+            // Only applied when the ladder is about to open a FRESH cycle (no
+            // unconsumed row). A genuinely in-flight arbiter is left to finish
+            // — it may still approve or supersede — and is separately bounded
+            // by the 24h arbitration deadline and the decision-failure cap.
+            if self.arbiter_hold_cycle_ceiling_reached(task).await {
+                return self
+                    .terminally_fail_on_hold_cycle_ceiling(task, role, quality_strikes)
+                    .await;
+            }
+
             // uv3p Part B: attempted-remediation requirement on the park rung.
             // A park declares the current intervention's remediation a failure —
             // but the audits (cgcl/7fj3/nlus) show parks landing 272ms–36s after
@@ -1638,9 +1663,18 @@ impl CoordinatorActor {
 
             let failing_ci_job_ids = self.parse_failing_ci_job_ids(ci_failure_sections);
             let excluded_models = serde_json::json!(history.rotation_excluded_models());
+            // Give the arbiter its own history. Without these two fields every
+            // Lead session decided in ignorance of the identical reopens before
+            // it — gy53 ran five arbiter dispatches that could not see each
+            // other, so each one re-derived the same reopen from scratch.
+            let prior_arbiter_decisions =
+                Self::summarize_prior_arbitrations(&arbiter_repo, &task.id, hold_cycle).await;
             let dossier = serde_json::json!({
                 "reason": reason,
                 "role": role,
+                "hold_cycle": hold_cycle,
+                "hold_cycle_ceiling": MAX_ARBITER_HOLD_CYCLES,
+                "prior_arbiter_decisions": prior_arbiter_decisions,
                 "intervention_count": task.intervention_count,
                 "total_reopen_count": task.total_reopen_count,
                 "reopen_count": task.reopen_count,
@@ -2423,6 +2457,226 @@ impl CoordinatorActor {
         true
     }
 
+    /// Summarize every arbitration cycle already closed on this task, newest
+    /// last, for inclusion in the dossier handed to the next Lead arbiter.
+    ///
+    /// Each entry carries the cycle index, its terminal state, the decision the
+    /// arbiter reached (from the persisted `directive.decision`), the directive
+    /// text it injected, the verification command it demanded, and the failure
+    /// counters — i.e. exactly what a fresh arbiter needs in order to NOT
+    /// repeat the previous cycle's decision verbatim. Cycles at/after
+    /// `current_cycle` are excluded (the row being opened right now is not
+    /// prior history). Fail-open: an unreadable ledger yields an empty array
+    /// rather than blocking the dispatch.
+    async fn summarize_prior_arbitrations(
+        arbiter_repo: &TaskArbitrationRepository,
+        task_id: &str,
+        current_cycle: i32,
+    ) -> serde_json::Value {
+        let records = match arbiter_repo.list_for_task(task_id).await {
+            Ok(records) => records,
+            Err(e) => {
+                tracing::warn!(
+                    task_id,
+                    error = %e,
+                    "CoordinatorActor: failed to read prior arbitrations for the arbiter dossier; \
+                     proceeding with no decision history"
+                );
+                return serde_json::json!([]);
+            }
+        };
+        let entries: Vec<serde_json::Value> = records
+            .iter()
+            .filter(|record| record.hold_cycle < current_cycle)
+            .map(|record| {
+                let decision = record
+                    .directive
+                    .as_ref()
+                    .and_then(|directive| directive.get("decision"))
+                    .and_then(serde_json::Value::as_str);
+                let directive_text = record
+                    .directive
+                    .as_ref()
+                    .and_then(|directive| directive.get("directive"))
+                    .and_then(serde_json::Value::as_str);
+                let dossier_summary = record
+                    .dossier
+                    .as_ref()
+                    .and_then(|dossier| dossier.get("summary").or_else(|| dossier.get("reason")))
+                    .and_then(serde_json::Value::as_str)
+                    .map(|summary| summary.chars().take(400).collect::<String>());
+                serde_json::json!({
+                    "hold_cycle": record.hold_cycle,
+                    "state": record.state,
+                    "decision": decision,
+                    "directive": directive_text,
+                    "verification_command": record.verification_command,
+                    "excluded_models": record.excluded_models,
+                    "monitored_reopen_count": record.monitored_reopen_count,
+                    "decision_failure_count": record.decision_failure_count,
+                    "infra_retry_count": record.infra_retry_count,
+                    "summary": dossier_summary,
+                    "created_at": record.created_at,
+                    "consumed_at": record.consumed_at,
+                })
+            })
+            .collect();
+        serde_json::json!(entries)
+    }
+
+    /// Has this task spent its cumulative arbitration budget
+    /// ([`MAX_ARBITER_HOLD_CYCLES`])?
+    ///
+    /// The cumulative key is the task's max `hold_cycle` across its
+    /// `task_arbitrations` rows — i.e. how many arbiter hold cycles the board
+    /// has ever opened for this source. `resolve_current_hold_cycle` returns
+    /// the PROSPECTIVE cycle: the unconsumed row's own cycle when an arbiter is
+    /// in flight, otherwise `latest + 1` (the cycle a fresh `try_create` would
+    /// open).
+    ///
+    /// Returns `true` only when a FRESH cycle is about to be opened and that
+    /// cycle index is at/above the ceiling. An unconsumed row means an arbiter
+    /// is genuinely in flight; it is left alone (it may still approve or
+    /// supersede) and is bounded independently by the 24h arbitration deadline
+    /// and the decision-failure cap.
+    ///
+    /// Fail-open on any arbitration read error: an unreadable ledger must not
+    /// terminally fail live work. The pre-existing fail-CLOSED park handling
+    /// further down the rung still catches that case.
+    async fn arbiter_hold_cycle_ceiling_reached(&self, task: &djinn_core::models::Task) -> bool {
+        let arbiter_repo = TaskArbitrationRepository::new(self.db.clone());
+        match arbiter_repo.resolve_current_hold_cycle(&task.id).await {
+            Ok((_, Some(_unconsumed))) => false,
+            Ok((prospective_cycle, None)) => prospective_cycle >= MAX_ARBITER_HOLD_CYCLES,
+            Err(e) => {
+                tracing::warn!(
+                    task_id = %task.short_id,
+                    error = %e,
+                    "CoordinatorActor: cumulative hold-cycle ceiling check failed to read the \
+                     arbitration ledger; failing open to the existing rung guards"
+                );
+                false
+            }
+        }
+    }
+
+    /// Terminal exit for the cumulative hold-cycle ceiling.
+    ///
+    /// Clears in-memory + durable dispatch backoff, records a durable
+    /// `arbiter_hold_cycle_ceiling` activity entry naming the budget and the
+    /// counters that got the task here, then routes through the single
+    /// dispatch-exhaustion gateway
+    /// ([`terminally_fail_task`](Self::terminally_fail_task)) so the task
+    /// reaches a genuinely terminal, non-redispatching state (ForceClose, or —
+    /// for a PR-bearing task — a poller handoff that likewise stops coordinator
+    /// dispatch). Always returns `true`: the caller must skip its dispatch this
+    /// pass either way, because a task at the ceiling must never be
+    /// redispatched.
+    async fn terminally_fail_on_hold_cycle_ceiling(
+        &mut self,
+        task: &djinn_core::models::Task,
+        role: &'static str,
+        quality_strikes: i64,
+    ) -> bool {
+        let reason = format!(
+            "Cumulative arbitration ceiling reached: {MAX_ARBITER_HOLD_CYCLES} arbiter hold \
+             cycle(s) already spent on this task without convergence \
+             (intervention_count={}, total_reopen_count={}, quality_strikes={quality_strikes}, \
+             role={role}). Every per-cycle guard on the remediation ladder resets by \
+             incrementing, so a task that declines via a different guard each round would loop \
+             forever and monopolize the dispatch queue (incident gy53). Terminally failing this \
+             task instead of opening hold cycle {MAX_ARBITER_HOLD_CYCLES}; a planner may \
+             resurrect the work from the epic, and the branch plus its PR are preserved.",
+            task.intervention_count, task.total_reopen_count,
+        );
+        tracing::warn!(
+            task_id = %task.short_id,
+            role,
+            intervention_count = task.intervention_count,
+            total_reopen_count = task.total_reopen_count,
+            quality_strikes,
+            ceiling = MAX_ARBITER_HOLD_CYCLES,
+            "CoordinatorActor: cumulative arbiter hold-cycle ceiling reached — terminally failing \
+             the task instead of opening another hold cycle"
+        );
+
+        // Clear streak/cooldown so nothing re-arms dispatch behind the terminal
+        // transition.
+        self.dispatch_failure_streak.remove(&task.id);
+        self.dispatch_cooldowns.remove(&task.id);
+        self.last_dispatched.remove(&task.id);
+        self.inflight_dispatches.remove(&task.id);
+        self.clear_durable_dispatch_backoff_state(
+            &task.id,
+            Some(&task.short_id),
+            "arbiter_hold_cycle_ceiling",
+        )
+        .await;
+
+        // Durable "why" record, independent of the transition reason text.
+        // Recorded once per task: a PR-bearing task terminalizes via an
+        // idempotent poller handoff, so this rung can legitimately be re-entered
+        // by the PR poller on a later tick and must not spam the activity log or
+        // double-count the park metric.
+        if !self.hold_cycle_ceiling_already_recorded(&task.id).await {
+            let payload = serde_json::json!({
+                "event": "arbiter_hold_cycle_ceiling",
+                "task_id": task.short_id,
+                "ceiling": MAX_ARBITER_HOLD_CYCLES,
+                "intervention_count": task.intervention_count,
+                "total_reopen_count": task.total_reopen_count,
+                "reopen_count": task.reopen_count,
+                "quality_strikes": quality_strikes,
+                "role": role,
+                "ci_failure_fingerprint": task.ci_failure_fingerprint,
+                "reason": reason,
+            });
+            if let Err(e) = self
+                .task_repo()
+                .log_activity(
+                    Some(&task.id),
+                    "coordinator",
+                    "system",
+                    HOLD_CYCLE_CEILING_MARKER,
+                    &payload.to_string(),
+                )
+                .await
+            {
+                tracing::warn!(
+                    task_id = %task.short_id,
+                    error = %e,
+                    "CoordinatorActor: failed to log arbiter_hold_cycle_ceiling activity"
+                );
+            }
+
+            djinn_telemetry::arbiter::record_park(
+                djinn_telemetry::arbiter::PARK_REASON_HOLD_CYCLE_CEILING,
+                djinn_telemetry::arbiter::PARK_OUTCOME_SUCCESS,
+            );
+            self.record_task_parked_metric(task, quality_strikes).await;
+        }
+
+        self.terminally_fail_task(task, "coordinator", &reason)
+            .await;
+        true
+    }
+
+    /// Has the hold-cycle ceiling already been recorded for this task?
+    /// Fail-open (returns `false`) on a query error: a duplicate audit entry is
+    /// far cheaper than losing the record entirely.
+    async fn hold_cycle_ceiling_already_recorded(&self, task_id: &str) -> bool {
+        self.task_repo()
+            .query_activity(ActivityQuery {
+                task_id: Some(task_id.to_owned()),
+                event_type: Some(HOLD_CYCLE_CEILING_MARKER.to_string()),
+                limit: 1,
+                ..ActivityQuery::default()
+            })
+            .await
+            .map(|entries| !entries.is_empty())
+            .unwrap_or(false)
+    }
+
     /// Fail-closed loop-breaker park path for the second-strike rung.
     ///
     /// Clears in-memory and durable backoff, interrupts running sessions, then
@@ -2521,9 +2775,14 @@ impl CoordinatorActor {
     /// — it owns the board and decides whether to reshape, dedupe, or (if the issue
     /// requires deeper code-structural reasoning) dispatch an Architect spike.
     ///
-    /// For [`RemediationKind::HumanReview`] no agent is dispatched (a human must
-    /// resolve it) and creation is skipped when the source is already held by an
-    /// unresolved blocker.
+    /// Neither held-remediation kind dispatches an agent inline, and creation is
+    /// skipped when the source is already held by an unresolved blocker. Note
+    /// that the autonomous rungs never construct
+    /// [`RemediationKind::HumanReview`] — every loop-breaker path routes to
+    /// [`RemediationKind::PlannerEscalation`], which the coordinator's normal
+    /// dispatch pass claims for the Planner. `HumanReview` is reachable ONLY
+    /// through the tripwire org-policy escape hatch (a rule an operator
+    /// explicitly set to `adjudication = human`).
     pub(crate) async fn create_remediation_task(
         &mut self,
         source_task_id: &str,
