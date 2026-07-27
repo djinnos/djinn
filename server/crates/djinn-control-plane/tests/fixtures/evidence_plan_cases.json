@@ -1,0 +1,25 @@
+{
+  "valid_capture": {
+    "checks": [
+      {"check_id": "source", "question": "Does the source expose the required identity?", "method": "code"},
+      {"check_id": "graph", "question": "Does the graph resolve the control-plane module?", "method": "graph"},
+      {"check_id": "command", "question": "Does the focused contract command pass?", "method": "command"}
+    ]
+  },
+  "invalid_captures": [
+    {"checks": []},
+    {"checks": [{"check_id": "same", "question": "One?", "method": "code"}, {"check_id": "same", "question": "Two?", "method": "graph"}]},
+    {"checks": [{"check_id": "one", "question": "Same?", "method": "code"}, {"check_id": "two", "question": "Same?", "method": "graph"}]},
+    {"checks": [{"check_id": "", "question": "Question?", "method": "code"}]}
+  ],
+  "reconciliations": [
+    {"name": "exact", "results": [{"check_id":"source","method":"code","terminal":true},{"check_id":"graph","method":"graph","terminal":true},{"check_id":"command","method":"command","terminal":true}], "ok": true},
+    {"name": "empty", "results": [], "ok": false},
+    {"name": "duplicate", "results": [{"check_id":"source","method":"code","terminal":true},{"check_id":"source","method":"code","terminal":true},{"check_id":"graph","method":"graph","terminal":true},{"check_id":"command","method":"command","terminal":true}], "ok": false},
+    {"name": "unknown_extra", "results": [{"check_id":"source","method":"code","terminal":true},{"check_id":"graph","method":"graph","terminal":true},{"check_id":"command","method":"command","terminal":true},{"check_id":"extra","method":"code","terminal":true}], "ok": false},
+    {"name": "omitted", "results": [{"check_id":"source","method":"code","terminal":true}], "ok": false},
+    {"name": "multiply_terminal", "results": [{"check_id":"source","method":"code","terminal":true},{"check_id":"graph","method":"graph","terminal":true},{"check_id":"command","method":"command","terminal":true},{"check_id":"command","method":"command","terminal":true}], "ok": false},
+    {"name": "method_mismatch", "results": [{"check_id":"source","method":"graph","terminal":true},{"check_id":"graph","method":"graph","terminal":true},{"check_id":"command","method":"command","terminal":true}], "ok": false},
+    {"name": "not_terminal", "results": [{"check_id":"source","method":"code","terminal":false},{"check_id":"graph","method":"graph","terminal":true},{"check_id":"command","method":"command","terminal":true}], "ok": false}
+  ]
+}
