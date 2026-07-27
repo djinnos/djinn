@@ -6,14 +6,44 @@
 //! dir. Mutable Cargo metadata is copied, and incremental state is skipped so it
 //! is never shared by inode with the warm base.
 //!
+//! # Only immutable payloads may be hardlinked
+//!
+//! The rule that governs [`classify_cargo_target_path`] is: **anything the run
+//! may rewrite must be copied, not linked.** A hardlink shares the inode with the
+//! warm base, so a rewrite in the private run dir lands THROUGH the link into the
+//! shared base that every other task-run pod seeds from. Cargo's fingerprints
+//! still consider the damaged units fresh, so nothing regenerates them and the
+//! base stops re-converging.
+//!
+//! Four classes are known to be rewritten in place and are carved out for that
+//! reason: cargo's per-profile lock files, `.rustc_info.json`, build-script
+//! `OUT_DIR` payloads, and the build-script stamp files. Adding a fifth means
+//! adding it here — the default arm is `Hardlink`, so an omission is silent.
+//!
+//! # Identities involved
+//!
+//! Four distinct uids touch this tree, and conflating any two of them produces a
+//! wrong conclusion about who can write what:
+//!
+//! | role                          | uid     | source                              |
+//! |-------------------------------|---------|-------------------------------------|
+//! | on-disk warm base owner       | `10001` | legacy; predates the warm pod move  |
+//! | warm Job pod                   | `1000`  | `warm_job.rs` (`WORKER_UID`)        |
+//! | task-run worker (this seeder) | `1000`  | `WORKER_UID`                        |
+//! | cargo and its build scripts   | `1001`  | `CHILD_UID`, gid `ARTIFACT_GID` 1000|
+//!
+//! The base's *bytes* were written by a warm pod that today runs as 1000, but the
+//! *inodes* on disk are still owned by the legacy 10001 from before that move.
+//! Cargo never runs as the seeder: the launcher `setresuid`s to `CHILD_UID` 1001,
+//! and the two share only gid 1000. So a seeded entry is writable by cargo when
+//! its GROUP bits allow it, never because the seeder created it.
+//!
 //! # Why a single entry must never discard the base
 //!
-//! The warm base is written by the warm Job (uid 10001) and read by the task-run
-//! worker (uid 1000, gid 1000). With `fs.protected_hardlinks=1` the kernel's
-//! `safe_hardlink_source()` refuses `linkat()` with **EPERM** for any source the
-//! calling process does not own unless it is a *group-writable regular file*.
-//! Measured against a 6.x kernel with a base owned by `10001:1000` and a process
-//! running `1000:1000`:
+//! With `fs.protected_hardlinks=1` the kernel's `safe_hardlink_source()` refuses
+//! `linkat()` with **EPERM** for any source the calling process does not own
+//! unless it is a *group-writable regular file*. Measured against a 6.x kernel
+//! with a base owned by `10001:1000` and a process running `1000:1000`:
 //!
 //! | source            | `linkat` | `copy` |
 //! |-------------------|----------|--------|
@@ -526,7 +556,85 @@ pub fn classify_cargo_target_path(relative_path: &Path) -> CloneAction {
         return CloneAction::Copy;
     }
 
+    // Build-script state under `build/<pkg>-<hash>/` is rewritten IN PLACE when
+    // cargo re-runs a build script, and it is the third instance of the same
+    // shared-inode hazard as `.rustc_info.json` and the cargo locks above.
+    //
+    // A `-sys` crate's build script populates `OUT_DIR` with `fs::copy`, and
+    // `std::fs::copy` on Unix opens the destination `O_CREAT|O_TRUNC` and only
+    // THEN `fchmod`s it to the source's mode, propagating the error
+    // (`open_to_and_set_permissions` in `std::sys::fs::unix`). Applied to a
+    // hardlinked destination, that single sequence produces both halves of the
+    // incident:
+    //
+    // 1. **The truncation writes THROUGH into the shared warm base.** The link
+    //    shares the inode, so `O_TRUNC` empties the base's copy — for every other
+    //    task-run pod that seeds from it, not just this run. Cargo's fingerprints
+    //    still consider those units fresh, so nothing ever regenerates them and
+    //    the base silently stops re-converging. Verified on the production node:
+    //    9 zero-byte files in the shared base, every one under `debug/build/*/out/`
+    //    and every one `nlink=2`, including
+    //    `build/libssh2-sys-*/out/include/libssh2.h`.
+    // 2. **The `fchmod` then fails EPERM and the build script panics.** Inode
+    //    metadata ops are owner-gated, and a hardlinked entry keeps the base's
+    //    owner. `libssh2-sys/build.rs:54` does `fs::copy(...).unwrap()`, so the
+    //    compile dies. Note EPERM, not EACCES: an OWNERSHIP failure, not a mode
+    //    one, which is why `ensure_owner_writable` cannot rescue it.
+    //
+    // Copying is what stops (1): the truncation lands on a private inode and the
+    // shared base is untouchable by construction. It does NOT by itself stop (2)
+    // — the seeder is uid 1000 and cargo runs as uid 1001, so `fchmod` on a
+    // seeded destination is still EPERM for the build script. Aligning those uids
+    // is separately planned work, and it is only safe AFTER this change: with a
+    // single identity the `fchmod` succeeds, and on a hardlinked entry that turns
+    // a loud panic into a silent overwrite of the shared base. Ownership is not
+    // the fix for the corruption; not sharing rewritable state by inode is.
+    //
+    // The `build-script-build` executables stay hardlinked: they are the heavy
+    // part of `build/` and cargo replaces them by rename, never in place.
+    if is_build_script_output(relative_path) || is_build_script_stamp(relative_path) {
+        return CloneAction::Copy;
+    }
+
     CloneAction::Hardlink
+}
+
+/// True for build-script `OUT_DIR` payloads: `[<triple>/]<profile>/build/<pkg>-<hash>/out/**`.
+///
+/// Matched positionally (`build/*/out`) rather than by "has a component named
+/// `out`" so an unrelated path that merely contains `out` is not swept in.
+fn is_build_script_output(path: &Path) -> bool {
+    normal_components(path)
+        .windows(3)
+        .any(|window| window[0] == "build" && window[2] == "out")
+}
+
+/// True for the per-package stamp files cargo rewrites in place after re-running
+/// a build script (`build/<pkg>-<hash>/{output,stderr,root-output,invoked.timestamp}`).
+///
+/// These are tiny, so copying them is free, and hardlinking them writes through
+/// to the shared warm base exactly like `.rustc_info.json` does.
+fn is_build_script_stamp(path: &Path) -> bool {
+    const STAMP_NAMES: &[&str] = &["output", "stderr", "root-output", "invoked.timestamp"];
+
+    let parts = normal_components(path);
+    let Some((name, parents)) = parts.split_last() else {
+        return false;
+    };
+    // `build/<pkg>-<hash>/<stamp>`: the stamp sits exactly one level below the
+    // package dir, which itself sits directly under `build/`.
+    let under_build_package = matches!(parents.split_last(), Some((_, rest)) if rest.last().is_some_and(|component| *component == "build"));
+
+    under_build_package && STAMP_NAMES.iter().any(|stamp| *name == *stamp)
+}
+
+fn normal_components(path: &Path) -> Vec<&std::ffi::OsStr> {
+    path.components()
+        .filter_map(|component| match component {
+            Component::Normal(part) => Some(part),
+            _ => None,
+        })
+        .collect()
 }
 
 fn fallback_result(start: Instant, reason: CargoTargetSeedFallback) -> CargoTargetSeedResult {
@@ -772,6 +880,9 @@ fn apply_entry(
                     // its owner. The run dir is disposable, so restore owner
                     // write unconditionally.
                     ensure_owner_writable(&destination);
+                    // A link would have carried the base's mtime; this copy is
+                    // standing in for a link, so it must too.
+                    preserve_source_times(&source, &destination);
                     metrics
                         .degraded_link_file_count
                         .fetch_add(1, Ordering::Relaxed);
@@ -799,6 +910,9 @@ fn apply_entry(
                     // the source mode, so a read-only base entry (a symlinked
                     // vendored payload, say) would arrive unwritable.
                     ensure_owner_writable(&destination);
+                    // Cargo compares raw mtimes for staleness, so a copied entry
+                    // must present the same age as the links around it.
+                    preserve_source_times(&source, &destination);
                     metrics.copied_file_count.fetch_add(1, Ordering::Relaxed);
                     metrics.copied_bytes.fetch_add(copied, Ordering::Relaxed);
                     Ok(())
@@ -824,6 +938,50 @@ fn link_file(backend: LinkBackend, source: &Path, destination: &Path) -> io::Res
             }
         }
     }
+}
+
+/// Copy the source's access/modification times onto a seeded destination.
+///
+/// A hardlink shares the inode, so it carries the base's mtime for free. A byte
+/// copy does not: `fs::copy` reproduces mode but *not* timestamps, so a copied
+/// entry lands with a SEED-time mtime while its hardlinked neighbours keep their
+/// WARM-time mtime. Cargo's `StaleDependency` check is a raw mtime comparison
+/// against the unit's dependencies, so mixing the two epochs inside one target
+/// dir makes cargo see freshly-seeded metadata as newer than the artifacts it
+/// describes and rebuild units that were perfectly good — broadly, and dependent
+/// on which side of the classification each path happened to fall. Restoring the
+/// source times keeps a copy indistinguishable from a link to the freshness
+/// checker, which is the entire point of seeding.
+///
+/// Must run AFTER [`ensure_owner_writable`]: `chmod` bumps ctime and the open
+/// below needs the write bit, so setting times has to be the last touch.
+///
+/// The seeder owns every destination it creates, and an owner may always set
+/// explicit times (`utimensat` with explicit values is owner-gated, not
+/// root-gated), so this is permitted without any privilege.
+///
+/// Best-effort, like [`ensure_owner_writable`]: a stale timestamp costs a
+/// needless rebuild, which is not a reason to drop an otherwise correctly seeded
+/// artifact.
+fn preserve_source_times(source: &Path, destination: &Path) {
+    let Ok(source_meta) = fs::metadata(source) else {
+        return;
+    };
+    let Ok(modified) = source_meta.modified() else {
+        return;
+    };
+
+    let mut times = fs::FileTimes::new().set_modified(modified);
+    if let Ok(accessed) = source_meta.accessed() {
+        times = times.set_accessed(accessed);
+    }
+
+    // `File::set_times` requires a handle opened for writing on some targets;
+    // open for write WITHOUT truncating, so this never touches the bytes.
+    let Ok(file) = fs::OpenOptions::new().write(true).open(destination) else {
+        return;
+    };
+    let _ = file.set_times(times);
 }
 
 /// Restore owner write on a seeded artifact in the private run dir.
