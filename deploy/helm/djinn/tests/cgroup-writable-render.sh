@@ -194,7 +194,10 @@ case "\$1" in
     probe="\$*"
     case "${case_name}" in
       readonly)
-        [[ "\$probe" == *'stat -fc %T "\$root"'* ]] || exit 91
+        # Inspect the launcher's actual writable-root operations, not merely
+        # the cgroup filesystem-type observation that precedes them.
+        [[ "\$probe" == *'mkdir "\$child"'* ]] || exit 91
+        [[ "\$probe" == *'rmdir "\$child"'* ]] || exit 91
         printf 'fixture worker-probe root=read-only result=unexpected-success\n' >>'$log' ;;
       namespace-escape)
         [[ "\$probe" == *'[ ! -d "\$root/system.slice" ]'* ]] || exit 92
@@ -203,7 +206,9 @@ case "\$1" in
         [[ "\$probe" == *'mkdir \\"\$leaf\\"'* ]] || exit 93
         printf 'fixture worker-probe mutation=child-creation result=unexpected-success\n' >>'$log' ;;
       mutation-cpu-max)
-        [[ "\$probe" == *'\$root/cpu.max'* ]] || exit 94
+        # The redirection distinguishes the denied write from the preceding
+        # read used to retain cpu.max's valid current value.
+        [[ "\$probe" == *'> \\"\$root/cpu.max\\"'* ]] || exit 94
         printf 'fixture worker-probe mutation=cpu.max result=unexpected-success\n' >>'$log' ;;
       mutation-cgroup-procs)
         [[ "\$probe" == *'printf 1 > \\"\$root/cgroup.procs\\"'* ]] || exit 95
@@ -215,7 +220,9 @@ case "\$1" in
         [[ "\$probe" == *'rmdir \\"\$launcher_leaf\\"'* ]] || exit 97
         printf 'fixture worker-probe mutation=launcher-leaf result=unexpected-success\n' >>'$log' ;;
       mutation-process-move)
-        [[ "\$probe" == *'writer tries to move its own process'* ]] || exit 98
+        # Match the root process-movement write itself; neither its explanatory
+        # comment nor the separate launcher-leaf movement is sufficient.
+        [[ "\$probe" == *'printf \\"\\\$\\\$\\" > \\"\$root/cgroup.procs\\"'* ]] || exit 98
         printf 'fixture worker-probe mutation=process-movement result=unexpected-success\n' >>'$log' ;;
       *) exit 0 ;;
     esac
