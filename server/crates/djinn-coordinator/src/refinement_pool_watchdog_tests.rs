@@ -392,6 +392,156 @@ async fn late_starting_session_gets_full_budget_from_start() {
     );
 }
 
+/// An actually-running role that exceeds its execution budget must not merely
+/// disappear from the disposable projections. The production watchdog path
+/// first records the exact run's typed terminal stop under its generation CAS,
+/// then cleans those projections; replaying the already-reported timeout must
+/// not manufacture another lifecycle stop.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn execution_timeout_terminalizes_exact_durable_run_once_before_projection_cleanup() {
+    let db = crate::test_helpers::create_test_db();
+    let fixture = seed_refinement_fixture(&db).await;
+    let (events_tx, _events_rx) = tokio::sync::broadcast::channel::<DjinnEventEnvelope>(256);
+    let task_id = seed_refinement_task_row(&db, &fixture.project_id, &fixture.user_id).await;
+
+    // A repository session proves this task has genuinely started. The actor's
+    // cached monotonic start is deliberately beyond the execution budget, which
+    // is the production input used by `drive_active_refinements`.
+    SessionRepository::new(db.clone(), EventBus::noop())
+        .create(CreateSessionParams {
+            project_id: &fixture.project_id,
+            task_id: Some(&task_id),
+            model: TEST_MODEL,
+            agent_type: "adversary",
+            metadata_json: None,
+            task_run_id: None,
+            pricing: None,
+            cost_basis: None,
+        })
+        .await
+        .expect("materialize running watchdog session");
+
+    let (pool, _counts) = spawn_counting_pool(vec![task_id.clone()]);
+    let mut actor = build_refinement_actor(&db, &events_tx, pool);
+    let (run_id, generation) = seed_durable_running_refinement_dispatched_at(
+        &mut actor,
+        &db,
+        &fixture.proposal_id,
+        &task_id,
+        ago(super::REFINEMENT_SESSION_TIMEOUT + Duration::from_secs(60)),
+    )
+    .await;
+    let replay_projection = actor.active_refinements[&run_id].clone();
+    actor
+        .refinement_sessions
+        .get_mut(&run_id)
+        .expect("exact watchdog session projection")
+        .session_started_at = Some(ago(
+        super::REFINEMENT_SESSION_TIMEOUT + Duration::from_secs(60)
+    ));
+
+    // Exercise the real `drive_active_refinements` running-session timeout
+    // branch; this must use the admitted run identity rather than the legacy
+    // empty-run compatibility projection.
+    actor.drive_active_refinements().await;
+
+    let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+    let durable = repo
+        .load_refinement_run_snapshot(LoadRefinementRunSnapshotRequest {
+            run_id: run_id.clone(),
+            heartbeat_grace_millis: 60_000,
+        })
+        .await
+        .expect("load terminal exact watchdog run")
+        .expect("admitted watchdog run exists");
+    let expected_reason = RefinementStopReason::AgentFailure {
+        role: RefinementRole::Adversary,
+        error_code: "agent_failure".into(),
+        message: "session timeout".into(),
+    };
+    assert_eq!(
+        durable.generation, generation,
+        "exact generation terminalized"
+    );
+    assert_eq!(durable.snapshot.run.state, RefinementRunState::Terminal);
+    assert_eq!(durable.snapshot.run.terminal_reason, Some(expected_reason));
+
+    let after_timeout = djinn_db::test_support::refinement_run_read_only_snapshot_for_test(
+        &db,
+        &fixture.proposal_id,
+        &run_id,
+    )
+    .await;
+    let expected_context = serde_json::json!({
+        "role": "adversary",
+        "error_code": "agent_failure",
+        "message": "session timeout",
+    });
+    assert_eq!(after_timeout.run.generation, generation);
+    assert_eq!(after_timeout.run.state, "terminal");
+    assert_eq!(after_timeout.run.stop_tag.as_deref(), Some("agent_failure"));
+    assert_eq!(
+        after_timeout.run.stop_context,
+        Some(expected_context.clone())
+    );
+    let stops: Vec<_> = after_timeout
+        .lifecycle_rows
+        .iter()
+        .filter(|row| row.event_kind == "refinement_stop")
+        .collect();
+    assert_eq!(
+        stops.len(),
+        1,
+        "one exact-run terminal CAS yields one stop row"
+    );
+    assert_eq!(
+        stops[0].refinement_stop_tag.as_deref(),
+        Some("agent_failure")
+    );
+    assert_eq!(stops[0].refinement_stop_context, Some(expected_context));
+    assert!(
+        !actor.active_refinements.contains_key(&run_id)
+            && !actor.refinement_sessions.contains_key(&run_id),
+        "projections are cleaned only after the durable terminal snapshot is readable"
+    );
+    assert!(
+        !(after_timeout.run.state == "running" && after_timeout.run.stop_tag.is_none()),
+        "a reported watchdog termination must never leave its exact durable run running without a stop tag"
+    );
+
+    // Replay the same stale running projection/session condition. The exact-run
+    // current-state fence observes the durable terminal state before a second
+    // watchdog termination can append a duplicate lifecycle row.
+    actor
+        .active_refinements
+        .insert(run_id.clone(), replay_projection);
+    actor.refinement_sessions.insert(
+        run_id.clone(),
+        RefinementSession {
+            task_id,
+            phase: RefinementPhase::AdversaryAttack,
+            run_id: run_id.clone(),
+            generation,
+            dispatched_at: ago(super::REFINEMENT_SESSION_TIMEOUT + Duration::from_secs(60)),
+            session_started_at: Some(ago(
+                super::REFINEMENT_SESSION_TIMEOUT + Duration::from_secs(60)
+            )),
+            model_id: TEST_MODEL.to_owned(),
+        },
+    );
+    actor.drive_active_refinements().await;
+    let after_replay = djinn_db::test_support::refinement_run_read_only_snapshot_for_test(
+        &db,
+        &fixture.proposal_id,
+        &run_id,
+    )
+    .await;
+    assert_eq!(
+        after_replay, after_timeout,
+        "timeout watchdog replay is idempotent"
+    );
+}
+
 /// (c) A dispatch that sits Pending past the pending-start timeout without ever
 /// starting a session is abandoned and retried (bounded by the retry cap), NOT
 /// terminated: the tribunal survives, the in-flight session is cleared, the
