@@ -9,7 +9,7 @@ use djinn_core::{
     models::TaskRefinementCorrelation,
     refinement_liveness::{
         RefinementIntentState, RefinementParkKind, RefinementPhase as DurablePhase, RefinementRole,
-        RefinementStopReason,
+        RefinementRunState, RefinementStopReason,
     },
 };
 use djinn_db::{
@@ -180,6 +180,170 @@ async fn recovery_hydrates_materialized_open_task_run_by_exact_run_id() {
         .expect("read materialized task")
         .expect("materialized task exists");
     assert_eq!(task.status, "open");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn recovery_rehydrates_closed_task_materialized_intent_without_reap() {
+    let db = crate::test_helpers::create_test_db();
+    let fixture = seed_refinement_fixture(&db).await;
+    let (events_tx, _events_rx) = tokio::sync::broadcast::channel::<DjinnEventEnvelope>(16);
+    let mut actor = build_refinement_actor(&db, &events_tx, spawn_test_pool(&db, 1));
+    let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+    let (run_id, generation, intent_id) = admit(
+        &repo,
+        &fixture.proposal_id,
+        "closed-task-materialized-recovery",
+    )
+    .await;
+    let task_id =
+        materialize_intent(&actor, &fixture, &repo, &run_id, generation, &intent_id).await;
+    djinn_db::test_support::close_task_at(&db, &task_id, "2026-07-26T00:00:00Z").await;
+
+    // A role can close before outcome handling consumes the durable
+    // materialization. Recovery must rebuild that exact live run, not reap it.
+    actor.active_refinements.clear();
+    actor.refinement_sessions.clear();
+    actor.recover_interrupted_refinements().await;
+    let state = &actor.active_refinements[&run_id];
+    assert_eq!(state.run_id, run_id);
+    assert_eq!(state.generation, generation);
+    assert_eq!(state.phase, RefinementPhase::AdversaryAttack);
+    assert_eq!(state.current_round, 1);
+
+    let snapshot = exact_snapshot(&repo, &run_id).await;
+    assert_eq!(snapshot.snapshot.run.state, RefinementRunState::Active);
+    assert_eq!(snapshot.snapshot.run.terminal_reason, None);
+    assert_eq!(
+        snapshot
+            .snapshot
+            .intents
+            .iter()
+            .find(|intent| intent.intent_id == intent_id)
+            .expect("correlated materialized intent remains in exact snapshot")
+            .state,
+        RefinementIntentState::Materialized,
+    );
+    let intents_before_replay = snapshot.snapshot.intents;
+    assert_eq!(
+        TaskRepository::new(db.clone(), EventBus::noop())
+            .get(&task_id)
+            .await
+            .expect("read closed materialized task")
+            .expect("materialized task remains")
+            .status,
+        "closed"
+    );
+    let durable_before_replay = djinn_db::test_support::refinement_run_read_only_snapshot_for_test(
+        &db,
+        &fixture.proposal_id,
+        &run_id,
+    )
+    .await;
+    assert_eq!(durable_before_replay.run.state, "running");
+    assert_eq!(durable_before_replay.run.stop_tag, None);
+    assert_eq!(durable_before_replay.run.typed_reap_count, 0);
+    assert_eq!(durable_before_replay.durable_typed_phantom_reap_count, 0);
+    assert!(
+        durable_before_replay
+            .lifecycle_rows
+            .iter()
+            .all(|row| row.refinement_stop_tag.as_deref() != Some("reaped_phantom")),
+        "same-run materialization must not create a reap lifecycle row"
+    );
+
+    actor.active_refinements.clear();
+    actor.refinement_sessions.clear();
+    actor.recover_interrupted_refinements().await;
+    let durable_after_replay = djinn_db::test_support::refinement_run_read_only_snapshot_for_test(
+        &db,
+        &fixture.proposal_id,
+        &run_id,
+    )
+    .await;
+    assert_eq!(durable_after_replay, durable_before_replay);
+    let snapshot_after_replay = exact_snapshot(&repo, &run_id).await;
+    assert_eq!(
+        snapshot_after_replay.snapshot.intents, intents_before_replay,
+        "recovery replay must preserve the entire exact-run intent set"
+    );
+    assert_eq!(
+        snapshot_after_replay
+            .snapshot
+            .intents
+            .iter()
+            .find(|intent| intent.intent_id == intent_id)
+            .expect("correlated materialized intent remains after replay")
+            .state,
+        RefinementIntentState::Materialized,
+    );
+    assert_eq!(
+        actor.active_refinements[&run_id].phase,
+        RefinementPhase::AdversaryAttack
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn recovery_reaps_current_phantom_without_using_terminal_prior_run_evidence() {
+    let db = crate::test_helpers::create_test_db();
+    let fixture = seed_refinement_fixture(&db).await;
+    let (events_tx, _events_rx) = tokio::sync::broadcast::channel::<DjinnEventEnvelope>(16);
+    let mut actor = build_refinement_actor(&db, &events_tx, spawn_test_pool(&db, 1));
+    let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+
+    let (prior_run_id, prior_generation, prior_intent_id) = admit(
+        &repo,
+        &fixture.proposal_id,
+        "terminal-materialized-prior-run",
+    )
+    .await;
+    let prior_task_id = materialize_intent(
+        &actor,
+        &fixture,
+        &repo,
+        &prior_run_id,
+        prior_generation,
+        &prior_intent_id,
+    )
+    .await;
+    djinn_db::test_support::close_task_at(&db, &prior_task_id, "2026-07-26T00:00:00Z").await;
+    assert!(
+        repo.terminal_refinement_run(TerminalRefinementRunRequest {
+            run_id: prior_run_id.clone(),
+            generation: prior_generation,
+            reason: RefinementStopReason::OperatorStop {
+                actor: "recovery-test".into(),
+                reason: None,
+            },
+        })
+        .await
+        .expect("terminalize materialized prior run")
+    );
+    let prior_audit =
+        djinn_db::test_support::refinement_run_audit_for_test(&db, &prior_run_id).await;
+
+    let (current_run_id, current_generation, _) =
+        admit(&repo, &fixture.proposal_id, "current-evidence-free-phantom").await;
+    djinn_db::test_support::make_refinement_run_phantom_for_test(&db, &current_run_id).await;
+    actor.active_refinements.clear();
+    actor.refinement_sessions.clear();
+    actor.recover_interrupted_refinements().await;
+
+    let current_audit =
+        djinn_db::test_support::refinement_run_audit_for_test(&db, &current_run_id).await;
+    assert_eq!(current_audit.generation, current_generation);
+    assert_eq!(current_audit.state, "terminal");
+    assert_eq!(current_audit.stop_tag.as_deref(), Some("reaped_phantom"));
+    assert_eq!(current_audit.typed_reap_count, 1);
+    assert_eq!(
+        current_audit.stop_context.expect("current reap context")["generation"],
+        current_generation
+    );
+    assert!(!actor.active_refinements.contains_key(&current_run_id));
+    assert_eq!(
+        djinn_db::test_support::refinement_run_audit_for_test(&db, &prior_run_id).await,
+        prior_audit,
+        "terminal prior-run materialization must not be reinterpreted or mutated"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
