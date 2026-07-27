@@ -708,7 +708,10 @@ impl CoordinatorActor {
 
     /// Terminate a refinement loop keyed by its exact durable run. Lifecycle
     /// persistence retains the proposal ID carried in the projection.
-    pub(super) async fn terminate_refinement(&mut self, run_id: &str, reason: StopReason) {
+    ///
+    /// Returns whether terminalization was published locally. Callers that own
+    /// pending task cleanup use this to wait for the exact-run CAS commit.
+    pub(super) async fn terminate_refinement(&mut self, run_id: &str, reason: StopReason) -> bool {
         let Some((proposal_id, durable_run_id, generation)) =
             self.active_refinements.get(run_id).map(|state| {
                 (
@@ -718,7 +721,7 @@ impl CoordinatorActor {
                 )
             })
         else {
-            return;
+            return false;
         };
         // The legacy compatibility projection has no exact durable identity.
         // Keep it non-durable so it cannot fabricate a proposal-scoped stop.
@@ -728,7 +731,7 @@ impl CoordinatorActor {
             }
             self.refinement_sessions.remove(run_id);
             self.active_refinements.remove(run_id);
-            return;
+            return true;
         }
 
         // The exact-run CAS is authoritative. Keep the projection and session
@@ -755,20 +758,27 @@ impl CoordinatorActor {
                     reason = reason.tag(),
                     "terminalized durable refinement run"
                 );
+                true
             }
-            Ok(false) => tracing::warn!(
-                proposal_id,
-                run_id = %durable_run_id,
-                generation,
-                "durable refinement terminal CAS did not apply; retaining retryable projection"
-            ),
-            Err(error) => tracing::warn!(
-                proposal_id,
-                run_id = %durable_run_id,
-                generation,
-                %error,
-                "failed to terminalize durable refinement run; retaining retryable projection"
-            ),
+            Ok(false) => {
+                tracing::warn!(
+                    proposal_id,
+                    run_id = %durable_run_id,
+                    generation,
+                    "durable refinement terminal CAS did not apply; retaining retryable projection"
+                );
+                false
+            }
+            Err(error) => {
+                tracing::warn!(
+                    proposal_id,
+                    run_id = %durable_run_id,
+                    generation,
+                    %error,
+                    "failed to terminalize durable refinement run; retaining retryable projection"
+                );
+                false
+            }
         }
     }
 
