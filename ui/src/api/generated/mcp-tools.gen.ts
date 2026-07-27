@@ -2775,7 +2775,6 @@ export namespace ImageCreateInputSchema {
   [k: string]: any
   }
   export interface LifecycleHooks {
-  final_verification?: FinalVerificationPlan
   /**
    * `RUN` lines appended to the generated Dockerfile. Bundle anything
    * you want baked into the image here (apt packages are the easy path;
@@ -2799,107 +2798,6 @@ export namespace ImageCreateInputSchema {
    */
   pre_verification?: HookCommand[]
   [k: string]: any
-  }
-  /**
-   * Authoritative post-authoring plan, distinct from setup-time hooks.
-   */
-  export interface FinalVerificationPlan {
-  /**
-   * Ordered command groups used by path selection in new declarations.
-   */
-  command_groups?: FinalVerificationCommandGroup[]
-  /**
-   * Legacy flat declaration. New configurations must use `command_groups`
-   * and `selection_rules`; this remains readable so persisted rows can be
-   * migrated without a flag day.
-   */
-  commands?: FinalVerificationCommand[]
-  /**
-   * What a recorded pass of this plan is worth. See
-   * [`VerificationEvidenceTier`]; the tier is identity material, so an
-   * attested pass and a recorded pass can never share a cache entry.
-   */
-  evidence_tier?: ("attested" | "recorded")
-  hermeticity?: HermeticityDeclaration
-  input_manifest?: VerificationInputManifest
-  output_only_globs?: string[]
-  profile_id?: string
-  profile_revision?: number
-  read_only_external_inputs?: ExternalInputDeclaration[]
-  required_checks?: string[]
-  /**
-   * Ordered path rules. A matching rule selects its named command groups.
-   */
-  selection_rules?: FinalVerificationSelectionRule[]
-  version?: number
-  }
-  /**
-   * A named, ordered subset of a final-verification plan.
-   */
-  export interface FinalVerificationCommandGroup {
-  commands?: FinalVerificationCommand[]
-  name: string
-  }
-  export interface FinalVerificationCommand {
-  argv?: string[]
-  check_id: string
-  descriptor_revision?: number
-  environment_names?: string[]
-  executable: string
-  timeout_seconds: number
-  working_directory?: string
-  }
-  export interface HermeticityDeclaration {
-  hermetic?: boolean
-  network_access?: boolean
-  reusable?: boolean
-  }
-  export interface VerificationInputManifest {
-  /**
-   * Environment names whose **values** are identity material: the resolved
-   * value is hashed into the environment identity digest, so a change to it
-   * invalidates every reusable pass. Use this for anything whose value
-   * genuinely changes what the commands do (`PATH`, `CARGO_HOME`,
-   * `CARGO_BUILD_RUSTFLAGS`).
-   */
-  environment_names?: string[]
-  repo_paths?: string[]
-  version?: number
-  /**
-   * Environment names that are declared and passed to commands, but whose
-   * **values** are deliberately NOT identity material — only the name is
-   * (via this manifest). The resolved value never reaches the identity
-   * digest, so a per-run value does not fracture reuse across task runs.
-   * 
-   * This is the same contract catalog services already have: a declared
-   * name with an attempt-scoped value. It exists because the production
-   * pod renders `CARGO_TARGET_DIR=/cache/cargo-target-runs/<task_run_id>`
-   * (a fresh path per run) and `RUSTC_WRAPPER=""` (an empty value, which
-   * identity material forbids). Hashing either would mean a worker run and
-   * the reviewer run of the same task could never share a pass — which is
-   * the entire point of the recorded tier.
-   * 
-   * Rejected unless `evidence_tier` is `recorded`: an unhashed input would
-   * void the attested tier's guarantee.
-   */
-  volatile_environment_names?: string[]
-  }
-  export interface ExternalInputDeclaration {
-  id: string
-  locator: string
-  }
-  /**
-   * Ordered path selection for one or more command groups.
-   */
-  export interface FinalVerificationSelectionRule {
-  /**
-   * Names of command groups selected by this rule.
-   */
-  command_groups?: string[]
-  /**
-   * Repository-relative globs. `**` is the explicit fail-safe catch-all.
-   */
-  match?: string[]
   }
   /**
    * A named pre-task command declared in the project environment config.
@@ -3233,7 +3131,6 @@ export namespace ImageListOutputSchema {
   [k: string]: any
   }
   export interface LifecycleHooks {
-  final_verification?: FinalVerificationPlan
   /**
    * `RUN` lines appended to the generated Dockerfile. Bundle anything
    * you want baked into the image here (apt packages are the easy path;
@@ -3257,107 +3154,6 @@ export namespace ImageListOutputSchema {
    */
   pre_verification?: HookCommand[]
   [k: string]: any
-  }
-  /**
-   * Authoritative post-authoring plan, distinct from setup-time hooks.
-   */
-  export interface FinalVerificationPlan {
-  /**
-   * Ordered command groups used by path selection in new declarations.
-   */
-  command_groups?: FinalVerificationCommandGroup[]
-  /**
-   * Legacy flat declaration. New configurations must use `command_groups`
-   * and `selection_rules`; this remains readable so persisted rows can be
-   * migrated without a flag day.
-   */
-  commands?: FinalVerificationCommand[]
-  /**
-   * What a recorded pass of this plan is worth. See
-   * [`VerificationEvidenceTier`]; the tier is identity material, so an
-   * attested pass and a recorded pass can never share a cache entry.
-   */
-  evidence_tier?: ("attested" | "recorded")
-  hermeticity?: HermeticityDeclaration
-  input_manifest?: VerificationInputManifest
-  output_only_globs?: string[]
-  profile_id?: string
-  profile_revision?: number
-  read_only_external_inputs?: ExternalInputDeclaration[]
-  required_checks?: string[]
-  /**
-   * Ordered path rules. A matching rule selects its named command groups.
-   */
-  selection_rules?: FinalVerificationSelectionRule[]
-  version?: number
-  }
-  /**
-   * A named, ordered subset of a final-verification plan.
-   */
-  export interface FinalVerificationCommandGroup {
-  commands?: FinalVerificationCommand[]
-  name: string
-  }
-  export interface FinalVerificationCommand {
-  argv?: string[]
-  check_id: string
-  descriptor_revision?: number
-  environment_names?: string[]
-  executable: string
-  timeout_seconds: number
-  working_directory?: string
-  }
-  export interface HermeticityDeclaration {
-  hermetic?: boolean
-  network_access?: boolean
-  reusable?: boolean
-  }
-  export interface VerificationInputManifest {
-  /**
-   * Environment names whose **values** are identity material: the resolved
-   * value is hashed into the environment identity digest, so a change to it
-   * invalidates every reusable pass. Use this for anything whose value
-   * genuinely changes what the commands do (`PATH`, `CARGO_HOME`,
-   * `CARGO_BUILD_RUSTFLAGS`).
-   */
-  environment_names?: string[]
-  repo_paths?: string[]
-  version?: number
-  /**
-   * Environment names that are declared and passed to commands, but whose
-   * **values** are deliberately NOT identity material — only the name is
-   * (via this manifest). The resolved value never reaches the identity
-   * digest, so a per-run value does not fracture reuse across task runs.
-   * 
-   * This is the same contract catalog services already have: a declared
-   * name with an attempt-scoped value. It exists because the production
-   * pod renders `CARGO_TARGET_DIR=/cache/cargo-target-runs/<task_run_id>`
-   * (a fresh path per run) and `RUSTC_WRAPPER=""` (an empty value, which
-   * identity material forbids). Hashing either would mean a worker run and
-   * the reviewer run of the same task could never share a pass — which is
-   * the entire point of the recorded tier.
-   * 
-   * Rejected unless `evidence_tier` is `recorded`: an unhashed input would
-   * void the attested tier's guarantee.
-   */
-  volatile_environment_names?: string[]
-  }
-  export interface ExternalInputDeclaration {
-  id: string
-  locator: string
-  }
-  /**
-   * Ordered path selection for one or more command groups.
-   */
-  export interface FinalVerificationSelectionRule {
-  /**
-   * Names of command groups selected by this rule.
-   */
-  command_groups?: string[]
-  /**
-   * Repository-relative globs. `**` is the explicit fail-safe catch-all.
-   */
-  match?: string[]
   }
   /**
    * A named pre-task command declared in the project environment config.
@@ -3667,7 +3463,6 @@ export namespace ImageUpdateInputSchema {
   [k: string]: any
   }
   export interface LifecycleHooks {
-  final_verification?: FinalVerificationPlan
   /**
    * `RUN` lines appended to the generated Dockerfile. Bundle anything
    * you want baked into the image here (apt packages are the easy path;
@@ -3691,107 +3486,6 @@ export namespace ImageUpdateInputSchema {
    */
   pre_verification?: HookCommand[]
   [k: string]: any
-  }
-  /**
-   * Authoritative post-authoring plan, distinct from setup-time hooks.
-   */
-  export interface FinalVerificationPlan {
-  /**
-   * Ordered command groups used by path selection in new declarations.
-   */
-  command_groups?: FinalVerificationCommandGroup[]
-  /**
-   * Legacy flat declaration. New configurations must use `command_groups`
-   * and `selection_rules`; this remains readable so persisted rows can be
-   * migrated without a flag day.
-   */
-  commands?: FinalVerificationCommand[]
-  /**
-   * What a recorded pass of this plan is worth. See
-   * [`VerificationEvidenceTier`]; the tier is identity material, so an
-   * attested pass and a recorded pass can never share a cache entry.
-   */
-  evidence_tier?: ("attested" | "recorded")
-  hermeticity?: HermeticityDeclaration
-  input_manifest?: VerificationInputManifest
-  output_only_globs?: string[]
-  profile_id?: string
-  profile_revision?: number
-  read_only_external_inputs?: ExternalInputDeclaration[]
-  required_checks?: string[]
-  /**
-   * Ordered path rules. A matching rule selects its named command groups.
-   */
-  selection_rules?: FinalVerificationSelectionRule[]
-  version?: number
-  }
-  /**
-   * A named, ordered subset of a final-verification plan.
-   */
-  export interface FinalVerificationCommandGroup {
-  commands?: FinalVerificationCommand[]
-  name: string
-  }
-  export interface FinalVerificationCommand {
-  argv?: string[]
-  check_id: string
-  descriptor_revision?: number
-  environment_names?: string[]
-  executable: string
-  timeout_seconds: number
-  working_directory?: string
-  }
-  export interface HermeticityDeclaration {
-  hermetic?: boolean
-  network_access?: boolean
-  reusable?: boolean
-  }
-  export interface VerificationInputManifest {
-  /**
-   * Environment names whose **values** are identity material: the resolved
-   * value is hashed into the environment identity digest, so a change to it
-   * invalidates every reusable pass. Use this for anything whose value
-   * genuinely changes what the commands do (`PATH`, `CARGO_HOME`,
-   * `CARGO_BUILD_RUSTFLAGS`).
-   */
-  environment_names?: string[]
-  repo_paths?: string[]
-  version?: number
-  /**
-   * Environment names that are declared and passed to commands, but whose
-   * **values** are deliberately NOT identity material — only the name is
-   * (via this manifest). The resolved value never reaches the identity
-   * digest, so a per-run value does not fracture reuse across task runs.
-   * 
-   * This is the same contract catalog services already have: a declared
-   * name with an attempt-scoped value. It exists because the production
-   * pod renders `CARGO_TARGET_DIR=/cache/cargo-target-runs/<task_run_id>`
-   * (a fresh path per run) and `RUSTC_WRAPPER=""` (an empty value, which
-   * identity material forbids). Hashing either would mean a worker run and
-   * the reviewer run of the same task could never share a pass — which is
-   * the entire point of the recorded tier.
-   * 
-   * Rejected unless `evidence_tier` is `recorded`: an unhashed input would
-   * void the attested tier's guarantee.
-   */
-  volatile_environment_names?: string[]
-  }
-  export interface ExternalInputDeclaration {
-  id: string
-  locator: string
-  }
-  /**
-   * Ordered path selection for one or more command groups.
-   */
-  export interface FinalVerificationSelectionRule {
-  /**
-   * Names of command groups selected by this rule.
-   */
-  command_groups?: string[]
-  /**
-   * Repository-relative globs. `**` is the explicit fail-safe catch-all.
-   */
-  match?: string[]
   }
   /**
    * A named pre-task command declared in the project environment config.
@@ -6357,7 +6051,6 @@ export namespace ProjectEnvironmentConfigGetOutputSchema {
   [k: string]: any
   }
   export interface LifecycleHooks {
-  final_verification?: FinalVerificationPlan
   /**
    * `RUN` lines appended to the generated Dockerfile. Bundle anything
    * you want baked into the image here (apt packages are the easy path;
@@ -6381,107 +6074,6 @@ export namespace ProjectEnvironmentConfigGetOutputSchema {
    */
   pre_verification?: HookCommand[]
   [k: string]: any
-  }
-  /**
-   * Authoritative post-authoring plan, distinct from setup-time hooks.
-   */
-  export interface FinalVerificationPlan {
-  /**
-   * Ordered command groups used by path selection in new declarations.
-   */
-  command_groups?: FinalVerificationCommandGroup[]
-  /**
-   * Legacy flat declaration. New configurations must use `command_groups`
-   * and `selection_rules`; this remains readable so persisted rows can be
-   * migrated without a flag day.
-   */
-  commands?: FinalVerificationCommand[]
-  /**
-   * What a recorded pass of this plan is worth. See
-   * [`VerificationEvidenceTier`]; the tier is identity material, so an
-   * attested pass and a recorded pass can never share a cache entry.
-   */
-  evidence_tier?: ("attested" | "recorded")
-  hermeticity?: HermeticityDeclaration
-  input_manifest?: VerificationInputManifest
-  output_only_globs?: string[]
-  profile_id?: string
-  profile_revision?: number
-  read_only_external_inputs?: ExternalInputDeclaration[]
-  required_checks?: string[]
-  /**
-   * Ordered path rules. A matching rule selects its named command groups.
-   */
-  selection_rules?: FinalVerificationSelectionRule[]
-  version?: number
-  }
-  /**
-   * A named, ordered subset of a final-verification plan.
-   */
-  export interface FinalVerificationCommandGroup {
-  commands?: FinalVerificationCommand[]
-  name: string
-  }
-  export interface FinalVerificationCommand {
-  argv?: string[]
-  check_id: string
-  descriptor_revision?: number
-  environment_names?: string[]
-  executable: string
-  timeout_seconds: number
-  working_directory?: string
-  }
-  export interface HermeticityDeclaration {
-  hermetic?: boolean
-  network_access?: boolean
-  reusable?: boolean
-  }
-  export interface VerificationInputManifest {
-  /**
-   * Environment names whose **values** are identity material: the resolved
-   * value is hashed into the environment identity digest, so a change to it
-   * invalidates every reusable pass. Use this for anything whose value
-   * genuinely changes what the commands do (`PATH`, `CARGO_HOME`,
-   * `CARGO_BUILD_RUSTFLAGS`).
-   */
-  environment_names?: string[]
-  repo_paths?: string[]
-  version?: number
-  /**
-   * Environment names that are declared and passed to commands, but whose
-   * **values** are deliberately NOT identity material — only the name is
-   * (via this manifest). The resolved value never reaches the identity
-   * digest, so a per-run value does not fracture reuse across task runs.
-   * 
-   * This is the same contract catalog services already have: a declared
-   * name with an attempt-scoped value. It exists because the production
-   * pod renders `CARGO_TARGET_DIR=/cache/cargo-target-runs/<task_run_id>`
-   * (a fresh path per run) and `RUSTC_WRAPPER=""` (an empty value, which
-   * identity material forbids). Hashing either would mean a worker run and
-   * the reviewer run of the same task could never share a pass — which is
-   * the entire point of the recorded tier.
-   * 
-   * Rejected unless `evidence_tier` is `recorded`: an unhashed input would
-   * void the attested tier's guarantee.
-   */
-  volatile_environment_names?: string[]
-  }
-  export interface ExternalInputDeclaration {
-  id: string
-  locator: string
-  }
-  /**
-   * Ordered path selection for one or more command groups.
-   */
-  export interface FinalVerificationSelectionRule {
-  /**
-   * Names of command groups selected by this rule.
-   */
-  command_groups?: string[]
-  /**
-   * Repository-relative globs. `**` is the explicit fail-safe catch-all.
-   */
-  match?: string[]
   }
   /**
    * A named pre-task command declared in the project environment config.
@@ -6775,7 +6367,6 @@ export namespace ProjectEnvironmentConfigResetOutputSchema {
   [k: string]: any
   }
   export interface LifecycleHooks {
-  final_verification?: FinalVerificationPlan
   /**
    * `RUN` lines appended to the generated Dockerfile. Bundle anything
    * you want baked into the image here (apt packages are the easy path;
@@ -6799,107 +6390,6 @@ export namespace ProjectEnvironmentConfigResetOutputSchema {
    */
   pre_verification?: HookCommand[]
   [k: string]: any
-  }
-  /**
-   * Authoritative post-authoring plan, distinct from setup-time hooks.
-   */
-  export interface FinalVerificationPlan {
-  /**
-   * Ordered command groups used by path selection in new declarations.
-   */
-  command_groups?: FinalVerificationCommandGroup[]
-  /**
-   * Legacy flat declaration. New configurations must use `command_groups`
-   * and `selection_rules`; this remains readable so persisted rows can be
-   * migrated without a flag day.
-   */
-  commands?: FinalVerificationCommand[]
-  /**
-   * What a recorded pass of this plan is worth. See
-   * [`VerificationEvidenceTier`]; the tier is identity material, so an
-   * attested pass and a recorded pass can never share a cache entry.
-   */
-  evidence_tier?: ("attested" | "recorded")
-  hermeticity?: HermeticityDeclaration
-  input_manifest?: VerificationInputManifest
-  output_only_globs?: string[]
-  profile_id?: string
-  profile_revision?: number
-  read_only_external_inputs?: ExternalInputDeclaration[]
-  required_checks?: string[]
-  /**
-   * Ordered path rules. A matching rule selects its named command groups.
-   */
-  selection_rules?: FinalVerificationSelectionRule[]
-  version?: number
-  }
-  /**
-   * A named, ordered subset of a final-verification plan.
-   */
-  export interface FinalVerificationCommandGroup {
-  commands?: FinalVerificationCommand[]
-  name: string
-  }
-  export interface FinalVerificationCommand {
-  argv?: string[]
-  check_id: string
-  descriptor_revision?: number
-  environment_names?: string[]
-  executable: string
-  timeout_seconds: number
-  working_directory?: string
-  }
-  export interface HermeticityDeclaration {
-  hermetic?: boolean
-  network_access?: boolean
-  reusable?: boolean
-  }
-  export interface VerificationInputManifest {
-  /**
-   * Environment names whose **values** are identity material: the resolved
-   * value is hashed into the environment identity digest, so a change to it
-   * invalidates every reusable pass. Use this for anything whose value
-   * genuinely changes what the commands do (`PATH`, `CARGO_HOME`,
-   * `CARGO_BUILD_RUSTFLAGS`).
-   */
-  environment_names?: string[]
-  repo_paths?: string[]
-  version?: number
-  /**
-   * Environment names that are declared and passed to commands, but whose
-   * **values** are deliberately NOT identity material — only the name is
-   * (via this manifest). The resolved value never reaches the identity
-   * digest, so a per-run value does not fracture reuse across task runs.
-   * 
-   * This is the same contract catalog services already have: a declared
-   * name with an attempt-scoped value. It exists because the production
-   * pod renders `CARGO_TARGET_DIR=/cache/cargo-target-runs/<task_run_id>`
-   * (a fresh path per run) and `RUSTC_WRAPPER=""` (an empty value, which
-   * identity material forbids). Hashing either would mean a worker run and
-   * the reviewer run of the same task could never share a pass — which is
-   * the entire point of the recorded tier.
-   * 
-   * Rejected unless `evidence_tier` is `recorded`: an unhashed input would
-   * void the attested tier's guarantee.
-   */
-  volatile_environment_names?: string[]
-  }
-  export interface ExternalInputDeclaration {
-  id: string
-  locator: string
-  }
-  /**
-   * Ordered path selection for one or more command groups.
-   */
-  export interface FinalVerificationSelectionRule {
-  /**
-   * Names of command groups selected by this rule.
-   */
-  command_groups?: string[]
-  /**
-   * Repository-relative globs. `**` is the explicit fail-safe catch-all.
-   */
-  match?: string[]
   }
   /**
    * A named pre-task command declared in the project environment config.
@@ -7186,7 +6676,6 @@ export namespace ProjectEnvironmentConfigSetInputSchema {
   [k: string]: any
   }
   export interface LifecycleHooks {
-  final_verification?: FinalVerificationPlan
   /**
    * `RUN` lines appended to the generated Dockerfile. Bundle anything
    * you want baked into the image here (apt packages are the easy path;
@@ -7210,107 +6699,6 @@ export namespace ProjectEnvironmentConfigSetInputSchema {
    */
   pre_verification?: HookCommand[]
   [k: string]: any
-  }
-  /**
-   * Authoritative post-authoring plan, distinct from setup-time hooks.
-   */
-  export interface FinalVerificationPlan {
-  /**
-   * Ordered command groups used by path selection in new declarations.
-   */
-  command_groups?: FinalVerificationCommandGroup[]
-  /**
-   * Legacy flat declaration. New configurations must use `command_groups`
-   * and `selection_rules`; this remains readable so persisted rows can be
-   * migrated without a flag day.
-   */
-  commands?: FinalVerificationCommand[]
-  /**
-   * What a recorded pass of this plan is worth. See
-   * [`VerificationEvidenceTier`]; the tier is identity material, so an
-   * attested pass and a recorded pass can never share a cache entry.
-   */
-  evidence_tier?: ("attested" | "recorded")
-  hermeticity?: HermeticityDeclaration
-  input_manifest?: VerificationInputManifest
-  output_only_globs?: string[]
-  profile_id?: string
-  profile_revision?: number
-  read_only_external_inputs?: ExternalInputDeclaration[]
-  required_checks?: string[]
-  /**
-   * Ordered path rules. A matching rule selects its named command groups.
-   */
-  selection_rules?: FinalVerificationSelectionRule[]
-  version?: number
-  }
-  /**
-   * A named, ordered subset of a final-verification plan.
-   */
-  export interface FinalVerificationCommandGroup {
-  commands?: FinalVerificationCommand[]
-  name: string
-  }
-  export interface FinalVerificationCommand {
-  argv?: string[]
-  check_id: string
-  descriptor_revision?: number
-  environment_names?: string[]
-  executable: string
-  timeout_seconds: number
-  working_directory?: string
-  }
-  export interface HermeticityDeclaration {
-  hermetic?: boolean
-  network_access?: boolean
-  reusable?: boolean
-  }
-  export interface VerificationInputManifest {
-  /**
-   * Environment names whose **values** are identity material: the resolved
-   * value is hashed into the environment identity digest, so a change to it
-   * invalidates every reusable pass. Use this for anything whose value
-   * genuinely changes what the commands do (`PATH`, `CARGO_HOME`,
-   * `CARGO_BUILD_RUSTFLAGS`).
-   */
-  environment_names?: string[]
-  repo_paths?: string[]
-  version?: number
-  /**
-   * Environment names that are declared and passed to commands, but whose
-   * **values** are deliberately NOT identity material — only the name is
-   * (via this manifest). The resolved value never reaches the identity
-   * digest, so a per-run value does not fracture reuse across task runs.
-   * 
-   * This is the same contract catalog services already have: a declared
-   * name with an attempt-scoped value. It exists because the production
-   * pod renders `CARGO_TARGET_DIR=/cache/cargo-target-runs/<task_run_id>`
-   * (a fresh path per run) and `RUSTC_WRAPPER=""` (an empty value, which
-   * identity material forbids). Hashing either would mean a worker run and
-   * the reviewer run of the same task could never share a pass — which is
-   * the entire point of the recorded tier.
-   * 
-   * Rejected unless `evidence_tier` is `recorded`: an unhashed input would
-   * void the attested tier's guarantee.
-   */
-  volatile_environment_names?: string[]
-  }
-  export interface ExternalInputDeclaration {
-  id: string
-  locator: string
-  }
-  /**
-   * Ordered path selection for one or more command groups.
-   */
-  export interface FinalVerificationSelectionRule {
-  /**
-   * Names of command groups selected by this rule.
-   */
-  command_groups?: string[]
-  /**
-   * Repository-relative globs. `**` is the explicit fail-safe catch-all.
-   */
-  match?: string[]
   }
   /**
    * A named pre-task command declared in the project environment config.

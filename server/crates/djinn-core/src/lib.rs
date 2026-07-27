@@ -1,6 +1,4 @@
 pub mod auth_context;
-pub mod auto_submit_decision;
-pub mod canonical_verify;
 pub mod cargo_target_runs;
 pub mod clock;
 pub mod commands;
@@ -15,7 +13,6 @@ pub mod liveness;
 pub mod message;
 pub mod models;
 pub mod paths;
-pub mod prepare_build_cache;
 pub mod refinement_liveness;
 pub mod run_progress;
 pub mod test_paths;

@@ -388,9 +388,8 @@ impl SupervisorServices for WorkerSupervisorServices {
         // Persist the workspace path onto the task_runs row exactly once, on
         // the first capture. The coordinator creates K8s pod-run rows with
         // `workspace_path = NULL` (it cannot know the in-pod clone path), and
-        // the completion boundary (`resolve_final_verification`) and the
-        // auto-submit fingerprint path resolve the run's worktree from that
-        // row — a NULL there fails every configured completion boundary. This
+        // the completion boundary resolves the run's worktree from that row —
+        // a NULL there fails every configured completion boundary. This
         // is a prerequisite for stage execution: continuing after a failed
         // write would leave the run unable to resolve its own worktree.
         if first_capture {

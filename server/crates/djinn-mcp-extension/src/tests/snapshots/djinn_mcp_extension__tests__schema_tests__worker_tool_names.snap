@@ -27,6 +27,5 @@ expression: names
   "memory_write",
   "memory_edit",
   "request_planner",
-  "run_verification",
   "submit_work"
 ]

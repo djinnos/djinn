@@ -463,8 +463,8 @@ pub fn agent_context_from_db(db: Database, _cancel: CancellationToken) -> SlotCo
 }
 
 /// Build a `SlotContext` from an in-memory DB with custom host callbacks.
-/// This lets tests override final-verification resolution and lease behavior
-/// without going through the production `AgentHostCallbacks`.
+/// This lets tests override host behavior without going through the production
+/// `AgentHostCallbacks`.
 pub fn agent_context_from_db_with_callbacks(
     db: Database,
     callbacks: Arc<dyn crate::host::SlotHostCallbacks>,
@@ -510,30 +510,6 @@ pub fn agent_context_from_db_with_dispatcher(
     // No-op host callbacks for tests
     struct NoopCallbacks;
     impl crate::host::SlotHostCallbacks for NoopCallbacks {
-        fn final_verification_outcome_for_test(
-            &self,
-            _request: &crate::final_verification::FinalVerificationCoordinatorRequest,
-        ) -> Option<crate::final_verification::FinalVerificationRecordingOutcome> {
-            Some(
-                crate::final_verification::FinalVerificationRecordingOutcome::Stored {
-                    verification_attempt_id: uuid::Uuid::now_v7().to_string(),
-                    verify_run_id: uuid::Uuid::now_v7().to_string(),
-                    evidence: Box::new(
-                        crate::final_verification::FinalVerificationSuccessEvidence {
-                            persisted_run_id: uuid::Uuid::now_v7().to_string(),
-                            completed_at: "2025-01-01T00:00:00Z".to_owned(),
-                            ordered_commands: serde_json::json!([]),
-                            covered_checks: serde_json::json!([]),
-                            required_checks: vec![],
-                            verification_input_fingerprint: "test-fingerprint".to_owned(),
-                            manifest_version: "manifest-v1".to_owned(),
-                            environment_identity_digest: "test-identity".to_owned(),
-                        },
-                    ),
-                },
-            )
-        }
-
         fn interrupt_paused_worker_session<'a>(
             &'a self,
             _task_id: &'a str,
@@ -762,8 +738,7 @@ pub async fn seed_context_fixture() -> ContextFixture {
     let epic = create_test_epic(&db, &project.id).await;
     let task = create_test_task(&db, &project.id, &epic.id).await;
     // Create a task run so the C2 validation boundary can resolve an active
-    // task_run_id. Without this, validate_or_reverify_completion_intent
-    // errors before reaching the test-injected final_verification_outcome.
+    // task_run_id for ordinary completion-boundary validation.
     djinn_db::repositories::task_run::TaskRunRepository::new(db.clone())
         .create(djinn_db::repositories::task_run::CreateTaskRunParams {
             id: &uuid::Uuid::now_v7().to_string(),

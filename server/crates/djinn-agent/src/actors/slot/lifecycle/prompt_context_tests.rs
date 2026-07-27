@@ -671,8 +671,8 @@ fn resume_metadata_with_checkpoint() -> djinn_runtime::ResumeLifecycleMetadata {
 fn resume_metadata_with_auto_submit() -> djinn_runtime::ResumeLifecycleMetadata {
     djinn_runtime::ResumeLifecycleMetadata {
         considered: true,
-        selection_reason: Some(djinn_runtime::ResumeSelectionReason::AutoSubmitAccepted),
-        source_kind: Some(djinn_runtime::ResumeSourceKind::AutoSubmit),
+        selection_reason: Some(djinn_runtime::ResumeSelectionReason::CleanTaskBranchFallback),
+        source_kind: Some(djinn_runtime::ResumeSourceKind::CleanTaskBranch),
         target_ref: Some("refs/heads/task/test".to_string()),
         submit_or_review_id: Some("review-7".to_string()),
         prior_session_lineage: Some("session-prior-002".to_string()),
@@ -726,7 +726,7 @@ async fn worker_resume_note_included_for_auto_submit_source() {
     let note_text = note.unwrap();
     assert_contains_all(
         &note_text,
-        &["session-prior-002", "review-7", "auto-submit accepted"],
+        &["session-prior-002", "review-7", "clean fallback"],
     );
     assert!(!note_text.contains("checkpoint"));
 }
@@ -1044,7 +1044,6 @@ async fn concurrent_assembly_is_deterministic() {
         extension_diagnostics: &[],
         cancellation: None,
         memory_intent_planner: None,
-        final_verification_configured: false,
     })
     .await;
 
@@ -1067,7 +1066,6 @@ async fn concurrent_assembly_is_deterministic() {
         extension_diagnostics: &[],
         cancellation: None,
         memory_intent_planner: None,
-        final_verification_configured: false,
     })
     .await;
 
@@ -1122,7 +1120,6 @@ fn resume_note_renders_all_source_kind_labels() {
     use djinn_runtime::ResumeSourceKind as K;
 
     let cases: &[(K, &str)] = &[
-        (K::AutoSubmit, "auto-submit"),
         (K::TaskBranchCheckpoint, "task-branch checkpoint"),
         (K::AlternateCheckpointRef, "alternate checkpoint ref"),
         (K::CleanTaskBranch, "clean task branch"),
@@ -1151,7 +1148,7 @@ fn resume_note_renders_all_termination_labels() {
     use djinn_runtime::ResumeSelectionReason as R;
 
     let cases: &[(R, &str)] = &[
-        (R::AutoSubmitAccepted, "auto-submit accepted"),
+        (R::CleanTaskBranchFallback, "clean fallback"),
         (R::LatestSafeCheckpoint, "no-progress checkpoint"),
         (R::AlternateCheckpointRef, "alternate checkpoint ref"),
         (R::CleanTaskBranchFallback, "clean fallback"),
@@ -1210,34 +1207,33 @@ fn resume_note_renders_alternate_checkpoint_ref_with_target_ref() {
     );
 }
 
-/// AC2: Selected source kind and target ref are rendered together in the resume
-/// note for all source/target combinations that carry both fields.
+/// AC2: Clean-task-branch source, target ref, prior-session lineage, review id,
+/// and fallback reason are rendered together without checkpoint replay.
 #[test]
 fn resume_note_selected_source_and_target_ref_details() {
-    // AutoSubmit with target_ref and submit_or_review_id
     let metadata = djinn_runtime::ResumeLifecycleMetadata {
         considered: true,
-        source_kind: Some(djinn_runtime::ResumeSourceKind::AutoSubmit),
+        source_kind: Some(djinn_runtime::ResumeSourceKind::CleanTaskBranch),
         target_ref: Some("refs/heads/task/my-feature".to_string()),
         submit_or_review_id: Some("pr-42".to_string()),
-        selection_reason: Some(djinn_runtime::ResumeSelectionReason::AutoSubmitAccepted),
-        prior_session_lineage: Some("session-submit-01".to_string()),
+        selection_reason: Some(djinn_runtime::ResumeSelectionReason::CleanTaskBranchFallback),
+        prior_session_lineage: Some("session-clean-task-branch-01".to_string()),
         ..Default::default()
     };
     let note = build_worker_resume_note("worker", Some(&metadata)).unwrap();
     assert_contains_all(
         &note,
         &[
-            "auto-submit",
+            "session-clean-task-branch-01",
+            "clean task branch",
             "refs/heads/task/my-feature",
             "pr-42",
-            "auto-submit accepted",
+            "clean fallback",
         ],
     );
-    // Auto-submit source should NOT include "checkpoint"
     assert!(
         !note.contains("checkpoint"),
-        "auto-submit note should not mention checkpoint: {note}"
+        "clean-task-branch note should not mention checkpoint: {note}"
     );
 }
 
@@ -1395,7 +1391,6 @@ async fn ci_blocking_appears_before_resume_context_in_prompt() {
         extension_diagnostics: &[],
         cancellation: None,
         memory_intent_planner: None,
-        final_verification_configured: false,
     })
     .await;
 
@@ -1546,7 +1541,6 @@ async fn resume_context_section_in_canonical_order_with_skills_and_sources() {
         extension_diagnostics: &[],
         cancellation: None,
         memory_intent_planner: None,
-        final_verification_configured: false,
     })
     .await;
 
@@ -1675,7 +1669,7 @@ fn resume_context_renders_minimal_fields_for_provider_rejection() {
         source_kind: Some(djinn_runtime::ResumeSourceKind::CleanTaskBranch),
         target_ref: Some("refs/heads/task/test".to_string()),
         selection_reason: Some(djinn_runtime::ResumeSelectionReason::CleanTaskBranchFallback),
-        // No checkpoint, no auto-submit, no failover — provider rejection.
+        // No checkpoint, submit/review id, or failover — provider rejection.
         ..Default::default()
     };
 
@@ -1689,7 +1683,7 @@ fn resume_context_renders_minimal_fields_for_provider_rejection() {
             "refs/heads/task/test",
         ],
     );
-    // Must NOT contain checkpoint or auto-submit fields.
+    // Must NOT contain checkpoint or submit/review fields.
     assert!(
         !note.contains("checkpoint `"),
         "must not mention checkpoint SHA when absent"
@@ -1700,19 +1694,17 @@ fn resume_context_renders_minimal_fields_for_provider_rejection() {
     );
 }
 
-/// AC 5: Preservation/no-replay — accepted auto-submit work produces a
-/// resume note that references the review id (not a checkpoint SHA).
-/// This proves the worker sees the auto-submit as the resume source
-/// and will not replay stale checkpoint work.
+/// AC 5: Preservation/no-replay — clean-task-branch resume metadata retains
+/// prior-session lineage and the review id without replaying a checkpoint SHA.
 #[test]
-fn preservation_no_replay_auto_submit_renders_review_id_not_checkpoint() {
+fn preservation_no_replay_clean_task_branch_renders_review_id_not_checkpoint() {
     let metadata = djinn_runtime::ResumeLifecycleMetadata {
         considered: true,
-        selection_reason: Some(djinn_runtime::ResumeSelectionReason::AutoSubmitAccepted),
-        source_kind: Some(djinn_runtime::ResumeSourceKind::AutoSubmit),
+        selection_reason: Some(djinn_runtime::ResumeSelectionReason::CleanTaskBranchFallback),
+        source_kind: Some(djinn_runtime::ResumeSourceKind::CleanTaskBranch),
         target_ref: Some("refs/heads/task/test".to_string()),
         submit_or_review_id: Some("review-accepted-42".to_string()),
-        prior_session_lineage: Some("session-auto-submit".to_string()),
+        prior_session_lineage: Some("session-clean-task-branch".to_string()),
         ..Default::default()
     };
 
@@ -1720,16 +1712,16 @@ fn preservation_no_replay_auto_submit_renders_review_id_not_checkpoint() {
     assert_contains_all(
         &note,
         &[
-            "session-auto-submit",
+            "session-clean-task-branch",
             "review-accepted-42",   // review id, not checkpoint
-            "auto-submit accepted", // selection reason label
-            "auto-submit",          // source kind label
+            "refs/heads/task/test", // target ref
+            "clean fallback",       // selection reason label
+            "clean task branch",    // source kind label
         ],
     );
-    // Must NOT contain checkpoint references.
     assert!(
         !note.contains("checkpoint `"),
-        "auto-submit note must not reference checkpoint SHA"
+        "clean-task-branch note must not reference checkpoint SHA"
     );
 }
 
@@ -1808,7 +1800,6 @@ async fn resume_context_deterministic_with_discontinuity_metadata() {
         extension_diagnostics: &[],
         cancellation: None,
         memory_intent_planner: None,
-        final_verification_configured: false,
     })
     .await;
 
@@ -1831,7 +1822,6 @@ async fn resume_context_deterministic_with_discontinuity_metadata() {
         extension_diagnostics: &[],
         cancellation: None,
         memory_intent_planner: None,
-        final_verification_configured: false,
     })
     .await;
 
@@ -2049,7 +2039,6 @@ macro_rules! planner_assembly_inputs {
             extension_diagnostics: &[],
             cancellation: None,
             memory_intent_planner: $planner,
-            final_verification_configured: false,
         }
     };
 }
