@@ -1416,3 +1416,7 @@ fn is_already_closed_refinement_close_error(error: &djinn_db::Error) -> bool {
 #[cfg(test)]
 #[path = "refinement_outcome_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "refinement_termination_failure_tests.rs"]
+mod termination_failure_tests;
