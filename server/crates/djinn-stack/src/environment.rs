@@ -48,14 +48,6 @@ const MAX_PRE_TASK_COMMAND_LEN: usize = 4096;
 const PRE_TASK_TIMEOUT_DEFAULT: u64 = 300;
 const PRE_TASK_TIMEOUT_MIN: u64 = 1;
 const PRE_TASK_TIMEOUT_MAX: u64 = 1800;
-const FINAL_VERIFICATION_VERSION: u32 = 1;
-const MAX_FINAL_VERIFICATION_COMMANDS: usize = 64;
-const MAX_FINAL_VERIFICATION_COMMAND_GROUPS: usize = 64;
-const MAX_FINAL_VERIFICATION_SELECTION_RULES: usize = 128;
-const MAX_FINAL_VERIFICATION_INPUTS: usize = 128;
-const MAX_FINAL_VERIFICATION_OUTPUTS: usize = 128;
-const FINAL_VERIFICATION_TIMEOUT_MIN: u64 = 1;
-const FINAL_VERIFICATION_TIMEOUT_MAX: u64 = 3600;
 
 #[derive(Debug, Error)]
 pub enum EnvironmentConfigError {
@@ -1159,40 +1151,6 @@ fn validate_path(field: &str, value: &str) -> EnvResult<()> {
     if !value
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '/'))
-    {
-        return Err(EnvironmentConfigError::UnsafeIdentifier {
-            field: field.into(),
-            value: value.into(),
-        });
-    }
-    Ok(())
-}
-
-/// Validate an output-only glob: like a repo-relative path but allows `*`
-/// and `**` wildcard segments. Rejects absolute paths, `..` segments, and
-/// unsafe characters. Globs must stay repo-relative.
-fn validate_glob(field: &str, value: &str) -> EnvResult<()> {
-    if value.is_empty() {
-        return Err(EnvironmentConfigError::EmptyValue {
-            field: field.into(),
-        });
-    }
-    if value.len() > MAX_STRING_LEN {
-        return Err(EnvironmentConfigError::TooLong {
-            field: field.into(),
-            len: value.len(),
-            max: MAX_STRING_LEN,
-        });
-    }
-    if value.starts_with('/') || value.split('/').any(|seg| seg == "..") {
-        return Err(EnvironmentConfigError::UnsafeIdentifier {
-            field: field.into(),
-            value: value.into(),
-        });
-    }
-    if !value
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '/' | '*' | '?'))
     {
         return Err(EnvironmentConfigError::UnsafeIdentifier {
             field: field.into(),
