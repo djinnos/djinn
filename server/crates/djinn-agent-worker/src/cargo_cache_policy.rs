@@ -203,6 +203,22 @@ fn build_warm_commands(
 
     let mut clippy_args = vec!["clippy".to_string()];
     clippy_args.extend(base_args.clone());
+    // `--keep-going` because the warm exists to DEPOSIT artifacts, not to gate.
+    // Cargo's default is to abort the whole run at the first failing unit, so a
+    // single crate with a lint error wipes the entire remaining check family
+    // from the deposit — which is how the base ended up with 292 `.rmeta`
+    // against 228 `.rlib`. Every downstream consumer then re-pays for the
+    // missing half: rust-analyzer's SCIP cargo prelude (measured at 706s) and
+    // every task-run `cargo clippy -p X`. With `--keep-going` a lint error
+    // costs only that crate's units.
+    //
+    // This does NOT soften the outcome: cargo still exits non-zero when any
+    // unit failed, so the step is still classified `seed_outcome=failed`. It
+    // just compiles more before giving up. Deliberately NOT `--cap-lints warn`
+    // or an `-A` via RUSTFLAGS: RUSTFLAGS feeds `-C metadata`, so touching it
+    // would invalidate all ~2800 units of the warm base on the next cycle.
+    // `--keep-going` is a cargo CLI flag and does not enter any fingerprint.
+    clippy_args.push("--keep-going".to_string());
     commands.push(CargoWarmCommand {
         label: "clippy",
         args: clippy_args,
@@ -329,7 +345,7 @@ version = "0.1.0"
         assert_eq!(policy.warm_commands[0].label, "clippy");
         assert_eq!(
             policy.warm_commands[0].args,
-            vec!["clippy", "--all-targets"]
+            vec!["clippy", "--all-targets", "--keep-going"]
         );
         assert!(policy.warm_commands[0].feature_args.is_empty());
         assert_eq!(policy.warm_commands[1].label, "build (clippy fallback)");
@@ -385,7 +401,7 @@ version = "0.1.0"
         assert_eq!(policy.warm_commands[0].label, "clippy");
         assert_eq!(
             policy.warm_commands[0].args,
-            vec!["clippy", "--workspace", "--all-targets"]
+            vec!["clippy", "--workspace", "--all-targets", "--keep-going"]
         );
         assert!(policy.warm_commands[0].feature_args.is_empty());
 
@@ -448,7 +464,7 @@ version = "0.1.0"
         assert_eq!(policy.warm_commands[0].label, "clippy");
         assert_eq!(
             policy.warm_commands[0].args,
-            vec!["clippy", "--workspace", "--all-targets"]
+            vec!["clippy", "--workspace", "--all-targets", "--keep-going"]
         );
         assert!(policy.warm_commands[0].feature_args.is_empty());
         assert_eq!(policy.warm_commands[2].label, "test (--no-run)");
@@ -488,7 +504,7 @@ version = "0.1.0"
         assert_eq!(policy.warm_commands.len(), 3);
         assert_eq!(
             policy.warm_commands[0].args,
-            vec!["clippy", "--all-targets"]
+            vec!["clippy", "--all-targets", "--keep-going"]
         );
         assert_eq!(
             policy.warm_commands[0].feature_args,
@@ -639,7 +655,10 @@ version = "0.1.0"
         assert_eq!(cmds.len(), 3);
 
         assert_eq!(cmds[0].label, "clippy");
-        assert_eq!(cmds[0].args, vec!["clippy", "--workspace", "--all-targets"]);
+        assert_eq!(
+            cmds[0].args,
+            vec!["clippy", "--workspace", "--all-targets", "--keep-going"]
+        );
         assert_eq!(cmds[0].feature_args, vec!["--all-features"]);
 
         assert_eq!(cmds[1].label, "build (clippy fallback)");
@@ -652,6 +671,47 @@ version = "0.1.0"
             vec!["test", "--workspace", "--all-targets", "--no-run"]
         );
         assert_eq!(cmds[2].feature_args, vec!["--all-features"]);
+    }
+
+    /// The warm's clippy step must carry `--keep-going`, in every shape.
+    ///
+    /// Not cosmetic. Cargo's default aborts the whole run at the first failing
+    /// unit, so one crate with a lint error discards the entire remaining check
+    /// family from the deposit -- which is how the base ended up with 292
+    /// `.rmeta` against 228 `.rlib`, making every downstream consumer re-pay for
+    /// the missing half (rust-analyzer's SCIP cargo prelude, every task-run
+    /// `cargo clippy -p X`). The per-shape assertions above pin the exact argv;
+    /// this one states the invariant so a future shape cannot silently omit it.
+    ///
+    /// It must stay on `clippy` only: `cargo nextest run` does not accept it,
+    /// so pushing it into the shared `base_args` would break the test-compile
+    /// step on every nextest project.
+    #[test]
+    fn every_warm_clippy_shape_keeps_going_past_the_first_failing_crate() {
+        for (workspace, all_features, features, nextest) in [
+            (true, false, vec![], true),
+            (true, true, vec![], false),
+            (false, false, vec![], false),
+            (false, false, vec!["qdrant".to_string()], true),
+        ] {
+            let cmds = build_warm_commands(workspace, all_features, &features, nextest);
+            let clippy = &cmds[0];
+            assert_eq!(clippy.label, "clippy");
+            assert!(
+                clippy.args.iter().any(|arg| arg == "--keep-going"),
+                "warm clippy lost --keep-going: {:?} -- one bad crate would \
+                 again wipe the rest of the deposit",
+                clippy.args
+            );
+            for other in &cmds[1..] {
+                assert!(
+                    !other.args.iter().any(|arg| arg == "--keep-going"),
+                    "{} must not carry --keep-going (cargo nextest rejects it): {:?}",
+                    other.label,
+                    other.args
+                );
+            }
+        }
     }
 
     // (d1b) build_warm_commands: nextest detected → nextest --no-run test step
@@ -675,7 +735,10 @@ version = "0.1.0"
         assert_eq!(cmds.len(), 3);
 
         assert_eq!(cmds[0].label, "clippy");
-        assert_eq!(cmds[0].args, vec!["clippy", "--workspace", "--all-targets"]);
+        assert_eq!(
+            cmds[0].args,
+            vec!["clippy", "--workspace", "--all-targets", "--keep-going"]
+        );
         assert!(
             cmds[0].feature_args.is_empty(),
             "default-features clippy must have empty feature_args"
@@ -705,7 +768,10 @@ version = "0.1.0"
         assert_eq!(cmds.len(), 3);
 
         assert_eq!(cmds[0].label, "clippy");
-        assert_eq!(cmds[0].args, vec!["clippy", "--all-targets"]);
+        assert_eq!(
+            cmds[0].args,
+            vec!["clippy", "--all-targets", "--keep-going"]
+        );
         assert!(
             cmds[0].feature_args.is_empty(),
             "single-crate default clippy must have empty feature_args"
@@ -731,7 +797,10 @@ version = "0.1.0"
         // clippy, build, test — all with --all-features in feature_args
         assert_eq!(cmds.len(), 3);
         assert_eq!(cmds[0].label, "clippy");
-        assert_eq!(cmds[0].args, vec!["clippy", "--all-targets"]);
+        assert_eq!(
+            cmds[0].args,
+            vec!["clippy", "--all-targets", "--keep-going"]
+        );
         assert_eq!(cmds[0].feature_args, vec!["--all-features"]);
 
         assert_eq!(cmds[1].label, "build (clippy fallback)");

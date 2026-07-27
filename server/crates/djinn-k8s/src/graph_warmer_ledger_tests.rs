@@ -3,6 +3,13 @@
 //! Split out of `graph_warmer_tests.rs`, which sits close to the 51200-byte
 //! `Server Guards` ceiling. Shares that module's warmer harness rather than
 //! duplicating it.
+//!
+//! Test-only: `Instant::now` bounds the deadlined ledger-poll loop below,
+//! exactly as in the module this was split out of. The workspace denies
+//! `clippy::disallowed_methods`, and that module's allowance did not come
+//! across with the split -- so `cargo clippy --workspace --all-targets`, which
+//! is the first command every production graph-warm cycle runs, failed here.
+#![allow(clippy::disallowed_methods)]
 
 use super::tests::{
     AdmissionRecording, LifecycleRecordingDispatcher, UidWatcher, seed_project_with_ready_image,

@@ -1918,14 +1918,28 @@ async fn run_cargo_warm_step_with_cargo(
     let resolved = budgets.resolve(kind);
     let started = djinn_core::clock::Clock::now_instant(&djinn_core::clock::SystemClock::new());
 
+    // Diagnostic tail of the child's stderr, populated only when the step
+    // actually failed. `output_with_timeout` has always piped and captured the
+    // child's output; both branches below used to drop it, so a failing warm
+    // step reported `seed_outcome=failed` and nothing else. That is how a
+    // clippy denial made every production warm cycle burn ~4m26s on a
+    // guaranteed failure for a day without a single log line naming the cause.
+    let mut failure_tail = String::new();
+
     let outcome = if let Some(forced) = forced_warm_step_outcome(project_id) {
         forced
     } else if !cargo_instrumented {
         let mut command = std::process::Command::new(cargo_bin.as_ref());
         command.args(&plan.args).current_dir(workspace_dir);
-        match warm_command_status(command, resolved.budget).await {
-            Ok(status) if status.success() => djinn_telemetry::cargo_warm_step::OUTCOME_OK,
-            Ok(_) => djinn_telemetry::cargo_warm_step::OUTCOME_FAILED,
+        // `warm_command_output`, not `warm_command_status`: on Linux (the only
+        // platform the warm Job runs on) these are the same call, but this one
+        // hands back the captured `Output` the failure branch needs.
+        match warm_command_output(command, resolved.budget).await {
+            Ok(output) if output.status.success() => djinn_telemetry::cargo_warm_step::OUTCOME_OK,
+            Ok(output) => {
+                failure_tail = warm_step_failure_tail(&output.stderr);
+                djinn_telemetry::cargo_warm_step::OUTCOME_FAILED
+            }
             Err(err) => {
                 warn!(
                     project_id,
@@ -1971,6 +1985,7 @@ async fn run_cargo_warm_step_with_cargo(
                 if output.status.success() {
                     djinn_telemetry::cargo_warm_step::OUTCOME_OK
                 } else {
+                    failure_tail = warm_step_failure_tail(&output.stderr);
                     djinn_telemetry::cargo_warm_step::OUTCOME_FAILED
                 }
             }
@@ -2019,6 +2034,10 @@ async fn run_cargo_warm_step_with_cargo(
             budget_clamped_by_job_deadline = resolved.clamped_by_deadline,
             job_deadline_secs = budgets.job_deadline().as_secs(),
             elapsed_ms = elapsed.as_millis() as u64,
+            // Bounded by `warm_step_failure_tail`; empty when the step never
+            // produced a captured `Output` (spawn error, timeout, forced
+            // outcome) or when it wrote nothing to stderr.
+            failure_tail = %failure_tail,
             "cargo warm: step did not succeed (non-fatal; continuing warm)"
         );
     }
@@ -2069,6 +2088,57 @@ async fn warm_command_output(
             .await
             .map_err(std::io::Error::other)?
     }
+}
+
+/// Hard ceiling on the diagnostic tail attached to a failed warm step.
+///
+/// A single `cargo clippy --workspace --all-targets` failure can emit megabytes
+/// of stderr. The tail exists to name the cause, not to mirror the build log.
+const WARM_STEP_FAILURE_TAIL_BYTES: usize = 8 * 1024;
+
+/// Bounded, diagnosis-oriented tail of a failed warm step's stderr.
+///
+/// Prefers rustc/cargo diagnostic blocks: a column-0 `error...` line plus the
+/// indented continuation that carries the `--> file:line:col` location. That is
+/// the whole diagnosis in the common case and drops the thousands of
+/// `Compiling`/`Fresh` progress lines around it. Falls back to the raw tail
+/// when no block matches, because a failure with no `error` line still needs
+/// *something* to look at.
+///
+/// Always truncated to [`WARM_STEP_FAILURE_TAIL_BYTES`] from the END: the last
+/// diagnostics are the ones naming the crate that failed to compile.
+fn warm_step_failure_tail(stderr: &[u8]) -> String {
+    let text = String::from_utf8_lossy(stderr);
+    let mut kept: Vec<&str> = Vec::new();
+    let mut in_diagnostic = false;
+    for line in text.lines() {
+        if line.starts_with("error") {
+            in_diagnostic = true;
+            kept.push(line);
+        } else if in_diagnostic && (line.is_empty() || line.starts_with(char::is_whitespace)) {
+            kept.push(line);
+        } else {
+            in_diagnostic = false;
+        }
+    }
+    let selected = if kept.is_empty() {
+        text.into_owned()
+    } else {
+        kept.join("\n")
+    };
+    bounded_tail(&selected, WARM_STEP_FAILURE_TAIL_BYTES)
+}
+
+/// Last `max_bytes` of `text`, snapped forward to a char boundary.
+fn bounded_tail(text: &str, max_bytes: usize) -> String {
+    if text.len() <= max_bytes {
+        return text.to_string();
+    }
+    let mut start = text.len() - max_bytes;
+    while start < text.len() && !text.is_char_boundary(start) {
+        start += 1;
+    }
+    format!("[truncated to last {max_bytes} bytes] {}", &text[start..])
 }
 
 /// Classify a warm-step process error into its bounded outcome label.
@@ -4856,6 +4926,113 @@ warning: something
         assert!(
             logs.contains("step=\"check\""),
             "missing step label: {logs}"
+        );
+    }
+
+    /// A failing warm step must NAME its cause in its terminal event.
+    ///
+    /// Regression for the 2026-07-26 outage: `graph_warmer_ledger_tests.rs`
+    /// tripped the workspace's `disallowed_methods` denial, so every production
+    /// warm cycle's first command -- `cargo clippy --workspace --all-targets
+    /// --features qdrant` -- exited 101 after ~4m26s and fell through to a
+    /// ~25m `cargo build`. The child's stderr WAS captured by
+    /// `output_with_timeout` and then thrown away, so the only trace of a
+    /// day-long failure was `seed_outcome=failed`. Nothing in the log said
+    /// which file, which lint, or even which crate.
+    ///
+    /// This asserts the side effect, not the label: the WARN event must carry
+    /// the rustc diagnostic block (message AND `-->` location), and must NOT
+    /// carry the `Compiling` progress noise around it, which is what makes the
+    /// tail bounded enough to log at all.
+    #[cfg(unix)]
+    #[test]
+    fn a_failing_warm_step_logs_a_bounded_stderr_tail_naming_the_cause() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // The non-instrumented branch is the one that used to discard the
+        // Output entirely, so pin the env off for this test.
+        let _guard = CARGO_INSTRUMENT_ENV_LOCK.lock().expect("env lock poisoned");
+        // SAFETY: guarded test-only env mutation.
+        unsafe { std::env::remove_var("DJINN_CARGO_INSTRUMENT") };
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cargo_bin = tmp.path().join("cargo-clippy-fail.sh");
+        // Verbatim shape of the production failure, progress noise included.
+        std::fs::write(
+            &cargo_bin,
+            "#!/bin/sh\ncat >&2 <<'MOCKEOF'\n   Compiling djinn-k8s v0.1.0 (/w/server/crates/djinn-k8s)\nerror: use of a disallowed method `std::time::Instant::now`\n  --> crates/djinn-k8s/src/graph_warmer_ledger_tests.rs:97:20\n   |\n   = note: `-D clippy::disallowed-methods` implied by the workspace lint table\n\nerror: could not compile `djinn-k8s` (lib test) due to 2 previous errors\nMOCKEOF\nexit 101\n",
+        )
+        .expect("write mock cargo");
+        let mut perms = std::fs::metadata(&cargo_bin)
+            .expect("metadata")
+            .permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&cargo_bin, perms).expect("chmod mock cargo");
+
+        let logs = CapturedLogs::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::INFO)
+            .with_writer(logs.clone())
+            .with_span_events(tracing_subscriber::fmt::format::FmtSpan::NONE)
+            .with_target(false)
+            .with_ansi(false)
+            .finish();
+        let dispatch = Dispatch::new(subscriber);
+
+        let result = tracing::dispatcher::with_default(&dispatch, || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_io()
+                .enable_time()
+                .build()
+                .expect("runtime")
+                .block_on(run_cargo_warm_step_with_cargo(
+                    &cargo_bin,
+                    "project-warm-tail",
+                    tmp.path(),
+                    &["clippy", "--workspace", "--all-targets"],
+                    "clippy",
+                    &warm_step_budget::WarmStepBudgets::now_from_env(),
+                ))
+        });
+
+        assert!(!result.succeeded(), "a 101-exit clippy step is a failure");
+        let logs = logs.take();
+        assert!(
+            logs.contains("cargo warm: step did not succeed"),
+            "missing the terminal failure event: {logs}"
+        );
+        assert!(
+            logs.contains("use of a disallowed method"),
+            "the failure event did not name the cause -- this is the exact \
+             blindness that hid a day of failed warm cycles: {logs}"
+        );
+        assert!(
+            logs.contains("graph_warmer_ledger_tests.rs:97:20"),
+            "the failure event must carry the diagnostic's file:line: {logs}"
+        );
+        assert!(
+            logs.contains("could not compile `djinn-k8s`"),
+            "the failure event must carry the crate that failed: {logs}"
+        );
+        assert!(
+            !logs.contains("Compiling djinn-k8s"),
+            "progress noise must be filtered out so the tail stays bounded: {logs}"
+        );
+    }
+
+    /// The tail is hard-bounded even when a step emits nothing filterable.
+    #[test]
+    fn warm_step_failure_tail_is_bounded_when_no_diagnostic_block_matches() {
+        let noise = "x".repeat(WARM_STEP_FAILURE_TAIL_BYTES * 4);
+        let tail = warm_step_failure_tail(noise.as_bytes());
+        assert!(
+            tail.len() < WARM_STEP_FAILURE_TAIL_BYTES + 128,
+            "unfiltered stderr must still be truncated, got {} bytes",
+            tail.len()
+        );
+        assert!(
+            tail.contains("truncated to last"),
+            "a truncated tail must say so: {tail}"
         );
     }
 
