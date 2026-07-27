@@ -124,7 +124,7 @@ spec:
     fsGroup: 1000
     fsGroupChangePolicy: OnRootMismatch
   containers:
-  - name: launcher-context
+  - name: conformance
     image: $PROBE_IMAGE
     command: ["/bin/sh", "-ceu", "while :; do sleep 3600; done"]
     securityContext:
@@ -132,19 +132,13 @@ spec:
       allowPrivilegeEscalation: false
       capabilities:
         drop: ["ALL"]
+        # Used only for the one-way launcher-to-worker identity transition.
+        # The worker verifies that none survive. SETPCAP is needed to empty
+        # the capability bounding set before the worker exec.
+        add: ["SETUID", "SETGID", "SETPCAP"]
       seccompProfile:
         type: RuntimeDefault
-  - name: worker
-    image: $PROBE_IMAGE
-    command: ["/bin/sh", "-ceu", "while :; do sleep 3600; done"]
-    securityContext:
-      runAsUser: 1000
-      runAsGroup: 1000
-      runAsNonRoot: true
-      allowPrivilegeEscalation: false
-      capabilities:
-        drop: ["ALL"]
-      seccompProfile:
+      appArmorProfile:
         type: RuntimeDefault
 EOF
 }
@@ -166,8 +160,9 @@ verify_node_identity() {
   [[ "$identity" == "$NODE_NAME|$NODE_NAME" ]] || die "probe node identity mismatch: $identity"
 }
 
-# Runs in the root launcher-context container. It proves that the runtime gave
-# this pod a private cgroup-v2 root; no hostPath or host fallback is involved.
+# Runs as the root launcher phase of the sole probe process. It proves that the
+# runtime gave this container a private cgroup-v2 root; no hostPath or host
+# fallback is involved. The same process then permanently becomes the worker.
 LAUNCHER_PROBE='set -eu
 root=/sys/fs/cgroup
 [ "$(stat -fc %T "$root")" = cgroup2fs ]
@@ -185,13 +180,23 @@ launcher_leaf="$root/.djinn-launcher-leaf"
 mkdir "$launcher_leaf"
 [ -d "$launcher_leaf" ]'
 
-# Runs with the exact worker_security_context/pod_security_context contract:
-# uid/gid 1000, fsGroup 1000, no_new_privs, ALL capabilities dropped,
-# RuntimeDefault seccomp, and the default (not Unconfined) AppArmor profile.
-# Every write-like operation must fail; reading/traversal remains deliberately
-# permitted and is checked first.
+# Runs after setpriv irreversibly enters the worker identity in the launcher
+# process and its private delegated cgroup namespace. Verify the effective
+# security state before making any authorization observation. Every write-like
+# operation must fail; reading/traversal remains deliberately permitted.
 WORKER_PROBE='set -eu
 root=/sys/fs/cgroup
+[ "$(awk '\''/^Uid:/ { print $2, $3, $4, $5 }'\'' /proc/self/status)" = "1000 1000 1000 1000" ]
+[ "$(awk '\''/^Gid:/ { print $2, $3, $4, $5 }'\'' /proc/self/status)" = "1000 1000 1000 1000" ]
+[ "$(awk '\''/^Groups:/ { $1=""; sub(/^[[:space:]]+/, ""); sub(/[[:space:]]+$/, ""); print }'\'' /proc/self/status)" = 1000 ]
+[ "$(awk '\''/^NoNewPrivs:/ { print $2 }'\'' /proc/self/status)" = 1 ]
+[ "$(awk '\''/^Seccomp:/ { print $2 }'\'' /proc/self/status)" = 2 ]
+for capability_set in CapBnd CapEff CapPrm; do
+  [ "$(awk -v field="$capability_set:" '\''$1 == field { print $2 }'\'' /proc/self/status)" = 0000000000000000 ]
+done
+apparmor=$(cat /proc/self/attr/current)
+[ -n "$apparmor" ]
+[ "$apparmor" != unconfined ]
 [ "$(stat -fc %T "$root")" = cgroup2fs ]
 [ "$(awk -F: '\''$1 == "0" && $2 == "" { print $3 }'\'' /proc/self/cgroup)" = / ]
 ls "$root" >/dev/null
@@ -203,6 +208,7 @@ launcher_leaf="$root/.djinn-launcher-leaf"
 ls "$launcher_leaf" >/dev/null
 cat "$launcher_leaf/cgroup.controllers" >/dev/null
 must_deny "mkdir \"$leaf\""
+must_deny "mkdir \"$launcher_leaf/.djinn-worker-child\""
 must_deny "printf x > \"$root/cpu.max\""
 # Preserve $$ for sh -c so the writer tries to move its own process.
 must_deny "printf \"\$\$\" > \"$root/cgroup.procs\""
@@ -247,8 +253,14 @@ PROBE_NAME=${PROBE_NAME:0:63}
 render_manifest | "$KUBECTL" apply -f - >/dev/null
 wait_for_probe
 verify_node_identity
-"$KUBECTL" exec "$PROBE_NAME" -c launcher-context -- /bin/sh -ceu "$LAUNCHER_PROBE" >/dev/null || die 'launcher cgroup root is not writable and isolated'
-"$KUBECTL" exec "$PROBE_NAME" -c worker -- /bin/sh -ceu "$WORKER_PROBE" >/dev/null || die 'worker security context permitted a cgroup mutation'
+# A single exec process performs both phases so the retained launcher leaf and
+# all worker checks necessarily use one private cgroup namespace/root. fsGroup
+# supplies supplementary group 1000; setpriv preserves that sole group, changes
+# uid/gid, enables no-new-privileges, clears every capability set, and execs the
+# worker checks without any path back to launcher authority.
+COMBINED_PROBE="$LAUNCHER_PROBE
+exec setpriv --reuid=1000 --regid=1000 --nnp --inh-caps=-all --ambient-caps=-all --bounding-set=-all /bin/sh -ceu \"\$1\""
+"$KUBECTL" exec "$PROBE_NAME" -c conformance -- /bin/sh -ceu "$COMBINED_PROBE" probe "$WORKER_PROBE" >/dev/null || die 'launcher/worker cgroup conformance failed'
 
 "$KUBECTL" label node "$NODE_NAME" "$LABEL=true" --overwrite >/dev/null
 printf 'PASS node=%s handler=runc-cgroupwritable cgroup_root=/ writable=true isolated=true worker_denials=true\n' "$NODE_NAME"
