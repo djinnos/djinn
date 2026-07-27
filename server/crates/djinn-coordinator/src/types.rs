@@ -431,8 +431,8 @@ pub(super) const MAX_PLANNER_INTERVENTIONS: i64 = 1;
 pub(super) const MAX_AUTONOMOUS_ESCALATIONS: i64 = 3;
 
 /// Cumulative, cross-cycle arbitration ceiling: the maximum number of arbiter
-/// hold cycles a single source task may ever open before the second-strike
-/// rung stops re-entering the ladder and terminally fails the task.
+/// ordinary hold cycles a single source task may open before the second-strike
+/// rung bypasses every redispatch guard and opens one final-disposition arbiter.
 ///
 /// **This is the only bound on the rung that is cumulative.** Every other guard
 /// on the second-strike ladder is per-cycle or per-fingerprint, and each one
@@ -463,8 +463,10 @@ pub(super) const MAX_AUTONOMOUS_ESCALATIONS: i64 = 3;
 ///
 /// Rationale for `3`: hold cycles 0, 1 and 2 give the Lead arbiter three full
 /// forensic rounds (each of which may reopen with a directive, rotate models,
-/// or supersede). A task that has burned three complete arbitration cycles
-/// without converging is not going to converge on the fourth; board-wide over
+/// or supersede). At prospective cycle 3 the arbiter gets exactly one final
+/// decision surface: supersede with replacements, or park into autonomous
+/// Planner replanning. Any non-terminal response is converted to that park.
+/// Board-wide over
 /// nine days only 18 of 55 arbitrated tasks ever reached `hold_cycle > 0` at
 /// all, so this ceiling is far above normal operation while still an order of
 /// magnitude below gy53's observed 9.

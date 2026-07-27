@@ -677,19 +677,42 @@ impl DirectServices {
             .as_ref()
             .map(|t| format!("{} ({})", t.title, t.short_id))
             .unwrap_or_else(|| source_task_id.to_string());
-        let description = format!(
-            "Escalated from task {source_label}. The arbiter decided to PARK and \
-             handed you (the Planner) terminal ownership of this task.\n\nYou OWN \
-             the resolution: decompose the source into replacement subtasks and \
-             supersede it, close it as won't-fix with a reason, or re-scope and \
-             reopen it. Do NOT create another escalation and do NOT wait for a \
-             human — closing THIS task releases the blocked source.\n\nReason: {}",
-            dossier_text
-        );
-        let instructions = "The arbiter parked this task and handed you terminal ownership. \
-             Resolve it autonomously (decompose + supersede, close as won't-fix, or re-scope + \
-             reopen the source); closing this task releases the blocked source. Do NOT escalate \
-             again and do NOT wait for a human.";
+        let final_disposition = dossier
+            .get("final_disposition")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        let (description, instructions) = if final_disposition {
+            (
+                format!(
+                    "Escalated from exhausted task {source_label}. The one-shot final arbiter \
+                     decided to PARK and handed you (the Planner) terminal ownership of the \
+                     epic/proposal shape.\n\nReplan from the durable branch/PR context: create \
+                     replacement tasks (including spikes when uncertainty remains) and supersede \
+                     the source with those replacement IDs, or close the source as no longer \
+                     required. Do NOT reopen the exhausted source and do NOT create another \
+                     escalation. Closing THIS planner task alone is insufficient until the source \
+                     has a terminal disposition.\n\nReason: {dossier_text}"
+                ),
+                "This is terminal epic/proposal replanning after the arbitration ceiling. Create \
+                 replacements and supersede the exhausted source, or close the source as no \
+                 longer required. Do not reopen it and do not create another escalation.",
+            )
+        } else {
+            (
+                format!(
+                    "Escalated from task {source_label}. The arbiter decided to PARK and \
+                     handed you (the Planner) terminal ownership of this task.\n\nYou OWN \
+                     the resolution: decompose the source into replacement subtasks and \
+                     supersede it, close it as won't-fix with a reason, or re-scope and \
+                     reopen it. Do NOT create another escalation and do NOT wait for a \
+                     human — closing THIS task releases the blocked source.\n\nReason: {dossier_text}"
+                ),
+                "The arbiter parked this task and handed you terminal ownership. Resolve it \
+                 autonomously (decompose + supersede, close as won't-fix, or re-scope + reopen \
+                 the source); closing this task releases the blocked source. Do NOT escalate \
+                 again and do NOT wait for a human.",
+            )
+        };
 
         // Create the escalation review task.
         let review_task = match djinn_core::auth_context::SESSION_USER_ID
@@ -697,7 +720,9 @@ impl DirectServices {
                 source_creator.clone(),
                 task_repo.create_in_project_with_provenance(
                     project_id,
-                    None,
+                    source_task
+                        .as_ref()
+                        .and_then(|task| task.epic_id.as_deref()),
                     EffectiveCreatorProvenance {
                         explicit_user_id: source_creator.as_deref(),
                         source_task_id: source_task.as_ref().map(|task| task.id.as_str()),

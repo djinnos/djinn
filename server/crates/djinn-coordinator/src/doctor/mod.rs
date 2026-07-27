@@ -22,6 +22,7 @@ pub mod mismatch_scan;
 pub mod refinement_phantom_active;
 pub mod retrieval_health;
 pub mod stale_cache_roots;
+pub mod stalled_epic;
 pub mod stranded_ready;
 
 use std::sync::Arc;
@@ -44,6 +45,10 @@ pub use stale_cache_roots::{
     MemoryStaleCacheRootsSource, ProjectRepositoryStaleCacheRootsSource,
     STALE_CACHE_ROOTS_CHECK_NAME, StaleCacheRootsCheck, StaleCacheRootsSource,
     scan_cache_roots_under, scan_production_cache_root,
+};
+pub use stalled_epic::{
+    MemoryStalledEpicSource, STALLED_EPIC_CHECK_NAME, StalledEpicCheck, StalledEpicSource,
+    TaskRepositoryStalledEpicSource,
 };
 pub use stranded_ready::{
     MemoryStrandedReadySource, STRANDED_READY_CHECK_NAME, StrandedReadyCandidate,
@@ -140,6 +145,14 @@ pub fn register_refinement_phantom_active_check(
     source: Arc<dyn RefinementPhantomActiveSource>,
 ) -> Option<String> {
     registry.register(Arc::new(RefinementPhantomActiveCheck::new(source)))
+}
+
+/// Register the read-only stalled-epic detector.
+pub fn register_stalled_epic_check(
+    registry: &DoctorRegistry,
+    source: Arc<dyn StalledEpicSource>,
+) -> Option<String> {
+    registry.register(Arc::new(StalledEpicCheck::new(source)))
 }
 
 // ---------------------------------------------------------------------------

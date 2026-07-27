@@ -1266,9 +1266,24 @@ impl CoordinatorActor {
             // unconsumed row). A genuinely in-flight arbiter is left to finish
             // — it may still approve or supersede — and is separately bounded
             // by the 24h arbitration deadline and the decision-failure cap.
-            if self.arbiter_hold_cycle_ceiling_reached(task).await {
+            let final_disposition = self.arbiter_hold_cycle_ceiling_reached(task).await;
+            if final_disposition && self.hold_cycle_ceiling_already_recorded(&task.id).await {
+                let dossier = serde_json::json!({
+                    "kind": "final_arbiter_reentry",
+                    "hold_description": "The one-shot final arbiter disposition already ran",
+                    "failure_analysis": "The exhausted task returned to the remediation rung after its final arbiter. A second final arbiter would violate the cumulative bound.",
+                    "recommended_action": "Replan the epic from this autonomous planner escalation; supersede the exhausted task with replacement work or close work that is no longer required.",
+                    "task_id": task.short_id,
+                    "hold_cycle_ceiling": MAX_ARBITER_HOLD_CYCLES,
+                });
                 return self
-                    .terminally_fail_on_hold_cycle_ceiling(task, role, quality_strikes)
+                    .park_source_human_review_with_dossier(
+                        task,
+                        "One-shot final arbiter disposition already consumed",
+                        quality_strikes,
+                        None,
+                        &dossier,
+                    )
                     .await;
             }
 
@@ -1304,7 +1319,8 @@ impl CoordinatorActor {
             // is unfounded against a novel failure (8y3q's fix was one token).
             // Skip the fingerprint check when CI evidence is stale (from a prior
             // head SHA) — it cannot serve as a park-triggering strike.
-            if !ci_stale
+            if !final_disposition
+                && !ci_stale
                 && let Some(fingerprint) = task
                     .ci_failure_fingerprint
                     .as_deref()
@@ -1345,7 +1361,8 @@ impl CoordinatorActor {
             // Below the bound, redispatch with forced model rotation instead of
             // consuming the final strike (dispatch-time exclusion in
             // task_dispatch.rs drops the models that just failed).
-            if !history.any_submitted
+            if !final_disposition
+                && !history.any_submitted
                 && history.non_attempt_models.len() < NON_ATTEMPT_PARK_THRESHOLD
             {
                 self.record_park_redispatch_marker(
@@ -1370,7 +1387,7 @@ impl CoordinatorActor {
             // (mirror-vs-GitHub staleness) must not serve as the park-triggering
             // strike. If the task is in needs_task_review/in_task_review with no
             // rejection newer than the submission, do not park.
-            if history.any_submitted && history.submission_pending_review {
+            if !final_disposition && history.any_submitted && history.submission_pending_review {
                 self.record_park_redispatch_marker(task, "submission_pending_review", None, 0)
                     .await;
                 tracing::warn!(
@@ -1674,6 +1691,12 @@ impl CoordinatorActor {
                 "role": role,
                 "hold_cycle": hold_cycle,
                 "hold_cycle_ceiling": MAX_ARBITER_HOLD_CYCLES,
+                "final_disposition": final_disposition,
+                "decision_mandate": if final_disposition {
+                    Some("This is the single final decision for this remediation rung. Choose exactly one terminal disposition: (1) supersede after creating replacement task(s), which transfers downstream blockers and closes the exhausted source; or (2) park with a complete dossier, which creates an autonomous planner escalation that can replan the epic/proposal. Do not approve, approve_conflict, or reopen: no further worker or arbiter cycle is permitted.")
+                } else {
+                    None
+                },
                 "prior_arbiter_decisions": prior_arbiter_decisions,
                 "intervention_count": task.intervention_count,
                 "total_reopen_count": task.total_reopen_count,
@@ -1689,8 +1712,13 @@ impl CoordinatorActor {
                 "attempt_ledger": attempt_ledger,
             });
             let directive = serde_json::json!({
-                "kind": "lead_arbiter",
-                "goal": "Forensic review of the current hold cycle after repeated planner interventions",
+                "kind": if final_disposition { "final_lead_arbiter" } else { "lead_arbiter" },
+                "goal": if final_disposition {
+                    "Make the one-shot terminal disposition: supersede with replacements or park into autonomous epic/proposal replanning"
+                } else {
+                    "Forensic review of the current hold cycle after repeated planner interventions"
+                },
+                "terminal_disposition_required": final_disposition,
                 "verification_command": None::<String>,
             });
             let deadline = {
@@ -1763,6 +1791,15 @@ impl CoordinatorActor {
 
             match create_result {
                 TryCreateResult::Created(_) => {
+                    if final_disposition {
+                        self.record_hold_cycle_ceiling_final_dispatch(
+                            task,
+                            role,
+                            quality_strikes,
+                            hold_cycle,
+                        )
+                        .await;
+                    }
                     // Arbiter dispatch path — fresh arbitration row created.
                     self.dispatch_arbiter_second_strike(
                         task,
@@ -2560,33 +2597,27 @@ impl CoordinatorActor {
         }
     }
 
-    /// Terminal exit for the cumulative hold-cycle ceiling.
+    /// Record the one-shot final arbiter opened at the cumulative ceiling.
     ///
-    /// Clears in-memory + durable dispatch backoff, records a durable
-    /// `arbiter_hold_cycle_ceiling` activity entry naming the budget and the
-    /// counters that got the task here, then routes through the single
-    /// dispatch-exhaustion gateway
-    /// ([`terminally_fail_task`](Self::terminally_fail_task)) so the task
-    /// reaches a genuinely terminal, non-redispatching state (ForceClose, or —
-    /// for a PR-bearing task — a poller handoff that likewise stops coordinator
-    /// dispatch). Always returns `true`: the caller must skip its dispatch this
-    /// pass either way, because a task at the ceiling must never be
-    /// redispatched.
-    async fn terminally_fail_on_hold_cycle_ceiling(
+    /// The ceiling is no longer a generic dispatch failure: a PR handoff from
+    /// `terminally_fail_task` can remain open forever and keep an epic's batch
+    /// completion rule from firing. The final arbiter instead owns one of two
+    /// release-producing dispositions: supersede with replacement tasks, or
+    /// park into the autonomous Planner escalation path.
+    async fn record_hold_cycle_ceiling_final_dispatch(
         &mut self,
         task: &djinn_core::models::Task,
         role: &'static str,
         quality_strikes: i64,
-    ) -> bool {
+        hold_cycle: i32,
+    ) {
         let reason = format!(
             "Cumulative arbitration ceiling reached: {MAX_ARBITER_HOLD_CYCLES} arbiter hold \
              cycle(s) already spent on this task without convergence \
              (intervention_count={}, total_reopen_count={}, quality_strikes={quality_strikes}, \
-             role={role}). Every per-cycle guard on the remediation ladder resets by \
-             incrementing, so a task that declines via a different guard each round would loop \
-             forever and monopolize the dispatch queue (incident gy53). Terminally failing this \
-             task instead of opening hold cycle {MAX_ARBITER_HOLD_CYCLES}; a planner may \
-             resurrect the work from the epic, and the branch plus its PR are preserved.",
+             role={role}). Opening the one-shot final arbiter at hold cycle {hold_cycle}; it must \
+             either supersede the source with replacement work or park into an autonomous \
+             Planner escalation that can replan the epic/proposal.",
             task.intervention_count, task.total_reopen_count,
         );
         tracing::warn!(
@@ -2596,28 +2627,13 @@ impl CoordinatorActor {
             total_reopen_count = task.total_reopen_count,
             quality_strikes,
             ceiling = MAX_ARBITER_HOLD_CYCLES,
-            "CoordinatorActor: cumulative arbiter hold-cycle ceiling reached — terminally failing \
-             the task instead of opening another hold cycle"
+            hold_cycle,
+            "CoordinatorActor: cumulative arbiter hold-cycle ceiling reached — dispatching the \
+             one-shot final arbiter"
         );
 
-        // Clear streak/cooldown so nothing re-arms dispatch behind the terminal
-        // transition.
-        self.dispatch_failure_streak.remove(&task.id);
-        self.dispatch_cooldowns.remove(&task.id);
-        self.last_dispatched.remove(&task.id);
-        self.inflight_dispatches.remove(&task.id);
-        self.clear_durable_dispatch_backoff_state(
-            &task.id,
-            Some(&task.short_id),
-            "arbiter_hold_cycle_ceiling",
-        )
-        .await;
-
-        // Durable "why" record, independent of the transition reason text.
-        // Recorded once per task: a PR-bearing task terminalizes via an
-        // idempotent poller handoff, so this rung can legitimately be re-entered
-        // by the PR poller on a later tick and must not spam the activity log or
-        // double-count the park metric.
+        // Durable one-shot marker. Re-entry sees this marker and routes directly
+        // to the Planner escalation instead of dispatching another final arbiter.
         if !self.hold_cycle_ceiling_already_recorded(&task.id).await {
             let payload = serde_json::json!({
                 "event": "arbiter_hold_cycle_ceiling",
@@ -2628,6 +2644,8 @@ impl CoordinatorActor {
                 "reopen_count": task.reopen_count,
                 "quality_strikes": quality_strikes,
                 "role": role,
+                "hold_cycle": hold_cycle,
+                "disposition": "final_arbiter",
                 "ci_failure_fingerprint": task.ci_failure_fingerprint,
                 "reason": reason,
             });
@@ -2655,10 +2673,6 @@ impl CoordinatorActor {
             );
             self.record_task_parked_metric(task, quality_strikes).await;
         }
-
-        self.terminally_fail_task(task, "coordinator", &reason)
-            .await;
-        true
     }
 
     /// Has the hold-cycle ceiling already been recorded for this task?
