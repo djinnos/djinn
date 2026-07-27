@@ -205,12 +205,27 @@ impl EvidenceRepository {
         session_id: &str,
     ) -> Result<Option<EvidencePlanHydration>> {
         self.db.ensure_initialized().await?;
+        let mut tx = self.db.pool().begin().await?;
+        let hydration =
+            Self::hydrate_by_identity_in_transaction(&mut tx, spike_task_id, session_id).await?;
+        tx.commit().await?;
+        Ok(hydration)
+    }
+
+    /// Hydrate the complete identity-scoped snapshot using a caller-owned
+    /// transaction. Finalizers use this with their projection insert so checks,
+    /// invocations, and any existing projection share one database snapshot.
+    pub async fn hydrate_by_identity_in_transaction(
+        tx: &mut Transaction<'_, Postgres>,
+        spike_task_id: &str,
+        session_id: &str,
+    ) -> Result<Option<EvidencePlanHydration>> {
         let plan_row = sqlx::query("SELECT id, spike_task_id, session_id, captured_commit_sha, worktree_fingerprint, created_at, updated_at FROM evidence_plans WHERE spike_task_id = $1 AND session_id = $2")
-            .bind(spike_task_id).bind(session_id).fetch_optional(self.db.pool()).await?;
+            .bind(spike_task_id).bind(session_id).fetch_optional(&mut **tx).await?;
         let Some(row) = plan_row else { return Ok(None) };
         let plan_id: String = row.get("id");
         let check_rows = sqlx::query("SELECT plan_id, ordinal, check_id, question, method FROM evidence_plan_checks WHERE plan_id = $1 ORDER BY ordinal")
-            .bind(&plan_id).fetch_all(self.db.pool()).await?;
+            .bind(&plan_id).fetch_all(&mut **tx).await?;
         let checks = check_rows
             .into_iter()
             .map(|r| EvidencePlanCheck {
@@ -232,13 +247,13 @@ impl EvidenceRepository {
             updated_at: row.get("updated_at"),
         };
         let invocation_rows = sqlx::query("SELECT id, plan_id, spike_task_id, session_id, captured_commit_sha, worktree_fingerprint, check_id, argv, canonical_cwd, launch_state, process_state, launched_at, finished_at, exit_code, signal, runner_failure, elapsed_millis, timeout_millis, timed_out, stdout_digest, stdout_excerpt, stdout_truncated, stderr_digest, stderr_excerpt, stderr_truncated, created_at FROM evidence_command_invocations WHERE plan_id = $1 ORDER BY created_at, id")
-            .bind(&plan_id).fetch_all(self.db.pool()).await?;
+            .bind(&plan_id).fetch_all(&mut **tx).await?;
         let invocations = invocation_rows
             .into_iter()
             .map(invocation_from_row)
             .collect::<Result<Vec<_>>>()?;
         let projection = sqlx::query("SELECT id, plan_id, version, payload, finalized_at FROM evidence_finalized_projections WHERE plan_id = $1")
-            .bind(&plan_id).fetch_optional(self.db.pool()).await?.map(|r| EvidenceFinalizedProjection { id: r.get("id"), plan_id: r.get("plan_id"), version: r.get("version"), payload: r.get("payload"), finalized_at: r.get("finalized_at") });
+            .bind(&plan_id).fetch_optional(&mut **tx).await?.map(|r| EvidenceFinalizedProjection { id: r.get("id"), plan_id: r.get("plan_id"), version: r.get("version"), payload: r.get("payload"), finalized_at: r.get("finalized_at") });
         Ok(Some(EvidencePlanHydration {
             plan,
             invocations,
@@ -353,4 +368,204 @@ fn invocation_from_row(row: sqlx::postgres::PgRow) -> Result<EvidenceCommandInvo
         stderr_truncated: row.get("stderr_truncated"),
         created_at: row.get("created_at"),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::repositories::test_support::{
+        UsageTestSessionSeed, UsageTestTaskSeed, seed_project, seed_session_row_with_id,
+        seed_task_row,
+    };
+
+    async fn fixture() -> (EvidenceRepository, String, String) {
+        let db = Database::ephemeral()
+            .await
+            .expect("open isolated Postgres database");
+        db.ensure_initialized().await.expect("initialize schema");
+        let project_id = uuid::Uuid::now_v7().to_string();
+        seed_project(&db, &project_id, &format!("evidence-{project_id}")).await;
+        let task_id = seed_task_row(
+            &db,
+            UsageTestTaskSeed {
+                project_id: &project_id,
+                status: "open",
+                close_reason: None,
+                total_reopen_count: 0,
+            },
+        )
+        .await;
+        let session_id = uuid::Uuid::now_v7().to_string();
+        seed_session_row_with_id(
+            &db,
+            &session_id,
+            UsageTestSessionSeed {
+                project_id: &project_id,
+                model_id: "test-model",
+                agent_type: "worker",
+                started_at: "2025-01-01T00:00:00.000Z",
+                tokens_in: 0,
+                tokens_out: 0,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+                cost_usd: None,
+                cost_basis: "unpriced",
+                task_id: Some(&task_id),
+            },
+        )
+        .await;
+        (EvidenceRepository::new(db), task_id, session_id)
+    }
+
+    fn plan_input(id: String, task_id: &str, session_id: &str) -> InsertEvidencePlan {
+        InsertEvidencePlan {
+            id,
+            spike_task_id: task_id.to_owned(),
+            session_id: session_id.to_owned(),
+            captured_commit_sha: "a1b2c3d4".to_owned(),
+            worktree_fingerprint: "worktree:fixture".to_owned(),
+            checks: vec![InsertEvidencePlanCheck {
+                check_id: "command-check".to_owned(),
+                question: "Does the command preserve every provenance field?".to_owned(),
+                method: "command".to_owned(),
+            }],
+        }
+    }
+
+    fn invocation_input(
+        id: String,
+        plan: &EvidencePlan,
+        exit_code: Option<i32>,
+    ) -> AppendEvidenceInvocation {
+        AppendEvidenceInvocation {
+            id,
+            plan_id: plan.id.clone(),
+            spike_task_id: plan.spike_task_id.clone(),
+            session_id: plan.session_id.clone(),
+            captured_commit_sha: plan.captured_commit_sha.clone(),
+            worktree_fingerprint: plan.worktree_fingerprint.clone(),
+            check_id: "command-check".to_owned(),
+            argv: vec![
+                "rg".to_owned(),
+                "evidence".to_owned(),
+                "--glob".to_owned(),
+                "*.rs".to_owned(),
+            ],
+            canonical_cwd: "/workspace/repository".to_owned(),
+            launch_state: "launched".to_owned(),
+            process_state: "exited".to_owned(),
+            launched_at: Some("2025-01-01T00:00:01.000Z".to_owned()),
+            finished_at: Some("2025-01-01T00:00:02.234Z".to_owned()),
+            exit_code,
+            signal: None,
+            runner_failure: Some("captured runner diagnostic".to_owned()),
+            elapsed_millis: Some(1234),
+            timeout_millis: Some(5000),
+            timed_out: false,
+            stdout_digest: Some("sha256:stdout".to_owned()),
+            stdout_excerpt: Some("stdout excerpt".to_owned()),
+            stdout_truncated: true,
+            stderr_digest: Some("sha256:stderr".to_owned()),
+            stderr_excerpt: Some("stderr excerpt".to_owned()),
+            stderr_truncated: true,
+        }
+    }
+
+    #[tokio::test]
+    async fn rejects_second_plan_for_same_task_session_identity() {
+        let (repo, task_id, session_id) = fixture().await;
+        repo.insert_plan(plan_input(
+            uuid::Uuid::now_v7().to_string(),
+            &task_id,
+            &session_id,
+        ))
+        .await
+        .expect("insert first frozen plan");
+
+        let duplicate = repo
+            .insert_plan(plan_input(
+                uuid::Uuid::now_v7().to_string(),
+                &task_id,
+                &session_id,
+            ))
+            .await;
+        assert!(
+            duplicate.is_err(),
+            "task/session identity must admit only one plan"
+        );
+    }
+
+    #[tokio::test]
+    async fn appends_retries_round_trips_provenance_and_rejects_mutation() {
+        let (repo, task_id, session_id) = fixture().await;
+        let plan = repo
+            .insert_plan(plan_input(
+                uuid::Uuid::now_v7().to_string(),
+                &task_id,
+                &session_id,
+            ))
+            .await
+            .expect("insert plan");
+        let first = repo
+            .append_invocation(invocation_input(
+                uuid::Uuid::now_v7().to_string(),
+                &plan,
+                Some(17),
+            ))
+            .await
+            .expect("append first invocation");
+        let second = repo
+            .append_invocation(invocation_input(
+                uuid::Uuid::now_v7().to_string(),
+                &plan,
+                Some(0),
+            ))
+            .await
+            .expect("append retry invocation");
+        assert_ne!(first.id, second.id, "retries must have distinct opaque ids");
+
+        let mut tx = repo
+            .db()
+            .pool()
+            .begin()
+            .await
+            .expect("begin hydration transaction");
+        let hydrated =
+            EvidenceRepository::hydrate_by_identity_in_transaction(&mut tx, &task_id, &session_id)
+                .await
+                .expect("hydrate in finalizer transaction")
+                .expect("plan exists");
+        tx.commit().await.expect("commit hydration transaction");
+        assert_eq!(hydrated.plan, plan);
+        assert_eq!(hydrated.invocations.len(), 2);
+        assert!(hydrated.invocations.contains(&first));
+        assert!(hydrated.invocations.contains(&second));
+
+        // The migration trigger protects the append-only ledger even against
+        // direct SQL; the repository intentionally has no overwrite operation.
+        assert!(
+            sqlx::query(
+                "UPDATE evidence_command_invocations SET canonical_cwd = '/tampered' WHERE id = $1"
+            )
+            .bind(&first.id)
+            .execute(repo.db().pool())
+            .await
+            .is_err()
+        );
+        assert!(
+            sqlx::query("DELETE FROM evidence_command_invocations WHERE id = $1")
+                .bind(&first.id)
+                .execute(repo.db().pool())
+                .await
+                .is_err()
+        );
+
+        let after = repo
+            .hydrate_by_identity(&task_id, &session_id)
+            .await
+            .expect("hydrate append-only ledger")
+            .expect("plan remains");
+        assert!(after.invocations.contains(&first));
+        assert!(after.invocations.contains(&second));
+    }
 }
