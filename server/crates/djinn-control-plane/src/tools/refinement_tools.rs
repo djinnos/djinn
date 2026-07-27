@@ -54,8 +54,36 @@ pub(crate) async fn admit_refinement_run(
     repo: &ProposalRepository,
     proposal_id: &str,
     source: RefinementAdmissionSource,
-    owner_user_id: Option<Option<&str>>,
+    explicit_owner_user_id: Option<&str>,
 ) -> Result<bool, String> {
+    // Every admission source — explicit start, demanded round, and
+    // committed-revision resume alike — must leave the run attributed.
+    // `proposals.refinement_owner_user_id` is the ONLY attribution
+    // `drive_durable_refinement_intents` accepts: with it absent the coordinator
+    // re-claims the run's dispatch intent on every tick and then `continue`s, so
+    // the run never creates a role task, never appends a debate entry, and
+    // reports `stale` in the gap between two claims — while `run_state` still
+    // reads `active`. Demand and revision admission previously passed no owner
+    // at all, which minted generation after generation of exactly that run.
+    //
+    // Resolution order is explicit override → already-persisted owner →
+    // proposal author. Falling back to the persisted owner (rather than
+    // unconditionally to the author) also stops a re-`start` from silently
+    // reassigning a run that someone else already owns.
+    let attributed_user = match explicit_owner_user_id {
+        Some(explicit) => Some(explicit.to_owned()),
+        None => repo
+            .get(proposal_id)
+            .await
+            .map_err(|_| "Persistence".to_owned())?
+            .and_then(|proposal| {
+                proposal
+                    .refinement_owner_user_id
+                    .or(proposal.author_user_id)
+            }),
+    }
+    .filter(|owner| !owner.trim().is_empty());
+
     let identity = match &source {
         RefinementAdmissionSource::ExplicitStart { actor } => format!("explicit:{actor}"),
         RefinementAdmissionSource::Demand { demand_id } => format!("demand:{demand_id}"),
@@ -85,8 +113,11 @@ pub(crate) async fn admit_refinement_run(
         RefinementAdmissionOutcome::Admitted { run_id, .. }
         | RefinementAdmissionOutcome::Existing { run_id, .. } => run_id,
     };
-    if let Some(owner_user_id) = owner_user_id {
-        repo.start_refinement_with_owner(proposal_id, owner_user_id)
+    // Only ever write a resolved owner. Writing `None` here would clear an
+    // attribution that the durable dispatcher depends on, turning a working run
+    // into a silently undispatchable one.
+    if let Some(attributed_user) = attributed_user.as_deref() {
+        repo.start_refinement_with_owner(proposal_id, Some(attributed_user))
             .await
             .map_err(|_| "Persistence".to_owned())?;
     }
@@ -248,7 +279,7 @@ impl DjinnMcpServer {
                         .unwrap_or_else(|| "proposal-author".to_owned())
                 ),
             },
-            Some(refinement_owner_user_id.as_deref()),
+            p.owner_user_id.as_deref(),
         )
         .await
         {
