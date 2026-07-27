@@ -20,7 +20,7 @@ use sqlx::{Connection, Executor};
 
 const MIGRATION_VERSION: u64 = 155;
 const MIGRATION_FILE: &str = "155_readiness_persistence.sql";
-const FINDING_CONFIDENCE_MIGRATION_FILE: &str = "156_readiness_finding_confidence.sql";
+const FINDING_CONFIDENCE_MIGRATION_FILE: &str = "157_readiness_finding_confidence.sql";
 const DESIGNATED_OPERATOR_ID: &str = "00000000-0000-7000-8000-000000000155";
 
 fn migrations_dir() -> PathBuf {
