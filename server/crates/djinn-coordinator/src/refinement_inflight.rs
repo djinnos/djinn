@@ -69,6 +69,25 @@ impl CoordinatorActor {
         } = registration;
         let phase = local_phase(phase);
 
+        // A durable poll can race a newer in-memory outcome/wake projection.
+        // The caller's run ID alone is insufficient authority to overwrite that
+        // projection: all generation, phase, and round coordinates must agree.
+        if self.active_refinements.get(run_id).is_some_and(|current| {
+            current.run_id != run_id
+                || current.generation != generation
+                || current.phase != phase
+                || current.current_round != round
+        }) {
+            tracing::debug!(
+                run_id,
+                generation,
+                ?phase,
+                round,
+                "ignored stale durable in-flight projection registration"
+            );
+            return true;
+        }
+
         let tracked = self.refinement_sessions.get(run_id).is_some_and(|session| {
             session.run_id == run_id
                 && session.generation == generation

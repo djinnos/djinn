@@ -20,8 +20,10 @@ mod status;
 mod writes;
 pub use writes::EffectiveCreatorProvenance;
 pub(crate) use writes::{
-    ReadinessIdentificationTask, create_readiness_identification_task_in_transaction,
-    incoming_task_creator, load_task_in_transaction, resolve_effective_creator,
+    ReadinessAreaAnalysisTask, ReadinessIdentificationTask,
+    create_readiness_area_analysis_task_in_transaction,
+    create_readiness_identification_task_in_transaction, incoming_task_creator,
+    load_task_in_transaction, resolve_effective_creator,
 };
 
 // Re-export parent-disposition types so `EpicRepository::close` can

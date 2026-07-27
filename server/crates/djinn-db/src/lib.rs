@@ -201,7 +201,7 @@ pub use repositories::{
         MaterializeReadinessKickoff, NewReadinessEvent, NewReadinessFinding,
         NewReadinessSuggestion, ReadinessAreaAttemptRow, ReadinessAreaResultCallback,
         ReadinessCallbackOutcome, ReadinessCompositionAreaRow, ReadinessGuardrailFindingRow,
-        ReadinessKickoffMaterialization, ReadinessRemediationSuggestionRow, ReadinessRepository,
+        ReadinessKickoffMaterialization, ReadinessRemediationSuggestionRow, ReadinessRepository, RetryReadinessAreaAttempt,
         ReadinessRunDetail, ReadinessRunEventRow, ReadinessRunRow,
     },
     refinement_run::{
