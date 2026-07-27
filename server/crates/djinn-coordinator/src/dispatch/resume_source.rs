@@ -9,8 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     CheckpointLifecycleMetadata, CheckpointSafetyScanMetadata, ResumeLifecycleConfig,
-    ResumeLifecycleMetadata,
-    ResumeSelectionReason, WorkerLifecycleMetadata,
+    ResumeLifecycleMetadata, ResumeSelectionReason, WorkerLifecycleMetadata,
 };
 
 /// Resume source classes, ordered by [`source_precedence`].
@@ -207,7 +206,7 @@ pub struct ResumeSourceCandidate {
     pub session_lineage: Option<String>,
     /// Commit SHA for checkpoint candidates.
     pub checkpoint_sha: Option<String>,
-    /// Submit/review id for accepted auto-submit candidates.
+    /// Legacy submit/review correlation id; checkpoint candidates leave this unset.
     pub submit_or_review_id: Option<String>,
     /// Ref the future integration should check out. The selector only records it.
     pub target_ref: String,
@@ -226,7 +225,7 @@ impl ResumeSourceCandidate {
             checkpoint_sha: None,
             submit_or_review_id: None,
             target_ref: target_ref.into(),
-                checkpoint_safety: None,
+            checkpoint_safety: None,
             age_secs: None,
         }
     }

@@ -1716,9 +1716,9 @@ fn preservation_no_replay_auto_submit_renders_review_id_not_checkpoint() {
         &note,
         &[
             "session-auto-submit",
-            "review-accepted-42",   // review id, not checkpoint
-            "clean fallback", // selection reason label
-            "auto-submit",          // source kind label
+            "review-accepted-42", // review id, not checkpoint
+            "clean fallback",     // selection reason label
+            "auto-submit",        // source kind label
         ],
     );
     // Must NOT contain checkpoint references.

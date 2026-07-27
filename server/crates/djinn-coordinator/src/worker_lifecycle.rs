@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 /// metadata payloads stable serde shapes for downstream detector/event wiring.
 /// Defaults preserve current worker behavior: durable-progress detection is
 /// shadow-only, no-progress enforcement is disabled, and no forced checkpoint,
-/// auto-submit, resume, or model-rotation action is requested.
+/// resume, or model-rotation action is requested.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct WorkerLifecycleConfig {
     /// Rollout switches for detector observation and destructive enforcement.

@@ -4,9 +4,7 @@ use std::pin::Pin;
 use crate::context::AgentContext;
 use djinn_supervisor::SupervisorServices;
 
-use super::adapter::{
-    AgentHostCallbacks, agent_credential_to_slot, build_slot_context,
-};
+use super::adapter::{AgentHostCallbacks, agent_credential_to_slot, build_slot_context};
 
 /// Build a dispatch-pathway [`djinn_slot::host::SlotContext`] from an [`AgentContext`].
 pub(crate) fn agent_to_dispatch_slot_context(

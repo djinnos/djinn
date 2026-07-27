@@ -542,17 +542,14 @@ where
 pub struct ResumeWorkspaceOutcome {
     /// What the supervisor actually used for the worktree base. For `Clean`
     /// the workspace checked out at the canonical task branch; for `Safe` /
-    /// `Alternate` it checked out the selected ref/SHA; for
-    /// `AutoSubmit` the workspace checked out at the task branch (auto-submit
-    /// carries no git content to base on — the review/submission metadata
-    /// rides the prompt context, not the worktree).
+    /// `Alternate` it checked out the selected ref/SHA.
     pub applied_source: ResumeSourceKind,
     /// The task-branch ref that the workspace will be promoted onto by the
     /// follow-up `ensure_branch(task_branch)` step. Always populated.
     pub applied_target_ref: String,
     /// Commit SHA the workspace was checked out at, if the helper could
-    /// resolve a concrete commit. `None` for auto-submit and the
-    /// clean-fallback paths where no specific commit was selected.
+    /// resolve a concrete commit. `None` for clean-fallback paths where no
+    /// specific commit was selected.
     pub applied_commit_sha: Option<String>,
     /// Why the helper fell back to the clean task branch instead of using
     /// the chosen source. `None` for the happy path; populated for skipped
@@ -835,11 +832,6 @@ fn timed_workspace_teardown(
 /// - `ResumeSourceKind::CleanTaskBranch`: returns `Ok(None)` so the legacy
 ///   `clone_ephemeral(task_branch)` path runs unchanged. The selector
 ///   already chose the fallback, so the worktree setup matches it.
-/// - `ResumeSourceKind::CleanTaskBranch`: accepted auto-submit/review state has
-///   no git content to base on — the worker pod is built on the canonical
-///   `task_branch` (same as the clean-task-branch path) and the resume
-///   prompt context (task `48ru`) carries the submit/review id. Falls back
-///   to the legacy path; no extra worktree-setup step is required.
 /// - `ResumeSourceKind::TaskBranchCheckpoint`: clones at `task_branch`
 ///   first (so `ensure_branch` can later refresh the branch ref) then
 ///   checks out the selected `commit_sha` in detached HEAD. The follow-up

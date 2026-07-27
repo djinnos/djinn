@@ -143,7 +143,6 @@ pub struct TaskContext {
     /// injected into planner/reviewer/lead/architect prompts.  `None` when
     /// there is no active monitored reopen or the role does not receive it.
     pub arbiter_directive: Option<String>,
-
 }
 
 // ─── Renderer ─────────────────────────────────────────────────────────────────

@@ -597,8 +597,7 @@ pub struct ResumeLifecycleMetadata {
     /// task — that is `twsk`'s responsibility.
     #[serde(default)]
     pub target_ref: Option<String>,
-    /// Submit/review id for accepted auto-submit candidates. `None` for
-    /// checkpoint and clean-task-branch selections.
+    /// Legacy submit/review correlation id. New checkpoint selections leave this unset.
     #[serde(default)]
     pub submit_or_review_id: Option<String>,
     /// Prior session or lineage identifier that produced the chosen source.
@@ -635,8 +634,7 @@ pub struct ResumeLifecycleMetadata {
     /// context about what was accomplished before termination.
     #[serde(default)]
     pub last_durable_progress_summary: Option<String>,
-    /// Suggested verification command from the prior session's
-    /// auto-submit/checkpoint metadata, when available. Used by the
+    /// Suggested command from prior checkpoint metadata, when available. Used by the
     /// resume-prompt note so the worker can re-verify quickly.
     #[serde(default)]
     pub verification_command: Option<String>,

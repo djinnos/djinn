@@ -1,5 +1,7 @@
 //! Lifecycle teardown: delegates to host callbacks.
-use crate::finalize_handlers::{process_finalize_payload_with_outcome, record_rejected_integrity_entry};
+use crate::finalize_handlers::{
+    process_finalize_payload_with_outcome, record_rejected_integrity_entry,
+};
 use crate::host::SlotContext;
 use crate::output_parser::ParsedAgentOutput;
 use crate::roles_support::AgentRole;
@@ -16,6 +18,92 @@ pub(crate) struct PostSessionParams {
     pub(crate) final_error: Option<String>,
     pub(crate) tokens_in: i64,
     pub(crate) tokens_out: i64,
+}
+
+fn should_process_explicit_finalize(
+    output: &ParsedAgentOutput,
+    expected_tool: &str,
+    session_succeeded: bool,
+) -> bool {
+    session_succeeded
+        && !output.no_progress_submission
+        && output.finalize_payload.is_some()
+        && output.finalize_tool_name.as_deref() == Some(expected_tool)
+}
+
+#[cfg(test)]
+mod retirement_regressions {
+    use super::*;
+
+    fn explicit_submit() -> ParsedAgentOutput {
+        ParsedAgentOutput {
+            finalize_payload: Some(serde_json::json!({"summary": "done"})),
+            finalize_tool_name: Some("submit_work".to_string()),
+            ..ParsedAgentOutput::default()
+        }
+    }
+
+    #[test]
+    fn explicit_submit_work_hands_off_to_ordinary_finalize() {
+        assert!(should_process_explicit_finalize(
+            &explicit_submit(),
+            "submit_work",
+            true
+        ));
+    }
+
+    #[test]
+    fn session_end_without_submit_cannot_synthesize_finalize() {
+        assert!(!should_process_explicit_finalize(
+            &ParsedAgentOutput::default(),
+            "submit_work",
+            true
+        ));
+    }
+
+    #[test]
+    fn reviewer_output_cannot_synthesize_worker_finalize() {
+        let mut output = explicit_submit();
+        output.finalize_tool_name = Some("submit_review".to_string());
+        assert!(!should_process_explicit_finalize(
+            &output,
+            "submit_work",
+            true
+        ));
+    }
+
+    #[test]
+    fn no_progress_settlement_cannot_synthesize_finalize() {
+        let mut output = explicit_submit();
+        output.no_progress_submission = true;
+        assert!(!should_process_explicit_finalize(
+            &output,
+            "submit_work",
+            true
+        ));
+    }
+
+    #[test]
+    fn deadline_or_failed_session_cannot_synthesize_finalize() {
+        assert!(!should_process_explicit_finalize(
+            &explicit_submit(),
+            "submit_work",
+            false
+        ));
+    }
+
+    #[test]
+    fn teardown_rejects_tool_name_without_explicit_payload() {
+        let output = ParsedAgentOutput {
+            finalize_tool_name: Some("submit_work".to_string()),
+            ..ParsedAgentOutput::default()
+        };
+        assert!(!should_process_explicit_finalize(
+            &output,
+            "submit_work",
+            true
+        ));
+    }
 }
 
 pub(crate) fn spawn_post_session_work(params: PostSessionParams) {
@@ -36,23 +124,23 @@ pub(crate) fn spawn_post_session_work(params: PostSessionParams) {
         // consecutive identical rejected-fingerprint submit_work, the reply
         // loop already settled the session via `settle_no_progress_submission`
         // (activity logging, streak increment, planner intervention routing).
-        // Teardown just skips normal finalize and auto-submit processing and
-        // does NOT increment the dispatch_failure_streak.
+        // Teardown skips normal finalize processing and does NOT increment the
+        // dispatch_failure_streak.
         if final_output.no_progress_submission {
             // Settlement already completed in the reply loop; nothing to do.
         } else {
-            let model_called_submit_work =
-                final_output.finalize_tool_name.as_deref() == Some(role.finalize_tool_name());
-            if model_called_submit_work {
-                if final_result_ok {
-                    let _ = process_finalize_payload_with_outcome(
-                        &final_output.finalize_payload,
-                        final_output.finalize_tool_name.as_deref().unwrap_or(""),
-                        &task_id,
-                        &ctx,
-                    )
-                    .await;
-                }
+            if should_process_explicit_finalize(
+                &final_output,
+                role.finalize_tool_name(),
+                final_result_ok,
+            ) {
+                let _ = process_finalize_payload_with_outcome(
+                    &final_output.finalize_payload,
+                    final_output.finalize_tool_name.as_deref().unwrap_or(""),
+                    &task_id,
+                    &ctx,
+                )
+                .await;
             }
         }
         apply_transition_and_dispatch(

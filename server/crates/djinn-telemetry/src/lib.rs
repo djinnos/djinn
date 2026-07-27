@@ -368,10 +368,6 @@ pub mod jit_pitfalls {
     }
 }
 
-
-
-
-
 /// Bounded gauges populated by the server's scrape-time memory sampler.
 ///
 /// Byte gauges intentionally have no labels. The separate outcome gauge is

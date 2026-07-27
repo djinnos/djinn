@@ -156,8 +156,8 @@ pub struct CoordinatorDeps {
     /// Runtime configuration for the inline PR/branch cleanup hook.
     pub pr_cleanup_config: PrCleanupConfig,
     /// Durable-progress / preservation-aware worker lifecycle rollout config.
-    /// Defaults are safe: no no-progress enforcement, no auto-submit, and no
-    /// checkpoint requirement unless explicitly enabled by production config.
+    /// Defaults are safe: no no-progress enforcement or checkpoint requirement
+    /// unless explicitly enabled by production config.
     pub worker_lifecycle_config: super::worker_lifecycle::WorkerLifecycleConfig,
 }
 

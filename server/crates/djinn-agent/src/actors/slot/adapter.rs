@@ -11,12 +11,21 @@ pub(crate) fn build_slot_context(
     tool_dispatcher: Option<Arc<dyn djinn_slot::host::SlotToolDispatcher>>,
 ) -> djinn_slot::host::SlotContext {
     djinn_slot::host::SlotContext {
-        db: agent.db.clone(), event_bus: agent.event_bus.clone(), catalog: agent.catalog.clone(),
-        health_tracker: agent.health_tracker.clone(), background_work_tasks: agent.background_work_tasks.clone(),
-        active_tasks: agent.active_tasks.clone(), default_project_id: agent.default_project_id.clone(),
-        working_root: agent.working_root.clone(), coordinator_trigger: None, runtime_ops: agent.runtime_ops.clone(),
-        repo_graph_ops: agent.repo_graph_ops.clone(), clock: Arc::new(SystemClock::new()), callbacks,
-        tool_dispatcher, compaction_cs: agent.compaction_cs.clone(),
+        db: agent.db.clone(),
+        event_bus: agent.event_bus.clone(),
+        catalog: agent.catalog.clone(),
+        health_tracker: agent.health_tracker.clone(),
+        background_work_tasks: agent.background_work_tasks.clone(),
+        active_tasks: agent.active_tasks.clone(),
+        default_project_id: agent.default_project_id.clone(),
+        working_root: agent.working_root.clone(),
+        coordinator_trigger: None,
+        runtime_ops: agent.runtime_ops.clone(),
+        repo_graph_ops: agent.repo_graph_ops.clone(),
+        clock: Arc::new(SystemClock::new()),
+        callbacks,
+        tool_dispatcher,
+        compaction_cs: agent.compaction_cs.clone(),
     }
 }
 
@@ -32,10 +41,16 @@ macro_rules! with_slot_context {
     }};
 }
 
-pub(crate) fn agent_credential_to_slot(credential: super::helpers::ProviderCredential) -> djinn_slot::helpers::ProviderCredential {
+pub(crate) fn agent_credential_to_slot(
+    credential: super::helpers::ProviderCredential,
+) -> djinn_slot::helpers::ProviderCredential {
     match credential {
-        super::helpers::ProviderCredential::ApiKey(k, v) => djinn_slot::helpers::ProviderCredential::ApiKey(k, v),
-        super::helpers::ProviderCredential::OAuthConfig(v) => djinn_slot::helpers::ProviderCredential::OAuthConfig(v),
+        super::helpers::ProviderCredential::ApiKey(k, v) => {
+            djinn_slot::helpers::ProviderCredential::ApiKey(k, v)
+        }
+        super::helpers::ProviderCredential::OAuthConfig(v) => {
+            djinn_slot::helpers::ProviderCredential::OAuthConfig(v)
+        }
     }
 }
 
@@ -45,7 +60,28 @@ pub(crate) struct AgentHostCallbacks {
     pub(crate) dispatch_mode: bool,
 }
 impl AgentHostCallbacks {
-    pub(crate) fn dispatch(agent: &AgentContext) -> Self { Self { agent: agent.clone(), services: None, dispatch_mode: true } }
-    pub(crate) fn reply_loop(agent: &AgentContext, services: &'static dyn SupervisorServices) -> Self { Self { agent: agent.clone(), services: Some(services), dispatch_mode: true } }
-    pub(crate) fn extraction(agent: &AgentContext) -> Self { Self { agent: agent.clone(), services: None, dispatch_mode: false } }
+    pub(crate) fn dispatch(agent: &AgentContext) -> Self {
+        Self {
+            agent: agent.clone(),
+            services: None,
+            dispatch_mode: true,
+        }
+    }
+    pub(crate) fn reply_loop(
+        agent: &AgentContext,
+        services: &'static dyn SupervisorServices,
+    ) -> Self {
+        Self {
+            agent: agent.clone(),
+            services: Some(services),
+            dispatch_mode: true,
+        }
+    }
+    pub(crate) fn extraction(agent: &AgentContext) -> Self {
+        Self {
+            agent: agent.clone(),
+            services: None,
+            dispatch_mode: false,
+        }
+    }
 }

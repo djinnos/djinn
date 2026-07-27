@@ -1,6 +1,4 @@
-use crate::finalize_handlers::{
-    apply_ac_verdicts,
-};
+use crate::finalize_handlers::apply_ac_verdicts;
 use crate::finalize_types::AcVerdict;
 use crate::test_helpers;
 use djinn_db::TaskRepository;

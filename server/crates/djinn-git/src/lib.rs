@@ -504,7 +504,6 @@ pub use submission_diff::{
     compute_submission_diff_fingerprint_with_config,
 };
 
-
 #[cfg(test)]
 mod test_support;
 
