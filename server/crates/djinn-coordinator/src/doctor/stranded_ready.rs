@@ -2,8 +2,14 @@
 //!
 //! Reuses the DB stranded-ready contract from `djinn_db::TaskRepository::board_health`
 //! (delivered by task `lke3`). The check is read-only: it snapshots the `stranded_ready`
-//! board-health section and emits one [`Finding`] per stranded task, preserving the
-//! threshold, severity, age, and dispatch-gate evidence already computed by the DB.
+//! board-health section and emits one [`Finding`] per task the section could NOT
+//! explain, preserving the threshold, severity, age, and dispatch-gate evidence
+//! already computed by the DB.
+//!
+//! This check has no independent judgement — it is a pure mirror. Everything it
+//! can and cannot claim is decided in `djinn-db`'s
+//! `repositories::task::board_health_dispatch_gate`, so read that module before
+//! changing what a finding here asserts.
 
 use djinn_core::doctor::{
     DoctorCheck, DoctorCheckCadence, DoctorResult, Finding, FindingSeverity, ResolverSnapshot,
@@ -37,6 +43,10 @@ pub struct StrandedReadyCandidate {
     pub epic_short_id: Option<String>,
     pub unclaimed_since: String,
     pub unclaimed_since_confidence: String,
+    /// Which signal the strand clock started from. Optional so a payload from
+    /// before the blocker-clear reset still parses.
+    #[serde(default)]
+    pub unclaimed_since_basis: Option<String>,
     pub elapsed_minutes: i64,
     pub severity: String,
     pub threshold: serde_json::Value,
@@ -60,6 +70,10 @@ impl StrandedReadyCandidate {
                 .get("unclaimed_since_confidence")?
                 .as_str()?
                 .to_owned(),
+            unclaimed_since_basis: value
+                .get("unclaimed_since_basis")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned),
             elapsed_minutes: value.get("elapsed_minutes")?.as_i64()?,
             severity: value.get("severity")?.as_str()?.to_owned(),
             threshold: value.get("threshold")?.clone(),
@@ -123,18 +137,39 @@ impl StrandedReadyCheck {
         );
         let severity_label = severity.as_str();
 
-        // Defence in depth: the DB contract is expected to exclude tasks whose
-        // dispatch gate would allow a normal dispatch. If a non-stranded verdict
-        // leaks through, skip it so the doctor check stays read-only and does not
-        // flag tasks that are gated for legitimate reasons.
+        // This check is a pure mirror of the DB `stranded_ready` section, so
+        // whatever that section can justify is what a finding can claim.
+        //
+        // A `blocked` candidate carries a named, durable cause (an unhealthy
+        // model, a queued build lease, a full build pool) and is therefore
+        // EXPLAINED — it belongs in the board-health payload, not in the
+        // doctor's alarm list. Only `unexplained` — no gate the section can
+        // evaluate accounts for the non-dispatch — becomes a finding.
+        //
+        // The verdict used to be `stranded`, which was emitted whenever the
+        // section's reasons list was empty. For a task with no chosen model
+        // that was structurally guaranteed, which is how 30-40 identical
+        // reasons-free `critical` findings were emitted every 30 seconds
+        // during the 2026-07-27 lease-tombstone incident: every one about a
+        // victim, none about the cause. With the cause now named on the
+        // candidates that have one, those become `blocked` and stop firing.
         let gate_verdict = candidate
             .dispatch_gate
             .get("gate_verdict")
             .and_then(|v| v.as_str())
-            .unwrap_or("stranded");
-        if gate_verdict != "stranded" {
+            // A payload with no verdict at all told us nothing, which is
+            // exactly what `unexplained` means.
+            .unwrap_or("unexplained");
+        if gate_verdict != "unexplained" {
             return None;
         }
+
+        let unevaluated = candidate
+            .dispatch_gate
+            .get("coverage")
+            .and_then(|coverage| coverage.get("unevaluated_gates"))
+            .and_then(|gates| gates.as_array())
+            .map_or(0, Vec::len);
 
         let inputs = json!({
             "id": candidate.id,
@@ -148,11 +183,17 @@ impl StrandedReadyCheck {
             "is_stranded": true,
             "severity": severity_label,
             "reason": "stranded_ready",
+            "gate_verdict": gate_verdict,
+            "unevaluated_gate_count": unevaluated,
         });
         let snapshot =
             ResolverSnapshot::new("resolve_stranded_ready", inputs.clone(), outputs.clone());
+        // The detail states the bound rather than implying the board proved
+        // nothing was wrong.
         let detail = format!(
-            "task {} ({}) has been stranded-ready for {} minutes (severity: {})",
+            "task {} ({}) has been dispatchable and unclaimed for {} minutes (severity: {}); \
+             no gate board_health can evaluate explains it, and {unevaluated} dispatcher \
+             gates were not consulted",
             candidate.short_id, candidate.title, candidate.elapsed_minutes, severity_label
         );
         let evidence = json!({
@@ -164,6 +205,7 @@ impl StrandedReadyCheck {
             "epic_short_id": candidate.epic_short_id,
             "unclaimed_since": candidate.unclaimed_since,
             "unclaimed_since_confidence": candidate.unclaimed_since_confidence,
+            "unclaimed_since_basis": candidate.unclaimed_since_basis,
             "elapsed_minutes": candidate.elapsed_minutes,
             "severity": severity_label,
             "threshold": candidate.threshold,
@@ -386,6 +428,7 @@ mod tests {
             json!("2026-01-01T00:00:00.000Z"),
         );
         map.insert("unclaimed_since_confidence".to_owned(), json!("high"));
+        map.insert("unclaimed_since_basis".to_owned(), json!("blocker_cleared"));
         map.insert("elapsed_minutes".to_owned(), json!(45));
         map.insert("severity".to_owned(), json!("warn"));
         map.insert(
@@ -403,8 +446,14 @@ mod tests {
                 "manually_paused": false,
                 "rate_limited": false,
                 "credential_available": true,
-                "gate_verdict": "stranded",
+                "gate_verdict": "unexplained",
                 "reasons": [],
+                "coverage": {
+                    "scope": "partial",
+                    "evaluated_gates": ["build_lease_admission", "model_health"],
+                    "unevaluated_gates": ["provider_circuit_breaker", "slot_pool_capacity"],
+                    "note": "reasons covers only evaluated_gates",
+                },
             }),
         );
         for (k, v) in overrides {
@@ -457,11 +506,69 @@ mod tests {
         );
         assert_eq!(
             finding.evidence["dispatch_gate"]["gate_verdict"],
-            "stranded"
+            "unexplained"
         );
+        assert_eq!(finding.evidence["unclaimed_since_basis"], "blocker_cleared");
         assert_eq!(finding.resolver_snapshot.resolver, "resolve_stranded_ready");
         assert_eq!(finding.resolver_snapshot.outputs["severity"], "warn");
+        assert_eq!(
+            finding.resolver_snapshot.outputs["unevaluated_gate_count"],
+            2
+        );
         assert!(finding.detail.contains("task-1") && finding.detail.contains("45 minutes"));
+        // The detail must state the bound, not imply the board proved the task
+        // was fine.
+        assert!(
+            finding.detail.contains("were not consulted"),
+            "detail must disclose the gates it did not evaluate: {}",
+            finding.detail
+        );
+    }
+
+    /// A candidate the DB section could explain (a queued build lease, a full
+    /// build pool, an unhealthy model) is EXPLAINED and must not be re-reported
+    /// as an unexplained starvation alarm every 30 seconds.
+    #[test]
+    fn capacity_blocked_candidate_is_not_an_unexplained_finding() {
+        let mut overrides = serde_json::Map::new();
+        overrides.insert(
+            "dispatch_gate".to_owned(),
+            json!({
+                "evaluated_role": "worker",
+                "toolset": ["task_edit"],
+                "model_requirement": null,
+                "image_ready": true,
+                "breaker_open": false,
+                "manually_paused": false,
+                "rate_limited": false,
+                "credential_available": true,
+                "build_capacity": {"occupancy": 3, "cap": 3, "enforcing": true, "at_capacity": true},
+                "gate_verdict": "blocked",
+                "reasons": ["build_pool_at_capacity"],
+            }),
+        );
+        let source = Arc::new(MemoryStrandedReadySource::new(snapshot_with(vec![
+            candidate_json(overrides),
+        ])));
+        let findings = StrandedReadyCheck::new(source).run().expect("run");
+        assert!(
+            findings.is_empty(),
+            "a candidate with a named durable cause must not fire the starvation alarm"
+        );
+    }
+
+    /// A payload with no verdict at all told us nothing, which is what
+    /// `unexplained` means — it must still surface rather than be silently
+    /// dropped.
+    #[test]
+    fn missing_verdict_is_treated_as_unexplained() {
+        let mut overrides = serde_json::Map::new();
+        overrides.insert("dispatch_gate".to_owned(), json!({"reasons": []}));
+        let source = Arc::new(MemoryStrandedReadySource::new(snapshot_with(vec![
+            candidate_json(overrides),
+        ])));
+        let findings = StrandedReadyCheck::new(source).run().expect("run");
+        assert_eq!(findings.len(), 1);
     }
 
     #[test]
@@ -498,7 +605,7 @@ mod tests {
     }
 
     #[test]
-    fn non_stranded_gate_verdict_is_skipped() {
+    fn unrecognised_gate_verdict_is_skipped() {
         let mut overrides = serde_json::Map::new();
         overrides.insert(
             "dispatch_gate".to_owned(),
@@ -511,7 +618,7 @@ mod tests {
                 "manually_paused": false,
                 "rate_limited": false,
                 "credential_available": true,
-                "gate_verdict": "not_stranded",
+                "gate_verdict": "some_future_verdict",
                 "reasons": [],
             }),
         );
@@ -521,7 +628,7 @@ mod tests {
         let findings = StrandedReadyCheck::new(source).run().expect("run");
         assert!(
             findings.is_empty(),
-            "a candidate with a non-stranded gate verdict must be skipped"
+            "only the `unexplained` verdict may raise a starvation finding"
         );
     }
 

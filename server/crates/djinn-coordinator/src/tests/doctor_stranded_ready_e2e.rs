@@ -109,8 +109,23 @@ async fn stranded_ready_consistency_across_doctor_and_board_health() {
         "90-minute backdate → error severity"
     );
     assert_eq!(
+        board_gate_verdict, "unexplained",
+        "no gate board_health can evaluate is open for a fresh test task, and the \
+         verdict must say so rather than assert the task is merely `stranded`"
+    );
+    assert_ne!(
         board_gate_verdict, "stranded",
-        "no gates should be open for a fresh test task"
+        "the `stranded` verdict is retired: it asserted a conclusion this section \
+         cannot reach"
+    );
+    let coverage = &board_gate["coverage"];
+    assert_eq!(coverage["scope"], "partial");
+    assert!(
+        !coverage["unevaluated_gates"]
+            .as_array()
+            .expect("unevaluated_gates is an array")
+            .is_empty(),
+        "an `unexplained` verdict must ship the gates it did not consult"
     );
 
     // ── 3. Doctor surface: run stranded_ready check ────────────────────
