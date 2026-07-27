@@ -448,8 +448,9 @@ const HANDOFF_ACTOR_ROLE: &str = "respawn_guard";
 /// reason and head SHA. Re-entry for the same head is a durable no-op, while a
 /// new head records a new handoff marker.
 ///
-/// Returns `true` when a new handoff marker was recorded, `false` when that
-/// head was already handed off, and an `Err` when persistence fails.
+/// Returns `true` when the handoff is established, including when the durable
+/// marker proves it was already established for this head, and an `Err` when
+/// persistence fails.
 pub async fn handoff_pr_to_poller(
     task_repo: &TaskRepository,
     task_id: &str,
@@ -471,7 +472,7 @@ pub async fn handoff_pr_to_poller(
         });
     if already_handed_off {
         tracing::debug!(task_id = %task_id, ?head_sha, "respawn_guard: terminal PR handoff already recorded for head");
-        return Ok(false);
+        return Ok(true);
     }
 
     if current_status == TaskStatus::PrReview.as_str() {
@@ -523,6 +524,26 @@ pub async fn handoff_adopted_pr_to_poller(
 ) -> bool {
     let reason =
         format!("respawn_guard: adopted open PR {pr_url} — handing off to PR poller (pr_review)");
+    if current_status == TaskStatus::PrReview.as_str() {
+        let payload = serde_json::json!({
+            "from_status": current_status,
+            "to_status": TaskStatus::PrReview.as_str(),
+            "reason": reason,
+            "pr_url": pr_url,
+            "idempotent": true,
+        })
+        .to_string();
+        return task_repo
+            .log_activity(
+                Some(task_id),
+                HANDOFF_ACTOR_ID,
+                HANDOFF_ACTOR_ROLE,
+                "adoption_handoff",
+                &payload,
+            )
+            .await
+            .is_ok();
+    }
     handoff_pr_to_poller(task_repo, task_id, current_status, pr_url, &reason, None)
         .await
         .unwrap_or(false)
