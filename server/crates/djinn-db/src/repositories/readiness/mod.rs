@@ -57,6 +57,8 @@ fn canonical_suggestion(
         .expect("validated suggestion");
     let mut area_ids = reference_values(prior, "area_ids");
     area_ids.extend(reference_values(Some(suggestion), "area_ids"));
+    area_ids.extend(reference_values(prior, "area_id"));
+    area_ids.extend(reference_values(Some(suggestion), "area_id"));
     area_ids.push(area_id.to_owned());
     let mut guardrail_ids = reference_values(prior, "guardrail_ids");
     guardrail_ids.extend(reference_values(Some(suggestion), "guardrail_ids"));
@@ -68,9 +70,16 @@ fn canonical_suggestion(
     guardrail_ids.dedup();
     result.insert("area_ids".into(), serde_json::json!(area_ids));
     result.insert("guardrail_ids".into(), serde_json::json!(guardrail_ids));
+    // Singular references are folded into their canonical sorted sets above.
+    // Keeping either one would make the stored value depend on callback order.
+    result.remove("area_id");
+    result.remove("guardrail_id");
     if let Some(prior) = prior.and_then(serde_json::Value::as_object) {
         for (key, prior_value) in prior {
-            if key == "area_ids" || key == "guardrail_ids" || key == "guardrail_id" {
+            if matches!(
+                key.as_str(),
+                "area_id" | "area_ids" | "guardrail_id" | "guardrail_ids"
+            ) {
                 continue;
             }
             if let Some(value) = result.get(key) {
@@ -1152,7 +1161,9 @@ impl ReadinessRepository {
 
 #[cfg(test)]
 mod aggregation_tests {
-    use super::{readiness_area_score, readiness_project_score, readiness_score_band};
+    use super::{
+        canonical_suggestion, readiness_area_score, readiness_project_score, readiness_score_band,
+    };
 
     #[test]
     fn proposal_status_severity_and_confidence_rules_are_exact() {
@@ -1194,5 +1205,42 @@ mod aggregation_tests {
         assert_eq!(readiness_score_band(0.8499), "ready");
         assert_eq!(readiness_score_band(0.85), "strong");
         assert_eq!(readiness_score_band(1.0), "strong");
+    }
+
+    #[test]
+    fn canonical_suggestion_is_identical_when_callback_arrival_is_reversed() {
+        let from_area_a = serde_json::json!({
+            "dedupe_key": "auth",
+            "action": "rotate credentials",
+            "guardrail_id": "z",
+            "area_id": "area-a"
+        });
+        let from_area_b = serde_json::json!({
+            "dedupe_key": "auth",
+            "action": "rotate credentials",
+            "guardrail_id": "a",
+            "area_id": "area-b"
+        });
+        let a_then_b = canonical_suggestion(
+            &from_area_b,
+            "area-b",
+            Some(&canonical_suggestion(&from_area_a, "area-a", None)),
+        );
+        let b_then_a = canonical_suggestion(
+            &from_area_a,
+            "area-a",
+            Some(&canonical_suggestion(&from_area_b, "area-b", None)),
+        );
+
+        assert_eq!(a_then_b, b_then_a);
+        assert_eq!(
+            a_then_b,
+            serde_json::json!({
+                "dedupe_key": "auth",
+                "action": "rotate credentials",
+                "area_ids": ["area-a", "area-b"],
+                "guardrail_ids": ["a", "z"]
+            })
+        );
     }
 }
