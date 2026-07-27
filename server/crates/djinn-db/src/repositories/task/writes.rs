@@ -11,6 +11,59 @@ pub struct EffectiveCreatorProvenance<'a> {
     pub proposal_id: Option<&'a str>,
 }
 
+pub(crate) async fn create_readiness_area_task_in_transaction(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    input: ReadinessAreaTask<'_>,
+) -> Result<Task> {
+    let creator = resolve_effective_creator(
+        tx,
+        EffectiveCreatorProvenance::explicit_user_id(input.creator_user_id),
+        None,
+    )
+    .await?;
+    let context = serde_json::to_value(
+        djinn_core::models::TaskExecutionContext::readiness_guardrail_analysis(
+            input.skill_name,
+            input.skill_version,
+        )?,
+    )
+    .map_err(|e| Error::InvalidData(format!("invalid task execution context: {e}")))?;
+    let description = serde_json::json!({"kind":"readiness_area_analysis","run_id":input.run_id,"area_id":input.area_id,"attempt_number":input.attempt_number,"correlation_key":input.correlation_key,"repository_snapshot":input.repository_snapshot,"skill_name":input.skill_name,"skill_version":input.skill_version,"composition":input.composition,"path_scopes":input.path_scopes}).to_string();
+    for _ in 0..16 {
+        let id = uuid::Uuid::now_v7().to_string();
+        let short_id = short_id_from_uuid(
+            &uuid::Uuid::parse_str(&id).map_err(|e| Error::Internal(e.to_string()))?,
+        );
+        let exists: Option<i32> = sqlx::query_scalar("SELECT 1 FROM tasks WHERE short_id=$1")
+            .bind(&short_id)
+            .fetch_optional(&mut **tx)
+            .await?;
+        if exists.is_some() {
+            continue;
+        }
+        sqlx::query("INSERT INTO tasks (id,project_id,short_id,title,description,design,issue_type,priority,owner,status,acceptance_criteria,agent_type,execution_context,created_by_user_id) VALUES ($1,$2,$3,$4,$5,'','task',0,$6,'open','[]'::jsonb,'architect',$7,$8)")
+            .bind(&id).bind(input.project_id).bind(&short_id).bind(format!("Analyze readiness area attempt {}", input.attempt_number)).bind(&description).bind(input.creator_user_id).bind(context).bind(creator).execute(&mut **tx).await?;
+        return load_task_in_transaction(tx, &id).await;
+    }
+    Err(Error::Internal(
+        "short_id collision after 16 retries".into(),
+    ))
+}
+
+pub(crate) struct ReadinessAreaTask<'a> {
+    pub project_id: &'a str,
+    pub creator_user_id: &'a str,
+    pub run_id: &'a str,
+    pub area_id: &'a str,
+    pub attempt_number: i32,
+    pub correlation_key: &'a str,
+    pub repository_snapshot: &'a str,
+    pub skill_name: &'a str,
+    pub skill_version: &'a str,
+    pub composition: &'a serde_json::Value,
+    pub path_scopes: &'a serde_json::Value,
+}
+
 /// Facts for the one Architect task that identifies readiness composition.
 pub(crate) struct ReadinessIdentificationTask<'a> {
     pub project_id: &'a str,

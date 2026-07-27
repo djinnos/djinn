@@ -199,10 +199,10 @@ pub use repositories::{
     readiness::{
         CreateReadinessAreaAttempt, CreateReadinessCompositionArea, CreateReadinessRun,
         MaterializeReadinessKickoff, NewReadinessEvent, NewReadinessFinding,
-        NewReadinessSuggestion, ReadinessAreaAttemptRow, ReadinessCompositionAreaRow,
-        ReadinessGuardrailFindingRow, ReadinessKickoffMaterialization,
-        ReadinessRemediationSuggestionRow, ReadinessRepository, ReadinessRunDetail,
-        ReadinessRunEventRow, ReadinessRunRow,
+        NewReadinessSuggestion, ReadinessAreaAttemptRow, ReadinessAreaResultCallback,
+        ReadinessCallbackOutcome, ReadinessCompositionAreaRow, ReadinessGuardrailFindingRow,
+        ReadinessKickoffMaterialization, ReadinessRemediationSuggestionRow, ReadinessRepository,
+        ReadinessRunDetail, ReadinessRunEventRow, ReadinessRunRow,
     },
     refinement_run::{
         AcknowledgeRefinementTaskMaterializationRequest, ActiveRefinementRun,
