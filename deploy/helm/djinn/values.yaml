@@ -93,16 +93,22 @@ cgroupLauncher:
   mode: required
 
 # -----------------------------------------------------------------------------
-# Writable cgroup RuntimeClass rollout
+# Writable cgroup preparation rollout
 # -----------------------------------------------------------------------------
-# Creates the cluster-scoped RuntimeClass used by the kubelet-delegated writable
-# cgroup rollout. It remains disabled until nodes have passed the corresponding
-# conformance check and are labeled `djinn.io/cgroup-writable=true`.
+# The preparation release can create the cluster-scoped RuntimeClass used by the
+# kubelet-delegated writable cgroup rollout after nodes have passed the
+# corresponding conformance check and are labeled
+# `djinn.io/cgroup-writable=true`.
 #
-# This only makes the RuntimeClass available; task-run Pods do not select it
-# until the task-run activation rollout explicitly assigns runtimeClassName.
-cgroupWritableRuntimeClass:
-  enabled: false
+# Both switches are deliberately disabled by default. Enabling runtimeClass
+# only makes the class available; it neither changes launcher privileges nor
+# assigns it to task-run Pods. taskRuns may only be enabled together with
+# runtimeClass in the activation release.
+cgroupWritable:
+  runtimeClass:
+    enabled: false
+  taskRuns:
+    enabled: false
 
 # -----------------------------------------------------------------------------
 # Server deployment
