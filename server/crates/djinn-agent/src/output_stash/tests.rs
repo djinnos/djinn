@@ -1569,3 +1569,31 @@ fn routed_view_reads_v1_and_legacy_remains_compatible_but_unlisted() {
         .clone();
     assert!(handle_stash_tool(&stash, "output_view", Some(&legacy_args)).is_err());
 }
+
+/// The durable stash writer must resolve the caller's own mount when
+/// `XDG_CACHE_HOME` is absent — which is exactly the server pod, where
+/// `XDG_CACHE_HOME` is never rendered and `/home/djinn/.cache` does not exist.
+///
+/// Neutralization: `durable_root_from` takes no `$HOME` input at all, so a
+/// reintroduced `$HOME/.cache` fallback cannot satisfy this signature; the host
+/// root must come back verbatim.
+#[test]
+fn durable_root_falls_back_to_the_host_mount_not_home_cache() {
+    let host_root = std::path::PathBuf::from("/var/lib/djinn/cache/djinn/output_stash");
+
+    for absent in [None, Some(String::new())] {
+        let resolved = durable_root_from(absent, host_root.clone());
+        assert_eq!(resolved, host_root);
+        assert!(
+            !resolved.starts_with("/home/djinn/.cache"),
+            "{} must not resolve into the ephemeral $HOME/.cache tree",
+            resolved.display()
+        );
+    }
+
+    // Job pods keep the PVC-backed XDG answer.
+    assert_eq!(
+        durable_root_from(Some("/cache/xdg/proj".into()), host_root),
+        std::path::PathBuf::from("/cache/xdg/proj/djinn/output_stash")
+    );
+}
