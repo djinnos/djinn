@@ -1716,10 +1716,10 @@ async fn reap_orphan_task_run(
 }
 
 async fn teardown_cargo_target_run_dir(app_state: &AgentContext, task_run_id: &str) {
-    let root = app_state
-        .cargo_target_runs_root
-        .clone()
-        .unwrap_or_else(djinn_core::paths::cargo_target_runs_root);
+    // No fallback by design: `cargo_target_runs_root` is the *calling process's*
+    // mount of the shared cache PVC, and the server pod and the Job pods mount it
+    // at different paths. See the field doc on `AgentContext`.
+    let root = app_state.cargo_target_runs_root.clone();
     let id = task_run_id.to_string();
     let log_root = root.clone();
     let log_id = id.clone();
@@ -3011,5 +3011,49 @@ mod tests {
             !failover_comment_already_logged(&task_repo, &task.id, "zai/glm-5.2").await,
             "a different model has no prior comment ⇒ must not be suppressed"
         );
+    }
+
+    /// The host teardown backstop must reap under the root the *calling process*
+    /// was configured with, and nothing else.
+    ///
+    /// This asserts the side effect, not the log line: the run dir is really gone
+    /// and its sibling really survives. The field carries this process's own mount
+    /// of the shared cache PVC — the server pod sees it at `$DJINN_HOME/cache`,
+    /// Job pods at `/cache` — so if this function ever resolved a path itself
+    /// (e.g. reinstating an `unwrap_or_else(djinn_core::paths::cargo_target_runs_root)`
+    /// fallback) it would sweep a directory that does not exist in the other pod
+    /// and leak silently. That would leave the run dir below intact and fail here.
+    #[tokio::test]
+    async fn host_teardown_reaps_only_the_exact_run_dir_under_the_configured_root() {
+        let root = tempfile::tempdir().expect("teardown root tempdir");
+        let mut app_state = crate::test_helpers::agent_context_from_db(
+            djinn_db::Database::open_in_memory().expect("in-memory db"),
+            CancellationToken::new(),
+        );
+        app_state.cargo_target_runs_root = root.path().to_path_buf();
+
+        let target = root.path().join("run-under-test");
+        let sibling = root.path().join("run-untouched");
+        std::fs::create_dir_all(target.join("debug")).expect("create run dir");
+        std::fs::write(target.join("debug/artifact.rlib"), b"bytes").expect("write artifact");
+        std::fs::create_dir_all(&sibling).expect("create sibling run dir");
+
+        teardown_cargo_target_run_dir(&app_state, "run-under-test").await;
+
+        assert!(
+            !target.exists(),
+            "teardown must remove the run dir under the configured root: {}",
+            target.display()
+        );
+        assert!(
+            sibling.exists(),
+            "teardown must not touch other runs under the same root"
+        );
+        assert!(root.path().exists(), "teardown must not remove the root");
+
+        // Idempotent: a second pass over an already-absent dir is a no-op, not a
+        // failure, and still leaves the sibling alone.
+        teardown_cargo_target_run_dir(&app_state, "run-under-test").await;
+        assert!(sibling.exists());
     }
 }
