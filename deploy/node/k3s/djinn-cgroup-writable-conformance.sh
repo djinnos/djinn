@@ -150,7 +150,7 @@ EOF
 }
 
 wait_for_probe() {
-  if ! "$KUBECTL" wait --for=condition=Ready "pod/$PROBE_NAME" --timeout="$TIMEOUT"; then
+  if ! "$KUBECTL" wait --for=condition=Ready "pod/$PROBE_NAME" --timeout="$TIMEOUT" >/dev/null; then
     local pod_json
     pod_json=$("$KUBECTL" get pod "$PROBE_NAME" -o json 2>/dev/null || true)
     if grep -Eq 'FailedCreatePodSandBox|runc-cgroupwritable' <<<"$pod_json"; then
@@ -176,8 +176,14 @@ root=/sys/fs/cgroup
 # A private root has no parent or sibling pod directories visible.
 [ -z "$(find "$root" -mindepth 1 -maxdepth 1 -type d -print -quit)" ]
 child="$root/.djinn-conformance-child"
-rmdir "$child" 2>/dev/null || true
-mkdir "$child"'
+# A successful creation alone is insufficient: prove launcher removal too.
+mkdir "$child"
+rmdir "$child"
+[ ! -e "$child" ]
+# Retain a launcher-owned leaf so worker denials exercise an existing object.
+launcher_leaf="$root/.djinn-launcher-leaf"
+mkdir "$launcher_leaf"
+[ -d "$launcher_leaf" ]'
 
 # Runs with the exact worker_security_context/pod_security_context contract:
 # uid/gid 1000, fsGroup 1000, no_new_privs, ALL capabilities dropped,
@@ -192,20 +198,21 @@ ls "$root" >/dev/null
 cat "$root/cgroup.controllers" >/dev/null
 must_deny() { if sh -c "$1"; then echo "unexpected worker mutation: $1" >&2; exit 1; fi; }
 leaf="$root/.djinn-worker-leaf"
-launcher_leaf="$root/.djinn-conformance-child"
+launcher_leaf="$root/.djinn-launcher-leaf"
 [ -d "$launcher_leaf" ]
 ls "$launcher_leaf" >/dev/null
 cat "$launcher_leaf/cgroup.controllers" >/dev/null
 must_deny "mkdir \"$leaf\""
 must_deny "printf x > \"$root/cpu.max\""
-must_deny "printf \"$$\" > \"$root/cgroup.procs\""
+# Preserve $$ for sh -c so the writer tries to move its own process.
+must_deny "printf \"\$\$\" > \"$root/cgroup.procs\""
+must_deny "printf 1 > \"$root/cgroup.procs\""
 must_deny "printf 1 > \"$root/cgroup.kill\""
-must_deny "mkdir \"$launcher_leaf\""
 must_deny "printf x > \"$launcher_leaf/cpu.max\""
-must_deny "printf \"$$\" > \"$launcher_leaf/cgroup.procs\""
+must_deny "printf \"\$\$\" > \"$launcher_leaf/cgroup.procs\""
 must_deny "printf 1 > \"$launcher_leaf/cgroup.kill\""
 must_deny "rmdir \"$launcher_leaf\""
-must_deny "printf \"1\" > \"$root/cgroup.procs\""'
+must_deny "printf 1 > \"$launcher_leaf/cgroup.procs\""'
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -232,7 +239,7 @@ require_command systemctl
 # repeats this on all unsuccessful paths, including restarts and timeouts.
 ensure_unlabeled
 install -D -m 0644 "$TEMPLATE_SOURCE" "$TEMPLATE_PATH"
-eval "$K3S_RESTART_CMD"
+eval "$K3S_RESTART_CMD" >/dev/null
 validate_live_runtime_table
 
 PROBE_NAME="djinn-cgroup-$(date +%s)-$RANDOM"
