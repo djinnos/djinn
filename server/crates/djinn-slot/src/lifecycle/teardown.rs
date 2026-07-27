@@ -37,11 +37,10 @@ mod retirement_regressions {
     use super::*;
 
     fn explicit_submit() -> ParsedAgentOutput {
-        ParsedAgentOutput {
-            finalize_payload: Some(serde_json::json!({"summary": "done"})),
-            finalize_tool_name: Some("submit_work".to_string()),
-            ..ParsedAgentOutput::default()
-        }
+        let mut output = ParsedAgentOutput::default();
+        output.finalize_payload = Some(serde_json::json!({"summary": "done"}));
+        output.finalize_tool_name = Some("submit_work".to_string());
+        output
     }
 
     #[test]
@@ -95,10 +94,8 @@ mod retirement_regressions {
 
     #[test]
     fn teardown_rejects_tool_name_without_explicit_payload() {
-        let output = ParsedAgentOutput {
-            finalize_tool_name: Some("submit_work".to_string()),
-            ..ParsedAgentOutput::default()
-        };
+        let mut output = ParsedAgentOutput::default();
+        output.finalize_tool_name = Some("submit_work".to_string());
         assert!(!should_process_explicit_finalize(
             &output,
             "submit_work",
