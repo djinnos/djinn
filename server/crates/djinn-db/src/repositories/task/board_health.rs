@@ -443,10 +443,10 @@ pub(super) async fn stranded_ready_section(pool: &sqlx::PgPool) -> serde_json::V
             }
 
             // ── Unclaimed-since / severity ─────────────────────────────────
-            // The LATEST signal wins: each one marks a moment the task became
-            // dispatchable, and only the most recent is still true. Including
-            // the blocker-clear signal is what stops a blocked task from
-            // reporting its whole blocked interval as strand time.
+            // The latest BECAME-DISPATCHABLE signal wins; `updated_at` is only
+            // a fallback, never part of that comparison. See `strand_clock` for
+            // why the distinction matters — folding `updated_at` into the max
+            // would let any edit reset a starved task's clock.
             let open_transition_at: Option<String> =
                 row.try_get("open_transition_at").ok().flatten();
             let session_release_at: Option<String> =
