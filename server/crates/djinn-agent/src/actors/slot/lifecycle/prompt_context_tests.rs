@@ -1207,34 +1207,33 @@ fn resume_note_renders_alternate_checkpoint_ref_with_target_ref() {
     );
 }
 
-/// AC2: Selected source kind and target ref are rendered together in the resume
-/// note for all source/target combinations that carry both fields.
+/// AC2: Clean-task-branch source, target ref, prior-session lineage, review id,
+/// and fallback reason are rendered together without checkpoint replay.
 #[test]
 fn resume_note_selected_source_and_target_ref_details() {
-    // AutoSubmit with target_ref and submit_or_review_id
     let metadata = djinn_runtime::ResumeLifecycleMetadata {
         considered: true,
         source_kind: Some(djinn_runtime::ResumeSourceKind::CleanTaskBranch),
         target_ref: Some("refs/heads/task/my-feature".to_string()),
         submit_or_review_id: Some("pr-42".to_string()),
         selection_reason: Some(djinn_runtime::ResumeSelectionReason::CleanTaskBranchFallback),
-        prior_session_lineage: Some("session-submit-01".to_string()),
+        prior_session_lineage: Some("session-clean-task-branch-01".to_string()),
         ..Default::default()
     };
     let note = build_worker_resume_note("worker", Some(&metadata)).unwrap();
     assert_contains_all(
         &note,
         &[
-            "auto-submit",
+            "session-clean-task-branch-01",
+            "clean task branch",
             "refs/heads/task/my-feature",
             "pr-42",
             "clean fallback",
         ],
     );
-    // Auto-submit source should NOT include "checkpoint"
     assert!(
         !note.contains("checkpoint"),
-        "auto-submit note should not mention checkpoint: {note}"
+        "clean-task-branch note should not mention checkpoint: {note}"
     );
 }
 
@@ -1670,7 +1669,7 @@ fn resume_context_renders_minimal_fields_for_provider_rejection() {
         source_kind: Some(djinn_runtime::ResumeSourceKind::CleanTaskBranch),
         target_ref: Some("refs/heads/task/test".to_string()),
         selection_reason: Some(djinn_runtime::ResumeSelectionReason::CleanTaskBranchFallback),
-        // No checkpoint, no auto-submit, no failover — provider rejection.
+        // No checkpoint, submit/review id, or failover — provider rejection.
         ..Default::default()
     };
 
@@ -1684,7 +1683,7 @@ fn resume_context_renders_minimal_fields_for_provider_rejection() {
             "refs/heads/task/test",
         ],
     );
-    // Must NOT contain checkpoint or auto-submit fields.
+    // Must NOT contain checkpoint or submit/review fields.
     assert!(
         !note.contains("checkpoint `"),
         "must not mention checkpoint SHA when absent"
@@ -1695,19 +1694,17 @@ fn resume_context_renders_minimal_fields_for_provider_rejection() {
     );
 }
 
-/// AC 5: Preservation/no-replay — accepted auto-submit work produces a
-/// resume note that references the review id (not a checkpoint SHA).
-/// This proves the worker sees the auto-submit as the resume source
-/// and will not replay stale checkpoint work.
+/// AC 5: Preservation/no-replay — clean-task-branch resume metadata retains
+/// prior-session lineage and the review id without replaying a checkpoint SHA.
 #[test]
-fn preservation_no_replay_auto_submit_renders_review_id_not_checkpoint() {
+fn preservation_no_replay_clean_task_branch_renders_review_id_not_checkpoint() {
     let metadata = djinn_runtime::ResumeLifecycleMetadata {
         considered: true,
         selection_reason: Some(djinn_runtime::ResumeSelectionReason::CleanTaskBranchFallback),
         source_kind: Some(djinn_runtime::ResumeSourceKind::CleanTaskBranch),
         target_ref: Some("refs/heads/task/test".to_string()),
         submit_or_review_id: Some("review-accepted-42".to_string()),
-        prior_session_lineage: Some("session-auto-submit".to_string()),
+        prior_session_lineage: Some("session-clean-task-branch".to_string()),
         ..Default::default()
     };
 
@@ -1715,16 +1712,16 @@ fn preservation_no_replay_auto_submit_renders_review_id_not_checkpoint() {
     assert_contains_all(
         &note,
         &[
-            "session-auto-submit",
-            "review-accepted-42", // review id, not checkpoint
-            "clean fallback",     // selection reason label
-            "auto-submit",        // source kind label
+            "session-clean-task-branch",
+            "review-accepted-42",   // review id, not checkpoint
+            "refs/heads/task/test", // target ref
+            "clean fallback",       // selection reason label
+            "clean task branch",    // source kind label
         ],
     );
-    // Must NOT contain checkpoint references.
     assert!(
         !note.contains("checkpoint `"),
-        "auto-submit note must not reference checkpoint SHA"
+        "clean-task-branch note must not reference checkpoint SHA"
     );
 }
 
