@@ -776,7 +776,7 @@ fn parse_iso_elapsed_with(ts: &str, now: time::OffsetDateTime) -> Option<u64> {
 /// the server pod — while every blob was written by Job pods to the cache PVC.
 pub(crate) fn durable_output_stash_gc_roots(host_cache_root: &Path) -> Vec<PathBuf> {
     crate::output_stash::durable_gc_roots_under(
-        &host_cache_root.join("xdg"),
+        &djinn_core::paths::xdg_cache_root_under(host_cache_root),
         crate::output_stash::durable_root_for_gc(),
     )
 }
@@ -987,6 +987,19 @@ mod output_stash_gc_tests {
                 "the sweep must not resolve the Job-pod literal"
             );
         }
+
+        // And the `xdg` component must come from `djinn_core::paths`, not a
+        // literal re-spelled here — otherwise the two can drift apart and the
+        // sweep silently walks a directory nothing writes to.
+        assert_eq!(
+            djinn_core::paths::xdg_cache_root_under(&host),
+            host.join("xdg")
+        );
+        assert!(
+            roots
+                .iter()
+                .any(|r| r.starts_with(djinn_core::paths::xdg_cache_root_under(&host)))
+        );
     }
 
     /// Deletion stays disarmed unless BOTH gates are set. Correcting the GC

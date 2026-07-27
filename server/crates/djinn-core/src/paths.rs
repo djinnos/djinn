@@ -130,12 +130,27 @@ const SCIP_INDEXER_SUFFIX: [&str; 2] = ["djinn", "scip-indexer"];
 /// MUST enumerate from here, exactly as [`cargo_target_runs_root`] does for the
 /// non-XDG half of the same PVC.
 pub fn xdg_cache_root() -> PathBuf {
-    cache_root().join("xdg")
+    xdg_cache_root_under(&cache_root())
+}
+
+/// [`xdg_cache_root`] relative to an explicit cache mount.
+///
+/// Callers that already hold a resolved cache root (a coordinator context, a
+/// test tempdir) use this so the `xdg` path component lives in exactly one
+/// place.
+pub fn xdg_cache_root_under(cache_root: &Path) -> PathBuf {
+    cache_root.join("xdg")
 }
 
 /// Host-side view of one project's Job-pod `$XDG_CACHE_HOME`.
 pub fn project_xdg_cache_dir(project_id: &str) -> PathBuf {
     xdg_cache_root().join(project_id)
+}
+
+/// Host-side view of one project's Job-pod `$XDG_CACHE_HOME`, relative to an
+/// explicit cache mount.
+pub fn project_xdg_cache_dir_under(cache_root: &Path, project_id: &str) -> PathBuf {
+    xdg_cache_root_under(cache_root).join(project_id)
 }
 
 /// Durable output-stash root beneath an arbitrary XDG cache directory.
