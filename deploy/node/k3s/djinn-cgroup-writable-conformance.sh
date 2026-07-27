@@ -7,6 +7,7 @@ set -Eeuo pipefail
 
 LABEL='djinn.io/cgroup-writable'
 HANDLER='runc-cgroupwritable'
+RUNTIME_CLASS='djinn-cgroup-writable'
 RUNTIME_TABLE='[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc-cgroupwritable]'
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 TEMPLATE_SOURCE=${DJINN_CGROUP_TEMPLATE_SOURCE:-"$SCRIPT_DIR/containerd/config.toml.tmpl"}
@@ -118,7 +119,7 @@ metadata:
     app.kubernetes.io/name: djinn-cgroup-writable-conformance
 spec:
   restartPolicy: Never
-  runtimeClassName: $HANDLER
+  runtimeClassName: $RUNTIME_CLASS
   nodeName: $NODE_NAME
   securityContext:
     fsGroup: 1000
