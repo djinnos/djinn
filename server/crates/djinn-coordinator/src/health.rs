@@ -106,8 +106,6 @@ pub(super) async fn renew_coordinator_incarnation(db: &djinn_db::Database, incar
     }
 }
 
-const CARGO_TARGET_RUNS_ROOT: &str = djinn_supervisor::CARGO_TARGET_RUNS_ROOT;
-
 /// Default durable output-stash retention window for coordinator maintenance.
 ///
 /// Terminal-session stash pointers are eligible for GC after 30 days by
@@ -1290,6 +1288,33 @@ mod cargo_cache_health_tests {
         );
     }
 
+    /// `djinn_supervisor::CARGO_TARGET_RUNS_ROOT` names the **Job-pod** mount.
+    /// It is correct for rendering Job specs and wrong as a host-side default,
+    /// so the sweep's `None` fallback resolves through `djinn_core::paths`.
+    /// This exercises the real resolver, so re-hardcoding the Job-pod literal
+    /// in that arm is a test failure rather than a silent no-op sweep.
+    #[test]
+    fn run_dir_sweep_fallback_is_the_host_root_not_the_supervisor_job_pod_constant() {
+        assert_eq!(
+            djinn_supervisor::CARGO_TARGET_RUNS_ROOT,
+            "/cache/cargo-target-runs",
+            "this test's premise is that the supervisor constant is the Job-pod path"
+        );
+        let fallback = resolve_cargo_target_runs_sweep_root(None);
+        assert_ne!(
+            fallback,
+            std::path::PathBuf::from(djinn_supervisor::CARGO_TARGET_RUNS_ROOT),
+            "the host-side sweep fallback must not be the Job-pod constant"
+        );
+        assert_eq!(fallback, djinn_core::paths::cargo_target_runs_root());
+        // An explicit root (the production wiring) is passed through untouched.
+        let explicit = std::path::PathBuf::from("/tmp/explicit-runs-root");
+        assert_eq!(
+            resolve_cargo_target_runs_sweep_root(Some(&explicit)),
+            explicit
+        );
+    }
+
     /// Staleness is the only observable symptom of warming having stopped:
     /// seeding still reports `hit`, no Job fails, and disk usage is unchanged.
     #[test]
@@ -1335,11 +1360,18 @@ mod cargo_cache_health_tests {
 
 // ─── /cache/sccache guard ──────────────────────────────────────────────────
 
-/// Default path for the sccache directory on the shared PVC.
-/// This matches the `SCCACHE_DIR` convention used by warm/worker pods
-/// (namespaced per project), but the guard sweeps the parent `/cache/sccache`
-/// directory as a whole.
-const SCCACHE_ROOT: &str = "/cache/sccache";
+/// Host-side path of the sccache directory on the shared PVC.
+///
+/// Job pods know this directory as `/cache/sccache` (the `SCCACHE_DIR`
+/// compatibility fallback, namespaced per project); the guard sweeps the parent
+/// directory as a whole. It MUST resolve through the host's own mount: the
+/// server pod has no `/cache` at all, so the former hardcoded
+/// `SCCACHE_ROOT = "/cache/sccache"` made this guard log
+/// `sccache guard skipped; path does not exist` on every tick for the entire
+/// life of the deployment.
+fn sccache_root() -> std::path::PathBuf {
+    djinn_core::paths::sccache_root()
+}
 
 /// Distinct structured outcomes for the sccache sweep guard.
 ///
@@ -1364,14 +1396,25 @@ pub(super) enum SccacheSweepOutcome {
     NotEnabled,
     /// Deletion was attempted but `tokio::fs::remove_dir_all` failed.
     DeletionError,
+    /// The directory is a stale candidate and the global mode *is* `delete`,
+    /// but the sccache-specific arming switch
+    /// (`DJINN_CACHE_CLEANUP_SCCACHE_DELETE_ARMED`) is off, so the candidate was
+    /// reported and retained.
+    ///
+    /// This variant exists because the guard's root was hardcoded to the
+    /// Job-pod `/cache/sccache`, so the runbook's "observe candidates in
+    /// dry_run before flipping to delete" gate was cleared against a path that
+    /// could never produce a candidate. Repointing the sweep at the real host
+    /// mount must not silently inherit that authorization.
+    SafetyDisabledReportOnly,
 }
 
-/// Production entry point: sweep the global `/cache/sccache` directory
-/// using the coordinator's cleanup config.
+/// Production entry point: sweep the global sccache directory using the
+/// coordinator's cleanup config.
 ///
 /// Called from [`sweep_stale_resources`] on every periodic tick.
 async fn sweep_sccache_guard(config: &crate::context::CacheCleanupConfig) {
-    sweep_sccache_guard_under(config, Path::new(SCCACHE_ROOT)).await;
+    sweep_sccache_guard_under(config, &sccache_root()).await;
 }
 
 /// Testable implementation that accepts an explicit sccache root path.
@@ -1384,7 +1427,7 @@ async fn sweep_sccache_guard_under(
     use djinn_telemetry::cache_cleanup as cleanup_metrics;
     use djinn_telemetry::cache_cleanup::{
         COMPONENT_SCCACHE, MODE_DELETE, MODE_DRY_RUN, OUTCOME_DELETED, OUTCOME_DRY_RUN,
-        OUTCOME_ERROR, OUTCOME_RETAINED, OUTCOME_SKIPPED,
+        OUTCOME_ERROR, OUTCOME_RETAINED, OUTCOME_SAFETY_DISABLED_REPORT_ONLY, OUTCOME_SKIPPED,
     };
 
     if !config.sccache_enabled {
@@ -1493,6 +1536,31 @@ async fn sweep_sccache_guard_under(
         );
         cleanup_metrics::increment_cleanup_total(COMPONENT_SCCACHE, OUTCOME_DRY_RUN, MODE_DRY_RUN);
         return SccacheSweepOutcome::DryRunReported;
+    }
+
+    // Stale, and the global mode is `delete` — but this sweep spent its entire
+    // production life pointed at the nonexistent Job-pod `/cache/sccache`, so
+    // the operator evidence that unlocked `delete` never observed this tree.
+    // Require a second, sccache-specific arming switch before the first real
+    // `remove_dir_all` against it. Mirrors the fingerprint sweep's
+    // `safety_disabled_report_only` posture.
+    if !config.sccache_delete_armed {
+        tracing::warn!(
+            path = %sccache_root.display(),
+            age_hours = ?age_hours,
+            size_bytes,
+            projected_bytes = size_bytes,
+            mode = MODE_DELETE,
+            cleanup_outcome = OUTCOME_SAFETY_DISABLED_REPORT_ONLY,
+            "CoordinatorActor: sccache guard would delete stale directory but is not armed; \
+             set DJINN_CACHE_CLEANUP_SCCACHE_DELETE_ARMED=true after observing this candidate"
+        );
+        cleanup_metrics::increment_cleanup_total(
+            COMPONENT_SCCACHE,
+            OUTCOME_SAFETY_DISABLED_REPORT_ONLY,
+            MODE_DELETE,
+        );
+        return SccacheSweepOutcome::SafetyDisabledReportOnly;
     }
 
     // Destructive mode: actually delete.
@@ -1612,6 +1680,66 @@ mod sccache_guard_tests {
     use super::*;
     use crate::context::{CacheCleanupConfig, CacheCleanupMode};
 
+    /// The production guard must resolve the server pod's own cache mount.
+    ///
+    /// Verified against production on 2026-07-27: `ls /cache` in the
+    /// djinn-server container returns `No such file or directory`, while
+    /// `/var/lib/djinn/cache/sccache` holds 6.1 GB. With the old hardcoded
+    /// `SCCACHE_ROOT = "/cache/sccache"` the guard logged
+    /// `sccache guard skipped; path does not exist` on every tick.
+    ///
+    /// `ends_with` would NOT catch a re-hardcode (`/cache/sccache` also ends
+    /// with `cache/sccache`); the `assert_ne!` and the equality against the
+    /// canonical accessor are the load-bearing assertions.
+    #[test]
+    fn sccache_guard_resolves_the_host_cache_mount_not_the_job_pod_path() {
+        let root = sccache_root();
+        assert_ne!(
+            root,
+            std::path::PathBuf::from("/cache/sccache"),
+            "the host guard must not resolve to the Job-pod cache path"
+        );
+        assert_eq!(
+            root,
+            djinn_core::paths::sccache_root(),
+            "the host guard must resolve through djinn_core::paths"
+        );
+        assert!(
+            root.starts_with(djinn_core::paths::cache_root()),
+            "the host guard must resolve under the host cache root: {}",
+            root.display()
+        );
+    }
+
+    /// Correcting the path re-points a whole-tree `remove_dir_all` at real
+    /// production bytes for the first time. `mode=delete` alone must not be
+    /// enough, because the operator evidence that unlocked `delete` was
+    /// collected while the guard was pointed at a nonexistent directory.
+    #[tokio::test]
+    async fn delete_mode_without_arming_reports_but_retains() {
+        let config = CacheCleanupConfig {
+            mode: CacheCleanupMode::Delete,
+            sccache_enabled: true,
+            sccache_max_age_hours: 0, // any age is stale
+            ..CacheCleanupConfig::default()
+        };
+        assert!(
+            !config.sccache_delete_armed,
+            "the arming switch must default to off"
+        );
+        let tmp = tempfile::TempDir::new().unwrap();
+        let sccache_dir = tmp.path().join("sccache");
+        std::fs::create_dir(&sccache_dir).unwrap();
+        std::fs::write(sccache_dir.join("old_cache"), b"data").unwrap();
+
+        let outcome = sweep_sccache_guard_under(&config, &sccache_dir).await;
+        assert_eq!(outcome, SccacheSweepOutcome::SafetyDisabledReportOnly);
+        assert!(
+            sccache_dir.join("old_cache").exists(),
+            "an unarmed delete-mode sweep must not remove anything"
+        );
+    }
+
     /// Missing sccache path is a harmless skip.
     #[tokio::test]
     async fn missing_path_is_noop() {
@@ -1673,6 +1801,9 @@ mod sccache_guard_tests {
             mode: CacheCleanupMode::Delete,
             sccache_enabled: true,
             sccache_max_age_hours: 0, // any age is stale
+            // Deletion now needs the sccache-specific arming switch on top of
+            // the global mode; see `sccache_delete_armed`.
+            sccache_delete_armed: true,
             ..CacheCleanupConfig::default()
         };
         let tmp = tempfile::TempDir::new().unwrap();
@@ -1837,15 +1968,22 @@ async fn sweep_orphaned_cargo_target_run_dirs(
     root: Option<&Path>,
     config: &crate::context::CacheCleanupConfig,
 ) {
-    // Production wiring sets `cargo_target_runs_root` explicitly (the server pod
-    // mounts the shared cache PVC at `$DJINN_HOME/cache`, NOT the Job-pod
-    // `/cache` path the [`CARGO_TARGET_RUNS_ROOT`] constant names). The
-    // fallback only fires in tests/contexts that don't set it.
-    let root = match root {
-        Some(root) => root,
-        None => Path::new(CARGO_TARGET_RUNS_ROOT),
-    };
-    sweep_orphaned_cargo_target_run_dirs_under(db, root, config).await;
+    let root = resolve_cargo_target_runs_sweep_root(root);
+    sweep_orphaned_cargo_target_run_dirs_under(db, &root, config).await;
+}
+
+/// Resolve the root the run-dir sweep operates on.
+///
+/// Production wiring sets `cargo_target_runs_root` explicitly, but the fallback
+/// must be host-correct too: the server pod mounts the shared cache PVC at
+/// `$DJINN_HOME/cache`, NOT at the Job-pod `/cache` that
+/// `djinn_supervisor::CARGO_TARGET_RUNS_ROOT` names. That Job-pod literal used
+/// to be baked into the `None` arm, so any future `CoordinatorContext`
+/// constructor that forgot the field would silently reinstate the
+/// unbounded-growth no-op instead of failing visibly.
+fn resolve_cargo_target_runs_sweep_root(root: Option<&Path>) -> std::path::PathBuf {
+    root.map(Path::to_path_buf)
+        .unwrap_or_else(djinn_core::paths::cargo_target_runs_root)
 }
 
 pub(super) async fn sweep_orphaned_cargo_target_run_dirs_under(
@@ -3805,6 +3943,7 @@ mod cache_cleanup_cross_path_tests {
 
         let delete = CacheCleanupConfig {
             mode: CacheCleanupMode::Delete,
+            sccache_delete_armed: true,
             ..dry_run
         };
         assert_eq!(
@@ -3875,10 +4014,13 @@ async fn sweep_cargo_warm_base_guard(
     use djinn_telemetry::cache_cleanup as metrics;
     let guard: Arc<dyn gc::WarmJobGuard> =
         warm_job_guard.unwrap_or_else(|| Arc::new(gc::UnavailableWarmJobGuard));
-    let inventory = match gc::inventory_under(Path::new(gc::CARGO_WARM_BASE_ROOT)) {
+    // Resolve the server pod's own cache mount, never the Job-pod `/cache`
+    // convention — the same defect `sweep_cargo_health` already documents.
+    let warm_base_root = gc::cargo_warm_base_root();
+    let inventory = match gc::inventory_under(&warm_base_root) {
         Ok(inventory) => inventory,
         Err(error) => {
-            tracing::warn!(error = %error, root = gc::CARGO_WARM_BASE_ROOT, "warm-base GC inventory failed; retaining bases");
+            tracing::warn!(error = %error, root = %warm_base_root.display(), "warm-base GC inventory failed; retaining bases");
             metrics::increment_cleanup_total(
                 metrics::COMPONENT_CARGO_WARM_BASE,
                 metrics::OUTCOME_ERROR,
@@ -3937,7 +4079,7 @@ async fn sweep_cargo_warm_base_guard(
         config,
         &clock,
         config.mode,
-        Path::new(gc::CARGO_WARM_BASE_ROOT),
+        &warm_base_root,
     )
     .await;
     if result.reclaimed_bytes > 0 {
@@ -4003,7 +4145,7 @@ async fn sweep_cargo_warm_base_guard(
         &capacity,
         config,
         &clock,
-        Path::new(gc::CARGO_WARM_BASE_ROOT),
+        &warm_base_root,
     )
     .await;
     tracing::info!(
