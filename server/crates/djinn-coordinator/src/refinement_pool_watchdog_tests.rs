@@ -500,10 +500,17 @@ async fn pending_start_timeout_escalates_to_termination_at_retry_cap() {
             ),
         })
     );
-    let stops: Vec<_> = ProposalRepository::new(db, EventBus::noop())
-        .revisions(&fixture.proposal_id)
-        .await
-        .expect("read retry-cap lifecycle")
+    // `ProposalRepository::revisions` intentionally projects only the public
+    // proposal-history shape. Use the test-only exact-run reader for columns
+    // that are durable lifecycle correlation rather than proposal fields.
+    let lifecycle = djinn_db::test_support::refinement_run_read_only_snapshot_for_test(
+        &db,
+        &fixture.proposal_id,
+        &run_id,
+    )
+    .await;
+    let stops: Vec<_> = lifecycle
+        .lifecycle_rows
         .into_iter()
         .filter(|row| row.event_kind == "refinement_stop")
         .collect();
@@ -512,7 +519,6 @@ async fn pending_start_timeout_escalates_to_termination_at_retry_cap() {
         1,
         "exact terminal CAS writes one lifecycle stop"
     );
-    assert_eq!(stops[0].refinement_run_id.as_deref(), Some(run_id.as_str()));
     assert_eq!(
         stops[0].refinement_stop_tag.as_deref(),
         Some("agent_failure")
