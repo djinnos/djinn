@@ -6,6 +6,7 @@ pub mod dispatch_pause_tools;
 pub mod doctor_tools;
 pub mod epic_ops;
 pub mod epic_tools;
+pub mod evidence_command;
 pub mod evidence_plan;
 pub mod execution_tools;
 pub mod git_ops;
