@@ -415,19 +415,36 @@ impl ScipCacheStore {
     }
 }
 
-fn resolve_cache_root_from_env(mut get_env: impl FnMut(&str) -> Option<String>) -> PathBuf {
+fn resolve_cache_root_from_env(get_env: impl FnMut(&str) -> Option<String>) -> PathBuf {
+    resolve_cache_root_with(get_env, djinn_core::paths::scip_indexer_cache_root)
+}
+
+/// Resolution order for the SCIP indexer cache root:
+///
+/// 1. `$DJINN_SCIP_CACHE_DIR` — explicit override (tests, ad-hoc runs).
+/// 2. `$XDG_CACHE_HOME/djinn/scip-indexer` — the **Job-pod** answer. `djinn_k8s`
+///    renders `XDG_CACHE_HOME=/cache/xdg/{project_id}`, putting the cache on the
+///    shared cache PVC. This leg is correct there and only there.
+/// 3. `host_root()` — [`djinn_core::paths::scip_indexer_cache_root`], the
+///    caller's own mount of that same PVC (`$DJINN_HOME/cache/djinn/scip-indexer`
+///    in the server pod).
+///
+/// The legs this replaced were `$HOME/.cache/djinn/scip-indexer` — which in the
+/// server pod is `/home/djinn/.cache`, an ephemeral container-layer path that
+/// does not exist there at all — and, with `$HOME` unset, a **cwd-relative**
+/// `.cache/djinn/scip-indexer`, which scatters cache state into whatever
+/// directory the process was started in.
+fn resolve_cache_root_with(
+    mut get_env: impl FnMut(&str) -> Option<String>,
+    host_root: impl FnOnce() -> PathBuf,
+) -> PathBuf {
     if let Some(path) = get_env(CACHE_DIR_ENV).filter(|value| !value.is_empty()) {
         return PathBuf::from(path);
     }
     if let Some(path) = get_env("XDG_CACHE_HOME").filter(|value| !value.is_empty()) {
         return PathBuf::from(path).join(DEFAULT_CACHE_SUFFIX);
     }
-    if let Some(path) = get_env("HOME").filter(|value| !value.is_empty()) {
-        return PathBuf::from(path)
-            .join(".cache")
-            .join(DEFAULT_CACHE_SUFFIX);
-    }
-    PathBuf::from(".cache").join(DEFAULT_CACHE_SUFFIX)
+    host_root()
 }
 
 fn version_override_env_name(indexer: SupportedIndexer) -> String {
@@ -629,29 +646,81 @@ mod tests {
     }
 
     #[test]
-    fn cache_root_prefers_explicit_env_then_xdg_then_home() {
+    fn cache_root_prefers_explicit_env_then_xdg_then_host_mount() {
+        let host_root = || PathBuf::from("/var/lib/djinn/cache").join(DEFAULT_CACHE_SUFFIX);
+
         assert_eq!(
-            resolve_cache_root_from_env(|name| match name {
-                CACHE_DIR_ENV => Some("/cache/scip".to_string()),
-                _ => None,
-            }),
+            resolve_cache_root_with(
+                |name| match name {
+                    CACHE_DIR_ENV => Some("/cache/scip".to_string()),
+                    _ => None,
+                },
+                host_root
+            ),
             PathBuf::from("/cache/scip")
         );
+        // Job pods: `XDG_CACHE_HOME=/cache/xdg/{project_id}` is the PVC.
         assert_eq!(
-            resolve_cache_root_from_env(|name| match name {
-                "XDG_CACHE_HOME" => Some("/xdg".to_string()),
-                "HOME" => Some("/home/me".to_string()),
-                _ => None,
-            }),
-            PathBuf::from("/xdg").join(DEFAULT_CACHE_SUFFIX)
+            resolve_cache_root_with(
+                |name| match name {
+                    "XDG_CACHE_HOME" => Some("/cache/xdg/proj".to_string()),
+                    "HOME" => Some("/home/djinn".to_string()),
+                    _ => None,
+                },
+                host_root
+            ),
+            PathBuf::from("/cache/xdg/proj").join(DEFAULT_CACHE_SUFFIX)
         );
-        assert_eq!(
-            resolve_cache_root_from_env(|name| match name {
-                "HOME" => Some("/home/me".to_string()),
-                _ => None,
-            }),
-            PathBuf::from("/home/me/.cache").join(DEFAULT_CACHE_SUFFIX)
-        );
+    }
+
+    /// Regression for the `$HOME`-relative leak: with `XDG_CACHE_HOME` unset —
+    /// which is exactly the server/coordinator pod, since `XDG_CACHE_HOME` is
+    /// rendered only into Job specs — the root must come from the host's own
+    /// cache mount, NOT from `$HOME/.cache` and NOT from a cwd-relative
+    /// `.cache`. Both of those resolve to a tree the SCIP artifacts are not in.
+    #[test]
+    fn cache_root_never_falls_back_to_home_or_the_current_directory() {
+        let host_root = PathBuf::from("/var/lib/djinn/cache").join(DEFAULT_CACHE_SUFFIX);
+
+        for env in [
+            // Server pod: HOME set, XDG unset.
+            Some("/home/djinn".to_string()),
+            // Nothing set at all: the old code returned a relative `.cache/…`.
+            None,
+        ] {
+            let resolved = resolve_cache_root_with(
+                |name| match name {
+                    "HOME" => env.clone(),
+                    _ => None,
+                },
+                || host_root.clone(),
+            );
+            assert_eq!(resolved, host_root);
+            assert!(
+                resolved.is_absolute(),
+                "{} must be absolute; a cwd-relative cache root scatters state",
+                resolved.display()
+            );
+            assert!(
+                !resolved.starts_with("/home/djinn/.cache"),
+                "{} must not resolve into the ephemeral $HOME/.cache tree",
+                resolved.display()
+            );
+        }
+    }
+
+    /// The production accessor must resolve through `djinn_core::paths`, so it
+    /// tracks whichever mount the calling pod actually has.
+    #[test]
+    fn production_cache_root_resolves_through_djinn_core_paths() {
+        let prior = std::env::var("XDG_CACHE_HOME").ok();
+        let prior_override = std::env::var(CACHE_DIR_ENV).ok();
+        if prior.is_none() && prior_override.is_none() {
+            assert_eq!(
+                resolve_cache_root_from_env(|name| std::env::var(name).ok()),
+                djinn_core::paths::scip_indexer_cache_root()
+            );
+        }
     }
 
     #[test]

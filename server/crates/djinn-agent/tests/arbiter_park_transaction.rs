@@ -51,7 +51,7 @@ fn test_agent_context(db: Database) -> AgentContext {
         graph_warmer: None,
         repo_graph_ops: None,
         runtime_ops: None,
-        cargo_target_runs_root: Some({
+        cargo_target_runs_root: {
             let path = std::env::current_dir()
                 .unwrap()
                 .join("target")
@@ -59,7 +59,7 @@ fn test_agent_context(db: Database) -> AgentContext {
                 .join(format!("cargo-target-runs-{}", uuid::Uuid::now_v7()));
             std::fs::create_dir_all(&path).unwrap();
             path
-        }),
+        },
         mirror: None,
         rpc_registry: None,
         default_project_id: None,

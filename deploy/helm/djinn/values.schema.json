@@ -59,12 +59,27 @@
         "mode": { "type": "string", "enum": ["disabled", "required"] }
       }
     },
-    "cgroupWritableRuntimeClass": {
+    "cgroupWritable": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["enabled"],
+      "required": ["runtimeClass", "taskRuns"],
       "properties": {
-        "enabled": { "type": "boolean" }
+        "runtimeClass": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["enabled"],
+          "properties": {
+            "enabled": { "type": "boolean" }
+          }
+        },
+        "taskRuns": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["enabled"],
+          "properties": {
+            "enabled": { "type": "boolean" }
+          }
+        }
       }
     },
     "server": {
@@ -96,6 +111,35 @@
   },
   "allOf": [
     {"if":{"properties":{"monitoring":{"properties":{"enabled":{"const":true}},"required":["enabled"]}}},"then":{"properties":{"monitoring":{"properties":{"alertmanager":{"properties":{"webhookSecret":{"properties":{"name":{"minLength":1}},"required":["name","key"]}},"required":["webhookSecret"]}},"required":["alertmanager"]}}}},
+    {
+      "if": {
+        "properties": {
+          "cgroupWritable": {
+            "properties": {
+              "taskRuns": {
+                "properties": { "enabled": { "const": true } },
+                "required": ["enabled"]
+              }
+            },
+            "required": ["taskRuns"]
+          }
+        },
+        "required": ["cgroupWritable"]
+      },
+      "then": {
+        "properties": {
+          "cgroupWritable": {
+            "properties": {
+              "runtimeClass": {
+                "properties": { "enabled": { "const": true } },
+                "required": ["enabled"]
+              }
+            },
+            "required": ["runtimeClass"]
+          }
+        }
+      }
+    },
     {
       "if": {
         "properties": {

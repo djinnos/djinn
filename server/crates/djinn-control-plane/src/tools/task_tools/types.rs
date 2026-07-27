@@ -1027,9 +1027,75 @@ pub struct BoardHealthStrandedThreshold {
 }
 
 /// Dispatch-gate evaluation attached to a single stranded-ready finding.
+/// The task's own `task_dispatch` build-lease row: the dispatcher's durable
+/// record of a layer-1 build-admission attempt. Absent when the task has no
+/// lease row, or when the ledger could not be read (see
+/// `BoardHealthDispatchGateCoverage::unevaluated_gates`).
+#[derive(Serialize, Deserialize, schemars::JsonSchema, Default)]
+pub struct BoardHealthBuildLease {
+    /// `{task_id}:{generation}` — the lease key the dispatcher asked for.
+    pub consumer_id: String,
+    /// `queued`, `granted`, `launching`, `bound`, `active`, `suspect`, or
+    /// `terminal`.
+    pub state: String,
+    /// Set only on a `terminal` row.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub terminal_reason: Option<String>,
+    /// Weighted capacity this row buys (0 for a non-double-charged escalation).
+    pub weight: i64,
+    pub enqueue_sequence: i64,
+    /// Queued rows ahead of this one in the FIFO. Meaningful only while
+    /// `state == "queued"`.
+    pub queued_ahead: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<String>,
+}
+
+/// Pool-wide build capacity as the dispatcher's own authority reads it.
+/// Absent when the lease ledger could not be read.
+#[derive(Serialize, Deserialize, schemars::JsonSchema, Default)]
+pub struct BoardHealthBuildCapacity {
+    /// Weighted `SUM` over the occupying lease states, across every consumer
+    /// kind (dispatch, invocation and warm all contend for one cap).
+    pub occupancy: i64,
+    /// `build_lease_caps.cap`.
+    pub cap: i64,
+    /// True only when `admission_handoff.v1_mode = 'enforce'`. While the v1
+    /// authority is off or shadowing it writes no dispatch rows and cannot be
+    /// denying anything, so a full pool is not attributed to it.
+    pub enforcing: bool,
+    /// `occupancy >= cap` with a positive cap.
+    pub at_capacity: bool,
+}
+
+/// What the dispatch-gate verdict actually covers.
+///
+/// This block exists because an empty `reasons` used to be indistinguishable
+/// from "no gate was consulted". The stranded-ready section evaluates the gates
+/// in `evaluated_gates`; the dispatcher applies many more, listed in
+/// `unevaluated_gates`. `reasons` speaks for the former only.
+#[derive(Serialize, Deserialize, schemars::JsonSchema, Default)]
+pub struct BoardHealthDispatchGateCoverage {
+    /// Always `partial` — this section can never see the whole dispatch path.
+    pub scope: String,
+    /// Gates whose durable state this section read.
+    #[serde(default)]
+    pub evaluated_gates: Vec<String>,
+    /// Gates the dispatcher applies that this section did not consult. Every
+    /// entry is a way a task can be left queued while `gate_verdict` is
+    /// `unexplained`.
+    #[serde(default)]
+    pub unevaluated_gates: Vec<String>,
+    /// Human-readable restatement of the bound, carried in the payload so an
+    /// operator reading raw JSON cannot miss it.
+    pub note: String,
+}
+
 /// Mirrors the DB-built JSON so callers can render the gate verdict and
 /// surface machine-readable `reasons` (e.g. `no_eligible_model`,
-/// `image_not_ready`).
+/// `image_not_ready`, `build_lease_queued`, `build_pool_at_capacity`).
 #[derive(Serialize, Deserialize, schemars::JsonSchema, Default)]
 pub struct BoardHealthDispatchGate {
     /// Role the coordinator would dispatch this task to, derived from
@@ -1057,15 +1123,34 @@ pub struct BoardHealthDispatchGate {
     /// True when a usable credential exists for the creator or as an
     /// org-shared fallback.
     pub credential_available: bool,
-    /// Final gate verdict — `stranded` when no blocker fired, `blocked`
-    /// otherwise.
+    /// The task's own `task_dispatch` build-lease row, when it has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build_lease: Option<BoardHealthBuildLease>,
+    /// Pool-wide build capacity, when the lease ledger was readable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build_capacity: Option<BoardHealthBuildCapacity>,
+    /// Final gate verdict — `blocked` when an evaluated gate fired,
+    /// `unexplained` when none did.
+    ///
+    /// **There is no `stranded` verdict.** It used to be emitted whenever
+    /// `reasons` was empty, which for a task with no chosen model was
+    /// structurally guaranteed — the payload asserted "nothing is wrong"
+    /// about tasks the dispatcher was refusing for reasons it never
+    /// consulted. `unexplained` says what an empty `reasons` actually means,
+    /// and `coverage` says what it was allowed to look at.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub gate_verdict: Option<String>,
     /// Machine-readable gate reasons (`no_eligible_model`,
-    /// `image_not_ready`). Always present in the serialized output
-    /// (may be an empty array) so clients can rely on the key existing.
+    /// `image_not_ready`, `build_lease_queued`, `build_lease_terminal`,
+    /// `build_lease_occupied_without_session`, `build_pool_at_capacity`).
+    /// Always present in the serialized output (may be an empty array) so
+    /// clients can rely on the key existing. Read it together with
+    /// `coverage`: empty means "no EVALUATED gate fired".
     #[serde(default)]
     pub reasons: Vec<String>,
+    /// The bound on `reasons` and `gate_verdict`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coverage: Option<BoardHealthDispatchGateCoverage>,
     /// Last role the dispatcher actually attempted for this task, when
     /// known. Retained for backward compatibility with the initial
     /// board_health contract.
@@ -1092,9 +1177,17 @@ pub struct BoardHealthStrandedReadyFinding {
     pub epic_short_id: Option<String>,
     /// ISO-8601 UTC timestamp the task became unclaimed.
     pub unclaimed_since: String,
-    /// `high` when derived from an activity_log open transition or
-    /// session release; `low` when falling back to `tasks.updated_at`.
+    /// `high` when derived from a recorded event (open transition, session
+    /// release, or a blocker's close event); `low` for an `updated_at`-shaped
+    /// fallback.
     pub unclaimed_since_confidence: String,
+    /// Which signal produced `unclaimed_since`: `open_transition`,
+    /// `session_release`, `blocker_cleared`, `blocker_task_updated_at`, or
+    /// `task_updated_at`. The latest signal wins, so a task whose blocker
+    /// merged at 04:24 reports strand time from 04:24 rather than from
+    /// creation.
+    #[serde(default)]
+    pub unclaimed_since_basis: String,
     /// Elapsed minutes between `unclaimed_since` and the DB clock at
     /// query time.
     pub elapsed_minutes: i64,

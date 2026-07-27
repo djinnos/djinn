@@ -6,7 +6,7 @@
 //! local location from `$DJINN_HOME/projects/{owner}/{repo}`, using
 //! this module as the single source of truth.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Root directory containing all project clones.
 ///
@@ -50,12 +50,26 @@ fn projects_root_from(djinn_home: Option<PathBuf>, home_dir: Option<PathBuf>) ->
 /// 2. `~/.djinn/cache` — docker-compose / local-dev fallback.
 /// 3. `/tmp/.djinn/cache` — last-ditch fallback when `$HOME` isn't set.
 pub fn cache_root() -> PathBuf {
-    if let Ok(djinn_home) = std::env::var("DJINN_HOME")
-        && !djinn_home.is_empty()
+    cache_root_from(
+        std::env::var_os("DJINN_HOME").map(PathBuf::from),
+        dirs::home_dir(),
+    )
+}
+
+/// Pure derivation behind [`cache_root`].
+///
+/// Deliberately takes **only** `$DJINN_HOME` and the home directory: there is
+/// no `XDG_CACHE_HOME` parameter, because `XDG_CACHE_HOME` is a Job-pod-only
+/// variable and consulting it on the host is precisely the bug this module
+/// exists to prevent. A regression that reintroduces an XDG leg has to change
+/// this signature.
+fn cache_root_from(djinn_home: Option<PathBuf>, home_dir: Option<PathBuf>) -> PathBuf {
+    if let Some(djinn_home) = djinn_home
+        && !djinn_home.as_os_str().is_empty()
     {
-        return PathBuf::from(djinn_home).join("cache");
+        return djinn_home.join("cache");
     }
-    dirs::home_dir()
+    home_dir
         .unwrap_or_else(|| PathBuf::from("/tmp"))
         .join(".djinn")
         .join("cache")
@@ -205,6 +219,14 @@ declare_cache_roots! {
         declared_by: "djinn_k8s::job::common_cache_env_vars (XDG_CACHE_HOME)",
         purpose: "per-project XDG cache home: durable output stash and SCIP indexer cache",
     }
+    /// Host-process cache namespace used when XDG_CACHE_HOME is unset.
+    Djinn {
+        dir: "djinn",
+        namespacing: CacheRootNamespacing::Shared,
+        reserved_children: [],
+        declared_by: "djinn_core::paths::{output_stash_root,scip_indexer_cache_root}",
+        purpose: "host-process durable output stash and SCIP indexer cache fallback",
+    }
     /// Shared Cargo registry index and crate sources.
     Cargo {
         dir: "cargo",
@@ -326,6 +348,86 @@ pub fn sccache_root() -> PathBuf {
     CacheRootId::Sccache.host_path()
 }
 
+/// Relative location of the durable output stash inside *any* XDG cache tree.
+///
+/// Kept as a shared constant so the writer (`$XDG_CACHE_HOME/djinn/output_stash`
+/// in Job pods) and the host-side GC cannot drift apart.
+const OUTPUT_STASH_SUFFIX: [&str; 2] = ["djinn", "output_stash"];
+
+/// Relative location of the SCIP indexer cache inside *any* XDG cache tree.
+const SCIP_INDEXER_SUFFIX: [&str; 2] = ["djinn", "scip-indexer"];
+
+/// Host-side root of the per-project XDG cache trees that Job pods write into.
+///
+/// `XDG_CACHE_HOME` is rendered **only** into Job pods, as
+/// `/cache/xdg/{project_id}` (`djinn_k8s::job`). It is set nowhere in the
+/// server/coordinator pod's Helm templates. So every `$XDG_CACHE_HOME`-relative
+/// store — the durable output stash, the SCIP indexer cache — lands on the
+/// shared cache PVC under `<pvc>/xdg/{project_id}/…` when a Job writes it, but
+/// the *same* XDG→`$HOME/.cache` chain evaluated in the server pod resolves to
+/// `/home/djinn/.cache`, a path that does not even exist there (verified in
+/// production). Host-side sweeps that want the bytes Job pods actually wrote
+/// MUST enumerate from here, exactly as [`cargo_target_runs_root`] does for the
+/// non-XDG half of the same PVC.
+pub fn xdg_cache_root() -> PathBuf {
+    CacheRootId::Xdg.host_path()
+}
+
+/// [`xdg_cache_root`] relative to an explicit cache mount.
+///
+/// Callers that already hold a resolved cache root (a coordinator context, a
+/// test tempdir) use this so the `xdg` path component lives in exactly one
+/// place.
+pub fn xdg_cache_root_under(cache_root: &Path) -> PathBuf {
+    cache_root.join(CacheRootId::Xdg.dir_name())
+}
+
+/// Host-side view of one project's Job-pod `$XDG_CACHE_HOME`.
+pub fn project_xdg_cache_dir(project_id: &str) -> PathBuf {
+    xdg_cache_root().join(project_id)
+}
+
+/// Host-side view of one project's Job-pod `$XDG_CACHE_HOME`, relative to an
+/// explicit cache mount.
+pub fn project_xdg_cache_dir_under(cache_root: &Path, project_id: &str) -> PathBuf {
+    xdg_cache_root_under(cache_root).join(project_id)
+}
+
+/// Durable output-stash root beneath an arbitrary XDG cache directory.
+///
+/// Pass a [`project_xdg_cache_dir`] to get the host's view of a Job pod's stash.
+pub fn output_stash_dir_under(xdg_cache_dir: &Path) -> PathBuf {
+    let mut path = xdg_cache_dir.to_path_buf();
+    path.extend(OUTPUT_STASH_SUFFIX);
+    path
+}
+
+/// SCIP indexer cache root beneath an arbitrary XDG cache directory.
+pub fn scip_indexer_cache_dir_under(xdg_cache_dir: &Path) -> PathBuf {
+    let mut path = xdg_cache_dir.to_path_buf();
+    path.extend(SCIP_INDEXER_SUFFIX);
+    path
+}
+
+/// Host-side durable output-stash root for a process with no `$XDG_CACHE_HOME`.
+///
+/// This is where a server-pod-hosted session's durable stash *should* live: on
+/// the cache PVC, not on the pod's ephemeral container layer.
+pub fn output_stash_root() -> PathBuf {
+    CacheRootId::Djinn.host_path().join("output_stash")
+}
+
+/// Host-side SCIP indexer cache root for a process with no `$XDG_CACHE_HOME`.
+///
+/// The last-resort fallback for `djinn_graph`'s cache-root resolution. The
+/// alternative it replaced was `$HOME/.cache/djinn/scip-indexer` (ephemeral,
+/// wrong tree) and — when `$HOME` was unset too — a **cwd-relative**
+/// `.cache/djinn/scip-indexer`, which silently scatters cache state into
+/// whatever directory the process happened to start in.
+pub fn scip_indexer_cache_root() -> PathBuf {
+    CacheRootId::Djinn.host_path().join("scip-indexer")
+}
+
 /// Per-project clone directory: `{projects_root}/{owner}/{repo}`.
 ///
 /// Every consumer of a project's filesystem location — git fetch,
@@ -408,6 +510,7 @@ mod tests {
             (cargo_target_root(), CacheRootId::CargoTarget),
             (cargo_target_runs_root(), CacheRootId::CargoTargetRuns),
             (sccache_root(), CacheRootId::Sccache),
+            (xdg_cache_root(), CacheRootId::Xdg),
         ] {
             assert_eq!(path, id.host_path());
             assert_eq!(
@@ -417,6 +520,14 @@ mod tests {
                 id.dir_name()
             );
         }
+        assert_eq!(
+            output_stash_root().parent(),
+            Some(CacheRootId::Djinn.host_path().as_path())
+        );
+        assert_eq!(
+            scip_indexer_cache_root().parent(),
+            Some(CacheRootId::Djinn.host_path().as_path())
+        );
     }
 
     #[test]
@@ -481,5 +592,87 @@ mod tests {
             .map(CacheRootId::dir_name)
             .collect();
         assert_eq!(per_run, vec!["cargo-target-runs"]);
+    }
+
+    /// The XDG accessors exist precisely because `XDG_CACHE_HOME` is a Job-pod
+    /// -only variable. If any of them ever resolved through the ambient
+    /// `XDG_CACHE_HOME`/`$HOME` chain, the host sweep would walk the server
+    /// pod's ephemeral container layer instead of the PVC — the leak these
+    /// accessors were added to close.
+    ///
+    /// Neutralization check: `cache_root_from` is the *only* input path, and it
+    /// takes no `XDG_CACHE_HOME`. Every XDG accessor must hang off it, so a
+    /// server pod (`DJINN_HOME=/var/lib/djinn`, `HOME=/home/djinn`,
+    /// `XDG_CACHE_HOME` unset) resolves the PVC mount and never
+    /// `/home/djinn/.cache`, whatever the ambient environment says.
+    #[test]
+    fn xdg_host_accessors_ignore_the_ambient_xdg_and_home_chain() {
+        let server_pod_cache = cache_root_from(
+            Some(PathBuf::from("/var/lib/djinn")),
+            Some(PathBuf::from("/home/djinn")),
+        );
+        assert_eq!(server_pod_cache, PathBuf::from("/var/lib/djinn/cache"));
+        assert!(
+            !server_pod_cache.starts_with("/home/djinn/.cache"),
+            "the server pod's cache root must never be the ephemeral $HOME/.cache tree"
+        );
+
+        for path in [
+            xdg_cache_root(),
+            output_stash_root(),
+            scip_indexer_cache_root(),
+        ] {
+            assert!(
+                path.starts_with(cache_root()),
+                "{} must live under the host cache root {}",
+                path.display(),
+                cache_root().display()
+            );
+            if let Some(xdg) = std::env::var_os("XDG_CACHE_HOME") {
+                assert!(
+                    !path.starts_with(PathBuf::from(xdg)),
+                    "{} must not resolve through the ambient XDG_CACHE_HOME",
+                    path.display()
+                );
+            }
+        }
+        assert_eq!(xdg_cache_root(), CacheRootId::Xdg.host_path());
+    }
+
+    /// The Job pod writes `$XDG_CACHE_HOME/djinn/{output_stash,scip-indexer}`
+    /// where `$XDG_CACHE_HOME = /cache/xdg/<project_id>`. The host's view of
+    /// that exact tree must be `cache_root()/xdg/<project_id>/djinn/…` — and
+    /// must never collapse onto the Job-pod `/cache` literal.
+    #[test]
+    fn project_xdg_accessors_mirror_the_job_pod_layout_under_the_host_mount() {
+        let project = "019ea3bd-a305-73e3-806c-4edcc96ebfe2";
+        let project_xdg = project_xdg_cache_dir(project);
+        assert_eq!(project_xdg, cache_root().join("xdg").join(project));
+
+        assert_eq!(
+            output_stash_dir_under(&project_xdg),
+            project_xdg.join("djinn").join("output_stash")
+        );
+        assert_eq!(
+            scip_indexer_cache_dir_under(&project_xdg),
+            project_xdg.join("djinn").join("scip-indexer")
+        );
+
+        for (host, job_pod_literal) in [
+            (
+                output_stash_dir_under(&project_xdg),
+                format!("/cache/xdg/{project}/djinn/output_stash"),
+            ),
+            (
+                scip_indexer_cache_dir_under(&project_xdg),
+                format!("/cache/xdg/{project}/djinn/scip-indexer"),
+            ),
+        ] {
+            assert_ne!(
+                host,
+                PathBuf::from(&job_pod_literal),
+                "host accessor must not resolve to the Job-pod path {job_pod_literal}"
+            );
+        }
     }
 }

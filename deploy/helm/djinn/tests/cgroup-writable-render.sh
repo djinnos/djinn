@@ -23,16 +23,31 @@ require_tool bash
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 
-# RuntimeClass remains an installation gate: defaults omit it and enabling it
-# must render precisely the runtime handler and eligibility selector.
+# The preparation release has two independent switches. Defaults must render
+# neither the RuntimeClass nor a task-run assignment; enabling only
+# runtimeClass installs the existing handler and selector without activating
+# task-run assignment.
 helm template cgroup-writable-default "$CHART_DIR" --is-upgrade >"$WORK/default.yaml"
-helm template cgroup-writable-enabled "$CHART_DIR" --is-upgrade \
-  --set cgroupWritableRuntimeClass.enabled=true >"$WORK/enabled.yaml"
-if helm template cgroup-writable-invalid "$CHART_DIR" --set-string cgroupWritableRuntimeClass.enabled=not-a-bool >/dev/null 2>&1; then
-  echo 'FAIL: cgroupWritableRuntimeClass.enabled accepted a malformed rollout value' >&2
-  exit 1
-fi
-python3 - "$WORK/default.yaml" "$WORK/enabled.yaml" <<'PY'
+helm template cgroup-writable-preparation "$CHART_DIR" --is-upgrade \
+  --set cgroupWritable.runtimeClass.enabled=true >"$WORK/preparation.yaml"
+for invalid in \
+  'cgroupWritable.runtimeClass.enabled=not-a-bool' \
+  'cgroupWritable.taskRuns.enabled=not-a-bool'; do
+  if helm template cgroup-writable-invalid "$CHART_DIR" --set-string "$invalid" >/dev/null 2>&1; then
+    echo "FAIL: cgroupWritable accepted malformed preparation value: $invalid" >&2
+    exit 1
+  fi
+done
+for invalid in \
+  'cgroupWritable.unknown.enabled=true' \
+  'cgroupWritable.runtimeClass.unknown=true' \
+  'cgroupWritable.runtimeClass.enabled=false,cgroupWritable.taskRuns.enabled=true'; do
+  if helm template cgroup-writable-invalid "$CHART_DIR" --set "$invalid" >/dev/null 2>&1; then
+    echo "FAIL: cgroupWritable accepted invalid preparation value: $invalid" >&2
+    exit 1
+  fi
+done
+python3 - "$WORK/default.yaml" "$WORK/preparation.yaml" <<'PY'
 import sys
 
 
@@ -43,10 +58,11 @@ def documents(text):
 def runtime_classes(text):
     return [doc for doc in documents(text) if '\nkind: RuntimeClass\n' in f'\n{doc}']
 
-base, enabled = (open(path, encoding='utf-8').read() for path in sys.argv[1:])
+base, preparation = (open(path, encoding='utf-8').read() for path in sys.argv[1:])
 assert not runtime_classes(base), 'disabled defaults rendered RuntimeClass'
-classes = runtime_classes(enabled)
-assert len(classes) == 1, f'enabled render expected one RuntimeClass, got {len(classes)}'
+assert 'runtimeClassName:' not in base, 'disabled defaults assigned RuntimeClass to a PodSpec'
+classes = runtime_classes(preparation)
+assert len(classes) == 1, f'preparation render expected one RuntimeClass, got {len(classes)}'
 manifest = classes[0]
 for exact in (
     'name: djinn-cgroup-writable',
@@ -54,7 +70,7 @@ for exact in (
     'djinn.io/cgroup-writable: "true"',
 ):
     assert exact in manifest, f'missing RuntimeClass contract: {exact}'
-assert 'runtimeClassName:' not in enabled, 'foundation must not assign RuntimeClass to task-run PodSpecs'
+assert 'runtimeClassName:' not in preparation, 'preparation must not assign RuntimeClass to task-run PodSpecs'
 PY
 
 # The alert is evaluated against compact event fixtures so the matcher is not
@@ -91,7 +107,7 @@ PY
 
 # The pinned table is intentionally exact, and task-run sources/renders must
 # never gain a cgroup hostPath during this foundation-only rollout.
-python3 - "$TEMPLATE" "$CONFORMANCE" "$WORK/enabled.yaml" "$REPO_DIR/deploy/helm/djinn/templates" <<'PY'
+python3 - "$TEMPLATE" "$CONFORMANCE" "$WORK/preparation.yaml" "$REPO_DIR/deploy/helm/djinn/templates" <<'PY'
 import re
 import sys
 from pathlib import Path

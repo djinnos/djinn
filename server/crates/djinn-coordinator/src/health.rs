@@ -2,7 +2,7 @@
 use super::*;
 
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use djinn_core::clock::{Clock, SystemClock};
 use djinn_provider::github_api::GitHubApiClient;
@@ -136,19 +136,36 @@ pub(super) async fn sweep_stale_resources(
     reap_orphaned_pending_attempts(db).await;
     reap_orphaned_taskrun_jobs(db, app_state, "periodic").await;
     sweep_orphan_worker_sessions(db).await;
+    // Every cache sweep below runs `remove_file` / `remove_dir_all` under the
+    // host's cache mount. They resolve it through the context (which defaults
+    // to `djinn_core::paths::cache_root()`) rather than calling `paths::` at
+    // each site, so a test context can confine them to a tempdir. With the old
+    // direct `paths::` calls, `health::sweep_stale_resources` under test
+    // resolved — and deleted from — the developer's real `~/.djinn/cache`.
+    let host_cache_root = app_state.resolved_host_cache_root();
+    let cargo_target_runs_root = app_state
+        .cargo_target_runs_root
+        .clone()
+        .unwrap_or_else(|| host_cache_root.join("cargo-target-runs"));
     sweep_orphaned_cargo_target_run_dirs(
         db,
-        app_state.cargo_target_runs_root.as_deref(),
+        Some(cargo_target_runs_root.as_path()),
         &app_state.cache_cleanup,
     )
     .await;
-    sweep_durable_output_stash(db).await;
-    sweep_cargo_health().await;
-    sweep_sccache_guard(&app_state.cache_cleanup).await;
-    sweep_cargo_warm_base_guard(
+    sweep_durable_output_stash_under(
+        db,
+        &durable_output_stash_gc_roots(&host_cache_root),
+        &app_state.cache_cleanup,
+    )
+    .await;
+    sweep_cargo_health_under(&host_cache_root.join("cargo-target")).await;
+    sweep_sccache_guard_under(&app_state.cache_cleanup, &host_cache_root.join("sccache")).await;
+    sweep_cargo_warm_base_guard_under(
         db,
         &app_state.cache_cleanup,
         app_state.warm_job_guard.clone(),
+        &host_cache_root.join("cargo-target"),
     )
     .await;
 
@@ -749,12 +766,46 @@ fn parse_iso_elapsed_with(ts: &str, now: time::OffsetDateTime) -> Option<u64> {
 
 // ─── Durable output-stash GC ────────────────────────────────────────────────
 
-async fn sweep_durable_output_stash(db: &djinn_db::Database) {
-    let Some(root) = crate::output_stash::durable_root_for_gc() else {
-        tracing::debug!("CoordinatorActor: output-stash GC skipped; durable root unavailable");
-        return;
-    };
+/// Every durable output-stash root the sweep must visit, given the host's cache
+/// mount.
+///
+/// This is where the leak was: the sweep used to visit exactly one root, the
+/// `$XDG_CACHE_HOME → $HOME/.cache` chain evaluated in the *server* pod. Since
+/// `XDG_CACHE_HOME` is rendered only into Job specs, that resolved to
+/// `/home/djinn/.cache/djinn/output_stash` — a directory that does not exist in
+/// the server pod — while every blob was written by Job pods to the cache PVC.
+pub(crate) fn durable_output_stash_gc_roots(host_cache_root: &Path) -> Vec<PathBuf> {
+    crate::output_stash::durable_gc_roots_under(
+        &djinn_core::paths::xdg_cache_root_under(host_cache_root),
+        crate::output_stash::durable_root_for_gc(),
+    )
+}
 
+/// Deletion is armed only when the global cleanup mode is `delete` AND the
+/// stash-specific arming switch is set. See
+/// `CacheCleanupConfig::output_stash_delete_armed` for why the second gate is
+/// not redundant.
+fn output_stash_gc_mode(
+    config: &crate::context::CacheCleanupConfig,
+) -> crate::output_stash::OutputStashGcMode {
+    if config.mode.is_delete() && config.output_stash_delete_armed {
+        crate::output_stash::OutputStashGcMode::Delete
+    } else {
+        crate::output_stash::OutputStashGcMode::ReportOnly
+    }
+}
+
+async fn sweep_durable_output_stash_under(
+    db: &djinn_db::Database,
+    roots: &[PathBuf],
+    config: &crate::context::CacheCleanupConfig,
+) {
+    if roots.is_empty() {
+        tracing::debug!("CoordinatorActor: output-stash GC skipped; no durable roots reachable");
+        return;
+    }
+
+    let mode = output_stash_gc_mode(config);
     let retention_days = output_stash_gc_retention_days();
     let retention_cutoff_unix_secs = output_stash_retention_cutoff_unix_secs(
         time::OffsetDateTime::now_utc().unix_timestamp(),
@@ -765,7 +816,7 @@ async fn sweep_durable_output_stash(db: &djinn_db::Database) {
         Err(e) => {
             tracing::warn!(
                 error = %e,
-                root = %root.display(),
+                root_count = roots.len(),
                 retention_days,
                 "CoordinatorActor: output-stash GC failed to load sessions; will retry on next sweep"
             );
@@ -773,59 +824,65 @@ async fn sweep_durable_output_stash(db: &djinn_db::Database) {
         }
     };
 
-    let gc_root = root.clone();
-    let report = match tokio::task::spawn_blocking(move || {
-        crate::output_stash::gc_durable_output_stash(
-            &gc_root,
-            retention_cutoff_unix_secs,
-            |session_id| Ok(sessions.get(session_id).cloned()),
-        )
-    })
-    .await
-    {
-        Ok(report) => report,
-        Err(e) => {
-            tracing::warn!(
-                error = %e,
-                root = %root.display(),
-                retention_days,
-                "CoordinatorActor: output-stash GC worker failed; will retry on next sweep"
-            );
-            return;
-        }
-    };
+    for root in roots {
+        let gc_root = root.clone();
+        let sessions = sessions.clone();
+        let report = match tokio::task::spawn_blocking(move || {
+            crate::output_stash::gc_durable_output_stash_with_mode(
+                &gc_root,
+                retention_cutoff_unix_secs,
+                |session_id| Ok(sessions.get(session_id).cloned()),
+                mode,
+            )
+        })
+        .await
+        {
+            Ok(report) => report,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    root = %root.display(),
+                    retention_days,
+                    "CoordinatorActor: output-stash GC worker failed; will retry on next sweep"
+                );
+                continue;
+            }
+        };
 
-    if report.is_success() {
-        tracing::info!(
-            root = %root.display(),
-            retention_days,
-            retention_cutoff_unix_secs,
-            pointers_scanned = report.pointers_scanned,
-            pointers_deleted = report.pointers_deleted,
-            pointers_retained = report.pointers_retained,
-            blobs_scanned = report.blobs_scanned,
-            blobs_deleted = report.blobs_deleted,
-            blobs_retained = report.blobs_retained,
-            error_count = 0_u64,
-            cleanup_outcome = "completed",
-            "CoordinatorActor: output-stash GC completed"
-        );
-    } else {
-        tracing::warn!(
-            root = %root.display(),
-            retention_days,
-            retention_cutoff_unix_secs,
-            pointers_scanned = report.pointers_scanned,
-            pointers_deleted = report.pointers_deleted,
-            pointers_retained = report.pointers_retained,
-            blobs_scanned = report.blobs_scanned,
-            blobs_deleted = report.blobs_deleted,
-            blobs_retained = report.blobs_retained,
-            error_count = report.errors.len(),
-            errors = ?report.errors,
-            cleanup_outcome = "completed_with_errors",
-            "CoordinatorActor: output-stash GC completed with errors; will retry failed work on next sweep"
-        );
+        if report.is_success() {
+            tracing::info!(
+                root = %root.display(),
+                mode = mode.as_metric_label(),
+                retention_days,
+                retention_cutoff_unix_secs,
+                pointers_scanned = report.pointers_scanned,
+                pointers_deleted = report.pointers_deleted,
+                pointers_retained = report.pointers_retained,
+                blobs_scanned = report.blobs_scanned,
+                blobs_deleted = report.blobs_deleted,
+                blobs_retained = report.blobs_retained,
+                error_count = 0_u64,
+                cleanup_outcome = "completed",
+                "CoordinatorActor: output-stash GC completed"
+            );
+        } else {
+            tracing::warn!(
+                root = %root.display(),
+                mode = mode.as_metric_label(),
+                retention_days,
+                retention_cutoff_unix_secs,
+                pointers_scanned = report.pointers_scanned,
+                pointers_deleted = report.pointers_deleted,
+                pointers_retained = report.pointers_retained,
+                blobs_scanned = report.blobs_scanned,
+                blobs_deleted = report.blobs_deleted,
+                blobs_retained = report.blobs_retained,
+                error_count = report.errors.len(),
+                errors = ?report.errors,
+                cleanup_outcome = "completed_with_errors",
+                "CoordinatorActor: output-stash GC completed with errors; will retry failed work on next sweep"
+            );
+        }
     }
 }
 
@@ -905,6 +962,140 @@ mod output_stash_gc_tests {
         assert_eq!(output_stash_retention_cutoff_unix_secs(-1, 30), 0);
         assert_eq!(output_stash_retention_cutoff_unix_secs(10, 30), 0);
     }
+
+    /// The sweep's roots must be derived from the host's own cache mount, so
+    /// they follow whatever the calling pod has mounted rather than the Job-pod
+    /// `/cache` convention or the server pod's ephemeral `$HOME/.cache`.
+    #[test]
+    fn gc_roots_are_derived_from_the_host_cache_mount() {
+        let host = crate::test_helpers::test_persistent_dir("djinn-stash-gc-roots-");
+        let project = "019ea3bd-a305-73e3-806c-4edcc96ebfe2";
+        let expected = host.join("xdg").join(project).join("djinn/output_stash");
+        std::fs::create_dir_all(&expected).unwrap();
+
+        let roots = durable_output_stash_gc_roots(&host);
+
+        assert!(
+            roots.contains(&expected),
+            "expected {} in {roots:?}",
+            expected.display()
+        );
+        for root in &roots {
+            assert_ne!(
+                root,
+                &PathBuf::from(format!("/cache/xdg/{project}/djinn/output_stash")),
+                "the sweep must not resolve the Job-pod literal"
+            );
+        }
+
+        // And the `xdg` component must come from `djinn_core::paths`, not a
+        // literal re-spelled here — otherwise the two can drift apart and the
+        // sweep silently walks a directory nothing writes to.
+        assert_eq!(
+            djinn_core::paths::xdg_cache_root_under(&host),
+            host.join("xdg")
+        );
+        assert!(
+            roots
+                .iter()
+                .any(|r| r.starts_with(djinn_core::paths::xdg_cache_root_under(&host)))
+        );
+    }
+
+    /// Deletion stays disarmed unless BOTH gates are set. Correcting the GC
+    /// path re-points a real `remove_file` loop at production blobs for the
+    /// first time; `mode=delete` alone was authorised against a path that could
+    /// never produce a candidate.
+    #[test]
+    fn output_stash_deletion_requires_both_the_mode_and_the_arming_flag() {
+        use crate::context::{CacheCleanupConfig, CacheCleanupMode};
+        use crate::output_stash::OutputStashGcMode;
+
+        let base = CacheCleanupConfig::default();
+        assert!(
+            !base.output_stash_delete_armed,
+            "the arming flag must default to off"
+        );
+        assert_eq!(output_stash_gc_mode(&base), OutputStashGcMode::ReportOnly);
+
+        let mode_only = CacheCleanupConfig {
+            mode: CacheCleanupMode::Delete,
+            ..CacheCleanupConfig::default()
+        };
+        assert_eq!(
+            output_stash_gc_mode(&mode_only),
+            OutputStashGcMode::ReportOnly,
+            "global delete mode alone must not arm the stash sweep"
+        );
+
+        let armed_only = CacheCleanupConfig {
+            output_stash_delete_armed: true,
+            ..CacheCleanupConfig::default()
+        };
+        assert_eq!(
+            output_stash_gc_mode(&armed_only),
+            OutputStashGcMode::ReportOnly,
+            "the arming flag alone must not bypass the global dry-run mode"
+        );
+
+        let both = CacheCleanupConfig {
+            mode: CacheCleanupMode::Delete,
+            output_stash_delete_armed: true,
+            ..CacheCleanupConfig::default()
+        };
+        assert_eq!(output_stash_gc_mode(&both), OutputStashGcMode::Delete);
+    }
+
+    /// `sweep_stale_resources` runs five cache sweeps, two of which call
+    /// `remove_dir_all`. A test context that leaves their roots unset resolves
+    /// `djinn_core::paths::cache_root()` — on a developer machine, the real
+    /// `~/.djinn/cache`. Running the coordinator suite must never be able to
+    /// delete a developer's build cache.
+    #[tokio::test]
+    async fn test_coordinator_context_confines_every_cache_sweep_to_a_tempdir() {
+        let db = crate::test_helpers::create_test_db();
+        let ctx = crate::test_helpers::coordinator_context_from_db(
+            db,
+            tokio_util::sync::CancellationToken::new(),
+        );
+
+        let real_cache_root = djinn_core::paths::cache_root();
+        let resolved = ctx.resolved_host_cache_root();
+        assert!(
+            ctx.host_cache_root.is_some(),
+            "a test context must pin the host cache root"
+        );
+        assert_ne!(
+            resolved,
+            real_cache_root,
+            "test sweeps must not resolve the real cache root {}",
+            real_cache_root.display()
+        );
+
+        // Every derived root the sweep uses must sit inside the tempdir.
+        let cargo_target_runs = ctx
+            .cargo_target_runs_root
+            .clone()
+            .expect("test context must pin the cargo-target-runs root");
+        for root in [
+            cargo_target_runs,
+            resolved.join("cargo-target"),
+            resolved.join("sccache"),
+            resolved.join("xdg"),
+        ] {
+            assert!(
+                root.starts_with(&resolved),
+                "{} escapes the test cache root {}",
+                root.display(),
+                resolved.display()
+            );
+            assert!(
+                !root.starts_with(&real_cache_root),
+                "{} points into the developer's real cache",
+                root.display()
+            );
+        }
+    }
 }
 
 // ─── Cargo cache health sweep ──────────────────────────────────────────────
@@ -926,14 +1117,6 @@ struct CargoCacheProjectHealth {
     seed_hit_count: u64,
     cold_fallback_count: u64,
     warm_base_age_seconds: Option<u64>,
-}
-
-async fn sweep_cargo_health() {
-    // Resolve the host's own mount, never the Job-pod convention. The cache PVC
-    // is mounted at `/cache` in Job pods and at `$DJINN_HOME/cache` here, so a
-    // hardcoded `/cache/cargo-target` made this sweep return `NotFound` on its
-    // first statement and emit nothing — for the entire life of the deployment.
-    sweep_cargo_health_under(&djinn_core::paths::cargo_target_root()).await;
 }
 
 async fn sweep_cargo_health_under(warm_base_root: &Path) {
@@ -1360,18 +1543,17 @@ mod cargo_cache_health_tests {
 
 // ─── /cache/sccache guard ──────────────────────────────────────────────────
 
-/// Host-side path of the sccache directory on the shared PVC.
-///
-/// Job pods know this directory as `/cache/sccache` (the `SCCACHE_DIR`
-/// compatibility fallback, namespaced per project); the guard sweeps the parent
-/// directory as a whole. It MUST resolve through the host's own mount: the
-/// server pod has no `/cache` at all, so the former hardcoded
-/// `SCCACHE_ROOT = "/cache/sccache"` made this guard log
-/// `sccache guard skipped; path does not exist` on every tick for the entire
-/// life of the deployment.
-fn sccache_root() -> std::path::PathBuf {
-    djinn_core::paths::sccache_root()
-}
+// The sccache root is supplied by the caller, derived from
+// `CoordinatorContext::resolved_host_cache_root()`, so a test context can
+// confine this guard's destructive branch to a tempdir.
+//
+// Job pods know this directory as `/cache/sccache` (the `SCCACHE_DIR`
+// compatibility fallback, namespaced per project); the guard sweeps the parent
+// directory as a whole. It MUST resolve through the host's own mount: the
+// server pod has no `/cache` at all, so the former hardcoded
+// `SCCACHE_ROOT = "/cache/sccache"` made this guard log
+// `sccache guard skipped; path does not exist` on every tick for the entire
+// life of the deployment.
 
 /// Distinct structured outcomes for the sccache sweep guard.
 ///
@@ -1413,10 +1595,6 @@ pub(super) enum SccacheSweepOutcome {
 /// coordinator's cleanup config.
 ///
 /// Called from [`sweep_stale_resources`] on every periodic tick.
-async fn sweep_sccache_guard(config: &crate::context::CacheCleanupConfig) {
-    sweep_sccache_guard_under(config, &sccache_root()).await;
-}
-
 /// Testable implementation that accepts an explicit sccache root path.
 ///
 /// Returns the outcome so tests can assert it.
@@ -1693,7 +1871,12 @@ mod sccache_guard_tests {
     /// canonical accessor are the load-bearing assertions.
     #[test]
     fn sccache_guard_resolves_the_host_cache_mount_not_the_job_pod_path() {
-        let root = sccache_root();
+        // Reproduce the production derivation: a context with no
+        // `host_cache_root` override resolves `djinn_core::paths::cache_root()`,
+        // and the sweep hangs `sccache` off it.
+        let production_cache_root = crate::context::CoordinatorContext::default_host_cache_root();
+        assert_eq!(production_cache_root, djinn_core::paths::cache_root());
+        let root = production_cache_root.join("sccache");
         assert_ne!(
             root,
             std::path::PathBuf::from("/cache/sccache"),
@@ -4004,19 +4187,22 @@ mod cache_cleanup_cross_path_tests {
 /// rechecking safety while the lock is held.  Both dry-run and delete modes
 /// select the same candidates; dry-run reports projected bytes, delete reports
 /// reclaimed bytes.
-async fn sweep_cargo_warm_base_guard(
+async fn sweep_cargo_warm_base_guard_under(
     db: &djinn_db::Database,
     config: &crate::context::CacheCleanupConfig,
     warm_job_guard: Option<Arc<dyn crate::cargo_warm_base_gc::WarmJobGuard>>,
+    warm_base_root: &Path,
 ) {
     use crate::cargo_warm_base_gc as gc;
     use djinn_core::clock::SystemClock;
     use djinn_telemetry::cache_cleanup as metrics;
     let guard: Arc<dyn gc::WarmJobGuard> =
         warm_job_guard.unwrap_or_else(|| Arc::new(gc::UnavailableWarmJobGuard));
-    // Resolve the server pod's own cache mount, never the Job-pod `/cache`
-    // convention — the same defect `sweep_cargo_health` already documents.
-    let warm_base_root = gc::cargo_warm_base_root();
+    // The root is supplied by the caller, derived from the host's own cache
+    // mount (never the Job-pod `/cache` convention — the server pod has no
+    // `/cache` at all), so a test context can confine this destructive sweep to
+    // a tempdir instead of the developer's real `~/.djinn/cache`.
+    let warm_base_root = warm_base_root.to_path_buf();
     let inventory = match gc::inventory_under(&warm_base_root) {
         Ok(inventory) => inventory,
         Err(error) => {

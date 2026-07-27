@@ -12,6 +12,7 @@ use djinn_core::models::{
 mod activity;
 mod blockers;
 mod board_health;
+mod board_health_dispatch_gate;
 mod ci;
 mod parent_disposition;
 mod queries;

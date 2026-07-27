@@ -600,6 +600,37 @@ pub async fn reject_refinement_successor_for_test(db: &Database) {
     .expect("failed to create refinement successor rejection trigger");
 }
 
+/// Install a test-only trigger that rejects an exact-run terminal lifecycle
+/// audit append. Terminalization updates the run and appends the audit in one
+/// transaction, so this injects a repository error without leaving a false
+/// terminal row behind.
+///
+/// **Not for production use.** Panics on SQL errors.
+pub async fn reject_refinement_terminal_audit_for_test(db: &Database) {
+    db.ensure_initialized().await.unwrap();
+    sqlx::query(
+        "CREATE FUNCTION reject_refinement_terminal_audit_for_test() RETURNS trigger AS $$ \
+         BEGIN \
+           IF NEW.event_kind = 'refinement_stop' THEN \
+             RAISE EXCEPTION 'injected terminal lifecycle persistence failure'; \
+           END IF; \
+           RETURN NEW; \
+         END; \
+         $$ LANGUAGE plpgsql",
+    )
+    .execute(db.pool())
+    .await
+    .expect("failed to create terminal audit rejection function");
+    sqlx::query(
+        "CREATE TRIGGER reject_refinement_terminal_audit_for_test \
+         BEFORE INSERT ON proposal_revisions \
+         FOR EACH ROW EXECUTE FUNCTION reject_refinement_terminal_audit_for_test()",
+    )
+    .execute(db.pool())
+    .await
+    .expect("failed to create terminal audit rejection trigger");
+}
+
 /// Backdate a task's `updated_at` by a PostgreSQL `interval` string
 /// (e.g. `'20 minutes'`).
 ///
