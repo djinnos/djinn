@@ -505,8 +505,30 @@ impl ProposalRepository {
             .get("context")
             .cloned()
             .unwrap_or(serde_json::Value::Null);
-        let result = sqlx::query("UPDATE refinement_runs SET state = 'terminal', park_kind = NULL, parked_at = NULL, terminal_at = to_char(transaction_timestamp() AT TIME ZONE 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'), stop_tag = $3, stop_context = $4, heartbeat_at = to_char(transaction_timestamp() AT TIME ZONE 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') WHERE id = $1 AND generation = $2 AND state IN ('running', 'parked')").bind(&request.run_id).bind(request.generation).bind(request.reason.tag()).bind(context).execute(self.db().pool()).await?;
-        Ok(result.rows_affected() == 1)
+        let mut tx = self.db().pool().begin().await?;
+        let proposal_id = sqlx::query_scalar::<_, String>("UPDATE refinement_runs SET state = 'terminal', park_kind = NULL, parked_at = NULL, terminal_at = to_char(transaction_timestamp() AT TIME ZONE 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'), stop_tag = $3, stop_context = $4, heartbeat_at = to_char(transaction_timestamp() AT TIME ZONE 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') WHERE id = $1 AND generation = $2 AND state IN ('running', 'parked') RETURNING proposal_id").bind(&request.run_id).bind(request.generation).bind(request.reason.tag()).bind(&context).fetch_optional(&mut *tx).await?;
+        let Some(proposal_id) = proposal_id else {
+            tx.commit().await?;
+            return Ok(false);
+        };
+        let seq = sqlx::query_scalar::<_, i32>(
+            "SELECT latest_revision_seq FROM proposals WHERE id = $1 FOR UPDATE",
+        )
+        .bind(&proposal_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        sqlx::query("INSERT INTO proposal_revisions (id, proposal_id, seq, title, body, body_format, acceptance_criteria, edited_by_user_id, event_kind, event_metadata, refinement_run_id, refinement_stop_tag, refinement_stop_context) VALUES ($1, $2, $3, '', '', 'markdown', '[]', NULL, 'refinement_stop', $4, $5, $6, $7)")
+            .bind(uuid::Uuid::now_v7().to_string())
+            .bind(&proposal_id)
+            .bind(seq)
+            .bind(serde_json::json!({"reason_tag": request.reason.tag(), "stop_context": context}))
+            .bind(&request.run_id)
+            .bind(request.reason.tag())
+            .bind(&context)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(true)
     }
     pub async fn record_refinement_durable_progress(
         &self,

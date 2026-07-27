@@ -720,54 +720,56 @@ impl CoordinatorActor {
         else {
             return;
         };
-        if let Some(state) = self.active_refinements.get_mut(run_id) {
-            state.terminate(reason.clone());
+        // The legacy compatibility projection has no exact durable identity.
+        // Keep it non-durable so it cannot fabricate a proposal-scoped stop.
+        if durable_run_id.is_empty() || generation <= 0 {
+            if let Some(state) = self.active_refinements.get_mut(run_id) {
+                state.terminate(reason);
+            }
+            self.refinement_sessions.remove(run_id);
+            self.active_refinements.remove(run_id);
+            return;
         }
-        // Terminalize the exact durable run under its `(run_id, generation)`
-        // CAS fence. Without this the coordinator's own stop decisions —
-        // execution watchdog, dispatch-retry cap, spawn cap — moved only the
-        // disposable projection: the row stayed `running` with a NULL stop tag
-        // and the loop was silently abandoned. Only the outcome-commit and reap
-        // paths ever wrote a stop tag, so a run that died any other way was
-        // unreapable and invisible.
-        if !durable_run_id.is_empty() && generation > 0 {
-            let repo = ProposalRepository::new(
-                self.db.clone(),
-                crate::events::event_bus_for(&self.events_tx),
-            );
-            match repo
-                .terminal_refinement_run(djinn_db::TerminalRefinementRunRequest {
-                    run_id: durable_run_id.clone(),
-                    generation,
-                    reason: durable_stop_reason(Some(&reason)),
-                })
-                .await
-            {
-                Ok(true) => tracing::info!(
+
+        // The exact-run CAS is authoritative. Keep the projection and session
+        // retryable on a miss/error; removing them first abandons a running row.
+        let repo = ProposalRepository::new(
+            self.db.clone(),
+            crate::events::event_bus_for(&self.events_tx),
+        );
+        match repo
+            .terminal_refinement_run(djinn_db::TerminalRefinementRunRequest {
+                run_id: durable_run_id.clone(),
+                generation,
+                reason: durable_stop_reason(Some(&reason)),
+            })
+            .await
+        {
+            Ok(true) => {
+                self.refinement_sessions.remove(run_id);
+                self.active_refinements.remove(run_id);
+                tracing::info!(
                     proposal_id,
                     run_id = %durable_run_id,
                     generation,
                     reason = reason.tag(),
                     "terminalized durable refinement run"
-                ),
-                Ok(false) => tracing::warn!(
-                    proposal_id,
-                    run_id = %durable_run_id,
-                    generation,
-                    "durable refinement run was already terminal at stop"
-                ),
-                Err(error) => tracing::warn!(
-                    proposal_id,
-                    run_id = %durable_run_id,
-                    generation,
-                    %error,
-                    "failed to terminalize durable refinement run; retrying on a later stop"
-                ),
+                );
             }
-        } else {
-            self.persist_refinement_stop(&proposal_id, &reason).await;
+            Ok(false) => tracing::warn!(
+                proposal_id,
+                run_id = %durable_run_id,
+                generation,
+                "durable refinement terminal CAS did not apply; retaining retryable projection"
+            ),
+            Err(error) => tracing::warn!(
+                proposal_id,
+                run_id = %durable_run_id,
+                generation,
+                %error,
+                "failed to terminalize durable refinement run; retaining retryable projection"
+            ),
         }
-        self.refinement_sessions.remove(run_id);
     }
 
     /// Resolve the human's single accept/reject review of a converged
