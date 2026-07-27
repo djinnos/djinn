@@ -1,5 +1,10 @@
 # Wave 3 reduction ledger
 
+> **Historical record.** This ledger preserves past reduction work and its
+> then-current test names. References below to former auto-submit paths describe
+> retired behavior only; they are not current runtime, configuration, operator,
+> or rollout instructions.
+
 ## Slice: lifecycle prompt-context and CI directive test scaffolding
 
 Task: `019f23f0-661c-7f00-b928-ba71e0349301` — Reduce duplicated slot lifecycle prompt and CI directive test scaffolding.
@@ -652,7 +657,9 @@ Net delta: **−442 scoped lifecycle Rust lines**.
 
 **Test consolidation** in `prompt_context_tests.rs` (675→530, −145):
 
-- Consolidated `resume_metadata_with_checkpoint()` and `resume_metadata_with_auto_submit()` using `..Default::default()` (−22 lines).
+- Consolidated the historical `resume_metadata_with_checkpoint()` and
+  `resume_metadata_with_auto_submit()` fixtures using `..Default::default()`
+  (−22 lines).
 - Removed `non_worker_role_prompt_has_no_resume_section`: assertions fully covered by `worker_resume_note_absent_cases` + `role_receives_worker_resume_check`.
 - Merged `epic_context_includes_blocking_and_sibling_sections` into `load_epic_context_includes_blocker_and_sibling_sections_in_order` (−76 lines): removed redundant `lead_epic_context` helper, preserved all assertions including section ordering.
 - Consolidated `role_receives_worker_resume_check` non-worker checks into a loop.
@@ -704,7 +711,10 @@ Focused tests:
 | `cargo test -p djinn-agent --lib -- lifecycle::prompt_context::ci_directive_tests::build_ci` | 3 passed, 0 failed |
 | `cargo test -p djinn-agent --lib -- lifecycle::prompt_context::ci_directive_tests::sa4x` | 2 passed, 0 failed |
 
-Total: **19 pure-logic tests passed, 0 failed**. DB-backed tests (`epic_context_*`, `worker_resume_note_injected_for_worker_role`, `worker_resume_note_included_for_auto_submit_source`, `prompt_context_has_one_promoted_structured_ci_directive_per_role`) fail on missing `djinn_test_template` database — same limitation as all prior slices. No tests were disabled or weakened.
+Total: **19 pure-logic tests passed, 0 failed**. DB-backed tests (including the
+historical `worker_resume_note_included_for_auto_submit_source` fixture) fail
+on missing `djinn_test_template` database — same limitation as all prior
+slices. No tests were disabled or weakened.
 
 ---
 
