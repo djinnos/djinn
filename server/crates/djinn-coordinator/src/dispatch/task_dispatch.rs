@@ -462,10 +462,11 @@ impl CoordinatorActor {
         &self,
         task: &djinn_core::models::Task,
     ) -> crate::WorkerLifecycleMetadata {
-        let mut lifecycle = crate::WorkerLifecycleMetadata::default();
-        lifecycle.checkpoint = self.checkpoint_lifecycle_from_activity(task).await;
-        lifecycle.model_rotation = self.model_rotation_lifecycle_from_activity(task).await;
-        lifecycle
+        crate::WorkerLifecycleMetadata {
+            checkpoint: self.checkpoint_lifecycle_from_activity(task).await,
+            model_rotation: self.model_rotation_lifecycle_from_activity(task).await,
+            ..Default::default()
+        }
     }
 
     async fn checkpoint_lifecycle_from_activity(
