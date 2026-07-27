@@ -4180,6 +4180,8 @@ edition = "2024"
                     toolchain: Some("stable".to_string()),
                     version: None,
                     package_manager: None,
+                    cargo_features: Vec::new(),
+                    cargo_all_features: false,
                 },
                 djinn_stack::Workspace {
                     slug: Some("ui".to_string()),
@@ -4190,6 +4192,8 @@ edition = "2024"
                     toolchain: None,
                     version: Some("22".to_string()),
                     package_manager: Some("pnpm".to_string()),
+                    cargo_features: Vec::new(),
+                    cargo_all_features: false,
                 },
             ],
             ..djinn_stack::EnvironmentConfig::empty()
@@ -4333,6 +4337,8 @@ edition = "2024"
                 toolchain: None,
                 version: None,
                 package_manager: None,
+                cargo_features: Vec::new(),
+                cargo_all_features: false,
             }],
             ..djinn_stack::EnvironmentConfig::empty()
         };

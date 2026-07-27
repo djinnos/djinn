@@ -140,11 +140,8 @@ pub struct EnvironmentConfig {
     ///
     /// The default is [`CargoCachePolicy::AutoDetected`]: djinn detects the
     /// cache strategy from the repository it is about to run, including the
-    /// Cargo workspace layout, `.cargo/config.toml` settings such as
-    /// `rustc-wrapper`, and configured setup command shapes. That
-    /// detection is deliberately read-only. djinn may read `.cargo/config.toml`
-    /// to keep warm-job and worker behavior consistent with the project, but it
-    /// never creates, edits, or rewrites the project's `.cargo/config.toml`.
+    /// Cargo workspace layout and the selected Rust workspace's Cargo feature
+    /// settings.
     ///
     /// Set an explicit policy only when project authors need to override the
     /// detected cargo feature set at the environment-config level. `None` is
@@ -318,6 +315,8 @@ impl EnvironmentConfig {
                     toolchain,
                     version,
                     package_manager: ws.package_manager.clone(),
+                    cargo_features: Vec::new(),
+                    cargo_all_features: false,
                 }
             })
             .collect();
@@ -613,6 +612,14 @@ pub struct Workspace {
     pub version: Option<String>,
     #[serde(default)]
     pub package_manager: Option<String>,
+    /// Cargo features that every platform-generated Cargo command for this
+    /// Rust workspace must enable. Ignored for non-Rust workspaces.
+    #[serde(default)]
+    pub cargo_features: Vec<String>,
+    /// Pass `--all-features` instead of named `cargo_features`. Ignored for
+    /// non-Rust workspaces.
+    #[serde(default)]
+    pub cargo_all_features: bool,
 }
 
 fn validate_workspaces(workspaces: &[Workspace]) -> EnvResult<()> {
@@ -658,6 +665,13 @@ fn validate_workspace_fields(ws: &Workspace) -> EnvResult<()> {
     }
     if let Some(pm) = &ws.package_manager {
         validate_identifier("workspaces[*].package_manager", pm)?;
+    }
+    validate_feature_list("workspaces[*].cargo_features", &ws.cargo_features)?;
+    if ws.cargo_all_features && !ws.cargo_features.is_empty() {
+        return Err(EnvironmentConfigError::UnsafeIdentifier {
+            field: "workspaces[*].cargo_features".into(),
+            value: "cargo_features cannot be combined with cargo_all_features".into(),
+        });
     }
     Ok(())
 }

@@ -526,6 +526,7 @@ async fn advertise_read_sources(
 fn lead_stage_outcome(
     finalize_name: &str,
     finalize_payload: Option<&serde_json::Value>,
+    terminal_disposition_required: bool,
 ) -> StageOutcome {
     let payload_str = |key: &str| {
         finalize_payload
@@ -543,6 +544,21 @@ fn lead_stage_outcome(
     match finalize_name {
         "submit_decision" => {
             let decision = payload_str("decision").unwrap_or("");
+            if terminal_disposition_required && !matches!(decision, "park" | "supersede") {
+                let dossier = serde_json::json!({
+                    "final_disposition": true,
+                    "hold_description": format!(
+                        "Final arbiter returned non-terminal decision '{decision}'"
+                    ),
+                    "failure_analysis": "The cumulative arbitration budget is exhausted, so approve/reopen outcomes cannot start another PR-poller or worker cycle.",
+                    "submitted_decision": decision,
+                    "submitted_payload": finalize_payload,
+                    "recommended_action": "Replan the epic/proposal and either create replacement work that supersedes the exhausted task or close work that is no longer required.",
+                });
+                return StageOutcome::LeadParked {
+                    park_dossier_json: dossier.to_string(),
+                };
+            }
             match decision {
                 // approve: work is complete + correct.
                 // Requires evidence citation.
@@ -666,8 +682,17 @@ fn lead_stage_outcome(
                                     provider_failure: None,
                                 }
                             } else {
-                                let dossier_json =
-                                    serde_json::to_string(d).unwrap_or_else(|_| "{}".to_string());
+                                let mut dossier = d.clone();
+                                if terminal_disposition_required
+                                    && let Some(object) = dossier.as_object_mut()
+                                {
+                                    object.insert(
+                                        "final_disposition".to_string(),
+                                        serde_json::Value::Bool(true),
+                                    );
+                                }
+                                let dossier_json = serde_json::to_string(&dossier)
+                                    .unwrap_or_else(|_| "{}".to_string());
                                 StageOutcome::LeadParked {
                                     park_dossier_json: dossier_json,
                                 }
@@ -1444,7 +1469,26 @@ pub(crate) async fn execute_stage(
                         },
                     },
                     RoleKind::Lead => {
-                        lead_stage_outcome(finalize_name, final_output.finalize_payload.as_ref())
+                        let terminal_disposition_required = {
+                            use djinn_db::repositories::task_arbitration::TaskArbitrationRepository;
+                            TaskArbitrationRepository::new(agent_context.db.clone())
+                                .resolve_current_hold_cycle(&task.id)
+                                .await
+                                .ok()
+                                .and_then(|(_, record)| record)
+                                .and_then(|record| record.directive)
+                                .and_then(|directive| {
+                                    directive
+                                        .get("terminal_disposition_required")
+                                        .and_then(serde_json::Value::as_bool)
+                                })
+                                .unwrap_or(false)
+                        };
+                        lead_stage_outcome(
+                            finalize_name,
+                            final_output.finalize_payload.as_ref(),
+                            terminal_disposition_required,
+                        )
                     }
                     // Refinement tribunal roles each finalize via their own
                     // configured tool: the Advocate `submit_work`, the Adversary
@@ -2140,7 +2184,7 @@ mod tests {
         });
         assert!(
             matches!(
-                lead_stage_outcome("submit_decision", Some(&payload)),
+                lead_stage_outcome("submit_decision", Some(&payload), false),
                 StageOutcome::LeadApproved { ref evidence } if !evidence.is_empty()
             ),
             "approve with valid evidence must succeed",
@@ -2153,7 +2197,7 @@ mod tests {
             "decision": "approve",
             "rationale": "looks good to me"
         });
-        match lead_stage_outcome("submit_decision", Some(&payload)) {
+        match lead_stage_outcome("submit_decision", Some(&payload), false) {
             StageOutcome::Failed { reason, .. } => {
                 assert!(
                     reason.contains("evidence"),
@@ -2173,7 +2217,7 @@ mod tests {
                 "summary": ""
             }
         });
-        match lead_stage_outcome("submit_decision", Some(&payload)) {
+        match lead_stage_outcome("submit_decision", Some(&payload), false) {
             StageOutcome::Failed { reason, .. } => {
                 assert!(
                     reason.contains("evidence"),
@@ -2196,7 +2240,7 @@ mod tests {
         });
         assert!(
             matches!(
-                lead_stage_outcome("submit_decision", Some(&payload)),
+                lead_stage_outcome("submit_decision", Some(&payload), false),
                 StageOutcome::LeadApproveConflict { ref reason, ref evidence } if reason == "correct but conflicts" && !evidence.is_empty()
             ),
             "approve_conflict with evidence and reason must succeed",
@@ -2211,7 +2255,7 @@ mod tests {
             "verification_command": "cargo test --test pagination",
             "exclude_models": ["gpt-4o"]
         });
-        match lead_stage_outcome("submit_decision", Some(&payload)) {
+        match lead_stage_outcome("submit_decision", Some(&payload), false) {
             StageOutcome::LeadReopen {
                 directive,
                 verification_command,
@@ -2235,7 +2279,7 @@ mod tests {
             "decision": "reopen",
             "verification_command": "cargo test"
         });
-        match lead_stage_outcome("submit_decision", Some(&payload)) {
+        match lead_stage_outcome("submit_decision", Some(&payload), false) {
             StageOutcome::Failed { reason, .. } => {
                 assert!(
                     reason.contains("directive"),
@@ -2252,7 +2296,7 @@ mod tests {
             "decision": "reopen",
             "directive": "Fix the bug"
         });
-        match lead_stage_outcome("submit_decision", Some(&payload)) {
+        match lead_stage_outcome("submit_decision", Some(&payload), false) {
             StageOutcome::Failed { reason, .. } => {
                 assert!(
                     reason.contains("verification_command"),
@@ -2276,7 +2320,7 @@ mod tests {
                 "recommended_action": "Assign to auth-team lead"
             }
         });
-        match lead_stage_outcome("submit_decision", Some(&payload)) {
+        match lead_stage_outcome("submit_decision", Some(&payload), false) {
             StageOutcome::LeadParked { park_dossier_json } => {
                 let parsed: serde_json::Value =
                     serde_json::from_str(&park_dossier_json).expect("valid JSON");
@@ -2299,7 +2343,7 @@ mod tests {
             "decision": "park",
             "rationale": "stuck"
         });
-        match lead_stage_outcome("submit_decision", Some(&payload)) {
+        match lead_stage_outcome("submit_decision", Some(&payload), false) {
             StageOutcome::Failed { reason, .. } => {
                 assert!(
                     reason.contains("park_dossier"),
@@ -2319,7 +2363,7 @@ mod tests {
                 "failure_analysis": "some analysis"
             }
         });
-        match lead_stage_outcome("submit_decision", Some(&payload)) {
+        match lead_stage_outcome("submit_decision", Some(&payload), false) {
             StageOutcome::Failed { reason, .. } => {
                 assert!(
                     reason.contains("hold_description"),
@@ -2336,7 +2380,7 @@ mod tests {
             "decision": "escalate",
             "rationale": "cannot resolve"
         });
-        match lead_stage_outcome("submit_decision", Some(&payload)) {
+        match lead_stage_outcome("submit_decision", Some(&payload), false) {
             StageOutcome::Failed { reason, .. } => {
                 assert!(
                     reason.contains("unknown or removed"),
@@ -2353,7 +2397,7 @@ mod tests {
             "decision": "decompose",
             "created_tasks": ["task-1", "task-2"]
         });
-        match lead_stage_outcome("submit_decision", Some(&payload)) {
+        match lead_stage_outcome("submit_decision", Some(&payload), false) {
             StageOutcome::Failed { reason, .. } => {
                 assert!(
                     reason.contains("unknown or removed"),
@@ -2370,7 +2414,7 @@ mod tests {
             "decision": "force_close",
             "rationale": "redundant"
         });
-        match lead_stage_outcome("submit_decision", Some(&payload)) {
+        match lead_stage_outcome("submit_decision", Some(&payload), false) {
             StageOutcome::Failed { reason, .. } => {
                 assert!(
                     reason.contains("unknown or removed"),
@@ -2383,7 +2427,7 @@ mod tests {
 
     #[test]
     fn arbiter_no_finalize_tool_fails() {
-        match lead_stage_outcome("", None) {
+        match lead_stage_outcome("", None, false) {
             StageOutcome::Failed { reason, .. } => {
                 assert!(
                     reason.contains("without calling submit_decision"),
@@ -2396,7 +2440,7 @@ mod tests {
 
     #[test]
     fn arbiter_unexpected_finalize_tool_fails() {
-        match lead_stage_outcome("submit_work", None) {
+        match lead_stage_outcome("submit_work", None, false) {
             StageOutcome::Failed { reason, .. } => {
                 assert!(
                     reason.contains("unexpected tool"),
@@ -2420,7 +2464,7 @@ mod tests {
             "decision": "park",
             "park_dossier": dossier
         });
-        match lead_stage_outcome("submit_decision", Some(&payload)) {
+        match lead_stage_outcome("submit_decision", Some(&payload), false) {
             StageOutcome::LeadParked { park_dossier_json } => {
                 let parsed: serde_json::Value =
                     serde_json::from_str(&park_dossier_json).expect("valid JSON");
@@ -2440,7 +2484,7 @@ mod tests {
             "rationale": "decomposed into 3 replacement subtasks",
             "created_tasks": ["repl-1", "repl-2", "repl-3"]
         });
-        match lead_stage_outcome("submit_decision", Some(&payload)) {
+        match lead_stage_outcome("submit_decision", Some(&payload), false) {
             StageOutcome::LeadSuperseded {
                 replacement_task_ids,
                 ..
@@ -2465,7 +2509,7 @@ mod tests {
             "decision": "supersede",
             "rationale": "meant to decompose but created nothing"
         });
-        match lead_stage_outcome("submit_decision", Some(&payload)) {
+        match lead_stage_outcome("submit_decision", Some(&payload), false) {
             StageOutcome::Failed { reason, .. } => {
                 assert!(
                     reason.contains("created_tasks"),
@@ -2487,7 +2531,7 @@ mod tests {
             "decision": "supersede",
             "created_tasks": []
         });
-        match lead_stage_outcome("submit_decision", Some(&payload)) {
+        match lead_stage_outcome("submit_decision", Some(&payload), false) {
             StageOutcome::Failed { reason, .. } => {
                 assert!(
                     reason.contains("created_tasks") && reason.contains("park"),
@@ -2499,6 +2543,64 @@ mod tests {
     }
 
     #[test]
+    fn final_arbiter_non_terminal_decision_is_terminally_parked() {
+        for decision in ["approve", "approve_conflict", "reopen"] {
+            let payload = serde_json::json!({
+                "decision": decision,
+                "reason": "try another cycle",
+                "evidence": {"summary": "locally acceptable"},
+                "directive": "repair once more",
+                "verification_command": "cargo test"
+            });
+            match lead_stage_outcome("submit_decision", Some(&payload), true) {
+                StageOutcome::LeadParked { park_dossier_json } => {
+                    let dossier: serde_json::Value =
+                        serde_json::from_str(&park_dossier_json).unwrap();
+                    assert_eq!(dossier["submitted_decision"], decision);
+                    assert!(
+                        dossier["recommended_action"]
+                            .as_str()
+                            .unwrap()
+                            .contains("Replan")
+                    );
+                }
+                other => panic!("final {decision} must convert to terminal park, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn final_arbiter_still_accepts_supersede() {
+        let payload = serde_json::json!({
+            "decision": "supersede",
+            "reason": "replace exhausted source",
+            "created_tasks": ["replacement-1"]
+        });
+        assert!(matches!(
+            lead_stage_outcome("submit_decision", Some(&payload), true),
+            StageOutcome::LeadSuperseded { .. }
+        ));
+    }
+
+    #[test]
+    fn final_arbiter_park_marks_terminal_planner_replan() {
+        let payload = serde_json::json!({
+            "decision": "park",
+            "park_dossier": {
+                "hold_description": "architecture is genuinely ambiguous",
+                "failure_analysis": "prior decisions conflict"
+            }
+        });
+        match lead_stage_outcome("submit_decision", Some(&payload), true) {
+            StageOutcome::LeadParked { park_dossier_json } => {
+                let dossier: serde_json::Value = serde_json::from_str(&park_dossier_json).unwrap();
+                assert_eq!(dossier["final_disposition"], true);
+            }
+            other => panic!("final park must remain a terminal planner park, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn arbiter_supersede_blank_ids_are_dropped_and_fail_when_all_blank() {
         // Whitespace-only ids are not real replacements — after trimming they
         // leave an empty set, which must fail with park guidance.
@@ -2506,7 +2608,7 @@ mod tests {
             "decision": "supersede",
             "created_tasks": ["   ", ""]
         });
-        match lead_stage_outcome("submit_decision", Some(&payload)) {
+        match lead_stage_outcome("submit_decision", Some(&payload), false) {
             StageOutcome::Failed { reason, .. } => {
                 assert!(
                     reason.contains("created_tasks"),
@@ -2526,7 +2628,7 @@ mod tests {
             "evidence": {"source": "git diff + CI", "summary": "all AC met"}
         });
         assert!(matches!(
-            lead_stage_outcome("submit_decision", Some(&approve)),
+            lead_stage_outcome("submit_decision", Some(&approve), false),
             StageOutcome::LeadApproved { .. }
         ));
 
@@ -2536,7 +2638,7 @@ mod tests {
             "verification_command": "cargo test -p djinn-coordinator"
         });
         assert!(matches!(
-            lead_stage_outcome("submit_decision", Some(&reopen)),
+            lead_stage_outcome("submit_decision", Some(&reopen), false),
             StageOutcome::LeadReopen { .. }
         ));
 
@@ -2545,7 +2647,7 @@ mod tests {
             "park_dossier": {"hold_description": "stuck", "failure_analysis": "why"}
         });
         assert!(matches!(
-            lead_stage_outcome("submit_decision", Some(&park)),
+            lead_stage_outcome("submit_decision", Some(&park), false),
             StageOutcome::LeadParked { .. }
         ));
 
@@ -2554,7 +2656,7 @@ mod tests {
             "evidence": {"source": "git diff", "summary": "correct but conflict"}
         });
         assert!(matches!(
-            lead_stage_outcome("submit_decision", Some(&approve_conflict)),
+            lead_stage_outcome("submit_decision", Some(&approve_conflict), false),
             StageOutcome::LeadApproveConflict { .. }
         ));
     }
@@ -2567,7 +2669,7 @@ mod tests {
             "verification_command": "cargo clippy",
             "exclude_models": ["model-a", "model-b"]
         });
-        match lead_stage_outcome("submit_decision", Some(&payload)) {
+        match lead_stage_outcome("submit_decision", Some(&payload), false) {
             StageOutcome::LeadReopen { exclude_models, .. } => {
                 assert_eq!(exclude_models, vec!["model-a", "model-b"]);
             }
