@@ -412,6 +412,73 @@ fn callback_result() -> serde_json::Value {
 }
 
 #[tokio::test]
+async fn area_callbacks_deduplicate_run_level_suggestions_without_rolling_back_success() {
+    let db = Database::ephemeral().await.expect("postgres");
+    let project = "readiness-area-suggestion-deduplication";
+    djinn_db::test_support::seed_project(&db, project, project).await;
+    let creator = seed_user(&db, 155_008, "readiness-area-suggestion-deduplication").await;
+    let repo = ReadinessRepository::new(db.clone());
+    let kickoff = repo
+        .materialize_kickoff(kickoff_input(project, &creator, "suggestion-deduplication"))
+        .await
+        .expect("kickoff");
+    let fanout = repo
+        .complete_identification(&kickoff.run.id, &creator, identification_output())
+        .await
+        .expect("two-area fanout");
+    assert_eq!(fanout.len(), 2);
+
+    for item in &fanout {
+        let callback = ReadinessAreaResultCallback {
+            run_id: kickoff.run.id.clone(),
+            area_id: item.area.id.clone(),
+            attempt_id: item.attempt.id.clone(),
+            correlation_key: item.attempt.correlation_key.clone(),
+            task_id: item.task.id.clone(),
+            status: "succeeded".into(),
+            result: callback_result(),
+        };
+        assert_eq!(
+            repo.ingest_area_result(callback)
+                .await
+                .expect("cross-area suggestion collision is idempotent"),
+            ReadinessCallbackOutcome::Accepted
+        );
+    }
+
+    let attempts: Vec<(String, String)> = sqlx::query_as(
+        "SELECT id,status FROM readiness_area_attempts WHERE run_id=$1 ORDER BY area_id",
+    )
+    .bind(&kickoff.run.id)
+    .fetch_all(db.pool())
+    .await
+    .expect("load terminal attempts");
+    assert_eq!(attempts.len(), 2);
+    assert!(attempts.iter().all(|(_, status)| status == "succeeded"));
+    for (attempt_id, _) in &attempts {
+        let findings: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM readiness_guardrail_findings WHERE attempt_id=$1",
+        )
+        .bind(attempt_id)
+        .fetch_one(db.pool())
+        .await
+        .expect("load accepted findings");
+        assert_eq!(
+            findings, 1,
+            "each area's complete finding set remains visible"
+        );
+    }
+    let suggestions: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM readiness_remediation_suggestions WHERE run_id=$1 AND dedupe_key='auth'",
+    )
+    .bind(&kickoff.run.id)
+    .fetch_one(db.pool())
+    .await
+    .expect("load deduplicated suggestion");
+    assert_eq!(suggestions, 1);
+}
+
+#[tokio::test]
 async fn area_callback_timeout_success_race_and_invalid_output_are_postgres_transactional() {
     let db = Database::ephemeral().await.expect("postgres");
     let project = "readiness-area-race";

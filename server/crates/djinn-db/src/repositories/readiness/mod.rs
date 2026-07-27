@@ -682,7 +682,7 @@ impl ReadinessRepository {
                 .as_array()
                 .expect("validated")
             {
-                sqlx::query("INSERT INTO readiness_remediation_suggestions (id,run_id,dedupe_key,suggestion) VALUES ($1,$2,$3,$4)").bind(Uuid::now_v7().to_string()).bind(&run).bind(suggestion["dedupe_key"].as_str().expect("validated")).bind(suggestion.clone()).execute(&mut *tx).await?;
+                sqlx::query("INSERT INTO readiness_remediation_suggestions (id,run_id,dedupe_key,suggestion) VALUES ($1,$2,$3,$4) ON CONFLICT (run_id,dedupe_key) DO NOTHING").bind(Uuid::now_v7().to_string()).bind(&run).bind(suggestion["dedupe_key"].as_str().expect("validated")).bind(suggestion.clone()).execute(&mut *tx).await?;
             }
         }
         sqlx::query("UPDATE readiness_area_attempts SET status=$1,payload_digest=$2,terminal_at=to_char(now() AT TIME ZONE 'utc','YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') WHERE id=$3").bind(final_status).bind(&digest).bind(&callback.attempt_id).execute(&mut *tx).await?;
