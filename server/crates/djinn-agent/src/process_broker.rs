@@ -505,6 +505,106 @@ fn child_environment(command: &Command) -> io::Result<Vec<(String, String)>> {
     Ok(environment.into_iter().collect())
 }
 
+/// The containment a launcher double owes the fixture children it spawns.
+///
+/// # Why a bare `std::process::Child` is not a leaf cgroup
+///
+/// [`ProcessHandle::kill`] is `cgroup.kill` in production: it reaches EVERY
+/// process in the invocation's leaf, children of the command included. And
+/// [`ProcessHandle::wait_empty`] returns only once the leaf reports
+/// `populated 0`, i.e. once nothing from that invocation is running any more.
+/// The doubles stand a bare [`std::process::Child`] in for that leaf, and a bare
+/// child has neither property: `Child::kill` signals ONLY the direct child, and
+/// there is nothing that waits for its descendants.
+///
+/// That gap is invisible wherever `/bin/sh` execs its `-c` command (bash does),
+/// and it leaks a process wherever `/bin/sh` FORKS it (dash does — which is
+/// `/bin/sh` on the CI runners). There, `sh -c "sleep 30"` is two processes; the
+/// double killed the shell, the `sleep` was orphaned still holding the test
+/// process's inherited stdout, and nextest — which waits for that pipe to close
+/// after the test process exits — reported the test as `LEAK`.
+///
+/// So the fixtures spawn into their own process group and tear the whole group
+/// down: `kill_group` is the stand-in for `cgroup.kill`, and `wait_group_empty`
+/// is the stand-in for `populated 0`. A double that returned from `wait_empty`
+/// while a fixture process was still alive would be asserting a containment
+/// property the production handle has and the double does not.
+#[cfg(test)]
+pub(crate) mod fixture_child {
+    use std::io;
+    use std::process::{Child, Command};
+    use std::time::Duration;
+
+    /// Spawn this command as the leader of its own process group, so the whole
+    /// subtree it may create stays addressable by one signal.
+    pub(crate) fn isolate_group(command: &mut Command) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            command.process_group(0);
+        }
+        #[cfg(not(unix))]
+        let _ = command;
+    }
+
+    /// SIGKILL the child's whole process group — the double's `cgroup.kill`.
+    pub(crate) fn kill_group(child: &mut Child) -> io::Result<()> {
+        #[cfg(unix)]
+        {
+            // A reaped pid can be recycled, so signalling by pid is only sound
+            // while the leader is still un-reaped. `try_wait` reaps an exited
+            // leader, and once it has, the group can no longer be named here.
+            if child.try_wait()?.is_some() {
+                return Ok(());
+            }
+            let pid = i32::try_from(child.id())
+                .map_err(|_| io::Error::other("fixture child pid does not fit in pid_t"))?;
+            // SAFETY: `kill(2)` with a negated pid signals the process group led
+            // by that pid. The fixture children are group leaders
+            // (`isolate_group`), so the group is exactly this child's subtree.
+            if unsafe { libc::kill(-pid, libc::SIGKILL) } != 0 {
+                // No such group (the child was spawned without isolation, or the
+                // group is already gone): fall back to the direct child.
+                let error = io::Error::last_os_error();
+                if error.raw_os_error() != Some(libc::ESRCH) {
+                    return Err(error);
+                }
+                return child.kill();
+            }
+            Ok(())
+        }
+        #[cfg(not(unix))]
+        child.kill()
+    }
+
+    /// Return only once nothing from this fixture is running — the double's
+    /// `populated 0`. Reaps the leader, then waits out its group.
+    pub(crate) fn wait_group_empty(child: &mut Child) -> io::Result<()> {
+        #[cfg(unix)]
+        let pid = i32::try_from(child.id()).ok();
+        child.wait()?;
+        #[cfg(unix)]
+        {
+            let Some(pid) = pid else { return Ok(()) };
+            // The group was just SIGKILLed, so this settles in microseconds. The
+            // bound is a safety valve only: a double must not be able to hang a
+            // test run forever.
+            for _ in 0..10_000 {
+                // SAFETY: signal 0 performs the existence check only.
+                if unsafe { libc::kill(-pid, 0) } != 0 {
+                    return Ok(());
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            Err(io::Error::other(
+                "fixture process group never emptied after SIGKILL",
+            ))
+        }
+        #[cfg(not(unix))]
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 impl ProcessHandle for std::process::Child {
     fn drain_stdout(&mut self) -> io::Result<Vec<u8>> {
@@ -535,11 +635,11 @@ impl ProcessHandle for std::process::Child {
     }
 
     fn kill(&mut self) -> io::Result<()> {
-        std::process::Child::kill(self)
+        fixture_child::kill_group(self)
     }
 
     fn wait_empty(&mut self) -> io::Result<()> {
-        Ok(())
+        fixture_child::wait_group_empty(self)
     }
 
     fn cleanup(&mut self) -> io::Result<()> {
