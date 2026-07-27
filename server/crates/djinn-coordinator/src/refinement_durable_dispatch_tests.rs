@@ -18,6 +18,7 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 use super::refinement_cap_tests;
+use crate::types::{REFINEMENT_INTENT_CLAIM_LEASE, STUCK_INTERVAL};
 
 const DURABLE_PROVIDER: &str = "durableobserver";
 const DURABLE_MODEL: &str = "durableobserver/configured-model";
@@ -240,6 +241,19 @@ async fn durable_driver_replays_claim_before_task_and_cache_loss_once_without_po
             .state,
         RefinementIntentState::Materialized
     );
+    let session = actor
+        .refinement_sessions
+        .get(&run_id)
+        .expect("successful durable enqueue creates the run-keyed outcome projection");
+    assert_eq!(session.run_id, run_id);
+    assert_eq!(session.generation, generation);
+    assert_eq!(session.task_id, first_task.id);
+    assert_eq!(
+        session.phase,
+        super::super::refinement::RefinementPhase::AdversaryAttack
+    );
+    assert_eq!(session.model_id, DURABLE_MODEL);
+    assert!(session.session_started_at.is_none());
 
     // Cache loss is not authority: the next durable poll finds the same task,
     // and read-only polling/enqueue retry does not keep the run alive.
@@ -459,6 +473,10 @@ async fn materialized_enqueue_failure_is_retried_with_the_same_task() {
         lifecycle_before,
         "pool failure must not append a proposal-scoped lifecycle stop"
     );
+    assert!(
+        actor.refinement_sessions.is_empty(),
+        "failed enqueue must not manufacture an outcome projection"
+    );
 
     // Model a coordinator crash after the materialization acknowledgement but
     // before a successful pool enqueue. Neither the projection nor its
@@ -489,6 +507,19 @@ async fn materialized_enqueue_failure_is_retried_with_the_same_task() {
             .expect("restarted durable enqueue observation");
     assert_eq!(restarted_task_id, task_id);
     assert_eq!(restarted_model_id, refinement_cap_tests::TEST_MODEL);
+    let retried_session = restarted
+        .refinement_sessions
+        .get(&run_id)
+        .expect("successful materialized retry repairs the run-keyed projection");
+    assert_eq!(retried_session.run_id, run_id);
+    assert_eq!(retried_session.generation, generation);
+    assert_eq!(retried_session.task_id, task_id);
+    assert_eq!(
+        retried_session.phase,
+        super::super::refinement::RefinementPhase::AdversaryAttack
+    );
+    assert_eq!(retried_session.model_id, refinement_cap_tests::TEST_MODEL);
+    assert!(retried_session.session_started_at.is_none());
     assert_eq!(
         task_repo
             .find_by_refinement_intent_id(&intent_id)
@@ -506,5 +537,285 @@ async fn materialized_enqueue_failure_is_retried_with_the_same_task() {
             .expect("same task remains")
             .id,
         task_id
+    );
+}
+
+/// Regression (proposal bzpt, 2026-07-26): the durable intent ledger is the
+/// ONLY dispatch path for a run with a `run_id` — `drive_one_refinement`
+/// returns early before the legacy `dispatch_next_refinement_phase` for any
+/// durable run. That ledger path used to inject the fixed literal
+/// `"Durable refinement intent dispatch."` as the readiness context and pass
+/// `None` for reviewer feedback, so every live tribunal role was dispatched
+/// blind:
+///
+/// * the Advocate never learned which DoR checks were failing, and
+/// * the Judge — whose prompt makes any injected `Current DoR status` other
+///   than the exact clean message a mandatory blocking reject — could never
+///   approve, regardless of spec quality.
+///
+/// On bzpt this produced advocate task pw4v whose entire description was
+/// "Current DoR status: Durable refinement intent dispatch." and a judge
+/// verdict that rejected a spec it had otherwise found complete.
+///
+/// This drives the real durable driver and asserts the materialized task
+/// carries the head-derived DoR failures, the lint summary, and the current
+/// reviewer feedback.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn durable_dispatch_injects_real_dor_findings_not_a_placeholder() {
+    let db = crate::test_helpers::create_test_db();
+    let fixture = refinement_cap_tests::seed_refinement_fixture(&db).await;
+    let (events_tx, _events_rx) = tokio::sync::broadcast::channel::<DjinnEventEnvelope>(256);
+    let pool = refinement_cap_tests::spawn_test_pool(&db, 4);
+    let mut actor = refinement_cap_tests::build_refinement_actor(&db, &events_tx, pool);
+
+    let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+
+    // Human demand-round feedback recorded against the current revision. The
+    // durable path used to drop this on the floor.
+    let reviewer_feedback = "REVIEWER-FEEDBACK-durable-path-bzpt";
+    repo.record_refinement_lifecycle(
+        &fixture.proposal_id,
+        "refinement_start",
+        Some(&serde_json::json!({
+            "source": "human_demand_round",
+            "reviewer_feedback": reviewer_feedback,
+            "reason": reviewer_feedback,
+        })),
+    )
+    .await
+    .expect("record demand-round reviewer feedback");
+
+    let (run_id, generation) =
+        admit_run(&repo, &fixture.proposal_id, "durable-dor-injection").await;
+    let intent_id = only_intent(&repo, &run_id, generation).await;
+    actor.active_refinements.insert(
+        run_id.clone(),
+        super::super::refinement::RefinementLoopState::new(fixture.proposal_id.clone(), 0)
+            .with_run_identity(run_id.clone(), generation)
+            .with_attributed_user(Some(fixture.user_id.clone())),
+    );
+
+    // Independently establish what the shared evaluator says about this head,
+    // so the assertions below are pinned to real findings rather than to any
+    // string the dispatcher happens to emit.
+    let readiness = actor
+        .evaluate_proposal_readiness(&fixture.proposal_id)
+        .await
+        .expect("fixture readiness resolves");
+    assert!(
+        !readiness.ready,
+        "fixture head (one-line body, empty ACs) must fail DoR for this test to be non-vacuous"
+    );
+    let expected_failures = readiness
+        .to_error_string()
+        .expect("failing head must render failure text");
+
+    actor.drive_active_refinements().await;
+
+    let task = TaskRepository::new(db.clone(), EventBus::noop())
+        .find_by_refinement_intent_id(&intent_id)
+        .await
+        .expect("read materialized task")
+        .expect("durable driver materialized a task");
+
+    assert!(
+        !task
+            .description
+            .contains("Durable refinement intent dispatch"),
+        "durable dispatch must not inject a placeholder readiness context:\n{}",
+        task.description
+    );
+    assert!(
+        task.description.contains(&expected_failures),
+        "durable dispatch must inject the head-derived DoR failures ({expected_failures}):\n{}",
+        task.description
+    );
+    assert!(
+        task.description
+            .contains("Latest SpecLintResultV1 summary (errors and warnings):"),
+        "durable dispatch must inject the shared lint summary:\n{}",
+        task.description
+    );
+    assert!(
+        !task
+            .description
+            .contains("Proposal currently meets all DoR checks."),
+        "a failing head must never render the clean DoR message the Judge treats as pass:\n{}",
+        task.description
+    );
+    assert!(
+        task.description.contains(reviewer_feedback),
+        "durable dispatch must inject current-revision reviewer feedback:\n{}",
+        task.description
+    );
+}
+
+// ── Claim lease vs durable poll interval ─────────────────────────────────────
+
+/// Simulate `elapsed` of wall-clock time passing for one exact run.
+async fn elapse_durable_wall_clock(db: &djinn_db::Database, run_id: &str, elapsed: Duration) {
+    djinn_db::test_support::elapse_refinement_run_wall_clock_for_test(
+        db,
+        run_id,
+        elapsed.as_secs() as i64,
+    )
+    .await;
+}
+
+async fn exact_liveness(
+    repo: &ProposalRepository,
+    run_id: &str,
+) -> djinn_core::refinement_liveness::RefinementLivenessResult {
+    repo.load_refinement_run_snapshot(LoadRefinementRunSnapshotRequest {
+        run_id: run_id.to_owned(),
+        heartbeat_grace_millis: 60_000,
+    })
+    .await
+    .expect("read exact-run snapshot")
+    .expect("run exists")
+    .liveness
+}
+
+/// A live refinement run must never present as evidence-less between two
+/// durable polls.
+///
+/// While an intent is `claimed` but not yet `materialized` — attribution not
+/// resolved yet, admission denied, cap-3 contention, a slow coordinator tick —
+/// the unexpired claim lease is the ONLY liveness evidence the run has, and
+/// `drive_active_refinements` is the only thing that can renew it.
+///
+/// Two independent ways that relationship breaks, both covered here:
+///
+///  1. The lease is shorter than the interval between the polls that renew it,
+///     so it lapses in every cycle rather than occasionally.
+///  2. The CAS refuses to renew a lease that has not already lapsed, making
+///     expiry a *precondition* of renewal. That window exists for any lease
+///     length, so it cannot be closed by picking a bigger number.
+///
+/// Either way the live run holds an expired claim, matches no evidence class in
+/// `evaluate_refinement_liveness`, and `reap_and_admit` terminalizes it as
+/// `reaped_phantom` while minting generation N+1 — the mechanism that drove
+/// `8ixk` to generation 5.
+///
+/// The loop runs more polls than the lease alone could ever cover
+/// (`REFINEMENT_INTENT_CLAIM_LEASE / STUCK_INTERVAL + 2`) and observes at the
+/// worst moment of every cycle: immediately before the renewing poll.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_live_run_never_holds_an_expired_claim_between_durable_polls() {
+    let db = crate::test_helpers::create_test_db();
+    let fixture = refinement_cap_tests::seed_refinement_fixture(&db).await;
+    let (events_tx, _events_rx) = tokio::sync::broadcast::channel::<DjinnEventEnvelope>(256);
+    let (pool, _observed_dispatches) = spawn_model_observing_pool(&db, DURABLE_MODEL);
+    let mut actor = refinement_cap_tests::build_refinement_actor(&db, &events_tx, pool);
+    let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+    let (run_id, generation) = admit_run(&repo, &fixture.proposal_id, "claim-lease-renewal").await;
+    let intent_id = only_intent(&repo, &run_id, generation).await;
+
+    // Hold the intent in `claimed` across polls exactly the way production does
+    // for a run that is slow to materialize: the durable pass takes the claim
+    // and then bails at the attribution gate. No task, no session, no
+    // materialized intent — the claim lease is the only evidence that remains.
+    repo.start_refinement_with_owner(&fixture.proposal_id, None)
+        .await
+        .expect("suspend durable refinement attribution");
+
+    actor.drive_active_refinements().await;
+    let claimed = repo
+        .load_dispatchable_refinement_intents(&run_id, generation)
+        .await
+        .expect("read exact-run intents");
+    assert_eq!(
+        claimed[0].state,
+        RefinementIntentState::Claimed,
+        "the durable pass must claim the intent and then stall at the attribution gate"
+    );
+    assert!(
+        TaskRepository::new(db.clone(), EventBus::noop())
+            .find_by_refinement_intent_id(&intent_id)
+            .await
+            .expect("read materialized task")
+            .is_none(),
+        "an unattributed intent must not materialize a task; the claim is the only evidence"
+    );
+
+    let polls = REFINEMENT_INTENT_CLAIM_LEASE.as_secs() / STUCK_INTERVAL.as_secs() + 2;
+    for poll in 1..=polls {
+        elapse_durable_wall_clock(&db, &run_id, STUCK_INTERVAL).await;
+        let liveness = exact_liveness(&repo, &run_id).await;
+        assert!(
+            matches!(
+                liveness,
+                djinn_core::refinement_liveness::RefinementLivenessResult::Live { .. }
+            ),
+            "poll {poll}/{polls}: a live run whose claim lapsed between polls matched no \
+             liveness evidence class {}s after its last renewal: {liveness:?}",
+            STUCK_INTERVAL.as_secs() * poll
+        );
+        actor.drive_active_refinements().await;
+    }
+
+    // The harm, not the label. `reap_and_admit` is what the admission path calls
+    // on every start/demand/revision; a `Stale` verdict at this observation is
+    // what terminalizes a live run and mints its successor generation.
+    elapse_durable_wall_clock(&db, &run_id, STUCK_INTERVAL).await;
+    let refused = repo
+        .reap_and_admit(AdmitRefinementRunRequest {
+            proposal_id: fixture.proposal_id.clone(),
+            idempotency_key: "reaper-observes-live-run".into(),
+            source: RefinementAdmissionSource::Demand {
+                demand_id: "reaper-observes-live-run".into(),
+            },
+            heartbeat_grace_millis: 60_000,
+        })
+        .await;
+    assert!(
+        matches!(
+            refused,
+            Err(djinn_db::RefinementAdmissionError::AlreadyActive { .. })
+        ),
+        "the admission reaper must refuse a live run, not terminalize it: {refused:?}"
+    );
+    let live_audit = djinn_db::test_support::refinement_run_audit_for_test(&db, &run_id).await;
+    assert_eq!(live_audit.state, "running", "a live run must stay running");
+    assert_eq!(
+        live_audit.typed_reap_count, 0,
+        "a live run must never be written as reaped_phantom"
+    );
+
+    // The reaper itself must NOT be weakened: an owner that actually stopped
+    // renewing — a dead coordinator — still lapses, still reads stale, and is
+    // still reaped.
+    elapse_durable_wall_clock(&db, &run_id, REFINEMENT_INTENT_CLAIM_LEASE + STUCK_INTERVAL).await;
+    let abandoned = exact_liveness(&repo, &run_id).await;
+    assert!(
+        matches!(
+            abandoned,
+            djinn_core::refinement_liveness::RefinementLivenessResult::Stale { .. }
+        ),
+        "an abandoned claim past its whole lease must still read stale: {abandoned:?}"
+    );
+    let reaped = repo
+        .reap_and_admit(AdmitRefinementRunRequest {
+            proposal_id: fixture.proposal_id.clone(),
+            idempotency_key: "reaper-observes-abandoned-run".into(),
+            source: RefinementAdmissionSource::Demand {
+                demand_id: "reaper-observes-abandoned-run".into(),
+            },
+            heartbeat_grace_millis: 60_000,
+        })
+        .await
+        .expect("abandoned run is reapable");
+    assert!(
+        matches!(
+            reaped,
+            RefinementAdmissionOutcome::Admitted { generation: 2, .. }
+        ),
+        "a genuinely abandoned run must still be reaped into a successor generation: {reaped:?}"
+    );
+    let reaped_audit = djinn_db::test_support::refinement_run_audit_for_test(&db, &run_id).await;
+    assert_eq!(
+        reaped_audit.stop_tag.as_deref(),
+        Some("reaped_phantom"),
+        "the reaper must still write reaped_phantom for a genuinely stale run"
     );
 }

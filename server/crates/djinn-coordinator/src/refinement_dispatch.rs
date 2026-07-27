@@ -32,7 +32,7 @@ use super::refinement::{RefinementPhase, StopReason, role_for_phase};
 use super::actor::CoordinatorActor;
 use super::refinement_inflight::DurableInflightRegistration;
 use super::refinement_outcome::RefinementOutcomeApplication;
-use super::types::InflightDispatch;
+use super::types::{InflightDispatch, REFINEMENT_INTENT_CLAIM_LEASE_MILLIS};
 use djinn_core::clock::{Clock, SystemClock};
 use djinn_core::models::TaskRefinementCorrelation;
 use djinn_core::refinement_liveness::RefinementRole;
@@ -101,15 +101,42 @@ fn durable_role_name(role: RefinementRole) -> &'static str {
     }
 }
 
+/// Project a durable intent phase onto the in-process loop phase. Sole
+/// conversion point, so a new durable phase variant fails to compile here
+/// rather than silently mis-projecting at one of two call sites.
+fn refinement_phase_for_intent(
+    phase: djinn_core::refinement_liveness::RefinementPhase,
+) -> RefinementPhase {
+    match phase {
+        djinn_core::refinement_liveness::RefinementPhase::AdversaryAttack => {
+            RefinementPhase::AdversaryAttack
+        }
+        djinn_core::refinement_liveness::RefinementPhase::AdvocateRevision => {
+            RefinementPhase::AdvocateRevision
+        }
+        djinn_core::refinement_liveness::RefinementPhase::JudgeAdjudication => {
+            RefinementPhase::JudgeAdjudication
+        }
+    }
+}
+
+/// Shared readiness/feedback context injected into every tribunal role task.
+pub(super) struct RefinementRoleContext {
+    /// Rendered current-head DoR failures and `SpecLintResultV1` summary, plus
+    /// any advocate spec-lint correction owed for this same round.
+    pub readiness_context: String,
+    /// Latest human reviewer feedback recorded against the current revision.
+    pub reviewer_feedback: Option<String>,
+}
+
 impl CoordinatorActor {
     /// Drive all active refinement loops. Called from `run_tick()`.
     pub(super) async fn drive_active_refinements(&mut self) {
-        // The durable intent ledger is the dispatch authority. This pass happens
-        // even when the recoverable projection has been dropped.
-        self.drive_durable_refinement_intents().await;
-
         let run_ids: Vec<String> = self.active_refinements.keys().cloned().collect();
         if run_ids.is_empty() {
+            // The durable ledger remains dispatch authority when no disposable
+            // projection survived to this tick.
+            self.drive_durable_refinement_intents().await;
             return;
         }
 
@@ -152,6 +179,12 @@ impl CoordinatorActor {
             self.drive_one_refinement(&run_id, running_tasks.as_ref())
                 .await;
         }
+
+        // The durable intent ledger is the dispatch authority. Run it after
+        // monitoring the projections that existed at tick entry: a successful
+        // enqueue must leave its newly-created outcome projection intact until
+        // the next tick can observe its real session/outcome evidence.
+        self.drive_durable_refinement_intents().await;
 
         // Clean up completed refinements.
         self.active_refinements
@@ -197,33 +230,33 @@ impl CoordinatorActor {
                                 Ok(Some(proposal)) => proposal,
                                 Ok(None) | Err(_) => continue,
                             };
-                            // Register the in-flight projection BEFORE any gate
-                            // that can `continue`. The outcome path is the only
-                            // writer of the successor intent, and it is only
-                            // reachable through this projection — a materialized
-                            // intent whose role already ran must be observable
-                            // even when attribution or admission would deny a
-                            // fresh enqueue. Skipping this is what left every
-                            // durable run stuck at `materialized` forever.
-                            let role_ran = self
-                                .register_durable_refinement_inflight(DurableInflightRegistration {
-                                    run_id: &run.run_id,
-                                    generation: run.generation,
-                                    proposal: &proposal,
-                                    phase: intent.phase,
-                                    round: intent.round,
-                                    task_id: &task.id,
-                                })
-                                .await;
+                            // A previously successful enqueue may have completed
+                            // before this coordinator rebuilt its disposable
+                            // projection. Recover that outcome without sending a
+                            // closed role task through the pool again.
+                            let role_ran = self.refinement_session_has_started(&task.id).await;
                             if role_ran {
-                                // The role already produced a session. What the
-                                // run is owed now is its OUTCOME, not another
-                                // dispatch; re-enqueueing a finished (and by now
-                                // closed) role task would loop forever.
+                                self.register_durable_refinement_inflight(
+                                    DurableInflightRegistration {
+                                        run_id: &run.run_id,
+                                        generation: run.generation,
+                                        proposal: &proposal,
+                                        phase: intent.phase,
+                                        round: intent.round,
+                                        task_id: &task.id,
+                                    },
+                                )
+                                .await;
                                 continue;
                             }
                             let Some(owner) = proposal.refinement_owner_user_id.as_deref() else {
-                                tracing::debug!(intent_id = %intent.intent_id, "awaiting durable refinement attribution");
+                                tracing::warn!(
+                                    intent_id = %intent.intent_id,
+                                    run_id = %run.run_id,
+                                    proposal_id = %run.proposal_id,
+                                    "refinement run has no durable owner; its intent cannot dispatch and will \
+                                     be retried on every tick until the proposal is attributed"
+                                );
                                 continue;
                             };
                             let Some((_agent_type, model_id)) = self
@@ -238,10 +271,34 @@ impl CoordinatorActor {
                             };
                             let project_path =
                                 self.resolve_refinement_project_path(&run.proposal_id).await;
-                            if let Err(error) =
-                                self.pool.dispatch(&task.id, &project_path, &model_id).await
-                            {
-                                tracing::warn!(task_id = %task.id, %error, "materialized refinement enqueue failed; retrying on next durable poll");
+                            match self.pool.dispatch(&task.id, &project_path, &model_id).await {
+                                Ok(()) => {
+                                    // Do not manufacture the outcome projection
+                                    // until this retry enqueue has succeeded.
+                                    self.register_durable_refinement_inflight(
+                                        DurableInflightRegistration {
+                                            run_id: &run.run_id,
+                                            generation: run.generation,
+                                            proposal: &proposal,
+                                            phase: intent.phase,
+                                            round: intent.round,
+                                            task_id: &task.id,
+                                        },
+                                    )
+                                    .await;
+                                    if let Some(session) =
+                                        self.refinement_sessions.get_mut(&run.run_id)
+                                        && session.run_id == run.run_id
+                                        && session.generation == run.generation
+                                        && session.task_id == task.id
+                                    {
+                                        session.model_id = model_id;
+                                        session.session_started_at = None;
+                                    }
+                                }
+                                Err(error) => {
+                                    tracing::warn!(task_id = %task.id, %error, "materialized refinement enqueue failed; retrying on next durable poll")
+                                }
                             }
                         }
                         Ok(None) => {
@@ -260,7 +317,11 @@ impl CoordinatorActor {
                         intent_id: intent.intent_id.clone(),
                         generation: run.generation,
                         owner: owner.clone(),
-                        lease_millis: 60_000,
+                        // Derived from the poll cadence, never a bare number:
+                        // this same call is what RENEWS the lease on every
+                        // durable poll, so the lease has to outlive the worst
+                        // case interval between two polls.
+                        lease_millis: REFINEMENT_INTENT_CLAIM_LEASE_MILLIS,
                     })
                     .await
                 {
@@ -281,7 +342,13 @@ impl CoordinatorActor {
                     Ok(None) | Err(_) => continue,
                 };
                 let Some(attributed_user) = proposal.refinement_owner_user_id.clone() else {
-                    tracing::debug!(intent_id = %lease.intent_id, "awaiting durable refinement attribution");
+                    tracing::warn!(
+                        intent_id = %lease.intent_id,
+                        run_id = %run.run_id,
+                        proposal_id = %run.proposal_id,
+                        "refinement run has no durable owner; its intent cannot dispatch and will \
+                         be retried on every tick until the proposal is attributed"
+                    );
                     continue;
                 };
                 let Some((_agent_type, model_id)) = self
@@ -316,14 +383,30 @@ impl CoordinatorActor {
                             }
                         };
                         let role = durable_role_name(lease.role);
+                        // The durable ledger is the ONLY dispatch path for a
+                        // run with a `run_id`, so this context is what every
+                        // live tribunal role actually reads. It must carry the
+                        // real DoR/lint findings and reviewer feedback — a
+                        // placeholder here leaves the Advocate unable to fix
+                        // readiness and forces a mandatory Judge reject.
+                        let RefinementRoleContext {
+                            readiness_context,
+                            reviewer_feedback,
+                        } = self
+                            .build_refinement_role_context(
+                                &run.proposal_id,
+                                &run.run_id,
+                                refinement_phase_for_intent(lease.phase),
+                            )
+                            .await;
                         let Some(task_id) = self
                             .create_refinement_task_with_context_and_correlation(
                                 &run.proposal_id,
                                 role,
                                 lease.round,
                                 proposal.latest_revision_seq,
-                                "Durable refinement intent dispatch.",
-                                None,
+                                &readiness_context,
+                                reviewer_feedback.as_deref(),
                                 Some(&attributed_user),
                                 Some(&correlation),
                             )
@@ -353,22 +436,32 @@ impl CoordinatorActor {
                 {
                     continue;
                 }
-                // Track the freshly materialized role as in-flight in the same
-                // pass that enqueues it, so its very first exit is observed and
-                // its outcome applied. Registering only on a later poll would
-                // leave a one-tick hole with no watcher.
-                self.register_durable_refinement_inflight(DurableInflightRegistration {
-                    run_id: &lease.run_id,
-                    generation: lease.generation,
-                    proposal: &proposal,
-                    phase: lease.phase,
-                    round: lease.round,
-                    task_id: &task_id,
-                })
-                .await;
                 let project_path = self.resolve_refinement_project_path(&run.proposal_id).await;
-                if let Err(error) = self.pool.dispatch(&task_id, &project_path, &model_id).await {
-                    tracing::warn!(task_id = %task_id, %error, "durable refinement enqueue failed; task remains retryable");
+                match self.pool.dispatch(&task_id, &project_path, &model_id).await {
+                    Ok(()) => {
+                        // Register only after the pool accepted this exact task.
+                        // This is the run-keyed bridge to outcome completion.
+                        self.register_durable_refinement_inflight(DurableInflightRegistration {
+                            run_id: &lease.run_id,
+                            generation: lease.generation,
+                            proposal: &proposal,
+                            phase: lease.phase,
+                            round: lease.round,
+                            task_id: &task_id,
+                        })
+                        .await;
+                        if let Some(session) = self.refinement_sessions.get_mut(&lease.run_id)
+                            && session.run_id == lease.run_id
+                            && session.generation == lease.generation
+                            && session.task_id == task_id
+                        {
+                            session.model_id = model_id;
+                            session.session_started_at = None;
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(task_id = %task_id, %error, "durable refinement enqueue failed; task remains retryable")
+                    }
                 }
             }
         }
@@ -397,17 +490,7 @@ impl CoordinatorActor {
             return None;
         }
 
-        let phase = match phase {
-            djinn_core::refinement_liveness::RefinementPhase::AdversaryAttack => {
-                RefinementPhase::AdversaryAttack
-            }
-            djinn_core::refinement_liveness::RefinementPhase::AdvocateRevision => {
-                RefinementPhase::AdvocateRevision
-            }
-            djinn_core::refinement_liveness::RefinementPhase::JudgeAdjudication => {
-                RefinementPhase::JudgeAdjudication
-            }
-        };
+        let phase = refinement_phase_for_intent(phase);
         let diverse_refinement = self.read_diverse_refinement_setting(proposal_id).await;
         let (agent_type, model_id) = self
             .resolve_refinement_dispatch_params(phase, diverse_refinement, Some(owner.as_str()))
@@ -662,6 +745,49 @@ impl CoordinatorActor {
         over_cap_error: String,
         tear_down_slot: bool,
     ) {
+        let over_cap = if let Some(state) = self.active_refinements.get_mut(run_id) {
+            state.dispatch_failures += 1;
+            state.dispatch_failures >= REFINEMENT_DISPATCH_RETRY_CAP
+        } else {
+            true
+        };
+
+        if over_cap {
+            tracing::warn!(
+                run_id = %run_id,
+                phase = ?session.phase,
+                "Refinement role session repeatedly failed to start — terminating"
+            );
+            // Keep both run-keyed projections until the exact-run terminal CAS
+            // succeeds. A miss or repository error must remain retryable.
+            if self
+                .terminate_refinement(
+                    run_id,
+                    StopReason::AgentFailure {
+                        role: role_for_phase(session.phase),
+                        error_code: "agent_start_failed".into(),
+                        message: over_cap_error,
+                    },
+                )
+                .await
+            {
+                if tear_down_slot {
+                    if let Err(e) = self.pool.kill_session(&session.task_id).await {
+                        tracing::warn!(
+                            run_id = %run_id,
+                            task_id = %session.task_id,
+                            error = %e,
+                            "Failed to tear down terminal Pending refinement task-run"
+                        );
+                    }
+                    self.clear_inflight_dispatch(&session.task_id).await;
+                }
+                self.close_refinement_task(&session.task_id, close_reason)
+                    .await;
+            }
+            return;
+        }
+
         if tear_down_slot {
             // The pool still holds the slot for the Pending task-run. Tear down
             // the (still-queued) Job and clear the in-flight reservation so the
@@ -680,33 +806,84 @@ impl CoordinatorActor {
         self.close_refinement_task(&session.task_id, close_reason)
             .await;
         self.refinement_sessions.remove(run_id);
-        let over_cap = if let Some(state) = self.active_refinements.get_mut(run_id) {
-            state.dispatch_failures += 1;
-            state.dispatch_failures >= REFINEMENT_DISPATCH_RETRY_CAP
-        } else {
-            true
+        tracing::warn!(
+            run_id = %run_id,
+            phase = ?session.phase,
+            "Refinement role session never started; will re-dispatch (not counted as dry)"
+        );
+    }
+
+    /// Build the shared per-role dispatch context every tribunal task needs:
+    /// the rendered current-head DoR/lint readiness report (plus any advocate
+    /// spec-lint correction for this same round) and the current-revision human
+    /// reviewer feedback.
+    ///
+    /// Both dispatch paths MUST go through this. The durable intent ledger
+    /// previously injected the fixed literal `"Durable refinement intent
+    /// dispatch."` as the readiness context and passed `None` for reviewer
+    /// feedback, so every durable-run role was dispatched blind:
+    ///
+    /// * the Advocate never learned which DoR checks were failing and so could
+    ///   not fix them, and
+    /// * the Judge — whose prompt treats any injected `Current DoR status`
+    ///   other than the exact clean message as a mandatory blocking reject —
+    ///   could never approve, no matter how good the spec was.
+    ///
+    /// Since `drive_one_refinement` returns early for any run with a non-empty
+    /// `run_id` ("durable runs are dispatched exclusively by the leased intent
+    /// ledger"), that placeholder was what every live refinement actually got.
+    async fn build_refinement_role_context(
+        &self,
+        proposal_id: &str,
+        run_id: &str,
+        phase: RefinementPhase,
+    ) -> RefinementRoleContext {
+        let readiness = self.evaluate_proposal_readiness(proposal_id).await;
+        let mut readiness_context = readiness
+            .as_ref()
+            .map(CoordinatorActor::format_readiness_context)
+            .unwrap_or_else(|| {
+                "Current proposal head could not be resolved for shared DoR/lint readiness."
+                    .to_string()
+            });
+
+        if phase == RefinementPhase::AdvocateRevision
+            && let Some(correction_context) =
+                self.active_refinements.get(run_id).and_then(|state| {
+                    super::refinement_outcome::format_advocate_lint_correction_context(
+                        &state.pending_advocate_lint_violations,
+                    )
+                })
+        {
+            readiness_context.push_str("\n\nSpec-lint correction required for this same round:\n");
+            readiness_context.push_str(&correction_context);
+        }
+
+        // Retrieve the latest current-revision human reviewer feedback recorded
+        // by a demand round. The helper filters to the proposal's current
+        // `latest_revision_seq` so stale feedback from a prior revision is
+        // never injected into the next tribunal task.
+        let event_bus = crate::events::event_bus_for(&self.events_tx);
+        let proposal_repo = djinn_db::ProposalRepository::new(self.db.clone(), event_bus);
+        let reviewer_feedback = match proposal_repo
+            .latest_current_revision_reviewer_feedback(proposal_id)
+            .await
+        {
+            Ok(fb) => fb,
+            Err(e) => {
+                tracing::warn!(
+                    proposal_id = %proposal_id,
+                    error = %e,
+                    "Failed to retrieve reviewer feedback for refinement dispatch; \
+                     proceeding without feedback injection"
+                );
+                None
+            }
         };
-        if over_cap {
-            tracing::warn!(
-                run_id = %run_id,
-                phase = ?session.phase,
-                "Refinement role session repeatedly failed to start — terminating"
-            );
-            self.terminate_refinement(
-                run_id,
-                StopReason::AgentFailure {
-                    role: role_for_phase(session.phase),
-                    error_code: "agent_start_failed".into(),
-                    message: over_cap_error,
-                },
-            )
-            .await;
-        } else {
-            tracing::warn!(
-                run_id = %run_id,
-                phase = ?session.phase,
-                "Refinement role session never started; will re-dispatch (not counted as dry)"
-            );
+
+        RefinementRoleContext {
+            readiness_context,
+            reviewer_feedback,
         }
     }
 
@@ -1010,51 +1187,12 @@ impl CoordinatorActor {
 
         // Build a readiness-enriched task description so the agent sees
         // current DoR findings.
-        let lint_correction_context = if phase == RefinementPhase::AdvocateRevision {
-            self.active_refinements.get(run_id).and_then(|state| {
-                super::refinement_outcome::format_advocate_lint_correction_context(
-                    &state.pending_advocate_lint_violations,
-                )
-            })
-        } else {
-            None
-        };
-
-        let mut readiness_context = readiness
-            .as_ref()
-            .map(CoordinatorActor::format_readiness_context)
-            .unwrap_or_else(|| {
-                "Current proposal head could not be resolved for shared DoR/lint readiness."
-                    .to_string()
-            });
-        if let Some(correction_context) = lint_correction_context {
-            readiness_context.push_str("\n\nSpec-lint correction required for this same round:\n");
-            readiness_context.push_str(&correction_context);
-        }
-
-        // Retrieve the latest current-revision human reviewer feedback recorded
-        // by a demand round. The helper filters to the proposal's current
-        // `latest_revision_seq` so stale feedback from a prior revision is
-        // never injected into the next tribunal task.
-        let reviewer_feedback = {
-            let event_bus = crate::events::event_bus_for(&self.events_tx);
-            let proposal_repo = djinn_db::ProposalRepository::new(self.db.clone(), event_bus);
-            match proposal_repo
-                .latest_current_revision_reviewer_feedback(&proposal_id)
-                .await
-            {
-                Ok(fb) => fb,
-                Err(e) => {
-                    tracing::warn!(
-                        proposal_id = %proposal_id,
-                        error = %e,
-                        "Failed to retrieve reviewer feedback for refinement dispatch; \
-                         proceeding without feedback injection"
-                    );
-                    None
-                }
-            }
-        };
+        let RefinementRoleContext {
+            readiness_context,
+            reviewer_feedback,
+        } = self
+            .build_refinement_role_context(&proposal_id, run_id, phase)
+            .await;
 
         // ── Step 3: Create the refinement task (first DB side effect) ────────
         //

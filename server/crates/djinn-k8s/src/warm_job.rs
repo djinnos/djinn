@@ -110,12 +110,13 @@ pub fn build_warm_job(
     let cmd = format!(
         r#"set -euo pipefail
 # Everything this Pod creates on the shared volumes must stay group-writable for
-# the other identity that reads/writes them (the launcher-spawned child, uid
-# 1001 primary group 1000). The container default 022 would give the clone 755
+# the other identities that read/write them (djinn-server at uid 10001, the
+# task-run worker at uid 1000 — both of which only manage lifecycle here and
+# work through gid 1000). The container default 022 would give the clone 755
 # dirs / 644 files, which the worker's startup contract check rejects. See
 # `djinn_agent_worker::volume_contract`.
 umask 0002
-# The mirror is server-owned (uid 10001) while this pod runs as uid 1000, so git
+# The mirror is server-owned (uid 10001) while this pod runs as uid 1001, so git
 # needs a `safe.directory` exception for it. It must be a config FILE in protected
 # scope: git honours safe.directory only from system/global files in the inner
 # `git-upload-pack` child of `git clone --local`, and strips command-scope config
@@ -302,19 +303,31 @@ exec {bin} warm-graph "{project_id}"
         volumes: Some(volumes),
         node_selector,
         tolerations,
-        // The warm pod shares the /cache cargo target PVC with task-runs, so it
-        // MUST carry the same identity and the same volume-ownership contract
-        // qut0 put on the task-run pod — otherwise the two halves of the shared
-        // cache write as different owners and neither can overwrite the other
-        // (task pwrr: the warm pod was still pinned to the legacy 10001 after
-        // task-runs moved to 1000). `fsGroup = ARTIFACT_GID` with
-        // `OnRootMismatch` gives the warm process membership in the artifact
-        // group without an unbounded recursive chown on every pod start; the
-        // worker binary re-validates the mounted result at startup
-        // (`djinn_agent_worker::volume_contract`) and fails closed.
+        // Why CHILD_UID (1001), not WORKER_UID (1000). The rule for this field
+        // is not "match the task-run pod": it is that every actor which CREATES
+        // CONTENT in the shared `/cache/cargo-target` tree must be the same uid.
+        // That uid is 1001, because cargo and its build scripts always run as
+        // the launcher-spawned child, and a build script copying over a seeded
+        // artifact ends in `set_permissions`. `chmod`/`chown`/`utimes` are
+        // governed by OWNERSHIP alone — EPERM to a non-owner even for a
+        // byte-identical mode, and no mode bit, setgid, ACL or group grants
+        // them. (Directory-entry and content ops DO work cross-identity through
+        // gid 1000 + setgid + `g+w`; only inode metadata does not.)
+        //
+        // This does not touch the launcher's security boundary: that boundary is
+        // the 0600 worker-owned broker socket, which refuses uid 1001 at
+        // `connect(2)`, and a warm Job renders no launcher sidecar and no socket
+        // at all. Asserted by `warm_pod_never_renders_a_launcher_sidecar`.
+        //
+        // `run_as_group`/`fsGroup` stay at ARTIFACT_GID: group remains the
+        // mechanism for the lifecycle-only actors (djinn-server at 10001,
+        // task-run worker at 1000). Only content creation moved.
+        //
+        // Moving the EXISTING base to this state is a one-time operator action:
+        // `docs/CARGO_CACHE_OWNERSHIP_MIGRATION_RUNBOOK.md`.
         security_context: Some(k8s_openapi::api::core::v1::PodSecurityContext {
-            run_as_user: Some(i64::from(crate::launcher::WORKER_UID)),
-            run_as_group: Some(i64::from(crate::launcher::WORKER_GID)),
+            run_as_user: Some(i64::from(crate::launcher::CHILD_UID)),
+            run_as_group: Some(i64::from(crate::launcher::ARTIFACT_GID)),
             ..crate::launcher::pod_security_context()
         }),
         ..PodSpec::default()
@@ -540,18 +553,26 @@ mod tests {
 
         let pod = spec.template.spec.as_ref().expect("pod");
         assert_eq!(pod.restart_policy.as_deref(), Some("Never"));
-        // Must carry the SAME identity and volume-ownership contract as a
-        // task-run pod: both write the shared /cache cargo target PVC, so a
-        // divergent uid/fsGroup leaves artifacts neither side can overwrite.
+        // See the rationale on `security_context` in `build_warm_job`.
         let psc = pod.security_context.as_ref().expect("pod security context");
         assert_eq!(
             psc.run_as_user,
+            Some(i64::from(crate::launcher::CHILD_UID)),
+            "warm pod must run as the cargo/build-script uid (1001): it CREATES \
+             content in the shared cargo base, and chmod/chown/utimes are \
+             governed by ownership alone"
+        );
+        assert_ne!(
+            psc.run_as_user,
             Some(i64::from(crate::launcher::WORKER_UID)),
-            "warm pod must run as the worker uid to share the cargo cache safely"
+            "the 1000/1001 split is load-bearing: the broker control socket is \
+             worker-owned 0600 precisely to refuse uid 1001 at connect(2)"
         );
         assert_eq!(
             psc.run_as_group,
-            Some(i64::from(crate::launcher::WORKER_GID))
+            Some(i64::from(crate::launcher::ARTIFACT_GID)),
+            "group stays 1000: still the mechanism for the lifecycle-only \
+             identities that share this tree"
         );
         assert_eq!(
             psc.fs_group,
@@ -838,6 +859,57 @@ mod tests {
         );
         assert_eq!(cfg.warm_memory_request, "2Gi");
         assert_eq!(cfg.warm_memory_limit, "6Gi");
+    }
+
+    /// The precondition that makes running the warm pod as `CHILD_UID` free of
+    /// security consequence — asserted, not assumed.
+    ///
+    /// `transport::restrict_socket_to_worker` hands the broker control socket to
+    /// `WORKER_UID` at mode `0600` so uid 1001 is refused at `connect(2)`. That
+    /// only matters if a warm pod has a socket to connect to; it does not. If a
+    /// launcher is ever added to the warm path this test fails, and the uid
+    /// choice above must be revisited in the same change.
+    #[test]
+    fn warm_pod_never_renders_a_launcher_sidecar() {
+        let cfg = KubernetesConfig::for_testing();
+        let plain = build_warm_job(&cfg, "proj-xyz", "example/warm:latest", None);
+        let leased = build_leased_warm_job(
+            &cfg,
+            "proj-xyz",
+            "example/warm:latest",
+            None,
+            &LeasedWarmJobIdentity::new("proj-xyz", "req-1", "rev-1", 7),
+        );
+
+        for (label, job) in [("plain", &plain), ("leased", &leased)] {
+            let pod = job
+                .spec
+                .as_ref()
+                .and_then(|spec| spec.template.spec.as_ref())
+                .expect("pod spec");
+            let names: Vec<&str> = pod
+                .containers
+                .iter()
+                .chain(pod.init_containers.iter().flatten())
+                .map(|c| c.name.as_str())
+                .collect();
+            assert!(
+                !names.contains(&crate::launcher::LAUNCHER_CONTAINER_NAME),
+                "{label} warm job renders a launcher sidecar ({names:?}); the warm \
+                 pod runs as CHILD_UID and would now be on the WRONG side of the \
+                 worker-owned 0600 broker socket"
+            );
+            let volume_names: Vec<&str> = pod
+                .volumes
+                .iter()
+                .flatten()
+                .map(|v| v.name.as_str())
+                .collect();
+            assert!(
+                !volume_names.contains(&crate::launcher::VOLUME_LAUNCHER_IPC),
+                "{label} warm job mounts the launcher IPC volume ({volume_names:?})"
+            );
+        }
     }
 
     /// The worker contract merged by l15u/t6g0 acquires its per-project

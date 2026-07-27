@@ -21,6 +21,41 @@ async fn insert_project(db: &Database, project_id: &str) {
     .expect("insert project");
 }
 
+/// Prove that dropping a [`PinnedGalaxyArtifact`] discarded its pinned session
+/// instead of handing it back to the pool while it still holds the shared pin.
+///
+/// `Drop` cannot await `pg_advisory_unlock`, so it marks the session
+/// close-on-drop and SQLx disposes of it in a task spawned from the drop
+/// handler. The *server-side* release therefore is not ordered before the next
+/// statement any other connection issues — probing the advisory lock straight
+/// after `drop()` is a race, and that race is exactly what made this test flaky
+/// under `cargo nextest` parallelism. What the drop contract actually
+/// guarantees is that the pinned session never returns to the pool, and that is
+/// observable exactly: SQLx releases a dropped connection's pool permit only
+/// after its disposal task has finished, so holding every permit the pool can
+/// issue is a sleep-free, retry-free barrier. Once all of them are in hand no
+/// other connection from this pool exists, and each one can be asked directly
+/// whether it is carrying the leaked pin.
+async fn assert_no_pooled_connection_holds_pin(
+    db: &Database,
+    contender: sqlx::pool::PoolConnection<sqlx::Postgres>,
+    key: GenerationStreamPinKey,
+    context: &str,
+) {
+    let pool = db.pool();
+    let max_connections = pool.options().get_max_connections() as usize;
+    let mut pooled = vec![contender];
+    while pooled.len() < max_connections {
+        pooled.push(pool.acquire().await.expect("drain pool connection"));
+    }
+    for connection in pooled.iter_mut() {
+        let holds_pin = release_generation_stream_pin_shared(connection, key)
+            .await
+            .expect("probe pooled connection for a leaked shared pin");
+        assert!(!holds_pin, "{context}");
+    }
+}
+
 /// Publish via the legacy unmarked cache upsert.  The migration triggers
 /// mint a fresh generation (artifact_required = false) and advance
 /// `repo_graph_current`.
@@ -348,17 +383,14 @@ async fn pinned_reader_shared_pin_survives_commit_and_releases() {
         other => panic!("expected pinned artifact, got {other:?}"),
     };
     drop(reader);
-    assert!(
-        try_acquire_generation_stream_pin_exclusive(&mut contender, key)
-            .await
-            .expect("try exclusive after drop"),
-        "drop must discard the pinned connection rather than leak its lock"
-    );
-    assert!(
-        release_generation_stream_pin_exclusive(&mut contender, key)
-            .await
-            .expect("release after drop")
-    );
+    assert_no_pooled_connection_holds_pin(
+        &db,
+        contender,
+        key,
+        "drop must discard the pinned connection rather than return it to the \
+         pool still holding its lock",
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -401,18 +433,14 @@ async fn pinned_reader_read_error_discards_its_pinned_connection() {
     );
     drop(reader);
 
-    let mut contender = db.pool().acquire().await.expect("contender connection");
-    assert!(
-        try_acquire_generation_stream_pin_exclusive(&mut contender, key)
-            .await
-            .expect("try exclusive after read error"),
-        "a read error must not return a session holding the shared pin"
-    );
-    assert!(
-        release_generation_stream_pin_exclusive(&mut contender, key)
-            .await
-            .expect("release exclusive")
-    );
+    let contender = db.pool().acquire().await.expect("contender connection");
+    assert_no_pooled_connection_holds_pin(
+        &db,
+        contender,
+        key,
+        "a read error must not return a session holding the shared pin",
+    )
+    .await;
 }
 
 #[tokio::test]

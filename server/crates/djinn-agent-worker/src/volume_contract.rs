@@ -18,6 +18,30 @@
 //!
 //! ## The contract
 //!
+//! The contract below is about the **group**, and it is deliberately silent on
+//! the owning uid — nothing in this module reads or enforces `st_uid`
+//! ([`check_metadata`] compares `st_gid` only). That is correct for everything
+//! the group mechanism can actually carry: directory-entry operations
+//! (create / unlink / rename / `linkat`) are governed by the DIRECTORY's
+//! permissions, and content operations (`open(O_TRUNC)` / `write` / `truncate`)
+//! by the FILE's, so gid 1000 + setgid + `g+w` genuinely lets any of the
+//! identities do those across uids.
+//!
+//! What the group cannot carry is **inode-metadata** operations — `chmod`,
+//! `chown`, `utimensat` with explicit times. Those are governed by OWNERSHIP
+//! alone: the kernel returns `EPERM` to a non-owner even when the requested
+//! mode is byte-identical to the current one, and no mode bit, setgid bit, ACL
+//! or group membership can delegate them. `std::fs::copy` always ends in
+//! `set_permissions`, so *any actor that copies over an existing file must own
+//! it*. That is the whole reason the warm Job now runs as `CHILD_UID` (1001)
+//! rather than `WORKER_UID` (1000): cargo and its build scripts run as 1001 and
+//! copy over seeded artifacts, and the task-run seed is performed through the
+//! broker so the seeded inodes are born owned by 1001 too. Lifecycle-only
+//! actors — djinn-server at uid 10001 (`.warm-locks`, `.djinn-gc.lock`,
+//! `remove_dir_all`, `read_dir`, `statvfs`) and the task-run worker at 1000
+//! (creating and removing run dirs) — never touch inode metadata here and stay
+//! where they are. See `docs/CARGO_CACHE_OWNERSHIP_MIGRATION_RUNBOOK.md`.
+//!
 //! For every mounted root the pod writes through:
 //!   * group ownership is [`ARTIFACT_GID`] — so the worker (gid 1000) and the
 //!     launcher-spawned child (primary group 1000) share every artifact;
@@ -142,23 +166,68 @@ pub enum ContractMode {
 /// a source executable's mode when it copies a build-script output and can
 /// resurrect an old artifact in a later warm cycle, so a touched-files list is
 /// not a sufficient proof that every seedable source is hardlinkable.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct WarmBaseModeNormalization {
     /// Regular files encountered during the full walk.
     pub regular_files: u64,
     /// Regular files to which the group-write bit was added.
     pub files_normalized: u64,
+    /// Regular files that needed `g+w` but whose `chmod` was refused — almost
+    /// always `EPERM` because the file is owned by another uid. Counted rather
+    /// than fatal: see the ownership note on
+    /// [`normalize_warm_base_regular_files`].
+    pub files_unchangeable: u64,
+    /// First `chmod` refusal, rendered with path and error, for the log line.
+    pub first_chmod_error: Option<String>,
 }
 
 /// Add group-write to every regular file below a completed Cargo warm base.
 ///
-/// The warm worker owns these files and holds the per-base lock while this
-/// runs. Symlinks are deliberately neither followed nor mutated: they are not
-/// eligible safe-hardlink sources and changing their target would escape the
-/// base invariant. Directories already have their distinct setgid/group-write
+/// # `chmod` needs OWNERSHIP, and this pass only owns what it created
+///
+/// `fs::set_permissions` is `chmod(2)`, which the kernel grants to the file's
+/// OWNER and to `CAP_FOWNER` — and to nobody else, whatever the mode, the
+/// setgid bit, the ACL or the group. So this pass is only authoritative over
+/// the files the warm pod itself created. It is written to be *partial by
+/// design*: a file it cannot chmod yields `EPERM`, the caller logs a warning,
+/// and the seed's per-entry copy/skip degradation remains the safety net.
+///
+/// Historically this comment claimed "the warm worker owns these files". That
+/// was FALSE on the live cache: the base was created by a pod that ran as uid
+/// 10001, later warm pods ran as 1000, and neither could chmod the other's
+/// inodes — a live production base measured 6,794 files owned by 10001 against
+/// 2,422 owned by 1000. It becomes true only once (a) the warm pod runs as
+/// `CHILD_UID` (1001), which is this change, AND (b) an operator performs the
+/// one-time `chown -R 1001:1000` in
+/// `docs/CARGO_CACHE_OWNERSHIP_MIGRATION_RUNBOOK.md`. Until (b) has run, expect
+/// this pass to report `files_normalized` well below the mismatch count and to
+/// warn; that is the accurate signal, not a regression.
+///
+/// The warm worker holds the per-base lock while this runs. Symlinks are
+/// deliberately neither followed nor mutated: they are not eligible
+/// safe-hardlink sources and changing their target would escape the base
+/// invariant. Directories already have their distinct setgid/group-write
 /// contract. This operation preserves every other permission bit, including
 /// execute, so build scripts remain executable (`755` becomes `775`).
 pub fn normalize_warm_base_regular_files(base: &Path) -> io::Result<WarmBaseModeNormalization> {
+    normalize_warm_base_regular_files_with(base, &|path, mode| {
+        fs::set_permissions(path, fs::Permissions::from_mode(mode))
+    })
+}
+
+/// [`normalize_warm_base_regular_files`] with the `chmod` implementation
+/// injected.
+///
+/// This seam exists for the same reason `cargo_target_seed::LinkBackend` does:
+/// the behaviour under test is the kernel's refusal to let a NON-OWNER `chmod`,
+/// and a CI runner cannot create a foreign-owned file without root — so a test
+/// running as the owner never observes the refusal at all, and would attest the
+/// non-fatal path against a case that cannot occur. Production always passes
+/// the real `set_permissions` above.
+pub fn normalize_warm_base_regular_files_with(
+    base: &Path,
+    chmod: &dyn Fn(&Path, u32) -> io::Result<()>,
+) -> io::Result<WarmBaseModeNormalization> {
     let metadata = match fs::symlink_metadata(base) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -194,8 +263,23 @@ pub fn normalize_warm_base_regular_files(base: &Path) -> io::Result<WarmBaseMode
             result.regular_files += 1;
             let mode = metadata.mode();
             if mode & MODE_GROUP_WRITE == 0 {
-                fs::set_permissions(&path, fs::Permissions::from_mode(mode | MODE_GROUP_WRITE))?;
-                result.files_normalized += 1;
+                // A refusal here is NOT fatal, and must never be. `chmod` is
+                // granted by ownership alone, so one foreign-owned file used to
+                // abort the walk with `?` and leave every LATER file in the base
+                // unnormalized — the transitional state this change creates (a
+                // 1001 warm pod over a base still holding 10001- and 1000-owned
+                // inodes) would have hit that on the first entry. Count it,
+                // keep the first error for the log, and continue.
+                match chmod(&path, mode | MODE_GROUP_WRITE) {
+                    Ok(()) => result.files_normalized += 1,
+                    Err(error) => {
+                        result.files_unchangeable += 1;
+                        if result.first_chmod_error.is_none() {
+                            result.first_chmod_error =
+                                Some(format!("chmod {}: {error}", path.display()));
+                        }
+                    }
+                }
             }
         }
     }

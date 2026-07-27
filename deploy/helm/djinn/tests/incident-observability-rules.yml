@@ -73,6 +73,34 @@ tests:
       - eval_time: 4m
         alertname: DjinnLogRotatorMissing
         exp_alerts: []
+  - name: cgroup-writable sandbox alert matches warning reason and handler message
+    interval: 1m
+    input_series:
+      - series: 'kube_event_count{type="Warning",reason="FailedCreatePodSandBox",message="failed to create runc-cgroupwritable sandbox"}'
+        values: '0+0x1 1+0x10'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: DjinnCgroupWritableSandboxFailure
+        exp_alerts:
+          - exp_labels: {message: failed to create runc-cgroupwritable sandbox, reason: FailedCreatePodSandBox, severity: warning, type: Warning}
+  - name: cgroup-writable sandbox alert rejects event without handler message
+    interval: 1m
+    input_series:
+      - series: 'kube_event_count{type="Warning",reason="FailedCreatePodSandBox",message="failed to create another sandbox"}'
+        values: '0+0x1 1+0x10'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: DjinnCgroupWritableSandboxFailure
+        exp_alerts: []
+  - name: cgroup-writable sandbox alert rejects event without sandbox reason
+    interval: 1m
+    input_series:
+      - series: 'kube_event_count{type="Warning",reason="OtherFailure",message="failed to create runc-cgroupwritable sandbox"}'
+        values: '0+0x1 1+0x10'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: DjinnCgroupWritableSandboxFailure
+        exp_alerts: []
   - name: memory server scrape log failure and rotator absence truth table
     interval: 1m
     input_series:

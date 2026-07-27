@@ -92,6 +92,7 @@ warning's explicit Helm override for a dry-run observation rollout.
 | `DJINN_CACHE_CLEANUP_MODE` | `dry_run` | Global destructive kill switch for sccache, debris, idle, and pressure cleanup. |
 | `DJINN_CACHE_CLEANUP_SCCACHE_ENABLED` | `true` | Enables the recurring `/cache/sccache` guard. |
 | `DJINN_CACHE_CLEANUP_SCCACHE_MAX_AGE_HOURS` | `24` | Stale threshold for the parent `/cache/sccache` directory. |
+| `DJINN_CACHE_CLEANUP_SCCACHE_DELETE_ARMED` | `false` | Second, sccache-specific arming switch. `DJINN_CACHE_CLEANUP_MODE=delete` alone reports the candidate as `safety_disabled_report_only` and retains it. Required because the guard's root was hardcoded to the Job-pod `/cache/sccache`, which does not exist in the server pod — so any Stage-3 observation recorded before that fix saw an empty path and cannot authorize deletion. |
 | `DJINN_CACHE_CLEANUP_CARGO_DEBRIS_ENABLED` | `true` | Enables malformed run-root directory and loose-file cleanup. |
 | `DJINN_CACHE_CLEANUP_CARGO_DEBRIS_MAX_AGE_DAYS` | `7` | Age threshold for non-UUID directories and loose files; `0` disables debris cleanup. |
 | `DJINN_CACHE_CLEANUP_WARM_BASE_IDLE_RETENTION_DAYS` | `14` | Whole warm-base idle retention period. |
@@ -123,6 +124,7 @@ kubectl -n "$NS" set env "deploy/$SERVER_DEPLOY" \
   DJINN_CACHE_CLEANUP_MODE=dry_run \
   DJINN_CACHE_CLEANUP_SCCACHE_ENABLED=true \
   DJINN_CACHE_CLEANUP_SCCACHE_MAX_AGE_HOURS=24 \
+  DJINN_CACHE_CLEANUP_SCCACHE_DELETE_ARMED=false \
   DJINN_CACHE_CLEANUP_CARGO_DEBRIS_ENABLED=true \
   DJINN_CACHE_CLEANUP_CARGO_DEBRIS_MAX_AGE_DAYS=7 \
   DJINN_CACHE_CLEANUP_WARM_BASE_IDLE_RETENTION_DAYS=14 \
@@ -291,12 +293,35 @@ kubectl -n "$NS" set env "deploy/$SERVER_DEPLOY" DJINN_CACHE_CLEANUP_MODE=delete
 kubectl -n "$NS" rollout status "deploy/$SERVER_DEPLOY"
 ```
 
+**sccache needs a second, explicit arming step.** Until the path fix, the guard
+resolved the Job-pod `/cache/sccache`, which does not exist in the server pod,
+so it logged `sccache guard skipped; path does not exist` on every tick and the
+gate above could only ever have been cleared on empty evidence. `mode=delete`
+therefore reports the sccache candidate as `safety_disabled_report_only` and
+retains it. Re-run the observation above against the corrected path — confirm
+`sccache guard candidate` now logs a real `path`, `size_bytes`, and `age_hours`
+for `$DJINN_HOME/cache/sccache`, and that Stage 1 is still clean — then arm it:
+
+```bash
+kubectl -n "$NS" set env "deploy/$SERVER_DEPLOY" \
+  DJINN_CACHE_CLEANUP_SCCACHE_DELETE_ARMED=true
+kubectl -n "$NS" rollout status "deploy/$SERVER_DEPLOY"
+```
+
+Note this guard deletes the **entire** `sccache` tree in one `remove_dir_all`
+when its latest recursive mtime crosses the threshold; there is no per-project
+or per-entry granularity, and no lock is taken against a concurrent writer.
+Stage 1's "no build pod relies on sccache" gate is the only thing standing
+between that call and live data.
+
 Expected delete evidence is `cleanup_outcome="deleted"` and reclaimed-byte
 increments for sccache; debris has `malformed_dir_deleted` or
 `loose_file_deleted` plus `size_bytes`. **Rollback:** immediately set
-`DJINN_CACHE_CLEANUP_MODE=dry_run`; to stop an individual recurring path also
-set its `*_ENABLED=false`. Deleted cache/run debris is rebuilt by normal warm
-or task execution; never recreate a deleted UUID run directory manually.
+`DJINN_CACHE_CLEANUP_MODE=dry_run` (or, for sccache alone,
+`DJINN_CACHE_CLEANUP_SCCACHE_DELETE_ARMED=false`); to stop an individual
+recurring path also set its `*_ENABLED=false`. Deleted cache/run debris is
+rebuilt by normal warm or task execution; never recreate a deleted UUID run
+directory manually.
 
 ## Stage 4 — warm-base idle eviction, then pressure eviction
 

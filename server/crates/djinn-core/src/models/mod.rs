@@ -2,11 +2,13 @@ pub mod agent;
 pub mod credential;
 pub mod dispatch_state;
 pub mod epic;
+pub mod evidence;
 pub mod git_settings;
 pub mod org_ai_policy;
 pub mod project;
 pub mod proposal;
 pub mod provider;
+pub mod rejected_submission_integrity;
 pub mod session;
 pub mod session_message;
 pub mod settings;
@@ -21,6 +23,10 @@ pub use agent::Agent;
 pub use credential::Credential;
 pub use dispatch_state::DispatchStateRecord;
 pub use epic::{Epic, EpicEventPayload};
+pub use evidence::{
+    EvidenceCommandInvocation, EvidenceFinalizedProjection, EvidencePlan, EvidencePlanCheck,
+    EvidencePlanHydration,
+};
 pub use git_settings::GitSettings;
 pub use org_ai_policy::{LockLevel, OrgAiPolicy, OrgDefaultLanes};
 pub use project::Project;
@@ -29,6 +35,9 @@ pub use proposal::{
     ProposalRevision, ProposalSignoff, ProposalTarget,
 };
 pub use provider::{CustomProvider, Model, Pricing, Provider, SeedModel};
+pub use rejected_submission_integrity::{
+    RejectedVerdictKind, TaskRejectedSubmissionIntegrityRecord,
+};
 pub use session::{CostBasis, SessionRecord, SessionStatus};
 pub use session_message::SessionMessage;
 pub use settings::{
@@ -50,8 +59,7 @@ pub use task_run::{TaskRunRecord, TaskRunStatus, TaskRunTrigger};
 pub use task_run_outcome::TaskRunOutcomeFact;
 pub use user_settings::{LaneMaxSessions, ModelLane, ModelLanes, UserSettings};
 pub use verify_run::{
-    AutoSubmitReviewRecord, AutoSubmitTriggerReason, RejectedVerdictKind,
-    TaskRejectedSubmissionIntegrityRecord, VerifyResult, VerifyRunRecord, VerifySource,
+    AutoSubmitReviewRecord, AutoSubmitTriggerReason, VerifyResult, VerifyRunRecord, VerifySource,
 };
 
 /// Parse a JSON array string (e.g. '["a","b"]') into a `Vec<String>`.

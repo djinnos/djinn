@@ -738,12 +738,24 @@ impl CoordinatorActor {
                 }
                 Ok(Some(permit))
             }
-            Ok(BuildAdmissionDecision::Denied { occupancy, cap }) => {
+            Ok(BuildAdmissionDecision::Denied {
+                occupancy,
+                cap,
+                cause,
+            }) => {
+                // `occupancy` is what was MEASURED, or "unmeasured" when the
+                // denial never consulted it. This line used to print a
+                // hard-coded 0 for every non-capacity denial, which is how a
+                // permanently tombstoned dispatch lease spent 40 minutes
+                // looking like a full pool at `occupancy=0 cap=3`. The cause
+                // is what tells those two apart.
                 tracing::info!(
                     task_id,
                     role,
-                    occupancy,
+                    occupancy = occupancy
+                        .map_or_else(|| "unmeasured".to_owned(), |value| value.to_string()),
                     cap,
+                    cause = %cause,
                     "build admission denied; leaving task queued"
                 );
                 Err(())

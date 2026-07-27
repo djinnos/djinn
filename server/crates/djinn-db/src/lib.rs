@@ -22,8 +22,8 @@ pub mod test_support {
         corrupt_credential_encrypted_value, corrupt_refinement_task_role_for_test,
         delete_proposal_lint_result_for_revision_for_test, delete_proposal_lint_results_for_test,
         delete_session_row, drop_table_cascade_for_test, drop_table_for_test,
-        ensure_doctor_findings_schema, event_bus_for, insert_pending_attempt_with_raw_owner,
-        make_coordinator_incarnation_error_after_first_read,
+        elapse_refinement_run_wall_clock_for_test, ensure_doctor_findings_schema, event_bus_for,
+        insert_pending_attempt_with_raw_owner, make_coordinator_incarnation_error_after_first_read,
         make_coordinator_incarnation_vanish_after_first_read, make_project,
         make_refinement_run_phantom_for_test, nullify_note_confidence_for_test,
         override_debate_trail_body_metadata, proposal_lint_revision_id_for_test,
@@ -81,8 +81,9 @@ pub use repositories::{
     },
     build_lease::{
         BuildLeaseConsumerKind, BuildLeaseKey, BuildLeaseRepository, BuildLeaseRow,
-        BuildLeaseSnapshot, BuildLeaseState, GrantNextBuildLeaseResult, QueueBuildLeaseInput,
-        QueueBuildLeaseResult, ReclaimAbsentBuildLeaseInput, ReclaimAbsentBuildLeaseOutcome,
+        BuildLeaseSnapshot, BuildLeaseState, BuildLeaseTerminalReason, GrantNextBuildLeaseResult,
+        QueueBuildLeaseInput, QueueBuildLeaseResult, ReclaimAbsentBuildLeaseInput,
+        ReclaimAbsentBuildLeaseOutcome,
     },
     chat_interruption_notice::{
         ChatInterruptionNotice, ChatInterruptionNoticeRepository, CreateChatInterruptionNotice,
@@ -112,6 +113,10 @@ pub use repositories::{
         EpicRepository, EpicTaskCounts, EpicUpdateInput,
     },
     events::EventsRepository,
+    evidence::{
+        AppendEvidenceInvocation, EvidenceRepository, InsertEvidenceFinalizedProjection,
+        InsertEvidencePlan, InsertEvidencePlanCheck,
+    },
     extension_load_diagnostic::{ExtensionLoadDiagnosticRepository, InsertExtensionLoadDiagnostic},
     git_settings::GitSettingsRepository,
     image::{Image, ImageRepository, ImageStatus, SelectedCatalogImage},
@@ -199,10 +204,10 @@ pub use repositories::{
     readiness::{
         CreateReadinessAreaAttempt, CreateReadinessCompositionArea, CreateReadinessRun,
         MaterializeReadinessKickoff, NewReadinessEvent, NewReadinessFinding,
-        NewReadinessSuggestion, ReadinessAreaAttemptRow, ReadinessCompositionAreaRow,
-        ReadinessGuardrailFindingRow, ReadinessKickoffMaterialization,
-        ReadinessRemediationSuggestionRow, ReadinessRepository, ReadinessRunDetail,
-        ReadinessRunEventRow, ReadinessRunRow,
+        NewReadinessSuggestion, ReadinessAreaAttemptRow, ReadinessAreaResultCallback,
+        ReadinessCallbackOutcome, ReadinessCompositionAreaRow, ReadinessGuardrailFindingRow,
+        ReadinessKickoffMaterialization, ReadinessRemediationSuggestionRow, ReadinessRepository,
+        ReadinessRunDetail, ReadinessRunEventRow, ReadinessRunRow, RetryReadinessAreaAttempt,
     },
     refinement_run::{
         AcknowledgeRefinementTaskMaterializationRequest, ActiveRefinementRun,

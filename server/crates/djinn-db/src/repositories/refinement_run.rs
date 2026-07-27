@@ -66,6 +66,12 @@ pub struct ClaimRefinementIntentRequest {
     pub intent_id: String,
     pub generation: i32,
     pub owner: String,
+    /// How long the claim stays valid. This must be derived from the caller's
+    /// renewal cadence, not chosen: the same call renews the lease, so a lease
+    /// shorter than the worst-case interval between two renewal attempts
+    /// expires in every cycle. Coordinator callers use
+    /// `djinn_coordinator::types::REFINEMENT_INTENT_CLAIM_LEASE_MILLIS`, which
+    /// is guarded by a compile-time assertion against the tick cadence.
     pub lease_millis: i64,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

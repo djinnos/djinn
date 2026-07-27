@@ -174,6 +174,22 @@ pub struct CacheCleanupConfig {
     /// Env: `DJINN_CACHE_CLEANUP_SCCACHE_MAX_AGE_HOURS` (default `24`).
     pub sccache_max_age_hours: u64,
 
+    /// Second, sccache-specific arming switch for the destructive branch of the
+    /// sccache guard.
+    /// Env: `DJINN_CACHE_CLEANUP_SCCACHE_DELETE_ARMED` (default `false`).
+    ///
+    /// `mode = delete` alone is deliberately NOT sufficient here. The guard's
+    /// root was hardcoded to the Job-pod `/cache/sccache`, which does not exist
+    /// in the server pod, so the guard never produced a single candidate. The
+    /// rollout runbook's Stage-3 gate ("observe bounded `sccache` candidates in
+    /// dry_run, then flip the global mode") was therefore satisfied *vacuously*
+    /// — the deployment reached `mode=delete` on evidence that could only ever
+    /// have been empty. Correcting the path re-points a whole-tree
+    /// `remove_dir_all` at real production bytes, so it must not inherit that
+    /// stale authorization. Operators re-run the observation stage against the
+    /// corrected path and then set this flag.
+    pub sccache_delete_armed: bool,
+
     /// Whether cargo-target-runs debris cleanup is enabled.
     /// Env: `DJINN_CACHE_CLEANUP_CARGO_DEBRIS_ENABLED` (default `true`).
     pub cargo_debris_enabled: bool,
@@ -218,6 +234,7 @@ impl Default for CacheCleanupConfig {
             mode: CacheCleanupMode::DryRun,
             sccache_enabled: true,
             sccache_max_age_hours: 24,
+            sccache_delete_armed: false,
             cargo_debris_enabled: true,
             cargo_debris_max_age_days: 7,
             warm_base_idle_retention_days: 14,
@@ -244,6 +261,10 @@ impl CacheCleanupConfig {
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(24);
+
+        let sccache_delete_armed = std::env::var("DJINN_CACHE_CLEANUP_SCCACHE_DELETE_ARMED")
+            .map(|v| parse_bool_env(&v))
+            .unwrap_or(false);
 
         let cargo_debris_enabled = std::env::var("DJINN_CACHE_CLEANUP_CARGO_DEBRIS_ENABLED")
             .map(|v| parse_bool_env(&v))
@@ -293,6 +314,7 @@ impl CacheCleanupConfig {
             mode,
             sccache_enabled,
             sccache_max_age_hours,
+            sccache_delete_armed,
             cargo_debris_enabled,
             cargo_debris_max_age_days,
             warm_base_idle_retention_days,
@@ -449,6 +471,10 @@ mod tests {
         assert_eq!(config.mode, CacheCleanupMode::DryRun);
         assert!(config.sccache_enabled);
         assert_eq!(config.sccache_max_age_hours, 24);
+        // Deleting the whole sccache tree needs its own opt-in on top of
+        // `mode=delete`: the guard's Stage-3 observation gate was cleared while
+        // it was pointed at the nonexistent Job-pod `/cache/sccache`.
+        assert!(!config.sccache_delete_armed);
         assert!(config.cargo_debris_enabled);
         assert_eq!(config.cargo_debris_max_age_days, 7);
         assert_eq!(config.warm_base_idle_retention_days, 14);

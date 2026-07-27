@@ -243,33 +243,49 @@ async fn durable_adversary_exit_hands_off_to_a_real_advocate_turn() {
     f.actor.drive_active_refinements().await;
 
     let after = snapshot(&f).await;
-    let advocate_intent = after
+    assert_eq!(
+        after.generation, f.generation,
+        "the exact-run snapshot must retain the generation that fences this handoff"
+    );
+    let advocate_intents = after
         .snapshot
         .intents
         .iter()
-        .find(|intent| {
+        .filter(|intent| {
             intent.run_id == f.run_id
+                && intent.round == 1
                 && intent.phase == DurablePhase::AdvocateRevision
                 && intent.role == RefinementRole::Advocate
         })
-        .unwrap_or_else(|| {
-            panic!(
-                "the adversary exit must durably enqueue the Advocate successor; \
-                 intents were {:?}",
-                after.snapshot.intents
-            )
-        });
-    assert_ne!(
-        advocate_intent.state,
-        RefinementIntentState::Completed,
-        "the successor advocate intent must still be dispatchable"
+        .collect::<Vec<_>>();
+    assert_eq!(
+        advocate_intents.len(),
+        1,
+        "the completed adversary must create exactly one round-1 Advocate successor; \
+         intents were {:?}",
+        after.snapshot.intents
     );
-    assert!(
-        after.snapshot.intents.iter().any(|intent| {
-            intent.phase == DurablePhase::AdversaryAttack
+    let advocate_intent = advocate_intents[0];
+    assert_eq!(
+        advocate_intent.state,
+        RefinementIntentState::Materialized,
+        "the production tick must immediately dispatch the exact correlated Advocate successor"
+    );
+    let completed_adversaries = after
+        .snapshot
+        .intents
+        .iter()
+        .filter(|intent| {
+            intent.run_id == f.run_id
+                && intent.round == 1
+                && intent.phase == DurablePhase::AdversaryAttack
+                && intent.role == RefinementRole::Adversary
                 && intent.state == RefinementIntentState::Completed
-        }),
-        "the adversary intent must be durably completed, not left materialized"
+        })
+        .count();
+    assert_eq!(
+        completed_adversaries, 1,
+        "the exact opening adversary source intent must be durably completed"
     );
     assert_eq!(
         TaskRepository::new(f.db.clone(), EventBus::noop())
@@ -282,11 +298,12 @@ async fn durable_adversary_exit_hands_off_to_a_real_advocate_turn() {
         "a finished role task must not linger open and keep the run artificially live"
     );
 
-    // The successor intent must produce a real Advocate role task — the
-    // advocate TURN, not merely a ledger row.
-    f.actor.drive_active_refinements().await;
-    let advocate = role_task(&f, "advocate")
+    // The same production tick must produce a real Advocate role task — the
+    // advocate TURN, not merely a ledger row or an unobservable Pending state.
+    let advocate = TaskRepository::new(f.db.clone(), EventBus::noop())
+        .find_by_refinement_intent_id(&advocate_intent.intent_id)
         .await
+        .expect("read exact correlated advocate task")
         .expect("the advocate successor intent must materialize an advocate role task");
     assert_eq!(
         advocate.refinement_run_id.as_deref(),
@@ -296,6 +313,16 @@ async fn durable_adversary_exit_hands_off_to_a_real_advocate_turn() {
         advocate.refinement_generation,
         Some(i64::from(f.generation))
     );
+    assert_eq!(
+        advocate.refinement_intent_id.as_deref(),
+        Some(advocate_intent.intent_id.as_str())
+    );
+    assert_eq!(advocate.refinement_round, Some(1));
+    assert_eq!(
+        advocate.refinement_phase.as_deref(),
+        Some("advocate_revision")
+    );
+    assert_eq!(advocate.refinement_role.as_deref(), Some("advocate"));
     wait_until_pool_holds(&f.actor.pool, &advocate.id).await;
 }
 

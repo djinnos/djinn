@@ -87,17 +87,35 @@ impl ProcessHandle for ScriptedHandle {
         *self.lifts.lock().unwrap() += 1;
         Ok(())
     }
+    /// The production `kill` is `cgroup.kill`: it reaches the whole leaf, not
+    /// just the command's own process. Killing only the direct child is what
+    /// orphaned a fixture process on the runners whose `/bin/sh` forks.
     fn kill(&mut self) -> io::Result<()> {
         self.kills.fetch_add(1, Ordering::SeqCst);
-        let _ = self.child.kill();
+        let _ = fixture_child::kill_group(&mut self.child);
         Ok(())
     }
+    /// The production `wait_empty` returns only at `populated 0`. Counting the
+    /// call and returning is a claim this double cannot otherwise honour — and
+    /// the test process exiting while a fixture process is still alive is
+    /// exactly what nextest reports as `LEAK`.
     fn wait_empty(&mut self) -> io::Result<()> {
         self.empties.fetch_add(1, Ordering::SeqCst);
-        Ok(())
+        fixture_child::wait_group_empty(&mut self.child)
     }
     fn cleanup(&mut self) -> io::Result<()> {
         Ok(())
+    }
+}
+
+/// The runner can also drop a handle without reaching the kill/`wait_empty`
+/// pair — every `?` in the invocation loop is such a path. In production the
+/// leaf still contains the child; here nothing would, so the group teardown is
+/// repeated on drop. It is idempotent: a reaped leader short-circuits it.
+impl Drop for ScriptedHandle {
+    fn drop(&mut self) {
+        let _ = fixture_child::kill_group(&mut self.child);
+        let _ = fixture_child::wait_group_empty(&mut self.child);
     }
 }
 
@@ -228,6 +246,30 @@ impl ProcessHandle for BrokerBackedHandle {
     }
 }
 
+/// A scripted-call counter a test can AWAIT instead of spinning on.
+///
+/// The counter and the wakeup have to be one object: a test that polls the count
+/// on a fixed budget of yields is timing the machine, not the runner. See
+/// [`wait_for`].
+#[derive(Default)]
+struct CallCounter {
+    count: AtomicUsize,
+    progress: Notify,
+}
+
+impl CallCounter {
+    /// Record a call and wake every waiter. The order matters: waiters register
+    /// before they read the count, so a bump that happens after their read still
+    /// wakes them.
+    fn record(&self) {
+        self.count.fetch_add(1, Ordering::SeqCst);
+        self.progress.notify_waiters();
+    }
+    fn load(&self, ordering: Ordering) -> usize {
+        self.count.load(ordering)
+    }
+}
+
 struct ScriptedServices {
     cancel: CancellationToken,
     queue: Mutex<VecDeque<LeaseResult>>,
@@ -235,11 +277,11 @@ struct ScriptedServices {
     status: Mutex<VecDeque<LeaseResult>>,
     abandon: Mutex<VecDeque<LeaseResult>>,
     release: Mutex<VecDeque<LeaseResult>>,
-    queue_calls: AtomicUsize,
-    grant_calls: AtomicUsize,
-    status_calls: AtomicUsize,
-    abandon_calls: AtomicUsize,
-    release_calls: AtomicUsize,
+    queue_calls: CallCounter,
+    grant_calls: CallCounter,
+    status_calls: CallCounter,
+    abandon_calls: CallCounter,
+    release_calls: CallCounter,
     release_fences: Mutex<Vec<LeaseFencingToken>>,
     pause_queue: AtomicBool,
     pause_grant: AtomicBool,
@@ -263,11 +305,11 @@ impl ScriptedServices {
             status: Mutex::new(status.into()),
             abandon: Mutex::new(VecDeque::new()),
             release: Mutex::new(VecDeque::new()),
-            queue_calls: AtomicUsize::new(0),
-            grant_calls: AtomicUsize::new(0),
-            status_calls: AtomicUsize::new(0),
-            abandon_calls: AtomicUsize::new(0),
-            release_calls: AtomicUsize::new(0),
+            queue_calls: CallCounter::default(),
+            grant_calls: CallCounter::default(),
+            status_calls: CallCounter::default(),
+            abandon_calls: CallCounter::default(),
+            release_calls: CallCounter::default(),
             release_fences: Mutex::new(Vec::new()),
             pause_queue: AtomicBool::new(false),
             pause_grant: AtomicBool::new(false),
@@ -297,7 +339,7 @@ impl SupervisorServices for ScriptedServices {
         &self.cancel
     }
     async fn queue_lease(&self, _: LeaseQueueRequest) -> LeaseResult {
-        self.queue_calls.fetch_add(1, Ordering::SeqCst);
+        self.queue_calls.record();
         self.queue_entered.notify_waiters();
         if self.pause_queue.load(Ordering::SeqCst) {
             std::future::pending().await
@@ -306,7 +348,7 @@ impl SupervisorServices for ScriptedServices {
         }
     }
     async fn grant_lease(&self, _: LeaseGrantRequest) -> LeaseResult {
-        self.grant_calls.fetch_add(1, Ordering::SeqCst);
+        self.grant_calls.record();
         self.grant_entered.notify_waiters();
         if self.pause_grant.load(Ordering::SeqCst) {
             std::future::pending().await
@@ -315,7 +357,7 @@ impl SupervisorServices for ScriptedServices {
         }
     }
     async fn lease_status(&self, _: LeaseStatusRequest) -> LeaseResult {
-        self.status_calls.fetch_add(1, Ordering::SeqCst);
+        self.status_calls.record();
         self.status_entered.notify_one();
         if self.pause_status.load(Ordering::SeqCst) {
             self.status_resume.notified().await;
@@ -323,7 +365,7 @@ impl SupervisorServices for ScriptedServices {
         Self::pop(&self.status)
     }
     async fn abandon_lease(&self, _: LeaseAbandonRequest) -> LeaseResult {
-        self.abandon_calls.fetch_add(1, Ordering::SeqCst);
+        self.abandon_calls.record();
         Self::pop(&self.abandon)
     }
     async fn bind_lease_pod(
@@ -339,7 +381,7 @@ impl SupervisorServices for ScriptedServices {
         })
     }
     async fn release_lease(&self, request: LeaseReleaseRequest) -> LeaseResult {
-        self.release_calls.fetch_add(1, Ordering::SeqCst);
+        self.release_calls.record();
         self.release_fences
             .lock()
             .unwrap()
@@ -517,9 +559,17 @@ fn granted(token: u64) -> LeaseResult {
         deadlines: deadlines(),
     })
 }
+/// A child that outlives the test unless the runner terminates it.
+///
+/// Deliberately NOT `sh -c "sleep 30"`: where `/bin/sh` forks its `-c` command
+/// (dash, i.e. the CI runners) that fixture is two processes, and the `sleep`
+/// survived a kill aimed at the shell — orphaned, still holding the test
+/// process's stdout, which is the `LEAK` nextest reported. One process, in its
+/// own group, is what the launcher double can actually contain.
 fn command() -> Command {
-    let mut c = Command::new("sh");
-    c.arg("-c").arg("sleep 30");
+    let mut c = Command::new("sleep");
+    c.arg("30");
+    fixture_child::isolate_group(&mut c);
     c
 }
 fn config() -> LeaseInvocationConfig {
@@ -536,14 +586,46 @@ fn config() -> LeaseInvocationConfig {
 fn clock() -> Arc<TestClock> {
     Arc::new(TestClock::new(SystemTime::UNIX_EPOCH, Instant::now()))
 }
-async fn wait_for(counter: &AtomicUsize, n: usize) {
-    for _ in 0..10_000 {
-        if counter.load(Ordering::SeqCst) >= n {
-            return;
+/// Wait until the runner has issued `n` calls of this kind.
+///
+/// # Why this is not a yield budget any more
+///
+/// It used to be `for _ in 0..10_000 { yield_now().await }`, which counts
+/// nothing the runner does: 10_000 yields is a wall-clock deadline of a few tens
+/// of milliseconds on whatever machine happens to run the test. Every call the
+/// runner makes here is downstream of one real await — the durable
+/// `invocation_lift_decision()` read, issued BEFORE the leaf is launched — so on
+/// a loaded runner opening a cold Postgres connection the budget expired first
+/// and `a_non_platform_database_fails_closed_instead_of_lifting` failed all
+/// three retries in 21ms, 44ms and 53ms with "counter did not reach 3". The
+/// production behaviour it asserts was never involved.
+///
+/// Waiting on the counter's own notification removes the deadline race
+/// entirely; the outer timeout exists only so a runner that never issues the
+/// call fails with this message instead of hanging.
+async fn wait_for(counter: &CallCounter, n: usize) {
+    let reached = async {
+        loop {
+            // Registered BEFORE the load, so a bump racing this check wakes us
+            // rather than being missed.
+            let progressed = counter.progress.notified();
+            tokio::pin!(progressed);
+            progressed.as_mut().enable();
+            if counter.load(Ordering::SeqCst) >= n {
+                return;
+            }
+            progressed.await;
         }
-        tokio::task::yield_now().await;
+    };
+    if tokio::time::timeout(Duration::from_secs(30), reached)
+        .await
+        .is_err()
+    {
+        panic!(
+            "counter did not reach {n} (observed {})",
+            counter.load(Ordering::SeqCst)
+        );
     }
-    panic!("counter did not reach {n}");
 }
 
 #[tokio::test]

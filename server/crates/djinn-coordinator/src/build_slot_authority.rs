@@ -44,6 +44,27 @@ impl BuildLeaseDispatchAuthority {
             generation,
         })
     }
+
+    /// Report a genuine capacity refusal, with the occupancy actually read.
+    ///
+    /// If occupancy cannot be read, this is NOT reported as a capacity denial:
+    /// an unmeasured pool is unknown, and a fabricated number here is exactly
+    /// what made the wedge unreadable in the log.
+    async fn at_capacity(&self) -> DispatchSlotOutcome {
+        match self.occupancy().await {
+            Some(occupancy) => DispatchSlotOutcome::AtCapacity {
+                occupancy,
+                cap: self.cap(),
+            },
+            None => unavailable("occupancy could not be read"),
+        }
+    }
+}
+
+fn unavailable(detail: &str) -> DispatchSlotOutcome {
+    DispatchSlotOutcome::Unavailable {
+        detail: detail.to_owned(),
+    }
 }
 
 #[async_trait]
@@ -52,7 +73,7 @@ impl BuildSlotAuthority for BuildLeaseDispatchAuthority {
         if !self.service.is_ready() {
             // Recovery has not completed, so occupancy is unknown. Unknown is
             // never permission.
-            return DispatchSlotOutcome::Unavailable;
+            return unavailable("lease service has not finished recovery");
         }
 
         // ── Shadow ──────────────────────────────────────────────────────────
@@ -87,38 +108,48 @@ impl BuildSlotAuthority for BuildLeaseDispatchAuthority {
             // Queued means the pool is full and this attempt now holds a FIFO
             // position. The task stays queued and the dispatcher retries; the
             // row is reclaimed by its queue deadline if the task never returns.
-            LeaseResult::Queued(_) => {
-                return match self.occupancy().await {
-                    Some(occupancy) => DispatchSlotOutcome::AtCapacity {
-                        occupancy,
-                        cap: self.cap(),
-                    },
-                    None => DispatchSlotOutcome::Unavailable,
-                };
-            }
+            //
+            // This is the ONLY outcome that may be reported as a capacity
+            // denial, because it is the only one produced by the cap.
+            LeaseResult::Queued(_) => return self.at_capacity().await,
             // A grant that arrived earlier and is already launching/bound is
             // this same attempt's capacity, replayed. It is held, not lost.
-            LeaseResult::Status(status)
-                if matches!(
-                    status.state,
+            LeaseResult::Status(status) => {
+                return match status.state {
                     LeaseState::Granted
-                        | LeaseState::Launching
-                        | LeaseState::Bound
-                        | LeaseState::Active
-                ) =>
-            {
-                return DispatchSlotOutcome::Granted;
-            }
-            LeaseResult::LeaseWaitTimeout { .. } => {
-                return match self.occupancy().await {
-                    Some(occupancy) => DispatchSlotOutcome::AtCapacity {
-                        occupancy,
-                        cap: self.cap(),
-                    },
-                    None => DispatchSlotOutcome::Unavailable,
+                    | LeaseState::Launching
+                    | LeaseState::Bound
+                    | LeaseState::Active => DispatchSlotOutcome::Granted,
+                    // Still waiting behind the FIFO: the pool is full.
+                    LeaseState::Queued => self.at_capacity().await,
+                    // Counted but unproven. It is not ours to use and the cap
+                    // is not what refused us.
+                    LeaseState::Suspect => unavailable("lease is suspect"),
+                    // A terminal state reached the queue path. With the spent
+                    // dispatch attempt retired by the repository this should be
+                    // unreachable; if it is ever reached it is NOT capacity.
+                    LeaseState::Cancelled => unavailable("lease already cancelled"),
+                    LeaseState::Released => unavailable("lease already released"),
                 };
             }
-            _ => return DispatchSlotOutcome::Unavailable,
+            LeaseResult::Bound(_) => return DispatchSlotOutcome::Granted,
+            // ── Not capacity answers ────────────────────────────────────────
+            //
+            // Every arm below used to be a single `_ => Unavailable`, and one
+            // of them (`reclaimed_absent`, arriving here as `LeaseUnavailable`)
+            // wedged production permanently while the operator's log blamed
+            // capacity. They are enumerated so a new `LeaseResult` variant is a
+            // compile error, and each carries its own words to the log.
+            LeaseResult::LeaseWaitTimeout { .. } => {
+                return unavailable("queue deadline expired before capacity was granted");
+            }
+            LeaseResult::Abandoned { .. } => return unavailable("lease attempt was abandoned"),
+            LeaseResult::Cancelled { .. } => return unavailable("lease attempt was cancelled"),
+            LeaseResult::Released { .. } => return unavailable("lease attempt was released"),
+            LeaseResult::LeaseIdentityConflict { .. } => {
+                return unavailable("lease identity conflict for this dispatch generation");
+            }
+            LeaseResult::LeaseUnavailable => return unavailable("lease ledger unavailable"),
         };
 
         // Acknowledge the grant so a recovered coordinator can tell a granted
@@ -136,7 +167,9 @@ impl BuildSlotAuthority for BuildLeaseDispatchAuthority {
             {
                 DispatchSlotOutcome::Granted
             }
-            _ => DispatchSlotOutcome::Unavailable,
+            other => unavailable(&format!(
+                "grant acknowledgement did not reach launching: {other:?}"
+            )),
         }
     }
 
