@@ -15,6 +15,22 @@ use super::{
     record_auto_merge_decision_metrics, record_pr_transition_reopen_metric,
     rollout_policy_publication_marker, should_auto_resolve_conversations,
 };
+
+#[test]
+fn behind_branch_refresh_precedes_review_ci_failure_gate() {
+    let source = include_str!("pr_review_watcher.rs");
+    let refresh = source
+        .find("if pr.mergeable_state.as_deref() == Some(\"behind\")")
+        .expect("behind refresh gate");
+    let ci_gate = source
+        .find("// ── CI checks on review PR")
+        .expect("review CI gate");
+
+    assert!(
+        refresh < ci_gate,
+        "behind branches must be refreshed before stale-head CI failures are handled"
+    );
+}
 use djinn_core::events::EventBus;
 use djinn_core::models::TransitionAction;
 use djinn_core::models::task_attempt::TaskAttemptOutcome;
