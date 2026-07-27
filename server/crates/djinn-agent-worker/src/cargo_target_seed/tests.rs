@@ -45,10 +45,69 @@ fn classifies_heavy_artifacts_for_hardlink() {
         classify_cargo_target_path(Path::new("debug/deps/libserde-abc.rlib")),
         CloneAction::Hardlink
     );
+    // The compiled build script itself IS immutable — cargo replaces it by
+    // rename, never in place — so it stays hardlinked. It is also the heavy part
+    // of `build/`, which is why the carve-out below is scoped to `out/` and the
+    // stamps rather than to all of `build/`.
     assert_eq!(
-        classify_cargo_target_path(Path::new("release/build/foo/out/generated.rs")),
+        classify_cargo_target_path(Path::new("release/build/ring-abc/build-script-build")),
         CloneAction::Hardlink
     );
+}
+
+#[test]
+fn classifies_build_script_output_for_copy() {
+    // A hardlinked OUT_DIR payload cannot be rewritten by a re-running build
+    // script: `fs::copy` applies the source mode to the destination, and that
+    // `fchmod` is EPERM on a file owned by the warm base's uid. `libssh2-sys`
+    // does exactly this and `.unwrap()`s, so the panic killed every local
+    // compile in the pod. Copying makes the destination owned by the seeding
+    // process, which is the same process that later runs cargo.
+    for path in [
+        "release/build/foo-abc/out/generated.rs",
+        "debug/build/libssh2-sys-abc/out/libssh2.h",
+        "debug/build/openssl-sys-def/out/openssl/include/opensslconf.h",
+        "x86_64-unknown-linux-gnu/debug/build/foo-abc/out/generated.rs",
+    ] {
+        assert_eq!(
+            classify_cargo_target_path(Path::new(path)),
+            CloneAction::Copy,
+            "{path} is build-script output and must be copied, not linked"
+        );
+    }
+}
+
+#[test]
+fn classifies_build_script_stamps_for_copy() {
+    // Cargo rewrites these in place after re-running a build script; a shared
+    // inode writes through into the warm base every other pod seeds from.
+    for name in ["output", "stderr", "root-output", "invoked.timestamp"] {
+        assert_eq!(
+            classify_cargo_target_path(Path::new(&format!("debug/build/foo-abc/{name}"))),
+            CloneAction::Copy,
+            "debug/build/foo-abc/{name} must be copied"
+        );
+    }
+}
+
+#[test]
+fn build_script_matchers_do_not_oversweep() {
+    // `out`/`output` only carry meaning at their cargo-defined position. A
+    // dependency artifact that merely contains the word must keep its normal
+    // classification, or the carve-out silently converts the heavy majority of
+    // the base from hardlinks into byte copies.
+    for path in [
+        "debug/deps/out.rlib",
+        "debug/deps/libout-abc.rlib",
+        "debug/out/stray.bin",
+        "debug/build/foo-abc/out.rs",
+    ] {
+        assert_eq!(
+            classify_cargo_target_path(Path::new(path)),
+            CloneAction::Hardlink,
+            "{path} must not be swept into the build-script carve-out"
+        );
+    }
 }
 
 #[test]
@@ -348,6 +407,69 @@ fn seeds_target_tree_with_required_clone_semantics() {
         // cargo rewrite cannot corrupt the shared warm base.
         assert_different_inode(&base.join(rustc_info), &run.join(rustc_info));
     }
+}
+
+#[test]
+fn build_script_output_is_privately_owned_and_rewritable_without_touching_the_base() {
+    // The gy53 production failure: a hardlinked OUT_DIR payload made every local
+    // compile in the task-run pod die in `libssh2-sys`'s build script with
+    // "Operation not permitted", because `fs::copy` ends by `fchmod`-ing the
+    // destination and the destination was still owned by the warm base's uid.
+    //
+    // The inode assertions below are the load-bearing ones: they fail
+    // deterministically under the old `Hardlink` classification on any uid,
+    // whereas the EPERM itself only reproduces when the base is genuinely
+    // foreign-owned (see `foreign_owner_tests`).
+    let _guard = metric_test_guard();
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let base = tmp.path().join("warm-base");
+    let run = tmp.path().join("run-target");
+
+    let out_header = Path::new("debug/build/libssh2-sys-abc/out/libssh2.h");
+    let out_nested = Path::new("debug/build/openssl-sys-def/out/openssl/include/opensslconf.h");
+    let stamp = Path::new("debug/build/libssh2-sys-abc/output");
+    let build_script = Path::new("debug/build/libssh2-sys-abc/build-script-build");
+
+    write_base_file(&base, out_header, b"original vendored header");
+    write_base_file(&base, out_nested, b"original vendored conf");
+    write_base_file(&base, stamp, b"cargo:rustc-link-lib=ssh2");
+    write_base_file(&base, build_script, b"build script binary");
+
+    seed_cargo_target_dir_with_options(&base, &run, &CargoTargetSeedOptions::new(4))
+        .expect("seed target dir");
+
+    // Every rewritable build-script path must own a private inode...
+    for path in [out_header, out_nested, stamp] {
+        assert_different_inode(&base.join(path), &run.join(path));
+    }
+    // ...while the immutable build script itself stays hardlinked, so the
+    // carve-out did not quietly convert the heavy part of `build/` into copies.
+    let base_script = fs::metadata(base.join(build_script)).expect("base build script");
+    let run_script = fs::metadata(run.join(build_script)).expect("run build script");
+    assert_eq!(
+        (base_script.dev(), base_script.ino()),
+        (run_script.dev(), run_script.ino()),
+        "the compiled build script is immutable and must still be hardlinked"
+    );
+
+    // Reproduce what a re-running `-sys` build script actually does: `fs::copy`
+    // a vendored source over the seeded OUT_DIR path.
+    let vendored = tmp.path().join("vendored-libssh2.h");
+    fs::write(&vendored, b"regenerated vendored header").expect("write vendored source");
+    fs::copy(&vendored, run.join(out_header)).expect(
+        "a re-running build script must be able to fs::copy over its own seeded OUT_DIR payload",
+    );
+
+    assert_eq!(
+        fs::read(run.join(out_header)).expect("read rewritten run payload"),
+        b"regenerated vendored header"
+    );
+    // The shared warm base that every other task-run pod seeds from is untouched.
+    assert_eq!(
+        fs::read(base.join(out_header)).expect("read base payload"),
+        b"original vendored header",
+        "rewriting the run dir must not write through into the shared warm base"
+    );
 }
 
 #[test]

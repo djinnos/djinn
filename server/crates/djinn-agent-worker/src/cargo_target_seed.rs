@@ -6,6 +6,21 @@
 //! dir. Mutable Cargo metadata is copied, and incremental state is skipped so it
 //! is never shared by inode with the warm base.
 //!
+//! # Only immutable payloads may be hardlinked
+//!
+//! The rule that governs [`classify_cargo_target_path`] is: **anything the run
+//! may rewrite must be copied, not linked.** A hardlink shares the inode with the
+//! warm base, which breaks such a path two ways — the rewrite either fails
+//! outright (`fchmod` on a file the caller does not own is EPERM regardless of
+//! mode, so `fs::copy` into a linked destination reports "Operation not
+//! permitted") or succeeds and writes THROUGH into the base that every other
+//! task-run pod seeds from.
+//!
+//! Four classes are known to be rewritten in place and are carved out for that
+//! reason: cargo's per-profile lock files, `.rustc_info.json`, build-script
+//! `OUT_DIR` payloads, and the build-script stamp files. Adding a fifth means
+//! adding it here — the default arm is `Hardlink`, so an omission is silent.
+//!
 //! # Why a single entry must never discard the base
 //!
 //! The warm base is written by the warm Job (uid 10001) and read by the task-run
@@ -526,7 +541,74 @@ pub fn classify_cargo_target_path(relative_path: &Path) -> CloneAction {
         return CloneAction::Copy;
     }
 
+    // Build-script state under `build/<pkg>-<hash>/` is rewritten IN PLACE when
+    // cargo re-runs a build script, and it is the third instance of the same
+    // shared-inode hazard as `.rustc_info.json` and the cargo locks above.
+    //
+    // Two distinct failures, both from hardlinking it:
+    //
+    // 1. **The build script cannot write at all.** A `-sys` crate's build script
+    //    populates `OUT_DIR` with `fs::copy`, and `fs::copy` finishes by applying
+    //    the SOURCE's mode to the destination — an `fchmod` on the destination
+    //    fd. `fchmod` is EPERM for a file the caller does not own, *regardless of
+    //    mode*, and a hardlinked entry keeps the warm base's owner. So the copy
+    //    fails "Operation not permitted" even though the bytes were writable
+    //    through the shared gid. `libssh2-sys/build.rs` does exactly this
+    //    (`fs::copy(...).unwrap()`), so the panic killed the whole compile before
+    //    it reached any workspace crate — the worker could never build locally.
+    //    Note EPERM, not EACCES: this is an OWNERSHIP failure, not a mode one,
+    //    which is why `ensure_owner_writable` cannot rescue it.
+    // 2. **A successful write corrupts the shared base.** Where the rewrite does
+    //    land, the shared inode means it writes THROUGH into the per-project warm
+    //    base that every other task-run pod seeds from.
+    //
+    // A byte copy makes the destination owned by the seeding process — which is
+    // also the process that later runs cargo — so both failures go away. The
+    // `build-script-build` executables stay hardlinked: they are the heavy part
+    // of `build/` and cargo replaces them by rename, never in place.
+    if is_build_script_output(relative_path) || is_build_script_stamp(relative_path) {
+        return CloneAction::Copy;
+    }
+
     CloneAction::Hardlink
+}
+
+/// True for build-script `OUT_DIR` payloads: `[<triple>/]<profile>/build/<pkg>-<hash>/out/**`.
+///
+/// Matched positionally (`build/*/out`) rather than by "has a component named
+/// `out`" so an unrelated path that merely contains `out` is not swept in.
+fn is_build_script_output(path: &Path) -> bool {
+    normal_components(path)
+        .windows(3)
+        .any(|window| window[0] == "build" && window[2] == "out")
+}
+
+/// True for the per-package stamp files cargo rewrites in place after re-running
+/// a build script (`build/<pkg>-<hash>/{output,stderr,root-output,invoked.timestamp}`).
+///
+/// These are tiny, so copying them is free, and hardlinking them writes through
+/// to the shared warm base exactly like `.rustc_info.json` does.
+fn is_build_script_stamp(path: &Path) -> bool {
+    const STAMP_NAMES: &[&str] = &["output", "stderr", "root-output", "invoked.timestamp"];
+
+    let parts = normal_components(path);
+    let Some((name, parents)) = parts.split_last() else {
+        return false;
+    };
+    // `build/<pkg>-<hash>/<stamp>`: the stamp sits exactly one level below the
+    // package dir, which itself sits directly under `build/`.
+    let under_build_package = matches!(parents.split_last(), Some((_, rest)) if rest.last().is_some_and(|component| *component == "build"));
+
+    under_build_package && STAMP_NAMES.iter().any(|stamp| *name == *stamp)
+}
+
+fn normal_components(path: &Path) -> Vec<&std::ffi::OsStr> {
+    path.components()
+        .filter_map(|component| match component {
+            Component::Normal(part) => Some(part),
+            _ => None,
+        })
+        .collect()
 }
 
 fn fallback_result(start: Instant, reason: CargoTargetSeedFallback) -> CargoTargetSeedResult {

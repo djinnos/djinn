@@ -44,9 +44,15 @@ struct BaseFile {
 ///
 /// The bulk is `0664` regular files and `0775` executables written by cargo and
 /// rustc under `umask 002`, which the kernel WILL let a foreign owner hardlink.
-/// The anomalies are the real-world minority that it will NOT: build-script
-/// `OUT_DIR` payloads and registry sources keep their SOURCE mode when a build
-/// script copies them, and the cargo registry ships `0644`/`0640`/`0600` files.
+/// The anomalies are the real-world minority that it will NOT: files that keep a
+/// SOURCE mode regardless of umask, plus anything a base built under `umask 022`
+/// leaves at `0644`/`0755`.
+///
+/// Build-script `OUT_DIR` payloads appear here too, but they never reach `linkat`
+/// at all — they are copied by classification because the run must be able to
+/// rewrite them. Keeping both groups distinct matters: if the only unlinkable
+/// entries were build-script output, the link-fallback path would silently stop
+/// being tested the moment that classification changed.
 const BASE_FILES: &[BaseFile] = &[
     // Linkable majority.
     BaseFile {
@@ -80,7 +86,12 @@ const BASE_FILES: &[BaseFile] = &[
         mode: 0o664,
         contents: b"dep info",
     },
-    // Anomalies the kernel refuses to hardlink for a foreign owner.
+    // Build-script OUT_DIR payloads. These are copied by CLASSIFICATION, not by
+    // link degradation: a re-running build script rewrites them in place, and a
+    // hardlinked destination both refuses the rewrite (`fs::copy` ends in an
+    // `fchmod` the non-owner cannot perform) and writes through into the shared
+    // base. Their odd modes are incidental here — they would be copied at 0664
+    // too. See `classify_cargo_target_path`.
     BaseFile {
         relative: "debug/build/ring-abc/out/aes_nohw.o",
         mode: 0o644,
@@ -95,6 +106,27 @@ const BASE_FILES: &[BaseFile] = &[
         relative: "debug/build/protobuf-ghi/out/protoc",
         mode: 0o755,
         contents: b"vendored tool not group writable",
+    },
+    // Anomalies the kernel refuses to hardlink for a foreign owner. These are
+    // ordinary compiled artifacts, not build-script output, so they still reach
+    // `linkat` and still exercise the bounded copy fallback. A warm base built
+    // under `umask 022` rather than `002` produces exactly this shape across
+    // `deps/`, which is why the fallback path must survive on its own merits and
+    // not merely because build-script payloads happened to populate it.
+    BaseFile {
+        relative: "debug/deps/libring-abc.rlib",
+        mode: 0o644,
+        contents: b"rlib written under umask 022",
+    },
+    BaseFile {
+        relative: "debug/libdjinn_core.a",
+        mode: 0o444,
+        contents: b"read-only static archive",
+    },
+    BaseFile {
+        relative: "debug/deps/djinn_probe-5678",
+        mode: 0o755,
+        contents: b"harness binary not group writable",
     },
 ];
 
@@ -198,9 +230,9 @@ fn foreign_owned_base_with_production_modes_seeds_completely() {
     // refuses are byte-copied instead of discarded.
     assert_eq!(result.linked_file_count, 4);
     assert_eq!(result.degraded_link_file_count, 3);
-    // `.fingerprint` and `.d` metadata are copied by classification, not by
-    // degradation.
-    assert_eq!(result.copied_file_count, 2);
+    // `.fingerprint`, `.d` metadata and the three build-script OUT_DIR payloads
+    // are copied by classification, not by degradation.
+    assert_eq!(result.copied_file_count, 5);
     assert!(!result.link_fallback_budget_exhausted);
     assert!(result.degraded());
     assert_every_expected_file_seeded(&run);
@@ -223,7 +255,10 @@ fn degraded_copies_are_writable_by_the_run_that_owns_them() {
 
     seed_cargo_target_dir_with_options(&base, &run, &emulating_options(2)).expect("seed");
 
-    let read_only_source = base.join("debug/build/zstd-sys-def/out/libzstd.a");
+    // Deliberately a NON-build-script artifact, so this exercises the degraded
+    // link-fallback copy. The classification-copy equivalent is covered by
+    // `copied_entries_are_writable_even_when_the_base_entry_is_read_only`.
+    let read_only_source = base.join("debug/libdjinn_core.a");
     assert_eq!(
         fs::metadata(&read_only_source)
             .expect("base metadata")
@@ -231,10 +266,10 @@ fn degraded_copies_are_writable_by_the_run_that_owns_them() {
             .mode()
             & 0o200,
         0,
-        "the fixture's vendored archive must be read-only in the base"
+        "the fixture's static archive must be read-only in the base"
     );
 
-    let seeded = run.join("debug/build/zstd-sys-def/out/libzstd.a");
+    let seeded = run.join("debug/libdjinn_core.a");
     let mode = fs::metadata(&seeded)
         .expect("seeded metadata")
         .permissions()
@@ -268,7 +303,7 @@ fn one_unseedable_entry_never_discards_the_base() {
         "unseedable entries must degrade the seed, not abandon the base"
     );
     assert_eq!(result.linked_file_count, 4);
-    assert_eq!(result.copied_file_count, 2);
+    assert_eq!(result.copied_file_count, 5);
     assert_eq!(result.degraded_link_file_count, 0);
     assert_eq!(result.unseeded_file_count, 3);
     assert!(result.link_fallback_budget_exhausted);
@@ -280,7 +315,10 @@ fn one_unseedable_entry_never_discards_the_base() {
         fs::read(run.join("debug/deps/libserde-abc.rlib")).expect("linked artifact"),
         b"serde rlib"
     );
-    assert!(!run.join("debug/build/protobuf-ghi/out/protoc").exists());
+    assert!(!run.join("debug/deps/djinn_probe-5678").exists());
+    // The budget bounds only the link fallback. Classification copies are not
+    // substitutes for a refused link, so build-script output still seeds.
+    assert!(run.join("debug/build/protobuf-ghi/out/protoc").exists());
 }
 
 /// The diagnostic that would have ended this investigation in one log line.
@@ -303,7 +341,7 @@ fn entry_error_names_the_operation_the_path_and_why_the_kernel_refused() {
         "the failing OPERATION must lead the message: {error}"
     );
     assert!(
-        ["out/aes_nohw.o", "out/libzstd.a", "out/protoc"]
+        ["libring-abc.rlib", "libdjinn_core.a", "djinn_probe-5678"]
             .iter()
             .any(|path| error.contains(path)),
         "the failing PATH must be named: {error}"
@@ -383,24 +421,24 @@ fn symlinks_are_materialised_privately_and_never_hardlinked() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let base = tmp.path().join("mold-jobs-4");
     let run = tmp.path().join("run-target");
-    fs::create_dir_all(base.join("debug/build/foo-abc/out")).expect("create base");
-    let target = base.join("debug/build/foo-abc/out/libnative.so.1.2.3");
+    // Deliberately under `deps/`, NOT a build-script `out/` dir: there the Copy
+    // classification would make the assertion below pass even if symlink
+    // handling were removed entirely.
+    fs::create_dir_all(base.join("debug/deps")).expect("create base");
+    let target = base.join("debug/deps/libnative.so.1.2.3");
     fs::write(&target, b"native library").expect("write link target");
     fs::set_permissions(&target, fs::Permissions::from_mode(0o664)).expect("mode");
-    std::os::unix::fs::symlink(&target, base.join("debug/build/foo-abc/out/libnative.so"))
+    std::os::unix::fs::symlink(&target, base.join("debug/deps/libnative.so"))
         .expect("symlink to a regular file");
     std::os::unix::fs::symlink(
-        base.join("debug/build/foo-abc/out/missing"),
-        base.join("debug/build/foo-abc/out/dangling.so"),
+        base.join("debug/deps/missing"),
+        base.join("debug/deps/dangling.so"),
     )
     .expect("dangling symlink");
     // A symlinked directory that points at its own ancestor: descending would
     // never terminate.
-    std::os::unix::fs::symlink(
-        base.join("debug"),
-        base.join("debug/build/foo-abc/out/loop"),
-    )
-    .expect("symlinked directory");
+    std::os::unix::fs::symlink(base.join("debug"), base.join("debug/deps/loop"))
+        .expect("symlinked directory");
 
     let entries = scan_entries(&base).expect("scan must survive symlinks");
     let symlink_entry = entries
@@ -418,7 +456,7 @@ fn symlinks_are_materialised_privately_and_never_hardlinked() {
 
     assert!(!result.cold_started(), "{:?}", result.first_entry_error);
     assert_eq!(result.unseeded_file_count, 0);
-    let seeded_link = run.join("debug/build/foo-abc/out/libnative.so");
+    let seeded_link = run.join("debug/deps/libnative.so");
     assert_eq!(
         fs::read(&seeded_link).expect("seeded symlink payload"),
         b"native library"
@@ -430,8 +468,8 @@ fn symlinks_are_materialised_privately_and_never_hardlinked() {
             .is_file(),
         "the run dir must own a private regular file, not a link into the base"
     );
-    assert!(!run.join("debug/build/foo-abc/out/dangling.so").exists());
-    assert!(!run.join("debug/build/foo-abc/out/loop").exists());
+    assert!(!run.join("debug/deps/dangling.so").exists());
+    assert!(!run.join("debug/deps/loop").exists());
 }
 
 /// Everything classified `Copy` is copied precisely so the run can rewrite it,
