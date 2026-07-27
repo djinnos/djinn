@@ -250,7 +250,13 @@ impl CoordinatorActor {
                                 continue;
                             }
                             let Some(owner) = proposal.refinement_owner_user_id.as_deref() else {
-                                tracing::debug!(intent_id = %intent.intent_id, "awaiting durable refinement attribution");
+                                tracing::warn!(
+                                    intent_id = %intent.intent_id,
+                                    run_id = %run.run_id,
+                                    proposal_id = %run.proposal_id,
+                                    "refinement run has no durable owner; its intent cannot dispatch and will \
+                                     be retried on every tick until the proposal is attributed"
+                                );
                                 continue;
                             };
                             let Some((_agent_type, model_id)) = self
@@ -332,7 +338,13 @@ impl CoordinatorActor {
                     Ok(None) | Err(_) => continue,
                 };
                 let Some(attributed_user) = proposal.refinement_owner_user_id.clone() else {
-                    tracing::debug!(intent_id = %lease.intent_id, "awaiting durable refinement attribution");
+                    tracing::warn!(
+                        intent_id = %lease.intent_id,
+                        run_id = %run.run_id,
+                        proposal_id = %run.proposal_id,
+                        "refinement run has no durable owner; its intent cannot dispatch and will \
+                         be retried on every tick until the proposal is attributed"
+                    );
                     continue;
                 };
                 let Some((_agent_type, model_id)) = self
