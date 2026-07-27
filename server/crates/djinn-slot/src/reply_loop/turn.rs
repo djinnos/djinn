@@ -8,11 +8,10 @@ use std::sync::atomic::Ordering;
 #[cfg(feature = "test-support")]
 use std::sync::OnceLock;
 
-use crate::final_verification::verify_completion_intent;
 use crate::finalize_types::SubmitWork;
 use crate::helpers::{runtime_env_diagnostics, runtime_fs_diagnostics};
 use crate::host::{PreCompactionToolResult, SlotContext};
-use crate::output_parser::{CompletionIntent, ParsedAgentOutput};
+use crate::output_parser::ParsedAgentOutput;
 use djinn_compaction::{
     COMPACTION_SUMMARY_END_MARKER, CompactionContext, CompactionOutcome,
     compact_conversation_with_pointers_outcome, needs_compaction, strip_compaction_markers,
@@ -1539,28 +1538,16 @@ pub async fn run_reply_loop(
                 .iter()
                 .find(|tc| matches!(tc, ContentBlock::ToolUse { name, .. } if name == primary_finalize))
             {
-                let (payload, tool_use_id) = if let ContentBlock::ToolUse { id, input, .. } = finalize_call { (input.clone(), id.clone()) } else { (serde_json::Value::Null, String::new()) };
+                let payload = if let ContentBlock::ToolUse { input, .. } = finalize_call { input.clone() } else { serde_json::Value::Null };
                 if role_name == "worker" && primary_finalize == "submit_work" {
                     match serde_json::from_value::<SubmitWork>(payload.clone()) {
                         Ok(work) if work.task_id == task_id => {
-                            let mut intent = CompletionIntent {
-                                finalize_payload: payload,
-                                tool_use_id,
-                                final_verification_evidence: None,
-                                final_verification_disposition: crate::output_parser::FinalVerificationDisposition::Pending,
-                            };
-                            match verify_completion_intent(&mut intent, task_id, None, cancel.clone(), slot_ctx, "submit_work").await {
-                                Ok(_) => {
-                                    output.finalize_payload = Some(intent.finalize_payload.clone());
-                                    output.finalize_tool_name = Some(primary_finalize.to_string());
-                                    output.completion_intent = Some(intent);
-                                    break;
-                                }
-                                Err(error) => {
-                                    let result_msg = Message { role: Role::User, content: vec![ContentBlock::ToolResult { tool_use_id: intent.tool_use_id, content: vec![ContentBlock::Text { text: error }], is_error: true }], metadata: None };
-                                    persist_session_message(&msg_repo, session_id, task_id, &result_msg).await; conversation.push(result_msg); continue;
-                                }
-                            }
+                            // Explicit submit_work is the only worker-completion trigger.
+                            // It is handed directly to ordinary finalization; sessions ending
+                            // without this tool call cannot synthesize a submission.
+                            output.finalize_payload = Some(payload);
+                            output.finalize_tool_name = Some(primary_finalize.to_string());
+                            break;
                         }
                         Ok(_) | Err(_) => {
                             let result_msg = Message::user("submit_work payload is invalid for this task; correct it and resubmit.");
@@ -1568,71 +1555,6 @@ pub async fn run_reply_loop(
                         }
                     }
                 }
-                // Reviewer canonical verification consults the same
-                // task-scoped complete-fingerprint cache after the reviewer has
-                // the current authored tree but strictly before any canonical
-                // verification command dispatch or invocation-lease request.
-                // A fresh hit injects the persisted run context and never
-                // executes canonical commands or requests/acquires the lease;
-                // every miss, stale verdict, or error records the normal
-                // canonical reviewer verification. This does NOT intercept
-                // arbitrary reviewer shell commands, setup `pre_verification`,
-                // or merge-queue/project CI.
-                if matches!(role_name, "reviewer" | "task_reviewer")
-                    && primary_finalize == "submit_review"
-                {
-                    let mut intent = CompletionIntent {
-                        finalize_payload: payload.clone(),
-                        tool_use_id: tool_use_id.clone(),
-                        final_verification_evidence: None,
-                                final_verification_disposition: crate::output_parser::FinalVerificationDisposition::Pending,
-                    };
-                    // The reviewer's authoritative final-verification boundary.
-                    // On a hit this suppresses canonical commands and lease
-                    // acquisition; on any miss/error it runs normal canonical
-                    // reviewer verification. The reviewer's verdict and AC
-                    // payload always survive to finalization unchanged.
-                    match verify_completion_intent(
-                        &mut intent,
-                        task_id,
-                        None,
-                        cancel.clone(),
-                        slot_ctx,
-                        "submit_review",
-                    )
-                    .await
-                    {
-                        Ok(_) => {
-                            output.finalize_payload = Some(intent.finalize_payload.clone());
-                            output.finalize_tool_name = Some(primary_finalize.to_string());
-                            output.completion_intent = Some(intent);
-                            break;
-                        }
-                        Err(error) => {
-                            let result_msg = Message {
-                                role: Role::User,
-                                content: vec![ContentBlock::ToolResult {
-                                    tool_use_id: intent.tool_use_id,
-                                    content: vec![ContentBlock::Text { text: error }],
-                                    is_error: true,
-                                }],
-                                metadata: None,
-                            };
-                            persist_session_message(&msg_repo, session_id, task_id, &result_msg)
-                                .await;
-                            conversation.push(result_msg);
-                            continue;
-                        }
-                    }
-                }
-                tracing::info!(
-                    task_id = %task_id,
-                    agent_type = %role_name,
-                    finalize_tool = %primary_finalize,
-                    turns,
-                    assistant_message_count,
-                    "ReplyLoop: primary finalize tool called — session complete"
-                );
                 output.finalize_payload = Some(payload);
                 output.finalize_tool_name = Some(primary_finalize.to_string());
                 break;

@@ -26,22 +26,8 @@ use djinn_orchestration_types::coordinator::BackgroundWorkTracker;
 use djinn_orchestration_types::trigger::CoordinatorTrigger;
 use djinn_provider::catalog::{CatalogService, HealthTracker};
 
-use crate::final_verification::{
-    FinalVerificationConsultationFailure, FinalVerificationInvocationLease,
-    FinalVerificationResolvedMaterial,
-};
-#[cfg(any(test, feature = "test-support"))]
-use crate::final_verification::{
-    FinalVerificationCoordinatorRequest, FinalVerificationRecordingOutcome,
-};
 use crate::helpers::ProviderCredential;
 use crate::reply_loop::compaction_guard::CompactionCriticalSection;
-#[cfg(any(test, feature = "test-support"))]
-use djinn_sandbox::final_verification_execution::FinalVerificationExecutionEvidence;
-
-type FinalVerificationLeaseFuture<'a> = Pin<
-    Box<dyn Future<Output = Result<Box<dyn FinalVerificationInvocationLease>, String>> + Send + 'a>,
->;
 
 /// Identifies the knowledge-write target for a session.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -74,101 +60,6 @@ pub type ActivityTracker = Arc<Mutex<HashMap<String, Arc<AtomicU64>>>>;
 /// `djinn-slot` depending on `djinn-agent` modules like `prompts`,
 /// `mcp_client`, `task_merge`, `runtime_bridge`, `supervisor`, etc.
 pub trait SlotHostCallbacks: Send + Sync + 'static {
-    /// Inject one named failure inside the production consult-or-run path.
-    fn inject_final_verification_consultation_failure_for_test(
-        &self,
-        _failure: FinalVerificationConsultationFailure,
-    ) -> bool {
-        false
-    }
-    /// Observe the bounded outcome and audit reason emitted for an injection.
-    fn record_final_verification_consultation_outcome_for_test(
-        &self,
-        _outcome: &'static str,
-        _reason: &'static str,
-    ) {
-    }
-    /// Deterministic coordinator boundary used only by reply-loop unit tests.
-    /// Production builds always execute `coordinate_final_verification` in full.
-    #[cfg(any(test, feature = "test-support"))]
-    fn final_verification_outcome_for_test(
-        &self,
-        _request: &FinalVerificationCoordinatorRequest,
-    ) -> Option<FinalVerificationRecordingOutcome> {
-        None
-    }
-    /// Deterministic executor seam for coordinator/persistence integration tests.
-    /// Unlike `final_verification_outcome_for_test`, this still exercises
-    /// resolution, leasing, evidence validation, and the durable writer.
-    #[cfg(any(test, feature = "test-support"))]
-    fn final_verification_evidence_for_test(
-        &self,
-        _request: &FinalVerificationCoordinatorRequest,
-    ) -> Option<FinalVerificationExecutionEvidence> {
-        None
-    }
-    /// Resolve canonical material for an authoritative final-verification call.
-    ///
-    /// `Ok(Some(material))` is a configured plan and keeps the full
-    /// fail-closed completion boundary. `Ok(None)` is the typed
-    /// "no final-verification plan is configured" signal: the coordinator
-    /// records a [`FinalVerificationRecordingOutcome::NotConfigured`] outcome
-    /// and the completion-intent path proceeds without evidence instead of
-    /// blocking submission. Hosts must return `Ok(None)` only when the
-    /// project genuinely declares zero final-verification commands — every
-    /// resolution failure for a configured plan stays `Err` (fail closed).
-    /// The default fails closed until a host wires completion intent.
-    fn resolve_final_verification<'a>(
-        &'a self,
-        _task_id: &'a str,
-        _task_run_id: &'a str,
-        _verification_attempt_id: &'a str,
-        _verify_run_id: &'a str,
-        _ctx: &'a SlotContext,
-    ) -> Pin<
-        Box<
-            dyn Future<Output = Result<Option<FinalVerificationResolvedMaterial>, String>>
-                + Send
-                + 'a,
-        >,
-    > {
-        Box::pin(async { Err("final verification resolution is not available".to_owned()) })
-    }
-    /// Run the agent-facing `run_verification` tool as a pure client of the
-    /// authoritative final-verification coordinator.
-    ///
-    /// The host owns argument parsing, per-session rate limiting (enforced
-    /// before lease acquisition), telemetry rendering, and the JSON tool result.
-    /// It routes the actual consult-or-run through
-    /// [`crate::final_verification::coordinate_final_verification_for_agent`] so
-    /// the coordinator remains the only attempt opener/recorder. The default
-    /// returns a typed error so hosts without the tool wired stay source
-    /// compatible.
-    fn run_agent_verification<'a>(
-        &'a self,
-        _task_id: &'a str,
-        _role_name: &'a str,
-        _arguments: Option<serde_json::Map<String, serde_json::Value>>,
-        _cancellation: tokio_util::sync::CancellationToken,
-        _ctx: &'a SlotContext,
-    ) -> Pin<Box<dyn Future<Output = serde_json::Value> + Send + 'a>> {
-        Box::pin(async {
-            serde_json::json!({
-                "outcome": "error",
-                "detail": "run_verification is not available in this host",
-            })
-        })
-    }
-    /// Acquire the ordinary per-invocation verification lease.
-    fn acquire_final_verification_lease<'a>(
-        &'a self,
-        _task_id: &'a str,
-        _task_run_id: &'a str,
-        _verification_attempt_id: &'a str,
-        _ctx: &'a SlotContext,
-    ) -> FinalVerificationLeaseFuture<'a> {
-        Box::pin(async { Err("final verification lease is not available".to_owned()) })
-    }
     /// Interrupt a paused worker session.
     fn interrupt_paused_worker_session<'a>(
         &'a self,

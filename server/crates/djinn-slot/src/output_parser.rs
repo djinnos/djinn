@@ -3,63 +3,6 @@
 //! Extracted from `djinn-agent::output_parser` so slot code can reference
 //! these types without depending on `djinn-agent`.
 
-use djinn_core::auto_submit_decision::{
-    AutoSubmitDecision, ReviewAutoSubmitDecisionEvent, VerifyFreshnessEvaluatedEvent,
-};
-use djinn_core::models::VerifyRunRecord;
-
-use crate::final_verification::FinalVerificationSuccessEvidence;
-
-/// Typed C1 decision carried into C2 independently of optional evidence.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FinalVerificationDisposition {
-    Pending,
-    /// C1 resolved a configured plan. Evidence may subsequently become stale,
-    /// but C2 must still use the configured writer path rather than confusing
-    /// absent or discarded evidence with the legacy skip.
-    Configured,
-    NotConfigured,
-}
-
-/// Validated worker completion awaiting authoritative verification.
-#[derive(Debug, Clone, PartialEq)]
-pub struct CompletionIntent {
-    pub finalize_payload: serde_json::Value,
-    pub tool_use_id: String,
-    /// Complete proof accepted at the authoritative completion boundary.
-    pub final_verification_evidence: Option<FinalVerificationSuccessEvidence>,
-    /// A typed legacy-path skip is not the same as absent evidence: C2 must
-    /// consume it without reopening the coordinator.
-    pub final_verification_disposition: FinalVerificationDisposition,
-}
-
-impl CompletionIntent {
-    /// Create the completion boundary for a lifecycle-generated submission.
-    /// Its payload stays empty until final verification has stored a pass.
-    pub fn auto_submit(task_run_id: &str) -> Self {
-        Self {
-            finalize_payload: serde_json::Value::Null,
-            tool_use_id: format!("auto-submit:{task_run_id}"),
-            final_verification_evidence: None,
-            final_verification_disposition: FinalVerificationDisposition::Pending,
-        }
-    }
-}
-
-/// Side-effect-free auto-submit settlement data prepared for lifecycle teardown.
-#[derive(Debug, Clone, PartialEq)]
-pub struct AutoSubmitSettlement {
-    pub task_run_id: String,
-    pub decision: AutoSubmitDecision,
-    pub freshness_event: VerifyFreshnessEvaluatedEvent,
-    pub review_event: ReviewAutoSubmitDecisionEvent,
-    pub verify_run: Option<VerifyRunRecord>,
-    pub commit_title: Option<String>,
-    pub summary: Option<String>,
-    pub files_changed: Vec<String>,
-    pub remaining_concerns: Vec<String>,
-}
-
 /// Parsed output from an agent session.
 ///
 /// After removing markers and nudging (see ADR-022 revision), this struct only
@@ -77,8 +20,6 @@ pub struct ParsedAgentOutput {
     /// Name of the finalize tool that was actually called (e.g. `"submit_work"`,
     /// `"request_planner"`). Set alongside `finalize_payload`.
     pub finalize_tool_name: Option<String>,
-    /// Present while a worker submission awaits final verification.
-    pub completion_intent: Option<CompletionIntent>,
     /// Text-only handoff captured after a budget-triggered wind-down directive.
     /// This is intentionally separate from normal assistant text so settlement
     /// can park the run and persist a `work_parked` handoff activity without
@@ -90,9 +31,6 @@ pub struct ParsedAgentOutput {
     /// `remaining_concerns: "budget-parked: <details>"` instead of a generic
     /// placeholder.
     pub budget_wind_down_details: Option<String>,
-    /// Auto-submit decision payload consumed by lifecycle teardown when the
-    /// model did not call the role's finalize tool.
-    pub auto_submit: Option<AutoSubmitSettlement>,
     /// Set to `true` when the reply loop's no-progress integrity gate detected
     /// a second consecutive identical rejected-fingerprint `submit_work`. The
     /// finalize payload is NOT accepted (no `finalize_payload`); lifecycle
@@ -115,10 +53,8 @@ impl ParsedAgentOutput {
             reviewer_feedback: None,
             finalize_payload: None,
             finalize_tool_name: None,
-            completion_intent: None,
             budget_wind_down_summary: None,
             budget_wind_down_details: None,
-            auto_submit: None,
             no_progress_submission: false,
         }
     }

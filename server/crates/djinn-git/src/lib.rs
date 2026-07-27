@@ -504,16 +504,6 @@ pub use submission_diff::{
     compute_submission_diff_fingerprint_with_config,
 };
 
-pub mod verification_input;
-pub mod verification_input_outputs;
-pub use verification_input::{
-    DEFAULT_VERIFICATION_BASE_REF, OutputOnlyPolicy, ResolvedExternalInputV1,
-    VERIFICATION_INPUT_FINGERPRINT_VERSION_V1, VerificationInputDigestV1, VerificationInputError,
-    VerificationInputFingerprint, VerificationInputFingerprintConfig, VerificationInputUnavailable,
-    collect_verification_changed_paths, compute_verification_input_fingerprint,
-    compute_verification_input_fingerprint_with_config,
-};
-
 #[cfg(test)]
 mod test_support;
 

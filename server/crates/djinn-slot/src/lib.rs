@@ -42,8 +42,6 @@ mod actor;
 pub mod attempt_lifecycle;
 pub mod commands;
 pub mod extraction_replay_eval;
-pub mod final_verification;
-pub mod final_verification_agent;
 pub mod finalize_handlers;
 pub mod finalize_types;
 pub mod helpers;
@@ -56,21 +54,11 @@ pub mod session_extraction;
 mod supervisor_runner;
 
 #[cfg(test)]
-mod final_verification_agent_tool_tests;
-#[cfg(test)]
-mod finalize_handlers_c2_tests;
-#[cfg(test)]
-mod finalize_handlers_fingerprint_tests;
-#[cfg(test)]
 mod finalize_handlers_tests;
 #[cfg(test)]
 mod helpers_tests;
 #[cfg(test)]
 mod llm_extraction_tests;
-#[cfg(test)]
-pub(crate) mod reply_loop_completion_intent_tests;
-#[cfg(test)]
-mod reply_loop_reviewer_reuse_tests;
 #[cfg(test)]
 mod reply_loop_tests;
 #[cfg(any(test, feature = "test-support"))]
