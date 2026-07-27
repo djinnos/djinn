@@ -1,4 +1,5 @@
 //! Typed, transactional persistence for Agent Readiness runs.
+// djinn:allow-oversize -- readiness transaction invariants remain co-located.
 use crate::{
     Error, Result,
     database::Database,
@@ -1213,13 +1214,17 @@ mod aggregation_tests {
             "dedupe_key": "auth",
             "action": "rotate credentials",
             "guardrail_id": "z",
-            "area_id": "area-a"
+            "guardrail_ids": ["m", "z"],
+            "area_id": "area-a",
+            "area_ids": ["area-shared", "area-a"]
         });
         let from_area_b = serde_json::json!({
             "dedupe_key": "auth",
             "action": "rotate credentials",
             "guardrail_id": "a",
-            "area_id": "area-b"
+            "guardrail_ids": ["m", "a"],
+            "area_id": "area-b",
+            "area_ids": ["area-b", "area-shared"]
         });
         let a_then_b = canonical_suggestion(
             &from_area_b,
@@ -1238,8 +1243,8 @@ mod aggregation_tests {
             serde_json::json!({
                 "dedupe_key": "auth",
                 "action": "rotate credentials",
-                "area_ids": ["area-a", "area-b"],
-                "guardrail_ids": ["a", "z"]
+                "area_ids": ["area-a", "area-b", "area-shared"],
+                "guardrail_ids": ["a", "m", "z"]
             })
         );
     }

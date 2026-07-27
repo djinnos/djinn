@@ -1,4 +1,5 @@
 //! Real-Postgres contract tests for readiness persistence migrations.
+// djinn:allow-oversize -- one sequential migration/transaction contract suite.
 //!
 //! These tests deliberately create a fresh database, replay the migrations
 //! before 155, and execute the readiness migrations directly. The constraints
