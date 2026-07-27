@@ -210,7 +210,7 @@ pub use repositories::{
         ReadinessKickoffMaterialization, ReadinessProjectScoreRow,
         ReadinessRemediationSuggestionRow, ReadinessRepository, ReadinessRunDetail,
         ReadinessRunEventRow, ReadinessRunRow, RetryReadinessAreaAttempt, readiness_area_score,
-        readiness_score_band, readiness_severity_weight,
+        readiness_project_score, readiness_score_band, readiness_severity_weight,
     },
     refinement_run::{
         AcknowledgeRefinementTaskMaterializationRequest, ActiveRefinementRun,
