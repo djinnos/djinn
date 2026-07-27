@@ -14,7 +14,7 @@ TEMPLATE_PATH=${DJINN_CGROUP_TEMPLATE_PATH:-/var/lib/rancher/k3s/agent/etc/conta
 LIVE_CONFIG_PATH=${DJINN_CGROUP_LIVE_CONFIG_PATH:-/var/lib/rancher/k3s/agent/etc/containerd/config.toml}
 KUBECTL=${DJINN_KUBECTL:-kubectl}
 K3S_RESTART_CMD=${DJINN_K3S_RESTART_CMD:-'systemctl restart k3s'}
-PROBE_IMAGE=${DJINN_CGROUP_PROBE_IMAGE:-busybox:1.36.1}
+PROBE_IMAGE=${DJINN_CGROUP_PROBE_IMAGE:-ubuntu@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90}
 TIMEOUT=${DJINN_CGROUP_TIMEOUT:-120s}
 FIXTURE_MODE=${DJINN_CGROUP_FIXTURE_MODE:-}
 FIXTURE_CASE=${DJINN_CGROUP_FIXTURE_CASE:-success}
@@ -259,7 +259,7 @@ verify_node_identity
 # uid/gid, enables no-new-privileges, clears every capability set, and execs the
 # worker checks without any path back to launcher authority.
 COMBINED_PROBE="$LAUNCHER_PROBE
-exec setpriv --reuid=1000 --regid=1000 --nnp --inh-caps=-all --ambient-caps=-all --bounding-set=-all /bin/sh -ceu \"\$1\""
+exec setpriv --reuid=1000 --regid=1000 --keep-groups --nnp --inh-caps=-all --ambient-caps=-all --bounding-set=-all /bin/sh -ceu \"\$1\""
 "$KUBECTL" exec "$PROBE_NAME" -c conformance -- /bin/sh -ceu "$COMBINED_PROBE" probe "$WORKER_PROBE" >/dev/null || die 'launcher/worker cgroup conformance failed'
 
 "$KUBECTL" label node "$NODE_NAME" "$LABEL=true" --overwrite >/dev/null
