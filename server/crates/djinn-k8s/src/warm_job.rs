@@ -303,52 +303,28 @@ exec {bin} warm-graph "{project_id}"
         volumes: Some(volumes),
         node_selector,
         tolerations,
-        // ── Why the warm pod runs as CHILD_UID (1001), not WORKER_UID (1000) ──
+        // Why CHILD_UID (1001), not WORKER_UID (1000). The rule for this field
+        // is not "match the task-run pod": it is that every actor which CREATES
+        // CONTENT in the shared `/cache/cargo-target` tree must be the same uid.
+        // That uid is 1001, because cargo and its build scripts always run as
+        // the launcher-spawned child, and a build script copying over a seeded
+        // artifact ends in `set_permissions`. `chmod`/`chown`/`utimes` are
+        // governed by OWNERSHIP alone — EPERM to a non-owner even for a
+        // byte-identical mode, and no mode bit, setgid, ACL or group grants
+        // them. (Directory-entry and content ops DO work cross-identity through
+        // gid 1000 + setgid + `g+w`; only inode metadata does not.)
         //
-        // The warm pod and every task-run write the SAME `/cache/cargo-target`
-        // tree, so the rule that governs this field is not "match the task-run
-        // pod" — it is **whoever CREATES content in the shared cargo cache must
-        // be the same uid**. That uid is 1001, and it is not negotiable:
-        // `cargo` and its build scripts always run as the launcher-spawned
-        // child (`CHILD_UID`), never as the worker, and a build script that
-        // `std::fs::copy`s over a seeded artifact ends in `set_permissions`.
+        // This does not touch the launcher's security boundary: that boundary is
+        // the 0600 worker-owned broker socket, which refuses uid 1001 at
+        // `connect(2)`, and a warm Job renders no launcher sidecar and no socket
+        // at all. Asserted by `warm_pod_never_renders_a_launcher_sidecar`.
         //
-        // `chmod`/`chown`/`utimes` are governed by **ownership only**. No mode
-        // bits, no setgid, no group membership and no ACL can grant them — the
-        // kernel returns EPERM even when the requested mode is byte-identical
-        // to the current one. So a build script at 1001 cannot finish a copy
-        // over a file the warm pod created at 1000, however conforming that
-        // file's mode is. Directory-entry ops (create/unlink/rename/link) and
-        // content ops (open/write/truncate) DO work cross-identity through gid
-        // 1000 + setgid + `g+w`; only inode-metadata ops do not. Aligning the
-        // *content creator* is therefore the only fix, and aligning it upward
-        // (1000 -> 1001) is the only direction available, since `CHILD_UID` is
-        // fixed by the launcher.
+        // `run_as_group`/`fsGroup` stay at ARTIFACT_GID: group remains the
+        // mechanism for the lifecycle-only actors (djinn-server at 10001,
+        // task-run worker at 1000). Only content creation moved.
         //
-        // This does NOT touch the launcher's security boundary. That boundary
-        // is the broker control socket, which is 0600 and worker-owned
-        // precisely so uid 1001 is refused at `connect(2)`
-        // (`djinn_cgroup_launcher::transport::restrict_socket_to_worker`).
-        // A warm Job renders exactly ONE container plus the optional warm-gate
-        // init container — no launcher sidecar, no broker socket, no
-        // handshake — so nothing in this pod is on the far side of that
-        // boundary. `WORKER_UID != CHILD_UID` stays true everywhere it means
-        // anything; see `warm_pod_never_renders_a_launcher_sidecar`.
-        //
-        // `run_as_group` / `fsGroup` stay at `ARTIFACT_GID` (1000): group is
-        // still the mechanism for the lifecycle-only actors (djinn-server at
-        // uid 10001 creating `.warm-locks` / `.djinn-gc.lock` and pruning, the
-        // task-run worker at 1000 creating and removing run dirs). Only content
-        // creation moved. `OnRootMismatch` keeps the kubelet from doing an
-        // unbounded recursive chown on every pod start; the worker binary
-        // re-validates the mounted result at startup
-        // (`djinn_agent_worker::volume_contract`) and fails closed.
-        //
-        // The existing on-disk base is a mix of 10001 (legacy) and 1000
-        // (post-pwrr warm pods); a ONE-TIME operator `chown -R 1001:1000` moves
-        // it to the target state. See
-        // `docs/CARGO_CACHE_OWNERSHIP_MIGRATION_RUNBOOK.md` — that migration
-        // must run AFTER this lands, and a full cold re-warm must be avoided.
+        // Moving the EXISTING base to this state is a one-time operator action:
+        // `docs/CARGO_CACHE_OWNERSHIP_MIGRATION_RUNBOOK.md`.
         security_context: Some(k8s_openapi::api::core::v1::PodSecurityContext {
             run_as_user: Some(i64::from(crate::launcher::CHILD_UID)),
             run_as_group: Some(i64::from(crate::launcher::ARTIFACT_GID)),
@@ -577,13 +553,7 @@ mod tests {
 
         let pod = spec.template.spec.as_ref().expect("pod");
         assert_eq!(pod.restart_policy.as_deref(), Some("Never"));
-        // Every actor that CREATES CONTENT in the shared /cache/cargo-target
-        // tree must be uid 1001, because cargo and its build scripts always run
-        // as the launcher-spawned child and `fs::copy` ends in
-        // `set_permissions` — an ownership-only operation no mode bit can
-        // delegate. The warm pod is a content creator, so it is 1001. Actors
-        // that only manage lifecycle (djinn-server at 10001, the task-run
-        // worker at 1000) stay where they are and work through gid 1000.
+        // See the rationale on `security_context` in `build_warm_job`.
         let psc = pod.security_context.as_ref().expect("pod security context");
         assert_eq!(
             psc.run_as_user,
@@ -601,7 +571,7 @@ mod tests {
         assert_eq!(
             psc.run_as_group,
             Some(i64::from(crate::launcher::ARTIFACT_GID)),
-            "group stays 1000: it is still the mechanism for the lifecycle-only \
+            "group stays 1000: still the mechanism for the lifecycle-only \
              identities that share this tree"
         );
         assert_eq!(
@@ -894,16 +864,10 @@ mod tests {
     /// The precondition that makes running the warm pod as `CHILD_UID` free of
     /// security consequence — asserted, not assumed.
     ///
-    /// The 1000/1001 split is load-bearing: `transport::restrict_socket_to_worker`
-    /// hands the broker control socket to `WORKER_UID` at mode `0600` so that
-    /// uid 1001 is refused by the kernel at `connect(2)`, before a byte of the
-    /// control protocol is read. Moving the *warm* pod to 1001 would matter only
-    /// if a warm pod had a broker socket to connect to. It does not: a warm Job
-    /// renders one `warmer` container and, on the leased path, one `warm-lease-gate`
-    /// init container. No `cgroup-launcher` sidecar, no launcher IPC volume, no
-    /// handshake.
-    ///
-    /// If a launcher is ever added to the warm path, this test fails and the uid
+    /// `transport::restrict_socket_to_worker` hands the broker control socket to
+    /// `WORKER_UID` at mode `0600` so uid 1001 is refused at `connect(2)`. That
+    /// only matters if a warm pod has a socket to connect to; it does not. If a
+    /// launcher is ever added to the warm path this test fails, and the uid
     /// choice above must be revisited in the same change.
     #[test]
     fn warm_pod_never_renders_a_launcher_sidecar() {
