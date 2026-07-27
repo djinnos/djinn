@@ -118,9 +118,9 @@ async fn task_on_the_park_rung(
 ///
 /// Each cycle declines through a DIFFERENT sub-guard, so no single guard's
 /// counter ever accumulates — exactly the shape that let gy53 ride to
-/// `hold_cycle` 9. The task must still terminate at the cumulative bound, and
-/// it must terminate through the ceiling rather than through the guard that
-/// would otherwise have granted yet another free remediation.
+/// `hold_cycle` 9. The task must still stop worker redispatch at the cumulative
+/// bound and enter the one-shot final arbiter rather than the guard that would
+/// otherwise grant another free remediation.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn hold_cycle_ceiling_terminates_when_a_different_guard_declines_each_cycle() {
     let db = test_helpers::create_test_db();
@@ -206,11 +206,12 @@ async fn hold_cycle_ceiling_terminates_when_a_different_guard_declines_each_cycl
          marker is written: {markers_after:?}"
     );
 
-    // Terminal, non-redispatching state, with the reason recorded durably.
-    let closed = repo.get(&base.id).await.unwrap().unwrap();
+    // Non-worker-dispatching final-arbiter state, with the reason recorded
+    // durably.
+    let held = repo.get(&base.id).await.unwrap().unwrap();
     assert_eq!(
-        closed.status, "closed",
-        "a PR-less task at the ceiling must be terminally closed, not parked or redispatched"
+        held.status, "needs_lead_intervention",
+        "the task must enter its one-shot final arbiter, not be worker-redispatched"
     );
     let ceiling_markers = hold_cycle_ceiling_markers(&repo, &base.id).await;
     assert_eq!(
@@ -224,14 +225,21 @@ async fn hold_cycle_ceiling_terminates_when_a_different_guard_declines_each_cycl
         "the audit entry names the fingerprint that would otherwise have won another free round"
     );
 
-    // No fourth hold cycle was ever opened.
+    // The prospective ceiling cycle is the single final arbitration row.
     let arb = TaskArbitrationRepository::new(db.clone());
-    assert!(
-        arb.get_by_task_and_cycle(&base.id, MAX_ARBITER_HOLD_CYCLES)
-            .await
-            .unwrap()
-            .is_none(),
-        "the ceiling must refuse to open hold cycle {MAX_ARBITER_HOLD_CYCLES}"
+    let final_row = arb
+        .get_by_task_and_cycle(&base.id, MAX_ARBITER_HOLD_CYCLES)
+        .await
+        .unwrap()
+        .expect("the ceiling opens one final arbitration row");
+    assert_eq!(
+        final_row.directive.unwrap()["terminal_disposition_required"],
+        true
+    );
+    assert_eq!(
+        final_row.dossier.unwrap()["final_disposition"],
+        true,
+        "the arbiter must receive the terminal mandate in its dossier"
     );
 }
 
@@ -307,14 +315,11 @@ async fn hold_cycle_ceiling_yields_to_an_in_flight_arbiter() {
     );
 }
 
-/// gy53 itself carried an open PR. `terminally_fail_task` deliberately hands a
-/// PR-bearing task to the PR poller rather than force-closing it (the PR and
-/// branch are preserved), so the terminal state differs — but the rung must
-/// still HANDLE the task (the caller skips its dispatch), must record the
-/// reason, and must not open another hold cycle. Re-entry from a later poller
-/// tick must stay idempotent instead of spamming the audit log.
+/// gy53 itself carried an open PR. The old generic terminal gate handed it to
+/// the PR poller and stranded the epic. A PR-bearing task must instead receive
+/// the same one-shot final arbiter, with no eager successor cycle.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn hold_cycle_ceiling_hands_a_pr_bearing_task_to_the_poller_idempotently() {
+async fn hold_cycle_ceiling_dispatches_one_final_arbiter_for_pr_task() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
     let mut actor = coordinator_actor_for_tests(&db, &tx);
@@ -339,18 +344,10 @@ async fn hold_cycle_ceiling_hands_a_pr_bearing_task_to_the_poller_idempotently()
     );
     let handed_off = repo.get(&base.id).await.unwrap().unwrap();
     assert_eq!(
-        handed_off.status, "pr_review",
-        "the terminal gate hands a PR-bearing task to the poller instead of force-closing it"
+        handed_off.status, "needs_lead_intervention",
+        "the PR-bearing task must reach the final arbiter instead of being parked in pr_review"
     );
 
-    // A later poller tick re-enters the rung; the audit entry must not double.
-    let reloaded = repo.get(&base.id).await.unwrap().unwrap();
-    assert!(
-        actor
-            .route_planner_intervention(&reloaded, "worker", "strike", None, 5)
-            .await,
-        "re-entry at the ceiling must keep handling the task"
-    );
     let ceiling_markers = hold_cycle_ceiling_markers(&repo, &base.id).await;
     assert_eq!(
         ceiling_markers.len(),
@@ -362,12 +359,18 @@ async fn hold_cycle_ceiling_hands_a_pr_bearing_task_to_the_poller_idempotently()
         "no sub-guard may run after the ceiling trips"
     );
     let arb = TaskArbitrationRepository::new(db.clone());
+    let final_row = arb
+        .get_by_task_and_cycle(&base.id, MAX_ARBITER_HOLD_CYCLES)
+        .await
+        .unwrap()
+        .expect("one final row exists");
+    assert!(final_row.consumed_at.is_none());
     assert!(
-        arb.get_by_task_and_cycle(&base.id, MAX_ARBITER_HOLD_CYCLES)
+        arb.get_by_task_and_cycle(&base.id, MAX_ARBITER_HOLD_CYCLES + 1)
             .await
             .unwrap()
             .is_none(),
-        "no fresh hold cycle may be opened once the ceiling has tripped"
+        "dispatching the final arbiter must not eagerly open a successor cycle"
     );
 }
 

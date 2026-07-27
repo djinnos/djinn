@@ -43,22 +43,20 @@ fn coordinator_exhaustion_force_close_has_one_terminal_gate() {
         "terminally_fail_task must be the sole dispatch-exhaustion ForceClose gateway"
     );
 
-    // These are the two current exhaustion owners: model-chain/max-retry
-    // dispatch and the autonomous-remediation ceiling. They may call the gate,
-    // but never the ForceClose transition directly.
-    for (path, source) in [
-        ("dispatch/task_dispatch.rs", TASK_DISPATCH_SRC),
-        ("dispatch/retry.rs", RETRY_SRC),
-    ] {
-        assert!(
-            source.contains("terminally_fail_task"),
-            "{path} owns an exhaustion path and must route it through terminally_fail_task"
-        );
-        assert!(
-            !source.contains("TransitionAction::ForceClose"),
-            "{path} must not bypass terminally_fail_task with TransitionAction::ForceClose"
-        );
-    }
+    // Model-chain/max-retry dispatch remains generic exhaustion and must use
+    // the terminal gate.
+    assert!(
+        TASK_DISPATCH_SRC.contains("terminally_fail_task"),
+        "dispatch/task_dispatch.rs owns generic exhaustion and must route it through terminally_fail_task"
+    );
+    // The arbitration ceiling is a lifecycle disposition, not generic
+    // exhaustion: its one-shot final arbiter must release the epic through
+    // supersede or autonomous Planner escalation. It still must not introduce
+    // a second ForceClose gateway.
+    assert!(
+        !RETRY_SRC.contains("TransitionAction::ForceClose"),
+        "dispatch/retry.rs must not bypass terminally_fail_task with TransitionAction::ForceClose"
+    );
 
     // Catch new recovery/exhaustion modules as well. Test fixtures are excluded
     // because they only model transitions; production modules are all scanned.

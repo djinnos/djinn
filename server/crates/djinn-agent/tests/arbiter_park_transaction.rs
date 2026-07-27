@@ -284,6 +284,11 @@ async fn direct_services_arbiter_park_full_transaction() {
         "escalation must be a review task (planner-dispatchable)"
     );
     assert_eq!(hold_task.status, "open", "escalation must be open");
+    assert_eq!(
+        hold_task.epic_id.as_deref(),
+        Some(epic_id.as_str()),
+        "planner escalation must stay inside the source epic so the epic has dispatchable replanning work"
+    );
     assert!(
         hold_task.labels.contains("planner-park-escalation"),
         "escalation must carry the planner-park-escalation label, got: {}",

@@ -582,6 +582,12 @@ impl CoordinatorActor {
                 ),
             ),
         );
+        crate::doctor::register_stalled_epic_check(
+            djinn_core::doctor::registry(),
+            Arc::new(crate::doctor::TaskRepositoryStalledEpicSource::new(
+                db.clone(),
+            )),
+        );
 
         Self {
             receiver,
