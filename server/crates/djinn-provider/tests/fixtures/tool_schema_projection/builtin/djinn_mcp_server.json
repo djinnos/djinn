@@ -4955,7 +4955,7 @@
               }
             },
             "cargo_cache_policy": {
-              "description": "Project-level override for Cargo target-cache warming/running policy.\n\nThe default is [`CargoCachePolicy::AutoDetected`]: djinn detects the\ncache strategy from the repository it is about to run, including the\nCargo workspace layout, `.cargo/config.toml` settings such as\n`rustc-wrapper`, and configured setup command shapes. That\ndetection is deliberately read-only. djinn may read `.cargo/config.toml`\nto keep warm-job and worker behavior consistent with the project, but it\nnever creates, edits, or rewrites the project's `.cargo/config.toml`.\n\nSet an explicit policy only when project authors need to override the\ndetected cargo feature set at the environment-config level. `None` is\naccepted for legacy rows and is treated the same as the\ndefault auto-detected policy by consumers.",
+              "description": "Project-level override for Cargo target-cache warming/running policy.\n\nThe default is [`CargoCachePolicy::AutoDetected`]: djinn detects the\ncache strategy from the repository it is about to run, including the\nCargo workspace layout and the selected Rust workspace's Cargo feature\nsettings.\n\nSet an explicit policy only when project authors need to override the\ndetected cargo feature set at the environment-config level. `None` is\naccepted for legacy rows and is treated the same as the\ndefault auto-detected policy by consumers.",
               "anyOf": [
                 {
                   "$ref": "#/$defs/CargoCachePolicy"
@@ -5249,6 +5249,19 @@
                 "null"
               ],
               "default": null
+            },
+            "cargo_features": {
+              "description": "Cargo features that every platform-generated Cargo command for this\nRust workspace must enable. Ignored for non-Rust workspaces.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": []
+            },
+            "cargo_all_features": {
+              "description": "Pass `--all-features` instead of named `cargo_features`. Ignored for\nnon-Rust workspaces.",
+              "type": "boolean",
+              "default": false
             }
           },
           "required": [
@@ -5717,7 +5730,7 @@
               }
             },
             "cargo_cache_policy": {
-              "description": "Project-level override for Cargo target-cache warming/running policy.\n\nThe default is [`CargoCachePolicy::AutoDetected`]: djinn detects the\ncache strategy from the repository it is about to run, including the\nCargo workspace layout, `.cargo/config.toml` settings such as\n`rustc-wrapper`, and configured setup command shapes. That\ndetection is deliberately read-only. djinn may read `.cargo/config.toml`\nto keep warm-job and worker behavior consistent with the project, but it\nnever creates, edits, or rewrites the project's `.cargo/config.toml`.\n\nSet an explicit policy only when project authors need to override the\ndetected cargo feature set at the environment-config level. `None` is\naccepted for legacy rows and is treated the same as the\ndefault auto-detected policy by consumers.",
+              "description": "Project-level override for Cargo target-cache warming/running policy.\n\nThe default is [`CargoCachePolicy::AutoDetected`]: djinn detects the\ncache strategy from the repository it is about to run, including the\nCargo workspace layout and the selected Rust workspace's Cargo feature\nsettings.\n\nSet an explicit policy only when project authors need to override the\ndetected cargo feature set at the environment-config level. `None` is\naccepted for legacy rows and is treated the same as the\ndefault auto-detected policy by consumers.",
               "anyOf": [
                 {
                   "$ref": "#/$defs/CargoCachePolicy"
@@ -6011,6 +6024,19 @@
                 "null"
               ],
               "default": null
+            },
+            "cargo_features": {
+              "description": "Cargo features that every platform-generated Cargo command for this\nRust workspace must enable. Ignored for non-Rust workspaces.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": []
+            },
+            "cargo_all_features": {
+              "description": "Pass `--all-features` instead of named `cargo_features`. Ignored for\nnon-Rust workspaces.",
+              "type": "boolean",
+              "default": false
             }
           },
           "required": [
@@ -6421,7 +6447,7 @@
               }
             },
             "cargo_cache_policy": {
-              "description": "Project-level override for Cargo target-cache warming/running policy.\n\nThe default is [`CargoCachePolicy::AutoDetected`]: djinn detects the\ncache strategy from the repository it is about to run, including the\nCargo workspace layout, `.cargo/config.toml` settings such as\n`rustc-wrapper`, and configured setup command shapes. That\ndetection is deliberately read-only. djinn may read `.cargo/config.toml`\nto keep warm-job and worker behavior consistent with the project, but it\nnever creates, edits, or rewrites the project's `.cargo/config.toml`.\n\nSet an explicit policy only when project authors need to override the\ndetected cargo feature set at the environment-config level. `None` is\naccepted for legacy rows and is treated the same as the\ndefault auto-detected policy by consumers.",
+              "description": "Project-level override for Cargo target-cache warming/running policy.\n\nThe default is [`CargoCachePolicy::AutoDetected`]: djinn detects the\ncache strategy from the repository it is about to run, including the\nCargo workspace layout and the selected Rust workspace's Cargo feature\nsettings.\n\nSet an explicit policy only when project authors need to override the\ndetected cargo feature set at the environment-config level. `None` is\naccepted for legacy rows and is treated the same as the\ndefault auto-detected policy by consumers.",
               "anyOf": [
                 {
                   "$ref": "#/$defs/CargoCachePolicy"
@@ -6715,6 +6741,19 @@
                 "null"
               ],
               "default": null
+            },
+            "cargo_features": {
+              "description": "Cargo features that every platform-generated Cargo command for this\nRust workspace must enable. Ignored for non-Rust workspaces.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": []
+            },
+            "cargo_all_features": {
+              "description": "Pass `--all-features` instead of named `cargo_features`. Ignored for\nnon-Rust workspaces.",
+              "type": "boolean",
+              "default": false
             }
           },
           "required": [
@@ -12654,7 +12693,7 @@
               }
             },
             "cargo_cache_policy": {
-              "description": "Project-level override for Cargo target-cache warming/running policy.\n\nThe default is [`CargoCachePolicy::AutoDetected`]: djinn detects the\ncache strategy from the repository it is about to run, including the\nCargo workspace layout, `.cargo/config.toml` settings such as\n`rustc-wrapper`, and configured setup command shapes. That\ndetection is deliberately read-only. djinn may read `.cargo/config.toml`\nto keep warm-job and worker behavior consistent with the project, but it\nnever creates, edits, or rewrites the project's `.cargo/config.toml`.\n\nSet an explicit policy only when project authors need to override the\ndetected cargo feature set at the environment-config level. `None` is\naccepted for legacy rows and is treated the same as the\ndefault auto-detected policy by consumers.",
+              "description": "Project-level override for Cargo target-cache warming/running policy.\n\nThe default is [`CargoCachePolicy::AutoDetected`]: djinn detects the\ncache strategy from the repository it is about to run, including the\nCargo workspace layout and the selected Rust workspace's Cargo feature\nsettings.\n\nSet an explicit policy only when project authors need to override the\ndetected cargo feature set at the environment-config level. `None` is\naccepted for legacy rows and is treated the same as the\ndefault auto-detected policy by consumers.",
               "anyOf": [
                 {
                   "$ref": "#/$defs/CargoCachePolicy"
@@ -12948,6 +12987,19 @@
                 "null"
               ],
               "default": null
+            },
+            "cargo_features": {
+              "description": "Cargo features that every platform-generated Cargo command for this\nRust workspace must enable. Ignored for non-Rust workspaces.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": []
+            },
+            "cargo_all_features": {
+              "description": "Pass `--all-features` instead of named `cargo_features`. Ignored for\nnon-Rust workspaces.",
+              "type": "boolean",
+              "default": false
             }
           },
           "required": [
@@ -13334,7 +13386,7 @@
               }
             },
             "cargo_cache_policy": {
-              "description": "Project-level override for Cargo target-cache warming/running policy.\n\nThe default is [`CargoCachePolicy::AutoDetected`]: djinn detects the\ncache strategy from the repository it is about to run, including the\nCargo workspace layout, `.cargo/config.toml` settings such as\n`rustc-wrapper`, and configured setup command shapes. That\ndetection is deliberately read-only. djinn may read `.cargo/config.toml`\nto keep warm-job and worker behavior consistent with the project, but it\nnever creates, edits, or rewrites the project's `.cargo/config.toml`.\n\nSet an explicit policy only when project authors need to override the\ndetected cargo feature set at the environment-config level. `None` is\naccepted for legacy rows and is treated the same as the\ndefault auto-detected policy by consumers.",
+              "description": "Project-level override for Cargo target-cache warming/running policy.\n\nThe default is [`CargoCachePolicy::AutoDetected`]: djinn detects the\ncache strategy from the repository it is about to run, including the\nCargo workspace layout and the selected Rust workspace's Cargo feature\nsettings.\n\nSet an explicit policy only when project authors need to override the\ndetected cargo feature set at the environment-config level. `None` is\naccepted for legacy rows and is treated the same as the\ndefault auto-detected policy by consumers.",
               "anyOf": [
                 {
                   "$ref": "#/$defs/CargoCachePolicy"
@@ -13628,6 +13680,19 @@
                 "null"
               ],
               "default": null
+            },
+            "cargo_features": {
+              "description": "Cargo features that every platform-generated Cargo command for this\nRust workspace must enable. Ignored for non-Rust workspaces.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": []
+            },
+            "cargo_all_features": {
+              "description": "Pass `--all-features` instead of named `cargo_features`. Ignored for\nnon-Rust workspaces.",
+              "type": "boolean",
+              "default": false
             }
           },
           "required": [
@@ -13988,7 +14053,7 @@
               }
             },
             "cargo_cache_policy": {
-              "description": "Project-level override for Cargo target-cache warming/running policy.\n\nThe default is [`CargoCachePolicy::AutoDetected`]: djinn detects the\ncache strategy from the repository it is about to run, including the\nCargo workspace layout, `.cargo/config.toml` settings such as\n`rustc-wrapper`, and configured setup command shapes. That\ndetection is deliberately read-only. djinn may read `.cargo/config.toml`\nto keep warm-job and worker behavior consistent with the project, but it\nnever creates, edits, or rewrites the project's `.cargo/config.toml`.\n\nSet an explicit policy only when project authors need to override the\ndetected cargo feature set at the environment-config level. `None` is\naccepted for legacy rows and is treated the same as the\ndefault auto-detected policy by consumers.",
+              "description": "Project-level override for Cargo target-cache warming/running policy.\n\nThe default is [`CargoCachePolicy::AutoDetected`]: djinn detects the\ncache strategy from the repository it is about to run, including the\nCargo workspace layout and the selected Rust workspace's Cargo feature\nsettings.\n\nSet an explicit policy only when project authors need to override the\ndetected cargo feature set at the environment-config level. `None` is\naccepted for legacy rows and is treated the same as the\ndefault auto-detected policy by consumers.",
               "anyOf": [
                 {
                   "$ref": "#/$defs/CargoCachePolicy"
@@ -14282,6 +14347,19 @@
                 "null"
               ],
               "default": null
+            },
+            "cargo_features": {
+              "description": "Cargo features that every platform-generated Cargo command for this\nRust workspace must enable. Ignored for non-Rust workspaces.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": []
+            },
+            "cargo_all_features": {
+              "description": "Pass `--all-features` instead of named `cargo_features`. Ignored for\nnon-Rust workspaces.",
+              "type": "boolean",
+              "default": false
             }
           },
           "required": [
