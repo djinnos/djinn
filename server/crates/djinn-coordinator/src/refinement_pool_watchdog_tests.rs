@@ -484,7 +484,10 @@ async fn pending_start_timeout_escalates_to_termination_at_retry_cap() {
         .await
         .expect("load exact retry-cap run")
         .expect("admitted retry-cap run exists");
-    assert_eq!(durable.generation, generation, "CAS must use exact generation");
+    assert_eq!(
+        durable.generation, generation,
+        "CAS must use exact generation"
+    );
     assert_eq!(durable.snapshot.run.state, RefinementRunState::Terminal);
     assert_eq!(
         durable.snapshot.run.terminal_reason,
@@ -504,7 +507,14 @@ async fn pending_start_timeout_escalates_to_termination_at_retry_cap() {
         .into_iter()
         .filter(|row| row.event_kind == "refinement_stop")
         .collect();
-    assert_eq!(stops.len(), 1, "exact terminal CAS writes one lifecycle stop");
+    assert_eq!(
+        stops.len(),
+        1,
+        "exact terminal CAS writes one lifecycle stop"
+    );
     assert_eq!(stops[0].refinement_run_id.as_deref(), Some(run_id.as_str()));
-    assert_eq!(stops[0].refinement_stop_tag.as_deref(), Some("agent_failure"));
+    assert_eq!(
+        stops[0].refinement_stop_tag.as_deref(),
+        Some("agent_failure")
+    );
 }
