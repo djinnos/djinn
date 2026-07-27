@@ -567,7 +567,7 @@ async fn normal_lock_order_completes_without_deadlock() {
     }
     // Capture every key before the delete sweep removes non-survivor rows.
     let generation_ids: Vec<String> = sqlx::query_scalar(
-        "SELECT id::text FROM repo_graph_generation WHERE project_id = 'p-order'",
+        "SELECT generation_id::text FROM repo_graph_generation WHERE project_id = 'p-order'",
     )
     .fetch_all(db.pool())
     .await
@@ -823,7 +823,7 @@ async fn dry_run_releases_all_session_pins() {
     // generation keys. Parallel tests may legitimately hold keys in the same
     // lock class while this assertion runs.
     let generation_ids: Vec<String> = sqlx::query_scalar(
-        "SELECT id::text FROM repo_graph_generation WHERE project_id = 'p-dryrun-pins'",
+        "SELECT generation_id::text FROM repo_graph_generation WHERE project_id = 'p-dryrun-pins'",
     )
     .fetch_all(db.pool())
     .await
