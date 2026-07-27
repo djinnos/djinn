@@ -838,7 +838,10 @@ impl CoordinatorActor {
     /// for any *other* unbounded await a pass might hit. It is generous
     /// relative to any healthy pass yet far below the multi-minute freeze it
     /// guards against.
-    const PASS_DEADLINE: StdDuration = StdDuration::from_secs(120);
+    /// Public to the crate because it is a *derivation input*: any durable
+    /// lease renewed from a coordinator pass must outlive this deadline (see
+    /// [`crate::types::COORDINATOR_PASS_WORST_CASE_INTERVAL`]).
+    pub(crate) const PASS_DEADLINE: StdDuration = StdDuration::from_secs(120);
 
     /// Run one coordinator pass under the whole-board-freeze watchdog.
     ///

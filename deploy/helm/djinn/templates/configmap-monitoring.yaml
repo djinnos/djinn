@@ -65,6 +65,11 @@ data:
             for: 2m
             labels: {severity: warning}
             annotations: {runbook: server/docs/runbooks/incident-observability.md, summary: No djinn log-rotator metrics target is present.}
+          - alert: DjinnCgroupWritableSandboxFailure
+            expr: increase(kube_event_count{type="Warning", reason="FailedCreatePodSandBox", message=~".*runc-cgroupwritable.*"}[5m]) > 0
+            for: 2m
+            labels: {severity: warning}
+            annotations: {runbook: server/docs/runbooks/incident-observability.md, summary: runc-cgroupwritable failed to create a pod sandbox; inspect the Kubernetes Warning event and the node's kubelet/containerd runtime configuration before retrying.}
           - alert: Watchdog
             expr: vector(1)
             for: 1m
