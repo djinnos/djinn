@@ -1,0 +1,11 @@
+{
+  "observations": [
+    {"name":"ok","exit_code":0,"expected_health":"ok"},
+    {"name":"degraded","exit_code":17,"expected_health":"degraded"},
+    {"name":"broken_signal","signal":9,"expected_health":"broken"},
+    {"name":"broken_no_exit","expected_health":"broken"},
+    {"name":"runner_error","exit_code":0,"runner_failure":"sandbox unavailable","expected_health":"error"},
+    {"name":"timeout_wins_over_exit","exit_code":0,"timed_out":true,"expected_health":"timeout"},
+    {"name":"timeout_wins_over_runner_failure","runner_failure":"runner lost","timed_out":true,"expected_health":"timeout"}
+  ]
+}
