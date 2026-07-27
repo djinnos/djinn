@@ -53,6 +53,69 @@ EOF
 sysctl --system
 ```
 
+### Bound the containerd image store (kubelet image GC)
+
+**This repo does not manage kubelet configuration declaratively — there is no
+ansible/terraform tree and nothing writes `/etc/rancher/k3s/config.yaml`. The
+step below is operator-applied, once, per node.**
+
+Every project-image build pushes a new devcontainer image, and the kubelet pulls
+it. Nothing evicts the old ones. On a long-lived node the containerd image store
+becomes the single largest consumer on the root filesystem (measured on the
+production VPS: **129 GB across 433 image refs, of which only 16 were in use**).
+
+kubelet's default image GC is *disk-level* only: it starts evicting when the
+filesystem crosses `imageGCHighThresholdPercent` (default 85%). That threshold
+is the reason the node keeps rediscovering DiskPressure — GC does nothing at
+all until the disk is already nearly full, then evicts under pressure. The
+durable fix is the *age-based* bound `imageMaximumGCAge`, which reclaims unused
+images on a timer regardless of how full the disk is.
+
+`imageMaximumGCAge` has **no kubelet command-line flag** — it exists only in the
+`KubeletConfiguration` file — so it cannot be passed via a bare `kubelet-arg`.
+Point kubelet at a config file instead:
+
+```bash
+cat >/etc/rancher/k3s/kubelet.conf <<'EOF'
+apiVersion: kubelet.config.k8s.io/v1beta1
+kind: KubeletConfiguration
+# Reclaim images unused for 7 days, on a timer, independent of disk level.
+# Must be strictly greater than the image GC scan period.
+imageMaximumGCAge: "168h"
+# Disk-level backstop retained at the kubelet defaults.
+imageGCHighThresholdPercent: 85
+imageGCLowThresholdPercent: 80
+EOF
+
+cat >/etc/rancher/k3s/config.yaml <<'EOF'
+kubelet-arg:
+  - "config=/etc/rancher/k3s/kubelet.conf"
+EOF
+
+systemctl restart k3s     # running pods are unaffected
+```
+
+Requires Kubernetes ≥ 1.30 (the `ImageMaximumGCAge` feature gate is beta/on by
+default there, GA from 1.32). Check with `k3s --version`.
+
+Safety: kubelet only garbage-collects images **not referenced by any container
+it currently manages**, so images backing Running/Pending pods — including the
+digest-pinned project image every task-run and warm Job references — are never
+candidates. Age is measured from last use, not from pull.
+
+Verify after the restart:
+
+```bash
+# The setting is live if it appears in the kubelet's effective config.
+kubectl get --raw "/api/v1/nodes/$(hostname)/proxy/configz" | grep -o '"imageMaximumGCAge":"[^"]*"'
+
+# Watch the image count fall over the following days.
+k3s crictl images | wc -l
+```
+
+If `/etc/rancher/k3s/config.yaml` already exists, merge the `kubelet-arg` key
+into it rather than overwriting the file.
+
 Install Helm if the box doesn't have it:
 
 ```bash

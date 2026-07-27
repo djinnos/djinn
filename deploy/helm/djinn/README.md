@@ -54,6 +54,58 @@ each table is bounded to at most N+1 full blobs, while the two compatibility
 tables together are bounded to at most 2(N+1) full blobs. Do not treat the
 combined bound as a per-table allowance.
 
+## Zot catalog retention rollout
+
+`imagePipeline.zot.retention` bounds the in-cluster Zot registry. Without it a
+catalog repo accumulates every manifest ever built — measured on the production
+VPS: **117 manifests in one `djinn-image-*` repo, 83 GB, 41 days deep**. Zot's
+blob GC (`gc: true`) was already working; it reclaimed 0.0 GiB because nothing
+is ever untagged, so *tag* retention is the missing piece. Keeping the newest 5
+tags reclaims ~78.5 GiB.
+
+The chart ships `enabled: true` with `dryRun: true`. That pairing is the point:
+a cluster **reports** the tags it would prune instead of growing silently, and
+still deletes nothing until an operator opts in. `tests/zot-retention-render.sh`
+validates every setting locally; no live cluster is required.
+
+Two independent safety properties hold before anything is deleted:
+
+1. **Scope.** The rendered policy targets `repositories: ["djinn-image-*"]` only.
+   BuildKit cache repos (`djinn-buildkitd-*`) and infra repos are out of scope.
+   Do not widen this glob.
+2. **Digest pins, not tags.** Every task-run and warm Job references its project
+   image *by digest*. The authoritative keep-set is therefore the database
+   (`ImageRepository::list_selected_catalog_images`), not the tag list. The
+   server's startup preflight (`retention_preflight.rs`) independently proves
+   each selected catalog image stays pullable by a retained tag or digest pin,
+   and is fail-closed: an unsafe image blocks the rollout and is reported.
+
+`DJINN_ZOT_RETENTION_ENABLED` is rendered from the *effective* value — the
+`retention.enabled` intent ANDed with `imagePipeline.enabled` and
+`imagePipeline.zot.enabled`. The preflight exits the process on a Zot fetch
+error, so a deployment on an external registry (the chart default
+`zot.enabled: false`) must never be told retention is on; there would be no
+in-cluster Zot to answer and the server would crash-loop on boot.
+
+Rollout order:
+
+1. Deploy the shipped default (`enabled: true`, `dryRun: true`). Zot logs the
+   manifests it would remove; the server logs one
+   `Zot catalog retention preflight report` line per boot.
+2. Read that preflight report and confirm `outcome` is not
+   `destructive_blocked` and that every selected catalog image is retained.
+   This is the gate — do not skip it, because the pinned digest is currently
+   the newest manifest and a tag-only view cannot prove it survives.
+3. Flip destructive with `--set imagePipeline.zot.retention.dryRun=false`.
+   Roll back by setting it to `true` again (or
+   `--set imagePipeline.zot.retention.enabled=false` to remove the policy).
+
+`newestTags` is the number of newest tags kept per catalog repo (default 5), and
+`deleteUntagged` removes manifests left with no tags after pruning. A destructive
+policy cannot render at all unless `imagePipeline.enabled` and
+`imagePipeline.zot.enabled` are both true — `zot-configmap.yaml` fails the
+render otherwise, rather than producing a policy with no matching preflight.
+
 ## Build admission mode
 
 `buildAdmission.mode` selects the literal `DJINN_BUILD_ADMISSION_MODE` emitted

@@ -766,7 +766,13 @@ imagePipeline:
     #
     # Safety model:
     # - `retention.enabled` controls whether the policy is rendered into
-    #   zot-configmap at all. When false, no retention policy exists.
+    #   zot-configmap at all. When false, no retention policy exists and the
+    #   repo grows without bound — a shipped `enabled: false` default meant
+    #   every cluster silently accumulated every catalog manifest ever built.
+    #   The shipped default is therefore `enabled: true` PAIRED WITH
+    #   `dryRun: true`: a cluster REPORTS its retention plan instead of
+    #   growing silently, and still deletes nothing until an operator
+    #   explicitly opts in with `--set imagePipeline.zot.retention.dryRun=false`.
     # - `retention.dryRun` (default true) puts Zot in dry-run mode: it reports
     #   what it WOULD delete but does not actually delete. Safe to enable
     #   alongside monitoring without risk.
@@ -781,7 +787,7 @@ imagePipeline:
     # If the preflight finds an unsafe image, it blocks and reports —
     # destructive retention never silently removes a selected image.
     retention:
-      enabled: false
+      enabled: true
       dryRun: true
       deleteUntagged: true
       newestTags: 5
