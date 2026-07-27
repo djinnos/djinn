@@ -85,8 +85,13 @@ async fn evidence_command_provenance_contract() {
         EvidencePlanCapture {
             checks: vec![
                 EvidencePlanCheckInput {
-                    check_id: "command".into(),
-                    question: "Run it?".into(),
+                    check_id: "command_a".into(),
+                    question: "Run A?".into(),
+                    method: EvidenceMethod::Command,
+                },
+                EvidencePlanCheckInput {
+                    check_id: "command_b".into(),
+                    question: "Run B?".into(),
                     method: EvidenceMethod::Command,
                 },
                 EvidencePlanCheckInput {
@@ -175,18 +180,23 @@ async fn evidence_command_provenance_contract() {
     ));
     let cases = fixture().observations;
     let first =
-        record_command_observation(&repository, &identity, "command", observation(&cases[0]))
+        record_command_observation(&repository, &identity, "command_a", observation(&cases[0]))
             .await
             .expect("first");
     let retry =
-        record_command_observation(&repository, &identity, "command", observation(&cases[0]))
+        record_command_observation(&repository, &identity, "command_a", observation(&cases[0]))
             .await
             .expect("retry");
     assert_ne!(first.id, retry.id);
+    let other_check =
+        record_command_observation(&repository, &identity, "command_b", observation(&cases[0]))
+            .await
+            .expect("other command check");
     assert!(matches!(
         hydrate_selected_command_provenance(
             &repository,
             &identity,
+            "command_a",
             &EvidenceCommandInvocationSelection {
                 invocation_id: "invented".into()
             }
@@ -194,15 +204,30 @@ async fn evidence_command_provenance_contract() {
         .await,
         Err(EvidenceCommandError::UnknownInvocation { .. })
     ));
+    assert!(matches!(
+        hydrate_selected_command_provenance(
+            &repository,
+            &identity,
+            "command_a",
+            &EvidenceCommandInvocationSelection {
+                invocation_id: other_check.id
+            }
+        )
+        .await,
+        Err(EvidenceCommandError::InvocationCheckMismatch {
+            expected_check_id,
+            actual_check_id,
+        }) if expected_check_id == "command_a" && actual_check_id == "command_b"
+    ));
     for case in &cases[1..] {
-        record_command_observation(&repository, &identity, "command", observation(case))
+        record_command_observation(&repository, &identity, "command_a", observation(case))
             .await
             .expect("append");
     }
     let hydrated = hydrate_command_provenance(&repository, &identity)
         .await
         .expect("hydrate");
-    assert_eq!(hydrated.len(), cases.len() + 1);
+    assert_eq!(hydrated.len(), cases.len() + 2);
     assert_eq!(
         hydrated[0].invocation.argv,
         vec!["cargo".to_owned(), "test".to_owned()]
@@ -215,7 +240,7 @@ async fn evidence_command_provenance_contract() {
     assert!(hydrated[0].invocation.stdout_truncated);
     assert_eq!(hydrated[0].health, EvidenceCommandHealth::Ok);
     assert_eq!(hydrated[1].health, EvidenceCommandHealth::Ok);
-    for (event, case) in hydrated.iter().skip(2).zip(&cases[1..]) {
+    for (event, case) in hydrated.iter().skip(3).zip(&cases[1..]) {
         assert_eq!(event.health, case.expected_health, "{}", case.name);
     }
 }

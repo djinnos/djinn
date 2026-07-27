@@ -62,9 +62,20 @@ pub struct HydratedCommandProvenance {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EvidenceCommandError {
     Plan(EvidencePlanError),
-    UnknownCheck { check_id: String },
-    UnknownInvocation { invocation_id: String },
-    MethodMismatch { check_id: String, actual: String },
+    UnknownCheck {
+        check_id: String,
+    },
+    UnknownInvocation {
+        invocation_id: String,
+    },
+    InvocationCheckMismatch {
+        expected_check_id: String,
+        actual_check_id: String,
+    },
+    MethodMismatch {
+        check_id: String,
+        actual: String,
+    },
     Persistence(String),
 }
 
@@ -76,6 +87,13 @@ impl std::fmt::Display for EvidenceCommandError {
             Self::UnknownInvocation { invocation_id } => {
                 write!(f, "unknown command invocation '{invocation_id}'")
             }
+            Self::InvocationCheckMismatch {
+                expected_check_id,
+                actual_check_id,
+            } => write!(
+                f,
+                "command invocation belongs to '{actual_check_id}', not expected check '{expected_check_id}'"
+            ),
             Self::MethodMismatch { check_id, actual } => write!(
                 f,
                 "command invocation for '{check_id}' requires method 'command', found '{actual}'"
@@ -162,21 +180,31 @@ pub async fn hydrate_command_provenance(
         .collect())
 }
 
-/// Resolve a completion selector through the immutable ledger. An invented id
-/// is rejected, and callers cannot replace any hydrated provenance field.
+/// Resolve a completion selector through the immutable ledger for one
+/// server-supplied command check. An invented or cross-check id is rejected,
+/// and callers cannot replace any hydrated provenance field.
 pub async fn hydrate_selected_command_provenance(
     repository: &EvidenceRepository,
     identity: &EvidencePlanIdentity,
+    expected_check_id: &str,
     selection: &EvidenceCommandInvocationSelection,
 ) -> Result<HydratedCommandProvenance, EvidenceCommandError> {
+    let expected_check_id = expected_check_id.trim();
     let invocation_id = selection.invocation_id.trim();
-    hydrate_command_provenance(repository, identity)
+    let provenance = hydrate_command_provenance(repository, identity)
         .await?
         .into_iter()
         .find(|provenance| provenance.invocation.id == invocation_id)
         .ok_or_else(|| EvidenceCommandError::UnknownInvocation {
             invocation_id: invocation_id.to_owned(),
-        })
+        })?;
+    if provenance.invocation.check_id != expected_check_id {
+        return Err(EvidenceCommandError::InvocationCheckMismatch {
+            expected_check_id: expected_check_id.to_owned(),
+            actual_check_id: provenance.invocation.check_id,
+        });
+    }
+    Ok(provenance)
 }
 
 /// Strict precedence: timeout, runner/sandbox failure, broken process, zero,
