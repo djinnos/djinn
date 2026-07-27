@@ -56,12 +56,21 @@ fn assert_environment_config_workspace_metadata_schema(
     );
     assert_eq!(
         workspace["properties"]["cargo_features"],
-        json!({"default": [], "items": {"type": "string"}, "type": "array"}),
+        json!({
+            "default": [],
+            "description": "Cargo features that every platform-generated Cargo command for this\nRust workspace must enable. Ignored for non-Rust workspaces.",
+            "items": {"type": "string"},
+            "type": "array"
+        }),
         "{context} Workspace.cargo_features schema drifted"
     );
     assert_eq!(
         workspace["properties"]["cargo_all_features"],
-        json!({"default": false, "type": "boolean"}),
+        json!({
+            "default": false,
+            "description": "Pass `--all-features` instead of named `cargo_features`. Ignored for\nnon-Rust workspaces.",
+            "type": "boolean"
+        }),
         "{context} Workspace.cargo_all_features schema drifted"
     );
 
