@@ -157,6 +157,9 @@ async fn terminal_gate_pr_review_handoff_is_idempotent() {
     let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
     let (task, _) = create_task_with_note(&db, &tx, "terminal-pr-review-idempotent").await;
     repo.set_pr_url(&task.id, PR_URL).await.unwrap();
+    repo.reset_ci_snapshot_for_head(&task.id, 9003, "head-9003")
+        .await
+        .unwrap();
     let poller_owned = repo.set_status(&task.id, "pr_review").await.unwrap();
     let task_count = repo.list_by_project(&task.project_id).await.unwrap().len();
 
@@ -191,13 +194,24 @@ async fn terminal_gate_pr_review_handoff_is_idempotent() {
     assert!(dispatch_state.inflight_creator_user_id.is_none());
 
     let activity = repo.list_activity(&task.id).await.unwrap();
+    let handoff_markers: Vec<_> = activity
+        .iter()
+        .filter(|entry| entry.event_type == "pr_terminal_handoff")
+        .collect();
     assert_eq!(
-        activity
-            .iter()
-            .filter(|entry| entry.payload.contains(HANDOFF_REASON))
-            .count(),
-        2,
-        "each idempotent terminal handoff must be durably auditable"
+        handoff_markers.len(),
+        1,
+        "terminal handoff is recorded once for repeated entry at the same head"
+    );
+    let handoff_payload: serde_json::Value =
+        serde_json::from_str(&handoff_markers[0].payload).unwrap();
+    assert_eq!(
+        handoff_payload["reason"], HANDOFF_REASON,
+        "the durable marker identifies the terminal gate"
+    );
+    assert_eq!(
+        handoff_payload["head_sha"], "head-9003",
+        "the durable marker keys idempotence to the observed PR head"
     );
     assert_no_destructive_activity(&activity);
 }
