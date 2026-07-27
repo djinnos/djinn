@@ -32,7 +32,7 @@ use super::refinement::{RefinementPhase, StopReason, role_for_phase};
 use super::actor::CoordinatorActor;
 use super::refinement_inflight::DurableInflightRegistration;
 use super::refinement_outcome::RefinementOutcomeApplication;
-use super::types::InflightDispatch;
+use super::types::{InflightDispatch, REFINEMENT_INTENT_CLAIM_LEASE_MILLIS};
 use djinn_core::clock::{Clock, SystemClock};
 use djinn_core::models::TaskRefinementCorrelation;
 use djinn_core::refinement_liveness::RefinementRole;
@@ -311,7 +311,11 @@ impl CoordinatorActor {
                         intent_id: intent.intent_id.clone(),
                         generation: run.generation,
                         owner: owner.clone(),
-                        lease_millis: 60_000,
+                        // Derived from the poll cadence, never a bare number:
+                        // this same call is what RENEWS the lease on every
+                        // durable poll, so the lease has to outlive the worst
+                        // case interval between two polls.
+                        lease_millis: REFINEMENT_INTENT_CLAIM_LEASE_MILLIS,
                     })
                     .await
                 {

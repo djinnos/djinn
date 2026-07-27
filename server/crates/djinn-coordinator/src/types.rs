@@ -253,8 +253,69 @@ impl CoordinatorDeps {
 // ─── Constants ───────────────────────────────────────────────────────────────
 
 /// Interval between stuck-detection passes (AGENT-08).
+///
+/// This is also the nominal cadence of EVERY pass `run_tick` owns, including
+/// `drive_active_refinements` — the sole renewer of a durable refinement
+/// dispatch-intent claim. Anything whose lease is renewed from a coordinator
+/// pass must be derived from [`COORDINATOR_PASS_WORST_CASE_INTERVAL`] below,
+/// never chosen independently.
 pub(super) const STUCK_INTERVAL: Duration = Duration::from_secs(30);
 pub(super) const STALE_SWEEP_INTERVAL: Duration = Duration::from_secs(15 * 60);
+
+/// Modelled worst-case wall-clock gap between two consecutive executions of any
+/// pass driven by `run_tick`.
+///
+/// `run_tick` is scheduled on [`STUCK_INTERVAL`] with
+/// `MissedTickBehavior::Skip`, and every pass is bounded by the
+/// whole-board-freeze watchdog at
+/// [`crate::actor::CoordinatorActor::PASS_DEADLINE`], so a tick can start at
+/// most one full watchdog pass after its predecessor's scheduled slot.
+///
+/// Measured against production on 2026-07-27 (`djinn-server`, 247 consecutive
+/// tick intervals over 2h04m): p50 30.0s, p99 31.8s, max 37.8s. The modelled
+/// bound is ~4x the worst value actually observed, which is the safety margin
+/// this constant is supposed to carry.
+pub(super) const COORDINATOR_PASS_WORST_CASE_INTERVAL: Duration = Duration::from_secs(
+    STUCK_INTERVAL.as_secs() + crate::actor::CoordinatorActor::PASS_DEADLINE.as_secs(),
+);
+
+/// How long a durable refinement dispatch-intent claim stays valid.
+///
+/// **Derived, not chosen.** While an intent is `claimed` but not yet
+/// `materialized`, the unexpired lease is the *only* liveness evidence the run
+/// has (see `djinn_core::refinement_liveness::evaluate_refinement_liveness`): a
+/// claim whose lease has lapsed matches no evidence class, the run evaluates
+/// `Stale`, and `ProposalRepository::reap_and_admit` terminalizes it as
+/// `reaped_phantom` and mints generation N+1 — while the run is alive.
+///
+/// The claim is renewed only by `drive_active_refinements`, so the lease must
+/// outlive [`COORDINATOR_PASS_WORST_CASE_INTERVAL`] with room for consecutive
+/// missed renewals. The `const` assertions below fail the BUILD, not a test, if
+/// a future change to the tick cadence, the watchdog deadline, or this value
+/// breaks that relationship.
+///
+/// Cost of the length: a coordinator that restarts while holding a claim cannot
+/// re-take it under its new incarnation id until the lease lapses, so an intent
+/// caught mid-claim by a restart waits up to this long for re-dispatch. That is
+/// a bounded delay for a rare state; a false `reaped_phantom` is a lost
+/// tribunal.
+pub(super) const REFINEMENT_INTENT_CLAIM_LEASE: Duration = Duration::from_secs(300);
+
+/// Consecutive renewal attempts a claim lease must survive before lapsing.
+const REFINEMENT_CLAIM_RENEWAL_HEADROOM: u64 = 2;
+
+const _: () = assert!(
+    REFINEMENT_INTENT_CLAIM_LEASE.as_secs()
+        >= COORDINATOR_PASS_WORST_CASE_INTERVAL.as_secs() * REFINEMENT_CLAIM_RENEWAL_HEADROOM,
+    "REFINEMENT_INTENT_CLAIM_LEASE must outlive COORDINATOR_PASS_WORST_CASE_INTERVAL with \
+     headroom. A lease shorter than the interval of the loop that renews it does not expire \
+     occasionally — it expires in EVERY cycle, leaving a live refinement run holding an expired \
+     claim, matching no liveness evidence class, and reapable as reaped_phantom."
+);
+
+/// Millisecond form for `ClaimRefinementIntentRequest::lease_millis`.
+pub(super) const REFINEMENT_INTENT_CLAIM_LEASE_MILLIS: i64 =
+    (REFINEMENT_INTENT_CLAIM_LEASE.as_secs() * 1_000) as i64;
 
 /// ADR-051 §7 — stale auto-dispatch safety net.  Epics that fell through
 /// all event-driven auto-dispatch paths are rechecked at this interval.

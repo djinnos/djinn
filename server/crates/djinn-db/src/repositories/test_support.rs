@@ -92,6 +92,34 @@ pub async fn make_refinement_run_phantom_for_test(db: &Database, run_id: &str) {
     transaction.commit().await.unwrap();
 }
 
+/// Rewind an exact run's durable timestamps by `seconds`, which is the exact
+/// dual of `seconds` of wall-clock time passing for that run.
+///
+/// Both the dispatch-intent claim CAS and the liveness snapshot are evaluated
+/// against Postgres `transaction_timestamp()`, so no in-process clock can move
+/// them. The claim expiry and the run heartbeat are rewound together: aging one
+/// while the other stays fresh would leave a liveness evidence class frozen and
+/// silently mask the window under test.
+///
+/// **Not for production use.** Panics on SQL errors.
+pub async fn elapse_refinement_run_wall_clock_for_test(db: &Database, run_id: &str, seconds: i64) {
+    db.ensure_initialized().await.unwrap();
+    let mut transaction = db.pool().begin().await.unwrap();
+    sqlx::query("UPDATE refinement_dispatch_intents SET claim_expires_at = to_char((claim_expires_at::timestamptz - ($2 * interval '1 second')) AT TIME ZONE 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') WHERE run_id = $1 AND claim_expires_at IS NOT NULL")
+        .bind(run_id)
+        .bind(seconds)
+        .execute(&mut *transaction)
+        .await
+        .expect("failed to elapse refinement claim expiry");
+    sqlx::query("UPDATE refinement_runs SET heartbeat_at = to_char((heartbeat_at::timestamptz - ($2 * interval '1 second')) AT TIME ZONE 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') WHERE id = $1")
+        .bind(run_id)
+        .bind(seconds)
+        .execute(&mut *transaction)
+        .await
+        .expect("failed to elapse refinement run heartbeat");
+    transaction.commit().await.unwrap();
+}
+
 /// Replace a legacy proposal head and its current spec snapshot for tests.
 pub async fn replace_legacy_proposal_head_for_test(
     db: &Database,
