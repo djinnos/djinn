@@ -130,7 +130,7 @@ fn canonical(value: &serde_json::Value) -> String {
     match value {
         serde_json::Value::Object(map) => {
             let mut entries: Vec<_> = map.iter().collect();
-            entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+            entries.sort_by_key(|(left, _)| *left);
             format!(
                 "{{{}}}",
                 entries
