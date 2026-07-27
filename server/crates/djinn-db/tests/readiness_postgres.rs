@@ -415,7 +415,7 @@ fn callback_result() -> serde_json::Value {
 #[tokio::test]
 async fn area_callbacks_deduplicate_run_level_suggestions_without_rolling_back_success() {
     let db = Database::ephemeral().await.expect("postgres");
-    let project = "readiness-area-suggestion-deduplication";
+    let project = "readiness-area-suggestion-dedup";
     djinn_db::test_support::seed_project(&db, project, project).await;
     let creator = seed_user(&db, 155_008, "readiness-area-suggestion-deduplication").await;
     let repo = ReadinessRepository::new(db.clone());
