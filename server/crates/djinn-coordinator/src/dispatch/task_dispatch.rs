@@ -2325,10 +2325,7 @@ impl CoordinatorActor {
                     // Fall through to dispatch (deliberately no `continue`).
                 } else {
                     match reappearing {
-                        Some(ReappearingDispatch::SameRoleFailure {
-                            next_streak,
-                            cooldown,
-                        }) => {
+                        Some(ReappearingDispatch::SameRoleFailure { next_streak }) => {
                             // A3: a throttle/rate-limit reappearance is a transient
                             // provider fault, NOT evidence the task is structurally
                             // undispatchable — so it must not advance the terminal
@@ -2448,16 +2445,25 @@ impl CoordinatorActor {
                                 self.dispatch_failure_streak.remove(&task.id);
                             }
 
+                            // Deterministic run/CI failures cannot heal while waiting:
+                            // retain a fixed one-minute anti-spin floor so a prompt
+                            // compile/test/snapshot fix can be retried promptly.
+                            // Typed provider failures can heal with time and therefore
+                            // retain the escalating provider-protection ladder.
+                            let cooldown = dispatch_cooldown_for_failure(
+                                next_streak,
+                                provider_failure.is_some(),
+                            );
+
                             // A6: honor a provider-stated reset as a redispatch floor.
-                            // `cooldown` is the escalating ladder value for this
-                            // reappearance; when the provider stated a Retry-After /
-                            // rate-limit-reset that exceeds it, redispatch no earlier
-                            // than that reset (otherwise a 5-hour quota window would be
-                            // probed every ~30 min, burning failover). The provider
-                            // reset is deliberately allowed to EXCEED the ladder's
-                            // 30-min ceiling — that's the whole point — but is clamped
-                            // to a hard safety max so a malformed value can't wedge the
-                            // task forever.
+                            // When the provider stated a Retry-After /
+                            // rate-limit-reset that exceeds the selected cooldown,
+                            // redispatch no earlier than that reset (otherwise a
+                            // 5-hour quota window would be probed every ~30 min,
+                            // burning failover). The provider reset is deliberately
+                            // allowed to EXCEED the ladder's 30-min ceiling — that's
+                            // the whole point — but is clamped to a hard safety max so
+                            // a malformed value can't wedge the task forever.
                             let retry_after_ms = provider_failure.and_then(|f| f.retry_after_ms);
                             let effective_cooldown =
                                 apply_provider_retry_floor(cooldown, retry_after_ms);
@@ -2476,8 +2482,9 @@ impl CoordinatorActor {
                                 role,
                                 streak = stored_streak,
                                 throttle,
+                                provider_backoff = provider_failure.is_some(),
                                 cooldown_secs = effective_cooldown.as_secs(),
-                                "CoordinatorActor: repeated task failure — backing off dispatch (escalating cooldown)"
+                                "CoordinatorActor: repeated task failure — backing off dispatch"
                             );
                             self.dispatch_cooldowns.insert(
                                 task.id.clone(),
