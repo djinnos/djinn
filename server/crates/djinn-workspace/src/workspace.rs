@@ -232,6 +232,7 @@ impl Workspace {
         let mut eligible: Vec<String> = Vec::new();
         let mut excluded: Vec<String> = Vec::new();
         let mut paths_to_unstage: Vec<String> = Vec::new();
+        let merge_paths = self.merge_paths().await?;
 
         for entry in &entries {
             // Ignored files (rarely seen without --ignored) — skip.
@@ -256,10 +257,13 @@ impl Workspace {
                         "commit: excluding path from staging"
                     );
                     excluded.push(entry.path.clone());
-                    // If this excluded path is already staged (index-only
-                    // or both index+worktree), queue it for unstaging so
-                    // pre-staged scratch files don't end up in the commit.
-                    if entry.index != ' ' && entry.index != '?' {
+                    // Preserve an index-only path only when Git's active merge
+                    // actually includes it. This keeps main-side `.cargo/`
+                    // changes while still removing worker-prestaged scratch.
+                    if entry.index != ' '
+                        && entry.index != '?'
+                        && (entry.worktree != ' ' || !merge_paths.contains(entry.path.as_str()))
+                    {
                         paths_to_unstage.push(entry.path.clone());
                     }
                 }
@@ -318,7 +322,72 @@ impl Workspace {
             ],
         )
         .await?;
+        self.assert_merge_tree_integrity().await?;
         Ok(CommitOutcome::Committed { excluded })
+    }
+
+    /// Paths participating in the active merge, or an empty set outside one.
+    async fn merge_paths(&self) -> Result<HashSet<String>, EphemeralWorkspaceError> {
+        let merge_head = self
+            .run_git(&["rev-parse", "--git-path", "MERGE_HEAD"], &[])
+            .await?;
+        let merge_head = PathBuf::from(merge_head.trim());
+        let merge_head = if merge_head.is_absolute() {
+            merge_head
+        } else {
+            self.root.path().join(merge_head)
+        };
+        if !merge_head.exists() {
+            return Ok(HashSet::new());
+        }
+
+        let paths = self
+            .run_git(&["diff", "--name-only", "HEAD", "MERGE_HEAD", "--"], &[])
+            .await?;
+        Ok(paths.lines().map(str::to_string).collect())
+    }
+
+    /// Reject a two-parent commit whose tree silently discards parent-two
+    /// content on a path the branch did not itself change.
+    async fn assert_merge_tree_integrity(&self) -> Result<(), EphemeralWorkspaceError> {
+        let parents = self
+            .run_git(&["rev-list", "--parents", "-n", "1", "HEAD"], &[])
+            .await?;
+        let commits: Vec<&str> = parents.split_whitespace().collect();
+        if commits.len() != 3 {
+            return Ok(());
+        }
+
+        let first_parent = commits[1];
+        let second_parent = commits[2];
+        let merge_base = self
+            .run_git(&["merge-base", first_parent, second_parent], &[])
+            .await?;
+        let merge_base = merge_base.trim();
+
+        let branch_paths = self
+            .run_git(
+                &["diff", "--name-only", merge_base, first_parent, "--"],
+                &[],
+            )
+            .await?;
+        let branch_paths: HashSet<&str> = branch_paths.lines().collect();
+        let differs_from_second = self
+            .run_git(&["diff", "--name-only", second_parent, "HEAD", "--"], &[])
+            .await?;
+        let unexpected: Vec<&str> = differs_from_second
+            .lines()
+            .filter(|path| !branch_paths.contains(path))
+            .collect();
+
+        if !unexpected.is_empty() {
+            return Err(EphemeralWorkspaceError::Git(format!(
+                "merge tree integrity check failed: HEAD differs from second parent \
+                 {second_parent} on paths not changed by the branch: {}",
+                unexpected.join(", ")
+            )));
+        }
+        Ok(())
     }
 
     /// Refuse to commit any staged file larger than GitHub's 100 MiB hard limit.
@@ -1193,6 +1262,9 @@ mod tests {
     }
 
     fn write(dir: &Path, name: &str, contents: &str) {
+        if let Some(parent) = dir.join(name).parent() {
+            std::fs::create_dir_all(parent).expect("create parent directories");
+        }
         std::fs::write(dir.join(name), contents).expect("write file");
     }
 
@@ -1366,6 +1438,94 @@ mod tests {
         assert!(
             cp.join("newfile.txt").exists(),
             "main's file must be merged in"
+        );
+    }
+
+    #[tokio::test]
+    async fn clean_merge_preserves_main_change_under_excluded_component() {
+        let (origin, clone, ws) = fixture();
+        let cp = clone.path();
+
+        write(cp, "task.txt", "task work\n");
+        git(cp, &["add", "-A"]);
+        git(cp, &["commit", "-m", "task work"]);
+
+        advance_main(
+            origin.path(),
+            ".cargo/config.toml",
+            "[build]\nfeatures = [\"qdrant\"]\n",
+            "configure warm build features",
+        );
+
+        match ws.try_merge("main").await.expect("merge") {
+            MergeOutcome::Clean => {}
+            other => panic!("expected clean merge, got {other:?}"),
+        }
+        let outcome = ws
+            .commit("Merge main into task", TEST_IDENT)
+            .await
+            .expect("merge commit");
+        assert!(outcome.committed());
+
+        assert_eq!(
+            std::fs::read_to_string(cp.join(".cargo/config.toml")).expect("merged config"),
+            "[build]\nfeatures = [\"qdrant\"]\n"
+        );
+
+        let parents = git(cp, &["rev-list", "--parents", "-n", "1", "HEAD"]);
+        let parents: Vec<&str> = parents.split_whitespace().collect();
+        assert_eq!(parents.len(), 3, "expected two-parent commit");
+        let true_tree = git(cp, &["merge-tree", "--write-tree", parents[1], parents[2]]);
+        let committed_tree = git(cp, &["rev-parse", "HEAD^{tree}"]);
+        assert_eq!(
+            committed_tree.trim(),
+            true_tree.trim(),
+            "committed tree must equal Git's merge of its parents"
+        );
+    }
+
+    #[tokio::test]
+    async fn merge_tree_integrity_rejects_dropped_second_parent_path() {
+        let (origin, clone, ws) = fixture();
+        let cp = clone.path();
+
+        write(cp, "task.txt", "task work\n");
+        git(cp, &["add", "-A"]);
+        git(cp, &["commit", "-m", "task work"]);
+        advance_main(
+            origin.path(),
+            ".cargo/config.toml",
+            "[build]\nfeatures = [\"qdrant\"]\n",
+            "configure warm build features",
+        );
+        git(cp, &["fetch", "origin", "main"]);
+
+        let first_parent = git(cp, &["rev-parse", "HEAD"]);
+        let second_parent = git(cp, &["rev-parse", "origin/main"]);
+        let stale_tree = git(cp, &["rev-parse", "HEAD^{tree}"]);
+        let lying_merge = git(
+            cp,
+            &[
+                "commit-tree",
+                stale_tree.trim(),
+                "-p",
+                first_parent.trim(),
+                "-p",
+                second_parent.trim(),
+                "-m",
+                "lying merge",
+            ],
+        );
+        git(cp, &["reset", "--hard", lying_merge.trim()]);
+
+        let err = ws
+            .assert_merge_tree_integrity()
+            .await
+            .expect_err("dropped parent-two content must fail loudly");
+        let message = err.to_string();
+        assert!(
+            message.contains(".cargo/config.toml"),
+            "error must identify the silently dropped path: {message}"
         );
     }
 
@@ -2129,6 +2289,29 @@ mod tests {
         assert!(
             !cached_after.contains("patch.txt"),
             "pre-staged scratch must be unstaged, cached still has: {cached_after}"
+        );
+    }
+
+    #[tokio::test]
+    async fn commit_unstages_excluded_worktree_scratch_outside_merge() {
+        let (_origin, clone, ws) = fixture();
+        let cp = clone.path();
+        let head_before = git(cp, &["rev-parse", "HEAD"]);
+
+        write(cp, "target/worker.log", "scratch\n");
+        git(cp, &["add", "-f", "target/worker.log"]);
+
+        let outcome = ws
+            .commit("worker scratch", TEST_IDENT)
+            .await
+            .expect("commit");
+        assert!(matches!(outcome, CommitOutcome::NoLegitimateChanges { .. }));
+        assert_eq!(git(cp, &["rev-parse", "HEAD"]).trim(), head_before.trim());
+        assert!(
+            git(cp, &["diff", "--cached", "--name-only"])
+                .trim()
+                .is_empty(),
+            "worker-created excluded scratch must be unstaged"
         );
     }
 

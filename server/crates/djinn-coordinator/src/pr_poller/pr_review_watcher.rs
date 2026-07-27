@@ -306,6 +306,54 @@ impl CoordinatorActor {
                 continue;
             }
 
+            // Refresh a stale branch before interpreting CI. A red check on a
+            // behind head may be caused by a collision already fixed on base;
+            // update-branch is what triggers the meaningful CI run.
+            if pr.mergeable_state.as_deref() == Some("behind") {
+                tracing::info!(
+                    task_id = %task.short_id,
+                    pr = pull_number,
+                    "PR poller: PR is behind base — calling update-branch and retrying next tick"
+                );
+                match gh_client
+                    .update_pull_request_branch(&owner, &repo, pull_number, &current_sha)
+                    .await
+                {
+                    Ok(_) => {
+                        self.pr_status_cache.remove(&task.id);
+                        self.review_stuck_sha_first_seen.remove(&task.id);
+                        self.merge_fail_count.remove(&task.id);
+                        self.delegated_to_github.remove(&task.id);
+                        self.conversations_resolved.remove(&task.id);
+                    }
+                    Err(e) => {
+                        let github_error =
+                            render_github_write_error("GitHub update-branch failed", &e);
+                        tracing::warn!(
+                            task_id = %task.short_id,
+                            pr = pull_number,
+                            error = %github_error,
+                            "PR poller: update-branch failed — falling back to local mechanical merge (background)"
+                        );
+                        if matches!(
+                            self.poll_auto_merge_fast_path(
+                                &task.id,
+                                &task.short_id,
+                                &task.project_id,
+                            ),
+                            AutoMergeFastPathState::Merged
+                        ) {
+                            self.pr_status_cache.remove(&task.id);
+                            self.review_stuck_sha_first_seen.remove(&task.id);
+                            self.merge_fail_count.remove(&task.id);
+                            self.delegated_to_github.remove(&task.id);
+                            self.conversations_resolved.remove(&task.id);
+                        }
+                    }
+                }
+                continue;
+            }
+
             // ── CI checks on review PR (cached per head SHA) ──────────────────
             // Only skip CI re-check if the SHA hasn't changed AND we previously
             // confirmed all checks completed successfully.  If checks were still
@@ -485,84 +533,6 @@ impl CoordinatorActor {
                     pull_number,
                 )
                 .await;
-                continue;
-            }
-
-            // ── Branch up-to-date check ───────────────────────────────────────
-            // GitHub reports `mergeable_state == "behind"` when there are no
-            // conflicts (`mergeable == true`) but branch protection requires
-            // the head to include the latest base. Calling update-branch
-            // merges base → head (the equivalent of clicking GitHub's
-            // "Update branch" button), which bumps the head SHA and triggers
-            // a fresh CI run. We bail out of this tick and let the poller
-            // re-evaluate next time around once the new SHA settles.
-            if pr.mergeable_state.as_deref() == Some("behind") {
-                tracing::info!(
-                    task_id = %task.short_id,
-                    pr = pull_number,
-                    "PR poller: PR is behind base — calling update-branch and retrying next tick"
-                );
-                match gh_client
-                    .update_pull_request_branch(&owner, &repo, pull_number, &current_sha)
-                    .await
-                {
-                    Ok(_) => {
-                        // Head SHA will change; invalidate the CI cache so
-                        // next tick re-checks against the new commit, and
-                        // reset merge_fail_count since we're not actually
-                        // attempting a merge this tick. Clear the
-                        // delegated-to-GitHub marker too — the queue
-                        // entry was pinned to the prior SHA and is now
-                        // invalidated by update-branch.
-                        self.pr_status_cache.remove(&task.id);
-                        self.review_stuck_sha_first_seen.remove(&task.id);
-                        self.merge_fail_count.remove(&task.id);
-                        self.delegated_to_github.remove(&task.id);
-                        self.conversations_resolved.remove(&task.id);
-                    }
-                    Err(e) => {
-                        let github_error =
-                            render_github_write_error("GitHub update-branch failed", &e);
-                        // The GitHub API refused (race on expected head SHA,
-                        // permissions, transient). Don't just warn-and-spin —
-                        // fall back to the same mechanical merge the conflict
-                        // path uses: fetch the mirror fresh, merge target →
-                        // task branch in an ephemeral clone, push to mirror +
-                        // GitHub. Clean merge → the PR refreshes exactly as
-                        // update-branch would have done; real conflict → the
-                        // next tick sees `dirty` and the conflict path (fast
-                        // path, then ConflictRetry) takes over. Either way the
-                        // PR can no longer sit `behind` forever on a wedged
-                        // update-branch call.
-                        tracing::warn!(
-                            task_id = %task.short_id,
-                            pr = pull_number,
-                            error = %github_error,
-                            "PR poller: update-branch failed — falling back to local mechanical merge (background)"
-                        );
-                        // Offloaded fallback: a clean background merge bumps the
-                        // head exactly as update-branch would have. On `Merged`
-                        // clear the per-SHA caches; `InFlight`/`Reopen` just wait
-                        // for the next tick (a real conflict surfaces as `dirty`
-                        // and the conflict path takes over then). Either way the
-                        // PR can no longer sit `behind` forever, and the merge no
-                        // longer blocks the tick.
-                        if matches!(
-                            self.poll_auto_merge_fast_path(
-                                &task.id,
-                                &task.short_id,
-                                &task.project_id,
-                            ),
-                            AutoMergeFastPathState::Merged
-                        ) {
-                            self.pr_status_cache.remove(&task.id);
-                            self.review_stuck_sha_first_seen.remove(&task.id);
-                            self.merge_fail_count.remove(&task.id);
-                            self.delegated_to_github.remove(&task.id);
-                            self.conversations_resolved.remove(&task.id);
-                        }
-                    }
-                }
                 continue;
             }
 
