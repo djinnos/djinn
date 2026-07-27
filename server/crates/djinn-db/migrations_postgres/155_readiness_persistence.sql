@@ -62,13 +62,11 @@ CREATE TABLE readiness_guardrail_findings (
     attempt_id VARCHAR(36) NOT NULL,
     guardrail_key VARCHAR(255) NOT NULL,
     severity VARCHAR(32) NOT NULL,
-    confidence DOUBLE PRECISION NOT NULL DEFAULT 0,
     accepted BOOLEAN NOT NULL DEFAULT FALSE,
     evidence JSONB NOT NULL DEFAULT '{}'::jsonb,
     created_at VARCHAR(64) NOT NULL DEFAULT to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
     CONSTRAINT readiness_findings_attempt_correlation_fk FOREIGN KEY (attempt_id, run_id, area_id) REFERENCES readiness_area_attempts(id, run_id, area_id) ON DELETE CASCADE,
     CONSTRAINT readiness_findings_severity_check CHECK (severity IN ('info','low','medium','high','critical')),
-    CONSTRAINT readiness_findings_confidence_check CHECK (confidence >= 0 AND confidence <= 1),
     CONSTRAINT readiness_findings_attempt_guardrail UNIQUE (attempt_id, guardrail_key)
 );
 CREATE INDEX readiness_findings_attempt_idx ON readiness_guardrail_findings(attempt_id);

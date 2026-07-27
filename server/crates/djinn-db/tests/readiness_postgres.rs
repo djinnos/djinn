@@ -1,8 +1,8 @@
-//! Real-Postgres contract tests for migration 155 readiness persistence.
+//! Real-Postgres contract tests for readiness persistence migrations.
 //!
 //! These tests deliberately create a fresh database, replay the migrations
-//! before 155, and execute migration 155 directly.  The constraints below are
-//! therefore exercised by Postgres itself rather than an in-memory substitute.
+//! before 155, and execute the readiness migrations directly. The constraints
+//! below are therefore exercised by Postgres rather than an in-memory substitute.
 
 use std::path::{Path, PathBuf};
 
@@ -20,6 +20,7 @@ use sqlx::{Connection, Executor};
 
 const MIGRATION_VERSION: u64 = 155;
 const MIGRATION_FILE: &str = "155_readiness_persistence.sql";
+const FINDING_CONFIDENCE_MIGRATION_FILE: &str = "156_readiness_finding_confidence.sql";
 const DESIGNATED_OPERATOR_ID: &str = "00000000-0000-7000-8000-000000000155";
 
 fn migrations_dir() -> PathBuf {
@@ -727,14 +728,16 @@ async fn apply_prior_migrations(conn: &mut PgConnection) {
 }
 
 async fn apply_readiness_migration(conn: &mut PgConnection) {
-    let path = migrations_dir().join(MIGRATION_FILE);
-    conn.execute(
-        std::fs::read_to_string(&path)
-            .expect("read readiness migration")
-            .as_str(),
-    )
-    .await
-    .expect("apply readiness migration");
+    for migration in [MIGRATION_FILE, FINDING_CONFIDENCE_MIGRATION_FILE] {
+        let path = migrations_dir().join(migration);
+        conn.execute(
+            std::fs::read_to_string(&path)
+                .expect("read readiness migration")
+                .as_str(),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("apply {}: {error}", path.display()));
+    }
 }
 
 async fn with_temp_database<T, Fut>(suffix: &str, f: impl FnOnce(String) -> Fut) -> T
