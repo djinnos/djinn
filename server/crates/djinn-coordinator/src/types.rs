@@ -352,9 +352,18 @@ pub(super) const PLANNER_INTERVENTION_MARKER: &str = "planner_intervention";
 /// park and redispatched instead (no post-intervention remediation was ever
 /// attempted, or a brand-new CI fingerprint deserved one shot). Payload carries
 /// the decision (`kind`), the fingerprint when relevant, and the non-attempt
-/// model count — an audit trail proving the fleet actually tried before a human
-/// is ever paged.
+/// model count — an audit trail proving the fleet actually tried before the
+/// ladder gives up.
 pub(super) const PARK_REDISPATCH_MARKER: &str = "park_attempted_remediation_redispatch";
+
+/// Activity marker recording that the cumulative arbitration ceiling
+/// ([`MAX_ARBITER_HOLD_CYCLES`]) terminated a task at the second-strike rung.
+/// Payload carries the ceiling, the intervention/reopen counters, the CI
+/// fingerprint in play, and the terminal reason text — the durable "why" behind
+/// a terminal close whose transition reason may later be truncated or rewritten.
+/// Written at most once per task (a PR-bearing task terminalizes via an
+/// idempotent poller handoff, so the rung can be re-entered).
+pub(super) const HOLD_CYCLE_CEILING_MARKER: &str = "arbiter_hold_cycle_ceiling";
 
 /// uv3p Part B: number of CONSECUTIVE post-intervention sessions that terminated
 /// pre-submission (across DIFFERENT models) after which the human-park rung
@@ -420,6 +429,48 @@ pub(super) const MAX_PLANNER_INTERVENTIONS: i64 = 1;
 /// documenting the exhausted ladder rather than creating another escalation. A
 /// planner can always resurrect the work from the epic level.
 pub(super) const MAX_AUTONOMOUS_ESCALATIONS: i64 = 3;
+
+/// Cumulative, cross-cycle arbitration ceiling: the maximum number of arbiter
+/// hold cycles a single source task may ever open before the second-strike
+/// rung stops re-entering the ladder and terminally fails the task.
+///
+/// **This is the only bound on the rung that is cumulative.** Every other guard
+/// on the second-strike ladder is per-cycle or per-fingerprint, and each one
+/// RESETS by incrementing:
+///
+/// - `hold_cycle` itself is otherwise unbounded — [`resolve_current_hold_cycle`]
+///   (`task_arbitration.rs`) does `hold_cycle.saturating_add(1)` whenever the
+///   prior row is consumed or failed, forever.
+/// - [`MAX_AUTONOMOUS_ESCALATIONS`] is reachable ONLY through
+///   `park_source_human_review`, which the ladder enters only on fail-closed
+///   error branches (arbitration DB error, consumed/failed row, expired 24h
+///   deadline, decision-failure cap). A task whose `try_create` keeps returning
+///   `Created` never touches it — the ceiling sits on the error path, not the
+///   happy path.
+/// - The first-occurrence CI fingerprint guard grants one free remediation per
+///   NOVEL fingerprint, so a task that never repeats a failure signature gets
+///   unlimited free remediations.
+///
+/// Incident gy53 (2026-07-27) is exactly that shape: a large multi-crate
+/// retirement where each repair pushed the compile error down a layer,
+/// producing a new CI fingerprint every round (5 distinct ones). No guard ever
+/// tripped: 65 sessions, `intervention_count` 9, `hold_cycle` 9, five Lead
+/// arbiter dispatches, ~100% of dispatch capacity for 12+ hours, zero merges
+/// board-wide for six hours. The control task fux8 had a comparable
+/// `intervention_count` of 5 but only two arbiter dispatches — because its CI
+/// happened to go green. Without a cumulative bound the ladder terminates only
+/// when the work succeeds.
+///
+/// Rationale for `3`: hold cycles 0, 1 and 2 give the Lead arbiter three full
+/// forensic rounds (each of which may reopen with a directive, rotate models,
+/// or supersede). A task that has burned three complete arbitration cycles
+/// without converging is not going to converge on the fourth; board-wide over
+/// nine days only 18 of 55 arbitrated tasks ever reached `hold_cycle > 0` at
+/// all, so this ceiling is far above normal operation while still an order of
+/// magnitude below gy53's observed 9.
+///
+/// [`resolve_current_hold_cycle`]: djinn_db::repositories::task_arbitration::TaskArbitrationRepository::resolve_current_hold_cycle
+pub(super) const MAX_ARBITER_HOLD_CYCLES: i32 = 3;
 
 /// Same-signature CI dead-end threshold: the number of consecutive identical
 /// required-CI failures (same failure fingerprint) on a PR whose head has NOT

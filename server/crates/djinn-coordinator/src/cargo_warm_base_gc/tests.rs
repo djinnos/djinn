@@ -1422,3 +1422,48 @@ mod fingerprint_inventory;
 mod fingerprint_sweep;
 mod idle_variant_lock;
 mod pressure_execution;
+
+/// The warm-base GC root must resolve the server pod's own cache mount.
+///
+/// Verified against production on 2026-07-27: the djinn-server container has no
+/// `/cache` at all, while `/var/lib/djinn/cache/cargo-target` holds 53 GB.
+/// With the old `CARGO_WARM_BASE_ROOT = "/cache/cargo-target"` constant,
+/// `inventory_under` hit `NotFound`, mapped it to an *empty* inventory, and the
+/// sweep logged `warm-base idle GC completed deleted=0 retained=0` — a success
+/// line from the wrong ledger, indistinguishable from "nothing to collect".
+///
+/// `ends_with` alone would not catch a re-hardcode (`/cache/cargo-target` also
+/// ends with `cache/cargo-target`); `assert_ne!` plus the equality against the
+/// canonical accessor are the load-bearing assertions.
+#[test]
+fn warm_base_root_resolves_the_host_cache_mount_not_the_job_pod_path() {
+    let root = cargo_warm_base_root();
+    assert_ne!(
+        root,
+        PathBuf::from("/cache/cargo-target"),
+        "the host warm-base GC must not resolve to the Job-pod cache path"
+    );
+    assert_eq!(
+        root,
+        djinn_core::paths::cargo_target_root(),
+        "the host warm-base GC must resolve through djinn_core::paths"
+    );
+    assert!(
+        root.starts_with(djinn_core::paths::cache_root()),
+        "the host warm-base GC must resolve under the host cache root: {}",
+        root.display()
+    );
+}
+
+/// The Job-pod path does not exist in the server pod, and `inventory_under`
+/// maps `NotFound` to `Ok(empty)` — so the old constant could never surface as
+/// an error, only as a permanently empty inventory. This pins that behaviour so
+/// the "empty inventory" symptom stays legible if the path ever regresses.
+#[test]
+fn inventory_under_a_missing_root_is_an_empty_success_not_an_error() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let missing = tmp.path().join("no-such-cargo-target");
+    let inventory = inventory_under(&missing).expect("missing root is not an error");
+    assert!(inventory.entries.is_empty());
+    assert_eq!(inventory.ignored, 0);
+}

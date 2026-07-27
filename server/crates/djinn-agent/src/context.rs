@@ -217,6 +217,41 @@ impl ShellLaunchContext {
         &self.runner
     }
 
+    /// Run one command **as the launcher-spawned child (uid 1001)** and collect
+    /// its output.
+    ///
+    /// # Why this exists as a public entry point
+    ///
+    /// The tool-facing shell path (`extension::handlers::workspace`) is not the
+    /// only thing that must run at `CHILD_UID`. Anything that CREATES CONTENT in
+    /// `/cache/cargo-target*` has to, because `chmod`/`chown`/`utimes` are
+    /// governed by ownership alone and `std::fs::copy` ends in
+    /// `set_permissions`: a build script at uid 1001 cannot copy over a file the
+    /// uid-1000 worker created, however conforming that file's mode is. The
+    /// task-run cargo-target seed is exactly such a producer, so the worker
+    /// re-enters through the broker rather than seeding in-process.
+    ///
+    /// # This never fails because of contention
+    ///
+    /// Losing the build-lease queue is contention, not a failure: the runner
+    /// degrades the invocation to the launcher's unleased quota and the child
+    /// still runs to completion (see `lease_failure` in `crate::process`). The
+    /// `Err` arm here means the broker could not launch or reap at all. Callers
+    /// that have a non-brokered fallback must take it on `Err` and must not
+    /// treat it as fatal.
+    pub async fn brokered_output(
+        &self,
+        cmd: std::process::Command,
+        timeout: Duration,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> std::io::Result<std::process::Output> {
+        self.runner
+            .output(cmd, self.invocation(timeout), cancel)
+            .await
+            .map(|output| output.process.output)
+            .map_err(|error| std::io::Error::other(format!("{error:?}")))
+    }
+
     /// Compose a shell context around a remote-child runner double in tests.
     /// Production construction remains restricted to [`Self::broker_backed`],
     /// which owns the authenticated Unix broker adapter.

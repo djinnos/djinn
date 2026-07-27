@@ -6,8 +6,21 @@ identities**:
 | Identity | Who | Where |
 |----------|-----|-------|
 | uid `10001` | `djinn-server` | `/var/lib/djinn/{mirrors,cache,projects}` |
-| uid/gid `1000` | task-run + warm Job worker | `/workspace`, `/cache`, `/mirror` |
-| uid `1001`, primary group `1000` | the launcher-spawned child (compiles, tests) | `/workspace`, `/cache` |
+| uid/gid `1000` | the task-run **worker process** | `/workspace`, `/cache`, `/mirror` |
+| uid `1001`, primary group `1000` | the launcher-spawned child (compiles, tests, **and the cargo-target seed**) and the **warm Job pod** | `/workspace`, `/cache` |
+
+> **The group carries directory-entry and content operations. It does not carry
+> inode metadata.** `chmod`, `chown` and `utimensat` with explicit times are
+> governed by **ownership alone** — `EPERM` to a non-owner even for a
+> byte-identical mode, with no mode bit, setgid bit, ACL or group membership able
+> to delegate them. Since `std::fs::copy` ends in `set_permissions`, every actor
+> that **creates content** in `/cache/cargo-target*` must be the same uid, and
+> that uid is `1001` because cargo and its build scripts are always the
+> launcher-spawned child. That is why the warm Job runs as `1001` and why the
+> task-run seed goes through the broker. Actors that only manage **lifecycle**
+> (create / delete / rename / readdir) stay where they are. Moving an existing
+> base to that state is a one-time operator action:
+> `docs/CARGO_CACHE_OWNERSHIP_MIGRATION_RUNBOOK.md`.
 
 They can only share those volumes under one contract:
 
@@ -103,7 +116,8 @@ base*. This happened while preparing the v0.7.0 deploy — 13,512 files owned by
 |-------|-----------|
 | Fresh install | The chart's `fix-volume-perms` initContainer normalizes the three volume **roots** to `ownerUid:artifactGid` with `chmod 2775` (setgid + `g+w`). O(1), idempotent, **never recursive**. |
 | Server access | The server pod gets `securityContext.supplementalGroups: [1000]` — membership in the artifact group with zero filesystem work. |
-| Worker/warm pods | The Pod render pins `fsGroup: 1000` + `fsGroupChangePolicy: OnRootMismatch` and runs as uid/gid `1000` (task-run **and** warm — they share `/cache`). |
+| Task-run pods | The Pod render pins `fsGroup: 1000` + `fsGroupChangePolicy: OnRootMismatch` and runs the worker container as uid/gid `1000`. The worker only manages lifecycle in the cargo trees; cargo, its build scripts and the cargo-target seed all run as the launcher-spawned child at uid `1001`. |
+| Warm pods | Same `fsGroup` + `fsGroupChangePolicy`, but `runAsUser: 1001` (`CHILD_UID`) — the warm pod **creates content** in the shared cargo base, so it must be the same uid as the build scripts that later copy over it. A warm Job renders no launcher sidecar and no broker socket, so this does not touch the worker/child security boundary (asserted by `warm_pod_never_renders_a_launcher_sidecar`). |
 | Runtime | `djinn-agent-worker` validates the **actually mounted** roots at startup (`volume_contract`) and fails readiness with a typed error naming the path and observed-versus-required ownership/mode. |
 
 The startup check stats the workspace, the git metadata (`<workspace>/.git` and
@@ -118,10 +132,22 @@ checks a *sample of the subtree*, not just the root, because the exact
 production near-miss had a hand-fixed root over a broken subtree. A passing
 sample (production has reported `entries_sampled=512, budget_exhausted=true`)
 is not proof that every warm-base file conforms. The warm worker therefore does
-the authoritative full regular-file mode normalization after each Cargo cycle;
-the startup check **never repairs** — a recursive `chown` over a 300G cache is a
-multi-minute stall on pod start, which is the whole reason
-`fsGroupChangePolicy` is `OnRootMismatch`.
+a full regular-file mode normalization after each Cargo cycle; the startup check
+**never repairs** — a recursive `chown` over a 300G cache is a multi-minute
+stall on pod start, which is the whole reason `fsGroupChangePolicy` is
+`OnRootMismatch`.
+
+That normalization is **authoritative only over the files the warm pod owns**,
+and saying otherwise was wrong for as long as the sentence existed. `chmod` is
+granted by ownership, not by mode: a warm pod cannot add `g+w` to a file another
+uid created, however conforming the directory is. A live production base
+measured **6,794 files owned by uid `10001` against 2,422 owned by `1000`** —
+neither identity could chmod the other's inodes, so the pass had always been
+partial. It reports that honestly: `files_unchangeable` counts the refusals and
+`first_chmod_error` names the first path, and a refusal does not abort the walk
+(it used to, via `?`, which meant one foreign-owned file left every later file
+unnormalized). `files_unchangeable > 0` after a warm cycle means
+`docs/CARGO_CACHE_OWNERSHIP_MIGRATION_RUNBOOK.md` has not been run yet.
 
 ## `$HOME` is part of the startup check too (9jrg)
 
@@ -232,10 +258,20 @@ Substitute the real claim names (`kubectl -n "$NS" get pvc`) — they differ whe
 `storage.*.existingClaim` is set. On a large cache this takes minutes; that is
 exactly why it is an operator action and not something a pod does at startup.
 
-Cheaper alternative when only the cache is broken: delete the Cargo warm base
-(`/cache/cargo-target`, `/cache/cargo-target-runs`) and let the next warm Job
-rebuild it under the correct ownership. It costs one cold warm cycle and no
+Cheaper-looking alternative when only the cache is broken: delete the Cargo warm
+base (`/cache/cargo-target`, `/cache/cargo-target-runs`) and let the next warm
+Job rebuild it under the correct ownership. It costs one cold warm cycle and no
 `chown` walk.
+
+**Do not take that option for a large Rust workspace.** `warm_job.rs` documents
+a cold first warm at ~20–25 min for a ~12-crate workspace against a 3600 s
+`active_deadline_seconds` with `backoffLimit: 0`; djinn's own `server/`
+workspace is ~30 crates and its base measures 27 GiB. A cold warm that overruns
+the deadline is SIGKILLed mid-compile, is not retried, and the next warm tick
+starts from zero — an unbounded loop that never produces a base while every
+task-run compiles cold. Prefer the targeted `chown` in
+`docs/CARGO_CACHE_OWNERSHIP_MIGRATION_RUNBOOK.md`, which preserves the compiled
+artifacts and completes in under a minute on 16k inodes.
 
 ### Break-glass
 

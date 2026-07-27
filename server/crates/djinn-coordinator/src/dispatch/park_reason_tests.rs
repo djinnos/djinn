@@ -259,8 +259,16 @@ fn in_flight_submitted_attempt_does_not_park() {
     // submission_pending_review guard prevents the park from firing.
     let reason = CoordinatorActor::compute_park_reason(&task, &history);
     assert!(
-        reason.contains("Auto-parked for human review"),
+        reason.contains("Auto-parked to autonomous arbitration"),
         "park reason template should render; got: {reason}"
+    );
+    // The park rung has had no human in it since the arbiter replaced the
+    // human hold; the narration must not claim otherwise (gy53 audit — three
+    // artifacts still advertised a human hold the code cannot produce).
+    assert!(
+        !reason.contains("human review") && !reason.contains("A human must resolve"),
+        "park reason must not advertise a human hold the autonomous path never creates; got: \
+         {reason}"
     );
 }
 

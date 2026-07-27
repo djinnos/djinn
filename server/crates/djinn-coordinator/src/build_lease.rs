@@ -12,8 +12,8 @@ use std::sync::{
 use async_trait::async_trait;
 use djinn_db::{
     AdmissionHandoffRepository, BuildLeaseConsumerKind, BuildLeaseKey, BuildLeaseRepository,
-    BuildLeaseRow, BuildLeaseState, GrantNextBuildLeaseResult, QueueBuildLeaseInput,
-    QueueBuildLeaseResult,
+    BuildLeaseRow, BuildLeaseState, BuildLeaseTerminalReason, GrantNextBuildLeaseResult,
+    QueueBuildLeaseInput, QueueBuildLeaseResult,
 };
 use djinn_runtime::BuildSlotWeight;
 use djinn_supervisor::services::{
@@ -974,21 +974,41 @@ fn queue_result(row: &BuildLeaseRow) -> Option<LeaseResult> {
         BuildLeaseState::Terminal => Some(terminal_result(row)),
     }
 }
+/// Map a retained terminal row onto the typed outcome its owner replays.
+///
+/// The match over [`BuildLeaseTerminalReason`] is EXHAUSTIVE and deliberately
+/// has no `_` arm. It used to, and that arm cost a production outage: when the
+/// dispatch reclaimer introduced `reclaimed_absent`, the new reason fell into
+/// `_ => LeaseUnavailable` and every task whose dispatch lease had been
+/// reclaimed was denied forever, with a log line that named capacity as the
+/// cause. Adding a reason must be a compile error here, not a silent denial.
+///
+/// The only remaining fall-through is a reason this binary cannot parse at all
+/// -- a row written by a NEWER schema than the one running. That is genuinely
+/// unknown, and unknown is not permission.
 fn terminal_result(row: &BuildLeaseRow) -> LeaseResult {
-    match row.terminal_reason.as_deref() {
-        Some("abandoned") => LeaseResult::Abandoned {
-            candidate_cleanup: row.candidate_cleanup.is_some(),
-        },
-        Some("cancelled") => LeaseResult::Cancelled {
-            candidate_cleanup: row.candidate_cleanup.is_some(),
-        },
-        Some("released") => LeaseResult::Released {
-            candidate_cleanup: row.candidate_cleanup.is_some(),
-        },
-        Some("deadline_expired") => LeaseResult::LeaseWaitTimeout {
+    let candidate_cleanup = row.candidate_cleanup.is_some();
+    let Some(reason) = row
+        .terminal_reason
+        .as_deref()
+        .and_then(BuildLeaseTerminalReason::parse)
+    else {
+        return LeaseResult::LeaseUnavailable;
+    };
+    match reason {
+        BuildLeaseTerminalReason::Abandoned => LeaseResult::Abandoned { candidate_cleanup },
+        BuildLeaseTerminalReason::Cancelled => LeaseResult::Cancelled { candidate_cleanup },
+        BuildLeaseTerminalReason::Released => LeaseResult::Released { candidate_cleanup },
+        BuildLeaseTerminalReason::DeadlineExpired => LeaseResult::LeaseWaitTimeout {
             timeout_credit: None,
         },
-        _ => LeaseResult::LeaseUnavailable,
+        // The object this lease was fenced onto was PROVEN absent, so the unit
+        // is dead and its holder is gone. There is no live work to replay and
+        // no outcome to report: the owner must mint a new attempt rather than
+        // adopt this one. `task_dispatch` does exactly that (the repository
+        // retires the spent row on the next `queue`); warm and invocation
+        // owners re-enter under a fresh identity.
+        BuildLeaseTerminalReason::ReclaimedAbsent => LeaseResult::LeaseUnavailable,
     }
 }
 fn status(row: &BuildLeaseRow) -> LeaseStatus {

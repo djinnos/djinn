@@ -62,9 +62,11 @@
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+mod brokered_cargo_target_seed;
 pub mod cargo_cache_policy;
 pub mod cargo_incremental_prune;
 pub mod cargo_metrics;
@@ -210,6 +212,32 @@ enum Cmd {
     WarmGraph {
         /// Project id (matches `projects.id`). Positional.
         project_id: String,
+    },
+
+    /// Seed a private per-task-run Cargo target dir from the project's warm
+    /// base and exit, printing a machine-readable summary line on stdout.
+    ///
+    /// # This subcommand exists to be run as a DIFFERENT UID
+    ///
+    /// It is not an operator entry point and no renderer launches it. The
+    /// task-run worker (uid 1000) re-enters its own binary through the cgroup
+    /// broker, which spawns children as `CHILD_UID` (1001), so the seeded
+    /// inodes are born owned by the identity that later overwrites them.
+    /// `chmod` is granted by ownership alone, and `std::fs::copy` ends in
+    /// `set_permissions` — a build script at 1001 cannot finish a copy over a
+    /// file the worker created at 1000, whatever its mode says. See
+    /// `brokered_cargo_target_seed`.
+    ///
+    /// Both arguments are positional-free and explicit so the parent can quote
+    /// them into a `bash -lc` script without relying on any inherited state.
+    SeedCargoTarget {
+        /// Warm base to seed FROM. Read-only to this process.
+        #[arg(long)]
+        base: PathBuf,
+
+        /// Private per-task-run target dir to seed INTO.
+        #[arg(long)]
+        run_dir: PathBuf,
     },
 
     /// Compare two cached repo graph artifacts for a project and exit.
@@ -411,12 +439,52 @@ async fn run() -> Result<()> {
     match cli.cmd {
         Cmd::TaskRun(args) => run_task_run(args).await,
         Cmd::WarmGraph { project_id } => run_warm_graph(&project_id).await,
+        Cmd::SeedCargoTarget { base, run_dir } => run_seed_cargo_target(&base, &run_dir),
         Cmd::CompareGraphArtifacts {
             project_id,
             old_commit,
             new_commit,
         } => run_compare_graph_artifacts(&project_id, &old_commit, &new_commit).await,
     }
+}
+
+/// The `seed-cargo-target` subcommand body — the half that runs at uid 1001.
+///
+/// Synchronous on purpose: this process does exactly one thing and exits, and
+/// the seed is bounded parallel filesystem work driven by its own rayon pool
+/// (`seed_cargo_target_dir`), not async IO.
+///
+/// The summary goes to STDOUT on a prefixed line and everything else to stderr,
+/// because the parent recovers this value across the process boundary and
+/// records the task-run's seed telemetry from it. A seed that runs but cannot
+/// report is indistinguishable to the parent from one that never ran, and
+/// degrades to the in-worker path.
+fn run_seed_cargo_target(base: &Path, run_dir: &Path) -> Result<()> {
+    let result = seed_cargo_target_dir(base, run_dir)
+        .with_context(|| format!("seed {} from {}", run_dir.display(), base.display()))?;
+    info!(
+        uid = volume_contract::current_uid(),
+        gid = volume_contract::current_gid(),
+        base = %base.display(),
+        run_dir = %run_dir.display(),
+        linked_file_count = result.linked_file_count,
+        copied_file_count = result.copied_file_count,
+        skipped_file_count = result.skipped_file_count,
+        "cargo target seed: brokered child completed the seed"
+    );
+    // Written and FLUSHED explicitly rather than with `println!` (which the
+    // workspace lint bans, and which swallows the write error): this line is the
+    // whole return value of the process. A silently dropped or short write is
+    // indistinguishable to the parent from a seed that never ran, so it must be
+    // an error the exit status carries.
+    let line = brokered_cargo_target_seed::encode_seed_result(&result);
+    let mut stdout = std::io::stdout().lock();
+    stdout
+        .write_all(line.as_bytes())
+        .and_then(|()| stdout.write_all(b"\n"))
+        .and_then(|()| stdout.flush())
+        .context("write the cargo-target seed summary to stdout")?;
+    Ok(())
 }
 
 /// Configure git + Go in the worker Pod so the agent's build/test commands can
@@ -710,7 +778,31 @@ fn completed_seed_join(
     Ok(result)
 }
 
-async fn prepare_cargo_target_dir(spec: &TaskRunSpec, workspace_path: &Path) -> PathBuf {
+/// Everything the cargo-target seed needs, resolved **before** the launcher
+/// handshake and independently of it.
+///
+/// # Why the resolution and the seed are two steps now
+///
+/// The seed itself moved after the launcher handshake so it can run as the
+/// launcher-spawned child (uid 1001) — see `brokered_cargo_target_seed`. The
+/// *resolution* must not move with it: `set_cargo_target_dir_for_children`
+/// publishes `CARGO_TARGET_DIR` into this process's environment, which is what
+/// every later child (brokered or not) inherits, and [`CargoTargetRunDirGuard`]
+/// is armed from the destination path. Keeping resolution where it always was
+/// preserves both the env-publication ordering and the guard's drop order
+/// relative to every other resource `run_task_run` holds.
+struct CargoTargetPlan {
+    /// Shared per-project warm base to seed FROM.
+    source_base: PathBuf,
+    /// Private per-task-run target dir to seed INTO.
+    destination_run_dir: PathBuf,
+    /// Absolute workspace dir, for the coordinator health sweep's correlation.
+    workspace_dir_display: String,
+    /// Absolute destination, for the same correlation.
+    cargo_target_dir_display: String,
+}
+
+fn plan_cargo_target_dir(spec: &TaskRunSpec, workspace_path: &Path) -> CargoTargetPlan {
     // Canonicalize once so every structured event for this task-run shares the
     // same absolute workspace_dir. The cargo warm path uses the SAME canonical
     // form (see `warm_cargo_target_base`), so emitting both absolute paths
@@ -780,13 +872,203 @@ async fn prepare_cargo_target_dir(spec: &TaskRunSpec, workspace_path: &Path) -> 
         "cargo target seed: preparing private run target dir"
     );
 
-    let seed_source_base = source_base.clone();
-    let seed_destination_run_dir = destination_run_dir.clone();
-    let seed_start = djinn_core::clock::Clock::now_instant(&djinn_core::clock::SystemClock::new());
-    let seed_join_result = tokio::task::spawn_blocking(move || {
+    CargoTargetPlan {
+        source_base,
+        destination_run_dir,
+        workspace_dir_display,
+        cargo_target_dir_display,
+    }
+}
+
+/// Run the seed for `plan`, preferring the brokered (uid 1001) path.
+///
+/// Returns the pre-existing join-result shape verbatim so every downstream
+/// telemetry classification (`classify_seed_outcome`, `record_seed_terminal_seconds`)
+/// stays byte-identical: the brokered path is a different *executor*, not a
+/// different *outcome vocabulary*.
+///
+/// A brokered failure is never fatal. `shell_launch: None` (launcher disabled
+/// or absent) and every broker-level error degrade to the in-worker seed that
+/// shipped before this change — the same seed, at uid 1000, with the same
+/// per-entry copy/skip safety net. What the fallback costs is exactly what this
+/// change buys: the seeded `Copy` inodes are owned by 1000 again, so a build
+/// script at 1001 that copies over one of them fails at its final `chmod`. That
+/// is a degraded build, not a dead dispatch, and it is what the fleet already
+/// lived with.
+async fn seed_cargo_target_dir_for_run(
+    spec: &TaskRunSpec,
+    plan: &CargoTargetPlan,
+    shell_launch: Option<&ShellLaunchContext>,
+    cancel: &CancellationToken,
+) -> Result<std::io::Result<CargoTargetSeedResult>, tokio::task::JoinError> {
+    match brokered_seed_attempt(spec, plan, shell_launch, cancel).await {
+        Ok(result) => return Ok(Ok(result)),
+        // Cancellation is a SHUTDOWN, not a degradation. A brokered seed that
+        // ended because SIGTERM or the soft deadline fired must not be retried
+        // in-process: the fallback would run the whole seed again — minutes, on
+        // a 27 GiB base — inside a 60s `terminationGracePeriodSeconds`, turning
+        // a graceful wind-down into a SIGKILL that loses the checkpoint. The
+        // run dir is torn down by its guard either way, and a cancelled run
+        // never compiles.
+        Err(_) if cancel.is_cancelled() => {
+            warn!(
+                task_run_id = %spec.task_run_id,
+                "cargo target seed: cancelled during the brokered seed; not re-seeding \
+                 in-process — the run is shutting down"
+            );
+            return Ok(Ok(CargoTargetSeedResult {
+                elapsed: Duration::ZERO,
+                linked_file_count: 0,
+                copied_file_count: 0,
+                skipped_file_count: 0,
+                linked_bytes: 0,
+                copied_bytes: 0,
+                degraded_link_file_count: 0,
+                unseeded_file_count: 0,
+                base_seedable_file_count: 0,
+                link_fallback_budget_exhausted: false,
+                first_entry_error: None,
+                fallback_reason: Some(CargoTargetSeedFallback::CloneFailed(
+                    "cancelled during the brokered seed".to_string(),
+                )),
+            }));
+        }
+        Err(degradation) => {
+            warn!(
+                task_run_id = %spec.task_run_id,
+                project_id = %spec.project_id,
+                seed_identity = "worker",
+                brokered_seed_degradation = degradation.as_str(),
+                destination_run_dir = %plan.destination_run_dir.display(),
+                "cargo target seed: brokered seed unavailable; seeding in-process at the \
+                 worker uid. Copy-classified entries will be owned by the worker, so a \
+                 build script that copies over one of them can fail at its final chmod"
+            );
+            // The brokered child may have created part of the destination
+            // before failing, and the in-worker seed's `hard_link`/`copy` would
+            // then hit EEXIST on every such entry and count it as an error. The
+            // run dir is private to this task-run and was created moments ago,
+            // so discarding it is free and makes the fallback a clean seed
+            // rather than a merge. Never touch a destination that is not the
+            // run-target dir we own — an operator-configured CARGO_TARGET_DIR
+            // may point anywhere.
+            if plan
+                .destination_run_dir
+                .starts_with(cargo_target_seed::RUN_TARGET_ROOT)
+                && let Err(error) = teardown_run_dir(&plan.destination_run_dir)
+            {
+                warn!(
+                    task_run_id = %spec.task_run_id,
+                    destination_run_dir = %plan.destination_run_dir.display(),
+                    error = %error,
+                    "cargo target seed: could not clear a partial brokered seed before \
+                     falling back; the in-process seed will report EEXIST per stale entry"
+                );
+            }
+        }
+    }
+
+    let seed_source_base = plan.source_base.clone();
+    let seed_destination_run_dir = plan.destination_run_dir.clone();
+    tokio::task::spawn_blocking(move || {
         seed_cargo_target_dir(seed_source_base, seed_destination_run_dir)
     })
-    .await;
+    .await
+}
+
+/// One brokered seed attempt. `Err` names why it did not produce a result; the
+/// caller degrades on every one of them.
+async fn brokered_seed_attempt(
+    spec: &TaskRunSpec,
+    plan: &CargoTargetPlan,
+    shell_launch: Option<&ShellLaunchContext>,
+    cancel: &CancellationToken,
+) -> Result<CargoTargetSeedResult, brokered_cargo_target_seed::BrokeredSeedDegradation> {
+    use brokered_cargo_target_seed::BrokeredSeedDegradation as Degradation;
+
+    let Some(launch) = shell_launch else {
+        return Err(Degradation::NoBroker);
+    };
+    if !brokered_cargo_target_seed::brokered_seed_enabled() {
+        return Err(Degradation::DisabledByEnv);
+    }
+    let Ok(exe) = std::env::current_exe() else {
+        return Err(Degradation::ExecutableUnresolved);
+    };
+
+    // The cwd must be `/workspace` or beneath: `safe_command_path(_, cwd: true)`
+    // refuses anything else and the broker's refusal is an opaque
+    // `InvalidCommand` on the wire.
+    let command = brokered_cargo_target_seed::build_seed_command(
+        &exe,
+        &plan.source_base,
+        &plan.destination_run_dir,
+        Path::new(volume_contract::WORKSPACE_MOUNT_ROOT),
+    );
+    let output = match launch
+        .brokered_output(
+            command,
+            brokered_cargo_target_seed::brokered_seed_timeout(),
+            cancel.clone(),
+        )
+        .await
+    {
+        Ok(output) => output,
+        Err(error) => {
+            warn!(
+                task_run_id = %spec.task_run_id,
+                error = %error,
+                "cargo target seed: broker could not run the seed child"
+            );
+            return Err(Degradation::LaunchFailed);
+        }
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    if !output.status.success() {
+        warn!(
+            task_run_id = %spec.task_run_id,
+            exit_code = output.status.code().unwrap_or(-1),
+            stderr = %String::from_utf8_lossy(&output.stderr),
+            "cargo target seed: brokered seed child exited non-zero"
+        );
+        return Err(Degradation::NonZeroExit);
+    }
+    let Some(result) = brokered_cargo_target_seed::decode_seed_result(&stdout) else {
+        warn!(
+            task_run_id = %spec.task_run_id,
+            "cargo target seed: brokered seed child exited 0 but emitted no parseable summary"
+        );
+        return Err(Degradation::UnparseableSummary);
+    };
+    info!(
+        task_run_id = %spec.task_run_id,
+        project_id = %spec.project_id,
+        seed_identity = "child",
+        linked_file_count = result.linked_file_count,
+        copied_file_count = result.copied_file_count,
+        "cargo target seed: seeded at the cargo/build-script uid through the broker"
+    );
+    Ok(result)
+}
+
+/// Record telemetry and emit the structured events for a completed seed
+/// attempt, and return the destination the run compiles into.
+async fn prepare_cargo_target_dir(
+    spec: &TaskRunSpec,
+    plan: &CargoTargetPlan,
+    shell_launch: Option<&ShellLaunchContext>,
+    cancel: &CancellationToken,
+) -> PathBuf {
+    let CargoTargetPlan {
+        source_base,
+        destination_run_dir,
+        workspace_dir_display,
+        cargo_target_dir_display,
+    } = plan;
+
+    let seed_start = djinn_core::clock::Clock::now_instant(&djinn_core::clock::SystemClock::new());
+    let seed_join_result = seed_cargo_target_dir_for_run(spec, plan, shell_launch, cancel).await;
     let seed_elapsed = seed_start.elapsed();
     // Record exactly one workspace_seed_seconds sample per started seed
     // attempt, regardless of outcome (ok / error / cancelled).
@@ -922,7 +1204,7 @@ async fn prepare_cargo_target_dir(spec: &TaskRunSpec, workspace_path: &Path) -> 
         }
     }
 
-    destination_run_dir
+    destination_run_dir.clone()
 }
 
 /// Resolve the cargo workspace directory under `project_root`.
@@ -1297,16 +1579,22 @@ async fn warm_cargo_target_base(
     // `755` build script in this base would make `linkat` fail under
     // fs.protected_hardlinks. Do a complete post-cycle pass, not merely over
     // files this cycle reports touching: Cargo can resurrect an older artifact.
-    // This runs while the warm-base lock is still held and on the uid that owns
-    // the base. Task-run seeding retains its per-entry copy/skip degradation
-    // path as the safety net if a future filesystem anomaly escapes this pass.
+    // This runs while the warm-base lock is still held. `chmod` is granted by
+    // OWNERSHIP alone, so the pass is authoritative only over files this pod
+    // owns — which is every file it created, and (after the one-time operator
+    // `chown -R 1001:1000` in `docs/CARGO_CACHE_OWNERSHIP_MIGRATION_RUNBOOK.md`)
+    // the whole base. `files_unchangeable > 0` means the migration has not run
+    // yet; it is a transitional signal, not a failure. Task-run seeding retains
+    // its per-entry copy/skip degradation path as the safety net.
     match volume_contract::normalize_warm_base_regular_files(&base_dir) {
         Ok(result) => info!(
             project_id,
             warm_base = %base_dir.display(),
             regular_files = result.regular_files,
             files_normalized = result.files_normalized,
-            "cargo warm: normalized group-write mode on every regular warm-base file"
+            files_unchangeable = result.files_unchangeable,
+            first_chmod_error = result.first_chmod_error.as_deref().unwrap_or(""),
+            "cargo warm: normalized group-write mode on the regular warm-base files this pod owns"
         ),
         Err(error) => warn!(
             project_id,
@@ -2192,11 +2480,17 @@ async fn run_task_run(args: WorkerDefaultArgs) -> Result<()> {
         bincode::deserialize(&spec_bytes).context("bincode deserialize TaskRunSpec")?;
     info!(task_id = %spec.task_id, flow = ?spec.flow, "received spec");
 
-    let cargo_target_run_dir = prepare_cargo_target_dir(&spec, &args.workspace_path).await;
+    // Resolve the target dirs and publish `CARGO_TARGET_DIR` HERE — the seed
+    // itself runs later, after the launcher handshake, so it can be performed by
+    // the launcher-spawned child (uid 1001) rather than by this process (uid
+    // 1000). See `seed_cargo_target_dir_for_run`. Resolution stays here so the
+    // env var is published before anything could spawn a child, and so this
+    // guard keeps its original position in `run_task_run`'s drop order.
+    let cargo_target_plan = plan_cargo_target_dir(&spec, &args.workspace_path);
     let _cargo_target_guard = CargoTargetRunDirGuard::new(
         spec.task_run_id.clone(),
         spec.project_id.clone(),
-        cargo_target_run_dir,
+        cargo_target_plan.destination_run_dir.clone(),
     );
 
     // Configure git + Go so the agent's build/test commands can fetch the
@@ -2406,6 +2700,21 @@ async fn run_task_run(args: WorkerDefaultArgs) -> Result<()> {
             .context("recover durable invocation journal")?,
         ),
     };
+
+    // 3c. Seed the private Cargo target dir — HERE, not before the handshake.
+    //
+    // The seed must run as the launcher-spawned child (uid 1001), because
+    // `chmod` is granted by ownership alone and `std::fs::copy` ends in
+    // `set_permissions`: a build script at 1001 cannot finish a copy over a
+    // `Copy`-classified entry the uid-1000 worker seeded, whatever the mode
+    // bits say. The broker is the only thing that can spawn at 1001, and it
+    // does not exist until `shell_launch` above is composed.
+    //
+    // It stays AHEAD of the pre-task boundary and supervisor dispatch below —
+    // both can compile — and `plan_cargo_target_dir` already published
+    // `CARGO_TARGET_DIR` for every child, brokered or not, before this point.
+    // A brokered failure degrades to the in-worker seed; it never fails the run.
+    prepare_cargo_target_dir(&spec, &cargo_target_plan, shell_launch.as_ref(), &cancel).await;
 
     // 4. Attach to the host-materialised workspace.
     let workspace = Workspace::attach_existing(args.workspace_path.as_path(), &spec.task_branch)

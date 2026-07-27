@@ -82,6 +82,18 @@ pub fn cargo_target_root() -> PathBuf {
     cache_root().join("cargo-target")
 }
 
+/// Host-side directory holding the shared sccache store.
+///
+/// The server/coordinator pod's view of the directory Job pods know as
+/// `/cache/sccache` (the `SCCACHE_DIR` compatibility fallback rendered into
+/// Job specs). The coordinator's sccache guard resolves here for the same
+/// reason [`cargo_target_root`] does: `/cache/sccache` does not exist in the
+/// server pod, so a hardcoded literal makes the guard a permanent
+/// `path does not exist` no-op.
+pub fn sccache_root() -> PathBuf {
+    cache_root().join("sccache")
+}
+
 /// Per-project clone directory: `{projects_root}/{owner}/{repo}`.
 ///
 /// Every consumer of a project's filesystem location — git fetch,
@@ -114,5 +126,44 @@ mod tests {
             projects_root_from(None, Some(home.clone())),
             home.join(".djinn/projects")
         );
+    }
+
+    /// Every host-side cache accessor must hang off [`cache_root`] and must
+    /// never equal the Job-pod literal. The server pod has no `/cache` at all
+    /// (verified: `ls /cache` → No such file or directory), so any accessor
+    /// that collapses onto the Job-pod path silently operates on nothing.
+    ///
+    /// `ends_with` alone is not sufficient to catch a regression here —
+    /// `/cache/cargo-target` also ends with `cache/cargo-target`. The
+    /// `assert_ne!` against the literal is the load-bearing assertion.
+    #[test]
+    fn host_cache_accessors_never_collapse_onto_the_job_pod_literals() {
+        for (host, job_pod_literal) in [
+            (cargo_target_root(), "/cache/cargo-target"),
+            (cargo_target_runs_root(), "/cache/cargo-target-runs"),
+            (sccache_root(), "/cache/sccache"),
+        ] {
+            assert_ne!(
+                host,
+                PathBuf::from(job_pod_literal),
+                "host accessor must not resolve to the Job-pod path {job_pod_literal}"
+            );
+            assert!(
+                host.starts_with(cache_root()),
+                "host accessor {} must live under the host cache root {}",
+                host.display(),
+                cache_root().display()
+            );
+        }
+    }
+
+    #[test]
+    fn host_cache_accessors_are_named_children_of_the_cache_root() {
+        assert_eq!(cargo_target_root(), cache_root().join("cargo-target"));
+        assert_eq!(
+            cargo_target_runs_root(),
+            cache_root().join("cargo-target-runs")
+        );
+        assert_eq!(sccache_root(), cache_root().join("sccache"));
     }
 }

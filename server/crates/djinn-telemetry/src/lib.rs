@@ -2898,13 +2898,18 @@ pub mod arbiter {
     pub const PARK_REASON_ARBITER_DECIDED: &str = "arbiter_decided";
     pub const PARK_REASON_CONSUMED_REENTRY: &str = "consumed_reentry";
     pub const PARK_REASON_ARBITRATION_ERROR: &str = "arbitration_error";
+    /// Cumulative cross-cycle arbitration ceiling: the task spent its whole
+    /// hold-cycle budget without converging and was terminally failed instead
+    /// of opening another cycle (incident gy53).
+    pub const PARK_REASON_HOLD_CYCLE_CEILING: &str = "hold_cycle_ceiling";
 
-    pub const ALL_PARK_REASONS: [&str; 5] = [
+    pub const ALL_PARK_REASONS: [&str; 6] = [
         PARK_REASON_DEADLINE_EXPIRED,
         PARK_REASON_DECISION_FAILURE_CAP,
         PARK_REASON_ARBITER_DECIDED,
         PARK_REASON_CONSUMED_REENTRY,
         PARK_REASON_ARBITRATION_ERROR,
+        PARK_REASON_HOLD_CYCLE_CEILING,
     ];
 
     // ── Monitored reopen outcome ───────────────────────────────────────

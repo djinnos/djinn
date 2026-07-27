@@ -22,7 +22,7 @@ use djinn_k8s::{WarmAdmission, WarmAdmissionTransition};
 use djinn_runtime::RoleResourceClass;
 
 use crate::build_admission::{
-    BuildAdmissionController, BuildAdmissionDecision, BuildAdmissionMode, TaskRunRole,
+    BuildAdmissionController, BuildAdmissionDecision, BuildAdmissionMode, DenialCause, TaskRunRole,
 };
 use crate::build_admission_capacity_support::{CapacityHarness, controller_with_capacity};
 
@@ -104,8 +104,9 @@ async fn light_roles_are_permitted_while_a_build_holds_the_only_slot() {
         matches!(
             admit(&h.controller, Some("worker"), "second-build").await,
             BuildAdmissionDecision::Denied {
-                occupancy: 1,
-                cap: 1
+                occupancy: Some(1),
+                cap: 1,
+                cause: DenialCause::AtCapacity
             }
         ),
         "a second build-capable task-run must be denied at cap 1"
@@ -358,8 +359,9 @@ async fn graph_warm_jobs_still_consume_a_slot() {
         matches!(
             admit(&h.controller, Some("worker"), "build-after-warm").await,
             BuildAdmissionDecision::Denied {
-                occupancy: 1,
-                cap: 1
+                occupancy: Some(1),
+                cap: 1,
+                cause: DenialCause::AtCapacity
             }
         ),
         "a warm Job's slot must deny a build-capable task-run at the same cap"

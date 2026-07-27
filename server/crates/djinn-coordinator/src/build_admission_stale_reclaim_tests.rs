@@ -31,7 +31,7 @@ use tokio::sync::RwLock;
 
 use crate::build_admission::{
     BuildAdmissionController, BuildAdmissionDecision, BuildAdmissionMode, BuildAdmissionReadiness,
-    BuildAdmissionRequest, BuildWorkloadKind, CapacitySource,
+    BuildAdmissionRequest, BuildWorkloadKind, CapacitySource, DenialCause,
 };
 use crate::build_admission_capacity_support::{CapacityHarness, attach_capacity};
 use crate::build_admission_inventory::BuildAdmissionReconciler;
@@ -421,8 +421,9 @@ async fn production_shaped_stale_population_is_reclaimed_and_enforce_admits_at_c
         matches!(
             fourth,
             BuildAdmissionDecision::Denied {
-                occupancy: 3,
-                cap: 3
+                occupancy: Some(3),
+                cap: 3,
+                cause: DenialCause::AtCapacity
             }
         ),
         "the cap must still bind after reconciliation; reclamation is not a bypass: {fourth:?}"

@@ -557,7 +557,21 @@ fn pressure_metric_rung(unit: &PressurePlanUnit) -> djinn_telemetry::cache_clean
     }
 }
 
-pub const CARGO_WARM_BASE_ROOT: &str = "/cache/cargo-target";
+/// Host-side root of the warm-base pool, as seen by the coordinator process.
+///
+/// This is deliberately a function over [`djinn_core::paths::cargo_target_root`]
+/// and NOT a `&'static str` constant. The cache PVC is mounted at `/cache` in
+/// Job pods but at `$DJINN_HOME/cache` in the server pod, and `/cache` does not
+/// exist there at all. The former `CARGO_WARM_BASE_ROOT = "/cache/cargo-target"`
+/// constant made every warm-base GC pass inventory a nonexistent directory:
+/// `inventory_under` maps `NotFound` to an empty inventory, so the sweep logged
+/// `warm-base idle GC completed deleted=0 retained=0` — a success line
+/// indistinguishable from "nothing to collect" — on every tick since the
+/// feature shipped.
+pub fn cargo_warm_base_root() -> PathBuf {
+    djinn_core::paths::cargo_target_root()
+}
+
 pub const WARM_BASE_GC_LOCK_FILE: &str = ".djinn-gc.lock";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1231,7 +1245,7 @@ pub async fn plan(
     locks: &dyn BaseLockGuard,
 ) -> WarmBasePlan {
     let mut plan = WarmBasePlan::default();
-    let free = match free_space.free_space_bytes(Path::new(CARGO_WARM_BASE_ROOT)) {
+    let free = match free_space.free_space_bytes(&cargo_warm_base_root()) {
         Ok(value) => value,
         Err(_) => {
             for entry in inventory.entries {
@@ -1338,7 +1352,7 @@ pub async fn plan_pressure_eviction(
     clock: &dyn Clock,
 ) -> PressureEvictionPlan {
     let mut plan = PressureEvictionPlan::default();
-    let capacity_snapshot = match capacity.capacity(Path::new(CARGO_WARM_BASE_ROOT)) {
+    let capacity_snapshot = match capacity.capacity(&cargo_warm_base_root()) {
         Ok(value) => value,
         Err(_) => {
             for entry in inventory.entries {

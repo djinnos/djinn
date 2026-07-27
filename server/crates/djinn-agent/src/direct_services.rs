@@ -53,6 +53,24 @@ use djinn_provider::message::{ContentBlock, Conversation};
 use djinn_provider::provider::{LlmProvider, LlmResponse, StreamEvent, TokenUsage, ToolChoice};
 use futures::StreamExt;
 
+/// Activity `actor_id` for a decision reached by a Lead arbiter session.
+///
+/// Matches the attribution the Lead's own board transitions already use (see
+/// `extension::handlers::task_admin`), so an arbiter decision and the board
+/// transition it causes agree on who acted.
+const ARBITER_ACTOR_ID: &str = "lead-agent";
+
+/// Activity `actor_role` for a decision reached by a Lead arbiter session.
+///
+/// `arbiter_decision` / `arbiter_parked` entries written from this module are
+/// the outcome of a `lead`-role agent session calling `submit_decision` — they
+/// are NOT coordinator actions. They were previously stamped
+/// `actor_id="system", actor_role="coordinator"`, which made a single arbiter
+/// ladder read as two subsystems fighting each other: in incident gy53 five
+/// consecutive Lead dispatches all surfaced on the task timeline as coordinator
+/// activity, hiding the fact that one role was reopening its own work.
+const ARBITER_ACTOR_ROLE: &str = "lead";
+
 /// Apply one provider event to the terminal response aggregate used by direct
 /// services. Returns `true` when the event terminates the stream.
 ///
@@ -528,8 +546,8 @@ impl DirectServices {
         if let Err(e) = task_repo
             .log_activity(
                 Some(task_id),
-                "system",
-                "coordinator",
+                ARBITER_ACTOR_ID,
+                ARBITER_ACTOR_ROLE,
                 "arbiter_decision",
                 &decision_payload.to_string(),
             )
@@ -554,8 +572,8 @@ impl DirectServices {
         if let Err(e) = task_repo
             .log_activity(
                 Some(task_id),
-                "system",
-                "coordinator",
+                ARBITER_ACTOR_ID,
+                ARBITER_ACTOR_ROLE,
                 "arbiter_parked",
                 &parked_payload.to_string(),
             )
@@ -921,8 +939,8 @@ impl DirectServices {
         if let Err(e) = task_repo
             .log_activity(
                 Some(task_id),
-                "system",
-                "coordinator",
+                ARBITER_ACTOR_ID,
+                ARBITER_ACTOR_ROLE,
                 "arbiter_decision",
                 &decision_payload.to_string(),
             )
@@ -1841,8 +1859,8 @@ impl SupervisorServices for DirectServices {
         if let Err(e) = task_repo
             .log_activity(
                 Some(&task_id),
-                "system",
-                "coordinator",
+                ARBITER_ACTOR_ID,
+                ARBITER_ACTOR_ROLE,
                 "arbiter_decision",
                 &activity_payload.to_string(),
             )
@@ -2002,8 +2020,8 @@ impl SupervisorServices for DirectServices {
         if let Err(e) = task_repo
             .log_activity(
                 Some(&task_id),
-                "system",
-                "coordinator",
+                ARBITER_ACTOR_ID,
+                ARBITER_ACTOR_ROLE,
                 "arbiter_decision",
                 &activity_payload.to_string(),
             )

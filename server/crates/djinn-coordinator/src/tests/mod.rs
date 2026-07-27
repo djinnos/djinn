@@ -1439,4 +1439,7 @@ mod tripwire_planner_escalation;
 mod escalation_ceiling;
 
 #[cfg(test)]
+mod hold_cycle_ceiling;
+
+#[cfg(test)]
 mod incarnation_lease_liveness;
