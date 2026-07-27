@@ -12,6 +12,7 @@ pub mod dispatch_state;
 pub mod doctor_finding;
 pub mod epic;
 pub mod events;
+pub mod evidence;
 pub mod extension_load_diagnostic;
 #[cfg(test)]
 pub mod extension_load_diagnostic_tests;

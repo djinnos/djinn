@@ -87,6 +87,11 @@ mod broker;
 /// ignored the `Command` it was handed.
 #[cfg(test)]
 pub(crate) use broker::command_spec;
+/// Process-group containment for the launcher doubles' fixture children — the
+/// stand-in for the leaf cgroup a bare `std::process::Child` does not have. See
+/// [`broker::fixture_child`] for why a double that skips it leaks a process.
+#[cfg(test)]
+pub(crate) use broker::fixture_child;
 /// The SINGLE source of an invocation's broker fence. Exported so a proof reads
 /// the same function the `BEGIN` control does instead of restating the rule —
 /// a second statement of it is exactly how blocker 14 shipped.
@@ -1601,11 +1606,23 @@ mod tests {
         }
     }
 
+    /// A long-lived fixture child, contained the way the production handle
+    /// contains a leaf: its own process group, torn down as a group. Spawning it
+    /// through `sh -c` left the real command as a grandchild on any runner whose
+    /// `/bin/sh` forks rather than execs, and the direct-child kill orphaned it
+    /// holding this test process's stdout — a nextest `LEAK`.
+    fn fixture_sleep() -> std::process::Child {
+        let mut command = Command::new("sleep");
+        command.arg("1");
+        fixture_child::isolate_group(&mut command);
+        command.spawn().unwrap()
+    }
+
     /// A paused service future must lose to irreversible cancellation, so its
     /// grant cannot reach the lift path (terminal-before-grant ordering).
     #[tokio::test]
     async fn paused_grant_loses_to_terminal_intent() {
-        let mut child = Command::new("sh").arg("-c").arg("sleep 1").spawn().unwrap();
+        let mut child = fixture_sleep();
         let cancel = CancellationToken::new();
         cancel.cancel();
         let clock = TestClock::new(std::time::SystemTime::UNIX_EPOCH, std::time::Instant::now());
@@ -1622,14 +1639,14 @@ mod tests {
             result,
             LeaseWait::Terminal((_, ProcessTermination::Cancelled))
         ));
-        let _ = child.kill();
-        let _ = child.wait();
+        fixture_child::kill_group(&mut child).unwrap();
+        fixture_child::wait_group_empty(&mut child).unwrap();
     }
 
     /// The injected fake clock controls timeout while a service response is paused.
     #[tokio::test]
     async fn fake_clock_times_out_paused_service() {
-        let mut child = Command::new("sh").arg("-c").arg("sleep 1").spawn().unwrap();
+        let mut child = fixture_sleep();
         let cancel = CancellationToken::new();
         let base = std::time::Instant::now();
         let clock = TestClock::new(std::time::SystemTime::UNIX_EPOCH, base);
@@ -1642,8 +1659,8 @@ mod tests {
             result,
             LeaseWait::Terminal((_, ProcessTermination::TimedOut))
         ));
-        let _ = child.kill();
-        let _ = child.wait();
+        fixture_child::kill_group(&mut child).unwrap();
+        fixture_child::wait_group_empty(&mut child).unwrap();
     }
 
     #[test]

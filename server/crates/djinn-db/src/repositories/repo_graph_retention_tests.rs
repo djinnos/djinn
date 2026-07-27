@@ -600,11 +600,19 @@ async fn normal_lock_order_completes_without_deadlock() {
     assert_eq!(generation_count(&db, "p-order").await, 2);
 
     // Verify no session advisory locks leaked for this project's generations.
-    // Other parallel tests intentionally hold locks in the same global class,
-    // so a class-only count is not isolated and flakes under nextest.
+    //
+    // `pg_locks` is cluster-wide: it lists advisory locks held in *every*
+    // database of the Postgres instance, and every test in this suite runs
+    // against its own `djinn_test_<uuid>` database on one shared server. A
+    // count filtered only by `classid` therefore also counts the pins that
+    // sibling tests legitimately hold at that instant, and reads non-zero for
+    // reasons that have nothing to do with this sweep. Scope the count to this
+    // database *and* to this project's own generation keys.
     let leaked_locks: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM pg_locks \
-         WHERE locktype = 'advisory' AND classid = $1 \
+         WHERE locktype = 'advisory' \
+           AND database = (SELECT oid FROM pg_database WHERE datname = current_database()) \
+           AND classid = $1 \
            AND objid::bigint = ANY(SELECT ((object_id + 4294967296) % 4294967296) \
                                    FROM unnest($2::bigint[]) AS object_id)",
     )
@@ -820,8 +828,9 @@ async fn dry_run_releases_all_session_pins() {
     assert_eq!(generation_count(&db, "p-dryrun-pins").await, 6);
 
     // Verify that no session advisory locks remain for this project's exact
-    // generation keys. Parallel tests may legitimately hold keys in the same
-    // lock class while this assertion runs.
+    // generation keys. `pg_locks` spans every database on the shared test
+    // server, so parallel tests in their own `djinn_test_<uuid>` databases may
+    // legitimately hold keys in the same lock class while this assertion runs.
     let generation_ids: Vec<String> = sqlx::query_scalar(
         "SELECT generation_id::text FROM repo_graph_generation WHERE project_id = 'p-dryrun-pins'",
     )
@@ -841,7 +850,9 @@ async fn dry_run_releases_all_session_pins() {
     let pin_class = crate::repositories::repo_graph_generation::GENERATION_STREAM_PIN_LOCK_CLASS;
     let leaked: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM pg_locks \
-         WHERE locktype = 'advisory' AND classid = $1 \
+         WHERE locktype = 'advisory' \
+           AND database = (SELECT oid FROM pg_database WHERE datname = current_database()) \
+           AND classid = $1 \
            AND objid::bigint = ANY(SELECT ((object_id + 4294967296) % 4294967296) \
                                    FROM unnest($2::bigint[]) AS object_id)",
     )
