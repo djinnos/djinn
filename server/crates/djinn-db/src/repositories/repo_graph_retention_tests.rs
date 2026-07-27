@@ -565,6 +565,23 @@ async fn normal_lock_order_completes_without_deadlock() {
     for i in 0..6 {
         legacy_publish(&db, "p-order", &format!("c{i}"), b"blob").await;
     }
+    // Capture every key before the delete sweep removes non-survivor rows.
+    let generation_ids: Vec<String> = sqlx::query_scalar(
+        "SELECT id::text FROM repo_graph_generation WHERE project_id = 'p-order'",
+    )
+    .fetch_all(db.pool())
+    .await
+    .expect("load project generation ids");
+    let object_ids: Vec<i64> = generation_ids
+        .iter()
+        .map(|id| {
+            i64::from(
+                crate::repositories::repo_graph_generation::generation_stream_pin_key(id)
+                    .expect("generation pin key")
+                    .object_id,
+            )
+        })
+        .collect();
 
     // A normal delete sweep must complete without requiring a deadlock victim.
     // The lock order (project advisory -> current -> candidate row -> stream pin)
@@ -582,15 +599,17 @@ async fn normal_lock_order_completes_without_deadlock() {
     assert_eq!(outcome.retries, 0, "no retries needed in normal path");
     assert_eq!(generation_count(&db, "p-order").await, 2);
 
-    // Verify no session advisory locks leaked from the sweep's connection back
-    // into the pool. After a successful sweep, all exclusive stream pins must
-    // have been released before commit.
+    // Verify no session advisory locks leaked for this project's generations.
+    // Other parallel tests intentionally hold locks in the same global class,
+    // so a class-only count is not isolated and flakes under nextest.
     let leaked_locks: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM pg_locks \
-         WHERE locktype = 'advisory' \
-           AND classid = $1",
+         WHERE locktype = 'advisory' AND classid = $1 \
+           AND objid::bigint = ANY(SELECT ((object_id + 4294967296) % 4294967296) \
+                                   FROM unnest($2::bigint[]) AS object_id)",
     )
     .bind(crate::repositories::repo_graph_generation::GENERATION_STREAM_PIN_LOCK_CLASS)
+    .bind(&object_ids)
     .fetch_one(db.pool())
     .await
     .expect("check leaked locks");
@@ -800,15 +819,34 @@ async fn dry_run_releases_all_session_pins() {
     assert_eq!(outcome.deleted, 0);
     assert_eq!(generation_count(&db, "p-dryrun-pins").await, 6);
 
-    // Verify that no session advisory locks remain on any pooled connection
-    // for the generation stream pin class. After the sweep, all exclusive
-    // pins should have been released.
+    // Verify that no session advisory locks remain for this project's exact
+    // generation keys. Parallel tests may legitimately hold keys in the same
+    // lock class while this assertion runs.
+    let generation_ids: Vec<String> = sqlx::query_scalar(
+        "SELECT id::text FROM repo_graph_generation WHERE project_id = 'p-dryrun-pins'",
+    )
+    .fetch_all(db.pool())
+    .await
+    .expect("load project generation ids");
+    let object_ids: Vec<i64> = generation_ids
+        .iter()
+        .map(|id| {
+            i64::from(
+                crate::repositories::repo_graph_generation::generation_stream_pin_key(id)
+                    .expect("generation pin key")
+                    .object_id,
+            )
+        })
+        .collect();
     let pin_class = crate::repositories::repo_graph_generation::GENERATION_STREAM_PIN_LOCK_CLASS;
     let leaked: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM pg_locks \
-         WHERE locktype = 'advisory' AND classid = $1",
+         WHERE locktype = 'advisory' AND classid = $1 \
+           AND objid::bigint = ANY(SELECT ((object_id + 4294967296) % 4294967296) \
+                                   FROM unnest($2::bigint[]) AS object_id)",
     )
     .bind(pin_class)
+    .bind(&object_ids)
     .fetch_one(db.pool())
     .await
     .expect("check leaked exclusive pins");
