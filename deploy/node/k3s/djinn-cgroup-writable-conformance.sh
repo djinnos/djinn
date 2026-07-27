@@ -57,8 +57,8 @@ run_fixture() {
       fixture_log "probe=direct-bound node=$NODE_NAME"
       fixture_log 'probe=cgroup-root writable=true isolated=true worker_denials=true'
       fixture_log "label node=$NODE_NAME"
-      SUCCESS=1
       printf 'PASS node=%s handler=runc-cgroupwritable cgroup_root=/ writable=true isolated=true worker_denials=true\n' "$NODE_NAME"
+      SUCCESS=1
       ;;
     timeout|wrong-node|sandbox|isolation|readonly|mutation-success|handler-removed)
       fixture_log "failure=$FIXTURE_CASE"
@@ -102,7 +102,7 @@ validate_live_runtime_table() {
 }
 
 ensure_unlabeled() {
-  "$KUBECTL" label node "$NODE_NAME" "$LABEL-" --overwrite
+  "$KUBECTL" label node "$NODE_NAME" "$LABEL-" --overwrite >/dev/null
   local current
   current=$("$KUBECTL" get node "$NODE_NAME" -o "jsonpath={.metadata.labels.djinn\\.io/cgroup-writable}")
   [[ -z "$current" ]] || die "node remains labeled after removal"
@@ -177,8 +177,7 @@ root=/sys/fs/cgroup
 [ -z "$(find "$root" -mindepth 1 -maxdepth 1 -type d -print -quit)" ]
 child="$root/.djinn-conformance-child"
 rmdir "$child" 2>/dev/null || true
-mkdir "$child"
-rmdir "$child"'
+mkdir "$child"'
 
 # Runs with the exact worker_security_context/pod_security_context contract:
 # uid/gid 1000, fsGroup 1000, no_new_privs, ALL capabilities dropped,
@@ -193,16 +192,19 @@ ls "$root" >/dev/null
 cat "$root/cgroup.controllers" >/dev/null
 must_deny() { if sh -c "$1"; then echo "unexpected worker mutation: $1" >&2; exit 1; fi; }
 leaf="$root/.djinn-worker-leaf"
-launcher_leaf="$root/.djinn-launcher-leaf"
+launcher_leaf="$root/.djinn-conformance-child"
+[ -d "$launcher_leaf" ]
+ls "$launcher_leaf" >/dev/null
+cat "$launcher_leaf/cgroup.controllers" >/dev/null
 must_deny "mkdir \"$leaf\""
-must_deny "rmdir \"$leaf\""
 must_deny "printf x > \"$root/cpu.max\""
 must_deny "printf \"$$\" > \"$root/cgroup.procs\""
 must_deny "printf 1 > \"$root/cgroup.kill\""
 must_deny "mkdir \"$launcher_leaf\""
-must_deny "rmdir \"$launcher_leaf\""
 must_deny "printf x > \"$launcher_leaf/cpu.max\""
 must_deny "printf \"$$\" > \"$launcher_leaf/cgroup.procs\""
+must_deny "printf 1 > \"$launcher_leaf/cgroup.kill\""
+must_deny "rmdir \"$launcher_leaf\""
 must_deny "printf \"1\" > \"$root/cgroup.procs\""'
 
 while [[ $# -gt 0 ]]; do
@@ -235,12 +237,12 @@ validate_live_runtime_table
 
 PROBE_NAME="djinn-cgroup-$(date +%s)-$RANDOM"
 PROBE_NAME=${PROBE_NAME:0:63}
-render_manifest | "$KUBECTL" apply -f -
+render_manifest | "$KUBECTL" apply -f - >/dev/null
 wait_for_probe
 verify_node_identity
-"$KUBECTL" exec "$PROBE_NAME" -c launcher-context -- /bin/sh -ceu "$LAUNCHER_PROBE" || die 'launcher cgroup root is not writable and isolated'
-"$KUBECTL" exec "$PROBE_NAME" -c worker -- /bin/sh -ceu "$WORKER_PROBE" || die 'worker security context permitted a cgroup mutation'
+"$KUBECTL" exec "$PROBE_NAME" -c launcher-context -- /bin/sh -ceu "$LAUNCHER_PROBE" >/dev/null || die 'launcher cgroup root is not writable and isolated'
+"$KUBECTL" exec "$PROBE_NAME" -c worker -- /bin/sh -ceu "$WORKER_PROBE" >/dev/null || die 'worker security context permitted a cgroup mutation'
 
-"$KUBECTL" label node "$NODE_NAME" "$LABEL=true" --overwrite
-SUCCESS=1
+"$KUBECTL" label node "$NODE_NAME" "$LABEL=true" --overwrite >/dev/null
 printf 'PASS node=%s handler=runc-cgroupwritable cgroup_root=/ writable=true isolated=true worker_denials=true\n' "$NODE_NAME"
+SUCCESS=1
