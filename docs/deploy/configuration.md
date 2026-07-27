@@ -162,11 +162,14 @@ recreating/migrating the claim.
 
 ### Ownership contract
 
-All three volumes are written by the server (uid `10001`) *and* by task-run /
-warm Job Pods (uid/gid `1000`, plus the launcher-spawned child at uid `1001`
-with primary group `1000`). Sharing them requires group ownership by the
-artifact GID, group-write, and setgid on directories so new files inherit the
-group:
+All three volumes are written by the server (uid `10001`), by the task-run
+worker process (uid/gid `1000`), and by the launcher-spawned child — cargo, its
+build scripts and the cargo-target seed — at uid `1001` with primary group
+`1000`. The warm Job Pod also runs as uid `1001`, because it *creates content*
+in the shared cargo base and `chmod` is granted by ownership alone, not by mode
+(see `docs/VOLUME_OWNERSHIP_CONTRACT_RUNBOOK.md`). Sharing these volumes
+requires group ownership by the artifact GID, group-write, and setgid on
+directories so new files inherit the group:
 
 ```yaml
 storage:

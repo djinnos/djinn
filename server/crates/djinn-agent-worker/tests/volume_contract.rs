@@ -12,7 +12,7 @@ use std::path::Path;
 
 use djinn_agent_worker::volume_contract::{
     ContractMode, VolumeContract, VolumeContractError, VolumeRoot, current_gid, enforce_with,
-    normalize_warm_base_regular_files, validate,
+    normalize_warm_base_regular_files, normalize_warm_base_regular_files_with, validate,
 };
 use tempfile::TempDir;
 
@@ -188,6 +188,79 @@ fn warm_base_normalization_makes_all_regular_files_group_writable() {
             .files_normalized,
         0,
         "successive warm cycles remain converged without a manual chmod"
+    );
+}
+
+/// A file this pod does not own must not abort the pass.
+///
+/// `chmod(2)` is granted by OWNERSHIP alone — no mode bit, setgid bit, ACL or
+/// group membership delegates it, and the kernel returns `EPERM` even when the
+/// requested mode is byte-identical to the current one. The live warm base is
+/// exactly that shape (measured: 6,794 files owned by uid 10001 against 2,422
+/// owned by 1000), so a `?` on the `chmod` meant the FIRST foreign-owned file
+/// ended the walk and left every later file unnormalized while the caller
+/// logged one warning.
+///
+/// A CI runner cannot create a foreign-owned file without root, and a test
+/// running as the owner never observes the refusal at all — so the refusal is
+/// injected, the same way `cargo_target_seed::LinkBackend` injects the kernel's
+/// `safe_hardlink_source()` refusal.
+#[test]
+fn a_chmod_refusal_is_counted_and_the_walk_continues() {
+    let dir = TempDir::new().expect("tempdir");
+    let base = dir.path().join("warm-base");
+    fs::create_dir_all(base.join("debug/deps")).expect("mkdir");
+    // Ten 644 files: the walk must reach all of them even though the first one
+    // it tries is refused.
+    for index in 0..10 {
+        let path = base.join(format!("debug/deps/lib{index}.rlib"));
+        fs::write(&path, b"x").expect("write");
+        chmod(&path, 0o644);
+    }
+    let refused = base.join("debug/deps/lib0.rlib");
+
+    let refused_for_closure = refused.clone();
+    let result = normalize_warm_base_regular_files_with(&base, &move |path, mode| {
+        if path == refused_for_closure {
+            return Err(std::io::Error::from_raw_os_error(libc::EPERM));
+        }
+        fs::set_permissions(path, fs::Permissions::from_mode(mode))
+    })
+    .expect("a chmod refusal must never be a hard error");
+
+    assert_eq!(result.regular_files, 10);
+    assert_eq!(
+        result.files_normalized, 9,
+        "every file the pass owns must still be normalized"
+    );
+    assert_eq!(result.files_unchangeable, 1);
+    assert!(
+        result
+            .first_chmod_error
+            .as_deref()
+            .is_some_and(|error| error.contains("lib0.rlib")),
+        "the refusal must name the path: {:?}",
+        result.first_chmod_error
+    );
+
+    // The observable side effect, not the counter: the other nine really are
+    // group-writable on disk.
+    for index in 1..10 {
+        let mode = fs::symlink_metadata(base.join(format!("debug/deps/lib{index}.rlib")))
+            .expect("stat")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o664, "lib{index} was left unnormalized");
+    }
+    assert_eq!(
+        fs::symlink_metadata(&refused)
+            .expect("stat refused")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o644,
+        "the refused file is genuinely unchanged; the counter is not cosmetic"
     );
 }
 
