@@ -3447,7 +3447,13 @@ fn build_worker_agent_context(
         graph_warmer: None,
         repo_graph_ops: None,
         runtime_ops: None,
-        cargo_target_runs_root: None,
+        // In-Pod view of the shared cache PVC. The Job pod mounts it at
+        // `/cache`, NOT at the server pod's `$DJINN_HOME/cache`, and Job specs
+        // never set `DJINN_HOME` — so `djinn_core::paths::cargo_target_runs_root()`
+        // would resolve here to `~/.djinn/cache/cargo-target-runs`, an empty
+        // container-layer path. Name this pod's own mount explicitly; the same
+        // constant `CARGO_TARGET_DIR` is rendered from.
+        cargo_target_runs_root: PathBuf::from(cargo_target_seed::RUN_TARGET_ROOT),
         mirror: None,
         rpc_registry: None,
         // The K8s worker only ever serves one project per Pod, so default
@@ -4004,6 +4010,61 @@ mod tests {
             assert_ne!(
                 authorization.owner_project_id.as_deref(),
                 Some("other-owner")
+            );
+        }
+    }
+
+    /// The in-Pod `AgentContext` must name the *Job pod's* mount of the shared
+    /// cache PVC, never the server pod's.
+    ///
+    /// The same PVC is mounted at `/cache` here and at `$DJINN_HOME/cache` in the
+    /// server/coordinator pod, and Job specs never set `DJINN_HOME` — so any
+    /// host-convention resolution (`djinn_core::paths::cargo_target_runs_root()`,
+    /// directly or as an `unwrap_or_else` fallback) lands on
+    /// `~/.djinn/cache/cargo-target-runs`, an empty container-layer path. Anything
+    /// reaping through it would be a permanent silent no-op that leaks disk,
+    /// which is exactly the bug class #2660 fixed in the other direction.
+    ///
+    /// Asserted against the real production constructor, not a re-derivation.
+    #[tokio::test]
+    async fn worker_context_cargo_target_runs_root_is_the_job_pod_mount() {
+        let (stream, _peer) = tokio::io::duplex(64);
+        let (read, write) = tokio::io::split(stream);
+        let cancel = CancellationToken::new();
+        let (rpc, _tasks) = RpcServices::from_split(read, write, cancel.clone());
+        let context = build_worker_agent_context(
+            Database::open_in_memory().expect("in-memory worker database"),
+            rpc,
+            "proj".to_string(),
+            Vec::new(),
+            KnowledgeInjectionConfig::default(),
+            None,
+        );
+        let root = context.cargo_target_runs_root.clone();
+        cancel.cancel();
+
+        // It is the Job-pod constant, and the exact parent of the directory this
+        // pod actually builds into (the one `CARGO_TARGET_DIR` is rendered from).
+        assert_eq!(root, Path::new(cargo_target_seed::RUN_TARGET_ROOT));
+        assert_eq!(
+            cargo_target_seed::run_target_dir("run-abc").parent(),
+            Some(root.as_path()),
+            "context root must be the parent of this pod's private run dir"
+        );
+        // Same path the in-pod supervisor validates deletions against.
+        assert_eq!(root, Path::new(djinn_supervisor::CARGO_TARGET_RUNS_ROOT));
+
+        // Neutralization guard: every server-pod-convention resolution is
+        // rejected by shape, so reintroducing the fallback fails here.
+        let rendered = root.display().to_string();
+        assert!(
+            rendered.starts_with("/cache/"),
+            "Job-pod cache mount is /cache; got {rendered}"
+        );
+        for host_convention in [".djinn", "/var/lib/djinn", "/tmp/", "/home/"] {
+            assert!(
+                !rendered.contains(host_convention),
+                "worker resolved a server-pod cache convention ({host_convention}): {rendered}"
             );
         }
     }

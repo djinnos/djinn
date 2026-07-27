@@ -440,11 +440,25 @@ pub struct AgentContext {
     /// control-plane seam without depending on Kubernetes directly. `None` in
     /// off-server/test contexts falls back to the agent-internal no-op runtime.
     pub runtime_ops: Option<Arc<dyn bridge::RuntimeOps>>,
-    /// Root under which coordinator stale-resource GC enumerates per-task-run
-    /// Cargo target directories. `None` uses the production PVC path
-    /// (`/cache/cargo-target-runs`); tests may inject a temp dir so sweeps never
-    /// touch the shared build cache used by the test process itself.
-    pub cargo_target_runs_root: Option<PathBuf>,
+    /// **This process's own view** of the per-task-run Cargo target root.
+    ///
+    /// Required, deliberately: the shared cache PVC is mounted at *different*
+    /// paths by different pods — the server/coordinator pod mounts it at
+    /// `$DJINN_HOME/cache` (so this is
+    /// [`djinn_core::paths::cargo_target_runs_root`]) while Job pods mount it at
+    /// `/cache` (so this is `djinn_supervisor::CARGO_TARGET_RUNS_ROOT`). There is
+    /// no correct default across both, so there is no default at all: every
+    /// constructor MUST name its own mount and the compiler enforces it.
+    ///
+    /// An `Option` with an `unwrap_or_else` fallback used to sit here. That shape
+    /// is the hazard, not a convenience: whichever convention the fallback picks
+    /// is silently wrong in the other pod, and "silently wrong" means reaping a
+    /// nonexistent directory — a permanent no-op that leaks disk instead of
+    /// failing visibly. That is precisely the bug class fixed in #2660.
+    ///
+    /// Tests inject a temp dir so sweeps never touch the shared build cache used
+    /// by the test process itself.
+    pub cargo_target_runs_root: PathBuf,
     /// Shared bare-mirror manager. Used by the mirror-native merge path in
     /// `task_merge` to run squash-merges against an ephemeral hardlinked
     /// clone instead of a worktree under `.task-runtime/worktrees/.merge-*`.
