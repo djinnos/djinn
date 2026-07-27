@@ -10,8 +10,8 @@ use crate::reply_loop_completion_intent_tests::{
     CompletionIntentCallbacks, fallback_evidence, reuse_material_with_fingerprint_config,
 };
 use crate::test_helpers;
+use djinn_db::repositories::task_rejected_submission_integrity::TaskRejectedSubmissionIntegrityRepository;
 use djinn_db::repositories::task_run::TaskRunRepository;
-use djinn_db::repositories::verify_run::TaskRejectedSubmissionIntegrityRepository;
 use djinn_db::{CreateTaskAttemptParams, TaskAttemptRepository};
 use djinn_git::{ResolvedExternalInputV1, VerificationInputFingerprintConfig};
 use djinn_sandbox::final_verification_execution::FinalVerificationIneligibilityReason;
@@ -464,7 +464,7 @@ async fn accepted_and_rejected_paths_store_comparable_fingerprints_from_shared_h
     }));
     process_finalize_payload(&rejected_payload, "submit_review", &task_rejected.id, &ctx).await;
     let integrity_repo =
-        djinn_db::repositories::verify_run::TaskRejectedSubmissionIntegrityRepository::new(db);
+        djinn_db::repositories::task_rejected_submission_integrity::TaskRejectedSubmissionIntegrityRepository::new(db);
     let rejected_latest = integrity_repo
         .latest_for_task(&task_rejected.id)
         .await
@@ -523,7 +523,7 @@ async fn reject_then_redispatch_reloads_latest_fingerprint_by_task_id() {
     }));
     process_finalize_payload(&payload, "submit_review", &task.id, &ctx).await;
     let integrity_repo =
-        djinn_db::repositories::verify_run::TaskRejectedSubmissionIntegrityRepository::new(
+        djinn_db::repositories::task_rejected_submission_integrity::TaskRejectedSubmissionIntegrityRepository::new(
             db.clone(),
         );
     let latest_run1 = integrity_repo
@@ -637,7 +637,7 @@ async fn historical_no_worktree_skips_rejected_fingerprint_and_emits_event() {
     process_finalize_payload(&payload, "submit_review", &task.id, &ctx).await;
     // The fingerprint must not be recorded.
     let integrity_repo =
-        djinn_db::repositories::verify_run::TaskRejectedSubmissionIntegrityRepository::new(db);
+        djinn_db::repositories::task_rejected_submission_integrity::TaskRejectedSubmissionIntegrityRepository::new(db);
     let latest = integrity_repo.latest_for_task(&task.id).await.unwrap();
     assert!(
         latest.is_none(),
@@ -705,7 +705,7 @@ async fn nonexistent_worktree_path_skips_rejected_fingerprint_and_emits_event() 
     process_finalize_payload(&payload, "submit_review", &task.id, &ctx).await;
     // The fingerprint must not be recorded.
     let integrity_repo =
-        djinn_db::repositories::verify_run::TaskRejectedSubmissionIntegrityRepository::new(db);
+        djinn_db::repositories::task_rejected_submission_integrity::TaskRejectedSubmissionIntegrityRepository::new(db);
     let latest = integrity_repo.latest_for_task(&task.id).await.unwrap();
     assert!(
         latest.is_none(),
@@ -785,7 +785,7 @@ async fn clean_worktree_skips_rejected_fingerprint_with_nodiff_event() {
     }));
     process_finalize_payload(&payload, "submit_review", &task.id, &ctx).await;
     let integrity_repo =
-        djinn_db::repositories::verify_run::TaskRejectedSubmissionIntegrityRepository::new(db);
+        djinn_db::repositories::task_rejected_submission_integrity::TaskRejectedSubmissionIntegrityRepository::new(db);
     let latest = integrity_repo.latest_for_task(&task.id).await.unwrap();
     assert!(
         latest.is_none(),
@@ -967,7 +967,7 @@ async fn settlement_accepted_and_rejected_paths_store_same_review_fingerprint() 
     );
     // But must persist in task_rejected_submission_integrity.
     let integrity_repo =
-        djinn_db::repositories::verify_run::TaskRejectedSubmissionIntegrityRepository::new(db);
+        djinn_db::repositories::task_rejected_submission_integrity::TaskRejectedSubmissionIntegrityRepository::new(db);
     let rejected_latest = integrity_repo
         .latest_for_task(&task_r.id)
         .await

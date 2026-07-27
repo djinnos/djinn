@@ -7,10 +7,12 @@ use crate::host::SlotContext;
 use crate::output_parser::CompletionIntent;
 use djinn_core::events::DjinnEventEnvelope;
 use djinn_db::TaskRepository;
+use djinn_db::repositories::task_rejected_submission_integrity::{
+    RecordTaskRejectedSubmissionParams, TaskRejectedSubmissionIntegrityRepository,
+};
 use djinn_db::repositories::task_run::TaskRunRepository;
 use djinn_db::repositories::verify_run::{
-    AutoSubmitReviewRepository, CreateAutoSubmitReviewParams, RecordTaskRejectedSubmissionParams,
-    TaskRejectedSubmissionIntegrityRepository,
+    AutoSubmitReviewRepository, CreateAutoSubmitReviewParams,
 };
 use djinn_git::{SubmissionDiffFingerprint, compute_submission_diff_fingerprint};
 
