@@ -209,12 +209,16 @@ ls "$launcher_leaf" >/dev/null
 cat "$launcher_leaf/cgroup.controllers" >/dev/null
 must_deny "mkdir \"$leaf\""
 must_deny "mkdir \"$launcher_leaf/.djinn-worker-child\""
-must_deny "printf x > \"$root/cpu.max\""
+root_cpu_max=$(cat "$root/cpu.max")
+[ -n "$root_cpu_max" ]
+must_deny "printf '\''%s\\n'\'' \"$root_cpu_max\" > \"$root/cpu.max\""
 # Preserve $$ for sh -c so the writer tries to move its own process.
 must_deny "printf \"\$\$\" > \"$root/cgroup.procs\""
 must_deny "printf 1 > \"$root/cgroup.procs\""
 must_deny "printf 1 > \"$root/cgroup.kill\""
-must_deny "printf x > \"$launcher_leaf/cpu.max\""
+launcher_cpu_max=$(cat "$launcher_leaf/cpu.max")
+[ -n "$launcher_cpu_max" ]
+must_deny "printf '\''%s\\n'\'' \"$launcher_cpu_max\" > \"$launcher_leaf/cpu.max\""
 must_deny "printf \"\$\$\" > \"$launcher_leaf/cgroup.procs\""
 must_deny "printf 1 > \"$launcher_leaf/cgroup.kill\""
 must_deny "rmdir \"$launcher_leaf\""
