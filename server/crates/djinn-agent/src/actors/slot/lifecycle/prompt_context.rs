@@ -1107,7 +1107,6 @@ pub(crate) async fn assemble_prompt_context(inputs: PromptContextInputs<'_>) -> 
         extension_diagnostics,
         cancellation,
         memory_intent_planner,
-        final_verification_configured,
     } = inputs;
     let uncancelled = CancellationToken::new();
     let cancellation = cancellation.unwrap_or(&uncancelled);
@@ -1345,8 +1344,7 @@ pub(crate) async fn assemble_prompt_context(inputs: PromptContextInputs<'_>) -> 
             ci_blocking_directive: ci_blocking_directive.clone(),
             worker_resume_note: worker_resume_note.map(str::to_string),
             arbiter_directive: arbiter_directive.map(str::to_string),
-            final_verification_configured,
-        },
+            },
     );
     let system_prompt_with_extensions =
         apply_role_extensions(&base_system_prompt, system_prompt_extensions);

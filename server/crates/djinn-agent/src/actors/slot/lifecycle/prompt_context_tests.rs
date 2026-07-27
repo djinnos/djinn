@@ -1044,7 +1044,6 @@ async fn concurrent_assembly_is_deterministic() {
         extension_diagnostics: &[],
         cancellation: None,
         memory_intent_planner: None,
-        final_verification_configured: false,
     })
     .await;
 
@@ -1067,7 +1066,6 @@ async fn concurrent_assembly_is_deterministic() {
         extension_diagnostics: &[],
         cancellation: None,
         memory_intent_planner: None,
-        final_verification_configured: false,
     })
     .await;
 
@@ -1395,7 +1393,6 @@ async fn ci_blocking_appears_before_resume_context_in_prompt() {
         extension_diagnostics: &[],
         cancellation: None,
         memory_intent_planner: None,
-        final_verification_configured: false,
     })
     .await;
 
@@ -1546,7 +1543,6 @@ async fn resume_context_section_in_canonical_order_with_skills_and_sources() {
         extension_diagnostics: &[],
         cancellation: None,
         memory_intent_planner: None,
-        final_verification_configured: false,
     })
     .await;
 
@@ -1808,7 +1804,6 @@ async fn resume_context_deterministic_with_discontinuity_metadata() {
         extension_diagnostics: &[],
         cancellation: None,
         memory_intent_planner: None,
-        final_verification_configured: false,
     })
     .await;
 
@@ -1831,7 +1826,6 @@ async fn resume_context_deterministic_with_discontinuity_metadata() {
         extension_diagnostics: &[],
         cancellation: None,
         memory_intent_planner: None,
-        final_verification_configured: false,
     })
     .await;
 
@@ -2049,7 +2043,6 @@ macro_rules! planner_assembly_inputs {
             extension_diagnostics: &[],
             cancellation: None,
             memory_intent_planner: $planner,
-            final_verification_configured: false,
         }
     };
 }

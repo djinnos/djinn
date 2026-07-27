@@ -5112,26 +5112,6 @@ expression: signatures
             "lifecycle": {
               "$ref": "#/$defs/LifecycleHooks",
               "default": {
-                "final_verification": {
-                  "evidence_tier": "attested",
-                  "hermeticity": {
-                    "hermetic": false,
-                    "network_access": false,
-                    "reusable": false
-                  },
-                  "input_manifest": {
-                    "environment_names": [],
-                    "repo_paths": [],
-                    "version": 1,
-                    "volatile_environment_names": []
-                  },
-                  "output_only_globs": [],
-                  "profile_id": "",
-                  "profile_revision": 0,
-                  "read_only_external_inputs": [],
-                  "required_checks": [],
-                  "version": 1
-                },
                 "post_build": [],
                 "pre_anything": [],
                 "pre_task": [],
@@ -5244,90 +5224,6 @@ expression: signatures
           "required": [
             "name"
           ],
-          "type": "object"
-        },
-        "FinalVerificationPlan": {
-          "additionalProperties": false,
-          "properties": {
-            "command_groups": {
-              "description": "Ordered command groups used by path selection in new declarations.",
-              "items": {
-                "$ref": "#/$defs/FinalVerificationCommandGroup"
-              },
-              "type": "array"
-            },
-            "commands": {
-              "description": "Legacy flat declaration. New configurations must use `command_groups`\nand `selection_rules`; this remains readable so persisted rows can be\nmigrated without a flag day.",
-              "items": {
-                "$ref": "#/$defs/FinalVerificationCommand"
-              },
-              "type": "array"
-            },
-            "evidence_tier": {
-              "$ref": "#/$defs/VerificationEvidenceTier",
-              "default": "attested",
-              "description": "What a recorded pass of this plan is worth. See\n[`VerificationEvidenceTier`]; the tier is identity material, so an\nattested pass and a recorded pass can never share a cache entry."
-            },
-            "hermeticity": {
-              "$ref": "#/$defs/HermeticityDeclaration",
-              "default": {
-                "hermetic": false,
-                "network_access": false,
-                "reusable": false
-              }
-            },
-            "input_manifest": {
-              "$ref": "#/$defs/VerificationInputManifest",
-              "default": {
-                "environment_names": [],
-                "repo_paths": [],
-                "version": 1,
-                "volatile_environment_names": []
-              }
-            },
-            "output_only_globs": {
-              "default": [],
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
-            "profile_id": {
-              "default": "",
-              "type": "string"
-            },
-            "profile_revision": {
-              "default": 0,
-              "format": "int64",
-              "type": "integer"
-            },
-            "read_only_external_inputs": {
-              "default": [],
-              "items": {
-                "$ref": "#/$defs/ExternalInputDeclaration"
-              },
-              "type": "array"
-            },
-            "required_checks": {
-              "default": [],
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
-            "selection_rules": {
-              "description": "Ordered path rules. A matching rule selects its named command groups.",
-              "items": {
-                "$ref": "#/$defs/FinalVerificationSelectionRule"
-              },
-              "type": "array"
-            },
-            "version": {
-              "default": 1,
-              "format": "int64",
-              "type": "integer"
-            }
-          },
           "type": "object"
         },
         "FinalVerificationSelectionRule": {
@@ -5509,30 +5405,6 @@ expression: signatures
         },
         "LifecycleHooks": {
           "properties": {
-            "final_verification": {
-              "$ref": "#/$defs/FinalVerificationPlan",
-              "default": {
-                "evidence_tier": "attested",
-                "hermeticity": {
-                  "hermetic": false,
-                  "network_access": false,
-                  "reusable": false
-                },
-                "input_manifest": {
-                  "environment_names": [],
-                  "repo_paths": [],
-                  "version": 1,
-                  "volatile_environment_names": []
-                },
-                "output_only_globs": [],
-                "profile_id": "",
-                "profile_revision": 0,
-                "read_only_external_inputs": [],
-                "required_checks": [],
-                "version": 1
-              },
-              "description": "Authoritative post-authoring plan, distinct from setup-time hooks."
-            },
             "post_build": {
               "default": [],
               "description": "`RUN` lines appended to the generated Dockerfile. Bundle anything\nyou want baked into the image here (apt packages are the easy path;\ncurl-installs like `protoc` go here).",
@@ -6131,26 +6003,6 @@ expression: signatures
             "lifecycle": {
               "$ref": "#/$defs/LifecycleHooks",
               "default": {
-                "final_verification": {
-                  "evidence_tier": "attested",
-                  "hermeticity": {
-                    "hermetic": false,
-                    "network_access": false,
-                    "reusable": false
-                  },
-                  "input_manifest": {
-                    "environment_names": [],
-                    "repo_paths": [],
-                    "version": 1,
-                    "volatile_environment_names": []
-                  },
-                  "output_only_globs": [],
-                  "profile_id": "",
-                  "profile_revision": 0,
-                  "read_only_external_inputs": [],
-                  "required_checks": [],
-                  "version": 1
-                },
                 "post_build": [],
                 "pre_anything": [],
                 "pre_task": [],
@@ -6263,90 +6115,6 @@ expression: signatures
           "required": [
             "name"
           ],
-          "type": "object"
-        },
-        "FinalVerificationPlan": {
-          "additionalProperties": false,
-          "properties": {
-            "command_groups": {
-              "description": "Ordered command groups used by path selection in new declarations.",
-              "items": {
-                "$ref": "#/$defs/FinalVerificationCommandGroup"
-              },
-              "type": "array"
-            },
-            "commands": {
-              "description": "Legacy flat declaration. New configurations must use `command_groups`\nand `selection_rules`; this remains readable so persisted rows can be\nmigrated without a flag day.",
-              "items": {
-                "$ref": "#/$defs/FinalVerificationCommand"
-              },
-              "type": "array"
-            },
-            "evidence_tier": {
-              "$ref": "#/$defs/VerificationEvidenceTier",
-              "default": "attested",
-              "description": "What a recorded pass of this plan is worth. See\n[`VerificationEvidenceTier`]; the tier is identity material, so an\nattested pass and a recorded pass can never share a cache entry."
-            },
-            "hermeticity": {
-              "$ref": "#/$defs/HermeticityDeclaration",
-              "default": {
-                "hermetic": false,
-                "network_access": false,
-                "reusable": false
-              }
-            },
-            "input_manifest": {
-              "$ref": "#/$defs/VerificationInputManifest",
-              "default": {
-                "environment_names": [],
-                "repo_paths": [],
-                "version": 1,
-                "volatile_environment_names": []
-              }
-            },
-            "output_only_globs": {
-              "default": [],
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
-            "profile_id": {
-              "default": "",
-              "type": "string"
-            },
-            "profile_revision": {
-              "default": 0,
-              "format": "int64",
-              "type": "integer"
-            },
-            "read_only_external_inputs": {
-              "default": [],
-              "items": {
-                "$ref": "#/$defs/ExternalInputDeclaration"
-              },
-              "type": "array"
-            },
-            "required_checks": {
-              "default": [],
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
-            "selection_rules": {
-              "description": "Ordered path rules. A matching rule selects its named command groups.",
-              "items": {
-                "$ref": "#/$defs/FinalVerificationSelectionRule"
-              },
-              "type": "array"
-            },
-            "version": {
-              "default": 1,
-              "format": "int64",
-              "type": "integer"
-            }
-          },
           "type": "object"
         },
         "FinalVerificationSelectionRule": {
@@ -6567,30 +6335,6 @@ expression: signatures
         },
         "LifecycleHooks": {
           "properties": {
-            "final_verification": {
-              "$ref": "#/$defs/FinalVerificationPlan",
-              "default": {
-                "evidence_tier": "attested",
-                "hermeticity": {
-                  "hermetic": false,
-                  "network_access": false,
-                  "reusable": false
-                },
-                "input_manifest": {
-                  "environment_names": [],
-                  "repo_paths": [],
-                  "version": 1,
-                  "volatile_environment_names": []
-                },
-                "output_only_globs": [],
-                "profile_id": "",
-                "profile_revision": 0,
-                "read_only_external_inputs": [],
-                "required_checks": [],
-                "version": 1
-              },
-              "description": "Authoritative post-authoring plan, distinct from setup-time hooks."
-            },
             "post_build": {
               "default": [],
               "description": "`RUN` lines appended to the generated Dockerfile. Bundle anything\nyou want baked into the image here (apt packages are the easy path;\ncurl-installs like `protoc` go here).",
@@ -7170,26 +6914,6 @@ expression: signatures
             "lifecycle": {
               "$ref": "#/$defs/LifecycleHooks",
               "default": {
-                "final_verification": {
-                  "evidence_tier": "attested",
-                  "hermeticity": {
-                    "hermetic": false,
-                    "network_access": false,
-                    "reusable": false
-                  },
-                  "input_manifest": {
-                    "environment_names": [],
-                    "repo_paths": [],
-                    "version": 1,
-                    "volatile_environment_names": []
-                  },
-                  "output_only_globs": [],
-                  "profile_id": "",
-                  "profile_revision": 0,
-                  "read_only_external_inputs": [],
-                  "required_checks": [],
-                  "version": 1
-                },
                 "post_build": [],
                 "pre_anything": [],
                 "pre_task": [],
@@ -7302,90 +7026,6 @@ expression: signatures
           "required": [
             "name"
           ],
-          "type": "object"
-        },
-        "FinalVerificationPlan": {
-          "additionalProperties": false,
-          "properties": {
-            "command_groups": {
-              "description": "Ordered command groups used by path selection in new declarations.",
-              "items": {
-                "$ref": "#/$defs/FinalVerificationCommandGroup"
-              },
-              "type": "array"
-            },
-            "commands": {
-              "description": "Legacy flat declaration. New configurations must use `command_groups`\nand `selection_rules`; this remains readable so persisted rows can be\nmigrated without a flag day.",
-              "items": {
-                "$ref": "#/$defs/FinalVerificationCommand"
-              },
-              "type": "array"
-            },
-            "evidence_tier": {
-              "$ref": "#/$defs/VerificationEvidenceTier",
-              "default": "attested",
-              "description": "What a recorded pass of this plan is worth. See\n[`VerificationEvidenceTier`]; the tier is identity material, so an\nattested pass and a recorded pass can never share a cache entry."
-            },
-            "hermeticity": {
-              "$ref": "#/$defs/HermeticityDeclaration",
-              "default": {
-                "hermetic": false,
-                "network_access": false,
-                "reusable": false
-              }
-            },
-            "input_manifest": {
-              "$ref": "#/$defs/VerificationInputManifest",
-              "default": {
-                "environment_names": [],
-                "repo_paths": [],
-                "version": 1,
-                "volatile_environment_names": []
-              }
-            },
-            "output_only_globs": {
-              "default": [],
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
-            "profile_id": {
-              "default": "",
-              "type": "string"
-            },
-            "profile_revision": {
-              "default": 0,
-              "format": "int64",
-              "type": "integer"
-            },
-            "read_only_external_inputs": {
-              "default": [],
-              "items": {
-                "$ref": "#/$defs/ExternalInputDeclaration"
-              },
-              "type": "array"
-            },
-            "required_checks": {
-              "default": [],
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
-            "selection_rules": {
-              "description": "Ordered path rules. A matching rule selects its named command groups.",
-              "items": {
-                "$ref": "#/$defs/FinalVerificationSelectionRule"
-              },
-              "type": "array"
-            },
-            "version": {
-              "default": 1,
-              "format": "int64",
-              "type": "integer"
-            }
-          },
           "type": "object"
         },
         "FinalVerificationSelectionRule": {
@@ -7567,30 +7207,6 @@ expression: signatures
         },
         "LifecycleHooks": {
           "properties": {
-            "final_verification": {
-              "$ref": "#/$defs/FinalVerificationPlan",
-              "default": {
-                "evidence_tier": "attested",
-                "hermeticity": {
-                  "hermetic": false,
-                  "network_access": false,
-                  "reusable": false
-                },
-                "input_manifest": {
-                  "environment_names": [],
-                  "repo_paths": [],
-                  "version": 1,
-                  "volatile_environment_names": []
-                },
-                "output_only_globs": [],
-                "profile_id": "",
-                "profile_revision": 0,
-                "read_only_external_inputs": [],
-                "required_checks": [],
-                "version": 1
-              },
-              "description": "Authoritative post-authoring plan, distinct from setup-time hooks."
-            },
             "post_build": {
               "default": [],
               "description": "`RUN` lines appended to the generated Dockerfile. Bundle anything\nyou want baked into the image here (apt packages are the easy path;\ncurl-installs like `protoc` go here).",
@@ -13661,26 +13277,6 @@ expression: signatures
             "lifecycle": {
               "$ref": "#/$defs/LifecycleHooks",
               "default": {
-                "final_verification": {
-                  "evidence_tier": "attested",
-                  "hermeticity": {
-                    "hermetic": false,
-                    "network_access": false,
-                    "reusable": false
-                  },
-                  "input_manifest": {
-                    "environment_names": [],
-                    "repo_paths": [],
-                    "version": 1,
-                    "volatile_environment_names": []
-                  },
-                  "output_only_globs": [],
-                  "profile_id": "",
-                  "profile_revision": 0,
-                  "read_only_external_inputs": [],
-                  "required_checks": [],
-                  "version": 1
-                },
                 "post_build": [],
                 "pre_anything": [],
                 "pre_task": [],
@@ -13793,90 +13389,6 @@ expression: signatures
           "required": [
             "name"
           ],
-          "type": "object"
-        },
-        "FinalVerificationPlan": {
-          "additionalProperties": false,
-          "properties": {
-            "command_groups": {
-              "description": "Ordered command groups used by path selection in new declarations.",
-              "items": {
-                "$ref": "#/$defs/FinalVerificationCommandGroup"
-              },
-              "type": "array"
-            },
-            "commands": {
-              "description": "Legacy flat declaration. New configurations must use `command_groups`\nand `selection_rules`; this remains readable so persisted rows can be\nmigrated without a flag day.",
-              "items": {
-                "$ref": "#/$defs/FinalVerificationCommand"
-              },
-              "type": "array"
-            },
-            "evidence_tier": {
-              "$ref": "#/$defs/VerificationEvidenceTier",
-              "default": "attested",
-              "description": "What a recorded pass of this plan is worth. See\n[`VerificationEvidenceTier`]; the tier is identity material, so an\nattested pass and a recorded pass can never share a cache entry."
-            },
-            "hermeticity": {
-              "$ref": "#/$defs/HermeticityDeclaration",
-              "default": {
-                "hermetic": false,
-                "network_access": false,
-                "reusable": false
-              }
-            },
-            "input_manifest": {
-              "$ref": "#/$defs/VerificationInputManifest",
-              "default": {
-                "environment_names": [],
-                "repo_paths": [],
-                "version": 1,
-                "volatile_environment_names": []
-              }
-            },
-            "output_only_globs": {
-              "default": [],
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
-            "profile_id": {
-              "default": "",
-              "type": "string"
-            },
-            "profile_revision": {
-              "default": 0,
-              "format": "int64",
-              "type": "integer"
-            },
-            "read_only_external_inputs": {
-              "default": [],
-              "items": {
-                "$ref": "#/$defs/ExternalInputDeclaration"
-              },
-              "type": "array"
-            },
-            "required_checks": {
-              "default": [],
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
-            "selection_rules": {
-              "description": "Ordered path rules. A matching rule selects its named command groups.",
-              "items": {
-                "$ref": "#/$defs/FinalVerificationSelectionRule"
-              },
-              "type": "array"
-            },
-            "version": {
-              "default": 1,
-              "format": "int64",
-              "type": "integer"
-            }
-          },
           "type": "object"
         },
         "FinalVerificationSelectionRule": {
@@ -14058,30 +13570,6 @@ expression: signatures
         },
         "LifecycleHooks": {
           "properties": {
-            "final_verification": {
-              "$ref": "#/$defs/FinalVerificationPlan",
-              "default": {
-                "evidence_tier": "attested",
-                "hermeticity": {
-                  "hermetic": false,
-                  "network_access": false,
-                  "reusable": false
-                },
-                "input_manifest": {
-                  "environment_names": [],
-                  "repo_paths": [],
-                  "version": 1,
-                  "volatile_environment_names": []
-                },
-                "output_only_globs": [],
-                "profile_id": "",
-                "profile_revision": 0,
-                "read_only_external_inputs": [],
-                "required_checks": [],
-                "version": 1
-              },
-              "description": "Authoritative post-authoring plan, distinct from setup-time hooks."
-            },
             "post_build": {
               "default": [],
               "description": "`RUN` lines appended to the generated Dockerfile. Bundle anything\nyou want baked into the image here (apt packages are the easy path;\ncurl-installs like `protoc` go here).",
@@ -14638,26 +14126,6 @@ expression: signatures
             "lifecycle": {
               "$ref": "#/$defs/LifecycleHooks",
               "default": {
-                "final_verification": {
-                  "evidence_tier": "attested",
-                  "hermeticity": {
-                    "hermetic": false,
-                    "network_access": false,
-                    "reusable": false
-                  },
-                  "input_manifest": {
-                    "environment_names": [],
-                    "repo_paths": [],
-                    "version": 1,
-                    "volatile_environment_names": []
-                  },
-                  "output_only_globs": [],
-                  "profile_id": "",
-                  "profile_revision": 0,
-                  "read_only_external_inputs": [],
-                  "required_checks": [],
-                  "version": 1
-                },
                 "post_build": [],
                 "pre_anything": [],
                 "pre_task": [],
@@ -14770,90 +14238,6 @@ expression: signatures
           "required": [
             "name"
           ],
-          "type": "object"
-        },
-        "FinalVerificationPlan": {
-          "additionalProperties": false,
-          "properties": {
-            "command_groups": {
-              "description": "Ordered command groups used by path selection in new declarations.",
-              "items": {
-                "$ref": "#/$defs/FinalVerificationCommandGroup"
-              },
-              "type": "array"
-            },
-            "commands": {
-              "description": "Legacy flat declaration. New configurations must use `command_groups`\nand `selection_rules`; this remains readable so persisted rows can be\nmigrated without a flag day.",
-              "items": {
-                "$ref": "#/$defs/FinalVerificationCommand"
-              },
-              "type": "array"
-            },
-            "evidence_tier": {
-              "$ref": "#/$defs/VerificationEvidenceTier",
-              "default": "attested",
-              "description": "What a recorded pass of this plan is worth. See\n[`VerificationEvidenceTier`]; the tier is identity material, so an\nattested pass and a recorded pass can never share a cache entry."
-            },
-            "hermeticity": {
-              "$ref": "#/$defs/HermeticityDeclaration",
-              "default": {
-                "hermetic": false,
-                "network_access": false,
-                "reusable": false
-              }
-            },
-            "input_manifest": {
-              "$ref": "#/$defs/VerificationInputManifest",
-              "default": {
-                "environment_names": [],
-                "repo_paths": [],
-                "version": 1,
-                "volatile_environment_names": []
-              }
-            },
-            "output_only_globs": {
-              "default": [],
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
-            "profile_id": {
-              "default": "",
-              "type": "string"
-            },
-            "profile_revision": {
-              "default": 0,
-              "format": "int64",
-              "type": "integer"
-            },
-            "read_only_external_inputs": {
-              "default": [],
-              "items": {
-                "$ref": "#/$defs/ExternalInputDeclaration"
-              },
-              "type": "array"
-            },
-            "required_checks": {
-              "default": [],
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
-            "selection_rules": {
-              "description": "Ordered path rules. A matching rule selects its named command groups.",
-              "items": {
-                "$ref": "#/$defs/FinalVerificationSelectionRule"
-              },
-              "type": "array"
-            },
-            "version": {
-              "default": 1,
-              "format": "int64",
-              "type": "integer"
-            }
-          },
           "type": "object"
         },
         "FinalVerificationSelectionRule": {
@@ -15035,30 +14419,6 @@ expression: signatures
         },
         "LifecycleHooks": {
           "properties": {
-            "final_verification": {
-              "$ref": "#/$defs/FinalVerificationPlan",
-              "default": {
-                "evidence_tier": "attested",
-                "hermeticity": {
-                  "hermetic": false,
-                  "network_access": false,
-                  "reusable": false
-                },
-                "input_manifest": {
-                  "environment_names": [],
-                  "repo_paths": [],
-                  "version": 1,
-                  "volatile_environment_names": []
-                },
-                "output_only_globs": [],
-                "profile_id": "",
-                "profile_revision": 0,
-                "read_only_external_inputs": [],
-                "required_checks": [],
-                "version": 1
-              },
-              "description": "Authoritative post-authoring plan, distinct from setup-time hooks."
-            },
             "post_build": {
               "default": [],
               "description": "`RUN` lines appended to the generated Dockerfile. Bundle anything\nyou want baked into the image here (apt packages are the easy path;\ncurl-installs like `protoc` go here).",
@@ -15589,26 +14949,6 @@ expression: signatures
             "lifecycle": {
               "$ref": "#/$defs/LifecycleHooks",
               "default": {
-                "final_verification": {
-                  "evidence_tier": "attested",
-                  "hermeticity": {
-                    "hermetic": false,
-                    "network_access": false,
-                    "reusable": false
-                  },
-                  "input_manifest": {
-                    "environment_names": [],
-                    "repo_paths": [],
-                    "version": 1,
-                    "volatile_environment_names": []
-                  },
-                  "output_only_globs": [],
-                  "profile_id": "",
-                  "profile_revision": 0,
-                  "read_only_external_inputs": [],
-                  "required_checks": [],
-                  "version": 1
-                },
                 "post_build": [],
                 "pre_anything": [],
                 "pre_task": [],
@@ -15721,90 +15061,6 @@ expression: signatures
           "required": [
             "name"
           ],
-          "type": "object"
-        },
-        "FinalVerificationPlan": {
-          "additionalProperties": false,
-          "properties": {
-            "command_groups": {
-              "description": "Ordered command groups used by path selection in new declarations.",
-              "items": {
-                "$ref": "#/$defs/FinalVerificationCommandGroup"
-              },
-              "type": "array"
-            },
-            "commands": {
-              "description": "Legacy flat declaration. New configurations must use `command_groups`\nand `selection_rules`; this remains readable so persisted rows can be\nmigrated without a flag day.",
-              "items": {
-                "$ref": "#/$defs/FinalVerificationCommand"
-              },
-              "type": "array"
-            },
-            "evidence_tier": {
-              "$ref": "#/$defs/VerificationEvidenceTier",
-              "default": "attested",
-              "description": "What a recorded pass of this plan is worth. See\n[`VerificationEvidenceTier`]; the tier is identity material, so an\nattested pass and a recorded pass can never share a cache entry."
-            },
-            "hermeticity": {
-              "$ref": "#/$defs/HermeticityDeclaration",
-              "default": {
-                "hermetic": false,
-                "network_access": false,
-                "reusable": false
-              }
-            },
-            "input_manifest": {
-              "$ref": "#/$defs/VerificationInputManifest",
-              "default": {
-                "environment_names": [],
-                "repo_paths": [],
-                "version": 1,
-                "volatile_environment_names": []
-              }
-            },
-            "output_only_globs": {
-              "default": [],
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
-            "profile_id": {
-              "default": "",
-              "type": "string"
-            },
-            "profile_revision": {
-              "default": 0,
-              "format": "int64",
-              "type": "integer"
-            },
-            "read_only_external_inputs": {
-              "default": [],
-              "items": {
-                "$ref": "#/$defs/ExternalInputDeclaration"
-              },
-              "type": "array"
-            },
-            "required_checks": {
-              "default": [],
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
-            "selection_rules": {
-              "description": "Ordered path rules. A matching rule selects its named command groups.",
-              "items": {
-                "$ref": "#/$defs/FinalVerificationSelectionRule"
-              },
-              "type": "array"
-            },
-            "version": {
-              "default": 1,
-              "format": "int64",
-              "type": "integer"
-            }
-          },
           "type": "object"
         },
         "FinalVerificationSelectionRule": {
@@ -15986,30 +15242,6 @@ expression: signatures
         },
         "LifecycleHooks": {
           "properties": {
-            "final_verification": {
-              "$ref": "#/$defs/FinalVerificationPlan",
-              "default": {
-                "evidence_tier": "attested",
-                "hermeticity": {
-                  "hermetic": false,
-                  "network_access": false,
-                  "reusable": false
-                },
-                "input_manifest": {
-                  "environment_names": [],
-                  "repo_paths": [],
-                  "version": 1,
-                  "volatile_environment_names": []
-                },
-                "output_only_globs": [],
-                "profile_id": "",
-                "profile_revision": 0,
-                "read_only_external_inputs": [],
-                "required_checks": [],
-                "version": 1
-              },
-              "description": "Authoritative post-authoring plan, distinct from setup-time hooks."
-            },
             "post_build": {
               "default": [],
               "description": "`RUN` lines appended to the generated Dockerfile. Bundle anything\nyou want baked into the image here (apt packages are the easy path;\ncurl-installs like `protoc` go here).",

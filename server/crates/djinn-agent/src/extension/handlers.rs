@@ -57,8 +57,6 @@ mod shell_exec;
 mod task_admin;
 #[allow(dead_code)]
 mod task_epic;
-pub(crate) mod verification;
-pub(crate) use verification::{RunVerificationLimits, SessionVerificationRateLimiter};
 mod workspace;
 mod workspace_helpers;
 

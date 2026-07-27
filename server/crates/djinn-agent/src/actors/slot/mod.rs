@@ -17,21 +17,17 @@ pub use djinn_slot::run_llm_extraction;
 
 mod actor; // HOST-ONLY: slot actor + handle
 pub(crate) mod adapter; // SHARED: AgentContext → SlotContext construction helpers
-mod catalog_endpoints; // Strict catalog service → verifier loopback policy
 mod commands; // THIN SHIM: SlotCommand/SlotError re-export
 pub(crate) mod finalize_handlers; // THIN SHIM: finalize handler adapters
 pub mod helpers; // HOST-ONLY: provider resolution, feedback, code-context
 pub(crate) mod host_callbacks; // HOST-ONLY: dispatch callback adapter
 pub(crate) mod lifecycle; // HOST-ONLY: per-stage lifecycle helpers
 mod pool; // HOST-ONLY: slot pool, handle, factory
-#[cfg(test)]
-mod recorded_verification_tests; // Recorded evidence tier, end to end
 pub(crate) mod reply_loop; // THIN SHIM: reply-loop facade adapter
 pub(crate) mod session_extraction; // THIN SHIM: extraction backfill adapter
 mod supervisor_runner; // HOST-ONLY: host-side dispatch logic
 
 pub use actor::*;
-pub use adapter::resolve_final_verification_for_task_run;
 pub use commands::{SlotCommand, SlotError};
 pub use helpers::*;
 pub use pool::*;

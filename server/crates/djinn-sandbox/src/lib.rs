@@ -13,17 +13,9 @@ use anyhow::Result;
 /// Consumed by both Linux Landlock backends.
 pub mod confidential;
 
-/// Strict reusable-final-verification launcher. Unlike [`SANDBOX`], this
-/// module never selects the heuristic fallback backend.
-#[cfg(target_os = "linux")]
-pub mod final_verification;
-#[cfg(target_os = "linux")]
-pub mod final_verification_execution;
 pub mod linux;
 #[cfg(target_os = "macos")]
 pub mod macos;
-#[cfg(target_os = "linux")]
-pub mod recorded_verification;
 #[cfg(target_os = "linux")]
 pub mod service_provisioning;
 

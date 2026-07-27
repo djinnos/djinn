@@ -22,6 +22,5 @@ expression: names
   "output_list",
   "memory_build_context",
   "request_planner",
-  "run_verification",
   "submit_review"
 ]

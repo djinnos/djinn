@@ -4951,27 +4951,7 @@
                 "post_build": [],
                 "pre_anything": [],
                 "pre_task": [],
-                "pre_verification": [],
-                "final_verification": {
-                  "version": 1,
-                  "profile_id": "",
-                  "profile_revision": 0,
-                  "required_checks": [],
-                  "input_manifest": {
-                    "version": 1,
-                    "repo_paths": [],
-                    "environment_names": [],
-                    "volatile_environment_names": []
-                  },
-                  "read_only_external_inputs": [],
-                  "output_only_globs": [],
-                  "hermeticity": {
-                    "hermetic": false,
-                    "reusable": false,
-                    "network_access": false
-                  },
-                  "evidence_tier": "attested"
-                }
+                "pre_verification": []
               }
             },
             "cargo_cache_policy": {
@@ -5310,30 +5290,6 @@
                 "$ref": "#/$defs/HookCommand"
               },
               "default": []
-            },
-            "final_verification": {
-              "description": "Authoritative post-authoring plan, distinct from setup-time hooks.",
-              "$ref": "#/$defs/FinalVerificationPlan",
-              "default": {
-                "version": 1,
-                "profile_id": "",
-                "profile_revision": 0,
-                "required_checks": [],
-                "input_manifest": {
-                  "version": 1,
-                  "repo_paths": [],
-                  "environment_names": [],
-                  "volatile_environment_names": []
-                },
-                "read_only_external_inputs": [],
-                "output_only_globs": [],
-                "hermeticity": {
-                  "hermetic": false,
-                  "reusable": false,
-                  "network_access": false
-                },
-                "evidence_tier": "attested"
-              }
             }
           }
         },
@@ -5395,90 +5351,6 @@
             "blocking",
             "best_effort"
           ]
-        },
-        "FinalVerificationPlan": {
-          "type": "object",
-          "properties": {
-            "version": {
-              "type": "integer",
-              "format": "int64",
-              "default": 1
-            },
-            "profile_id": {
-              "type": "string",
-              "default": ""
-            },
-            "profile_revision": {
-              "type": "integer",
-              "format": "int64",
-              "default": 0
-            },
-            "commands": {
-              "description": "Legacy flat declaration. New configurations must use `command_groups`\nand `selection_rules`; this remains readable so persisted rows can be\nmigrated without a flag day.",
-              "type": "array",
-              "items": {
-                "$ref": "#/$defs/FinalVerificationCommand"
-              }
-            },
-            "command_groups": {
-              "description": "Ordered command groups used by path selection in new declarations.",
-              "type": "array",
-              "items": {
-                "$ref": "#/$defs/FinalVerificationCommandGroup"
-              }
-            },
-            "selection_rules": {
-              "description": "Ordered path rules. A matching rule selects its named command groups.",
-              "type": "array",
-              "items": {
-                "$ref": "#/$defs/FinalVerificationSelectionRule"
-              }
-            },
-            "required_checks": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              },
-              "default": []
-            },
-            "input_manifest": {
-              "$ref": "#/$defs/VerificationInputManifest",
-              "default": {
-                "version": 1,
-                "repo_paths": [],
-                "environment_names": [],
-                "volatile_environment_names": []
-              }
-            },
-            "read_only_external_inputs": {
-              "type": "array",
-              "items": {
-                "$ref": "#/$defs/ExternalInputDeclaration"
-              },
-              "default": []
-            },
-            "output_only_globs": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              },
-              "default": []
-            },
-            "hermeticity": {
-              "$ref": "#/$defs/HermeticityDeclaration",
-              "default": {
-                "hermetic": false,
-                "reusable": false,
-                "network_access": false
-              }
-            },
-            "evidence_tier": {
-              "description": "What a recorded pass of this plan is worth. See\n[`VerificationEvidenceTier`]; the tier is identity material, so an\nattested pass and a recorded pass can never share a cache entry.",
-              "$ref": "#/$defs/VerificationEvidenceTier",
-              "default": "attested"
-            }
-          },
-          "additionalProperties": false
         },
         "FinalVerificationCommand": {
           "type": "object",
@@ -6011,27 +5883,7 @@
                 "post_build": [],
                 "pre_anything": [],
                 "pre_task": [],
-                "pre_verification": [],
-                "final_verification": {
-                  "version": 1,
-                  "profile_id": "",
-                  "profile_revision": 0,
-                  "required_checks": [],
-                  "input_manifest": {
-                    "version": 1,
-                    "repo_paths": [],
-                    "environment_names": [],
-                    "volatile_environment_names": []
-                  },
-                  "read_only_external_inputs": [],
-                  "output_only_globs": [],
-                  "hermeticity": {
-                    "hermetic": false,
-                    "reusable": false,
-                    "network_access": false
-                  },
-                  "evidence_tier": "attested"
-                }
+                "pre_verification": []
               }
             },
             "cargo_cache_policy": {
@@ -6370,30 +6222,6 @@
                 "$ref": "#/$defs/HookCommand"
               },
               "default": []
-            },
-            "final_verification": {
-              "description": "Authoritative post-authoring plan, distinct from setup-time hooks.",
-              "$ref": "#/$defs/FinalVerificationPlan",
-              "default": {
-                "version": 1,
-                "profile_id": "",
-                "profile_revision": 0,
-                "required_checks": [],
-                "input_manifest": {
-                  "version": 1,
-                  "repo_paths": [],
-                  "environment_names": [],
-                  "volatile_environment_names": []
-                },
-                "read_only_external_inputs": [],
-                "output_only_globs": [],
-                "hermeticity": {
-                  "hermetic": false,
-                  "reusable": false,
-                  "network_access": false
-                },
-                "evidence_tier": "attested"
-              }
             }
           }
         },
@@ -6455,90 +6283,6 @@
             "blocking",
             "best_effort"
           ]
-        },
-        "FinalVerificationPlan": {
-          "type": "object",
-          "properties": {
-            "version": {
-              "type": "integer",
-              "format": "int64",
-              "default": 1
-            },
-            "profile_id": {
-              "type": "string",
-              "default": ""
-            },
-            "profile_revision": {
-              "type": "integer",
-              "format": "int64",
-              "default": 0
-            },
-            "commands": {
-              "description": "Legacy flat declaration. New configurations must use `command_groups`\nand `selection_rules`; this remains readable so persisted rows can be\nmigrated without a flag day.",
-              "type": "array",
-              "items": {
-                "$ref": "#/$defs/FinalVerificationCommand"
-              }
-            },
-            "command_groups": {
-              "description": "Ordered command groups used by path selection in new declarations.",
-              "type": "array",
-              "items": {
-                "$ref": "#/$defs/FinalVerificationCommandGroup"
-              }
-            },
-            "selection_rules": {
-              "description": "Ordered path rules. A matching rule selects its named command groups.",
-              "type": "array",
-              "items": {
-                "$ref": "#/$defs/FinalVerificationSelectionRule"
-              }
-            },
-            "required_checks": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              },
-              "default": []
-            },
-            "input_manifest": {
-              "$ref": "#/$defs/VerificationInputManifest",
-              "default": {
-                "version": 1,
-                "repo_paths": [],
-                "environment_names": [],
-                "volatile_environment_names": []
-              }
-            },
-            "read_only_external_inputs": {
-              "type": "array",
-              "items": {
-                "$ref": "#/$defs/ExternalInputDeclaration"
-              },
-              "default": []
-            },
-            "output_only_globs": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              },
-              "default": []
-            },
-            "hermeticity": {
-              "$ref": "#/$defs/HermeticityDeclaration",
-              "default": {
-                "hermetic": false,
-                "reusable": false,
-                "network_access": false
-              }
-            },
-            "evidence_tier": {
-              "description": "What a recorded pass of this plan is worth. See\n[`VerificationEvidenceTier`]; the tier is identity material, so an\nattested pass and a recorded pass can never share a cache entry.",
-              "$ref": "#/$defs/VerificationEvidenceTier",
-              "default": "attested"
-            }
-          },
-          "additionalProperties": false
         },
         "FinalVerificationCommand": {
           "type": "object",
@@ -7013,27 +6757,7 @@
                 "post_build": [],
                 "pre_anything": [],
                 "pre_task": [],
-                "pre_verification": [],
-                "final_verification": {
-                  "version": 1,
-                  "profile_id": "",
-                  "profile_revision": 0,
-                  "required_checks": [],
-                  "input_manifest": {
-                    "version": 1,
-                    "repo_paths": [],
-                    "environment_names": [],
-                    "volatile_environment_names": []
-                  },
-                  "read_only_external_inputs": [],
-                  "output_only_globs": [],
-                  "hermeticity": {
-                    "hermetic": false,
-                    "reusable": false,
-                    "network_access": false
-                  },
-                  "evidence_tier": "attested"
-                }
+                "pre_verification": []
               }
             },
             "cargo_cache_policy": {
@@ -7372,30 +7096,6 @@
                 "$ref": "#/$defs/HookCommand"
               },
               "default": []
-            },
-            "final_verification": {
-              "description": "Authoritative post-authoring plan, distinct from setup-time hooks.",
-              "$ref": "#/$defs/FinalVerificationPlan",
-              "default": {
-                "version": 1,
-                "profile_id": "",
-                "profile_revision": 0,
-                "required_checks": [],
-                "input_manifest": {
-                  "version": 1,
-                  "repo_paths": [],
-                  "environment_names": [],
-                  "volatile_environment_names": []
-                },
-                "read_only_external_inputs": [],
-                "output_only_globs": [],
-                "hermeticity": {
-                  "hermetic": false,
-                  "reusable": false,
-                  "network_access": false
-                },
-                "evidence_tier": "attested"
-              }
             }
           }
         },
@@ -7457,90 +7157,6 @@
             "blocking",
             "best_effort"
           ]
-        },
-        "FinalVerificationPlan": {
-          "type": "object",
-          "properties": {
-            "version": {
-              "type": "integer",
-              "format": "int64",
-              "default": 1
-            },
-            "profile_id": {
-              "type": "string",
-              "default": ""
-            },
-            "profile_revision": {
-              "type": "integer",
-              "format": "int64",
-              "default": 0
-            },
-            "commands": {
-              "description": "Legacy flat declaration. New configurations must use `command_groups`\nand `selection_rules`; this remains readable so persisted rows can be\nmigrated without a flag day.",
-              "type": "array",
-              "items": {
-                "$ref": "#/$defs/FinalVerificationCommand"
-              }
-            },
-            "command_groups": {
-              "description": "Ordered command groups used by path selection in new declarations.",
-              "type": "array",
-              "items": {
-                "$ref": "#/$defs/FinalVerificationCommandGroup"
-              }
-            },
-            "selection_rules": {
-              "description": "Ordered path rules. A matching rule selects its named command groups.",
-              "type": "array",
-              "items": {
-                "$ref": "#/$defs/FinalVerificationSelectionRule"
-              }
-            },
-            "required_checks": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              },
-              "default": []
-            },
-            "input_manifest": {
-              "$ref": "#/$defs/VerificationInputManifest",
-              "default": {
-                "version": 1,
-                "repo_paths": [],
-                "environment_names": [],
-                "volatile_environment_names": []
-              }
-            },
-            "read_only_external_inputs": {
-              "type": "array",
-              "items": {
-                "$ref": "#/$defs/ExternalInputDeclaration"
-              },
-              "default": []
-            },
-            "output_only_globs": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              },
-              "default": []
-            },
-            "hermeticity": {
-              "$ref": "#/$defs/HermeticityDeclaration",
-              "default": {
-                "hermetic": false,
-                "reusable": false,
-                "network_access": false
-              }
-            },
-            "evidence_tier": {
-              "description": "What a recorded pass of this plan is worth. See\n[`VerificationEvidenceTier`]; the tier is identity material, so an\nattested pass and a recorded pass can never share a cache entry.",
-              "$ref": "#/$defs/VerificationEvidenceTier",
-              "default": "attested"
-            }
-          },
-          "additionalProperties": false
         },
         "FinalVerificationCommand": {
           "type": "object",
@@ -13544,27 +13160,7 @@
                 "post_build": [],
                 "pre_anything": [],
                 "pre_task": [],
-                "pre_verification": [],
-                "final_verification": {
-                  "version": 1,
-                  "profile_id": "",
-                  "profile_revision": 0,
-                  "required_checks": [],
-                  "input_manifest": {
-                    "version": 1,
-                    "repo_paths": [],
-                    "environment_names": [],
-                    "volatile_environment_names": []
-                  },
-                  "read_only_external_inputs": [],
-                  "output_only_globs": [],
-                  "hermeticity": {
-                    "hermetic": false,
-                    "reusable": false,
-                    "network_access": false
-                  },
-                  "evidence_tier": "attested"
-                }
+                "pre_verification": []
               }
             },
             "cargo_cache_policy": {
@@ -13903,30 +13499,6 @@
                 "$ref": "#/$defs/HookCommand"
               },
               "default": []
-            },
-            "final_verification": {
-              "description": "Authoritative post-authoring plan, distinct from setup-time hooks.",
-              "$ref": "#/$defs/FinalVerificationPlan",
-              "default": {
-                "version": 1,
-                "profile_id": "",
-                "profile_revision": 0,
-                "required_checks": [],
-                "input_manifest": {
-                  "version": 1,
-                  "repo_paths": [],
-                  "environment_names": [],
-                  "volatile_environment_names": []
-                },
-                "read_only_external_inputs": [],
-                "output_only_globs": [],
-                "hermeticity": {
-                  "hermetic": false,
-                  "reusable": false,
-                  "network_access": false
-                },
-                "evidence_tier": "attested"
-              }
             }
           }
         },
@@ -13988,90 +13560,6 @@
             "blocking",
             "best_effort"
           ]
-        },
-        "FinalVerificationPlan": {
-          "type": "object",
-          "properties": {
-            "version": {
-              "type": "integer",
-              "format": "int64",
-              "default": 1
-            },
-            "profile_id": {
-              "type": "string",
-              "default": ""
-            },
-            "profile_revision": {
-              "type": "integer",
-              "format": "int64",
-              "default": 0
-            },
-            "commands": {
-              "description": "Legacy flat declaration. New configurations must use `command_groups`\nand `selection_rules`; this remains readable so persisted rows can be\nmigrated without a flag day.",
-              "type": "array",
-              "items": {
-                "$ref": "#/$defs/FinalVerificationCommand"
-              }
-            },
-            "command_groups": {
-              "description": "Ordered command groups used by path selection in new declarations.",
-              "type": "array",
-              "items": {
-                "$ref": "#/$defs/FinalVerificationCommandGroup"
-              }
-            },
-            "selection_rules": {
-              "description": "Ordered path rules. A matching rule selects its named command groups.",
-              "type": "array",
-              "items": {
-                "$ref": "#/$defs/FinalVerificationSelectionRule"
-              }
-            },
-            "required_checks": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              },
-              "default": []
-            },
-            "input_manifest": {
-              "$ref": "#/$defs/VerificationInputManifest",
-              "default": {
-                "version": 1,
-                "repo_paths": [],
-                "environment_names": [],
-                "volatile_environment_names": []
-              }
-            },
-            "read_only_external_inputs": {
-              "type": "array",
-              "items": {
-                "$ref": "#/$defs/ExternalInputDeclaration"
-              },
-              "default": []
-            },
-            "output_only_globs": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              },
-              "default": []
-            },
-            "hermeticity": {
-              "$ref": "#/$defs/HermeticityDeclaration",
-              "default": {
-                "hermetic": false,
-                "reusable": false,
-                "network_access": false
-              }
-            },
-            "evidence_tier": {
-              "description": "What a recorded pass of this plan is worth. See\n[`VerificationEvidenceTier`]; the tier is identity material, so an\nattested pass and a recorded pass can never share a cache entry.",
-              "$ref": "#/$defs/VerificationEvidenceTier",
-              "default": "attested"
-            }
-          },
-          "additionalProperties": false
         },
         "FinalVerificationCommand": {
           "type": "object",
@@ -14522,27 +14010,7 @@
                 "post_build": [],
                 "pre_anything": [],
                 "pre_task": [],
-                "pre_verification": [],
-                "final_verification": {
-                  "version": 1,
-                  "profile_id": "",
-                  "profile_revision": 0,
-                  "required_checks": [],
-                  "input_manifest": {
-                    "version": 1,
-                    "repo_paths": [],
-                    "environment_names": [],
-                    "volatile_environment_names": []
-                  },
-                  "read_only_external_inputs": [],
-                  "output_only_globs": [],
-                  "hermeticity": {
-                    "hermetic": false,
-                    "reusable": false,
-                    "network_access": false
-                  },
-                  "evidence_tier": "attested"
-                }
+                "pre_verification": []
               }
             },
             "cargo_cache_policy": {
@@ -14881,30 +14349,6 @@
                 "$ref": "#/$defs/HookCommand"
               },
               "default": []
-            },
-            "final_verification": {
-              "description": "Authoritative post-authoring plan, distinct from setup-time hooks.",
-              "$ref": "#/$defs/FinalVerificationPlan",
-              "default": {
-                "version": 1,
-                "profile_id": "",
-                "profile_revision": 0,
-                "required_checks": [],
-                "input_manifest": {
-                  "version": 1,
-                  "repo_paths": [],
-                  "environment_names": [],
-                  "volatile_environment_names": []
-                },
-                "read_only_external_inputs": [],
-                "output_only_globs": [],
-                "hermeticity": {
-                  "hermetic": false,
-                  "reusable": false,
-                  "network_access": false
-                },
-                "evidence_tier": "attested"
-              }
             }
           }
         },
@@ -14966,90 +14410,6 @@
             "blocking",
             "best_effort"
           ]
-        },
-        "FinalVerificationPlan": {
-          "type": "object",
-          "properties": {
-            "version": {
-              "type": "integer",
-              "format": "int64",
-              "default": 1
-            },
-            "profile_id": {
-              "type": "string",
-              "default": ""
-            },
-            "profile_revision": {
-              "type": "integer",
-              "format": "int64",
-              "default": 0
-            },
-            "commands": {
-              "description": "Legacy flat declaration. New configurations must use `command_groups`\nand `selection_rules`; this remains readable so persisted rows can be\nmigrated without a flag day.",
-              "type": "array",
-              "items": {
-                "$ref": "#/$defs/FinalVerificationCommand"
-              }
-            },
-            "command_groups": {
-              "description": "Ordered command groups used by path selection in new declarations.",
-              "type": "array",
-              "items": {
-                "$ref": "#/$defs/FinalVerificationCommandGroup"
-              }
-            },
-            "selection_rules": {
-              "description": "Ordered path rules. A matching rule selects its named command groups.",
-              "type": "array",
-              "items": {
-                "$ref": "#/$defs/FinalVerificationSelectionRule"
-              }
-            },
-            "required_checks": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              },
-              "default": []
-            },
-            "input_manifest": {
-              "$ref": "#/$defs/VerificationInputManifest",
-              "default": {
-                "version": 1,
-                "repo_paths": [],
-                "environment_names": [],
-                "volatile_environment_names": []
-              }
-            },
-            "read_only_external_inputs": {
-              "type": "array",
-              "items": {
-                "$ref": "#/$defs/ExternalInputDeclaration"
-              },
-              "default": []
-            },
-            "output_only_globs": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              },
-              "default": []
-            },
-            "hermeticity": {
-              "$ref": "#/$defs/HermeticityDeclaration",
-              "default": {
-                "hermetic": false,
-                "reusable": false,
-                "network_access": false
-              }
-            },
-            "evidence_tier": {
-              "description": "What a recorded pass of this plan is worth. See\n[`VerificationEvidenceTier`]; the tier is identity material, so an\nattested pass and a recorded pass can never share a cache entry.",
-              "$ref": "#/$defs/VerificationEvidenceTier",
-              "default": "attested"
-            }
-          },
-          "additionalProperties": false
         },
         "FinalVerificationCommand": {
           "type": "object",
@@ -15474,27 +14834,7 @@
                 "post_build": [],
                 "pre_anything": [],
                 "pre_task": [],
-                "pre_verification": [],
-                "final_verification": {
-                  "version": 1,
-                  "profile_id": "",
-                  "profile_revision": 0,
-                  "required_checks": [],
-                  "input_manifest": {
-                    "version": 1,
-                    "repo_paths": [],
-                    "environment_names": [],
-                    "volatile_environment_names": []
-                  },
-                  "read_only_external_inputs": [],
-                  "output_only_globs": [],
-                  "hermeticity": {
-                    "hermetic": false,
-                    "reusable": false,
-                    "network_access": false
-                  },
-                  "evidence_tier": "attested"
-                }
+                "pre_verification": []
               }
             },
             "cargo_cache_policy": {
@@ -15833,30 +15173,6 @@
                 "$ref": "#/$defs/HookCommand"
               },
               "default": []
-            },
-            "final_verification": {
-              "description": "Authoritative post-authoring plan, distinct from setup-time hooks.",
-              "$ref": "#/$defs/FinalVerificationPlan",
-              "default": {
-                "version": 1,
-                "profile_id": "",
-                "profile_revision": 0,
-                "required_checks": [],
-                "input_manifest": {
-                  "version": 1,
-                  "repo_paths": [],
-                  "environment_names": [],
-                  "volatile_environment_names": []
-                },
-                "read_only_external_inputs": [],
-                "output_only_globs": [],
-                "hermeticity": {
-                  "hermetic": false,
-                  "reusable": false,
-                  "network_access": false
-                },
-                "evidence_tier": "attested"
-              }
             }
           }
         },
@@ -15918,90 +15234,6 @@
             "blocking",
             "best_effort"
           ]
-        },
-        "FinalVerificationPlan": {
-          "type": "object",
-          "properties": {
-            "version": {
-              "type": "integer",
-              "format": "int64",
-              "default": 1
-            },
-            "profile_id": {
-              "type": "string",
-              "default": ""
-            },
-            "profile_revision": {
-              "type": "integer",
-              "format": "int64",
-              "default": 0
-            },
-            "commands": {
-              "description": "Legacy flat declaration. New configurations must use `command_groups`\nand `selection_rules`; this remains readable so persisted rows can be\nmigrated without a flag day.",
-              "type": "array",
-              "items": {
-                "$ref": "#/$defs/FinalVerificationCommand"
-              }
-            },
-            "command_groups": {
-              "description": "Ordered command groups used by path selection in new declarations.",
-              "type": "array",
-              "items": {
-                "$ref": "#/$defs/FinalVerificationCommandGroup"
-              }
-            },
-            "selection_rules": {
-              "description": "Ordered path rules. A matching rule selects its named command groups.",
-              "type": "array",
-              "items": {
-                "$ref": "#/$defs/FinalVerificationSelectionRule"
-              }
-            },
-            "required_checks": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              },
-              "default": []
-            },
-            "input_manifest": {
-              "$ref": "#/$defs/VerificationInputManifest",
-              "default": {
-                "version": 1,
-                "repo_paths": [],
-                "environment_names": [],
-                "volatile_environment_names": []
-              }
-            },
-            "read_only_external_inputs": {
-              "type": "array",
-              "items": {
-                "$ref": "#/$defs/ExternalInputDeclaration"
-              },
-              "default": []
-            },
-            "output_only_globs": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              },
-              "default": []
-            },
-            "hermeticity": {
-              "$ref": "#/$defs/HermeticityDeclaration",
-              "default": {
-                "hermetic": false,
-                "reusable": false,
-                "network_access": false
-              }
-            },
-            "evidence_tier": {
-              "description": "What a recorded pass of this plan is worth. See\n[`VerificationEvidenceTier`]; the tier is identity material, so an\nattested pass and a recorded pass can never share a cache entry.",
-              "$ref": "#/$defs/VerificationEvidenceTier",
-              "default": "attested"
-            }
-          },
-          "additionalProperties": false
         },
         "FinalVerificationCommand": {
           "type": "object",

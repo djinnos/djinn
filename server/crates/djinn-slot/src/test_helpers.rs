@@ -398,141 +398,7 @@ mod externalization_seam_tests {
     }
 
     #[test]
-    fn mock_externalize_escapes_header_values() {
-        let dispatcher: Arc<dyn SlotToolDispatcher> = Arc::new(MockToolDispatcher);
-        let rendered = "0123456789".repeat(80);
 
-        let stub =
-            dispatcher.externalize_rendered_result("call-\\\"é", "tool-\\\"name", &rendered, 12);
-
-        assert!(stub.starts_with(
-            "[djinn-output-stash tool_use_id=\"call-\\\\\\\"é\" tool_name=\"tool-\\\\\\\"name\" reason=\"turn_budget\""
-        ));
-    }
-}
-
-/// Map a `StageOutcome` to `(SessionStatus, Option<park_reason>)`.
-///
-/// Slot-local copy of the agent's `session_settlement_for_stage_outcome` so
-/// reply-loop tests can exercise budget-park settlement without depending on
-/// `djinn-agent`.
-pub fn test_session_settlement_for_stage_outcome(
-    stage_outcome: &djinn_supervisor::StageOutcome,
-    final_result_ok: bool,
-) -> (djinn_core::models::SessionStatus, Option<String>) {
-    use djinn_core::models::SessionStatus;
-    use djinn_supervisor::{ParkReason, StageOutcome};
-    match stage_outcome {
-        StageOutcome::Parked {
-            reason: ParkReason::Budget,
-            ..
-        } => (SessionStatus::Completed, Some("budget".to_string())),
-        _ if final_result_ok => (SessionStatus::Completed, None),
-        _ => (SessionStatus::Failed, None),
-    }
-}
-
-pub fn create_test_db() -> Database {
-    Database::open_in_memory().expect("open in-memory test database")
-}
-
-/// Cheap `SupervisorServices` stub for tests that exercise non-host-bound tool
-/// paths. This mirrors the agent test helper without pulling in any
-/// `djinn-agent`-only state.
-pub fn test_services() -> djinn_supervisor::services::rpc::UnimplementedRpcServices {
-    djinn_supervisor::services::rpc::UnimplementedRpcServices::new()
-}
-
-pub fn test_events() -> EventBus {
-    EventBus::noop()
-}
-
-pub fn test_tempdir(prefix: &str) -> tempfile::TempDir {
-    tempfile::Builder::new()
-        .prefix(prefix)
-        .tempdir()
-        .expect("failed to create tempdir")
-}
-
-pub fn test_path(prefix: &str) -> std::path::PathBuf {
-    test_tempdir(prefix).keep()
-}
-
-pub fn agent_context_from_db(db: Database, _cancel: CancellationToken) -> SlotContext {
-    agent_context_from_db_with_dispatcher(db, _cancel, Some(Arc::new(MockToolDispatcher)))
-}
-
-/// Build a `SlotContext` from an in-memory DB with custom host callbacks.
-/// This lets tests override final-verification resolution and lease behavior
-/// without going through the production `AgentHostCallbacks`.
-pub fn agent_context_from_db_with_callbacks(
-    db: Database,
-    callbacks: Arc<dyn crate::host::SlotHostCallbacks>,
-) -> SlotContext {
-    let event_bus = test_events();
-    let catalog = djinn_provider::catalog::CatalogService::new();
-    let health_tracker = djinn_provider::catalog::HealthTracker::default();
-    let background_work =
-        std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
-    let active_tasks = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
-    SlotContext {
-        db,
-        event_bus,
-        catalog,
-        health_tracker,
-        background_work_tasks: background_work,
-        active_tasks,
-        default_project_id: None,
-        working_root: None,
-        coordinator_trigger: None,
-        runtime_ops: None,
-        repo_graph_ops: None,
-        clock: std::sync::Arc::new(djinn_core::clock::SystemClock::new()),
-        callbacks,
-        tool_dispatcher: Some(Arc::new(MockToolDispatcher)),
-        compaction_cs: CompactionCriticalSection::new(),
-    }
-}
-
-/// Build a `SlotContext` from an in-memory DB with an explicit tool dispatcher.
-/// Pass `None` for `tool_dispatcher` to test the "no dispatcher" error path.
-pub fn agent_context_from_db_with_dispatcher(
-    db: Database,
-    _cancel: CancellationToken,
-    tool_dispatcher: Option<Arc<dyn SlotToolDispatcher>>,
-) -> SlotContext {
-    let event_bus = test_events();
-    let catalog = djinn_provider::catalog::CatalogService::new();
-    let health_tracker = djinn_provider::catalog::HealthTracker::default();
-    let background_work =
-        std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
-    let active_tasks = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
-    // No-op host callbacks for tests
-    struct NoopCallbacks;
-    impl crate::host::SlotHostCallbacks for NoopCallbacks {
-        fn final_verification_outcome_for_test(
-            &self,
-            _request: &crate::final_verification::FinalVerificationCoordinatorRequest,
-        ) -> Option<crate::final_verification::FinalVerificationRecordingOutcome> {
-            Some(
-                crate::final_verification::FinalVerificationRecordingOutcome::Stored {
-                    verification_attempt_id: uuid::Uuid::now_v7().to_string(),
-                    verify_run_id: uuid::Uuid::now_v7().to_string(),
-                    evidence: Box::new(
-                        crate::final_verification::FinalVerificationSuccessEvidence {
-                            persisted_run_id: uuid::Uuid::now_v7().to_string(),
-                            completed_at: "2025-01-01T00:00:00Z".to_owned(),
-                            ordered_commands: serde_json::json!([]),
-                            covered_checks: serde_json::json!([]),
-                            required_checks: vec![],
-                            verification_input_fingerprint: "test-fingerprint".to_owned(),
-                            manifest_version: "manifest-v1".to_owned(),
-                            environment_identity_digest: "test-identity".to_owned(),
-                        },
-                    ),
-                },
-            )
-        }
 
         fn interrupt_paused_worker_session<'a>(
             &'a self,
@@ -763,7 +629,6 @@ pub async fn seed_context_fixture() -> ContextFixture {
     let task = create_test_task(&db, &project.id, &epic.id).await;
     // Create a task run so the C2 validation boundary can resolve an active
     // task_run_id. Without this, validate_or_reverify_completion_intent
-    // errors before reaching the test-injected final_verification_outcome.
     djinn_db::repositories::task_run::TaskRunRepository::new(db.clone())
         .create(djinn_db::repositories::task_run::CreateTaskRunParams {
             id: &uuid::Uuid::now_v7().to_string(),

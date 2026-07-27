@@ -1,13 +1,11 @@
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
 
 use crate::context::AgentContext;
 use djinn_supervisor::SupervisorServices;
 
 use super::adapter::{
-    AgentHostCallbacks, HostFinalVerificationLease, agent_credential_to_slot, build_slot_context,
-    resolve_final_verification_for_task_run,
+    AgentHostCallbacks, agent_credential_to_slot, build_slot_context,
 };
 
 /// Build a dispatch-pathway [`djinn_slot::host::SlotContext`] from an [`AgentContext`].
@@ -39,96 +37,6 @@ pub(crate) fn agent_to_reply_loop_slot_context(
 }
 
 impl djinn_slot::host::SlotHostCallbacks for AgentHostCallbacks {
-    fn run_agent_verification<'a>(
-        &'a self,
-        task_id: &'a str,
-        role_name: &'a str,
-        _arguments: Option<serde_json::Map<String, serde_json::Value>>,
-        cancellation: tokio_util::sync::CancellationToken,
-        ctx: &'a djinn_slot::host::SlotContext,
-    ) -> Pin<Box<dyn Future<Output = serde_json::Value> + Send + 'a>> {
-        let limiter = Arc::clone(&self.run_verification_limiter);
-        Box::pin(async move {
-            crate::extension::handlers::verification::run_verification(
-                &limiter,
-                task_id,
-                role_name,
-                cancellation,
-                ctx,
-            )
-            .await
-        })
-    }
-    fn resolve_final_verification<'a>(
-        &'a self,
-        _task_id: &'a str,
-        task_run_id: &'a str,
-        _attempt: &'a str,
-        _verify_run: &'a str,
-        _ctx: &'a djinn_slot::host::SlotContext,
-    ) -> Pin<
-        Box<
-            dyn Future<
-                    Output = Result<
-                        Option<djinn_slot::final_verification::FinalVerificationResolvedMaterial>,
-                        String,
-                    >,
-                > + Send
-                + 'a,
-        >,
-    > {
-        let db = self.agent.db.clone();
-        let id = task_run_id.to_owned();
-        #[cfg(test)]
-        let probe = self.probe.clone();
-        Box::pin(async move {
-            #[cfg(test)]
-            if let Some(probe) = &probe {
-                probe
-                    .resolver_calls
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            }
-            resolve_final_verification_for_task_run(&db, &id).await
-        })
-    }
-    fn acquire_final_verification_lease<'a>(
-        &'a self,
-        _task_id: &'a str,
-        _task_run_id: &'a str,
-        attempt: &'a str,
-        ctx: &'a djinn_slot::host::SlotContext,
-    ) -> Pin<
-        Box<
-            dyn Future<
-                    Output = Result<
-                        Box<dyn djinn_slot::final_verification::FinalVerificationInvocationLease>,
-                        String,
-                    >,
-                > + Send
-                + 'a,
-        >,
-    > {
-        let db = ctx.db.clone();
-        let attempt = attempt.to_owned();
-        #[cfg(test)]
-        let probe = self.probe.clone();
-        Box::pin(async move {
-            #[cfg(test)]
-            if let Some(probe) = &probe {
-                probe
-                    .lease_requests
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            }
-            let lease = HostFinalVerificationLease::acquire(&db, &attempt).await?;
-            #[cfg(test)]
-            if let Some(probe) = &probe {
-                probe
-                    .lease_acquisitions
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            }
-            Ok(lease)
-        })
-    }
     fn interrupt_paused_worker_session<'a>(
         &'a self,
         _task_id: &'a str,
@@ -275,68 +183,5 @@ impl djinn_slot::host::SlotHostCallbacks for AgentHostCallbacks {
             }),
             None => Box::pin(async { Ok(()) }),
         }
-    }
-    #[cfg(test)]
-    fn final_verification_outcome_for_test(
-        &self,
-        _request: &djinn_slot::final_verification::FinalVerificationCoordinatorRequest,
-    ) -> Option<djinn_slot::final_verification::FinalVerificationRecordingOutcome> {
-        // When the observation probe is present, decline the terminal test
-        // shortcut so the coordinator reaches the real repository-backed
-        // resolver. The shortcut counter stays at its default 0 because this
-        // early return never enters the synthetic branch, so `0` is an explicit
-        // assertion that the shortcut did not decide the coordinator regression.
-        if self.probe.is_some() {
-            return None;
-        }
-        Some(
-            djinn_slot::final_verification::FinalVerificationRecordingOutcome::Stored {
-                verification_attempt_id: uuid::Uuid::now_v7().to_string(),
-                verify_run_id: uuid::Uuid::now_v7().to_string(),
-                evidence: Box::new(
-                    djinn_slot::final_verification::FinalVerificationSuccessEvidence {
-                        persisted_run_id: uuid::Uuid::now_v7().to_string(),
-                        completed_at: "2025-01-01T00:00:00Z".to_owned(),
-                        ordered_commands: serde_json::json!([]),
-                        covered_checks: serde_json::json!([]),
-                        required_checks: vec![],
-                        verification_input_fingerprint: "test-fingerprint".to_owned(),
-                        manifest_version: "manifest-v1".to_owned(),
-                        environment_identity_digest: "test-identity".to_owned(),
-                    },
-                ),
-            },
-        )
-    }
-    #[cfg(test)]
-    fn record_final_verification_consultation_outcome_for_test(
-        &self,
-        outcome: &'static str,
-        reason: &'static str,
-    ) {
-        if let Some(probe) = &self.probe {
-            probe
-                .consultation_outcomes
-                .lock()
-                .expect("consultation probe mutex not poisoned")
-                .push((outcome, reason));
-        }
-    }
-    #[cfg(test)]
-    fn final_verification_evidence_for_test(
-        &self,
-        _request: &djinn_slot::final_verification::FinalVerificationCoordinatorRequest,
-    ) -> Option<djinn_sandbox::final_verification_execution::FinalVerificationExecutionEvidence>
-    {
-        if let Some(probe) = &self.probe {
-            // The expected resolver error makes the coordinator return before the
-            // canonical execution checkpoint, so this must never be reached.
-            // Incrementing here converts any unexpected traversal into a
-            // countable assertion failure rather than injecting passing evidence.
-            probe
-                .canonical_execution_requests
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        }
-        None
     }
 }

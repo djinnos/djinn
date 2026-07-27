@@ -143,7 +143,7 @@ pub async fn environment_config_for_path(db: &Database, worktree_path: &Path) ->
 ///
 /// Bundling both lets callers that need the project id *and* the config (e.g.
 /// the build-drift soft gate, which folds the project id into its deny key and
-/// reads `lifecycle.final_verification.command_groups` from the config) do a
+/// reads the lifecycle configuration from the config) do a
 /// single project-id resolution instead of two.
 pub struct ResolvedProjectEnvironment {
     /// The resolved owning project id, or `None` when the path matches no row.
