@@ -647,6 +647,29 @@ async fn lifecycle_reads_claim_polling_and_progress_obey_heartbeat_boundaries() 
         .unwrap()
         .is_none()
     );
+    // The holder renews its own still-valid claim. Without this, expiry is a
+    // precondition of renewal: a live owner would have to let its only piece of
+    // liveness evidence lapse before it could take it again, and the run is
+    // reapable for the whole span in between.
+    let renewed = repo
+        .claim_refinement_intent(ClaimRefinementIntentRequest {
+            run_id: run_id.clone(),
+            intent_id: intent_id.clone(),
+            generation: 1,
+            owner: "first-owner".into(),
+            lease_millis: 180_000,
+        })
+        .await
+        .unwrap()
+        .expect("the holder renews its own unexpired claim");
+    assert_eq!(renewed.owner, "first-owner");
+    assert!(
+        renewed.expires_at.0 > lease.expires_at.0 + 60_000,
+        "renewal must extend the lease from now, not leave the original deadline: \
+         {:?} vs {:?}",
+        renewed.expires_at,
+        lease.expires_at
+    );
     assert!(
         repo.release_refinement_intent_claim(ReleaseRefinementIntentClaimRequest {
             run_id: run_id.clone(),

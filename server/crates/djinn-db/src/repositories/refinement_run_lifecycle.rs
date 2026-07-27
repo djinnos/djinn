@@ -582,7 +582,24 @@ impl ProposalRepository {
             .await
     }
 
-    /// CAS claim pending or DB-time-expired work. Polling does not advance heartbeat.
+    /// CAS claim pending or DB-time-expired work, **or renew a claim this owner
+    /// already holds**. Polling does not advance heartbeat.
+    ///
+    /// The renewal arm is load-bearing, not a convenience. An unexpired claim is
+    /// the only liveness evidence an intent has between `claimed` and
+    /// `materialized`, and the durable poll is the only thing that can refresh
+    /// it. Without a same-owner arm, expiry is a *precondition* of re-claiming:
+    /// the holder cannot extend a lease it still holds, so the lease must first
+    /// lapse — and for the whole span between that lapse and the next poll the
+    /// live run matches no evidence class in `evaluate_refinement_liveness` and
+    /// `reap_and_admit` terminalizes it as `reaped_phantom`. That window exists
+    /// for ANY lease length, so it cannot be closed by lengthening the lease;
+    /// only renewing before expiry closes it.
+    ///
+    /// Mutual exclusion is unaffected: the new arm matches solely on
+    /// `claimed_by = owner`, so a foreign coordinator still cannot take an
+    /// unexpired claim. `claimed_at` is preserved across a renewal so it keeps
+    /// meaning "when this owner first took the claim".
     pub async fn claim_refinement_intent(
         &self,
         request: ClaimRefinementIntentRequest,
@@ -599,7 +616,7 @@ impl ProposalRepository {
             ));
         }
         self.db().ensure_initialized().await?;
-        let row = sqlx::query("UPDATE refinement_dispatch_intents i SET state = 'claimed', claimed_by = $4, claimed_at = to_char(transaction_timestamp() AT TIME ZONE 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'), claim_expires_at = to_char((transaction_timestamp() + ($5 * interval '1 millisecond')) AT TIME ZONE 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'), updated_at = to_char(transaction_timestamp() AT TIME ZONE 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') FROM refinement_runs r WHERE i.id = $2 AND i.run_id = $1 AND r.id = i.run_id AND r.generation = $3 AND r.state = 'running' AND (i.state = 'pending' OR (i.state = 'claimed' AND i.claim_expires_at::timestamptz <= transaction_timestamp())) RETURNING i.id, i.run_id, r.generation, i.round, i.phase, i.role, i.claimed_by, i.claim_expires_at").bind(&request.run_id).bind(&request.intent_id).bind(request.generation).bind(&request.owner).bind(request.lease_millis).fetch_optional(self.db().pool()).await?;
+        let row = sqlx::query("UPDATE refinement_dispatch_intents i SET state = 'claimed', claimed_by = $4, claimed_at = CASE WHEN i.state = 'claimed' AND i.claimed_by = $4 AND i.claim_expires_at::timestamptz > transaction_timestamp() THEN i.claimed_at ELSE to_char(transaction_timestamp() AT TIME ZONE 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') END, claim_expires_at = to_char((transaction_timestamp() + ($5 * interval '1 millisecond')) AT TIME ZONE 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'), updated_at = to_char(transaction_timestamp() AT TIME ZONE 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') FROM refinement_runs r WHERE i.id = $2 AND i.run_id = $1 AND r.id = i.run_id AND r.generation = $3 AND r.state = 'running' AND (i.state = 'pending' OR (i.state = 'claimed' AND (i.claimed_by = $4 OR i.claim_expires_at::timestamptz <= transaction_timestamp()))) RETURNING i.id, i.run_id, r.generation, i.round, i.phase, i.role, i.claimed_by, i.claim_expires_at").bind(&request.run_id).bind(&request.intent_id).bind(request.generation).bind(&request.owner).bind(request.lease_millis).fetch_optional(self.db().pool()).await?;
         row.map(lease_row).transpose()
     }
 
