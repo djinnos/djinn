@@ -708,23 +708,53 @@ impl CoordinatorActor {
                 ci_failure_sections.join("\n")
             )
         };
-        let comment_body = format!("**PR CI Escalation**: {reason}{sections_text}\n\nPR: {pr_url}");
-        let comment_payload = serde_json::json!({ "body": comment_body }).to_string();
-        if let Err(e) = task_repo
-            .log_activity(
-                Some(&task.id),
-                "coordinator",
-                "system",
-                "comment",
-                &comment_payload,
-            )
+        let escalation_head_sha = task
+            .ci_github_head_sha
+            .as_deref()
+            .or(task.ci_head_sha.as_deref())
+            .unwrap_or("unknown");
+        let comment_already_logged = task_repo
+            .list_activity(&task.id)
             .await
-        {
-            tracing::warn!(
-                task_id = %task.short_id,
-                error = %e,
-                "PR poller: failed to log CI escalation comment"
-            );
+            .map(|entries| {
+                entries.iter().any(|entry| {
+                    entry.event_type == "comment"
+                        && serde_json::from_str::<serde_json::Value>(&entry.payload)
+                            .ok()
+                            .and_then(|payload| {
+                                payload
+                                    .get("escalation_head_sha")
+                                    .and_then(|value| value.as_str())
+                                    .map(|sha| sha == escalation_head_sha)
+                            })
+                            .unwrap_or(false)
+                })
+            })
+            .unwrap_or(false);
+        if !comment_already_logged {
+            let comment_body =
+                format!("**PR CI Escalation**: {reason}{sections_text}\n\nPR: {pr_url}");
+            let comment_payload = serde_json::json!({
+                "body": comment_body,
+                "escalation_head_sha": escalation_head_sha,
+            })
+            .to_string();
+            if let Err(e) = task_repo
+                .log_activity(
+                    Some(&task.id),
+                    "coordinator",
+                    "system",
+                    "comment",
+                    &comment_payload,
+                )
+                .await
+            {
+                tracing::warn!(
+                    task_id = %task.short_id,
+                    error = %e,
+                    "PR poller: failed to log CI escalation comment"
+                );
+            }
         }
 
         // Route the CI-loop park through the autonomous escalation ladder: a
