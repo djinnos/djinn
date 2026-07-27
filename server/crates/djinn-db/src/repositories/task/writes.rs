@@ -17,11 +17,18 @@ pub(crate) async fn create_readiness_area_analysis_task_in_transaction(
     input: ReadinessAreaAnalysisTask<'_>,
 ) -> Result<Task> {
     let created_by_user_id = resolve_effective_creator(
-        tx, EffectiveCreatorProvenance::explicit_user_id(input.creator_user_id), None,
-    ).await?;
+        tx,
+        EffectiveCreatorProvenance::explicit_user_id(input.creator_user_id),
+        None,
+    )
+    .await?;
     let execution_context = serde_json::to_value(
-        djinn_core::models::TaskExecutionContext::readiness_guardrail_analysis(input.skill_name, input.skill_version)?,
-    ).map_err(|error| Error::InvalidData(format!("invalid task execution context: {error}")))?;
+        djinn_core::models::TaskExecutionContext::readiness_guardrail_analysis(
+            input.skill_name,
+            input.skill_version,
+        )?,
+    )
+    .map_err(|error| Error::InvalidData(format!("invalid task execution context: {error}")))?;
     let description = serde_json::json!({
         "kind":"readiness_area_analysis", "run_id":input.run_id, "area_id":input.area_id,
         "area_key":input.area_key, "attempt_id":input.attempt_id, "attempt_number":input.attempt_number,
@@ -31,16 +38,23 @@ pub(crate) async fn create_readiness_area_analysis_task_in_transaction(
     }).to_string();
     for _ in 0..16 {
         let id = uuid::Uuid::now_v7().to_string();
-        let seed = uuid::Uuid::parse_str(&id).map_err(|error| Error::Internal(error.to_string()))?;
+        let seed =
+            uuid::Uuid::parse_str(&id).map_err(|error| Error::Internal(error.to_string()))?;
         let short_id = short_id_from_uuid(&seed);
         let exists: Option<i32> = sqlx::query_scalar("SELECT 1 FROM tasks WHERE short_id = $1")
-            .bind(&short_id).fetch_optional(&mut **tx).await?;
-        if exists.is_some() { continue; }
+            .bind(&short_id)
+            .fetch_optional(&mut **tx)
+            .await?;
+        if exists.is_some() {
+            continue;
+        }
         sqlx::query("INSERT INTO tasks (id, project_id, short_id, title, description, design, issue_type, priority, owner, status, acceptance_criteria, agent_type, execution_context, created_by_user_id) VALUES ($1,$2,$3,$4,$5,'','task',0,$6,'open','[]'::jsonb,'architect',$7,$8)")
             .bind(&id).bind(input.project_id).bind(&short_id).bind(format!("Analyze readiness area: {}", input.area_key)).bind(&description).bind(input.creator_user_id).bind(execution_context).bind(created_by_user_id).execute(&mut **tx).await?;
         return load_task_in_transaction(tx, &id).await;
     }
-    Err(Error::Internal("short_id collision after 16 retries".into()))
+    Err(Error::Internal(
+        "short_id collision after 16 retries".into(),
+    ))
 }
 
 /// Facts for the one Architect task that identifies readiness composition.

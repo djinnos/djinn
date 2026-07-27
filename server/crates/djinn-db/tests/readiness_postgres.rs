@@ -10,8 +10,9 @@ use djinn_core::models::TaskExecutionContext;
 use djinn_db::{
     Database, UserRepository,
     repositories::readiness::{
-        CreateReadinessRun, MaterializeReadinessKickoff, ReadinessIdentificationOutput,
-        ReadinessAreaResultCallback, ReadinessCallbackOutcome, ReadinessIdentifiedArea, ReadinessRepository, RetryReadinessAreaAttempt,
+        CreateReadinessRun, MaterializeReadinessKickoff, ReadinessAreaResultCallback,
+        ReadinessCallbackOutcome, ReadinessIdentificationOutput, ReadinessIdentifiedArea,
+        ReadinessRepository, RetryReadinessAreaAttempt,
     },
 };
 use sqlx::postgres::PgConnection;
@@ -302,7 +303,6 @@ async fn identification_fanout_database_failure_rolls_back_every_artifact() {
     assert_eq!(run, ("identifying".into(), None));
 }
 
-
 #[tokio::test]
 async fn area_callback_redelivery_conflict_and_retry_are_postgres_transactional() {
     let db = Database::ephemeral().await.expect("postgres");
@@ -310,28 +310,202 @@ async fn area_callback_redelivery_conflict_and_retry_are_postgres_transactional(
     djinn_db::test_support::seed_project(&db, project, project).await;
     let creator = seed_user(&db, 155_006, "readiness-area-callback").await;
     let repo = ReadinessRepository::new(db.clone());
-    let kickoff = repo.materialize_kickoff(kickoff_input(project, &creator, "callback")).await.expect("kickoff");
-    let fanout = repo.complete_identification(&kickoff.run.id, &creator, identification_output()).await.expect("fanout");
+    let kickoff = repo
+        .materialize_kickoff(kickoff_input(project, &creator, "callback"))
+        .await
+        .expect("kickoff");
+    let fanout = repo
+        .complete_identification(&kickoff.run.id, &creator, identification_output())
+        .await
+        .expect("fanout");
     let first = &fanout[0];
-    let callback = ReadinessAreaResultCallback { run_id: kickoff.run.id.clone(), area_id: first.area.id.clone(), attempt_id: first.attempt.id.clone(), correlation_key: first.attempt.correlation_key.clone(), task_id: first.task.id.clone(), status: "succeeded".into(), result: callback_result() };
-    assert_eq!(repo.ingest_area_result(callback.clone()).await.expect("accepted"), ReadinessCallbackOutcome::Accepted);
-    assert_eq!(repo.ingest_area_result(callback.clone()).await.expect("same digest"), ReadinessCallbackOutcome::Redelivered);
-    let mut changed = callback.clone(); changed.result["findings"][0]["guardrail_key"] = serde_json::json!("changed");
-    assert_eq!(repo.ingest_area_result(changed).await.expect("conflict"), ReadinessCallbackOutcome::Conflict);
-    let findings: i64 = sqlx::query_scalar("SELECT count(*) FROM readiness_guardrail_findings WHERE attempt_id=$1").bind(&first.attempt.id).fetch_one(db.pool()).await.expect("findings");
-    assert_eq!(findings, 1, "same digest redelivery never duplicates findings");
+    let callback = ReadinessAreaResultCallback {
+        run_id: kickoff.run.id.clone(),
+        area_id: first.area.id.clone(),
+        attempt_id: first.attempt.id.clone(),
+        correlation_key: first.attempt.correlation_key.clone(),
+        task_id: first.task.id.clone(),
+        status: "succeeded".into(),
+        result: callback_result(),
+    };
+    assert_eq!(
+        repo.ingest_area_result(callback.clone())
+            .await
+            .expect("accepted"),
+        ReadinessCallbackOutcome::Accepted
+    );
+    assert_eq!(
+        repo.ingest_area_result(callback.clone())
+            .await
+            .expect("same digest"),
+        ReadinessCallbackOutcome::Redelivered
+    );
+    let mut changed = callback.clone();
+    changed.result["findings"][0]["guardrail_key"] = serde_json::json!("changed");
+    assert_eq!(
+        repo.ingest_area_result(changed).await.expect("conflict"),
+        ReadinessCallbackOutcome::Conflict
+    );
+    let findings: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM readiness_guardrail_findings WHERE attempt_id=$1")
+            .bind(&first.attempt.id)
+            .fetch_one(db.pool())
+            .await
+            .expect("findings");
+    assert_eq!(
+        findings, 1,
+        "same digest redelivery never duplicates findings"
+    );
+    let finding: (f64, serde_json::Value) = sqlx::query_as(
+        "SELECT confidence,evidence FROM readiness_guardrail_findings WHERE attempt_id=$1",
+    )
+    .bind(&first.attempt.id)
+    .fetch_one(db.pool())
+    .await
+    .expect("complete accepted finding");
+    assert_eq!(finding, (0.9, serde_json::json!([{"path":"src/auth.rs"}])));
 
     let second = &fanout[1];
-    let timeout = ReadinessAreaResultCallback { run_id: kickoff.run.id.clone(), area_id: second.area.id.clone(), attempt_id: second.attempt.id.clone(), correlation_key: second.attempt.correlation_key.clone(), task_id: second.task.id.clone(), status: "timed_out".into(), result: serde_json::json!({}) };
-    assert_eq!(repo.ingest_area_result(timeout).await.expect("timeout"), ReadinessCallbackOutcome::Accepted);
-    let retry = repo.retry_area_attempt(RetryReadinessAreaAttempt { run_id: kickoff.run.id.clone(), area_id: second.area.id.clone(), creator_user_id: creator }).await.expect("retry");
+    let timeout = ReadinessAreaResultCallback {
+        run_id: kickoff.run.id.clone(),
+        area_id: second.area.id.clone(),
+        attempt_id: second.attempt.id.clone(),
+        correlation_key: second.attempt.correlation_key.clone(),
+        task_id: second.task.id.clone(),
+        status: "timed_out".into(),
+        result: serde_json::json!({}),
+    };
+    assert_eq!(
+        repo.ingest_area_result(timeout).await.expect("timeout"),
+        ReadinessCallbackOutcome::Accepted
+    );
+    let retry = repo
+        .retry_area_attempt(RetryReadinessAreaAttempt {
+            run_id: kickoff.run.id.clone(),
+            area_id: second.area.id.clone(),
+            creator_user_id: creator,
+        })
+        .await
+        .expect("retry");
     assert_eq!(retry.attempt.attempt_number, 2);
-    assert_ne!(retry.attempt.correlation_key, second.attempt.correlation_key);
-    let late = ReadinessAreaResultCallback { run_id: kickoff.run.id.clone(), area_id: second.area.id.clone(), attempt_id: second.attempt.id.clone(), correlation_key: second.attempt.correlation_key.clone(), task_id: second.task.id.clone(), status: "succeeded".into(), result: callback_result() };
-    assert_eq!(repo.ingest_area_result(late).await.expect("late"), ReadinessCallbackOutcome::Ignored);
+    assert_ne!(
+        retry.attempt.correlation_key,
+        second.attempt.correlation_key
+    );
+    let late = ReadinessAreaResultCallback {
+        run_id: kickoff.run.id.clone(),
+        area_id: second.area.id.clone(),
+        attempt_id: second.attempt.id.clone(),
+        correlation_key: second.attempt.correlation_key.clone(),
+        task_id: second.task.id.clone(),
+        status: "succeeded".into(),
+        result: callback_result(),
+    };
+    assert_eq!(
+        repo.ingest_area_result(late).await.expect("late"),
+        ReadinessCallbackOutcome::Ignored
+    );
 }
 
-fn callback_result() -> serde_json::Value { serde_json::json!({"findings":[{"guardrail_key":"auth","severity":"high","confidence":0.9,"evidence":[{"path":"src/auth.rs"}]}],"unsupported":[{"reason":"fixture"}],"warnings":[{"warning":"fixture"}],"remediation_suggestions":[{"dedupe_key":"auth","action":"fix"}]}) }
+fn callback_result() -> serde_json::Value {
+    serde_json::json!({"findings":[{"guardrail_key":"auth","severity":"high","confidence":0.9,"evidence":[{"path":"src/auth.rs"}]}],"unsupported":[{"reason":"fixture"}],"warnings":[{"warning":"fixture"}],"remediation_suggestions":[{"dedupe_key":"auth","action":"fix"}]})
+}
+
+#[tokio::test]
+async fn area_callback_timeout_success_race_and_invalid_output_are_postgres_transactional() {
+    let db = Database::ephemeral().await.expect("postgres");
+    let project = "readiness-area-race";
+    djinn_db::test_support::seed_project(&db, project, project).await;
+    let creator = seed_user(&db, 155_007, "readiness-area-race").await;
+    let repo = ReadinessRepository::new(db.clone());
+    let kickoff = repo
+        .materialize_kickoff(kickoff_input(project, &creator, "race"))
+        .await
+        .expect("kickoff");
+    let fanout = repo
+        .complete_identification(&kickoff.run.id, &creator, identification_output())
+        .await
+        .expect("fanout");
+    let race = &fanout[0];
+    let success = ReadinessAreaResultCallback {
+        run_id: kickoff.run.id.clone(),
+        area_id: race.area.id.clone(),
+        attempt_id: race.attempt.id.clone(),
+        correlation_key: race.attempt.correlation_key.clone(),
+        task_id: race.task.id.clone(),
+        status: "succeeded".into(),
+        result: callback_result(),
+    };
+    let timeout = ReadinessAreaResultCallback {
+        run_id: kickoff.run.id.clone(),
+        area_id: race.area.id.clone(),
+        attempt_id: race.attempt.id.clone(),
+        correlation_key: race.attempt.correlation_key.clone(),
+        task_id: race.task.id.clone(),
+        status: "timed_out".into(),
+        result: serde_json::json!({}),
+    };
+    let left_repo = ReadinessRepository::new(db.clone());
+    let right_repo = ReadinessRepository::new(db.clone());
+    let (left, right) = tokio::join!(
+        left_repo.ingest_area_result(success),
+        right_repo.ingest_area_result(timeout)
+    );
+    let outcomes = [
+        left.expect("success callback"),
+        right.expect("timeout callback"),
+    ];
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|outcome| **outcome == ReadinessCallbackOutcome::Accepted)
+            .count(),
+        1
+    );
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|outcome| **outcome == ReadinessCallbackOutcome::Conflict)
+            .count(),
+        1
+    );
+    let terminal: String =
+        sqlx::query_scalar("SELECT status FROM readiness_area_attempts WHERE id=$1")
+            .bind(&race.attempt.id)
+            .fetch_one(db.pool())
+            .await
+            .expect("terminal status");
+    let findings: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM readiness_guardrail_findings WHERE attempt_id=$1")
+            .bind(&race.attempt.id)
+            .fetch_one(db.pool())
+            .await
+            .expect("findings");
+    assert_eq!(
+        findings,
+        if terminal == "succeeded" { 1 } else { 0 },
+        "only winning success inserts findings"
+    );
+
+    let invalid = &fanout[1];
+    let malformed = ReadinessAreaResultCallback {
+        run_id: kickoff.run.id.clone(),
+        area_id: invalid.area.id.clone(),
+        attempt_id: invalid.attempt.id.clone(),
+        correlation_key: invalid.attempt.correlation_key.clone(),
+        task_id: invalid.task.id.clone(),
+        status: "succeeded".into(),
+        result: serde_json::json!({"findings":[{"guardrail_key":"bad","severity":"high","confidence":0.5,"evidence":null}],"unsupported":[null],"warnings":[{"warning":null}],"remediation_suggestions":[{"dedupe_key":"bad","action":null}]}),
+    };
+    assert_eq!(
+        repo.ingest_area_result(malformed)
+            .await
+            .expect("invalid terminalizes"),
+        ReadinessCallbackOutcome::Accepted
+    );
+    let invalid_state: (String, i64) = sqlx::query_as("SELECT a.status,(SELECT count(*) FROM readiness_guardrail_findings f WHERE f.attempt_id=a.id) FROM readiness_area_attempts a WHERE a.id=$1").bind(&invalid.attempt.id).fetch_one(db.pool()).await.expect("invalid state");
+    assert_eq!(invalid_state, ("invalid".into(), 0));
+}
 
 #[derive(sqlx::FromRow)]
 struct PersistedAreaTask {

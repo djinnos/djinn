@@ -33,44 +33,95 @@ fn validate_success(result: &serde_json::Value) -> Result<()> {
     let object = result
         .as_object()
         .ok_or_else(|| Error::InvalidData("readiness result must be an object".into()))?;
-    for key in ["findings", "unsupported", "warnings", "remediation_suggestions"] {
+    for key in [
+        "findings",
+        "unsupported",
+        "warnings",
+        "remediation_suggestions",
+    ] {
         if !object.get(key).is_some_and(serde_json::Value::is_array) {
-            return Err(Error::InvalidData(format!("readiness result {key} must be an array")));
+            return Err(Error::InvalidData(format!(
+                "readiness result {key} must be an array"
+            )));
         }
     }
+    let mut finding_keys = std::collections::HashSet::new();
     for finding in object["findings"].as_array().expect("array checked") {
         let Some(finding) = finding.as_object() else {
-            return Err(Error::InvalidData("readiness finding must be an object".into()));
+            return Err(Error::InvalidData(
+                "readiness finding must be an object".into(),
+            ));
         };
-        let evidence = finding.get("evidence");
-        let evidence_is_structured = matches!(evidence, Some(serde_json::Value::Object(values)) if !values.is_empty())
-            || matches!(evidence, Some(serde_json::Value::Array(values)) if !values.is_empty());
-        if !finding.get("guardrail_key").and_then(serde_json::Value::as_str).is_some_and(|value| !value.trim().is_empty())
-            || !matches!(finding.get("severity").and_then(serde_json::Value::as_str), Some("info" | "low" | "medium" | "high" | "critical"))
+        let evidence_is_structured = finding.get("evidence").is_some_and(structured_evidence);
+        let guardrail_key = finding
+            .get("guardrail_key")
+            .and_then(serde_json::Value::as_str);
+        if !guardrail_key.is_some_and(|value| !value.trim().is_empty())
+            || !finding_keys.insert(guardrail_key.expect("checked non-empty"))
+            || !matches!(
+                finding.get("severity").and_then(serde_json::Value::as_str),
+                Some("info" | "low" | "medium" | "high" | "critical")
+            )
             || !evidence_is_structured
-            || !finding.get("confidence").and_then(serde_json::Value::as_f64).is_some_and(|value| value.is_finite() && (0.0..=1.0).contains(&value))
+            || !finding
+                .get("confidence")
+                .and_then(serde_json::Value::as_f64)
+                .is_some_and(|value| value.is_finite() && (0.0..=1.0).contains(&value))
         {
-            return Err(Error::InvalidData("invalid structured readiness finding".into()));
+            return Err(Error::InvalidData(
+                "invalid structured readiness finding".into(),
+            ));
         }
     }
     for key in ["unsupported", "warnings"] {
         for entry in object[key].as_array().expect("array checked") {
-            if !entry.as_object().is_some_and(|value| !value.is_empty()) {
-                return Err(Error::InvalidData(format!("readiness {key} entry must be a non-empty object")));
+            if !structured_object(entry) {
+                return Err(Error::InvalidData(format!(
+                    "readiness {key} entry must be a non-empty object"
+                )));
             }
         }
     }
-    for entry in object["remediation_suggestions"].as_array().expect("array checked") {
+    let mut suggestion_keys = std::collections::HashSet::new();
+    for entry in object["remediation_suggestions"]
+        .as_array()
+        .expect("array checked")
+    {
         let Some(suggestion) = entry.as_object() else {
-            return Err(Error::InvalidData("readiness remediation suggestion must be an object".into()));
+            return Err(Error::InvalidData(
+                "readiness remediation suggestion must be an object".into(),
+            ));
         };
-        if !suggestion.get("dedupe_key").and_then(serde_json::Value::as_str).is_some_and(|value| !value.trim().is_empty())
+        let dedupe_key = suggestion
+            .get("dedupe_key")
+            .and_then(serde_json::Value::as_str);
+        if !dedupe_key.is_some_and(|value| !value.trim().is_empty())
+            || !suggestion_keys.insert(dedupe_key.expect("checked non-empty"))
             || suggestion.len() < 2
+            || !structured_object(entry)
         {
-            return Err(Error::InvalidData("invalid structured readiness remediation suggestion".into()));
+            return Err(Error::InvalidData(
+                "invalid structured readiness remediation suggestion".into(),
+            ));
         }
     }
     Ok(())
+}
+
+fn structured_object(value: &serde_json::Value) -> bool {
+    value.as_object().is_some_and(|object| {
+        !object.is_empty()
+            && object
+                .iter()
+                .all(|(key, value)| !key.trim().is_empty() && !value.is_null())
+    })
+}
+
+fn structured_evidence(value: &serde_json::Value) -> bool {
+    structured_object(value)
+        || value
+            .as_array()
+            .is_some_and(|entries| !entries.is_empty() && entries.iter().all(structured_object))
 }
 
 /// Render JSON with sorted object keys and sorted array representations. Readiness
@@ -80,7 +131,18 @@ fn canonical(value: &serde_json::Value) -> String {
         serde_json::Value::Object(map) => {
             let mut entries: Vec<_> = map.iter().collect();
             entries.sort_by(|(left, _), (right, _)| left.cmp(right));
-            format!("{{{}}}", entries.into_iter().map(|(key, value)| format!("{}:{}", serde_json::to_string(key).expect("JSON key"), canonical(value))).collect::<Vec<_>>().join(","))
+            format!(
+                "{{{}}}",
+                entries
+                    .into_iter()
+                    .map(|(key, value)| format!(
+                        "{}:{}",
+                        serde_json::to_string(key).expect("JSON key"),
+                        canonical(value)
+                    ))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )
         }
         serde_json::Value::Array(values) => {
             let mut values = values.iter().map(canonical).collect::<Vec<_>>();
@@ -93,14 +155,26 @@ fn canonical(value: &serde_json::Value) -> String {
 
 fn callback_digest(callback: &ReadinessAreaResultCallback) -> Result<String> {
     if [
-        &callback.run_id, &callback.area_id, &callback.attempt_id, &callback.correlation_key, &callback.task_id,
-    ].iter().any(|value| value.trim().is_empty()) {
-        return Err(Error::InvalidData("readiness callback correlation fields must be non-empty".into()));
+        &callback.run_id,
+        &callback.area_id,
+        &callback.attempt_id,
+        &callback.correlation_key,
+        &callback.task_id,
+    ]
+    .iter()
+    .any(|value| value.trim().is_empty())
+    {
+        return Err(Error::InvalidData(
+            "readiness callback correlation fields must be non-empty".into(),
+        ));
     }
-    Ok(format!("sha256:{:x}", Sha256::digest(canonical(&serde_json::json!({
-        "status": callback.status,
-        "result": callback.result,
-    })))))
+    Ok(format!(
+        "sha256:{:x}",
+        Sha256::digest(canonical(&serde_json::json!({
+            "status": callback.status,
+            "result": callback.result,
+        })))
+    ))
 }
 
 #[derive(Clone, Debug)]
@@ -115,37 +189,105 @@ pub struct ReadinessAreaResultCallback {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ReadinessCallbackOutcome { Accepted, Redelivered, Ignored, Conflict }
+pub enum ReadinessCallbackOutcome {
+    Accepted,
+    Redelivered,
+    Ignored,
+    Conflict,
+}
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct ReadinessIdentificationOutput { pub areas: Vec<ReadinessIdentifiedArea> }
+pub struct ReadinessIdentificationOutput {
+    pub areas: Vec<ReadinessIdentifiedArea>,
+}
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ReadinessIdentifiedArea {
-    pub area_key: String, pub path_scopes: Vec<String>, pub languages: Vec<String>, pub roles: Vec<String>,
-    pub frameworks: Vec<String>, pub key_libraries: Vec<String>, pub confidence: f64, pub evidence: Vec<String>,
+    pub area_key: String,
+    pub path_scopes: Vec<String>,
+    pub languages: Vec<String>,
+    pub roles: Vec<String>,
+    pub frameworks: Vec<String>,
+    pub key_libraries: Vec<String>,
+    pub confidence: f64,
+    pub evidence: Vec<String>,
 }
 #[derive(Clone, Debug)]
-pub struct ReadinessAreaFanout { pub area: ReadinessCompositionAreaRow, pub attempt: ReadinessAreaAttemptRow, pub task: Task }
+pub struct ReadinessAreaFanout {
+    pub area: ReadinessCompositionAreaRow,
+    pub attempt: ReadinessAreaAttemptRow,
+    pub task: Task,
+}
 #[derive(Clone, Debug)]
-pub struct RetryReadinessAreaAttempt { pub run_id: String, pub area_id: String, pub creator_user_id: String }
+pub struct RetryReadinessAreaAttempt {
+    pub run_id: String,
+    pub area_id: String,
+    pub creator_user_id: String,
+}
 
-pub fn validate_identification_output(output: ReadinessIdentificationOutput) -> std::result::Result<Vec<ReadinessIdentifiedArea>, String> {
-    if output.areas.is_empty() { return Err("identification output must contain at least one area".into()); }
+pub fn validate_identification_output(
+    output: ReadinessIdentificationOutput,
+) -> std::result::Result<Vec<ReadinessIdentifiedArea>, String> {
+    if output.areas.is_empty() {
+        return Err("identification output must contain at least one area".into());
+    }
     let mut keys = std::collections::HashSet::new();
     for area in &output.areas {
         let key = area.area_key.as_bytes();
-        if key.is_empty() || !key[0].is_ascii_lowercase() || !key.iter().all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'_' || *byte == b'-') || !keys.insert(&area.area_key) { return Err(format!("invalid or duplicate stable area_key: {}", area.area_key)); }
-        if area.path_scopes.is_empty() || area.path_scopes.iter().any(|scope| !valid_repo_relative_scope(scope)) { return Err(format!("area {} has an invalid path scope", area.area_key)); }
-        for (name, values) in [("languages", &area.languages), ("roles", &area.roles), ("frameworks", &area.frameworks), ("key_libraries", &area.key_libraries)] {
-            if !normalized_unique(values) { return Err(format!("area {} has unnormalized or duplicate {name}", area.area_key)); }
+        if key.is_empty()
+            || !key[0].is_ascii_lowercase()
+            || !key.iter().all(|byte| {
+                byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'_' || *byte == b'-'
+            })
+            || !keys.insert(&area.area_key)
+        {
+            return Err(format!(
+                "invalid or duplicate stable area_key: {}",
+                area.area_key
+            ));
         }
-        if !area.confidence.is_finite() || !(0.0..=1.0).contains(&area.confidence) { return Err(format!("area {} has invalid confidence", area.area_key)); }
-        if area.evidence.is_empty() || area.evidence.iter().any(|value| value.trim().is_empty()) { return Err(format!("area {} must include evidence", area.area_key)); }
+        if area.path_scopes.is_empty()
+            || area
+                .path_scopes
+                .iter()
+                .any(|scope| !valid_repo_relative_scope(scope))
+        {
+            return Err(format!("area {} has an invalid path scope", area.area_key));
+        }
+        for (name, values) in [
+            ("languages", &area.languages),
+            ("roles", &area.roles),
+            ("frameworks", &area.frameworks),
+            ("key_libraries", &area.key_libraries),
+        ] {
+            if !normalized_unique(values) {
+                return Err(format!(
+                    "area {} has unnormalized or duplicate {name}",
+                    area.area_key
+                ));
+            }
+        }
+        if !area.confidence.is_finite() || !(0.0..=1.0).contains(&area.confidence) {
+            return Err(format!("area {} has invalid confidence", area.area_key));
+        }
+        if area.evidence.is_empty() || area.evidence.iter().any(|value| value.trim().is_empty()) {
+            return Err(format!("area {} must include evidence", area.area_key));
+        }
     }
     Ok(output.areas)
 }
-fn normalized_unique(values: &[String]) -> bool { let mut seen = std::collections::HashSet::new(); values.iter().all(|value| !value.is_empty() && value.trim() == value && seen.insert(value)) }
-fn valid_repo_relative_scope(scope: &str) -> bool { !scope.trim().is_empty() && scope.trim() == scope && !scope.starts_with('/') && !scope.starts_with('\\') && !scope.split(['/', '\\']).any(|part| part == "..") }
+fn normalized_unique(values: &[String]) -> bool {
+    let mut seen = std::collections::HashSet::new();
+    values
+        .iter()
+        .all(|value| !value.is_empty() && value.trim() == value && seen.insert(value))
+}
+fn valid_repo_relative_scope(scope: &str) -> bool {
+    !scope.trim().is_empty()
+        && scope.trim() == scope
+        && !scope.starts_with('/')
+        && !scope.starts_with('\\')
+        && !scope.split(['/', '\\']).any(|part| part == "..")
+}
 #[derive(Clone, Debug)]
 pub struct MaterializeReadinessKickoff {
     pub project_id: String,
@@ -190,6 +332,7 @@ pub struct ReadinessGuardrailFindingRow {
     pub attempt_id: String,
     pub guardrail_key: String,
     pub severity: String,
+    pub confidence: f64,
     pub accepted: bool,
     pub evidence: serde_json::Value,
     pub created_at: String,
@@ -236,6 +379,7 @@ pub struct CreateReadinessAreaAttempt {
 pub struct NewReadinessFinding {
     pub guardrail_key: String,
     pub severity: String,
+    pub confidence: f64,
     pub evidence: serde_json::Value,
 }
 #[derive(Clone, Debug)]
@@ -455,7 +599,7 @@ impl ReadinessRepository {
             ));
         };
         for f in findings {
-            sqlx::query("INSERT INTO readiness_guardrail_findings (id,run_id,area_id,attempt_id,guardrail_key,severity,accepted,evidence) VALUES ($1,$2,$3,$4,$5,$6,true,$7)").bind(Uuid::now_v7().to_string()).bind(&run).bind(&area).bind(&a.id).bind(&f.guardrail_key).bind(&f.severity).bind(&f.evidence).execute(&mut *tx).await?;
+            sqlx::query("INSERT INTO readiness_guardrail_findings (id,run_id,area_id,attempt_id,guardrail_key,severity,confidence,accepted,evidence) VALUES ($1,$2,$3,$4,$5,$6,$7,true,$8)").bind(Uuid::now_v7().to_string()).bind(&run).bind(&area).bind(&a.id).bind(&f.guardrail_key).bind(&f.severity).bind(f.confidence).bind(&f.evidence).execute(&mut *tx).await?;
         }
         for s in suggestions {
             sqlx::query("INSERT INTO readiness_remediation_suggestions (id,run_id,dedupe_key,suggestion) VALUES ($1,$2,$3,$4) ON CONFLICT (run_id,dedupe_key) DO NOTHING").bind(Uuid::now_v7().to_string()).bind(&run).bind(&s.dedupe_key).bind(&s.suggestion).execute(&mut *tx).await?;
@@ -479,38 +623,140 @@ impl ReadinessRepository {
     }
     /// First terminal callback wins. The attempt and current-area rows are locked
     /// before the whole accepted set becomes visible.
-    pub async fn ingest_area_result(&self, callback: ReadinessAreaResultCallback) -> Result<ReadinessCallbackOutcome> {
+    pub async fn ingest_area_result(
+        &self,
+        callback: ReadinessAreaResultCallback,
+    ) -> Result<ReadinessCallbackOutcome> {
         self.db.ensure_initialized().await?;
         let digest = callback_digest(&callback)?;
         let mut tx = self.db.pool().begin().await?;
         let row: Option<(String,String,String,String,Option<String>)> = sqlx::query_as("SELECT run_id,area_id,correlation_key,status,payload_digest FROM readiness_area_attempts WHERE id=$1 FOR UPDATE").bind(&callback.attempt_id).fetch_optional(&mut *tx).await?;
-        let Some((run, area, key, status, old)) = row else { return Err(Error::InvalidData("readiness callback attempt not found".into())); };
-        let record = |kind: &str, tx: &mut sqlx::Transaction<'_, sqlx::Postgres>| async { sqlx::query("INSERT INTO readiness_run_events (id,run_id,event_kind,payload) VALUES ($1,$2,$3,$4)").bind(Uuid::now_v7().to_string()).bind(&run).bind(kind).bind(serde_json::json!({"attempt_id":callback.attempt_id,"area_id":callback.area_id,"correlation_key":callback.correlation_key,"task_id":callback.task_id,"digest":digest})).execute(&mut **tx).await };
+        let Some((run, area, key, status, old)) = row else {
+            return Err(Error::InvalidData(
+                "readiness callback attempt not found".into(),
+            ));
+        };
+        let record = |kind: &str, tx: &mut sqlx::Transaction<'_, sqlx::Postgres>| async {
+            sqlx::query("INSERT INTO readiness_run_events (id,run_id,event_kind,payload) VALUES ($1,$2,$3,$4)").bind(Uuid::now_v7().to_string()).bind(&run).bind(kind).bind(serde_json::json!({"attempt_id":callback.attempt_id,"area_id":callback.area_id,"correlation_key":callback.correlation_key,"task_id":callback.task_id,"digest":digest})).execute(&mut **tx).await
+        };
         let task_matches: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM tasks WHERE id=$1 AND (CASE WHEN description LIKE '{%' THEN description::jsonb ELSE '{}'::jsonb END) @> jsonb_build_object('kind','readiness_area_analysis','run_id',$2,'area_id',$3,'attempt_id',$4,'correlation_key',$5))").bind(&callback.task_id).bind(&run).bind(&area).bind(&callback.attempt_id).bind(&key).fetch_one(&mut *tx).await?;
-        if run != callback.run_id || area != callback.area_id || key != callback.correlation_key || !task_matches { record("readiness_callback_ignored", &mut tx).await?; tx.commit().await?; return Ok(ReadinessCallbackOutcome::Ignored); }
+        if run != callback.run_id
+            || area != callback.area_id
+            || key != callback.correlation_key
+            || !task_matches
+        {
+            record("readiness_callback_ignored", &mut tx).await?;
+            tx.commit().await?;
+            return Ok(ReadinessCallbackOutcome::Ignored);
+        }
         let current: Option<String> = sqlx::query_scalar("SELECT id FROM readiness_area_attempts WHERE area_id=$1 ORDER BY attempt_number DESC LIMIT 1 FOR UPDATE").bind(&area).fetch_optional(&mut *tx).await?;
-        if current.as_deref() != Some(callback.attempt_id.as_str()) { record("readiness_callback_ignored", &mut tx).await?; tx.commit().await?; return Ok(ReadinessCallbackOutcome::Ignored); }
-        if status != "running" { let outcome = if old.as_deref() == Some(&digest) { ReadinessCallbackOutcome::Redelivered } else { record("readiness_callback_conflict", &mut tx).await?; ReadinessCallbackOutcome::Conflict }; tx.commit().await?; return Ok(outcome); }
+        if current.as_deref() != Some(callback.attempt_id.as_str()) {
+            record("readiness_callback_ignored", &mut tx).await?;
+            tx.commit().await?;
+            return Ok(ReadinessCallbackOutcome::Ignored);
+        }
+        if status != "running" {
+            let outcome = if old.as_deref() == Some(&digest) {
+                ReadinessCallbackOutcome::Redelivered
+            } else {
+                record("readiness_callback_conflict", &mut tx).await?;
+                ReadinessCallbackOutcome::Conflict
+            };
+            tx.commit().await?;
+            return Ok(outcome);
+        }
         let valid = callback.status == "succeeded" && validate_success(&callback.result).is_ok();
-        let final_status = if valid { "succeeded" } else { match callback.status.as_str() { "failed" | "timed_out" | "invalid" => callback.status.as_str(), _ => "invalid" } };
-        if valid { for finding in callback.result["findings"].as_array().expect("validated") { sqlx::query("INSERT INTO readiness_guardrail_findings (id,run_id,area_id,attempt_id,guardrail_key,severity,accepted,evidence) VALUES ($1,$2,$3,$4,$5,$6,true,$7)").bind(Uuid::now_v7().to_string()).bind(&run).bind(&area).bind(&callback.attempt_id).bind(finding["guardrail_key"].as_str().expect("validated")).bind(finding["severity"].as_str().expect("validated")).bind(finding["evidence"].clone()).execute(&mut *tx).await?; } for suggestion in callback.result["remediation_suggestions"].as_array().expect("validated") { sqlx::query("INSERT INTO readiness_remediation_suggestions (id,run_id,dedupe_key,suggestion) VALUES ($1,$2,$3,$4) ON CONFLICT (run_id,dedupe_key) DO NOTHING").bind(Uuid::now_v7().to_string()).bind(&run).bind(suggestion["dedupe_key"].as_str().expect("validated")).bind(suggestion.clone()).execute(&mut *tx).await?; } }
+        let final_status = if valid {
+            "succeeded"
+        } else {
+            match callback.status.as_str() {
+                "failed" | "timed_out" | "invalid" => callback.status.as_str(),
+                _ => "invalid",
+            }
+        };
+        if valid {
+            for finding in callback.result["findings"].as_array().expect("validated") {
+                sqlx::query("INSERT INTO readiness_guardrail_findings (id,run_id,area_id,attempt_id,guardrail_key,severity,confidence,accepted,evidence) VALUES ($1,$2,$3,$4,$5,$6,$7,true,$8)").bind(Uuid::now_v7().to_string()).bind(&run).bind(&area).bind(&callback.attempt_id).bind(finding["guardrail_key"].as_str().expect("validated")).bind(finding["severity"].as_str().expect("validated")).bind(finding["confidence"].as_f64().expect("validated")).bind(finding["evidence"].clone()).execute(&mut *tx).await?;
+            }
+            for suggestion in callback.result["remediation_suggestions"]
+                .as_array()
+                .expect("validated")
+            {
+                sqlx::query("INSERT INTO readiness_remediation_suggestions (id,run_id,dedupe_key,suggestion) VALUES ($1,$2,$3,$4)").bind(Uuid::now_v7().to_string()).bind(&run).bind(suggestion["dedupe_key"].as_str().expect("validated")).bind(suggestion.clone()).execute(&mut *tx).await?;
+            }
+        }
         sqlx::query("UPDATE readiness_area_attempts SET status=$1,payload_digest=$2,terminal_at=to_char(now() AT TIME ZONE 'utc','YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') WHERE id=$3").bind(final_status).bind(&digest).bind(&callback.attempt_id).execute(&mut *tx).await?;
-        sqlx::query("UPDATE readiness_composition_areas SET status=$1 WHERE id=$2").bind(final_status).bind(&area).execute(&mut *tx).await?;
-        record(if valid { "readiness_result_accepted" } else { "readiness_result_terminal_failure" }, &mut tx).await?; tx.commit().await?; Ok(ReadinessCallbackOutcome::Accepted)
+        sqlx::query("UPDATE readiness_composition_areas SET status=$1 WHERE id=$2")
+            .bind(final_status)
+            .bind(&area)
+            .execute(&mut *tx)
+            .await?;
+        record(
+            if valid {
+                "readiness_result_accepted"
+            } else {
+                "readiness_result_terminal_failure"
+            },
+            &mut tx,
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(ReadinessCallbackOutcome::Accepted)
     }
 
-    pub async fn retry_area_attempt(&self, input: RetryReadinessAreaAttempt) -> Result<ReadinessAreaFanout> {
-        self.db.ensure_initialized().await?; let mut tx = self.db.pool().begin().await?;
+    pub async fn retry_area_attempt(
+        &self,
+        input: RetryReadinessAreaAttempt,
+    ) -> Result<ReadinessAreaFanout> {
+        self.db.ensure_initialized().await?;
+        let mut tx = self.db.pool().begin().await?;
         let run: ReadinessRunRow = sqlx::query_as("SELECT id,project_id,idempotency_key,status,repository_snapshot,skill_name,skill_version,expected_area_count,created_at,completed_at FROM readiness_runs WHERE id=$1 FOR UPDATE").bind(&input.run_id).fetch_optional(&mut *tx).await?.ok_or_else(|| Error::InvalidData("readiness run not found".into()))?;
-        if !matches!(run.status.as_str(), "identifying" | "analyzing" | "aggregating") { return Err(Error::InvalidTransition("cannot retry an area in a terminal readiness run".into())); }
+        if !matches!(
+            run.status.as_str(),
+            "identifying" | "analyzing" | "aggregating"
+        ) {
+            return Err(Error::InvalidTransition(
+                "cannot retry an area in a terminal readiness run".into(),
+            ));
+        }
         let area: ReadinessCompositionAreaRow = sqlx::query_as("SELECT id,run_id,area_key,composition,path_scopes,frozen_at,status FROM readiness_composition_areas WHERE id=$1 AND run_id=$2 FOR UPDATE").bind(&input.area_id).bind(&run.id).fetch_optional(&mut *tx).await?.ok_or_else(|| Error::InvalidData("readiness area not found".into()))?;
         let previous: ReadinessAreaAttemptRow = sqlx::query_as("SELECT id,run_id,area_id,attempt_number,correlation_key,status,payload_digest,created_at,terminal_at FROM readiness_area_attempts WHERE area_id=$1 ORDER BY attempt_number DESC LIMIT 1 FOR UPDATE").bind(&area.id).fetch_optional(&mut *tx).await?.ok_or_else(|| Error::InvalidData("readiness area has no attempt".into()))?;
-        if !matches!(previous.status.as_str(), "failed" | "timed_out" | "invalid") { return Err(Error::InvalidTransition("only the current failed, timed-out, or invalid attempt may be retried".into())); }
+        if !matches!(previous.status.as_str(), "failed" | "timed_out" | "invalid") {
+            return Err(Error::InvalidTransition(
+                "only the current failed, timed-out, or invalid attempt may be retried".into(),
+            ));
+        }
         let attempt: ReadinessAreaAttemptRow = sqlx::query_as("INSERT INTO readiness_area_attempts (id,run_id,area_id,attempt_number,correlation_key) VALUES ($1,$2,$3,$4,$5) RETURNING id,run_id,area_id,attempt_number,correlation_key,status,payload_digest,created_at,terminal_at").bind(Uuid::now_v7().to_string()).bind(&run.id).bind(&area.id).bind(previous.attempt_number + 1).bind(Uuid::now_v7().to_string()).fetch_one(&mut *tx).await?;
-        let task = create_readiness_area_analysis_task_in_transaction(&mut tx, ReadinessAreaAnalysisTask { project_id: &run.project_id, creator_user_id: &input.creator_user_id, run_id: &run.id, area_id: &area.id, area_key: &area.area_key, attempt_id: &attempt.id, attempt_number: attempt.attempt_number, correlation_key: &attempt.correlation_key, repository_snapshot: &run.repository_snapshot, skill_name: &run.skill_name, skill_version: &run.skill_version, composition: &area.composition, path_scopes: &area.path_scopes }).await?;
-        sqlx::query("UPDATE readiness_composition_areas SET status='running' WHERE id=$1").bind(&area.id).execute(&mut *tx).await?;
+        let task = create_readiness_area_analysis_task_in_transaction(
+            &mut tx,
+            ReadinessAreaAnalysisTask {
+                project_id: &run.project_id,
+                creator_user_id: &input.creator_user_id,
+                run_id: &run.id,
+                area_id: &area.id,
+                area_key: &area.area_key,
+                attempt_id: &attempt.id,
+                attempt_number: attempt.attempt_number,
+                correlation_key: &attempt.correlation_key,
+                repository_snapshot: &run.repository_snapshot,
+                skill_name: &run.skill_name,
+                skill_version: &run.skill_version,
+                composition: &area.composition,
+                path_scopes: &area.path_scopes,
+            },
+        )
+        .await?;
+        sqlx::query("UPDATE readiness_composition_areas SET status='running' WHERE id=$1")
+            .bind(&area.id)
+            .execute(&mut *tx)
+            .await?;
         sqlx::query("INSERT INTO readiness_run_events (id,run_id,event_kind,payload) VALUES ($1,$2,'readiness_attempt_retried',$3)").bind(Uuid::now_v7().to_string()).bind(&run.id).bind(serde_json::json!({"area_id":area.id,"prior_attempt_id":previous.id,"attempt_id":attempt.id,"task_id":task.id})).execute(&mut *tx).await?;
-        tx.commit().await?; Ok(ReadinessAreaFanout { area, attempt, task })
+        tx.commit().await?;
+        Ok(ReadinessAreaFanout {
+            area,
+            attempt,
+            task,
+        })
     }
     pub async fn active_or_latest_for_project(&self, p: &str) -> Result<Option<ReadinessRunRow>> {
         self.db.ensure_initialized().await?;
