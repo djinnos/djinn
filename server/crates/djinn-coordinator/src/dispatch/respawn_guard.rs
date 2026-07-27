@@ -444,51 +444,39 @@ const HANDOFF_ACTOR_ROLE: &str = "respawn_guard";
 /// other non-closed status (e.g. `open`, `in_progress`, `pr_draft`) is
 /// transitioned to `pr_review`.
 ///
-/// Idempotent for the already-`pr_review` case: the no-op still durably
-/// records the handoff reason via a standalone activity entry so callers
-/// (e.g. the terminal gate) can prove the task was preserved rather than
-/// force-closed. The `TaskRepository::transition` path inserts an activity row
-/// automatically (status.rs:156-172); this no-op path does not, so it records
-/// one itself.
+/// Every successful handoff records a `pr_terminal_handoff` activity keyed by
+/// reason and head SHA. Re-entry for the same head is a durable no-op, while a
+/// new head records a new handoff marker.
 ///
-/// Returns `true` when the task was moved to `pr_review` or was already there,
-/// and an `Err` only when a repository transition/handoff fails (so the
-/// terminal gate can fail safe).
+/// Returns `true` when a new handoff marker was recorded, `false` when that
+/// head was already handed off, and an `Err` when persistence fails.
 pub async fn handoff_pr_to_poller(
     task_repo: &TaskRepository,
     task_id: &str,
     current_status: &str,
     pr_url: &str,
     reason: &str,
+    head_sha: Option<&str>,
 ) -> std::result::Result<bool, String> {
+    let already_handed_off = task_repo
+        .list_activity(task_id)
+        .await
+        .map_err(|e| e.to_string())?
+        .iter()
+        .filter(|entry| entry.event_type == "pr_terminal_handoff")
+        .filter_map(|entry| serde_json::from_str::<serde_json::Value>(&entry.payload).ok())
+        .any(|payload| {
+            payload.get("head_sha").and_then(|value| value.as_str()) == head_sha
+                && payload.get("reason").and_then(|value| value.as_str()) == Some(reason)
+        });
+    if already_handed_off {
+        tracing::debug!(task_id = %task_id, ?head_sha, "respawn_guard: terminal PR handoff already recorded for head");
+        return Ok(false);
+    }
+
     if current_status == TaskStatus::PrReview.as_str() {
         tracing::debug!(task_id = %task_id, current_status = %current_status, "respawn_guard: task already in pr_review — handoff is an idempotent no-op");
-        // No transition runs, so we record a standalone activity entry to make
-        // the handoff reason durable and auditable.
-        let payload = serde_json::json!({
-            "from_status": current_status,
-            "to_status": TaskStatus::PrReview.as_str(),
-            "reason": reason,
-            "pr_url": pr_url,
-            "idempotent": true,
-        })
-        .to_string();
-        task_repo
-            .log_activity(
-                Some(task_id),
-                HANDOFF_ACTOR_ID,
-                HANDOFF_ACTOR_ROLE,
-                "adoption_handoff",
-                &payload,
-            )
-            .await
-            .map_err(|e| {
-                tracing::warn!(task_id = %task_id, pr_url = %pr_url, error = %e, "respawn_guard: failed to record idempotent handoff activity");
-                e.to_string()
-            })?;
-        return Ok(true);
-    }
-    match task_repo
+    } else if let Err(e) = task_repo
         .transition(
             task_id,
             TransitionAction::AdoptionHandoff,
@@ -499,15 +487,30 @@ pub async fn handoff_pr_to_poller(
         )
         .await
     {
-        Ok(task) => {
-            tracing::info!(task_id = %task_id, pr_url = %pr_url, to_status = %task.status, "respawn_guard: PR handed off to poller (pr_review)");
-            Ok(true)
-        }
-        Err(e) => {
-            tracing::warn!(task_id = %task_id, pr_url = %pr_url, error = %e, "respawn_guard: failed to hand PR off to poller");
-            Err(e.to_string())
-        }
+        tracing::warn!(task_id = %task_id, pr_url = %pr_url, error = %e, "respawn_guard: failed to hand PR off to poller");
+        return Err(e.to_string());
     }
+
+    let payload = serde_json::json!({
+        "from_status": current_status,
+        "to_status": TaskStatus::PrReview.as_str(),
+        "reason": reason,
+        "pr_url": pr_url,
+        "head_sha": head_sha,
+    })
+    .to_string();
+    task_repo
+        .log_activity(
+            Some(task_id),
+            HANDOFF_ACTOR_ID,
+            HANDOFF_ACTOR_ROLE,
+            "pr_terminal_handoff",
+            &payload,
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    tracing::info!(task_id = %task_id, pr_url = %pr_url, ?head_sha, "respawn_guard: PR handed off to poller (pr_review)");
+    Ok(true)
 }
 
 /// Compatibility wrapper for the respawn-guard adoption path. The terminal
@@ -520,7 +523,7 @@ pub async fn handoff_adopted_pr_to_poller(
 ) -> bool {
     let reason =
         format!("respawn_guard: adopted open PR {pr_url} — handing off to PR poller (pr_review)");
-    handoff_pr_to_poller(task_repo, task_id, current_status, pr_url, &reason)
+    handoff_pr_to_poller(task_repo, task_id, current_status, pr_url, &reason, None)
         .await
         .unwrap_or(false)
 }

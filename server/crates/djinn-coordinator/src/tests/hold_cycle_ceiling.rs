@@ -357,6 +357,20 @@ async fn hold_cycle_ceiling_hands_a_pr_bearing_task_to_the_poller_idempotently()
         1,
         "the ceiling audit entry is written once per task, not once per tick: {ceiling_markers:?}"
     );
+    let handoff_markers = repo
+        .query_activity(ActivityQuery {
+            task_id: Some(base.id.clone()),
+            event_type: Some("pr_terminal_handoff".to_string()),
+            limit: 100,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        handoff_markers.len(),
+        1,
+        "terminal PR handoff must be durable and idempotent for one head"
+    );
     assert!(
         park_redispatch_markers(&repo, &base.id).await.is_empty(),
         "no sub-guard may run after the ceiling trips"

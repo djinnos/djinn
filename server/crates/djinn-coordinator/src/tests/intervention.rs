@@ -1991,7 +1991,9 @@ async fn escalate_ci_failure_includes_sections_in_comment_and_reason() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
     let mut actor = coordinator_actor_for_tests(&db, &tx);
-    let task = make_task_with_reopen_count(&db, &tx, 0).await;
+    let mut task = make_task_with_reopen_count(&db, &tx, 0).await;
+    task.ci_head_sha = Some("head-for-escalation".to_string());
+    task.ci_github_head_sha = Some("head-for-escalation".to_string());
     let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
 
     let reason = "PR #42 stuck: required checks (build) failed across 5 rounds.";
@@ -2003,6 +2005,9 @@ async fn escalate_ci_failure_includes_sections_in_comment_and_reason() {
     ];
     let pr_url = "https://github.com/owner/repo/pull/42";
 
+    actor
+        .escalate_ci_failure_and_park(&task, pr_url, reason, &sections)
+        .await;
     actor
         .escalate_ci_failure_and_park(&task, pr_url, reason, &sections)
         .await;
@@ -2023,10 +2028,22 @@ async fn escalate_ci_failure_includes_sections_in_comment_and_reason() {
         .await
         .unwrap();
 
-    let escalation_comment = comments
+    let escalation_comments: Vec<_> = comments
         .iter()
-        .find(|c| c.payload.contains("**PR CI Escalation**"))
-        .expect("escalate_ci_failure_and_park must log a PR CI Escalation comment");
+        .filter(|c| c.payload.contains("**PR CI Escalation**"))
+        .collect();
+    assert_eq!(
+        escalation_comments.len(),
+        1,
+        "CI escalation comments must be deduplicated per head SHA"
+    );
+    let escalation_comment = escalation_comments[0];
+    let escalation_payload: serde_json::Value =
+        serde_json::from_str(&escalation_comment.payload).unwrap();
+    assert_eq!(
+        escalation_payload["escalation_head_sha"], "head-for-escalation",
+        "dedupe marker must carry the current head SHA",
+    );
     assert!(
         escalation_comment
             .payload

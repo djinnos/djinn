@@ -2074,12 +2074,17 @@ impl CoordinatorActor {
             .filter(|url| !url.is_empty())
         {
             const HANDOFF_REASON: &str = "terminal_close_deferred_pr_handoff";
+            let handoff_head_sha = latest
+                .ci_github_head_sha
+                .as_deref()
+                .or(latest.ci_head_sha.as_deref());
             match super::respawn_guard::handoff_pr_to_poller(
                 &repo,
                 &latest.id,
                 &latest.status,
                 pr_url,
                 HANDOFF_REASON,
+                handoff_head_sha,
             )
             .await
             {
