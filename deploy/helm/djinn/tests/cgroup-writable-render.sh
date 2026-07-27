@@ -92,6 +92,7 @@ PY
 # The pinned table is intentionally exact, and task-run sources/renders must
 # never gain a cgroup hostPath during this foundation-only rollout.
 python3 - "$TEMPLATE" "$CONFORMANCE" "$WORK/enabled.yaml" "$REPO_DIR/deploy/helm/djinn/templates" <<'PY'
+import re
 import sys
 from pathlib import Path
 
@@ -104,11 +105,21 @@ conformance_text = conformance.read_text(encoding='utf-8')
 assert "RUNTIME_TABLE=" in conformance_text, 'conformance no longer validates live table'
 assert "RUNTIME_CLASS='djinn-cgroup-writable'" in conformance_text
 assert 'runtimeClassName: $RUNTIME_CLASS' in conformance_text
-for required_probe in (
-    'mkdir \\"$leaf\\"', 'cpu.max', 'cgroup.procs', 'cgroup.kill',
-    'launcher_leaf', 'printf \\"\\$\\$\\"',
-):
-    assert required_probe in conformance_text, f'worker mutation denial missing: {required_probe}'
+# This asserts the failure branch of must_deny itself, instead of merely
+# checking for filenames. The fakes below model each named successful write.
+must_deny = re.search(r'must_deny\(\) \{([^\n]+)\}', conformance_text)
+assert must_deny, 'worker mutation denial helper missing'
+assert 'if sh -c "$1"; then' in must_deny.group(1) and 'exit 1' in must_deny.group(1), \
+    'must_deny no longer rejects a successful worker mutation'
+for name, required_probe in {
+    'child': 'must_deny "mkdir',
+    'cpu-max': 'cpu.max',
+    'cgroup-procs': 'cgroup.procs',
+    'cgroup-kill': 'cgroup.kill',
+    'launcher-leaf': 'must_deny "rmdir',
+    'process-move': 'printf \\"\\$\\$\\"',
+}.items():
+    assert required_probe in conformance_text, f'worker mutation denial missing: {name}'
 for source in list(templates.rglob('*')) + [rendered]:
     if source.is_file():
         text = source.read_text(encoding='utf-8')
@@ -178,8 +189,41 @@ case "\$1" in
     fi
     exit 0 ;;
   exec)
-    case "${case_name}" in readonly|namespace-escape|mutation-child|mutation-cpu-max|mutation-cgroup-procs|mutation-cgroup-kill|mutation-launcher-leaf|mutation-process-move) exit 1;; esac
-    exit 0 ;;
+    # kubectl receives the whole launcher/worker program. Inspect it before
+    # modeling the specific successful operation which must_deny rejects.
+    probe="\$*"
+    case "${case_name}" in
+      readonly)
+        [[ "\$probe" == *'stat -fc %T "\$root"'* ]] || exit 91
+        printf 'fixture worker-probe root=read-only result=unexpected-success\n' >>'$log' ;;
+      namespace-escape)
+        [[ "\$probe" == *'[ ! -d "\$root/system.slice" ]'* ]] || exit 92
+        printf 'fixture worker-probe namespace=host-visible result=unexpected-success\n' >>'$log' ;;
+      mutation-child)
+        [[ "\$probe" == *'mkdir \\"\$leaf\\"'* ]] || exit 93
+        printf 'fixture worker-probe mutation=child-creation result=unexpected-success\n' >>'$log' ;;
+      mutation-cpu-max)
+        [[ "\$probe" == *'\$root/cpu.max'* ]] || exit 94
+        printf 'fixture worker-probe mutation=cpu.max result=unexpected-success\n' >>'$log' ;;
+      mutation-cgroup-procs)
+        [[ "\$probe" == *'printf 1 > \\"\$root/cgroup.procs\\"'* ]] || exit 95
+        printf 'fixture worker-probe mutation=cgroup.procs result=unexpected-success\n' >>'$log' ;;
+      mutation-cgroup-kill)
+        [[ "\$probe" == *'printf 1 > \\"\$root/cgroup.kill\\"'* ]] || exit 96
+        printf 'fixture worker-probe mutation=cgroup.kill result=unexpected-success\n' >>'$log' ;;
+      mutation-launcher-leaf)
+        [[ "\$probe" == *'rmdir \\"\$launcher_leaf\\"'* ]] || exit 97
+        printf 'fixture worker-probe mutation=launcher-leaf result=unexpected-success\n' >>'$log' ;;
+      mutation-process-move)
+        [[ "\$probe" == *'writer tries to move its own process'* ]] || exit 98
+        printf 'fixture worker-probe mutation=process-movement result=unexpected-success\n' >>'$log' ;;
+      *) exit 0 ;;
+    esac
+    # The nonzero result models must_deny aborting after that write succeeds.
+    # Its source-level semantic assertion above catches a regression that
+    # would instead accept a successful sh -c mutation.
+    exit 1
+    ;;
   delete) exit 0 ;;
 esac
 exit 0
@@ -223,6 +267,20 @@ run_lifecycle_case() {
     # Failures after initial unlabel must remove eligibility again in cleanup.
     [ "$(grep -Fc 'label node fixture-node djinn.io/cgroup-writable- --overwrite' "$case_dir/log")" -ge 2 ]
     ! grep -Fq 'djinn.io/cgroup-writable=true' "$case_dir/log"
+    case "$case_name" in
+      readonly) expected_probe='fixture worker-probe root=read-only result=unexpected-success' ;;
+      namespace-escape) expected_probe='fixture worker-probe namespace=host-visible result=unexpected-success' ;;
+      mutation-child) expected_probe='fixture worker-probe mutation=child-creation result=unexpected-success' ;;
+      mutation-cpu-max) expected_probe='fixture worker-probe mutation=cpu.max result=unexpected-success' ;;
+      mutation-cgroup-procs) expected_probe='fixture worker-probe mutation=cgroup.procs result=unexpected-success' ;;
+      mutation-cgroup-kill) expected_probe='fixture worker-probe mutation=cgroup.kill result=unexpected-success' ;;
+      mutation-launcher-leaf) expected_probe='fixture worker-probe mutation=launcher-leaf result=unexpected-success' ;;
+      mutation-process-move) expected_probe='fixture worker-probe mutation=process-movement result=unexpected-success' ;;
+      *) expected_probe='' ;;
+    esac
+    if [ -n "$expected_probe" ]; then
+      grep -Fx "$expected_probe" "$case_dir/log" >/dev/null
+    fi
   fi
 }
 
