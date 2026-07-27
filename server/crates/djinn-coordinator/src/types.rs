@@ -567,17 +567,16 @@ pub(super) struct DispatchMarker {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ReappearingDispatch {
-    SameRoleFailure {
-        next_streak: u32,
-        cooldown: Duration,
-    },
+    SameRoleFailure { next_streak: u32 },
     RoleTransition,
 }
 
-/// Base cooldown before re-dispatching a task that failed (lifecycle setup, a
-/// crashed run, or a provider that returned empty/throttled turns). Escalates
-/// per consecutive failure via [`escalating_dispatch_cooldown`] to prevent hot
-/// re-dispatch loops that hammer a degraded provider.
+/// Fixed floor before re-dispatching a task after a deterministic run/CI
+/// failure. One minute prevents a coordinator-tick spin while keeping compile,
+/// test, golden, snapshot, and other code failures responsive to a prompt fix.
+///
+/// Provider/environmental failures use this as the base of
+/// [`escalating_dispatch_cooldown`].
 pub(super) const DISPATCH_COOLDOWN: Duration = Duration::from_secs(60);
 
 /// Upper bound on the escalating per-task dispatch cooldown.
@@ -594,10 +593,11 @@ pub(super) const PROVIDER_RETRY_AFTER_MAX: Duration = Duration::from_secs(6 * 60
 
 /// Consecutive failed dispatch attempts (same role) — whether the run failed or
 /// the task's owner has no model that resolves a credential — after which the
-/// task is failed **terminally** instead of looping forever. Combined with the
-/// escalating cooldown this spans hours, so transient provider/credential blips
-/// never reach it; only structurally-undispatchable tasks do. Terminal close
-/// also keeps review-type tasks from wedging open forever.
+/// task is failed **terminally** instead of looping forever. Provider and
+/// credential failures reach it through the escalating cooldown; deterministic
+/// run/CI failures keep a fixed anti-spin floor and are ordinarily routed into
+/// the cumulatively bounded Planner/arbiter ladder first. Terminal close remains
+/// the final backstop for roles or paths that cannot enter that ladder.
 pub(super) const MAX_DISPATCH_FAILURES: u32 = 10;
 
 /// Consecutive failover-chain exhaustions for a task whose role lane has a
@@ -682,6 +682,22 @@ pub(super) fn escalating_dispatch_cooldown(streak: u32) -> Duration {
     Duration::from_secs(secs)
 }
 
+/// Select the redispatch cooldown for a same-role failed reappearance.
+///
+/// Typed provider failures are conditions that can heal with time (provider
+/// errors, empty/throttled turns, model-health trips), so they ride the
+/// escalating ladder. Untyped failures are the deterministic run/CI class and
+/// retain only [`DISPATCH_COOLDOWN`]'s fixed anti-spin floor; their cumulative
+/// safety bounds remain the Planner/arbiter ladder and
+/// [`MAX_DISPATCH_FAILURES`].
+pub(super) fn dispatch_cooldown_for_failure(streak: u32, had_provider_failure: bool) -> Duration {
+    if had_provider_failure {
+        escalating_dispatch_cooldown(streak)
+    } else {
+        DISPATCH_COOLDOWN
+    }
+}
+
 /// A3: the terminal `dispatch_failure_streak` value to STORE after a same-role
 /// failed reappearance.
 ///
@@ -737,10 +753,7 @@ pub(super) fn classify_reappearing_dispatch(
     }
 
     let next_streak = current_streak.saturating_add(1);
-    Some(ReappearingDispatch::SameRoleFailure {
-        next_streak,
-        cooldown: escalating_dispatch_cooldown(next_streak),
-    })
+    Some(ReappearingDispatch::SameRoleFailure { next_streak })
 }
 
 #[cfg(test)]
@@ -761,7 +774,7 @@ mod cooldown_tests {
     }
 
     #[test]
-    fn reappearing_same_role_is_failure_and_escalates_from_existing_streak() {
+    fn reappearing_same_role_is_failure_and_advances_existing_streak() {
         let marker = DispatchMarker {
             instant: StdInstant::now(),
             role: "worker".to_owned(),
@@ -769,10 +782,32 @@ mod cooldown_tests {
 
         assert_eq!(
             classify_reappearing_dispatch(marker, "worker", 1),
-            Some(ReappearingDispatch::SameRoleFailure {
-                next_streak: 2,
-                cooldown: Duration::from_secs(120),
-            })
+            Some(ReappearingDispatch::SameRoleFailure { next_streak: 2 })
+        );
+    }
+
+    #[test]
+    fn deterministic_ci_failure_keeps_fixed_floor_instead_of_provider_backoff() {
+        assert_eq!(
+            dispatch_cooldown_for_failure(5, false),
+            DISPATCH_COOLDOWN,
+            "compile/test/snapshot failures must remain prompt at later streaks"
+        );
+        assert!(
+            dispatch_cooldown_for_failure(5, false) < escalating_dispatch_cooldown(5),
+            "the deterministic class must not accrue the provider ladder"
+        );
+    }
+
+    #[test]
+    fn provider_failure_still_accrues_escalating_backoff() {
+        assert_eq!(
+            dispatch_cooldown_for_failure(5, true),
+            escalating_dispatch_cooldown(5)
+        );
+        assert_eq!(
+            dispatch_cooldown_for_failure(5, true),
+            Duration::from_secs(16 * 60)
         );
     }
 
