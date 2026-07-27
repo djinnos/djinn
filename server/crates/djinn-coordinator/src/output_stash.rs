@@ -108,6 +108,49 @@ pub(crate) fn durable_root_for_gc() -> Option<PathBuf> {
     durable_root()
 }
 
+/// Every durable output-stash root this process can actually reach on disk.
+///
+/// The coordinator's GC used to sweep exactly one root — `durable_root()`,
+/// i.e. the `$XDG_CACHE_HOME → $HOME/.cache` chain evaluated **in the server
+/// pod**. `XDG_CACHE_HOME` is rendered only into Job specs, so in the server
+/// pod that chain lands on `/home/djinn/.cache/djinn/output_stash`: a path that
+/// does not exist there at all. `scan_pointers` maps `NotFound` to "nothing to
+/// do", so the sweep logged `pointers_scanned=0 blobs_scanned=0 error_count=0`
+/// on every tick — a success line indistinguishable from an empty stash —
+/// while every real blob accumulated on the cache PVC under
+/// `<pvc>/xdg/<project_id>/djinn/output_stash`, written by Job pods and never
+/// once considered for the 30-day retention window.
+///
+/// The server pod mounts that same claim at `$DJINN_HOME/cache`, so the
+/// per-project Job-pod roots are enumerable from here with no new volume
+/// plumbing (`djinn_k8s::job` already says as much in-tree).
+///
+/// The coordinator's entry point is
+/// `crate::health::durable_output_stash_gc_roots`, which supplies the host cache
+/// mount from the coordinator context.
+///
+/// `own_root` is this process's own stash root (kept so a server-hosted session
+/// that wrote locally is still collected); `xdg_cache_root` is the host's view
+/// of the per-project Job-pod `$XDG_CACHE_HOME` directories.
+pub(crate) fn durable_gc_roots_under(
+    xdg_cache_root: &Path,
+    own_root: Option<PathBuf>,
+) -> Vec<PathBuf> {
+    let mut roots: Vec<PathBuf> = own_root.into_iter().collect();
+
+    if let Ok(entries) = std::fs::read_dir(xdg_cache_root) {
+        for entry in entries.flatten() {
+            if entry.file_type().is_ok_and(|t| t.is_dir()) {
+                roots.push(djinn_core::paths::output_stash_dir_under(&entry.path()));
+            }
+        }
+    }
+
+    roots.sort();
+    roots.dedup();
+    roots
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum DurablePointerKind {
     Version2,
@@ -335,20 +378,31 @@ fn durable_root() -> Option<PathBuf> {
 
 #[cfg(not(test))]
 fn durable_root() -> Option<PathBuf> {
-    if let Ok(xdg) = std::env::var("XDG_CACHE_HOME")
-        && !xdg.is_empty()
-    {
-        return Some(PathBuf::from(xdg).join("djinn").join("output_stash"));
+    Some(durable_root_from(
+        std::env::var("XDG_CACHE_HOME").ok(),
+        djinn_core::paths::output_stash_root(),
+    ))
+}
+
+/// Pure derivation behind [`durable_root`].
+///
+/// * `xdg_cache_home` — Job pods only. `djinn_k8s::job` renders
+///   `XDG_CACHE_HOME=/cache/xdg/{project_id}`, putting the stash on the shared
+///   cache PVC. Correct there and only there.
+/// * `host_root` — [`djinn_core::paths::output_stash_root`], the caller's own
+///   mount of that same PVC.
+///
+/// There is deliberately **no `$HOME` parameter**. The leg this replaced was
+/// `$HOME/.cache/djinn/output_stash`, which in the server pod is
+/// `/home/djinn/.cache/...`: an ephemeral container-layer path that does not
+/// exist there at all, so a stash meant to survive a restart never did and the
+/// retention sweep could never see it. See [`durable_gc_roots_under`].
+#[cfg_attr(test, allow(dead_code))]
+fn durable_root_from(xdg_cache_home: Option<String>, host_root: PathBuf) -> PathBuf {
+    match xdg_cache_home {
+        Some(xdg) if !xdg.is_empty() => PathBuf::from(xdg).join("djinn").join("output_stash"),
+        _ => host_root,
     }
-    std::env::var("HOME")
-        .ok()
-        .filter(|h| !h.is_empty())
-        .map(|h| {
-            PathBuf::from(h)
-                .join(".cache")
-                .join("djinn")
-                .join("output_stash")
-        })
 }
 
 /// Content-addressed blob path: `<root>/blobs/<sha256(content)>`.
@@ -398,6 +452,36 @@ impl OutputStashGcReport {
     }
 }
 
+/// Whether a GC pass may actually unlink files.
+///
+/// This exists because correcting the GC root **arms a sweep that has never
+/// run**. Every prior tick scanned a nonexistent directory, so the operational
+/// evidence authorising deletion ("30-day retention has been running fine for
+/// months") was collected against an empty set and is structurally worthless —
+/// the same trap `CacheCleanupConfig::sccache_delete_armed` documents. The
+/// corrected path points a real `remove_file` loop at ~4 GiB of production
+/// blobs, so it must be explicitly armed rather than inherit that authorization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutputStashGcMode {
+    /// Scan and count deletion candidates; unlink nothing.
+    ReportOnly,
+    /// Scan and unlink expired pointers and unreferenced blobs.
+    Delete,
+}
+
+impl OutputStashGcMode {
+    fn deletes(self) -> bool {
+        matches!(self, Self::Delete)
+    }
+
+    pub fn as_metric_label(self) -> &'static str {
+        match self {
+            Self::ReportOnly => "report_only",
+            Self::Delete => "delete",
+        }
+    }
+}
+
 fn is_terminal_session_status(status: SessionStatus) -> bool {
     matches!(
         status,
@@ -426,7 +510,30 @@ fn file_modified_unix_secs(path: &Path) -> Result<u64, String> {
 pub fn gc_durable_output_stash<F>(
     root: &Path,
     retention_cutoff_unix_secs: u64,
+    lookup_session: F,
+) -> OutputStashGcReport
+where
+    F: FnMut(&str) -> Result<Option<OutputStashGcSession>, String>,
+{
+    gc_durable_output_stash_with_mode(
+        root,
+        retention_cutoff_unix_secs,
+        lookup_session,
+        OutputStashGcMode::Delete,
+    )
+}
+
+/// [`gc_durable_output_stash`] with an explicit deletion mode.
+///
+/// In [`OutputStashGcMode::ReportOnly`] the scan is byte-identical but no file
+/// is unlinked: `pointers_deleted` / `blobs_deleted` report what *would* have
+/// been removed. This is the default the coordinator ships with — see
+/// [`OutputStashGcMode`] for why.
+pub fn gc_durable_output_stash_with_mode<F>(
+    root: &Path,
+    retention_cutoff_unix_secs: u64,
     mut lookup_session: F,
+    mode: OutputStashGcMode,
 ) -> OutputStashGcReport
 where
     F: FnMut(&str) -> Result<Option<OutputStashGcSession>, String>,
@@ -444,17 +551,32 @@ where
         &mut retained_hashes,
         &mut lookup_session,
         retention_cutoff_unix_secs,
+        mode,
     );
     scan_blobs(
         &blobs_dir,
         &mut report,
         &retained_hashes,
         retention_cutoff_unix_secs,
+        mode,
     );
 
     report
 }
 
+/// Unlink `path` unless the pass is report-only.
+///
+/// Report-only returns `Ok(())` without touching the filesystem, so callers
+/// account for the entry exactly as they would for a real deletion.
+fn remove_unless_report_only(path: &Path, mode: OutputStashGcMode) -> std::io::Result<()> {
+    if mode.deletes() {
+        std::fs::remove_file(path)
+    } else {
+        Ok(())
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn scan_pointers<F>(
     root: &Path,
     ids_dir: &Path,
@@ -462,6 +584,7 @@ fn scan_pointers<F>(
     retained_hashes: &mut HashSet<String>,
     lookup_session: &mut F,
     retention_cutoff_unix_secs: u64,
+    mode: OutputStashGcMode,
 ) where
     F: FnMut(&str) -> Result<Option<OutputStashGcSession>, String>,
 {
@@ -482,6 +605,7 @@ fn scan_pointers<F>(
                     retained_hashes,
                     lookup_session,
                     retention_cutoff_unix_secs,
+                    mode,
                 );
             }
         }
@@ -492,6 +616,7 @@ fn scan_pointers<F>(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn process_pointer_entry<F>(
     root: &Path,
     entry: std::fs::DirEntry,
@@ -499,6 +624,7 @@ fn process_pointer_entry<F>(
     retained_hashes: &mut HashSet<String>,
     lookup_session: &mut F,
     retention_cutoff_unix_secs: u64,
+    mode: OutputStashGcMode,
 ) where
     F: FnMut(&str) -> Result<Option<OutputStashGcSession>, String>,
 {
@@ -530,7 +656,7 @@ fn process_pointer_entry<F>(
     };
 
     if !blob_path(root, &record.content_hash).is_file() {
-        match std::fs::remove_file(&pointer_path) {
+        match remove_unless_report_only(&pointer_path, mode) {
             Ok(()) => report.pointers_deleted += 1,
             Err(e) => {
                 report.errors.push(format!(
@@ -547,7 +673,7 @@ fn process_pointer_entry<F>(
         should_delete_pointer(&record, retention_cutoff_unix_secs, lookup_session, report);
 
     if should_delete {
-        match std::fs::remove_file(&pointer_path) {
+        match remove_unless_report_only(&pointer_path, mode) {
             Ok(()) => report.pointers_deleted += 1,
             Err(e) => {
                 report.errors.push(format!(
@@ -599,6 +725,7 @@ fn scan_blobs(
     report: &mut OutputStashGcReport,
     retained_hashes: &HashSet<String>,
     retention_cutoff_unix_secs: u64,
+    mode: OutputStashGcMode,
 ) {
     match std::fs::read_dir(blobs_dir) {
         Ok(entries) => {
@@ -610,7 +737,13 @@ fn scan_blobs(
                         continue;
                     }
                 };
-                process_blob_entry(entry, report, retained_hashes, retention_cutoff_unix_secs);
+                process_blob_entry(
+                    entry,
+                    report,
+                    retained_hashes,
+                    retention_cutoff_unix_secs,
+                    mode,
+                );
             }
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -625,6 +758,7 @@ fn process_blob_entry(
     report: &mut OutputStashGcReport,
     retained_hashes: &HashSet<String>,
     retention_cutoff_unix_secs: u64,
+    mode: OutputStashGcMode,
 ) {
     let blob = entry.path();
     if !blob.is_file() {
@@ -641,7 +775,7 @@ fn process_blob_entry(
     }
     match file_modified_unix_secs(&blob) {
         Ok(modified_at) if modified_at <= retention_cutoff_unix_secs => {
-            match std::fs::remove_file(&blob) {
+            match remove_unless_report_only(&blob, mode) {
                 Ok(()) => report.blobs_deleted += 1,
                 Err(e) => {
                     report
@@ -2625,5 +2759,181 @@ mod tests {
         // A stash with no session_id must NOT resolve a v2 record.
         let unowned = OutputStash::with_session_id_and_durable_root("nobody", root.clone());
         assert!(unowned.view("call-secret", 0, 10).is_err());
+    }
+
+    // ─── Durable root resolution (the cross-pod cache-path leak) ─────────────
+
+    /// The writer must resolve the caller's own mount when `XDG_CACHE_HOME` is
+    /// absent — which is exactly the server pod. Neutralization: there is no
+    /// `$HOME` input at all, so a reintroduced `$HOME/.cache` fallback cannot
+    /// satisfy this signature, and the host root is returned verbatim.
+    #[test]
+    fn durable_root_falls_back_to_the_host_mount_not_home_cache() {
+        let host_root = PathBuf::from("/var/lib/djinn/cache/djinn/output_stash");
+
+        for absent in [None, Some(String::new())] {
+            let resolved = durable_root_from(absent, host_root.clone());
+            assert_eq!(resolved, host_root);
+            assert!(
+                !resolved.starts_with("/home/djinn/.cache"),
+                "{} must not resolve into the ephemeral $HOME/.cache tree",
+                resolved.display()
+            );
+        }
+
+        // Job pods keep the PVC-backed XDG answer.
+        assert_eq!(
+            durable_root_from(Some("/cache/xdg/proj".into()), host_root),
+            PathBuf::from("/cache/xdg/proj/djinn/output_stash")
+        );
+    }
+
+    // ─── GC root discovery (the cross-pod cache-path leak) ────────────────────
+
+    /// Build a fake host-side view of the cache PVC: `<cache>/xdg/<project>/…`,
+    /// exactly the layout `djinn_k8s::job` produces via
+    /// `XDG_CACHE_HOME=/cache/xdg/{project_id}`.
+    fn host_cache_with_projects(name: &str, projects: &[&str]) -> PathBuf {
+        let cache = crate::test_helpers::test_persistent_dir("djinn-host-cache-").join(name);
+        let _ = std::fs::remove_dir_all(&cache);
+        for project in projects {
+            let stash = cache.join("xdg").join(project).join("djinn/output_stash");
+            std::fs::create_dir_all(stash.join("ids")).unwrap();
+            std::fs::create_dir_all(stash.join("blobs")).unwrap();
+        }
+        cache
+    }
+
+    /// The GC must discover the per-project stash roots Job pods actually wrote
+    /// on the shared cache PVC, seen through the *server pod's* mount.
+    #[test]
+    fn gc_roots_enumerate_the_per_project_job_pod_stashes() {
+        let cache = host_cache_with_projects("enumerate", &["project-a", "project-b"]);
+        // A non-project file at the xdg level must be ignored, not turned into
+        // a bogus root.
+        std::fs::write(cache.join("xdg").join("stray-file"), b"x").unwrap();
+
+        let roots = durable_gc_roots_under(&cache.join("xdg"), None);
+
+        assert_eq!(
+            roots,
+            vec![
+                cache.join("xdg/project-a/djinn/output_stash"),
+                cache.join("xdg/project-b/djinn/output_stash"),
+            ]
+        );
+    }
+
+    /// Neutralization: this is the exact production shape. `XDG_CACHE_HOME` is
+    /// unset in the server pod, so the old chain resolved
+    /// `$HOME/.cache/djinn/output_stash`. Point the discovery at that tree and
+    /// it finds NOTHING — while the real blobs sit under the cache mount.
+    /// A regression that reintroduces the `$HOME`-relative root fails here.
+    #[test]
+    fn home_relative_root_discovers_none_of_the_real_stashes() {
+        let cache = host_cache_with_projects("neutralize", &["project-a"]);
+        let ephemeral_home_cache = cache.join("fake-home/.cache");
+
+        let via_home = durable_gc_roots_under(&ephemeral_home_cache, None);
+        assert!(
+            via_home.is_empty(),
+            "the $HOME/.cache tree holds no Job-pod stash, yet discovery returned {via_home:?}"
+        );
+
+        let via_cache_mount = durable_gc_roots_under(&cache.join("xdg"), None);
+        assert_eq!(via_cache_mount.len(), 1);
+        assert!(via_cache_mount[0].starts_with(&cache));
+    }
+
+    /// The process's own root is still swept, and duplicates collapse.
+    #[test]
+    fn gc_roots_include_the_processes_own_root_without_duplicating_it() {
+        let cache = host_cache_with_projects("own-root", &["project-a"]);
+        let own = cache.join("xdg/project-a/djinn/output_stash");
+
+        let roots = durable_gc_roots_under(&cache.join("xdg"), Some(own.clone()));
+        assert_eq!(roots, vec![own.clone()]);
+
+        let elsewhere = cache.join("djinn/output_stash");
+        let roots = durable_gc_roots_under(&cache.join("xdg"), Some(elsewhere.clone()));
+        assert!(roots.contains(&elsewhere));
+        assert!(roots.contains(&own));
+        assert_eq!(roots.len(), 2);
+    }
+
+    // ─── Report-only arming gate ──────────────────────────────────────────────
+
+    /// Seed a root with one expired pointer + blob pair that a `Delete` pass
+    /// would remove. Returns `(root, pointer_path, blob_path)`.
+    fn seed_expired_entry(name: &str) -> (PathBuf, PathBuf, PathBuf) {
+        let root = gc_root(name);
+        let mut stash =
+            OutputStash::with_session_id_and_durable_root("expired-session", root.clone());
+        stash
+            .insert("call-expired".into(), "shell".into(), "content\n".into())
+            .unwrap();
+        let pointer = owner_id_pointer_path(&root, "expired-session", "call-expired");
+        let record = parse_durable_pointer(&std::fs::read_to_string(&pointer).unwrap()).unwrap();
+        let blob = blob_path(&root, &record.content_hash);
+        assert!(pointer.is_file() && blob.is_file());
+        (root, pointer, blob)
+    }
+
+    fn expired_session_lookup(_id: &str) -> Result<Option<OutputStashGcSession>, String> {
+        Ok(Some(OutputStashGcSession {
+            status: SessionStatus::Completed,
+            ended_at_unix_secs: Some(0),
+        }))
+    }
+
+    /// Correcting the GC path arms a `remove_file` loop that has never once run
+    /// against real data. Report-only mode must count candidates and delete
+    /// nothing — asserted on the side effect (the files still exist), not on the
+    /// report's labels.
+    #[test]
+    fn report_only_mode_counts_candidates_but_unlinks_nothing() {
+        let (root, pointer, blob) = seed_expired_entry("report-only");
+
+        let report = gc_durable_output_stash_with_mode(
+            &root,
+            unix_time_secs() + 1_000,
+            expired_session_lookup,
+            OutputStashGcMode::ReportOnly,
+        );
+
+        assert_eq!(report.pointers_scanned, 1);
+        assert_eq!(report.pointers_deleted, 1, "candidate must be reported");
+        assert_eq!(report.blobs_deleted, 1, "candidate must be reported");
+        assert!(report.is_success());
+
+        assert!(
+            pointer.is_file(),
+            "report-only must not unlink {}",
+            pointer.display()
+        );
+        assert!(
+            blob.is_file(),
+            "report-only must not unlink {}",
+            blob.display()
+        );
+    }
+
+    /// The armed path still deletes — proving the report-only assertion above is
+    /// about the mode and not about an inert GC.
+    #[test]
+    fn delete_mode_actually_unlinks_the_same_candidates() {
+        let (root, pointer, blob) = seed_expired_entry("delete-mode");
+
+        let report = gc_durable_output_stash_with_mode(
+            &root,
+            unix_time_secs() + 1_000,
+            expired_session_lookup,
+            OutputStashGcMode::Delete,
+        );
+
+        assert_eq!(report.pointers_deleted, 1);
+        assert_eq!(report.blobs_deleted, 1);
+        assert!(!pointer.exists(), "delete mode must unlink the pointer");
+        assert!(!blob.exists(), "delete mode must unlink the blob");
     }
 }

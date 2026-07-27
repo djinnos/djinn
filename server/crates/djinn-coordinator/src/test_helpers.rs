@@ -26,6 +26,18 @@ pub fn test_persistent_dir(prefix: &str) -> PathBuf {
     test_tempdir(prefix).keep()
 }
 
+/// Isolated stand-in for `djinn_core::paths::cache_root()` in tests.
+///
+/// One directory per test binary, so the cache sweeps in
+/// `health::sweep_stale_resources` operate on a tempdir instead of the
+/// developer's real `~/.djinn/cache`.
+pub fn test_cache_root() -> PathBuf {
+    static TEST_CACHE_ROOT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    TEST_CACHE_ROOT
+        .get_or_init(|| test_persistent_dir("djinn-test-cache-root-"))
+        .clone()
+}
+
 pub fn create_test_db() -> Database {
     Database::open_in_memory().expect("open in-memory test database")
 }
@@ -281,7 +293,17 @@ pub fn coordinator_context_from_db(
         warm_job_guard: None,
         repo_graph_ops: None,
         runtime_ops: None,
-        cargo_target_runs_root: None,
+        // A test context MUST NOT leave the cache sweeps unrooted.
+        //
+        // `health::sweep_stale_resources` runs five cache sweeps, and the
+        // destructive branches of the sccache and warm-base guards call
+        // `remove_dir_all`. With `None` here they resolved
+        // `djinn_core::paths::cache_root()`, which on a developer machine is the
+        // real `~/.djinn/cache` — so running the coordinator test suite could
+        // delete the developer's own build cache. Pin every root under one
+        // per-process tempdir instead.
+        cargo_target_runs_root: Some(test_cache_root().join("cargo-target-runs")),
+        host_cache_root: Some(test_cache_root()),
         mirror: None,
         rpc_registry: None,
         default_project_id: None,
