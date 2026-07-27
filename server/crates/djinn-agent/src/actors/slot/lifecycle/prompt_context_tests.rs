@@ -671,8 +671,8 @@ fn resume_metadata_with_checkpoint() -> djinn_runtime::ResumeLifecycleMetadata {
 fn resume_metadata_with_auto_submit() -> djinn_runtime::ResumeLifecycleMetadata {
     djinn_runtime::ResumeLifecycleMetadata {
         considered: true,
-        selection_reason: Some(djinn_runtime::ResumeSelectionReason::AutoSubmitAccepted),
-        source_kind: Some(djinn_runtime::ResumeSourceKind::AutoSubmit),
+        selection_reason: Some(djinn_runtime::ResumeSelectionReason::CleanTaskBranchFallback),
+        source_kind: Some(djinn_runtime::ResumeSourceKind::CleanTaskBranch),
         target_ref: Some("refs/heads/task/test".to_string()),
         submit_or_review_id: Some("review-7".to_string()),
         prior_session_lineage: Some("session-prior-002".to_string()),
@@ -726,7 +726,7 @@ async fn worker_resume_note_included_for_auto_submit_source() {
     let note_text = note.unwrap();
     assert_contains_all(
         &note_text,
-        &["session-prior-002", "review-7", "auto-submit accepted"],
+        &["session-prior-002", "review-7", "clean fallback"],
     );
     assert!(!note_text.contains("checkpoint"));
 }
@@ -1120,7 +1120,6 @@ fn resume_note_renders_all_source_kind_labels() {
     use djinn_runtime::ResumeSourceKind as K;
 
     let cases: &[(K, &str)] = &[
-        (K::AutoSubmit, "auto-submit"),
         (K::TaskBranchCheckpoint, "task-branch checkpoint"),
         (K::AlternateCheckpointRef, "alternate checkpoint ref"),
         (K::CleanTaskBranch, "clean task branch"),
@@ -1149,7 +1148,7 @@ fn resume_note_renders_all_termination_labels() {
     use djinn_runtime::ResumeSelectionReason as R;
 
     let cases: &[(R, &str)] = &[
-        (R::AutoSubmitAccepted, "auto-submit accepted"),
+        (R::CleanTaskBranchFallback, "clean fallback"),
         (R::LatestSafeCheckpoint, "no-progress checkpoint"),
         (R::AlternateCheckpointRef, "alternate checkpoint ref"),
         (R::CleanTaskBranchFallback, "clean fallback"),
@@ -1215,10 +1214,10 @@ fn resume_note_selected_source_and_target_ref_details() {
     // AutoSubmit with target_ref and submit_or_review_id
     let metadata = djinn_runtime::ResumeLifecycleMetadata {
         considered: true,
-        source_kind: Some(djinn_runtime::ResumeSourceKind::AutoSubmit),
+        source_kind: Some(djinn_runtime::ResumeSourceKind::CleanTaskBranch),
         target_ref: Some("refs/heads/task/my-feature".to_string()),
         submit_or_review_id: Some("pr-42".to_string()),
-        selection_reason: Some(djinn_runtime::ResumeSelectionReason::AutoSubmitAccepted),
+        selection_reason: Some(djinn_runtime::ResumeSelectionReason::CleanTaskBranchFallback),
         prior_session_lineage: Some("session-submit-01".to_string()),
         ..Default::default()
     };
@@ -1229,7 +1228,7 @@ fn resume_note_selected_source_and_target_ref_details() {
             "auto-submit",
             "refs/heads/task/my-feature",
             "pr-42",
-            "auto-submit accepted",
+            "clean fallback",
         ],
     );
     // Auto-submit source should NOT include "checkpoint"
@@ -1704,8 +1703,8 @@ fn resume_context_renders_minimal_fields_for_provider_rejection() {
 fn preservation_no_replay_auto_submit_renders_review_id_not_checkpoint() {
     let metadata = djinn_runtime::ResumeLifecycleMetadata {
         considered: true,
-        selection_reason: Some(djinn_runtime::ResumeSelectionReason::AutoSubmitAccepted),
-        source_kind: Some(djinn_runtime::ResumeSourceKind::AutoSubmit),
+        selection_reason: Some(djinn_runtime::ResumeSelectionReason::CleanTaskBranchFallback),
+        source_kind: Some(djinn_runtime::ResumeSourceKind::CleanTaskBranch),
         target_ref: Some("refs/heads/task/test".to_string()),
         submit_or_review_id: Some("review-accepted-42".to_string()),
         prior_session_lineage: Some("session-auto-submit".to_string()),
@@ -1718,7 +1717,7 @@ fn preservation_no_replay_auto_submit_renders_review_id_not_checkpoint() {
         &[
             "session-auto-submit",
             "review-accepted-42",   // review id, not checkpoint
-            "auto-submit accepted", // selection reason label
+            "clean fallback", // selection reason label
             "auto-submit",          // source kind label
         ],
     );

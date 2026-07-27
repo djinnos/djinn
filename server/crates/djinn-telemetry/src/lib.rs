@@ -3625,20 +3625,6 @@ mod tests {
                 "missing JIT pitfall outcome label {outcome} in:\n{rendered}"
             );
         }
-        for outcome in VERIFY_CACHE_LOOKUP_OUTCOMES {
-            assert!(
-                rendered.contains(&format!(
-                    "verify_cache_lookup_total{{outcome=\"{outcome}\"}}"
-                )),
-                "missing verification lookup outcome label {outcome} in:\n{rendered}"
-            );
-        }
-        for outcome in VERIFY_RUN_RECORD_OUTCOMES {
-            assert!(
-                rendered.contains(&format!("verify_run_record_total{{outcome=\"{outcome}\"}}")),
-                "missing verification recording outcome label {outcome} in:\n{rendered}"
-            );
-        }
         for metric in [
             TASKRUN_JOBS_STARTED_TOTAL,
             WORKER_COMPLETIONS_SUBMITTED_TOTAL,

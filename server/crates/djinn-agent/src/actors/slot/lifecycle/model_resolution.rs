@@ -143,7 +143,6 @@ pub(crate) fn map_resume_selection_reason_to_rotation_cause(
     use djinn_runtime::ResumeSelectionReason as R;
     match reason {
         Some(R::LatestSafeCheckpoint) => Some(RotationTerminationCause::NoProgress),
-        Some(R::AutoSubmitAccepted) => Some(RotationTerminationCause::Deadline),
         Some(R::AlternateCheckpointRef) => Some(RotationTerminationCause::Flaky),
         Some(R::NewerTaskBranch) => Some(RotationTerminationCause::RepeatedVerifyLoop),
         _ => None,
@@ -430,7 +429,7 @@ mod rotation_tests {
             Some(RotationTerminationCause::NoProgress)
         );
         assert_eq!(
-            map_resume_selection_reason_to_rotation_cause(Some(R::AutoSubmitAccepted)),
+            map_resume_selection_reason_to_rotation_cause(Some(R::CleanTaskBranchFallback)),
             Some(RotationTerminationCause::Deadline)
         );
         assert_eq!(

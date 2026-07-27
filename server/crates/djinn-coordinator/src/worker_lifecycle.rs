@@ -19,9 +19,6 @@ pub struct WorkerLifecycleConfig {
     /// Placeholder config for sibling checkpoint-preservation work.
     #[serde(default)]
     pub checkpoint: CheckpointLifecycleConfig,
-    /// Placeholder config for sibling auto-submit-if-green work.
-    #[serde(default)]
-    pub auto_submit: AutoSubmitLifecycleConfig,
     /// Placeholder config for sibling resume-via-git work.
     #[serde(default)]
     pub resume: ResumeLifecycleConfig,
@@ -51,10 +48,6 @@ pub struct DurableProgressRolloutConfig {
     /// Defaults false because checkpoint mechanics are owned by a sibling epic.
     #[serde(default)]
     pub checkpoint_before_no_progress_exit: bool,
-    /// Gate for auto-submit-if-green execution. Defaults false; this task only
-    /// defines the DTO shape consumed by sibling auto-submit work.
-    #[serde(default)]
-    pub auto_submit_if_green: bool,
     /// Gate for resume selection from preserved checkpoints. Defaults false;
     /// resume-via-git mechanics are owned by a sibling epic.
     #[serde(default)]
@@ -71,7 +64,6 @@ impl Default for DurableProgressRolloutConfig {
             detection_mode: DurableProgressDetectionMode::Shadow,
             no_progress_enforcement: NoProgressEnforcementMode::Disabled,
             checkpoint_before_no_progress_exit: false,
-            auto_submit_if_green: false,
             resume_from_checkpoint: false,
             rotate_model_on_no_progress: false,
         }
@@ -477,56 +469,6 @@ pub struct CheckpointSafetyScanMetadata {
     pub findings: Vec<String>,
 }
 
-/// Auto-submit-if-green metadata placeholder populated by sibling epics.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct AutoSubmitLifecycleMetadata {
-    /// Whether auto-submit was considered for this lifecycle decision.
-    #[serde(default)]
-    pub considered: bool,
-    /// Whether all freshness/verification gates were green at evaluation time.
-    #[serde(default)]
-    pub green: Option<bool>,
-    /// Verification command or suite used as the canonical freshness gate.
-    #[serde(default)]
-    pub verification_command: Option<String>,
-    /// Review/submission identifier created by auto-submit, when present.
-    #[serde(default)]
-    pub submission_id: Option<String>,
-    /// Reason auto-submit did not happen or was deferred.
-    #[serde(default)]
-    pub skipped_reason: Option<AutoSubmitSkipReason>,
-    /// Free-form extension map for rollout-specific auto-submit details.
-    #[serde(default)]
-    pub extra: serde_json::Map<String, serde_json::Value>,
-}
-
-/// Passive auto-submit rollout config; defaults do not submit worker output.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AutoSubmitLifecycleConfig {
-    /// Whether auto-submit-if-green is enabled.
-    #[serde(default)]
-    pub enabled: bool,
-    /// Whether a fresh canonical verification result is required before submit.
-    #[serde(default)]
-    pub require_fresh_verification: bool,
-    /// Optional name of the canonical verification gate.
-    #[serde(default)]
-    pub canonical_verification_gate: Option<String>,
-}
-
-/// Classification for why auto-submit was skipped or deferred.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AutoSubmitSkipReason {
-    NotEnabled,
-    NotGreen,
-    VerificationStale,
-    CheckpointMissing,
-    ReviewRequired,
-    SafetyScanFailed,
-    MergeConflict,
-}
-
 /// Coordinator command-liveness view for no-progress enforcement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NoProgressCommandState {
@@ -556,9 +498,7 @@ pub enum NoProgressControlledExitDecision {
 /// Side-effect-free preservation branch used by controlled no-progress exits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ControlledExitPreservationAction {
-    /// A ymed auto-submit decision already accepted the output; checkpoint can be skipped.
-    UseAutoSubmit,
-    /// No auto-submit was accepted; request/await the 8yjx checkpoint preservation path.
+    /// Request or await checkpoint preservation.
     RequestCheckpoint,
     /// Preservation failed and the configured policy blocks the terminal transition.
     BlockForPreservationFailure,
@@ -566,15 +506,11 @@ pub enum ControlledExitPreservationAction {
     RecordFailureAndProceed,
 }
 
-/// Decide whether a controlled exit should consume auto-submit, checkpoint, or policy result.
+/// Decide whether a controlled exit should checkpoint or apply the failure policy.
 pub fn decide_controlled_exit_preservation_action(
-    auto_submit_accepted: bool,
     checkpoint_outcome: Option<PreservationOutcome>,
     failure_policy: PreservationFailurePolicy,
 ) -> ControlledExitPreservationAction {
-    if auto_submit_accepted {
-        return ControlledExitPreservationAction::UseAutoSubmit;
-    }
     let Some(outcome) = checkpoint_outcome else {
         return ControlledExitPreservationAction::RequestCheckpoint;
     };
@@ -678,12 +614,6 @@ pub struct ResumeLifecycleMetadata {
     /// preserve context for the fallback worker.
     #[serde(default)]
     pub last_durable_progress_summary: Option<String>,
-    /// Suggested verification command from the prior session's
-    /// auto-submit/checkpoint metadata, when available. Mirrors the runtime
-    /// `ResumeLifecycleMetadata::verification_command` field so the fallback
-    /// worker can re-verify quickly.
-    #[serde(default)]
-    pub verification_command: Option<String>,
 }
 
 /// Passive resume rollout config; defaults do not alter dispatch selection.
@@ -786,7 +716,6 @@ impl ResumeLifecycleConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ResumeSelectionReason {
-    AutoSubmitAccepted,
     LatestSafeCheckpoint,
     AlternateCheckpointRef,
     CleanTaskBranchFallback,
@@ -911,481 +840,10 @@ pub struct WorkerLifecycleMetadata {
     /// Checkpoint state populated by preservation/checkpoint work.
     #[serde(default)]
     pub checkpoint: Option<CheckpointLifecycleMetadata>,
-    /// Auto-submit state populated by auto-submit-if-green work.
-    #[serde(default)]
-    pub auto_submit: Option<AutoSubmitLifecycleMetadata>,
     /// Resume state populated by resume-via-git work.
     #[serde(default)]
     pub resume: Option<ResumeLifecycleMetadata>,
     /// Model-rotation state populated by future enforcement work.
     #[serde(default)]
     pub model_rotation: Option<ModelRotationLifecycleMetadata>,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn worker_lifecycle_config_defaults_preserve_existing_behavior() {
-        let config = WorkerLifecycleConfig::default();
-
-        assert_eq!(
-            config.rollout.detection_mode,
-            DurableProgressDetectionMode::Shadow
-        );
-        assert_eq!(
-            config.rollout.no_progress_enforcement,
-            NoProgressEnforcementMode::Disabled
-        );
-        assert!(!config.rollout.checkpoint_before_no_progress_exit);
-        assert!(!config.rollout.auto_submit_if_green);
-        assert!(!config.rollout.resume_from_checkpoint);
-        assert!(!config.rollout.rotate_model_on_no_progress);
-        assert_eq!(config.no_progress_thresholds.forced_exit_turns, None);
-        assert_eq!(config.no_progress_thresholds.model_rotation_turns, None);
-        assert!(!config.checkpoint.enabled);
-        assert!(!config.auto_submit.enabled);
-        assert!(!config.resume.enabled);
-        assert!(!config.model_rotation.enabled);
-        assert!(config.slow_extension.enabled);
-        assert_eq!(config.slow_extension.quantum_secs, 10 * 60);
-        assert_eq!(config.slow_extension.max_extensions, 3);
-    }
-
-    fn enforcing_config() -> WorkerLifecycleConfig {
-        WorkerLifecycleConfig {
-            rollout: DurableProgressRolloutConfig {
-                detection_mode: DurableProgressDetectionMode::Enforce,
-                no_progress_enforcement: NoProgressEnforcementMode::Enforce,
-                checkpoint_before_no_progress_exit: true,
-                auto_submit_if_green: true,
-                resume_from_checkpoint: false,
-                rotate_model_on_no_progress: false,
-            },
-            no_progress_thresholds: NoProgressThresholdConfig {
-                min_evaluated_turns: 2,
-                warning_turns: 2,
-                model_rotation_turns: None,
-                forced_exit_turns: Some(4),
-                long_command_suspension_secs: 600,
-                flaky_command_grace_turns: 0,
-            },
-            checkpoint: CheckpointLifecycleConfig {
-                enabled: true,
-                require_before_no_progress_exit: true,
-                ref_namespace: None,
-                failure_policy: PreservationFailurePolicy::RecordAndProceed,
-            },
-            auto_submit: AutoSubmitLifecycleConfig {
-                enabled: true,
-                require_fresh_verification: true,
-                canonical_verification_gate: Some("default".to_string()),
-            },
-            resume: ResumeLifecycleConfig::default(),
-            model_rotation: ModelRotationLifecycleConfig::default(),
-            slow_extension: SlowExtensionConfig::default(),
-        }
-    }
-
-    #[test]
-    fn no_progress_gate_default_off_disables_exit() {
-        assert_eq!(
-            evaluate_no_progress_controlled_exit(
-                &WorkerLifecycleConfig::default(),
-                99,
-                NoProgressCommandState::Idle
-            ),
-            NoProgressControlledExitDecision::Disabled
-        );
-    }
-
-    #[test]
-    fn no_progress_gate_requests_exit_after_threshold_when_idle() {
-        assert_eq!(
-            evaluate_no_progress_controlled_exit(
-                &enforcing_config(),
-                4,
-                NoProgressCommandState::Idle
-            ),
-            NoProgressControlledExitDecision::RequestExit
-        );
-    }
-
-    #[test]
-    fn no_progress_gate_defers_long_or_unknown_command_state() {
-        assert_eq!(
-            evaluate_no_progress_controlled_exit(
-                &enforcing_config(),
-                4,
-                NoProgressCommandState::InFlight { running_secs: 1200 }
-            ),
-            NoProgressControlledExitDecision::DeferredForCommand
-        );
-        assert_eq!(
-            evaluate_no_progress_controlled_exit(
-                &enforcing_config(),
-                4,
-                NoProgressCommandState::Unknown
-            ),
-            NoProgressControlledExitDecision::DeferredForCommand
-        );
-    }
-
-    #[test]
-    fn no_progress_gate_shadow_observes_without_exit() {
-        let mut config = enforcing_config();
-        config.rollout.no_progress_enforcement = NoProgressEnforcementMode::Shadow;
-
-        assert_eq!(
-            evaluate_no_progress_controlled_exit(&config, 4, NoProgressCommandState::Idle),
-            NoProgressControlledExitDecision::ShadowWouldExit
-        );
-    }
-
-    #[test]
-    fn controlled_exit_preservation_prefers_auto_submit() {
-        assert_eq!(
-            decide_controlled_exit_preservation_action(
-                true,
-                Some(PreservationOutcome::RuntimeUnavailable),
-                PreservationFailurePolicy::Block
-            ),
-            ControlledExitPreservationAction::UseAutoSubmit
-        );
-    }
-
-    #[test]
-    fn controlled_exit_preservation_requests_checkpoint_fallback() {
-        assert_eq!(
-            decide_controlled_exit_preservation_action(
-                false,
-                None,
-                PreservationFailurePolicy::RecordAndProceed
-            ),
-            ControlledExitPreservationAction::RequestCheckpoint
-        );
-        assert_eq!(
-            decide_controlled_exit_preservation_action(
-                false,
-                Some(PreservationOutcome::Succeeded),
-                PreservationFailurePolicy::RecordAndProceed
-            ),
-            ControlledExitPreservationAction::RequestCheckpoint
-        );
-    }
-
-    #[test]
-    fn controlled_exit_preservation_applies_failure_policy() {
-        assert_eq!(
-            decide_controlled_exit_preservation_action(
-                false,
-                Some(PreservationOutcome::Failed),
-                PreservationFailurePolicy::RecordAndProceed
-            ),
-            ControlledExitPreservationAction::RecordFailureAndProceed
-        );
-        assert_eq!(
-            decide_controlled_exit_preservation_action(
-                false,
-                Some(PreservationOutcome::Failed),
-                PreservationFailurePolicy::Block
-            ),
-            ControlledExitPreservationAction::BlockForPreservationFailure
-        );
-    }
-
-    #[test]
-    fn worker_lifecycle_config_deserializes_missing_fields_to_safe_defaults()
-    -> Result<(), serde_json::Error> {
-        let config = serde_json::from_value::<WorkerLifecycleConfig>(json!({}))?;
-
-        assert_eq!(config, WorkerLifecycleConfig::default());
-        Ok(())
-    }
-
-    #[test]
-    fn lifecycle_metadata_serializes_representative_json() -> Result<(), serde_json::Error> {
-        let metadata = WorkerLifecycleMetadata {
-            no_progress_streak: 7,
-            last_reset_reason: Some(DurableProgressResetReason::NewlyGreenVerification),
-            last_no_reset_reason: Some(DurableProgressNoResetReason::ReadOnlyOrNoOpToolSuccess),
-            thresholds: NoProgressThresholdConfig {
-                min_evaluated_turns: 2,
-                warning_turns: 5,
-                model_rotation_turns: Some(8),
-                forced_exit_turns: Some(13),
-                long_command_suspension_secs: 900,
-                flaky_command_grace_turns: 3,
-            },
-            rollout: DurableProgressRolloutConfig {
-                detection_mode: DurableProgressDetectionMode::Shadow,
-                no_progress_enforcement: NoProgressEnforcementMode::Shadow,
-                checkpoint_before_no_progress_exit: true,
-                auto_submit_if_green: true,
-                resume_from_checkpoint: true,
-                rotate_model_on_no_progress: true,
-            },
-            checkpoint: Some(CheckpointLifecycleMetadata {
-                checkpoint_id: Some("ckpt-1".to_string()),
-                commit_sha: Some("abc123".to_string()),
-                ref_name: Some("refs/djinn/checkpoints/task-1".to_string()),
-                requested_for: Some(CheckpointRequestReason::NoProgressWindDown),
-                safety_scan: Some(CheckpointSafetyScanMetadata {
-                    passed: true,
-                    scanner: Some("safety-v1".to_string()),
-                    findings: vec![],
-                }),
-                preservation_outcome: Some(PreservationOutcome::Succeeded),
-                extra: serde_json::Map::new(),
-            }),
-            auto_submit: Some(AutoSubmitLifecycleMetadata {
-                considered: true,
-                green: Some(false),
-                verification_command: Some("cargo test -p djinn-coordinator".to_string()),
-                submission_id: None,
-                skipped_reason: Some(AutoSubmitSkipReason::VerificationStale),
-                extra: serde_json::Map::new(),
-            }),
-            resume: Some(ResumeLifecycleMetadata {
-                dispatch_owner_incarnation_id: None,
-                dispatch_group_id: None,
-                considered: true,
-                checkpoint_id: Some("ckpt-1".to_string()),
-                commit_sha: Some("abc123".to_string()),
-                selection_reason: Some(ResumeSelectionReason::LatestSafeCheckpoint),
-                extra: serde_json::Map::new(),
-                previous_model: Some("provider/old".to_string()),
-                new_model: Some("provider/new".to_string()),
-                failover_reason: Some("no_durable_progress_streak".to_string()),
-                last_durable_progress_summary: Some("Wrote the parser module".to_string()),
-                verification_command: Some("cargo test".to_string()),
-            }),
-            model_rotation: Some(ModelRotationLifecycleMetadata {
-                considered: true,
-                reason: Some(ModelRotationReason::NoDurableProgressStreak),
-                previous_model: Some("provider/old".to_string()),
-                next_model: Some("provider/new".to_string()),
-                extra: serde_json::Map::new(),
-            }),
-        };
-
-        let value = serde_json::to_value(&metadata)?;
-
-        assert_eq!(
-            value,
-            json!({
-                "no_progress_streak": 7,
-                "last_reset_reason": "newly_green_verification",
-                "last_no_reset_reason": "read_only_or_no_op_tool_success",
-                "thresholds": {
-                    "min_evaluated_turns": 2,
-                    "warning_turns": 5,
-                    "model_rotation_turns": 8,
-                    "forced_exit_turns": 13,
-                    "long_command_suspension_secs": 900,
-                    "flaky_command_grace_turns": 3
-                },
-                "rollout": {
-                    "detection_mode": "shadow",
-                    "no_progress_enforcement": "shadow",
-                    "checkpoint_before_no_progress_exit": true,
-                    "auto_submit_if_green": true,
-                    "resume_from_checkpoint": true,
-                    "rotate_model_on_no_progress": true
-                },
-                "checkpoint": {
-                    "checkpoint_id": "ckpt-1",
-                    "commit_sha": "abc123",
-                    "ref_name": "refs/djinn/checkpoints/task-1",
-                    "requested_for": "no_progress_wind_down",
-                    "safety_scan": {
-                        "passed": true,
-                        "scanner": "safety-v1",
-                        "findings": []
-                    },
-                    "preservation_outcome": "succeeded",
-                    "extra": {}
-                },
-                "auto_submit": {
-                    "considered": true,
-                    "green": false,
-                    "verification_command": "cargo test -p djinn-coordinator",
-                    "submission_id": null,
-                    "skipped_reason": "verification_stale",
-                    "extra": {}
-                },
-                "resume": {
-                    "dispatch_owner_incarnation_id": null,
-                    "dispatch_group_id": null,
-                    "considered": true,
-                    "checkpoint_id": "ckpt-1",
-                    "commit_sha": "abc123",
-                    "selection_reason": "latest_safe_checkpoint",
-                    "extra": {},
-                    "previous_model": "provider/old",
-                    "new_model": "provider/new",
-                    "failover_reason": "no_durable_progress_streak",
-                    "last_durable_progress_summary": "Wrote the parser module",
-                    "verification_command": "cargo test",
-                },
-                "model_rotation": {
-                    "considered": true,
-                    "reason": "no_durable_progress_streak",
-                    "previous_model": "provider/old",
-                    "next_model": "provider/new",
-                    "extra": {}
-                }
-            })
-        );
-        Ok(())
-    }
-
-    // ── ResumeLifecycleConfig::resolve tests ──────────────────────
-    // These tests cover proposal `phif` AC 1/3: default-off config,
-    // DB-scoped enablement, and env rollback gate.
-
-    #[test]
-    fn resolve_default_off_when_env_unset_and_db_absent() {
-        let config = ResumeLifecycleConfig::resolve(ResumeLifecycleEnvFlag::Unset, None);
-        assert!(
-            !config.enabled,
-            "default-off: env Unset + DB absent must produce disabled resume"
-        );
-        assert!(
-            !config.prefer_checkpoint,
-            "default-off: prefer_checkpoint must be false"
-        );
-        assert_eq!(
-            config.max_checkpoint_age_secs, None,
-            "default-off: max_checkpoint_age_secs must be None"
-        );
-    }
-
-    #[test]
-    fn resolve_default_off_when_env_unset_and_db_disabled() {
-        let db = ResumeLifecycleConfig {
-            enabled: false,
-            prefer_checkpoint: true,
-            max_checkpoint_age_secs: Some(600),
-        };
-        let config = ResumeLifecycleConfig::resolve(ResumeLifecycleEnvFlag::Unset, Some(&db));
-        assert!(
-            !config.enabled,
-            "env Unset + DB disabled must stay disabled"
-        );
-    }
-
-    #[test]
-    fn resolve_db_scoped_enablement_when_env_unset() {
-        let db = ResumeLifecycleConfig {
-            enabled: true,
-            prefer_checkpoint: true,
-            max_checkpoint_age_secs: Some(300),
-        };
-        let config = ResumeLifecycleConfig::resolve(ResumeLifecycleEnvFlag::Unset, Some(&db));
-        assert!(
-            config.enabled,
-            "env Unset + DB enabled must produce enabled resume"
-        );
-        assert!(
-            config.prefer_checkpoint,
-            "DB prefer_checkpoint must pass through"
-        );
-        assert_eq!(
-            config.max_checkpoint_age_secs,
-            Some(300),
-            "DB max_checkpoint_age_secs must pass through"
-        );
-    }
-
-    #[test]
-    fn resolve_db_scoped_enablement_when_env_true() {
-        let db = ResumeLifecycleConfig {
-            enabled: true,
-            prefer_checkpoint: true,
-            max_checkpoint_age_secs: Some(120),
-        };
-        let config = ResumeLifecycleConfig::resolve(ResumeLifecycleEnvFlag::True, Some(&db));
-        assert!(
-            config.enabled,
-            "env True + DB enabled must produce enabled resume"
-        );
-        assert!(config.prefer_checkpoint);
-        assert_eq!(config.max_checkpoint_age_secs, Some(120));
-    }
-
-    #[test]
-    fn resolve_env_true_without_db_defaults_to_enabled() {
-        let config = ResumeLifecycleConfig::resolve(ResumeLifecycleEnvFlag::True, None);
-        assert!(
-            config.enabled,
-            "env True + DB absent must enable resume with default fields"
-        );
-        assert!(
-            !config.prefer_checkpoint,
-            "env True without DB: prefer_checkpoint defaults to false"
-        );
-        assert_eq!(config.max_checkpoint_age_secs, None);
-    }
-
-    #[test]
-    fn resolve_env_rollback_suppresses_db_enabled() {
-        // Proposal phif AC 3: explicit env false is a global rollback gate.
-        let db = ResumeLifecycleConfig {
-            enabled: true,
-            prefer_checkpoint: true,
-            max_checkpoint_age_secs: Some(300),
-        };
-        let config = ResumeLifecycleConfig::resolve(ResumeLifecycleEnvFlag::False, Some(&db));
-        assert!(
-            !config.enabled,
-            "env False must suppress DB-enabled resume (global rollback gate)"
-        );
-        assert!(
-            !config.prefer_checkpoint,
-            "env False: prefer_checkpoint must be reset to default"
-        );
-        assert_eq!(
-            config.max_checkpoint_age_secs, None,
-            "env False: max_checkpoint_age_secs must be reset to default"
-        );
-    }
-
-    #[test]
-    fn resolve_env_rollback_suppresses_even_db_true_fields() {
-        // Regression: env False returns default(), ignoring all DB fields.
-        let db = ResumeLifecycleConfig {
-            enabled: true,
-            prefer_checkpoint: true,
-            max_checkpoint_age_secs: Some(999),
-        };
-        let config = ResumeLifecycleConfig::resolve(ResumeLifecycleEnvFlag::False, Some(&db));
-        assert_eq!(config, ResumeLifecycleConfig::default());
-    }
-
-    // ── ResumeLifecycleEnvFlag::from_value tests ──────────────────
-
-    #[test]
-    fn env_flag_from_value_truthy_variants() {
-        for val in &["1", "true", "True", "TRUE", "yes", "Yes", "YES"] {
-            assert_eq!(
-                ResumeLifecycleEnvFlag::from_value(val),
-                ResumeLifecycleEnvFlag::True,
-                "expected True for value: {val}"
-            );
-        }
-    }
-
-    #[test]
-    fn env_flag_from_value_falsy_variants() {
-        for val in &["0", "false", "no", "off", "", "garbage", "2"] {
-            assert_eq!(
-                ResumeLifecycleEnvFlag::from_value(val),
-                ResumeLifecycleEnvFlag::False,
-                "expected False for value: {val}"
-            );
-        }
-    }
 }

@@ -672,8 +672,6 @@ pub struct RejectedResumeSourceWire {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ResumeSourceKind {
-    /// Accepted auto-submit/review state from the normal submission path.
-    AutoSubmit,
     /// A safety-scanned checkpoint commit on the task branch.
     TaskBranchCheckpoint,
     /// A safety-scanned checkpoint commit on an alternate checkpoint ref.
@@ -688,7 +686,6 @@ pub enum ResumeSourceKind {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ResumeSelectionReason {
-    AutoSubmitAccepted,
     LatestSafeCheckpoint,
     AlternateCheckpointRef,
     CleanTaskBranchFallback,
@@ -1023,7 +1020,7 @@ mod tests {
                 submit_or_review_id: Some("review-7".to_string()),
                 prior_session_lineage: Some("session-prev".to_string()),
                 skipped: vec![RejectedResumeSourceWire {
-                    kind: Some(ResumeSourceKind::AutoSubmit),
+                    kind: Some(ResumeSourceKind::CleanTaskBranch),
                     target_ref: Some("refs/heads/task/resume-target".to_string()),
                     checkpoint_sha: None,
                     submit_or_review_id: Some("review-7".to_string()),
@@ -1082,7 +1079,7 @@ mod tests {
         );
         assert_eq!(
             meta.skipped[0].kind,
-            Some(ResumeSourceKind::AutoSubmit),
+            Some(ResumeSourceKind::CleanTaskBranch),
             "rejected-candidate kind must reach the spec"
         );
         assert_eq!(

@@ -1564,7 +1564,6 @@ pub(crate) fn build_worker_resume_note(
 fn termination_label(reason: djinn_runtime::ResumeSelectionReason) -> &'static str {
     use djinn_runtime::ResumeSelectionReason as R;
     match reason {
-        R::AutoSubmitAccepted => "auto-submit accepted",
         R::LatestSafeCheckpoint => "no-progress checkpoint",
         R::AlternateCheckpointRef => "alternate checkpoint ref",
         R::CleanTaskBranchFallback => "clean fallback",
@@ -1580,7 +1579,6 @@ fn termination_label(reason: djinn_runtime::ResumeSelectionReason) -> &'static s
 fn source_kind_label(kind: djinn_runtime::ResumeSourceKind) -> &'static str {
     use djinn_runtime::ResumeSourceKind as K;
     match kind {
-        K::AutoSubmit => "auto-submit",
         K::TaskBranchCheckpoint => "task-branch checkpoint",
         K::AlternateCheckpointRef => "alternate checkpoint ref",
         K::CleanTaskBranch => "clean task branch",

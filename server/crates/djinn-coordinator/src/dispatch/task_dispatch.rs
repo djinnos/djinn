@@ -380,14 +380,7 @@ impl CoordinatorActor {
             .checkpoint
             .as_ref()
             .and_then(|checkpoint| checkpoint.extra.get("session_id"))
-            .and_then(serde_json::Value::as_str)
-            .or_else(|| {
-                lifecycle
-                    .auto_submit
-                    .as_ref()
-                    .and_then(|auto_submit| auto_submit.extra.get("session_id"))
-                    .and_then(serde_json::Value::as_str)
-            });
+            .and_then(serde_json::Value::as_str);
         let candidates = crate::dispatch::resume_source::build_resume_source_candidates(
             &task.id,
             &target_ref,
@@ -431,11 +424,6 @@ impl CoordinatorActor {
                 metadata.failover_reason = Some(reason_str);
             }
         }
-        if let Some(auto_submit) = &lifecycle.auto_submit
-            && let Some(cmd) = &auto_submit.verification_command
-        {
-            metadata.verification_command = Some(cmd.clone());
-        }
         // last_durable_progress_summary: extract from checkpoint extra if present.
         if let Some(checkpoint) = &lifecycle.checkpoint
             && let Some(summary) = checkpoint.extra.get("last_durable_progress_summary")
@@ -475,62 +463,9 @@ impl CoordinatorActor {
         task: &djinn_core::models::Task,
     ) -> crate::WorkerLifecycleMetadata {
         let mut lifecycle = crate::WorkerLifecycleMetadata::default();
-        let mut latest_task_run_id: Option<String> = None;
-
-        match djinn_db::TaskRunRepository::new(self.db.clone())
-            .list_for_task(&task.id)
-            .await
-        {
-            Ok(task_runs) => {
-                latest_task_run_id = task_runs.first().map(|run| run.id.clone());
-            }
-            Err(e) => {
-                tracing::warn!(task_id = %task.short_id, error = %e, "CoordinatorActor: failed to load task-runs for resume selection");
-            }
-        }
-
-        if let Some(task_run_id) = latest_task_run_id.as_deref() {
-            lifecycle.auto_submit = self.auto_submit_lifecycle_for_task_run(task_run_id).await;
-        }
         lifecycle.checkpoint = self.checkpoint_lifecycle_from_activity(task).await;
         lifecycle.model_rotation = self.model_rotation_lifecycle_from_activity(task).await;
         lifecycle
-    }
-
-    async fn auto_submit_lifecycle_for_task_run(
-        &self,
-        task_run_id: &str,
-    ) -> Option<crate::AutoSubmitLifecycleMetadata> {
-        let repo =
-            djinn_db::repositories::verify_run::AutoSubmitReviewRepository::new(self.db.clone());
-        let reviews = match repo.list_for_task_run(task_run_id).await {
-            Ok(reviews) => reviews,
-            Err(e) => {
-                tracing::warn!(task_run_id = %task_run_id, error = %e, "CoordinatorActor: failed to load auto-submit reviews for resume selection");
-                return None;
-            }
-        };
-        let review = reviews.first()?;
-        let mut extra = serde_json::Map::new();
-        extra.insert(
-            "task_run_id".to_string(),
-            serde_json::json!(review.task_run_id),
-        );
-        if let Some(session_id) = &review.session_id {
-            extra.insert("session_id".to_string(), serde_json::json!(session_id));
-        }
-        if let Some(model_id) = &review.model_id {
-            extra.insert("model_id".to_string(), serde_json::json!(model_id));
-        }
-        Some(crate::AutoSubmitLifecycleMetadata {
-            considered: true,
-            green: Some(review.model_called_submit_work),
-            verification_command: review.verify_source.clone(),
-            submission_id: review.model_called_submit_work.then(|| review.id.clone()),
-            skipped_reason: (!review.model_called_submit_work)
-                .then_some(crate::AutoSubmitSkipReason::ReviewRequired),
-            extra,
-        })
     }
 
     async fn checkpoint_lifecycle_from_activity(

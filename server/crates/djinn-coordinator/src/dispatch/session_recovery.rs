@@ -555,31 +555,14 @@ impl CoordinatorActor {
                         termination_reason = "no_progress",
                         "djinn.controlled_exit.requested"
                     );
-                    let auto_submit_accepted = self
-                        .try_accept_existing_auto_submit(
+                    let preservation_result = self
+                        .request_session_preservation(
                             task_id,
                             &session.id,
                             session.task_run_id.as_deref(),
-                            no_progress_streak,
-                            "no_progress",
+                            djinn_telemetry::preservation::TRIGGER_STALL,
                         )
                         .await;
-                    let preservation_result = if auto_submit_accepted {
-                        PreservationGateResult::clean_skip(
-                            task_id,
-                            &session.id,
-                            djinn_telemetry::preservation::TRIGGER_STALL,
-                            "auto-submit accepted before no-progress exit",
-                        )
-                    } else {
-                        self.request_session_preservation(
-                            task_id,
-                            &session.id,
-                            session.task_run_id.as_deref(),
-                            djinn_telemetry::preservation::TRIGGER_STALL,
-                        )
-                        .await
-                    };
                     let preservation_blocks = preservation_result.outcome.should_block_transition(
                         self.worker_lifecycle_config.checkpoint.failure_policy,
                     );
@@ -589,7 +572,6 @@ impl CoordinatorActor {
                         threshold = ?no_progress_threshold,
                         streak = no_progress_streak,
                         termination_reason = "no_progress",
-                        auto_submit_result = if auto_submit_accepted { "accepted" } else { "not_accepted" },
                         checkpoint_result = ?preservation_result.outcome,
                         failure_policy = ?self.worker_lifecycle_config.checkpoint.failure_policy,
                         failure_policy_outcome = if preservation_blocks { "blocked" } else { "proceeded" },
@@ -2052,80 +2034,6 @@ impl CoordinatorActor {
                 total_recovered = self.recovered,
                 "CoordinatorActor: stuck-task recovery pass complete"
             );
-        }
-    }
-
-    async fn try_accept_existing_auto_submit(
-        &self,
-        task_id: &str,
-        session_id: &str,
-        task_run_id: Option<&str>,
-        no_progress_streak: u32,
-        termination_reason: &'static str,
-    ) -> bool {
-        let Some(task_run_id) = task_run_id else {
-            tracing::info!(
-                task_id = %task_id,
-                session_id = %session_id,
-                termination_reason,
-                no_progress_streak,
-                auto_submit_result = "skipped",
-                block_reason = "missing_task_run_id",
-                "djinn.auto_submit.decision"
-            );
-            return false;
-        };
-        let enabled = self.worker_lifecycle_config.rollout.auto_submit_if_green
-            && self.worker_lifecycle_config.auto_submit.enabled;
-        if !enabled {
-            tracing::info!(
-                task_id = %task_id,
-                session_id = %session_id,
-                task_run_id = %task_run_id,
-                termination_reason,
-                no_progress_streak,
-                auto_submit_result = "skipped",
-                block_reason = "not_enabled",
-                "djinn.auto_submit.decision"
-            );
-            return false;
-        }
-        let repo =
-            djinn_db::repositories::verify_run::AutoSubmitReviewRepository::new(self.db.clone());
-        match repo.list_for_task_run(task_run_id).await {
-            Ok(reviews) => {
-                let accepted = reviews.iter().any(|review| {
-                    review.trigger_reason
-                        == djinn_core::models::AutoSubmitTriggerReason::NoProgress.as_str()
-                        && review.session_id.as_deref() == Some(session_id)
-                        && review.model_called_submit_work
-                });
-                tracing::info!(
-                    task_id = %task_id,
-                    session_id = %session_id,
-                    task_run_id = %task_run_id,
-                    termination_reason,
-                    no_progress_streak,
-                    auto_submit_result = if accepted { "accepted" } else { "blocked" },
-                    block_reason = if accepted { "none" } else { "no_eligible_no_progress_review" },
-                    "djinn.auto_submit.decision"
-                );
-                accepted
-            }
-            Err(e) => {
-                tracing::warn!(
-                    task_id = %task_id,
-                    session_id = %session_id,
-                    task_run_id = %task_run_id,
-                    termination_reason,
-                    no_progress_streak,
-                    auto_submit_result = "blocked",
-                    block_reason = "repository_error",
-                    error = %e,
-                    "djinn.auto_submit.decision"
-                );
-                false
-            }
         }
     }
 

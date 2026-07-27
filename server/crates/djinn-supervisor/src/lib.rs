@@ -835,7 +835,7 @@ fn timed_workspace_teardown(
 /// - `ResumeSourceKind::CleanTaskBranch`: returns `Ok(None)` so the legacy
 ///   `clone_ephemeral(task_branch)` path runs unchanged. The selector
 ///   already chose the fallback, so the worktree setup matches it.
-/// - `ResumeSourceKind::AutoSubmit`: accepted auto-submit/review state has
+/// - `ResumeSourceKind::CleanTaskBranch`: accepted auto-submit/review state has
 ///   no git content to base on — the worker pod is built on the canonical
 ///   `task_branch` (same as the clean-task-branch path) and the resume
 ///   prompt context (task `48ru`) carries the submit/review id. Falls back
@@ -885,20 +885,13 @@ async fn prepare_resume_workspace(
         .source_kind
         .unwrap_or(ResumeSourceKind::CleanTaskBranch);
 
-    // Clean / AutoSubmit variants: no worktree-setup work is needed. The
-    // caller falls through to `clone_ephemeral(task_branch)` which is the
-    // byte-for-byte legacy default. The outcome is `None` so the dispatch
-    // logs record `selection_kind` (from the spec metadata) without us
-    // re-asserting "applied clean task branch" — the existing legacy log
-    // already does that on success.
-    if matches!(
-        source_kind,
-        ResumeSourceKind::CleanTaskBranch | ResumeSourceKind::AutoSubmit
-    ) {
+    // Clean fallback needs no extra worktree setup. The caller uses the
+    // canonical task-branch clone path selected by the coordinator.
+    if matches!(source_kind, ResumeSourceKind::CleanTaskBranch) {
         debug!(
             source_kind = ?source_kind,
             task_branch,
-            "resume: clean/auto-submit selection; using legacy task-branch clone path unchanged"
+            "resume: clean selection; using task-branch clone path"
         );
         return Ok(None);
     }
@@ -5388,11 +5381,10 @@ mod tests {
         );
     }
 
-    /// `AutoSubmit` selection: no git content to base on; the worker pod
-    /// uses the canonical task branch and the submit/review id rides the
-    /// prompt context. Must return `Ok(None)` so the legacy path runs.
+    /// Clean selection with auxiliary historical metadata still uses the
+    /// canonical task branch and requires no extra workspace setup.
     #[tokio::test]
-    async fn prepare_resume_workspace_falls_through_for_auto_submit() {
+    async fn prepare_resume_workspace_falls_through_for_clean_source() {
         let tmp = tempfile::tempdir().expect("mirrors tempdir");
         let (mgr, _tip) = build_resume_test_mirror(tmp.path(), false).await;
 
@@ -5401,8 +5393,8 @@ mod tests {
         let meta = ResumeLifecycleMetadata {
             considered: true,
             submit_or_review_id: Some("review-1".to_string()),
-            selection_reason: Some(djinn_runtime::ResumeSelectionReason::AutoSubmitAccepted),
-            source_kind: Some(djinn_runtime::ResumeSourceKind::AutoSubmit),
+            selection_reason: Some(djinn_runtime::ResumeSelectionReason::CleanTaskBranchFallback),
+            source_kind: Some(djinn_runtime::ResumeSourceKind::CleanTaskBranch),
             ..Default::default()
         };
         let outcome = prepare_resume_workspace(
@@ -5415,10 +5407,10 @@ mod tests {
             &cancel,
         )
         .await
-        .expect("auto-submit selection must not error");
+        .expect("clean selection must not error");
         assert!(
             outcome.is_none(),
-            "auto-submit selection must use the legacy task-branch clone path (no git content to base on)"
+            "clean selection must use the task-branch clone path"
         );
     }
 
