@@ -240,6 +240,19 @@ async fn durable_driver_replays_claim_before_task_and_cache_loss_once_without_po
             .state,
         RefinementIntentState::Materialized
     );
+    let session = actor
+        .refinement_sessions
+        .get(&run_id)
+        .expect("successful durable enqueue creates the run-keyed outcome projection");
+    assert_eq!(session.run_id, run_id);
+    assert_eq!(session.generation, generation);
+    assert_eq!(session.task_id, first_task.id);
+    assert_eq!(
+        session.phase,
+        super::super::refinement::RefinementPhase::AdversaryAttack
+    );
+    assert_eq!(session.model_id, DURABLE_MODEL);
+    assert!(session.session_started_at.is_none());
 
     // Cache loss is not authority: the next durable poll finds the same task,
     // and read-only polling/enqueue retry does not keep the run alive.
@@ -459,6 +472,10 @@ async fn materialized_enqueue_failure_is_retried_with_the_same_task() {
         lifecycle_before,
         "pool failure must not append a proposal-scoped lifecycle stop"
     );
+    assert!(
+        actor.refinement_sessions.is_empty(),
+        "failed enqueue must not manufacture an outcome projection"
+    );
 
     // Model a coordinator crash after the materialization acknowledgement but
     // before a successful pool enqueue. Neither the projection nor its
@@ -489,6 +506,19 @@ async fn materialized_enqueue_failure_is_retried_with_the_same_task() {
             .expect("restarted durable enqueue observation");
     assert_eq!(restarted_task_id, task_id);
     assert_eq!(restarted_model_id, refinement_cap_tests::TEST_MODEL);
+    let retried_session = restarted
+        .refinement_sessions
+        .get(&run_id)
+        .expect("successful materialized retry repairs the run-keyed projection");
+    assert_eq!(retried_session.run_id, run_id);
+    assert_eq!(retried_session.generation, generation);
+    assert_eq!(retried_session.task_id, task_id);
+    assert_eq!(
+        retried_session.phase,
+        super::super::refinement::RefinementPhase::AdversaryAttack
+    );
+    assert_eq!(retried_session.model_id, refinement_cap_tests::TEST_MODEL);
+    assert!(retried_session.session_started_at.is_none());
     assert_eq!(
         task_repo
             .find_by_refinement_intent_id(&intent_id)
