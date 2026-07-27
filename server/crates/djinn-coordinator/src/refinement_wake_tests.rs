@@ -136,7 +136,14 @@ async fn foreign_session_generation_is_rejected_for_current_run_projection() {
 
     actor.drive_active_refinements().await;
     assert!(actor.active_refinements.contains_key(&run_id));
-    assert!(!actor.refinement_sessions.contains_key(&run_id));
+    let repaired = actor
+        .refinement_sessions
+        .get(&run_id)
+        .expect("successful durable dispatch repairs the stale session projection");
+    assert_eq!(repaired.run_id, run_id);
+    assert_eq!(repaired.generation, generation);
+    assert_eq!(repaired.phase, RefinementPhase::AdversaryAttack);
+    assert_ne!(repaired.task_id, "late-session");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
