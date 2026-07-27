@@ -27,9 +27,6 @@ mod wave_dispatch;
 mod wave_dispatch_tests;
 
 #[cfg(test)]
-mod lifecycle_integration_tests;
-
-#[cfg(test)]
 mod park_reason_tests;
 
 pub(crate) use admission::model_under_user_cap;

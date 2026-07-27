@@ -254,7 +254,6 @@ async fn assemble(
         extension_diagnostics: &[],
         cancellation: None,
         memory_intent_planner: planner,
-        final_verification_configured: false,
     })
     .await
 }

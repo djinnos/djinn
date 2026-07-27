@@ -143,7 +143,6 @@ pub(crate) fn map_resume_selection_reason_to_rotation_cause(
     use djinn_runtime::ResumeSelectionReason as R;
     match reason {
         Some(R::LatestSafeCheckpoint) => Some(RotationTerminationCause::NoProgress),
-        Some(R::AutoSubmitAccepted) => Some(RotationTerminationCause::Deadline),
         Some(R::AlternateCheckpointRef) => Some(RotationTerminationCause::Flaky),
         Some(R::NewerTaskBranch) => Some(RotationTerminationCause::RepeatedVerifyLoop),
         _ => None,
@@ -201,8 +200,6 @@ pub(crate) async fn attempt_resume_model_rotation(
 pub(crate) enum RotationTerminationCause {
     /// No durable progress for the configured threshold.
     NoProgress,
-    /// Session hit a deadline/turn/time bound.
-    Deadline,
     /// Repeated flaky verification command failures.
     Flaky,
     /// Repeated verify-loop (command passed then failed or vice versa).
@@ -214,7 +211,7 @@ impl RotationTerminationCause {
     pub fn should_rotate(self) -> bool {
         matches!(
             self,
-            Self::NoProgress | Self::Deadline | Self::Flaky | Self::RepeatedVerifyLoop
+            Self::NoProgress | Self::Flaky | Self::RepeatedVerifyLoop
         )
     }
 }
@@ -430,10 +427,6 @@ mod rotation_tests {
             Some(RotationTerminationCause::NoProgress)
         );
         assert_eq!(
-            map_resume_selection_reason_to_rotation_cause(Some(R::AutoSubmitAccepted)),
-            Some(RotationTerminationCause::Deadline)
-        );
-        assert_eq!(
             map_resume_selection_reason_to_rotation_cause(Some(R::AlternateCheckpointRef)),
             Some(RotationTerminationCause::Flaky)
         );
@@ -450,7 +443,6 @@ mod rotation_tests {
     #[test]
     fn rotation_cause_should_rotate() {
         assert!(RotationTerminationCause::NoProgress.should_rotate());
-        assert!(RotationTerminationCause::Deadline.should_rotate());
         assert!(RotationTerminationCause::Flaky.should_rotate());
         assert!(RotationTerminationCause::RepeatedVerifyLoop.should_rotate());
     }

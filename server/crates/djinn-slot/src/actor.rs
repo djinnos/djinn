@@ -901,7 +901,7 @@ mod tests {
             "submit_or_review_id": "review-7",
             "prior_session_lineage": "session-prev",
             "skipped": [
-                {"kind": "auto_submit", "reason": "auto_submit_not_accepted"}
+                {"kind": "clean_task_branch", "reason": "disabled"}
             ]
         });
         slot.run_task_with_resume(

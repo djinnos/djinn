@@ -47,12 +47,9 @@ pub mod test_runners;
 pub use detect::{detect, detect_blocking};
 pub use environment::{
     CargoCachePolicy, CargoCachePolicyOverride, CargoWarmCommand, ClangLanguage, ConfigSource,
-    DotnetLanguage, EnvironmentConfig, EnvironmentConfigError, ExternalInputDeclaration,
-    FinalVerificationCommand, FinalVerificationCommandGroup, FinalVerificationPlan,
-    FinalVerificationSelectionRule, GoLanguage, HermeticityDeclaration, HookCommand, JavaLanguage,
-    Languages, LifecycleHooks, NodeLanguage, PreTaskCommand, PreTaskFailurePolicy, PythonLanguage,
-    RubyLanguage, RustLanguage, SCHEMA_VERSION, VerificationEvidenceTier,
-    VerificationInputManifest, Workspace,
+    DotnetLanguage, EnvironmentConfig, EnvironmentConfigError, GoLanguage, HookCommand,
+    JavaLanguage, Languages, LifecycleHooks, NodeLanguage, PreTaskCommand, PreTaskFailurePolicy,
+    PythonLanguage, RubyLanguage, RustLanguage, SCHEMA_VERSION, Workspace,
 };
 pub use schema::{LanguageStat, ManifestSignals, Runtimes, Stack};
 pub use slug::workspace_slug;

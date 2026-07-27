@@ -661,7 +661,7 @@ mod tests {
     /// dispatched run therefore reached the final-verification completion
     /// boundary with a NULL binding and hard-failed with `task run has no
     /// bound catalog image`, so no work could be submitted while a project had
-    /// a non-empty `final_verification` plan. The binding must match
+    /// the former verification plan. The binding must match
     /// [`crate::repositories::task_run::TaskRunRepository::create`] exactly:
     /// the project's currently selected catalog image, snapshotted at insert.
     #[tokio::test]

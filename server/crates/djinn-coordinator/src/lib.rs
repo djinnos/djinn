@@ -174,7 +174,6 @@ pub use types::{
     PrCleanupConfig,
 };
 pub use worker_lifecycle::{
-    AutoSubmitLifecycleConfig, AutoSubmitLifecycleMetadata, AutoSubmitSkipReason,
     CheckpointLifecycleConfig, CheckpointLifecycleMetadata, CheckpointRequestReason,
     CheckpointSafetyScanMetadata, ControlledExitPreservationAction, DurableProgressDetectionMode,
     DurableProgressNoResetReason, DurableProgressResetReason, DurableProgressRolloutConfig,
