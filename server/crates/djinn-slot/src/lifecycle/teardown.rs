@@ -5,6 +5,7 @@ use crate::finalize_handlers::{
 use crate::host::SlotContext;
 use crate::output_parser::ParsedAgentOutput;
 use crate::roles_support::AgentRole;
+use djinn_core::events::DjinnEventEnvelope;
 use djinn_db::repositories::task_rejected_submission_integrity::TaskRejectedSubmissionIntegrityRepository;
 use std::sync::Arc;
 

@@ -1,10 +1,10 @@
 use crate::finalize_types::{AcVerdict, SubmitDecision, SubmitGrooming, SubmitReview, SubmitWork};
 use crate::host::SlotContext;
-use djinn_core::events::DjinnEventEnvelope;
 use djinn_db::TaskRepository;
 use djinn_db::repositories::task_rejected_submission_integrity::{
     RecordTaskRejectedSubmissionParams, TaskRejectedSubmissionIntegrityRepository,
 };
+use djinn_db::repositories::task_run::TaskRunRepository;
 
 /// Process the structured finalize tool payload captured by the reply loop (ADR-036).
 ///
@@ -155,6 +155,159 @@ pub(crate) async fn handle_submit_work(
     )
     .await;
     true
+}
+
+/// Apply a reviewer's AC verdicts and log the ordinary review handoff.
+pub(crate) async fn handle_submit_review(
+    payload: &serde_json::Value,
+    task_id: &str,
+    app_state: &SlotContext,
+) {
+    let review = match serde_json::from_value::<SubmitReview>(payload.clone()) {
+        Ok(review) => review,
+        Err(error) => {
+            tracing::warn!(
+                task_id = %task_id,
+                error = %error,
+                "finalize_handlers: malformed submit_review payload"
+            );
+            return;
+        }
+    };
+    let repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+    if !review.acceptance_criteria.is_empty() {
+        match repo.get(task_id).await {
+            Ok(Some(task)) => {
+                let acceptance_criteria =
+                    apply_ac_verdicts(&task.acceptance_criteria, &review.acceptance_criteria);
+                if let Err(error) = repo
+                    .update(
+                        task_id,
+                        &task.title,
+                        &task.description,
+                        &task.design,
+                        task.priority,
+                        &task.owner,
+                        &task.labels,
+                        &acceptance_criteria,
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        task_id = %task_id,
+                        error = %error,
+                        "finalize_handlers: failed to update AC from submit_review"
+                    );
+                }
+            }
+            Ok(None) => tracing::warn!(
+                task_id = %task_id,
+                "finalize_handlers: task not found for AC update"
+            ),
+            Err(error) => tracing::warn!(
+                task_id = %task_id,
+                error = %error,
+                "finalize_handlers: failed to load task for AC update"
+            ),
+        }
+    }
+
+    let activity_payload = serde_json::json!({
+        "verdict": review.verdict,
+        "feedback": review.feedback,
+    })
+    .to_string();
+    if let Err(error) = repo
+        .log_activity(
+            Some(task_id),
+            "agent-supervisor",
+            "reviewer",
+            "review_submitted",
+            &activity_payload,
+        )
+        .await
+    {
+        tracing::warn!(
+            task_id = %task_id,
+            error = %error,
+            "finalize_handlers: failed to log submit_review activity"
+        );
+    }
+
+    if review.verdict == "rejected" {
+        record_rejected_submission_fingerprint(
+            task_id,
+            app_state,
+            djinn_core::models::RejectedVerdictKind::ReviewerReject.as_str(),
+        )
+        .await;
+    }
+}
+
+/// Record the latest task-run worktree fingerprint for a rejected review.
+/// Missing worktrees and empty diffs are legitimate historical cases and do
+/// not manufacture integrity records.
+async fn record_rejected_submission_fingerprint(
+    task_id: &str,
+    app_state: &SlotContext,
+    verdict_kind: &str,
+) {
+    let task_run_repo = TaskRunRepository::new(app_state.db.clone());
+    let runs = match task_run_repo.list_for_task(task_id).await {
+        Ok(runs) => runs,
+        Err(error) => {
+            tracing::warn!(
+                task_id = %task_id,
+                error = %error,
+                "finalize_handlers: failed to query task runs for rejected fingerprint"
+            );
+            return;
+        }
+    };
+    let Some((task_run_id, workspace_path)) = runs
+        .iter()
+        .find_map(|run| Some((run.id.as_str(), run.workspace_path.as_deref()?)))
+    else {
+        tracing::info!(
+            task_id = %task_id,
+            verdict_kind,
+            "finalize_handlers: no worktree available for rejected fingerprint"
+        );
+        return;
+    };
+    let fingerprint =
+        match djinn_git::compute_submission_diff_fingerprint(std::path::Path::new(workspace_path))
+            .await
+        {
+            Ok(fingerprint) => fingerprint,
+            Err(error) => {
+                tracing::warn!(
+                    task_id = %task_id,
+                    task_run_id,
+                    error = %error,
+                    "finalize_handlers: failed to compute rejected submission fingerprint"
+                );
+                return;
+            }
+        };
+    let Some(digest) = fingerprint.fingerprint() else {
+        tracing::info!(
+            task_id = %task_id,
+            task_run_id,
+            verdict_kind,
+            "finalize_handlers: rejected submission worktree has no diff"
+        );
+        return;
+    };
+    record_rejected_integrity_entry(
+        task_id,
+        app_state,
+        verdict_kind,
+        None,
+        Some(task_run_id),
+        digest,
+    )
+    .await;
 }
 
 pub(crate) async fn record_rejected_integrity_entry(
