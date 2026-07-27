@@ -69,6 +69,19 @@ an Enforce release that does not meet this topology. Off and Observe retain the
 configured server replica and rollout settings, so their normal default is the
 availability-first rolling update (`maxSurge: 1`, `maxUnavailable: 0`).
 
+## Writable cgroup preparation rollout
+
+`cgroupWritable.runtimeClass.enabled` and `cgroupWritable.taskRuns.enabled`
+both default to `false`. The preparation release may set only
+`cgroupWritable.runtimeClass.enabled=true` after the node conformance process
+has labeled eligible nodes. That installs `RuntimeClass/djinn-cgroup-writable`
+with its existing handler and node selector, but does not assign it to task-run
+Pods or change launcher privileges.
+
+`cgroupWritable.taskRuns.enabled=true` requires
+`cgroupWritable.runtimeClass.enabled=true`; Helm rejects the unsafe inverse
+pair. Task-run assignment is reserved for the later activation release.
+
 ## Node prerequisites
 
 The image pipeline runs BuildKit **rootless** via user namespaces. Every
