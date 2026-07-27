@@ -91,6 +91,7 @@ impl CoordinatorActor {
             repo_graph_ops: None,
             runtime_ops: None,
             cargo_target_runs_root: Some(djinn_core::paths::cargo_target_runs_root()),
+            host_cache_root: None,
             mirror: self.mirror.clone(),
             rpc_registry: None,
             default_project_id: None,

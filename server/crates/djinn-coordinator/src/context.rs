@@ -190,6 +190,23 @@ pub struct CacheCleanupConfig {
     /// corrected path and then set this flag.
     pub sccache_delete_armed: bool,
 
+    /// Arming switch for the destructive branch of the durable output-stash GC.
+    /// Env: `DJINN_CACHE_CLEANUP_OUTPUT_STASH_DELETE_ARMED` (default `false`).
+    ///
+    /// Same structural hazard as [`Self::sccache_delete_armed`], one layer
+    /// deeper. The stash GC resolved its root through the
+    /// `$XDG_CACHE_HOME → $HOME/.cache` chain, but `XDG_CACHE_HOME` is rendered
+    /// only into Job specs — so in the server pod the GC walked
+    /// `/home/djinn/.cache/djinn/output_stash`, which does not exist there.
+    /// Every tick logged `pointers_scanned=0 blobs_scanned=0 error_count=0`,
+    /// so the 30-day retention window has never once been applied to a real
+    /// blob; the stash on the cache PVC has only ever grown. Repointing the
+    /// sweep at the real tree arms a `remove_file` loop over production data
+    /// for the first time, and it must not inherit an authorization that could
+    /// only ever have been vacuous. Operators observe candidate counts against
+    /// the corrected roots first, then set this flag.
+    pub output_stash_delete_armed: bool,
+
     /// Whether cargo-target-runs debris cleanup is enabled.
     /// Env: `DJINN_CACHE_CLEANUP_CARGO_DEBRIS_ENABLED` (default `true`).
     pub cargo_debris_enabled: bool,
@@ -235,6 +252,7 @@ impl Default for CacheCleanupConfig {
             sccache_enabled: true,
             sccache_max_age_hours: 24,
             sccache_delete_armed: false,
+            output_stash_delete_armed: false,
             cargo_debris_enabled: true,
             cargo_debris_max_age_days: 7,
             warm_base_idle_retention_days: 14,
@@ -265,6 +283,11 @@ impl CacheCleanupConfig {
         let sccache_delete_armed = std::env::var("DJINN_CACHE_CLEANUP_SCCACHE_DELETE_ARMED")
             .map(|v| parse_bool_env(&v))
             .unwrap_or(false);
+
+        let output_stash_delete_armed =
+            std::env::var("DJINN_CACHE_CLEANUP_OUTPUT_STASH_DELETE_ARMED")
+                .map(|v| parse_bool_env(&v))
+                .unwrap_or(false);
 
         let cargo_debris_enabled = std::env::var("DJINN_CACHE_CLEANUP_CARGO_DEBRIS_ENABLED")
             .map(|v| parse_bool_env(&v))
@@ -315,6 +338,7 @@ impl CacheCleanupConfig {
             sccache_enabled,
             sccache_max_age_hours,
             sccache_delete_armed,
+            output_stash_delete_armed,
             cargo_debris_enabled,
             cargo_debris_max_age_days,
             warm_base_idle_retention_days,
@@ -384,6 +408,14 @@ pub struct CoordinatorContext {
     pub repo_graph_ops: Option<Arc<dyn bridge::RepoGraphOps>>,
     pub runtime_ops: Option<Arc<dyn bridge::RuntimeOps>>,
     pub cargo_target_runs_root: Option<PathBuf>,
+    /// Override for the host's cache mount root, used by every cache sweep in
+    /// [`crate::health::sweep_stale_resources`].
+    ///
+    /// `None` means "resolve `djinn_core::paths::cache_root()`", which is what
+    /// production wants. Tests MUST set it: the sub-sweeps run whole-tree
+    /// `remove_dir_all` / `remove_file` passes, and with `None` they resolve a
+    /// developer's real `~/.djinn/cache` on the machine running the suite.
+    pub host_cache_root: Option<PathBuf>,
     pub mirror: Option<Arc<MirrorManager>>,
     pub rpc_registry: Option<Arc<ConnectionRegistry>>,
     pub default_project_id: Option<String>,
@@ -392,6 +424,26 @@ pub struct CoordinatorContext {
 }
 
 impl CoordinatorContext {
+    /// The host cache mount a context with no override resolves.
+    ///
+    /// The cache PVC is mounted at `/cache` in Job pods and at
+    /// `$DJINN_HOME/cache` in the server pod, which has no `/cache` at all, so
+    /// every host-side sweep must derive from here.
+    pub fn default_host_cache_root() -> PathBuf {
+        djinn_core::paths::cache_root()
+    }
+
+    /// The host cache mount every cache sweep must operate under.
+    ///
+    /// Honours [`Self::host_cache_root`] so a test context can confine the
+    /// destructive sweeps to a tempdir instead of the developer's real
+    /// `~/.djinn/cache`.
+    pub fn resolved_host_cache_root(&self) -> PathBuf {
+        self.host_cache_root
+            .clone()
+            .unwrap_or_else(Self::default_host_cache_root)
+    }
+
     /// Get or spawn a `GitActorHandle` for the given project path.
     pub async fn git_actor(&self, path: &Path) -> Result<GitActorHandle, GitError> {
         let mut map = self.git_actors.lock().await;

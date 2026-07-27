@@ -1317,6 +1317,9 @@ impl CoordinatorActor {
             // sweep's `unwrap_or_else` fallback meant the sweep silently no-op'd
             // on `ErrorKind::NotFound` and `cargo-target-runs` grew unbounded.
             cargo_target_runs_root: Some(djinn_core::paths::cargo_target_runs_root()),
+            // `None` = resolve `djinn_core::paths::cache_root()`, i.e. this
+            // pod's own mount of the shared cache PVC. Only tests override it.
+            host_cache_root: None,
             mirror: self.mirror.clone(),
             rpc_registry: self.rpc_registry.clone(),
             default_project_id: None,

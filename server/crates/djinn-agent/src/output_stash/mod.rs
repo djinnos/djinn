@@ -339,20 +339,32 @@ fn durable_root() -> Option<PathBuf> {
 
 #[cfg(not(any(test, feature = "test-support")))]
 fn durable_root() -> Option<PathBuf> {
-    if let Ok(xdg) = std::env::var("XDG_CACHE_HOME")
-        && !xdg.is_empty()
-    {
-        return Some(PathBuf::from(xdg).join("djinn").join("output_stash"));
+    Some(durable_root_from(
+        std::env::var("XDG_CACHE_HOME").ok(),
+        djinn_core::paths::output_stash_root(),
+    ))
+}
+
+/// Pure derivation behind [`durable_root`].
+///
+/// * `xdg_cache_home` — Job pods only. `djinn_k8s::job` renders
+///   `XDG_CACHE_HOME=/cache/xdg/{project_id}`, putting the stash on the shared
+///   cache PVC. Correct there and only there.
+/// * `host_root` — [`djinn_core::paths::output_stash_root`], the caller's own
+///   mount of that same PVC.
+///
+/// There is deliberately **no `$HOME` parameter**. The leg this replaced was
+/// `$HOME/.cache/djinn/output_stash`, which in the server pod is
+/// `/home/djinn/.cache/...`: an ephemeral container-layer path that dies with
+/// the Pod (and does not exist there at all), so a stash meant to be read back
+/// after a restart never survived one, and the coordinator's retention sweep
+/// could never see it.
+#[cfg_attr(any(test, feature = "test-support"), allow(dead_code))]
+fn durable_root_from(xdg_cache_home: Option<String>, host_root: PathBuf) -> PathBuf {
+    match xdg_cache_home {
+        Some(xdg) if !xdg.is_empty() => PathBuf::from(xdg).join("djinn").join("output_stash"),
+        _ => host_root,
     }
-    std::env::var("HOME")
-        .ok()
-        .filter(|h| !h.is_empty())
-        .map(|h| {
-            PathBuf::from(h)
-                .join(".cache")
-                .join("djinn")
-                .join("output_stash")
-        })
 }
 
 /// Content-addressed blob path: `<root>/blobs/<sha256(content)>`.
