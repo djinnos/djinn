@@ -94,13 +94,18 @@ const DEFAULT_LINK_FALLBACK_COPY_BUDGET_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const LINK_FALLBACK_COPY_BUDGET_ENV: &str = "DJINN_CARGO_TARGET_SEED_LINK_FALLBACK_COPY_BYTES";
 
 /// Filesystem convention for the warm, per-project Cargo target base.
-pub const WARM_BASE_ROOT: &str = "/cache/cargo-target";
+///
+/// Resolved from the cache-root manifest rather than written out, so this root
+/// cannot exist without a manifest entry describing it.
+pub const WARM_BASE_ROOT: &str = djinn_core::paths::CacheRootId::CargoTarget.job_pod_path();
 
 /// Existing pod environment selector for the Cargo/mold parallelism variant.
 pub const CARGO_BUILD_JOBS_ENV: &str = "CARGO_BUILD_JOBS";
 
 /// Filesystem convention for private, per-task-run Cargo target directories.
-pub const RUN_TARGET_ROOT: &str = "/cache/cargo-target-runs";
+///
+/// Resolved from the cache-root manifest, like [`WARM_BASE_ROOT`].
+pub const RUN_TARGET_ROOT: &str = djinn_core::paths::CacheRootId::CargoTargetRuns.job_pod_path();
 
 /// Implementation used to hardlink one base artifact into the run dir.
 ///
