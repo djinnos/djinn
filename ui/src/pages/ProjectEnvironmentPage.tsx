@@ -349,7 +349,7 @@ function WorkspacesEditor({
                       updateAt(idx, {
                         cargo_features: e.target.value
                           .split(",")
-                          .map((feature) => feature.trim())
+                          .map((feature) => feature.trim()),
                         cargo_all_features: false,
                       })
                     }
