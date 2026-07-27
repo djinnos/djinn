@@ -745,6 +745,49 @@ impl CoordinatorActor {
         over_cap_error: String,
         tear_down_slot: bool,
     ) {
+        let over_cap = if let Some(state) = self.active_refinements.get_mut(run_id) {
+            state.dispatch_failures += 1;
+            state.dispatch_failures >= REFINEMENT_DISPATCH_RETRY_CAP
+        } else {
+            true
+        };
+
+        if over_cap {
+            tracing::warn!(
+                run_id = %run_id,
+                phase = ?session.phase,
+                "Refinement role session repeatedly failed to start — terminating"
+            );
+            // Keep both run-keyed projections until the exact-run terminal CAS
+            // succeeds. A miss or repository error must remain retryable.
+            if self
+                .terminate_refinement(
+                    run_id,
+                    StopReason::AgentFailure {
+                        role: role_for_phase(session.phase),
+                        error_code: "agent_start_failed".into(),
+                        message: over_cap_error,
+                    },
+                )
+                .await
+            {
+                if tear_down_slot {
+                    if let Err(e) = self.pool.kill_session(&session.task_id).await {
+                        tracing::warn!(
+                            run_id = %run_id,
+                            task_id = %session.task_id,
+                            error = %e,
+                            "Failed to tear down terminal Pending refinement task-run"
+                        );
+                    }
+                    self.clear_inflight_dispatch(&session.task_id).await;
+                }
+                self.close_refinement_task(&session.task_id, close_reason)
+                    .await;
+            }
+            return;
+        }
+
         if tear_down_slot {
             // The pool still holds the slot for the Pending task-run. Tear down
             // the (still-queued) Job and clear the in-flight reservation so the
@@ -763,34 +806,11 @@ impl CoordinatorActor {
         self.close_refinement_task(&session.task_id, close_reason)
             .await;
         self.refinement_sessions.remove(run_id);
-        let over_cap = if let Some(state) = self.active_refinements.get_mut(run_id) {
-            state.dispatch_failures += 1;
-            state.dispatch_failures >= REFINEMENT_DISPATCH_RETRY_CAP
-        } else {
-            true
-        };
-        if over_cap {
-            tracing::warn!(
-                run_id = %run_id,
-                phase = ?session.phase,
-                "Refinement role session repeatedly failed to start — terminating"
-            );
-            self.terminate_refinement(
-                run_id,
-                StopReason::AgentFailure {
-                    role: role_for_phase(session.phase),
-                    error_code: "agent_start_failed".into(),
-                    message: over_cap_error,
-                },
-            )
-            .await;
-        } else {
-            tracing::warn!(
-                run_id = %run_id,
-                phase = ?session.phase,
-                "Refinement role session never started; will re-dispatch (not counted as dry)"
-            );
-        }
+        tracing::warn!(
+            run_id = %run_id,
+            phase = ?session.phase,
+            "Refinement role session never started; will re-dispatch (not counted as dry)"
+        );
     }
 
     /// Build the shared per-role dispatch context every tribunal task needs:
