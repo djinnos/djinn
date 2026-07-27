@@ -1043,7 +1043,7 @@ export namespace DoctorListFindingsOutputSchema {
   }
   /**
    * One persisted finding surfaced through `doctor_list_findings`.
-   *
+   * 
    * Mirrors [`djinn_db::DoctorFinding`] but uses [`AnyJson`] for the
    * free-form JSON payloads (`entity_ids`, `evidence`,
    * `resolver_snapshot`) so the generated JSON Schema is the
@@ -1125,7 +1125,7 @@ export namespace DoctorRunOutputSchema {
   results: DoctorRunCheckResult[]
   /**
    * Total number of findings emitted across all selected checks.
-   *
+   * 
    * Counters are `i64` (not `usize`) so the generated MCP JSON schema
    * lands on `format: int64` instead of the nonstandard `uint` pinned by
    * `tool_schemas::mcp_tools_list_schemas_do_not_use_nonstandard_uint_…`.
@@ -1168,7 +1168,7 @@ export namespace DoctorRunOutputSchema {
   }
   /**
    * Direct projection of a persisted V1 extension diagnostic.
-   *
+   * 
    * The project probe never creates a duplicate `doctor_findings` row.
    */
   export interface DoctorExtensionDiagnosticFinding {
@@ -2273,7 +2273,7 @@ export namespace GetProjectStackOutputSchema {
    * Per-workspace toolchain detail — one entry per manifest dir that
    * the detector considered a distinct workspace root. Populated by
    * [`detect`]; empty when no manifests are present.
-   *
+   * 
    * Used by [`crate::environment::EnvironmentConfig::from_stack`] to
    * seed `environment_config.workspaces` during the P5 boot reseed
    * hook.
@@ -2304,7 +2304,7 @@ export namespace GetProjectStackOutputSchema {
   /**
    * Declared runtime versions (e.g. `{"node": "22"}`). `None` when
    * the manifest exists but the field is absent.
-   *
+   * 
    * This is "*a* version" for each language — convenient for the UI
    * banner and Phase-3 image hashing. Multi-toolchain callers
    * (post-env-config P5) read [`Stack::workspaces`] instead, since a
@@ -2326,7 +2326,7 @@ export namespace GetProjectStackOutputSchema {
    * crate without a workspace table); plus every `package.json`,
    * `pyproject.toml`, `go.mod`, `Gemfile`, `pom.xml`, and root-level
    * build.gradle(.kts) found at any depth.
-   *
+   * 
    * The detector de-duplicates by "shallowest ancestor per language":
    * if `repo/server/Cargo.toml` is already a workspace, a member
    * `repo/server/crates/foo/Cargo.toml` does *not* also get emitted.
@@ -2534,7 +2534,7 @@ export type GithubSearchOutput = GithubSearchOutputSchema.GithubSearchOutput;
 export namespace ImageCreateInputSchema {
   /**
    * Per-project Cargo target-cache strategy override.
-   *
+   * 
    * The default [`AutoDetected`](Self::AutoDetected) mode is detection-driven:
    * consumers resolve the policy by reading the project shape (Cargo workspace
    * layout, `.cargo/config.toml`, and configured setup command
@@ -2553,12 +2553,12 @@ export namespace ImageCreateInputSchema {
   })
   /**
    * A lifecycle / setup command.
-   *
+   * 
    * Shape matches the `LifecycleCommand` enum in
    * `server/crates/djinn-agent-worker/src/lifecycle.rs`. In P5, that module's
    * local enum is replaced with this canonical definition so the on-disk
    * config JSON round-trips through both sides without a translation layer.
-   *
+   * 
    * The three forms follow the devcontainer spec that originally inspired them:
    * a shell string passed to `/bin/sh -c`, an argv array exec'd directly, or
    * a named map run in parallel.
@@ -2601,7 +2601,7 @@ export namespace ImageCreateInputSchema {
   build_resources?: (BuildResources | null)
   /**
    * Project-level override for Cargo target-cache warming/running policy.
-   *
+   * 
    * The default is [`CargoCachePolicy::AutoDetected`]: djinn detects the
    * cache strategy from the repository it is about to run, including the
    * Cargo workspace layout, `.cargo/config.toml` settings such as
@@ -2609,7 +2609,7 @@ export namespace ImageCreateInputSchema {
    * detection is deliberately read-only. djinn may read `.cargo/config.toml`
    * to keep warm-job and worker behavior consistent with the project, but it
    * never creates, edits, or rewrites the project's `.cargo/config.toml`.
-   *
+   * 
    * Set an explicit policy only when project authors need to override the
    * detected cargo feature set at the environment-config level. `None` is
    * accepted for legacy rows and is treated the same as the
@@ -2635,7 +2635,7 @@ export namespace ImageCreateInputSchema {
   schema_version?: number
   /**
    * How the config landed in the column.
-   *
+   * 
    * * `AutoDetected` — written by the P5 boot reseed hook from stack detection.
    *   Re-writing from detection is OK (config may still be overwritten on the
    *   next detector pass until the user edits it).
@@ -2651,7 +2651,7 @@ export namespace ImageCreateInputSchema {
   }
   /**
    * Optional per-project CPU/memory overrides for the task-run and warm Pods.
-   *
+   * 
    * The whole object is optional on `EnvironmentConfig`; each inner block is
    * optional; each field within a block is optional. Anything unset inherits
    * the deployment default at resolution time. The two blocks are resolved
@@ -2691,7 +2691,7 @@ export namespace ImageCreateInputSchema {
   }
   /**
    * Explicit Cargo target-cache policy used when auto-detection is overridden.
-   *
+   * 
    * NOT `deny_unknown_fields`: the dead `sccache`/`incremental` knobs were
    * removed once the platform began forcing `CARGO_INCREMENTAL=1` +
    * `RUSTC_WRAPPER=""` on every warm/verify/worker pod (PR #874). Stored rows
@@ -2800,80 +2800,8 @@ export namespace ImageCreateInputSchema {
   [k: string]: any
   }
   /**
-   * Authoritative post-authoring plan, distinct from setup-time hooks.
-   */
-
-  /**
-   * A named, ordered subset of a final-verification plan.
-   */
-  export interface FinalVerificationCommandGroup {
-  commands?: FinalVerificationCommand[]
-  name: string
-  }
-  export interface FinalVerificationCommand {
-  argv?: string[]
-  check_id: string
-  descriptor_revision?: number
-  environment_names?: string[]
-  executable: string
-  timeout_seconds: number
-  working_directory?: string
-  }
-  export interface HermeticityDeclaration {
-  hermetic?: boolean
-  network_access?: boolean
-  reusable?: boolean
-  }
-  export interface VerificationInputManifest {
-  /**
-   * Environment names whose **values** are identity material: the resolved
-   * value is hashed into the environment identity digest, so a change to it
-   * invalidates every reusable pass. Use this for anything whose value
-   * genuinely changes what the commands do (`PATH`, `CARGO_HOME`,
-   * `CARGO_BUILD_RUSTFLAGS`).
-   */
-  environment_names?: string[]
-  repo_paths?: string[]
-  version?: number
-  /**
-   * Environment names that are declared and passed to commands, but whose
-   * **values** are deliberately NOT identity material — only the name is
-   * (via this manifest). The resolved value never reaches the identity
-   * digest, so a per-run value does not fracture reuse across task runs.
-   *
-   * This is the same contract catalog services already have: a declared
-   * name with an attempt-scoped value. It exists because the production
-   * pod renders `CARGO_TARGET_DIR=/cache/cargo-target-runs/<task_run_id>`
-   * (a fresh path per run) and `RUSTC_WRAPPER=""` (an empty value, which
-   * identity material forbids). Hashing either would mean a worker run and
-   * the reviewer run of the same task could never share a pass — which is
-   * the entire point of the recorded tier.
-   *
-   * Rejected unless `evidence_tier` is `recorded`: an unhashed input would
-   * void the attested tier's guarantee.
-   */
-  volatile_environment_names?: string[]
-  }
-  export interface ExternalInputDeclaration {
-  id: string
-  locator: string
-  }
-  /**
-   * Ordered path selection for one or more command groups.
-   */
-  export interface FinalVerificationSelectionRule {
-  /**
-   * Names of command groups selected by this rule.
-   */
-  command_groups?: string[]
-  /**
-   * Repository-relative globs. `**` is the explicit fail-safe catch-all.
-   */
-  match?: string[]
-  }
-  /**
    * A named pre-task command declared in the project environment config.
-   *
+   * 
    * Pre-task commands run in the task-run Pod before the supervisor starts.
    * Each command carries an optional name (auto-generated as `pre_task_N`
    * when omitted), a shell command string, a timeout, and a failure policy.
@@ -2950,7 +2878,7 @@ export type ImageListInput = ImageListInputSchema.ImageListInput;
 export namespace ImageListOutputSchema {
   /**
    * Per-project Cargo target-cache strategy override.
-   *
+   * 
    * The default [`AutoDetected`](Self::AutoDetected) mode is detection-driven:
    * consumers resolve the policy by reading the project shape (Cargo workspace
    * layout, `.cargo/config.toml`, and configured setup command
@@ -2969,12 +2897,12 @@ export namespace ImageListOutputSchema {
   })
   /**
    * A lifecycle / setup command.
-   *
+   * 
    * Shape matches the `LifecycleCommand` enum in
    * `server/crates/djinn-agent-worker/src/lifecycle.rs`. In P5, that module's
    * local enum is replaced with this canonical definition so the on-disk
    * config JSON round-trips through both sides without a translation layer.
-   *
+   * 
    * The three forms follow the devcontainer spec that originally inspired them:
    * a shell string passed to `/bin/sh -c`, an argv array exec'd directly, or
    * a named map run in parallel.
@@ -3029,7 +2957,7 @@ export namespace ImageListOutputSchema {
   build_resources?: (BuildResources | null)
   /**
    * Project-level override for Cargo target-cache warming/running policy.
-   *
+   * 
    * The default is [`CargoCachePolicy::AutoDetected`]: djinn detects the
    * cache strategy from the repository it is about to run, including the
    * Cargo workspace layout, `.cargo/config.toml` settings such as
@@ -3037,7 +2965,7 @@ export namespace ImageListOutputSchema {
    * detection is deliberately read-only. djinn may read `.cargo/config.toml`
    * to keep warm-job and worker behavior consistent with the project, but it
    * never creates, edits, or rewrites the project's `.cargo/config.toml`.
-   *
+   * 
    * Set an explicit policy only when project authors need to override the
    * detected cargo feature set at the environment-config level. `None` is
    * accepted for legacy rows and is treated the same as the
@@ -3063,7 +2991,7 @@ export namespace ImageListOutputSchema {
   schema_version?: number
   /**
    * How the config landed in the column.
-   *
+   * 
    * * `AutoDetected` — written by the P5 boot reseed hook from stack detection.
    *   Re-writing from detection is OK (config may still be overwritten on the
    *   next detector pass until the user edits it).
@@ -3079,7 +3007,7 @@ export namespace ImageListOutputSchema {
   }
   /**
    * Optional per-project CPU/memory overrides for the task-run and warm Pods.
-   *
+   * 
    * The whole object is optional on `EnvironmentConfig`; each inner block is
    * optional; each field within a block is optional. Anything unset inherits
    * the deployment default at resolution time. The two blocks are resolved
@@ -3119,7 +3047,7 @@ export namespace ImageListOutputSchema {
   }
   /**
    * Explicit Cargo target-cache policy used when auto-detection is overridden.
-   *
+   * 
    * NOT `deny_unknown_fields`: the dead `sccache`/`incremental` knobs were
    * removed once the platform began forcing `CARGO_INCREMENTAL=1` +
    * `RUSTC_WRAPPER=""` on every warm/verify/worker pod (PR #874). Stored rows
@@ -3228,80 +3156,8 @@ export namespace ImageListOutputSchema {
   [k: string]: any
   }
   /**
-   * Authoritative post-authoring plan, distinct from setup-time hooks.
-   */
-
-  /**
-   * A named, ordered subset of a final-verification plan.
-   */
-  export interface FinalVerificationCommandGroup {
-  commands?: FinalVerificationCommand[]
-  name: string
-  }
-  export interface FinalVerificationCommand {
-  argv?: string[]
-  check_id: string
-  descriptor_revision?: number
-  environment_names?: string[]
-  executable: string
-  timeout_seconds: number
-  working_directory?: string
-  }
-  export interface HermeticityDeclaration {
-  hermetic?: boolean
-  network_access?: boolean
-  reusable?: boolean
-  }
-  export interface VerificationInputManifest {
-  /**
-   * Environment names whose **values** are identity material: the resolved
-   * value is hashed into the environment identity digest, so a change to it
-   * invalidates every reusable pass. Use this for anything whose value
-   * genuinely changes what the commands do (`PATH`, `CARGO_HOME`,
-   * `CARGO_BUILD_RUSTFLAGS`).
-   */
-  environment_names?: string[]
-  repo_paths?: string[]
-  version?: number
-  /**
-   * Environment names that are declared and passed to commands, but whose
-   * **values** are deliberately NOT identity material — only the name is
-   * (via this manifest). The resolved value never reaches the identity
-   * digest, so a per-run value does not fracture reuse across task runs.
-   *
-   * This is the same contract catalog services already have: a declared
-   * name with an attempt-scoped value. It exists because the production
-   * pod renders `CARGO_TARGET_DIR=/cache/cargo-target-runs/<task_run_id>`
-   * (a fresh path per run) and `RUSTC_WRAPPER=""` (an empty value, which
-   * identity material forbids). Hashing either would mean a worker run and
-   * the reviewer run of the same task could never share a pass — which is
-   * the entire point of the recorded tier.
-   *
-   * Rejected unless `evidence_tier` is `recorded`: an unhashed input would
-   * void the attested tier's guarantee.
-   */
-  volatile_environment_names?: string[]
-  }
-  export interface ExternalInputDeclaration {
-  id: string
-  locator: string
-  }
-  /**
-   * Ordered path selection for one or more command groups.
-   */
-  export interface FinalVerificationSelectionRule {
-  /**
-   * Names of command groups selected by this rule.
-   */
-  command_groups?: string[]
-  /**
-   * Repository-relative globs. `**` is the explicit fail-safe catch-all.
-   */
-  match?: string[]
-  }
-  /**
    * A named pre-task command declared in the project environment config.
-   *
+   * 
    * Pre-task commands run in the task-run Pod before the supervisor starts.
    * Each command carries an optional name (auto-generated as `pre_task_N`
    * when omitted), a shell command string, a timeout, and a failure policy.
@@ -3369,7 +3225,7 @@ export type ImageSetServicesOutput = ImageSetServicesOutputSchema.ImageSetServic
 export namespace ImageUpdateInputSchema {
   /**
    * Per-project Cargo target-cache strategy override.
-   *
+   * 
    * The default [`AutoDetected`](Self::AutoDetected) mode is detection-driven:
    * consumers resolve the policy by reading the project shape (Cargo workspace
    * layout, `.cargo/config.toml`, and configured setup command
@@ -3388,12 +3244,12 @@ export namespace ImageUpdateInputSchema {
   })
   /**
    * A lifecycle / setup command.
-   *
+   * 
    * Shape matches the `LifecycleCommand` enum in
    * `server/crates/djinn-agent-worker/src/lifecycle.rs`. In P5, that module's
    * local enum is replaced with this canonical definition so the on-disk
    * config JSON round-trips through both sides without a translation layer.
-   *
+   * 
    * The three forms follow the devcontainer spec that originally inspired them:
    * a shell string passed to `/bin/sh -c`, an argv array exec'd directly, or
    * a named map run in parallel.
@@ -3433,7 +3289,7 @@ export namespace ImageUpdateInputSchema {
   build_resources?: (BuildResources | null)
   /**
    * Project-level override for Cargo target-cache warming/running policy.
-   *
+   * 
    * The default is [`CargoCachePolicy::AutoDetected`]: djinn detects the
    * cache strategy from the repository it is about to run, including the
    * Cargo workspace layout, `.cargo/config.toml` settings such as
@@ -3441,7 +3297,7 @@ export namespace ImageUpdateInputSchema {
    * detection is deliberately read-only. djinn may read `.cargo/config.toml`
    * to keep warm-job and worker behavior consistent with the project, but it
    * never creates, edits, or rewrites the project's `.cargo/config.toml`.
-   *
+   * 
    * Set an explicit policy only when project authors need to override the
    * detected cargo feature set at the environment-config level. `None` is
    * accepted for legacy rows and is treated the same as the
@@ -3467,7 +3323,7 @@ export namespace ImageUpdateInputSchema {
   schema_version?: number
   /**
    * How the config landed in the column.
-   *
+   * 
    * * `AutoDetected` — written by the P5 boot reseed hook from stack detection.
    *   Re-writing from detection is OK (config may still be overwritten on the
    *   next detector pass until the user edits it).
@@ -3483,7 +3339,7 @@ export namespace ImageUpdateInputSchema {
   }
   /**
    * Optional per-project CPU/memory overrides for the task-run and warm Pods.
-   *
+   * 
    * The whole object is optional on `EnvironmentConfig`; each inner block is
    * optional; each field within a block is optional. Anything unset inherits
    * the deployment default at resolution time. The two blocks are resolved
@@ -3523,7 +3379,7 @@ export namespace ImageUpdateInputSchema {
   }
   /**
    * Explicit Cargo target-cache policy used when auto-detection is overridden.
-   *
+   * 
    * NOT `deny_unknown_fields`: the dead `sccache`/`incremental` knobs were
    * removed once the platform began forcing `CARGO_INCREMENTAL=1` +
    * `RUSTC_WRAPPER=""` on every warm/verify/worker pod (PR #874). Stored rows
@@ -3632,80 +3488,8 @@ export namespace ImageUpdateInputSchema {
   [k: string]: any
   }
   /**
-   * Authoritative post-authoring plan, distinct from setup-time hooks.
-   */
-
-  /**
-   * A named, ordered subset of a final-verification plan.
-   */
-  export interface FinalVerificationCommandGroup {
-  commands?: FinalVerificationCommand[]
-  name: string
-  }
-  export interface FinalVerificationCommand {
-  argv?: string[]
-  check_id: string
-  descriptor_revision?: number
-  environment_names?: string[]
-  executable: string
-  timeout_seconds: number
-  working_directory?: string
-  }
-  export interface HermeticityDeclaration {
-  hermetic?: boolean
-  network_access?: boolean
-  reusable?: boolean
-  }
-  export interface VerificationInputManifest {
-  /**
-   * Environment names whose **values** are identity material: the resolved
-   * value is hashed into the environment identity digest, so a change to it
-   * invalidates every reusable pass. Use this for anything whose value
-   * genuinely changes what the commands do (`PATH`, `CARGO_HOME`,
-   * `CARGO_BUILD_RUSTFLAGS`).
-   */
-  environment_names?: string[]
-  repo_paths?: string[]
-  version?: number
-  /**
-   * Environment names that are declared and passed to commands, but whose
-   * **values** are deliberately NOT identity material — only the name is
-   * (via this manifest). The resolved value never reaches the identity
-   * digest, so a per-run value does not fracture reuse across task runs.
-   *
-   * This is the same contract catalog services already have: a declared
-   * name with an attempt-scoped value. It exists because the production
-   * pod renders `CARGO_TARGET_DIR=/cache/cargo-target-runs/<task_run_id>`
-   * (a fresh path per run) and `RUSTC_WRAPPER=""` (an empty value, which
-   * identity material forbids). Hashing either would mean a worker run and
-   * the reviewer run of the same task could never share a pass — which is
-   * the entire point of the recorded tier.
-   *
-   * Rejected unless `evidence_tier` is `recorded`: an unhashed input would
-   * void the attested tier's guarantee.
-   */
-  volatile_environment_names?: string[]
-  }
-  export interface ExternalInputDeclaration {
-  id: string
-  locator: string
-  }
-  /**
-   * Ordered path selection for one or more command groups.
-   */
-  export interface FinalVerificationSelectionRule {
-  /**
-   * Names of command groups selected by this rule.
-   */
-  command_groups?: string[]
-  /**
-   * Repository-relative globs. `**` is the explicit fail-safe catch-all.
-   */
-  match?: string[]
-  }
-  /**
    * A named pre-task command declared in the project environment config.
-   *
+   * 
    * Pre-task commands run in the task-run Pod before the supervisor starts.
    * Each command carries an optional name (auto-generated as `pre_task_N`
    * when omitted), a shell command string, a timeout, and a failure policy.
@@ -3947,7 +3731,7 @@ export namespace MemoryBuildContextOutputSchema {
   }
   /**
    * Compact proposal overview for `memory_build_context` responses.
-   *
+   * 
    * **Progressive disclosure:** this overview ships `title` +
    * `acceptance_criteria` so the planner can decide whether to fetch the
    * full body via `proposal_show`. The full proposal body is intentionally
@@ -4407,7 +4191,7 @@ export namespace MemoryGraphOutputSchema {
    * `kind` value other than `co_access` and surfaced through the
    * `memory_graph` tool as a separate layer from wikilink `GraphEdge`s so the
    * UI can toggle/style them independently.
-   *
+   * 
    * Note: the F5 `note_associations` substrate is undirected (canonical-pair
    * ordering: `note_a_id < note_b_id`). Outbound direction for directional
    * kinds (e.g. `supersedes`) is reconstructed at scoring/context time.
@@ -4536,7 +4320,7 @@ export namespace MemoryHealthOutputSchema {
   }
   /**
    * Authoritative, independently keyed taxonomy-v1 retrieval group.
-   *
+   * 
    * Versioned counters exclude legacy and malformed terminals. Those exclusions
    * and validation telemetry remain visible on this group rather than being
    * pooled or inferred from legacy candidate payloads.
@@ -5186,7 +4970,7 @@ export namespace MemoryRunEnrichmentInputSchema {
    * When true, schedule enrichment on a background tokio task and return
    * immediately with `status="queued"`. When false (the default), run the
    * pass synchronously and embed the structured report in the response.
-   *
+   * 
    * Background execution mirrors the diei roadmap's "best-effort, never
    * blocks retrieval" constraint: the spawn path yields to the runtime so
    * `memory_graph` (and the wider MCP surface) keep serving while the
@@ -5230,7 +5014,7 @@ export namespace MemoryRunEnrichmentOutputSchema {
   }
   /**
    * Structured report returned by the enrichment pass.
-   *
+   * 
    * Mirrors `djinn_slot::memory_enrichment::EnrichmentReport`
    * one-for-one. The server-side bridge converts between the two at the
    * implementation boundary so the MCP wire shape stays stable.
@@ -5325,7 +5109,7 @@ export namespace MemorySearchOutputSchema {
   }
   /**
    * A single unified search result row.
-   *
+   * 
    * Entity taxonomy: the `entity` field discriminates the row type.
    * Current values are `"note"` (memory notes) and `"proposal"` (planning
    * proposals). Future waves may add `"task"` or `"epic"`. Use the
@@ -6024,7 +5808,7 @@ export type ProjectEnvironmentConfigGetInput = ProjectEnvironmentConfigGetInputS
 export namespace ProjectEnvironmentConfigGetOutputSchema {
   /**
    * Per-project Cargo target-cache strategy override.
-   *
+   * 
    * The default [`AutoDetected`](Self::AutoDetected) mode is detection-driven:
    * consumers resolve the policy by reading the project shape (Cargo workspace
    * layout, `.cargo/config.toml`, and configured setup command
@@ -6043,12 +5827,12 @@ export namespace ProjectEnvironmentConfigGetOutputSchema {
   })
   /**
    * A lifecycle / setup command.
-   *
+   * 
    * Shape matches the `LifecycleCommand` enum in
    * `server/crates/djinn-agent-worker/src/lifecycle.rs`. In P5, that module's
    * local enum is replaced with this canonical definition so the on-disk
    * config JSON round-trips through both sides without a translation layer.
-   *
+   * 
    * The three forms follow the devcontainer spec that originally inspired them:
    * a shell string passed to `/bin/sh -c`, an argv array exec'd directly, or
    * a named map run in parallel.
@@ -6093,7 +5877,7 @@ export namespace ProjectEnvironmentConfigGetOutputSchema {
   build_resources?: (BuildResources | null)
   /**
    * Project-level override for Cargo target-cache warming/running policy.
-   *
+   * 
    * The default is [`CargoCachePolicy::AutoDetected`]: djinn detects the
    * cache strategy from the repository it is about to run, including the
    * Cargo workspace layout, `.cargo/config.toml` settings such as
@@ -6101,7 +5885,7 @@ export namespace ProjectEnvironmentConfigGetOutputSchema {
    * detection is deliberately read-only. djinn may read `.cargo/config.toml`
    * to keep warm-job and worker behavior consistent with the project, but it
    * never creates, edits, or rewrites the project's `.cargo/config.toml`.
-   *
+   * 
    * Set an explicit policy only when project authors need to override the
    * detected cargo feature set at the environment-config level. `None` is
    * accepted for legacy rows and is treated the same as the
@@ -6127,7 +5911,7 @@ export namespace ProjectEnvironmentConfigGetOutputSchema {
   schema_version?: number
   /**
    * How the config landed in the column.
-   *
+   * 
    * * `AutoDetected` — written by the P5 boot reseed hook from stack detection.
    *   Re-writing from detection is OK (config may still be overwritten on the
    *   next detector pass until the user edits it).
@@ -6143,7 +5927,7 @@ export namespace ProjectEnvironmentConfigGetOutputSchema {
   }
   /**
    * Optional per-project CPU/memory overrides for the task-run and warm Pods.
-   *
+   * 
    * The whole object is optional on `EnvironmentConfig`; each inner block is
    * optional; each field within a block is optional. Anything unset inherits
    * the deployment default at resolution time. The two blocks are resolved
@@ -6183,7 +5967,7 @@ export namespace ProjectEnvironmentConfigGetOutputSchema {
   }
   /**
    * Explicit Cargo target-cache policy used when auto-detection is overridden.
-   *
+   * 
    * NOT `deny_unknown_fields`: the dead `sccache`/`incremental` knobs were
    * removed once the platform began forcing `CARGO_INCREMENTAL=1` +
    * `RUSTC_WRAPPER=""` on every warm/verify/worker pod (PR #874). Stored rows
@@ -6292,80 +6076,8 @@ export namespace ProjectEnvironmentConfigGetOutputSchema {
   [k: string]: any
   }
   /**
-   * Authoritative post-authoring plan, distinct from setup-time hooks.
-   */
-
-  /**
-   * A named, ordered subset of a final-verification plan.
-   */
-  export interface FinalVerificationCommandGroup {
-  commands?: FinalVerificationCommand[]
-  name: string
-  }
-  export interface FinalVerificationCommand {
-  argv?: string[]
-  check_id: string
-  descriptor_revision?: number
-  environment_names?: string[]
-  executable: string
-  timeout_seconds: number
-  working_directory?: string
-  }
-  export interface HermeticityDeclaration {
-  hermetic?: boolean
-  network_access?: boolean
-  reusable?: boolean
-  }
-  export interface VerificationInputManifest {
-  /**
-   * Environment names whose **values** are identity material: the resolved
-   * value is hashed into the environment identity digest, so a change to it
-   * invalidates every reusable pass. Use this for anything whose value
-   * genuinely changes what the commands do (`PATH`, `CARGO_HOME`,
-   * `CARGO_BUILD_RUSTFLAGS`).
-   */
-  environment_names?: string[]
-  repo_paths?: string[]
-  version?: number
-  /**
-   * Environment names that are declared and passed to commands, but whose
-   * **values** are deliberately NOT identity material — only the name is
-   * (via this manifest). The resolved value never reaches the identity
-   * digest, so a per-run value does not fracture reuse across task runs.
-   *
-   * This is the same contract catalog services already have: a declared
-   * name with an attempt-scoped value. It exists because the production
-   * pod renders `CARGO_TARGET_DIR=/cache/cargo-target-runs/<task_run_id>`
-   * (a fresh path per run) and `RUSTC_WRAPPER=""` (an empty value, which
-   * identity material forbids). Hashing either would mean a worker run and
-   * the reviewer run of the same task could never share a pass — which is
-   * the entire point of the recorded tier.
-   *
-   * Rejected unless `evidence_tier` is `recorded`: an unhashed input would
-   * void the attested tier's guarantee.
-   */
-  volatile_environment_names?: string[]
-  }
-  export interface ExternalInputDeclaration {
-  id: string
-  locator: string
-  }
-  /**
-   * Ordered path selection for one or more command groups.
-   */
-  export interface FinalVerificationSelectionRule {
-  /**
-   * Names of command groups selected by this rule.
-   */
-  command_groups?: string[]
-  /**
-   * Repository-relative globs. `**` is the explicit fail-safe catch-all.
-   */
-  match?: string[]
-  }
-  /**
    * A named pre-task command declared in the project environment config.
-   *
+   * 
    * Pre-task commands run in the task-run Pod before the supervisor starts.
    * Each command carries an optional name (auto-generated as `pre_task_N`
    * when omitted), a shell command string, a timeout, and a failure policy.
@@ -6418,7 +6130,7 @@ export type ProjectEnvironmentConfigResetInput = ProjectEnvironmentConfigResetIn
 export namespace ProjectEnvironmentConfigResetOutputSchema {
   /**
    * Per-project Cargo target-cache strategy override.
-   *
+   * 
    * The default [`AutoDetected`](Self::AutoDetected) mode is detection-driven:
    * consumers resolve the policy by reading the project shape (Cargo workspace
    * layout, `.cargo/config.toml`, and configured setup command
@@ -6437,12 +6149,12 @@ export namespace ProjectEnvironmentConfigResetOutputSchema {
   })
   /**
    * A lifecycle / setup command.
-   *
+   * 
    * Shape matches the `LifecycleCommand` enum in
    * `server/crates/djinn-agent-worker/src/lifecycle.rs`. In P5, that module's
    * local enum is replaced with this canonical definition so the on-disk
    * config JSON round-trips through both sides without a translation layer.
-   *
+   * 
    * The three forms follow the devcontainer spec that originally inspired them:
    * a shell string passed to `/bin/sh -c`, an argv array exec'd directly, or
    * a named map run in parallel.
@@ -6481,7 +6193,7 @@ export namespace ProjectEnvironmentConfigResetOutputSchema {
   build_resources?: (BuildResources | null)
   /**
    * Project-level override for Cargo target-cache warming/running policy.
-   *
+   * 
    * The default is [`CargoCachePolicy::AutoDetected`]: djinn detects the
    * cache strategy from the repository it is about to run, including the
    * Cargo workspace layout, `.cargo/config.toml` settings such as
@@ -6489,7 +6201,7 @@ export namespace ProjectEnvironmentConfigResetOutputSchema {
    * detection is deliberately read-only. djinn may read `.cargo/config.toml`
    * to keep warm-job and worker behavior consistent with the project, but it
    * never creates, edits, or rewrites the project's `.cargo/config.toml`.
-   *
+   * 
    * Set an explicit policy only when project authors need to override the
    * detected cargo feature set at the environment-config level. `None` is
    * accepted for legacy rows and is treated the same as the
@@ -6515,7 +6227,7 @@ export namespace ProjectEnvironmentConfigResetOutputSchema {
   schema_version?: number
   /**
    * How the config landed in the column.
-   *
+   * 
    * * `AutoDetected` — written by the P5 boot reseed hook from stack detection.
    *   Re-writing from detection is OK (config may still be overwritten on the
    *   next detector pass until the user edits it).
@@ -6531,7 +6243,7 @@ export namespace ProjectEnvironmentConfigResetOutputSchema {
   }
   /**
    * Optional per-project CPU/memory overrides for the task-run and warm Pods.
-   *
+   * 
    * The whole object is optional on `EnvironmentConfig`; each inner block is
    * optional; each field within a block is optional. Anything unset inherits
    * the deployment default at resolution time. The two blocks are resolved
@@ -6571,7 +6283,7 @@ export namespace ProjectEnvironmentConfigResetOutputSchema {
   }
   /**
    * Explicit Cargo target-cache policy used when auto-detection is overridden.
-   *
+   * 
    * NOT `deny_unknown_fields`: the dead `sccache`/`incremental` knobs were
    * removed once the platform began forcing `CARGO_INCREMENTAL=1` +
    * `RUSTC_WRAPPER=""` on every warm/verify/worker pod (PR #874). Stored rows
@@ -6680,80 +6392,8 @@ export namespace ProjectEnvironmentConfigResetOutputSchema {
   [k: string]: any
   }
   /**
-   * Authoritative post-authoring plan, distinct from setup-time hooks.
-   */
-
-  /**
-   * A named, ordered subset of a final-verification plan.
-   */
-  export interface FinalVerificationCommandGroup {
-  commands?: FinalVerificationCommand[]
-  name: string
-  }
-  export interface FinalVerificationCommand {
-  argv?: string[]
-  check_id: string
-  descriptor_revision?: number
-  environment_names?: string[]
-  executable: string
-  timeout_seconds: number
-  working_directory?: string
-  }
-  export interface HermeticityDeclaration {
-  hermetic?: boolean
-  network_access?: boolean
-  reusable?: boolean
-  }
-  export interface VerificationInputManifest {
-  /**
-   * Environment names whose **values** are identity material: the resolved
-   * value is hashed into the environment identity digest, so a change to it
-   * invalidates every reusable pass. Use this for anything whose value
-   * genuinely changes what the commands do (`PATH`, `CARGO_HOME`,
-   * `CARGO_BUILD_RUSTFLAGS`).
-   */
-  environment_names?: string[]
-  repo_paths?: string[]
-  version?: number
-  /**
-   * Environment names that are declared and passed to commands, but whose
-   * **values** are deliberately NOT identity material — only the name is
-   * (via this manifest). The resolved value never reaches the identity
-   * digest, so a per-run value does not fracture reuse across task runs.
-   *
-   * This is the same contract catalog services already have: a declared
-   * name with an attempt-scoped value. It exists because the production
-   * pod renders `CARGO_TARGET_DIR=/cache/cargo-target-runs/<task_run_id>`
-   * (a fresh path per run) and `RUSTC_WRAPPER=""` (an empty value, which
-   * identity material forbids). Hashing either would mean a worker run and
-   * the reviewer run of the same task could never share a pass — which is
-   * the entire point of the recorded tier.
-   *
-   * Rejected unless `evidence_tier` is `recorded`: an unhashed input would
-   * void the attested tier's guarantee.
-   */
-  volatile_environment_names?: string[]
-  }
-  export interface ExternalInputDeclaration {
-  id: string
-  locator: string
-  }
-  /**
-   * Ordered path selection for one or more command groups.
-   */
-  export interface FinalVerificationSelectionRule {
-  /**
-   * Names of command groups selected by this rule.
-   */
-  command_groups?: string[]
-  /**
-   * Repository-relative globs. `**` is the explicit fail-safe catch-all.
-   */
-  match?: string[]
-  }
-  /**
    * A named pre-task command declared in the project environment config.
-   *
+   * 
    * Pre-task commands run in the task-run Pod before the supervisor starts.
    * Each command carries an optional name (auto-generated as `pre_task_N`
    * when omitted), a shell command string, a timeout, and a failure policy.
@@ -6795,7 +6435,7 @@ export type ProjectEnvironmentConfigResetOutput = ProjectEnvironmentConfigResetO
 export namespace ProjectEnvironmentConfigSetInputSchema {
   /**
    * Per-project Cargo target-cache strategy override.
-   *
+   * 
    * The default [`AutoDetected`](Self::AutoDetected) mode is detection-driven:
    * consumers resolve the policy by reading the project shape (Cargo workspace
    * layout, `.cargo/config.toml`, and configured setup command
@@ -6814,12 +6454,12 @@ export namespace ProjectEnvironmentConfigSetInputSchema {
   })
   /**
    * A lifecycle / setup command.
-   *
+   * 
    * Shape matches the `LifecycleCommand` enum in
    * `server/crates/djinn-agent-worker/src/lifecycle.rs`. In P5, that module's
    * local enum is replaced with this canonical definition so the on-disk
    * config JSON round-trips through both sides without a translation layer.
-   *
+   * 
    * The three forms follow the devcontainer spec that originally inspired them:
    * a shell string passed to `/bin/sh -c`, an argv array exec'd directly, or
    * a named map run in parallel.
@@ -6862,7 +6502,7 @@ export namespace ProjectEnvironmentConfigSetInputSchema {
   build_resources?: (BuildResources | null)
   /**
    * Project-level override for Cargo target-cache warming/running policy.
-   *
+   * 
    * The default is [`CargoCachePolicy::AutoDetected`]: djinn detects the
    * cache strategy from the repository it is about to run, including the
    * Cargo workspace layout, `.cargo/config.toml` settings such as
@@ -6870,7 +6510,7 @@ export namespace ProjectEnvironmentConfigSetInputSchema {
    * detection is deliberately read-only. djinn may read `.cargo/config.toml`
    * to keep warm-job and worker behavior consistent with the project, but it
    * never creates, edits, or rewrites the project's `.cargo/config.toml`.
-   *
+   * 
    * Set an explicit policy only when project authors need to override the
    * detected cargo feature set at the environment-config level. `None` is
    * accepted for legacy rows and is treated the same as the
@@ -6896,7 +6536,7 @@ export namespace ProjectEnvironmentConfigSetInputSchema {
   schema_version?: number
   /**
    * How the config landed in the column.
-   *
+   * 
    * * `AutoDetected` — written by the P5 boot reseed hook from stack detection.
    *   Re-writing from detection is OK (config may still be overwritten on the
    *   next detector pass until the user edits it).
@@ -6912,7 +6552,7 @@ export namespace ProjectEnvironmentConfigSetInputSchema {
   }
   /**
    * Optional per-project CPU/memory overrides for the task-run and warm Pods.
-   *
+   * 
    * The whole object is optional on `EnvironmentConfig`; each inner block is
    * optional; each field within a block is optional. Anything unset inherits
    * the deployment default at resolution time. The two blocks are resolved
@@ -6952,7 +6592,7 @@ export namespace ProjectEnvironmentConfigSetInputSchema {
   }
   /**
    * Explicit Cargo target-cache policy used when auto-detection is overridden.
-   *
+   * 
    * NOT `deny_unknown_fields`: the dead `sccache`/`incremental` knobs were
    * removed once the platform began forcing `CARGO_INCREMENTAL=1` +
    * `RUSTC_WRAPPER=""` on every warm/verify/worker pod (PR #874). Stored rows
@@ -7061,80 +6701,8 @@ export namespace ProjectEnvironmentConfigSetInputSchema {
   [k: string]: any
   }
   /**
-   * Authoritative post-authoring plan, distinct from setup-time hooks.
-   */
-
-  /**
-   * A named, ordered subset of a final-verification plan.
-   */
-  export interface FinalVerificationCommandGroup {
-  commands?: FinalVerificationCommand[]
-  name: string
-  }
-  export interface FinalVerificationCommand {
-  argv?: string[]
-  check_id: string
-  descriptor_revision?: number
-  environment_names?: string[]
-  executable: string
-  timeout_seconds: number
-  working_directory?: string
-  }
-  export interface HermeticityDeclaration {
-  hermetic?: boolean
-  network_access?: boolean
-  reusable?: boolean
-  }
-  export interface VerificationInputManifest {
-  /**
-   * Environment names whose **values** are identity material: the resolved
-   * value is hashed into the environment identity digest, so a change to it
-   * invalidates every reusable pass. Use this for anything whose value
-   * genuinely changes what the commands do (`PATH`, `CARGO_HOME`,
-   * `CARGO_BUILD_RUSTFLAGS`).
-   */
-  environment_names?: string[]
-  repo_paths?: string[]
-  version?: number
-  /**
-   * Environment names that are declared and passed to commands, but whose
-   * **values** are deliberately NOT identity material — only the name is
-   * (via this manifest). The resolved value never reaches the identity
-   * digest, so a per-run value does not fracture reuse across task runs.
-   *
-   * This is the same contract catalog services already have: a declared
-   * name with an attempt-scoped value. It exists because the production
-   * pod renders `CARGO_TARGET_DIR=/cache/cargo-target-runs/<task_run_id>`
-   * (a fresh path per run) and `RUSTC_WRAPPER=""` (an empty value, which
-   * identity material forbids). Hashing either would mean a worker run and
-   * the reviewer run of the same task could never share a pass — which is
-   * the entire point of the recorded tier.
-   *
-   * Rejected unless `evidence_tier` is `recorded`: an unhashed input would
-   * void the attested tier's guarantee.
-   */
-  volatile_environment_names?: string[]
-  }
-  export interface ExternalInputDeclaration {
-  id: string
-  locator: string
-  }
-  /**
-   * Ordered path selection for one or more command groups.
-   */
-  export interface FinalVerificationSelectionRule {
-  /**
-   * Names of command groups selected by this rule.
-   */
-  command_groups?: string[]
-  /**
-   * Repository-relative globs. `**` is the explicit fail-safe catch-all.
-   */
-  match?: string[]
-  }
-  /**
    * A named pre-task command declared in the project environment config.
-   *
+   * 
    * Pre-task commands run in the task-run Pod before the supervisor starts.
    * Each command carries an optional name (auto-generated as `pre_task_N`
    * when omitted), a shell command string, a timeout, and a failure policy.
@@ -7585,7 +7153,7 @@ export namespace ProposalBlockPatchOutputSchema {
   }
   /**
    * Compact tribunal/readiness state for a single proposal row on the list.
-   *
+   * 
    * Every field is a cheap, batched approximation of the richer per-proposal
    * gate/refinement status surfaced by `proposal_show` — enough to drive the
    * list-row chips (tribunal round / awaiting-review / evidence, and a gate
@@ -7870,7 +7438,7 @@ export namespace ProposalCreateOutputSchema {
   }
   /**
    * Compact tribunal/readiness state for a single proposal row on the list.
-   *
+   * 
    * Every field is a cheap, batched approximation of the richer per-proposal
    * gate/refinement status surfaced by `proposal_show` — enough to drive the
    * list-row chips (tribunal round / awaiting-review / evidence, and a gate
@@ -8426,7 +7994,7 @@ export namespace ProposalExportOutputSchema {
   }
   /**
    * Compact tribunal/readiness state for a single proposal row on the list.
-   *
+   * 
    * Every field is a cheap, batched approximation of the richer per-proposal
    * gate/refinement status surfaced by `proposal_show` — enough to drive the
    * list-row chips (tribunal round / awaiting-review / evidence, and a gate
@@ -8749,7 +8317,7 @@ export namespace ProposalGraduateOutputSchema {
   }
   /**
    * Compact tribunal/readiness state for a single proposal row on the list.
-   *
+   * 
    * Every field is a cheap, batched approximation of the richer per-proposal
    * gate/refinement status surfaced by `proposal_show` — enough to drive the
    * list-row chips (tribunal round / awaiting-review / evidence, and a gate
@@ -8957,7 +8525,7 @@ export namespace ProposalImportOutputSchema {
   }
   /**
    * Compact tribunal/readiness state for a single proposal row on the list.
-   *
+   * 
    * Every field is a cheap, batched approximation of the richer per-proposal
    * gate/refinement status surfaced by `proposal_show` — enough to drive the
    * list-row chips (tribunal round / awaiting-review / evidence, and a gate
@@ -9073,7 +8641,7 @@ export namespace ProposalListOutputSchema {
   }
   /**
    * List-specific proposal row model.
-   *
+   * 
    * The default wire shape is a bounded summary. Body data and criteria are
    * opt-in; callers needing complete proposal detail use `proposal_show`.
    */
@@ -9138,7 +8706,7 @@ export namespace ProposalListOutputSchema {
   }
   /**
    * Compact tribunal/readiness state for a single proposal row on the list.
-   *
+   * 
    * Every field is a cheap, batched approximation of the richer per-proposal
    * gate/refinement status surfaced by `proposal_show` — enough to drive the
    * list-row chips (tribunal round / awaiting-review / evidence, and a gate
@@ -9320,7 +8888,7 @@ export namespace ProposalRefinementDemandEvidenceOutputSchema {
   }
   /**
    * Accepted demand result for `proposal_refinement_demand_evidence`.
-   *
+   * 
    * Returned inside [`NeedsEvidenceDemandResponse`] when the Judge's demand
    * passes validation. The accepted-demand mutation atomically creates the
    * evidence spike task, links it to the proposal, writes a `needs_evidence`
@@ -9373,7 +8941,7 @@ export type ProposalRefinementDemandRoundInput = ProposalRefinementDemandRoundIn
 export namespace ProposalRefinementDemandRoundOutputSchema {
   /**
    * Evidence lifecycle phase for a needs-evidence parking.
-   *
+   * 
    * This is the inner phase within a `NeedsEvidenceStatus` and describes
    * only the evidence-spike lifecycle. See [`EvidenceLifecycleState`] for
    * the top-level refinement status discriminator that includes Active,
@@ -9611,7 +9179,7 @@ export type ProposalRefinementStartInput = ProposalRefinementStartInputSchema.Pr
 export namespace ProposalRefinementStartOutputSchema {
   /**
    * Evidence lifecycle phase for a needs-evidence parking.
-   *
+   * 
    * This is the inner phase within a `NeedsEvidenceStatus` and describes
    * only the evidence-spike lifecycle. See [`EvidenceLifecycleState`] for
    * the top-level refinement status discriminator that includes Active,
@@ -9800,7 +9368,7 @@ export type ProposalRefinementStatusInput = ProposalRefinementStatusInputSchema.
 export namespace ProposalRefinementStatusOutputSchema {
   /**
    * Evidence lifecycle phase for a needs-evidence parking.
-   *
+   * 
    * This is the inner phase within a `NeedsEvidenceStatus` and describes
    * only the evidence-spike lifecycle. See [`EvidenceLifecycleState`] for
    * the top-level refinement status discriminator that includes Active,
@@ -10044,7 +9612,7 @@ export type ProposalShowInput = ProposalShowInputSchema.ProposalShowInput;
 export namespace ProposalShowOutputSchema {
   /**
    * Evidence lifecycle phase for a needs-evidence parking.
-   *
+   * 
    * This is the inner phase within a `NeedsEvidenceStatus` and describes
    * only the evidence-spike lifecycle. See [`EvidenceLifecycleState`] for
    * the top-level refinement status discriminator that includes Active,
@@ -10458,7 +10026,7 @@ export namespace ProposalShowOutputSchema {
   }
   /**
    * Compact tribunal/readiness state for a single proposal row on the list.
-   *
+   * 
    * Every field is a cheap, batched approximation of the richer per-proposal
    * gate/refinement status surfaced by `proposal_show` — enough to drive the
    * list-row chips (tribunal round / awaiting-review / evidence, and a gate
@@ -10613,7 +10181,7 @@ export namespace ProposalShowOutputSchema {
   id: string
   /**
    * Repository-backed lint result for this exact immutable revision.
-   *
+   * 
    * This is additive so clients deserializing historical responses that
    * predate lint publication continue to work. Read handlers always set it
    * from `ProposalRepository::lint_for_revision`.
@@ -10811,7 +10379,7 @@ export namespace ProposalSignoffOutputSchema {
   }
   /**
    * Compact tribunal/readiness state for a single proposal row on the list.
-   *
+   * 
    * Every field is a cheap, batched approximation of the richer per-proposal
    * gate/refinement status surfaced by `proposal_show` — enough to drive the
    * list-row chips (tribunal round / awaiting-review / evidence, and a gate
@@ -11023,7 +10591,7 @@ export namespace ProposalSignoffClearOutputSchema {
   }
   /**
    * Compact tribunal/readiness state for a single proposal row on the list.
-   *
+   * 
    * Every field is a cheap, batched approximation of the richer per-proposal
    * gate/refinement status surfaced by `proposal_show` — enough to drive the
    * list-row chips (tribunal round / awaiting-review / evidence, and a gate
@@ -11329,7 +10897,7 @@ export namespace ProposalUpdateOutputSchema {
   }
   /**
    * Compact tribunal/readiness state for a single proposal row on the list.
-   *
+   * 
    * Every field is a cheap, batched approximation of the richer per-proposal
    * gate/refinement status surfaced by `proposal_show` — enough to drive the
    * list-row chips (tribunal round / awaiting-review / evidence, and a gate
@@ -11538,11 +11106,11 @@ export type ProviderModelLookupInput = ProviderModelLookupInputSchema.ProviderMo
 export namespace ProviderModelLookupOutputSchema {
   /**
    * Coarse failure taxonomy for [`ToolError`].
-   *
+   * 
    * Used by supervisors and downstream consumers to branch on failure mode
    * without having to re-parse the message string. Every variant maps to a
    * distinct operational decision the agent can make.
-   *
+   * 
    * See the [module-level documentation](self) for the full classification
    * table. The serialized form is the snake_case variant name (e.g.
    * `"conflict_recoverable"`).
@@ -12726,12 +12294,12 @@ export namespace TaskListOutputSchema {
   }
   /**
    * Snapshot of the current-head required-CI gate for a task's PR.
-   *
+   * 
    * Populated from the repository-backed CI snapshot (`task_pr_ci_snapshots`).
    * `None` when no snapshot exists yet (e.g. task has no PR or has not been
    * polled). Downstream lifecycle/API code reads these fields directly instead
    * of scraping activity prose.
-   *
+   * 
    * Derived fields (`gate_state`, `primary_blocking_check`, `summary_reason`,
    * `merge_blocked_reason`) are computed from the raw CI status combined with
    * the task's lifecycle status.  They expose human/agent-friendly gate
@@ -12745,7 +12313,7 @@ export namespace TaskListOutputSchema {
   /**
    * Bounded rendering of the GitHub annotations on
    * [`Self::primary_blocking_check`].
-   *
+   * 
    * Runner-host failures — out of disk, runner process crash — surface ONLY
    * as annotations, not as a check conclusion and often not in job logs
    * either. This field is what lets a reader see `No space left on device`
@@ -12763,13 +12331,13 @@ export namespace TaskListOutputSchema {
   first_seen_at: string
   /**
    * Derived CI gate state combining raw CI status with task lifecycle.
-   *
+   * 
    * Maps to the upstream low-risk design contract:
    * - `passing` / `failing` / `pending` / `unknown` mirror `CiStatus`
    *   when the task is not in `pr_draft`.
    * - `awaiting_ci` when the task is in `pr_draft` *and* the raw CI
    *   status is `pending` or `unknown` (CI has not completed yet).
-   *
+   * 
    * UI consumers render this value directly as the badge text.
    */
   gate_state: (("passing" | "failing" | "pending" | "unknown") | "inconclusive" | "awaiting_ci")
@@ -12803,7 +12371,7 @@ export namespace TaskListOutputSchema {
   last_seen_at: string
   /**
    * Reason merge/close is blocked by CI, if applicable.
-   *
+   * 
    * `Some(_)` when the raw CI status is not `passing` (i.e. failing,
    * pending, or unknown).  `None` when CI is passing or when no
    * snapshot exists.
@@ -12811,7 +12379,7 @@ export namespace TaskListOutputSchema {
   merge_blocked_reason?: string
   /**
    * Merge-queue (`merge_group`) failure lane for the current PR head.
-   *
+   * 
    * Present only when GitHub's merge queue rejected the PR at dequeue time
    * (a PR head whose own required checks are green can still be dequeued if
    * the heavy `merge_group` stages fail). Populated from the `mq_*` columns
@@ -12830,13 +12398,13 @@ export namespace TaskListOutputSchema {
   /**
    * The single required check to triage first — the earliest-started
    * blocking lane that actually executed and hard-failed.
-   *
+   * 
    * Selected by the PR poller from *structural execution evidence*
    * (conclusion class, execution interval, annotation count, start order),
    * never from name order and never from a list of job names. A check that
    * was `cancelled`, or that never executed, is a symptom of a run-level
    * abort rather than a cause, and is never selected.
-   *
+   * 
    * `None` when no blocking check carries causal information — i.e. `status`
    * is `inconclusive` and the run should be retriggered, not remediated.
    */
@@ -12852,7 +12420,7 @@ export namespace TaskListOutputSchema {
   status: ("passing" | "failing" | "pending" | "inconclusive" | "unknown")
   /**
    * Human-readable summary of the current CI gate state.
-   *
+   * 
    * Derived from raw CI status and blocking check names.  Examples:
    * - `"All required checks passed"` (passing)
    * - `"Required check failing: clippy"` (failing with one check)
@@ -12865,7 +12433,7 @@ export namespace TaskListOutputSchema {
   /**
    * The merge-queue (`merge_group`) failure lane surfaced in a
    * [`CiGateSnapshot`].
-   *
+   * 
    * Mirrors `djinn_core::models::MergeQueueLane` in serialized form. GitHub's
    * merge queue runs the heavy CI stages on the ephemeral `merge_group` ref, so
    * a PR whose own head checks pass can still be rejected by the queue. This
@@ -13040,7 +12608,7 @@ export namespace TaskTimelineOutputSchema {
   }
   /**
    * A canonical extension-load diagnostic placed on a task timeline.
-   *
+   * 
    * The diagnostic remains the shared V1 wire object rather than a timeline-
    * specific copy of its fields. `session_id` and `timestamp` provide the
    * placement metadata needed by timeline renderers.
