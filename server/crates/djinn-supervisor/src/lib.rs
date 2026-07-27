@@ -66,7 +66,11 @@ pub use djinn_runtime::spec::{
 };
 
 /// Root under the shared cache PVC for per-task-run Cargo target directories.
-pub const CARGO_TARGET_RUNS_ROOT: &str = "/cache/cargo-target-runs";
+///
+/// Resolved from the cache-root manifest rather than written out, so this root
+/// cannot exist without a manifest entry describing it.
+pub const CARGO_TARGET_RUNS_ROOT: &str =
+    djinn_core::paths::CacheRootId::CargoTargetRuns.job_pod_path();
 
 /// Canonical private Cargo target directory for a task-run Pod.
 pub fn cargo_target_run_dir(task_run_id: &str) -> PathBuf {

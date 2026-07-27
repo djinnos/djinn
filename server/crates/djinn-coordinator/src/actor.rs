@@ -564,6 +564,15 @@ impl CoordinatorActor {
             Arc::clone(&closed_parent_open_children_source)
                 as Arc<dyn crate::doctor::ClosedParentOpenChildrenRepairSource>,
         );
+        // Read-only cache-root manifest detector. On-demand cadence: it stats
+        // the cache PVC and walks candidates, which is too expensive for the
+        // cheap periodic subset. It has no fix path.
+        crate::doctor::register_stale_cache_roots_check(
+            djinn_core::doctor::registry(),
+            Arc::new(crate::doctor::ProjectRepositoryStaleCacheRootsSource::new(
+                db.clone(),
+            )),
+        );
         crate::doctor::register_refinement_phantom_active_check(
             djinn_core::doctor::registry(),
             Arc::new(
