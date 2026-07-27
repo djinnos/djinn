@@ -18,6 +18,8 @@ use std::collections::HashMap;
 
 use sqlx::Row;
 
+use super::board_health_dispatch_gate::strand_clock;
+
 /// Bounded number of recent liveness-evidence rows surfaced in `liveness_outcomes`.
 const LIVENESS_OUTCOMES_LIMIT: i64 = 25;
 /// Bounded number of recent protocol-violation rows surfaced.
@@ -281,10 +283,10 @@ pub(super) async fn attribution_findings_section(pool: &sqlx::PgPool) -> serde_j
 ///   * owner-credential-blocked (the creator has credentials but they are all
 ///     revoked and no org-shared fallback credential is available).
 ///
-/// Surviving findings carry a `dispatch_gate` object documenting the evaluated
-/// role, its toolset, the model requirement, image readiness, each gate flag,
-/// credential availability, a final `gate_verdict`, and machine-readable
-/// `reasons` (e.g. `no_eligible_model`, `image_not_ready`).
+/// Surviving findings carry a `dispatch_gate` object built by
+/// [`super::board_health_dispatch_gate`]. **Its verdict is `blocked` or
+/// `unexplained`, never `stranded`** — read that module before changing what a
+/// finding here claims.
 pub(super) async fn stranded_ready_section(pool: &sqlx::PgPool) -> serde_json::Value {
     let warning_threshold = STRANDED_THRESHOLD_MINUTES;
     let error_threshold = STRANDED_THRESHOLD_MINUTES * 2;
@@ -307,6 +309,11 @@ pub(super) async fn stranded_ready_section(pool: &sqlx::PgPool) -> serde_json::V
 
     let now_iso = db_utc_now(pool).await;
 
+    // The dispatcher's OWN durable record of layer-1 build admission. Loaded
+    // once for the whole section (two queries, no N+1) so each finding can
+    // report a lease/capacity fact instead of an independent guess.
+    let lease_ledger = super::board_health_dispatch_gate::load_lease_ledger(pool).await;
+
     let stranded_sql = r#"SELECT t.id, t.short_id, t.title, t.status, t.updated_at, t.owner,
                   t.epic_id, t.issue_type, t.project_id, t.created_by_user_id,
                   e.short_id AS epic_short_id,
@@ -327,6 +334,22 @@ pub(super) async fn stranded_ready_section(pool: &sqlx::PgPool) -> serde_json::V
                    WHERE s.task_id = t.id AND s.ended_at IS NOT NULL
                    ORDER BY s.ended_at DESC
                    LIMIT 1) AS session_release_at,
+                  -- When the LAST blocker cleared. This section excludes tasks
+                  -- with unresolved blockers but never reset the clock when one
+                  -- cleared, so a task blocked for ten hours reported eighteen
+                  -- hours of strand. `blockers` carries no timestamp, so the
+                  -- clearing moment is the blocking task's close event, with its
+                  -- `updated_at` as the low-confidence fallback.
+                  (SELECT MAX(bal.created_at)
+                   FROM blockers b
+                   JOIN activity_log bal ON bal.task_id = b.blocking_task_id
+                   WHERE b.task_id = t.id
+                     AND bal.event_type = 'status_changed'
+                     AND bal.payload->>'to_status' = 'closed') AS blocker_closed_event_at,
+                  (SELECT MAX(bt2.updated_at)
+                   FROM blockers b
+                   JOIN tasks bt2 ON bt2.id = b.blocking_task_id
+                   WHERE b.task_id = t.id) AS blocker_task_updated_at,
                   EXISTS (SELECT 1 FROM sessions s
                           WHERE s.task_id = t.id AND s.status = 'paused') AS has_paused_session,
                   EXISTS (SELECT 1 FROM dispatch_pauses dp
@@ -420,24 +443,27 @@ pub(super) async fn stranded_ready_section(pool: &sqlx::PgPool) -> serde_json::V
             }
 
             // ── Unclaimed-since / severity ─────────────────────────────────
-            // Prefer the most recent high-confidence release signal (ready/open
-            // transition or session release); fall back to updated_at.
+            // The latest BECAME-DISPATCHABLE signal wins; `updated_at` is only
+            // a fallback, never part of that comparison. See `strand_clock` for
+            // why the distinction matters — folding `updated_at` into the max
+            // would let any edit reset a starved task's clock.
             let open_transition_at: Option<String> =
                 row.try_get("open_transition_at").ok().flatten();
             let session_release_at: Option<String> =
                 row.try_get("session_release_at").ok().flatten();
+            let blocker_closed_event_at: Option<String> =
+                row.try_get("blocker_closed_event_at").ok().flatten();
+            let blocker_task_updated_at: Option<String> =
+                row.try_get("blocker_task_updated_at").ok().flatten();
             let updated_at: String = row.get("updated_at");
 
-            let high_signal = match (open_transition_at, session_release_at) {
-                (Some(a), Some(b)) => Some(if a >= b { a } else { b }),
-                (Some(a), None) => Some(a),
-                (None, Some(b)) => Some(b),
-                (None, None) => None,
-            };
-            let (unclaimed_since, confidence) = match high_signal {
-                Some(ts) => (ts, "high"),
-                None => (updated_at.clone(), "low"),
-            };
+            let (unclaimed_since, confidence, unclaimed_since_basis) = strand_clock(
+                &updated_at,
+                open_transition_at.as_deref(),
+                session_release_at.as_deref(),
+                blocker_closed_event_at.as_deref(),
+                blocker_task_updated_at.as_deref(),
+            );
 
             let elapsed = elapsed_minutes_iso(&unclaimed_since, &now_iso).unwrap_or(0);
             // Not yet stranded (below 1× threshold).
@@ -473,14 +499,26 @@ pub(super) async fn stranded_ready_section(pool: &sqlx::PgPool) -> serde_json::V
 
             let evaluated_role = dispatched_role_for_status_type(&task_status, &issue_type);
             let toolset = super::queries::toolset_for_role(evaluated_role);
-            let gate_verdict = if reasons.is_empty() {
-                "stranded"
-            } else {
-                "blocked"
-            };
+            let task_id: String = row.get("id");
+            // The verdict and `reasons` are assembled together from the same
+            // list, alongside the coverage statement that bounds them.
+            let dispatch_gate = super::board_health_dispatch_gate::dispatch_gate_json(
+                evaluated_role,
+                toolset,
+                inflight_model_id,
+                image_ready,
+                breaker_open,
+                manually_paused,
+                rate_limited,
+                credential_available,
+                row.get::<Option<String>, _>("last_dispatched_role"),
+                cooldown_until,
+                super::board_health_dispatch_gate::lease_gate(&lease_ledger, &task_id),
+                reasons,
+            );
 
             Some(serde_json::json!({
-                "id":            row.get::<String, _>("id"),
+                "id":            task_id,
                 "short_id":      row.get::<String, _>("short_id"),
                 "title":         row.get::<String, _>("title"),
                 "status":        task_status,
@@ -489,6 +527,7 @@ pub(super) async fn stranded_ready_section(pool: &sqlx::PgPool) -> serde_json::V
                 "epic_short_id": row.get::<Option<String>, _>("epic_short_id"),
                 "unclaimed_since": unclaimed_since,
                 "unclaimed_since_confidence": confidence,
+                "unclaimed_since_basis": unclaimed_since_basis,
                 "elapsed_minutes": elapsed,
                 "severity":      severity,
                 "threshold":     serde_json::json!({
@@ -496,22 +535,7 @@ pub(super) async fn stranded_ready_section(pool: &sqlx::PgPool) -> serde_json::V
                     "error_minutes":    error_threshold,
                     "critical_minutes": critical_threshold,
                 }),
-                "dispatch_gate": serde_json::json!({
-                    "evaluated_role":       evaluated_role,
-                    "toolset":              toolset,
-                    "model_requirement":    inflight_model_id,
-                    "image_ready":          image_ready,
-                    "breaker_open":         breaker_open,
-                    "manually_paused":      manually_paused,
-                    "rate_limited":         rate_limited,
-                    "credential_available": credential_available,
-                    "gate_verdict":         gate_verdict,
-                    "reasons":              reasons,
-                    // Retained for backward compatibility with the initial
-                    // board_health contract.
-                    "last_dispatched_role": row.get::<Option<String>, _>("last_dispatched_role"),
-                    "cooldown_until":       cooldown_until,
-                }),
+                "dispatch_gate": dispatch_gate,
             }))
         })
         .collect();
