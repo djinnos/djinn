@@ -177,6 +177,31 @@ fn callback_digest(callback: &ReadinessAreaResultCallback) -> Result<String> {
     ))
 }
 
+async fn record_callback_event(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    run_id: &str,
+    callback: &ReadinessAreaResultCallback,
+    digest: &str,
+    event_kind: &str,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO readiness_run_events (id,run_id,event_kind,payload) VALUES ($1,$2,$3,$4)",
+    )
+    .bind(Uuid::now_v7().to_string())
+    .bind(run_id)
+    .bind(event_kind)
+    .bind(serde_json::json!({
+        "attempt_id": callback.attempt_id,
+        "area_id": callback.area_id,
+        "correlation_key": callback.correlation_key,
+        "task_id": callback.task_id,
+        "digest": digest,
+    }))
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
 #[derive(Clone, Debug)]
 pub struct ReadinessAreaResultCallback {
     pub run_id: String,
@@ -636,22 +661,33 @@ impl ReadinessRepository {
                 "readiness callback attempt not found".into(),
             ));
         };
-        let record = |kind: &str, tx: &mut sqlx::Transaction<'_, sqlx::Postgres>| async {
-            sqlx::query("INSERT INTO readiness_run_events (id,run_id,event_kind,payload) VALUES ($1,$2,$3,$4)").bind(Uuid::now_v7().to_string()).bind(&run).bind(kind).bind(serde_json::json!({"attempt_id":callback.attempt_id,"area_id":callback.area_id,"correlation_key":callback.correlation_key,"task_id":callback.task_id,"digest":digest})).execute(&mut **tx).await
-        };
         let task_matches: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM tasks WHERE id=$1 AND (CASE WHEN description LIKE '{%' THEN description::jsonb ELSE '{}'::jsonb END) @> jsonb_build_object('kind','readiness_area_analysis','run_id',$2,'area_id',$3,'attempt_id',$4,'correlation_key',$5))").bind(&callback.task_id).bind(&run).bind(&area).bind(&callback.attempt_id).bind(&key).fetch_one(&mut *tx).await?;
         if run != callback.run_id
             || area != callback.area_id
             || key != callback.correlation_key
             || !task_matches
         {
-            record("readiness_callback_ignored", &mut tx).await?;
+            record_callback_event(
+                &mut tx,
+                &run,
+                &callback,
+                &digest,
+                "readiness_callback_ignored",
+            )
+            .await?;
             tx.commit().await?;
             return Ok(ReadinessCallbackOutcome::Ignored);
         }
         let current: Option<String> = sqlx::query_scalar("SELECT id FROM readiness_area_attempts WHERE area_id=$1 ORDER BY attempt_number DESC LIMIT 1 FOR UPDATE").bind(&area).fetch_optional(&mut *tx).await?;
         if current.as_deref() != Some(callback.attempt_id.as_str()) {
-            record("readiness_callback_ignored", &mut tx).await?;
+            record_callback_event(
+                &mut tx,
+                &run,
+                &callback,
+                &digest,
+                "readiness_callback_ignored",
+            )
+            .await?;
             tx.commit().await?;
             return Ok(ReadinessCallbackOutcome::Ignored);
         }
@@ -659,7 +695,14 @@ impl ReadinessRepository {
             let outcome = if old.as_deref() == Some(&digest) {
                 ReadinessCallbackOutcome::Redelivered
             } else {
-                record("readiness_callback_conflict", &mut tx).await?;
+                record_callback_event(
+                    &mut tx,
+                    &run,
+                    &callback,
+                    &digest,
+                    "readiness_callback_conflict",
+                )
+                .await?;
                 ReadinessCallbackOutcome::Conflict
             };
             tx.commit().await?;
@@ -691,13 +734,16 @@ impl ReadinessRepository {
             .bind(&area)
             .execute(&mut *tx)
             .await?;
-        record(
+        record_callback_event(
+            &mut tx,
+            &run,
+            &callback,
+            &digest,
             if valid {
                 "readiness_result_accepted"
             } else {
                 "readiness_result_terminal_failure"
             },
-            &mut tx,
         )
         .await?;
         tx.commit().await?;
