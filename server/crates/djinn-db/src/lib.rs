@@ -112,6 +112,10 @@ pub use repositories::{
         EpicRepository, EpicTaskCounts, EpicUpdateInput,
     },
     events::EventsRepository,
+    evidence::{
+        AppendEvidenceInvocation, EvidenceRepository, InsertEvidenceFinalizedProjection,
+        InsertEvidencePlan, InsertEvidencePlanCheck,
+    },
     extension_load_diagnostic::{ExtensionLoadDiagnosticRepository, InsertExtensionLoadDiagnostic},
     git_settings::GitSettingsRepository,
     image::{Image, ImageRepository, ImageStatus, SelectedCatalogImage},

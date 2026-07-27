@@ -2,6 +2,7 @@ pub mod agent;
 pub mod credential;
 pub mod dispatch_state;
 pub mod epic;
+pub mod evidence;
 pub mod git_settings;
 pub mod org_ai_policy;
 pub mod project;
@@ -21,6 +22,10 @@ pub use agent::Agent;
 pub use credential::Credential;
 pub use dispatch_state::DispatchStateRecord;
 pub use epic::{Epic, EpicEventPayload};
+pub use evidence::{
+    EvidenceCommandInvocation, EvidenceFinalizedProjection, EvidencePlan, EvidencePlanCheck,
+    EvidencePlanHydration,
+};
 pub use git_settings::GitSettings;
 pub use org_ai_policy::{LockLevel, OrgAiPolicy, OrgDefaultLanes};
 pub use project::Project;
