@@ -46,27 +46,26 @@
         session_id
     }
 
-    /// Observe through the same fenced repository adapter as the registered
-    /// phantom doctor. The shared evaluator, not this assertion helper, owns
-    /// evidence precedence.
-    async fn doctor_stale_run_ids(repo: &ProposalRepository) -> Vec<String> {
-        let mut stale = repo
-            .load_recoverable_refinement_run_snapshots(60_000)
-            .await
+    /// Observe through the registered production doctor source and check. In
+    /// particular, `refresh` retains the repository's exact-generation fence;
+    /// this fixture must not recreate that scan/evaluation path in test code.
+    fn doctor_stale_run_ids(
+        source: std::sync::Arc<
+            djinn_coordinator::doctor::ProposalRepositoryRefinementPhantomActiveSource,
+        >,
+    ) -> Vec<String> {
+        use djinn_core::doctor::DoctorCheck;
+
+        let mut stale = djinn_coordinator::doctor::RefinementPhantomActiveCheck::new(source)
+            .run()
             .unwrap()
             .into_iter()
-            .filter_map(|exact| {
-                if matches!(
-                    djinn_core::refinement_liveness::evaluate_refinement_liveness(
-                        &exact.snapshot,
-                        exact.observed_at,
-                    ),
-                    RefinementLivenessResult::Stale { .. }
-                ) {
-                    Some(exact.snapshot.run.run_id)
-                } else {
-                    None
-                }
+            .filter_map(|finding| {
+                finding
+                    .evidence
+                    .get("run_id")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned)
             })
             .collect::<Vec<_>>();
         stale.sort();
@@ -324,13 +323,20 @@
                 _ => unreachable!(),
             };
             djinn_db::test_support::make_refinement_run_phantom_for_test(&db, &phantom).await;
+            let (doctor_events_tx, _doctor_events_rx) = tokio::sync::broadcast::channel(16);
+            let doctor_source = std::sync::Arc::new(
+                djinn_coordinator::doctor::ProposalRepositoryRefinementPhantomActiveSource::new(
+                    db.clone(),
+                    doctor_events_tx,
+                ),
+            );
             let before = djinn_db::test_support::refinement_run_read_only_snapshot_for_test(&db, &proposal.id, &phantom).await;
 
             for _ in 0..2 {
                 let status = server.dispatch_tool("proposal_refinement_status", serde_json::json!({ "proposal_id": proposal.id })).await.unwrap();
                 assert_eq!(status["refinement"]["run_id"], phantom);
                 assert_eq!(status["refinement"]["liveness"], "stale");
-                assert_eq!(doctor_stale_run_ids(&repo).await, vec![phantom.clone()],
+                assert_eq!(doctor_stale_run_ids(doctor_source.clone()), vec![phantom.clone()],
                     "{name} doctor observation must ignore terminal prior-run evidence");
                 let board = server.dispatch_tool("board_health", serde_json::json!({
                     "project": format!("test-owner/test-repo-{project_id}")
