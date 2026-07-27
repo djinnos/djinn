@@ -548,10 +548,28 @@ async fn board_health_stranded_ready_matches_seeded_task() {
     let gate = finding
         .get("dispatch_gate")
         .expect("dispatch_gate must be present");
+    // No gate board_health can evaluate fired, and the verdict must say
+    // exactly that rather than assert the task is merely `stranded` — that
+    // label was emitted whenever `reasons` was empty, which for a task with no
+    // chosen model was structurally guaranteed.
     assert_eq!(
         gate.get("gate_verdict").and_then(|v| v.as_str()),
-        Some("stranded"),
-        "gate_verdict must be stranded for an unblocked task"
+        Some("unexplained"),
+        "gate_verdict must be `unexplained` when no evaluated gate fired"
+    );
+    let coverage = gate
+        .get("coverage")
+        .expect("an unexplained verdict must ship its coverage");
+    assert_eq!(
+        coverage.get("scope").and_then(|v| v.as_str()),
+        Some("partial")
+    );
+    assert!(
+        coverage
+            .get("unevaluated_gates")
+            .and_then(|v| v.as_array())
+            .is_some_and(|gates| !gates.is_empty()),
+        "coverage must name the dispatcher gates this section did not consult"
     );
     assert_eq!(
         gate.get("credential_available").and_then(|v| v.as_bool()),

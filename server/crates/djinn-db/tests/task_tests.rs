@@ -16,6 +16,8 @@ pub(crate) use tokio::sync::broadcast;
 
 #[path = "task_tests/board_health.rs"]
 mod board_health;
+#[path = "task_tests/board_health_dispatch_gate.rs"]
+mod board_health_dispatch_gate;
 #[path = "task_tests/closed_task_sync.rs"]
 mod closed_task_sync;
 #[path = "task_tests/existing.rs"]
