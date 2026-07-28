@@ -747,11 +747,10 @@ jobs:
       #      is serving this lane, several thousand means it is not.
       #   2. `workspaces[].cargo_features` in the djinn project's environment
       #      config — since #2677 the warm reads its `--features` from there,
-      #      NOT from `server/.cargo/config.toml`, whose `[build] features` key
-      #      that PR deleted. That config has never set it, so the warm
-      #      currently runs with NO features while this lane uses
-      #      `--features qdrant`. It needs `["qdrant"]` for the parity this
-      #      step assumes to actually hold.
+      #      NOT from `server/.cargo/config.toml`. That config now declares
+      #      `["qdrant"]` for the `server` workspace, so it matches this lane.
+      #      If the `--features` on the line below ever changes, change it
+      #      there too or the warm silently stops serving this lane.
       - name: Clippy
         run: cargo clippy --workspace --all-targets --features qdrant --keep-going -- -D warnings
       - name: Fingerprint census (after clippy)

@@ -1,7 +1,8 @@
 //! Cargo cache policy resolver — project-agnostic detection of per-project
 //! cargo build strategy.
 //!
-//! Detects from workspace layout and `.cargo/config.toml`.  Pure/unit-
+//! Detects from workspace layout and the project's `EnvironmentConfig`
+//! (`workspaces[*].cargo_features` / `cargo_all_features`).  Pure/unit-
 //! testable; never mutates any project file.
 
 use std::path::{Path, PathBuf};
@@ -34,7 +35,8 @@ impl CargoCachePolicy {
     ///
     /// * Empty vec → default features (no extra flags).
     /// * `["--all-features"]` → all features enabled.
-    /// * `["--features", "foo,bar"]` → named features from `.cargo/config.toml`.
+    /// * `["--features", "foo,bar"]` → named features from the project's
+    ///   `EnvironmentConfig` (`workspaces[*].cargo_features`).
     pub fn features(&self) -> Vec<String> {
         if self.all_features {
             vec!["--all-features".to_string()]
