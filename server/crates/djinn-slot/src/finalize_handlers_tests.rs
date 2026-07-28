@@ -3,6 +3,8 @@ use crate::finalize_types::AcVerdict;
 use crate::test_helpers;
 use djinn_db::TaskRepository;
 
+const AUTHENTICATED_SESSION_ID: &str = "server-authenticated-session-123";
+
 #[test]
 fn apply_ac_verdicts_sets_met_flags_from_payload() {
     let existing =
@@ -97,7 +99,7 @@ async fn budget_park_empty_summary_skips_activity() {
 }
 
 #[tokio::test]
-async fn submit_work_logs_activity_with_summary_and_files() {
+async fn submit_work_accepts_server_authenticated_session_separately_from_payload() {
     let crate::test_helpers::ContextFixture {
         db,
         ctx,
@@ -112,7 +114,14 @@ async fn submit_work_logs_activity_with_summary_and_files() {
         "files_changed": ["src/main.rs", "src/lib.rs"],
         "remaining_concerns": ["needs perf testing"]
     }));
-    process_finalize_payload(&payload, "submit_work", &task.id, &ctx).await;
+    process_finalize_payload(
+        &payload,
+        "submit_work",
+        &task.id,
+        AUTHENTICATED_SESSION_ID,
+        &ctx,
+    )
+    .await;
     let repo = TaskRepository::new(db.clone(), ctx.event_bus.clone());
     let entries = repo.list_activity(&task.id).await.unwrap();
     let work_entry = entries.iter().find(|e| e.event_type == "work_submitted");
@@ -142,7 +151,14 @@ async fn budget_park_submit_work_activity_surfaces_unchanged() {
         "files_changed": ["src/lib.rs"],
         "remaining_concerns": ["budget-parked: finish the follow-up UI snapshot"]
     }));
-    process_finalize_payload(&payload, "submit_work", &task.id, &ctx).await;
+    process_finalize_payload(
+        &payload,
+        "submit_work",
+        &task.id,
+        AUTHENTICATED_SESSION_ID,
+        &ctx,
+    )
+    .await;
     let repo = TaskRepository::new(db.clone(), ctx.event_bus.clone());
     let entries = repo.list_activity(&task.id).await.unwrap();
     let work_entry = entries
@@ -169,7 +185,14 @@ async fn submit_work_malformed_payload_does_not_crash() {
     // Missing required "summary" field.
     let payload = Some(serde_json::json!({"task_id": task.id}));
     // Should not panic.
-    process_finalize_payload(&payload, "submit_work", &task.id, &ctx).await;
+    process_finalize_payload(
+        &payload,
+        "submit_work",
+        &task.id,
+        AUTHENTICATED_SESSION_ID,
+        &ctx,
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -198,7 +221,14 @@ async fn submit_review_atomically_sets_ac_from_criteria_array() {
         ],
         "feedback": null
     }));
-    process_finalize_payload(&payload, "submit_review", &task.id, &ctx).await;
+    process_finalize_payload(
+        &payload,
+        "submit_review",
+        &task.id,
+        AUTHENTICATED_SESSION_ID,
+        &ctx,
+    )
+    .await;
     // AC should be updated in the DB.
     let repo = TaskRepository::new(db.clone(), ctx.event_bus.clone());
     let updated = repo.get(&task.id).await.unwrap().unwrap();
@@ -222,7 +252,14 @@ async fn submit_review_logs_verdict_activity() {
         "acceptance_criteria": [],
         "feedback": "missing edge case handling"
     }));
-    process_finalize_payload(&payload, "submit_review", &task.id, &ctx).await;
+    process_finalize_payload(
+        &payload,
+        "submit_review",
+        &task.id,
+        AUTHENTICATED_SESSION_ID,
+        &ctx,
+    )
+    .await;
     let repo = TaskRepository::new(db.clone(), ctx.event_bus.clone());
     let entries = repo.list_activity(&task.id).await.unwrap();
     let entry = entries.iter().find(|e| e.event_type == "review_submitted");
@@ -243,7 +280,14 @@ async fn submit_review_malformed_payload_does_not_crash() {
     } = crate::test_helpers::seed_context_fixture().await;
     // "verdict" is required but missing.
     let payload = Some(serde_json::json!({"task_id": task.id}));
-    process_finalize_payload(&payload, "submit_review", &task.id, &ctx).await;
+    process_finalize_payload(
+        &payload,
+        "submit_review",
+        &task.id,
+        AUTHENTICATED_SESSION_ID,
+        &ctx,
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -261,7 +305,14 @@ async fn submit_decision_logs_decision_activity() {
         "rationale": "scope was too broad",
         "created_tasks": []
     }));
-    process_finalize_payload(&payload, "submit_decision", &task.id, &ctx).await;
+    process_finalize_payload(
+        &payload,
+        "submit_decision",
+        &task.id,
+        AUTHENTICATED_SESSION_ID,
+        &ctx,
+    )
+    .await;
     let repo = TaskRepository::new(db.clone(), ctx.event_bus.clone());
     let entries = repo.list_activity(&task.id).await.unwrap();
     let entry = entries
@@ -287,7 +338,14 @@ async fn submit_decision_malformed_payload_does_not_crash() {
     } = crate::test_helpers::seed_context_fixture().await;
     // "decision" is required but missing.
     let payload = Some(serde_json::json!({"task_id": task.id}));
-    process_finalize_payload(&payload, "submit_decision", &task.id, &ctx).await;
+    process_finalize_payload(
+        &payload,
+        "submit_decision",
+        &task.id,
+        AUTHENTICATED_SESSION_ID,
+        &ctx,
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -308,7 +366,14 @@ async fn submit_grooming_logs_per_task_activity_entries() {
     }));
     // Planner is project-scoped; pass synthetic task_id.
     let synthetic_id = format!("project:{}:planner", project.id);
-    process_finalize_payload(&payload, "submit_grooming", &synthetic_id, &ctx).await;
+    process_finalize_payload(
+        &payload,
+        "submit_grooming",
+        &synthetic_id,
+        AUTHENTICATED_SESSION_ID,
+        &ctx,
+    )
+    .await;
     let repo = TaskRepository::new(db.clone(), ctx.event_bus.clone());
     let entries1 = repo.list_activity(&task1.id).await.unwrap();
     let e1 = entries1.iter().find(|e| e.event_type == "planning_entry");
@@ -348,7 +413,14 @@ async fn submit_grooming_blocked_on_records_epic_blocker_durably() {
         "decision": "escalate",
         "blocked_on": [blocker.short_id],
     }));
-    process_finalize_payload(&payload, "submit_grooming", &planning_task.id, &ctx).await;
+    process_finalize_payload(
+        &payload,
+        "submit_grooming",
+        &planning_task.id,
+        AUTHENTICATED_SESSION_ID,
+        &ctx,
+    )
+    .await;
     // The durable edge must exist and the gate must see an open blocker.
     assert!(
         epic_repo.has_unresolved_blockers(&parked.id).await.unwrap(),
@@ -358,7 +430,14 @@ async fn submit_grooming_blocked_on_records_epic_blocker_durably() {
     assert_eq!(blockers.len(), 1);
     assert_eq!(blockers[0].epic_id, blocker.id);
     // Idempotent: re-declaring the same blocker must not error or duplicate.
-    process_finalize_payload(&payload, "submit_grooming", &planning_task.id, &ctx).await;
+    process_finalize_payload(
+        &payload,
+        "submit_grooming",
+        &planning_task.id,
+        AUTHENTICATED_SESSION_ID,
+        &ctx,
+    )
+    .await;
     let blockers_again = epic_repo.list_blockers(&parked.id).await.unwrap();
     assert_eq!(
         blockers_again.len(),
@@ -387,7 +466,14 @@ async fn submit_grooming_blocked_on_unresolvable_ref_is_skipped() {
         "tasks_reviewed": [],
         "blocked_on": ["does-not-exist"],
     }));
-    process_finalize_payload(&payload, "submit_grooming", &planning_task.id, &ctx).await;
+    process_finalize_payload(
+        &payload,
+        "submit_grooming",
+        &planning_task.id,
+        AUTHENTICATED_SESSION_ID,
+        &ctx,
+    )
+    .await;
     let epic_repo = djinn_db::EpicRepository::new(db.clone(), ctx.event_bus.clone());
     assert!(
         !epic_repo.has_unresolved_blockers(&parked.id).await.unwrap(),
@@ -402,5 +488,12 @@ async fn submit_grooming_malformed_payload_does_not_crash() {
         test_helpers::agent_context_from_db(db.clone(), tokio_util::sync::CancellationToken::new());
     // Missing "tasks_reviewed" entirely.
     let payload = Some(serde_json::json!({}));
-    process_finalize_payload(&payload, "submit_grooming", "any-task-id", &ctx).await;
+    process_finalize_payload(
+        &payload,
+        "submit_grooming",
+        "any-task-id",
+        AUTHENTICATED_SESSION_ID,
+        &ctx,
+    )
+    .await;
 }
