@@ -144,6 +144,15 @@ impl ChildReaper {
     /// platforms deliberately provide the same registration seam without a
     /// wait consumer so existing non-Linux process behavior remains available
     /// to callers until a platform implementation is introduced.
+    ///
+    /// # Panics
+    ///
+    /// On Linux, panics if a second instance is constructed in the same
+    /// process. See [`worker_child_reaper`]: `waitpid(-1, ...)` is not
+    /// addressable, so two consumers do not partition the children between
+    /// them — they race for every terminal status in the process, and the
+    /// loser's registry never learns that its own registered child exited.
+    /// Use [`worker_child_reaper`] instead of constructing another reaper.
     #[must_use]
     pub fn new() -> Self {
         let reaper = Self::new_inner();
@@ -363,8 +372,24 @@ impl ChildReaper {
         self.inner.changed.notify_all();
     }
 
+    /// Install the single per-process `waitpid(-1, WNOHANG)` consumer.
+    ///
+    /// The claim is enforced, not merely documented. A second waiter cannot be
+    /// scoped to "its own" children: `waitpid(-1, ...)` asks for *any* child of
+    /// the process, so two loops race for every terminal status and each one
+    /// silently swallows the statuses it wins as anonymous "adopted" records.
+    /// The registry that actually registered the child then never de-registers
+    /// it, and its supervisor either waits forever on a status route that will
+    /// never be written or reports a long-dead PID as a shutdown survivor.
     #[cfg(target_os = "linux")]
     fn start_linux_waiter(&self) {
+        static WAITER_INSTALLED: std::sync::atomic::AtomicBool =
+            std::sync::atomic::AtomicBool::new(false);
+        assert!(
+            !WAITER_INSTALLED.swap(true, std::sync::atomic::Ordering::SeqCst),
+            "a second waitpid(-1) child reaper was started in this process; \
+             use worker_child_reaper() instead of constructing another ChildReaper"
+        );
         let reaper = self.clone();
         std::thread::Builder::new()
             .name("djinn-child-reaper".to_owned())

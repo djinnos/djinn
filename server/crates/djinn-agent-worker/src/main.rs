@@ -3966,6 +3966,28 @@ fn _assert_contract_workspace_path() -> &'static Path {
     Path::new(_CONTRACT_WORKSPACE)
 }
 
+/// Serialises every test in this binary that spawns a real child process.
+///
+/// Child lifecycle here is PROCESS-GLOBAL in two independent ways, and both are
+/// load-bearing production behaviour that cannot be narrowed for tests:
+///
+/// * one `waitpid(-1, ...)` consumer — the `djinn_graph` [`ChildReaper`] — owns
+///   every terminal status in the process, and the warm-lifecycle cases
+///   `close_admission()` on it, so an overlapping spawn is refused outright;
+/// * warm shutdown SIGTERM/SIGKILLs every direct child of the process that is
+///   not inside a registered process group. That is exactly what a warm worker
+///   must do to a `setsid` escapee, so it cannot distinguish a neighbouring
+///   test's `sleep 60` from a runaway build.
+///
+/// So no two tests that own a live child may overlap. `djinn_graph::process`
+/// hoists the same lock over its own spawners for the same reason. Under
+/// `cargo nextest` (what CI runs) each test is its own process and this lock is
+/// uncontended; it exists for `cargo test`, which shares one.
+///
+/// [`ChildReaper`]: djinn_graph::child_reaper::ChildReaper
+#[cfg(test)]
+static WARM_LIFECYCLE_TEST_MUTEX: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4960,6 +4982,9 @@ warning: something
 
     #[test]
     fn run_cargo_warm_step_instrumented_parses_mock_output_and_logs_counts() {
+        // Spawns a real child through the process-global reaper; see
+        // WARM_LIFECYCLE_TEST_MUTEX.
+        let _serial = WARM_LIFECYCLE_TEST_MUTEX.blocking_lock();
         let _guard = CARGO_INSTRUMENT_ENV_LOCK.lock().expect("env lock poisoned");
         // SAFETY: guarded test-only env mutation.
         unsafe { std::env::set_var("DJINN_CARGO_INSTRUMENT", "1") };
@@ -5049,6 +5074,9 @@ warning: something
     #[cfg(unix)]
     #[test]
     fn a_failing_warm_step_logs_a_bounded_stderr_tail_naming_the_cause() {
+        // Spawns a real child through the process-global reaper; see
+        // WARM_LIFECYCLE_TEST_MUTEX.
+        let _serial = WARM_LIFECYCLE_TEST_MUTEX.blocking_lock();
         use std::os::unix::fs::PermissionsExt;
 
         // The non-instrumented branch is the one that used to discard the
@@ -5204,6 +5232,9 @@ warning: something
 
     #[test]
     fn run_cargo_warm_step_absent_toggle_uses_status_path_without_instrumentation_log() {
+        // Spawns a real child through the process-global reaper; see
+        // WARM_LIFECYCLE_TEST_MUTEX.
+        let _serial = WARM_LIFECYCLE_TEST_MUTEX.blocking_lock();
         let _guard = CARGO_INSTRUMENT_ENV_LOCK.lock().expect("env lock poisoned");
         // SAFETY: guarded test-only env mutation.
         unsafe { std::env::remove_var("DJINN_CARGO_INSTRUMENT") };
@@ -5733,11 +5764,10 @@ warning: something
             "attached teardown must NOT emit any sample"
         );
     }
-    static WARM_CARGO_ORDERING_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
     fn warm_cargo_ordering_recorder_captures_real_failure_before_commands() {
-        let _serial = WARM_CARGO_ORDERING_MUTEX.lock().expect("ordering mutex");
+        let _serial = WARM_LIFECYCLE_TEST_MUTEX.blocking_lock();
         let fixture = tempfile::tempdir().expect("workspace fixture");
         std::fs::write(
             fixture.path().join("Cargo.toml"),
@@ -5784,7 +5814,7 @@ warning: something
     #[test]
     fn warm_cargo_ordering_recorder_observes_prune_stamp_compile_and_end_sweep() {
         use std::os::unix::fs::PermissionsExt;
-        let _serial = WARM_CARGO_ORDERING_MUTEX.lock().expect("ordering mutex");
+        let _serial = WARM_LIFECYCLE_TEST_MUTEX.blocking_lock();
         let fixture = tempfile::tempdir().expect("workspace fixture");
         std::fs::write(
             fixture.path().join("Cargo.toml"),
@@ -5866,7 +5896,7 @@ warning: something
     #[test]
     fn truncated_warm_step_records_timeout_and_suppresses_the_tail_sweep() {
         use std::os::unix::fs::PermissionsExt;
-        let _serial = WARM_CARGO_ORDERING_MUTEX.lock().expect("ordering mutex");
+        let _serial = WARM_LIFECYCLE_TEST_MUTEX.blocking_lock();
         let fixture = tempfile::tempdir().expect("workspace fixture");
         std::fs::write(
             fixture.path().join("Cargo.toml"),
@@ -6053,7 +6083,7 @@ warning: something
     fn warm_cargo_ordering_operation_failures_emit_once_before_stamp_or_compile() {
         use cargo_incremental_prune::WarmLockOperationFailure;
 
-        let _serial = WARM_CARGO_ORDERING_MUTEX.lock().expect("ordering mutex");
+        let _serial = WARM_LIFECYCLE_TEST_MUTEX.blocking_lock();
         djinn_telemetry::init().expect("telemetry init");
         let fixture = tempfile::tempdir().expect("workspace fixture");
         std::fs::write(
@@ -6153,7 +6183,7 @@ warning: something
         // that arms it must hold this mutex — otherwise it steals a sibling
         // test's lock acquisition and that sibling fails with a bogus
         // `["failed"]` phase trace.
-        let _serial = WARM_CARGO_ORDERING_MUTEX.lock().expect("ordering mutex");
+        let _serial = WARM_LIFECYCLE_TEST_MUTEX.blocking_lock();
         let fixture = tempfile::tempdir().expect("fixture");
         let policy = cargo_cache_policy::CargoCachePolicy::default();
         let project = format!("warm-boundary-order-{}", std::process::id());
@@ -6237,18 +6267,36 @@ warning: something
         }
     }
 
+    /// Reopen the process-global admission gate a warm-lifecycle case closed.
+    ///
+    /// `close_admission()` is permanent by design — a warm worker never admits
+    /// another command after shutdown begins — but in a test binary the reaper
+    /// outlives the case, so a case that closes admission and returns leaves
+    /// every later spawn in the whole binary failing with `BrokenPipe`. Restore
+    /// what the case changed rather than letting the next case inherit it.
     #[cfg(target_os = "linux")]
-    static WARM_LIFECYCLE_TEST_MUTEX: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    fn restore_warm_lifecycle_admission(reaper: &djinn_graph::child_reaper::ChildReaper) {
+        let _ = reaper.drain();
+        assert!(reaper.wait_for_supervisors_idle(Duration::from_secs(5)));
+        assert!(reaper.wait_for_adopted_idle(Duration::from_secs(5)));
+        reaper.reopen_after_idle_for_test();
+    }
 
     #[cfg(target_os = "linux")]
     fn test_warm_reaper() -> &'static djinn_graph::child_reaper::ChildReaper {
-        use std::sync::OnceLock;
-
-        // Every lifecycle case shares this one permanent waiter. Constructing
-        // one reaper per test leaves old waitpid(-1) threads alive, allowing an
-        // earlier test to steal status from a later test's registry.
-        static REAPER: OnceLock<djinn_graph::child_reaper::ChildReaper> = OnceLock::new();
-        let reaper = REAPER.get_or_init(djinn_graph::child_reaper::ChildReaper::new);
+        // THE process-global reaper — the same one production's
+        // `initialize_linux_warm_lifecycle` returns. A private
+        // `ChildReaper::new()` here looks like isolation but is the opposite:
+        // it installs a SECOND `waitpid(-1)` thread, while every other test in
+        // this binary that spawns through `djinn_graph::process` (the
+        // warm-cargo ordering cases, `lifecycle`, `warm_build_lease`, ...)
+        // lazily starts the global one. `waitpid(-1, ...)` is not addressable,
+        // so the two loops then race for every child status in the process
+        // instead of partitioning them. Whichever loop wins files the status;
+        // if that is not the registry holding the PID route, the child stays
+        // registered forever and this test's shutdown reports an already-dead
+        // fixture as a surviving PID.
+        let reaper = djinn_graph::child_reaper::worker_child_reaper();
         // Test bodies are serialized; drain retained adopted statuses and prove
         // the old registry empty before reopening admission for the next case.
         let _ = reaper.drain();
@@ -6304,6 +6352,8 @@ warning: something
         assert!(!reaper.admission_open(), "cleanup must close admission");
         assert!(reaper.wait_for_supervisors_idle(Duration::ZERO));
         assert!(reaper.wait_for_adopted_idle(Duration::ZERO));
+        // Restore the process-global admission gate this case closed.
+        restore_warm_lifecycle_admission(reaper);
     }
 
     #[cfg(target_os = "linux")]
@@ -6336,6 +6386,8 @@ warning: something
         );
         assert!(reaper.wait_for_supervisors_idle(Duration::ZERO));
         assert!(reaper.wait_for_adopted_idle(Duration::ZERO));
+        // Restore the process-global admission gate this case closed.
+        restore_warm_lifecycle_admission(reaper);
     }
 
     #[cfg(target_os = "linux")]
@@ -6369,6 +6421,8 @@ warning: something
         );
         assert!(reaper.wait_for_supervisors_idle(Duration::ZERO));
         assert!(reaper.wait_for_adopted_idle(Duration::ZERO));
+        // Restore the process-global admission gate this case closed.
+        restore_warm_lifecycle_admission(reaper);
     }
 
     #[cfg(target_os = "linux")]
@@ -6483,5 +6537,7 @@ warning: something
         }
         assert!(reaper.wait_for_supervisors_idle(Duration::ZERO));
         assert!(reaper.wait_for_adopted_idle(Duration::ZERO));
+        // Restore the process-global admission gate this case closed.
+        restore_warm_lifecycle_admission(reaper);
     }
 }
