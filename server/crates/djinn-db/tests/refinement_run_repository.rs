@@ -72,7 +72,6 @@ async fn human_review_acceptance_and_rejection_failures_are_atomic_and_retryable
         repo.resolve_refinement_human_review(ResolveRefinementHumanReviewRequest {
             run_id: run_id.clone(),
             generation,
-            snapshot_revision_seq: 1,
             accept: true
         })
         .await
@@ -129,7 +128,6 @@ async fn human_review_acceptance_and_rejection_failures_are_atomic_and_retryable
             repo.resolve_refinement_human_review(ResolveRefinementHumanReviewRequest {
                 run_id: run_id.clone(),
                 generation,
-                snapshot_revision_seq: 1,
                 accept: false
             })
             .await
@@ -150,7 +148,6 @@ async fn human_review_acceptance_and_rejection_failures_are_atomic_and_retryable
             repo.resolve_refinement_human_review(ResolveRefinementHumanReviewRequest {
                 run_id,
                 generation,
-                snapshot_revision_seq: 1,
                 accept: false
             })
             .await
@@ -182,7 +179,6 @@ async fn human_review_acceptance_and_rejection_failures_are_atomic_and_retryable
         repo.resolve_refinement_human_review(ResolveRefinementHumanReviewRequest {
             run_id: run_id.clone(),
             generation: generation + 1,
-            snapshot_revision_seq: 1,
             accept: false
         })
         .await
@@ -195,13 +191,98 @@ async fn human_review_acceptance_and_rejection_failures_are_atomic_and_retryable
         repo.resolve_refinement_human_review(ResolveRefinementHumanReviewRequest {
             run_id,
             generation,
-            snapshot_revision_seq: 1,
             accept: false
         })
         .await
         .is_err()
     );
     assert_eq!(durable_shape(&db, &proposal_id).await, before);
+}
+
+/// The tribunal writes a spec revision every round, so by the time a run parks
+/// for human review the proposal head is far ahead of the revision the run was
+/// admitted from. Resolution used to compare the caller's projected snapshot
+/// seq against the run's captured one; a projection rebuilt from the live head
+/// (every coordinator restart or wake re-hydration does exactly that) then
+/// matched neither accept nor reject, and the park could never be resolved.
+#[tokio::test]
+async fn human_review_resolves_after_the_head_advances_past_the_captured_snapshot() {
+    for accept in [true, false] {
+        let (db, repo, proposal_id) = fixture().await;
+        sqlx::query("INSERT INTO proposal_revisions (id, proposal_id, seq, title, body, body_format, acceptance_criteria, event_kind) VALUES ($1, $2, 1, 'captured', 'captured body', 'markdown', '[]', 'spec_revision')").bind(uuid::Uuid::now_v7().to_string()).bind(&proposal_id).execute(db.pool()).await.unwrap();
+        let admitted = repo
+            .admit_refinement_run(demand(
+                proposal_id.clone(),
+                format!("drifted-head-{accept}"),
+            ))
+            .await
+            .unwrap();
+        let (run_id, generation) = match admitted {
+            RefinementAdmissionOutcome::Admitted {
+                run_id, generation, ..
+            } => (run_id, generation),
+            _ => unreachable!(),
+        };
+        assert_eq!(
+            repo.refinement_run_captured_snapshot_seq(&run_id)
+                .await
+                .unwrap(),
+            Some(1)
+        );
+        // Three tribunal rounds of Advocate revisions land on top of the
+        // captured snapshot.
+        for seq in 2..=7 {
+            sqlx::query("INSERT INTO proposal_revisions (id, proposal_id, seq, title, body, body_format, acceptance_criteria, event_kind) VALUES ($1, $2, $3, 'refined', 'refined body', 'markdown', '[]', 'spec_revision')").bind(uuid::Uuid::now_v7().to_string()).bind(&proposal_id).bind(seq).execute(db.pool()).await.unwrap();
+        }
+        sqlx::query("UPDATE proposals SET title='refined', body='refined body', status='in_review', latest_revision_seq=7 WHERE id=$1").bind(&proposal_id).execute(db.pool()).await.unwrap();
+        sqlx::query(
+            "UPDATE refinement_runs SET state='parked', park_kind='awaiting_review', parked_at=$2 WHERE id=$1",
+        )
+        .bind(&run_id)
+        .bind(OLD)
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        assert!(
+            repo.resolve_refinement_human_review(ResolveRefinementHumanReviewRequest {
+                run_id: run_id.clone(),
+                generation,
+                accept,
+            })
+            .await
+            .unwrap(),
+            "a park must resolve regardless of how far the head has advanced"
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, String>("SELECT stop_tag FROM refinement_runs WHERE id=$1")
+                .bind(&run_id)
+                .fetch_one(db.pool())
+                .await
+                .unwrap(),
+            if accept {
+                "human_accepted"
+            } else {
+                "human_rejected"
+            }
+        );
+        // Reject reverts to the run's own captured revision, not to whatever
+        // seq the caller happened to project.
+        let (title, body): (String, String) =
+            sqlx::query_as("SELECT title, body FROM proposals WHERE id=$1")
+                .bind(&proposal_id)
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+        if accept {
+            assert_eq!((title.as_str(), body.as_str()), ("refined", "refined body"));
+        } else {
+            assert_eq!(
+                (title.as_str(), body.as_str()),
+                ("captured", "captured body")
+            );
+        }
+    }
 }
 
 #[tokio::test]
@@ -877,7 +958,6 @@ async fn human_rejection_reverts_snapshot_and_terminalizes_atomically() {
         repo.resolve_refinement_human_review(ResolveRefinementHumanReviewRequest {
             run_id: run_id.clone(),
             generation,
-            snapshot_revision_seq: 1,
             accept: false
         })
         .await
@@ -906,7 +986,6 @@ async fn human_rejection_reverts_snapshot_and_terminalizes_atomically() {
             .resolve_refinement_human_review(ResolveRefinementHumanReviewRequest {
                 run_id,
                 generation,
-                snapshot_revision_seq: 1,
                 accept: false
             })
             .await
