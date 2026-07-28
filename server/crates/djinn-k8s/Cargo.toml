@@ -34,7 +34,9 @@ workspace-hack.workspace = true
 
 [dev-dependencies]
 async-trait = "0.1"
+djinn-db = { path = "../djinn-db", features = ["test-support"] }
 djinn-provider = { path = "../djinn-provider" }
+sqlx = { version = "0.8", features = ["postgres", "runtime-tokio-rustls"] }
 # goxi launcher blocker 8/9 guard: the required-path set a brokered child depends
 # on is derived from the REAL image ENV the Dockerfile emitter bakes, not from a
 # copy of it. See tests/launcher_child_filesystem_reachability.rs.
