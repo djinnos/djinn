@@ -119,30 +119,6 @@ pub fn control_volume_mount() -> VolumeMount {
     }
 }
 
-/// The admin-URL environment variable each wrapper binary reads to reach its
-/// co-located stock daemon on Pod loopback. Returns `None` for a service type
-/// that has no catalog wrapper.
-fn wrapper_admin_env_var(service_type: &str) -> Option<&'static str> {
-    match service_type {
-        "postgres" => Some("POSTGRES_WRAPPER_ADMIN_URL"),
-        "redis" => Some("REDIS_WRAPPER_ADMIN_URL"),
-        "rabbitmq" => Some("RABBITMQ_WRAPPER_AMQP_URL"),
-        _ => None,
-    }
-}
-
-/// The exported-environment-names variable each wrapper binary reads to learn
-/// which env names a lease URL is returned under. Returns `None` for a service
-/// type that has no catalog wrapper.
-fn wrapper_env_names_var(service_type: &str) -> Option<&'static str> {
-    match service_type {
-        "postgres" => Some("CATALOG_POSTGRES_ENV_NAMES"),
-        "redis" => Some("CATALOG_REDIS_ENV_NAMES"),
-        "rabbitmq" => Some("CATALOG_RABBITMQ_ENV_NAMES"),
-        _ => None,
-    }
-}
-
 /// Everything the sidecar builder needs from a `service_presets` row. The
 /// caller maps it so this module never reaches into DB row shape.
 #[derive(Clone, Debug)]
