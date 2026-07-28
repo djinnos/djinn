@@ -13,6 +13,7 @@ pub mod logging;
 mod mcp_bridge;
 pub mod mirror_fetcher;
 pub mod readiness_pin_resolver;
+pub mod scip_index_watcher;
 pub mod server;
 pub mod server_memory;
 pub mod sse;

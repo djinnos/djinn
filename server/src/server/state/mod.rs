@@ -2634,6 +2634,14 @@ impl AppState {
         );
         crate::mirror_fetcher::spawn(self.clone());
 
+        // Standalone SCIP-index driver (leader-only, same reasoning as
+        // mirror_fetcher: it creates cluster objects). The real scheduler is
+        // wired here unconditionally; whether it creates Jobs is decided per
+        // tick by `DJINN_K8S_SCIP_INDEX_ENABLED`, which defaults to OFF. That
+        // ordering is deliberate -- gating the WIRING instead of the ACTION is
+        // how a feature ends up shipped and permanently unreachable.
+        crate::scip_index_watcher::spawn(self.clone());
+
         // Periodic `git gc` over every project's mirror + working clone. Both
         // fetch with `--prune` but never reclaim the objects behind deleted
         // task branches, so the on-disk stores grow without bound — this is

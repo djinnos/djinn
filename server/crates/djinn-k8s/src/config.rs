@@ -216,6 +216,28 @@ pub struct KubernetesConfig {
     /// `activeDeadlineSeconds` on the SCIP-index Job. Default `7200` (2h)
     /// against a measured 3523s (58m43s) SCIP phase.
     pub scip_job_timeout_seconds: i64,
+    /// Master switch for standalone SCIP-index dispatch. **Defaults to
+    /// `false`.**
+    ///
+    /// The composition root wires the real
+    /// [`crate::scip_schedule::ScipIndexScheduler`] unconditionally — this flag
+    /// is checked inside the tick, not at wiring time, so arming the feature is
+    /// a config flip rather than a redeploy, and the code path is never
+    /// unreachable. Off means the watcher ticks, logs its decisions at debug,
+    /// and creates nothing.
+    pub scip_index_enabled: bool,
+    /// How long the repository head must have stood still before a SCIP index
+    /// is worth producing, in seconds. Default `3523` — the measured duration
+    /// of the SCIP phase itself.
+    ///
+    /// The SCIP cache key folds in `source_hashes`, so an index produced at
+    /// head `H0` only serves a warm running against `H0`'s sources. If `main`
+    /// advances during the ~59-minute run, the following warm misses and
+    /// re-indexes inline. Requiring the tree to have been stable for at least
+    /// as long as the run takes is the cheap, stateless way to bias toward the
+    /// case where the artifact is still current when it lands. `0` disables the
+    /// gate. See [`crate::scip_schedule::decide`].
+    pub scip_quiescence_seconds: u64,
     /// `spec.nodeSelector` applied to both task-run and warm Pods. Empty map
     /// leaves the field unset (any node tolerating the Pod's other constraints
     /// is eligible). Operators typically use this together with `tolerations`
@@ -326,6 +348,10 @@ impl KubernetesConfig {
             scip_index_interval_seconds: 10_800,
             scip_job_ttl_seconds: 14_400,
             scip_job_timeout_seconds: 7_200,
+            // OFF by default. The scheduler is wired for real regardless; this
+            // is the only thing that lets it create a Job.
+            scip_index_enabled: false,
+            scip_quiescence_seconds: crate::scip_job::MEASURED_SCIP_PHASE_SECONDS as u64,
             node_selector: BTreeMap::new(),
             tolerations: Vec::new(),
             // v1 leases enforcement contract. Both fail render validation if set
@@ -380,6 +406,8 @@ impl KubernetesConfig {
     /// | `DJINN_K8S_SCIP_INDEX_INTERVAL_SECONDS` | `scip_index_interval_seconds` | `10800` (parsed as `u64`) |
     /// | `DJINN_K8S_SCIP_JOB_TTL_SECONDS` | `scip_job_ttl_seconds` | `14400` (parsed as `i32`) |
     /// | `DJINN_K8S_SCIP_JOB_TIMEOUT_SECONDS` | `scip_job_timeout_seconds` | `7200` (parsed as `i64`) |
+    /// | `DJINN_K8S_SCIP_INDEX_ENABLED` | `scip_index_enabled` | `false` — the arming switch |
+    /// | `DJINN_K8S_SCIP_QUIESCENCE_SECONDS` | `scip_quiescence_seconds` | `3523` (the measured phase cost; `0` disables) |
     /// | `DJINN_K8S_NODE_SELECTOR` | `node_selector` | `{}` (parsed as a JSON object of string→string) |
     /// | `DJINN_K8S_TOLERATIONS` | `tolerations` | `[]` (parsed as a JSON array of k8s `Toleration` objects) |
     /// | `DJINN_K8S_CGROUP_DELEGATION_PROFILE` | `cgroup_delegation_profile` | `cgroup-v2-cpu-only` |
@@ -519,6 +547,22 @@ impl KubernetesConfig {
                     value = %v,
                     error = %e,
                     "DJINN_K8S_SCIP_JOB_TTL_SECONDS not a valid i32 — keeping default"
+                ),
+            }
+        }
+        if let Ok(v) = std::env::var("DJINN_K8S_SCIP_INDEX_ENABLED") {
+            cfg.scip_index_enabled = matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            );
+        }
+        if let Ok(v) = std::env::var("DJINN_K8S_SCIP_QUIESCENCE_SECONDS") {
+            match v.parse::<u64>() {
+                Ok(n) => cfg.scip_quiescence_seconds = n,
+                Err(e) => tracing::warn!(
+                    value = %v,
+                    error = %e,
+                    "DJINN_K8S_SCIP_QUIESCENCE_SECONDS not a valid u64 — keeping default"
                 ),
             }
         }

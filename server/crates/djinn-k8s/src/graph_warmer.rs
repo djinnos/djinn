@@ -1299,6 +1299,31 @@ impl K8sGraphWarmer {
         })
     }
 
+    /// Build the standalone SCIP-index scheduler from this warmer's own client
+    /// and config.
+    ///
+    /// It shares the warmer's `kube::Client` deliberately — the composition
+    /// root must not build a second one — but it shares nothing else. The
+    /// returned scheduler holds no `GraphWarmLease`, no `WarmAdmission`, and no
+    /// `WarmCandidateControl`, because the Jobs it creates take no build slot;
+    /// that is the entire point of the split.
+    ///
+    /// `None` only on the test/mock-dispatcher path, which owns no live client.
+    /// Production always gets `Some`, and the watcher that calls this logs at
+    /// ERROR if it ever gets `None` while the feature is armed — a scheduler
+    /// that silently resolves to nothing is exactly the failure mode this
+    /// codebase has hit before.
+    pub fn scip_index_scheduler(&self) -> Option<crate::scip_schedule::ScipIndexScheduler> {
+        let client = self.client.clone()?;
+        Some(crate::scip_schedule::ScipIndexScheduler::new(
+            self.dispatch.config.clone(),
+            Arc::new(crate::scip_schedule::KubeClientScipJobInventory::new(
+                client.clone(),
+            )),
+            Arc::new(KubeClientDispatcher::new(client)),
+        ))
+    }
+
     /// Override the merge-storm debounce policy (builder style). Production
     /// takes it from the environment via [`Self::new`]; tests use this to
     /// exercise the quiet-window / max-wait / disabled behaviours with short

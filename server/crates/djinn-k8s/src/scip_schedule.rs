@@ -86,6 +86,11 @@ pub enum ScipIndexDecision {
     /// the change-detection gate** and it is checked before the cadence, so an
     /// unchanged head never dispatches no matter how much time has passed.
     SkipHeadUnchanged { revision: String },
+    /// Head advanced, but the tree has not stood still long enough for the
+    /// index to be worth producing — it would very likely be stale before it
+    /// finished. `None` age means the head's commit time was unreadable, which
+    /// is treated the same way. See [`decide`].
+    SkipHeadNotQuiescent { age: Option<Duration> },
     /// Head advanced, but the cadence floor has not elapsed since the last
     /// dispatch. Rate limit on a continuously-advancing `main`.
     SkipCadence { remaining: Duration },
@@ -110,6 +115,7 @@ impl ScipIndexDecision {
             Self::SkipInventoryUnavailable => "inventory_unavailable",
             Self::SkipInFlight => "in_flight",
             Self::SkipHeadUnchanged { .. } => "head_unchanged",
+            Self::SkipHeadNotQuiescent { .. } => "head_not_quiescent",
             Self::SkipCadence { .. } => "cadence",
         }
     }
@@ -139,6 +145,22 @@ pub trait ScipJobInventory: Send + Sync {
     ) -> Result<ScipJobObservation, String>;
 }
 
+/// The observed head of a project's mirror, and how long it has been the head.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MirrorHead {
+    /// `refs/heads/main` in the project's bare mirror.
+    pub revision: String,
+    /// Age of that commit, i.e. how long the tree has been unchanged.
+    pub age: Duration,
+}
+
+/// Resolves [`MirrorHead`] for a project. A separate seam from the warm path's
+/// own tip discovery so the SCIP cadence cannot be coupled to warm dispatch.
+#[async_trait]
+pub trait MirrorHeadSource: Send + Sync {
+    async fn head(&self, project_id: &str) -> Option<MirrorHead>;
+}
+
 /// The pure decision. No I/O, no clock, no cluster — every input is an
 /// argument, so every branch is directly unit-testable.
 ///
@@ -147,12 +169,43 @@ pub trait ScipJobInventory: Send + Sync {
 /// 2. in-flight coalesces;
 /// 3. **head-unchanged wins over the cadence**, because the requirement is
 ///    "every 3 hours *and only if* the head advanced", not "or";
-/// 4. the cadence floor rate-limits an advancing head.
+/// 4. **head-not-quiescent** skips — see below;
+/// 5. the cadence floor rate-limits an advancing head.
+///
+/// # The quiescence gate, and why the benefit is conditional
+///
+/// The SCIP artifact cache key includes `source_hashes` over the workspace's
+/// sources (`CacheKeyIngredients`, `scip_indexer/cache.rs`). So an index
+/// produced at head `H0` is only a `CachedHit` for a warm that runs against
+/// `H0`'s sources. Warm chases head continuously — `mirror_fetcher` triggers
+/// every 60s and the dead debounce collapses every window at its 900s cap — so
+/// **if `main` advances during the ~59 minutes this Job takes, the warm that
+/// follows misses the cache and re-indexes inline for the full 58m43s.** On a
+/// repository merging more often than once an hour the hit rate tends toward
+/// zero and the SCIP Job's work is redundant.
+///
+/// (The key is per-workspace, so a commit touching only workspace A leaves
+/// workspace B's key intact and B still hits. That helps a polyglot repo, but
+/// it does not help the case that dominates the cost here: djinn's own Rust
+/// `server/` workspace is both the most expensive to index and the most
+/// frequently touched.)
+///
+/// This gate is the cheap, stateless mitigation: **do not index a tree that has
+/// not been stable for at least as long as indexing it takes.** `quiescence`
+/// defaults to the measured 3523s phase cost, so a dispatch only happens when
+/// the head has already stood still longer than the run will last — the
+/// condition under which the result is likely to still be current when it
+/// lands. It cannot prevent a commit arriving *during* the run; nothing can.
+///
+/// An unreadable head age is treated as not quiescent, consistent with every
+/// other uncertainty here resolving toward not dispatching.
 #[must_use]
 pub fn decide(
     head_revision: Option<&str>,
+    head_age: Option<Duration>,
     observation: Option<&ScipJobObservation>,
     interval: Duration,
+    quiescence: Duration,
 ) -> ScipIndexDecision {
     let Some(head) = head_revision.map(str::trim).filter(|h| !h.is_empty()) else {
         return ScipIndexDecision::SkipUnknownRevision;
@@ -167,6 +220,14 @@ pub fn decide(
         return ScipIndexDecision::SkipHeadUnchanged {
             revision: head.to_string(),
         };
+    }
+    if !quiescence.is_zero() {
+        let Some(age) = head_age else {
+            return ScipIndexDecision::SkipHeadNotQuiescent { age: None };
+        };
+        if age < quiescence {
+            return ScipIndexDecision::SkipHeadNotQuiescent { age: Some(age) };
+        }
     }
     if let Some(elapsed) = observation.since_last_dispatch
         && elapsed < interval
@@ -210,13 +271,25 @@ impl ScipIndexScheduler {
         Duration::from_secs(self.config.scip_index_interval_seconds)
     }
 
+    /// How long the head must have stood still before an index is worth
+    /// producing. See [`decide`].
+    #[must_use]
+    pub fn quiescence(&self) -> Duration {
+        Duration::from_secs(self.config.scip_quiescence_seconds)
+    }
+
+    /// Whether the operator has armed SCIP-index dispatch at all. Defaults to
+    /// `false`: the composition root wires the real scheduler unconditionally,
+    /// and this flag is the only thing that decides whether it creates Jobs, so
+    /// arming it is a config flip rather than a redeploy.
+    #[must_use]
+    pub fn enabled(&self) -> bool {
+        self.config.scip_index_enabled
+    }
+
     /// Evaluate one project without creating anything. Exposed so the decision
     /// can be observed (and asserted) separately from the side effect.
-    pub async fn evaluate(
-        &self,
-        project_id: &str,
-        head_revision: Option<&str>,
-    ) -> ScipIndexDecision {
+    pub async fn evaluate(&self, project_id: &str, head: Option<&MirrorHead>) -> ScipIndexDecision {
         let observation = match self
             .inventory
             .observe(&self.config.namespace, project_id)
@@ -232,7 +305,13 @@ impl ScipIndexScheduler {
                 None
             }
         };
-        decide(head_revision, observation.as_ref(), self.interval())
+        decide(
+            head.map(|h| h.revision.as_str()),
+            head.map(|h| h.age),
+            observation.as_ref(),
+            self.interval(),
+            self.quiescence(),
+        )
     }
 
     /// Evaluate one project and, only on [`ScipIndexDecision::Dispatch`],
@@ -244,11 +323,11 @@ impl ScipIndexScheduler {
     pub async fn tick_project(
         &self,
         project_id: &str,
-        head_revision: Option<&str>,
+        head: Option<&MirrorHead>,
         image_tag: &str,
         policy: Option<&djinn_stack::environment::CargoCachePolicy>,
     ) -> ScipIndexDecision {
-        let decision = self.evaluate(project_id, head_revision).await;
+        let decision = self.evaluate(project_id, head).await;
         let Some(revision) = decision.dispatch_revision() else {
             debug!(
                 project_id,
@@ -275,6 +354,54 @@ impl ScipIndexScheduler {
             ),
         }
         decision
+    }
+}
+
+/// Reads `refs/heads/main` and its commit age straight out of the project's
+/// bare mirror.
+///
+/// This deliberately duplicates the two-line git call in
+/// `graph_warmer::discover_mirror_main_tip` rather than sharing it. The warm
+/// path's tip discovery is private to its dispatch flow, and the duplication
+/// keeps this module free of any coupling to warm dispatch — the two cadences
+/// must be able to move independently, which was the whole point of not
+/// building on the (dead) warm debounce.
+pub struct GitMirrorHeadSource;
+
+#[async_trait]
+impl MirrorHeadSource for GitMirrorHeadSource {
+    async fn head(&self, project_id: &str) -> Option<MirrorHead> {
+        let mirror = djinn_workspace::mirror_path_for(project_id);
+        let rev = djinn_git::run_git_command_in(
+            &mirror,
+            vec!["rev-parse".into(), "refs/heads/main".into()],
+        )
+        .await
+        .ok()?;
+        let revision = rev.stdout.trim().to_string();
+        if revision.is_empty() {
+            return None;
+        }
+        // Committer timestamp of the head commit. `decide` treats an
+        // unreadable age as "not quiescent", so a failure here skips rather
+        // than dispatching against an unknown tree.
+        let stamp = djinn_git::run_git_command_in(
+            &mirror,
+            vec![
+                "log".into(),
+                "-1".into(),
+                "--format=%ct".into(),
+                revision.clone(),
+            ],
+        )
+        .await
+        .ok()?;
+        let committed_at = stamp.stdout.trim().parse::<i64>().ok()?;
+        let now = time::OffsetDateTime::now_utc().unix_timestamp();
+        // A commit dated in the future (clock skew) reads as age zero, i.e.
+        // maximally NOT quiescent — the fail-closed direction.
+        let age = Duration::from_secs(now.saturating_sub(committed_at).max(0) as u64);
+        Some(MirrorHead { revision, age })
     }
 }
 
@@ -376,6 +503,10 @@ mod tests {
     const HEAD: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const OLD: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     const THREE_HOURS: Duration = Duration::from_secs(10_800);
+    /// Long enough to satisfy the default quiescence gate in tests that are
+    /// not about it.
+    const QUIET: Option<Duration> = Some(Duration::from_secs(9_999));
+    const QUIESCENCE: Duration = Duration::from_secs(3_523);
 
     fn observed(
         in_flight: bool,
@@ -404,8 +535,10 @@ mod tests {
             assert_eq!(
                 decide(
                     Some(HEAD),
+                    QUIET,
                     Some(&observed(false, Some(HEAD), elapsed)),
-                    THREE_HOURS
+                    THREE_HOURS,
+                    QUIESCENCE,
                 ),
                 ScipIndexDecision::SkipHeadUnchanged {
                     revision: HEAD.to_string()
@@ -423,8 +556,10 @@ mod tests {
         assert_eq!(
             decide(
                 Some(HEAD),
+                QUIET,
                 Some(&observed(false, Some(OLD), Some(THREE_HOURS))),
                 THREE_HOURS,
+                QUIESCENCE,
             ),
             ScipIndexDecision::Dispatch {
                 revision: HEAD.to_string()
@@ -434,8 +569,10 @@ mod tests {
         assert_eq!(
             decide(
                 Some(HEAD),
+                QUIET,
                 Some(&ScipJobObservation::default()),
-                THREE_HOURS
+                THREE_HOURS,
+                QUIESCENCE
             ),
             ScipIndexDecision::Dispatch {
                 revision: HEAD.to_string()
@@ -449,8 +586,10 @@ mod tests {
     fn advanced_head_inside_the_cadence_window_waits() {
         let decision = decide(
             Some(HEAD),
+            QUIET,
             Some(&observed(false, Some(OLD), Some(Duration::from_secs(600)))),
             THREE_HOURS,
+            QUIESCENCE,
         );
         assert_eq!(
             decision,
@@ -462,8 +601,10 @@ mod tests {
         assert!(matches!(
             decide(
                 Some(HEAD),
+                QUIET,
                 Some(&observed(false, Some(OLD), Some(THREE_HOURS))),
                 THREE_HOURS,
+                QUIESCENCE,
             ),
             ScipIndexDecision::Dispatch { .. }
         ));
@@ -475,17 +616,117 @@ mod tests {
     fn unknown_head_and_unreadable_inventory_fail_closed() {
         let fresh = observed(false, None, None);
         assert_eq!(
-            decide(None, Some(&fresh), THREE_HOURS),
+            decide(None, QUIET, Some(&fresh), THREE_HOURS, QUIESCENCE),
             ScipIndexDecision::SkipUnknownRevision
         );
         assert_eq!(
-            decide(Some("   "), Some(&fresh), THREE_HOURS),
+            decide(Some("   "), QUIET, Some(&fresh), THREE_HOURS, QUIESCENCE),
             ScipIndexDecision::SkipUnknownRevision
         );
         assert_eq!(
-            decide(Some(HEAD), None, THREE_HOURS),
+            decide(Some(HEAD), QUIET, None, THREE_HOURS, QUIESCENCE),
             ScipIndexDecision::SkipInventoryUnavailable
         );
+    }
+
+    /// **The quiescence gate.** The SCIP cache key folds in `source_hashes`, so
+    /// an index produced at head `H0` only serves a warm running against `H0`'s
+    /// sources. Indexing a tree that is still moving produces an artifact that
+    /// is stale before it lands — the warm then re-indexes inline and the run
+    /// bought nothing. Do not index a tree that has not stood still for at
+    /// least as long as indexing it takes.
+    #[test]
+    fn a_head_that_has_not_stood_still_long_enough_is_not_indexed() {
+        let fresh = observed(false, Some(OLD), Some(THREE_HOURS));
+
+        // One second short of the measured phase cost: the index would very
+        // likely be stale on arrival.
+        assert_eq!(
+            decide(
+                Some(HEAD),
+                Some(QUIESCENCE - Duration::from_secs(1)),
+                Some(&fresh),
+                THREE_HOURS,
+                QUIESCENCE,
+            ),
+            ScipIndexDecision::SkipHeadNotQuiescent {
+                age: Some(QUIESCENCE - Duration::from_secs(1))
+            },
+        );
+        // At the threshold it dispatches — without this the test above would
+        // also pass for a gate that never dispatches.
+        assert!(matches!(
+            decide(
+                Some(HEAD),
+                Some(QUIESCENCE),
+                Some(&fresh),
+                THREE_HOURS,
+                QUIESCENCE
+            ),
+            ScipIndexDecision::Dispatch { .. }
+        ));
+        // An unreadable commit time is uncertainty, and uncertainty never
+        // dispatches.
+        assert_eq!(
+            decide(Some(HEAD), None, Some(&fresh), THREE_HOURS, QUIESCENCE),
+            ScipIndexDecision::SkipHeadNotQuiescent { age: None },
+        );
+        // Zero disables the gate entirely, for a deployment that would rather
+        // index eagerly and accept the miss rate.
+        assert!(matches!(
+            decide(
+                Some(HEAD),
+                Some(Duration::ZERO),
+                Some(&fresh),
+                THREE_HOURS,
+                Duration::ZERO,
+            ),
+            ScipIndexDecision::Dispatch { .. }
+        ));
+    }
+
+    /// An unchanged head still wins over quiescence: re-indexing an already
+    /// indexed revision is waste no matter how still the tree is.
+    #[test]
+    fn head_unchanged_outranks_quiescence() {
+        assert_eq!(
+            decide(
+                Some(HEAD),
+                Some(Duration::from_secs(30 * 86_400)),
+                Some(&observed(false, Some(HEAD), Some(THREE_HOURS))),
+                THREE_HOURS,
+                QUIESCENCE,
+            ),
+            ScipIndexDecision::SkipHeadUnchanged {
+                revision: HEAD.to_string()
+            },
+        );
+    }
+
+    /// The default quiescence window is the measured phase cost, not a round
+    /// number someone liked — and the feature ships disarmed.
+    #[test]
+    fn config_defaults_are_the_measured_values_and_the_switch_is_off() {
+        let cfg = KubernetesConfig::for_testing();
+        assert_eq!(
+            cfg.scip_quiescence_seconds as i64,
+            crate::scip_job::MEASURED_SCIP_PHASE_SECONDS,
+            "the quiescence window must track the measured SCIP phase cost: an \
+             index is only worth starting if the tree has already been still \
+             for longer than the run will last"
+        );
+        assert!(
+            !cfg.scip_index_enabled,
+            "SCIP-index dispatch must ship disarmed; arming it creates leaseless \
+             16Gi Pods and is an operator decision"
+        );
+        let scheduler = ScipIndexScheduler::new(
+            cfg,
+            Arc::new(RecordingInventory(Ok(ScipJobObservation::default()))),
+            Arc::new(RecordingDispatcher::default()),
+        );
+        assert!(!scheduler.enabled());
+        assert_eq!(scheduler.quiescence(), QUIESCENCE);
     }
 
     #[test]
@@ -493,8 +734,10 @@ mod tests {
         assert_eq!(
             decide(
                 Some(HEAD),
+                QUIET,
                 Some(&observed(true, Some(OLD), None)),
-                THREE_HOURS
+                THREE_HOURS,
+                QUIESCENCE,
             ),
             ScipIndexDecision::SkipInFlight
         );
@@ -552,7 +795,13 @@ mod tests {
         );
         assert!(!past_the_floor.in_flight);
         assert_eq!(
-            decide(Some(HEAD), Some(&past_the_floor), THREE_HOURS),
+            decide(
+                Some(HEAD),
+                QUIET,
+                Some(&past_the_floor),
+                THREE_HOURS,
+                QUIESCENCE
+            ),
             ScipIndexDecision::Dispatch {
                 revision: HEAD.to_string()
             },
@@ -572,7 +821,13 @@ mod tests {
         );
         assert_eq!(inside_the_floor.last_indexed_revision.as_deref(), Some(OLD));
         assert!(matches!(
-            decide(Some(HEAD), Some(&inside_the_floor), THREE_HOURS),
+            decide(
+                Some(HEAD),
+                QUIET,
+                Some(&inside_the_floor),
+                THREE_HOURS,
+                QUIESCENCE
+            ),
             ScipIndexDecision::SkipCadence { .. }
         ));
     }
@@ -636,6 +891,15 @@ mod tests {
         }
     }
 
+    /// A head that satisfies the quiescence gate, so these tests exercise the
+    /// branch they name rather than tripping over quiescence.
+    fn quiescent(revision: &str) -> MirrorHead {
+        MirrorHead {
+            revision: revision.to_string(),
+            age: Duration::from_secs(9_999),
+        }
+    }
+
     async fn run_tick(
         observation: Result<ScipJobObservation, String>,
         head: Option<&str>,
@@ -646,7 +910,10 @@ mod tests {
             Arc::new(RecordingInventory(observation)),
             dispatcher.clone(),
         );
-        let decision = scheduler.tick_project("proj", head, "img:tag", None).await;
+        let head = head.map(quiescent);
+        let decision = scheduler
+            .tick_project("proj", head.as_ref(), "img:tag", None)
+            .await;
         let created = dispatcher.0.lock().expect("lock").clone();
         (decision, created)
     }
@@ -732,7 +999,13 @@ mod tests {
         let observation = observe_from_jobs(&[succeeded], now());
         assert_eq!(observation.last_indexed_revision.as_deref(), Some(HEAD));
         assert_eq!(
-            decide(Some(HEAD), Some(&observation), THREE_HOURS),
+            decide(
+                Some(HEAD),
+                QUIET,
+                Some(&observation),
+                THREE_HOURS,
+                QUIESCENCE
+            ),
             ScipIndexDecision::SkipHeadUnchanged {
                 revision: HEAD.to_string()
             },
