@@ -23,8 +23,10 @@ fn setup(prefix: &str) -> (tempfile::TempDir, crate::context::AgentContext) {
 /// prompt and sets edit_forced.  A re-read + retry succeeds (FileTime freshness
 /// is restored but edit_forced is preserved).  A third edit on the same file
 /// succeeds without re-gating.
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn edit_worker_first_deny_second_allow_third_no_regate() {
+    let _jit_env = crate::test_helpers::jit_env_read_guard();
     let (worktree, state) = setup("gged-edit-steady-");
     let file = worktree.path().join("svc.rs");
     tokio::fs::write(&file, "let a = services;\nlet b = helper;\nlet c = util;\n")
@@ -131,8 +133,10 @@ async fn edit_worker_first_deny_second_allow_third_no_regate() {
 /// First worker write to an existing fully covered file returns the FORCE
 /// investigation prompt.  After re-read + retry the write succeeds.
 /// A subsequent write on the same path is not re-gated.
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn write_worker_first_deny_second_allow_third_no_regate() {
+    let _jit_env = crate::test_helpers::jit_env_read_guard();
     let (worktree, state) = setup("gged-write-steady-");
     let file = worktree.path().join("config.json");
     tokio::fs::write(&file, "{ \"key\": \"old\" }\n")
@@ -224,8 +228,10 @@ async fn write_worker_first_deny_second_allow_third_no_regate() {
 
 /// First worker apply_patch (update operation) on a fully covered file returns
 /// the investigation prompt.  After re-read + retry it succeeds.
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn patch_update_worker_first_deny_second_allow() {
+    let _jit_env = crate::test_helpers::jit_env_read_guard();
     let (worktree, state) = setup("gged-patch-steady-");
     let file = worktree.path().join("svc.rs");
     tokio::fs::write(&file, "fn main() {\n    services();\n}\n")
@@ -296,8 +302,10 @@ async fn patch_update_worker_first_deny_second_allow() {
 
 /// First worker apply_patch with a DELETE operation on a fully covered file
 /// returns the investigation prompt.  After re-read + retry it succeeds.
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn patch_delete_worker_first_deny_second_allow() {
+    let _jit_env = crate::test_helpers::jit_env_read_guard();
     let (worktree, state) = setup("gged-patch-del-");
     let file = worktree.path().join("deprecated.rs");
     tokio::fs::write(&file, "// remove me\nfn old() {}\n")
@@ -361,8 +369,10 @@ async fn patch_delete_worker_first_deny_second_allow() {
 // ─── AC 3: role bypass — reviewer ────────────────────────────────────────
 
 /// Reviewer edits succeed without GateGuard interference on all three surfaces.
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn reviewer_bypasses_gate_guard_all_surfaces() {
+    let _jit_env = crate::test_helpers::jit_env_read_guard();
     let (worktree, state) = setup("gged-reviewer-");
     let file = worktree.path().join("svc.rs");
     tokio::fs::write(&file, "let a = services;\n")
@@ -464,8 +474,10 @@ async fn reviewer_bypasses_gate_guard_all_surfaces() {
 // ─── AC 3: role bypass — planner ─────────────────────────────────────────
 
 /// Planner edit succeeds without GateGuard.
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn planner_bypasses_gate_guard() {
+    let _jit_env = crate::test_helpers::jit_env_read_guard();
     let (worktree, state) = setup("gged-planner-");
     let file = worktree.path().join("svc.rs");
     tokio::fs::write(&file, "let a = services;\n")
@@ -515,8 +527,10 @@ async fn planner_bypasses_gate_guard() {
 // ─── AC 3: role bypass — architect ───────────────────────────────────────
 
 /// Architect apply_patch succeeds without GateGuard.
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn architect_bypasses_gate_guard() {
+    let _jit_env = crate::test_helpers::jit_env_read_guard();
     let (worktree, state) = setup("gged-arch-");
     let file = worktree.path().join("svc.rs");
     tokio::fs::write(&file, "fn main() {\n    services();\n}\n")
@@ -563,8 +577,10 @@ async fn architect_bypasses_gate_guard() {
 // ─── AC 3: role bypass — missing role (None) ─────────────────────────────
 
 /// Missing role (None) succeeds without GateGuard for all three surfaces.
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn missing_role_bypasses_gate_guard_all_surfaces() {
+    let _jit_env = crate::test_helpers::jit_env_read_guard();
     let (worktree, state) = setup("gged-norole-");
     let file = worktree.path().join("svc.rs");
     tokio::fs::write(&file, "let a = services;\n")
@@ -647,8 +663,10 @@ async fn missing_role_bypasses_gate_guard_all_surfaces() {
 /// The investigation prompt must explicitly demand importers/callers, public
 /// functions/types, data schema/shape, and the verbatim task instruction —
 /// not just a generic "you can't edit yet" message.
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn force_prompt_demands_all_four_facts() {
+    let _jit_env = crate::test_helpers::jit_env_read_guard();
     let (worktree, state) = setup("gged-prompt-");
     let file = worktree.path().join("svc.rs");
     tokio::fs::write(&file, "let a = services;\n")
@@ -706,8 +724,10 @@ async fn force_prompt_demands_all_four_facts() {
 }
 
 /// Same fact-demand check for the write surface.
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn force_prompt_demands_facts_for_write() {
+    let _jit_env = crate::test_helpers::jit_env_read_guard();
     let (worktree, state) = setup("gged-prompt-w-");
     let file = worktree.path().join("config.rs");
     tokio::fs::write(&file, "let x = 1;\n").await.expect("seed");
@@ -761,8 +781,10 @@ async fn force_prompt_demands_facts_for_write() {
 }
 
 /// Same fact-demand check for the apply_patch surface.
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn force_prompt_demands_facts_for_patch() {
+    let _jit_env = crate::test_helpers::jit_env_read_guard();
     let (worktree, state) = setup("gged-prompt-p-");
     let file = worktree.path().join("mod.rs");
     tokio::fs::write(&file, "fn main() {\n    run();\n}\n")
