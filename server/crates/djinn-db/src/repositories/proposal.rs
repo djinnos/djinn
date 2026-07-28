@@ -1054,6 +1054,28 @@ impl ProposalRepository {
         input: ProposalDebateTrailCreateInput<'_>,
     ) -> Result<ProposalDebateTrail> {
         self.db.ensure_initialized().await?;
+        let proposal_id = input.proposal_id;
+        let mut tx = self.db.pool().begin().await?;
+        let entry = self.add_debate_trail_entry_in_tx(&mut tx, input).await?;
+        tx.commit().await?;
+        self.events
+            .send(DjinnEventEnvelope::proposal_debate_trail_created(
+                proposal_id,
+                &entry,
+            ));
+        Ok(entry)
+    }
+
+    /// Append a debate-trail entry within a caller-owned transaction.
+    ///
+    /// This performs the complete validation, attribution, insertion, and row
+    /// fetch performed by [`Self::add_debate_trail_entry`], but does not commit
+    /// the transaction or emit an event.
+    pub async fn add_debate_trail_entry_in_tx(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        input: ProposalDebateTrailCreateInput<'_>,
+    ) -> Result<ProposalDebateTrail> {
         // Validate kind + per-kind invariants.
         match input.kind {
             "objection" | "rebuttal" | "verdict" => {
@@ -1139,7 +1161,12 @@ impl ProposalRepository {
             }
         }
         // Validate proposal exists.
-        if self.get(input.proposal_id).await?.is_none() {
+        if sqlx::query_scalar::<_, String>("SELECT id FROM proposals WHERE id = $1")
+            .bind(input.proposal_id)
+            .fetch_optional(&mut **tx)
+            .await?
+            .is_none()
+        {
             return Err(Error::InvalidData(format!(
                 "proposal not found: {}",
                 input.proposal_id
@@ -1171,15 +1198,23 @@ impl ProposalRepository {
             input.round,
             input.body_metadata,
         )
-        .execute(self.db.pool())
+        .execute(&mut **tx)
         .await?;
-        let entry = self.get_debate_trail_entry_required(&id).await?;
-        self.events
-            .send(DjinnEventEnvelope::proposal_debate_trail_created(
-                input.proposal_id,
-                &entry,
-            ));
-        Ok(entry)
+        Ok(sqlx::query_as!(
+            ProposalDebateTrail,
+            r#"SELECT id, proposal_id, kind, body, blocking, agent_role, author_kind,
+                    author_user_id, author_model, source_task_id,
+                    against_revision_seq, round,
+                    body_metadata::text AS body_metadata,
+                    resolved_at, resolved_by_user_id,
+                    reopened_at, reopened_by_user_id,
+                    created_at, updated_at
+             FROM proposal_debate_trail
+             WHERE id = $1"#,
+            id
+        )
+        .fetch_one(&mut **tx)
+        .await?)
     }
 
     /// Resolve a debate-trail entry. Stamps the resolving user via
