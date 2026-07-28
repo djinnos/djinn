@@ -139,6 +139,7 @@ fn plan_for_partition(name: &str, output_root: &Path) -> PlannedIndexerCommand {
         workspace_rel_root: name.into(),
         workspace_slug: name.to_string(),
         output_path,
+        config_file: None,
     }
 }
 
