@@ -84,7 +84,7 @@ async fn test_stream_done_propagation() {
             StreamEvent::Delta(ContentBlock::Text { text }) if text == "hi"
         ),
         "first event should be text delta, got {:?}",
-        &events[0]
+        events[0]
     );
     assert!(
         matches!(events.last().unwrap(), StreamEvent::Done),

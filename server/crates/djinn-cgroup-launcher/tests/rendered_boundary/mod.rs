@@ -639,7 +639,7 @@ impl SpawnIntoCgroup for AdversaryClone {
         }
         unsafe { libc::close(go_read) };
         place_in_cgroup(cgroup, pid).expect("place the adversary in the invocation cgroup");
-        let go = [b'G'];
+        let go = *b"G";
         assert_eq!(
             unsafe { libc::write(go_write, go.as_ptr().cast(), 1) },
             1,
