@@ -370,7 +370,13 @@
             assert_eq!(snapshot.snapshot.intents.len(), 1, "{name}: exactly one pending intent");
             assert_eq!(snapshot.snapshot.intents[0].state, djinn_core::refinement_liveness::RefinementIntentState::Pending);
             let revisions = repo.revisions(&proposal.id).await.unwrap();
-            assert_eq!(revisions.iter().filter(|row| row.refinement_stop_tag.as_deref() == Some("reaped_phantom")).count(), 1);
+            // `ProposalRevision` does not carry `refinement_stop_tag` — the column
+            // lives on `proposal_revisions` but is not in the model's SELECT list.
+            // This per-proposal aggregate counts exactly the same rows
+            // (`refinement_stop_tag = 'reaped_phantom'` for this proposal), so the
+            // assertion is unchanged in meaning without widening a shared model.
+            let reaps = repo.load_refinement_lifecycle_aggregate(&proposal.id, 60_000).await.unwrap();
+            assert_eq!(reaps.reaped_phantom_last_24h, 1, "{name}: exactly one durable reaped_phantom revision");
             assert_eq!(revisions.iter().filter(|row| row.event_kind == "refinement_stop").count(), 1, "{name}: no handler-error stop");
             assert_eq!(revisions.iter().filter(|row| row.event_kind == "refinement_start").count(), 3, "{name}: retry returns the winner");
             let board = server.dispatch_tool("board_health", serde_json::json!({
