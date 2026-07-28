@@ -82,13 +82,23 @@ pub struct KubernetesConfig {
     /// terminates it (`activeDeadlineSeconds`). Keeps a wedged indexer
     /// subprocess from pinning a Pod indefinitely.
     ///
-    /// Default 3600s (60 minutes). The warm Pod runs a single default-features
+    /// Default 7200s (120 minutes). The warm Pod runs a single default-features
     /// cargo pass (clippy + build + test-compile) matching the worker's feature
-    /// set. From Phase 0 data: a default-features re-warm took ~10 minutes,
-    /// and a cold first warm for a ~12-crate workspace took ~20-25 minutes.
-    /// 3600s leaves ample margin for the single-pass worst case. Warm Jobs
-    /// run in the background and don't affect worker latency, so a generous
-    /// deadline is safe. Tunable per deployment via
+    /// set, and then — inside the SAME Pod and against the SAME deadline — the
+    /// whole SCIP indexing and graph-publication phase.
+    ///
+    /// The old 3600s default only ever accounted for the cargo half. MEASURED on
+    /// a complete production warm (2026-07-27, 22:12:30Z → 23:43:12Z): the graph
+    /// phase alone took 3 644 498 ms (60m44s), of which the rust-analyzer SCIP
+    /// pass was 3 522 197 ms, and the whole Job needed ~5442s. **On the shipped
+    /// default every warm of that workspace would have been SIGKILLed at 60
+    /// minutes, forever** — only the deployed
+    /// `DJINN_K8S_WARM_JOB_TIMEOUT_SECONDS=7200` override kept it alive, so the
+    /// chart default was silently a broken configuration for any workspace of
+    /// that size. 7200s covers the measured worst case with ~32% margin.
+    ///
+    /// Warm Jobs run in the background and don't affect worker latency, so a
+    /// generous deadline is safe. Tunable per deployment via
     /// `DJINN_K8S_WARM_JOB_TIMEOUT_SECONDS`; raise it if a larger workspace
     /// consistently hits the deadline. This sets the Job's
     /// `activeDeadlineSeconds`; the in-process watcher deadline follows it
@@ -236,7 +246,7 @@ impl KubernetesConfig {
             cache_pvc: "djinn-cache".into(),
             server_addr: "djinn.djinn.svc.cluster.local:8443".into(),
             warm_job_ttl_seconds: 300,
-            warm_job_timeout_seconds: 3600,
+            warm_job_timeout_seconds: 7200,
             database_url: None,
             task_run_active_deadline_seconds: 10800,
             task_run_termination_grace_period_seconds: 60,
@@ -294,7 +304,7 @@ impl KubernetesConfig {
     /// | `DJINN_K8S_CACHE_PVC` | `cache_pvc` | `djinn-cache` |
     /// | `DJINN_K8S_SERVER_ADDR` | `server_addr` | `djinn.djinn.svc.cluster.local:8443` |
     /// | `DJINN_K8S_WARM_JOB_TTL_SECONDS` | `warm_job_ttl_seconds` | `300` (parsed as `i32`) |
-    /// | `DJINN_K8S_WARM_JOB_TIMEOUT_SECONDS` | `warm_job_timeout_seconds` | `3600` (parsed as `i64`) |
+    /// | `DJINN_K8S_WARM_JOB_TIMEOUT_SECONDS` | `warm_job_timeout_seconds` | `7200` (parsed as `i64`) |
     /// | `DJINN_DATABASE_URL` | `database_url` | _(unset → warm Pod has no fallback; helm chart projects this via the `djinn-server` ConfigMap)_ |
     /// | `DJINN_K8S_TASK_RUN_ACTIVE_DEADLINE_SECONDS` | `task_run_active_deadline_seconds` | `10800` (parsed as `u64`) |
     /// | `DJINN_K8S_TASK_RUN_TERMINATION_GRACE_PERIOD_SECONDS` | `task_run_termination_grace_period_seconds` | `60` (parsed as `i64`) |
@@ -555,20 +565,29 @@ mod tests {
         }
     }
 
-    /// The default `warm_job_timeout_seconds` must accommodate a single
-    /// default-features warm pass: clippy + build fallback + test-compile
-    /// (`nextest run --no-run` / `cargo test --no-run`). The worst cold case
-    /// for a ~12-crate workspace is ~25 minutes; 3600s (60 min) leaves ample
-    /// margin. This regression guard fails loudly if the default is reduced
-    /// below 3600.
+    /// The default `warm_job_timeout_seconds` must accommodate the WHOLE warm
+    /// Job, not just its cargo half: the same Pod, against the same
+    /// `activeDeadlineSeconds`, then runs SCIP indexing and graph publication.
+    ///
+    /// The old guard asserted `>= 3600` on the strength of the cargo phase
+    /// alone (~25 min cold for a ~12-crate workspace). A complete production
+    /// warm measured on 2026-07-27 needed **5442s end to end** — 1798s of cargo
+    /// and 3644s of graph phase — so every warm of that workspace on the
+    /// shipped default was SIGKILLed at 60 minutes with no graph published.
+    /// The floor is therefore the measured requirement, not the cargo estimate.
     #[test]
-    fn warm_job_timeout_default_accommodates_single_pass_warm() {
+    fn warm_job_timeout_default_accommodates_the_whole_warm_job() {
+        /// The measured end-to-end cost of the 2026-07-27 production warm.
+        const MEASURED_FULL_WARM_SECONDS: i64 = 5442;
+
         let cfg = KubernetesConfig::for_testing();
         assert!(
-            cfg.warm_job_timeout_seconds >= 3600,
-            "default warm_job_timeout_seconds is {} but must be >= 3600 \
-             (60 min) to cover a cold single-pass + test-compile warm with margin",
+            cfg.warm_job_timeout_seconds >= MEASURED_FULL_WARM_SECONDS,
+            "default warm_job_timeout_seconds is {} but must be >= {} — the \
+             measured cargo + SCIP + publish cost of one real warm Job. Below \
+             that the Pod is SIGKILLed mid-SCIP and publishes no server index.",
             cfg.warm_job_timeout_seconds,
+            MEASURED_FULL_WARM_SECONDS,
         );
     }
 }

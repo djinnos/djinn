@@ -49,10 +49,62 @@ pub const ENV_SWEEP_BUDGET_SECONDS: &str = "DJINN_WARM_STEP_TIMEOUT_SWEEP_SECOND
 /// Mirrors `djinn_k8s::config::KubernetesConfig::warm_job_timeout_seconds`'s
 /// default so a worker started without the projected env behaves like a Pod
 /// launched with the shipped default.
-pub const DEFAULT_JOB_DEADLINE: Duration = Duration::from_secs(3600);
-/// Post-compile SCIP indexing + publication share the Job deadline with the
-/// compile phase; withhold this much from every step clamp.
+pub const DEFAULT_JOB_DEADLINE: Duration = Duration::from_secs(7200);
+/// Reserve used when this project has NO persisted indexing evidence at all
+/// (first warm ever), and the floor every derived reserve is raised to.
+///
+/// This was the *whole* model, and as a constant it was wrong by 4x: the graph
+/// phase of the 2026-07-27 production warm took **3 644 498 ms (60m44s)**
+/// against a 900s reserve. The consequence is not a smaller reserve, it is a
+/// silently mispriced one — cargo was permitted to run to 6300s of a 7200s Job,
+/// so any cargo phase over 3556s SIGKILLs the Pod mid-SCIP and loses the entire
+/// graph, while `StepBudget::clamped_by_deadline` still reports `false` because
+/// nothing in the model knew the tail was that expensive. See
+/// [`derive_tail_reserve`].
 pub const DEFAULT_TAIL_RESERVE: Duration = Duration::from_secs(900);
+
+/// Multiplier applied to the observed indexing cost to cover the REST of the
+/// graph phase — artifact collection, graph build, serialization, publication,
+/// cache writes — which run after the indexers and inside the same deadline.
+///
+/// Measured on 2026-07-27: 3 522 197 ms of indexing inside a 3 644 498 ms graph
+/// phase, i.e. the tail beyond indexing is ~3.5% of indexing. 5/4 covers that
+/// with room for run-to-run variance in the indexer itself.
+const GRAPH_PHASE_NUMERATOR: u32 = 5;
+const GRAPH_PHASE_DENOMINATOR: u32 = 4;
+
+/// Hard bound on the derived reserve as a fraction of the Job deadline.
+///
+/// The reserve is withheld from the compile phase, so an unbounded reserve
+/// would starve cargo to [`MIN_STEP_BUDGET`] and quietly stop the warm base
+/// converging. Two thirds keeps at least a third of the Job for compiling even
+/// when the graph phase is enormous — and when the reserve is genuinely
+/// clamped here, the deadline itself is what needs raising.
+const MAX_RESERVE_NUMERATOR: u32 = 2;
+const MAX_RESERVE_DENOMINATOR: u32 = 3;
+
+/// Derive the tail reserve for this project from its OBSERVED indexing cost.
+///
+/// `observed_indexing` is the largest per-(workspace, indexer) elapsed persisted
+/// in `scip_indexer_timing` for the project — the indexers fan out
+/// concurrently, so the slowest one, not their sum, sets the phase length.
+///
+/// * `None` (no evidence yet) → [`DEFAULT_TAIL_RESERVE`], the historical value.
+/// * otherwise → `observed * 5/4`, never below [`DEFAULT_TAIL_RESERVE`] and
+///   never above two thirds of `job_deadline`.
+pub fn derive_tail_reserve(
+    observed_indexing: Option<Duration>,
+    job_deadline: Duration,
+) -> Duration {
+    let ceiling = (job_deadline.saturating_mul(MAX_RESERVE_NUMERATOR) / MAX_RESERVE_DENOMINATOR)
+        .max(DEFAULT_TAIL_RESERVE);
+    let Some(observed) = observed_indexing.filter(|d| *d > Duration::ZERO) else {
+        return DEFAULT_TAIL_RESERVE.min(ceiling);
+    };
+    (observed.saturating_mul(GRAPH_PHASE_NUMERATOR) / GRAPH_PHASE_DENOMINATOR)
+        .max(DEFAULT_TAIL_RESERVE)
+        .min(ceiling)
+}
 /// Unchanged from the retired `WARM_COMMAND_TIMEOUT` so existing deployments
 /// do not regress on the steps that were already finishing inside it.
 pub const DEFAULT_CLIPPY_BUDGET: Duration = Duration::from_secs(30 * 60);
@@ -141,9 +193,26 @@ impl WarmStepBudgets {
     /// Resolve from the process environment, anchoring elapsed-time accounting
     /// at `started`.
     pub fn from_env(started: Instant) -> Self {
+        Self::from_env_with_observed_indexing(started, None)
+    }
+
+    /// As [`Self::from_env`], but deriving the tail reserve from this project's
+    /// observed indexing cost instead of the [`DEFAULT_TAIL_RESERVE`] constant.
+    ///
+    /// An explicit `DJINN_WARM_TAIL_RESERVE_SECONDS` still wins: the derived
+    /// value is only the *fallback*, so an operator override is never silently
+    /// discarded.
+    pub fn from_env_with_observed_indexing(
+        started: Instant,
+        observed_indexing: Option<Duration>,
+    ) -> Self {
+        let job_deadline = duration_from_env(ENV_JOB_DEADLINE_SECONDS, DEFAULT_JOB_DEADLINE);
         Self {
-            job_deadline: duration_from_env(ENV_JOB_DEADLINE_SECONDS, DEFAULT_JOB_DEADLINE),
-            tail_reserve: duration_from_env(ENV_TAIL_RESERVE_SECONDS, DEFAULT_TAIL_RESERVE),
+            job_deadline,
+            tail_reserve: duration_from_env(
+                ENV_TAIL_RESERVE_SECONDS,
+                derive_tail_reserve(observed_indexing, job_deadline),
+            ),
             clippy: budget_from_env(WarmStepKind::Clippy),
             build: budget_from_env(WarmStepKind::Build),
             test_no_run: budget_from_env(WarmStepKind::TestNoRun),
@@ -155,6 +224,15 @@ impl WarmStepBudgets {
     /// Resolve from the environment anchored at "now".
     pub fn now_from_env() -> Self {
         Self::from_env(Clock::now_instant(&SystemClock::new()))
+    }
+
+    /// Resolve from the environment anchored at "now", with the project's
+    /// observed indexing cost feeding the tail reserve.
+    pub fn now_from_env_with_observed_indexing(observed_indexing: Option<Duration>) -> Self {
+        Self::from_env_with_observed_indexing(
+            Clock::now_instant(&SystemClock::new()),
+            observed_indexing,
+        )
     }
 
     /// Deterministic budgets for the in-crate warm orchestration tests.
@@ -346,5 +424,114 @@ mod tests {
             ),
             DEFAULT_TEST_BUDGET
         );
+    }
+
+    // --- Derived tail reserve ---------------------------------------------
+
+    /// The measured production shape: 3 522 197 ms of indexing inside a
+    /// 3 644 498 ms graph phase, against a 900s constant reserve. Deriving the
+    /// reserve is what stops cargo being handed 6300s of a 7200s Job when the
+    /// tail needs 3644s of it.
+    #[test]
+    fn reserve_derived_from_observed_indexing_covers_the_measured_graph_phase() {
+        const MEASURED_GRAPH_PHASE: Duration = Duration::from_millis(3_644_498);
+
+        let reserve = derive_tail_reserve(
+            Some(Duration::from_millis(3_522_197)),
+            Duration::from_secs(7200),
+        );
+        assert!(
+            reserve >= MEASURED_GRAPH_PHASE,
+            "derived reserve {reserve:?} must cover the measured graph phase \
+             {MEASURED_GRAPH_PHASE:?}"
+        );
+        assert!(
+            reserve > DEFAULT_TAIL_RESERVE * 4,
+            "the constant reserve was 4x too small; derived reserve is {reserve:?}"
+        );
+    }
+
+    /// The side effect that matters: with the derived reserve, a cargo step is
+    /// actually FORBIDDEN from eating the time SCIP needs. Under the constant
+    /// reserve the same step was granted 6300s of a 7200s Job and reported
+    /// `clamped_by_deadline = false` while doing it.
+    #[test]
+    fn derived_reserve_stops_cargo_from_consuming_the_graph_phase() {
+        let observed = Some(Duration::from_millis(3_522_197));
+        let job_deadline = Duration::from_secs(7200);
+
+        let constant = WarmStepBudgets {
+            job_deadline,
+            tail_reserve: DEFAULT_TAIL_RESERVE,
+            clippy: DEFAULT_CLIPPY_BUDGET,
+            build: DEFAULT_BUILD_BUDGET,
+            test_no_run: DEFAULT_TEST_BUDGET,
+            sweep: DEFAULT_SWEEP_BUDGET,
+            started: Clock::now_instant(&SystemClock::new()),
+        };
+        let derived = WarmStepBudgets {
+            tail_reserve: derive_tail_reserve(observed, job_deadline),
+            ..constant
+        };
+
+        // A test-compile step starting 30 minutes in.
+        let elapsed = Duration::from_secs(1800);
+        let constant_budget = constant.resolve_at(WarmStepKind::TestNoRun, elapsed);
+        let derived_budget = derived.resolve_at(WarmStepKind::TestNoRun, elapsed);
+
+        // Old model: the 900s reserve leaves a 4500s ceiling, so the step keeps
+        // its full nominal hour and is not even reported as deadline-clamped —
+        // leaving 1800s for a graph phase that needs 3644s. The Pod is
+        // SIGKILLed mid-SCIP and the whole graph is lost.
+        assert_eq!(constant_budget.budget, DEFAULT_TEST_BUDGET);
+        assert!(!constant_budget.clamped_by_deadline);
+        assert!(
+            job_deadline - elapsed - constant_budget.budget < Duration::from_millis(3_644_498),
+            "the constant reserve leaves less than the measured graph phase"
+        );
+
+        // New model: the step is bounded so the measured graph phase survives.
+        assert!(derived_budget.budget < constant_budget.budget);
+        assert!(
+            job_deadline - elapsed - derived_budget.budget >= Duration::from_millis(3_644_498),
+            "derived reserve must leave the whole measured graph phase; step got \
+             {:?} of a {job_deadline:?} Job at {elapsed:?} elapsed",
+            derived_budget.budget
+        );
+    }
+
+    /// No evidence yet (a project's first warm) keeps the historical constant,
+    /// so a fresh project behaves exactly as it does today.
+    #[test]
+    fn reserve_without_evidence_is_the_historical_constant() {
+        assert_eq!(
+            derive_tail_reserve(None, Duration::from_secs(7200)),
+            DEFAULT_TAIL_RESERVE
+        );
+        assert_eq!(
+            derive_tail_reserve(Some(Duration::ZERO), Duration::from_secs(7200)),
+            DEFAULT_TAIL_RESERVE
+        );
+    }
+
+    /// A cheap indexing history must never SHRINK the reserve below the value
+    /// the compile phase has always been sized against.
+    #[test]
+    fn reserve_never_drops_below_the_historical_floor() {
+        assert_eq!(
+            derive_tail_reserve(Some(Duration::from_secs(60)), Duration::from_secs(7200)),
+            DEFAULT_TAIL_RESERVE
+        );
+    }
+
+    /// An enormous graph phase must not starve cargo to nothing: the reserve is
+    /// clamped to two thirds of the Job, and at that point the deadline itself
+    /// is what needs raising.
+    #[test]
+    fn reserve_is_clamped_so_cargo_always_keeps_a_third_of_the_job() {
+        let job_deadline = Duration::from_secs(7200);
+        let reserve = derive_tail_reserve(Some(Duration::from_secs(9000)), job_deadline);
+        assert_eq!(reserve, Duration::from_secs(4800));
+        assert!(job_deadline - reserve >= job_deadline / 3);
     }
 }

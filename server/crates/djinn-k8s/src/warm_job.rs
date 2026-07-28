@@ -352,13 +352,15 @@ exec {bin} warm-graph "{project_id}"
             template,
             backoff_limit: Some(0),
             ttl_seconds_after_finished: Some(config.warm_job_ttl_seconds),
-            // Deadline margin: `warm_cargo_target_base` compiles a single
-            // default-features pass (clippy + build + test-compile) matching
-            // the worker's feature set. A cold first warm takes ~20-25 min
-            // for a ~12-crate workspace. The default `warm_job_timeout_seconds`
-            // is 3600s (60 min), leaving ~35 min of margin. If a larger
-            // workspace consistently hits this deadline the warm Pod is
-            // SIGKILLed mid-compile and the next warm tick starts over from
+            // Deadline margin: this ONE deadline covers both halves of the warm
+            // Pod's work — `warm_cargo_target_base`'s single default-features
+            // pass (clippy + build + test-compile), and then the SCIP indexing
+            // + graph publication phase. A complete production warm measured on
+            // 2026-07-27 spent 1798s in cargo and 3644s in the graph phase:
+            // 5442s end to end. The default `warm_job_timeout_seconds` is
+            // 7200s (120 min), leaving ~29 min of margin. If a larger workspace
+            // consistently hits this deadline the warm Pod is SIGKILLed
+            // mid-compile or mid-SCIP and the next warm tick starts over from
             // scratch (backoffLimit: 0) — so raise the timeout via
             // `DJINN_K8S_WARM_JOB_TIMEOUT_SECONDS` rather than trimming the
             // compile set. See the `warm_job_timeout_seconds` field doc in

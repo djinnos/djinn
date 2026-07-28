@@ -190,7 +190,7 @@ pub async fn output_with_timeout(cmd: Command, timeout: Duration) -> io::Result<
     {
         let (out, deadline_fired) = output_with_kill_inner(cmd, timeout).await?;
         if deadline_fired {
-            return Err(io::Error::new(io::ErrorKind::TimedOut, "process timed out"));
+            return Err(timed_out_error(timeout, &out));
         }
         // Deadline did NOT fire, so we never signalled the child ourselves. Any
         // signal death here is external (e.g. OOM killer) — surface it as a
@@ -206,7 +206,7 @@ pub async fn output_with_timeout(cmd: Command, timeout: Duration) -> io::Result<
     {
         let (out, deadline_fired) = output_with_kill_inner(cmd, timeout).await?;
         if deadline_fired {
-            return Err(io::Error::new(io::ErrorKind::TimedOut, "process timed out"));
+            return Err(timed_out_error(timeout, &out));
         }
         // The legacy local waiter owns the child status on non-Linux Unix, but
         // retains the same classification contract as the Linux supervisor:
@@ -223,6 +223,76 @@ pub async fn output_with_timeout(cmd: Command, timeout: Duration) -> io::Result<
         // Non-Unix historically has no process-group timeout implementation.
         output_with_kill(cmd, timeout).await
     }
+}
+
+/// Serialises every test in this crate that spawns a real child.
+///
+/// The Linux child reaper is PROCESS-GLOBAL: `worker_child_reaper().supervisors()`
+/// sees every in-flight spawn in the whole test binary, so two spawning tests
+/// running concurrently make each other's "no supervisor is registered"
+/// assertions flaky. The supervisor tests already serialised among themselves;
+/// this hoists the same lock so the plain `process::tests` spawners join them.
+#[cfg(test)]
+pub(crate) fn child_lifecycle_test_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+/// Wait for the process-global reaper to finish accounting for a test's child
+/// before the [`child_lifecycle_test_lock`] is released.
+///
+/// Holding the lock is not on its own enough: a killed process group is
+/// deregistered ASYNCHRONOUSLY, so a test that merely returns can leave adopted
+/// PIDs behind for whichever test acquires the lock next — and
+/// `spawn_failure_returns_original_io_error` asserts global idleness with a
+/// ZERO-length wait. Call this at the end of every spawning test.
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) fn drain_child_reaper_for_tests() {
+    let reaper = crate::child_reaper::worker_child_reaper();
+    reaper.wait_for_supervisors_idle(Duration::from_secs(10));
+    reaper.wait_for_adopted_idle(Duration::from_secs(10));
+}
+
+#[cfg(all(test, not(target_os = "linux")))]
+pub(crate) fn drain_child_reaper_for_tests() {}
+
+/// Maximum bytes of captured child output carried on a `TimedOut` error.
+///
+/// Bounded because a runaway indexer can emit megabytes; the tail is what
+/// matters (the last thing it was doing before we killed it), so we keep the
+/// END of each stream rather than the start.
+pub const TIMED_OUT_OUTPUT_TAIL_BYTES: usize = 4096;
+
+/// Build the `TimedOut` error for a child we killed at its deadline, carrying a
+/// bounded tail of whatever it had already written.
+///
+/// The old error was the bare string `"process timed out"` and the drained
+/// stdout/stderr — the only account of what the process was doing for the whole
+/// budget — was **dropped on the floor**. On the production warm that is an
+/// hour of rust-analyzer output discarded at exactly the moment an operator
+/// needs it, leaving four words in the `timed_out` status detail.
+fn timed_out_error(timeout: Duration, out: &Output) -> io::Error {
+    let stderr_tail = output_tail(&out.stderr);
+    let stdout_tail = output_tail(&out.stdout);
+    let mut message = format!("process timed out after {timeout:?}");
+    if !stderr_tail.is_empty() {
+        message.push_str(&format!("; stderr tail: {stderr_tail}"));
+    }
+    if !stdout_tail.is_empty() {
+        message.push_str(&format!("; stdout tail: {stdout_tail}"));
+    }
+    if stderr_tail.is_empty() && stdout_tail.is_empty() {
+        message.push_str("; the process produced no output before the deadline");
+    }
+    io::Error::new(io::ErrorKind::TimedOut, message)
+}
+
+/// Last [`TIMED_OUT_OUTPUT_TAIL_BYTES`] of a captured stream, lossily decoded
+/// and trimmed. Slices on a byte boundary and lets `from_utf8_lossy` repair any
+/// character split — never panics on a multi-byte cut.
+fn output_tail(bytes: &[u8]) -> String {
+    let start = bytes.len().saturating_sub(TIMED_OUT_OUTPUT_TAIL_BYTES);
+    String::from_utf8_lossy(&bytes[start..]).trim().to_string()
 }
 
 /// Run a pre-configured `std::process::Command` on a blocking thread and return
@@ -1087,190 +1157,8 @@ pub async fn output_with_kill(mut cmd: Command, _timeout: Duration) -> io::Resul
 // ===========================================================================
 
 #[cfg(all(test, unix))]
-mod tests {
-    use super::*;
-    #[cfg(not(target_os = "linux"))]
-    use djinn_core::clock::{Clock, SystemClock};
-
-    /// A hung child (`sleep 30`) must be terminated within the grace window and
-    /// the call must return promptly rather than hanging. Linux has a stronger
-    /// fixture in `process_linux_supervisor_tests` which records its PID and
-    /// asserts the six-second lifecycle contract.
-    #[cfg(not(target_os = "linux"))]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn timeout_kills_hung_child_promptly() {
-        let mut cmd = Command::new("sh");
-        cmd.arg("-c").arg("sleep 30");
-
-        let start = SystemClock::new().now_instant();
-        let err = output_with_timeout(cmd, Duration::from_millis(200))
-            .await
-            .expect_err("hung child should surface as a timeout error");
-        let elapsed = start.elapsed();
-
-        assert_eq!(err.kind(), io::ErrorKind::TimedOut);
-        // 200ms timeout + bounded TERM/KILL cleanup; comfortably under 8s.
-        assert!(
-            elapsed < Duration::from_secs(8),
-            "call should return promptly after kill, took {elapsed:?}"
-        );
-    }
-
-    /// Keep the macOS/other-Unix local waiter deadline-bound. This is separate
-    /// from the Linux supervisor test because a regression to `cmd.output()`
-    /// would otherwise only be caught when this module is exercised off Linux.
-    #[cfg(not(target_os = "linux"))]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn non_linux_unix_timeout_argument_is_enforced() {
-        let mut cmd = Command::new("sh");
-        cmd.arg("-c").arg("sleep 30");
-
-        let start = SystemClock::new().now_instant();
-        let err = output_with_timeout(cmd, Duration::from_millis(100))
-            .await
-            .expect_err("sleep must be terminated at the supplied deadline");
-
-        assert_eq!(err.kind(), io::ErrorKind::TimedOut);
-        assert!(
-            start.elapsed() < Duration::from_secs(3),
-            "non-Linux Unix must not fall back to unbounded Command::output()"
-        );
-    }
-
-    /// The child runs in its own process group, and after the timeout kill the
-    /// whole group is gone (no leaked grandchildren).
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn timeout_reaps_whole_process_group() {
-        // The shell prints its pgid, then forks a grandchild that sleeps. If the
-        // group kill works, signalling -pgid reaches the grandchild too.
-        let mut cmd = Command::new("sh");
-        cmd.arg("-c")
-            .arg("ps -o pgid= -p $$ | tr -d ' '; sleep 30 & sleep 30");
-
-        let out = output_with_kill(cmd, Duration::from_millis(200))
-            .await
-            .expect("process should be reaped after timeout kill");
-
-        // Killed by signal => not a clean success.
-        assert!(!out.status.success());
-        assert!(killed_by_signal(&out.status).is_some());
-
-        let pgid: i32 = String::from_utf8_lossy(&out.stdout)
-            .lines()
-            .next()
-            .unwrap_or("")
-            .trim()
-            .parse()
-            .expect("child should have printed its pgid");
-
-        // The supervisor should have already ensured the direct child's process
-        // group was cleaned up.  On systems where PID 1 reaps orphans promptly,
-        // kill(-pgid, 0) returns ESRCH.  In test containers where PID 1 is not a
-        // reaping init, orphaned grandchildren may linger as zombies; verify that
-        // no *live* (non-zombie) member of the group remains.
-        let mut gone = false;
-        for _ in 0..20 {
-            let rc = unsafe { libc::kill(-pgid, 0) };
-            if rc != 0 {
-                gone = true;
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        }
-        if !gone {
-            // The group didn't fully disappear — check that any remaining
-            // processes are zombies (state Z), not live.
-            let live = std::process::Command::new("sh")
-                .arg("-c")
-                .arg(format!(
-                    "ps -e -o pgid=,stat= --no-headers | awk '$1=={pgid} && $2!~/Z/' | wc -l"
-                ))
-                .output();
-            if let Ok(out) = live {
-                let count: usize = String::from_utf8_lossy(&out.stdout)
-                    .trim()
-                    .parse()
-                    .unwrap_or(0);
-                assert_eq!(
-                    count, 0,
-                    "live processes remain in process group {pgid} after timeout kill"
-                );
-            }
-        }
-    }
-
-    /// A child killed by an EXTERNAL signal (modelling the kernel OOM killer)
-    /// *before* the deadline must NOT be reported as a timeout — otherwise the
-    /// `timed_out` status becomes untrustworthy. It surfaces as a distinct
-    /// non-timeout failure instead.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn external_signal_before_deadline_is_not_a_timeout() {
-        // The shell SIGKILLs itself immediately, well within the generous
-        // 30s deadline, so our timeout-kill path never fires.
-        let mut cmd = Command::new("sh");
-        cmd.arg("-c").arg("kill -9 $$");
-
-        let err = output_with_timeout(cmd, Duration::from_secs(30))
-            .await
-            .expect_err("a signal-killed child must surface as an error");
-
-        assert_ne!(
-            err.kind(),
-            io::ErrorKind::TimedOut,
-            "an external SIGKILL before the deadline must not be reported as a timeout"
-        );
-        assert!(
-            err.to_string().contains("signal"),
-            "expected a distinct signal-death message, got: {err}"
-        );
-    }
-
-    /// The in-process warmer (no `DJINN_PROJECT_ROOT`) keeps nice 10 so the
-    /// indexer fan-out can't starve the interactive server it shares a cgroup
-    /// with.
-    #[test]
-    fn nice_level_defaults_to_10_in_process() {
-        assert_eq!(resolve_nice_level(None, false), 10);
-    }
-
-    /// In a dedicated warm Pod the indexer owns the whole cgroup — nothing to
-    /// yield to — so it must run at normal priority (0), not niced. This is the
-    /// core of the starvation fix: niceing a sole-tenant cgroup only costs the
-    /// throughput graph freshness depends on.
-    #[test]
-    fn nice_level_is_zero_in_pod_workspace() {
-        assert_eq!(resolve_nice_level(None, true), 0);
-    }
-
-    /// An explicit `DJINN_INDEXER_NICE` override wins in either context.
-    #[test]
-    fn explicit_nice_override_wins() {
-        assert_eq!(resolve_nice_level(Some("5"), true), 5);
-        assert_eq!(resolve_nice_level(Some("15"), false), 15);
-        assert_eq!(resolve_nice_level(Some(" 3 "), true), 3);
-    }
-
-    /// A malformed override falls back to the context default rather than
-    /// crashing the spawn path.
-    #[test]
-    fn malformed_nice_override_falls_back() {
-        assert_eq!(resolve_nice_level(Some("not-a-number"), true), 0);
-        assert_eq!(resolve_nice_level(Some(""), false), 10);
-    }
-
-    /// A fast command still returns its real output and a success status.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn fast_command_returns_output() {
-        let mut cmd = Command::new("sh");
-        cmd.arg("-c").arg("printf hello");
-
-        let out = output_with_timeout(cmd, Duration::from_secs(10))
-            .await
-            .expect("fast command succeeds");
-        assert!(out.status.success());
-        assert_eq!(&out.stdout, b"hello");
-    }
-}
+#[path = "process_tests.rs"]
+mod tests;
 
 // ===========================================================================
 

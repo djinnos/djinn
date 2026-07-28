@@ -295,9 +295,14 @@ resources:
       memory: "16Gi"
     # Max wall-clock seconds a warm Job may run before the kubelet terminates
     # it (activeDeadlineSeconds), surfaced as DJINN_K8S_WARM_JOB_TIMEOUT_SECONDS.
-    # 3600s (60 min) covers a cold single-pass warm of a ~12-crate workspace
-    # (~20-25 min observed) with ample margin. Raise it if a larger workspace
-    # consistently hits the deadline.
+    # This one deadline covers BOTH halves of the warm Pod's work: the cargo
+    # pass AND the SCIP indexing + graph publication that follow it in the same
+    # Pod. A complete production warm measured on 2026-07-27 spent 1798s in
+    # cargo and 3644s in the graph phase — 5442s end to end. 7200s (120 min)
+    # covers that with ~29 min of margin. The previous 3600s default only ever
+    # accounted for the cargo half, so any workspace of that size was SIGKILLed
+    # at 60 minutes on every warm and published no server index. Raise it if a
+    # larger workspace consistently hits the deadline.
     #
     # This is the ONLY warm wall-clock knob that matters: it is the Job's
     # activeDeadlineSeconds, it drives the in-process warm watcher deadline
@@ -306,7 +311,7 @@ resources:
     # budgets clamp against it. A step can therefore never be given a bound
     # that outlives the deadline which would kill the Pod anyway; to give the
     # test-binary compile more room, raise this rather than a per-step override.
-    jobTimeoutSeconds: 3600
+    jobTimeoutSeconds: 7200
 
 # -----------------------------------------------------------------------------
 # Node-local durable pod-log collector (disabled until the host store exists)

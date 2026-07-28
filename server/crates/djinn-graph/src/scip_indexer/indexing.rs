@@ -270,16 +270,18 @@ pub(crate) async fn run_indexers_already_locked(
 
 /// Compute the wall-clock timeout for a planned indexer command.
 ///
-/// When no prior timing exists (a project's first-ever warm), the budget model
-/// yields the size-scaled baseline, combined with the legacy
-/// `SupportedIndexer::timeout()` cap via `max()` — byte-identical to the
-/// shipped fixed-cap behavior. When prior timings ARE supplied (fed from
-/// persisted `scip_indexer_timing` rows), the budget adapts: a slow-but-passing
-/// run raises the timeout within `max_cap`, and a run that keeps TIMING OUT
-/// grows headroom above `max_cap` up to the adaptive ceiling (`max_cap * 3`),
-/// so a heavy workspace stops silently dropping out of the graph on every warm.
-/// The `max(..., timeout())` floor guarantees the adaptive value never dips
-/// below today's static cap.
+/// When no prior timing exists (a project's first-ever warm, or one whose
+/// `scip_indexer_timing` row was lost to a project recreation / slug change /
+/// FK cascade), the budget model yields the size-scaled estimate — including
+/// the measured superlinear term for indexers that have one — combined with the
+/// legacy `SupportedIndexer::timeout()` cap via `max()`. When prior timings ARE
+/// supplied, the budget adapts: a slow-but-passing run raises the timeout within
+/// `max_cap`, and a run that keeps TIMING OUT grows headroom above `max_cap` up
+/// to the adaptive ceiling, so a heavy workspace stops silently dropping out of
+/// the graph on every warm. The ceiling itself rises with proven cost and is
+/// bounded only by the enclosing warm Job deadline, so a legitimately growing
+/// workspace can never become permanently unwarmable. The `max(..., timeout())`
+/// floor guarantees the adaptive value never dips below today's static cap.
 fn budgeted_timeout_for_plan(
     plan: &PlannedIndexerCommand,
     prior: Option<&super::IndexerPriorTiming>,
@@ -424,6 +426,102 @@ impl GoPackageLister for CommandGoPackageLister {
 /// cache store is unavailable, the indexer runs as if there were no cache.
 /// A cache hit skips the indexer entirely and copies the cached artifact to
 /// the planned output path so `collect_scip_artifacts` still finds it.
+/// How often the indexer phase emits a liveness heartbeat.
+///
+/// The production rust-analyzer pass runs for ~59 minutes and, until this
+/// existed, logged **nothing at all** for its whole duration: its stdout/stderr
+/// are captured into `ExecutedIndexerCommand` and the success path never
+/// printed them, so an operator watching `kubectl logs` could not distinguish
+/// "indexing, 40 minutes in" from "wedged". Five minutes is frequent enough to
+/// answer that question and rare enough to add ~12 lines to an hour-long run.
+const INDEXER_HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Bytes of indexer stdout/stderr echoed into the Pod log on completion.
+const INDEXER_OUTPUT_TAIL_BYTES: usize = 2048;
+
+/// Last [`INDEXER_OUTPUT_TAIL_BYTES`] of a captured stream, lossily decoded.
+fn indexer_output_tail(bytes: &[u8]) -> String {
+    let start = bytes.len().saturating_sub(INDEXER_OUTPUT_TAIL_BYTES);
+    String::from_utf8_lossy(&bytes[start..]).trim().to_string()
+}
+
+/// Invoke one indexer, emitting a periodic heartbeat while it runs and echoing
+/// a bounded tail of its output when it finishes.
+///
+/// The heartbeat task is aborted on drop by `select!`-free construction: it is
+/// spawned, and the `JoinHandle` is aborted the moment the process future
+/// resolves, so it can never outlive the invocation it describes.
+async fn run_indexer_with_progress(
+    plan: &PlannedIndexerCommand,
+    cmd: std::process::Command,
+    timeout: std::time::Duration,
+) -> std::io::Result<std::process::Output> {
+    use djinn_core::clock::{Clock, SystemClock};
+
+    let indexer = plan.indexer.binary_name();
+    let workspace = plan.workspace_root.display().to_string();
+    tracing::info!(
+        indexer,
+        workspace = %workspace,
+        budget_secs = timeout.as_secs(),
+        "SCIP indexer starting"
+    );
+
+    let heartbeat_indexer = indexer.to_string();
+    let heartbeat_workspace = workspace.clone();
+    let heartbeat = tokio::spawn(async move {
+        let started = SystemClock::new().now_instant();
+        let mut ticker = tokio::time::interval(INDEXER_HEARTBEAT_INTERVAL);
+        // The first tick fires immediately; the start line above already
+        // covers t=0, so consume it.
+        ticker.tick().await;
+        loop {
+            ticker.tick().await;
+            tracing::info!(
+                indexer = %heartbeat_indexer,
+                workspace = %heartbeat_workspace,
+                elapsed_secs = started.elapsed().as_secs(),
+                budget_secs = timeout.as_secs(),
+                "SCIP indexer still running"
+            );
+        }
+    });
+
+    let started = SystemClock::new().now_instant();
+    let result = process::output_with_timeout(cmd, timeout).await;
+    heartbeat.abort();
+    let elapsed_secs = started.elapsed().as_secs();
+
+    match &result {
+        Ok(output) => {
+            let stdout_tail = indexer_output_tail(&output.stdout);
+            let stderr_tail = indexer_output_tail(&output.stderr);
+            tracing::info!(
+                indexer,
+                workspace = %workspace,
+                elapsed_secs,
+                budget_secs = timeout.as_secs(),
+                exit_code = ?output.status.code(),
+                stdout_tail = %stdout_tail,
+                stderr_tail = %stderr_tail,
+                "SCIP indexer finished"
+            );
+        }
+        Err(error) => {
+            tracing::warn!(
+                indexer,
+                workspace = %workspace,
+                elapsed_secs,
+                budget_secs = timeout.as_secs(),
+                error = %error,
+                "SCIP indexer did not complete"
+            );
+        }
+    }
+
+    result
+}
+
 async fn execute_plan_with_cache(
     plan: PlannedIndexerCommand,
     timeout: std::time::Duration,
@@ -468,7 +566,7 @@ async fn execute_plan_with_cache(
 
     // Cache miss (or cache unavailable): invoke the indexer.
     let cmd = plan.build_command();
-    let result = process::output_with_timeout(cmd, timeout).await;
+    let result = run_indexer_with_progress(&plan, cmd, timeout).await;
 
     // On success, attempt to cache the produced artifact if it is non-empty.
     // Cache write failures are non-fatal: the warm still proceeds with the
