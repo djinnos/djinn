@@ -80,6 +80,12 @@ export function GalaxyView({ projectId }: { projectId: string }) {
   const [workspaces, setWorkspaces] = useState<CodeGraphWorkspace[]>([]);
   const [workspaceSlug, setWorkspaceSlug] = useState<string | null>(null);
   const [coverage, setCoverage] = useState<CodeGraphCoverage | null>(null);
+  // Wall clock captured when coverage landed. The banner renders "N ago" off
+  // this instead of reading the clock during render, so the chip stays pure and
+  // the age is anchored to the data it describes.
+  const [coverageFetchedAt, setCoverageFetchedAt] = useState<
+    number | undefined
+  >(undefined);
   const [showHotspots, setShowHotspots] = useState(false);
   const [hotspotSelection, setHotspotSelection] =
     useState<GalaxyHotspot | null>(null);
@@ -122,9 +128,12 @@ export function GalaxyView({ projectId }: { projectId: string }) {
     // unindexed workspaces so the galaxy never lies by omission. Best-effort:
     // a failure just hides the banner.
     setCoverage(null);
+    setCoverageFetchedAt(undefined);
     void fetchCoverage(projectId)
       .then((cov) => {
-        if (!cancelled) setCoverage(cov);
+        if (cancelled) return;
+        setCoverage(cov);
+        setCoverageFetchedAt(Date.now());
       })
       .catch(() => {
         if (!cancelled) setCoverage(null);
@@ -132,7 +141,9 @@ export function GalaxyView({ projectId }: { projectId: string }) {
 
     void (async () => {
       try {
-        const artifact = await fetchGalaxyArtifact(projectId, { signal: controller.signal });
+        const artifact = await fetchGalaxyArtifact(projectId, {
+          signal: controller.signal,
+        });
         if (cancelled) return;
         let snapshot;
         if (artifact.kind === "artifact") {
@@ -184,7 +195,9 @@ export function GalaxyView({ projectId }: { projectId: string }) {
         setState({
           phase: "error",
           message:
-            error instanceof Error ? error.message : "Failed to load the galaxy.",
+            error instanceof Error
+              ? error.message
+              : "Failed to load the galaxy.",
         });
       }
     })();
@@ -203,7 +216,9 @@ export function GalaxyView({ projectId }: { projectId: string }) {
     const nodes = full.nodes.filter(
       (n) =>
         (!hideTests || !n.isTest) &&
-        (!workspaceSlug || n.workspace === undefined || n.workspace === workspaceSlug),
+        (!workspaceSlug ||
+          n.workspace === undefined ||
+          n.workspace === workspaceSlug),
     );
     const kept = new Set(nodes.map((n) => n.id));
     const edges = full.edges.filter(
@@ -218,7 +233,9 @@ export function GalaxyView({ projectId }: { projectId: string }) {
     return state.hotspots.filter(
       (h) =>
         (!hideTests || !h.isTest) &&
-        (!workspaceSlug || h.workspace === undefined || h.workspace === workspaceSlug),
+        (!workspaceSlug ||
+          h.workspace === undefined ||
+          h.workspace === workspaceSlug),
     );
   }, [state, hideTests, workspaceSlug]);
 
@@ -233,7 +250,13 @@ export function GalaxyView({ projectId }: { projectId: string }) {
               aria-label="Loading galaxy"
             />
           )}
-          <p>{state.phase === "error" ? state.message : state.phase === "loading" ? state.message : null}</p>
+          <p>
+            {state.phase === "error"
+              ? state.message
+              : state.phase === "loading"
+                ? state.message
+                : null}
+          </p>
         </div>
       </div>
     );
@@ -244,7 +267,13 @@ export function GalaxyView({ projectId }: { projectId: string }) {
       data={visibleData}
       focusIds={focusIds}
       focusPrimaryId={hotspotSelection?.fileId ?? null}
-      banner={<CoverageGapBanner coverage={coverage} />}
+      banner={
+        <CoverageGapBanner
+          coverage={coverage}
+          workspaces={workspaces}
+          now={coverageFetchedAt}
+        />
+      }
       sidePanel={
         showHotspots ? (
           <HotspotPanel
@@ -286,11 +315,15 @@ export function GalaxyView({ projectId }: { projectId: string }) {
                 }
               }}
             >
-              <SelectTrigger size="sm" aria-label="Workspace" className={HUD_CHIP}>
+              <SelectTrigger
+                size="sm"
+                aria-label="Workspace"
+                className={HUD_CHIP}
+              >
                 <span>
                   {workspaceSlug
-                    ? (workspaces.find((w) => w.slug === workspaceSlug)?.display ??
-                      workspaceSlug)
+                    ? (workspaces.find((w) => w.slug === workspaceSlug)
+                        ?.display ?? workspaceSlug)
                     : "All"}
                 </span>
               </SelectTrigger>
