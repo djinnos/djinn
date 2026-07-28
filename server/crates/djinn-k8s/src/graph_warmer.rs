@@ -114,7 +114,7 @@ pub use crate::graph_warmer_candidates::{
     CleanupObservation, GateObservation, KubeWarmCandidateClient, WarmAnnotationValidation,
     WarmCandidate, WarmCandidateClient, WarmCandidateControl, WarmCandidateInventory,
     WarmCandidateKind, WarmCandidateObject, WarmCandidateSet, WarmCandidateSetState,
-    WarmInventoryObservation,
+    WarmInventoryObservation, WarmObjectLifecycle,
 };
 pub use warm_admission::{
     WarmAdmission, WarmAdmissionError, WarmAdmissionPermit, WarmAdmissionRequest,
@@ -1399,6 +1399,37 @@ impl K8sGraphWarmer {
                 }
             }
             if inventory.jobs.candidates.is_empty() && inventory.pods.candidates.is_empty() {
+                let _ = lease
+                    .release(&recovery.identity, recovery.fencing_token.clone())
+                    .await;
+                continue;
+            }
+            // A FINISHED workload releases its slot; a garbage-collected one is
+            // just the special case above.
+            //
+            // Object absence was the only release condition, which made the
+            // build slot's real holder the API server's garbage collector: a
+            // `Complete` warm Job kept one of THREE slots until
+            // `ttlSecondsAfterFinished` fired. Observed in production as
+            // `occupancy=3 cap=3` with only two running task-runs — a third of
+            // the fleet's build capacity held by a Job that had already
+            // finished warming.
+            //
+            // The safety property the absence rule was protecting — never
+            // release a slot whose workload might still be running — is
+            // preserved and stated directly rather than inferred from GC:
+            // `workload_finished` requires BOTH lists observed without error,
+            // every Job carrying Kubernetes' own `Complete`/`Failed` condition
+            // (so no further Pod can be created), and every observed Pod in a
+            // terminal phase (so none is still running). See
+            // [`WarmCandidateInventory::workload_finished`].
+            if inventory.workload_finished() {
+                info!(
+                    request_id = %recovery.identity.warm_request_id,
+                    jobs = inventory.jobs.candidates.len(),
+                    pods = inventory.pods.candidates.len(),
+                    "K8sGraphWarmer: warm workload reached a terminal state; releasing its build slot"
+                );
                 let _ = lease
                     .release(&recovery.identity, recovery.fencing_token.clone())
                     .await;
