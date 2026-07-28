@@ -2684,7 +2684,7 @@ mod tests {
     // concurrently on Cargo's test threads and clobber each other's env,
     // which is the root cause of the intermittent "no index produced"
     // flake. Route every one through `test_helpers::lock_pipeline_env`.
-    use crate::test_helpers::lock_pipeline_env;
+    use crate::test_helpers::{lock_pipeline_env, lock_pipeline_env_blocking};
 
     struct EnvVarGuard {
         key: &'static str,
@@ -2996,7 +2996,7 @@ edition = "2024"
 
     #[test]
     fn test_out_of_core_graph_parity_with_in_memory() {
-        let _env_lock = lock_pipeline_env();
+        let _env_lock = lock_pipeline_env_blocking();
         let tmp = workspace_tempdir("ooc-graph-parity-");
         let store_path = tmp.path().join("store");
 
@@ -3029,7 +3029,7 @@ edition = "2024"
 
     #[test]
     fn test_out_of_core_graph_diverges_on_file_change() {
-        let _env_lock = lock_pipeline_env();
+        let _env_lock = lock_pipeline_env_blocking();
         let tmp = workspace_tempdir("ooc-graph-diverge-");
         let store_path = tmp.path().join("store");
 
@@ -3518,7 +3518,7 @@ edition = "2024"
         // Mutates the process-global GRAPH_CACHE; serialize with the other
         // slot-touching tests (incl. the revalidation-backstop tests) so
         // concurrent installs/clears can't clobber the single shared slot.
-        let _env_lock = lock_pipeline_env();
+        let _env_lock = lock_pipeline_env().await;
         let tmp = workspace_tempdir("canonical-graph-");
         let project_root = make_project(tmp.path()).await;
         let db = create_test_db();
@@ -3560,7 +3560,7 @@ edition = "2024"
 
     #[tokio::test]
     async fn ensure_canonical_graph_treats_stale_blob_as_cache_miss() {
-        let _env_lock = lock_pipeline_env();
+        let _env_lock = lock_pipeline_env().await;
         let tmp = workspace_tempdir("canonical-graph-");
         let project_root = make_project(tmp.path()).await;
         let db = create_test_db();
@@ -3603,7 +3603,7 @@ edition = "2024"
 
     #[tokio::test]
     async fn cache_only_readers_serve_cached_graph_and_caches() {
-        let _env_lock = lock_pipeline_env();
+        let _env_lock = lock_pipeline_env().await;
         let tmp = workspace_tempdir("canonical-graph-");
         let project_root = make_project(tmp.path()).await;
         let db = create_test_db();
@@ -3665,7 +3665,7 @@ edition = "2024"
     async fn load_canonical_graph_reloads_when_slot_commit_is_stale() {
         // Serialize against every other test that mutates the process-global
         // GRAPH_CACHE / revalidation stamp (see `lock_pipeline_env` note).
-        let _env_lock = lock_pipeline_env();
+        let _env_lock = lock_pipeline_env().await;
         let tmp = workspace_tempdir("canonical-graph-reval-stale-");
         let project_root = make_project(tmp.path()).await;
         let db = create_test_db();
@@ -3740,7 +3740,7 @@ edition = "2024"
     /// blob is picked up. This pins the "cheap staleness check" contract.
     #[tokio::test]
     async fn load_canonical_graph_serves_slot_within_ttl_then_reloads_after_expiry() {
-        let _env_lock = lock_pipeline_env();
+        let _env_lock = lock_pipeline_env().await;
         let tmp = workspace_tempdir("canonical-graph-reval-ttl-");
         let project_root = make_project(tmp.path()).await;
         let db = create_test_db();
@@ -3822,7 +3822,7 @@ edition = "2024"
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn load_canonical_graph_fast_path_serves_shared_arc_without_reload() {
-        let _env_lock = lock_pipeline_env();
+        let _env_lock = lock_pipeline_env().await;
         let tmp = workspace_tempdir("canonical-graph-arc-share-");
         let project_root = make_project(tmp.path()).await;
         let db = create_test_db();
@@ -3894,7 +3894,7 @@ edition = "2024"
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn load_canonical_graph_single_flights_concurrent_empty_slot_loads() {
-        let _env_lock = lock_pipeline_env();
+        let _env_lock = lock_pipeline_env().await;
         let tmp = workspace_tempdir("canonical-graph-single-flight-");
         let project_root = make_project(tmp.path()).await;
         let db = create_test_db();
@@ -3961,7 +3961,7 @@ edition = "2024"
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn invalidation_is_debounced_and_reloads_only_on_new_sha() {
-        let _env_lock = lock_pipeline_env();
+        let _env_lock = lock_pipeline_env().await;
         let tmp = workspace_tempdir("canonical-graph-invalidation-");
         let project_root = make_project(tmp.path()).await;
         let db = create_test_db();
@@ -4393,7 +4393,7 @@ edition = "2024"
     /// for the same commit must pass `assert_graph_artifact_blob_parity`.
     #[tokio::test]
     async fn incremental_full_equivalence_same_commit() {
-        let _env_lock = lock_pipeline_env();
+        let _env_lock = lock_pipeline_env().await;
         let tmp = workspace_tempdir("incremental-equiv-");
         let project_root = make_project(tmp.path()).await;
         let db = create_test_db();
@@ -4538,7 +4538,7 @@ cp "$DJINN_TEST_SCIP_FIXTURE" "$out"
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn out_of_core_warm_produces_identical_graph_blob() {
-        let _env_lock = lock_pipeline_env();
+        let _env_lock = lock_pipeline_env().await;
         let _ooc_flag = EnvVarGuard::remove("DJINN_GRAPH_OUT_OF_CORE");
         let _ooc_min_nodes = EnvVarGuard::remove("DJINN_GRAPH_OUT_OF_CORE_MIN_NODES");
         let _ooc_path = EnvVarGuard::remove("DJINN_GRAPH_OUT_OF_CORE_PATH");
@@ -4677,7 +4677,7 @@ cp "$DJINN_TEST_SCIP_FIXTURE" "$out"
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn cache_reuse_produces_identical_graph_blob() {
-        let _env_lock = lock_pipeline_env();
+        let _env_lock = lock_pipeline_env().await;
 
         // Remove any pre-existing cache-reuse env var.
         unsafe {

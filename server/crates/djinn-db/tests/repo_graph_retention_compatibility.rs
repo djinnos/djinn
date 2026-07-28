@@ -71,7 +71,7 @@ async fn fresh() -> (Database, RepoGraphRetentionRepository) {
                 .await
                 .expect("bind designated operator GUC");
         }
-        let sql = std::fs::read_to_string(&path).expect("read migration");
+        let sql = std::fs::read_to_string(path).expect("read migration");
         migration
             .execute(sql.as_str())
             .await

@@ -32,78 +32,6 @@ fn should_process_explicit_finalize(
         && output.finalize_tool_name.as_deref() == Some(expected_tool)
 }
 
-#[cfg(test)]
-mod retirement_regressions {
-    use super::*;
-
-    fn explicit_submit() -> ParsedAgentOutput {
-        let mut output = ParsedAgentOutput::default();
-        output.finalize_payload = Some(serde_json::json!({"summary": "done"}));
-        output.finalize_tool_name = Some("submit_work".to_string());
-        output
-    }
-
-    #[test]
-    fn explicit_submit_work_hands_off_to_ordinary_finalize() {
-        assert!(should_process_explicit_finalize(
-            &explicit_submit(),
-            "submit_work",
-            true
-        ));
-    }
-
-    #[test]
-    fn session_end_without_submit_cannot_synthesize_finalize() {
-        assert!(!should_process_explicit_finalize(
-            &ParsedAgentOutput::default(),
-            "submit_work",
-            true
-        ));
-    }
-
-    #[test]
-    fn reviewer_output_cannot_synthesize_worker_finalize() {
-        let mut output = explicit_submit();
-        output.finalize_tool_name = Some("submit_review".to_string());
-        assert!(!should_process_explicit_finalize(
-            &output,
-            "submit_work",
-            true
-        ));
-    }
-
-    #[test]
-    fn no_progress_settlement_cannot_synthesize_finalize() {
-        let mut output = explicit_submit();
-        output.no_progress_submission = true;
-        assert!(!should_process_explicit_finalize(
-            &output,
-            "submit_work",
-            true
-        ));
-    }
-
-    #[test]
-    fn deadline_or_failed_session_cannot_synthesize_finalize() {
-        assert!(!should_process_explicit_finalize(
-            &explicit_submit(),
-            "submit_work",
-            false
-        ));
-    }
-
-    #[test]
-    fn teardown_rejects_tool_name_without_explicit_payload() {
-        let mut output = ParsedAgentOutput::default();
-        output.finalize_tool_name = Some("submit_work".to_string());
-        assert!(!should_process_explicit_finalize(
-            &output,
-            "submit_work",
-            true
-        ));
-    }
-}
-
 pub(crate) fn spawn_post_session_work(params: PostSessionParams) {
     params.ctx.register_background_work(&params.task_id);
     tokio::spawn(async move {
@@ -254,5 +182,77 @@ pub(crate) async fn apply_transition_and_dispatch(
 ) {
     if let Ok(task) = ctx.load_task(task_id).await {
         ctx.trigger_dispatch_for_project(&task.project_id).await;
+    }
+}
+
+#[cfg(test)]
+mod retirement_regressions {
+    use super::*;
+
+    fn explicit_submit() -> ParsedAgentOutput {
+        let mut output = ParsedAgentOutput::default();
+        output.finalize_payload = Some(serde_json::json!({"summary": "done"}));
+        output.finalize_tool_name = Some("submit_work".to_string());
+        output
+    }
+
+    #[test]
+    fn explicit_submit_work_hands_off_to_ordinary_finalize() {
+        assert!(should_process_explicit_finalize(
+            &explicit_submit(),
+            "submit_work",
+            true
+        ));
+    }
+
+    #[test]
+    fn session_end_without_submit_cannot_synthesize_finalize() {
+        assert!(!should_process_explicit_finalize(
+            &ParsedAgentOutput::default(),
+            "submit_work",
+            true
+        ));
+    }
+
+    #[test]
+    fn reviewer_output_cannot_synthesize_worker_finalize() {
+        let mut output = explicit_submit();
+        output.finalize_tool_name = Some("submit_review".to_string());
+        assert!(!should_process_explicit_finalize(
+            &output,
+            "submit_work",
+            true
+        ));
+    }
+
+    #[test]
+    fn no_progress_settlement_cannot_synthesize_finalize() {
+        let mut output = explicit_submit();
+        output.no_progress_submission = true;
+        assert!(!should_process_explicit_finalize(
+            &output,
+            "submit_work",
+            true
+        ));
+    }
+
+    #[test]
+    fn deadline_or_failed_session_cannot_synthesize_finalize() {
+        assert!(!should_process_explicit_finalize(
+            &explicit_submit(),
+            "submit_work",
+            false
+        ));
+    }
+
+    #[test]
+    fn teardown_rejects_tool_name_without_explicit_payload() {
+        let mut output = ParsedAgentOutput::default();
+        output.finalize_tool_name = Some("submit_work".to_string());
+        assert!(!should_process_explicit_finalize(
+            &output,
+            "submit_work",
+            true
+        ));
     }
 }

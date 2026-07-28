@@ -25,7 +25,14 @@ use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
 const PROBE_NAME: &str = "extension_load.project_probe";
-static DJINN_HOME_LOCK: Mutex<()> = Mutex::new(());
+/// Serializes the process-wide `DJINN_HOME` mutation below. A
+/// `tokio::sync::Mutex`, not the `std::sync::Mutex` used for plain data in this
+/// file: the holder is a `#[tokio::test(flavor = "current_thread")]` that
+/// awaits for its whole body while holding the guard, and a `std` guard across
+/// an await point blocks the executor thread rather than the task
+/// (clippy::await_holding_lock) — on a single-threaded runtime, that is a
+/// deadlock waiting for a second holder.
+static DJINN_HOME_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 struct ProductionProbe {
     context: AgentContext,
@@ -105,7 +112,7 @@ fn finding_fields(row: &ExtensionLoadDiagnosticV1) -> serde_json::Value {
 
 #[tokio::test(flavor = "current_thread")]
 async fn extension_diagnostics_doctor_auth_retention() {
-    let _environment_guard = DJINN_HOME_LOCK.lock().expect("DJINN_HOME lock");
+    let _environment_guard = DJINN_HOME_LOCK.lock().await;
     let home = tempfile::tempdir().expect("isolated DJINN_HOME");
     let restore = DjinnHomeRestore(std::env::var_os("DJINN_HOME"));
     // SAFETY: the process-wide lock is held until `restore` runs.
@@ -338,7 +345,7 @@ async fn extension_diagnostics_doctor_auth_retention() {
             .iter()
             .all(|row| row.task_id.is_none() && row.session_id.is_none())
     );
-    let response_fields: Vec<_> = findings.iter().cloned().collect();
+    let response_fields: Vec<_> = findings.to_vec();
     let canonical_fields: Vec<_> = canonical.iter().map(finding_fields).collect();
     assert_eq!(
         response_fields, canonical_fields,
@@ -415,7 +422,7 @@ async fn extension_diagnostics_doctor_auth_retention() {
         "project B doctor rows remain task- and session-independent"
     );
     let project_b_canonical = repository
-        .list_for_load_attempt(&project_b.id, &project_b_attempt)
+        .list_for_load_attempt(&project_b.id, project_b_attempt)
         .await
         .expect("project B attempt rows");
     assert_eq!(
@@ -423,7 +430,7 @@ async fn extension_diagnostics_doctor_auth_retention() {
         "project B probe returns its own canonical persisted rows"
     );
     assert_eq!(
-        project_b_findings.iter().cloned().collect::<Vec<_>>(),
+        project_b_findings.to_vec(),
         project_b_canonical
             .iter()
             .map(finding_fields)

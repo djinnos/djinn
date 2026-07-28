@@ -143,7 +143,7 @@ cp "$DJINN_TEST_SCIP_FIXTURE" "$out"
 async fn run_real_full_warm(
     db: &Database,
 ) -> (String, Arc<crate::repo_graph::RepoDependencyGraph>) {
-    let _env_lock = crate::test_helpers::lock_pipeline_env();
+    let _env_lock = crate::test_helpers::lock_pipeline_env().await;
     crate::canonical_graph::clear_test_caches().await;
     let temp = crate::test_helpers::workspace_tempdir("full-warm-publication-");
     let project_root = temp.path().join("repo");

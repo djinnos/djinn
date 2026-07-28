@@ -5186,7 +5186,7 @@ mod tests {
         // `timed_clone_attempt` records into the process-global Prometheus
         // recorder; serialize with the telemetry-scrape tests so their
         // delta assertions are not polluted by this test's samples.
-        let _guard = clone_telemetry_guard();
+        let _guard = clone_telemetry_guard().await;
         let tmp = tempfile::tempdir().expect("mirrors tempdir");
         let (mgr, _tip) = build_resume_test_mirror(tmp.path(), false).await;
         let (clock, cancel) = resume_test_clock_and_cancel();
@@ -5215,7 +5215,7 @@ mod tests {
         // `timed_clone_attempt` records into the process-global Prometheus
         // recorder; serialize with the telemetry-scrape tests so their
         // delta assertions are not polluted by this test's samples.
-        let _guard = clone_telemetry_guard();
+        let _guard = clone_telemetry_guard().await;
         let tmp = tempfile::tempdir().expect("mirrors tempdir");
         let (mgr, _tip) = build_resume_test_mirror(tmp.path(), false).await;
         let mirror_path = mgr.mirror_path(RESUME_TEST_PROJECT_ID);
@@ -5253,7 +5253,7 @@ mod tests {
         // `timed_clone_attempt` records into the process-global Prometheus
         // recorder; serialize with the telemetry-scrape tests so their
         // delta assertions are not polluted by this test's samples.
-        let _guard = clone_telemetry_guard();
+        let _guard = clone_telemetry_guard().await;
         let tmp = tempfile::tempdir().expect("mirrors tempdir");
         let (mgr, _tip) = build_resume_test_mirror(tmp.path(), false).await;
 
@@ -5626,12 +5626,17 @@ mod tests {
 
     /// The Prometheus recorder is process-global; serialize telemetry-scrape
     /// tests behind a mutex so each assertion can use a precise delta.
-    static CLONE_TELEMETRY_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    ///
+    /// `tokio::sync::Mutex` rather than `std`: every holder is an `async` test
+    /// that awaits while holding the guard for its whole body, and a `std`
+    /// guard held across an await point blocks the executor thread instead of
+    /// the task (clippy::await_holding_lock). The `.expect("poisoned")` goes
+    /// away with it — tokio's mutex has no poisoning, so one panicking test no
+    /// longer fails every sibling that shares the lock.
+    static CLONE_TELEMETRY_MUTEX: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-    fn clone_telemetry_guard() -> std::sync::MutexGuard<'static, ()> {
-        CLONE_TELEMETRY_MUTEX
-            .lock()
-            .expect("clone telemetry test mutex poisoned")
+    async fn clone_telemetry_guard() -> tokio::sync::MutexGuard<'static, ()> {
+        CLONE_TELEMETRY_MUTEX.lock().await
     }
 
     /// Count `workspace_clone_seconds_count` samples for a given outcome.
@@ -5687,7 +5692,7 @@ mod tests {
     /// injected monotonic clock.
     #[tokio::test]
     async fn timed_clone_attempt_records_one_ok_sample() {
-        let _guard = clone_telemetry_guard();
+        let _guard = clone_telemetry_guard().await;
         djinn_telemetry::init().expect("telemetry init");
 
         let tmp = tempfile::tempdir().expect("mirrors tempdir");
@@ -5743,7 +5748,7 @@ mod tests {
     /// sample when the cancel token is NOT set.
     #[tokio::test]
     async fn timed_clone_attempt_records_one_error_sample() {
-        let _guard = clone_telemetry_guard();
+        let _guard = clone_telemetry_guard().await;
         djinn_telemetry::init().expect("telemetry init");
 
         let tmp = tempfile::tempdir().expect("mirrors tempdir");
@@ -5792,7 +5797,7 @@ mod tests {
     /// records exactly one `cancelled` sample.
     #[tokio::test]
     async fn timed_clone_attempt_records_cancelled_when_token_set() {
-        let _guard = clone_telemetry_guard();
+        let _guard = clone_telemetry_guard().await;
         djinn_telemetry::init().expect("telemetry init");
 
         let tmp = tempfile::tempdir().expect("mirrors tempdir");
@@ -5847,7 +5852,7 @@ mod tests {
     /// operation actually begins.
     #[tokio::test]
     async fn timed_clone_attempt_multi_attempt_fallback_records_two_samples() {
-        let _guard = clone_telemetry_guard();
+        let _guard = clone_telemetry_guard().await;
         djinn_telemetry::init().expect("telemetry init");
 
         let tmp = tempfile::tempdir().expect("mirrors tempdir");
@@ -5942,12 +5947,20 @@ mod tests {
 
     /// The Prometheus recorder is process-global; serialize telemetry-scrape
     /// tests behind a mutex so each assertion can use a precise delta.
-    static CLEANUP_TELEMETRY_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    ///
+    /// `tokio::sync::Mutex` for the same reason as [`CLONE_TELEMETRY_MUTEX`]:
+    /// the async holders await while holding it. This one has synchronous
+    /// `#[test]` holders too, hence the two accessors below.
+    static CLEANUP_TELEMETRY_MUTEX: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-    fn cleanup_telemetry_guard() -> std::sync::MutexGuard<'static, ()> {
-        CLEANUP_TELEMETRY_MUTEX
-            .lock()
-            .expect("cleanup telemetry test mutex poisoned")
+    async fn cleanup_telemetry_guard() -> tokio::sync::MutexGuard<'static, ()> {
+        CLEANUP_TELEMETRY_MUTEX.lock().await
+    }
+
+    /// Synchronous `#[test]` counterpart. Panics if called from inside a
+    /// runtime — async callers must use [`cleanup_telemetry_guard`].
+    fn cleanup_telemetry_guard_blocking() -> tokio::sync::MutexGuard<'static, ()> {
+        CLEANUP_TELEMETRY_MUTEX.blocking_lock()
     }
 
     /// Count `workspace_cleanup_seconds_count` samples for a given
@@ -6063,7 +6076,7 @@ mod tests {
     /// with the classified trigger.
     #[tokio::test]
     async fn timed_teardown_records_one_complete_ok_sample() {
-        let _guard = cleanup_telemetry_guard();
+        let _guard = cleanup_telemetry_guard().await;
         djinn_telemetry::init().expect("telemetry init");
 
         let tmp = tempfile::tempdir().expect("mirrors tempdir");
@@ -6102,7 +6115,7 @@ mod tests {
     /// attached directories are never deleted or observed.
     #[test]
     fn timed_teardown_on_attached_emits_nothing() {
-        let _guard = cleanup_telemetry_guard();
+        let _guard = cleanup_telemetry_guard_blocking();
         djinn_telemetry::init().expect("telemetry init");
 
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -6136,7 +6149,7 @@ mod tests {
     /// it returns, without relying on slow filesystem failures.
     #[test]
     fn cleanup_records_all_eight_returned_operation_outcomes() {
-        let _guard = cleanup_telemetry_guard();
+        let _guard = cleanup_telemetry_guard_blocking();
         djinn_telemetry::init().expect("telemetry init");
         let clock = TestClock::new(std::time::SystemTime::UNIX_EPOCH, std::time::Instant::now());
         let elapsed = Duration::from_millis(42);
@@ -6188,7 +6201,7 @@ mod tests {
 
     #[test]
     fn cleanup_panic_emits_nothing_until_a_later_returned_teardown() {
-        let _guard = cleanup_telemetry_guard();
+        let _guard = cleanup_telemetry_guard_blocking();
         djinn_telemetry::init().expect("telemetry init");
         let clock = TestClock::new(std::time::SystemTime::UNIX_EPOCH, std::time::Instant::now());
         let before = djinn_telemetry::render().expect("render before");
@@ -6227,7 +6240,7 @@ mod tests {
     /// no-op.
     #[tokio::test]
     async fn teardown_owned_prevents_double_drop() {
-        let _guard = cleanup_telemetry_guard();
+        let _guard = cleanup_telemetry_guard().await;
         djinn_telemetry::init().expect("telemetry init");
 
         let tmp = tempfile::tempdir().expect("mirrors tempdir");
@@ -6283,7 +6296,7 @@ mod tests {
     /// emitted if teardown never returns (panic/SIGKILL are out of scope).
     #[tokio::test]
     async fn timed_teardown_records_error_on_failure() {
-        let _guard = cleanup_telemetry_guard();
+        let _guard = cleanup_telemetry_guard().await;
         djinn_telemetry::init().expect("telemetry init");
 
         let tmp = tempfile::tempdir().expect("mirrors tempdir");
@@ -9372,17 +9385,17 @@ mod tests {
 
         // The committed files must contain the legitimate file.
         assert!(
-            changed_files.iter().any(|f| *f == "src_main.rs"),
+            changed_files.contains(&"src_main.rs"),
             "committed branch must contain the legitimate file src_main.rs, got: {changed_files:?}"
         );
 
         // The committed files must NOT contain any scratch files.
         assert!(
-            !changed_files.iter().any(|f| *f == "patch.txt"),
+            !changed_files.contains(&"patch.txt"),
             "committed branch must NOT contain scratch file patch.txt, got: {changed_files:?}"
         );
         assert!(
-            !changed_files.iter().any(|f| *f == "test2.txt"),
+            !changed_files.contains(&"test2.txt"),
             "committed branch must NOT contain scratch file test2.txt, got: {changed_files:?}"
         );
     }
@@ -9519,7 +9532,7 @@ mod tests {
                     "rev-parse",
                     "--verify",
                     "--quiet",
-                    &format!("refs/heads/djinn/aah4-stale"),
+                    "refs/heads/djinn/aah4-stale",
                 ])
                 .output()
                 .expect("git rev-parse mirror HEAD after run");

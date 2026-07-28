@@ -152,7 +152,7 @@ fn validate_success(result: &serde_json::Value) -> Result<()> {
         let guardrail_key = finding
             .get("guardrail_key")
             .and_then(serde_json::Value::as_str);
-        if !guardrail_key.is_some_and(|value| !value.trim().is_empty())
+        if guardrail_key.is_none_or(|value| value.trim().is_empty())
             || !finding_keys.insert(guardrail_key.expect("checked non-empty"))
             || !matches!(
                 finding.get("status").and_then(serde_json::Value::as_str),
@@ -202,7 +202,7 @@ fn validate_success(result: &serde_json::Value) -> Result<()> {
         let dedupe_key = suggestion
             .get("dedupe_key")
             .and_then(serde_json::Value::as_str);
-        if !dedupe_key.is_some_and(|value| !value.trim().is_empty())
+        if dedupe_key.is_none_or(|value| value.trim().is_empty())
             || !suggestion_keys.insert(dedupe_key.expect("checked non-empty"))
             || suggestion.len() < 2
             || !structured_object(entry)

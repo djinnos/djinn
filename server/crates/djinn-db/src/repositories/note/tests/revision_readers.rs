@@ -60,6 +60,11 @@ fn provenance(row: &serde_json::Value) -> TrustedNoteRevisionProvenance {
     .unwrap()
 }
 
+// Fixture builder: every parameter maps 1:1 onto a field of the row or
+// params struct it fills, so interposing another struct here would only
+// duplicate that one. Scoped to this fn — a new over-wide function
+// elsewhere still warns.
+#[allow(clippy::too_many_arguments)]
 fn create_cmd(
     project: &str,
     id: &str,
@@ -93,6 +98,11 @@ fn create_cmd(
     }
 }
 
+// Fixture builder: every parameter maps 1:1 onto a field of the row or
+// params struct it fills, so interposing another struct here would only
+// duplicate that one. Scoped to this fn — a new over-wide function
+// elsewhere still warns.
+#[allow(clippy::too_many_arguments)]
 fn update_cmd(
     project: &str,
     id: &str,
@@ -666,7 +676,7 @@ async fn revision_lookup_returns_none_for_wrong_project() {
         .revision_lookup(RevisionLookupRequest {
             project_id: &project_b,
             note_id: primary,
-            revision_id: revision_id,
+            revision_id,
         })
         .await
         .unwrap();

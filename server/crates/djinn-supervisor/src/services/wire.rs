@@ -1398,8 +1398,10 @@ mod tests {
                     timeout_seconds: 300,
                     failure_policy: Default::default(),
                 }],
+                // No `..Default::default()`: these four ARE every field of
+                // LifecycleHooks. Listing them exhaustively also means a new
+                // hook kind breaks this test until the round-trip covers it.
                 pre_verification: vec![],
-                ..Default::default()
             },
             ..EnvironmentConfig::empty()
         };

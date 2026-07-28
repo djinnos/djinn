@@ -38,15 +38,28 @@ use crate::repo_graph::{
 /// Every test that touches any of these vars MUST hold this single lock for
 /// its whole body so the mutations are fully serialized (a per-var or
 /// per-module lock is NOT enough — the vars are shared across modules).
-pub(crate) static PIPELINE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+///
+/// This is a `tokio::sync::Mutex`, not a `std` one, because most holders are
+/// `async` tests that await while holding it for their whole body — a `std`
+/// guard held across an await point blocks the executor thread rather than the
+/// task (clippy::await_holding_lock), so under a multi-thread runtime it can
+/// stall unrelated tasks and under a `current_thread` one it can deadlock
+/// outright. Poison recovery disappears with the switch and is not missed:
+/// tokio's mutex has no poisoning, so one panicking env-mutating test already
+/// cannot cascade into spurious failures across every other holder — which is
+/// exactly what the previous `PoisonError::into_inner` call bought by hand.
+pub(crate) static PIPELINE_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-/// Acquire [`PIPELINE_ENV_LOCK`], transparently recovering from a poisoned
-/// mutex so one panicking env-mutating test does not cascade into spurious
-/// failures across every other test that shares the lock.
-pub(crate) fn lock_pipeline_env() -> std::sync::MutexGuard<'static, ()> {
-    PIPELINE_ENV_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+/// Acquire [`PIPELINE_ENV_LOCK`] from an `async` test. Hold the guard for the
+/// whole test body.
+pub(crate) async fn lock_pipeline_env() -> tokio::sync::MutexGuard<'static, ()> {
+    PIPELINE_ENV_LOCK.lock().await
+}
+
+/// Acquire [`PIPELINE_ENV_LOCK`] from a synchronous `#[test]`. Panics if called
+/// from inside a runtime — async callers must use [`lock_pipeline_env`].
+pub(crate) fn lock_pipeline_env_blocking() -> tokio::sync::MutexGuard<'static, ()> {
+    PIPELINE_ENV_LOCK.blocking_lock()
 }
 
 /// Open a fresh test database (isolated Dolt branch via

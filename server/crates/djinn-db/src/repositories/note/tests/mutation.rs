@@ -2,6 +2,19 @@ use futures::future::join_all;
 
 use super::*;
 
+/// One `note_revision_events` row as projected by the ledger assertions below:
+/// `(event_kind, note_seq, content_before, content_after, confidence_before,
+/// confidence_after)`. Named so the `sqlx::query_as` binding stays readable
+/// (clippy::type_complexity).
+type RevisionEventRow = (
+    String,
+    Option<i64>,
+    Option<String>,
+    Option<String>,
+    Option<f64>,
+    Option<f64>,
+);
+
 fn create_command(project_id: &str, note_id: String) -> NoteRevisionMutation {
     NoteRevisionMutation {
         project_id: project_id.to_owned(),
@@ -168,7 +181,7 @@ async fn revision_mutation_persists_every_repository_event_shape() {
     .await
     .unwrap();
 
-    let rows: Vec<(String, Option<i64>, Option<String>, Option<String>, Option<f64>, Option<f64>)> = sqlx::query_as("SELECT event_kind, note_seq, content_before, content_after, confidence_before, confidence_after FROM note_revision_events WHERE project_id = $1 ORDER BY note_seq NULLS LAST")
+    let rows: Vec<RevisionEventRow> = sqlx::query_as("SELECT event_kind, note_seq, content_before, content_after, confidence_before, confidence_after FROM note_revision_events WHERE project_id = $1 ORDER BY note_seq NULLS LAST")
         .bind(&project.id).fetch_all(db.pool()).await.unwrap();
     assert_eq!(rows.len(), 5);
     assert_eq!(

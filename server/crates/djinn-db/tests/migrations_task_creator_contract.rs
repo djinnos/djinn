@@ -25,8 +25,12 @@
 //! - Catalog non-nullability and direct SQL NULL rejection.
 //! - Deleting a referenced user fails under NOT NULL + FK.
 
+// `pub(crate)` so `effective_creator_rollout.rs`, which includes this whole
+// file as its canonical migration-142 matrix, can reach these helpers THROUGH
+// that inclusion. Including `support/` a second time there would compile the
+// same module twice into one test binary (clippy::duplicate_mod).
 #[path = "support/migrations_task_creator_contract.rs"]
-mod migrations_task_creator_contract_support;
+pub(crate) mod migrations_task_creator_contract_support;
 
 use djinn_db::migrations::MigrationContext;
 use migrations_task_creator_contract_support::*;

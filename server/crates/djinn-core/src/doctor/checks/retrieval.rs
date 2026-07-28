@@ -899,7 +899,7 @@ mod tests {
             "DJINN_RETRIEVAL_HEALTH_QUERY_FLOOR",
         ] {
             unsafe {
-                let _ = std::env::remove_var(var);
+                std::env::remove_var(var);
             }
         }
     }
