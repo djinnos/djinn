@@ -7211,12 +7211,16 @@ mod tests {
         let db = test_db();
         let (bus, captured) = capturing_bus();
         let repo = ProposalRepository::new(db.clone(), bus);
-        let proposal = repo.create(create_input("Caller-owned boundaries")).await.unwrap();
+        let proposal = repo
+            .create(create_input("Caller-owned boundaries"))
+            .await
+            .unwrap();
         captured.lock().unwrap().clear();
 
-        let committed_source_task_id = format!("commit-{}", uuid::Uuid::now_v7());
+        let committed_source_task_id = uuid::Uuid::now_v7().to_string();
         let committed_findings =
-            serde_json::to_value(sample_evidence_findings("committed caller-owned finding")).unwrap();
+            serde_json::to_value(sample_evidence_findings("committed caller-owned finding"))
+                .unwrap();
         let committed = {
             let mut tx = db.pool().begin().await.unwrap();
             let entry = repo
@@ -7251,9 +7255,10 @@ mod tests {
             Some(committed_source_task_id.as_str())
         );
 
-        let rolled_back_source_task_id = format!("rollback-{}", uuid::Uuid::now_v7());
+        let rolled_back_source_task_id = uuid::Uuid::now_v7().to_string();
         let rolled_back_findings =
-            serde_json::to_value(sample_evidence_findings("rolled-back caller-owned finding")).unwrap();
+            serde_json::to_value(sample_evidence_findings("rolled-back caller-owned finding"))
+                .unwrap();
         let rolled_back = {
             let mut tx = db.pool().begin().await.unwrap();
             let entry = repo
@@ -7289,10 +7294,13 @@ mod tests {
     async fn caller_owned_debate_drop_discards_uncommitted_entry() {
         let db = test_db();
         let repo = ProposalRepository::new(db.clone(), EventBus::noop());
-        let proposal = repo.create(create_input("Caller-owned drop")).await.unwrap();
-        let source_task_id = format!("drop-{}", uuid::Uuid::now_v7());
-        let findings = serde_json::to_value(sample_evidence_findings("dropped caller-owned finding"))
+        let proposal = repo
+            .create(create_input("Caller-owned drop"))
+            .await
             .unwrap();
+        let source_task_id = uuid::Uuid::now_v7().to_string();
+        let findings =
+            serde_json::to_value(sample_evidence_findings("dropped caller-owned finding")).unwrap();
 
         let dropped_entry_id = {
             let mut tx = db.pool().begin().await.unwrap();
@@ -7322,12 +7330,15 @@ mod tests {
         let db = test_db();
         let (bus, captured) = capturing_bus();
         let repo = ProposalRepository::new(db.clone(), bus);
-        let proposal = repo.create(create_input("Wrapper event boundary")).await.unwrap();
+        let proposal = repo
+            .create(create_input("Wrapper event boundary"))
+            .await
+            .unwrap();
         captured.lock().unwrap().clear();
 
-        let source_task_id = format!("wrapper-{}", uuid::Uuid::now_v7());
-        let findings = serde_json::to_value(sample_evidence_findings("wrapper committed finding"))
-            .unwrap();
+        let source_task_id = uuid::Uuid::now_v7().to_string();
+        let findings =
+            serde_json::to_value(sample_evidence_findings("wrapper committed finding")).unwrap();
         let returned = repo
             .add_debate_trail_entry(evidence_findings_debate_input(
                 &proposal.id,
@@ -7347,7 +7358,11 @@ mod tests {
         assert_eq!(durable.body_metadata, returned.body_metadata);
 
         let events = captured.lock().unwrap();
-        assert_eq!(events.len(), 1, "the pre-registered listener sees one event");
+        assert_eq!(
+            events.len(),
+            1,
+            "the pre-registered listener sees one event"
+        );
         assert_eq!(events[0].entity_type, "proposal_debate_trail");
         assert_eq!(events[0].action, "created");
         assert_eq!(events[0].payload["proposal_id"], proposal.id);
@@ -7358,12 +7373,15 @@ mod tests {
     async fn caller_owned_debate_wrapper_validation_failure_emits_no_created_event() {
         let (bus, captured) = capturing_bus();
         let repo = ProposalRepository::new(test_db(), bus);
-        let proposal = repo.create(create_input("Wrapper failed event boundary")).await.unwrap();
+        let proposal = repo
+            .create(create_input("Wrapper failed event boundary"))
+            .await
+            .unwrap();
         captured.lock().unwrap().clear();
 
-        let source_task_id = format!("failed-{}", uuid::Uuid::now_v7());
-        let findings = serde_json::to_value(sample_evidence_findings("invalid blocking finding"))
-            .unwrap();
+        let source_task_id = uuid::Uuid::now_v7().to_string();
+        let findings =
+            serde_json::to_value(sample_evidence_findings("invalid blocking finding")).unwrap();
         let error = repo
             .add_debate_trail_entry(ProposalDebateTrailCreateInput {
                 blocking: true,
