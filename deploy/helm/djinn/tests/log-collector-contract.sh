@@ -45,12 +45,19 @@ for expected in ('automountServiceAccountToken: false', 'mountPath: /source/pods
                  'uri: http://127.0.0.1:8687/ingest', 'retry_statuses: [507]',
                  'max_size: 67108864', 'when_full: drop_newest',
                  'for_each(json) -> |key, value| {', 'map_values(json, recursive: true)',
-                 'original_bytes = length(value)', 'for_each(split(value, ""))',
-                 'length(capped) + length(character) <= 2048', 'to_string(original_bytes)'):
+                 'original_bytes = length(text)', 'for_each(split(text, ""))',
+                 'length(capped) + length(character) <= 2048', 'to_string(original_bytes)',
+                 'json = set!(json, [key], "***REDACTED***")',
+                 'branch = set!(branch, [key], "***REDACTED***")'):
     assert expected in text, expected
 assert 'for_each(object:' not in text
 assert 'strlen!' not in text
 assert 'slice!(value, 0, 2048)' not in text
+# VRL has no index assignment for object keys; `json[key] = ...` is a syntax
+# error that only surfaces when Vector builds the topology (`vector validate`
+# accepts it), so assert the invalid form can never reappear in the ConfigMap.
+assert 'json[key]' not in text
+assert 'nested[key]' not in text
 vector = text[text.index('- name: vector'):text.index('- name: rotator')]
 rotator = text[text.index('- name: rotator'):text.index('volumes:')]
 assert '/source/pods' in vector and '/store' not in vector
@@ -122,7 +129,7 @@ sources:
     framing:
       method: character_delimited
       character_delimited:
-        delimiter: "\u001e"
+        delimiter: "\\x1e"
 transforms:
   sanitize:
     type: remap

@@ -15,8 +15,17 @@ TMPDIR_RENDER=$(mktemp -d)
 trap 'rm -rf "$TMPDIR_RENDER"' EXIT
 
 assert_projects_pvc() {
-    local fullname=$1 expected=$2 output="$TMPDIR_RENDER/$fullname.yaml"
+    # `local` is a builtin: every word on its line is expanded before any of
+    # its assignments run, so `output=...$fullname...` on this same line would
+    # read an unset variable and trip `set -u`. Keep the derived value separate.
+    local fullname=$1 expected=$2
+    local output="$TMPDIR_RENDER/$fullname.yaml"
+    # `--is-upgrade`: deployment-server.yaml hard-requires
+    # migration.designatedOperatorSecret on fresh installs, and Helm evaluates
+    # every template before --show-only filters the output. The ConfigMap under
+    # test is identical on install and upgrade.
     helm template projects-pvc-test "$CHART_DIR" \
+        --is-upgrade \
         --show-only templates/configmap.yaml \
         --set-string "fullnameOverride=$fullname" > "$output"
 

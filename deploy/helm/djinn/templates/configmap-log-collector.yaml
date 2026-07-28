@@ -26,7 +26,10 @@ data:
         source: |
           parsed, err = parse_regex(.message, r'^(?P<timestamp>[^ ]+) (?P<stream>stdout|stderr) [^ ] (?P<message>.*)$')
           if err != null { abort }
-          path, err = parse_regex!(.file, r'^/source/pods/(?P<namespace>[^_]+)_(?P<pod_name>[^_]+)_(?P<pod_uid>[0-9a-f-]+)/(?P<container>[^/]+)/')
+          # `parse_regex!` aborts on failure, so pairing it with an `, err`
+          # assignment is an E104 compile error ("unnecessary error assignment")
+          # that leaves `path` undefined for every line below.
+          path = parse_regex!(.file, r'^/source/pods/(?P<namespace>[^_]+)_(?P<pod_name>[^_]+)_(?P<pod_uid>[0-9a-f-]+)/(?P<container>[^/]+)/')
           .timestamp = parsed.timestamp
           .stream = parsed.stream
           .message = parsed.message
@@ -38,53 +41,71 @@ data:
         type: remap
         inputs: [cri]
         source: |
+          # VRL type inference does not cross transform boundaries: every remap
+          # program sees `.message` as `any`, so `cri` assigning it a captured
+          # string upstream is not enough. Re-establish the string type here or
+          # every `contains`/`replace` below is fallible and refuses to compile.
+          .message = string!(.message)
           # Match the infra_death_log_tail policy case-insensitively. JSON is
           # changed only after successful parsing; malformed/plain/multiline and
           # panic-summary records deliberately pass through byte-for-byte.
           if !contains(.message, "\n") && !contains(.message, "\r") && !contains(.message, "djinn.panic_summary.v1") {
             json, err = parse_json(.message)
             if err == null && is_object(json) {
+              # VRL objects are immutable values and its index-assignment form
+              # accepts integer literals only, so a variable object key can
+              # never be assigned by indexing. Every field rewrite below goes
+              # through `set!(object, [key], value)` and rebinds the variable.
+              json = object!(json)
               # Transform the root object, then use map_values' recursive walk
               # to apply the same policy to every nested object (including
               # objects held in arrays).
               for_each(json) -> |key, value| {
-                normalized = replace(downcase(string!(key)), r'-', "_")
+                normalized = replace(downcase(key), r'-', "_")
                 if contains(normalized, "authorization") || contains(normalized, "apikey") || contains(normalized, "api_key") || contains(normalized, "access_token") || contains(normalized, "secret") || contains(normalized, "bearer") || contains(normalized, "password") || contains(normalized, "passwd") {
-                  json[key] = "***REDACTED***"
-                } else if (key == "statement" || key == "sql" || key == "query" || key == "request_body" || key == "response_body" || key == "body") && is_string(value) && length(value) > 2048 {
-                  original_bytes = length(value)
-                  capped = ""
-                  # split on the empty string yields UTF-8 characters, unlike
-                  # slice which accepts raw byte offsets. Keep only complete
-                  # characters whose accumulated bytes fit the cap.
-                  for_each(split(value, "")) -> |_index, character| {
-                    if length(capped) + length(character) <= 2048 { capped = capped + character }
+                  json = set!(json, [key], "***REDACTED***")
+                } else if (key == "statement" || key == "sql" || key == "query" || key == "request_body" || key == "response_body" || key == "body") && is_string(value) {
+                  text = string!(value)
+                  if length(text) > 2048 {
+                    original_bytes = length(text)
+                    capped = ""
+                    # split on the empty string yields UTF-8 characters, unlike
+                    # slice which accepts raw byte offsets. Keep only complete
+                    # characters whose accumulated bytes fit the cap.
+                    for_each(split(text, "")) -> |_index, character| {
+                      if length(capped) + length(character) <= 2048 { capped = capped + character }
+                    }
+                    json = set!(json, [key], capped + "…[FIELD_TRUNCATED original_bytes=" + to_string(original_bytes) + "]")
                   }
-                  json[key] = capped + "…[FIELD_TRUNCATED original_bytes=" + to_string(original_bytes) + "]"
                 }
               }
               json = map_values(json, recursive: true) -> |nested| {
                 if is_object(nested) {
-                  for_each(nested) -> |key, value| {
-                    normalized = replace(downcase(string!(key)), r'-', "_")
+                  branch = object!(nested)
+                  for_each(branch) -> |key, value| {
+                    normalized = replace(downcase(key), r'-', "_")
                     if contains(normalized, "authorization") || contains(normalized, "apikey") || contains(normalized, "api_key") || contains(normalized, "access_token") || contains(normalized, "secret") || contains(normalized, "bearer") || contains(normalized, "password") || contains(normalized, "passwd") {
-                      nested[key] = "***REDACTED***"
-                    } else if (key == "statement" || key == "sql" || key == "query" || key == "request_body" || key == "response_body" || key == "body") && is_string(value) && length(value) > 2048 {
-                      original_bytes = length(value)
-                      capped = ""
-                      for_each(split(value, "")) -> |_index, character| {
-                        if length(capped) + length(character) <= 2048 { capped = capped + character }
+                      branch = set!(branch, [key], "***REDACTED***")
+                    } else if (key == "statement" || key == "sql" || key == "query" || key == "request_body" || key == "response_body" || key == "body") && is_string(value) {
+                      text = string!(value)
+                      if length(text) > 2048 {
+                        original_bytes = length(text)
+                        capped = ""
+                        for_each(split(text, "")) -> |_index, character| {
+                          if length(capped) + length(character) <= 2048 { capped = capped + character }
+                        }
+                        branch = set!(branch, [key], capped + "…[FIELD_TRUNCATED original_bytes=" + to_string(original_bytes) + "]")
                       }
-                      nested[key] = capped + "…[FIELD_TRUNCATED original_bytes=" + to_string(original_bytes) + "]"
                     }
                   }
+                  nested = branch
                 }
                 nested
               }
               .message = encode_json(json)
             }
           }
-          .message = replace(.message, r'(?i)^([[:space:]]*(?:API_KEY|APIKEY|SECRET|TOKEN|PASSWORD|PASSWD|AUTH|BEARER|OPENAI_API_KEY|ANTHROPIC_API_KEY|GITHUB_TOKEN|GH_TOKEN|AWS_SECRET|AWS_SESSION_TOKEN)(?:_[A-Z0-9_]+)?=).*$', "${1}***REDACTED***")
+          .message = replace(.message, r'(?i)^([[:space:]]*(?:API_KEY|APIKEY|SECRET|TOKEN|PASSWORD|PASSWD|AUTH|BEARER|OPENAI_API_KEY|ANTHROPIC_API_KEY|GITHUB_TOKEN|GH_TOKEN|AWS_SECRET|AWS_SESSION_TOKEN)(?:_[A-Z0-9_]+)?=).*$', "$${1}***REDACTED***")
       record:
         type: remap
         inputs: [sanitize]
