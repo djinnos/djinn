@@ -8,7 +8,7 @@ edition = "2024"
 doctest = false
 
 [features]
-test-support = []
+test-support = ["dep:futures"]
 qdrant = ["dep:qdrant-client"]
 
 [dependencies]
@@ -21,6 +21,7 @@ djinn-stack = { path = "../djinn-stack" }
 djinn-memory = { path = "../djinn-memory", features = ["sqlx"] }
 djinn-spec-lint = { path = "../djinn-spec-lint" }
 dirs = "6"
+futures = { version = "0.3", optional = true }
 globset = "0.4"
 ring = "0.17"
 serde = { version = "1", features = ["derive"] }
@@ -39,7 +40,6 @@ workspace-hack.workspace = true
 
 [dev-dependencies]
 djinn-db = { path = ".", features = ["test-support"] }
-futures = "0.3"
 proptest = "1"
 rstest = "0.24"
 serde_json = "1"
