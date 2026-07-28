@@ -175,36 +175,25 @@ impl ProposalRepositoryRefinementPhantomActiveSource {
             self.db.clone(),
             crate::events::event_bus_for(&self.events_tx),
         );
-        let runs = match repository.load_recoverable_refinement_runs().await {
-            Ok(runs) => runs,
+        let exact_runs = match repository
+            .load_recoverable_refinement_run_snapshots(HEARTBEAT_GRACE_MILLIS)
+            .await
+        {
+            Ok(exact_runs) => exact_runs,
             Err(error) => {
                 warn!(%error, "refinement_phantom_active doctor: failed to enumerate active runs");
                 return;
             }
         };
-        let mut snapshots = Vec::with_capacity(runs.len());
-        for run in runs {
-            match repository
-                .load_refinement_run_snapshot(djinn_db::LoadRefinementRunSnapshotRequest {
-                    run_id: run.run_id,
-                    heartbeat_grace_millis: HEARTBEAT_GRACE_MILLIS,
-                })
-                .await
-            {
-                Ok(Some(exact)) if exact.generation == run.generation => {
-                    snapshots.push(RefinementPhantomActiveSnapshot {
-                        proposal_id: exact.proposal_id,
-                        generation: exact.generation,
-                        snapshot: exact.snapshot,
-                        observed_at: exact.observed_at,
-                    })
-                }
-                Ok(_) => {}
-                Err(error) => {
-                    warn!(%error, "refinement_phantom_active doctor: failed exact-run observation")
-                }
-            }
-        }
+        let snapshots = exact_runs
+            .into_iter()
+            .map(|exact| RefinementPhantomActiveSnapshot {
+                proposal_id: exact.proposal_id,
+                generation: exact.generation,
+                snapshot: exact.snapshot,
+                observed_at: exact.observed_at,
+            })
+            .collect();
         *self.cache.write().await = snapshots;
     }
 
@@ -359,6 +348,49 @@ mod tests {
             MemoryRefinementPhantomActiveSource::new(vec![]),
         ));
         assert!(clean.run().unwrap().is_empty(), "clean/no-run fixture");
+    }
+
+    #[test]
+    fn shared_snapshot_edge_states_have_the_same_doctor_outcome() {
+        let mut claimed = stale("run-claimed");
+        let mut claimed_intent = pending_intent("run-claimed");
+        claimed_intent.state = RefinementIntentState::Claimed;
+        claimed_intent.lease_expires_at = Some(DbTimestamp(20_000));
+        claimed.snapshot.intents.push(claimed_intent);
+
+        let mut heartbeat_grace = stale("run-heartbeat-grace");
+        heartbeat_grace
+            .snapshot
+            .heartbeat
+            .as_mut()
+            .unwrap()
+            .heartbeat_at = DbTimestamp(9_999);
+
+        let mut expired_claim = stale("run-expired-claim");
+        let mut expired_intent = pending_intent("run-expired-claim");
+        expired_intent.state = RefinementIntentState::Claimed;
+        expired_intent.lease_expires_at = Some(DbTimestamp(2));
+        expired_claim.snapshot.intents.push(expired_intent);
+
+        let mut terminal = stale("run-terminal");
+        terminal.snapshot.run.state = RefinementRunState::Terminal;
+
+        for (name, fixture, expected_findings) in [
+            ("claimed intent", claimed, 0),
+            ("heartbeat grace", heartbeat_grace, 0),
+            ("expired claim", expired_claim, 1),
+            ("terminal", terminal, 0),
+            ("truly stale", stale("run-stale"), 1),
+        ] {
+            let check = RefinementPhantomActiveCheck::new(Arc::new(
+                MemoryRefinementPhantomActiveSource::new(vec![fixture]),
+            ));
+            assert_eq!(
+                check.run().expect("run doctor check").len(),
+                expected_findings,
+                "{name} must follow the shared liveness evaluator"
+            );
+        }
     }
 
     #[test]
