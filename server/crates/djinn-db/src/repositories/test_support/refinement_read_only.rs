@@ -24,6 +24,21 @@ pub struct RefinementDispatchIntentRowForTest {
     pub terminal_at: Option<String>,
 }
 
+/// The exact column tuple `refinement_dispatch_intents` is projected into
+/// before it is mapped onto [`RefinementDispatchIntentRowForTest`]: `id`,
+/// `state`, `claimed_by`, `claimed_at`, `claim_expires_at`, `task_id`,
+/// `next_intent_id`, `terminal_at`.
+type RefinementDispatchIntentQueryRow = (
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
+
 /// Complete durable state used to prove a refinement observation is read-only.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RefinementRunReadOnlySnapshotForTest {
@@ -70,16 +85,7 @@ pub async fn refinement_run_read_only_snapshot_for_test(
         .fetch_all(db.pool())
         .await
         .expect("failed to read refinement lifecycle rows");
-    let dispatch_intents: Vec<(
-        String,
-        String,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-    )> = sqlx::query_as(
+    let dispatch_intents: Vec<RefinementDispatchIntentQueryRow> = sqlx::query_as(
         "SELECT id, state, claimed_by, claimed_at, claim_expires_at, task_id, next_intent_id, terminal_at \
          FROM refinement_dispatch_intents WHERE run_id = $1 ORDER BY round, id",
     )
