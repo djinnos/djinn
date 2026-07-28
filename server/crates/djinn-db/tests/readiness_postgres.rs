@@ -336,6 +336,18 @@ async fn area_callback_redelivery_conflict_and_retry_are_postgres_transactional(
             .expect("accepted"),
         ReadinessCallbackOutcome::Accepted
     );
+    let accepted_outputs: Vec<serde_json::Value> = sqlx::query_scalar(
+        "SELECT result FROM readiness_area_result_outputs WHERE attempt_id=$1",
+    )
+    .bind(&first.attempt.id)
+    .fetch_all(db.pool())
+    .await
+    .expect("load accepted callback output");
+    assert_eq!(
+        accepted_outputs,
+        vec![callback.result.clone()],
+        "the current successful winner persists its complete callback document"
+    );
     assert_eq!(
         repo.ingest_area_result(callback.clone())
             .await
@@ -347,6 +359,17 @@ async fn area_callback_redelivery_conflict_and_retry_are_postgres_transactional(
     assert_eq!(
         repo.ingest_area_result(changed).await.expect("conflict"),
         ReadinessCallbackOutcome::Conflict
+    );
+    let output_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM readiness_area_result_outputs WHERE attempt_id=$1",
+    )
+    .bind(&first.attempt.id)
+    .fetch_one(db.pool())
+    .await
+    .expect("count accepted winner outputs");
+    assert_eq!(
+        output_count, 1,
+        "redeliveries and conflicting duplicates do not add another output row"
     );
     let findings: i64 =
         sqlx::query_scalar("SELECT count(*) FROM readiness_guardrail_findings WHERE attempt_id=$1")
@@ -368,18 +391,29 @@ async fn area_callback_redelivery_conflict_and_retry_are_postgres_transactional(
     assert_eq!(finding, (0.9, serde_json::json!([{"path":"src/auth.rs"}])));
 
     let second = &fanout[1];
-    let timeout = ReadinessAreaResultCallback {
+    let failed = ReadinessAreaResultCallback {
         run_id: kickoff.run.id.clone(),
         area_id: second.area.id.clone(),
         attempt_id: second.attempt.id.clone(),
         correlation_key: second.attempt.correlation_key.clone(),
         task_id: second.task.id.clone(),
-        status: "timed_out".into(),
+        status: "failed".into(),
         result: serde_json::json!({}),
     };
     assert_eq!(
-        repo.ingest_area_result(timeout).await.expect("timeout"),
+        repo.ingest_area_result(failed).await.expect("failed"),
         ReadinessCallbackOutcome::Accepted
+    );
+    let failed_output_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM readiness_area_result_outputs WHERE attempt_id=$1",
+    )
+    .bind(&second.attempt.id)
+    .fetch_one(db.pool())
+    .await
+    .expect("count failed callback outputs");
+    assert_eq!(
+        failed_output_count, 0,
+        "terminal failed callbacks do not persist accepted output documents"
     );
     let retry = repo
         .retry_area_attempt(RetryReadinessAreaAttempt {
@@ -406,6 +440,18 @@ async fn area_callback_redelivery_conflict_and_retry_are_postgres_transactional(
     assert_eq!(
         repo.ingest_area_result(late).await.expect("late"),
         ReadinessCallbackOutcome::Ignored
+    );
+    let late_output_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM readiness_area_result_outputs WHERE attempt_id IN ($1,$2)",
+    )
+    .bind(&second.attempt.id)
+    .bind(&retry.attempt.id)
+    .fetch_one(db.pool())
+    .await
+    .expect("count failed and superseded callback outputs");
+    assert_eq!(
+        late_output_count, 0,
+        "late non-current callbacks do not persist output documents"
     );
 }
 
@@ -675,8 +721,8 @@ async fn area_callback_timeout_success_race_and_invalid_output_are_postgres_tran
             .expect("invalid terminalizes"),
         ReadinessCallbackOutcome::Accepted
     );
-    let invalid_state: (String, i64) = sqlx::query_as("SELECT a.status,(SELECT count(*) FROM readiness_guardrail_findings f WHERE f.attempt_id=a.id) FROM readiness_area_attempts a WHERE a.id=$1").bind(&invalid.attempt.id).fetch_one(db.pool()).await.expect("invalid state");
-    assert_eq!(invalid_state, ("invalid".into(), 0));
+    let invalid_state: (String, i64, i64) = sqlx::query_as("SELECT a.status,(SELECT count(*) FROM readiness_guardrail_findings f WHERE f.attempt_id=a.id),(SELECT count(*) FROM readiness_area_result_outputs o WHERE o.attempt_id=a.id) FROM readiness_area_attempts a WHERE a.id=$1").bind(&invalid.attempt.id).fetch_one(db.pool()).await.expect("invalid state");
+    assert_eq!(invalid_state, ("invalid".into(), 0, 0));
 }
 
 #[derive(sqlx::FromRow)]
