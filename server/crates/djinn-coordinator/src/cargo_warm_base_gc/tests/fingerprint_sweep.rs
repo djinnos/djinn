@@ -1,5 +1,5 @@
 use super::super::{LockOutcome, RetainReason, report_only_fingerprint_sweep};
-use super::{Activity, ActivitySnapshot, Lock, Warm, WarmBaseEntry, WarmBaseInventory, snapshot};
+use super::{Activity, ActivitySnapshot, Lock, Warm, WarmBaseEntry, snapshot, warm_inventory};
 use crate::context::CacheCleanupMode;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -157,11 +157,7 @@ async fn dry_run_and_delete_report_identical_candidates_and_preserve_artifacts()
         path: base.clone(),
         size_bytes: 0,
     };
-    let inventory = WarmBaseInventory {
-        entries: vec![entry],
-        ignored: 0,
-        unrecognized: Vec::new(),
-    };
+    let inventory = warm_inventory(vec![entry]);
 
     let dry_run = report_only_fingerprint_sweep(
         inventory.clone(),
@@ -201,11 +197,7 @@ async fn active_task_run_retains_base() {
         path: PathBuf::from("base"),
         size_bytes: 0,
     };
-    let inventory = WarmBaseInventory {
-        entries: vec![entry],
-        ignored: 0,
-        unrecognized: Vec::new(),
-    };
+    let inventory = warm_inventory(vec![entry]);
     let activity = Activity(Ok(ActivitySnapshot {
         has_active_task_run: true,
         ..snapshot()
@@ -234,11 +226,7 @@ async fn guard_error_retains_base_and_reports_error() {
         path: PathBuf::from("base"),
         size_bytes: 0,
     };
-    let inventory = WarmBaseInventory {
-        entries: vec![entry],
-        ignored: 0,
-        unrecognized: Vec::new(),
-    };
+    let inventory = warm_inventory(vec![entry]);
 
     let report = report_only_fingerprint_sweep(
         inventory,
@@ -262,11 +250,7 @@ async fn comprehensive_fixture_has_report_only_mode_parity_and_byte_preservation
     fs::create_dir(&base).expect("base");
     let expected_projected_bytes = comprehensive_fixture(&base);
     let before = fixture_snapshot(&base);
-    let inventory = WarmBaseInventory {
-        entries: vec![fixture_entry(&base)],
-        ignored: 0,
-        unrecognized: Vec::new(),
-    };
+    let inventory = warm_inventory(vec![fixture_entry(&base)]);
 
     let dry_run = report_only_fingerprint_sweep(
         inventory.clone(),
@@ -307,11 +291,7 @@ async fn lock_db_kubernetes_and_traversal_failures_preserve_fixture_and_close_ca
     fs::create_dir(&base).expect("base");
     comprehensive_fixture(&base);
     let before = fixture_snapshot(&base);
-    let inventory = WarmBaseInventory {
-        entries: vec![fixture_entry(&base)],
-        ignored: 0,
-        unrecognized: Vec::new(),
-    };
+    let inventory = warm_inventory(vec![fixture_entry(&base)]);
 
     let lock_busy = report_only_fingerprint_sweep(
         inventory.clone(),
@@ -352,11 +332,7 @@ async fn lock_db_kubernetes_and_traversal_failures_preserve_fixture_and_close_ca
         .expect("empty fingerprint unit");
     let traversal_before = fixture_snapshot(&traversal_base);
     let traversal = report_only_fingerprint_sweep(
-        WarmBaseInventory {
-            entries: vec![fixture_entry(&traversal_base)],
-            ignored: 0,
-            unrecognized: Vec::new(),
-        },
+        warm_inventory(vec![fixture_entry(&traversal_base)]),
         &Activity(Ok(snapshot())),
         &Warm(Ok(false)),
         &Lock(LockOutcome::Available),

@@ -64,11 +64,7 @@ async fn idle_eviction_deletes_only_the_selected_mold_variant() {
         succeed: true,
     };
     let result = evict_idle_warm_bases(
-        WarmBaseInventory {
-            entries: vec![selected],
-            ignored: 0,
-            unrecognized: Vec::new(),
-        },
+        warm_inventory(vec![selected]),
         &Activity(Ok(snapshot())),
         &Warm(Ok(false)),
         &locks,
