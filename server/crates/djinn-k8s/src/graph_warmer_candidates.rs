@@ -720,7 +720,10 @@ mod tests {
             }))
             .expect("pod fixture")
         };
-        assert_eq!(pod_lifecycle(&pod("Succeeded")), WarmObjectLifecycle::Terminal);
+        assert_eq!(
+            pod_lifecycle(&pod("Succeeded")),
+            WarmObjectLifecycle::Terminal
+        );
         assert_eq!(pod_lifecycle(&pod("Failed")), WarmObjectLifecycle::Terminal);
         assert_eq!(pod_lifecycle(&pod("Running")), WarmObjectLifecycle::Live);
         assert_eq!(pod_lifecycle(&pod("Pending")), WarmObjectLifecycle::Live);
