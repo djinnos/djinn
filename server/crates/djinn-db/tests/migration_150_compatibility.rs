@@ -53,12 +53,13 @@ async fn migration_150_wrapper_values_survive_upgrade_and_are_ignored_by_preset_
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(&preset.env)
                 .expect("repository env is valid JSON"),
-            serde_json::from_str(fixture.ordinary_preset.env).expect("fixture env is valid JSON")
+            serde_json::from_str::<serde_json::Value>(fixture.ordinary_preset.env)
+                .expect("fixture env is valid JSON")
         );
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(&preset.resources)
                 .expect("repository resources are valid JSON"),
-            serde_json::from_str(fixture.ordinary_preset.resources)
+            serde_json::from_str::<serde_json::Value>(fixture.ordinary_preset.resources)
                 .expect("fixture resources are valid JSON")
         );
         assert_eq!(preset.conn_template, fixture.ordinary_preset.conn_template);
