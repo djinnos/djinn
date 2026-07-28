@@ -340,6 +340,36 @@ monitoring:
 # RWX is required for the mirrors PVC on multi-node clusters — the controller
 # writes mirror clones and task-run Job Pods read from them. The cache PVC is
 # similarly RWX so cargo/pnpm/pip caches survive across task runs.
+#
+# -----------------------------------------------------------------------------
+# `size:` IS A REQUEST, NOT A QUOTA. READ THIS BEFORE RAISING ONE.
+# -----------------------------------------------------------------------------
+# Every `size:` below lands in `spec.resources.requests.storage` on a PVC. What
+# that means depends entirely on the provisioner:
+#
+#   local-path (k3s / kind — the default on the VPS): the provisioner mkdirs a
+#     directory on the node filesystem and hands it over. It applies no quota of
+#     any kind. The number is ADVISORY. Measured on the production VPS:
+#     `djinn-zot` and `djinn-cache` are declared 40Gi and each holds 83G. No
+#     layer complains, because no layer is checking.
+#   CSI block volumes (EBS, PD, Ceph RBD, Longhorn, TopoLVM …): the number IS
+#     enforced — the filesystem is exactly that big and writes past it get
+#     ENOSPC. Undersizing here is a hard outage, not a warning.
+#
+# So a number in this file is either meaningless or dangerous, never a
+# backstop. Two consequences the chart deliberately accepts:
+#
+#  1. These defaults are NOT raised to match observed production usage. On a
+#     non-expandable StorageClass (local-path is non-expandable) `helm upgrade`
+#     with a larger request is REJECTED by the API server, wedging the release.
+#     Growing a number that enforces nothing is not worth breaking upgrades for.
+#  2. The real bound is on the PRODUCERS, not the volumes: Zot tag/cache
+#     retention (`imagePipeline.zot.retention`), `cacheCleanup.mode`,
+#     `graphRetention`, and node-level kubelet image GC + eviction thresholds.
+#     Those are the things that actually stop growth. See
+#     `docs/deploy/vps.md` for the operator-side quota and alerting options,
+#     including why the chart does not ship a PVC-fullness alert it cannot
+#     actually make fire.
 storage:
   # ---------------------------------------------------------------------------
   # Volume ownership contract (task pwrr / goxi)
@@ -759,10 +789,25 @@ imagePipeline:
     # pipeline — avoids wiring pull-secrets onto every Job Pod Spec.
     # Leave false in environments where image confidentiality matters.
     anonymousPull: false
-    # Catalog image tag retention policy. When enabled, Zot prunes old tags
-    # from djinn-image-* catalog repositories on a schedule, keeping only the
-    # newest N tags per repo. BuildKit cache repos (djinn-buildkitd-*) and any
-    # other non-catalog repos are never touched.
+    # Zot retention policies. Two repo families grow without bound and each
+    # needs a DIFFERENT policy shape, because they grow differently:
+    #
+    #   djinn-image-*  Shared catalog image repos. Every content hash pushes a
+    #                  NEW TAG and nothing removes the old ones. Growth vector
+    #                  = tag count → newest-N tag retention (`newestTags`).
+    #   cache/*        BuildKit registry cache repos. `build_job.rs` exports
+    #                  `--export-cache type=registry,ref=<reg>/cache/<subject>,
+    #                  mode=max`, which rewrites the SAME `:latest` ref on every
+    #                  build. Tag count is pinned at one, so newest-N does
+    #                  nothing here. Growth vector = the SUPERSEDED MANIFEST
+    #                  each export leaves behind, untagged but still indexed and
+    #                  therefore still pinning its blobs → `deleteUntagged`
+    #                  (see `retention.cache` below).
+    #
+    # Neither family is bounded by `gc: true` alone. Live blob GC only reclaims
+    # blobs no manifest references, and untagged-but-indexed manifests still
+    # reference theirs — measured on the production VPS as 0.0 GiB reclaimed
+    # while the store kept growing.
     #
     # Safety model:
     # - `retention.enabled` controls whether the policy is rendered into
@@ -786,11 +831,56 @@ imagePipeline:
     # by retained tag or digest pin BEFORE destructive deletion can proceed.
     # If the preflight finds an unsafe image, it blocks and reports —
     # destructive retention never silently removes a selected image.
+    #
+    # NOTE: that preflight covers `djinn-image-*` ONLY. It reads the DB's
+    # selected-catalog-image set; it knows nothing about `cache/*`, and it
+    # needs nothing, because no database row and no kubelet pull ever
+    # references a cache repo — the only reader is buildctl's `--import-cache`.
     retention:
       enabled: true
       dryRun: true
       deleteUntagged: true
       newestTags: 5
+      # BuildKit registry cache retention (`cache/*`). Default ON, and — like
+      # the catalog policy — governed by the SHARED `dryRun` flag above, so it
+      # ships report-only and deletes nothing until an operator opts in once
+      # for both. Zot's `dryRun` is a single retention-block-level switch; it
+      # cannot be set per policy. Set `cache.enabled: false` to roll the
+      # catalog policy destructive while leaving cache repos untouched.
+      #
+      # The rendered policy is `deleteUntagged: true` plus a catch-all
+      # `keepTags` rule, i.e. "retain every tag, collect superseded
+      # manifests". It targets the actual growth vector and it cannot touch
+      # the live `:latest` cache ref.
+      #
+      # Worst case is a cache MISS, never a failed build:
+      #  * The live ref is never a candidate (catch-all keepTags), so the
+      #    common path is untouched.
+      #  * A superseded manifest becomes a candidate only after the
+      #    retention `delay` (1h) and its blobs only vanish after `gcDelay`
+      #    (1h) on the next `gcInterval` (24h) sweep. A build resolves and
+      #    fetches its cache in seconds.
+      #  * Even a total miss is a proven-safe state: the FIRST build of every
+      #    project already imports a cache ref that does not exist yet, and
+      #    those builds succeed. buildctl treats an unresolvable
+      #    `--import-cache` as "no cache", not as an error.
+      #
+      # Byte reclamation is deliberately not promised. `storage.dedupe: true`
+      # means a `mode=max` cache blob and an identical `djinn-image-*` layer
+      # blob are the same stored object; deleting a cache manifest frees
+      # nothing for blobs a live catalog manifest still references, and vice
+      # versa. The two policies are complementary — pruning only one side
+      # leaves shared blobs alive through the other side's references.
+      cache:
+        enabled: true
+    # ---------------------------------------------------------------------
+    # Declared PVC size is a REQUEST, not a quota. See the top-level
+    # `storage:` block's preamble for the full explanation.
+    # ---------------------------------------------------------------------
+    # On the k3s/kind `local-path` provisioner this number is advisory only —
+    # nothing enforces it, and a Zot PVC declared 40Gi will happily hold 83G.
+    # The bound that actually holds is the retention policy above, not this
+    # field. Do not treat a larger number here as a fix.
     storage:
       size: 100Gi
       storageClassName: ""   # "" → cluster default

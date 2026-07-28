@@ -7,6 +7,29 @@
 # storage bounded without a restart; dedupe dedupes identical blobs across
 # repos which matters heavily for per-project devcontainer builds that share
 # the djinn-agent-worker Feature base layers.
+#
+# Two retention policies, addressing two different growth vectors:
+#
+#   djinn-image-*  catalog repos. One NEW TAG per content hash, forever. The
+#                  growth vector is tag count, so the policy is newest-N.
+#   cache/*        BuildKit registry cache repos, written by
+#                  `--export-cache type=registry,ref=<reg>/cache/<subject>`
+#                  (build_job.rs). `mode=max` overwrites the SAME `:latest`
+#                  ref every build, so tag count is pinned at one and
+#                  newest-N is a no-op here. The growth vector is the
+#                  SUPERSEDED MANIFEST: every export leaves the previous
+#                  cache manifest in the repo's index, untagged, still
+#                  referencing its blobs. Those blobs are therefore still
+#                  reachable, which is exactly why `gc: true` measured 0.0
+#                  GiB of unreachable garbage on the production VPS while
+#                  the store kept growing. `deleteUntagged` is the operator
+#                  that turns them into garbage; `gc` then reclaims them.
+#
+# `keepTags: [{patterns: [".*"]}]` on the cache policy is load-bearing, not
+# decorative: it retains EVERY tag unconditionally, so the live `:latest`
+# cache ref that in-flight builds `--import-cache` can never be a deletion
+# candidate. Only superseded, already-untagged manifests are in scope, and
+# the retention `delay` below exempts anything untagged within the last hour.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -37,7 +60,16 @@ data:
                   "newest": {{ .Values.imagePipeline.zot.retention.newestTags }}
                 }
               ]
-            }
+            }{{- if .Values.imagePipeline.zot.retention.cache.enabled }},
+            {
+              "repositories": ["cache/*"],
+              "deleteUntagged": true,
+              "keepTags": [
+                {
+                  "patterns": [".*"]
+                }
+              ]
+            }{{- end }}
           ]
         }{{- end }}
       },

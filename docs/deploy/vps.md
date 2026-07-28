@@ -116,6 +116,66 @@ k3s crictl images | wc -l
 If `/etc/rancher/k3s/config.yaml` already exists, merge the `kubelet-arg` key
 into it rather than overwriting the file.
 
+### PVC sizes are requests, not quotas
+
+Read this before you "fix" a full volume by raising a number.
+
+Measured on this production VPS: the `djinn-zot` and `djinn-cache` PVCs are each
+declared **40Gi** and each holds **83G**. Nothing errored, nothing alerted,
+nothing was evicted. That is not a bug in the chart's numbers — it is what
+`spec.resources.requests.storage` *means* under the k3s `local-path`
+provisioner, which mkdirs a directory on the node filesystem and applies no
+quota of any kind. The declared capacity is advisory. There is no backstop at
+any layer below it.
+
+(Both 40Gi values are install-time overrides. The chart's own defaults are
+100Gi for `imagePipeline.zot.storage.size` and 20Gi for `storage.cache.size`.
+Raising them would not have changed anything here — see below.)
+
+**Why the chart does not simply ship bigger numbers.** On `local-path` a bigger
+number enforces nothing, so it buys nothing. On a StorageClass that *does*
+enforce (EBS, PD, Ceph RBD, Longhorn, TopoLVM) a bigger number is also a
+one-way door: `local-path` sets `allowVolumeExpansion: false`, and raising a
+PVC request against a non-expandable StorageClass is **rejected by the API
+server**, which wedges `helm upgrade` for every existing install. Growing a
+number that means nothing is not worth breaking upgrades for.
+
+There are exactly three things that actually bound this node, in order of how
+much they matter:
+
+1. **Bound the producers.** This is the real fix and it is where the chart's
+   defaults do the work: `imagePipeline.zot.retention` (catalog *and* BuildKit
+   cache repos), `cacheCleanup.mode`, `graphRetention`, and the kubelet image
+   GC configured in the previous section. A volume with no producer bound will
+   fill any number you give it; a volume with bounded producers does not need
+   one.
+2. **Use a StorageClass that can enforce, if you need enforcement.** `local-path`
+   cannot. XFS project quotas on the backing filesystem, or a real CSI driver
+   (TopoLVM, Longhorn), can. This is a node/infrastructure decision, not a chart
+   value — the chart honours `storageClassName` and takes no position beyond
+   that. Expect to size deliberately at that point, because on those drivers
+   `size:` becomes a hard ENOSPC boundary rather than a suggestion.
+3. **Watch the node filesystem, not the PVCs.** Under `local-path` every PVC on
+   this box shares one filesystem, so per-PVC accounting is a fiction anyway and
+   node-level free space is the only real signal:
+
+   ```bash
+   df -h /var/lib/rancher/k3s/storage
+   du -sh /var/lib/rancher/k3s/storage/* | sort -h | tail
+   ```
+
+**On alerting.** The chart bundles Prometheus + Alertmanager
+(`monitoring.enabled`, default off), and it deliberately does **not** ship a
+"PVC is N% full" rule. The metrics that would carry that signal
+(`kubelet_volume_stats_*`) come from the kubelet, and the bundled Prometheus
+scrapes only `djinn-server` and `djinn-log-rotator` — it runs with
+`automountServiceAccountToken: false` and has no RBAC for `nodes/metrics`. A
+rule written against those metrics today would be permanently inert: an alert
+that never fires, which is worse than no alert because it reads like coverage.
+If you want that alert, add the kubelet scrape job, ServiceAccount and
+ClusterRole first, then the rule — and verify the target is `up` before
+believing it.
+
 Install Helm if the box doesn't have it:
 
 ```bash

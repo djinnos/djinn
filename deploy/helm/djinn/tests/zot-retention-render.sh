@@ -195,10 +195,16 @@ echo "=== Test 6: shipped chart defaults are report-only, not unbounded growth =
 render_manifests "$TMPDIR_RENDER/shipped-defaults.yaml"
 assert_manifests "$TMPDIR_RENDER/shipped-defaults.yaml" true true 5 test-release-djinn-zot-auth
 
-# assert_manifests reads the policy out of the rendered JSON, but the safety
-# glob deserves its own explicit, independent check: widening `repositories`
-# beyond `djinn-image-*` would put the buildkitd cache repos (djinn-buildkitd-*)
-# in scope of tag pruning. Assert the rendered glob is exactly the catalog one.
+# assert_manifests reads the CATALOG policy out of the rendered JSON, but the
+# safety glob deserves its own explicit, independent check: widening
+# `repositories` beyond `djinn-image-*` would put the BuildKit registry cache
+# repos (`cache/*` — see build_job.rs `--export-cache
+# type=registry,ref=<reg>/cache/<subject>`) in scope of NEWEST-N TAG pruning,
+# which is the wrong policy shape for them entirely. Assert the catalog glob is
+# exactly the catalog one and that it is still the FIRST policy.
+#
+# `cache/*` has its own, differently shaped policy; it is asserted in
+# tests/zot-cache-retention-render.sh. This test only guards the catalog one.
 python3 - "$TMPDIR_RENDER/shipped-defaults.yaml" <<'PY'
 import json, sys
 
@@ -212,16 +218,25 @@ for line in rendered[start:]:
 config = json.loads("\n".join(lines))
 
 policies = config["storage"]["retention"]["policies"]
-assert len(policies) == 1, f"expected exactly one policy, got {len(policies)}"
-assert policies[0]["repositories"] == ["djinn-image-*"], (
-    "retention repositories glob must stay exactly ['djinn-image-*']; widening it "
-    f"would put buildkitd cache repos in scope, got {policies[0]['repositories']}"
+catalog = [p for p in policies if p["repositories"] == ["djinn-image-*"]]
+assert len(catalog) == 1, (
+    f"expected exactly one ['djinn-image-*'] policy, got {len(catalog)} of {policies}"
 )
-assert policies[0]["deleteUntagged"] is True, "shipped default must delete untagged manifests"
+assert policies[0] is catalog[0], (
+    "the catalog policy must stay first; Zot applies the first matching policy "
+    f"per repo, got {policies[0]['repositories']} first"
+)
+assert catalog[0]["deleteUntagged"] is True, "shipped default must delete untagged manifests"
+# No OTHER policy may claim a glob that could also match a catalog repo.
+for other in policies[1:]:
+    for glob in other["repositories"]:
+        assert not glob.startswith("djinn-image"), (
+            f"a non-catalog policy widened into catalog scope: {glob}"
+        )
 assert config["storage"]["retention"]["dryRun"] is True, (
     "shipped default must be dry-run: destructive deletion is an explicit operator opt-in"
 )
-print("PASS: shipped defaults render a report-only policy scoped to djinn-image-* only")
+print("PASS: shipped defaults render a report-only catalog policy scoped to djinn-image-* only")
 PY
 
 echo ""
