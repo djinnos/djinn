@@ -167,6 +167,77 @@ pub struct KubernetesConfig {
     /// Memory limit on the warm Pod container. Hard ceiling so a runaway
     /// indexer can't OOM the node. Default `4Gi`.
     pub warm_memory_limit: String,
+    /// CPU request on the standalone SCIP-index Pod ([`crate::scip_job`]).
+    ///
+    /// Default `1`. Unlike every other build-tier request this one is **not**
+    /// sized for parallelism — the SCIP phase is 94% serial (rust-analyzer's
+    /// `StaticIndex::compute` is a bare loop with no rayon, upstream issue
+    /// #18140) so a second core buys almost nothing. It is sized instead by the
+    /// capacity budget: the SCIP Job takes no build lease, so under proposal
+    /// `8ixk` its request folds into `protected_mcpu` and is subtracted from the
+    /// CPU build slots are derived from. The ceiling before the derived cap
+    /// drops from 2 to 1 on the current 12-core node is **2200m**; see
+    /// [`crate::scip_job::SCIP_PROTECTED_REQUEST_CEILING_MILLICORES`], which is
+    /// enforced by test.
+    pub scip_cpu_request: String,
+    /// CPU limit on the standalone SCIP-index Pod. Default `2` — headroom for
+    /// the brief parallel window (measured 20s against a 368s serial window)
+    /// and for the non-Rust indexers, without changing the request the capacity
+    /// derivation actually reads.
+    pub scip_cpu_limit: String,
+    /// Memory request on the standalone SCIP-index Pod. Default `4Gi`.
+    pub scip_memory_request: String,
+    /// Memory limit on the standalone SCIP-index Pod. Default `16Gi`.
+    ///
+    /// This is a **measured** figure, not a default to be trimmed: peak RSS for
+    /// the SCIP phase is 10.0 GB. The warm Pod's `warm_memory_limit` still
+    /// defaults to `6Gi` and survives production only because an out-of-band
+    /// override raises it to 16Gi — this field states the real number in the
+    /// manifest instead, and
+    /// `crate::scip_job::tests::scip_memory_limit_covers_the_measured_peak`
+    /// fails the build if it is ever lowered below the measured peak.
+    pub scip_memory_limit: String,
+    /// Cadence floor for the standalone SCIP index, in seconds. Default
+    /// `10800` (3 hours).
+    ///
+    /// This is a *rate limit*, not a timer: a tick still dispatches nothing
+    /// unless the repository head has advanced since the last successful index
+    /// (see [`crate::scip_schedule`]). It exists so a continuously-advancing
+    /// `main` cannot turn a leaseless 16Gi Job into a permanent resident.
+    pub scip_index_interval_seconds: u64,
+    /// `ttlSecondsAfterFinished` on the SCIP-index Job. Default `14400` (4h).
+    ///
+    /// Deliberately longer than [`Self::scip_index_interval_seconds`]: the
+    /// retained *succeeded* Job set — keyed by its
+    /// `djinn.app/scip-revision` annotation — is the durable ledger the
+    /// change-detection gate reads. A TTL shorter than the interval would make
+    /// every tick look like "never indexed" and re-dispatch unconditionally.
+    pub scip_job_ttl_seconds: i32,
+    /// `activeDeadlineSeconds` on the SCIP-index Job. Default `7200` (2h)
+    /// against a measured 3523s (58m43s) SCIP phase.
+    pub scip_job_timeout_seconds: i64,
+    /// Master switch for standalone SCIP-index dispatch. **Defaults to
+    /// `false`.**
+    ///
+    /// The composition root wires the real
+    /// [`crate::scip_schedule::ScipIndexScheduler`] unconditionally — this flag
+    /// is checked inside the tick, not at wiring time, so arming the feature is
+    /// a config flip rather than a redeploy, and the code path is never
+    /// unreachable. Off means the watcher ticks, logs its decisions at debug,
+    /// and creates nothing.
+    pub scip_index_enabled: bool,
+    /// How long the repository head must have stood still before a SCIP index
+    /// is worth producing, in seconds. Default `3523` — the measured duration
+    /// of the SCIP phase itself.
+    ///
+    /// The SCIP cache key folds in `source_hashes`, so an index produced at
+    /// head `H0` only serves a warm running against `H0`'s sources. If `main`
+    /// advances during the ~59-minute run, the following warm misses and
+    /// re-indexes inline. Requiring the tree to have been stable for at least
+    /// as long as the run takes is the cheap, stateless way to bias toward the
+    /// case where the artifact is still current when it lands. `0` disables the
+    /// gate. See [`crate::scip_schedule::decide`].
+    pub scip_quiescence_seconds: u64,
     /// `spec.nodeSelector` applied to both task-run and warm Pods. Empty map
     /// leaves the field unset (any node tolerating the Pod's other constraints
     /// is eligible). Operators typically use this together with `tolerations`
@@ -265,6 +336,22 @@ impl KubernetesConfig {
             // links more codegen units at once than clippy alone.
             warm_memory_request: "2Gi".into(),
             warm_memory_limit: "6Gi".into(),
+            // The SCIP phase is 94% serial, so this request buys capacity
+            // accounting (8ixk `protected_mcpu`), not throughput. 1000m sits
+            // well inside the 2200m ceiling that would cost a build slot.
+            scip_cpu_request: "1".into(),
+            scip_cpu_limit: "2".into(),
+            scip_memory_request: "4Gi".into(),
+            // MEASURED peak is 10.0 GB. Stated explicitly here rather than
+            // inherited from a 6Gi default plus a production override.
+            scip_memory_limit: "16Gi".into(),
+            scip_index_interval_seconds: 10_800,
+            scip_job_ttl_seconds: 14_400,
+            scip_job_timeout_seconds: 7_200,
+            // OFF by default. The scheduler is wired for real regardless; this
+            // is the only thing that lets it create a Job.
+            scip_index_enabled: false,
+            scip_quiescence_seconds: crate::scip_job::MEASURED_SCIP_PHASE_SECONDS as u64,
             node_selector: BTreeMap::new(),
             tolerations: Vec::new(),
             // v1 leases enforcement contract. Both fail render validation if set
@@ -312,6 +399,15 @@ impl KubernetesConfig {
     /// | `DJINN_K8S_WARM_CPU_LIMIT` | `warm_cpu_limit` | `4` |
     /// | `DJINN_K8S_WARM_MEMORY_REQUEST` | `warm_memory_request` | `2Gi` |
     /// | `DJINN_K8S_WARM_MEMORY_LIMIT` | `warm_memory_limit` | `6Gi` |
+    /// | `DJINN_K8S_SCIP_CPU_REQUEST` | `scip_cpu_request` | `1` (≤ 2200m or the derived build-slot cap drops) |
+    /// | `DJINN_K8S_SCIP_CPU_LIMIT` | `scip_cpu_limit` | `2` |
+    /// | `DJINN_K8S_SCIP_MEMORY_REQUEST` | `scip_memory_request` | `4Gi` |
+    /// | `DJINN_K8S_SCIP_MEMORY_LIMIT` | `scip_memory_limit` | `16Gi` (measured peak 10.0 GB) |
+    /// | `DJINN_K8S_SCIP_INDEX_INTERVAL_SECONDS` | `scip_index_interval_seconds` | `10800` (parsed as `u64`) |
+    /// | `DJINN_K8S_SCIP_JOB_TTL_SECONDS` | `scip_job_ttl_seconds` | `14400` (parsed as `i32`) |
+    /// | `DJINN_K8S_SCIP_JOB_TIMEOUT_SECONDS` | `scip_job_timeout_seconds` | `7200` (parsed as `i64`) |
+    /// | `DJINN_K8S_SCIP_INDEX_ENABLED` | `scip_index_enabled` | `false` — the arming switch |
+    /// | `DJINN_K8S_SCIP_QUIESCENCE_SECONDS` | `scip_quiescence_seconds` | `3523` (the measured phase cost; `0` disables) |
     /// | `DJINN_K8S_NODE_SELECTOR` | `node_selector` | `{}` (parsed as a JSON object of string→string) |
     /// | `DJINN_K8S_TOLERATIONS` | `tolerations` | `[]` (parsed as a JSON array of k8s `Toleration` objects) |
     /// | `DJINN_K8S_CGROUP_DELEGATION_PROFILE` | `cgroup_delegation_profile` | `cgroup-v2-cpu-only` |
@@ -421,6 +517,64 @@ impl KubernetesConfig {
         }
         if let Ok(v) = std::env::var("DJINN_K8S_WARM_MEMORY_LIMIT") {
             cfg.warm_memory_limit = v;
+        }
+        if let Ok(v) = std::env::var("DJINN_K8S_SCIP_CPU_REQUEST") {
+            cfg.scip_cpu_request = v;
+        }
+        if let Ok(v) = std::env::var("DJINN_K8S_SCIP_CPU_LIMIT") {
+            cfg.scip_cpu_limit = v;
+        }
+        if let Ok(v) = std::env::var("DJINN_K8S_SCIP_MEMORY_REQUEST") {
+            cfg.scip_memory_request = v;
+        }
+        if let Ok(v) = std::env::var("DJINN_K8S_SCIP_MEMORY_LIMIT") {
+            cfg.scip_memory_limit = v;
+        }
+        if let Ok(v) = std::env::var("DJINN_K8S_SCIP_INDEX_INTERVAL_SECONDS") {
+            match v.parse::<u64>() {
+                Ok(n) => cfg.scip_index_interval_seconds = n,
+                Err(e) => tracing::warn!(
+                    value = %v,
+                    error = %e,
+                    "DJINN_K8S_SCIP_INDEX_INTERVAL_SECONDS not a valid u64 — keeping default"
+                ),
+            }
+        }
+        if let Ok(v) = std::env::var("DJINN_K8S_SCIP_JOB_TTL_SECONDS") {
+            match v.parse::<i32>() {
+                Ok(n) => cfg.scip_job_ttl_seconds = n,
+                Err(e) => tracing::warn!(
+                    value = %v,
+                    error = %e,
+                    "DJINN_K8S_SCIP_JOB_TTL_SECONDS not a valid i32 — keeping default"
+                ),
+            }
+        }
+        if let Ok(v) = std::env::var("DJINN_K8S_SCIP_INDEX_ENABLED") {
+            cfg.scip_index_enabled = matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            );
+        }
+        if let Ok(v) = std::env::var("DJINN_K8S_SCIP_QUIESCENCE_SECONDS") {
+            match v.parse::<u64>() {
+                Ok(n) => cfg.scip_quiescence_seconds = n,
+                Err(e) => tracing::warn!(
+                    value = %v,
+                    error = %e,
+                    "DJINN_K8S_SCIP_QUIESCENCE_SECONDS not a valid u64 — keeping default"
+                ),
+            }
+        }
+        if let Ok(v) = std::env::var("DJINN_K8S_SCIP_JOB_TIMEOUT_SECONDS") {
+            match v.parse::<i64>() {
+                Ok(n) => cfg.scip_job_timeout_seconds = n,
+                Err(e) => tracing::warn!(
+                    value = %v,
+                    error = %e,
+                    "DJINN_K8S_SCIP_JOB_TIMEOUT_SECONDS not a valid i64 — keeping default"
+                ),
+            }
         }
         if let Ok(v) = std::env::var("DJINN_K8S_NODE_SELECTOR")
             && !v.is_empty()

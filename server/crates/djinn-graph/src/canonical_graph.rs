@@ -676,6 +676,124 @@ pub async fn run_warm_graph_command<C: WarmContext>(
     Ok(())
 }
 
+/// Run the **semantic pass only** and leave its artifacts in the shared
+/// content-addressed SCIP cache. Publishes no graph and writes no
+/// `repo_graph_*` row.
+///
+/// This is the body of the standalone SCIP-index Job
+/// (`djinn_k8s::scip_job`). The combined warm Job measured 90m42s end to end
+/// with 58m43s of that in the SCIP index — a phase that is 94% serial, so the
+/// warm Job was holding a full 4-core build slot to run one core. Splitting the
+/// phase into its own leaseless Job returns that capacity.
+///
+/// # Why this produces something the warm path consumes
+///
+/// [`crate::scip_indexer::run_indexers_already_locked`] writes through
+/// `ScipCacheStore`, whose root resolves from `$XDG_CACHE_HOME` — pointed at
+/// the shared `/cache` PVC in every djinn build Pod. Its key is *content*
+/// derived (tool version, command shape, workspace identity, source/config/
+/// lockfile hashes) and its `WorkspaceIdentity` holds a **relative** workspace
+/// root, so an artifact this Job produces from its own clone is a `CachedHit`
+/// for the warm Job's `execute_plan_with_cache` even though the two Pods cloned
+/// to different absolute paths.
+///
+/// Consequently no change to [`ensure_canonical_graph`] is required, and none
+/// is made: the warm pipeline still runs the indexers, it just finds them
+/// already computed.
+///
+/// # Degradation
+///
+/// Failure here is contained. This function never touches `repo_graph_cache`,
+/// `repo_graph_generation`, or `repo_graph_current`, so a failed, skipped, or
+/// never-scheduled SCIP run cannot move the served graph at all — the warm path
+/// simply re-indexes inline as it does today, still under the `node_count == 0`
+/// guard that refuses to publish an empty blob and still with per-workspace
+/// salvage from the previous artifact. There is no path from "SCIP Job did not
+/// run" to "graph served empty".
+///
+/// The syntactic and git-derived passes deliberately do **not** move here.
+/// `ingest_coupling_best_effort` and the tree-sitter post-processors want
+/// per-commit freshness and are cheap; they stay on the warm path, which
+/// continues to run at its own cadence.
+pub async fn run_scip_index_command<C: WarmContext>(
+    ctx: &C,
+    project_id: &str,
+) -> anyhow::Result<()> {
+    use djinn_db::ProjectRepository;
+
+    let repo = ProjectRepository::new(ctx.db().clone(), ctx.event_bus());
+    let project = repo
+        .get(project_id)
+        .await
+        .map_err(|e| anyhow::anyhow!("lookup project {project_id}: {e}"))?
+        .ok_or_else(|| anyhow::anyhow!("project {project_id} not found"))?;
+    let project_root = match std::env::var("DJINN_PROJECT_ROOT") {
+        Ok(v) if !v.is_empty() => PathBuf::from(v),
+        _ => djinn_core::paths::project_dir(&project.github_owner, &project.github_repo),
+    };
+
+    // Same tree resolution as `ensure_canonical_graph`, so the two runs index
+    // the same content and agree on workspace identity.
+    let mut handle = crate::index_tree::IndexTree::ensure(project_id, &project_root)
+        .await
+        .map_err(|e| anyhow::anyhow!("ensure index tree: {e}"))?;
+    let _ = handle
+        .fetch_if_stale(crate::index_tree::DEFAULT_FETCH_COOLDOWN)
+        .await;
+    let _ = handle.reset_to_origin_main().await;
+    let commit_sha = handle.commit_sha().to_string();
+
+    // Serialize against any in-process indexer fan-out, matching the warm path.
+    let indexer_lock = ctx.indexer_lock();
+    let _guard = indexer_lock.lock().await;
+
+    let temp_base = std::env::current_dir()
+        .map_err(|e| anyhow::anyhow!("resolve current dir for scip-index tempdir: {e}"))?
+        .join("target")
+        .join("test-tmp");
+    std::fs::create_dir_all(&temp_base)
+        .map_err(|e| anyhow::anyhow!("create scip-index tempdir base: {e}"))?;
+    let output_temp = tempfile::Builder::new()
+        .prefix("djinn-scip-index-")
+        .tempdir_in(&temp_base)
+        .map_err(|e| anyhow::anyhow!("create scip-index tempdir: {e}"))?;
+
+    let target_dir = handle.indexer_target_dir_override();
+    let stack_filter = resolve_stack_indexer_filter(ctx, project_id).await;
+    let declared_workspaces = resolve_declared_workspaces(ctx, project_id).await;
+    let timing_priors = load_indexer_timing_priors(ctx, project_id).await;
+
+    let clock = SystemClock::new();
+    let started = clock.now_instant();
+    let run = crate::scip_indexer::run_indexers_already_locked(
+        handle.path(),
+        output_temp.path(),
+        target_dir.as_deref(),
+        stack_filter.as_deref(),
+        declared_workspaces.as_deref(),
+        Some(&timing_priors),
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("run_indexers: {e}"))?;
+
+    // Feed the adaptive per-indexer budget exactly as the warm path does, so a
+    // heavy workspace's timings are learned here instead of being lost.
+    persist_indexer_timings_best_effort(ctx, project_id, &run.timings).await;
+
+    tracing::info!(
+        project_id,
+        commit_sha,
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        artifacts = run.artifacts.len(),
+        "run_scip_index_command: semantic index complete; artifacts are in the \
+         shared SCIP cache for the next warm to reuse"
+    );
+    // `output_temp` drops here: the raw `.scip` files were transient. The
+    // durable product is the content-addressed cache the indexers wrote
+    // through, which is exactly what the warm Job reads back.
+    Ok(())
+}
+
 pub async fn ensure_canonical_graph<C: WarmContext>(
     ctx: &C,
     project_id: &str,

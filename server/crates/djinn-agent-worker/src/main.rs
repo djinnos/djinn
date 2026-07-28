@@ -215,6 +215,19 @@ enum Cmd {
         project_id: String,
     },
 
+    /// Run the SEMANTIC pass only (SCIP indexers) for a project and exit,
+    /// leaving its artifacts in the shared content-addressed SCIP cache.
+    ///
+    /// Dispatched by `djinn_k8s::scip_job::build_scip_index_job` in the
+    /// standalone SCIP-index Pod. Unlike `warm-graph` this runs no cargo warm
+    /// base, publishes no graph, and -- because it is not a
+    /// `LeaseIdentity::GraphWarm` consumer -- holds no build slot. The warm Job
+    /// picks its output up as a `CachedHit` and skips the 58m43s re-index.
+    ScipIndex {
+        /// Project id (matches `projects.id`). Positional.
+        project_id: String,
+    },
+
     /// Seed a private per-task-run Cargo target dir from the project's warm
     /// base and exit, printing a machine-readable summary line on stdout.
     ///
@@ -440,6 +453,7 @@ async fn run() -> Result<()> {
     match cli.cmd {
         Cmd::TaskRun(args) => run_task_run(args).await,
         Cmd::WarmGraph { project_id } => run_warm_graph(&project_id).await,
+        Cmd::ScipIndex { project_id } => run_scip_index(&project_id).await,
         Cmd::SeedCargoTarget { base, run_dir } => run_seed_cargo_target(&base, &run_dir),
         Cmd::CompareGraphArtifacts {
             project_id,
@@ -3655,6 +3669,83 @@ fn worker_bridge_ignores_pair(entity_type: &str, action: &str) -> bool {
 /// run `djinn_graph::canonical_graph::run_warm_graph_command` once and
 /// exit.  The heavy pipeline's progress lands in shared DB caches that
 /// the server process reads on subsequent graph queries.
+/// The `scip-index` subcommand: run the semantic pass and exit.
+///
+/// Deliberately a sibling of [`run_warm_graph`] rather than a flag on it. The
+/// two Pods have different capacity contracts -- the warm Job is charged a full
+/// build slot and this one is charged none -- so they must not be able to
+/// collapse into the same process by accident.
+async fn run_scip_index(project_id: &str) -> Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        return run_linux_warm_graph_with_initializer(
+            project_id,
+            initialize_linux_warm_lifecycle,
+            || run_scip_index_body(project_id),
+        )
+        .await;
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    run_scip_index_body(project_id).await
+}
+
+/// The semantic-pass body. Mirrors [`run_warm_graph_body`]'s startup contract
+/// (volume readiness, DB bootstrap, `pre_anything` hooks) and then runs the
+/// indexers only.
+///
+/// The `pre_anything` hooks are NOT optional decoration here: a project pinning
+/// its toolchain relies on them for `rustup component add rust-analyzer`, and
+/// without that the SCIP indexers fail with "Unknown binary" -- which in this
+/// Pod would mean a completely empty index run rather than a degraded warm.
+/// They stay non-fatal for the same reason they are non-fatal on the warm path.
+async fn run_scip_index_body(project_id: &str) -> Result<()> {
+    let project_root = std::env::var("DJINN_PROJECT_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from(volume_contract::WORKSPACE_MOUNT_ROOT));
+    volume_contract::enforce_at_startup(
+        "scip-index",
+        &volume_contract::warm_roots(&project_root, project_id),
+    )?;
+
+    let db = bootstrap_warm_database().await?;
+    let ctx = WorkerWarmContext {
+        db,
+        indexer_lock: Arc::new(tokio::sync::Mutex::new(())),
+    };
+
+    let env_config_path = PathBuf::from(lifecycle::ENV_CONFIG_MOUNT_FILE);
+    match lifecycle::load_environment_config(&env_config_path).await {
+        Ok(Some(cfg)) => {
+            if let Err(e) =
+                lifecycle::run_phase(&project_root, "pre_anything", &cfg.lifecycle.pre_anything)
+                    .await
+            {
+                warn!(
+                    project_id,
+                    project_root = %project_root.display(),
+                    error = %format!("{e:#}"),
+                    "pre_anything hook failed; continuing with scip-index anyway"
+                );
+            }
+        }
+        Ok(None) => tracing::debug!(
+            project_id,
+            "no environment_config mounted at {} -- continuing without hooks",
+            env_config_path.display()
+        ),
+        Err(e) => warn!(
+            project_id,
+            error = %format!("{e:#}"),
+            "environment_config present but failed to load; ignoring"
+        ),
+    }
+
+    djinn_graph::canonical_graph::run_scip_index_command(&ctx, project_id)
+        .await
+        .with_context(|| format!("run_scip_index_command({project_id})"))
+}
+
 async fn run_warm_graph(project_id: &str) -> Result<()> {
     #[cfg(target_os = "linux")]
     {

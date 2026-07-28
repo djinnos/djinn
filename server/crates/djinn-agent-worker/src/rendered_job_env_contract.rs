@@ -206,6 +206,65 @@ fn the_warm_pod_argv_parses_with_the_real_parser() {
     }
 }
 
+/// **The contract, SCIP-index path.** Same argument as the warm path, for the
+/// standalone semantic-index Pod added alongside it.
+///
+/// This Pod is dispatched by a scheduler on a 3-hour cadence rather than by an
+/// interactive trigger, so a `scip-index` subcommand that did not exist — or
+/// whose argv did not parse — would produce a Pod that exits 2, a Job that
+/// reports failure, and a change-detection ledger that never advances. That
+/// pattern would be invisible in the warm path's own tests, which is precisely
+/// why the derivation below reads the real clap parser rather than a list.
+#[test]
+fn the_scip_index_pod_argv_parses_with_the_real_parser() {
+    let job = djinn_k8s::scip_job::build_scip_index_job(
+        &KubernetesConfig::for_testing(),
+        "proj-scip",
+        "registry.example/djinn-project:scip",
+        "0123456789abcdef0123456789abcdef01234567",
+        None,
+    );
+    let pod = job
+        .spec
+        .as_ref()
+        .and_then(|spec| spec.template.spec.as_ref())
+        .expect("rendered SCIP Job has a pod spec");
+    let script = pod.containers[0]
+        .command
+        .as_deref()
+        .and_then(|command| command.last())
+        .expect("SCIP Pod runs a shell script");
+
+    let exec_line = script
+        .lines()
+        .find(|line| line.starts_with(&format!("exec {WARM_COMMAND_BIN}")))
+        .unwrap_or_else(|| panic!("SCIP Pod script never execs {WARM_COMMAND_BIN}:\n{script}"));
+
+    let argv = split_shell_words(exec_line.trim_start_matches("exec "));
+    assert_eq!(
+        argv.get(1).map(String::as_str),
+        Some("scip-index"),
+        "the SCIP Pod must invoke the semantic-only subcommand, not the combined \
+         warm pipeline — running `warm-graph` here would re-acquire the whole \
+         cargo phase this split exists to leave behind: {argv:?}"
+    );
+    Cli::try_parse_from(&argv).unwrap_or_else(|error| {
+        panic!(
+            "the SCIP Pod's own command line does not parse: {argv:?}\n{error}\nEvery SCIP \
+             Pod dispatched with this manifest exits 2 before indexing anything."
+        )
+    });
+
+    for arg in unsatisfiable_without("scip-index") {
+        assert!(
+            arg.is_positional(),
+            "required scip-index argument `{}` is not positional; the SCIP Pod's shell \
+             command supplies positionals only, so it must be rendered into the Pod env",
+            arg.get_id()
+        );
+    }
+}
+
 /// Minimal double-quote-aware tokenizer: enough for the argv this crate's own
 /// renderer emits (`exec <bin> warm-graph "<project id>"`), and it deliberately
 /// refuses anything more exotic rather than guessing at shell semantics.
