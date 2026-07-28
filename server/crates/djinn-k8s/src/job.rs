@@ -895,7 +895,7 @@ fn common_cache_env_vars(project_id: &str, cpu_limit: &str) -> Vec<EnvVar> {
     // job count from the pod's declared CPU limit keeps the aggregate runnable
     // process count bounded by the node's real capacity.
     let jobs = cpu_limit_to_jobs(cpu_limit).to_string();
-    vec![
+    let mut env = vec![
         // Generic XDG cache root, rendered for the same reason CARGO_HOME,
         // SCCACHE_DIR, GOMODCACHE and PNPM_HOME are: `$HOME`-relative stores are
         // both unwritable and ephemeral in these pods (task 9jrg).
@@ -1007,7 +1007,42 @@ fn common_cache_env_vars(project_id: &str, cpu_limit: &str) -> Vec<EnvVar> {
         // per-pod value so test execution parallelism matches build
         // parallelism.
         env_var("NEXTEST_TEST_THREADS", &jobs),
-    ]
+    ];
+    // SCIP indexer cache retention (djinn-graph scip_indexer::cache_gc). The
+    // cache lives on the same /cache PVC these env vars route everything else
+    // onto, and the pods rendered here — not the server — are what write it, so
+    // the chart's tuning has to reach them. Forwarded rather than templated
+    // because it is optional: djinn-graph ships the same defaults, so a chart
+    // that sets nothing still yields a bounded cache and this simply renders
+    // nothing.
+    env.extend(forwarded_env_vars(SCIP_CACHE_FORWARDED_ENV, |name| {
+        std::env::var(name).ok()
+    }));
+    env
+}
+
+/// Env var names forwarded verbatim from the server process onto build pods.
+const SCIP_CACHE_FORWARDED_ENV: &[&str] = &[
+    "DJINN_SCIP_CACHE_MAX_BYTES",
+    "DJINN_SCIP_CACHE_MAX_IDLE_HOURS",
+];
+
+/// Forward the named variables from the server's own environment, skipping any
+/// that are unset or empty. An empty value must not be forwarded: the consumer
+/// treats an unparseable override as "keep the built-in default", and rendering
+/// an empty string would only add noise to every PodSpec.
+fn forwarded_env_vars(
+    names: &[&str],
+    mut get_env: impl FnMut(&str) -> Option<String>,
+) -> Vec<EnvVar> {
+    names
+        .iter()
+        .filter_map(|name| {
+            get_env(name)
+                .filter(|value| !value.trim().is_empty())
+                .map(|value| env_var(name, &value))
+        })
+        .collect()
 }
 
 /// Derive a cargo/nextest parallel-job count from a Kubernetes CPU limit
@@ -2256,6 +2291,40 @@ mod tests {
             warm_env.get("CARGO_BUILD_JOBS"),
             worker_env.get("CARGO_BUILD_JOBS"),
             "each pod type derives CARGO_BUILD_JOBS from its own limit (parity != identical value)"
+        );
+    }
+
+    /// The SCIP cache retention tuning is written by the pods this module
+    /// renders, not by the server, so the chart's values have to arrive as pod
+    /// env. Asserts the rendered `EnvVar`s, and that an unset or blank value
+    /// renders nothing at all rather than an empty override the consumer would
+    /// have to defend against.
+    #[test]
+    fn scip_cache_retention_tuning_is_forwarded_onto_build_pods() {
+        let forwarded = forwarded_env_vars(SCIP_CACHE_FORWARDED_ENV, |name| match name {
+            "DJINN_SCIP_CACHE_MAX_BYTES" => Some("4294967296".to_string()),
+            "DJINN_SCIP_CACHE_MAX_IDLE_HOURS" => Some("168".to_string()),
+            _ => None,
+        });
+        let rendered: BTreeMap<&str, &str> = forwarded
+            .iter()
+            .map(|e| (e.name.as_str(), e.value.as_deref().unwrap_or_default()))
+            .collect();
+        assert_eq!(
+            rendered.get("DJINN_SCIP_CACHE_MAX_BYTES").copied(),
+            Some("4294967296")
+        );
+        assert_eq!(
+            rendered.get("DJINN_SCIP_CACHE_MAX_IDLE_HOURS").copied(),
+            Some("168")
+        );
+
+        // Unset in the server: nothing is rendered, and djinn-graph's own
+        // defaults are what bound the cache.
+        assert!(forwarded_env_vars(SCIP_CACHE_FORWARDED_ENV, |_| None).is_empty());
+        // Blank is not an override.
+        assert!(
+            forwarded_env_vars(SCIP_CACHE_FORWARDED_ENV, |_| Some("  ".to_string())).is_empty()
         );
     }
 
