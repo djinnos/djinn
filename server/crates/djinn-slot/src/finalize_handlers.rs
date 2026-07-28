@@ -21,21 +21,31 @@ pub async fn process_finalize_payload(
     payload: &Option<serde_json::Value>,
     finalize_tool_name: &str,
     task_id: &str,
+    authenticated_session_id: &str,
     app_state: &SlotContext,
 ) {
-    let _ = process_finalize_payload_with_outcome(payload, finalize_tool_name, task_id, app_state)
-        .await;
+    let _ = process_finalize_payload_with_outcome(
+        payload,
+        finalize_tool_name,
+        task_id,
+        authenticated_session_id,
+        app_state,
+    )
+    .await;
 }
 
 pub async fn process_finalize_payload_with_outcome(
     payload: &Option<serde_json::Value>,
     finalize_tool_name: &str,
     task_id: &str,
+    authenticated_session_id: &str,
     app_state: &SlotContext,
 ) -> bool {
     let Some(payload) = payload else { return true };
     match finalize_tool_name {
-        "submit_work" => handle_submit_work(payload, task_id, app_state).await,
+        "submit_work" => {
+            handle_submit_work(payload, task_id, authenticated_session_id, app_state).await
+        }
         "submit_review" => {
             handle_submit_review(payload, task_id, app_state).await;
             true
@@ -100,8 +110,13 @@ pub async fn handle_budget_park(
 pub(crate) async fn handle_submit_work(
     payload: &serde_json::Value,
     task_id: &str,
+    authenticated_session_id: &str,
     app_state: &SlotContext,
 ) -> bool {
+    // This boundary deliberately receives identity separately from the
+    // agent-controlled JSON payload. A subsequent finalization slice consumes
+    // the server-owned value; this slice only establishes the boundary.
+    let _ = authenticated_session_id;
     let work = match serde_json::from_value::<SubmitWork>(payload.clone()) {
         Ok(w) => w,
         Err(e) => {
