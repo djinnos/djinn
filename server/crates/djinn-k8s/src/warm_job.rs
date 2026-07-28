@@ -46,6 +46,26 @@ pub const ANNOTATION_FENCING_TOKEN: &str = "djinn.app/fencing-token";
 pub const GATE_AUTHORIZATION_KEY: &str = "authorization";
 pub const VOLUME_WARM_GATE: &str = "warm-gate";
 
+/// Durable build-lease consumer id (the lease's `warm_request_id`), projected
+/// into the WARMER container so the in-Pod worker can hand the build slot back
+/// the moment its cargo phase ends.
+///
+/// The warm Pod holds one of only three build slots for its entire life, but
+/// only its cargo half is a build: measured over 6h48m on 2026-07-27 the warm
+/// held a slot for 6h44m (98.9% duty cycle) and 60.7% of that hold was the SCIP
+/// phase — one single-threaded rust-analyzer process averaging ~0.82 of the 4
+/// cores the slot is weighted for. Releasing at the cargo→graph boundary
+/// recovers ~0.6 of 3 slots with no change to graph freshness.
+///
+/// This is deliberately NOT a second lease authority: queue/grant/bind stay
+/// host-owned. The Pod performs one fenced, idempotent release of a slot it
+/// already holds.
+pub const ENV_WARM_LEASE_CONSUMER_ID: &str = "DJINN_WARM_LEASE_CONSUMER_ID";
+/// Fencing token for [`ENV_WARM_LEASE_CONSUMER_ID`]. A release that does not
+/// carry the current token is rejected by the ledger, so a Pod outlived by a
+/// newer grant can never release the new holder's slot.
+pub const ENV_WARM_LEASE_FENCING_TOKEN: &str = "DJINN_WARM_LEASE_FENCING_TOKEN";
+
 /// Mount path for the read-only mirror PVC (mirrors the task-run Job).
 pub const MIRROR_MOUNT_DIR: &str = "/mirror";
 /// Volume name for the read-only mirror PVC.
@@ -407,6 +427,22 @@ pub fn build_leased_warm_job(
         .spec
         .as_mut()
         .expect("warm job always has a pod spec");
+
+    // Hand the warmer container the identity it needs to release its own build
+    // slot at the cargo→graph boundary. Only the LEASED path projects these:
+    // an unleased warm holds no slot and must not attempt a release.
+    for container in pod.containers.iter_mut() {
+        let env = container.env.get_or_insert_default();
+        env.push(env_var(
+            ENV_WARM_LEASE_CONSUMER_ID,
+            &identity.warm_request_id,
+        ));
+        env.push(env_var(
+            ENV_WARM_LEASE_FENCING_TOKEN,
+            &identity.fencing_token.to_string(),
+        ));
+    }
+
     pod.volumes.get_or_insert_default().push(Volume {
         name: VOLUME_WARM_GATE.into(),
         config_map: Some(ConfigMapVolumeSource {

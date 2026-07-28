@@ -242,3 +242,101 @@ fn split_shell_words(line: &str) -> Vec<String> {
     }
     words
 }
+
+/// **The contract, warm build-lease path.** The in-Pod worker hands its build
+/// slot back at the cargo→graph boundary using two values it can only get from
+/// the environment. Nothing but this test compares the names the worker reads
+/// with the names the renderer writes.
+///
+/// A drift here is silent and expensive: `WarmBuildLease::from_env`
+/// deliberately returns `None` for anything it cannot prove, so a renamed
+/// variable does not crash the warm — it just quietly gives up the ~20% of
+/// build capacity the release was supposed to recover, on every warm, forever.
+/// Exactly the shape of defect this module was created for.
+#[test]
+fn the_leased_warm_job_renders_the_build_lease_identity_the_worker_releases_with() {
+    use djinn_k8s::graph_warmer_identity::LeasedWarmJobIdentity;
+    use djinn_k8s::warm_job::{
+        ENV_WARM_LEASE_CONSUMER_ID, ENV_WARM_LEASE_FENCING_TOKEN, build_leased_warm_job,
+    };
+
+    use crate::warm_build_lease::{ENV_LEASE_CONSUMER_ID, ENV_LEASE_FENCING_TOKEN, WarmBuildLease};
+
+    // Both sides of the contract must agree on the NAMES…
+    assert_eq!(ENV_LEASE_CONSUMER_ID, ENV_WARM_LEASE_CONSUMER_ID);
+    assert_eq!(ENV_LEASE_FENCING_TOKEN, ENV_WARM_LEASE_FENCING_TOKEN);
+
+    let identity = LeasedWarmJobIdentity::new("proj-lease", "warm-req-7", "rev-1", 4242);
+    let job = build_leased_warm_job(
+        &KubernetesConfig::for_testing(),
+        "proj-lease",
+        "registry.example/djinn-project:lease",
+        None,
+        &identity,
+    );
+    let pod = job
+        .spec
+        .as_ref()
+        .and_then(|spec| spec.template.spec.as_ref())
+        .expect("rendered leased warm Job has a pod spec");
+    let warmer = pod
+        .containers
+        .iter()
+        .find(|container| container.name == "warmer")
+        .expect("rendered leased warm Job has a warmer container");
+    let rendered: BTreeMap<&str, &str> = warmer
+        .env
+        .iter()
+        .flatten()
+        .filter_map(|entry| Some((entry.name.as_str(), entry.value.as_deref()?)))
+        .collect();
+
+    // …and the RENDERED VALUES must be exactly what the ledger will fence on.
+    assert_eq!(
+        rendered.get(ENV_LEASE_CONSUMER_ID).copied(),
+        Some("warm-req-7"),
+        "the warmer container must carry the durable lease consumer id"
+    );
+    assert_eq!(
+        rendered.get(ENV_LEASE_FENCING_TOKEN).copied(),
+        Some("4242"),
+        "the warmer container must carry the lease's fencing token"
+    );
+
+    // The side effect the whole contract exists for: those exact rendered
+    // strings resolve into a releasable lease handle.
+    let lease = WarmBuildLease::from_parts(
+        rendered.get(ENV_LEASE_CONSUMER_ID).copied(),
+        rendered.get(ENV_LEASE_FENCING_TOKEN).copied(),
+    )
+    .expect(
+        "the rendered manifest must produce a releasable build lease; without it the warm \
+         silently holds a build slot through the whole SCIP phase",
+    );
+    assert_eq!(lease.key().consumer_id, "warm-req-7");
+}
+
+/// An UNLEASED warm holds no durable slot, so it must not be handed an identity
+/// it could release. Guards the other direction of the same contract.
+#[test]
+fn the_unleased_warm_job_renders_no_build_lease_identity() {
+    use djinn_k8s::warm_job::{ENV_WARM_LEASE_CONSUMER_ID, ENV_WARM_LEASE_FENCING_TOKEN};
+
+    let job = build_warm_job(
+        &KubernetesConfig::for_testing(),
+        "proj-unleased",
+        "registry.example/djinn-project:unleased",
+        None,
+    );
+    let pod = job
+        .spec
+        .as_ref()
+        .and_then(|spec| spec.template.spec.as_ref())
+        .expect("rendered warm Job has a pod spec");
+    for container in &pod.containers {
+        for entry in container.env.iter().flatten() {
+            assert_ne!(entry.name, ENV_WARM_LEASE_CONSUMER_ID);
+            assert_ne!(entry.name, ENV_WARM_LEASE_FENCING_TOKEN);
+        }
+    }
+}
