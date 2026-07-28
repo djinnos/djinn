@@ -332,9 +332,17 @@ async fn run_git(cwd: &Path, args: &[&str]) -> Result<String> {
     // on non-zero exit, so a successful `Ok` here means git exited 0 — we
     // surface its trimmed stdout regardless of stderr (git often emits
     // advisory hints to stderr on a successful run).
+    //
+    // The context deliberately does NOT say "spawn": a non-zero exit and a
+    // failure to launch arrive through the same `Err`, and calling both a spawn
+    // failure sent the first production run of the standalone SCIP Job to a
+    // diagnosis that could not be reached. `GitError`'s own `Display` carries
+    // the exit code, stdout and stderr, so the only requirement here is that
+    // the source chain survives — `anyhow!("...: {e}")` at a caller flattens it
+    // to this line alone and throws the cause away.
     let CommandOutput { stdout, .. } = djinn_git::run_git_command_in(cwd, owned_args)
         .await
-        .with_context(|| format!("spawn git {} in {}", args.join(" "), cwd.display()))?;
+        .with_context(|| format!("git {} in {}", args.join(" "), cwd.display()))?;
     Ok(stdout.trim().to_string())
 }
 
@@ -425,6 +433,49 @@ mod tests {
             .await
             .unwrap();
         project_root
+    }
+
+    /// A failing git command must arrive in the log with the exit code and
+    /// stderr that say *why*.
+    ///
+    /// The first production run of the standalone SCIP-index Job reported
+    /// exactly one line — `ensure index tree: spawn git rev-parse HEAD in
+    /// /workspace/<project>` — and nothing else. Two separate defects produced
+    /// that: this context claimed "spawn" for what is also the non-zero-exit
+    /// path, and the caller rendered the error with `{e}`, which prints only the
+    /// outermost message and discards the `GitError` carrying the exit status
+    /// and stderr.
+    #[tokio::test]
+    async fn a_failing_git_command_surfaces_its_exit_code_and_stderr() {
+        let tmp = workspace_tempdir("index-tree-error-legibility-");
+        let repo = tmp.path().join("no-commits");
+        tokio::fs::create_dir_all(&repo).await.unwrap();
+        run_git(&repo, &["init", "-q", "-b", "main"]).await.unwrap();
+
+        // A repository with no commits: `rev-parse HEAD` exits 128.
+        let err = read_head_sha(&repo)
+            .await
+            .expect_err("rev-parse HEAD must fail in a repo with no commits");
+        // `{:#}` is how djinn-agent-worker renders a fatal error.
+        let rendered = format!("{err:#}");
+
+        assert!(
+            rendered.contains("git rev-parse HEAD in"),
+            "the failing command and its cwd must be named: {rendered}"
+        );
+        assert!(
+            !rendered.contains("spawn git"),
+            "a non-zero exit is not a spawn failure; that wording sent a real \
+             production diagnosis down the wrong path: {rendered}"
+        );
+        assert!(
+            rendered.contains("exit 128"),
+            "git's exit code must reach the log: {rendered}"
+        );
+        assert!(
+            rendered.contains("ambiguous argument"),
+            "git's stderr must reach the log: {rendered}"
+        );
     }
 
     #[tokio::test]
