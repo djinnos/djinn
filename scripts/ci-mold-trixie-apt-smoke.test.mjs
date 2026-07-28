@@ -8,17 +8,24 @@ const smoke = readFileSync(resolve('scripts/image-ci/run-mold-trixie-apt-smoke.s
 const installer = readFileSync(resolve('server/crates/djinn-image-builder/scripts/install-rust.sh'), 'utf8');
 const runtimeDockerfile = readFileSync(resolve('server/docker/djinn-agent-runtime-base.Dockerfile'), 'utf8');
 
-function preflightBlock(source) {
-  const start = source.indexOf('\n  preflight:\n');
-  assert.ok(start >= 0, 'Quality Gate must retain an always-run preflight job');
+// The smoke lives in `ci-contracts`, not `preflight`: it is path-independent,
+// so it runs beside the routed lanes instead of blocking them (every other job
+// `needs: preflight`). What this contract pins is the always-run property, not
+// the job name — the block must exist and must carry no `if:` guard.
+const CONTRACTS_JOB = 'ci-contracts';
+
+function jobBlock(source, job = CONTRACTS_JOB) {
+  const marker = `\n  ${job}:\n`;
+  const start = source.indexOf(marker);
+  assert.ok(start >= 0, `Quality Gate must retain an always-run ${job} job`);
   // Match the next top-level job key: a newline followed by exactly two
   // spaces and a non-whitespace character. This avoids matching the
-  // four-/six-space indented lines inside the preflight job body, which
-  // a bare '\n  ' substring search would incorrectly latch onto.
-  const rest = source.slice(start + 15);
+  // four-/six-space indented lines inside the job body, which a bare
+  // '\n  ' substring search would incorrectly latch onto.
+  const rest = source.slice(start + marker.length);
   const nextRel = rest.search(/\n  \S/);
-  assert.ok(nextRel >= 0, 'Quality Gate must retain a job following preflight');
-  const end = start + 15 + nextRel;
+  assert.ok(nextRel >= 0, `Quality Gate must retain a job following ${job}`);
+  const end = start + marker.length + nextRel;
   return source.slice(start, end);
 }
 
@@ -54,11 +61,17 @@ function assertSmokeContract(source) {
 test('Quality Gate executes the trixie apt smoke for pull requests and merge groups', () => {
   assert.match(workflow, /^  pull_request:/m);
   assert.match(workflow, /^  merge_group:/m);
-  const preflight = preflightBlock(workflow);
-  assert.doesNotMatch(preflight, /^    if:/m,
-    'preflight must not conditionally bypass the required smoke');
-  assert.match(preflight, /name: Exercise pinned mold apt stanza on current trixie/);
-  assert.match(preflight, /run: \.\/scripts\/image-ci\/run-mold-trixie-apt-smoke\.sh/);
+  const contracts = jobBlock(workflow);
+  assert.doesNotMatch(contracts, /^    if:/m,
+    'ci-contracts must not conditionally bypass the required smoke');
+  assert.match(contracts, /name: Exercise pinned mold apt stanza on current trixie/);
+  assert.match(contracts, /run: \.\/scripts\/image-ci\/run-mold-trixie-apt-smoke\.sh/);
+  // The split is only safe while the quality gate still fails closed on this
+  // job — otherwise moving the smoke out of preflight would make it advisory.
+  assert.match(workflow, /^      - ci-contracts$/m,
+    'quality-gate must depend on ci-contracts');
+  assert.match(workflow, /\[ "\$CONTRACTS" = success \]/,
+    'quality-gate must fail closed on the ci-contracts result');
 });
 
 test('trixie apt smoke uses canonical pins, preserves sources, installs, and probes', () => {
@@ -80,8 +93,12 @@ test('contract rejects mutations that turn the smoke into lint or bypass evidenc
   }
 
   assert.throws(
-    () => assert.match(preflightBlock(workflow.replace('run: ./scripts/image-ci/run-mold-trixie-apt-smoke.sh', 'run: true')), /run: \.\/scripts\/image-ci\/run-mold-trixie-apt-smoke\.sh/),
+    () => assert.match(jobBlock(workflow.replace('run: ./scripts/image-ci/run-mold-trixie-apt-smoke.sh', 'run: true')), /run: \.\/scripts\/image-ci\/run-mold-trixie-apt-smoke\.sh/),
     'workflow contract must reject a non-executing smoke step',
+  );
+  assert.throws(
+    () => assert.match(jobBlock(workflow.replace(/^      - ci-contracts\n/m, '')), /^      - ci-contracts$/m),
+    'workflow contract must reject dropping ci-contracts from the quality gate',
   );
   assert.throws(
     () => assert.match(workflow.replace(/^  pull_request:\n/m, ''), /^  pull_request:/m),
