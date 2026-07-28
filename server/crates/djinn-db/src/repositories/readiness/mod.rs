@@ -1161,7 +1161,16 @@ impl ReadinessRepository {
     }
     pub async fn active_or_latest_for_project(&self, p: &str) -> Result<Option<ReadinessRunRow>> {
         self.db.ensure_initialized().await?;
-        sqlx::query_as("SELECT id,project_id,idempotency_key,status,repository_snapshot,skill_name,skill_version,expected_area_count,created_at,completed_at FROM readiness_runs WHERE project_id=$1 ORDER BY (status IN ('identifying','analyzing','aggregating')) DESC,created_at DESC,id DESC LIMIT 1").bind(p).fetch_optional(self.db.pool()).await.map_err(Into::into)
+        sqlx::query_as(
+            "SELECT id,project_id,idempotency_key,status,repository_snapshot,skill_name,skill_version,expected_area_count,created_at,completed_at \
+             FROM readiness_runs WHERE project_id=$1 \
+             ORDER BY CASE WHEN status IN ('identifying','analyzing','aggregating') THEN 0 ELSE 1 END, \
+                      created_at DESC, id DESC LIMIT 1",
+        )
+        .bind(p)
+        .fetch_optional(self.db.pool())
+        .await
+        .map_err(Into::into)
     }
     pub async fn append_event(
         &self,
