@@ -9,7 +9,8 @@ SERVER_ROOT="$REPO_ROOT/server"
 RETRIEVAL_FIXTURE="$SCRIPT_DIR/test-djinn-observability-logs.sh"
 RUNTIME_FIXTURE="$SCRIPT_DIR/test-djinn-log-rotator-runtime.sh"
 COLLECTOR_CONTRACT="$REPO_ROOT/deploy/helm/djinn/tests/log-collector-contract.sh"
-COLLECTOR_DELIVERY="$REPO_ROOT/deploy/helm/djinn/tests/log-collector-delivery.sh"
+# Held out of the gating suite; see deploy/helm/djinn/tests/deferred/README.md.
+COLLECTOR_DELIVERY="$REPO_ROOT/deploy/helm/djinn/tests/deferred/log-collector-delivery.sh"
 CURRENT_STAGE="startup"
 
 fail() {

@@ -87,7 +87,14 @@ assert upgrade_external.count("name: shared-environment") == 2
 assert "bootstrap-designated-operator" not in upgrade_with_operator
 assert upgrade_with_operator.count("name: DJINN_MIGRATION_DESIGNATED_OPERATOR_USER_ID") == 1
 assert "DJINN_BOOTSTRAP_DESIGNATED_OPERATOR_" not in upgrade_with_operator
-assert upgrade_with_operator.count("name: operator-identity") == 1
+# The chart renders every secret name through `| quote`, so the secretRef the
+# migrate container carries is the quoted form. Assert that exact rendered
+# spelling: a bare `name: operator-identity` never appears in any manifest.
+assert upgrade_with_operator.count('name: "operator-identity"') == 1
+assert upgrade_with_operator.count("operator-identity") == 1
+# The install renders bind it three times in bootstrap plus once in migrate.
+assert install_bundled.count('name: "operator-identity"') == 4
+assert install_external.count('name: "operator-identity"') == 4
 PY
 
 echo "=== PostgreSQL migration lifecycle Helm render tests passed ==="

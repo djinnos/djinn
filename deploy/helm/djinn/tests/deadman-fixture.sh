@@ -26,7 +26,12 @@ done
 # The Secret name is intentionally fixture-only. Its URL value never appears in
 # chart values: the rendered deployment must mount its `url` key at the exact
 # url_file consumed by the rendered Alertmanager receiver.
+# `--is-upgrade`: deployment-server.yaml hard-requires
+# migration.designatedOperatorSecret on fresh installs, and Helm evaluates every
+# template before --show-only filters the output. The monitoring resources under
+# test are identical on install and upgrade.
 helm template deadman-fixture "$CHART_DIR" \
+    --is-upgrade \
     --set monitoring.enabled=true \
     --set monitoring.alertmanager.webhookSecret.name=fixture-webhook \
     --show-only templates/configmap-monitoring.yaml \
