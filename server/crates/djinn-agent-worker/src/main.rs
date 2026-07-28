@@ -4823,6 +4823,8 @@ mod tests {
     /// It is not used by production worker or checkpoint logic.
     #[tokio::test]
     async fn checkpoint_commits_and_pushes_uncommitted_work() {
+        // Spawns real `git` children — see WARM_LIFECYCLE_TEST_MUTEX.
+        let _serial = WARM_LIFECYCLE_TEST_MUTEX.lock().await;
         let origin = tempfile::TempDir::new().expect("origin");
         let op = origin.path();
         git(op, &["init", "--bare", "-b", "main"]);
@@ -4875,6 +4877,8 @@ mod tests {
     /// committed-but-unpushed work (the common case: workers commit via shell).
     #[tokio::test]
     async fn checkpoint_pushes_committed_but_unpushed_work() {
+        // Spawns real `git` children — see WARM_LIFECYCLE_TEST_MUTEX.
+        let _serial = WARM_LIFECYCLE_TEST_MUTEX.lock().await;
         let origin = tempfile::TempDir::new().expect("origin");
         let op = origin.path();
         git(op, &["init", "--bare", "-b", "main"]);
@@ -4938,6 +4942,8 @@ mod tests {
     /// `git rev-parse`; an absent branch resolves to `None` (skip-this-tick).
     #[tokio::test]
     async fn resolve_branch_sha_reads_local_head_and_handles_absent_branch() {
+        // Spawns real `git` children — see WARM_LIFECYCLE_TEST_MUTEX.
+        let _serial = WARM_LIFECYCLE_TEST_MUTEX.lock().await;
         let clone = tempfile::TempDir::new().expect("clone");
         let cp = clone.path();
         git(cp, &["init", "-b", "main"]);
@@ -4959,6 +4965,8 @@ mod tests {
     /// seam. Drives one tick by stubbing the tick logic the loop runs.
     #[tokio::test]
     async fn periodic_push_pushes_committed_work_without_committing() {
+        // Spawns real `git` children — see WARM_LIFECYCLE_TEST_MUTEX.
+        let _serial = WARM_LIFECYCLE_TEST_MUTEX.lock().await;
         let origin = tempfile::TempDir::new().expect("origin");
         let op = origin.path();
         git(op, &["init", "--bare", "-b", "main"]);
