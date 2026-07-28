@@ -54,6 +54,27 @@ fn inventory_observation(
     }
 }
 
+/// Whether Kubernetes has declared one observed object finished.
+///
+/// This is deliberately two-valued and fail-safe: everything a probe cannot
+/// positively classify as finished is [`Self::Live`], because the only thing
+/// this answer is used for is releasing a build slot, and releasing a slot
+/// whose workload is still running is the failure mode the object-absence rule
+/// existed to prevent.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum WarmObjectLifecycle {
+    /// The object exists and is not provably finished — running, pending,
+    /// unreadable status, or a status shape this code does not understand.
+    #[default]
+    Live,
+    /// A Job carrying a `Complete` or `Failed` condition, or a Pod in the
+    /// `Succeeded` / `Failed` phase. Both are Kubernetes' own terminal
+    /// declarations, not an inference from counters: `status.failed > 0` is NOT
+    /// terminal in general (a Job with retries left keeps running), which is
+    /// why the conditions are read instead.
+    Terminal,
+}
+
 /// Data obtained from Kubernetes before identity validation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WarmCandidateObject {
@@ -61,6 +82,9 @@ pub struct WarmCandidateObject {
     pub name: String,
     pub uid: Option<String>,
     pub annotations: BTreeMap<String, String>,
+    /// Kubernetes' own terminal declaration for this object. Defaults to
+    /// [`WarmObjectLifecycle::Live`] for anything not positively finished.
+    pub lifecycle: WarmObjectLifecycle,
 }
 
 /// Result of checking the three durable annotations against the persisted
@@ -83,6 +107,8 @@ pub struct WarmCandidate {
     pub name: String,
     pub uid: Option<String>,
     pub annotation_validation: WarmAnnotationValidation,
+    /// Carried through from the observation. See [`WarmObjectLifecycle`].
+    pub lifecycle: WarmObjectLifecycle,
 }
 
 /// Classification for candidates of one Kubernetes kind.
@@ -152,6 +178,46 @@ impl WarmCandidateInventory {
             .then(|| self.pods.candidates.first())
             .flatten()
     }
+
+    /// Whether this request's workload has provably finished: Kubernetes has
+    /// declared every observed Job terminal and no observed Pod is still live.
+    ///
+    /// # Why this is safe to release a build slot on
+    ///
+    /// The rule it replaces was "both object lists are empty", which is a proof
+    /// about the API server's garbage collector, not about the workload: a
+    /// `Complete` warm Job holds one of only three slots until
+    /// `ttlSecondsAfterFinished` fires. Observed live as `occupancy=3 cap=3`
+    /// with two running task-runs.
+    ///
+    /// Three conditions, all required, and each one closes a hole the others
+    /// leave open:
+    ///
+    /// * `observation == Observed` — an `ApiError` on EITHER list makes the
+    ///   answer unknown, and unknown is never proof. A degraded API server
+    ///   therefore keeps every slot occupied, exactly like the absence rule.
+    /// * at least one Job candidate, and every Job candidate terminal. A Job's
+    ///   `Complete`/`Failed` condition is the Job controller's own statement
+    ///   that it will create no further Pods, so nothing can start after this
+    ///   observation. (The warm Job is `backoffLimit: 0`, `restartPolicy:
+    ///   Never`, one completion — a single Pod, no retries.)
+    /// * every observed Pod candidate terminal. This is the direct statement of
+    ///   "nothing is still running", and it is what makes the release safe
+    ///   independently of any assumption about the Job controller: a `Running`
+    ///   or `Pending` Pod — including one still terminating — keeps the slot.
+    ///
+    /// A zero-Job inventory deliberately answers `false`: that population is
+    /// the object-absence branch, which releases for its own reason.
+    pub fn workload_finished(&self) -> bool {
+        self.observation == WarmInventoryObservation::Observed
+            && !self.jobs.candidates.is_empty()
+            && self
+                .jobs
+                .candidates
+                .iter()
+                .chain(self.pods.candidates.iter())
+                .all(|candidate| candidate.lifecycle == WarmObjectLifecycle::Terminal)
+    }
 }
 
 /// Outcome of attempting to write a gate authorization.
@@ -219,13 +285,52 @@ fn candidate_object(
     name: Option<String>,
     uid: Option<String>,
     annotations: Option<BTreeMap<String, String>>,
+    lifecycle: WarmObjectLifecycle,
 ) -> Option<WarmCandidateObject> {
     Some(WarmCandidateObject {
         kind,
         name: name?,
         uid,
         annotations: annotations.unwrap_or_default(),
+        lifecycle,
     })
+}
+
+/// Kubernetes' terminal declaration for a Job.
+///
+/// Read from `status.conditions`, never from the `succeeded`/`failed` counters:
+/// a counter says how many Pods have finished, and for a Job with retries left
+/// `failed > 0` is entirely compatible with a Pod that is still running. The
+/// `Complete` / `Failed` conditions are the Job controller's statement that it
+/// is done creating Pods, which is the only thing a slot release may rely on.
+fn job_lifecycle(job: &Job) -> WarmObjectLifecycle {
+    let terminal = job.status.as_ref().is_some_and(|status| {
+        status.conditions.iter().flatten().any(|condition| {
+            matches!(condition.type_.as_str(), "Complete" | "Failed") && condition.status == "True"
+        })
+    });
+    if terminal {
+        WarmObjectLifecycle::Terminal
+    } else {
+        WarmObjectLifecycle::Live
+    }
+}
+
+/// Kubernetes' terminal declaration for a Pod: the two terminal phases. Every
+/// other phase — including an absent or unrecognised one — is [`Live`].
+///
+/// [`Live`]: WarmObjectLifecycle::Live
+fn pod_lifecycle(pod: &Pod) -> WarmObjectLifecycle {
+    let terminal = pod
+        .status
+        .as_ref()
+        .and_then(|status| status.phase.as_deref())
+        .is_some_and(|phase| matches!(phase, "Succeeded" | "Failed"));
+    if terminal {
+        WarmObjectLifecycle::Terminal
+    } else {
+        WarmObjectLifecycle::Live
+    }
 }
 
 fn api_error(error: kube::Error) -> String {
@@ -242,11 +347,13 @@ impl WarmCandidateClient for KubeWarmCandidateClient {
             .items
             .into_iter()
             .filter_map(|job| {
+                let lifecycle = job_lifecycle(&job);
                 candidate_object(
                     WarmCandidateKind::Job,
                     job.metadata.name,
                     job.metadata.uid,
                     job.metadata.annotations,
+                    lifecycle,
                 )
             })
             .collect())
@@ -260,11 +367,13 @@ impl WarmCandidateClient for KubeWarmCandidateClient {
             .items
             .into_iter()
             .filter_map(|pod| {
+                let lifecycle = pod_lifecycle(&pod);
                 candidate_object(
                     WarmCandidateKind::Pod,
                     pod.metadata.name,
                     pod.metadata.uid,
                     pod.metadata.annotations,
+                    lifecycle,
                 )
             })
             .collect())
@@ -377,6 +486,7 @@ impl<C: WarmCandidateClient> WarmCandidateControl<C> {
                 name: object.name,
                 uid: object.uid,
                 annotation_validation: validate_annotations(&object.annotations, identity),
+                lifecycle: object.lifecycle,
             })
             .collect::<Vec<_>>();
         let jobs = candidate_set(
@@ -542,6 +652,159 @@ mod tests {
     fn identity() -> LeasedWarmJobIdentity {
         LeasedWarmJobIdentity::new("project", "request", "revision", 7)
     }
+
+    /// The classification a build-slot release depends on, read off the API
+    /// objects Kubernetes actually returns.
+    ///
+    /// Without this the reconciler's release test could pass forever against a
+    /// mapping that answers `Live` for every real Job — the fix would be inert
+    /// in production and every test would still be green.
+    #[test]
+    fn kubernetes_status_decides_the_lifecycle() {
+        let job = |status: serde_json::Value| -> Job {
+            serde_json::from_value(serde_json::json!({
+                "metadata": {"name": "warm"},
+                "status": status,
+            }))
+            .expect("job fixture")
+        };
+        assert_eq!(
+            job_lifecycle(&job(
+                serde_json::json!({"conditions": [{"type": "Complete", "status": "True"}]})
+            )),
+            WarmObjectLifecycle::Terminal,
+            "a Complete Job is finished and its slot must come back"
+        );
+        assert_eq!(
+            job_lifecycle(&job(
+                serde_json::json!({"conditions": [{"type": "Failed", "status": "True"}]})
+            )),
+            WarmObjectLifecycle::Terminal
+        );
+        assert_eq!(
+            job_lifecycle(&job(serde_json::json!({"active": 1}))),
+            WarmObjectLifecycle::Live
+        );
+        assert_eq!(
+            job_lifecycle(&job(serde_json::json!({}))),
+            WarmObjectLifecycle::Live
+        );
+        // A condition that is present but NOT true says the opposite of what a
+        // type-only match would read.
+        assert_eq!(
+            job_lifecycle(&job(
+                serde_json::json!({"conditions": [{"type": "Complete", "status": "False"}]})
+            )),
+            WarmObjectLifecycle::Live
+        );
+        // The counter trap: `failed > 0` is not terminal on its own, because a
+        // Job with retries left keeps running.
+        assert_eq!(
+            job_lifecycle(&job(serde_json::json!({"failed": 1, "active": 1}))),
+            WarmObjectLifecycle::Live,
+            "a failure counter is not a terminal declaration"
+        );
+        assert_eq!(
+            job_lifecycle(
+                &serde_json::from_value(serde_json::json!({"metadata": {"name": "warm"}}))
+                    .expect("job fixture")
+            ),
+            WarmObjectLifecycle::Live,
+            "an unreported status is unknown, and unknown never releases"
+        );
+
+        let pod = |phase: &str| -> Pod {
+            serde_json::from_value(serde_json::json!({
+                "metadata": {"name": "warm-pod"},
+                "status": {"phase": phase},
+            }))
+            .expect("pod fixture")
+        };
+        assert_eq!(pod_lifecycle(&pod("Succeeded")), WarmObjectLifecycle::Terminal);
+        assert_eq!(pod_lifecycle(&pod("Failed")), WarmObjectLifecycle::Terminal);
+        assert_eq!(pod_lifecycle(&pod("Running")), WarmObjectLifecycle::Live);
+        assert_eq!(pod_lifecycle(&pod("Pending")), WarmObjectLifecycle::Live);
+        assert_eq!(
+            pod_lifecycle(
+                &serde_json::from_value(serde_json::json!({"metadata": {"name": "warm-pod"}}))
+                    .expect("pod fixture")
+            ),
+            WarmObjectLifecycle::Live
+        );
+    }
+
+    /// The slot-release predicate itself: every unknown answers "keep the slot".
+    #[test]
+    fn only_a_finished_and_fully_observed_workload_releases() {
+        let candidate = |kind, lifecycle| WarmCandidate {
+            kind,
+            name: "object".into(),
+            uid: Some("uid".into()),
+            annotation_validation: WarmAnnotationValidation::Matching,
+            lifecycle,
+        };
+        let inventory = |observation: WarmInventoryObservation,
+                         jobs: Vec<WarmCandidate>,
+                         pods: Vec<WarmCandidate>| WarmCandidateInventory {
+            observation,
+            jobs_observation: WarmCandidateListObservation::Observed,
+            jobs: candidate_set(jobs),
+            pods_observation: WarmCandidateListObservation::Observed,
+            pods: candidate_set(pods),
+        };
+        let terminal_job = candidate(WarmCandidateKind::Job, WarmObjectLifecycle::Terminal);
+        let live_job = candidate(WarmCandidateKind::Job, WarmObjectLifecycle::Live);
+        let terminal_pod = candidate(WarmCandidateKind::Pod, WarmObjectLifecycle::Terminal);
+        let live_pod = candidate(WarmCandidateKind::Pod, WarmObjectLifecycle::Live);
+
+        assert!(
+            inventory(
+                WarmInventoryObservation::Observed,
+                vec![terminal_job.clone()],
+                vec![terminal_pod.clone()]
+            )
+            .workload_finished()
+        );
+        assert!(
+            inventory(
+                WarmInventoryObservation::Observed,
+                vec![terminal_job.clone()],
+                vec![]
+            )
+            .workload_finished(),
+            "a finished Job whose Pod is already gone is finished"
+        );
+        assert!(
+            !inventory(
+                WarmInventoryObservation::Observed,
+                vec![terminal_job.clone()],
+                vec![live_pod]
+            )
+            .workload_finished(),
+            "a running Pod keeps the slot however finished its Job claims to be"
+        );
+        assert!(
+            !inventory(
+                WarmInventoryObservation::Observed,
+                vec![live_job],
+                vec![terminal_pod.clone()]
+            )
+            .workload_finished()
+        );
+        assert!(
+            !inventory(
+                WarmInventoryObservation::ApiError("apiserver unavailable".into()),
+                vec![terminal_job],
+                vec![terminal_pod]
+            )
+            .workload_finished(),
+            "an unusable observation is never proof"
+        );
+        assert!(
+            !inventory(WarmInventoryObservation::Observed, vec![], vec![]).workload_finished(),
+            "an empty inventory is the object-absence branch, not this one"
+        );
+    }
     fn object(kind: WarmCandidateKind, name: &str, uid: Option<&str>) -> WarmCandidateObject {
         let id = identity();
         WarmCandidateObject {
@@ -556,6 +819,7 @@ mod tests {
                     id.fencing_token.to_string(),
                 ),
             ]),
+            lifecycle: WarmObjectLifecycle::Live,
         }
     }
     #[tokio::test]
@@ -713,6 +977,7 @@ mod tests {
             name: "pod".into(),
             uid: Some("uid".into()),
             annotation_validation: WarmAnnotationValidation::Matching,
+            lifecycle: WarmObjectLifecycle::Live,
         };
         let control = WarmCandidateControl::new(Fake {
             delete_result: CleanupObservation::Unresolved("timeout".into()),

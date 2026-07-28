@@ -878,6 +878,9 @@ async fn production_adapter_cancellation_reconciles_uid_before_capacity_release(
                 ),
                 ("djinn.app/fencing-token".into(), token.0.to_string()),
             ]),
+            // A Pod the cancellation path still has to delete: not finished,
+            // so the terminal-workload release never applies to it.
+            lifecycle: djinn_k8s::WarmObjectLifecycle::Live,
         },
     ]));
     let deleted = Arc::new(std::sync::Mutex::new(Vec::new()));

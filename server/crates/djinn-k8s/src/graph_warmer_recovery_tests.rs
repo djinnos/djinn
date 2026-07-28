@@ -138,6 +138,7 @@ fn pod_inventory(uid: &str) -> WarmCandidateInventory {
         name: "pod".into(),
         uid: Some(uid.into()),
         annotation_validation: WarmAnnotationValidation::Matching,
+        lifecycle: WarmObjectLifecycle::Live,
     };
     WarmCandidateInventory {
         observation: WarmInventoryObservation::Observed,
@@ -149,6 +150,136 @@ fn pod_inventory(uid: &str) -> WarmCandidateInventory {
             candidates: vec![candidate],
         },
     }
+}
+
+/// An inventory carrying one Job and one Pod for this request, each with an
+/// explicit Kubernetes lifecycle.
+fn job_and_pod_inventory(
+    job: WarmObjectLifecycle,
+    pod: WarmObjectLifecycle,
+) -> WarmCandidateInventory {
+    WarmCandidateInventory {
+        observation: WarmInventoryObservation::Observed,
+        jobs_observation: crate::graph_warmer_candidates::WarmCandidateListObservation::Observed,
+        jobs: WarmCandidateSet {
+            state: WarmCandidateSetState::One,
+            candidates: vec![WarmCandidate {
+                kind: WarmCandidateKind::Job,
+                name: "job".into(),
+                uid: Some("job-uid".into()),
+                annotation_validation: WarmAnnotationValidation::Matching,
+                lifecycle: job,
+            }],
+        },
+        pods_observation: crate::graph_warmer_candidates::WarmCandidateListObservation::Observed,
+        pods: WarmCandidateSet {
+            state: WarmCandidateSetState::One,
+            candidates: vec![WarmCandidate {
+                kind: WarmCandidateKind::Pod,
+                name: "pod".into(),
+                uid: Some("uid-a".into()),
+                annotation_validation: WarmAnnotationValidation::Matching,
+                lifecycle: pod,
+            }],
+        },
+    }
+}
+
+/// A `Complete` warm Job used to hold its build slot until Kubernetes garbage
+/// collected the object — one of THREE slots, observed in production as
+/// `occupancy=3 cap=3` with only two running task-runs. The workload is over;
+/// the capacity must come back.
+#[tokio::test]
+async fn a_terminal_warm_job_releases_its_build_slot() {
+    let lease = Arc::new(LeaseFake {
+        rows: StdMutex::new(vec![recovery(LeaseState::Active, Some("uid-a"), false)]),
+        binds: StdMutex::new(Vec::new()),
+        reports: StdMutex::new(Vec::new()),
+        releases: StdMutex::new(0),
+    });
+    let candidates = Arc::new(CandidatesFake {
+        inventories: StdMutex::new(VecDeque::from([job_and_pod_inventory(
+            WarmObjectLifecycle::Terminal,
+            WarmObjectLifecycle::Terminal,
+        )])),
+        deletes: StdMutex::new(Vec::new()),
+        gates: StdMutex::new(Vec::new()),
+        delete_outcome: CleanupObservation::ConfirmedDelete,
+    });
+    let warmer = warmer(lease.clone(), candidates.clone());
+    warmer.reconcile_durable_warm_leases().await;
+
+    assert_eq!(
+        *lease.releases.lock().unwrap(),
+        1,
+        "a finished warm workload must hand its build slot back, not wait for \
+         the API server's garbage collector"
+    );
+    // Replaying the pass must not return the same capacity twice: the release
+    // retires the row, so the second pass has nothing to reconcile.
+    warmer.reconcile_durable_warm_leases().await;
+    assert_eq!(*lease.releases.lock().unwrap(), 1);
+    assert!(candidates.deletes.lock().unwrap().is_empty());
+}
+
+/// The safety property the object-absence rule was protecting, stated
+/// directly: a Job Kubernetes has already declared finished whose Pod is STILL
+/// RUNNING keeps its slot. Releasing here would let a second build start
+/// against capacity the first one is still using.
+#[tokio::test]
+async fn a_terminal_job_with_a_live_pod_keeps_its_build_slot() {
+    let lease = Arc::new(LeaseFake {
+        rows: StdMutex::new(vec![recovery(LeaseState::Active, Some("uid-a"), false)]),
+        binds: StdMutex::new(Vec::new()),
+        reports: StdMutex::new(Vec::new()),
+        releases: StdMutex::new(0),
+    });
+    let candidates = Arc::new(CandidatesFake {
+        inventories: StdMutex::new(VecDeque::from([job_and_pod_inventory(
+            WarmObjectLifecycle::Terminal,
+            WarmObjectLifecycle::Live,
+        )])),
+        deletes: StdMutex::new(Vec::new()),
+        gates: StdMutex::new(Vec::new()),
+        delete_outcome: CleanupObservation::ConfirmedDelete,
+    });
+    warmer(lease.clone(), candidates.clone())
+        .reconcile_durable_warm_leases()
+        .await;
+
+    assert_eq!(
+        *lease.releases.lock().unwrap(),
+        0,
+        "a still-running Pod holds the slot however finished its Job claims to be"
+    );
+}
+
+/// A warm that is simply running keeps its slot and stays on the ordinary
+/// bind/gate path.
+#[tokio::test]
+async fn a_running_warm_keeps_its_build_slot() {
+    let lease = Arc::new(LeaseFake {
+        rows: StdMutex::new(vec![recovery(LeaseState::Bound, Some("uid-a"), false)]),
+        binds: StdMutex::new(Vec::new()),
+        reports: StdMutex::new(Vec::new()),
+        releases: StdMutex::new(0),
+    });
+    let candidates = Arc::new(CandidatesFake {
+        inventories: StdMutex::new(VecDeque::from([job_and_pod_inventory(
+            WarmObjectLifecycle::Live,
+            WarmObjectLifecycle::Live,
+        )])),
+        deletes: StdMutex::new(Vec::new()),
+        gates: StdMutex::new(Vec::new()),
+        delete_outcome: CleanupObservation::ConfirmedDelete,
+    });
+    warmer(lease.clone(), candidates.clone())
+        .reconcile_durable_warm_leases()
+        .await;
+
+    assert_eq!(*lease.releases.lock().unwrap(), 0);
+    assert_eq!(lease.binds.lock().unwrap().as_slice(), ["uid-a"]);
+    assert_eq!(candidates.gates.lock().unwrap().as_slice(), ["uid-a"]);
 }
 
 fn warmer(lease: Arc<LeaseFake>, candidates: Arc<CandidatesFake>) -> K8sGraphWarmer {
@@ -303,6 +434,7 @@ async fn unsafe_recovery_inventory_never_binds_or_opens_graph_work_gate() {
                     expected: "revision".into(),
                     found: Some("other".into()),
                 },
+                lifecycle: WarmObjectLifecycle::Live,
             }],
         },
     };
