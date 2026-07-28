@@ -663,3 +663,121 @@ async fn escalating_invocation_journals_before_the_queue_request() {
     test_clock.advance_mono(Duration::from_secs(120));
     let _ = run.await.expect("join");
 }
+
+/// Regression: the sweep must not reap an invocation this process is still
+/// executing.
+///
+/// A durable record exists for the whole life of an escalated command. The
+/// sweep cannot tell from the file whether that command is running or was
+/// orphaned by a dead predecessor, so it read every long `cargo` build as an
+/// orphan and fired the exact-pod watchdog against its OWN Pod. Production
+/// (2026-07-28) killed workers mid-compile this way even after the
+/// non-escalated record leak was fixed: `kziu` died at 15m and `3iir` at 10m,
+/// both on live cargo invocations.
+///
+/// The record is deliberately recorded far beyond the grace and the clock
+/// advanced past it, so the ONLY thing standing between this record and a
+/// termination request is the liveness claim.
+#[tokio::test]
+async fn a_live_invocation_is_never_reaped_by_its_own_watchdog() {
+    let directory = tempfile::tempdir().unwrap();
+    let identity = TaskInvocationLeaseIdentity {
+        task_id: "task".into(),
+        task_run_id: "run".into(),
+        invocation_id: "long-running-cargo".into(),
+    };
+    let journal = InvocationJournal::new(directory.path().to_path_buf(), "pod-uid".into()).unwrap();
+    journal.begin_live(&identity);
+    journal
+        .record_at(
+            &identity,
+            Some(LeaseFencingToken(11)),
+            false,
+            SystemTime::UNIX_EPOCH,
+        )
+        .unwrap();
+
+    let services = ScriptedServices::new(vec![], vec![], vec![]);
+    let clock = TestClock::new(SystemTime::UNIX_EPOCH, Instant::now());
+    clock.advance_wall(Duration::from_secs(3_600));
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    InvocationRecovery {
+        journal: &journal,
+        services: &services,
+        clock: &clock,
+        watchdog_grace: Duration::from_secs(300),
+    }
+    .run(|request| {
+        calls.lock().unwrap().push(request.pod_uid.clone());
+        std::future::ready(())
+    })
+    .await
+    .unwrap();
+
+    assert!(
+        calls.lock().unwrap().is_empty(),
+        "a command still running in this process must never make its own Pod a \
+         watchdog target, however long it has been compiling"
+    );
+    let retained = journal.unresolved().unwrap();
+    assert_eq!(
+        retained.len(),
+        1,
+        "the live record is retained, not cleared"
+    );
+    assert!(
+        !retained[0].watchdog_notified,
+        "no notification bit may be burned on a live invocation — that bit is \
+         one-shot, so setting it here would forfeit the real reap later"
+    );
+}
+
+/// The complement, and the reason the claim is a drop guard: once the
+/// invocation finishes, its record is reapable again. Without this the fix
+/// would trade a false kill for a permanently disarmed watchdog, which is the
+/// orphan hole the journal exists to close.
+#[tokio::test]
+async fn a_finished_invocations_record_becomes_reapable_again() {
+    let directory = tempfile::tempdir().unwrap();
+    let identity = TaskInvocationLeaseIdentity {
+        task_id: "task".into(),
+        task_run_id: "run".into(),
+        invocation_id: "finished-cargo".into(),
+    };
+    let journal = InvocationJournal::new(directory.path().to_path_buf(), "pod-uid".into()).unwrap();
+    journal.begin_live(&identity);
+    journal
+        .record_at(
+            &identity,
+            Some(LeaseFencingToken(12)),
+            false,
+            SystemTime::UNIX_EPOCH,
+        )
+        .unwrap();
+    // The command exited; the drop guard released the claim.
+    journal.finish_live(&identity.invocation_id);
+
+    let services = ScriptedServices::new(vec![], vec![], vec![]);
+    let clock = TestClock::new(SystemTime::UNIX_EPOCH, Instant::now());
+    clock.advance_wall(Duration::from_secs(3_600));
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    InvocationRecovery {
+        journal: &journal,
+        services: &services,
+        clock: &clock,
+        watchdog_grace: Duration::from_secs(300),
+    }
+    .run(|request| {
+        calls.lock().unwrap().push(request.pod_uid.clone());
+        std::future::ready(())
+    })
+    .await
+    .unwrap();
+
+    assert_eq!(
+        calls.lock().unwrap().len(),
+        1,
+        "a grace-expired record with no live owner is exactly the orphan the \
+         watchdog exists for"
+    );
+}
