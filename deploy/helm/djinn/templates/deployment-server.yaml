@@ -397,6 +397,12 @@ spec:
               value: {{ include "djinn.namespace" . | quote }}
             - name: DJINN_K8S_SERVICE_ACCOUNT
               value: {{ include "djinn.serviceAccountName.taskrun" . | quote }}
+            # This activation bit and the privilege-free task-run launcher form
+            # one release contract. It stays false in disabled and preparation
+            # releases, so existing server replicas keep the old path until the
+            # atomic activation upgrade.
+            - name: DJINN_K8S_TASK_RUN_CGROUP_WRITABLE_ENABLED
+              value: {{ .Values.cgroupWritable.taskRuns.enabled | quote }}
             - name: DJINN_K8S_MIRROR_PVC
               value: {{ include "djinn.pvcName.mirrors" . | quote }}
             - name: DJINN_K8S_CACHE_PVC

@@ -1,0 +1,29 @@
+{
+  "release": "preparation",
+  "server": {
+    "runtimeImageGeneration": "privileged",
+    "environment": {
+      "DJINN_K8S_TASK_RUN_CGROUP_WRITABLE_ENABLED": "false"
+    }
+  },
+  "taskRunPod": {
+    "spec": {
+      "initContainers": [
+        {
+          "name": "cgroup-launcher",
+          "imageGeneration": "privileged",
+          "env": {"DJINN_LAUNCHER_CGROUP_ROOT": "/run/djinn-cgroup"},
+          "volumeMounts": [{"name": "launcher-cgroup", "mountPath": "/run/djinn-cgroup"}],
+          "securityContext": {
+            "allowPrivilegeEscalation": false,
+            "readOnlyRootFilesystem": true,
+            "capabilities": {"drop": ["ALL"], "add": ["CHOWN", "SETGID", "SETUID", "SETPCAP", "SYS_ADMIN", "SYS_RESOURCE"]},
+            "appArmorProfile": {"type": "Unconfined"},
+            "seccompProfile": {"type": "RuntimeDefault"}
+          }
+        }
+      ],
+      "volumes": [{"name": "launcher-cgroup", "emptyDir": {"medium": "Memory"}}]
+    }
+  }
+}
