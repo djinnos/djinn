@@ -8,6 +8,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use sha2::{Digest, Sha256};
+
 fn migrations_dir(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(name)
 }
@@ -48,4 +50,18 @@ fn postgres_migration_names_are_canonical_and_increasing() {
         );
         last = *v;
     }
+}
+
+#[test]
+fn postgres_migration_150_is_immutable() {
+    let bytes = fs::read(
+        migrations_dir("migrations_postgres").join("150_service_preset_wrapper_identity.sql"),
+    )
+    .expect("migration 150 readable");
+    let digest = Sha256::digest(bytes);
+
+    assert_eq!(
+        format!("{digest:x}"),
+        "c341372f7b745f384175ef412d1d40a7c809b8194930cf16533eb638d49f3dc1"
+    );
 }
