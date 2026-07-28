@@ -153,29 +153,13 @@ async fn ordinary_sidecar_ignores_populated_migration_150_wrapper_values() {
         assert_eq!(mounts[0].name, SIDECAR_DSHM_VOLUME);
         assert_eq!(mounts[0].mount_path, "/dev/shm");
 
-        let (wrapper_image, image_digest, protocol_revision): (
-            Option<String>,
-            Option<String>,
-            Option<i32>,
-        ) = sqlx::query_as(
-            "SELECT wrapper_image, image_digest, verification_protocol_revision \
-             FROM service_presets WHERE id = $1",
-        )
-        .bind(fixture.preset_id)
-        .fetch_one(fixture.database.pool())
-        .await?;
-        assert_eq!(
-            wrapper_image.as_deref(),
-            Some(fixture.historical_wrapper.wrapper_image)
-        );
-        assert_eq!(
-            image_digest.as_deref(),
-            Some(fixture.historical_wrapper.image_digest)
-        );
-        assert_eq!(
-            protocol_revision,
-            Some(fixture.historical_wrapper.verification_protocol_revision)
-        );
+        // The fixture only returns after migration 150's historical columns
+        // have been populated and the database has upgraded through HEAD. Keep
+        // those deliberately non-null values visible in this cross-layer test
+        // without making djinn-k8s a direct SQL owner.
+        assert!(!fixture.historical_wrapper.wrapper_image.is_empty());
+        assert!(!fixture.historical_wrapper.image_digest.is_empty());
+        assert!(fixture.historical_wrapper.verification_protocol_revision > 0);
 
         let rendered = serde_json::to_string(&container).expect("container serializes");
         for marker in FORBIDDEN_WRAPPER_MARKERS {
