@@ -20,6 +20,15 @@
         "historyN": { "type": "integer", "minimum": 1, "maximum": 64 }
       }
     },
+    "scipCache": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["maxBytes", "maxIdleHours"],
+      "properties": {
+        "maxBytes": { "type": "integer", "minimum": 0 },
+        "maxIdleHours": { "type": "integer", "minimum": 0 }
+      }
+    },
     "buildAdmission": {
       "type": "object",
       "additionalProperties": false,

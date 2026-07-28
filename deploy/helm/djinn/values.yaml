@@ -37,6 +37,36 @@ graphRetention:
   historyN: 3
 
 # -----------------------------------------------------------------------------
+# SCIP indexer cache retention
+# -----------------------------------------------------------------------------
+# Bounds the content-addressed SCIP index cache on the shared `/cache` PVC
+# (`$XDG_CACHE_HOME/djinn/scip-indexer`). Every warm mints a new entry for each
+# workspace whose sources changed, and nothing used to remove one: the tree on
+# the production cluster reached 4.5 GiB across 40 entries, of which 33 had
+# never been read back.
+#
+# These are TUNING ONLY. The binary carries the same two defaults, so a
+# deployment that never sets them — an older chart, a raw manifest, a local
+# `cargo run` — still gets a bounded cache. Removing this block does not
+# unbound anything.
+#
+# Eviction is least-recently-USED (newest of atime/mtime), so entries that keep
+# producing cache hits keep surviving; entries written once and never read back
+# are exactly what gets reclaimed. An entry another pod is publishing into or
+# has touched in the last 30 minutes is never a candidate.
+#
+# Set either value to 0 to disable that bound. Nothing else does.
+scipCache:
+  # Total-size ceiling for the cache tree, in bytes. Default 4 GiB ≈ 25 warm
+  # generations of the largest project measured on the cluster (~165 MiB per
+  # generation across all its workspaces), comfortably above the longest reuse
+  # distance observed there (26 h) and ~5% of the shared cache claim.
+  maxBytes: 4294967296
+  # Evict entries unused for longer than this. The size cap binds first on a
+  # busy project; this leg bounds a project warmed too rarely to ever hit it.
+  maxIdleHours: 168
+
+# -----------------------------------------------------------------------------
 # Build admission
 # -----------------------------------------------------------------------------
 # Admission controls the combined task-run and warm-build concurrency cap. The

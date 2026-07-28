@@ -22,6 +22,7 @@ use serde::{Deserialize, Serialize};
 
 mod budget;
 pub(crate) mod cache;
+mod cache_gc;
 mod indexing;
 #[cfg(test)]
 mod warm_cost_regression;

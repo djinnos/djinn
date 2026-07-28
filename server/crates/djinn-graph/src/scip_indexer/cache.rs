@@ -12,9 +12,13 @@ use djinn_core::clock::{Clock, SystemClock};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use super::cache_gc;
 use super::{PlannedIndexerCommand, SupportedIndexer};
 
 const SCHEMA_VERSION: &str = "v1";
+/// Manifest file name. Single-sourced with [`cache_gc`], which identifies an
+/// entry directory by the presence of this file.
+const MANIFEST_FILE: &str = cache_gc::ENTRY_MANIFEST;
 const CACHE_DIR_ENV: &str = "DJINN_SCIP_CACHE_DIR";
 const DEFAULT_CACHE_SUFFIX: &str = "djinn/scip-indexer";
 
@@ -260,7 +264,7 @@ impl ScipCacheStore {
 
     pub(crate) fn load_bytes(&self, key: &ScipCacheKey) -> Result<Option<Vec<u8>>> {
         let entry = self.entry_dir(key);
-        let manifest_path = entry.join("manifest.json");
+        let manifest_path = entry.join(MANIFEST_FILE);
         let artifact_path = entry.join("artifact.scip");
         let manifest_bytes = match fs::read(&manifest_path) {
             Ok(bytes) => bytes,
@@ -297,7 +301,36 @@ impl ScipCacheStore {
             .with_context(|| format!("create SCIP cache entry dir {}", entry.display()))?;
 
         self.publish_artifact(key, &entry, bytes)?;
+        self.enforce_retention();
         Ok(())
+    }
+
+    /// Apply the retention bound to this store's root.
+    ///
+    /// Hung off the write path deliberately: a write is the only event that
+    /// grows the tree, it is the only moment every producer (warm Job,
+    /// task-run Pod, server process) is guaranteed to reach, and it needs no
+    /// scheduler of its own. The sweep is throttled and cross-process locked
+    /// inside [`cache_gc`], so a burst of stores costs one walk, and it is
+    /// best-effort: retention never fails a store or a warm.
+    fn enforce_retention(&self) {
+        let policy = cache_gc::RetentionPolicy::from_environment();
+        let Some(report) = cache_gc::maybe_enforce_retention(&self.root, &policy) else {
+            return;
+        };
+        if report.evicted() > 0 || report.reclaimed_staged > 0 {
+            tracing::info!(
+                root = %self.root.display(),
+                scanned = report.scanned,
+                evicted_idle = report.evicted_idle,
+                evicted_over_cap = report.evicted_over_cap,
+                reclaimed_bytes = report.reclaimed_bytes,
+                retained_bytes = report.retained_bytes,
+                skipped_in_flight = report.skipped_in_flight,
+                reclaimed_staged = report.reclaimed_staged,
+                "SCIP cache retention sweep evicted entries"
+            );
+        }
     }
 
     fn publish_artifact(&self, key: &ScipCacheKey, entry: &Path, bytes: &[u8]) -> Result<()> {
@@ -323,7 +356,7 @@ impl ScipCacheStore {
                         serde_json::to_vec_pretty(&manifest).context("serialize cache manifest")?;
 
                     atomic_write(entry, "artifact.scip", bytes)?;
-                    atomic_write(entry, "manifest.json", &manifest_bytes)?;
+                    atomic_write(entry, MANIFEST_FILE, &manifest_bytes)?;
                     return Ok(());
                 }
                 None => std::thread::sleep(Duration::from_millis(5)),
@@ -341,7 +374,7 @@ impl ScipCacheStore {
     }
 
     fn entry_is_valid(&self, key: &ScipCacheKey, entry: &Path) -> Result<bool> {
-        let manifest_path = entry.join("manifest.json");
+        let manifest_path = entry.join(MANIFEST_FILE);
         let artifact_path = entry.join("artifact.scip");
         let manifest_bytes = match fs::read(&manifest_path) {
             Ok(bytes) => bytes,
@@ -370,7 +403,7 @@ impl ScipCacheStore {
 
     fn try_lookup(&self, key: &ScipCacheKey, output_path: &Path) -> Result<bool> {
         let entry = self.entry_dir(key);
-        let manifest_path = entry.join("manifest.json");
+        let manifest_path = entry.join(MANIFEST_FILE);
         let artifact_path = entry.join("artifact.scip");
         let manifest_bytes = match fs::read(&manifest_path) {
             Ok(bytes) => bytes,
@@ -537,7 +570,7 @@ struct PublishLock {
 
 impl PublishLock {
     fn try_acquire(entry: &Path) -> Result<Option<Self>> {
-        let path = entry.join(".publish.lock");
+        let path = entry.join(cache_gc::PUBLISH_LOCK_DIR);
         match fs::create_dir(&path) {
             Ok(()) => Ok(Some(Self { path })),
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Ok(None),
@@ -930,7 +963,7 @@ mod tests {
             .expect("store artifact");
         let entry = store.entry_dir(&key);
 
-        fs::write(entry.join("manifest.json"), b"not json").expect("corrupt manifest");
+        fs::write(entry.join(MANIFEST_FILE), b"not json").expect("corrupt manifest");
         assert_eq!(store.lookup(&key, &output), CacheLookup::Miss);
 
         store
@@ -943,7 +976,7 @@ mod tests {
             artifact_len: 4,
         };
         fs::write(
-            entry.join("manifest.json"),
+            entry.join(MANIFEST_FILE),
             serde_json::to_vec(&manifest).expect("manifest json"),
         )
         .expect("write mismatch manifest");
@@ -969,7 +1002,7 @@ mod tests {
             artifact_len: 4,
         };
         fs::write(
-            entry.join("manifest.json"),
+            entry.join(MANIFEST_FILE),
             serde_json::to_vec(&manifest).expect("manifest json"),
         )
         .expect("write v2 manifest");
