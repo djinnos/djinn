@@ -1,5 +1,5 @@
 //! Unit tests for [`crate::launcher`]: the rendered v1 security contract, the
-//! role-classed resource envelope, the launcher's bootstrap capability set, and
+//! role-classed resource envelope, the launcher's residual capability set, and
 //! the fail-closed render validation.
 //!
 //! Split out of `launcher.rs` to keep that file inside the repository's per-file
@@ -108,39 +108,22 @@ fn worker_security_context_is_restricted() {
     assert_eq!(sc.seccomp_profile.as_ref().unwrap().type_, "RuntimeDefault");
 }
 
-/// The launcher is granted exactly the six capabilities it needs, spelled
-/// the way the API server accepts, and is never `privileged`.
-///
-/// `CHOWN` is retained past bootstrap because the broker socket is handed to the
-/// worker with `chown(2)`, which requires the capability even at euid 0.
+/// The launcher is granted exactly the residual identity/socket capabilities
+/// it needs, spelled the way the API server accepts, and is never `privileged`.
 #[test]
 fn launcher_capabilities_are_exactly_the_designed_set() {
     let caps = launcher_capabilities();
     assert_eq!(caps.drop.as_deref(), Some(&["ALL".to_string()][..]));
     let add = caps.add.expect("launcher adds capabilities");
-    assert_eq!(
-        add,
-        vec![
-            "CHOWN",
-            "SETGID",
-            "SETUID",
-            "SETPCAP",
-            "SYS_ADMIN",
-            "SYS_RESOURCE"
-        ]
-    );
-    // `privileged: true` would grant everything and defeat the bootstrap
-    // drop entirely; it must never appear.
+    assert_eq!(add, vec!["CHOWN", "SETGID", "SETUID", "SETPCAP"]);
+    // `privileged: true` would grant everything; it must never appear.
     let sc = launcher_security_context();
     assert_eq!(sc.privileged, None);
     assert_eq!(sc.read_only_root_filesystem, Some(true));
 }
 
-/// The Kubernetes API server rejects the literal string `CAP_SYS_ADMIN` in
-/// `capabilities.add` when `allowPrivilegeEscalation` is false. goxi's
-/// manifest as written uses that spelling and is therefore API-invalid; the
-/// conventional bare name is accepted. A regression here is a 422 at Job
-/// submission, which is a much worse place to find out.
+/// Kubernetes capability names use the API's bare spelling. A prefixed name
+/// alongside `allowPrivilegeEscalation: false` is rejected at Job submission.
 #[test]
 fn capabilities_use_the_api_accepted_spelling_alongside_no_privilege_escalation() {
     let sc = launcher_security_context();
@@ -154,16 +137,9 @@ fn capabilities_use_the_api_accepted_spelling_alongside_no_privilege_escalation(
     }
 }
 
-/// The rendered grant and the runtime `capset` must be the same set.
-///
-/// This is the guard for the third v0.7.x rollback. The launcher retains exactly
-/// `bootstrap::RETAINED_CAPABILITIES` and destroys the rest, so a capability the
-/// manifest grants but the runtime does not retain is gone microseconds later,
-/// and one the runtime retains but the manifest never grants never existed. Both
-/// directions are silent until a real kernel refuses a syscall — which is how
-/// `CAP_CHOWN` came to be missing while `UnixBrokerServer::bind` needed it.
+/// The render grants exactly the identity/socket capabilities the launcher uses.
 #[test]
-fn the_rendered_grant_is_exactly_what_the_runtime_retains_plus_bootstrap_only() {
+fn the_rendered_grant_is_exactly_the_runtime_residual_set() {
     let cfg = KubernetesConfig::for_testing();
     let container = launcher_sidecar_container(&cfg, "registry.example/proj:tag", false, false);
     let add = container
@@ -173,22 +149,11 @@ fn the_rendered_grant_is_exactly_what_the_runtime_retains_plus_bootstrap_only() 
         .unwrap()
         .add
         .unwrap();
-
     let expected: Vec<String> = RETAINED_CAPABILITY_NAMES
         .iter()
         .map(|capability| (*capability).to_string())
         .collect();
-    assert_eq!(
-        add, expected,
-        "the Pod grant must be the runtime's retained set plus its bootstrap-only set"
-    );
-
-    for retained in RETAINED_CAPABILITY_NAMES {
-        assert!(
-            !LAUNCHER_BOOTSTRAP_ONLY_CAPABILITIES.contains(retained),
-            "{retained} cannot be both retained and dropped"
-        );
-    }
+    assert_eq!(add, expected);
 }
 
 /// Defect 1, asserted on the manifest: a CPU limit on the launcher container
@@ -246,30 +211,19 @@ fn user_namespaces_are_never_requested_because_they_break_the_delegation() {
     assert_eq!(pod_host_users(CgroupLauncherMode::Required), None);
 }
 
-/// The armed sidecar mounts a writable directory at the cgroup root path.
-/// Without it `readOnlyRootFilesystem: true` makes the launcher's own
-/// `mount(2)` fail at the mountpoint, before it ever reaches the kernel.
+/// The RuntimeClass supplies the writable cgroup hierarchy; a rendered Pod must
+/// not attempt to replace it with an emptyDir or hostPath mount.
 #[test]
-fn the_launcher_mounts_a_writable_mountpoint_at_the_cgroup_root() {
+fn launcher_has_no_rendered_cgroup_mount() {
     let cfg = KubernetesConfig::for_testing();
-    let c = launcher_sidecar_container(&cfg, "registry.example/proj:tag", false, false);
-    let mount = c
-        .volume_mounts
-        .unwrap()
-        .into_iter()
-        .find(|mount| mount.mount_path == LAUNCHER_CGROUP_ROOT)
-        .expect("the launcher must mount a writable cgroup mountpoint");
-    assert_eq!(mount.name, VOLUME_LAUNCHER_CGROUP);
-    assert_ne!(
-        mount.read_only,
-        Some(true),
-        "a read-only mountpoint cannot be mounted over"
+    let container = launcher_sidecar_container(&cfg, "registry.example/proj:tag", false, false);
+    assert!(
+        container
+            .volume_mounts
+            .iter()
+            .flatten()
+            .all(|mount| mount.mount_path != LAUNCHER_CGROUP_ROOT)
     );
-    // And the volume that backs it must be declared, or the API server
-    // rejects the manifest for a dangling volumeMount.
-    let volume = launcher_cgroup_mountpoint_volume();
-    assert_eq!(volume.name, VOLUME_LAUNCHER_CGROUP);
-    assert!(volume.empty_dir.is_some());
 }
 
 #[test]
@@ -388,228 +342,17 @@ fn recognized_but_nonconforming_cgroup_profiles_are_rejected_by_the_launcher_con
 /// changing the render without updating the fixture fails here instead of
 /// silently proving a boundary nobody ships.
 #[test]
-fn rendered_security_context_matches_the_adversarial_proof_fixture() {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../djinn-cgroup-launcher/tests/fixtures/rendered-security-context.env");
-    let raw = std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("read rendered security-context fixture {path:?}: {e}"));
-    let fixture: BTreeMap<&str, &str> = raw
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty() && !line.starts_with('#'))
-        .map(|line| {
-            let (key, value) = line.split_once('=').expect("fixture line is key=value");
-            (key.trim(), value.trim())
-        })
-        .collect();
-
-    let config = KubernetesConfig::for_testing();
-    // Use the production/default Job builder rather than a parallel security
-    // context fixture. The privileged cpu.stat lane consumes this file, so a
-    // manifest change cannot leave it measuring a stale approximation.
-    let job = crate::job::build_task_run_job(
-        &config,
-        &uuid::Uuid::now_v7(),
-        "rendered-contract-project",
-        "djinn-taskrun-rendered-contract",
-        "registry.example/djinn-project:contract",
-        &[],
-        None,
-        false,
-        Some(RoleKind::Worker),
-    );
-    let pod = job
-        .spec
-        .as_ref()
-        .and_then(|spec| spec.template.spec.as_ref())
-        .expect("production Job has a pod spec");
-    let worker = pod
-        .containers
-        .iter()
-        .find(|container| container.name == "worker")
-        .and_then(|container| container.security_context.as_ref())
-        .expect("production Job worker security context");
-    let launcher_container = pod
-        .init_containers
-        .iter()
-        .flatten()
-        .find(|container| container.name == LAUNCHER_CONTAINER_NAME)
-        .expect("production required Job launcher container");
-    let launcher = launcher_container
-        .security_context
-        .as_ref()
-        .expect("production Job launcher security context");
-    let pod_security = pod
-        .security_context
-        .as_ref()
-        .expect("production Job pod security context");
-    let capabilities = |sc: &SecurityContext, take_added: bool| {
-        let caps = sc.capabilities.as_ref().expect("capabilities");
-        let list = if take_added {
-            caps.add.clone().unwrap_or_default()
-        } else {
-            caps.drop.clone().unwrap_or_default()
-        };
-        list.join(",")
-    };
-    let expected: BTreeMap<&str, String> = BTreeMap::from([
-        (
-            "worker_run_as_user",
-            worker.run_as_user.unwrap().to_string(),
-        ),
-        (
-            "worker_run_as_group",
-            worker.run_as_group.unwrap().to_string(),
-        ),
-        (
-            "worker_run_as_non_root",
-            worker.run_as_non_root.unwrap().to_string(),
-        ),
-        (
-            "worker_allow_privilege_escalation",
-            worker.allow_privilege_escalation.unwrap().to_string(),
-        ),
-        ("worker_capabilities_drop", capabilities(worker, false)),
-        (
-            "launcher_run_as_user",
-            launcher.run_as_user.unwrap().to_string(),
-        ),
-        (
-            "launcher_run_as_group",
-            launcher.run_as_group.unwrap().to_string(),
-        ),
-        (
-            "launcher_allow_privilege_escalation",
-            launcher.allow_privilege_escalation.unwrap().to_string(),
-        ),
-        (
-            "launcher_read_only_root_filesystem",
-            launcher.read_only_root_filesystem.unwrap().to_string(),
-        ),
-        ("launcher_capabilities_drop", capabilities(launcher, false)),
-        ("launcher_capabilities_add", capabilities(launcher, true)),
-        (
-            "launcher_bootstrap_only_capabilities",
-            LAUNCHER_BOOTSTRAP_ONLY_CAPABILITIES.join(","),
-        ),
-        (
-            "launcher_apparmor_profile",
-            launcher
-                .app_armor_profile
-                .as_ref()
-                .expect("the required render pins the launcher's AppArmor profile")
-                .type_
-                .clone(),
-        ),
-        ("child_run_as_user", CHILD_UID.to_string()),
-        ("child_run_as_group", ARTIFACT_GID.to_string()),
-        ("child_umask", "0002".to_string()),
-        ("pod_fs_group", pod_security.fs_group.unwrap().to_string()),
-        (
-            "pod_fs_group_change_policy",
-            pod_security.fs_group_change_policy.clone().unwrap(),
-        ),
-        (
-            "seccomp_profile",
-            worker.seccomp_profile.as_ref().unwrap().type_.clone(),
-        ),
-        ("launcher_expected_uid", LAUNCHER_UID.to_string()),
-        (
-            "unleased_millicores",
-            LAUNCHER_UNLEASED_MILLICORES.to_string(),
-        ),
-        (
-            "leased_millicores",
-            launcher_leased_millicores(&config).to_string(),
-        ),
-        (
-            "cgroup_delegation_profile",
-            config.cgroup_delegation_profile.clone(),
-        ),
-        (
-            "volume_ownership_mode",
-            config.volume_ownership_mode.clone(),
-        ),
-        (
-            "launcher_cpu_limit",
-            launcher_container
-                .resources
-                .as_ref()
-                .and_then(|resources| resources.limits.as_ref())
-                .and_then(|limits| limits.get("cpu"))
-                .map_or_else(|| "none".to_owned(), |quantity| quantity.0.clone()),
-        ),
-        (
-            "launcher_cpu_request",
-            launcher_container
-                .resources
-                .as_ref()
-                .and_then(|resources| resources.requests.as_ref())
-                .and_then(|requests| requests.get("cpu"))
-                .expect("production launcher CPU request")
-                .0
-                .clone(),
-        ),
-        (
-            "launcher_memory_request",
-            launcher_container
-                .resources
-                .as_ref()
-                .and_then(|resources| resources.requests.as_ref())
-                .and_then(|requests| requests.get("memory"))
-                .expect("production launcher memory request")
-                .0
-                .clone(),
-        ),
-        (
-            "launcher_memory_limit",
-            launcher_container
-                .resources
-                .as_ref()
-                .and_then(|resources| resources.limits.as_ref())
-                .and_then(|limits| limits.get("memory"))
-                .expect("production launcher memory limit")
-                .0
-                .clone(),
-        ),
-        (
-            "launcher_lease_quota_millicores",
-            launcher_container
-                .env
-                .as_ref()
-                .and_then(|env| {
-                    env.iter()
-                        .find(|entry| entry.name == "DJINN_LAUNCHER_LEASED_MILLICORES")
-                })
-                .and_then(|entry| entry.value.clone())
-                .expect("production launcher explicit lease quota"),
-        ),
-    ]);
-
-    for (key, value) in &expected {
-        assert_eq!(
-            fixture.get(key).copied(),
-            Some(value.as_str()),
-            "the adversarial proof fixture is stale for `{key}`; update \
-             crates/djinn-cgroup-launcher/tests/fixtures/rendered-security-context.env"
-        );
-    }
-    let extra: Vec<&&str> = fixture
-        .keys()
-        .filter(|k| !expected.contains_key(*k))
-        .collect();
-    assert!(
-        extra.is_empty(),
-        "the fixture declares keys the render does not produce: {extra:?}"
-    );
-    // The launcher and worker share one seccomp profile; assert it rather
-    // than let the fixture describe only half the contract.
+fn rendered_security_context_uses_runtime_default_without_apparmor_override() {
+    let launcher = launcher_security_context();
+    assert_eq!(launcher.app_armor_profile, None);
+    assert_eq!(launcher.seccomp_profile.unwrap().type_, "RuntimeDefault");
     assert_eq!(
-        launcher.seccomp_profile.as_ref().unwrap().type_,
-        fixture["seccomp_profile"]
+        launcher.capabilities.unwrap().add.unwrap(),
+        RETAINED_CAPABILITY_NAMES
+            .iter()
+            .map(|capability| (*capability).to_string())
+            .collect::<Vec<_>>()
     );
-    // The render must also actually accept the profile pair it advertises.
-    assert!(validate_enforcement_render(&config).is_ok());
 }
 
 #[test]

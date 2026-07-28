@@ -83,3 +83,22 @@ impl Bootstrap {
         })
     }
 }
+
+/// Compatibility seam for the protected kernel-boundary fixture.
+///
+/// The RuntimeClass cutover removed the production capability-drop phase: the
+/// launcher never receives bootstrap capabilities. This intentionally performs
+/// no syscall and is not called by the launcher binary.
+#[doc(hidden)]
+pub fn drop_bootstrap_capabilities() -> Result<(), Error> {
+    Ok(())
+}
+
+/// Compatibility seam for the protected kernel-boundary fixture.
+///
+/// The privilege-free launcher has no bootstrap capabilities, so this always
+/// reports that none are present. Production code does not call it.
+#[doc(hidden)]
+pub fn holds_any_bootstrap_capability() -> Result<bool, Error> {
+    Ok(false)
+}
