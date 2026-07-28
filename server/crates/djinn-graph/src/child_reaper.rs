@@ -1,11 +1,22 @@
 //! Worker-scoped child lifecycle registry.
 //!
-//! On Linux this module owns the worker's `waitpid(-1, ...)` loop.  Code which
+//! On Linux this module owns the worker's child-reaping loop.  Code which
 //! registers a direct child must never call `Child::{wait,try_wait}` itself:
 //! the terminal status is delivered through the [`DirectChild`] receiver.
 //! Unrecognised statuses are retained as adopted-child records, rather than
 //! being silently discarded because they do not belong to a known process
 //! group.  This matters when the warm worker is a Linux subreaper.
+//!
+//! ## What the loop will not reap
+//!
+//! The loop **peeks** with `waitid(P_ALL, .., WNOWAIT)` and only then collects
+//! the PID it saw. It used to call `waitpid(-1, WNOHANG)` directly, which
+//! consumes a status before the caller can see whose it was — including the
+//! status of a child `tokio::process` spawned and is itself waiting on. Tokio's
+//! own `waitpid` then fails with `ECHILD` and reports a subprocess that ran
+//! perfectly as an I/O error. PIDs registered in
+//! [`djinn_core::child_ownership`] are therefore skipped while admission is
+//! open; see that module for the measurements.
 
 use std::collections::HashMap;
 use std::io;
@@ -372,15 +383,53 @@ impl ChildReaper {
         self.inner.changed.notify_all();
     }
 
-    /// Install the single per-process `waitpid(-1, WNOHANG)` consumer.
+    /// Peek at the next child whose terminal status is collectable, **without**
+    /// consuming it (`WNOWAIT`).
+    ///
+    /// This is what makes the wait loop able to decline a PID. `waitpid(-1, ..)`
+    /// consumes before the caller can see whose status it took, which is
+    /// precisely how this reaper used to steal `tokio::process`'s children (see
+    /// [`djinn_core::child_ownership`]).
+    ///
+    /// `Some(pid)` when a child is waitable, `None` when none is or when there
+    /// are no children at all.
+    #[cfg(target_os = "linux")]
+    fn peek_waitable() -> Option<u32> {
+        // SAFETY: an all-zero `siginfo_t` is a valid initialized value, and the
+        // kernel leaves `si_pid` at 0 when WNOHANG finds nothing — so it must be
+        // zeroed before the call for the "nothing ready" case to be detectable.
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        // SAFETY: `info` is valid writable memory for the duration of the call.
+        let rc = unsafe {
+            libc::waitid(
+                libc::P_ALL,
+                0,
+                &mut info,
+                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+            )
+        };
+        if rc != 0 {
+            let err = io::Error::last_os_error();
+            if err.raw_os_error() != Some(libc::ECHILD) && err.raw_os_error() != Some(libc::EINTR) {
+                tracing::warn!(error = %err, "child reaper waitid failed");
+            }
+            return None;
+        }
+        // SAFETY: `si_pid` is initialized for a successful `waitid`.
+        let pid = unsafe { info.si_pid() };
+        (pid > 0).then_some(pid as u32)
+    }
+
+    /// Install the single per-process child-reaping consumer.
     ///
     /// The claim is enforced, not merely documented. A second waiter cannot be
-    /// scoped to "its own" children: `waitpid(-1, ...)` asks for *any* child of
-    /// the process, so two loops race for every terminal status and each one
-    /// silently swallows the statuses it wins as anonymous "adopted" records.
-    /// The registry that actually registered the child then never de-registers
-    /// it, and its supervisor either waits forever on a status route that will
-    /// never be written or reports a long-dead PID as a shutdown survivor.
+    /// scoped to "its own" children: the peek behind this loop asks for *any*
+    /// child of the process, so two loops race for every terminal status and
+    /// each one silently swallows the statuses it wins as anonymous "adopted"
+    /// records. The registry that actually registered the child then never
+    /// de-registers it, and its supervisor either waits forever on a status
+    /// route that will never be written or reports a long-dead PID as a
+    /// shutdown survivor.
     #[cfg(target_os = "linux")]
     fn start_linux_waiter(&self) {
         static WAITER_INSTALLED: std::sync::atomic::AtomicBool =
@@ -397,19 +446,40 @@ impl ChildReaper {
                 loop {
                     let mut reaped_any = false;
                     loop {
+                        // Held for the whole pass so no other thread can be
+                        // between `fork` and its ownership registration while
+                        // this loop decides what to collect.
+                        let _pass = djinn_core::child_ownership::reaper_pass();
+                        let Some(pid) = Self::peek_waitable() else {
+                            break;
+                        };
+                        // Someone in this process is already waiting on this
+                        // child. Collecting it here would leave that waiter's
+                        // `waitpid` returning ECHILD for a subprocess that ran
+                        // fine. Leave it; its owner collects it in microseconds
+                        // and the next pass moves on.
+                        //
+                        // Shutdown is the exception: `close_admission` means no
+                        // new command can start, so nothing is legitimately
+                        // waiting any more and the loop must be able to drain
+                        // everything or cleanup would never reach idle.
+                        if reaper.admission_open() && djinn_core::child_ownership::is_owned(pid) {
+                            break;
+                        }
                         let mut raw_status = 0;
-                        // SAFETY: `raw_status` is valid writable memory and -1 with
-                        // WNOHANG asks the kernel for any child of this worker.
-                        let pid = unsafe { libc::waitpid(-1, &mut raw_status, libc::WNOHANG) };
-                        if pid > 0 {
+                        // SAFETY: `raw_status` is valid writable memory; the PID
+                        // came from the peek above and is still unwaited.
+                        let reaped =
+                            unsafe { libc::waitpid(pid as i32, &mut raw_status, libc::WNOHANG) };
+                        if reaped > 0 {
                             reaped_any = true;
                             reaper.record_terminal(TerminalStatus {
-                                pid: pid as u32,
+                                pid: reaped as u32,
                                 raw_status,
                             });
                             continue;
                         }
-                        if pid < 0 {
+                        if reaped < 0 {
                             let err = io::Error::last_os_error();
                             if err.raw_os_error() != Some(libc::ECHILD)
                                 && err.raw_os_error() != Some(libc::EINTR)
