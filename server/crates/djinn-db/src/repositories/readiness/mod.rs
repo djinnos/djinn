@@ -654,8 +654,20 @@ pub struct ReadinessRunDetail {
     pub areas: Vec<ReadinessCompositionAreaRow>,
     pub attempts: Vec<ReadinessAreaAttemptRow>,
     pub findings: Vec<ReadinessGuardrailFindingRow>,
+    pub outputs: Vec<ReadinessAreaResultOutputRow>,
     pub suggestions: Vec<ReadinessRemediationSuggestionRow>,
+    pub area_scores: Vec<ReadinessAreaScoreRow>,
+    pub project_score: Option<ReadinessProjectScoreRow>,
     pub events: Vec<ReadinessRunEventRow>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, FromRow)]
+pub struct ReadinessAreaResultOutputRow {
+    pub run_id: String,
+    pub area_id: String,
+    pub attempt_id: String,
+    pub result: serde_json::Value,
+    pub created_at: String,
 }
 pub struct ReadinessRepository {
     db: Database,
@@ -965,6 +977,7 @@ impl ReadinessRepository {
                 )
                 .await?;
             }
+            sqlx::query("INSERT INTO readiness_area_result_outputs (run_id,area_id,attempt_id,result) VALUES ($1,$2,$3,$4)").bind(&run).bind(&area).bind(&callback.attempt_id).bind(&callback.result).execute(&mut *tx).await?;
         }
         sqlx::query("UPDATE readiness_area_attempts SET status=$1,payload_digest=$2,terminal_at=to_char(now() AT TIME ZONE 'utc','YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') WHERE id=$3").bind(final_status).bind(&digest).bind(&callback.attempt_id).execute(&mut *tx).await?;
         sqlx::query("UPDATE readiness_composition_areas SET status=$1 WHERE id=$2")
