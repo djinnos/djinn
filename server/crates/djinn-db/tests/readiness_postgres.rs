@@ -22,6 +22,7 @@ use sqlx::{Connection, Executor};
 const MIGRATION_VERSION: u64 = 155;
 const MIGRATION_FILE: &str = "155_readiness_persistence.sql";
 const FINDING_CONFIDENCE_MIGRATION_FILE: &str = "157_readiness_finding_confidence.sql";
+const RESULT_OUTPUTS_MIGRATION_FILE: &str = "159_readiness_result_outputs.sql";
 const DESIGNATED_OPERATOR_ID: &str = "00000000-0000-7000-8000-000000000155";
 
 fn migrations_dir() -> PathBuf {
@@ -336,13 +337,12 @@ async fn area_callback_redelivery_conflict_and_retry_are_postgres_transactional(
             .expect("accepted"),
         ReadinessCallbackOutcome::Accepted
     );
-    let accepted_outputs: Vec<serde_json::Value> = sqlx::query_scalar(
-        "SELECT result FROM readiness_area_result_outputs WHERE attempt_id=$1",
-    )
-    .bind(&first.attempt.id)
-    .fetch_all(db.pool())
-    .await
-    .expect("load accepted callback output");
+    let accepted_outputs: Vec<serde_json::Value> =
+        sqlx::query_scalar("SELECT result FROM readiness_area_result_outputs WHERE attempt_id=$1")
+            .bind(&first.attempt.id)
+            .fetch_all(db.pool())
+            .await
+            .expect("load accepted callback output");
     assert_eq!(
         accepted_outputs,
         vec![callback.result.clone()],
@@ -878,7 +878,11 @@ async fn apply_prior_migrations(conn: &mut PgConnection) {
 }
 
 async fn apply_readiness_migration(conn: &mut PgConnection) {
-    for migration in [MIGRATION_FILE, FINDING_CONFIDENCE_MIGRATION_FILE] {
+    for migration in [
+        MIGRATION_FILE,
+        FINDING_CONFIDENCE_MIGRATION_FILE,
+        RESULT_OUTPUTS_MIGRATION_FILE,
+    ] {
         let path = migrations_dir().join(migration);
         conn.execute(
             std::fs::read_to_string(&path)
@@ -1003,6 +1007,41 @@ async fn migration_constraints_reject_identity_correlation_and_lifecycle_violati
         assert_rejected(&mut conn, "INSERT INTO readiness_guardrail_findings (id,run_id,area_id,attempt_id,guardrail_key,severity) VALUES ('finding-cross','run-b','area-b','attempt-a','other','high')", "readiness_findings_attempt_correlation_fk").await;
         sqlx::query("INSERT INTO readiness_remediation_suggestions (id,run_id,dedupe_key,suggestion) VALUES ('suggestion-a','run-a','dedupe','{}')").execute(&mut conn).await.expect("insert suggestion");
         assert_rejected(&mut conn, "INSERT INTO readiness_remediation_suggestions (id,run_id,dedupe_key,suggestion) VALUES ('suggestion-duplicate','run-a','dedupe','{}')", "readiness_suggestions_run_dedupe").await;
+    }).await;
+}
+
+#[tokio::test]
+async fn result_output_constraints_enforce_identity_and_completed_run_immutability() {
+    with_temp_database("result-output-constraints", |url| async move {
+        let mut conn = migrated_connection(&url).await;
+        seed_project(&mut conn, "output-project-a").await;
+        seed_project(&mut conn, "output-project-b").await;
+        seed_project(&mut conn, "output-terminal-project").await;
+
+        run(&mut conn, "output-run-a", "output-project-a", "output-key-a").await;
+        area(&mut conn, "output-area-a", "output-run-a", "output-area-key-a").await;
+        attempt(&mut conn, "output-attempt-a", "output-run-a", "output-area-a", 1, "output-correlation-a").await;
+        run(&mut conn, "output-run-b", "output-project-b", "output-key-b").await;
+        area(&mut conn, "output-area-b", "output-run-b", "output-area-key-b").await;
+        attempt(&mut conn, "output-attempt-b", "output-run-b", "output-area-b", 1, "output-correlation-b").await;
+
+        // This attempt has no output row yet, so the composite FK—not the
+        // output primary key—must reject its mismatched run and area values.
+        assert_rejected(&mut conn, "INSERT INTO readiness_area_result_outputs (run_id,area_id,attempt_id,result) VALUES ('output-run-b','output-area-b','output-attempt-a','{}')", "readiness_area_result_outputs_attempt_id_run_id_area_id_fkey").await;
+        sqlx::query("INSERT INTO readiness_area_result_outputs (run_id,area_id,attempt_id,result) VALUES ('output-run-a','output-area-a','output-attempt-a','{}')").execute(&mut conn).await.expect("insert correlated output");
+        assert_rejected(&mut conn, "INSERT INTO readiness_area_result_outputs (run_id,area_id,attempt_id,result) VALUES ('output-run-a','output-area-a','output-attempt-a','{\"duplicate\":true}')", "readiness_area_result_outputs_pkey").await;
+
+        run(&mut conn, "output-terminal-run", "output-terminal-project", "output-terminal-key").await;
+        area(&mut conn, "output-terminal-area", "output-terminal-run", "output-terminal-area-key").await;
+        attempt(&mut conn, "output-terminal-attempt", "output-terminal-run", "output-terminal-area", 1, "output-terminal-correlation").await;
+        attempt(&mut conn, "output-terminal-insert-attempt", "output-terminal-run", "output-terminal-area", 2, "output-terminal-insert-correlation").await;
+        sqlx::query("INSERT INTO readiness_area_result_outputs (run_id,area_id,attempt_id,result) VALUES ('output-terminal-run','output-terminal-area','output-terminal-attempt','{}')").execute(&mut conn).await.expect("seed output before completion");
+        sqlx::query("UPDATE readiness_composition_areas SET status='succeeded' WHERE id='output-terminal-area'").execute(&mut conn).await.expect("terminalize output area");
+        sqlx::query("UPDATE readiness_runs SET expected_area_count=1,status='completed',completed_at='2025-01-01T00:00:00.000Z' WHERE id='output-terminal-run'").execute(&mut conn).await.expect("complete output run");
+
+        assert_rejected(&mut conn, "INSERT INTO readiness_area_result_outputs (run_id,area_id,attempt_id,result) VALUES ('output-terminal-run','output-terminal-area','output-terminal-insert-attempt','{}')", "readiness run is terminal").await;
+        assert_rejected(&mut conn, "UPDATE readiness_area_result_outputs SET result='{\"changed\":true}' WHERE attempt_id='output-terminal-attempt'", "readiness run is terminal").await;
+        assert_rejected(&mut conn, "DELETE FROM readiness_area_result_outputs WHERE attempt_id='output-terminal-attempt'", "readiness run is terminal").await;
     }).await;
 }
 
