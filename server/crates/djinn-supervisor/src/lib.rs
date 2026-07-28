@@ -9372,17 +9372,17 @@ mod tests {
 
         // The committed files must contain the legitimate file.
         assert!(
-            changed_files.iter().any(|f| *f == "src_main.rs"),
+            changed_files.contains(&"src_main.rs"),
             "committed branch must contain the legitimate file src_main.rs, got: {changed_files:?}"
         );
 
         // The committed files must NOT contain any scratch files.
         assert!(
-            !changed_files.iter().any(|f| *f == "patch.txt"),
+            !changed_files.contains(&"patch.txt"),
             "committed branch must NOT contain scratch file patch.txt, got: {changed_files:?}"
         );
         assert!(
-            !changed_files.iter().any(|f| *f == "test2.txt"),
+            !changed_files.contains(&"test2.txt"),
             "committed branch must NOT contain scratch file test2.txt, got: {changed_files:?}"
         );
     }
@@ -9519,7 +9519,7 @@ mod tests {
                     "rev-parse",
                     "--verify",
                     "--quiet",
-                    &format!("refs/heads/djinn/aah4-stale"),
+                    "refs/heads/djinn/aah4-stale",
                 ])
                 .output()
                 .expect("git rev-parse mirror HEAD after run");

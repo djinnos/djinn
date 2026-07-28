@@ -666,7 +666,7 @@ async fn revision_lookup_returns_none_for_wrong_project() {
         .revision_lookup(RevisionLookupRequest {
             project_id: &project_b,
             note_id: primary,
-            revision_id: revision_id,
+            revision_id,
         })
         .await
         .unwrap();

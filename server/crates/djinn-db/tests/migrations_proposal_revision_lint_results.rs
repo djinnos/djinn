@@ -45,7 +45,7 @@ fn migration_entries(dir: &Path) -> Vec<(u64, PathBuf)> {
                 .then_some((version, path))
         })
         .collect();
-    entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+    entries.sort_by_key(|(left, _)| *left);
     entries
 }
 

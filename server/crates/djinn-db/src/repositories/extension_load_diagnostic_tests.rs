@@ -192,7 +192,7 @@ async fn identity_retry_and_ordering_contract() {
     assert_eq!(ordered[0].source_key, "alpha");
     assert_eq!(ordered[0].phase, ExtensionLoadPhase::Handshake);
     let mut expected_alpha_tools_list_ids =
-        vec![mcp_alpha.diagnostic_id, mcp_alpha_tie.diagnostic_id];
+        [mcp_alpha.diagnostic_id, mcp_alpha_tie.diagnostic_id];
     expected_alpha_tools_list_ids.sort();
     assert_eq!(
         ordered[1..3]

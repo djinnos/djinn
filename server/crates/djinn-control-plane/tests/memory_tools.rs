@@ -935,7 +935,7 @@ async fn build_graduated_proposal_fixture(harness: &McpTestHarness) -> Graduated
     let project = project_row.slug();
 
     // Three notes: one on an epic, one on a task, one shared across both.
-    let epic_note = dispatch_as_authenticated_human(&caller, &harness, "memory_write",
+    let epic_note = dispatch_as_authenticated_human(&caller, harness, "memory_write",
             json!({"project": project, "title": "Epic Ref Note", "content": "epic level note", "reason": "create fixture note for memory tool coverage", "type": "adr"}),
         )
         .await
@@ -946,7 +946,7 @@ async fn build_graduated_proposal_fixture(harness: &McpTestHarness) -> Graduated
         .expect("epic note permalink")
         .to_string();
 
-    let task_note = dispatch_as_authenticated_human(&caller, &harness, "memory_write",
+    let task_note = dispatch_as_authenticated_human(&caller, harness, "memory_write",
             json!({"project": project, "title": "Task Ref Note", "content": "task level note", "reason": "create fixture note for memory tool coverage", "type": "pitfall"}),
         )
         .await
@@ -957,7 +957,7 @@ async fn build_graduated_proposal_fixture(harness: &McpTestHarness) -> Graduated
         .expect("task note permalink")
         .to_string();
 
-    let shared_note = dispatch_as_authenticated_human(&caller, &harness, "memory_write",
+    let shared_note = dispatch_as_authenticated_human(&caller, harness, "memory_write",
             json!({"project": project, "title": "Shared Ref Note", "content": "shared across epic and task", "reason": "create fixture note for memory tool coverage", "type": "reference"}),
         )
         .await
