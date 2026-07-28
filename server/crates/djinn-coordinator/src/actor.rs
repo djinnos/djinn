@@ -1584,9 +1584,14 @@ impl CoordinatorActor {
             Ok(Some(proposal)) => proposal.latest_revision_seq,
             _ => return,
         };
+        let captured_snapshot_seq = repo
+            .refinement_run_captured_snapshot_seq(run_id)
+            .await
+            .unwrap_or_default();
         let mut state =
             super::refinement::RefinementLoopState::new(&exact.proposal_id, revision_seq)
-                .with_run_identity(exact.snapshot.run.run_id.clone(), exact.generation);
+                .with_run_identity(exact.snapshot.run.run_id.clone(), exact.generation)
+                .with_captured_snapshot_seq(captured_snapshot_seq);
         if let Some(park) = &exact.snapshot.park {
             state.phase = match park.kind {
                 RefinementParkKind::AwaitingReview => {
