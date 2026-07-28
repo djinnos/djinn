@@ -263,6 +263,19 @@ impl RefinementLoopState {
         self
     }
 
+    /// Restore the pre-refinement snapshot revision captured when the run was
+    /// admitted. Every projection rebuilt from the durable ledger must call
+    /// this: `new` seeds the snapshot from the proposal head, which by then has
+    /// advanced past the tribunal's own revisions, and the resulting projection
+    /// would report the refined spec as its own `before` side. `None` (no
+    /// durable start revision) leaves the head-derived seed in place.
+    pub fn with_captured_snapshot_seq(mut self, snapshot_revision_seq: Option<i32>) -> Self {
+        if let Some(seq) = snapshot_revision_seq.filter(|seq| *seq > 0) {
+            self.snapshot_revision_seq = seq;
+        }
+        self
+    }
+
     /// Attribute this refinement run to a specific user (owner of the spawned
     /// refinement tasks + scope for per-user model resolution). Builder-style so
     /// the existing `new`/`with_config` constructors stay source-compatible.
@@ -1121,6 +1134,23 @@ mod tests {
         assert_eq!(state.current_round, 3);
         assert_eq!(state.attributed_user_id.as_deref(), Some("user-9"));
         assert_eq!(state.stop_reason, Some(StopReason::RoundCap));
+    }
+
+    /// Every ledger-driven rebuild seeds the projection from the proposal's
+    /// *current* head, which has already absorbed the tribunal's revisions. The
+    /// durable captured seq must win, or the rebuilt projection reports the
+    /// refined spec as its own pre-refinement snapshot.
+    #[test]
+    fn captured_snapshot_seq_overrides_the_head_derived_seed() {
+        let state = RefinementLoopState::new("p1", 7).with_captured_snapshot_seq(Some(1));
+        assert_eq!(state.snapshot_revision_seq, 1);
+        assert_eq!(state.current_revision_seq, 7);
+
+        // A run with no durable start revision keeps the head-derived seed.
+        for absent in [None, Some(0), Some(-1)] {
+            let state = RefinementLoopState::new("p1", 7).with_captured_snapshot_seq(absent);
+            assert_eq!(state.snapshot_revision_seq, 7);
+        }
     }
 
     #[test]

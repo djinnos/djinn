@@ -11,7 +11,14 @@ pub mod short_id;
 mod template_bootstrap;
 
 #[cfg(any(test, feature = "test-support"))]
+mod migration_150_test_support;
+
+#[cfg(any(test, feature = "test-support"))]
 pub mod test_support {
+    pub use crate::migration_150_test_support::{
+        Migration150Fixture, Migration150HistoricalWrapperValues, Migration150OrdinaryPreset,
+        with_migration_150_fixture,
+    };
     pub use crate::repositories::test_support::{
         HousekeepingFixture, HousekeepingFixtureExpectedCounts, HousekeepingFixtureProject,
         RefinementLifecycleAuditRowForTest, RefinementRunAuditForTest,

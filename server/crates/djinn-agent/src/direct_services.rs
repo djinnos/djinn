@@ -663,15 +663,20 @@ impl DirectServices {
             serde_json::to_string_pretty(dossier).unwrap_or_else(|_| dossier.to_string())
         );
 
+        // An arbiter park is by definition the TERMINAL rung, so it shares the
+        // terminal title prefix with the coordinator's planner-park rung rather
+        // than the first-response `Planner remediation` prefix. (char-safe
+        // truncation on both the title and the dossier summary.)
+        let prefix = djinn_coordinator::roles::PLANNER_TERMINAL_ESCALATION_TITLE_PREFIX;
         let title = match source_task.as_ref() {
             Some(t) => {
                 let name: String = t.title.chars().take(70).collect();
-                format!("Planner remediation [{}]: {}", t.short_id, name)
+                format!("{prefix} [{}]: {}", t.short_id, name)
             }
-            None => format!(
-                "Arbiter park escalation: {}",
-                &dossier_summary[..dossier_summary.len().min(60)]
-            ),
+            None => {
+                let summary: String = dossier_summary.chars().take(60).collect();
+                format!("{prefix}: {summary}")
+            }
         };
         let source_label = source_task
             .as_ref()

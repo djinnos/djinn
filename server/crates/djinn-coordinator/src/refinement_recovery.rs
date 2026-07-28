@@ -77,9 +77,14 @@ impl CoordinatorActor {
                 Ok(Some(proposal)) => proposal,
                 Ok(None) | Err(_) => continue,
             };
+            let captured_snapshot_seq = proposal_repo
+                .refinement_run_captured_snapshot_seq(&run.run_id)
+                .await
+                .unwrap_or_default();
             let mut state =
                 RefinementLoopState::new(&exact.proposal_id, proposal.latest_revision_seq)
                     .with_run_identity(run.run_id.clone(), exact.generation)
+                    .with_captured_snapshot_seq(captured_snapshot_seq)
                     .with_attributed_user(proposal.refinement_owner_user_id.clone());
 
             if let Some(park) = exact.snapshot.park.as_ref() {

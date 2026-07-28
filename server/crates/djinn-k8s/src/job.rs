@@ -2497,9 +2497,6 @@ mod tests {
         let postgres = BackingServiceSpec {
             service_type: "postgres".into(),
             image: "postgres:18-alpine".into(),
-            is_wrapper: false,
-            control_socket_name: "preset-postgres-18.sock".into(),
-            wrapper_env: Vec::new(),
             port: 5432,
             env: vec![("POSTGRES_PASSWORD".into(), "postgres".into())],
             cpu_request: "100m".into(),
@@ -2835,9 +2832,6 @@ mod tests {
         let postgres = BackingServiceSpec {
             service_type: "postgres".into(),
             image: "postgres:18-alpine".into(),
-            is_wrapper: false,
-            control_socket_name: "preset-postgres-18.sock".into(),
-            wrapper_env: Vec::new(),
             port: 5432,
             env: vec![("POSTGRES_PASSWORD".into(), "postgres".into())],
             cpu_request: "100m".into(),
@@ -2914,9 +2908,6 @@ mod tests {
         let postgres = BackingServiceSpec {
             service_type: "postgres".into(),
             image: "postgres:18-alpine".into(),
-            is_wrapper: false,
-            control_socket_name: "preset-postgres-18.sock".into(),
-            wrapper_env: Vec::new(),
             port: 5432,
             env: vec![("POSTGRES_PASSWORD".into(), "postgres".into())],
             cpu_request: "100m".into(),
@@ -3004,9 +2995,6 @@ mod tests {
         let postgres = BackingServiceSpec {
             service_type: "postgres".into(),
             image: "postgres:18-alpine".into(),
-            is_wrapper: false,
-            control_socket_name: "preset-postgres-18.sock".into(),
-            wrapper_env: Vec::new(),
             port: 5432,
             env: vec![("POSTGRES_PASSWORD".into(), "postgres".into())],
             cpu_request: "100m".into(),
@@ -3132,9 +3120,6 @@ mod tests {
         let postgres = BackingServiceSpec {
             service_type: "postgres".into(),
             image: "postgres:18-alpine".into(),
-            is_wrapper: false,
-            control_socket_name: "preset-postgres-18.sock".into(),
-            wrapper_env: Vec::new(),
             port: 5432,
             env: vec![("POSTGRES_PASSWORD".into(), "postgres".into())],
             cpu_request: "100m".into(),
@@ -3198,9 +3183,6 @@ mod tests {
         let postgres = BackingServiceSpec {
             service_type: "postgres".into(),
             image: "postgres:18-alpine".into(),
-            is_wrapper: false,
-            control_socket_name: "preset-postgres-18.sock".into(),
-            wrapper_env: Vec::new(),
             port: 5432,
             env: vec![("POSTGRES_PASSWORD".into(), "postgres".into())],
             cpu_request: "100m".into(),
@@ -3264,9 +3246,6 @@ mod tests {
         let postgres = BackingServiceSpec {
             service_type: "postgres".into(),
             image: "postgres:18-alpine".into(),
-            is_wrapper: false,
-            control_socket_name: "preset-postgres-18.sock".into(),
-            wrapper_env: Vec::new(),
             port: 5432,
             env: vec![("POSTGRES_PASSWORD".into(), "postgres".into())],
             cpu_request: "100m".into(),
@@ -3824,9 +3803,6 @@ mod tests {
         let postgres = BackingServiceSpec {
             service_type: "postgres".into(),
             image: "postgres:18-alpine".into(),
-            is_wrapper: false,
-            control_socket_name: "preset-postgres-18.sock".into(),
-            wrapper_env: Vec::new(),
             port: 5432,
             env: vec![("POSTGRES_PASSWORD".into(), "postgres".into())],
             cpu_request: "100m".into(),
