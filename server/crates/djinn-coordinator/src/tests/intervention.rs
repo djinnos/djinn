@@ -1210,8 +1210,12 @@ async fn ci_loop_human_review_hold_excludes_source_from_ready_dispatch_tick() {
         remediation.labels
     );
     assert!(
-        remediation.title.starts_with("Planner remediation ["),
-        "remediation keeps the `Planner remediation [<short_id>]: <title>` convention; got {:?}",
+        remediation
+            .title
+            .starts_with("Planner terminal escalation ["),
+        "a CI-loop park is the TERMINAL rung and must carry the terminal title prefix \
+         (`Planner terminal escalation [<short_id>]: <title>`), not the first-response \
+         `Planner remediation` prefix; got {:?}",
         remediation.title
     );
 
@@ -5509,7 +5513,7 @@ async fn arbiter_park_persists_decision_creates_planner_escalation() {
             &task.project_id,
             None,
             &format!(
-                "Planner remediation [{}]: {}",
+                "Planner terminal escalation [{}]: {}",
                 task.short_id,
                 task.title.chars().take(70).collect::<String>()
             ),
@@ -7379,5 +7383,280 @@ async fn reentry_with_monitored_reopen_directive_does_not_self_consume() {
     assert_eq!(
         all_arbs[0].state, "unconsumed",
         "monitored reopen row must stay unconsumed"
+    );
+}
+
+// ── Remediation rung labelling (title / description honesty) ─────────────
+//
+// `create_remediation_task` builds the board-visible remediation task for all
+// three `RemediationKind` variants. Every variant used to be titled
+// `Planner remediation [<short_id>]: <title>`, so a first-response remediation
+// and a TERMINAL post-arbiter escalation were indistinguishable on the board
+// without reading the description prose — and the `Planner` variant's
+// description asserted "Lead could not resolve", which is false: that variant
+// fires from the coordinator's own loop detectors with no arbiter/Lead session
+// anywhere in the source task's history.
+
+/// Create a remediation of `kind` for a fresh source task and return the
+/// remediation task the source ends up blocked on.
+async fn remediation_task_for_kind(
+    db: &Database,
+    tx: &broadcast::Sender<DjinnEventEnvelope>,
+    actor: &mut CoordinatorActor,
+    repo: &TaskRepository,
+    kind: crate::dispatch::RemediationKind,
+    reason: &str,
+) -> djinn_core::models::Task {
+    let source = make_task_with_reopen_count(db, tx, 0).await;
+    actor
+        .create_remediation_task(&source.id, reason, &source.project_id, kind)
+        .await;
+    let blockers = repo.list_blockers(&source.id).await.unwrap();
+    assert_eq!(
+        blockers.len(),
+        1,
+        "{kind:?} must hold the source on exactly one remediation blocker"
+    );
+    repo.get(&blockers[0].task_id).await.unwrap().unwrap()
+}
+
+/// The three rungs must be tellable apart from the TITLE alone: a human (or an
+/// agent) scanning the board must see whether a remediation is the
+/// first-response rung or the terminal post-arbiter escalation without opening
+/// the description.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn remediation_kinds_are_distinguishable_by_title_alone() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
+    let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+
+    let first_response = remediation_task_for_kind(
+        &db,
+        &tx,
+        &mut actor,
+        &repo,
+        crate::dispatch::RemediationKind::Planner,
+        "coordinator detected a reopen loop",
+    )
+    .await;
+    let terminal = remediation_task_for_kind(
+        &db,
+        &tx,
+        &mut actor,
+        &repo,
+        crate::dispatch::RemediationKind::PlannerEscalation,
+        "automated remediation could not converge",
+    )
+    .await;
+    let human = remediation_task_for_kind(
+        &db,
+        &tx,
+        &mut actor,
+        &repo,
+        crate::dispatch::RemediationKind::HumanReview,
+        "operator policy demands human adjudication",
+    )
+    .await;
+
+    // Each rung owns a DISTINCT title prefix.
+    assert!(
+        first_response
+            .title
+            .starts_with(crate::roles::PLANNER_REMEDIATION_TITLE_PREFIX),
+        "first-response remediation must be titled `Planner remediation [...]`; got {:?}",
+        first_response.title
+    );
+    assert!(
+        terminal
+            .title
+            .starts_with(crate::roles::PLANNER_TERMINAL_ESCALATION_TITLE_PREFIX),
+        "terminal escalation must be titled `Planner terminal escalation [...]`; got {:?}",
+        terminal.title
+    );
+    assert!(
+        human
+            .title
+            .starts_with(crate::roles::HUMAN_REVIEW_TITLE_PREFIX),
+        "human hold must be titled `Human review required [...]`; got {:?}",
+        human.title
+    );
+
+    // The terminal rung must NOT read as a first-response remediation. This is
+    // the exact collision that made 198 board tasks indistinguishable: both
+    // rungs shared the `Planner remediation [` prefix.
+    assert!(
+        !terminal
+            .title
+            .starts_with(crate::roles::PLANNER_REMEDIATION_TITLE_PREFIX),
+        "a terminal escalation must not wear the first-response prefix; got {:?}",
+        terminal.title
+    );
+
+    // All three titles differ pairwise on their prefix, and stay bounded.
+    let prefixes: Vec<&str> = [&first_response, &terminal, &human]
+        .iter()
+        .map(|t| t.title.split(" [").next().unwrap())
+        .collect();
+    assert_eq!(
+        prefixes
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        3,
+        "the three rungs must carry three distinct title prefixes; got {prefixes:?}"
+    );
+    for t in [&first_response, &terminal, &human] {
+        assert!(
+            t.title.chars().count() <= 160,
+            "remediation titles stay bounded; got {} chars: {:?}",
+            t.title.chars().count(),
+            t.title
+        );
+    }
+
+    // The rung is queryable, not just readable.
+    assert!(
+        first_response
+            .labels
+            .contains(crate::roles::PLANNER_REMEDIATION_LABEL),
+        "first-response remediation must carry the `planner-remediation` label; labels={}",
+        first_response.labels
+    );
+    assert!(
+        !crate::roles::releases_source_on_close(&first_response),
+        "the descriptive first-response label must NOT turn the remediation into a \
+         source-releasing hold; labels={}",
+        first_response.labels
+    );
+    assert!(
+        !crate::roles::is_human_review_hold(&first_response),
+        "the first-response label must NOT read as a human hold; labels={}",
+        first_response.labels
+    );
+    assert!(
+        terminal
+            .labels
+            .contains(crate::roles::PLANNER_PARK_ESCALATION_LABEL),
+        "terminal escalation keeps the `planner-park-escalation` label; labels={}",
+        terminal.labels
+    );
+    assert!(
+        crate::roles::is_human_review_hold(&human),
+        "human rung keeps the `human-review-hold` label; labels={}",
+        human.labels
+    );
+}
+
+/// The first-response rung must describe what ACTUALLY happened — the
+/// coordinator detected the loop — and must never assert that a Lead tried and
+/// failed. `prompts/planner/intervention.md` teaches the Planner to read "Lead
+/// escalation" as a distinct case meaning a Lead genuinely ran, so the old
+/// "Lead could not resolve" sentence actively misinformed the agent on a task
+/// with `intervention_count = 0` and no `lead` session.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn planner_remediation_does_not_claim_a_lead_ran() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
+    let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+
+    let precondition = make_task_with_reopen_count(&db, &tx, 0).await;
+    assert_eq!(
+        precondition.intervention_count, 0,
+        "fixture precondition: no arbiter/Lead rung has run on the source"
+    );
+
+    let remediation = remediation_task_for_kind(
+        &db,
+        &tx,
+        &mut actor,
+        &repo,
+        crate::dispatch::RemediationKind::Planner,
+        "worker cycled 3 times on the same failure",
+    )
+    .await;
+
+    let lowered = remediation.description.to_lowercase();
+    assert!(
+        !lowered.contains("lead could not resolve"),
+        "the first-response rung must not claim a Lead tried and failed; description={:?}",
+        remediation.description
+    );
+    assert!(
+        !lowered.contains("lead "),
+        "no Lead ran before this rung, so the description must not narrate one; \
+         description={:?}",
+        remediation.description
+    );
+    assert!(
+        remediation.description.contains("COORDINATOR"),
+        "the description must name the coordinator as the actual detector; description={:?}",
+        remediation.description
+    );
+    // The escalation reason survives the rewrite — it is the payload the
+    // Planner acts on.
+    assert!(
+        remediation
+            .description
+            .contains("worker cycled 3 times on the same failure"),
+        "the escalation reason must stay in the description; description={:?}",
+        remediation.description
+    );
+}
+
+/// The terminal and human rungs are CORRECT today — their instructions must
+/// survive the title/description split verbatim in substance.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn terminal_and_human_rungs_keep_their_semantics() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
+    let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+
+    let terminal = remediation_task_for_kind(
+        &db,
+        &tx,
+        &mut actor,
+        &repo,
+        crate::dispatch::RemediationKind::PlannerEscalation,
+        "arbiter ladder spent its hold cycles",
+    )
+    .await;
+    assert!(
+        terminal.description.contains("terminal ownership"),
+        "terminal escalation must still hand the Planner terminal ownership; got {:?}",
+        terminal.description
+    );
+    assert!(
+        terminal.description.contains("Do NOT")
+            && terminal.description.contains("create another escalation"),
+        "terminal escalation must still forbid creating another escalation; got {:?}",
+        terminal.description
+    );
+    assert!(
+        terminal.description.contains("releases the blocked source"),
+        "terminal escalation must still state that closing it releases the source; got {:?}",
+        terminal.description
+    );
+
+    let human = remediation_task_for_kind(
+        &db,
+        &tx,
+        &mut actor,
+        &repo,
+        crate::dispatch::RemediationKind::HumanReview,
+        "operator policy demands human adjudication",
+    )
+    .await;
+    assert!(
+        human.description.contains("requires HUMAN review"),
+        "human rung must still demand human review; got {:?}",
+        human.description
+    );
+    assert!(
+        human.description.contains("Do NOT auto-resolve"),
+        "human rung must still forbid auto-resolution; got {:?}",
+        human.description
     );
 }

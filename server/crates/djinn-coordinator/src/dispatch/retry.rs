@@ -164,12 +164,31 @@ impl PostInterventionHistory {
 
 /// Which kind of remediation task to create for a stuck source task.
 ///
-/// Both kinds create a `Planner remediation [<short_id>]: <title>` review task
-/// and block the source on it. They differ in WHO is expected to resolve it:
+/// All three kinds create a `review` task and block the source on it. They
+/// differ in WHICH RUNG of the escalation ladder produced them and in WHO is
+/// expected to resolve it — and, because those are very different board
+/// states, each gets its OWN title prefix so a human or an agent can tell them
+/// apart from the title alone (see [`crate::roles`]):
+///
+/// | Kind | Title prefix | Label | Rung |
+/// |---|---|---|---|
+/// | [`Self::Planner`] | `Planner remediation` | `planner-remediation` | first response |
+/// | [`Self::PlannerEscalation`] | `Planner terminal escalation` | `planner-park-escalation` | terminal, post-arbiter |
+/// | [`Self::HumanReview`] | `Human review required` | `human-review-hold` | terminal, human-only |
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RemediationKind {
-    /// A Planner is dispatched to auto-remediate (reshape / dedupe / spike). When
-    /// it closes, `emit_unblocked_tasks` revives the source automatically.
+    /// **First-response** remediation. A Planner is dispatched to auto-remediate
+    /// (reshape / dedupe / spike). When it closes, `emit_unblocked_tasks`
+    /// revives the source automatically.
+    ///
+    /// Reached from the coordinator's own loop detectors
+    /// (`maybe_intervene_on_stuck_task`, `maybe_intervene_on_cycling_task`,
+    /// `maybe_escalate_provider_failure_streak`, the PR/CI-loop paths) and from
+    /// an agent calling `request_planner`. **No arbiter/Lead session has run on
+    /// the source when this fires** — the arbiter rung only starts once
+    /// `intervention_count >= MAX_PLANNER_INTERVENTIONS`, strictly later than
+    /// this variant. The description must therefore never claim a Lead tried
+    /// and failed.
     Planner,
     /// Repeated automated remediation already failed — this requires a HUMAN.
     /// No Planner (or any agent) is dispatched, so the remediation never
@@ -2926,27 +2945,58 @@ impl CoordinatorActor {
 
         // Name the review task after the work it is solving, not just a
         // truncated reason. "[<short_id>] <title>" gives the board immediate
-        // line-of-sight into which task the Planner is remediating; the reason
-        // still lives in the description below. (char-safe truncation — the old
-        // byte slice could panic on a multi-byte boundary.)
+        // line-of-sight into which task is being remediated; the reason still
+        // lives in the description below. (char-safe truncation — the old byte
+        // slice could panic on a multi-byte boundary.)
+        //
+        // The PREFIX encodes the rung. Every kind used to be titled
+        // `Planner remediation [...]`, so a terminal post-arbiter escalation and
+        // a first-detection remediation were indistinguishable on the board
+        // without reading the description prose. They are very different states:
+        // `Planner` is the first-response rung (nothing has adjudicated the
+        // source yet), `PlannerEscalation` is the TERMINAL rung reached after
+        // the arbiter ladder spent its hold cycles.
+        let title_prefix = match kind {
+            RemediationKind::Planner => crate::roles::PLANNER_REMEDIATION_TITLE_PREFIX,
+            RemediationKind::PlannerEscalation => {
+                crate::roles::PLANNER_TERMINAL_ESCALATION_TITLE_PREFIX
+            }
+            RemediationKind::HumanReview => crate::roles::HUMAN_REVIEW_TITLE_PREFIX,
+        };
         let reason_snippet: String = reason.chars().take(80).collect();
         let title = match source_task.as_ref() {
             Some(t) => {
                 let name: String = t.title.chars().take(70).collect();
-                format!("Planner remediation [{}]: {}", t.short_id, name)
+                format!("{title_prefix} [{}]: {}", t.short_id, name)
             }
-            None => format!("Planner escalation: {reason_snippet}"),
+            None => format!("{title_prefix}: {reason_snippet}"),
         };
         let source_label = source_task
             .as_ref()
             .map(|t| format!("{} ({})", t.title, t.short_id))
             .unwrap_or_else(|| source_task_id.to_string());
         let (description, instructions) = match kind {
+            // FIRST-RESPONSE rung. Do NOT claim a Lead ran here: this variant
+            // fires from the coordinator's own loop detectors (and from
+            // `request_planner`) with no arbiter session anywhere in the source
+            // task's history — the arbiter/Lead rung only starts once
+            // `intervention_count >= MAX_PLANNER_INTERVENTIONS`. The Planner
+            // prompt (`prompts/planner/intervention.md`) reads "Lead escalation"
+            // as a distinct case meaning a Lead genuinely tried and failed, so
+            // asserting it here actively misinforms the agent.
             RemediationKind::Planner => (
                 format!(
-                    "Escalated from task {source_label}. Lead could not resolve — Planner review required.\n\nReason: {reason}"
+                    "First-response remediation for task {source_label}. The COORDINATOR detected \
+                     that the source is not progressing on its own and dispatched you (the \
+                     Planner) — no Lead, arbiter, or human has adjudicated it yet.\n\nThis is the \
+                     FIRST rung of the escalation ladder, not a terminal escalation: nothing has \
+                     been ruled out, and if the source keeps looping after this the board \
+                     escalates further (arbiter adjudication, then a terminal planner-park \
+                     escalation).\n\nReason: {reason}"
                 ),
-                "Review the escalated task and either resolve it, reshape the work, or leave a 'Requires human review' comment.",
+                "The coordinator detected the loop — no Lead or arbiter has reviewed this task \
+                 yet, so treat nothing as already ruled out. Review the escalated task and either \
+                 resolve it, reshape the work, or leave a 'Requires human review' comment.",
             ),
             RemediationKind::HumanReview => (
                 format!(
@@ -3021,7 +3071,7 @@ impl CoordinatorActor {
             );
         }
 
-        // Label the held remediation task. Write only the labels column:
+        // Label the remediation task with its RUNG. Write only the labels column:
         // reusing the broad `update` path here is more fragile because it
         // reserializes unrelated JSON columns and can silently leave the hold
         // unlabeled if any copied field fails validation. Non-fatal: a failed
@@ -3037,18 +3087,25 @@ impl CoordinatorActor {
         //   status + any active tripwire `gate.held`) is the real gate. The
         //   label only drives the close-time source-release semantics
         //   (`releases_source_on_close`).
-        let hold_label: Option<&str> = match kind {
-            RemediationKind::HumanReview => Some(r#"["human-review-hold"]"#),
-            RemediationKind::PlannerEscalation => Some(r#"["planner-park-escalation"]"#),
-            RemediationKind::Planner => None,
+        // - `Planner` → `planner-remediation`: a purely DESCRIPTIVE sibling that
+        //   makes the first-response rung queryable instead of only readable. It
+        //   is inert against every behavioural predicate — it is not a human
+        //   hold (`is_human_review_hold`), does not release the source on close
+        //   (`releases_source_on_close` — a first-response remediation revives
+        //   its source through the ordinary blocker path), and does not affect
+        //   planner claiming (`planner_review_claims` only excludes
+        //   `human-review-hold`).
+        let kind_label = match kind {
+            RemediationKind::HumanReview => crate::roles::HUMAN_REVIEW_HOLD_LABEL,
+            RemediationKind::PlannerEscalation => crate::roles::PLANNER_PARK_ESCALATION_LABEL,
+            RemediationKind::Planner => crate::roles::PLANNER_REMEDIATION_LABEL,
         };
-        if let Some(labels_json) = hold_label
-            && let Err(e) = task_repo.update_labels(&review_task.id, labels_json).await
-        {
+        let labels_json = serde_json::json!([kind_label]).to_string();
+        if let Err(e) = task_repo.update_labels(&review_task.id, &labels_json).await {
             tracing::warn!(
                 error = %e,
                 review_task_id = %review_task.short_id,
-                "CoordinatorActor: held remediation — failed to set hold label"
+                "CoordinatorActor: remediation — failed to set kind label"
             );
         }
 
