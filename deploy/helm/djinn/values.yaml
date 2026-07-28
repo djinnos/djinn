@@ -668,32 +668,6 @@ env:
   # evaluation; production remains organization-only by default.
   allowUserInstallations: false
 
-# -----------------------------------------------------------------------------
-# Catalog service-wrapper image identities (ij6g)
-# -----------------------------------------------------------------------------
-# `server/docker/build-wrapper-images.sh` builds the three catalog wrapper
-# images (Postgres/Redis/RabbitMQ) and writes a manifest recording the digest
-# buildx ACTUALLY pushed for each one. Paste that manifest here and the chart
-# projects it into the server container as a file, pointing
-# DJINN_WRAPPER_IMAGE_MANIFEST at it. On boot the image controller
-# (`reconcile_wrapper_catalog_from_env`) records each identity into
-# `service_presets`, so strict canonical verification can resolve
-# `{wrapper_image}@{digest}` for attempt-scoped service leases.
-#
-# Accepts either the manifest JSON as a string or the equivalent YAML mapping
-# (`{entries: [{preset_id, wrapper_image, image_digest}, ...]}`); both render
-# to the same JSON file.
-#
-# Digests must be the real `sha256:<64 hex>` the registry returned —
-# `ServicePresetRepository::set_wrapper_identity` rejects mutable or malformed
-# identities before any write, so a placeholder can never become deployable.
-# Empty (the default) renders no ConfigMap and no env var: the controller then
-# leaves wrapper digests unpopulated and strict resolution stays fail-closed.
-# Left null rather than "" so overriding it with the mapping form doesn't make
-# Helm's coalesce warn about replacing a scalar with a table.
-serviceWrappers:
-  imageManifest: null
-
 # Arbitrary extra env injected into the server container. Useful for ad-hoc
 # tuning knobs without re-templating.
 extraEnv: []

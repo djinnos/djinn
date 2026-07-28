@@ -13,6 +13,7 @@ pub(crate) async fn process_finalize_payload(
     payload: &Option<serde_json::Value>,
     finalize_tool_name: &str,
     task_id: &str,
+    authenticated_session_id: &str,
     app_state: &AgentContext,
 ) {
     crate::with_slot_context!(app_state, |slot_ctx| {
@@ -20,6 +21,7 @@ pub(crate) async fn process_finalize_payload(
             payload,
             finalize_tool_name,
             task_id,
+            authenticated_session_id,
             slot_ctx,
         )
     });
@@ -42,6 +44,8 @@ mod tests {
     use super::*;
     use crate::test_helpers;
     use djinn_db::{Database, TaskRepository};
+
+    const AUTHENTICATED_SESSION_ID: &str = "server-authenticated-session-123";
     struct FinalizeFixtures {
         db: Database,
         ctx: crate::context::AgentContext,
@@ -160,7 +164,14 @@ mod tests {
             "files_changed": ["src/main.rs", "src/lib.rs"],
             "remaining_concerns": ["needs perf testing"]
         }));
-        process_finalize_payload(&payload, "submit_work", &f.task.id, &f.ctx).await;
+        process_finalize_payload(
+            &payload,
+            "submit_work",
+            &f.task.id,
+            AUTHENTICATED_SESSION_ID,
+            &f.ctx,
+        )
+        .await;
         let entries = f.repo().list_activity(&f.task.id).await.unwrap();
         let work_entry = entries.iter().find(|e| e.event_type == "work_submitted");
         assert!(
@@ -182,7 +193,14 @@ mod tests {
             "files_changed": ["src/lib.rs"],
             "remaining_concerns": ["budget-parked: finish the follow-up UI snapshot"]
         }));
-        process_finalize_payload(&payload, "submit_work", &f.task.id, &f.ctx).await;
+        process_finalize_payload(
+            &payload,
+            "submit_work",
+            &f.task.id,
+            AUTHENTICATED_SESSION_ID,
+            &f.ctx,
+        )
+        .await;
         let entries = f.repo().list_activity(&f.task.id).await.unwrap();
         let work_entry = entries
             .iter()
@@ -199,7 +217,14 @@ mod tests {
     async fn submit_work_malformed_payload_does_not_crash() {
         let f = FinalizeFixtures::new().await;
         let payload = Some(serde_json::json!({"task_id": f.task.id}));
-        process_finalize_payload(&payload, "submit_work", &f.task.id, &f.ctx).await;
+        process_finalize_payload(
+            &payload,
+            "submit_work",
+            &f.task.id,
+            AUTHENTICATED_SESSION_ID,
+            &f.ctx,
+        )
+        .await;
     }
     #[tokio::test]
     async fn submit_review_atomically_sets_ac_from_criteria_array() {
@@ -220,7 +245,14 @@ mod tests {
             ],
             "feedback": null
         }));
-        process_finalize_payload(&payload, "submit_review", &f.task.id, &f.ctx).await;
+        process_finalize_payload(
+            &payload,
+            "submit_review",
+            &f.task.id,
+            AUTHENTICATED_SESSION_ID,
+            &f.ctx,
+        )
+        .await;
         let updated = f.repo().get(&f.task.id).await.unwrap().unwrap();
         let ac: Vec<serde_json::Value> =
             serde_json::from_str(&updated.acceptance_criteria).unwrap();
@@ -236,7 +268,14 @@ mod tests {
             "acceptance_criteria": [],
             "feedback": "missing edge case handling"
         }));
-        process_finalize_payload(&payload, "submit_review", &f.task.id, &f.ctx).await;
+        process_finalize_payload(
+            &payload,
+            "submit_review",
+            &f.task.id,
+            AUTHENTICATED_SESSION_ID,
+            &f.ctx,
+        )
+        .await;
         let entries = f.repo().list_activity(&f.task.id).await.unwrap();
         let entry = entries.iter().find(|e| e.event_type == "review_submitted");
         assert!(entry.is_some(), "expected review_submitted activity entry");
@@ -248,7 +287,14 @@ mod tests {
     async fn submit_review_malformed_payload_does_not_crash() {
         let f = FinalizeFixtures::new().await;
         let payload = Some(serde_json::json!({"task_id": f.task.id}));
-        process_finalize_payload(&payload, "submit_review", &f.task.id, &f.ctx).await;
+        process_finalize_payload(
+            &payload,
+            "submit_review",
+            &f.task.id,
+            AUTHENTICATED_SESSION_ID,
+            &f.ctx,
+        )
+        .await;
     }
     #[tokio::test]
     async fn submit_decision_logs_decision_activity() {
@@ -259,7 +305,14 @@ mod tests {
             "rationale": "scope was too broad",
             "created_tasks": []
         }));
-        process_finalize_payload(&payload, "submit_decision", &f.task.id, &f.ctx).await;
+        process_finalize_payload(
+            &payload,
+            "submit_decision",
+            &f.task.id,
+            AUTHENTICATED_SESSION_ID,
+            &f.ctx,
+        )
+        .await;
         let entries = f.repo().list_activity(&f.task.id).await.unwrap();
         let entry = entries
             .iter()
@@ -276,7 +329,14 @@ mod tests {
     async fn submit_decision_malformed_payload_does_not_crash() {
         let f = FinalizeFixtures::new().await;
         let payload = Some(serde_json::json!({"task_id": f.task.id}));
-        process_finalize_payload(&payload, "submit_decision", &f.task.id, &f.ctx).await;
+        process_finalize_payload(
+            &payload,
+            "submit_decision",
+            &f.task.id,
+            AUTHENTICATED_SESSION_ID,
+            &f.ctx,
+        )
+        .await;
     }
     #[tokio::test]
     async fn submit_grooming_logs_per_task_activity_entries() {
@@ -293,7 +353,14 @@ mod tests {
             "summary": "groomed 2 tasks"
         }));
         let synthetic_id = format!("project:{}:planner", project.id);
-        process_finalize_payload(&payload, "submit_grooming", &synthetic_id, &f.ctx).await;
+        process_finalize_payload(
+            &payload,
+            "submit_grooming",
+            &synthetic_id,
+            AUTHENTICATED_SESSION_ID,
+            &f.ctx,
+        )
+        .await;
         let repo = f.repo();
         let entries1 = repo.list_activity(&task1.id).await.unwrap();
         let e1 = entries1.iter().find(|e| e.event_type == "planning_entry");
@@ -311,17 +378,38 @@ mod tests {
     async fn submit_grooming_malformed_payload_does_not_crash() {
         let f = FinalizeFixtures::new().await;
         let payload = Some(serde_json::json!("not-an-object"));
-        process_finalize_payload(&payload, "submit_grooming", "project:x:planner", &f.ctx).await;
+        process_finalize_payload(
+            &payload,
+            "submit_grooming",
+            "project:x:planner",
+            AUTHENTICATED_SESSION_ID,
+            &f.ctx,
+        )
+        .await;
     }
     #[tokio::test]
     async fn none_payload_is_a_noop() {
         let f = FinalizeFixtures::new().await;
-        process_finalize_payload(&None, "submit_work", "any-task-id", &f.ctx).await;
+        process_finalize_payload(
+            &None,
+            "submit_work",
+            "any-task-id",
+            AUTHENTICATED_SESSION_ID,
+            &f.ctx,
+        )
+        .await;
     }
     #[tokio::test]
     async fn unknown_finalize_tool_is_a_noop() {
         let f = FinalizeFixtures::new().await;
         let payload = Some(serde_json::json!({"anything": "here"}));
-        process_finalize_payload(&payload, "submit_unknown", "any-task-id", &f.ctx).await;
+        process_finalize_payload(
+            &payload,
+            "submit_unknown",
+            "any-task-id",
+            AUTHENTICATED_SESSION_ID,
+            &f.ctx,
+        )
+        .await;
     }
 }
