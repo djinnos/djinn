@@ -605,36 +605,12 @@ fn append_preset_resolution(
                 port: p.port,
                 conn_env_var: p.conn_env_var.clone(),
             });
-            // A preset with a wrapper repository AND a valid immutable digest
-            // runs the digest-pinned wrapper artifact (stock daemon + control
-            // server). Legacy presets missing either keep the stock image so
-            // ordinary dispatch stays byte-compatible with the pre-wrapper shape.
-            let wrapper = p
-                .wrapper_image
-                .as_deref()
-                .map(str::trim)
-                .filter(|w| !w.is_empty())
-                .zip(p.image_digest.as_deref().filter(|d| valid_digest(d)));
-            let (is_wrapper, image, wrapper_env) = match wrapper {
-                Some((wrapper_image, digest)) => {
-                    let mut wrapper_env = Vec::new();
-                    let admin = render_local_conn(&p.conn_template, p.port);
-                    if let Some(name) = wrapper_admin_env_var(&p.service_type) {
-                        wrapper_env.push((name.to_string(), admin));
-                    }
-                    if let Some(name) = wrapper_env_names_var(&p.service_type) {
-                        wrapper_env.push((name.to_string(), p.conn_env_var.clone()));
-                    }
-                    (true, format!("{wrapper_image}@{digest}"), wrapper_env)
-                }
-                None => (false, p.image.clone(), Vec::new()),
-            };
             specs.push(BackingServiceSpec {
                 control_socket_name: control_socket_file_name(preset_id),
-                is_wrapper,
-                wrapper_env,
+                is_wrapper: false,
+                wrapper_env: Vec::new(),
                 service_type: p.service_type,
-                image,
+                image: p.image,
                 port: p.port,
                 env: parse_env(&p.env),
                 cpu_request,
@@ -917,57 +893,44 @@ mod tests {
     }
 
     #[test]
-    fn catalog_wrapper_digest_pins_dispatch_sidecar_image() {
+    fn preset_with_wrapper_identity_uses_ordinary_sidecar_shape() {
         let mut services = Vec::new();
+        let mut injected = Vec::new();
         append_preset_resolution(
             "project",
             "preset-postgres-18",
             Ok(Some(preset())),
             &mut services,
-            &mut Vec::new(),
+            &mut injected,
             &mut Vec::new(),
         );
-        // A wrapper preset renders the digest-pinned wrapper artifact, not the
-        // stock image, and is marked as a wrapper so job.rs wires the private
-        // control mount + socket env.
+        // `preset()` deliberately contains a wrapper repository and digest,
+        // but ordinary dispatch always preserves the configured service image.
+        let service = &services[0];
+        assert_eq!(service.image, "postgres:18-alpine");
+        assert!(!service.is_wrapper);
+        assert!(service.wrapper_env.is_empty());
+        assert_eq!(service.control_socket_name, "preset-postgres-18.sock");
+        assert_eq!(service.service_type, "postgres");
+        assert_eq!(service.port, 5432);
         assert_eq!(
-            services[0].image,
-            "ghcr.io/djinnos/djinn-postgres-wrapper@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+            service.conn_template,
+            "postgres://postgres:postgres@{host}:{port}/app_test"
         );
-        assert!(services[0].is_wrapper);
-        assert_eq!(services[0].control_socket_name, "preset-postgres-18.sock");
-        // The wrapper admin URL + exported env names are wired for the binary.
-        assert!(
-            services[0]
-                .wrapper_env
-                .iter()
-                .any(|(k, v)| k == "POSTGRES_WRAPPER_ADMIN_URL"
-                    && v == "postgres://postgres:postgres@127.0.0.1:5432/app_test")
+        assert_eq!(service.conn_env_var, "DATABASE_URL,TEST_POSTGRES_URL");
+        assert_eq!(
+            service.env,
+            vec![("POSTGRES_PASSWORD".to_string(), "postgres".to_string())]
         );
-        assert!(services[0].wrapper_env.iter().any(
-            |(k, v)| k == "CATALOG_POSTGRES_ENV_NAMES" && v == "DATABASE_URL,TEST_POSTGRES_URL"
-        ));
-    }
-
-    /// A legacy preset with no wrapper image stays dispatch-compatible: the
-    /// sidecar runs the stock image and is not marked as a wrapper.
-    #[test]
-    fn legacy_preset_without_wrapper_runs_stock_image() {
-        let mut legacy = preset();
-        legacy.wrapper_image = None;
-        legacy.image_digest = None;
-        let mut services = Vec::new();
-        append_preset_resolution(
-            "project",
-            "preset-postgres-18",
-            Ok(Some(legacy)),
-            &mut services,
-            &mut Vec::new(),
-            &mut Vec::new(),
-        );
-        assert_eq!(services[0].image, "postgres:18-alpine");
-        assert!(!services[0].is_wrapper);
-        assert!(services[0].wrapper_env.is_empty());
+        assert_eq!(service.cpu_request, "100m");
+        assert_eq!(service.memory_request, "256Mi");
+        assert_eq!(service.cpu_limit, "500m");
+        assert_eq!(service.memory_limit, "512Mi");
+        assert_eq!(injected.len(), 1);
+        assert_eq!(injected[0].preset_id, "preset-postgres-18");
+        assert_eq!(injected[0].service_type, "postgres");
+        assert_eq!(injected[0].port, 5432);
+        assert_eq!(injected[0].conn_env_var, "DATABASE_URL,TEST_POSTGRES_URL");
     }
 
     /// AC2: strict resolution rejects a preset that has no catalog wrapper
