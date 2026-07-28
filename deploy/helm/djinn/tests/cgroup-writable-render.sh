@@ -30,6 +30,8 @@ trap 'rm -rf "$WORK"' EXIT
 helm template cgroup-writable-default "$CHART_DIR" --is-upgrade >"$WORK/default.yaml"
 helm template cgroup-writable-preparation "$CHART_DIR" --is-upgrade \
   --set cgroupWritable.runtimeClass.enabled=true >"$WORK/preparation.yaml"
+helm template cgroup-writable-activation "$CHART_DIR" --is-upgrade \
+  --set cgroupWritable.runtimeClass.enabled=true,cgroupWritable.taskRuns.enabled=true >"$WORK/activation.yaml"
 for invalid in \
   'cgroupWritable.runtimeClass.enabled=not-a-bool' \
   'cgroupWritable.taskRuns.enabled=not-a-bool'; do
@@ -47,8 +49,10 @@ for invalid in \
     exit 1
   fi
 done
-python3 - "$WORK/default.yaml" "$WORK/preparation.yaml" <<'PY'
+python3 - "$WORK/default.yaml" "$WORK/preparation.yaml" "$WORK/activation.yaml" "$FIXTURES" <<'PY'
+import json
 import sys
+from pathlib import Path
 
 
 def documents(text):
@@ -58,7 +62,8 @@ def documents(text):
 def runtime_classes(text):
     return [doc for doc in documents(text) if '\nkind: RuntimeClass\n' in f'\n{doc}']
 
-base, preparation = (open(path, encoding='utf-8').read() for path in sys.argv[1:])
+base, preparation, activation = (Path(path).read_text(encoding='utf-8') for path in sys.argv[1:4])
+fixtures = Path(sys.argv[4])
 assert not runtime_classes(base), 'disabled defaults rendered RuntimeClass'
 assert 'runtimeClassName:' not in base, 'disabled defaults assigned RuntimeClass to a PodSpec'
 classes = runtime_classes(preparation)
@@ -71,6 +76,99 @@ for exact in (
 ):
     assert exact in manifest, f'missing RuntimeClass contract: {exact}'
 assert 'runtimeClassName:' not in preparation, 'preparation must not assign RuntimeClass to task-run PodSpecs'
+assert len(runtime_classes(activation)) == 1, 'activation must retain the RuntimeClass'
+
+
+def server_activation(rendered):
+    marker = 'name: DJINN_K8S_TASK_RUN_CGROUP_WRITABLE_ENABLED\n              value: '
+    assert marker in rendered, 'server render omitted task-run activation environment'
+    return rendered.split(marker, 1)[1].splitlines()[0].strip().strip('"')
+
+
+assert server_activation(base) == 'false', 'disabled render armed task-run activation'
+assert server_activation(preparation) == 'false', 'preparation render armed task-run activation'
+assert server_activation(activation) == 'true', 'activation render omitted task-run activation'
+
+
+def fail(message, contract):
+    raise AssertionError(f'{contract["release"]}: {message}')
+
+
+def launcher(contract):
+    matches = [item for item in contract['taskRunPod']['spec']['initContainers'] if item['name'] == 'cgroup-launcher']
+    assert len(matches) == 1, f'{contract["release"]}: expected one launcher'
+    return matches[0]
+
+
+def validate_release_contract(contract):
+    """Validate a release artifact without contacting a cluster.
+
+    A rollback selects the old preparation artifact for subsequently created
+    task-run Pods; it never edits task-run Pods that activation already made.
+    """
+    server = contract['server']
+    pod = contract['taskRunPod']['spec']
+    sidecar = launcher(contract)
+    enabled = server['environment']['DJINN_K8S_TASK_RUN_CGROUP_WRITABLE_ENABLED'] == 'true'
+    generation = server['runtimeImageGeneration']
+    security = sidecar['securityContext']
+    caps = security['capabilities']
+    volume_names = {volume['name'] for volume in pod['volumes']}
+
+    assert security['allowPrivilegeEscalation'] is False
+    assert security['readOnlyRootFilesystem'] is True
+    assert security['seccompProfile'] == {'type': 'RuntimeDefault'}
+    assert caps['drop'] == ['ALL']
+    for volume in pod['volumes']:
+        if 'hostPath' in volume and volume['hostPath'].get('path') == '/sys/fs/cgroup':
+            fail('enabled task-run PodSpec contains a /sys/fs/cgroup hostPath', contract)
+
+    if generation == 'privileged':
+        if enabled or 'runtimeClassName' in pod:
+            fail('old privileged launcher must remain unassigned in preparation', contract)
+        assert sidecar['imageGeneration'] == 'privileged'
+        assert sidecar['env']['DJINN_LAUNCHER_CGROUP_ROOT'] == '/run/djinn-cgroup'
+        assert sidecar['volumeMounts'] == [{'name': 'launcher-cgroup', 'mountPath': '/run/djinn-cgroup'}]
+        assert volume_names == {'launcher-cgroup'}
+        assert caps['add'] == ['CHOWN', 'SETGID', 'SETUID', 'SETPCAP', 'SYS_ADMIN', 'SYS_RESOURCE']
+        assert security['appArmorProfile'] == {'type': 'Unconfined'}
+        return
+
+    if generation != 'privilege-free':
+        fail('unknown runtime image generation', contract)
+    if not enabled or pod.get('runtimeClassName') != 'djinn-cgroup-writable':
+        fail('privilege-free launcher is not atomically paired with task-run RuntimeClass assignment', contract)
+    assert sidecar['imageGeneration'] == 'privilege-free'
+    assert sidecar['env']['DJINN_LAUNCHER_CGROUP_ROOT'] == '/sys/fs/cgroup'
+    assert sidecar['volumeMounts'] == []
+    assert volume_names == set()
+    assert caps['add'] == ['CHOWN', 'SETGID', 'SETUID', 'SETPCAP']
+    assert 'appArmorProfile' not in security
+
+
+preparation_contract = json.loads((fixtures / 'preparation-task-run.json').read_text(encoding='utf-8'))
+activation_contract = json.loads((fixtures / 'activation-task-run.json').read_text(encoding='utf-8'))
+assert server_activation(preparation) == preparation_contract['server']['environment']['DJINN_K8S_TASK_RUN_CGROUP_WRITABLE_ENABLED']
+assert server_activation(activation) == activation_contract['server']['environment']['DJINN_K8S_TASK_RUN_CGROUP_WRITABLE_ENABLED']
+validate_release_contract(preparation_contract)
+validate_release_contract(activation_contract)
+
+# Atomic rollback restores exactly the complete preparation render. It does not
+# claim a mutation of already-running new-path Pods, which may finish normally.
+rollback_contract = preparation_contract
+assert rollback_contract == preparation_contract
+validate_release_contract(rollback_contract)
+
+for fixture, expected in (
+    ('privilege-free-without-runtimeclass.json', 'RuntimeClass assignment'),
+    ('enabled-task-run-hostpath.json', '/sys/fs/cgroup hostPath'),
+):
+    try:
+        validate_release_contract(json.loads((fixtures / fixture).read_text(encoding='utf-8')))
+    except AssertionError as error:
+        assert expected in str(error), f'{fixture}: unexpected rejection: {error}'
+    else:
+        raise AssertionError(f'{fixture}: forbidden release artifact was accepted')
 PY
 
 # The alert is evaluated against compact event fixtures so the matcher is not

@@ -1,0 +1,28 @@
+{
+  "release": "forbidden-cross-product",
+  "server": {
+    "runtimeImageGeneration": "privilege-free",
+    "environment": {
+      "DJINN_K8S_TASK_RUN_CGROUP_WRITABLE_ENABLED": "false"
+    }
+  },
+  "taskRunPod": {
+    "spec": {
+      "initContainers": [
+        {
+          "name": "cgroup-launcher",
+          "imageGeneration": "privilege-free",
+          "env": {"DJINN_LAUNCHER_CGROUP_ROOT": "/sys/fs/cgroup"},
+          "volumeMounts": [],
+          "securityContext": {
+            "allowPrivilegeEscalation": false,
+            "readOnlyRootFilesystem": true,
+            "capabilities": {"drop": ["ALL"], "add": ["CHOWN", "SETGID", "SETUID", "SETPCAP"]},
+            "seccompProfile": {"type": "RuntimeDefault"}
+          }
+        }
+      ],
+      "volumes": []
+    }
+  }
+}
