@@ -194,6 +194,34 @@ directly and the in-cluster Zot Service name is ignored.
 {{- end -}}
 {{- end -}}
 
+{{/*
+Effective Zot retention mode for the server's startup preflight.
+
+`imagePipeline.zot.retention.enabled` is an intent flag; this helper is the
+*effective* value, and it is deliberately ANDed with the two switches that
+decide whether an in-cluster Zot (and therefore a rendered retention policy)
+exists at all. zot-configmap.yaml only renders when
+`imagePipeline.enabled && imagePipeline.zot.enabled`, so without this AND the
+server could be told retention is enabled while no policy — and no reachable
+registry — exists.
+
+That mismatch is not cosmetic. The server's startup preflight is fail-closed:
+on a Zot fetch error it returns Err and the leader calls `std::process::exit(1)`
+("refusing leader startup"). A deployment using an external registry (ECR/GHCR,
+the chart default `zot.enabled: false`) has no in-cluster Zot to answer
+`/v2/_catalog` and no Basic-auth Secret keys rendered, so an unconditional
+`enabled: true` would crash-loop the server on boot. Gating here keeps the
+report-only default safe to ship for every topology: it activates exactly where
+a policy is actually rendered, and stays inert everywhere else.
+*/}}
+{{- define "djinn.imagePipeline.zotRetentionEnabled" -}}
+{{- if and .Values.imagePipeline.enabled .Values.imagePipeline.zot.enabled .Values.imagePipeline.zot.retention.enabled -}}
+true
+{{- else -}}
+false
+{{- end -}}
+{{- end -}}
+
 {{- define "djinn.imagePipeline.registryAuthSecretName" -}}
 {{- if .Values.imagePipeline.zot.auth.existingSecret -}}
 {{- .Values.imagePipeline.zot.auth.existingSecret -}}

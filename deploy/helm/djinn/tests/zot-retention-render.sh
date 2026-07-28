@@ -88,9 +88,19 @@ def assert_value(name, expected):
 assert_value("DJINN_ZOT_RETENTION_ENABLED", retention_enabled)
 assert_value("DJINN_ZOT_RETENTION_DRY_RUN", expected_dry_run)
 assert_value("DJINN_ZOT_RETENTION_NEWEST_TAGS", expected_newest)
+# The preflight endpoint must resolve to the namespace the Zot resources are
+# actually rendered into. Derive that namespace from the render itself rather
+# than hard-coding it, so a change to the chart's namespace default cannot make
+# this assertion stale (it previously hard-coded "default" and silently rotted
+# once values.namespace.name started defaulting to "djinn").
+rendered_ns = next(
+    (m.group(1) for m in (re.match(r"^  namespace: (\S+)$", line) for line in rendered) if m),
+    None,
+)
+assert rendered_ns, "no rendered resource carried a metadata.namespace"
 assert_value(
     "DJINN_ZOT_RETENTION_ENDPOINT",
-    "http://test-release-djinn-zot.default.svc.cluster.local:5000",
+    f"http://test-release-djinn-zot.{rendered_ns}.svc.cluster.local:5000",
 )
 
 for name, key in (("DJINN_ZOT_RETENTION_USERNAME", "username"),
@@ -174,6 +184,99 @@ if helm template test-release "$CHART_DIR" \
     echo "FAIL: destructive retention rendered without an enabled Zot endpoint" >&2
     exit 1
 fi
+
+echo ""
+echo "=== Test 6: shipped chart defaults are report-only, not unbounded growth ==="
+# Every scenario above pins retention with an explicit --set, so none of them
+# can observe what values.yaml actually ships. A cluster installed without any
+# retention override is the common case and is what let one repo accumulate 117
+# manifests / 83 GiB. Render with NO retention.* override at all and assert the
+# shipped default renders a real, non-destructive policy.
+render_manifests "$TMPDIR_RENDER/shipped-defaults.yaml"
+assert_manifests "$TMPDIR_RENDER/shipped-defaults.yaml" true true 5 test-release-djinn-zot-auth
+
+# assert_manifests reads the policy out of the rendered JSON, but the safety
+# glob deserves its own explicit, independent check: widening `repositories`
+# beyond `djinn-image-*` would put the buildkitd cache repos (djinn-buildkitd-*)
+# in scope of tag pruning. Assert the rendered glob is exactly the catalog one.
+python3 - "$TMPDIR_RENDER/shipped-defaults.yaml" <<'PY'
+import json, sys
+
+rendered = open(sys.argv[1], encoding="utf-8").read().splitlines()
+start = rendered.index("  config.json: |") + 1
+lines = []
+for line in rendered[start:]:
+    if line and not line.startswith("    "):
+        break
+    lines.append(line[4:] if line else "")
+config = json.loads("\n".join(lines))
+
+policies = config["storage"]["retention"]["policies"]
+assert len(policies) == 1, f"expected exactly one policy, got {len(policies)}"
+assert policies[0]["repositories"] == ["djinn-image-*"], (
+    "retention repositories glob must stay exactly ['djinn-image-*']; widening it "
+    f"would put buildkitd cache repos in scope, got {policies[0]['repositories']}"
+)
+assert policies[0]["deleteUntagged"] is True, "shipped default must delete untagged manifests"
+assert config["storage"]["retention"]["dryRun"] is True, (
+    "shipped default must be dry-run: destructive deletion is an explicit operator opt-in"
+)
+print("PASS: shipped defaults render a report-only policy scoped to djinn-image-* only")
+PY
+
+echo ""
+echo "=== Test 7: default retention stays inert without an in-cluster Zot ==="
+# The startup preflight is fail-closed: on a Zot fetch error it returns Err and
+# the leader calls std::process::exit(1). External-registry deployments (the
+# chart default imagePipeline.zot.enabled=false) render no Zot ConfigMap and no
+# auth Secret keys, so telling the server retention is enabled would crash-loop
+# it on boot. Assert the shipped `retention.enabled: true` default is ANDed down
+# to an effective "false" whenever no in-cluster Zot is rendered.
+assert_effective_disabled() {
+    local render=$1
+    local label=$2
+    python3 - "$render" "$label" <<'PY'
+import re, sys
+
+render_path, label = sys.argv[1:]
+rendered = open(render_path, encoding="utf-8").read().splitlines()
+
+start = next(i for i, line in enumerate(rendered)
+             if line == "            - name: DJINN_ZOT_RETENTION_ENABLED")
+end = next((i for i in range(start + 1, len(rendered))
+            if rendered[i].startswith("            - name: ")), len(rendered))
+block = "\n".join(rendered[start:end])
+match = re.search(r"^              value: (.+)$", block, re.MULTILINE)
+assert match, "DJINN_ZOT_RETENTION_ENABLED must render a literal value"
+value = match.group(1).strip('"')
+assert value == "false", (
+    f"{label}: effective retention must be false when no in-cluster Zot is "
+    f"rendered, or the fail-closed startup preflight exit(1)s the server; got {value}"
+)
+# A preflight that cannot authenticate is exactly the fetch error that kills
+# boot, so the credential refs must be absent in this topology too.
+assert "DJINN_ZOT_RETENTION_USERNAME" not in "\n".join(rendered), (
+    f"{label}: Zot auth SecretKeyRefs must not render without in-cluster Zot"
+)
+print(f"PASS: {label} renders effective retention=false")
+PY
+}
+
+# 7a: chart defaults (imagePipeline.enabled=true, zot.enabled=false).
+helm template test-release "$CHART_DIR" \
+    --is-upgrade \
+    --show-only templates/deployment-server.yaml \
+    > "$TMPDIR_RENDER/no-zot.yaml"
+assert_effective_disabled "$TMPDIR_RENDER/no-zot.yaml" "external-registry defaults"
+
+# 7b: retention explicitly requested but the whole image pipeline is off.
+helm template test-release "$CHART_DIR" \
+    --is-upgrade \
+    --show-only templates/deployment-server.yaml \
+    --set imagePipeline.enabled=false \
+    --set imagePipeline.zot.retention.enabled=true \
+    > "$TMPDIR_RENDER/no-pipeline.yaml"
+assert_effective_disabled "$TMPDIR_RENDER/no-pipeline.yaml" "image pipeline disabled"
 
 echo ""
 echo "=== All Helm rendering tests passed ==="
