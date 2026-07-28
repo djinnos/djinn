@@ -20,6 +20,8 @@ pub mod launcher_child_fs;
 mod launcher_cpu;
 pub mod private_dep_config;
 pub mod runtime;
+pub mod scip_job;
+pub mod scip_schedule;
 pub mod secret;
 pub mod sidecar;
 pub mod token_review;
@@ -51,6 +53,15 @@ pub use graph_warmer_candidates::{
 };
 pub use graph_warmer_identity::{LeasedWarmJobIdentity, deterministic_warm_job_name, warm_work_id};
 pub use runtime::{KubernetesRuntime, taskrun_job_name};
+pub use scip_job::{
+    ANNOTATION_SCIP_REVISION, COMPONENT_SCIP_INDEX, LABEL_CAPACITY_RESERVED, LABEL_SCIP_INDEX,
+    MEASURED_SCIP_PEAK_MEMORY_BYTES, SCIP_PROTECTED_REQUEST_CEILING_MILLICORES,
+    build_scip_index_job, scip_index_job_name,
+};
+pub use scip_schedule::{
+    KubeClientScipJobInventory, ScipIndexDecision, ScipIndexScheduler, ScipJobInventory,
+    ScipJobObservation, decide as decide_scip_index, observe_from_jobs,
+};
 pub use token_review::TokenReviewer;
 pub use warm_job::{build_leased_warm_job, build_warm_job};
 pub use workload_inventory::{
