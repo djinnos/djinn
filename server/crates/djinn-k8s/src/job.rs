@@ -27,12 +27,12 @@ use crate::invocation_journal::{
     invocation_journal_volume, worker_invocation_journal_env, worker_invocation_journal_mount,
 };
 use crate::launcher::{
-    launcher_cgroup_mountpoint_volume, launcher_ipc_volume, launcher_sidecar_container,
-    pod_host_users, pod_security_context, worker_launcher_env, worker_launcher_ipc_mount,
-    worker_resources, worker_security_context, RoleResourceClass,
+    RoleResourceClass, launcher_cgroup_mountpoint_volume, launcher_ipc_volume,
+    launcher_sidecar_container, pod_host_users, pod_security_context, worker_launcher_env,
+    worker_launcher_ipc_mount, worker_resources, worker_security_context,
 };
 use crate::sidecar::{
-    sidecar_conn_env, sidecar_container, sidecar_dshm_volume, BackingServiceSpec,
+    BackingServiceSpec, sidecar_conn_env, sidecar_container, sidecar_dshm_volume,
 };
 
 /// Label key for the task-run id (Djinn's primary correlator).
@@ -3365,12 +3365,14 @@ mod tests {
                 .as_ref()
                 .is_some_and(|pvc| pvc.claim_name == cfg.projects_pvc)
         }));
-        assert!(!pod.containers[0]
-            .volume_mounts
-            .as_ref()
-            .unwrap()
-            .iter()
-            .any(|mount| mount.name == "read-sources"));
+        assert!(
+            !pod.containers[0]
+                .volume_mounts
+                .as_ref()
+                .unwrap()
+                .iter()
+                .any(|mount| mount.name == "read-sources")
+        );
     }
 
     // ── qut0: v1 leases enforcement rendering ─────────────────────────────
@@ -3858,7 +3860,9 @@ mod tests {
         assert!(
             mount_names(launcher).contains(&crate::launcher::VOLUME_LAUNCHER_CGROUP.to_string())
         );
-        assert!(!mount_names(worker).contains(&crate::launcher::VOLUME_LAUNCHER_CGROUP.to_string()));
+        assert!(
+            !mount_names(worker).contains(&crate::launcher::VOLUME_LAUNCHER_CGROUP.to_string())
+        );
 
         // Backing sidecar gets neither IPC nor cgroup nor workspace access.
         let svc = pod

@@ -1156,15 +1156,22 @@ async fn repository_active_or_latest_selection_is_deterministic() {
         .expect("seed selector candidate");
     }
 
-    let active = repo
-        .active_or_latest_for_project(project)
-        .await
-        .expect("select active run")
-        .expect("active run exists");
-    assert_eq!(
-        active.id, "selector-active",
-        "an active run wins even when a terminal run is newer"
-    );
+    for status in ["identifying", "analyzing", "aggregating"] {
+        sqlx::query("UPDATE readiness_runs SET status=$1 WHERE id='selector-active'")
+            .bind(status)
+            .execute(db.pool())
+            .await
+            .expect("set active selector status");
+        let active = repo
+            .active_or_latest_for_project(project)
+            .await
+            .expect("select active run")
+            .expect("active run exists");
+        assert_eq!(
+            active.id, "selector-active",
+            "the {status} active run wins even when a terminal run is newer"
+        );
+    }
 
     sqlx::query(
         "UPDATE readiness_runs \
