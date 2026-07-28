@@ -8,9 +8,14 @@
 //!
 //! ## Retention model
 //!
-//! * Only `djinn-image-*` catalog repositories are eligible for retention.
-//!   BuildKit cache repos (`djinn-buildkitd-*`) and any other repo are never
-//!   touched.
+//! * Only `djinn-image-*` catalog repositories are eligible for this planner.
+//!   Every other repo is invisible to it — notably the BuildKit registry cache
+//!   repos, which live under `cache/*` (`--export-cache
+//!   type=registry,ref=<registry>/cache/<subject>` in [`crate::build_job`]).
+//!   Those are bounded separately by the Zot-side `cache/*` retention policy
+//!   the Helm chart renders, and need no planner coverage here: nothing in the
+//!   database and no kubelet pull ever references a cache repo, so there is no
+//!   selected-image safety property to prove for them.
 //! * Within each eligible repo, the **newest-N** tags by push timestamp are
 //!   retained; the rest are deletion candidates.
 //! * Every selected catalog image must remain pullable after retention. A
@@ -494,10 +499,11 @@ mod tests {
     #[test]
     fn non_catalog_repos_are_ignored() {
         let repos = vec![
-            repo(
-                "djinn-buildkitd-foo",
-                vec![tag("a", "sha256:1", 100, "2024-01-01")],
-            ),
+            // The real BuildKit registry cache repo shape. The old fixture
+            // said `djinn-buildkitd-foo`, a repo name this system has never
+            // produced, so it proved nothing about the repo that actually
+            // has to stay out of scope.
+            repo("cache/foo", vec![tag("a", "sha256:1", 100, "2024-01-01")]),
             repo("random-repo", vec![tag("b", "sha256:2", 200, "2024-01-01")]),
         ];
         let plan = plan_retention(&repos, &[], &RetentionPolicy { newest_tags: 1 });

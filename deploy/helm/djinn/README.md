@@ -70,9 +70,10 @@ validates every setting locally; no live cluster is required.
 
 Two independent safety properties hold before anything is deleted:
 
-1. **Scope.** The rendered policy targets `repositories: ["djinn-image-*"]` only.
-   BuildKit cache repos (`djinn-buildkitd-*`) and infra repos are out of scope.
-   Do not widen this glob.
+1. **Scope.** The rendered catalog policy targets `repositories:
+   ["djinn-image-*"]` only. BuildKit cache repos (`cache/*`) and infra repos are
+   out of scope of *this* policy — cache repos get their own, differently
+   shaped one (see below). Do not widen this glob.
 2. **Digest pins, not tags.** Every task-run and warm Job references its project
    image *by digest*. The authoritative keep-set is therefore the database
    (`ImageRepository::list_selected_catalog_images`), not the tag list. The
@@ -105,6 +106,92 @@ Rollout order:
 policy cannot render at all unless `imagePipeline.enabled` and
 `imagePipeline.zot.enabled` are both true — `zot-configmap.yaml` fails the
 render otherwise, rather than producing a policy with no matching preflight.
+
+## BuildKit registry cache retention (`cache/*`)
+
+The catalog policy is scoped to `djinn-image-*`, which is correct — and it left
+a second repo family with **no retention, no TTL and no eviction of any kind**,
+inside the same PVC. `build_job.rs` exports build cache with:
+
+```
+--export-cache type=registry,ref=<registry>/cache/<subject>,mode=max,image-manifest=true,oci-mediatypes=true
+--import-cache type=registry,ref=<registry>/cache/<subject>
+```
+
+so every project's BuildKit cache is a `cache/<subject>` repo in the same Zot.
+
+**The growth vector is not tag count.** `mode=max` rewrites the *same* `:latest`
+ref on every build, so a cache repo has exactly one tag forever and newest-N tag
+retention is a no-op against it. What accumulates is the **superseded manifest**:
+each export leaves the previous cache manifest in the repo's index, untagged but
+still indexed, still referencing its blobs. Because those blobs are still
+*reachable*, live blob GC has nothing to collect — which is precisely why
+`gc: true` / `gcDelay: 1h` / `gcInterval: 24h` measured **0.0 GiB** reclaimed on
+the production VPS while the store kept growing. `gc` is the collector; it was
+missing an operator to produce garbage in the first place.
+
+`imagePipeline.zot.retention.cache.enabled` (default `true`) renders that
+operator as a second policy:
+
+```json
+{
+  "repositories": ["cache/*"],
+  "deleteUntagged": true,
+  "keepTags": [{ "patterns": [".*"] }]
+}
+```
+
+`keepTags: [{patterns: [".*"]}]` is load-bearing, not decorative. It retains
+every tag unconditionally, so the live `:latest` ref that in-flight builds
+`--import-cache` is structurally ineligible for deletion; only already-superseded
+manifests are candidates. It also makes the policy well-defined regardless of how
+Zot treats a policy with an empty `keepTags` list.
+
+### Safety: worst case is a cache miss, never a failed build
+
+* The live ref is never a candidate — see above.
+* A superseded manifest becomes a candidate only after the retention `delay`
+  (`1h`), and its now-unreachable blobs are only reclaimed after `gcDelay` (`1h`)
+  on the next `gcInterval` (`24h`) sweep. A build resolves and fetches its cache
+  in seconds. The window is not close.
+* Even a total miss is a state this code path already handles in production: the
+  **first** build of every project imports a `cache/<subject>` ref that does not
+  exist yet, and those builds succeed. `buildctl` treats an unresolvable
+  `--import-cache` as "no cache available", not as an error. A pruned ref is
+  indistinguishable from a never-created one.
+
+### Dedupe: why no byte figure is promised
+
+`storage.dedupe: true` stores one copy of each blob digest and shares it across
+repos. A `mode=max` cache export and a `djinn-image-*` layer frequently *are* the
+same blob. So:
+
+* Deleting a cache manifest frees **zero** bytes for every blob a live catalog
+  manifest still references, and vice versa.
+* The reclaimable set is bounded above by the size of the *cache-only* blobs, not
+  by the nominal size of the deleted manifests.
+* The two policies are therefore complementary, not additive. Pruning only one
+  side leaves shared blobs alive through the other side's references, and the
+  catalog policy's own estimate is an upper bound for the same reason.
+
+Report the real number from the dry-run, do not predict it.
+
+### Rollout
+
+The cache policy is governed by the **shared** `retention.dryRun` flag — Zot's
+`dryRun` is a single retention-block-level switch and cannot be set per policy.
+So it ships report-only alongside the catalog policy and goes destructive at the
+same moment, on the same one operator action. To roll the catalog policy
+destructive while leaving cache repos untouched, set
+`imagePipeline.zot.retention.cache.enabled=false`.
+
+The server's startup preflight (`retention_preflight.rs`) covers `djinn-image-*`
+**only**, and needs nothing for `cache/*`: no database row and no kubelet pull
+ever references a cache repo. Its only reader is `buildctl --import-cache`, whose
+failure mode is the cache miss above. The cache policy's dry-run report comes
+from Zot's own logs, not from the server preflight.
+
+`tests/zot-cache-retention-render.sh` pins all of this.
 
 ## Build admission mode
 
