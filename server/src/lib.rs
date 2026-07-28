@@ -2,6 +2,7 @@
 
 pub mod admin;
 pub mod allocator;
+pub mod build_admission_reconcile;
 pub mod codex_keepalive;
 pub mod db;
 pub mod error;

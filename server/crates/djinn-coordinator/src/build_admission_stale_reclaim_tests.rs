@@ -31,10 +31,11 @@ use tokio::sync::RwLock;
 
 use crate::build_admission::{
     BuildAdmissionController, BuildAdmissionDecision, BuildAdmissionMode, BuildAdmissionReadiness,
-    BuildAdmissionRequest, BuildWorkloadKind, CapacitySource, DenialCause,
+    BuildAdmissionRequest, BuildSlotAuthority, BuildWorkloadKind, CapacitySource, DenialCause,
 };
 use crate::build_admission_capacity_support::{CapacityHarness, attach_capacity};
 use crate::build_admission_inventory::BuildAdmissionReconciler;
+use crate::build_slot_authority::BuildLeaseDispatchAuthority;
 
 const PREDECESSOR_EPOCH: &str = "epoch-before-the-restart";
 const REPLACEMENT_EPOCH: &str = "epoch-after-the-restart";
@@ -544,6 +545,153 @@ async fn current_epoch_and_unsettled_rows_are_never_reclaimed() {
         "an unsettled row is not yet safe to judge by a listing"
     );
     assert_eq!(journal.count_task_or_warm_occupancy().await.unwrap(), 1);
+}
+
+/// The 2026-07-28 production wedge, end to end: the startup pass alone is not
+/// enough, and a later pass is what heals it.
+///
+/// A rolling deploy kills the outgoing pod mid-create. Its row is marked
+/// `CreateUnknown` with no object uid, and the incoming pod's startup
+/// reconciliation runs seconds later — correctly refusing to judge a row the
+/// API server could still be admitting. `CreateUnknown` feeds
+/// `create_unknown_pending`, which `readiness()` reports as
+/// `CreateUnknownHealth`, which fails Enforce closed for *every* admission
+/// before any capacity is measured. One such row halted the whole board.
+///
+/// [`current_epoch_and_unsettled_rows_are_never_reclaimed`] proves the skip is
+/// correct and stops there. This test continues the story, and the first half
+/// is the load-bearing part: it pins that the startup pass leaves the board
+/// wedged, so a *periodic* reconciliation pass
+/// ([`crate`]'s caller in `djinn-server`'s `build_admission_reconcile`) is
+/// required for recovery and not merely an optimisation.
+#[tokio::test]
+async fn a_settled_create_unknown_row_is_reclaimed_by_a_later_pass_and_unwedges_enforce() {
+    let db = Database::open_in_memory().unwrap();
+    let journal = Arc::new(AdmissionJournalRepository::new(db.clone()));
+
+    // The outgoing pod POSTs a create and dies before learning the outcome.
+    // Its harness owns the one capacity authority for this database; the
+    // successor below reaches capacity through that same authority, exactly as
+    // two successive processes share one durable lease table in production.
+    let outgoing = replacement(&db, &journal, 3).await;
+    let doomed = Arc::clone(&outgoing.controller);
+    doomed.mark_ready();
+    let project_id = seed_project(&db, "killed-mid-create").await;
+    let warmer = K8sGraphWarmer::with_dispatcher(
+        KubernetesConfig::for_testing(),
+        db.clone(),
+        Arc::new(LostResponseDispatcher),
+        Arc::new(NeverTerminalWatcher {
+            uid: "unused".into(),
+        }),
+    )
+    .with_warm_admission(doomed.clone());
+    warmer.trigger(&project_id).await;
+    let work_id = warm_work_id(&project_id, "unknown");
+    await_state(&journal, &work_id, AdmissionState::CreateUnknown).await;
+
+    // The successor boots under a fresh epoch, reaching capacity through the
+    // production lease authority so its denials and admissions are the real
+    // ones. Recovery seeds the predecessor's orphan row.
+    let authority: Arc<dyn BuildSlotAuthority> = Arc::new(BuildLeaseDispatchAuthority::new(
+        Arc::clone(&outgoing.lease),
+    ));
+    let successor = Arc::new(
+        BuildAdmissionController::new(
+            Arc::clone(&journal),
+            BuildAdmissionMode::Enforce,
+            3,
+            "epoch-after-the-rolling-deploy",
+        )
+        .with_slot_authority(authority),
+    );
+    successor.recover_all_predecessors_and_seed().await.unwrap();
+    successor.mark_inventory_ready();
+    successor.mark_topology_ready();
+    assert!(
+        matches!(
+            successor.readiness(),
+            BuildAdmissionReadiness::CreateUnknownHealth
+        ),
+        "one orphaned CreateUnknown row must fail the successor closed: {:?}",
+        successor.readiness()
+    );
+
+    // Startup reconciliation, inside the settle window — exactly the timing a
+    // rolling deploy produces. The row is correctly skipped, and the board is
+    // now wedged with nothing scheduled to look at it again.
+    let startup_pass = BuildAdmissionReconciler::with_settle_window(
+        Arc::clone(&successor),
+        Arc::new(NamespaceInventory::empty()),
+        Duration::from_secs(3600),
+    )
+    .reconcile()
+    .await;
+    assert_eq!(
+        startup_pass.reclaimed, 0,
+        "an unsettled row is not yet safe to judge by a listing"
+    );
+    assert_eq!(journal.count_task_or_warm_occupancy().await.unwrap(), 1);
+    assert!(
+        matches!(
+            successor.readiness(),
+            BuildAdmissionReadiness::CreateUnknownHealth
+        ),
+        "the startup pass alone leaves Enforce fail-closed: {:?}",
+        successor.readiness()
+    );
+    let denied = successor
+        .admit(build_request("blocked-by-the-orphan"))
+        .await
+        .expect("a denial is a decision, not an error");
+    assert!(
+        matches!(
+            denied,
+            BuildAdmissionDecision::Denied {
+                occupancy: None,
+                cause: DenialCause::ControllerNotAdmitting,
+                ..
+            }
+        ),
+        "the wedge denies before measuring any occupancy: {denied:?}"
+    );
+
+    // A later pass, once the row has settled. Nothing else about the world
+    // changed: same journal, same empty namespace, same controller.
+    let later_pass = BuildAdmissionReconciler::with_settle_window(
+        Arc::clone(&successor),
+        Arc::new(NamespaceInventory::empty()),
+        Duration::ZERO,
+    )
+    .reconcile()
+    .await;
+    assert!(
+        later_pass.blockers.is_empty(),
+        "unexpected blockers: {:?}",
+        later_pass.blockers
+    );
+    assert_eq!(
+        later_pass.reclaimed, 1,
+        "the settled orphan is proven absent and retired"
+    );
+    assert_eq!(
+        journal.count_task_or_warm_occupancy().await.unwrap(),
+        0,
+        "no occupying row survives the pass"
+    );
+    assert!(
+        matches!(successor.readiness(), BuildAdmissionReadiness::Healthy),
+        "reclaiming the orphan must clear the startup gate: {:?}",
+        successor.readiness()
+    );
+    let admitted = successor
+        .admit(build_request("board-runs-again"))
+        .await
+        .expect("admission must succeed once the orphan is retired");
+    assert!(
+        matches!(admitted, BuildAdmissionDecision::Permitted { .. }),
+        "the board must run again after reclamation: {admitted:?}"
+    );
 }
 
 /// One task's durable generation history, written through the journal

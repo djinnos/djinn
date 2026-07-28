@@ -1167,6 +1167,24 @@ impl AppState {
         );
     }
 
+    /// Re-run the Kubernetes inventory reconciliation pass on an already-booted
+    /// leader.
+    ///
+    /// This is [`Self::initialize_build_admission_inventory`] under a name that
+    /// says what it does outside startup. It exists because reclamation of an
+    /// occupying row whose object is gone is gated on that row having settled
+    /// past the reclaim settle window: a row created moments before a rolling
+    /// deploy is skipped by the successor's startup pass, and with no later
+    /// pass it holds shared capacity — or, for a `CreateUnknown` row, fails
+    /// every admission closed — until the next restart.
+    ///
+    /// Leader-only by construction: the caller is spawned from
+    /// [`Self::become_leader`], preserving the single-active-writer invariant
+    /// the topology gate enforces.
+    pub(crate) async fn reconcile_build_admission_inventory(&self) {
+        self.initialize_build_admission_inventory().await;
+    }
+
     /// Run the broad Kubernetes build-capable inventory and advance the
     /// Enforce readiness gate.
     ///
@@ -1184,6 +1202,11 @@ impl AppState {
     /// retires Reserved rows and converts CreateInFlight into occupying
     /// CreateUnknown, so without a reconciliation pass every occupying row
     /// whose object died with its creator holds shared capacity permanently.
+    ///
+    /// Startup is not the only caller: [`crate::build_admission_reconcile`]
+    /// re-runs this on a leader-only timer via
+    /// [`Self::reconcile_build_admission_inventory`], because a row that had
+    /// not settled during the startup pass is otherwise never looked at again.
     async fn initialize_build_admission_inventory(&self) {
         let Some(admission) = self.inner.build_admission.clone() else {
             // Off: no controller, no readiness coupling.
@@ -2613,6 +2636,15 @@ impl AppState {
             self.cancel().clone(),
         );
         crate::mirror_fetcher::spawn(self.clone());
+
+        // Periodic build-admission reconciliation. The startup pass above
+        // cannot reclaim an occupying row that has not yet settled past the
+        // reclaim settle window — and a rolling deploy is precisely what
+        // creates such a row, seconds before the successor's only pass ran.
+        // Left alone, one `CreateUnknown` row from the outgoing pod fails
+        // every admission closed until the next restart. Writes the durable
+        // journal, so leader-only for the same reason as the loops above.
+        crate::build_admission_reconcile::spawn(self.clone());
 
         // Standalone SCIP-index driver (leader-only, same reasoning as
         // mirror_fetcher: it creates cluster objects). The real scheduler is
