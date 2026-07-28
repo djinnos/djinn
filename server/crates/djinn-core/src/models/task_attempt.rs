@@ -133,6 +133,33 @@ impl TaskAttemptOutcome {
         matches!(self, Self::Interrupted)
     }
 
+    /// True if this terminal outcome proves the session was CANCELLED or
+    /// reclaimed by the platform before the agent's run could conclude, rather
+    /// than the run reaching its own terminal decision.
+    ///
+    /// - `Cancelled` — the session's cancellation token fired (operator, host,
+    ///   arbiter, or the session cap); the supervisor reports
+    ///   `TaskRunOutcome::Interrupted` and the coordinator's stuck-task sweep
+    ///   releases the task back to `open` / `needs_task_review`.
+    /// - `TimedOut` — a coordinator stall kill reclaimed a live session.
+    /// - `Interrupted` — an environmental deploy/rollout/reap interruption.
+    ///
+    /// This is deliberately NARROWER than [`is_infra`](Self::is_infra): a
+    /// `Crashed` or `SpawnFailed` attempt did reach its own terminal decision
+    /// (it is a genuine failure of the run) and is therefore excluded here.
+    ///
+    /// Used by the coordinator's cycling gate (trigger B), whose whole premise
+    /// is "each run FINISHES and the task lands right back where it was". A
+    /// cancelled session never finished, so it is no evidence at all about the
+    /// task's scope or acceptance criteria and must not arm a Planner
+    /// remediation (task 7mq0, 2026-07-28: four ~10-minute worker sessions in a
+    /// row ended `session cancelled` + coordinator recovery, trigger B fired on
+    /// the fourth, and the Planner — with no lever but reshaping the work —
+    /// force-closed a healthy task and replaced it with narrower ones).
+    pub fn is_cancelled_or_reclaimed(&self) -> bool {
+        matches!(self, Self::Cancelled | Self::TimedOut | Self::Interrupted)
+    }
+
     /// Lifecycle rank used for forward-only ordering.
     ///
     /// Non-terminal outcomes are ordered before terminal outcomes. Within each
