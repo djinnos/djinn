@@ -860,17 +860,31 @@ async fn run_pre_task_command(
     let timeout = Duration::from_secs(cmd.timeout_seconds);
 
     // Spawn the child in its own process group for clean group-kill.
-    let mut child = match tokio::process::Command::new("/bin/sh")
-        .arg("-c")
-        .arg(&cmd.command)
-        .current_dir(project_root)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .process_group(0)
-        .kill_on_drop(true)
-        .spawn()
-    {
-        Ok(c) => c,
+    //
+    // Through `spawn_owned` because this function waits on the child itself.
+    // Any process that has run a graph command has a `waitpid`-based child
+    // reaper running (`djinn_graph::process` starts it lazily via
+    // `worker_child_reaper`), and an unclaimed PID is collected by that loop
+    // first — after which tokio reports ECHILD and this command is recorded as
+    // failed despite having run fine. With a `failure_policy` of `abort` that
+    // would end the task run.
+    let spawned = djinn_core::child_ownership::spawn_owned(
+        || {
+            tokio::process::Command::new("/bin/sh")
+                .arg("-c")
+                .arg(&cmd.command)
+                .current_dir(project_root)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .process_group(0)
+                .kill_on_drop(true)
+                .spawn()
+        },
+        tokio::process::Child::id,
+    );
+    // Held until this function returns, i.e. past every wait below.
+    let (mut child, _ownership) = match spawned {
+        Ok(pair) => pair,
         Err(e) => {
             let elapsed = start.elapsed();
             warn!(name = %name, error = %e, "pre-task: failed to spawn command");

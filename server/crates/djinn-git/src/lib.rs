@@ -564,6 +564,43 @@ pub struct MergeResult {
     pub commit_sha: String,
 }
 
+/// `Command::output()` that first claims wait rights over the spawned child.
+///
+/// Every git subprocess must go through this (or [`spawn_owned_child`]) rather
+/// than calling `output()` directly. `djinn-agent-worker` runs a
+/// `waitpid(-1, ...)` subreaper loop, and an unclaimed child is stolen from
+/// under `tokio::process`, which then reports `ECHILD` ("No child processes")
+/// for a git command that in fact ran fine. See
+/// [`djinn_core::child_ownership`].
+async fn output_owned(cmd: &mut tokio::process::Command) -> std::io::Result<std::process::Output> {
+    let (child, ownership) =
+        djinn_core::child_ownership::spawn_owned(|| cmd.spawn(), tokio::process::Child::id)?;
+    let output = child.wait_with_output().await;
+    // Explicit: wait rights are released only after the status is collected.
+    drop(ownership);
+    output
+}
+
+/// Synchronous counterpart to [`output_owned`].
+fn output_owned_std(cmd: &mut std::process::Command) -> std::io::Result<std::process::Output> {
+    let (child, ownership) =
+        djinn_core::child_ownership::spawn_owned(|| cmd.spawn(), |c| Some(c.id()))?;
+    let output = child.wait_with_output();
+    drop(ownership);
+    output
+}
+
+/// `Command::spawn()` that claims wait rights over the child, for callers that
+/// drive `wait()` themselves. The returned guard must outlive the wait.
+fn spawn_owned_child(
+    cmd: &mut tokio::process::Command,
+) -> std::io::Result<(
+    tokio::process::Child,
+    djinn_core::child_ownership::OwnedChild,
+)> {
+    djinn_core::child_ownership::spawn_owned(|| cmd.spawn(), tokio::process::Child::id)
+}
+
 pub async fn run_git_command(path: PathBuf, args: Vec<String>) -> Result<CommandOutput, GitError> {
     use std::process::Stdio;
     let mut cmd = git_command();
@@ -573,7 +610,7 @@ pub async fn run_git_command(path: PathBuf, args: Vec<String>) -> Result<Command
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     lower_process_priority(&mut cmd);
-    let output = cmd.output().await?;
+    let output = output_owned(&mut cmd).await?;
 
     let code = output.status.code().unwrap_or(-1);
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
@@ -613,7 +650,7 @@ pub async fn run_git_command_with_timeout(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     lower_process_priority(&mut cmd);
-    let mut child = cmd.spawn()?;
+    let (mut child, _ownership) = spawn_owned_child(&mut cmd)?;
 
     // Take stdout/stderr handles so we can read them concurrently with wait,
     // avoiding deadlocks if the child fills a pipe buffer, while still being
@@ -857,7 +894,7 @@ pub async fn run_git_command_allow_failure(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     lower_process_priority(&mut cmd);
-    let output = cmd.output().await?;
+    let output = output_owned(&mut cmd).await?;
     Ok(CommandOutput {
         stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
         stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
@@ -893,7 +930,7 @@ pub async fn run_git_command_in_with_env_allow_failure(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     lower_process_priority(&mut cmd);
-    let output = cmd.output().await?;
+    let output = output_owned(&mut cmd).await?;
     Ok(CommandOutput {
         stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
         stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
@@ -917,7 +954,7 @@ pub fn run_git_command_binary_in(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     lower_process_priority_sync(&mut cmd);
-    let output = cmd.output()?;
+    let output = output_owned_std(&mut cmd)?;
     let code = output.status.code().unwrap_or(-1);
     if !output.status.success() {
         return Err(GitError::CommandFailed {
@@ -957,7 +994,7 @@ pub async fn run_git_command_in_with_env(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     lower_process_priority(&mut cmd);
-    let output = cmd.output().await?;
+    let output = output_owned(&mut cmd).await?;
 
     let code = output.status.code().unwrap_or(-1);
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();

@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use anyhow::Context as _;
 use tokio::sync::RwLock;
 
 use crate::WarmContext;
@@ -676,6 +677,24 @@ pub async fn run_warm_graph_command<C: WarmContext>(
     Ok(())
 }
 
+/// Scratch directory for one indexer run's raw `.scip` output.
+///
+/// The durable product of an indexer run is the content-addressed SCIP cache
+/// under `$XDG_CACHE_HOME`; the `.scip` files themselves are transient and are
+/// deleted when the returned handle drops.
+///
+/// Rooted at the process temp directory, deliberately. Both the warm and the
+/// SCIP call site previously built this as
+/// `std::env::current_dir()?.join("target").join("test-tmp")`, which is wrong
+/// twice over: `target/test-tmp` is the workspace's *test* scratch convention
+/// (see `.gitignore` and `test_helpers::workspace_tempdir`), and deriving a
+/// production path from the process CWD makes the output location a property of
+/// how the binary happened to be launched. In both Pods it resolved inside the
+/// cloned repository — the very tree being indexed.
+fn indexer_output_tempdir(prefix: &str) -> std::io::Result<tempfile::TempDir> {
+    tempfile::Builder::new().prefix(prefix).tempdir()
+}
+
 /// Run the **semantic pass only** and leave its artifacts in the shared
 /// content-addressed SCIP cache. Publishes no graph and writes no
 /// `repo_graph_*` row.
@@ -734,9 +753,13 @@ pub async fn run_scip_index_command<C: WarmContext>(
 
     // Same tree resolution as `ensure_canonical_graph`, so the two runs index
     // the same content and agree on workspace identity.
+    // `.context(..)`, not `anyhow!("...: {e}")`: the latter renders only the
+    // outermost message of `e` and drops its source, which is how the first
+    // production run of this Job reported `ensure index tree: git rev-parse
+    // HEAD in ...` with the git exit code and stderr nowhere in the log.
     let mut handle = crate::index_tree::IndexTree::ensure(project_id, &project_root)
         .await
-        .map_err(|e| anyhow::anyhow!("ensure index tree: {e}"))?;
+        .context("ensure index tree")?;
     let _ = handle
         .fetch_if_stale(crate::index_tree::DEFAULT_FETCH_COOLDOWN)
         .await;
@@ -747,16 +770,8 @@ pub async fn run_scip_index_command<C: WarmContext>(
     let indexer_lock = ctx.indexer_lock();
     let _guard = indexer_lock.lock().await;
 
-    let temp_base = std::env::current_dir()
-        .map_err(|e| anyhow::anyhow!("resolve current dir for scip-index tempdir: {e}"))?
-        .join("target")
-        .join("test-tmp");
-    std::fs::create_dir_all(&temp_base)
-        .map_err(|e| anyhow::anyhow!("create scip-index tempdir base: {e}"))?;
-    let output_temp = tempfile::Builder::new()
-        .prefix("djinn-scip-index-")
-        .tempdir_in(&temp_base)
-        .map_err(|e| anyhow::anyhow!("create scip-index tempdir: {e}"))?;
+    let output_temp =
+        indexer_output_tempdir("djinn-scip-index-").context("create scip-index tempdir")?;
 
     let target_dir = handle.indexer_target_dir_override();
     let stack_filter = resolve_stack_indexer_filter(ctx, project_id).await;
@@ -818,7 +833,11 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
 
     let mut handle = crate::index_tree::IndexTree::ensure(project_id, project_root)
         .await
-        .map_err(|e| format!("ensure index tree: {e}"))?;
+        // `{e:#}`, not `{e}`: this arm collapses an `anyhow::Error` into a
+        // `String`, and the plain form keeps only the outermost context — which
+        // is how a failing `git rev-parse` here reports the call it made and
+        // never the exit code or stderr that says why it failed.
+        .map_err(|e| format!("ensure index tree: {e:#}"))?;
     let _ = handle
         .fetch_if_stale(crate::index_tree::DEFAULT_FETCH_COOLDOWN)
         .await;
@@ -951,15 +970,7 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
         );
     }
 
-    let temp_base = std::env::current_dir()
-        .map_err(|e| format!("resolve current dir for canonical-graph tempdir: {e}"))?
-        .join("target")
-        .join("test-tmp");
-    std::fs::create_dir_all(&temp_base)
-        .map_err(|e| format!("create canonical-graph tempdir base: {e}"))?;
-    let output_temp = tempfile::Builder::new()
-        .prefix("djinn-canonical-graph-")
-        .tempdir_in(&temp_base)
+    let output_temp = indexer_output_tempdir("djinn-canonical-graph-")
         .map_err(|e| format!("create canonical-graph tempdir: {e}"))?;
     let output_dir = output_temp.path().to_path_buf();
     // In the K8s warm-Pod path this resolves to `None` when the Pod already

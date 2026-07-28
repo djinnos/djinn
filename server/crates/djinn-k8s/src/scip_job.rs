@@ -114,6 +114,15 @@ pub const LABEL_CAPACITY_RESERVED: &str = "djinn.io/capacity-reserved";
 /// decide whether the head has advanced since the last successful index.
 pub const ANNOTATION_SCIP_REVISION: &str = "djinn.app/scip-revision";
 
+/// Env key under which the enclosing Job's `activeDeadlineSeconds` is projected
+/// into the Pod.
+///
+/// Named for the reader, not the writer: `djinn_graph::scip_indexer::budget`
+/// and `djinn_agent_worker::warm_step_budget` both look up this exact string to
+/// find "the deadline that will kill the Pod I am in". A SCIP-specific key
+/// would render fine, pass every manifest test, and be read by nobody.
+pub const SCIP_JOB_DEADLINE_ENV: &str = "DJINN_WARM_JOB_DEADLINE_SECONDS";
+
 /// Container name of the SCIP indexer. Distinct from the warm Job's `warmer`
 /// so [`crate::build_resources::apply_resolved_resources`] — which targets
 /// `worker`/`warmer` — cannot silently retarget this Pod with warm overrides.
@@ -265,8 +274,22 @@ exec {bin} scip-index "{project_id}"
         env_var("DJINN_PROJECT_ROOT", &project_root),
         env_var("DJINN_SCIP_REVISION", revision),
         env_var("RUST_LOG", "info,djinn=debug"),
+        // THE KEY IS THE CONTRACT, AND THE READER NAMED IT.
+        //
+        // `djinn_graph::scip_indexer::budget` bounds each indexer's timeout by
+        // the enclosing Job's deadline, and it reads exactly
+        // `DJINN_WARM_JOB_DEADLINE_SECONDS`. The value is this Job's own
+        // `activeDeadlineSeconds`, not the warm Job's — only the *name* is
+        // shared, because the budget's question ("what deadline will kill the
+        // Pod I am running in?") is the same in both Pods.
+        //
+        // This originally rendered as `DJINN_SCIP_JOB_DEADLINE_SECONDS`, which
+        // nothing reads. With the key unread the budget falls back to its
+        // unenclosed 4h ceiling while the kubelet kills this Pod at
+        // `scip_job_timeout_seconds` — turning an observable `timed_out`
+        // indexer status into an unexplained SIGKILL with no artifacts written.
         env_var(
-            "DJINN_SCIP_JOB_DEADLINE_SECONDS",
+            SCIP_JOB_DEADLINE_ENV,
             &config.scip_job_timeout_seconds.to_string(),
         ),
     ];
@@ -861,6 +884,43 @@ mod tests {
             "scip_job_timeout_seconds {} leaves no margin over the measured \
              {MEASURED_SCIP_PHASE_SECONDS}s SCIP phase",
             cfg.scip_job_timeout_seconds,
+        );
+    }
+
+    /// The deadline must reach the indexer budget, which means it must be
+    /// projected under the key that budget reads.
+    ///
+    /// A rendered-but-unread key is indistinguishable from a correct one in the
+    /// manifest, and its only symptom is a Pod the kubelet kills partway
+    /// through an index that believed it had four hours.
+    #[test]
+    fn scip_deadline_is_projected_under_the_key_the_indexer_budget_reads() {
+        let cfg = KubernetesConfig::for_testing();
+        let env = env_of(&job(&cfg));
+
+        assert_eq!(
+            SCIP_JOB_DEADLINE_ENV, "DJINN_WARM_JOB_DEADLINE_SECONDS",
+            "this is the literal string `djinn_graph::scip_indexer::budget` \
+             looks up; changing it here without changing it there silently \
+             unbounds the budget"
+        );
+        assert_eq!(
+            env.get(SCIP_JOB_DEADLINE_ENV).map(String::as_str),
+            Some(cfg.scip_job_timeout_seconds.to_string().as_str()),
+            "the projected deadline must be THIS Job's activeDeadlineSeconds"
+        );
+        assert_eq!(
+            job(&cfg)
+                .spec
+                .as_ref()
+                .and_then(|s| s.active_deadline_seconds),
+            Some(cfg.scip_job_timeout_seconds),
+            "…and it must equal the deadline the kubelet actually enforces"
+        );
+        assert!(
+            !env.contains_key("DJINN_SCIP_JOB_DEADLINE_SECONDS"),
+            "the SCIP-specific key is read by nothing; rendering it back would \
+             restore the unbounded budget this test exists to prevent"
         );
     }
 
