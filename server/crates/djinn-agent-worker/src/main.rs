@@ -3652,18 +3652,24 @@ async fn run_warm_graph_body(project_id: &str) -> Result<()> {
     // 6300s of a 7200s Job while the graph phase needed 3644s, so a long cargo
     // phase SIGKILLs the Pod mid-SCIP and loses the whole graph.
     let observed_indexing = observed_indexing_cost(&ctx.db, project_id).await;
-    warm_cargo_and_continue(project_id, &lifecycle_root, &policy, observed_indexing, || async {
-        // Architect-only warm path: this subcommand binary is dispatched
-        // exclusively by `K8sGraphWarmer`, which is wired into the
-        // architect-only `GraphWarmerService::trigger` pipeline.
-        djinn_graph::canonical_graph::run_warm_graph_command(
-            &ctx,
-            project_id,
-            djinn_graph::architect::ArchitectWarmToken::new(),
-        )
-        .await
-        .with_context(|| format!("run_warm_graph_command({project_id})"))
-    })
+    warm_cargo_and_continue(
+        project_id,
+        &lifecycle_root,
+        &policy,
+        observed_indexing,
+        || async {
+            // Architect-only warm path: this subcommand binary is dispatched
+            // exclusively by `K8sGraphWarmer`, which is wired into the
+            // architect-only `GraphWarmerService::trigger` pipeline.
+            djinn_graph::canonical_graph::run_warm_graph_command(
+                &ctx,
+                project_id,
+                djinn_graph::architect::ArchitectWarmToken::new(),
+            )
+            .await
+            .with_context(|| format!("run_warm_graph_command({project_id})"))
+        },
+    )
     .await
 }
 
@@ -5527,7 +5533,12 @@ warning: something
             .enable_all()
             .build()
             .expect("runtime")
-            .block_on(warm_cargo_target_base(&project, fixture.path(), &policy, None));
+            .block_on(warm_cargo_target_base(
+                &project,
+                fixture.path(),
+                &policy,
+                None,
+            ));
         match previous {
             Some(value) => unsafe { std::env::set_var(CARGO_TARGET_DIR_ENV, value) },
             None => unsafe { std::env::remove_var(CARGO_TARGET_DIR_ENV) },
@@ -5597,7 +5608,12 @@ warning: something
             .enable_all()
             .build()
             .expect("runtime")
-            .block_on(warm_cargo_target_base(&project, fixture.path(), &policy, None));
+            .block_on(warm_cargo_target_base(
+                &project,
+                fixture.path(),
+                &policy,
+                None,
+            ));
         *WARM_CARGO_TEST_ROOT.lock().expect("warm test root") = None;
         unsafe { std::env::set_var("PATH", previous_path) };
         match previous_target {
@@ -5700,7 +5716,12 @@ warning: something
                 .enable_all()
                 .build()
                 .expect("runtime")
-                .block_on(warm_cargo_target_base(&project, fixture.path(), &policy, None));
+                .block_on(warm_cargo_target_base(
+                    &project,
+                    fixture.path(),
+                    &policy,
+                    None,
+                ));
         });
 
         *WARM_CARGO_TEST_ROOT.lock().expect("warm test root") = None;
@@ -5835,7 +5856,12 @@ warning: something
                 .enable_all()
                 .build()
                 .expect("runtime")
-                .block_on(warm_cargo_target_base(&project, fixture.path(), &policy, None));
+                .block_on(warm_cargo_target_base(
+                    &project,
+                    fixture.path(),
+                    &policy,
+                    None,
+                ));
             assert_eq!(
                 *WARM_CARGO_PHASES.lock().expect("recorder"),
                 ["failed"],

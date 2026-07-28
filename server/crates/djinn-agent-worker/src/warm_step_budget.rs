@@ -92,7 +92,10 @@ const MAX_RESERVE_DENOMINATOR: u32 = 3;
 /// * `None` (no evidence yet) → [`DEFAULT_TAIL_RESERVE`], the historical value.
 /// * otherwise → `observed * 5/4`, never below [`DEFAULT_TAIL_RESERVE`] and
 ///   never above two thirds of `job_deadline`.
-pub fn derive_tail_reserve(observed_indexing: Option<Duration>, job_deadline: Duration) -> Duration {
+pub fn derive_tail_reserve(
+    observed_indexing: Option<Duration>,
+    job_deadline: Duration,
+) -> Duration {
     let ceiling = (job_deadline.saturating_mul(MAX_RESERVE_NUMERATOR) / MAX_RESERVE_DENOMINATOR)
         .max(DEFAULT_TAIL_RESERVE);
     let Some(observed) = observed_indexing.filter(|d| *d > Duration::ZERO) else {
