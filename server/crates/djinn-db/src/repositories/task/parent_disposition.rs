@@ -1829,10 +1829,16 @@ mod tests {
         let child = make_task(&db, &epic, "open", "t1").await;
 
         let mut tx = db.pool().begin().await.unwrap();
-        let outcome =
-            apply_doctor_repair_tx(&mut tx, &child, "open", "close", &[epic.clone()], &[])
-                .await
-                .unwrap();
+        let outcome = apply_doctor_repair_tx(
+            &mut tx,
+            &child,
+            "open",
+            "close",
+            std::slice::from_ref(&epic),
+            &[],
+        )
+        .await
+        .unwrap();
         tx.commit().await.unwrap();
 
         assert_eq!(
@@ -1861,10 +1867,16 @@ mod tests {
         let child = make_task(&db, &epic, "in_progress", "t1").await;
 
         let mut tx = db.pool().begin().await.unwrap();
-        let outcome =
-            apply_doctor_repair_tx(&mut tx, &child, "in_progress", "park", &[epic.clone()], &[])
-                .await
-                .unwrap();
+        let outcome = apply_doctor_repair_tx(
+            &mut tx,
+            &child,
+            "in_progress",
+            "park",
+            std::slice::from_ref(&epic),
+            &[],
+        )
+        .await
+        .unwrap();
         tx.commit().await.unwrap();
 
         assert_eq!(
@@ -1892,10 +1904,16 @@ mod tests {
         let child = make_task(&db, &epic, "pr_review", "t1").await;
 
         let mut tx = db.pool().begin().await.unwrap();
-        let outcome =
-            apply_doctor_repair_tx(&mut tx, &child, "pr_review", "park", &[epic.clone()], &[])
-                .await
-                .unwrap();
+        let outcome = apply_doctor_repair_tx(
+            &mut tx,
+            &child,
+            "pr_review",
+            "park",
+            std::slice::from_ref(&epic),
+            &[],
+        )
+        .await
+        .unwrap();
         tx.commit().await.unwrap();
 
         assert_eq!(
@@ -1946,10 +1964,16 @@ mod tests {
 
         let mut tx = db.pool().begin().await.unwrap();
         // Simulate a stale snapshot where status was "open" but is now "in_progress".
-        let outcome =
-            apply_doctor_repair_tx(&mut tx, &child, "open", "close", &[epic.clone()], &[])
-                .await
-                .unwrap();
+        let outcome = apply_doctor_repair_tx(
+            &mut tx,
+            &child,
+            "open",
+            "close",
+            std::slice::from_ref(&epic),
+            &[],
+        )
+        .await
+        .unwrap();
         tx.commit().await.unwrap();
 
         assert_eq!(
@@ -2002,10 +2026,16 @@ mod tests {
         link_epic(&db, &proposal, &epic, &project).await;
 
         let mut tx = db.pool().begin().await.unwrap();
-        let outcome =
-            apply_doctor_repair_tx(&mut tx, &child, "open", "close", &[epic.clone()], &[])
-                .await
-                .unwrap();
+        let outcome = apply_doctor_repair_tx(
+            &mut tx,
+            &child,
+            "open",
+            "close",
+            std::slice::from_ref(&epic),
+            &[],
+        )
+        .await
+        .unwrap();
         tx.commit().await.unwrap();
 
         assert_eq!(
@@ -2040,7 +2070,7 @@ mod tests {
             &child,
             "open",
             "close",
-            &[closing_epic.clone()],
+            std::slice::from_ref(&closing_epic),
             &[],
         )
         .await
@@ -2096,10 +2126,16 @@ mod tests {
                 .unwrap();
 
         let mut tx = db.pool().begin().await.unwrap();
-        let outcome =
-            apply_doctor_repair_tx(&mut tx, &child, "open", "close", &[epic.clone()], &[])
-                .await
-                .unwrap();
+        let outcome = apply_doctor_repair_tx(
+            &mut tx,
+            &child,
+            "open",
+            "close",
+            std::slice::from_ref(&epic),
+            &[],
+        )
+        .await
+        .unwrap();
         tx.commit().await.unwrap();
         assert!(outcome.applied());
 
@@ -2145,10 +2181,16 @@ mod tests {
             .unwrap();
 
         let mut tx = db.pool().begin().await.unwrap();
-        let outcome =
-            apply_doctor_repair_tx(&mut tx, &child, "pr_review", "park", &[epic.clone()], &[])
-                .await
-                .unwrap();
+        let outcome = apply_doctor_repair_tx(
+            &mut tx,
+            &child,
+            "pr_review",
+            "park",
+            std::slice::from_ref(&epic),
+            &[],
+        )
+        .await
+        .unwrap();
         tx.commit().await.unwrap();
         assert!(outcome.applied());
 
@@ -2177,19 +2219,31 @@ mod tests {
 
         // First repair: closes the task.
         let mut tx = db.pool().begin().await.unwrap();
-        let outcome1 =
-            apply_doctor_repair_tx(&mut tx, &child, "open", "close", &[epic.clone()], &[])
-                .await
-                .unwrap();
+        let outcome1 = apply_doctor_repair_tx(
+            &mut tx,
+            &child,
+            "open",
+            "close",
+            std::slice::from_ref(&epic),
+            &[],
+        )
+        .await
+        .unwrap();
         tx.commit().await.unwrap();
         assert!(outcome1.applied());
 
         // Second repair with the same snapshot: must skip (already closed).
         let mut tx = db.pool().begin().await.unwrap();
-        let outcome2 =
-            apply_doctor_repair_tx(&mut tx, &child, "open", "close", &[epic.clone()], &[])
-                .await
-                .unwrap();
+        let outcome2 = apply_doctor_repair_tx(
+            &mut tx,
+            &child,
+            "open",
+            "close",
+            std::slice::from_ref(&epic),
+            &[],
+        )
+        .await
+        .unwrap();
         tx.commit().await.unwrap();
         assert!(!outcome2.applied());
         assert!(matches!(
@@ -2216,10 +2270,16 @@ mod tests {
 
         // Repair parks the in-flight orphan.
         let mut tx = db.pool().begin().await.unwrap();
-        let outcome =
-            apply_doctor_repair_tx(&mut tx, &child, "in_progress", "park", &[epic.clone()], &[])
-                .await
-                .unwrap();
+        let outcome = apply_doctor_repair_tx(
+            &mut tx,
+            &child,
+            "in_progress",
+            "park",
+            std::slice::from_ref(&epic),
+            &[],
+        )
+        .await
+        .unwrap();
         tx.commit().await.unwrap();
         assert!(outcome.applied());
 
@@ -2259,8 +2319,8 @@ mod tests {
             &child,
             "open",
             "close",
-            &[e1.clone()],
-            &[proposal.clone()],
+            std::slice::from_ref(&e1),
+            std::slice::from_ref(&proposal),
         )
         .await
         .unwrap();

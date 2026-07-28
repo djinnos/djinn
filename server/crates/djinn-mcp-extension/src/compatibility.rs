@@ -695,7 +695,7 @@ mod tests {
         let mut args = Map::new();
         args.insert("old".into(), Value::from(7));
         let NormalizationResult::Prepared(call) =
-            normalize_call(&[trap.clone()], &v("1.1.0"), "new", Some(args))
+            normalize_call(std::slice::from_ref(&trap), &v("1.1.0"), "new", Some(args))
         else {
             panic!()
         };

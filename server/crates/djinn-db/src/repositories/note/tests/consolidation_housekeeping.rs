@@ -1,6 +1,21 @@
 use super::*;
 use crate::repositories::note::NoteSearchParams;
 
+/// One `note_revision_events` row as projected by the consolidation assertions
+/// below: `(actor_kind, subsystem, event_kind, content_before, content_after,
+/// confidence_before, confidence_after, reason)`. Named so the
+/// `sqlx::query_as` binding stays readable (clippy::type_complexity).
+type ConsolidationRevisionRow = (
+    String,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<f64>,
+    Option<f64>,
+    String,
+);
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn consolidation_lists_db_note_groups_and_clusters_deterministically() {
     let tmp = crate::database::test_tempdir().unwrap();
@@ -274,7 +289,7 @@ async fn consolidation_create_canonical_note_persists_db_note_confidence_and_pro
     assert_eq!(fetched.abstract_.as_deref(), Some("short abstract"));
     assert_eq!(fetched.overview.as_deref(), Some("overview summary"));
 
-    let revision: (String, String, String, Option<String>, Option<String>, Option<f64>, Option<f64>, String) = sqlx::query_as("SELECT actor_kind, subsystem, event_kind, content_before, content_after, confidence_before, confidence_after, reason FROM note_revision_events WHERE note_id = $1")
+    let revision: ConsolidationRevisionRow = sqlx::query_as("SELECT actor_kind, subsystem, event_kind, content_before, content_after, confidence_before, confidence_after, reason FROM note_revision_events WHERE note_id = $1")
         .bind(&created.note.id)
         .fetch_one(db.pool())
         .await

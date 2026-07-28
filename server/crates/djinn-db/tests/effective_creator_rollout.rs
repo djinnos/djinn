@@ -858,9 +858,11 @@ pub async fn runtime_writer() { repo.create_in_project_with_provenance(); }"#,
 #[path = "migrations_task_creator_contract.rs"]
 mod canonical_migration_140_matrix;
 
-#[path = "support/migrations_task_creator_contract.rs"]
-#[allow(dead_code)]
-mod contract_support;
+// Reached through the canonical matrix above rather than included a second
+// time: a direct `#[path = "support/..."] mod` here compiled the same support
+// module twice into this one test binary (clippy::duplicate_mod), giving the
+// binary two distinct copies of every fixture constant and helper.
+use canonical_migration_140_matrix::migrations_task_creator_contract_support as contract_support;
 
 use sqlx::Connection;
 use sqlx::postgres::PgConnection;
