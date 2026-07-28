@@ -591,6 +591,9 @@ impl LeaseInvocationRunner {
         // makes a command SLOW, never dead. Nothing here kills the child, and
         // the durable record is still reconciled to terminal after the loop.
         let mut unleased_degrade = false;
+        // The absolute queue deadline this invocation sent, once it queued.
+        // `0` means it never reached the lease authority.
+        let mut queue_deadline_ms = 0_i64;
         // This variable is assigned only by `terminal_now` or by a service
         // wait that observed terminal intent. Consequently no later response
         // can authorize a cgroup lift.
@@ -613,10 +616,20 @@ impl LeaseInvocationRunner {
                 continue;
             } else if !queued && cpu.usage_usec >= config.cpu_usage_threshold_usec {
                 queued = true;
+                // Captured HERE, not hoisted out of the loop: the deadline is
+                // relative to the moment this invocation actually crossed the
+                // escalation threshold, which for a long command can be minutes
+                // after launch. Retained so the degrade diagnostic can say
+                // whether the queue position had genuinely expired — a status
+                // read reports a terminalized row as `Cancelled` and carries no
+                // terminal reason over the wire, so the deadline and the clock
+                // are the only evidence available in the pod.
+                let queued_deadlines = self.lease_deadlines(&config);
+                queue_deadline_ms = queued_deadlines.queue_deadline_ms;
                 match await_lease_or_terminal(
                     self.services.queue_lease(LeaseQueueRequest {
                         identity: lease.clone(),
-                        deadlines: self.lease_deadlines(&config),
+                        deadlines: queued_deadlines,
                     }),
                     &mut *child,
                     &cancel,
@@ -660,6 +673,8 @@ impl LeaseInvocationRunner {
                             identity: &identity,
                             observed_usage_usec: cpu.usage_usec,
                             authority,
+                            queue_deadline_ms,
+                            now_ms: epoch_ms(self.clock.now()),
                         },
                         LeaseResult::LeaseUnavailable,
                         &mut deadline,
@@ -698,6 +713,8 @@ impl LeaseInvocationRunner {
                                 identity: &identity,
                                 observed_usage_usec: cpu.usage_usec,
                                 authority,
+                                queue_deadline_ms,
+                                now_ms: epoch_ms(self.clock.now()),
                             },
                             other,
                             &mut deadline,
@@ -892,6 +909,8 @@ impl LeaseInvocationRunner {
                                     identity: &identity,
                                     observed_usage_usec: cpu.usage_usec,
                                     authority,
+                                    queue_deadline_ms,
+                                    now_ms: epoch_ms(self.clock.now()),
                                 },
                                 other,
                                 &mut deadline,
@@ -909,6 +928,8 @@ impl LeaseInvocationRunner {
                                     identity: &identity,
                                     observed_usage_usec: cpu.usage_usec,
                                     authority,
+                                    queue_deadline_ms,
+                                    now_ms: epoch_ms(self.clock.now()),
                                 },
                                 LeaseResult::LeaseUnavailable,
                                 &mut deadline,
@@ -923,6 +944,8 @@ impl LeaseInvocationRunner {
                             identity: &identity,
                             observed_usage_usec: cpu.usage_usec,
                             authority,
+                            queue_deadline_ms,
+                            now_ms: epoch_ms(self.clock.now()),
                         },
                         other,
                         &mut deadline,
@@ -1255,6 +1278,10 @@ fn lease_failure(
             observed_usage_usec = diagnostic.observed_usage_usec,
             authority = ?diagnostic.authority,
             degraded_quota = degraded_quota(diagnostic.authority),
+            queue_deadline_ms = diagnostic.queue_deadline_ms,
+            now_ms = diagnostic.now_ms,
+            queue_deadline_passed =
+                diagnostic.queue_deadline_ms > 0 && diagnostic.now_ms >= diagnostic.queue_deadline_ms,
             "lease invocation DEGRADED: the build lease will never be granted, so the command \
              runs the rest of its life at the quota it was born at. Under an Armed authority that \
              is the launcher's unleased quota (250m by default) — a ~16x slowdown for a compile — \
@@ -1279,6 +1306,17 @@ struct DegradeDiagnostic<'a> {
     /// rest of its life; `Unarmed` means there was never a quota to lift and
     /// the degrade costs nothing.
     authority: djinn_cgroup_launcher::LeaseAuthority,
+    /// The absolute queue deadline this invocation sent, and the clock it is
+    /// judged against.
+    ///
+    /// Both are logged because the reason a status read reports is
+    /// structurally lossy: the coordinator terminalizes an expired queue row as
+    /// `deadline_expired`, but `LeaseStatus` carries no terminal reason, so the
+    /// pod sees a bare `Cancelled`. `now_ms >= queue_deadline_ms > 0` is the
+    /// evidence that distinguishes "its queue position expired" from "somebody
+    /// cancelled it".
+    queue_deadline_ms: i64,
+    now_ms: i64,
 }
 
 /// Closed enumeration naming why this invocation can never hold the lease.
@@ -1734,6 +1772,8 @@ mod tests {
             identity,
             observed_usage_usec: 52_800_000,
             authority: djinn_cgroup_launcher::LeaseAuthority::Armed,
+            queue_deadline_ms: 0,
+            now_ms: 0,
         }
     }
 

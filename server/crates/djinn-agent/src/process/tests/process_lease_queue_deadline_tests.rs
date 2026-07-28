@@ -342,7 +342,10 @@ async fn a_degraded_invocation_reports_why_and_at_what_quota() {
         "the line must identify the invocation that is now throttled"
     );
     assert_eq!(
-        degrade.fields.get("observed_usage_usec").map(String::as_str),
+        degrade
+            .fields
+            .get("observed_usage_usec")
+            .map(String::as_str),
         Some("52800000"),
         "the CPU already burned is what makes a degrade actionable"
     );
@@ -350,6 +353,34 @@ async fn a_degraded_invocation_reports_why_and_at_what_quota() {
         degrade.fields.get("degraded_quota").map(String::as_str),
         Some("launcher_unleased"),
         "the line must name the quota the command is stuck at"
+    );
+    // A status read reports a terminalized row as a bare `Cancelled` and
+    // carries no terminal reason over the wire, so the deadline and the clock
+    // are the only evidence in the pod that the queue position expired rather
+    // than somebody cancelling it.
+    assert_eq!(
+        degrade
+            .fields
+            .get("queue_deadline_passed")
+            .map(String::as_str),
+        Some("true")
+    );
+    let deadline: i64 = degrade
+        .fields
+        .get("queue_deadline_ms")
+        .expect("the deadline it sent")
+        .parse()
+        .expect("epoch milliseconds");
+    let now: i64 = degrade
+        .fields
+        .get("now_ms")
+        .expect("the clock it is judged against")
+        .parse()
+        .expect("epoch milliseconds");
+    assert!(
+        deadline > 0 && now >= deadline,
+        "the diagnostic must carry the deadline it actually sent ({deadline}) and the \
+         clock that outlived it ({now})"
     );
 }
 
@@ -370,7 +401,10 @@ fn queue_timeout_defaults_to_the_shared_dispatch_deadline() {
     // thread-per-test runner.
     // SAFETY: single-threaded test body; no other test reads this variable.
     unsafe { std::env::remove_var(ShellLaunchContext::QUEUE_TIMEOUT_ENV) };
-    assert_eq!(ShellLaunchContext::queue_timeout(), BUILD_LEASE_QUEUE_DEADLINE);
+    assert_eq!(
+        ShellLaunchContext::queue_timeout(),
+        BUILD_LEASE_QUEUE_DEADLINE
+    );
     assert_eq!(
         i64::try_from(BUILD_LEASE_QUEUE_DEADLINE.as_millis()).unwrap(),
         BUILD_LEASE_QUEUE_DEADLINE_MS,
@@ -382,5 +416,8 @@ fn queue_timeout_defaults_to_the_shared_dispatch_deadline() {
     assert_eq!(ShellLaunchContext::queue_timeout(), Duration::from_secs(90));
     // SAFETY: as above.
     unsafe { std::env::remove_var(ShellLaunchContext::QUEUE_TIMEOUT_ENV) };
-    assert_eq!(ShellLaunchContext::queue_timeout(), BUILD_LEASE_QUEUE_DEADLINE);
+    assert_eq!(
+        ShellLaunchContext::queue_timeout(),
+        BUILD_LEASE_QUEUE_DEADLINE
+    );
 }
