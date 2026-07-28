@@ -59,6 +59,7 @@ mod brokered_shell_program_tests;
 mod code_graph_tests;
 mod compatibility_fallback_tests;
 mod edit_dispatch_tests;
+mod edit_dispatch_unicode_tests;
 mod epic_extension_tests;
 mod evidence_spike_dispatch_tests;
 mod gate_guard_dispatch_tests;

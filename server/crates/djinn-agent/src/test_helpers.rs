@@ -457,6 +457,56 @@ impl LlmProvider for FailingProvider {
     }
 }
 
+/// Serialises access to the process-global JIT-pitfalls rollout env vars
+/// (`DJINN_JIT_PITFALLS_ROLLOUT`, `DJINN_JIT_PITFALLS`).
+///
+/// # Why this lives here and not beside the JIT tests
+///
+/// It used to be a private `Mutex` inside `extension/tests/jit_trace_tests.rs`,
+/// scoped — per its own comment — so that "concurrent JIT tests must not observe
+/// each other's env mutation". That scope was too narrow, and the suite flaked
+/// about 1 run in 10 on `main`.
+///
+/// The gate is read by `rollout_mode_from_env()` at call time, on the *write
+/// tool path* — not only by JIT tests. So while a JIT test has the rollout set
+/// to `enabled`, every other concurrently-running test that calls `call_write`
+/// (in `gate_guard/tests/{patch,write}_tests.rs`,
+/// `tests/gate_guard_dispatch_tests.rs`, `tests/tool_dispatch_tests.rs`) also
+/// takes the JIT branch and bumps the shared
+/// `djinn_jit_pitfall_hints_total{outcome="eligible_search"}` counter. That
+/// corrupts the before/after delta assertion in
+/// `assert_jit_pitfall_outcome_deltas` — observed as `left: 3, right: 1` — and
+/// because the old guard was a `Mutex`, the resulting panic poisoned it and
+/// cascaded into every other JIT test in the same run.
+///
+/// # Why `RwLock` rather than `Mutex`
+///
+/// Only the JIT tests *mutate* the env; everyone else merely needs the value to
+/// hold still. Writers (env mutators) take [`std::sync::RwLock::write`] and are
+/// therefore exclusive against all readers; the many write-path tests take
+/// [`std::sync::RwLock::read`] and still run concurrently with each other, so
+/// covering them costs no suite wall-clock.
+///
+/// Any test that reads or writes those env vars — directly, or indirectly by
+/// invoking the write tool path — must hold this lock.
+pub static JIT_PITFALLS_ENV_LOCK: std::sync::RwLock<()> = std::sync::RwLock::new(());
+
+/// Shared read side of [`JIT_PITFALLS_ENV_LOCK`], for the write/edit/apply_patch
+/// tests that merely need the gate to hold still. These stay concurrent with
+/// each other and are excluded only while a JIT test is mutating the env.
+pub fn jit_env_read_guard() -> std::sync::RwLockReadGuard<'static, ()> {
+    JIT_PITFALLS_ENV_LOCK
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Exclusive side, for the JIT tests that mutate the rollout env vars.
+pub fn jit_env_write_guard() -> std::sync::RwLockWriteGuard<'static, ()> {
+    JIT_PITFALLS_ENV_LOCK
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 #[cfg(test)]
 mod tests {
     use std::panic::{AssertUnwindSafe, catch_unwind};
