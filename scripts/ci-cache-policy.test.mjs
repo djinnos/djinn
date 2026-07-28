@@ -27,8 +27,14 @@ function cacheWorkflows() {
 // 10 GB and evicts LRU, and four families sat at ~8.94 GB — so every family
 // was competing with the one CI actually reads on every run. server-quality
 // served a single job after #2342; release-bins served ~1.9 releases a day
-// against ~298 CI runs. Their ~4 GB funds cache-workspace-crates on
-// server-test. Adding a family back means finding budget for it first.
+// against ~298 CI runs. Adding a family back means finding budget for it first.
+//
+// Their ~4 GB did NOT go to `cache-workspace-crates` as originally planned:
+// that option was measured worthless and removed (quality-gate.yml documents
+// why — cargo fingerprints workspace crates by mtime, `actions/checkout`
+// restamps them). It funds the check-mode dependency units now deposited by
+// `cache-warm-x86_64-test`'s clippy step into the same `server-test` entry,
+// which `Server Clippy` reads on every PR.
 const CACHE_OWNERS = new Map([
   ['server-test', 'cache-warm-x86_64-test'],
   ['server-aarch64-check', 'cache-warm-aarch64'],
