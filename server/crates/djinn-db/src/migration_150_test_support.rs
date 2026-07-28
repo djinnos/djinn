@@ -118,6 +118,19 @@ async fn create_migration_150_fixture() -> DbResult<(Migration150Fixture, Fixtur
         .await
         .map_err(DbError::from)?;
     let setup_result = async {
+        // `bootstrap_designated_operator` uses a separate connection. Migration
+        // 142 consumes this session-scoped GUC, so configure it again on the
+        // connection that owns the remainder of the historical migration run.
+        sqlx::query("SET statement_timeout = 0")
+            .execute(&mut connection)
+            .await
+            .map_err(DbError::from)?;
+        sqlx::query("SELECT set_config('djinn.migration_designated_operator_user_id', $1, false)")
+            .bind(OPERATOR_ID)
+            .execute(&mut connection)
+            .await
+            .map_err(DbError::from)?;
+
         let embedded = sqlx::migrate!("./migrations_postgres");
         let through_150 = sqlx::migrate::Migrator {
             migrations: Cow::Owned(
