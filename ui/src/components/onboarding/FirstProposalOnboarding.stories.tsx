@@ -1,6 +1,6 @@
 /**
- * The final showroom step: explain how a proposal moves from an idea to
- * executable work, then create the repository's first safe draft.
+ * The final showroom step: choose a recommended agentic-ready environment
+ * brief or shape a custom outcome, then create the repository's first draft.
  */
 
 import type { Meta, StoryObj } from "@storybook/react-vite";
@@ -45,4 +45,4 @@ const meta = {
 export default meta;
 type Story = StoryObj<typeof meta>;
 
-export const DraftForm: Story = {};
+export const AgenticReadyDefault: Story = {};

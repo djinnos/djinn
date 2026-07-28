@@ -8,6 +8,9 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock("@/api/proposals", () => ({
+  AGENTIC_READY_OUTCOME:
+    "A developer or agent can start from a clean checkout and run the documented setup, build, lint, and test workflows deterministically, with CI parity and no undocumented manual steps.",
+  AGENTIC_READY_TITLE: "Make the development environment agent-ready",
   createStarterProposal: mocks.createStarterProposal,
 }));
 
@@ -30,7 +33,7 @@ describe("FirstProposalOnboarding", () => {
     });
   });
 
-  it("explains the proposal lifecycle and creates a safe targeted draft", async () => {
+  it("defaults to a safe agentic-ready environment proposal", async () => {
     const user = userEvent.setup();
     const onFinished = vi.fn();
     render(
@@ -40,7 +43,7 @@ describe("FirstProposalOnboarding", () => {
 
     const heading = screen.getByRole("heading", {
       level: 1,
-      name: "Create your first proposal",
+      name: "Choose your first proposal",
     });
     await waitFor(() => expect(heading).toHaveFocus());
     expect(screen.getByText("Shape")).toBeInTheDocument();
@@ -50,9 +53,59 @@ describe("FirstProposalOnboarding", () => {
     expect(
       screen.getByText(/does not start agents or change code/i),
     ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /Agentic-ready environment/i }),
+    ).toHaveAttribute("aria-pressed", "true");
+    expect(
+      screen.getByRole("button", { name: /Custom proposal/i }),
+    ).toHaveAttribute("aria-pressed", "false");
+    expect(screen.queryByLabelText("What should change?")).not.toBeInTheDocument();
+    expect(screen.getByText("CI parity")).toBeInTheDocument();
 
     const create = screen.getByRole("button", {
-      name: "Create draft proposal",
+      name: "Create agent-ready draft",
+    });
+    expect(create).toBeEnabled();
+    await user.click(create);
+
+    await waitFor(() =>
+      expect(mocks.createStarterProposal).toHaveBeenCalledWith({
+        project,
+        kind: "agentic-ready",
+        title: "Make the development environment agent-ready",
+        outcome:
+          "A developer or agent can start from a clean checkout and run the documented setup, build, lint, and test workflows deterministically, with CI parity and no undocumented manual steps.",
+      }),
+    );
+    expect(
+      await screen.findByRole("heading", {
+        name: "Your first proposal is ready",
+      }),
+    ).toHaveFocus();
+    expect(screen.getByText(/nothing runs yet/i)).toBeInTheDocument();
+    expect(screen.getByText(/proposals in the sidebar/i)).toBeInTheDocument();
+
+    await user.click(
+      screen.getByRole("button", { name: "Open your proposal" }),
+    );
+    expect(onFinished).toHaveBeenCalledOnce();
+  });
+
+  it("keeps the flexible outcome form as the custom path", async () => {
+    const user = userEvent.setup();
+    render(
+      <FirstProposalOnboarding project={project} onFinished={vi.fn()} />,
+      { wrapperOptions: { routerProps: { initialEntries: ["/"] } } },
+    );
+
+    await user.click(
+      screen.getByRole("button", { name: /Custom proposal/i }),
+    );
+    expect(
+      screen.getByRole("button", { name: /Custom proposal/i }),
+    ).toHaveAttribute("aria-pressed", "true");
+    const create = screen.getByRole("button", {
+      name: "Create custom draft",
     });
     expect(create).toBeDisabled();
 
@@ -69,22 +122,11 @@ describe("FirstProposalOnboarding", () => {
     await waitFor(() =>
       expect(mocks.createStarterProposal).toHaveBeenCalledWith({
         project,
+        kind: "custom",
         title: "Reliable draft autosave",
         outcome:
           "Editors keep their latest changes when the network briefly disconnects.",
       }),
     );
-    expect(
-      await screen.findByRole("heading", {
-        name: "Your repository is agent-ready",
-      }),
-    ).toHaveFocus();
-    expect(screen.getByText(/nothing runs yet/i)).toBeInTheDocument();
-    expect(screen.getByText(/proposals in the sidebar/i)).toBeInTheDocument();
-
-    await user.click(
-      screen.getByRole("button", { name: "Open your proposal" }),
-    );
-    expect(onFinished).toHaveBeenCalledOnce();
   });
 });

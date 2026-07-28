@@ -4,6 +4,9 @@ import { callMcpTool } from "@/api/mcpClient";
 import type { Project } from "@/api/server";
 
 import {
+  AGENTIC_READY_OUTCOME,
+  AGENTIC_READY_TITLE,
+  agenticReadyProposalBody,
   createStarterProposal,
   hasAnyProposal,
   starterProposalBody,
@@ -79,9 +82,50 @@ describe("proposal onboarding API", () => {
     expect(body).toContain("Do not start implementation");
   });
 
+  it("creates a concrete agentic-ready environment draft", async () => {
+    vi.mocked(callMcpTool).mockResolvedValueOnce({
+      id: "proposal-agentic",
+      short_id: "PROP-2",
+      title: AGENTIC_READY_TITLE,
+    } as never);
+
+    await createStarterProposal({
+      project,
+      kind: "agentic-ready",
+      title: AGENTIC_READY_TITLE,
+      outcome: AGENTIC_READY_OUTCOME,
+    });
+
+    expect(callMcpTool).toHaveBeenCalledWith(
+      "proposal_create",
+      expect.objectContaining({
+        title: AGENTIC_READY_TITLE,
+        status: "draft",
+        target_projects: ["project-1"],
+        acceptance_criteria: expect.arrayContaining([
+          expect.stringMatching(/clean checkout/i),
+          expect.stringMatching(/CI.*pinned toolchain/i),
+          expect.stringMatching(/services, secrets/i),
+        ]),
+      }),
+    );
+    const body = (
+      vi.mocked(callMcpTool).mock.calls[0]?.[1] as
+        | { body?: string }
+        | undefined
+    )?.body;
+    expect(body).toContain("## Current-state audit");
+    expect(body).toContain("## Non-goals");
+    expect(body).toContain("Do not hide failures");
+    expect(body).toContain("No undocumented interactive or manual step");
+  });
+
   it("makes the safety boundary explicit in the starter body", () => {
     expect(
       starterProposalBody("A bounded outcome.", "djinnos/example"),
     ).toMatch(/human can review the plan before agents are allowed to execute/i);
+    expect(agenticReadyProposalBody("djinnos/example")).toMatch(
+      /Do not start implementation while this proposal is still a draft/i,
+    );
   });
 });
