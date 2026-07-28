@@ -67,6 +67,7 @@ async fn idle_eviction_deletes_only_the_selected_mold_variant() {
         WarmBaseInventory {
             entries: vec![selected],
             ignored: 0,
+            unrecognized: Vec::new(),
         },
         &Activity(Ok(snapshot())),
         &Warm(Ok(false)),

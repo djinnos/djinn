@@ -53,6 +53,7 @@ therefore `delete`.
 | `DJINN_CACHE_CLEANUP_WARM_BASE_LOW_FREE_RATIO` | `0.15` | Pressure starts below this free-space ratio. |
 | `DJINN_CACHE_CLEANUP_WARM_BASE_HIGH_FREE_RATIO` | `0.25` | Pressure stops at this free-space ratio. |
 | `DJINN_CACHE_CLEANUP_WARM_PROFILE_MIN_IDLE_HOURS` | `24` | A profile becomes pressure-eligible after this project-idle period; `0` means immediate eligibility. Artifact mtimes do not prove profile idleness. |
+| `DJINN_CACHE_CLEANUP_WARM_UNRECOGNIZED_MIN_IDLE_DAYS` | `7` | A directory inside `/cache/cargo-target/<project_id>/` that is not a canonical `mold-jobs-N` variant is reclaimed once nothing has written anywhere in that tree for this long. Requires no active task run, no in-flight warm Job, and the whole-project warm lock; the idleness is re-proved under that lock. `0` makes any such entry immediately eligible. |
 | `DJINN_CARGO_TARGET_RUNS_MAX_DIRS` | `64` | Maximum run directories. `0` disables **count only**. |
 | `DJINN_CARGO_TARGET_RUNS_MAX_BYTES` | `8589934592` | Maximum allocated bytes (8 GiB). `0` disables **bytes only**. |
 

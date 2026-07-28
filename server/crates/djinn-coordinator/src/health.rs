@@ -4223,6 +4223,31 @@ async fn sweep_cargo_warm_base_guard_under(
             inventory_count,
         );
     }
+    // `ignored` used to be write-only: a dozen assignments and no reader, so a
+    // tree the allowlist could not classify left no trace anywhere. Report it,
+    // and report the unrecognized project-root directories by name, before any
+    // phase runs — a sweep that cannot explain part of the root must say so.
+    if inventory.ignored > 0 || !inventory.unrecognized.is_empty() {
+        let unrecognized_bytes = inventory
+            .unrecognized
+            .iter()
+            .map(|entry| entry.size_bytes)
+            .fold(0u64, u64::saturating_add);
+        tracing::info!(
+            component = metrics::COMPONENT_CARGO_WARM_BASE,
+            mode = config.mode.as_metric_label(),
+            root = %warm_base_root.display(),
+            ignored = inventory.ignored,
+            unrecognized = inventory.unrecognized.len(),
+            unrecognized_bytes,
+            unrecognized_names = ?inventory
+                .unrecognized
+                .iter()
+                .map(|entry| format!("{}/{}", entry.project_id, entry.name))
+                .collect::<Vec<_>>(),
+            "warm-base GC inventory found entries outside the canonical layout"
+        );
+    }
     let clock = SystemClock::new();
     // Idle deletion must serialize with worker warm writes using the exact
     // production variant lock identity under `.warm-locks`. Project activity
@@ -4256,6 +4281,38 @@ async fn sweep_cargo_warm_base_guard_under(
         config.mode,
     )
     .await;
+
+    // Reclaim directories inside a project root that no current layout
+    // produces. The allowlist-driven phases below cannot reach these at all —
+    // they enumerate `<project-id>/mold-jobs-N` and nothing else — so an
+    // abandoned layout is invisible to them rather than retained by them.
+    let unrecognized_result = gc::reclaim_unrecognized_warm_entries(
+        &inventory.unrecognized,
+        &activity,
+        guard.as_ref(),
+        &gc::SharedWarmProjectLock,
+        config,
+        &clock,
+        config.mode,
+        &warm_base_root,
+    )
+    .await;
+    // Reclaimed bytes and per-entry outcomes are emitted inside the reclaimer,
+    // at the point each removal actually succeeds; this is the roll-up log.
+    if !unrecognized_result.scanned.is_empty() {
+        tracing::info!(
+            component = metrics::COMPONENT_CARGO_WARM_BASE,
+            mode = config.mode.as_metric_label(),
+            scanned = unrecognized_result.scanned.len(),
+            scanned_bytes = unrecognized_result.scanned_bytes(),
+            deleted = unrecognized_result.deleted.len(),
+            dry_run = unrecognized_result.dry_run.len(),
+            retained = unrecognized_result.retained.len(),
+            reclaimed_bytes = unrecognized_result.reclaimed_bytes,
+            min_idle_days = config.warm_unrecognized_min_idle_days,
+            "warm-base unrecognized-entry GC completed"
+        );
+    }
 
     let result = gc::evict_idle_warm_bases(
         inventory,
@@ -4345,4 +4402,113 @@ async fn sweep_cargo_warm_base_guard_under(
         remeasurement_failed = pressure.remeasurement_failed,
         "warm-base three-rung pressure GC completed"
     );
+}
+
+#[cfg(test)]
+mod warm_base_unrecognized_sweep_tests {
+    use super::*;
+    use crate::cargo_warm_base_gc as gc;
+    use crate::context::{CacheCleanupConfig, CacheCleanupMode};
+    use std::time::SystemTime;
+
+    struct NoWarmJobs;
+    #[async_trait::async_trait]
+    impl gc::WarmJobGuard for NoWarmJobs {
+        async fn has_in_flight_warm(&self, _: &str) -> Result<bool, String> {
+            Ok(false)
+        }
+    }
+
+    fn age_tree(root: &Path, days: u64) {
+        let mut stack = vec![root.to_path_buf()];
+        let mut all = Vec::new();
+        while let Some(path) = stack.pop() {
+            all.push(path.clone());
+            if let Ok(children) = std::fs::read_dir(&path) {
+                for child in children.flatten() {
+                    stack.push(child.path());
+                }
+            }
+        }
+        let when = filetime::FileTime::from_system_time(
+            SystemTime::now() - Duration::from_secs(days * 24 * 60 * 60),
+        );
+        for path in all.into_iter().rev() {
+            filetime::set_file_mtime(&path, when).expect("set mtime");
+        }
+    }
+
+    /// Reaching the reclaimer from the real maintenance entry point, not just
+    /// from a unit test that calls it directly.
+    ///
+    /// The unit tests prove the reclaimer works; this proves it is *wired*.
+    /// The composition site is where this class of fix usually dies: a correct
+    /// implementation that nothing calls behaves exactly like the bug.
+    #[tokio::test]
+    async fn the_maintenance_sweep_reclaims_a_stale_project_directory() {
+        let db = crate::test_helpers::create_test_db();
+        let project = crate::test_helpers::create_test_project(&db).await;
+        let temp = tempfile::TempDir::new().expect("temp");
+        let root = temp.path().join("cargo-target");
+        let live = root.join(&project.id).join("mold-jobs-4");
+        let stale = root.join(&project.id).join("debug");
+        std::fs::create_dir_all(live.join("deps")).expect("live");
+        std::fs::write(live.join("deps").join("live.rlib"), b"live").expect("live artifact");
+        std::fs::create_dir_all(stale.join("deps")).expect("stale");
+        std::fs::write(stale.join("deps").join("stale.rlib"), b"stale").expect("stale artifact");
+        age_tree(&stale, 10);
+
+        let config = CacheCleanupConfig {
+            mode: CacheCleanupMode::Delete,
+            ..CacheCleanupConfig::default()
+        };
+        sweep_cargo_warm_base_guard_under(
+            &db,
+            &config,
+            Some(Arc::new(NoWarmJobs) as Arc<dyn gc::WarmJobGuard>),
+            &root,
+        )
+        .await;
+
+        assert!(
+            !stale.exists(),
+            "the maintenance sweep must reach the abandoned layout"
+        );
+        assert!(
+            live.join("deps").join("live.rlib").exists(),
+            "the live mold-jobs-4 variant must survive the same pass"
+        );
+    }
+
+    /// The shipped default is a week, so a three-day-old tree survives without
+    /// anyone configuring anything.
+    #[tokio::test]
+    async fn the_maintenance_sweep_keeps_a_recently_written_project_directory() {
+        let db = crate::test_helpers::create_test_db();
+        let project = crate::test_helpers::create_test_project(&db).await;
+        let temp = tempfile::TempDir::new().expect("temp");
+        let root = temp.path().join("cargo-target");
+        let stale = root.join(&project.id).join("debug");
+        std::fs::create_dir_all(root.join(&project.id).join("mold-jobs-4")).expect("live");
+        std::fs::create_dir_all(&stale).expect("stale");
+        std::fs::write(stale.join("artifact"), b"recent").expect("artifact");
+        age_tree(&stale, 3);
+
+        let config = CacheCleanupConfig {
+            mode: CacheCleanupMode::Delete,
+            ..CacheCleanupConfig::default()
+        };
+        sweep_cargo_warm_base_guard_under(
+            &db,
+            &config,
+            Some(Arc::new(NoWarmJobs) as Arc<dyn gc::WarmJobGuard>),
+            &root,
+        )
+        .await;
+
+        assert!(
+            stale.exists(),
+            "a tree written three days ago is inside the shipped idle threshold"
+        );
+    }
 }

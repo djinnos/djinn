@@ -160,6 +160,7 @@ async fn dry_run_and_delete_report_identical_candidates_and_preserve_artifacts()
     let inventory = WarmBaseInventory {
         entries: vec![entry],
         ignored: 0,
+        unrecognized: Vec::new(),
     };
 
     let dry_run = report_only_fingerprint_sweep(
@@ -203,6 +204,7 @@ async fn active_task_run_retains_base() {
     let inventory = WarmBaseInventory {
         entries: vec![entry],
         ignored: 0,
+        unrecognized: Vec::new(),
     };
     let activity = Activity(Ok(ActivitySnapshot {
         has_active_task_run: true,
@@ -235,6 +237,7 @@ async fn guard_error_retains_base_and_reports_error() {
     let inventory = WarmBaseInventory {
         entries: vec![entry],
         ignored: 0,
+        unrecognized: Vec::new(),
     };
 
     let report = report_only_fingerprint_sweep(
@@ -262,6 +265,7 @@ async fn comprehensive_fixture_has_report_only_mode_parity_and_byte_preservation
     let inventory = WarmBaseInventory {
         entries: vec![fixture_entry(&base)],
         ignored: 0,
+        unrecognized: Vec::new(),
     };
 
     let dry_run = report_only_fingerprint_sweep(
@@ -306,6 +310,7 @@ async fn lock_db_kubernetes_and_traversal_failures_preserve_fixture_and_close_ca
     let inventory = WarmBaseInventory {
         entries: vec![fixture_entry(&base)],
         ignored: 0,
+        unrecognized: Vec::new(),
     };
 
     let lock_busy = report_only_fingerprint_sweep(
@@ -350,6 +355,7 @@ async fn lock_db_kubernetes_and_traversal_failures_preserve_fixture_and_close_ca
         WarmBaseInventory {
             entries: vec![fixture_entry(&traversal_base)],
             ignored: 0,
+            unrecognized: Vec::new(),
         },
         &Activity(Ok(snapshot())),
         &Warm(Ok(false)),

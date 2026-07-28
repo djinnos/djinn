@@ -27,7 +27,8 @@ mod fingerprint_inventory;
 mod three_rung_plan;
 
 pub use fingerprint_inventory::{
-    FINGERPRINT_DIR, FingerprintUnitEntry, FingerprintUnitInventory, inventory_fingerprint_units,
+    FINGERPRINT_DIR, FingerprintUnitEntry, FingerprintUnitInventory, ProfileRootMeasurement,
+    inventory_fingerprint_units,
 };
 pub use three_rung_plan::{
     PressureBaseSnapshot, PressurePlanDisposition, PressurePlanRetainReason, PressurePlanUnit,
@@ -114,6 +115,386 @@ impl BaseLock for SharedWarmBaseLock {
             }
         }
     }
+}
+
+/// The whole-project lock shared with warm work.
+///
+/// An unrecognized tree is a sibling of the `mold-jobs-N` variants, not one of
+/// them, so a per-variant lock cannot cover it: a variant lock deliberately
+/// "cannot contend with, or authorize mutation of, legacy and sibling bases"
+/// (`WarmBaseLock::acquire_for_jobs`). The identity used here is the worker's
+/// whole-project lock, `<root>/.warm-locks/<project-id>.lock`, which is exactly
+/// what `WarmBaseLock::acquire` takes — the lock any legacy-layout writer of
+/// `<project-id>/debug` would have held.
+pub struct SharedWarmProjectLock;
+
+impl BaseLock for SharedWarmProjectLock {
+    fn try_lock(&self, path: &Path) -> Result<Option<Box<dyn LockGuard>>, String> {
+        let project_id = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or("invalid project id")?;
+        let parsed = Uuid::parse_str(project_id).map_err(|_| "invalid project id")?;
+        if parsed.to_string() != project_id {
+            return Err("invalid project id".into());
+        }
+        let root = path.parent().ok_or("project has no warm root")?;
+        let lock_dir = root.join(".warm-locks");
+        std::fs::create_dir_all(&lock_dir)
+            .map_err(|error| format!("failed to create warm lock directory: {error}"))?;
+        let lock_path = lock_dir.join(format!("{project_id}.lock"));
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)
+            .map_err(|error| {
+                format!("failed to open warm lock {}: {error}", lock_path.display())
+            })?;
+        let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        if rc == 0 {
+            Ok(Some(Box::new(FlockGuard { _file: file })))
+        } else {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::WouldBlock {
+                Ok(None)
+            } else {
+                Err(error.to_string())
+            }
+        }
+    }
+}
+
+/// Why an unrecognized entry was left in place this pass. Every variant is a
+/// bounded enumeration; project ids and paths appear only in logs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnrecognizedRetainReason {
+    /// A name the sweep never reclaims (djinn machinery, dot-directories).
+    Reserved,
+    /// The tree could not be measured, so its age is unknown.
+    MeasurementError,
+    /// The tree was written to more recently than the idle threshold.
+    Young,
+    ActivityError,
+    ActiveTaskRun,
+    WarmJobError,
+    WarmJobInFlight,
+    LockBusy,
+    LockError,
+    /// A post-lock recheck disagreed with the planned observation.
+    Changed,
+    DeleteError,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct UnrecognizedReclaimResult {
+    /// Everything the inventory saw, whatever happened to it.
+    pub scanned: Vec<UnrecognizedWarmEntry>,
+    /// Entries that passed every guard in dry-run mode and were only reported.
+    pub dry_run: Vec<UnrecognizedWarmEntry>,
+    pub deleted: Vec<UnrecognizedWarmEntry>,
+    pub retained: Vec<(UnrecognizedWarmEntry, UnrecognizedRetainReason)>,
+    pub reclaimed_bytes: u64,
+}
+
+impl UnrecognizedReclaimResult {
+    pub fn scanned_bytes(&self) -> u64 {
+        self.scanned
+            .iter()
+            .map(|entry| entry.size_bytes)
+            .fold(0u64, u64::saturating_add)
+    }
+}
+
+fn retain_unrecognized(
+    result: &mut UnrecognizedReclaimResult,
+    entry: &UnrecognizedWarmEntry,
+    reason: UnrecognizedRetainReason,
+    mode: crate::context::CacheCleanupMode,
+) {
+    use djinn_telemetry::cache_cleanup as metrics;
+    let outcome = match reason {
+        UnrecognizedRetainReason::Young => metrics::OUTCOME_RETAINED_YOUNG,
+        UnrecognizedRetainReason::ActiveTaskRun => metrics::OUTCOME_RETAINED_ACTIVE,
+        UnrecognizedRetainReason::LockBusy => metrics::OUTCOME_RETAINED_LOCK_BUSY,
+        UnrecognizedRetainReason::Reserved
+        | UnrecognizedRetainReason::WarmJobInFlight
+        | UnrecognizedRetainReason::Changed => metrics::OUTCOME_RETAINED,
+        UnrecognizedRetainReason::MeasurementError
+        | UnrecognizedRetainReason::ActivityError
+        | UnrecognizedRetainReason::WarmJobError
+        | UnrecognizedRetainReason::LockError
+        | UnrecognizedRetainReason::DeleteError => metrics::OUTCOME_ERROR,
+    };
+    metrics::increment_cleanup_total(
+        metrics::COMPONENT_CARGO_WARM_BASE,
+        outcome,
+        mode.as_metric_label(),
+    );
+    tracing::info!(
+        project_id = %entry.project_id,
+        entry = %entry.name,
+        size_bytes = entry.size_bytes,
+        reason = ?reason,
+        "warm-base unrecognized entry retained"
+    );
+    result.retained.push((entry.clone(), reason));
+}
+
+/// Reclaim directories inside a warm project root that no current layout
+/// produces.
+///
+/// This is the reach fix for the whole-base and three-rung sweeps: both walk a
+/// strict `<project-id>/mold-jobs-N` allowlist, so a tree such as
+/// `<project-id>/debug` is not *retained* by them, it is unreachable to them.
+///
+/// The safety posture is the one the existing deletion paths already have, with
+/// one addition. Reclamation requires, in order:
+///
+/// 1. a name outside the reserved namespace;
+/// 2. a successfully measured tree whose newest mtime anywhere is older than
+///    `warm_unrecognized_min_idle_days` — an unmeasurable tree has an unknown
+///    age and is never eligible;
+/// 3. no active task run and no in-flight warm Job for that project;
+/// 4. the whole-project warm lock, taken non-blocking;
+/// 5. a post-lock recheck that re-walks the tree and re-verifies both the
+///    idleness and the canonical containment `root ⊂ project ⊂ target`.
+///
+/// Step 5 is what makes idleness a real guard rather than a planning-time
+/// snapshot: anything that touched the tree between planning and the lock makes
+/// the newest mtime fresh and aborts the removal.
+///
+/// Dry-run reports what it would remove and never opens a lock, because opening
+/// one creates a lock file and mutates fallback mtime state.
+#[allow(clippy::too_many_arguments)]
+pub async fn reclaim_unrecognized_warm_entries(
+    unrecognized: &[UnrecognizedWarmEntry],
+    activity: &dyn ActivityGuard,
+    warm_jobs: &dyn WarmJobGuard,
+    locks: &dyn BaseLock,
+    config: &crate::context::CacheCleanupConfig,
+    clock: &dyn Clock,
+    mode: crate::context::CacheCleanupMode,
+    root: &Path,
+) -> UnrecognizedReclaimResult {
+    use crate::context::CacheCleanupMode;
+    use djinn_telemetry::cache_cleanup as metrics;
+
+    let mut result = UnrecognizedReclaimResult {
+        scanned: unrecognized.to_vec(),
+        ..UnrecognizedReclaimResult::default()
+    };
+    if unrecognized.is_empty() {
+        return result;
+    }
+    metrics::increment_candidates(
+        metrics::COMPONENT_CARGO_WARM_BASE,
+        mode.as_metric_label(),
+        unrecognized.len() as u64,
+    );
+    let min_idle = Duration::from_secs(
+        config
+            .warm_unrecognized_min_idle_days
+            .saturating_mul(24 * 60 * 60),
+    );
+    let now = clock.now();
+
+    for entry in unrecognized {
+        if is_reserved_project_child(&entry.name) {
+            retain_unrecognized(&mut result, entry, UnrecognizedRetainReason::Reserved, mode);
+            continue;
+        }
+        let Some(newest) = entry.newest_mtime else {
+            retain_unrecognized(
+                &mut result,
+                entry,
+                UnrecognizedRetainReason::MeasurementError,
+                mode,
+            );
+            continue;
+        };
+        if !tree_is_idle(now, newest, min_idle) {
+            retain_unrecognized(&mut result, entry, UnrecognizedRetainReason::Young, mode);
+            continue;
+        }
+        let snapshot = match activity.activity(&entry.project_id).await {
+            Ok(snapshot) => snapshot,
+            Err(_) => {
+                retain_unrecognized(
+                    &mut result,
+                    entry,
+                    UnrecognizedRetainReason::ActivityError,
+                    mode,
+                );
+                continue;
+            }
+        };
+        if snapshot.has_active_task_run {
+            retain_unrecognized(
+                &mut result,
+                entry,
+                UnrecognizedRetainReason::ActiveTaskRun,
+                mode,
+            );
+            continue;
+        }
+        match warm_jobs.has_in_flight_warm(&entry.project_id).await {
+            Ok(false) => {}
+            Ok(true) => {
+                retain_unrecognized(
+                    &mut result,
+                    entry,
+                    UnrecognizedRetainReason::WarmJobInFlight,
+                    mode,
+                );
+                continue;
+            }
+            Err(_) => {
+                retain_unrecognized(
+                    &mut result,
+                    entry,
+                    UnrecognizedRetainReason::WarmJobError,
+                    mode,
+                );
+                continue;
+            }
+        }
+        if mode == CacheCleanupMode::DryRun {
+            metrics::increment_cleanup_total(
+                metrics::COMPONENT_CARGO_WARM_BASE,
+                metrics::OUTCOME_DRY_RUN,
+                mode.as_metric_label(),
+            );
+            tracing::info!(
+                project_id = %entry.project_id,
+                entry = %entry.name,
+                size_bytes = entry.size_bytes,
+                "warm-base unrecognized entry would be reclaimed"
+            );
+            result.dry_run.push(entry.clone());
+            continue;
+        }
+        let Some(project_dir) = entry.path.parent() else {
+            retain_unrecognized(&mut result, entry, UnrecognizedRetainReason::Changed, mode);
+            continue;
+        };
+        let guard = match locks.try_lock(project_dir) {
+            Ok(Some(guard)) => guard,
+            Ok(None) => {
+                retain_unrecognized(&mut result, entry, UnrecognizedRetainReason::LockBusy, mode);
+                continue;
+            }
+            Err(_) => {
+                retain_unrecognized(
+                    &mut result,
+                    entry,
+                    UnrecognizedRetainReason::LockError,
+                    mode,
+                );
+                continue;
+            }
+        };
+        let bytes = match recheck_unrecognized_after_lock(entry, root, now, min_idle) {
+            Ok(bytes) => bytes,
+            Err(reason) => {
+                retain_unrecognized(&mut result, entry, reason, mode);
+                drop(guard);
+                continue;
+            }
+        };
+        // A concurrent remover winning the race is idempotent, not a failure.
+        let removed = match std::fs::remove_dir_all(&entry.path) {
+            Ok(()) => true,
+            Err(error) => error.kind() == std::io::ErrorKind::NotFound,
+        };
+        match removed {
+            true => {
+                result.reclaimed_bytes = result.reclaimed_bytes.saturating_add(bytes);
+                result.deleted.push(entry.clone());
+                metrics::increment_cleanup_total(
+                    metrics::COMPONENT_CARGO_WARM_BASE,
+                    metrics::OUTCOME_DELETED,
+                    mode.as_metric_label(),
+                );
+                if bytes > 0 {
+                    metrics::record_reclaimed_bytes(
+                        metrics::COMPONENT_CARGO_WARM_BASE,
+                        mode.as_metric_label(),
+                        bytes,
+                    );
+                }
+                tracing::info!(
+                    project_id = %entry.project_id,
+                    entry = %entry.name,
+                    reclaimed_bytes = bytes,
+                    "warm-base unrecognized entry reclaimed"
+                );
+            }
+            false => {
+                retain_unrecognized(
+                    &mut result,
+                    entry,
+                    UnrecognizedRetainReason::DeleteError,
+                    mode,
+                );
+            }
+        }
+        drop(guard);
+    }
+    result
+}
+
+/// Idle exactly when the newest observed write is at least `min_idle` in the
+/// past. A clock that has gone backwards yields "not idle", never "idle".
+fn tree_is_idle(now: SystemTime, newest: SystemTime, min_idle: Duration) -> bool {
+    match newest.checked_add(min_idle) {
+        Some(cutoff) => now >= cutoff,
+        None => false,
+    }
+}
+
+/// Re-establish every fact the removal depends on while the project lock is
+/// held, and return the freshly measured size.
+fn recheck_unrecognized_after_lock(
+    entry: &UnrecognizedWarmEntry,
+    root: &Path,
+    now: SystemTime,
+    min_idle: Duration,
+) -> Result<u64, UnrecognizedRetainReason> {
+    use UnrecognizedRetainReason::{Changed, MeasurementError};
+
+    let metadata = std::fs::symlink_metadata(&entry.path).map_err(|_| Changed)?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(Changed);
+    }
+    let canonical_root = std::fs::canonicalize(root).map_err(|_| Changed)?;
+    let project_dir = entry.path.parent().ok_or(Changed)?;
+    let canonical_project = std::fs::canonicalize(project_dir).map_err(|_| Changed)?;
+    let canonical_target = std::fs::canonicalize(&entry.path).map_err(|_| Changed)?;
+    if !canonical_project.starts_with(&canonical_root)
+        || !canonical_target.starts_with(&canonical_project)
+        || canonical_target == canonical_project
+    {
+        return Err(Changed);
+    }
+    // The name must still be one this layout cannot explain, and still be
+    // outside the reserved namespace.
+    let name = canonical_target
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or(Changed)?;
+    if name != entry.name
+        || is_reserved_project_child(name)
+        || canonical_mold_jobs_name(name).is_some()
+    {
+        return Err(Changed);
+    }
+    let (bytes, newest) = measure_tree_fail_closed(&entry.path).map_err(|_| MeasurementError)?;
+    if !tree_is_idle(now, newest, min_idle) {
+        return Err(UnrecognizedRetainReason::Young);
+    }
+    Ok(bytes)
 }
 
 /// Consume the immutable three-rung plan in delete mode. Every operation after
@@ -825,22 +1206,110 @@ pub struct WarmBaseEntry {
     pub size_bytes: u64,
 }
 
+/// A directory that lives directly under a canonical `<project-id>` warm root
+/// but is not a canonical `mold-jobs-N` variant.
+///
+/// Before this existed, every such directory was folded into
+/// [`WarmBaseInventory::ignored`] — a counter written at a dozen sites and read
+/// at none — so an abandoned layout (`<project-id>/debug`, left behind when the
+/// warm base moved to `mold-jobs-N` subdirectories) was invisible to the sweep
+/// *and* to the operator. The 27 GB `debug/` tree that sat untouched beside a
+/// live `mold-jobs-4` on the production cache PVC was not retained by a safety
+/// decision; nothing ever saw it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnrecognizedWarmEntry {
+    pub project_id: String,
+    /// The directory name inside the project root, e.g. `debug`.
+    pub name: String,
+    pub path: PathBuf,
+    /// Measured bytes, or `0` when the tree could not be fully measured.
+    pub size_bytes: u64,
+    /// Newest mtime anywhere in the tree, including the tree root itself.
+    ///
+    /// `None` means the traversal failed, which is deliberately *not* the same
+    /// as "old": an entry with no measured age is never reclaimable.
+    pub newest_mtime: Option<SystemTime>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WarmBaseInventory {
     pub entries: Vec<WarmBaseEntry>,
     pub ignored: usize,
+    /// Non-variant directories found inside canonical project roots.
+    pub unrecognized: Vec<UnrecognizedWarmEntry>,
+}
+
+/// Names inside a project root that the sweep never reclaims regardless of age.
+///
+/// Cargo never creates a dot-directory inside a target dir, so reserving the
+/// whole `.`-prefixed namespace costs nothing and keeps djinn's own machinery
+/// (and anything an operator deliberately parked there) out of reach.
+fn is_reserved_project_child(name: &str) -> bool {
+    name.starts_with('.')
+}
+
+/// Measure a tree's size and newest mtime in one traversal, failing closed.
+///
+/// Any unreadable entry aborts the measurement rather than being skipped: a
+/// partial walk could report a stale newest-mtime and make a live tree look
+/// reclaimable. Symlinks contribute their own `lstat` mtime and are never
+/// descended into (`remove_dir_all` unlinks them without following them).
+fn measure_tree_fail_closed(root: &Path) -> Result<(u64, SystemTime), String> {
+    let root_metadata = std::fs::symlink_metadata(root)
+        .map_err(|error| format!("failed to stat {}: {error}", root.display()))?;
+    let mut newest = root_metadata
+        .modified()
+        .map_err(|error| format!("failed to read mtime for {}: {error}", root.display()))?;
+    let mut total: u64 = 0;
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(path) = pending.pop() {
+        let children = std::fs::read_dir(&path)
+            .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
+        for child in children {
+            let child = child
+                .map_err(|error| format!("failed to read entry in {}: {error}", path.display()))?;
+            let child_path = child.path();
+            let metadata = std::fs::symlink_metadata(&child_path)
+                .map_err(|error| format!("failed to stat {}: {error}", child_path.display()))?;
+            let mtime = metadata.modified().map_err(|error| {
+                format!("failed to read mtime for {}: {error}", child_path.display())
+            })?;
+            newest = newest.max(mtime);
+            if metadata.file_type().is_symlink() {
+                continue;
+            }
+            if metadata.is_dir() {
+                pending.push(child_path);
+            } else {
+                total = total.saturating_add(metadata.len());
+            }
+        }
+    }
+    Ok((total, newest))
 }
 
 /// Inventory canonical `/cache/cargo-target/<project-id>/mold-jobs-N` entries.
 /// Symlinks, legacy unkeyed project contents, and malformed variants are
 /// intentionally ignored rather than being substituted for another `N`.
+///
+/// Non-variant *directories* inside a canonical project root are additionally
+/// reported in [`WarmBaseInventory::unrecognized`] so the sweep can see — and
+/// [`reclaim_unrecognized_warm_entries`] can reclaim — trees no current layout
+/// produces. Anything at the warm root itself that is not a canonical project
+/// UUID stays purely in `ignored`: that level holds reserved machinery such as
+/// `.warm-locks` and is out of this sweep's scope.
 pub fn inventory_under(root: &Path) -> Result<WarmBaseInventory, String> {
     let mut entries = Vec::new();
+    let mut unrecognized = Vec::new();
     let mut ignored = 0;
     let children = match std::fs::read_dir(root) {
         Ok(children) => children,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(WarmBaseInventory { entries, ignored });
+            return Ok(WarmBaseInventory {
+                entries,
+                ignored,
+                unrecognized,
+            });
         }
         Err(error) => return Err(error.to_string()),
     };
@@ -895,6 +1364,20 @@ pub fn inventory_under(root: &Path) -> Result<WarmBaseInventory, String> {
             };
             let Some(mold_jobs) = canonical_mold_jobs_name(&variant_name) else {
                 ignored += 1;
+                // A directory the current layout cannot explain. Report it
+                // instead of dropping it; measurement failures are recorded as
+                // an unknown age, which is never reclaimable.
+                let (size_bytes, newest_mtime) = match measure_tree_fail_closed(&variant.path()) {
+                    Ok((size, newest)) => (size, Some(newest)),
+                    Err(_) => (0, None),
+                };
+                unrecognized.push(UnrecognizedWarmEntry {
+                    project_id: name.clone(),
+                    name: variant_name,
+                    path: variant.path(),
+                    size_bytes,
+                    newest_mtime,
+                });
                 continue;
             };
             let path = variant.path();
@@ -911,7 +1394,16 @@ pub fn inventory_under(root: &Path) -> Result<WarmBaseInventory, String> {
             .cmp(&right.project_id)
             .then_with(|| left.mold_jobs.cmp(&right.mold_jobs))
     });
-    Ok(WarmBaseInventory { entries, ignored })
+    unrecognized.sort_by(|left, right| {
+        left.project_id
+            .cmp(&right.project_id)
+            .then_with(|| left.name.cmp(&right.name))
+    });
+    Ok(WarmBaseInventory {
+        entries,
+        ignored,
+        unrecognized,
+    })
 }
 
 fn canonical_mold_jobs_name(name: &str) -> Option<u32> {
@@ -1100,7 +1592,14 @@ pub struct FingerprintSweepReport {
     /// Number of fingerprint units discovered across all passing bases.
     pub candidate_count: u64,
     /// Measured bytes inside all discovered fingerprint units.
+    ///
+    /// This is `.fingerprint/<unit>` metadata only. It is *not* the disk a unit
+    /// occupies — see [`Self::profile_root_bytes`].
     pub projected_bytes: u64,
+    /// Measured bytes of every discovered profile root, including `deps`,
+    /// `build` and `incremental`. Reported alongside `projected_bytes` so the
+    /// unit total cannot be read as the profile's footprint.
+    pub profile_root_bytes: u64,
     /// Always zero while fingerprint sweeping remains report-only.
     pub reclaimed_bytes: u64,
     /// Bases retained by guard failure (active task, warm job, lock, etc.).
@@ -1168,6 +1667,9 @@ pub async fn report_only_fingerprint_sweep(
                     .fold(0u64, u64::saturating_add);
                 report.candidate_count = report.candidate_count.saturating_add(unit_count);
                 report.projected_bytes = report.projected_bytes.saturating_add(projected);
+                report.profile_root_bytes = report
+                    .profile_root_bytes
+                    .saturating_add(inventory.profile_root_bytes());
                 if unit_count > 0 {
                     metrics::increment_candidates(
                         metrics::COMPONENT_CARGO_WARM_BASE_FINGERPRINT,
@@ -1228,6 +1730,7 @@ pub(crate) fn log_fingerprint_sweep_completion(
         outcome = outcome,
         candidate_count = report.candidate_count,
         projected_bytes = report.projected_bytes,
+        profile_root_bytes = report.profile_root_bytes,
         reclaimed_bytes = report.reclaimed_bytes,
         retained = report.retained.len(),
         error_bases = report.error_bases.len(),

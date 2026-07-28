@@ -379,3 +379,50 @@ fn inventory_fails_closed_when_nested_profile_root_is_unreadable() {
         "unexpected error: {err}"
     );
 }
+
+/// `projected_bytes` counts only `.fingerprint/<unit>` metadata stamps. The
+/// artifacts those units cost live in `deps`, `build` and `incremental`, so a
+/// report built from unit bytes alone understates the profile by whatever ratio
+/// the artifacts happen to have. The per-profile measurement makes the
+/// shortfall visible.
+#[test]
+fn profile_root_measurement_counts_deps_build_and_incremental() {
+    let (_temp, base) = temp_base();
+    write_file(
+        &base.join("debug/.fingerprint/libcrate-abc123/lib-libcrate.json"),
+        b"{}",
+    );
+    write_file(&base.join("debug/deps/libcrate-abc123.rlib"), &[0u8; 4096]);
+    write_file(
+        &base.join("debug/build/libcrate-abc123/output"),
+        &[0u8; 512],
+    );
+    write_file(
+        &base.join("debug/incremental/crate-1/dep-graph.bin"),
+        &[0u8; 256],
+    );
+    write_file(&base.join("debug/djinn-binary"), &[0u8; 64]);
+
+    let inventory = inventory_fingerprint_units(&base).expect("inventory should succeed");
+
+    let unit_bytes: u64 = inventory
+        .units
+        .iter()
+        .map(|unit| unit.projected_bytes)
+        .sum();
+    assert_eq!(unit_bytes, 2, "unit bytes are metadata only");
+
+    assert_eq!(inventory.profile_roots.len(), 1);
+    let measured = &inventory.profile_roots[0];
+    assert_eq!(measured.fingerprint_bytes, 2);
+    assert_eq!(measured.deps_bytes, 4096);
+    assert_eq!(measured.build_bytes, 512);
+    assert_eq!(measured.incremental_bytes, 256);
+    assert_eq!(measured.other_bytes, 64);
+    assert_eq!(measured.total_bytes(), 4930);
+    assert_eq!(inventory.profile_root_bytes(), 4930);
+    assert!(
+        inventory.profile_root_bytes() > unit_bytes * 100,
+        "the unit total must be visibly smaller than the profile's real footprint"
+    );
+}

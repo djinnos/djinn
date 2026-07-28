@@ -110,6 +110,7 @@ async fn classifications_registered_deleted_and_orphaned() {
         WarmBaseInventory {
             entries: vec![entry()],
             ignored: 0,
+            unrecognized: Vec::new(),
         },
         &Activity(Ok(ActivitySnapshot {
             known_project: true,
@@ -129,6 +130,7 @@ async fn classifications_registered_deleted_and_orphaned() {
         WarmBaseInventory {
             entries: vec![entry()],
             ignored: 0,
+            unrecognized: Vec::new(),
         },
         &Activity(Ok(ActivitySnapshot {
             known_project: false,
@@ -149,6 +151,7 @@ async fn classifications_registered_deleted_and_orphaned() {
         WarmBaseInventory {
             entries: vec![entry()],
             ignored: 0,
+            unrecognized: Vec::new(),
         },
         &Activity(Ok(ActivitySnapshot {
             known_project: false,
@@ -173,6 +176,7 @@ async fn guards_fail_closed_and_classify() {
         WarmBaseInventory {
             entries: vec![entry()],
             ignored: 0,
+            unrecognized: Vec::new(),
         },
         &activity,
         &Warm(Ok(false)),
@@ -217,6 +221,7 @@ async fn guards_fail_closed_and_classify() {
             WarmBaseInventory {
                 entries: vec![entry()],
                 ignored: 0,
+                unrecognized: Vec::new(),
             },
             &active,
             &warm,
@@ -235,6 +240,7 @@ async fn activity_and_measurement_errors_retain() {
         WarmBaseInventory {
             entries: vec![entry()],
             ignored: 0,
+            unrecognized: Vec::new(),
         },
         &Activity(Err("db".into())),
         &warm,
@@ -247,6 +253,7 @@ async fn activity_and_measurement_errors_retain() {
         WarmBaseInventory {
             entries: vec![entry()],
             ignored: 0,
+            unrecognized: Vec::new(),
         },
         &Activity(Ok(snapshot())),
         &warm,
@@ -288,6 +295,7 @@ async fn idle_eviction_deletes_old_registered_base() {
     let inventory = WarmBaseInventory {
         entries: vec![entry],
         ignored: 0,
+        unrecognized: Vec::new(),
     };
     let activity = Activity(Ok(ActivitySnapshot {
         known_project: true,
@@ -339,6 +347,7 @@ async fn idle_eviction_retains_young_base_by_mtime() {
     let inventory = WarmBaseInventory {
         entries: vec![entry],
         ignored: 0,
+        unrecognized: Vec::new(),
     };
     let activity = Activity(Ok(ActivitySnapshot {
         known_project: true,
@@ -391,6 +400,7 @@ async fn idle_eviction_db_activity_takes_precedence_over_mtime() {
     let inventory = WarmBaseInventory {
         entries: vec![entry],
         ignored: 0,
+        unrecognized: Vec::new(),
     };
     let activity = Activity(Ok(ActivitySnapshot {
         known_project: true,
@@ -427,6 +437,7 @@ async fn idle_eviction_deletes_deleted_project_base() {
     let inventory = WarmBaseInventory {
         entries: vec![entry],
         ignored: 0,
+        unrecognized: Vec::new(),
     };
     let activity = Activity(Ok(ActivitySnapshot {
         known_project: false,
@@ -463,6 +474,7 @@ async fn idle_eviction_deletes_orphaned_base() {
     let inventory = WarmBaseInventory {
         entries: vec![entry],
         ignored: 0,
+        unrecognized: Vec::new(),
     };
     let activity = Activity(Ok(ActivitySnapshot {
         known_project: false,
@@ -499,6 +511,7 @@ async fn active_task_run_retains_base() {
     let inventory = WarmBaseInventory {
         entries: vec![entry],
         ignored: 0,
+        unrecognized: Vec::new(),
     };
     let activity = Activity(Ok(ActivitySnapshot {
         known_project: true,
@@ -536,6 +549,7 @@ async fn in_flight_warm_job_retains_base() {
     let inventory = WarmBaseInventory {
         entries: vec![entry],
         ignored: 0,
+        unrecognized: Vec::new(),
     };
     let activity = Activity(Ok(ActivitySnapshot {
         known_project: true,
@@ -573,6 +587,7 @@ async fn lock_busy_retains_base() {
     let inventory = WarmBaseInventory {
         entries: vec![entry],
         ignored: 0,
+        unrecognized: Vec::new(),
     };
     let activity = Activity(Ok(ActivitySnapshot {
         known_project: true,
@@ -614,6 +629,7 @@ async fn post_lock_recheck_retains_base() {
     let inventory = WarmBaseInventory {
         entries: vec![entry],
         ignored: 0,
+        unrecognized: Vec::new(),
     };
     struct FlipActivityGuard {
         first: std::sync::Mutex<Option<ActivitySnapshot>>,
@@ -679,6 +695,7 @@ async fn dry_run_and_delete_select_same_candidates() {
     let inventory = WarmBaseInventory {
         entries: vec![entry],
         ignored: 0,
+        unrecognized: Vec::new(),
     };
     let activity = Activity(Ok(ActivitySnapshot {
         known_project: true,
@@ -736,6 +753,7 @@ async fn dry_run_and_delete_parity_with_flock_lock() {
     let inventory = WarmBaseInventory {
         entries: vec![entry],
         ignored: 0,
+        unrecognized: Vec::new(),
     };
     let activity = Activity(Ok(ActivitySnapshot {
         known_project: true,
@@ -795,6 +813,7 @@ async fn activity_error_fails_closed() {
     let inventory = WarmBaseInventory {
         entries: vec![entry],
         ignored: 0,
+        unrecognized: Vec::new(),
     };
     let activity = Activity(Err("db down".into()));
     let warm = Warm(Ok(false));
@@ -827,6 +846,7 @@ async fn lock_error_fails_closed() {
     let inventory = WarmBaseInventory {
         entries: vec![entry],
         ignored: 0,
+        unrecognized: Vec::new(),
     };
     let activity = Activity(Ok(ActivitySnapshot {
         known_project: true,
@@ -864,6 +884,7 @@ async fn unsafe_path_is_not_deleted() {
     let inventory = WarmBaseInventory {
         entries: vec![entry],
         ignored: 0,
+        unrecognized: Vec::new(),
     };
     let activity = Activity(Ok(ActivitySnapshot {
         known_project: true,
@@ -943,6 +964,7 @@ async fn pressure_above_low_watermark_produces_no_candidates() {
     let inventory = WarmBaseInventory {
         entries: vec![pressure_entry("018f8b9a-0d70-7f0a-8000-000000000001", 100)],
         ignored: 0,
+        unrecognized: Vec::new(),
     };
     let activity = Activity(Ok(snapshot_at(Some(old_activity(14)))));
     let warm = Warm(Ok(false));
@@ -969,6 +991,7 @@ async fn pressure_at_low_watermark_is_no_op() {
     let inventory = WarmBaseInventory {
         entries: vec![pressure_entry("018f8b9a-0d70-7f0a-8000-000000000001", 100)],
         ignored: 0,
+        unrecognized: Vec::new(),
     };
     let activity = Activity(Ok(snapshot_at(Some(old_activity(14)))));
     let warm = Warm(Ok(false));
@@ -1000,6 +1023,7 @@ async fn pressure_below_low_selects_minimal_prefix() {
             pressure_entry("018f8b9a-0d70-7f0a-8000-000000000002", 60),
         ],
         ignored: 0,
+        unrecognized: Vec::new(),
     };
     // Same activity for all, so ordering is by project ID.
     let activity = Activity(Ok(snapshot_at(Some(old_activity(12)))));
@@ -1041,6 +1065,7 @@ async fn pressure_orders_by_activity_then_project_id() {
             pressure_entry("018f8b9a-0d70-7f0a-8000-000000000002", 50),
         ],
         ignored: 0,
+        unrecognized: Vec::new(),
     };
     let activity = Activity(Ok(snapshot_at(Some(old_activity(12)))));
     let warm = Warm(Ok(false));
@@ -1084,6 +1109,7 @@ async fn pressure_excluded_candidates_are_not_selected() {
             pressure_entry("018f8b9a-0d70-7f0a-8000-000000000006", 50),
         ],
         ignored: 0,
+        unrecognized: Vec::new(),
     };
 
     struct GuardActivity;
@@ -1155,6 +1181,7 @@ async fn pressure_measurement_error_fails_closed() {
     let inventory = WarmBaseInventory {
         entries: vec![pressure_entry("018f8b9a-0d70-7f0a-8000-000000000001", 100)],
         ignored: 0,
+        unrecognized: Vec::new(),
     };
     let activity = Activity(Ok(snapshot_at(Some(old_activity(12)))));
     let warm = Warm(Ok(false));
@@ -1185,6 +1212,7 @@ async fn pressure_insufficient_reclaimable_space_selects_all_safe() {
             pressure_entry("018f8b9a-0d70-7f0a-8000-000000000002", 60),
         ],
         ignored: 0,
+        unrecognized: Vec::new(),
     };
     let activity = Activity(Ok(snapshot_at(Some(old_activity(12)))));
     let warm = Warm(Ok(false));
@@ -1216,6 +1244,7 @@ async fn pressure_exact_stop_at_high_watermark() {
             pressure_entry("018f8b9a-0d70-7f0a-8000-000000000002", 50),
         ],
         ignored: 0,
+        unrecognized: Vec::new(),
     };
     let activity = Activity(Ok(snapshot_at(Some(old_activity(12)))));
     let warm = Warm(Ok(false));
@@ -1247,6 +1276,7 @@ async fn pressure_young_base_is_excluded() {
             pressure_entry("018f8b9a-0d70-7f0a-8000-000000000002", 50),
         ],
         ignored: 0,
+        unrecognized: Vec::new(),
     };
 
     struct YoungActivity;
@@ -1301,6 +1331,7 @@ async fn pressure_fractional_byte_boundary_reaches_high_watermark() {
     let inventory = WarmBaseInventory {
         entries: vec![pressure_entry("018f8b9a-0d70-7f0a-8000-000000000001", 1)],
         ignored: 0,
+        unrecognized: Vec::new(),
     };
     let activity = Activity(Ok(snapshot_at(Some(old_activity(12)))));
     let warm = Warm(Ok(false));
@@ -1334,6 +1365,7 @@ async fn pressure_large_capacity_preserves_high_watermark_byte_ceiling() {
             2_251_799_813_685_248,
         )],
         ignored: 0,
+        unrecognized: Vec::new(),
     };
     let activity = Activity(Ok(snapshot_at(Some(old_activity(12)))));
     let warm = Warm(Ok(false));
@@ -1360,6 +1392,7 @@ async fn pressure_large_capacity_compares_low_watermark_exactly() {
     let inventory = WarmBaseInventory {
         entries: vec![pressure_entry("018f8b9a-0d70-7f0a-8000-000000000001", 1)],
         ignored: 0,
+        unrecognized: Vec::new(),
     };
     let plan = plan_pressure_eviction(
         inventory,
@@ -1389,6 +1422,7 @@ async fn pressure_lock_busy_and_error_retained() {
             pressure_entry("018f8b9a-0d70-7f0a-8000-000000000002", 50),
         ],
         ignored: 0,
+        unrecognized: Vec::new(),
     };
 
     struct BusyLock;
@@ -1422,6 +1456,7 @@ mod fingerprint_inventory;
 mod fingerprint_sweep;
 mod idle_variant_lock;
 mod pressure_execution;
+mod unrecognized_reclaim;
 
 /// The warm-base GC root must resolve the server pod's own cache mount.
 ///
