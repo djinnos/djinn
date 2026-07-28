@@ -122,6 +122,49 @@ impl InterventionChaosHarness {
         (handled, refreshed)
     }
 
+    /// Terminalize a `task_attempts` row for this task/role with `outcome`,
+    /// exactly as the supervisor's terminal run report does
+    /// (`attempt_outcome_for_terminal_report`): a cancelled session lands
+    /// `cancelled`, a run that concluded lands `completed`/`reopened`/etc.
+    /// This is the durable evidence the dispatch pass reads back through
+    /// `latest_attempt_strike_decision` on the next reappearance.
+    async fn record_terminal_attempt(
+        &self,
+        role: &'static str,
+        outcome: djinn_core::models::TaskAttemptOutcome,
+    ) {
+        let attempt_repo = TaskAttemptRepository::new(self.db.clone());
+        let attempt_id = uuid::Uuid::now_v7().to_string();
+        let attempt = attempt_repo
+            .create_or_get_pending(CreateTaskAttemptParams {
+                id: &attempt_id,
+                task_id: &self.task_id,
+                role,
+                dispatch_key: &format!("trigger-b-cycle:{attempt_id}"),
+                session_id: None,
+                attempt_seq: None,
+                dispatch_owner_incarnation_id: None,
+                dispatch_group_id: None,
+            })
+            .await
+            .unwrap();
+        attempt_repo
+            .advance_to_terminal(TerminalTaskAttemptParams {
+                id: &attempt.id,
+                outcome,
+                pr_url: None,
+                submit_ref: None,
+                checkpoint_ref: None,
+                mirror_head_sha: None,
+                github_head_sha: None,
+                summary: None,
+                summary_json: None,
+                log_tail: None,
+            })
+            .await
+            .unwrap();
+    }
+
     async fn dispatch_same_role_reappearance_like_dispatch(
         &mut self,
         role: &'static str,
@@ -139,7 +182,17 @@ impl InterventionChaosHarness {
         let task = self.task().await;
         self.actor.last_dispatched.remove(&task.id);
 
-        if should_route_cycling_intervention(role, next_streak, had_provider_failure)
+        // Mirrors the dispatch pass: the prior session's terminal disposition
+        // comes from the same production read the SameRoleFailure arm performs,
+        // and falls back to `Concluded` when there is no attempt evidence.
+        let prior_session = self
+            .actor
+            .latest_attempt_strike_decision(&task.id, role)
+            .await
+            .map(|decision| decision.prior_session)
+            .unwrap_or(PriorSessionDisposition::Concluded);
+
+        if should_route_cycling_intervention(role, next_streak, had_provider_failure, prior_session)
             && self
                 .actor
                 .maybe_intervene_on_cycling_task(&task, role, next_streak)
@@ -201,6 +254,25 @@ impl InterventionChaosHarness {
     ) -> (bool, djinn_core::models::Task) {
         let mut last = (false, self.task().await);
         for _ in 0..cycles {
+            last = self
+                .dispatch_same_role_reappearance_like_dispatch(role, false)
+                .await;
+        }
+        last
+    }
+
+    /// `cycles` same-role redispatches, each preceded by a terminal attempt row
+    /// carrying `outcome` — i.e. each reappearance is explained by a session
+    /// that ended that way.
+    async fn dispatch_same_role_reappearances_after_sessions(
+        &mut self,
+        role: &'static str,
+        outcome: djinn_core::models::TaskAttemptOutcome,
+        cycles: u32,
+    ) -> (bool, djinn_core::models::Task) {
+        let mut last = (false, self.task().await);
+        for _ in 0..cycles {
+            self.record_terminal_attempt(role, outcome).await;
             last = self
                 .dispatch_same_role_reappearance_like_dispatch(role, false)
                 .await;
@@ -802,17 +874,20 @@ async fn same_role_cycling_trigger_b_chaos_intervenes_then_terminally_closes() {
     assert!(should_route_cycling_intervention(
         role,
         STREAK_INTERVENTION_THRESHOLD,
-        false
+        false,
+        PriorSessionDisposition::Concluded
     ));
     assert!(!should_route_cycling_intervention(
         role,
         STREAK_INTERVENTION_THRESHOLD,
-        true
+        true,
+        PriorSessionDisposition::Concluded
     ));
     assert!(!should_route_cycling_intervention(
         "planner",
         STREAK_INTERVENTION_THRESHOLD,
-        false
+        false,
+        PriorSessionDisposition::Concluded
     ));
 
     let (below_handled, below_threshold) = harness
@@ -915,6 +990,126 @@ async fn same_role_cycling_trigger_b_chaos_intervenes_then_terminally_closes() {
     provider_guard
         .assert_same_role_backoff_after_reappearance(STREAK_INTERVENTION_THRESHOLD)
         .await;
+}
+
+/// Regression for task 7mq0 (2026-07-28): four consecutive `worker` sessions
+/// were cancelled (`session cancelled`, ~10 min each) and the coordinator
+/// recovered the task `in_progress → open` every time. On the fourth, trigger B
+/// fired and summoned a Planner remediation whose reason claimed "each run
+/// finishes and the task lands right back where it was". The Planner correctly
+/// diagnosed an infrastructure-cancellation loop, but its only levers are
+/// decompose / rescope / close — so it force-closed a healthy task as `reshape`
+/// and replaced it with two narrower ones whose acceptance criteria forbid the
+/// worker from compiling. An infra timeout permanently damaged the board.
+///
+/// A cancelled session never concluded, so it must not advance the streak into
+/// trigger B at all — the same exclusion typed provider failures already get.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cancelled_sessions_do_not_route_the_cycling_planner_intervention() {
+    let mut harness = InterventionChaosHarness::new(0).await;
+    let role = "worker";
+
+    assert_eq!(
+        STREAK_INTERVENTION_THRESHOLD, 4,
+        "the 7mq0 regression is pinned to the production threshold"
+    );
+
+    // Exactly the 7mq0 shape: four same-role redispatches, each explained by a
+    // session the platform cancelled before the run could conclude.
+    let (handled, task) = harness
+        .dispatch_same_role_reappearances_after_sessions(
+            role,
+            djinn_core::models::TaskAttemptOutcome::Cancelled,
+            STREAK_INTERVENTION_THRESHOLD,
+        )
+        .await;
+
+    assert!(
+        !handled,
+        "four cancelled sessions must NOT route a Planner intervention — the runs \
+         never finished, so the streak is no evidence about the task's scope"
+    );
+    assert_eq!(
+        task.status, "open",
+        "the source task must stay dispatchable, not be handed to a Planner"
+    );
+    harness.assert_planner_marker_count(0).await;
+    harness.assert_open_planner_review_count(0).await;
+    harness
+        .assert_same_role_backoff_after_reappearance(STREAK_INTERVENTION_THRESHOLD)
+        .await;
+
+    // Well past the threshold the exclusion still holds — it is not a one-cycle
+    // grace period that the next cancelled session walks straight through.
+    let (still_excluded, still_open) = harness
+        .dispatch_same_role_reappearances_after_sessions(
+            role,
+            djinn_core::models::TaskAttemptOutcome::Cancelled,
+            3,
+        )
+        .await;
+    assert!(
+        !still_excluded,
+        "the cancellation exclusion must not decay as the streak grows"
+    );
+    assert_eq!(still_open.status, "open");
+    harness.assert_planner_marker_count(0).await;
+    harness.assert_open_planner_review_count(0).await;
+}
+
+/// The other half of the contract: trigger B must keep firing at 4 on the
+/// review-cycle livelock it exists to catch (the t9wi/32bk wedge), whose runs
+/// DO conclude — and the reason it emits must name the session outcomes it
+/// actually observed rather than asserting completion it never checked.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn completed_same_role_redispatches_still_route_the_cycling_planner_intervention() {
+    let mut harness = InterventionChaosHarness::new(0).await;
+    let role = "worker";
+
+    let (below_handled, below) = harness
+        .dispatch_same_role_reappearances_after_sessions(
+            role,
+            djinn_core::models::TaskAttemptOutcome::Completed,
+            STREAK_INTERVENTION_THRESHOLD - 1,
+        )
+        .await;
+    assert!(!below_handled, "below threshold only seeds backoff");
+    assert_eq!(below.status, "open");
+    harness.assert_planner_marker_count(0).await;
+
+    let (handled, routed) = harness
+        .dispatch_same_role_reappearances_after_sessions(
+            role,
+            djinn_core::models::TaskAttemptOutcome::Completed,
+            1,
+        )
+        .await;
+    assert!(
+        handled,
+        "four concluded same-role redispatches must still route the Planner \
+         intervention — the fix must not weaken trigger B for genuine livelocks"
+    );
+    assert_eq!(routed.status, "open", "the source task stays open");
+    harness.assert_planner_marker_count(1).await;
+    harness.assert_open_planner_review_count(1).await;
+
+    // The escalation the Planner reads must describe the evidence truthfully.
+    let reviews = harness.open_planner_intervention_reviews().await;
+    let description = reviews
+        .first()
+        .map(|review| review.description.clone())
+        .expect("trigger B must create a Planner remediation review task");
+    assert!(
+        description.contains(
+            "Observed session outcomes for `worker`, newest first: \
+             completed, completed, completed, completed"
+        ),
+        "the reason must report the session outcomes it counted, got: {description}"
+    );
+    assert!(
+        !description.contains("Each run finishes"),
+        "the reason must not assert completion it never verified, got: {description}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

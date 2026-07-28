@@ -20,6 +20,12 @@ pub(crate) struct DispatchStrikeDecision {
     pub exempted: bool,
     pub decision: &'static str,
     pub source: &'static str,
+    /// Terminal disposition of the session behind this attempt: did the run
+    /// conclude on its own, or was it cancelled / reclaimed by the platform?
+    /// Consumed by the trigger-B gate
+    /// ([`should_route_cycling_intervention`]), which must not treat a
+    /// cancelled session as "the run finished and the task didn't move".
+    pub prior_session: PriorSessionDisposition,
 }
 
 impl CoordinatorActor {
@@ -89,7 +95,37 @@ impl CoordinatorActor {
                 djinn_telemetry::dispatch::STRIKE_DECISION_COUNTED
             },
             source: exempt_source.unwrap_or(source),
+            prior_session: PriorSessionDisposition::from_attempt_outcome(&attempt.outcome),
         })
+    }
+
+    /// Terminal `task_attempts.outcome` strings for the most recent same-role
+    /// attempts on a task, newest first, for truthful escalation reasons.
+    ///
+    /// Guard-only rows (`deferred`) and PR adoptions (`adopted_pr`) are skipped
+    /// — they are bookkeeping, not sessions — matching the filter
+    /// [`Self::latest_attempt_strike_decision`] uses to pick the attempt behind
+    /// a reappearance. Returns an empty vec on any lookup error: the reason
+    /// text then says the outcomes were unavailable rather than inventing them.
+    pub(crate) async fn recent_same_role_attempt_outcomes(
+        &self,
+        task_id: &str,
+        role: &str,
+        limit: usize,
+    ) -> Vec<String> {
+        TaskAttemptRepository::new(self.db.clone())
+            .list_for_task(task_id)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|attempt| {
+                attempt.role == role
+                    && attempt.outcome != TaskAttemptOutcome::Deferred.as_str()
+                    && attempt.outcome != TaskAttemptOutcome::AdoptedPr.as_str()
+            })
+            .take(limit.clamp(1, 8))
+            .map(|attempt| attempt.outcome)
+            .collect()
     }
 }
 
@@ -508,10 +544,17 @@ impl CoordinatorActor {
     /// bound was the terminal close at [`MAX_DISPATCH_FAILURES`], which
     /// force-closes a task whose durable worker output may be perfectly fine
     /// (the t9wi/32bk wedge, 2026-06-11). When the streak crosses
-    /// [`STREAK_INTERVENTION_THRESHOLD`] with no typed provider failure to
-    /// blame (gated by `should_route_cycling_intervention` at the call site),
-    /// hand the loop to the Planner for the same decompose / rescope / close
-    /// decision instead.
+    /// [`STREAK_INTERVENTION_THRESHOLD`] with no typed provider failure and no
+    /// cancelled/reclaimed session to blame (both gated by
+    /// `should_route_cycling_intervention` at the call site), hand the loop to
+    /// the Planner for the same decompose / rescope / close decision instead.
+    ///
+    /// The premise is that the RUNS CONCLUDE and the task still does not move.
+    /// A session cancelled by infrastructure never concluded, says nothing about
+    /// the task's scope, and must not reach here — see
+    /// [`PriorSessionDisposition`]. The reason emitted below therefore names the
+    /// terminal `task_attempts` outcomes actually observed instead of asserting
+    /// completion the coordinator never checked (task 7mq0, 2026-07-28).
     ///
     /// Shares all of trigger A's machinery — second-strike terminal park,
     /// reopen-count-keyed idempotency marker (stable across a review-cycle
@@ -528,14 +571,29 @@ impl CoordinatorActor {
         role: &'static str,
         streak: u32,
     ) -> bool {
+        let observed = self
+            .recent_same_role_attempt_outcomes(&task.id, role, streak as usize)
+            .await;
+        let observed_evidence = if observed.is_empty() {
+            "No `task_attempts` rows were readable for this role, so the per-session outcomes \
+             behind the streak could not be shown."
+                .to_owned()
+        } else {
+            format!(
+                "Observed session outcomes for `{role}`, newest first: {}. Sessions cancelled or \
+                 reclaimed by infrastructure (`cancelled` / `timed_out` / `interrupted`) do NOT \
+                 advance this streak, so every run counted above reached its own terminal \
+                 decision and the task still landed right back where it was.",
+                observed.join(", ")
+            )
+        };
         let reason = format!(
             "Task is cycling without converging: {streak} consecutive `{role}` redispatches \
-             completed without the task changing status (status `{}`, reopen_count={} — the \
-             loop never passes through `open`, so the reopen-based escalation never saw it). \
-             Each run finishes and the task lands right back where it was. Decide how to \
-             unstick this: DECOMPOSE into focused subtasks, RESCOPE/clarify the acceptance \
-             criteria and re-dispatch, or CLOSE if the durable work on the task branch is \
-             already sufficient or the task is moot/duplicate.",
+             without the task changing status (status `{}`, reopen_count={} — the loop never \
+             passes through `open`, so the reopen-based escalation never saw it). \
+             {observed_evidence} Decide how to unstick this: DECOMPOSE into focused subtasks, \
+             RESCOPE/clarify the acceptance criteria and re-dispatch, or CLOSE if the durable \
+             work on the task branch is already sufficient or the task is moot/duplicate.",
             task.status, task.reopen_count
         );
         self.route_planner_intervention(task, role, &reason, None, task.reopen_count)
