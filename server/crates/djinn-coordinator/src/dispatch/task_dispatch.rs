@@ -2381,10 +2381,27 @@ impl CoordinatorActor {
                             // Planner was already routed for this loop (idempotency
                             // marker) — the terminal close then remains the final
                             // backstop.
+                            //
+                            // A reappearance whose prior session was CANCELLED or
+                            // reclaimed before the run could conclude is excluded
+                            // for the same reason a typed provider failure is:
+                            // the run did not finish, so its reappearance is not
+                            // evidence about the task's scope or acceptance
+                            // criteria, and a Planner handed that loop has no
+                            // lever but reshaping healthy work (task 7mq0,
+                            // 2026-07-28). The disposition comes from the prior
+                            // attempt's terminal outcome — never from wall clock
+                            // and never from the task's status alone. No attempt
+                            // evidence fails CLOSED to `Concluded`, preserving the
+                            // t9wi/32bk review-cycle protection.
+                            let prior_session = strike_decision
+                                .map(|decision| decision.prior_session)
+                                .unwrap_or(PriorSessionDisposition::Concluded);
                             if should_route_cycling_intervention(
                                 role,
                                 next_streak,
                                 provider_failure.is_some(),
+                                prior_session,
                             ) && self
                                 .maybe_intervene_on_cycling_task(&task, role, next_streak)
                                 .await
