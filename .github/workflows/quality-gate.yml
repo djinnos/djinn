@@ -126,51 +126,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Verify mold Debian snapshot contracts
-        run: |
-          ./scripts/test-mold-debian-snapshot-contract.sh
-          ./scripts/test-mold-debian-snapshot-contract-regressions.sh
-      - name: Exercise pinned mold apt stanza on current trixie
-        run: ./scripts/image-ci/run-mold-trixie-apt-smoke.sh
-      - name: Verify trixie mold apt smoke contract
-        run: node --test scripts/ci-mold-trixie-apt-smoke.test.mjs
-      - name: Verify routed-scope contract
-        run: node --test scripts/ci-changed-scope.test.mjs
-      - name: Verify cache ownership policy
-        run: node --test scripts/ci-cache-policy.test.mjs
-      - name: Verify qa-smoke workflow contract
-        run: node --test scripts/ci-qa-smoke-workflow.test.mjs
-      - name: Verify release image validation contract
-        run: node --test scripts/ci-release-image-validation.test.mjs
-      - name: Verify shard failure summary contract
-        run: node --test scripts/ci-shard-failure-summary.test.mjs
-      - name: Verify retirement manifest generator contract
-        run: node --test scripts/test-djinn-retirement-manifest.mjs
-      - name: Run retirement manifest strict reconciliation guard
-        run: ./scripts/check-djinn-retirement-manifest.sh
-      - name: Lint all workflow files (actionlint)
-        env:
-          ACTIONLINT_VERSION: 1.7.12
-          ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
-        run: |
-          set -euo pipefail
-          # Sibling workflows (release.yml, cla.yml, stale-branches.yml,
-          # memory-qa-nightly.yml) route narrowly in the scope router, so
-          # this always-on lint is their gate. It also catches invalid
-          # triggers that GitHub only surfaces as a red zero-job run on
-          # every subsequent push (e.g. `on: workflow_job`, which is a
-          # webhook event, not a workflow trigger — the exact bug shipped
-          # in #2221's ci-fail-fast.yml).
-          curl --fail --silent --show-error --location \
-            --retry 3 --connect-timeout 10 --max-time 60 \
-            --output "$RUNNER_TEMP/actionlint.tar.gz" \
-            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
-          printf '%s  %s\n' "$ACTIONLINT_SHA256" "$RUNNER_TEMP/actionlint.tar.gz" | sha256sum --check --strict
-          tar -xzf "$RUNNER_TEMP/actionlint.tar.gz" -C "$RUNNER_TEMP" actionlint
-          # shellcheck/pyflakes deliberately disabled: schema, trigger, and
-          # expression checks only, so run-block style nits cannot wedge
-          # the gate.
-          "$RUNNER_TEMP/actionlint" -shellcheck= -pyflakes= .github/workflows/*.yml
       - name: Compute safe event diff and route it
         id: router
         env:
@@ -217,6 +172,68 @@ jobs:
           path: preflight/manifest.json
           if-no-files-found: error
           retention-days: 30
+  ci-contracts:
+    name: CI Contracts
+    # These verify the CI machinery itself, so they are path-independent: the
+    # same work regardless of what the diff touches. They used to live in
+    # `preflight`, where they cost ~83s of that job's ~98s while the routing
+    # they blocked took ~2s — and because every other job `needs: preflight`,
+    # that was a serial prefix on the critical path of every PR and every
+    # merge-queue entry. Running them beside the lanes instead of ahead of
+    # them removes that prefix without weakening anything: this job carries no
+    # `if:` guard, so it still runs on every event, and `quality-gate` fails
+    # closed on its result below.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify mold Debian snapshot contracts
+        run: |
+          ./scripts/test-mold-debian-snapshot-contract.sh
+          ./scripts/test-mold-debian-snapshot-contract-regressions.sh
+      - name: Exercise pinned mold apt stanza on current trixie
+        run: ./scripts/image-ci/run-mold-trixie-apt-smoke.sh
+      - name: Verify trixie mold apt smoke contract
+        run: node --test scripts/ci-mold-trixie-apt-smoke.test.mjs
+      - name: Verify routed-scope contract
+        run: node --test scripts/ci-changed-scope.test.mjs
+      - name: Verify cache ownership policy
+        run: node --test scripts/ci-cache-policy.test.mjs
+      - name: Verify qa-smoke workflow contract
+        run: node --test scripts/ci-qa-smoke-workflow.test.mjs
+      - name: Verify release image validation contract
+        run: node --test scripts/ci-release-image-validation.test.mjs
+      - name: Verify shard failure summary contract
+        run: node --test scripts/ci-shard-failure-summary.test.mjs
+      - name: Verify retirement manifest generator contract
+        run: node --test scripts/test-djinn-retirement-manifest.mjs
+      - name: Run retirement manifest strict reconciliation guard
+        run: ./scripts/check-djinn-retirement-manifest.sh
+      - name: Lint all workflow files (actionlint)
+        env:
+          ACTIONLINT_VERSION: 1.7.12
+          ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+        run: |
+          set -euo pipefail
+          # Sibling workflows (release.yml, cla.yml, stale-branches.yml,
+          # memory-qa-nightly.yml) route narrowly in the scope router, so
+          # this always-on lint is their gate. It also catches invalid
+          # triggers that GitHub only surfaces as a red zero-job run on
+          # every subsequent push (e.g. `on: workflow_job`, which is a
+          # webhook event, not a workflow trigger — the exact bug shipped
+          # in #2221's ci-fail-fast.yml).
+          curl --fail --silent --show-error --location \
+            --retry 3 --connect-timeout 10 --max-time 60 \
+            --output "$RUNNER_TEMP/actionlint.tar.gz" \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          printf '%s  %s\n' "$ACTIONLINT_SHA256" "$RUNNER_TEMP/actionlint.tar.gz" | sha256sum --check --strict
+          tar -xzf "$RUNNER_TEMP/actionlint.tar.gz" -C "$RUNNER_TEMP" actionlint
+          # shellcheck/pyflakes deliberately disabled: schema, trigger, and
+          # expression checks only, so run-block style nits cannot wedge
+          # the gate.
+          "$RUNNER_TEMP/actionlint" -shellcheck= -pyflakes= .github/workflows/*.yml
   local-dev-contracts:
     name: Local Dev Contracts
     needs: preflight
@@ -1975,6 +1992,7 @@ jobs:
     if: always() && github.event_name != 'push'
     needs:
       - preflight
+      - ci-contracts
       - server-guards
       - server-clippy
       - server-aarch64-check
@@ -1990,6 +2008,7 @@ jobs:
       - name: Fail closed on selected work
         env:
           PREFLIGHT: ${{ needs.preflight.result }}
+          CONTRACTS: ${{ needs.ci-contracts.result }}
           GUARDS: |-
             ${{ (needs.preflight.outputs.cargoDeny == 'true'
                || needs.preflight.outputs.size == 'true'
@@ -2010,6 +2029,7 @@ jobs:
         run: |
           set -euo pipefail
           [ "$PREFLIGHT" = success ] || { echo "preflight ended $PREFLIGHT"; exit 1; }
+          [ "$CONTRACTS" = success ] || { echo "ci-contracts ended $CONTRACTS"; exit 1; }
           check() {
             local lane=$1 pair=$2 selected=${2%%:*} result=${2#*:}
             if [ "$selected" = true ] && [ "$result" = success ]; then return; fi
