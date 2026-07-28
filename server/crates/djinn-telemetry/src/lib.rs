@@ -184,6 +184,19 @@ const BUILD_ADMISSION_CREATE_UNKNOWN_HEALTH: &str = "djinn_build_admission_creat
 const BUILD_ADMISSION_SHADOW_INVOCATION_TOTAL: &str =
     "djinn_build_admission_shadow_invocation_total";
 const BUILD_ADMISSION_LIFT_REJECTED_TOTAL: &str = "djinn_build_admission_lift_rejected_total";
+const BUILD_ADMISSION_INVOCATION_DEGRADED_TOTAL: &str =
+    "djinn_build_admission_invocation_degraded_total";
+/// Closed enumeration of the durable answers that end an invocation's ability
+/// to be escalated. `deadline_expired` is the one that produced the fleet-wide
+/// 16x slowdown: the invocation's queue deadline expired behind a dispatch row.
+const BUILD_ADMISSION_DEGRADE_REASONS: [&str; 6] = [
+    "deadline_expired",
+    "cancelled",
+    "released",
+    "abandoned",
+    "lease_unavailable",
+    "unclassified",
+];
 const BUILD_ADMISSION_TRANSITION_TOTAL: &str = "djinn_build_admission_transition_total";
 // One closed enumeration for every durable journal write attempt: the two
 // lifecycle outcomes plus the two startup-reconciliation outcomes. Extending
@@ -1925,6 +1938,14 @@ fn register_metrics() {
          durable grant was held, and the kernel boundary still refused it."
     );
     metrics::describe_counter!(
+        BUILD_ADMISSION_INVOCATION_DEGRADED_TOTAL,
+        "Lease invocations that lost the build-lease queue and run the rest of \
+         their life at the quota they were born at, by terminal reason. A \
+         non-zero `deadline_expired` share means compiles are being throttled \
+         to the 250m unleased quota because their queue position expired — the \
+         one-way degrade is silent in every other signal."
+    );
+    metrics::describe_counter!(
         BUILD_ADMISSION_TRANSITION_TOTAL,
         "Durable admission-journal lifecycle transitions by outcome. A rejected \
          share near one means the journal is refusing every observation and \
@@ -3311,6 +3332,27 @@ pub mod build_admission {
     /// `/metrics` endpoint, so in a task-run Pod the log line is what escapes.
     pub fn record_lift_rejected() {
         metrics::counter!(super::BUILD_ADMISSION_LIFT_REJECTED_TOTAL).increment(1);
+    }
+
+    /// Record one invocation that lost the build-lease queue and degraded to
+    /// the quota it was born at. `reason` MUST be one of
+    /// [`super::BUILD_ADMISSION_DEGRADE_REASONS`].
+    ///
+    /// Emits a structured `tracing::warn!` at the call site for the same reason
+    /// [`record_shadow_invocation`] logs: every caller lives in the task-run
+    /// Pod and `djinn-agent-worker` exposes no `/metrics` endpoint, so in
+    /// production the log line is what escapes. The counter exists so a server
+    /// -side scrape can still answer "what fraction of invocations degraded"
+    /// wherever the emitter runs with an exporter.
+    ///
+    /// Every series in the family is written on the first degrade, so a
+    /// process that has degraded nothing of a given reason is distinguishable
+    /// from one that never reported at all.
+    pub fn record_invocation_degraded(reason: &'static str) {
+        for candidate in super::BUILD_ADMISSION_DEGRADE_REASONS {
+            metrics::counter!(super::BUILD_ADMISSION_INVOCATION_DEGRADED_TOTAL, "reason" => candidate)
+                .increment(u64::from(candidate == reason));
+        }
     }
 }
 

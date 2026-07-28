@@ -591,6 +591,9 @@ impl LeaseInvocationRunner {
         // makes a command SLOW, never dead. Nothing here kills the child, and
         // the durable record is still reconciled to terminal after the loop.
         let mut unleased_degrade = false;
+        // The absolute queue deadline this invocation sent, once it queued.
+        // `0` means it never reached the lease authority.
+        let mut queue_deadline_ms = 0_i64;
         // This variable is assigned only by `terminal_now` or by a service
         // wait that observed terminal intent. Consequently no later response
         // can authorize a cgroup lift.
@@ -613,10 +616,20 @@ impl LeaseInvocationRunner {
                 continue;
             } else if !queued && cpu.usage_usec >= config.cpu_usage_threshold_usec {
                 queued = true;
+                // Captured HERE, not hoisted out of the loop: the deadline is
+                // relative to the moment this invocation actually crossed the
+                // escalation threshold, which for a long command can be minutes
+                // after launch. Retained so the degrade diagnostic can say
+                // whether the queue position had genuinely expired — a status
+                // read reports a terminalized row as `Cancelled` and carries no
+                // terminal reason over the wire, so the deadline and the clock
+                // are the only evidence available in the pod.
+                let queued_deadlines = self.lease_deadlines(&config);
+                queue_deadline_ms = queued_deadlines.queue_deadline_ms;
                 match await_lease_or_terminal(
                     self.services.queue_lease(LeaseQueueRequest {
                         identity: lease.clone(),
-                        deadlines: self.lease_deadlines(&config),
+                        deadlines: queued_deadlines,
                     }),
                     &mut *child,
                     &cancel,
@@ -656,6 +669,13 @@ impl LeaseInvocationRunner {
                 unavailable_responses += 1;
                 if unavailable_responses >= 3 {
                     lease_failure(
+                        DegradeDiagnostic {
+                            identity: &identity,
+                            observed_usage_usec: cpu.usage_usec,
+                            authority,
+                            queue_deadline_ms,
+                            now_ms: epoch_ms(self.clock.now()),
+                        },
                         LeaseResult::LeaseUnavailable,
                         &mut deadline,
                         &mut credit_used,
@@ -689,6 +709,13 @@ impl LeaseInvocationRunner {
                     }
                     other => {
                         lease_failure(
+                            DegradeDiagnostic {
+                                identity: &identity,
+                                observed_usage_usec: cpu.usage_usec,
+                                authority,
+                                queue_deadline_ms,
+                                now_ms: epoch_ms(self.clock.now()),
+                            },
                             other,
                             &mut deadline,
                             &mut credit_used,
@@ -878,6 +905,13 @@ impl LeaseInvocationRunner {
                                 fence = Some(token);
                             }
                             other => lease_failure(
+                                DegradeDiagnostic {
+                                    identity: &identity,
+                                    observed_usage_usec: cpu.usage_usec,
+                                    authority,
+                                    queue_deadline_ms,
+                                    now_ms: epoch_ms(self.clock.now()),
+                                },
                                 other,
                                 &mut deadline,
                                 &mut credit_used,
@@ -890,6 +924,13 @@ impl LeaseInvocationRunner {
                         unavailable_responses += 1;
                         if unavailable_responses >= 3 {
                             lease_failure(
+                                DegradeDiagnostic {
+                                    identity: &identity,
+                                    observed_usage_usec: cpu.usage_usec,
+                                    authority,
+                                    queue_deadline_ms,
+                                    now_ms: epoch_ms(self.clock.now()),
+                                },
                                 LeaseResult::LeaseUnavailable,
                                 &mut deadline,
                                 &mut credit_used,
@@ -899,6 +940,13 @@ impl LeaseInvocationRunner {
                         }
                     }
                     other => lease_failure(
+                        DegradeDiagnostic {
+                            identity: &identity,
+                            observed_usage_usec: cpu.usage_usec,
+                            authority,
+                            queue_deadline_ms,
+                            now_ms: epoch_ms(self.clock.now()),
+                        },
                         other,
                         &mut deadline,
                         &mut credit_used,
@@ -1195,8 +1243,118 @@ fn deadline_epoch_ms(now_ms: i64, timeout: Duration) -> i64 {
 ///
 /// Only responses meaning the lease authority cannot be used coherently at all
 /// — an identity conflict, or repeated unavailability — remain hard errors.
+///
+/// # This path REPORTS
+///
+/// The degrade used to be completely silent: no `tracing::` call anywhere on
+/// it, so a command that lost its queue was indistinguishable in the logs from
+/// one that never needed a lease. The only observable was a `lease invocation
+/// launched` line with no matching `cgroup quota lifted`, which is an absence —
+/// nothing greps for it and no alert fires on it. Four armed rollouts were
+/// diagnosed by reading `cpu.max` out of cgroupfs on the node by hand, and the
+/// 16x fleet-wide slowdown this function's caller now names ran for days.
+/// [`degrade_reason`] and the `warn!` below are that missing event.
 #[cfg_attr(not(test), allow(dead_code))] // consumed by the workspace lease wiring task
 fn lease_failure(
+    diagnostic: DegradeDiagnostic<'_>,
+    result: LeaseResult,
+    deadline: &mut std::time::Instant,
+    credit_used: &mut bool,
+    output: &mut Option<LeaseInvocationError>,
+    unleased: &mut bool,
+) {
+    // Read before the match consumes `result`, and compared against the state
+    // BEFORE it so the one-way degrade reports exactly once per invocation
+    // rather than on every subsequent terminal status poll.
+    let reason = degrade_reason(&result);
+    let already_degraded = *unleased;
+    lease_failure_classify(result, deadline, credit_used, output, unleased);
+    if *unleased && !already_degraded {
+        djinn_telemetry::build_admission::record_invocation_degraded(reason);
+        tracing::warn!(
+            invocation_id = %diagnostic.identity.invocation_id,
+            task_run_id = %diagnostic.identity.task_run_id,
+            terminal_reason = reason,
+            observed_usage_usec = diagnostic.observed_usage_usec,
+            authority = ?diagnostic.authority,
+            degraded_quota = degraded_quota(diagnostic.authority),
+            queue_deadline_ms = diagnostic.queue_deadline_ms,
+            now_ms = diagnostic.now_ms,
+            queue_deadline_passed =
+                diagnostic.queue_deadline_ms > 0 && diagnostic.now_ms >= diagnostic.queue_deadline_ms,
+            "lease invocation DEGRADED: the build lease will never be granted, so the command \
+             runs the rest of its life at the quota it was born at. Under an Armed authority that \
+             is the launcher's unleased quota (250m by default) — a ~16x slowdown for a compile — \
+             and the degrade is one-way: this invocation will not be escalated again"
+        );
+    }
+}
+
+/// The identity and measurements the degrade diagnostic names.
+///
+/// Carried into [`lease_failure`] rather than logged at its five call sites so
+/// no future arm can be added that degrades without reporting.
+#[cfg_attr(not(test), allow(dead_code))] // consumed by the workspace lease wiring task
+struct DegradeDiagnostic<'a> {
+    identity: &'a TaskInvocationLeaseIdentity,
+    /// `cpu.stat usage_usec` for this leaf at the moment it lost the lease.
+    /// This is the number that makes a degrade actionable: 52.8 CPU-seconds
+    /// against a 0.25 CPU-s escalation threshold says the throttling is being
+    /// applied to real build work, not to a trivial command.
+    observed_usage_usec: u64,
+    /// The authority the leaf was BORN at. `Armed` means it is clamped for the
+    /// rest of its life; `Unarmed` means there was never a quota to lift and
+    /// the degrade costs nothing.
+    authority: djinn_cgroup_launcher::LeaseAuthority,
+    /// The absolute queue deadline this invocation sent, and the clock it is
+    /// judged against.
+    ///
+    /// Both are logged because the reason a status read reports is
+    /// structurally lossy: the coordinator terminalizes an expired queue row as
+    /// `deadline_expired`, but `LeaseStatus` carries no terminal reason, so the
+    /// pod sees a bare `Cancelled`. `now_ms >= queue_deadline_ms > 0` is the
+    /// evidence that distinguishes "its queue position expired" from "somebody
+    /// cancelled it".
+    queue_deadline_ms: i64,
+    now_ms: i64,
+}
+
+/// Closed enumeration naming why this invocation can never hold the lease.
+/// Bounded because it is also a metric label.
+#[cfg_attr(not(test), allow(dead_code))] // consumed by the workspace lease wiring task
+fn degrade_reason(result: &LeaseResult) -> &'static str {
+    match result {
+        // The coordinator terminalizes an expired queue row as
+        // `deadline_expired`; a wait that ends without a grant reports it as a
+        // timeout here and as a cancelled terminal state on a later status read.
+        LeaseResult::LeaseWaitTimeout { .. } => "deadline_expired",
+        LeaseResult::Cancelled { .. }
+        | LeaseResult::Status(LeaseStatus {
+            state: LeaseState::Cancelled,
+            ..
+        }) => "cancelled",
+        LeaseResult::Released { .. }
+        | LeaseResult::Status(LeaseStatus {
+            state: LeaseState::Released,
+            ..
+        }) => "released",
+        LeaseResult::Abandoned { .. } => "abandoned",
+        LeaseResult::LeaseUnavailable => "lease_unavailable",
+        _ => "unclassified",
+    }
+}
+
+/// What "degraded" means for a leaf born under `authority`.
+#[cfg_attr(not(test), allow(dead_code))] // consumed by the workspace lease wiring task
+fn degraded_quota(authority: djinn_cgroup_launcher::LeaseAuthority) -> &'static str {
+    match authority {
+        djinn_cgroup_launcher::LeaseAuthority::Armed => "launcher_unleased",
+        djinn_cgroup_launcher::LeaseAuthority::Unarmed => "unrestricted",
+    }
+}
+
+#[cfg_attr(not(test), allow(dead_code))] // consumed by the workspace lease wiring task
+fn lease_failure_classify(
     result: LeaseResult,
     deadline: &mut std::time::Instant,
     credit_used: &mut bool,
@@ -1606,6 +1764,19 @@ mod tests {
         }
     }
 
+    /// The reporting context every `lease_failure` call carries. These unit
+    /// tests exercise the CLASSIFICATION; the emitted diagnostic itself is
+    /// asserted end-to-end in `process/tests/process_lease_queue_deadline_tests`.
+    fn degrade_diagnostic(identity: &TaskInvocationLeaseIdentity) -> DegradeDiagnostic<'_> {
+        DegradeDiagnostic {
+            identity,
+            observed_usage_usec: 52_800_000,
+            authority: djinn_cgroup_launcher::LeaseAuthority::Armed,
+            queue_deadline_ms: 0,
+            now_ms: 0,
+        }
+    }
+
     /// A long-lived fixture child, contained the way the production handle
     /// contains a leaf: its own process group, torn down as a group. Spawning it
     /// through `sh -c` left the real command as a grandchild on any runner whose
@@ -1670,6 +1841,7 @@ mod tests {
         let mut error = None;
         let mut unleased = false;
         lease_failure(
+            degrade_diagnostic(&test_identity()),
             LeaseResult::LeaseIdentityConflict {
                 identity: LeaseIdentity::TaskInvocation(test_identity()),
             },
@@ -1684,6 +1856,7 @@ mod tests {
         ));
         error = None;
         lease_failure(
+            degrade_diagnostic(&test_identity()),
             LeaseResult::LeaseUnavailable,
             &mut deadline,
             &mut used,
@@ -1736,6 +1909,7 @@ mod tests {
             let mut error = None;
             let mut unleased = false;
             lease_failure(
+                degrade_diagnostic(&test_identity()),
                 result.clone(),
                 &mut deadline,
                 &mut used,
@@ -1758,6 +1932,7 @@ mod tests {
         let mut error = None;
         let mut unleased = false;
         lease_failure(
+            degrade_diagnostic(&test_identity()),
             LeaseResult::Status(LeaseStatus {
                 state: LeaseState::Queued,
                 fencing_token: None,
@@ -1791,6 +1966,7 @@ mod tests {
         };
         let mut unleased = false;
         lease_failure(
+            degrade_diagnostic(&test_identity()),
             credit.clone(),
             &mut deadline,
             &mut used,
@@ -1799,7 +1975,14 @@ mod tests {
         );
         assert_eq!(deadline, original + Duration::from_millis(25));
         assert!(!unleased, "the one credited retry still waits for capacity");
-        lease_failure(credit, &mut deadline, &mut used, &mut error, &mut unleased);
+        lease_failure(
+            degrade_diagnostic(&test_identity()),
+            credit,
+            &mut deadline,
+            &mut used,
+            &mut error,
+            &mut unleased,
+        );
         assert_eq!(deadline, original + Duration::from_millis(25));
         assert!(error.is_none());
         assert!(

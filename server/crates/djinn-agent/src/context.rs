@@ -37,7 +37,9 @@ use djinn_orchestration_types::coordinator::BackgroundWorkTracker;
 use djinn_provider::catalog::{CatalogService, HealthTracker};
 use djinn_slot::reply_loop::CompactionCriticalSection;
 use djinn_supervisor::SupervisorServices;
-use djinn_supervisor::services::{DurableInvocationLiftAuthority, WatchdogTerminationRequest};
+use djinn_supervisor::services::{
+    BUILD_LEASE_QUEUE_DEADLINE, DurableInvocationLiftAuthority, WatchdogTerminationRequest,
+};
 
 /// Shared tracker for per-task last-activity timestamps (unix seconds).
 /// Used by stall detection to kill sessions that stop producing tokens.
@@ -198,8 +200,22 @@ impl ShellLaunchContext {
     /// before the coordinator gives up on it. These are RELATIVE timeouts; the
     /// runner converts them to the absolute epoch-millisecond deadlines the
     /// coordinator compares against its wall clock.
-    const QUEUE_TIMEOUT: Duration = Duration::from_secs(30);
+    ///
+    /// The queue deadline is not a number of its own: an invocation must
+    /// outwait the dispatch row blocking it in their shared FIFO, so both
+    /// derive from [`BUILD_LEASE_QUEUE_DEADLINE`]. At 30s against that row's 30
+    /// minutes it always expired first and the compile ran at 250m.
     const LAUNCH_TIMEOUT: Duration = Duration::from_secs(60);
+
+    /// Override in seconds; `0` disables the deadline, unparseable keeps it.
+    pub(crate) const QUEUE_TIMEOUT_ENV: &'static str = "DJINN_INVOCATION_QUEUE_TIMEOUT_SECS";
+
+    pub(crate) fn queue_timeout() -> Duration {
+        std::env::var(Self::QUEUE_TIMEOUT_ENV)
+            .ok()
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .map_or(BUILD_LEASE_QUEUE_DEADLINE, Duration::from_secs)
+    }
 
     pub(crate) fn invocation(&self, timeout: Duration) -> LeaseInvocationConfig {
         LeaseInvocationConfig {
@@ -207,7 +223,7 @@ impl ShellLaunchContext {
             task_run_id: self.task_run_id.clone(),
             pod_uid: self.pod_uid.clone(),
             cpu_usage_threshold_usec: 250_000,
-            queue_timeout: Self::QUEUE_TIMEOUT,
+            queue_timeout: Self::queue_timeout(),
             launch_timeout: Self::LAUNCH_TIMEOUT,
             timeout,
         }

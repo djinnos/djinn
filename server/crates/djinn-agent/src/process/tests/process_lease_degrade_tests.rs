@@ -590,16 +590,19 @@ async fn rendered_invocation_deadlines_are_granted_and_reach_the_fenced_lift() {
         "the rendered queue deadline must not be in the past"
     );
 
-    // The stored deadlines are absolute instants exactly 30s / 60s past the
-    // runner's `now` — not 1970, and not the raw timeouts.
+    // The stored deadlines are absolute instants exactly one queue deadline /
+    // 60s past the runner's `now` — not 1970, and not the raw timeouts. The
+    // queue value is read from the shared constant rather than restated: it is
+    // deliberately the SAME deadline the coordinator stamps on the dispatch row
+    // that blocks this invocation in the FIFO.
     assert_eq!(
         durable_deadline_ms(
             row.queue_deadline
                 .as_deref()
                 .expect("the queued row retains its deadline"),
         ),
-        now_ms + 30_000,
-        "the durable queue deadline must be now + 30s"
+        now_ms + djinn_supervisor::services::BUILD_LEASE_QUEUE_DEADLINE_MS,
+        "the durable queue deadline must be now + BUILD_LEASE_QUEUE_DEADLINE"
     );
     assert_eq!(
         durable_deadline_ms(
