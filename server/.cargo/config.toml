@@ -1,21 +1,13 @@
 [build]
-# Feature set djinn's warm-cache pre-build compiles with, so the warm base
-# matches what CI and task-run pods actually build.
-#
-# `djinn-agent-worker::cargo_cache_policy` reads this key to derive the warm
-# job's `--features` args; without it the warm base is built with NO features
-# while CI (`.github/workflows/quality-gate.yml`) and worker commands use
-# `--features qdrant`. Feature resolution differs, so every unit whose
-# resolution depends on it misses the warm base and recompiles.
-#
-# This is djinn's own convention, NOT a cargo key: cargo emits
-# `warning: unused config key build.features` and ignores it. That warning is
-# expected — do not "fix" it by deleting this, and do not move the feature list
-# into the platform, which is deliberately repo-agnostic and reads it from here.
-#
-# Keep in sync with the `--features` used by the Server Clippy / Server Test
-# jobs in `.github/workflows/quality-gate.yml`.
-features = ["qdrant"]
+# NOTE: do NOT re-add a `features = [...]` key here. It is not a cargo key —
+# cargo ignores it and emits `warning: unused config key build.features` on
+# every invocation. It was djinn's own convention until #2677 moved the warm
+# job's feature set to `workspaces[*].cargo_features` in the djinn project's
+# environment config, which `djinn-agent-worker::cargo_cache_policy` reads.
+# That config now declares `["qdrant"]` for the `server` workspace, matching
+# the `--features` used by the Server Clippy / Server Test jobs in
+# `.github/workflows/quality-gate.yml`. Change the feature set there, not here;
+# a key in this file has no effect on anything.
 
 # NOTE: `rustc-wrapper = "sccache"` is intentionally NOT set here. The djinn
 # platform (warm/worker pods) reuses a warm, main-based per-project
