@@ -94,6 +94,11 @@ fn doctor_input(fixture: &Fixture, attempt: &str) -> InsertExtensionLoadDiagnost
     input
 }
 
+// Fixture builder: every parameter maps 1:1 onto a field of the row or
+// params struct it fills, so interposing another struct here would only
+// duplicate that one. Scoped to this fn — a new over-wide function
+// elsewhere still warns.
+#[allow(clippy::too_many_arguments)]
 async fn raw_insert(
     db: &Database,
     fixture: &Fixture,
@@ -191,8 +196,7 @@ async fn identity_retry_and_ordering_contract() {
     assert_eq!(ordered[0].source_kind, ExtensionLoadSourceKind::ProjectMcp);
     assert_eq!(ordered[0].source_key, "alpha");
     assert_eq!(ordered[0].phase, ExtensionLoadPhase::Handshake);
-    let mut expected_alpha_tools_list_ids =
-        [mcp_alpha.diagnostic_id, mcp_alpha_tie.diagnostic_id];
+    let mut expected_alpha_tools_list_ids = [mcp_alpha.diagnostic_id, mcp_alpha_tie.diagnostic_id];
     expected_alpha_tools_list_ids.sort();
     assert_eq!(
         ordered[1..3]

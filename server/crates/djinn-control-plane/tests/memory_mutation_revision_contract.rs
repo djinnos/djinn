@@ -81,6 +81,11 @@ fn stable_note_projection(note: &Note) -> Value {
     })
 }
 
+// Fixture builder: every parameter maps 1:1 onto a field of the row or
+// params struct it fills, so interposing another struct here would only
+// duplicate that one. Scoped to this fn — a new over-wide function
+// elsewhere still warns.
+#[allow(clippy::too_many_arguments)]
 async fn assert_tenant_state_unchanged(
     repo: &NoteRepository,
     owner_project_id: &str,
