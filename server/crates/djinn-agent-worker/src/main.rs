@@ -6148,6 +6148,12 @@ warning: something
         use crate::cargo_incremental_prune::WarmLockOperationFailure;
         use std::sync::{Arc, Mutex};
 
+        // `WARM_CARGO_INJECTED_LOCK_FAILURE` is process-global and CONSUMED by
+        // whichever warm reaches `acquire_warm_base_lock` first, so every test
+        // that arms it must hold this mutex — otherwise it steals a sibling
+        // test's lock acquisition and that sibling fails with a bogus
+        // `["failed"]` phase trace.
+        let _serial = WARM_CARGO_ORDERING_MUTEX.lock().expect("ordering mutex");
         let fixture = tempfile::tempdir().expect("fixture");
         let policy = cargo_cache_policy::CargoCachePolicy::default();
         let project = format!("warm-boundary-order-{}", std::process::id());
@@ -6171,6 +6177,10 @@ warning: something
                     graph_order.lock().expect("order").push("graph");
                 },
             ));
+
+        // The warm above consumed the armed failure, but clear it anyway so a
+        // future edit that short-circuits before the acquire cannot leak it.
+        *WARM_CARGO_INJECTED_LOCK_FAILURE.lock().expect("injection") = None;
 
         assert_eq!(
             order.lock().expect("order").as_slice(),
