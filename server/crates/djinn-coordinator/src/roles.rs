@@ -145,6 +145,45 @@ pub(crate) fn is_human_review_hold(task: &Task) -> bool {
 /// carries an active tripwire hold.
 pub(crate) const PLANNER_PARK_ESCALATION_LABEL: &str = "planner-park-escalation";
 
+/// Label marking a task as a **first-response** Planner remediation — the
+/// FIRST rung of the escalation ladder, created by the coordinator's own
+/// loop detectors (stuck task, cycling task, provider-failure streak, the
+/// PR/CI-loop paths) or by an agent calling `request_planner`.
+///
+/// It is the queryable sibling of [`PLANNER_PARK_ESCALATION_LABEL`] and is
+/// deliberately INERT with respect to every behavioural predicate in this
+/// module: it is neither a human hold ([`is_human_review_hold`]) nor a
+/// source-releasing hold ([`releases_source_on_close`]). A first-response
+/// remediation is dispatched to a Planner inline and, when it closes, the
+/// source revives through the ordinary `emit_unblocked_tasks` blocker path —
+/// not the hold-release path. The label exists so the board can DISTINGUISH
+/// the first-response rung from the terminal post-arbiter rung by query
+/// rather than by reading description prose.
+pub(crate) const PLANNER_REMEDIATION_LABEL: &str = "planner-remediation";
+
+/// Title prefix for a **first-response** Planner remediation
+/// ([`PLANNER_REMEDIATION_LABEL`]): `Planner remediation [<short_id>]: <title>`.
+///
+/// The three remediation rungs use three DIFFERENT prefixes so the board can
+/// tell them apart from the title alone. Before this split every rung was
+/// titled `Planner remediation [...]`, and a terminal post-arbiter escalation
+/// was indistinguishable from a first-detection one without reading the
+/// description.
+pub const PLANNER_REMEDIATION_TITLE_PREFIX: &str = "Planner remediation";
+
+/// Title prefix for the **terminal**, post-arbiter planner-park escalation
+/// ([`PLANNER_PARK_ESCALATION_LABEL`]):
+/// `Planner terminal escalation [<short_id>]: <title>`.
+///
+/// Used by BOTH producers of a planner-park escalation: the coordinator's
+/// loop-breaker rungs (`dispatch/retry.rs`) and the arbiter `park` decision
+/// (`djinn-agent`'s `create_arbiter_planner_escalation`).
+pub const PLANNER_TERMINAL_ESCALATION_TITLE_PREFIX: &str = "Planner terminal escalation";
+
+/// Title prefix for a human-only remediation hold
+/// ([`HUMAN_REVIEW_HOLD_LABEL`]): `Human review required [<short_id>]: <title>`.
+pub const HUMAN_REVIEW_TITLE_PREFIX: &str = "Human review required";
+
 /// Returns `true` if closing `task` must run the hold-release semantics on the
 /// source task(s) it was blocking — stamping `human_review_resolved_at` and
 /// emitting `tripwire.hold.released`.

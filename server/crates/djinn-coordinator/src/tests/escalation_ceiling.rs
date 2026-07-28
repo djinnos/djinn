@@ -229,7 +229,7 @@ async fn seed_prior_escalation(
             None,
             djinn_db::EffectiveCreatorProvenance::explicit_user_id(&user.id),
             &format!(
-                "Planner remediation [{}]: prior escalation {n}",
+                "Planner terminal escalation [{}]: prior escalation {n}",
                 source.short_id
             ),
             "prior autonomous escalation",

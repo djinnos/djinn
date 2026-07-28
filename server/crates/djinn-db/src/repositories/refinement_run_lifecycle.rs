@@ -33,6 +33,29 @@ impl ProposalRepository {
             .collect())
     }
 
+    /// The spec revision this run was admitted from — the pre-refinement
+    /// snapshot the human's reject reverts to, and the `before` side of the
+    /// reviewed diff.
+    ///
+    /// Disposable in-memory projections must read it from here rather than from
+    /// the proposal's current head: the head advances with every revision the
+    /// tribunal writes, so a projection rebuilt mid-run would otherwise adopt
+    /// the refined spec as its own "pre-refinement" snapshot.
+    pub async fn refinement_run_captured_snapshot_seq(
+        &self,
+        run_id: &str,
+    ) -> IntentMutationResult<Option<i32>> {
+        self.db().ensure_initialized().await?;
+        Ok(sqlx::query_scalar::<_, i32>(
+            "SELECT start.seq FROM refinement_runs r \
+             JOIN proposal_revisions start ON start.id = r.source_start_revision_id \
+             WHERE r.id = $1",
+        )
+        .bind(run_id)
+        .fetch_optional(self.db().pool())
+        .await?)
+    }
+
     /// Discover durable running runs without changing leases or heartbeat.
     pub async fn load_active_refinement_runs(
         &self,
@@ -230,13 +253,9 @@ impl ProposalRepository {
         &self,
         request: ResolveRefinementHumanReviewRequest,
     ) -> IntentMutationResult<bool> {
-        if request.run_id.trim().is_empty()
-            || request.generation <= 0
-            || request.snapshot_revision_seq <= 0
-        {
+        if request.run_id.trim().is_empty() || request.generation <= 0 {
             return Err(RefinementIntentMutationError::InvalidRequest(
-                "exact run, positive generation, and captured snapshot revision are required"
-                    .into(),
+                "exact run and positive generation are required".into(),
             ));
         }
         self.db().ensure_initialized().await?;
@@ -268,11 +287,14 @@ impl ProposalRepository {
                 "human review resolution requires an exact awaiting-review park".into(),
             ));
         }
-        if run.get::<i32, _>("captured_seq") != request.snapshot_revision_seq {
-            return Err(RefinementIntentMutationError::InvalidRequest(
-                "human review snapshot does not match the captured run snapshot".into(),
-            ));
-        }
+        // The run row itself is the only authority for which revision the
+        // refinement started from. Callers hold a disposable in-memory
+        // projection that is rebuilt from the *live* proposal head whenever the
+        // coordinator restarts or re-hydrates mid-run, so any caller-supplied
+        // snapshot seq drifts forward with every tribunal revision. Comparing
+        // against it wedged parked runs permanently: neither accept nor reject
+        // could ever match once a projection had been rebuilt.
+        let captured_seq: i32 = run.get("captured_seq");
         let proposal_id: String = run.get("proposal_id");
         let reason = if request.accept {
             djinn_core::refinement_liveness::RefinementStopReason::HumanAccepted
@@ -296,7 +318,7 @@ impl ProposalRepository {
                  ORDER BY created_at DESC, id DESC LIMIT 1",
             )
             .bind(&proposal_id)
-            .bind(request.snapshot_revision_seq)
+            .bind(captured_seq)
             .fetch_optional(&mut *tx)
             .await?
             .ok_or_else(|| {
@@ -340,7 +362,7 @@ impl ProposalRepository {
             .bind(&body)
             .bind(&body_format)
             .bind(&acceptance_criteria)
-            .bind(serde_json::json!({"source":"human_review_rejection","snapshot_revision_seq":request.snapshot_revision_seq}))
+            .bind(serde_json::json!({"source":"human_review_rejection","snapshot_revision_seq":captured_seq}))
             .execute(&mut *tx)
             .await?;
         }
