@@ -832,7 +832,6 @@ impl CoordinatorActor {
             .resolve_refinement_human_review(ResolveRefinementHumanReviewRequest {
                 run_id: state.run_id.clone(),
                 generation: state.generation,
-                snapshot_revision_seq: state.snapshot_revision_seq,
                 accept,
             })
             .await

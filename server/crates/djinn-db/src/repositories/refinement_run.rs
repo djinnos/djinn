@@ -145,7 +145,6 @@ pub struct TerminalRefinementRunFromIntentRequest {
 pub struct ResolveRefinementHumanReviewRequest {
     pub run_id: String,
     pub generation: i32,
-    pub snapshot_revision_seq: i32,
     pub accept: bool,
 }
 /// A named durable append boundary that is permitted to move the heartbeat.
