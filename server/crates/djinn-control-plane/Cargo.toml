@@ -50,6 +50,9 @@ test-support = []
 djinn-control-plane = { path = ".", features = ["test-support"] }
 djinn-db = { path = "../djinn-db", features = ["test-support"] }
 djinn-agent = { path = "../djinn-agent", features = ["test-support"] }
+# The refinement cross-surface regression drives the registered coordinator
+# doctor source/check, rather than reconstructing its repository reads.
+djinn-coordinator = { path = "../djinn-coordinator" }
 tempfile = "3"
 anyhow = "1"
 async-trait = "0.1"

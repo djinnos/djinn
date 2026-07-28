@@ -416,6 +416,40 @@ impl ProposalRepository {
         Ok(result)
     }
 
+    /// Load the exact snapshots consumed by the phantom-active doctor source.
+    ///
+    /// Enumeration and exact observation intentionally remain separate reads:
+    /// an intervening generation change is discarded by the generation fence,
+    /// rather than being reported as an observation of the old run.
+    pub async fn load_recoverable_refinement_run_snapshots(
+        &self,
+        heartbeat_grace_millis: i64,
+    ) -> std::result::Result<Vec<RefinementRunSnapshotResult>, RefinementRunSnapshotError> {
+        self.db().ensure_initialized().await?;
+        let rows = sqlx::query(
+            "SELECT id, generation FROM refinement_runs \
+             WHERE state IN ('running', 'parked') ORDER BY created_at",
+        )
+        .fetch_all(self.db().pool())
+        .await?;
+        let mut snapshots = Vec::with_capacity(rows.len());
+        for row in rows {
+            let run_id: String = row.get("id");
+            let generation: i32 = row.get("generation");
+            if let Some(exact) = self
+                .load_refinement_run_snapshot(LoadRefinementRunSnapshotRequest {
+                    run_id,
+                    heartbeat_grace_millis,
+                })
+                .await?
+                && exact.generation == generation
+            {
+                snapshots.push(exact);
+            }
+        }
+        Ok(snapshots)
+    }
+
     /// Load the latest exact run for a proposal, including its terminal
     /// disposition when no later generation has replaced it.
     pub async fn load_current_refinement_run_snapshot(
