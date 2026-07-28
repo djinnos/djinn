@@ -25,11 +25,115 @@ pub struct FingerprintUnitEntry {
     pub projected_bytes: u64,
 }
 
+/// Measured bytes of one profile root, split by the directory Cargo puts them
+/// in.
+///
+/// [`FingerprintUnitEntry::projected_bytes`] only ever counted bytes inside
+/// `.fingerprint/<unit>`, which are metadata stamps of a few kilobytes each.
+/// The artifacts a unit actually costs on disk live in `deps/`, `build/` and
+/// `incremental/` — orders of magnitude more — so a report built from unit
+/// bytes alone understates the profile's real footprint by roughly that ratio.
+/// This measurement is what makes the shortfall visible; it does not attribute
+/// `deps`/`build`/`incremental` bytes back to individual units, which would
+/// require reproducing Cargo's unit-hash-to-artifact mapping.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ProfileRootMeasurement {
+    pub profile_root: PathBuf,
+    pub fingerprint_bytes: u64,
+    pub deps_bytes: u64,
+    pub build_bytes: u64,
+    pub incremental_bytes: u64,
+    /// Everything else directly under the profile root (final binaries, loose
+    /// files, `examples/`, and so on).
+    pub other_bytes: u64,
+}
+
+impl ProfileRootMeasurement {
+    pub fn total_bytes(&self) -> u64 {
+        [
+            self.fingerprint_bytes,
+            self.deps_bytes,
+            self.build_bytes,
+            self.incremental_bytes,
+            self.other_bytes,
+        ]
+        .into_iter()
+        .fold(0u64, u64::saturating_add)
+    }
+}
+
 /// Report-only, side-effect-free inventory of Cargo fingerprint units inside a
 /// warm base.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct FingerprintUnitInventory {
     pub units: Vec<FingerprintUnitEntry>,
+    /// Per-profile-root disk measurement. Reported alongside the unit inventory
+    /// so a reader cannot mistake summed unit bytes for the profile's real size.
+    pub profile_roots: Vec<ProfileRootMeasurement>,
+}
+
+impl FingerprintUnitInventory {
+    /// Total measured bytes across every discovered profile root.
+    pub fn profile_root_bytes(&self) -> u64 {
+        self.profile_roots
+            .iter()
+            .map(ProfileRootMeasurement::total_bytes)
+            .fold(0u64, u64::saturating_add)
+    }
+}
+
+/// Measure a profile root's immediate children, bucketed by Cargo's layout.
+fn measure_profile_root(profile_root: &Path) -> Result<ProfileRootMeasurement, String> {
+    let mut measurement = ProfileRootMeasurement {
+        profile_root: profile_root.to_path_buf(),
+        ..ProfileRootMeasurement::default()
+    };
+    let children = std::fs::read_dir(profile_root).map_err(|e| {
+        format!(
+            "failed to read profile root {}: {e}",
+            profile_root.display()
+        )
+    })?;
+    for child in children {
+        let child = child.map_err(|e| {
+            format!(
+                "failed to read directory entry under {}: {e}",
+                profile_root.display()
+            )
+        })?;
+        let kind = child.file_type().map_err(|e| {
+            format!(
+                "failed to read file type for {}: {e}",
+                child.path().display()
+            )
+        })?;
+        if kind.is_dir() {
+            let bytes = directory_size_fail_closed(&child.path())?;
+            let name = child.file_name();
+            match name.to_string_lossy().as_ref() {
+                FINGERPRINT_DIR => {
+                    measurement.fingerprint_bytes =
+                        measurement.fingerprint_bytes.saturating_add(bytes);
+                }
+                "deps" => measurement.deps_bytes = measurement.deps_bytes.saturating_add(bytes),
+                "build" => measurement.build_bytes = measurement.build_bytes.saturating_add(bytes),
+                "incremental" => {
+                    measurement.incremental_bytes =
+                        measurement.incremental_bytes.saturating_add(bytes);
+                }
+                _ => measurement.other_bytes = measurement.other_bytes.saturating_add(bytes),
+            }
+        } else if kind.is_file() {
+            let metadata = child.metadata().map_err(|e| {
+                format!(
+                    "failed to read metadata for {}: {e}",
+                    child.path().display()
+                )
+            })?;
+            measurement.other_bytes = measurement.other_bytes.saturating_add(metadata.len());
+        }
+    }
+    Ok(measurement)
 }
 
 fn is_profile_root_name(name: &str) -> bool {
@@ -196,6 +300,7 @@ pub fn inventory_fingerprint_units(base: &Path) -> Result<FingerprintUnitInvento
     profile_roots.dedup();
 
     let mut units = Vec::new();
+    let mut measurements = Vec::new();
     for profile_root in profile_roots {
         let profile_canonical = std::fs::canonicalize(&profile_root).map_err(|e| {
             format!(
@@ -241,6 +346,14 @@ pub fn inventory_fingerprint_units(base: &Path) -> Result<FingerprintUnitInvento
                 base_canonical.display()
             ));
         }
+
+        // Measure the whole profile root, not just `.fingerprint`. Summed unit
+        // bytes are metadata only; `deps`, `build` and `incremental` hold the
+        // artifacts. This runs after the `.fingerprint` checks so the existing
+        // fail-closed error precedence is unchanged, which also means a profile
+        // root with no `.fingerprint` at all is skipped here exactly as it is
+        // for units.
+        measurements.push(measure_profile_root(&profile_canonical)?);
 
         let unit_entries = std::fs::read_dir(&fingerprint_canonical).map_err(|e| {
             format!(
@@ -300,6 +413,10 @@ pub fn inventory_fingerprint_units(base: &Path) -> Result<FingerprintUnitInvento
             .cmp(&right.profile_root)
             .then_with(|| left.unit_name.cmp(&right.unit_name))
     });
+    measurements.sort_by(|left, right| left.profile_root.cmp(&right.profile_root));
 
-    Ok(FingerprintUnitInventory { units })
+    Ok(FingerprintUnitInventory {
+        units,
+        profile_roots: measurements,
+    })
 }

@@ -243,6 +243,20 @@ pub struct CacheCleanupConfig {
     /// eviction stops. Expressed as a fraction of total available bytes.
     /// Env: `DJINN_CACHE_CLEANUP_WARM_BASE_HIGH_FREE_RATIO` (default `0.25`).
     pub warm_base_high_free_ratio: f64,
+
+    /// How long a directory inside `/cache/cargo-target/<project_id>/` that is
+    /// not a canonical `mold-jobs-N` variant must go untouched before the sweep
+    /// reclaims it.
+    /// Env: `DJINN_CACHE_CLEANUP_WARM_UNRECOGNIZED_MIN_IDLE_DAYS` (default `7`).
+    ///
+    /// This is deliberately a shipped default rather than an arming flag. An
+    /// unrecognized entry is by definition something the code does not
+    /// understand, so the sweep does not reason about *what* it is — it proves
+    /// nothing has written anywhere in the tree for this long, that the project
+    /// has no active task run or in-flight warm Job, and takes the whole-project
+    /// warm lock. Setting `0` makes any such entry immediately eligible, which
+    /// is why the shipped value is a week rather than zero.
+    pub warm_unrecognized_min_idle_days: u64,
 }
 
 impl Default for CacheCleanupConfig {
@@ -260,6 +274,7 @@ impl Default for CacheCleanupConfig {
             warm_base_grace_period: Duration::from_secs(300),
             warm_base_low_free_ratio: 0.15,
             warm_base_high_free_ratio: 0.25,
+            warm_unrecognized_min_idle_days: 7,
         }
     }
 }
@@ -333,6 +348,12 @@ impl CacheCleanupConfig {
 
         let warm_base_low_free_ratio = warm_base_low_free_ratio.min(warm_base_high_free_ratio);
 
+        let warm_unrecognized_min_idle_days =
+            std::env::var("DJINN_CACHE_CLEANUP_WARM_UNRECOGNIZED_MIN_IDLE_DAYS")
+                .ok()
+                .and_then(|value| parse_unsigned_decimal(&value))
+                .unwrap_or(7);
+
         Self {
             mode,
             sccache_enabled,
@@ -346,6 +367,7 @@ impl CacheCleanupConfig {
             warm_base_grace_period: Duration::from_secs(warm_base_grace_period_secs),
             warm_base_low_free_ratio,
             warm_base_high_free_ratio,
+            warm_unrecognized_min_idle_days,
         }
     }
 
@@ -534,6 +556,35 @@ mod tests {
         assert_eq!(config.warm_base_grace_period, Duration::from_secs(300));
         assert!((config.warm_base_low_free_ratio - 0.15).abs() < f64::EPSILON);
         assert!((config.warm_base_high_free_ratio - 0.25).abs() < f64::EPSILON);
+        // Reclaiming a directory the layout cannot explain is default-on, with
+        // a shipped idle threshold rather than an arming flag an operator has
+        // to remember. A zero here would make any unrecognized entry
+        // immediately eligible.
+        assert_eq!(config.warm_unrecognized_min_idle_days, 7);
+    }
+
+    #[test]
+    fn cache_cleanup_unrecognized_idle_days_falls_back_to_the_shipped_default() {
+        unsafe {
+            std::env::set_var(
+                "DJINN_CACHE_CLEANUP_WARM_UNRECOGNIZED_MIN_IDLE_DAYS",
+                "not-a-number",
+            );
+        }
+        assert_eq!(
+            CacheCleanupConfig::from_env().warm_unrecognized_min_idle_days,
+            7
+        );
+        unsafe {
+            std::env::set_var("DJINN_CACHE_CLEANUP_WARM_UNRECOGNIZED_MIN_IDLE_DAYS", "30");
+        }
+        assert_eq!(
+            CacheCleanupConfig::from_env().warm_unrecognized_min_idle_days,
+            30
+        );
+        unsafe {
+            std::env::remove_var("DJINN_CACHE_CLEANUP_WARM_UNRECOGNIZED_MIN_IDLE_DAYS");
+        }
     }
 
     #[test]

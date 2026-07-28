@@ -65,6 +65,22 @@ fn entry() -> WarmBaseEntry {
         size_bytes: 7,
     }
 }
+/// Build an inventory from its entries alone.
+///
+/// Every test here that constructs an inventory cares only about the entries;
+/// `ignored` and `unrecognized` are inventory-reporting concerns exercised by
+/// `inventory_under` and the `unrecognized_reclaim` module against a real
+/// filesystem. Spelling those fields out at each site meant that adding one
+/// field to `WarmBaseInventory` forced ~34 mechanical edits and pushed this
+/// file through the repository's Rust file-size guard. Constructing through a
+/// helper makes the next field addition free.
+fn warm_inventory(entries: Vec<WarmBaseEntry>) -> WarmBaseInventory {
+    WarmBaseInventory {
+        entries,
+        ignored: 0,
+        unrecognized: Vec::new(),
+    }
+}
 fn snapshot() -> ActivitySnapshot {
     ActivitySnapshot {
         known_project: true,
@@ -107,10 +123,7 @@ async fn classifications_registered_deleted_and_orphaned() {
     let space = Space(Ok(9));
     let warm = Warm(Ok(false));
     let registered = plan(
-        WarmBaseInventory {
-            entries: vec![entry()],
-            ignored: 0,
-        },
+        warm_inventory(vec![entry()]),
         &Activity(Ok(ActivitySnapshot {
             known_project: true,
             ..snapshot()
@@ -126,10 +139,7 @@ async fn classifications_registered_deleted_and_orphaned() {
     );
 
     let deleted = plan(
-        WarmBaseInventory {
-            entries: vec![entry()],
-            ignored: 0,
-        },
+        warm_inventory(vec![entry()]),
         &Activity(Ok(ActivitySnapshot {
             known_project: false,
             deleted_project: true,
@@ -146,10 +156,7 @@ async fn classifications_registered_deleted_and_orphaned() {
     );
 
     let orphaned = plan(
-        WarmBaseInventory {
-            entries: vec![entry()],
-            ignored: 0,
-        },
+        warm_inventory(vec![entry()]),
         &Activity(Ok(ActivitySnapshot {
             known_project: false,
             ..snapshot()
@@ -170,10 +177,7 @@ async fn guards_fail_closed_and_classify() {
     let space = Space(Ok(9));
     let lock = Lock(LockOutcome::Available);
     let initial_plan = plan(
-        WarmBaseInventory {
-            entries: vec![entry()],
-            ignored: 0,
-        },
+        warm_inventory(vec![entry()]),
         &activity,
         &Warm(Ok(false)),
         &space,
@@ -213,17 +217,7 @@ async fn guards_fail_closed_and_classify() {
         } else {
             Lock(LockOutcome::Available)
         };
-        let planned = plan(
-            WarmBaseInventory {
-                entries: vec![entry()],
-                ignored: 0,
-            },
-            &active,
-            &warm,
-            &space,
-            &lock,
-        )
-        .await;
+        let planned = plan(warm_inventory(vec![entry()]), &active, &warm, &space, &lock).await;
         assert_eq!(planned.retained[0].1, reason);
     }
 }
@@ -232,10 +226,7 @@ async fn activity_and_measurement_errors_retain() {
     let lock = Lock(LockOutcome::Available);
     let warm = Warm(Ok(false));
     let result = plan(
-        WarmBaseInventory {
-            entries: vec![entry()],
-            ignored: 0,
-        },
+        warm_inventory(vec![entry()]),
         &Activity(Err("db".into())),
         &warm,
         &Space(Ok(1)),
@@ -244,10 +235,7 @@ async fn activity_and_measurement_errors_retain() {
     .await;
     assert_eq!(result.retained[0].1, RetainReason::ActivityError);
     let result = plan(
-        WarmBaseInventory {
-            entries: vec![entry()],
-            ignored: 0,
-        },
+        warm_inventory(vec![entry()]),
         &Activity(Ok(snapshot())),
         &warm,
         &Space(Err("stat".into())),
@@ -285,10 +273,7 @@ async fn idle_eviction_deletes_old_registered_base() {
 
     let clock = TestClock::new(future(15), std::time::Instant::now());
     let entry = make_entry(&base);
-    let inventory = WarmBaseInventory {
-        entries: vec![entry],
-        ignored: 0,
-    };
+    let inventory = warm_inventory(vec![entry]);
     let activity = Activity(Ok(ActivitySnapshot {
         known_project: true,
         has_active_task_run: false,
@@ -336,10 +321,7 @@ async fn idle_eviction_retains_young_base_by_mtime() {
         path: base.clone(),
         size_bytes: 1,
     };
-    let inventory = WarmBaseInventory {
-        entries: vec![entry],
-        ignored: 0,
-    };
+    let inventory = warm_inventory(vec![entry]);
     let activity = Activity(Ok(ActivitySnapshot {
         known_project: true,
         has_active_task_run: false,
@@ -388,10 +370,7 @@ async fn idle_eviction_db_activity_takes_precedence_over_mtime() {
         path: base.clone(),
         size_bytes: 1,
     };
-    let inventory = WarmBaseInventory {
-        entries: vec![entry],
-        ignored: 0,
-    };
+    let inventory = warm_inventory(vec![entry]);
     let activity = Activity(Ok(ActivitySnapshot {
         known_project: true,
         has_active_task_run: false,
@@ -424,10 +403,7 @@ async fn idle_eviction_deletes_deleted_project_base() {
     let id = "018f8b9a-0d70-7f0a-8000-000000000001";
     let base = old_base(&temp, id);
     let entry = make_entry(&base);
-    let inventory = WarmBaseInventory {
-        entries: vec![entry],
-        ignored: 0,
-    };
+    let inventory = warm_inventory(vec![entry]);
     let activity = Activity(Ok(ActivitySnapshot {
         known_project: false,
         deleted_project: true,
@@ -460,10 +436,7 @@ async fn idle_eviction_deletes_orphaned_base() {
     let id = "018f8b9a-0d70-7f0a-8000-000000000001";
     let base = old_base(&temp, id);
     let entry = make_entry(&base);
-    let inventory = WarmBaseInventory {
-        entries: vec![entry],
-        ignored: 0,
-    };
+    let inventory = warm_inventory(vec![entry]);
     let activity = Activity(Ok(ActivitySnapshot {
         known_project: false,
         deleted_project: false,
@@ -496,10 +469,7 @@ async fn active_task_run_retains_base() {
     let id = "018f8b9a-0d70-7f0a-8000-000000000001";
     let base = old_base(&temp, id);
     let entry = make_entry(&base);
-    let inventory = WarmBaseInventory {
-        entries: vec![entry],
-        ignored: 0,
-    };
+    let inventory = warm_inventory(vec![entry]);
     let activity = Activity(Ok(ActivitySnapshot {
         known_project: true,
         has_active_task_run: true,
@@ -533,10 +503,7 @@ async fn in_flight_warm_job_retains_base() {
     let id = "018f8b9a-0d70-7f0a-8000-000000000001";
     let base = old_base(&temp, id);
     let entry = make_entry(&base);
-    let inventory = WarmBaseInventory {
-        entries: vec![entry],
-        ignored: 0,
-    };
+    let inventory = warm_inventory(vec![entry]);
     let activity = Activity(Ok(ActivitySnapshot {
         known_project: true,
         has_active_task_run: false,
@@ -570,10 +537,7 @@ async fn lock_busy_retains_base() {
     let id = "018f8b9a-0d70-7f0a-8000-000000000001";
     let base = old_base(&temp, id);
     let entry = make_entry(&base);
-    let inventory = WarmBaseInventory {
-        entries: vec![entry],
-        ignored: 0,
-    };
+    let inventory = warm_inventory(vec![entry]);
     let activity = Activity(Ok(ActivitySnapshot {
         known_project: true,
         has_active_task_run: false,
@@ -611,10 +575,7 @@ async fn post_lock_recheck_retains_base() {
     let id = "018f8b9a-0d70-7f0a-8000-000000000001";
     let base = old_base(&temp, id);
     let entry = make_entry(&base);
-    let inventory = WarmBaseInventory {
-        entries: vec![entry],
-        ignored: 0,
-    };
+    let inventory = warm_inventory(vec![entry]);
     struct FlipActivityGuard {
         first: std::sync::Mutex<Option<ActivitySnapshot>>,
         second: ActivitySnapshot,
@@ -676,10 +637,7 @@ async fn dry_run_and_delete_select_same_candidates() {
         path: base.clone(),
         size_bytes: 42,
     };
-    let inventory = WarmBaseInventory {
-        entries: vec![entry],
-        ignored: 0,
-    };
+    let inventory = warm_inventory(vec![entry]);
     let activity = Activity(Ok(ActivitySnapshot {
         known_project: true,
         has_active_task_run: false,
@@ -733,10 +691,7 @@ async fn dry_run_and_delete_parity_with_flock_lock() {
         path: base.clone(),
         size_bytes: 42,
     };
-    let inventory = WarmBaseInventory {
-        entries: vec![entry],
-        ignored: 0,
-    };
+    let inventory = warm_inventory(vec![entry]);
     let activity = Activity(Ok(ActivitySnapshot {
         known_project: true,
         has_active_task_run: false,
@@ -792,10 +747,7 @@ async fn activity_error_fails_closed() {
     let id = "018f8b9a-0d70-7f0a-8000-000000000001";
     let base = old_base(&temp, id);
     let entry = make_entry(&base);
-    let inventory = WarmBaseInventory {
-        entries: vec![entry],
-        ignored: 0,
-    };
+    let inventory = warm_inventory(vec![entry]);
     let activity = Activity(Err("db down".into()));
     let warm = Warm(Ok(false));
     let locks = NoopBaseLock;
@@ -824,10 +776,7 @@ async fn lock_error_fails_closed() {
     let id = "018f8b9a-0d70-7f0a-8000-000000000001";
     let base = old_base(&temp, id);
     let entry = make_entry(&base);
-    let inventory = WarmBaseInventory {
-        entries: vec![entry],
-        ignored: 0,
-    };
+    let inventory = warm_inventory(vec![entry]);
     let activity = Activity(Ok(ActivitySnapshot {
         known_project: true,
         has_active_task_run: false,
@@ -861,10 +810,7 @@ async fn unsafe_path_is_not_deleted() {
     let id = "018f8b9a-0d70-7f0a-8000-000000000001";
     let base = old_base(&temp, id);
     let entry = make_entry(&base);
-    let inventory = WarmBaseInventory {
-        entries: vec![entry],
-        ignored: 0,
-    };
+    let inventory = warm_inventory(vec![entry]);
     let activity = Activity(Ok(ActivitySnapshot {
         known_project: true,
         has_active_task_run: false,
@@ -940,10 +886,10 @@ async fn pressure_above_low_watermark_produces_no_candidates() {
         total_bytes: 1000,
         available_bytes: 200,
     }));
-    let inventory = WarmBaseInventory {
-        entries: vec![pressure_entry("018f8b9a-0d70-7f0a-8000-000000000001", 100)],
-        ignored: 0,
-    };
+    let inventory = warm_inventory(vec![pressure_entry(
+        "018f8b9a-0d70-7f0a-8000-000000000001",
+        100,
+    )]);
     let activity = Activity(Ok(snapshot_at(Some(old_activity(14)))));
     let warm = Warm(Ok(false));
     let locks = Lock(LockOutcome::Available);
@@ -966,10 +912,10 @@ async fn pressure_at_low_watermark_is_no_op() {
         total_bytes: 1000,
         available_bytes: 150,
     }));
-    let inventory = WarmBaseInventory {
-        entries: vec![pressure_entry("018f8b9a-0d70-7f0a-8000-000000000001", 100)],
-        ignored: 0,
-    };
+    let inventory = warm_inventory(vec![pressure_entry(
+        "018f8b9a-0d70-7f0a-8000-000000000001",
+        100,
+    )]);
     let activity = Activity(Ok(snapshot_at(Some(old_activity(14)))));
     let warm = Warm(Ok(false));
     let locks = Lock(LockOutcome::Available);
@@ -993,14 +939,11 @@ async fn pressure_below_low_selects_minimal_prefix() {
         total_bytes: 1000,
         available_bytes: 100,
     }));
-    let inventory = WarmBaseInventory {
-        entries: vec![
-            pressure_entry("018f8b9a-0d70-7f0a-8000-000000000003", 80),
-            pressure_entry("018f8b9a-0d70-7f0a-8000-000000000001", 100),
-            pressure_entry("018f8b9a-0d70-7f0a-8000-000000000002", 60),
-        ],
-        ignored: 0,
-    };
+    let inventory = warm_inventory(vec![
+        pressure_entry("018f8b9a-0d70-7f0a-8000-000000000003", 80),
+        pressure_entry("018f8b9a-0d70-7f0a-8000-000000000001", 100),
+        pressure_entry("018f8b9a-0d70-7f0a-8000-000000000002", 60),
+    ]);
     // Same activity for all, so ordering is by project ID.
     let activity = Activity(Ok(snapshot_at(Some(old_activity(12)))));
     let warm = Warm(Ok(false));
@@ -1034,14 +977,11 @@ async fn pressure_orders_by_activity_then_project_id() {
         total_bytes: 1000,
         available_bytes: 100,
     }));
-    let inventory = WarmBaseInventory {
-        entries: vec![
-            pressure_entry("018f8b9a-0d70-7f0a-8000-000000000003", 50),
-            pressure_entry("018f8b9a-0d70-7f0a-8000-000000000001", 50),
-            pressure_entry("018f8b9a-0d70-7f0a-8000-000000000002", 50),
-        ],
-        ignored: 0,
-    };
+    let inventory = warm_inventory(vec![
+        pressure_entry("018f8b9a-0d70-7f0a-8000-000000000003", 50),
+        pressure_entry("018f8b9a-0d70-7f0a-8000-000000000001", 50),
+        pressure_entry("018f8b9a-0d70-7f0a-8000-000000000002", 50),
+    ]);
     let activity = Activity(Ok(snapshot_at(Some(old_activity(12)))));
     let warm = Warm(Ok(false));
     let locks = Lock(LockOutcome::Available);
@@ -1074,17 +1014,14 @@ async fn pressure_excluded_candidates_are_not_selected() {
         total_bytes: 1000,
         available_bytes: 100,
     }));
-    let inventory = WarmBaseInventory {
-        entries: vec![
-            pressure_entry("018f8b9a-0d70-7f0a-8000-000000000001", 50),
-            pressure_entry("018f8b9a-0d70-7f0a-8000-000000000002", 50),
-            pressure_entry("018f8b9a-0d70-7f0a-8000-000000000003", 50),
-            pressure_entry("018f8b9a-0d70-7f0a-8000-000000000004", 50),
-            pressure_entry("018f8b9a-0d70-7f0a-8000-000000000005", 50),
-            pressure_entry("018f8b9a-0d70-7f0a-8000-000000000006", 50),
-        ],
-        ignored: 0,
-    };
+    let inventory = warm_inventory(vec![
+        pressure_entry("018f8b9a-0d70-7f0a-8000-000000000001", 50),
+        pressure_entry("018f8b9a-0d70-7f0a-8000-000000000002", 50),
+        pressure_entry("018f8b9a-0d70-7f0a-8000-000000000003", 50),
+        pressure_entry("018f8b9a-0d70-7f0a-8000-000000000004", 50),
+        pressure_entry("018f8b9a-0d70-7f0a-8000-000000000005", 50),
+        pressure_entry("018f8b9a-0d70-7f0a-8000-000000000006", 50),
+    ]);
 
     struct GuardActivity;
     #[async_trait]
@@ -1152,10 +1089,10 @@ async fn pressure_excluded_candidates_are_not_selected() {
 async fn pressure_measurement_error_fails_closed() {
     let config = pressure_config(0.15, 0.25);
     let capacity = Capacity(Err("statvfs failed".into()));
-    let inventory = WarmBaseInventory {
-        entries: vec![pressure_entry("018f8b9a-0d70-7f0a-8000-000000000001", 100)],
-        ignored: 0,
-    };
+    let inventory = warm_inventory(vec![pressure_entry(
+        "018f8b9a-0d70-7f0a-8000-000000000001",
+        100,
+    )]);
     let activity = Activity(Ok(snapshot_at(Some(old_activity(12)))));
     let warm = Warm(Ok(false));
     let locks = Lock(LockOutcome::Available);
@@ -1179,13 +1116,10 @@ async fn pressure_insufficient_reclaimable_space_selects_all_safe() {
         total_bytes: 1000,
         available_bytes: 100,
     }));
-    let inventory = WarmBaseInventory {
-        entries: vec![
-            pressure_entry("018f8b9a-0d70-7f0a-8000-000000000001", 40),
-            pressure_entry("018f8b9a-0d70-7f0a-8000-000000000002", 60),
-        ],
-        ignored: 0,
-    };
+    let inventory = warm_inventory(vec![
+        pressure_entry("018f8b9a-0d70-7f0a-8000-000000000001", 40),
+        pressure_entry("018f8b9a-0d70-7f0a-8000-000000000002", 60),
+    ]);
     let activity = Activity(Ok(snapshot_at(Some(old_activity(12)))));
     let warm = Warm(Ok(false));
     let locks = Lock(LockOutcome::Available);
@@ -1210,13 +1144,10 @@ async fn pressure_exact_stop_at_high_watermark() {
         total_bytes: 1000,
         available_bytes: 100,
     }));
-    let inventory = WarmBaseInventory {
-        entries: vec![
-            pressure_entry("018f8b9a-0d70-7f0a-8000-000000000001", 150),
-            pressure_entry("018f8b9a-0d70-7f0a-8000-000000000002", 50),
-        ],
-        ignored: 0,
-    };
+    let inventory = warm_inventory(vec![
+        pressure_entry("018f8b9a-0d70-7f0a-8000-000000000001", 150),
+        pressure_entry("018f8b9a-0d70-7f0a-8000-000000000002", 50),
+    ]);
     let activity = Activity(Ok(snapshot_at(Some(old_activity(12)))));
     let warm = Warm(Ok(false));
     let locks = Lock(LockOutcome::Available);
@@ -1241,13 +1172,10 @@ async fn pressure_young_base_is_excluded() {
         total_bytes: 1000,
         available_bytes: 100,
     }));
-    let inventory = WarmBaseInventory {
-        entries: vec![
-            pressure_entry("018f8b9a-0d70-7f0a-8000-000000000001", 50),
-            pressure_entry("018f8b9a-0d70-7f0a-8000-000000000002", 50),
-        ],
-        ignored: 0,
-    };
+    let inventory = warm_inventory(vec![
+        pressure_entry("018f8b9a-0d70-7f0a-8000-000000000001", 50),
+        pressure_entry("018f8b9a-0d70-7f0a-8000-000000000002", 50),
+    ]);
 
     struct YoungActivity;
     #[async_trait]
@@ -1298,10 +1226,10 @@ async fn pressure_fractional_byte_boundary_reaches_high_watermark() {
         total_bytes: 10,
         available_bytes: 1,
     }));
-    let inventory = WarmBaseInventory {
-        entries: vec![pressure_entry("018f8b9a-0d70-7f0a-8000-000000000001", 1)],
-        ignored: 0,
-    };
+    let inventory = warm_inventory(vec![pressure_entry(
+        "018f8b9a-0d70-7f0a-8000-000000000001",
+        1,
+    )]);
     let activity = Activity(Ok(snapshot_at(Some(old_activity(12)))));
     let warm = Warm(Ok(false));
     let locks = Lock(LockOutcome::Available);
@@ -1328,13 +1256,10 @@ async fn pressure_large_capacity_preserves_high_watermark_byte_ceiling() {
         total_bytes: 9_007_199_254_740_993,
         available_bytes: 0,
     }));
-    let inventory = WarmBaseInventory {
-        entries: vec![pressure_entry(
-            "018f8b9a-0d70-7f0a-8000-000000000001",
-            2_251_799_813_685_248,
-        )],
-        ignored: 0,
-    };
+    let inventory = warm_inventory(vec![pressure_entry(
+        "018f8b9a-0d70-7f0a-8000-000000000001",
+        2_251_799_813_685_248,
+    )]);
     let activity = Activity(Ok(snapshot_at(Some(old_activity(12)))));
     let warm = Warm(Ok(false));
     let locks = Lock(LockOutcome::Available);
@@ -1357,10 +1282,10 @@ async fn pressure_large_capacity_compares_low_watermark_exactly() {
         total_bytes: 9_007_199_254_740_993,
         available_bytes: 4_503_599_627_370_496,
     }));
-    let inventory = WarmBaseInventory {
-        entries: vec![pressure_entry("018f8b9a-0d70-7f0a-8000-000000000001", 1)],
-        ignored: 0,
-    };
+    let inventory = warm_inventory(vec![pressure_entry(
+        "018f8b9a-0d70-7f0a-8000-000000000001",
+        1,
+    )]);
     let plan = plan_pressure_eviction(
         inventory,
         &Activity(Ok(snapshot_at(Some(old_activity(12))))),
@@ -1383,13 +1308,10 @@ async fn pressure_lock_busy_and_error_retained() {
         total_bytes: 1000,
         available_bytes: 100,
     }));
-    let inventory = WarmBaseInventory {
-        entries: vec![
-            pressure_entry("018f8b9a-0d70-7f0a-8000-000000000001", 50),
-            pressure_entry("018f8b9a-0d70-7f0a-8000-000000000002", 50),
-        ],
-        ignored: 0,
-    };
+    let inventory = warm_inventory(vec![
+        pressure_entry("018f8b9a-0d70-7f0a-8000-000000000001", 50),
+        pressure_entry("018f8b9a-0d70-7f0a-8000-000000000002", 50),
+    ]);
 
     struct BusyLock;
     impl BaseLockGuard for BusyLock {
@@ -1422,6 +1344,7 @@ mod fingerprint_inventory;
 mod fingerprint_sweep;
 mod idle_variant_lock;
 mod pressure_execution;
+mod unrecognized_reclaim;
 
 /// The warm-base GC root must resolve the server pod's own cache mount.
 ///
