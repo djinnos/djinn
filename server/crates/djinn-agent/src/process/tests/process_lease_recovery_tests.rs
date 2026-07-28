@@ -544,3 +544,122 @@ async fn watchdog_targets_recorded_identity_exactly_once_across_pod_reconstructi
     assert_eq!(records.len(), 1);
     assert!(records[0].watchdog_notified);
 }
+
+/// Regression: a non-escalating invocation must leave NO journal record.
+///
+/// The journal exists to recover a lease this pod may have created at the
+/// coordinator. An invocation whose CPU never crosses
+/// `cpu_usage_threshold_usec` never calls `queue_lease`, so it owns no durable
+/// coordinator state and has nothing to recover.
+///
+/// Production (2026-07-28) wrote the record unconditionally at the top of
+/// `output()` while the terminal clear stayed gated on `queued`. Every cheap
+/// command therefore left a permanently-unresolved record; the pod-local
+/// recovery sweep read it as an orphan and fired the exact-pod watchdog against
+/// its OWN pod. With a 300s grace and a 300s sweep tick, every worker pod
+/// deleted itself ~600s after start and its task bounced `in_progress -> open`
+/// forever.
+///
+/// Asserting `unresolved()` is empty is the side effect that matters: it is
+/// exactly what the sweep reads. `queue_calls == 0` pins the precondition, so
+/// this cannot pass by the invocation quietly having escalated.
+#[tokio::test]
+async fn non_escalating_invocation_leaves_no_journal_record() {
+    let directory = tempfile::tempdir().unwrap();
+    let journal =
+        Arc::new(InvocationJournal::new(directory.path().to_path_buf(), "pod-uid".into()).unwrap());
+    let services = Arc::new(ScriptedServices::new(vec![], vec![], vec![]));
+    // CPU stays two orders of magnitude below the escalation threshold, and the
+    // child exits naturally after a couple of polls.
+    let launcher = Arc::new(FixtureLauncher::new(500, Some(2)));
+    let runner = LeaseInvocationRunner::new(
+        services.clone(),
+        services.clone(),
+        launcher.clone(),
+        clock(),
+    )
+    .with_journal(journal.clone());
+
+    let output = runner
+        .output(
+            // `command()`, not `cmd_from(..)`: the fixture drives escalation
+            // from `FixtureLauncher`'s CPU sample, so the command string is
+            // decorative — but a real child still spawns. `command()` is the
+            // process-group-isolated `sleep` this file already uses; a literal
+            // `cargo build` here would contend for the target-dir lock with the
+            // harness's own cargo and flake the timeout-sensitive tests.
+            command(),
+            config_with_threshold(1_000_000),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("a cheap command runs to natural exit");
+
+    assert_eq!(output.process.termination, ProcessTermination::Exited);
+    assert_eq!(
+        services.queue_calls.load(Ordering::SeqCst),
+        0,
+        "precondition: this invocation must never have escalated to the lease authority"
+    );
+    assert!(
+        journal.unresolved().unwrap().is_empty(),
+        "a non-escalating invocation must leave nothing for the recovery sweep to \
+         mistake for an orphaned pod; a record here re-arms the ~600s exact-pod watchdog"
+    );
+}
+
+/// The write-ahead property the journal exists for: for an invocation that DOES
+/// escalate, the record must be durable *before* the `queue_lease` request goes
+/// out, so a pod that dies mid-request still leaves evidence to reconcile.
+///
+/// Proven by pausing the queue response and reading the journal while the RPC is
+/// genuinely in flight — moving the write any later than the request would make
+/// this observation empty.
+#[tokio::test]
+async fn escalating_invocation_journals_before_the_queue_request() {
+    let directory = tempfile::tempdir().unwrap();
+    let journal =
+        Arc::new(InvocationJournal::new(directory.path().to_path_buf(), "pod-uid".into()).unwrap());
+    let services = Arc::new(ScriptedServices::new(vec![], vec![], vec![]));
+    services.pause_queue.store(true, Ordering::SeqCst);
+    // CPU is above the threshold on the first sample, so the invocation
+    // escalates immediately and blocks on the paused queue response.
+    let launcher = Arc::new(FixtureLauncher::new(5_000, None));
+    let test_clock = clock();
+    let runner = LeaseInvocationRunner::new(
+        services.clone(),
+        services.clone(),
+        launcher.clone(),
+        test_clock.clone(),
+    )
+    .with_journal(journal.clone());
+
+    let run_services = services.clone();
+    let run = tokio::spawn(async move {
+        runner
+            .output(
+                // Process-group-isolated `sleep`, never a real `cargo build` —
+                // see the note in the sibling test above.
+                command(),
+                config_with_threshold(1_000),
+                CancellationToken::new(),
+            )
+            .await
+    });
+
+    poll_until(move || run_services.queue_calls.load(Ordering::SeqCst) >= 1).await;
+    let in_flight = journal.unresolved().unwrap();
+    assert_eq!(
+        in_flight.len(),
+        1,
+        "the record must already be durable while the queue_lease RPC is in flight"
+    );
+    assert!(
+        !in_flight[0].terminal_intent,
+        "the write-ahead record is not terminal yet"
+    );
+
+    // Let the paused invocation fall through its deadline and finish cleanly.
+    test_clock.advance_mono(Duration::from_secs(120));
+    let _ = run.await.expect("join");
+}
