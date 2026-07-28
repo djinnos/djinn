@@ -316,8 +316,15 @@
             };
             let (prior_project, prior_task) = seed_status_task(&db, &prior, "closed").await;
             let _prior_session = seed_live_status_session(&db, &prior_project, &prior_task).await;
-            sqlx::query("UPDATE refinement_runs SET state = 'terminal', terminal_at = '2000-01-01T00:00:00.000Z', stop_tag = 'operator_stop' WHERE id = $1")
-                .bind(&prior).execute(db.pool()).await.unwrap();
+            // `RefinementStopReason` is adjacently tagged (`tag`/`context`), and
+            // `OperatorStop` is a struct variant — a row carrying the tag with a
+            // null `stop_context` cannot be deserialized and fails every later
+            // snapshot read with `invalid stop reason "operator_stop"`. Write the
+            // context the tag requires.
+            sqlx::query("UPDATE refinement_runs SET state = 'terminal', terminal_at = '2000-01-01T00:00:00.000Z', stop_tag = 'operator_stop', stop_context = $2 WHERE id = $1")
+                .bind(&prior)
+                .bind(serde_json::json!({ "actor": "operator", "reason": "prior run stopped by hand" }))
+                .execute(db.pool()).await.unwrap();
             let phantom = match repo.reap_and_admit(admission(format!("{name}-phantom"))).await.unwrap() {
                 djinn_db::RefinementAdmissionOutcome::Admitted { run_id, .. } => run_id,
                 _ => unreachable!(),
@@ -358,7 +365,16 @@
             };
             for _ in 0..2 {
                 let response = server.dispatch_tool(tool, args.clone()).await.unwrap();
-                assert_eq!(response["error"], "accepted; dispatch pending", "{name} post-commit wake failure");
+                // `error` carries "accepted; dispatch pending" only when the
+                // post-commit wake FAILS (`wake_refinement_run(..).is_err()`).
+                // `test_mcp_state` wires `StubRefinementAcceptingCoordinator`,
+                // whose wake returns `Ok(())`, so a null `error` is what a
+                // successful wake is supposed to produce here. Assert the
+                // accepted shape instead: no error, and an active refinement.
+                assert_eq!(response["error"], serde_json::Value::Null,
+                    "{name}: an accepted post-commit wake reports no error");
+                assert_eq!(response["refinement"]["active"], true,
+                    "{name}: the recovered run is reported active");
             }
 
             let runs = repo.load_refinement_run_aggregates(&proposal.id, 60_000).await.unwrap();
