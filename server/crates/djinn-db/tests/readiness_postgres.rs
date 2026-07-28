@@ -23,6 +23,7 @@ const MIGRATION_VERSION: u64 = 155;
 const MIGRATION_FILE: &str = "155_readiness_persistence.sql";
 const FINDING_CONFIDENCE_MIGRATION_FILE: &str = "157_readiness_finding_confidence.sql";
 const RESULT_OUTPUTS_MIGRATION_FILE: &str = "159_readiness_result_outputs.sql";
+const CURRENT_ATTEMPT_MIGRATION_FILE: &str = "160_readiness_current_attempt.sql";
 const DESIGNATED_OPERATOR_ID: &str = "00000000-0000-7000-8000-000000000155";
 
 fn migrations_dir() -> PathBuf {
@@ -725,6 +726,30 @@ async fn area_callback_timeout_success_race_and_invalid_output_are_postgres_tran
     assert_eq!(invalid_state, ("invalid".into(), 0, 0));
 }
 
+#[tokio::test]
+async fn run_detail_is_deterministic_and_excludes_historical_accepted_output() {
+    let db = Database::ephemeral().await.expect("postgres");
+    let project = "readiness-detail";
+    djinn_db::test_support::seed_project(&db, project, project).await;
+    let repo = ReadinessRepository::new(db.clone());
+    let run = repo.create_run(CreateReadinessRun { project_id: project.into(), idempotency_key: "detail".into(), repository_snapshot: "snapshot-detail".into(), skill_name: "skill-detail".into(), skill_version: "2.0.0".into() }).await.expect("run");
+    for (area, key) in [("detail-front", "frontend"), ("detail-back", "backend")] { sqlx::query("INSERT INTO readiness_composition_areas (id,run_id,area_key,composition,path_scopes) VALUES ($1,$2,$3,'{}','[]')").bind(area).bind(&run.id).bind(key).execute(db.pool()).await.expect("area"); }
+    for (id, area, number) in [("old", "detail-front", 1), ("current", "detail-front", 2), ("back-current", "detail-back", 1)] { sqlx::query("INSERT INTO readiness_area_attempts (id,run_id,area_id,attempt_number,correlation_key) VALUES ($1,$2,$3,$4,$5)").bind(id).bind(&run.id).bind(area).bind(number).bind(format!("key-{id}")).execute(db.pool()).await.expect("attempt"); }
+    for (area, attempt) in [("detail-front", "current"), ("detail-back", "back-current")] { sqlx::query("UPDATE readiness_composition_areas SET current_attempt_id=$1 WHERE id=$2").bind(attempt).bind(area).execute(db.pool()).await.expect("current"); }
+    for (id, attempt, key) in [("old-finding", "old", "old"), ("current-finding", "current", "current")] { sqlx::query("INSERT INTO readiness_guardrail_findings (id,run_id,area_id,attempt_id,guardrail_key,status,severity,confidence,accepted,evidence) VALUES ($1,$2,'detail-front',$3,$4,'covered','high',0.9,true,'{}')").bind(id).bind(&run.id).bind(attempt).bind(key).execute(db.pool()).await.expect("finding"); }
+    for (attempt, output) in [("old", serde_json::json!({"warnings":["historical"]})), ("current", serde_json::json!({"warnings":["current"],"errors":[{"message":"preserved"}],"unsupported":[{"reason":"kept"}]}))] { sqlx::query("INSERT INTO readiness_area_result_outputs (run_id,area_id,attempt_id,result) VALUES ($1,'detail-front',$2,$3)").bind(&run.id).bind(attempt).bind(output).execute(db.pool()).await.expect("output"); }
+    let first = repo.run_detail(&run.id).await.expect("detail").expect("exists");
+    let second = repo.run_detail(&run.id).await.expect("detail").expect("exists");
+    assert_eq!(first, second);
+    assert_eq!(first.run.repository_snapshot, "snapshot-detail");
+    assert_eq!(first.areas.iter().map(|area| area.area.area_key.as_str()).collect::<Vec<_>>(), vec!["backend", "frontend"]);
+    let front = first.areas.iter().find(|area| area.area.id == "detail-front").expect("front");
+    assert_eq!(front.attempts.iter().map(|attempt| (attempt.attempt.id.as_str(), attempt.is_current)).collect::<Vec<_>>(), vec![("old", false), ("current", true)]);
+    assert_eq!(front.accepted_findings.iter().map(|finding| finding.guardrail_key.as_str()).collect::<Vec<_>>(), vec!["current"]);
+    assert_eq!(front.accepted_outputs.len(), 1);
+    assert_eq!(front.accepted_outputs[0].result["errors"][0]["message"], "preserved");
+}
+
 #[derive(sqlx::FromRow)]
 struct PersistedAreaTask {
     project_id: String,
@@ -882,6 +907,7 @@ async fn apply_readiness_migration(conn: &mut PgConnection) {
         MIGRATION_FILE,
         FINDING_CONFIDENCE_MIGRATION_FILE,
         RESULT_OUTPUTS_MIGRATION_FILE,
+        CURRENT_ATTEMPT_MIGRATION_FILE,
     ] {
         let path = migrations_dir().join(migration);
         conn.execute(
