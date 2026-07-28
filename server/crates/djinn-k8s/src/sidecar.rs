@@ -24,15 +24,13 @@
 //! [`resolve_image_services`] is the impure resolver that reads the catalog for
 //! a project's image (used by the task-run dispatch paths).
 
-use std::collections::BTreeMap;
-use std::path::PathBuf;
-
 use k8s_openapi::api::core::v1::{
     Container, ContainerPort, EmptyDirVolumeSource, EnvVar, Probe, ResourceRequirements,
     SecurityContext, TCPSocketAction, Volume, VolumeMount,
 };
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
+use std::collections::BTreeMap;
 
 use djinn_db::{Database, ImageRepository, ServicePreset, ServicePresetRepository};
 use serde::{Deserialize, Serialize};
@@ -45,98 +43,13 @@ use crate::config::KubernetesConfig;
 /// only when at least one service is injected.
 pub const SIDECAR_DSHM_VOLUME: &str = "svc-dshm";
 
-/// Pod volume name for the private service-control `emptyDir`. Mounted only into
-/// the worker container and the wrapper sidecars — never a canonical command
-/// container. The wrapper sidecars bind their protocol-v1 control sockets here
-/// and the worker adapter connects to them.
-pub const CONTROL_VOLUME: &str = "svc-control";
-
-/// In-Pod mount path of the private service-control `emptyDir`. Each wrapper
-/// sidecar binds `<CONTROL_SOCKET_DIR>/<socket>` and the worker adapter connects
-/// to the identical path. This directory is deliberately absent from every
-/// canonical-command Landlock grant, so verification commands cannot reach it.
-pub const CONTROL_SOCKET_DIR: &str = "/var/run/djinn/service-control";
-
-/// Environment variable a wrapper sidecar reads to learn where to bind its
-/// control socket. Consumed by the `djinn-*-wrapper` binaries.
-pub const CONTROL_SOCKET_ENV: &str = "CATALOG_CONTROL_SOCKET";
-
-/// Deterministic, sanitized socket file name for a preset. Every byte that is
-/// not `[a-z0-9_-]` collapses to `_`; the result is lowercased and bounded so a
-/// preset id can never escape the control directory or produce a path-unsafe
-/// name. Distinct presets whose ids sanitize to the same stem collide on
-/// purpose — strict resolution rejects that collision rather than silently
-/// serving two services from one socket.
-pub fn control_socket_file_name(preset_id: &str) -> String {
-    let mut stem: String = preset_id
-        .chars()
-        .map(|c| {
-            let c = c.to_ascii_lowercase();
-            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    stem.truncate(64);
-    if stem.is_empty() {
-        stem.push('_');
-    }
-    format!("{stem}.sock")
-}
-
-/// Absolute in-Pod path of a preset's control socket. The worker adapter and
-/// the wrapper sidecar derive the identical path from this function so a client
-/// socket always names the socket its wrapper server binds.
-pub fn control_socket_path(preset_id: &str) -> PathBuf {
-    PathBuf::from(CONTROL_SOCKET_DIR).join(control_socket_file_name(preset_id))
-}
-
-/// Absolute in-Pod path for an already-sanitized socket file name.
-pub fn control_socket_path_from_name(socket_name: &str) -> PathBuf {
-    PathBuf::from(CONTROL_SOCKET_DIR).join(socket_name)
-}
-
-/// The private control `emptyDir` volume. Added to the Pod only when at least
-/// one wrapper sidecar is injected.
-pub fn control_volume() -> Volume {
-    Volume {
-        name: CONTROL_VOLUME.to_string(),
-        empty_dir: Some(EmptyDirVolumeSource::default()),
-        ..Volume::default()
-    }
-}
-
-/// The control-socket mount shared by the worker and every wrapper sidecar.
-pub fn control_volume_mount() -> VolumeMount {
-    VolumeMount {
-        name: CONTROL_VOLUME.to_string(),
-        mount_path: CONTROL_SOCKET_DIR.to_string(),
-        ..VolumeMount::default()
-    }
-}
-
 /// Everything the sidecar builder needs from a `service_presets` row. The
 /// caller maps it so this module never reaches into DB row shape.
 #[derive(Clone, Debug)]
 pub struct BackingServiceSpec {
     pub service_type: String,
-    /// The container image the sidecar runs. When a wrapper artifact is
-    /// resolved this is the digest-pinned wrapper reference
-    /// (`{wrapper_image}@{digest}`); legacy presets without a wrapper keep the
-    /// stock service image for dispatch compatibility.
+    /// The container image the sidecar runs.
     pub image: String,
-    /// `true` when the sidecar runs a catalog wrapper (stock daemon + protocol
-    /// control server). Drives the private control mount, the socket env, and
-    /// the wrapper admin env. `false` keeps the pre-wrapper dispatch shape.
-    pub is_wrapper: bool,
-    /// Sanitized per-preset control socket file name (see
-    /// [`control_socket_file_name`]).
-    pub control_socket_name: String,
-    /// Extra environment the wrapper binary needs (admin URL + exported env
-    /// names). Empty for non-wrapper sidecars.
-    pub wrapper_env: Vec<(String, String)>,
     pub port: i32,
     pub env: Vec<(String, String)>,
     pub cpu_request: String,
@@ -229,7 +142,7 @@ pub fn sidecar_conn_env(spec: &BackingServiceSpec) -> Vec<EnvVar> {
 /// appends it to the Pod's `initContainers` (NOT `containers`); the
 /// `restartPolicy: Always` is what makes the kubelet treat it as a sidecar.
 pub fn sidecar_container(config: &KubernetesConfig, spec: &BackingServiceSpec) -> Container {
-    let mut env: Vec<EnvVar> = spec
+    let env: Vec<EnvVar> = spec
         .env
         .iter()
         .map(|(k, v)| EnvVar {
@@ -238,33 +151,12 @@ pub fn sidecar_container(config: &KubernetesConfig, spec: &BackingServiceSpec) -
             ..EnvVar::default()
         })
         .collect();
-    // A wrapper sidecar additionally learns where to bind its control socket and
-    // how to reach its co-located stock daemon (wrapper_env).
-    if spec.is_wrapper {
-        env.push(EnvVar {
-            name: CONTROL_SOCKET_ENV.to_string(),
-            value: Some(
-                control_socket_path_from_name(&spec.control_socket_name)
-                    .to_string_lossy()
-                    .into_owned(),
-            ),
-            ..EnvVar::default()
-        });
-        env.extend(spec.wrapper_env.iter().map(|(k, v)| EnvVar {
-            name: k.clone(),
-            value: Some(v.clone()),
-            ..EnvVar::default()
-        }));
-    }
 
-    let mut volume_mounts = vec![VolumeMount {
+    let volume_mounts = vec![VolumeMount {
         name: SIDECAR_DSHM_VOLUME.to_string(),
         mount_path: "/dev/shm".to_string(),
         ..VolumeMount::default()
     }];
-    if spec.is_wrapper {
-        volume_mounts.push(control_volume_mount());
-    }
 
     let probe = || Probe {
         tcp_socket: Some(TCPSocketAction {
@@ -364,9 +256,6 @@ fn append_preset_resolution(
                 conn_env_var: p.conn_env_var.clone(),
             });
             specs.push(BackingServiceSpec {
-                control_socket_name: control_socket_file_name(preset_id),
-                is_wrapper: false,
-                wrapper_env: Vec::new(),
                 service_type: p.service_type,
                 image: p.image,
                 port: p.port,
@@ -520,9 +409,6 @@ mod tests {
         BackingServiceSpec {
             service_type: "postgres".into(),
             image: "postgres:18-alpine".into(),
-            is_wrapper: false,
-            control_socket_name: "preset-postgres-18.sock".into(),
-            wrapper_env: Vec::new(),
             port: 5432,
             env: vec![("POSTGRES_PASSWORD".into(), "postgres".into())],
             cpu_request: "100m".into(),
@@ -648,7 +534,7 @@ mod tests {
     }
 
     #[test]
-    fn preset_with_wrapper_identity_uses_ordinary_sidecar_shape() {
+    fn preset_uses_ordinary_sidecar_shape() {
         let mut services = Vec::new();
         let mut injected = Vec::new();
         append_preset_resolution(
@@ -659,13 +545,8 @@ mod tests {
             &mut injected,
             &mut Vec::new(),
         );
-        // `preset()` deliberately contains a wrapper repository and digest,
-        // but ordinary dispatch always preserves the configured service image.
         let service = &services[0];
         assert_eq!(service.image, "postgres:18-alpine");
-        assert!(!service.is_wrapper);
-        assert!(service.wrapper_env.is_empty());
-        assert_eq!(service.control_socket_name, "preset-postgres-18.sock");
         assert_eq!(service.service_type, "postgres");
         assert_eq!(service.port, 5432);
         assert_eq!(
