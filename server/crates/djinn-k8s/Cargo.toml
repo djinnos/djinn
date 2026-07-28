@@ -34,6 +34,7 @@ workspace-hack.workspace = true
 
 [dev-dependencies]
 async-trait = "0.1"
+djinn-db = { path = "../djinn-db", features = ["test-support"] }
 djinn-provider = { path = "../djinn-provider" }
 # goxi launcher blocker 8/9 guard: the required-path set a brokered child depends
 # on is derived from the REAL image ENV the Dockerfile emitter bakes, not from a
