@@ -2016,6 +2016,10 @@ mod tests {
 
     #[tokio::test]
     async fn pretask_enforces_timeout() {
+        // This case asserts that its child survives until its own timeout
+        // fires. Warm shutdown signals every child of the process, so it
+        // must not run concurrently — see WARM_LIFECYCLE_TEST_MUTEX.
+        let _serial = crate::WARM_LIFECYCLE_TEST_MUTEX.lock().await;
         let tmp = tempfile::tempdir().expect("tempdir");
         let cfg = EnvironmentConfig {
             lifecycle: djinn_stack::environment::LifecycleHooks {
@@ -2586,6 +2590,10 @@ mod tests {
 
     #[tokio::test]
     async fn pretask_activity_timeout_emits_blocked_and_environmental() {
+        // This case asserts that its child survives until its own timeout
+        // fires. Warm shutdown signals every child of the process, so it
+        // must not run concurrently — see WARM_LIFECYCLE_TEST_MUTEX.
+        let _serial = crate::WARM_LIFECYCLE_TEST_MUTEX.lock().await;
         let tmp = tempfile::tempdir().expect("tempdir");
         let cfg = EnvironmentConfig {
             lifecycle: djinn_stack::environment::LifecycleHooks {
@@ -3429,6 +3437,10 @@ mod tests {
     /// `timed_out=true`, and `failure_class=environmental`.
     #[tokio::test]
     async fn blocking_timeout_produces_environmental_blocked_activity() {
+        // This case asserts that its child survives until its own timeout
+        // fires. Warm shutdown signals every child of the process, so it
+        // must not run concurrently — see WARM_LIFECYCLE_TEST_MUTEX.
+        let _serial = crate::WARM_LIFECYCLE_TEST_MUTEX.lock().await;
         let tmp = tempfile::tempdir().expect("tempdir");
         let cfg = EnvironmentConfig {
             lifecycle: djinn_stack::environment::LifecycleHooks {
@@ -3546,6 +3558,10 @@ mod tests {
     /// and `blocked=true`.
     #[tokio::test]
     async fn cancellation_produces_blocked_activity_with_cancelled_flag() {
+        // This case asserts that its child survives until its own timeout
+        // fires. Warm shutdown signals every child of the process, so it
+        // must not run concurrently — see WARM_LIFECYCLE_TEST_MUTEX.
+        let _serial = crate::WARM_LIFECYCLE_TEST_MUTEX.lock().await;
         let tmp = tempfile::tempdir().expect("tempdir");
         let should_not_exist = tmp.path().join("never-after-cancel.marker");
 
