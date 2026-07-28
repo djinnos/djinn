@@ -47,6 +47,29 @@
 //! A failed release is *also* safe: it is logged and the warm proceeds, and the
 //! slot is reclaimed on the existing host path. The only cost of a failure is
 //! the capacity win, never correctness.
+//!
+//! ## Relationship to the host-side terminal release (#2688)
+//!
+//! #2688 made `K8sGraphWarmer::reconcile_durable_warm_leases` release the slot
+//! once `WarmCandidateInventory::workload_finished()` holds — every Job carrying
+//! `Complete`/`Failed` and every Pod in a terminal phase — instead of waiting
+//! for the API server's garbage collector. The two changes compose, in both
+//! orders, for reasons that are properties of the ledger rather than of timing:
+//!
+//! * **This release first (the normal case, mid-SCIP).** The row becomes
+//!   terminal, and `BuildLeaseGraphWarmAdapter::recoverable` filters
+//!   `state != Terminal`, so the row never reaches #2688's path at all. Nothing
+//!   double-releases because there is nothing left to reconcile.
+//! * **#2688 first.** It cannot fire while this Pod is warming: a Pod running
+//!   SCIP is `Running`, not terminal, which is exactly the safety property
+//!   #2688 preserves. If it somehow did, `release_once` reports
+//!   [`WarmLeaseRelease::AlreadyTerminal`] — logged, and explicitly NOT counted
+//!   as a freed slot, so the capacity accounting stays honest.
+//!
+//! #2688 stays load-bearing for every warm that never reaches this boundary —
+//! one that dies during the cargo phase, or an unleased/failed-early path. What
+//! changes for a normally-completing warm is that its slot is already free by
+//! the time #2688 looks, roughly 60% of the Job earlier.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
