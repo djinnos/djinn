@@ -1,4 +1,5 @@
 //! Typed, transactional persistence for Agent Readiness runs.
+// djinn:allow-oversize -- readiness transaction invariants remain co-located.
 use crate::{
     Error, Result,
     database::Database,
@@ -26,6 +27,101 @@ pub struct ReadinessRunRow {
     pub expected_area_count: Option<i32>,
     pub created_at: String,
     pub completed_at: Option<String>,
+}
+
+fn reference_values(value: Option<&serde_json::Value>, key: &str) -> Vec<String> {
+    value
+        .and_then(serde_json::Value::as_object)
+        .and_then(|object| object.get(key))
+        .map(|value| match value {
+            serde_json::Value::String(value) => vec![value.clone()],
+            serde_json::Value::Array(values) => values
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::to_owned)
+                .collect(),
+            _ => Vec::new(),
+        })
+        .unwrap_or_default()
+}
+
+/// Canonicalize set-like suggestion references and make conflicting descriptive
+/// values independent of which area's callback arrived first.
+fn canonical_suggestion(
+    suggestion: &serde_json::Value,
+    area_id: &str,
+    prior: Option<&serde_json::Value>,
+) -> serde_json::Value {
+    let mut result = suggestion
+        .as_object()
+        .cloned()
+        .expect("validated suggestion");
+    let mut area_ids = reference_values(prior, "area_ids");
+    area_ids.extend(reference_values(Some(suggestion), "area_ids"));
+    area_ids.extend(reference_values(prior, "area_id"));
+    area_ids.extend(reference_values(Some(suggestion), "area_id"));
+    area_ids.push(area_id.to_owned());
+    let mut guardrail_ids = reference_values(prior, "guardrail_ids");
+    guardrail_ids.extend(reference_values(Some(suggestion), "guardrail_ids"));
+    guardrail_ids.extend(reference_values(prior, "guardrail_id"));
+    guardrail_ids.extend(reference_values(Some(suggestion), "guardrail_id"));
+    area_ids.sort();
+    area_ids.dedup();
+    guardrail_ids.sort();
+    guardrail_ids.dedup();
+    result.insert("area_ids".into(), serde_json::json!(area_ids));
+    result.insert("guardrail_ids".into(), serde_json::json!(guardrail_ids));
+    // Singular references are folded into their canonical sorted sets above.
+    // Keeping either one would make the stored value depend on callback order.
+    result.remove("area_id");
+    result.remove("guardrail_id");
+    if let Some(prior) = prior.and_then(serde_json::Value::as_object) {
+        for (key, prior_value) in prior {
+            if matches!(
+                key.as_str(),
+                "area_id" | "area_ids" | "guardrail_id" | "guardrail_ids"
+            ) {
+                continue;
+            }
+            if let Some(value) = result.get(key) {
+                if canonical(prior_value) < canonical(value) {
+                    result.insert(key.clone(), prior_value.clone());
+                }
+            } else {
+                result.insert(key.clone(), prior_value.clone());
+            }
+        }
+    }
+    serde_json::Value::Object(result)
+}
+
+async fn merge_suggestion(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    run_id: &str,
+    area_id: &str,
+    dedupe_key: &str,
+    suggestion: &serde_json::Value,
+) -> Result<()> {
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(format!("{run_id}:{dedupe_key}"))
+        .execute(&mut **tx)
+        .await?;
+    let prior: Option<serde_json::Value> = sqlx::query_scalar(
+        "SELECT suggestion FROM readiness_remediation_suggestions WHERE run_id=$1 AND dedupe_key=$2 FOR UPDATE",
+    )
+    .bind(run_id)
+    .bind(dedupe_key)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let merged = canonical_suggestion(suggestion, area_id, prior.as_ref());
+    if prior.is_some() {
+        sqlx::query("UPDATE readiness_remediation_suggestions SET suggestion=$1 WHERE run_id=$2 AND dedupe_key=$3")
+            .bind(merged).bind(run_id).bind(dedupe_key).execute(&mut **tx).await?;
+    } else {
+        sqlx::query("INSERT INTO readiness_remediation_suggestions (id,run_id,dedupe_key,suggestion) VALUES ($1,$2,$3,$4)")
+            .bind(Uuid::now_v7().to_string()).bind(run_id).bind(dedupe_key).bind(merged).execute(&mut **tx).await?;
+    }
+    Ok(())
 }
 
 /// Validate the complete success contract before any result state is visible.
@@ -59,8 +155,19 @@ fn validate_success(result: &serde_json::Value) -> Result<()> {
         if !guardrail_key.is_some_and(|value| !value.trim().is_empty())
             || !finding_keys.insert(guardrail_key.expect("checked non-empty"))
             || !matches!(
+                finding.get("status").and_then(serde_json::Value::as_str),
+                Some(
+                    "covered"
+                        | "partial"
+                        | "missing"
+                        | "unknown"
+                        | "unsupported"
+                        | "analysis_error"
+                )
+            )
+            || !matches!(
                 finding.get("severity").and_then(serde_json::Value::as_str),
-                Some("info" | "low" | "medium" | "high" | "critical")
+                Some("low" | "medium" | "high" | "critical")
             )
             || !evidence_is_structured
             || !finding
@@ -356,6 +463,7 @@ pub struct ReadinessGuardrailFindingRow {
     pub area_id: String,
     pub attempt_id: String,
     pub guardrail_key: String,
+    pub status: String,
     pub severity: String,
     pub confidence: f64,
     pub accepted: bool,
@@ -369,6 +477,128 @@ pub struct ReadinessRemediationSuggestionRow {
     pub dedupe_key: String,
     pub suggestion: serde_json::Value,
     pub created_at: String,
+}
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, FromRow)]
+pub struct ReadinessAreaScoreRow {
+    pub run_id: String,
+    pub area_id: String,
+    pub score: f64,
+    pub applicable_weight: i32,
+    pub covered_weight: f64,
+    pub status: String,
+    pub created_at: String,
+}
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, FromRow)]
+pub struct ReadinessProjectScoreRow {
+    pub run_id: String,
+    pub score: f64,
+    pub band: String,
+    pub created_at: String,
+}
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReadinessAggregation {
+    pub area_scores: Vec<ReadinessAreaScoreRow>,
+    pub project_score: ReadinessProjectScoreRow,
+    pub status: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReadinessGuardrailStatus {
+    Covered,
+    Partial,
+    Missing,
+    Unknown,
+    Unsupported,
+    AnalysisError,
+}
+impl ReadinessGuardrailStatus {
+    fn parse(value: &str) -> Option<Self> {
+        Some(match value {
+            "covered" => Self::Covered,
+            "partial" => Self::Partial,
+            "missing" => Self::Missing,
+            "unknown" => Self::Unknown,
+            "unsupported" => Self::Unsupported,
+            "analysis_error" => Self::AnalysisError,
+            _ => return None,
+        })
+    }
+}
+pub fn readiness_severity_weight(severity: &str) -> Option<i32> {
+    Some(match severity {
+        "critical" => 5,
+        "high" => 3,
+        "medium" => 2,
+        "low" => 1,
+        _ => return None,
+    })
+}
+/// Exact proposal arithmetic. Covered evidence below 0.7 is capped at partial.
+pub fn readiness_area_score(findings: &[(String, String, f64)]) -> (f64, i32, f64, String) {
+    let mut applicable = 0;
+    let mut covered = 0.0;
+    for (status, severity, confidence) in findings {
+        let Some(status) = ReadinessGuardrailStatus::parse(status) else {
+            continue;
+        };
+        let Some(weight) = readiness_severity_weight(severity) else {
+            continue;
+        };
+        if status == ReadinessGuardrailStatus::Unsupported {
+            continue;
+        }
+        applicable += weight;
+        covered += f64::from(weight)
+            * match status {
+                ReadinessGuardrailStatus::Covered if *confidence >= 0.7 => 1.0,
+                ReadinessGuardrailStatus::Covered | ReadinessGuardrailStatus::Partial => 0.5,
+                ReadinessGuardrailStatus::Missing
+                | ReadinessGuardrailStatus::Unknown
+                | ReadinessGuardrailStatus::AnalysisError
+                | ReadinessGuardrailStatus::Unsupported => 0.0,
+            };
+    }
+    let score = if applicable == 0 {
+        0.0
+    } else {
+        covered / f64::from(applicable)
+    };
+    (
+        score,
+        applicable,
+        covered,
+        if applicable == 0 {
+            "unsupported"
+        } else {
+            "supported"
+        }
+        .into(),
+    )
+}
+/// Applicable-weighted mean; zero-applicable (unsupported) areas contribute
+/// neither numerator nor denominator.
+pub fn readiness_project_score(area_scores: &[(i32, f64)]) -> f64 {
+    let (applicable, covered) = area_scores
+        .iter()
+        .fold((0, 0.0), |(weight, total), (area_weight, area_covered)| {
+            (weight + area_weight, total + area_covered)
+        });
+    if applicable == 0 {
+        0.0
+    } else {
+        covered / f64::from(applicable)
+    }
+}
+pub fn readiness_score_band(score: f64) -> &'static str {
+    if score < 0.40 {
+        "blocked"
+    } else if score < 0.70 {
+        "emerging"
+    } else if score < 0.85 {
+        "ready"
+    } else {
+        "strong"
+    }
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, FromRow)]
 pub struct ReadinessRunEventRow {
@@ -403,6 +633,7 @@ pub struct CreateReadinessAreaAttempt {
 #[derive(Clone, Debug)]
 pub struct NewReadinessFinding {
     pub guardrail_key: String,
+    pub status: String,
     pub severity: String,
     pub confidence: f64,
     pub evidence: serde_json::Value,
@@ -624,10 +855,10 @@ impl ReadinessRepository {
             ));
         };
         for f in findings {
-            sqlx::query("INSERT INTO readiness_guardrail_findings (id,run_id,area_id,attempt_id,guardrail_key,severity,confidence,accepted,evidence) VALUES ($1,$2,$3,$4,$5,$6,$7,true,$8)").bind(Uuid::now_v7().to_string()).bind(&run).bind(&area).bind(&a.id).bind(&f.guardrail_key).bind(&f.severity).bind(f.confidence).bind(&f.evidence).execute(&mut *tx).await?;
+            sqlx::query("INSERT INTO readiness_guardrail_findings (id,run_id,area_id,attempt_id,guardrail_key,status,severity,confidence,accepted,evidence) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,true,$9)").bind(Uuid::now_v7().to_string()).bind(&run).bind(&area).bind(&a.id).bind(&f.guardrail_key).bind(&f.status).bind(&f.severity).bind(f.confidence).bind(&f.evidence).execute(&mut *tx).await?;
         }
         for s in suggestions {
-            sqlx::query("INSERT INTO readiness_remediation_suggestions (id,run_id,dedupe_key,suggestion) VALUES ($1,$2,$3,$4) ON CONFLICT (run_id,dedupe_key) DO NOTHING").bind(Uuid::now_v7().to_string()).bind(&run).bind(&s.dedupe_key).bind(&s.suggestion).execute(&mut *tx).await?;
+            merge_suggestion(&mut tx, &run, &area, &s.dedupe_key, &s.suggestion).await?;
         }
         sqlx::query("UPDATE readiness_area_attempts SET status='succeeded',terminal_at=to_char(now() AT TIME ZONE 'utc','YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') WHERE id=$1").bind(&a.id).execute(&mut *tx).await?;
         sqlx::query("UPDATE readiness_composition_areas SET status='succeeded' WHERE id=$1")
@@ -719,13 +950,20 @@ impl ReadinessRepository {
         };
         if valid {
             for finding in callback.result["findings"].as_array().expect("validated") {
-                sqlx::query("INSERT INTO readiness_guardrail_findings (id,run_id,area_id,attempt_id,guardrail_key,severity,confidence,accepted,evidence) VALUES ($1,$2,$3,$4,$5,$6,$7,true,$8)").bind(Uuid::now_v7().to_string()).bind(&run).bind(&area).bind(&callback.attempt_id).bind(finding["guardrail_key"].as_str().expect("validated")).bind(finding["severity"].as_str().expect("validated")).bind(finding["confidence"].as_f64().expect("validated")).bind(finding["evidence"].clone()).execute(&mut *tx).await?;
+                sqlx::query("INSERT INTO readiness_guardrail_findings (id,run_id,area_id,attempt_id,guardrail_key,status,severity,confidence,accepted,evidence) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,true,$9)").bind(Uuid::now_v7().to_string()).bind(&run).bind(&area).bind(&callback.attempt_id).bind(finding["guardrail_key"].as_str().expect("validated")).bind(finding["status"].as_str().expect("validated")).bind(finding["severity"].as_str().expect("validated")).bind(finding["confidence"].as_f64().expect("validated")).bind(finding["evidence"].clone()).execute(&mut *tx).await?;
             }
             for suggestion in callback.result["remediation_suggestions"]
                 .as_array()
                 .expect("validated")
             {
-                sqlx::query("INSERT INTO readiness_remediation_suggestions (id,run_id,dedupe_key,suggestion) VALUES ($1,$2,$3,$4) ON CONFLICT (run_id,dedupe_key) DO NOTHING").bind(Uuid::now_v7().to_string()).bind(&run).bind(suggestion["dedupe_key"].as_str().expect("validated")).bind(suggestion.clone()).execute(&mut *tx).await?;
+                merge_suggestion(
+                    &mut tx,
+                    &run,
+                    &area,
+                    suggestion["dedupe_key"].as_str().expect("validated"),
+                    suggestion,
+                )
+                .await?;
             }
         }
         sqlx::query("UPDATE readiness_area_attempts SET status=$1,payload_digest=$2,terminal_at=to_char(now() AT TIME ZONE 'utc','YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') WHERE id=$3").bind(final_status).bind(&digest).bind(&callback.attempt_id).execute(&mut *tx).await?;
@@ -804,6 +1042,110 @@ impl ReadinessRepository {
             task,
         })
     }
+    /// Fence aggregation on the run row.  Every calculation below is performed
+    /// from the immutable frozen area set and each area's current attempt.
+    pub async fn aggregate_run(&self, run_id: &str, owner: &str) -> Result<ReadinessAggregation> {
+        if owner.trim().is_empty() {
+            return Err(Error::InvalidData(
+                "readiness aggregation owner must be non-empty".into(),
+            ));
+        }
+        self.db.ensure_initialized().await?;
+        let mut tx = self.db.pool().begin().await?;
+        let run: ReadinessRunRow = sqlx::query_as("SELECT id,project_id,idempotency_key,status,repository_snapshot,skill_name,skill_version,expected_area_count,created_at,completed_at FROM readiness_runs WHERE id=$1 FOR UPDATE")
+            .bind(run_id).fetch_optional(&mut *tx).await?
+            .ok_or_else(|| Error::InvalidData("readiness run not found".into()))?;
+        if matches!(run.status.as_str(), "completed" | "completed_with_errors") {
+            let area_scores = sqlx::query_as("SELECT run_id,area_id,score,applicable_weight,covered_weight,status,created_at FROM readiness_area_scores WHERE run_id=$1 ORDER BY area_id")
+                .bind(run_id).fetch_all(&mut *tx).await?;
+            let project_score = sqlx::query_as(
+                "SELECT run_id,score,band,created_at FROM readiness_project_scores WHERE run_id=$1",
+            )
+            .bind(run_id)
+            .fetch_one(&mut *tx)
+            .await?;
+            tx.commit().await?;
+            return Ok(ReadinessAggregation {
+                area_scores,
+                project_score,
+                status: run.status,
+            });
+        }
+        if run.status != "analyzing" && run.status != "aggregating" {
+            return Err(Error::InvalidTransition(
+                "readiness run is not ready for aggregation".into(),
+            ));
+        }
+        let expected = run.expected_area_count.ok_or_else(|| {
+            Error::InvalidTransition(
+                "readiness aggregation requires a frozen expected area count".into(),
+            )
+        })?;
+        let areas: Vec<(String, String)> = sqlx::query_as(
+            "SELECT id,status FROM readiness_composition_areas WHERE run_id=$1 ORDER BY id FOR UPDATE",
+        ).bind(run_id).fetch_all(&mut *tx).await?;
+        if i32::try_from(areas.len()).ok() != Some(expected) || areas.is_empty() {
+            return Err(Error::InvalidTransition(
+                "frozen readiness areas do not match expected area count".into(),
+            ));
+        }
+        let mut current = Vec::with_capacity(areas.len());
+        for (area_id, area_status) in &areas {
+            let attempt: Option<(String, String)> = sqlx::query_as(
+                "SELECT id,status FROM readiness_area_attempts WHERE area_id=$1 ORDER BY attempt_number DESC LIMIT 1 FOR UPDATE",
+            ).bind(area_id).fetch_optional(&mut *tx).await?;
+            let Some((attempt_id, attempt_status)) = attempt else {
+                return Err(Error::InvalidTransition(
+                    "frozen readiness area has no current attempt".into(),
+                ));
+            };
+            if !matches!(
+                attempt_status.as_str(),
+                "succeeded" | "failed" | "timed_out" | "invalid"
+            ) || &attempt_status != area_status
+            {
+                return Err(Error::InvalidTransition(
+                    "every current readiness attempt must be terminal".into(),
+                ));
+            }
+            current.push((area_id.clone(), attempt_id, attempt_status));
+        }
+        sqlx::query("UPDATE readiness_runs SET status='aggregating',aggregation_owner=$1,aggregation_generation=aggregation_generation+1 WHERE id=$2")
+            .bind(owner).bind(run_id).execute(&mut *tx).await?;
+        let mut area_scores = Vec::with_capacity(current.len());
+        let mut project_areas = Vec::with_capacity(current.len());
+        let has_errors = current.iter().any(|(_, _, status)| status != "succeeded");
+        for (area_id, attempt_id, _) in current {
+            let findings: Vec<(String, String, f64)> = sqlx::query_as(
+                "SELECT status,severity,confidence FROM readiness_guardrail_findings WHERE attempt_id=$1 AND accepted=true ORDER BY guardrail_key",
+            ).bind(&attempt_id).fetch_all(&mut *tx).await?;
+            let (score, applicable_weight, covered_weight, status) =
+                readiness_area_score(&findings);
+            let row: ReadinessAreaScoreRow = sqlx::query_as("INSERT INTO readiness_area_scores (run_id,area_id,score,applicable_weight,covered_weight,status) VALUES ($1,$2,$3,$4,$5,$6) RETURNING run_id,area_id,score,applicable_weight,covered_weight,status,created_at")
+                .bind(run_id).bind(&area_id).bind(score).bind(applicable_weight).bind(covered_weight).bind(&status).fetch_one(&mut *tx).await?;
+            project_areas.push((applicable_weight, covered_weight));
+            area_scores.push(row);
+        }
+        let project_value = readiness_project_score(&project_areas);
+        let project_score: ReadinessProjectScoreRow = sqlx::query_as("INSERT INTO readiness_project_scores (run_id,score,band) VALUES ($1,$2,$3) RETURNING run_id,score,band,created_at")
+            .bind(run_id).bind(project_value).bind(readiness_score_band(project_value)).fetch_one(&mut *tx).await?;
+        let terminal_status = if has_errors {
+            "completed_with_errors"
+        } else {
+            "completed"
+        };
+        sqlx::query("INSERT INTO readiness_run_events (id,run_id,event_kind,payload) VALUES ($1,$2,'readiness_aggregated',$3)")
+            .bind(Uuid::now_v7().to_string()).bind(run_id).bind(serde_json::json!({"owner":owner,"score":project_value,"band":project_score.band,"status":terminal_status}))
+            .execute(&mut *tx).await?;
+        sqlx::query("UPDATE readiness_runs SET status=$1,completed_at=to_char(now() AT TIME ZONE 'utc','YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') WHERE id=$2")
+            .bind(terminal_status).bind(run_id).execute(&mut *tx).await?;
+        tx.commit().await?;
+        Ok(ReadinessAggregation {
+            area_scores,
+            project_score,
+            status: terminal_status.into(),
+        })
+    }
     pub async fn active_or_latest_for_project(&self, p: &str) -> Result<Option<ReadinessRunRow>> {
         self.db.ensure_initialized().await?;
         sqlx::query_as("SELECT id,project_id,idempotency_key,status,repository_snapshot,skill_name,skill_version,expected_area_count,created_at,completed_at FROM readiness_runs WHERE project_id=$1 ORDER BY (status IN ('identifying','analyzing','aggregating')) DESC,created_at DESC LIMIT 1").bind(p).fetch_optional(self.db.pool()).await.map_err(Into::into)
@@ -815,5 +1157,95 @@ impl ReadinessRepository {
     ) -> Result<ReadinessRunEventRow> {
         self.db.ensure_initialized().await?;
         sqlx::query_as("INSERT INTO readiness_run_events (id,run_id,event_kind,payload) VALUES ($1,$2,$3,$4) RETURNING id,run_id,event_kind,payload,created_at").bind(Uuid::now_v7().to_string()).bind(run).bind(e.event_kind).bind(e.payload).fetch_one(self.db.pool()).await.map_err(Into::into)
+    }
+}
+
+#[cfg(test)]
+mod aggregation_tests {
+    use super::{
+        canonical_suggestion, readiness_area_score, readiness_project_score, readiness_score_band,
+    };
+
+    #[test]
+    fn proposal_status_severity_and_confidence_rules_are_exact() {
+        let findings = vec![
+            ("covered".into(), "critical".into(), 0.9),
+            ("partial".into(), "high".into(), 1.0),
+            ("covered".into(), "medium".into(), 0.69),
+            ("missing".into(), "low".into(), 1.0),
+            ("unknown".into(), "high".into(), 1.0),
+            ("analysis_error".into(), "medium".into(), 1.0),
+            ("unsupported".into(), "critical".into(), 1.0),
+        ];
+        let (score, applicable, covered, status) = readiness_area_score(&findings);
+        assert_eq!(
+            (applicable, covered, status.as_str()),
+            (16, 7.5, "supported")
+        );
+        assert!((score - 7.5 / 16.0).abs() < f64::EPSILON);
+        assert_eq!(
+            readiness_area_score(&[("unsupported".into(), "high".into(), 1.0)]).3,
+            "unsupported"
+        );
+    }
+
+    #[test]
+    fn proposal_project_score_is_applicable_weighted_and_excludes_unsupported_areas() {
+        assert!(
+            (readiness_project_score(&[(8, 6.0), (2, 1.0), (0, 0.0)]) - 0.7).abs() < f64::EPSILON
+        );
+        assert_eq!(readiness_project_score(&[(0, 0.0)]), 0.0);
+    }
+
+    #[test]
+    fn proposal_score_band_boundaries_are_exact() {
+        assert_eq!(readiness_score_band(0.3999), "blocked");
+        assert_eq!(readiness_score_band(0.40), "emerging");
+        assert_eq!(readiness_score_band(0.6999), "emerging");
+        assert_eq!(readiness_score_band(0.70), "ready");
+        assert_eq!(readiness_score_band(0.8499), "ready");
+        assert_eq!(readiness_score_band(0.85), "strong");
+        assert_eq!(readiness_score_band(1.0), "strong");
+    }
+
+    #[test]
+    fn canonical_suggestion_is_identical_when_callback_arrival_is_reversed() {
+        let from_area_a = serde_json::json!({
+            "dedupe_key": "auth",
+            "action": "rotate credentials",
+            "guardrail_id": "z",
+            "guardrail_ids": ["m", "z"],
+            "area_id": "area-a",
+            "area_ids": ["area-shared", "area-a"]
+        });
+        let from_area_b = serde_json::json!({
+            "dedupe_key": "auth",
+            "action": "rotate credentials",
+            "guardrail_id": "a",
+            "guardrail_ids": ["m", "a"],
+            "area_id": "area-b",
+            "area_ids": ["area-b", "area-shared"]
+        });
+        let a_then_b = canonical_suggestion(
+            &from_area_b,
+            "area-b",
+            Some(&canonical_suggestion(&from_area_a, "area-a", None)),
+        );
+        let b_then_a = canonical_suggestion(
+            &from_area_a,
+            "area-a",
+            Some(&canonical_suggestion(&from_area_b, "area-b", None)),
+        );
+
+        assert_eq!(a_then_b, b_then_a);
+        assert_eq!(
+            a_then_b,
+            serde_json::json!({
+                "dedupe_key": "auth",
+                "action": "rotate credentials",
+                "area_ids": ["area-a", "area-b", "area-shared"],
+                "guardrail_ids": ["a", "m", "z"]
+            })
+        );
     }
 }

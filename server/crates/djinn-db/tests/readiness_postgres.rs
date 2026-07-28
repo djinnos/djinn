@@ -1,4 +1,5 @@
 //! Real-Postgres contract tests for readiness persistence migrations.
+// djinn:allow-oversize -- one sequential migration/transaction contract suite.
 //!
 //! These tests deliberately create a fresh database, replay the migrations
 //! before 155, and execute the readiness migrations directly. The constraints
@@ -409,7 +410,7 @@ async fn area_callback_redelivery_conflict_and_retry_are_postgres_transactional(
 }
 
 fn callback_result() -> serde_json::Value {
-    serde_json::json!({"findings":[{"guardrail_key":"auth","severity":"high","confidence":0.9,"evidence":[{"path":"src/auth.rs"}]}],"unsupported":[{"reason":"fixture"}],"warnings":[{"warning":"fixture"}],"remediation_suggestions":[{"dedupe_key":"auth","action":"fix"}]})
+    serde_json::json!({"findings":[{"guardrail_key":"auth","status":"covered","severity":"high","confidence":0.9,"evidence":[{"path":"src/auth.rs"}]}],"unsupported":[{"reason":"fixture"}],"warnings":[{"warning":"fixture"}],"remediation_suggestions":[{"dedupe_key":"auth","action":"fix"}]})
 }
 
 #[tokio::test]
@@ -477,6 +478,109 @@ async fn area_callbacks_deduplicate_run_level_suggestions_without_rolling_back_s
     .await
     .expect("load deduplicated suggestion");
     assert_eq!(suggestions, 1);
+}
+
+#[tokio::test]
+async fn aggregators_are_fenced_and_persist_one_terminal_score_set() {
+    let db = Database::ephemeral().await.expect("postgres");
+    let project = "readiness-aggregation-race";
+    djinn_db::test_support::seed_project(&db, project, project).await;
+    let creator = seed_user(&db, 155_009, "readiness-aggregation-race").await;
+    let repo = ReadinessRepository::new(db.clone());
+    let kickoff = repo
+        .materialize_kickoff(kickoff_input(project, &creator, "completed"))
+        .await
+        .expect("kickoff");
+    let fanout = repo
+        .complete_identification(&kickoff.run.id, &creator, identification_output())
+        .await
+        .expect("fanout");
+    for (index, item) in fanout.iter().enumerate() {
+        let mut result = callback_result();
+        result["findings"][0]["status"] =
+            serde_json::json!(if index == 0 { "missing" } else { "covered" });
+        result["remediation_suggestions"][0]["guardrail_ids"] =
+            serde_json::json!([format!("guardrail-{index}")]);
+        repo.ingest_area_result(ReadinessAreaResultCallback {
+            run_id: kickoff.run.id.clone(),
+            area_id: item.area.id.clone(),
+            attempt_id: item.attempt.id.clone(),
+            correlation_key: item.attempt.correlation_key.clone(),
+            task_id: item.task.id.clone(),
+            status: "succeeded".into(),
+            result,
+        })
+        .await
+        .expect("accepted callback");
+    }
+    let left = ReadinessRepository::new(db.clone());
+    let right = ReadinessRepository::new(db.clone());
+    let (first, second) = tokio::join!(
+        left.aggregate_run(&kickoff.run.id, "worker-a"),
+        right.aggregate_run(&kickoff.run.id, "worker-b")
+    );
+    assert_eq!(first.expect("first aggregate").status, "completed");
+    assert_eq!(second.expect("second aggregate").status, "completed");
+    let persisted_status: String =
+        sqlx::query_scalar("SELECT status FROM readiness_runs WHERE id=$1")
+            .bind(&kickoff.run.id)
+            .fetch_one(db.pool())
+            .await
+            .expect("run status");
+    assert_eq!(persisted_status, "completed");
+    let counts: (i64, i64, i64) = sqlx::query_as("SELECT (SELECT count(*) FROM readiness_area_scores WHERE run_id=$1), (SELECT count(*) FROM readiness_project_scores WHERE run_id=$1), (SELECT count(*) FROM readiness_run_events WHERE run_id=$1 AND event_kind='readiness_aggregated')").bind(&kickoff.run.id).fetch_one(db.pool()).await.expect("one aggregation set");
+    assert_eq!(counts, (2, 1, 1));
+    let (missing_status, missing_score): (String, f64) = sqlx::query_as("SELECT f.status,s.score FROM readiness_guardrail_findings f JOIN readiness_area_scores s ON s.area_id=f.area_id WHERE f.run_id=$1 AND f.status='missing'").bind(&kickoff.run.id).fetch_one(db.pool()).await.expect("persisted missing finding");
+    assert_eq!((missing_status.as_str(), missing_score), ("missing", 0.0));
+    let suggestion: serde_json::Value = sqlx::query_scalar("SELECT suggestion FROM readiness_remediation_suggestions WHERE run_id=$1 AND dedupe_key='auth'").bind(&kickoff.run.id).fetch_one(db.pool()).await.expect("merged suggestion");
+    assert_eq!(
+        suggestion["area_ids"].as_array().expect("area ids").len(),
+        2
+    );
+    assert_eq!(
+        suggestion["guardrail_ids"],
+        serde_json::json!(["guardrail-0", "guardrail-1"])
+    );
+
+    let errors = repo
+        .materialize_kickoff(kickoff_input(project, &creator, "with-errors"))
+        .await
+        .expect("error run");
+    let error_fanout = repo
+        .complete_identification(&errors.run.id, &creator, identification_output())
+        .await
+        .expect("error fanout");
+    let succeeded = &error_fanout[0];
+    repo.ingest_area_result(ReadinessAreaResultCallback {
+        run_id: errors.run.id.clone(),
+        area_id: succeeded.area.id.clone(),
+        attempt_id: succeeded.attempt.id.clone(),
+        correlation_key: succeeded.attempt.correlation_key.clone(),
+        task_id: succeeded.task.id.clone(),
+        status: "succeeded".into(),
+        result: callback_result(),
+    })
+    .await
+    .expect("success terminal");
+    let failed = &error_fanout[1];
+    repo.ingest_area_result(ReadinessAreaResultCallback {
+        run_id: errors.run.id.clone(),
+        area_id: failed.area.id.clone(),
+        attempt_id: failed.attempt.id.clone(),
+        correlation_key: failed.attempt.correlation_key.clone(),
+        task_id: failed.task.id.clone(),
+        status: "timed_out".into(),
+        result: serde_json::json!({}),
+    })
+    .await
+    .expect("timeout terminal");
+    assert_eq!(
+        repo.aggregate_run(&errors.run.id, "worker-errors")
+            .await
+            .expect("aggregate errors")
+            .status,
+        "completed_with_errors"
+    );
 }
 
 #[tokio::test]
