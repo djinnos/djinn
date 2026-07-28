@@ -2,11 +2,13 @@ use super::*;
 use crate::child_reaper::worker_child_reaper;
 use djinn_core::clock::{Clock, SystemClock};
 use std::path::Path;
-use std::sync::{Once, OnceLock};
+use std::sync::Once;
 
+/// Shared with `process::tests` — the child reaper this asserts on is
+/// process-global, so every spawning test in the binary must serialise on ONE
+/// lock, not one per test module.
 fn lifecycle_test_lock() -> &'static tokio::sync::Mutex<()> {
-    static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+    super::child_lifecycle_test_lock()
 }
 
 fn assert_pid_gone_without_zombie(pid: i32) {

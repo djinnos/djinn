@@ -1278,6 +1278,7 @@ async fn warm_cargo_target_base(
     project_id: &str,
     project_root: &Path,
     policy: &cargo_cache_policy::CargoCachePolicy,
+    observed_indexing: Option<Duration>,
 ) {
     let Some(workspace_dir) = resolve_cargo_workspace_dir(project_root, None) else {
         info!(
@@ -1376,11 +1377,12 @@ async fn warm_cargo_target_base(
     // warm Job's activeDeadlineSeconds (projected as
     // `DJINN_WARM_JOB_DEADLINE_SECONDS`). Resolved once so every step's clamp
     // is measured from the same anchor.
-    let budgets = resolve_warm_step_budgets();
+    let budgets = resolve_warm_step_budgets(observed_indexing);
     info!(
         project_id,
         job_deadline_secs = budgets.job_deadline().as_secs(),
         tail_reserve_secs = budgets.tail_reserve().as_secs(),
+        observed_indexing_secs = observed_indexing.map(|d| d.as_secs()),
         clippy_budget_secs = budgets
             .nominal(warm_step_budget::WarmStepKind::Clippy)
             .as_secs(),
@@ -1635,7 +1637,9 @@ static WARM_CARGO_TEST_ROOT: std::sync::Mutex<Option<std::path::PathBuf>> =
 static WARM_CARGO_TEST_BUDGETS: std::sync::Mutex<Option<warm_step_budget::WarmStepBudgets>> =
     std::sync::Mutex::new(None);
 
-fn resolve_warm_step_budgets() -> warm_step_budget::WarmStepBudgets {
+fn resolve_warm_step_budgets(
+    observed_indexing: Option<Duration>,
+) -> warm_step_budget::WarmStepBudgets {
     #[cfg(test)]
     if let Some(injected) = *WARM_CARGO_TEST_BUDGETS
         .lock()
@@ -1643,7 +1647,7 @@ fn resolve_warm_step_budgets() -> warm_step_budget::WarmStepBudgets {
     {
         return injected;
     }
-    warm_step_budget::WarmStepBudgets::now_from_env()
+    warm_step_budget::WarmStepBudgets::now_from_env_with_observed_indexing(observed_indexing)
 }
 
 /// Forced terminal outcome for warm steps, for the orchestration tests.
@@ -1742,14 +1746,52 @@ async fn warm_cargo_and_continue<F, Fut>(
     project_id: &str,
     project_root: &Path,
     policy: &cargo_cache_policy::CargoCachePolicy,
+    observed_indexing: Option<Duration>,
     continuation: F,
 ) -> Fut::Output
 where
     F: FnOnce() -> Fut,
     Fut: std::future::Future,
 {
-    warm_cargo_target_base(project_id, project_root, policy).await;
+    warm_cargo_target_base(project_id, project_root, policy, observed_indexing).await;
     continuation().await
+}
+
+/// Largest per-(workspace, indexer) elapsed this project has on record, used to
+/// price the tail reserve the cargo phase must leave for graph indexing.
+///
+/// The indexers fan out concurrently, so the SLOWEST one — not their sum — sets
+/// the phase length. Every evidence column is considered: a success is the
+/// proven cost, and a timed-out high-water is a lower bound on a cost we have
+/// not yet been able to pay. Best-effort: any DB failure yields `None`, which
+/// falls the reserve back to its historical constant.
+async fn observed_indexing_cost(db: &Database, project_id: &str) -> Option<Duration> {
+    let rows = match djinn_db::ScipIndexerTimingRepository::new(db.clone())
+        .list_for_project(project_id)
+        .await
+    {
+        Ok(rows) => rows,
+        Err(error) => {
+            warn!(
+                project_id,
+                error = %error,
+                "warm: could not read scip_indexer_timing; tail reserve falls back to its default"
+            );
+            return None;
+        }
+    };
+    let worst_ms = rows
+        .iter()
+        .flat_map(|row| {
+            [
+                row.success_elapsed_ms.unwrap_or(0),
+                row.timed_out_elapsed_ms.unwrap_or(0),
+                row.last_elapsed_ms,
+            ]
+        })
+        .filter(|ms| *ms > 0)
+        .max()?;
+    Some(Duration::from_millis(u64::try_from(worst_ms).ok()?))
 }
 
 /// Convert the prune primitive's bounded error taxonomy into the telemetry
@@ -3604,7 +3646,13 @@ async fn run_warm_graph_body(project_id: &str) -> Result<()> {
     let policy =
         cargo_cache_policy::resolve_cargo_cache_policy(&lifecycle_root, env_config.as_ref())
             .unwrap_or_default();
-    warm_cargo_and_continue(project_id, &lifecycle_root, &policy, || async {
+    // Price the tail reserve from what indexing this project ACTUALLY costs.
+    // Read before the cargo phase starts, because the reserve is what bounds
+    // that phase: with a constant 900s reserve, cargo was allowed to run to
+    // 6300s of a 7200s Job while the graph phase needed 3644s, so a long cargo
+    // phase SIGKILLs the Pod mid-SCIP and loses the whole graph.
+    let observed_indexing = observed_indexing_cost(&ctx.db, project_id).await;
+    warm_cargo_and_continue(project_id, &lifecycle_root, &policy, observed_indexing, || async {
         // Architect-only warm path: this subcommand binary is dispatched
         // exclusively by `K8sGraphWarmer`, which is wired into the
         // architect-only `GraphWarmerService::trigger` pipeline.
@@ -5479,7 +5527,7 @@ warning: something
             .enable_all()
             .build()
             .expect("runtime")
-            .block_on(warm_cargo_target_base(&project, fixture.path(), &policy));
+            .block_on(warm_cargo_target_base(&project, fixture.path(), &policy, None));
         match previous {
             Some(value) => unsafe { std::env::set_var(CARGO_TARGET_DIR_ENV, value) },
             None => unsafe { std::env::remove_var(CARGO_TARGET_DIR_ENV) },
@@ -5549,7 +5597,7 @@ warning: something
             .enable_all()
             .build()
             .expect("runtime")
-            .block_on(warm_cargo_target_base(&project, fixture.path(), &policy));
+            .block_on(warm_cargo_target_base(&project, fixture.path(), &policy, None));
         *WARM_CARGO_TEST_ROOT.lock().expect("warm test root") = None;
         unsafe { std::env::set_var("PATH", previous_path) };
         match previous_target {
@@ -5652,7 +5700,7 @@ warning: something
                 .enable_all()
                 .build()
                 .expect("runtime")
-                .block_on(warm_cargo_target_base(&project, fixture.path(), &policy));
+                .block_on(warm_cargo_target_base(&project, fixture.path(), &policy, None));
         });
 
         *WARM_CARGO_TEST_ROOT.lock().expect("warm test root") = None;
@@ -5787,7 +5835,7 @@ warning: something
                 .enable_all()
                 .build()
                 .expect("runtime")
-                .block_on(warm_cargo_target_base(&project, fixture.path(), &policy));
+                .block_on(warm_cargo_target_base(&project, fixture.path(), &policy, None));
             assert_eq!(
                 *WARM_CARGO_PHASES.lock().expect("recorder"),
                 ["failed"],
@@ -5824,6 +5872,7 @@ warning: something
                 &project,
                 fixture.path(),
                 &policy,
+                None,
                 || async { graph_warmed = true },
             ));
         assert!(graph_warmed, "graph warming continues after Cargo failure");
