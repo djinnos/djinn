@@ -360,14 +360,23 @@ jobs:
       # against 4763 that are `.rmeta`-only (check), with zero overlap.
       #
       # The selection here MUST stay byte-identical to the `Clippy` step in
-      # `server-clippy`. `server/Cargo.toml` has a root `[package]`, so
+      # `server-clippy`, which is now `--workspace`. Under resolver 2 feature
+      # unification is computed over the SELECTED package set, so a deposit
+      # whose selection differs from its consumer's resolves a different
+      # feature union on shared dependencies, gives them a different
+      # `-C metadata`, and serves that consumer NOTHING while still looking
+      # like a populated cache. That is why this line carries `--workspace`
+      # even though it costs more to build than the old `djinn-server`-only
+      # deposit: `server/Cargo.toml` has a root `[package]`, so
       # `workspace_default_members` is 1 of 33 and a bare `cargo clippy`
-      # selects `djinn-server` alone. Under resolver 2 feature unification is
-      # computed over the SELECTED package set, so warming with `--workspace`
-      # would resolve a different feature union on shared dependencies, give
-      # them different `-C metadata`, and miss the consumer entirely while
-      # still looking like a populated cache. If the lint lane's selection or
-      # features change, change this line in the same commit.
+      # selects `djinn-server` alone — which is no longer what the lint lane
+      # asks for. If the lint lane's selection or features change again,
+      # change this line in the SAME commit.
+      #
+      # The extra cost is bounded to the workspace members' own units, and
+      # those are exactly what rust-cache prunes from the saved entry. What
+      # this step actually deposits is the dependency layer, and `--workspace`
+      # is what makes that layer's feature union match the consumer's.
       #
       # `-- -D warnings` is deliberately omitted: it reaches only the selected
       # workspace units, which rust-cache prunes from the entry anyway. The
@@ -381,7 +390,7 @@ jobs:
       # non-zero when any unit failed, and `cache-on-failure: true` above means
       # the partial deposit is saved either way.
       - name: Build check-mode deps (populate cache)
-        run: cargo clippy --all-targets --features qdrant --keep-going
+        run: cargo clippy --workspace --all-targets --features qdrant --keep-going
       # Both artifact sets now coexist in server/target. Recorded so the disk
       # headroom cost of this job is a measured number rather than an estimate
       # before anyone adds a third (`--all-features`) warm pass for
@@ -676,8 +685,58 @@ jobs:
       - name: Fingerprint census (restored)
         id: fingerprints-restored
         run: echo "count=$(ls target/debug/.fingerprint 2>/dev/null | wc -l)" >> "$GITHUB_OUTPUT"
+      # ONE clippy invocation, whose package selection and feature set match the
+      # FIRST command every production graph-warm cycle runs (built by
+      # `build_warm_commands` in
+      # server/crates/djinn-agent-worker/src/cargo_cache_policy.rs) and the
+      # `Build check-mode deps` deposit in `cache-warm-x86_64-test`.
+      #
+      # `--workspace` is the load-bearing word. Run from `server/`, a bare
+      # `cargo clippy` selects ONLY the root `djinn-server` package:
+      # `server/Cargo.toml` carries a root `[package]`, so
+      # `workspace_default_members` is 1 of 33 and every member crate is linted
+      # as a dependency *lib*. No member crate's lib-TEST target is ever built,
+      # so every `#[cfg(test)]` module under `crates/*` went unlinted on every
+      # PR and in the merge queue — while the warm base compiled all of them.
+      # That asymmetry let a `disallowed_methods` denial reach main twice
+      # (2026-07-13 workspace_cargo_outcome_tests.rs, 2026-07-26
+      # graph_warmer_ledger_tests.rs). Each turned every warm cycle into a
+      # ~4m26s guaranteed failure plus a ~25m `cargo build` fallback, and the
+      # second went unnoticed for a month because a failing warm step logged
+      # `seed_outcome=failed` and no diagnostic.
+      #
+      # `-- -D warnings` is affordable here only because the backlog this
+      # selection exposes was cleared first: 68 warnings over 26 files and 7
+      # crates that had never been linted at all, burned down in #2694.
+      # Nothing was `#[allow]`ed at class scope to get here — suppressing a
+      # class would rebuild the same blind spot with extra steps. Loosen this
+      # step by fixing the warning, never by widening an allow.
+      #
+      # `--keep-going` earns its place on a GATE: cargo's default fail-fast
+      # reports only the FIRST failing crate, so one offender hides every other
+      # and costs a full round-trip per hidden one. It does not mask failure —
+      # cargo still exits non-zero when any unit failed (verified: exit 101).
+      #
+      # SELECTION DISCIPLINE — read before editing this line. Under resolver 2,
+      # feature unification is computed over the SELECTED package set. A warm
+      # or a cache deposit whose selection or features differ from this line
+      # resolves a different feature union on shared dependencies, hands them a
+      # different `-C metadata`, and serves this lane NOTHING while still
+      # reporting `cache-hit=true`. Two things track this line:
+      #   1. `Build check-mode deps` in `cache-warm-x86_64-test` (this file),
+      #      moved to `--workspace` in this same commit for exactly that
+      #      reason. The `Fingerprint census` steps below are the alarm if the
+      #      two ever drift apart again: `built=` near zero means the deposit
+      #      is serving this lane, several thousand means it is not.
+      #   2. `workspaces[].cargo_features` in the djinn project's environment
+      #      config — since #2677 the warm reads its `--features` from there,
+      #      NOT from `server/.cargo/config.toml`, whose `[build] features` key
+      #      that PR deleted. That config has never set it, so the warm
+      #      currently runs with NO features while this lane uses
+      #      `--features qdrant`. It needs `["qdrant"]` for the parity this
+      #      step assumes to actually hold.
       - name: Clippy
-        run: cargo clippy --all-targets --features qdrant -- -D warnings
+        run: cargo clippy --workspace --all-targets --features qdrant --keep-going -- -D warnings
       - name: Fingerprint census (after clippy)
         if: always()
         run: |-
