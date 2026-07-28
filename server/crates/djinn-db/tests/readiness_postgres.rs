@@ -1117,6 +1117,100 @@ async fn repository_concurrent_start_has_one_active_run_and_same_key_resolves() 
 }
 
 #[tokio::test]
+async fn repository_active_or_latest_selection_is_deterministic() {
+    // Database::ephemeral is a template-cloned, real Postgres database.
+    let db = Database::ephemeral()
+        .await
+        .expect("open postgres test database");
+    let project = "readiness-selector";
+    djinn_db::test_support::seed_project(&db, project, project).await;
+    let repo = ReadinessRepository::new(db.clone());
+
+    for (id, key, status, created_at) in [
+        (
+            "selector-terminal-newer",
+            "terminal-newer",
+            "failed",
+            "2026-01-03T00:00:00.000Z",
+        ),
+        (
+            "selector-active",
+            "active",
+            "identifying",
+            "2026-01-01T00:00:00.000Z",
+        ),
+    ] {
+        sqlx::query(
+            "INSERT INTO readiness_runs \
+             (id,project_id,idempotency_key,status,repository_snapshot,skill_name,skill_version,created_at,completed_at) \
+             VALUES ($1,$2,$3,$4,'snapshot','skill','1.0.0',$5, \
+                     CASE WHEN $4 = 'identifying' THEN NULL ELSE $5 END)",
+        )
+        .bind(id)
+        .bind(project)
+        .bind(key)
+        .bind(status)
+        .bind(created_at)
+        .execute(db.pool())
+        .await
+        .expect("seed selector candidate");
+    }
+
+    let active = repo
+        .active_or_latest_for_project(project)
+        .await
+        .expect("select active run")
+        .expect("active run exists");
+    assert_eq!(
+        active.id, "selector-active",
+        "an active run wins even when a terminal run is newer"
+    );
+
+    sqlx::query(
+        "UPDATE readiness_runs \
+         SET status='failed', completed_at='2026-01-04T00:00:00.000Z' WHERE id='selector-active'",
+    )
+    .execute(db.pool())
+    .await
+    .expect("terminalize active selector candidate");
+    let latest_terminal = repo
+        .active_or_latest_for_project(project)
+        .await
+        .expect("select latest terminal run")
+        .expect("terminal run exists");
+    assert_eq!(
+        latest_terminal.id, "selector-terminal-newer",
+        "without an active run, the newest terminal run wins"
+    );
+
+    for (id, key) in [("selector-tie-a", "tie-a"), ("selector-tie-z", "tie-z")] {
+        sqlx::query(
+            "INSERT INTO readiness_runs \
+             (id,project_id,idempotency_key,status,repository_snapshot,skill_name,skill_version,created_at,completed_at) \
+             VALUES ($1,$2,$3,'failed','snapshot','skill','1.0.0', \
+                     '2026-01-05T00:00:00.000Z','2026-01-05T00:00:00.000Z')",
+        )
+        .bind(id)
+        .bind(project)
+        .bind(key)
+        .execute(db.pool())
+        .await
+        .expect("seed equal-timestamp selector candidate");
+    }
+    for _ in 0..5 {
+        let selected = repo
+            .active_or_latest_for_project(project)
+            .await
+            .expect("select tied terminal run")
+            .expect("tied terminal runs exist");
+        assert_eq!(
+            selected.id, "selector-tie-z",
+            "equal timestamps resolve by descending stable run id"
+        );
+    }
+}
+
+#[tokio::test]
 async fn active_latest_and_detail_indexes_have_expected_query_paths() {
     with_temp_database("indexes", |url| async move {
         let mut conn = migrated_connection(&url).await;
