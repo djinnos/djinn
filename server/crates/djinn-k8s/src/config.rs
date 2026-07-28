@@ -320,6 +320,9 @@ pub struct KubernetesConfig {
     /// ignored with a warning rather than silently flipping enforcement.
     #[serde(default)]
     pub cgroup_launcher_mode: CgroupLauncherMode,
+    /// Activates the kubelet-delegated cgroup RuntimeClass for new task-run Pods.
+    #[serde(default)]
+    pub task_run_cgroup_writable_enabled: bool,
 }
 
 impl KubernetesConfig {
@@ -394,6 +397,7 @@ impl KubernetesConfig {
             volume_ownership_mode: crate::launcher::VOLUME_OWNERSHIP_ON_ROOT_MISMATCH.into(),
             // Production task-runs require the launcher and use fresh invocation leaves.
             cgroup_launcher_mode: CgroupLauncherMode::Required,
+            task_run_cgroup_writable_enabled: false,
             // Unbounded by default: per-project build_resources overrides are
             // gated only by request <= limit until an operator configures the
             // per-kind DJINN_K8S_{TASK,WARM}_{CPU,MEMORY}_{MIN,MAX} envs.
@@ -662,7 +666,13 @@ impl KubernetesConfig {
                 ),
             }
         }
-        // Per-project build_resources hard bounds (per Pod kind, per resource).
+        if let Ok(v) = std::env::var("DJINN_K8S_TASK_RUN_CGROUP_WRITABLE_ENABLED") {
+            match v.parse::<bool>() {
+                Ok(enabled) => cfg.task_run_cgroup_writable_enabled = enabled,
+                Err(error) => tracing::warn!(value = %v, %error, "DJINN_K8S_TASK_RUN_CGROUP_WRITABLE_ENABLED is not a boolean — keeping disabled"),
+            }
+        }
+                // Per-project build_resources hard bounds (per Pod kind, per resource).
         // Unset leaves the axis unbounded. Empty strings are ignored so an
         // operator can clear a bound by exporting the var empty.
         let bound = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());

@@ -463,14 +463,7 @@ pub fn build_task_run_job(
         // Enforcement volumes for the cgroup-launcher sidecar:
         //   * `launcher-ipc` — Memory emptyDir carrying the broker control
         //     socket + worker-private credential (worker + launcher only);
-        //   * `launcher-cgroup` — Memory emptyDir supplying a writable
-        //     MOUNTPOINT, not a delegated cgroup root. The delegation itself is
-        //     established by the launcher's own `mount(2)` inside its cgroup
-        //     namespace; no volume source can supply one, which is what task
-        //     grkq's P0 proved. `readOnlyRootFilesystem: true` is why the
-        //     mountpoint has to come from a volume at all.
         volumes.push(launcher_ipc_volume());
-        volumes.push(launcher_cgroup_mountpoint_volume());
         //   * `invocation-journal` — Memory emptyDir the worker opens its
         //     durable invocation journal in. `ShellLaunchContext::broker_backed`
         //     runs `create_dir_all` on it before the supervisor starts, and its
@@ -542,6 +535,7 @@ pub fn build_task_run_job(
         (!config.tolerations.is_empty()).then(|| config.tolerations.clone());
 
     let pod_spec = PodSpec {
+        runtime_class_name: config.task_run_cgroup_writable_enabled.then_some("djinn-cgroup-writable".to_string()),
         service_account_name: Some(config.service_account.clone()),
         // jqvg: the task-run Pod runs repository-controlled code (agent shell
         // commands, `build.rs`, test targets, npm `postinstall`). Nothing in

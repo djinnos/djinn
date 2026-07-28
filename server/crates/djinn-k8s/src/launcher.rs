@@ -29,7 +29,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use k8s_openapi::api::core::v1::{
-    AppArmorProfile, Capabilities, Container, EmptyDirVolumeSource, EnvVar, PodSecurityContext,
+    Capabilities, Container, EmptyDirVolumeSource, EnvVar, PodSecurityContext,
     ResourceRequirements, SeccompProfile, SecurityContext, Volume, VolumeMount,
 };
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
@@ -137,19 +137,8 @@ pub const LAUNCHER_SOCKET_PATH: &str = "/var/run/djinn/launcher/broker.sock";
 /// Worker-private launcher credential path inside [`LAUNCHER_IPC_DIR`].
 pub const LAUNCHER_CREDENTIAL_PATH: &str = "/var/run/djinn/launcher/credential";
 
-/// Volume name for the launcher's writable cgroup **mountpoint**.
-///
-/// This is NOT the delegation. It is an `emptyDir` whose only job is to give the
-/// launcher a writable directory to `mount(2)` cgroup2 onto: the container runs
-/// with `readOnlyRootFilesystem: true`, so a mountpoint cannot be created on the
-/// image's own rootfs, and `readOnlyRootFilesystem` does not block creating one
-/// on an emptyDir/tmpfs. The delegated cgroup v2 tree itself is established by
-/// the launcher at startup (`djinn_cgroup_launcher::bootstrap`); no volume
-/// source can supply one, which is what task grkq's P0 proved the hard way.
-pub const VOLUME_LAUNCHER_CGROUP: &str = "launcher-cgroup";
-/// Mount path of [`VOLUME_LAUNCHER_CGROUP`], and the path the launcher mounts
-/// its delegated cgroup-v2 root onto (owned by [`LAUNCHER_UID`]).
-pub const LAUNCHER_CGROUP_ROOT: &str = "/run/djinn-cgroup";
+/// Kubelet-delegated writable cgroup root supplied by the RuntimeClass.
+pub const LAUNCHER_CGROUP_ROOT: &str = "/sys/fs/cgroup";
 
 /// Whether an enforcement task-run Pod renders the cgroup-launcher sidecar.
 ///
@@ -315,140 +304,19 @@ pub fn worker_security_context() -> SecurityContext {
     }
 }
 
-/// Capability set the launcher container is granted at admission.
-///
-/// Three of the five are permanent, and two of them are not:
-///
-///   * `SETUID`/`SETGID` — `setresuid(1001)` / `setresgid(1000)` +
-///     `setgroups(0)` to drop the child to [`CHILD_UID`]/[`ARTIFACT_GID`];
-///   * `SETPCAP` — clear the child's capability bounding/ambient set, and
-///     `capset` the launcher's OWN set down after bootstrap (below);
-///   * `SYS_ADMIN` — `mount(2)` the delegated cgroup2 filesystem. **Bootstrap
-///     only.**
-///   * `SYS_RESOURCE` — cgroup limit management on the delegated tree.
-///     **Bootstrap only.**
-///
-/// # The two bootstrap capabilities do not survive startup
-///
-/// `CAP_SYS_ADMIN` is a node-wide escape primitive: with it a process can
-/// `umount` the runtime's `/proc` masks and write `/proc/sys/kernel/core_pattern`,
-/// which is not namespaced. The production node's `core_pattern` is already a
-/// pipe, so that is a direct route to executing a payload as root outside every
-/// namespace. Granting it to a pod that runs arbitrary repository code would be
-/// indefensible.
-///
-/// It is not granted to such a pod. `djinn_cgroup_launcher::bootstrap` mounts,
-/// delegates, and then `capset`s both bootstrap capabilities out of the
-/// permitted, effective, inheritable AND bounding sets — verifying the drop with
-/// `capget` and refusing to serve if it did not take — all **before** the broker
-/// binds its control socket. The only code that runs while they are held is that
-/// bootstrap function. The worker container never has them
-/// ([`worker_security_context`] drops ALL), and the launched child never has
-/// them (`child::prepare_child` clears its capabilities and installs a seccomp
-/// filter denying `mount`/`unshare`/`setns` before `execve`).
-///
-/// This is also the only real implementation of goxi's "allowPrivilegeEscalation
-/// false AFTER INITIALIZATION": a container `securityContext` is static, so the
-/// phase change cannot be a Pod field. `CAP_SETPCAP` is what makes it
-/// expressible, and it is runtime behaviour rather than a manifest line.
-///
-/// # Why the names have no `CAP_` prefix
-///
-/// The Kubernetes API rejects `capabilities.add: ["CAP_SYS_ADMIN"]` together
-/// with `allowPrivilegeEscalation: false` — validation string-matches the
-/// literal `"CAP_SYS_ADMIN"`. The conventional, and universally used, spelling
-/// is the bare `"SYS_ADMIN"`, which is accepted; goxi's manifest as literally
-/// written is API-invalid. Keeping `allowPrivilegeEscalation: false` is the
-/// stronger posture and it is what the launcher actually needs — it drops
-/// privilege, it never gains any across `execve`.
-/// Every capability the launcher container is granted: the set it keeps for the
-/// pod's lifetime, plus the two it destroys once the delegated root exists.
-///
-/// Both lists come from `djinn_cgroup_launcher::bootstrap`, which is the crate
-/// that actually performs the post-bootstrap `capset`. They used to be a second
-/// hand-kept copy here, and the copies disagreed: the runtime retained
-/// `CAP_CHOWN` nowhere while `UnixBrokerServer::bind` needed it to hand the
-/// control socket to the worker, so the launcher died `EPERM` after a fully
-/// successful bootstrap. Rendering from the runtime's own lists makes that
-/// class of drift unrepresentable rather than merely tested.
+/// Capability set required for the launcher's broker and child identity boundary.
+/// The kubelet RuntimeClass delegates the cgroup root, so no mount or bootstrap
+/// capability is granted.
 fn launcher_capabilities() -> Capabilities {
-    let add = RETAINED_CAPABILITY_NAMES
-        .iter()
-        .chain(BOOTSTRAP_ONLY_CAPABILITY_NAMES)
-        .map(|capability| (*capability).to_string())
-        .collect();
     Capabilities {
         drop: Some(vec!["ALL".to_string()]),
-        add: Some(add),
+        add: Some(RETAINED_CAPABILITY_NAMES.iter().map(|capability| (*capability).to_string()).collect()),
     }
 }
 
-/// Capabilities the launcher holds only during bootstrap and then `capset`s
-/// away. Re-exported from the launcher crate so the render and the runtime drop
-/// really are one list rather than two that agree by inspection.
-pub const LAUNCHER_BOOTSTRAP_ONLY_CAPABILITIES: &[&str] = BOOTSTRAP_ONLY_CAPABILITY_NAMES;
-
-/// Container-level security context for the launcher sidecar. Root, minimal
-/// caps, restricted seccomp, read-only rootfs (it only writes the delegated
-/// cgroup and the control socket, both on dedicated mounts). `no_new_privs` on
-/// the *children* it spawns is applied by the launcher at runtime
-/// (`child::prepare_child`); `allowPrivilegeEscalation: false` here matches that
-/// intent for the launcher process itself (dropping to the child uid still works
-/// under NNP).
-///
-/// # Why `appArmorProfile: Unconfined` (task 22rj follow-up, v0.7.5 rollback)
-///
-/// Arming the launcher in production failed on the very first task pod with
-/// `mount(2)` returning **errno 13 (EACCES)** while `CAP_SYS_ADMIN` was
-/// demonstrably present (`CapEff: 00000000012001c0`). The capability was never
-/// what was missing.
-///
-/// Measured on the production node (Ubuntu 24.04, k3s v1.35.5, cgroup v2), one
-/// variable at a time, with the rest of this security context held fixed:
-///
-/// | variant                                     | `mount("cgroup2", ...)` |
-/// |---------------------------------------------|-------------------------|
-/// | baseline (RuntimeDefault seccomp, default AppArmor) | `EACCES`        |
-/// | `seccompProfile: Unconfined`                | **still `EACCES`**      |
-/// | `appArmorProfile: Unconfined`               | **succeeds**            |
-///
-/// containerd applies its built-in `cri-containerd.apparmor.d` profile to every
-/// container that does not opt out, and that profile contains a flat
-/// `deny mount,`. AppArmor's `sb_mount` hook denies with `EACCES`, which is
-/// exactly the errno observed; seccomp denies with `EPERM` and in any case the
-/// runtime default permits `mount` once `CAP_SYS_ADMIN` is held. Note that the
-/// denial leaves **no audit record**: AppArmor `deny` rules are silent unless
-/// written `audit deny`, so an empty `dmesg | grep DENIED` is not evidence of
-/// absence — the isolation table above is the evidence.
-///
-/// So goxi's "clone3 seccomp allowlist" was aimed at the wrong axis, and task
-/// 22rj's "RuntimeDefault seccomp" acceptance criterion is not wrong in value —
-/// `RuntimeDefault` genuinely is correct and is retained here — it is simply
-/// irrelevant to the failure. Neither contract mentioned AppArmor at all.
-///
-/// ## What this gives up, honestly
-///
-/// The container runtime's default AppArmor confinement on this one container:
-/// principally `deny mount,` (which is the point) and the profile's write denials
-/// on `/proc/sys/**`, `/sys/**`, `/proc/sysrq-trigger` and
-/// `/proc/kernel/core_pattern`. During the bootstrap window this process
-/// therefore holds a genuinely unconfined `CAP_SYS_ADMIN`.
-///
-/// That window is bounded by construction and the bound is asserted, not
-/// asserted-about: `bootstrap::run` mounts, vacates, delegates and then
-/// `capset`s `CAP_SYS_ADMIN`/`CAP_SYS_RESOURCE` out of the permitted, effective,
-/// inheritable **and bounding** sets before the broker binds its socket. No
-/// user-controlled code executes while the capability is held — the only code
-/// running is that function. Verified on the node against the real launcher
-/// binary: once the container reaches `Running`, `/proc/1/status` reports
-/// `CapEff: 00000000000001c0` and `CapBnd: 00000000000001c0` — `SETUID`,
-/// `SETGID`, `SETPCAP` and nothing more.
-///
-/// A `Localhost` profile allowing only `mount fstype=cgroup2` would be tighter,
-/// but it must be preloaded on every node before the pod starts and the deploy
-/// repo has no mechanism to place one; a missing profile fails the pod closed,
-/// which is precisely the outage this is fixing. That hardening is a follow-up,
-/// not a prerequisite.
+/// Container-level security context for the launcher sidecar. The delegated
+/// cgroup root is supplied by the RuntimeClass; the sidecar keeps only the
+/// identity capabilities required to broker children.
 pub fn launcher_security_context() -> SecurityContext {
     SecurityContext {
         run_as_user: Some(LAUNCHER_UID),
@@ -458,18 +326,7 @@ pub fn launcher_security_context() -> SecurityContext {
         read_only_root_filesystem: Some(true),
         capabilities: Some(launcher_capabilities()),
         seccomp_profile: Some(runtime_default_seccomp()),
-        app_armor_profile: Some(unconfined_apparmor()),
         ..SecurityContext::default()
-    }
-}
-
-/// The `Unconfined` AppArmor profile the launcher container needs so `mount(2)`
-/// is reachable at all. See [`launcher_security_context`] for the measurement
-/// that establishes this is the axis that actually blocks the mount.
-fn unconfined_apparmor() -> AppArmorProfile {
-    AppArmorProfile {
-        type_: "Unconfined".to_string(),
-        ..AppArmorProfile::default()
     }
 }
 
