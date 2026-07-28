@@ -1,5 +1,8 @@
 mod admission;
 pub(crate) mod attempt_lifecycle;
+/// Trigger B: the same-role cycling gate (threshold, prior-session terminal
+/// disposition, and the arming decision). Re-exported through `crate::types`.
+pub(crate) mod cycling_intervention;
 pub(crate) mod lane_resolution_log;
 pub(crate) mod liveness;
 mod outcome;
