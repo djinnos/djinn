@@ -677,7 +677,7 @@ mod tests {
     fn test_out_of_core_disabled_by_default() {
         // Shared with the canonical-graph out-of-core tests, which read the
         // same `DJINN_GRAPH_OUT_OF_CORE*` process env. Serialize them all.
-        let _env_lock = crate::test_helpers::lock_pipeline_env();
+        let _env_lock = crate::test_helpers::lock_pipeline_env_blocking();
         // Ensure the env var is not set.
         // SAFETY: tests run single-threaded for env var mutation.
         unsafe {
@@ -696,7 +696,7 @@ mod tests {
 
     #[test]
     fn test_out_of_core_disabled_for_truthy_variants() {
-        let _env_lock = crate::test_helpers::lock_pipeline_env();
+        let _env_lock = crate::test_helpers::lock_pipeline_env_blocking();
         // All the truthy variants should enable.
         for val in &["1", "true", "TRUE", "True", "yes", "YES", "on", "ON"] {
             unsafe {
@@ -726,7 +726,7 @@ mod tests {
 
     #[test]
     fn test_threshold_gating_small_repo() {
-        let _env_lock = crate::test_helpers::lock_pipeline_env();
+        let _env_lock = crate::test_helpers::lock_pipeline_env_blocking();
         unsafe {
             std::env::set_var("DJINN_GRAPH_OUT_OF_CORE", "1");
             std::env::set_var("DJINN_GRAPH_OUT_OF_CORE_MIN_NODES", "100000");
@@ -844,7 +844,7 @@ mod tests {
 
     #[test]
     fn test_lru_capacity_is_configurable() {
-        let _env_lock = crate::test_helpers::lock_pipeline_env();
+        let _env_lock = crate::test_helpers::lock_pipeline_env_blocking();
         unsafe {
             std::env::set_var("DJINN_GRAPH_OUT_OF_CORE", "1");
             std::env::set_var("DJINN_GRAPH_OUT_OF_CORE_MIN_NODES", "100");
