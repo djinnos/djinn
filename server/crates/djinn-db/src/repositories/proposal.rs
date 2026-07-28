@@ -7186,6 +7186,217 @@ mod tests {
         }
     }
 
+    fn evidence_findings_debate_input<'a>(
+        proposal_id: &'a str,
+        source_task_id: &'a str,
+        findings: &'a serde_json::Value,
+    ) -> ProposalDebateTrailCreateInput<'a> {
+        ProposalDebateTrailCreateInput {
+            proposal_id,
+            kind: "evidence_findings",
+            body: "caller-owned transaction evidence findings",
+            blocking: false,
+            agent_role: "spike",
+            author_kind: "agent",
+            author_model: Some("test-spike"),
+            source_task_id: Some(source_task_id),
+            against_revision_seq: 1,
+            round: 1,
+            body_metadata: Some(findings),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn caller_owned_debate_commit_and_rollback_have_expected_visibility() {
+        let db = test_db();
+        let (bus, captured) = capturing_bus();
+        let repo = ProposalRepository::new(db.clone(), bus);
+        let proposal = repo
+            .create(create_input("Caller-owned boundaries"))
+            .await
+            .unwrap();
+        captured.lock().unwrap().clear();
+
+        let committed_source_task_id = uuid::Uuid::now_v7().to_string();
+        let committed_findings =
+            serde_json::to_value(sample_evidence_findings("committed caller-owned finding"))
+                .unwrap();
+        let committed = {
+            let mut tx = db.pool().begin().await.unwrap();
+            let entry = repo
+                .add_debate_trail_entry_in_tx(
+                    &mut tx,
+                    evidence_findings_debate_input(
+                        &proposal.id,
+                        &committed_source_task_id,
+                        &committed_findings,
+                    ),
+                )
+                .await
+                .unwrap();
+            tx.commit().await.unwrap();
+            entry
+        };
+
+        assert!(
+            captured.lock().unwrap().is_empty(),
+            "the caller-owned primitive must not emit an event when it commits"
+        );
+
+        let fresh_reader = ProposalRepository::new(db.clone(), EventBus::noop());
+        let durable = fresh_reader
+            .get_debate_trail_entry(&committed.id)
+            .await
+            .unwrap()
+            .expect("committed caller-owned entry must be visible to a fresh reader");
+        assert_eq!(durable.id, committed.id);
+        assert_eq!(
+            durable.source_task_id.as_deref(),
+            Some(committed_source_task_id.as_str())
+        );
+
+        let rolled_back_source_task_id = uuid::Uuid::now_v7().to_string();
+        let rolled_back_findings =
+            serde_json::to_value(sample_evidence_findings("rolled-back caller-owned finding"))
+                .unwrap();
+        let rolled_back = {
+            let mut tx = db.pool().begin().await.unwrap();
+            let entry = repo
+                .add_debate_trail_entry_in_tx(
+                    &mut tx,
+                    evidence_findings_debate_input(
+                        &proposal.id,
+                        &rolled_back_source_task_id,
+                        &rolled_back_findings,
+                    ),
+                )
+                .await
+                .unwrap();
+            tx.rollback().await.unwrap();
+            entry
+        };
+
+        assert!(
+            fresh_reader
+                .get_debate_trail_entry(&rolled_back.id)
+                .await
+                .unwrap()
+                .is_none(),
+            "explicit rollback must leave no durable debate entry"
+        );
+        assert!(
+            captured.lock().unwrap().is_empty(),
+            "the caller-owned primitive must not emit an event when it rolls back"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn caller_owned_debate_drop_discards_uncommitted_entry() {
+        let db = test_db();
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let proposal = repo
+            .create(create_input("Caller-owned drop"))
+            .await
+            .unwrap();
+        let source_task_id = uuid::Uuid::now_v7().to_string();
+        let findings =
+            serde_json::to_value(sample_evidence_findings("dropped caller-owned finding")).unwrap();
+
+        let dropped_entry_id = {
+            let mut tx = db.pool().begin().await.unwrap();
+            let entry = repo
+                .add_debate_trail_entry_in_tx(
+                    &mut tx,
+                    evidence_findings_debate_input(&proposal.id, &source_task_id, &findings),
+                )
+                .await
+                .unwrap();
+            entry.id
+        };
+
+        let fresh_reader = ProposalRepository::new(db.clone(), EventBus::noop());
+        assert!(
+            fresh_reader
+                .get_debate_trail_entry(&dropped_entry_id)
+                .await
+                .unwrap()
+                .is_none(),
+            "dropping an uncommitted transaction must leave no durable debate entry"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn caller_owned_debate_wrapper_returns_durable_entry_and_emits_created_event() {
+        let db = test_db();
+        let (bus, captured) = capturing_bus();
+        let repo = ProposalRepository::new(db.clone(), bus);
+        let proposal = repo
+            .create(create_input("Wrapper event boundary"))
+            .await
+            .unwrap();
+        captured.lock().unwrap().clear();
+
+        let source_task_id = uuid::Uuid::now_v7().to_string();
+        let findings =
+            serde_json::to_value(sample_evidence_findings("wrapper committed finding")).unwrap();
+        let returned = repo
+            .add_debate_trail_entry(evidence_findings_debate_input(
+                &proposal.id,
+                &source_task_id,
+                &findings,
+            ))
+            .await
+            .unwrap();
+
+        let fresh_reader = ProposalRepository::new(db.clone(), EventBus::noop());
+        let durable = fresh_reader
+            .get_debate_trail_entry(&returned.id)
+            .await
+            .unwrap()
+            .expect("wrapper return value must identify a committed entry");
+        assert_eq!(durable.id, returned.id);
+        assert_eq!(durable.body_metadata, returned.body_metadata);
+
+        let events = captured.lock().unwrap();
+        assert_eq!(
+            events.len(),
+            1,
+            "the pre-registered listener sees one event"
+        );
+        assert_eq!(events[0].entity_type, "proposal_debate_trail");
+        assert_eq!(events[0].action, "created");
+        assert_eq!(events[0].payload["proposal_id"], proposal.id);
+        assert_eq!(events[0].payload["entry"]["id"], returned.id);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn caller_owned_debate_wrapper_validation_failure_emits_no_created_event() {
+        let (bus, captured) = capturing_bus();
+        let repo = ProposalRepository::new(test_db(), bus);
+        let proposal = repo
+            .create(create_input("Wrapper failed event boundary"))
+            .await
+            .unwrap();
+        captured.lock().unwrap().clear();
+
+        let source_task_id = uuid::Uuid::now_v7().to_string();
+        let findings =
+            serde_json::to_value(sample_evidence_findings("invalid blocking finding")).unwrap();
+        let error = repo
+            .add_debate_trail_entry(ProposalDebateTrailCreateInput {
+                blocking: true,
+                ..evidence_findings_debate_input(&proposal.id, &source_task_id, &findings)
+            })
+            .await
+            .unwrap_err();
+
+        assert!(format!("{error}").contains("blocking = false"));
+        assert!(
+            captured.lock().unwrap().is_empty(),
+            "a failed wrapper insertion must not emit a created event"
+        );
+    }
+
     fn sample_needs_evidence_claim(round: i32, against_revision_seq: i32) -> NeedsEvidenceClaim {
         NeedsEvidenceClaim {
             question: "Can the linked spike answer the claim?".to_owned(),

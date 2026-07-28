@@ -2,11 +2,12 @@ use super::*;
 
 // ─── F2: just-in-time pitfall retrieval on first write (gated) ────────────
 
-/// Env-lock for the `DJINN_JIT_PITFALLS_ROLLOUT` rollout gate. Held across `.await` on
-/// purpose: the flag is process-global, so concurrent JIT tests must not
-/// observe each other's env mutation. Same pattern as the auto-code-context
-/// env tests in `helpers.rs`.
-static JIT_PITFALLS_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+// These tests are the *writers* for the `DJINN_JIT_PITFALLS_ROLLOUT` gate —
+// they mutate the process-global env — so they take the exclusive side via
+// `test_helpers::jit_env_write_guard()`, held across `.await` on purpose. The
+// lock lives in `test_helpers` because the gate is read on the whole
+// write/edit/apply_patch tool path, not just by JIT tests; see the doc comment
+// there for the flake this scoping fixes.
 
 const JIT_PITFALL_OUTCOMES: [&str; 7] = [
     "disabled_default_off",
@@ -102,7 +103,7 @@ async fn latest_jit_trace(
 async fn jit_pitfalls_trace_preserves_top_two_output_and_candidate_outcomes() {
     use djinn_db::repositories::retrieval_trace::{CandidateOutcome, SkippedReason};
 
-    let _guard = JIT_PITFALLS_ENV_LOCK.lock().unwrap();
+    let _guard = crate::test_helpers::jit_env_write_guard();
     unsafe {
         std::env::remove_var("DJINN_JIT_PITFALLS");
         std::env::set_var("DJINN_JIT_PITFALLS_ROLLOUT", "cohort");
@@ -202,7 +203,7 @@ async fn jit_pitfalls_trace_preserves_top_two_output_and_candidate_outcomes() {
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn jit_pitfalls_search_error_persists_error_trace_and_consumes_session() {
-    let _guard = JIT_PITFALLS_ENV_LOCK.lock().unwrap();
+    let _guard = crate::test_helpers::jit_env_write_guard();
     unsafe {
         std::env::remove_var("DJINN_JIT_PITFALLS");
         std::env::set_var("DJINN_JIT_PITFALLS_ROLLOUT", "enabled");
@@ -337,7 +338,7 @@ async fn jit_pitfalls_search_error_persists_error_trace_and_consumes_session() {
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn jit_pitfalls_trace_insert_failure_is_fail_open_for_rendered_hint() {
-    let _guard = JIT_PITFALLS_ENV_LOCK.lock().unwrap();
+    let _guard = crate::test_helpers::jit_env_write_guard();
     unsafe {
         std::env::remove_var("DJINN_JIT_PITFALLS");
         std::env::set_var("DJINN_JIT_PITFALLS_ROLLOUT", "enabled");
@@ -397,7 +398,7 @@ async fn jit_pitfalls_trace_insert_failure_is_fail_open_for_rendered_hint() {
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn jit_pitfalls_trace_serialization_failure_is_fail_open() {
-    let _guard = JIT_PITFALLS_ENV_LOCK.lock().unwrap();
+    let _guard = crate::test_helpers::jit_env_write_guard();
     unsafe {
         std::env::remove_var("DJINN_JIT_PITFALLS");
         std::env::set_var("DJINN_JIT_PITFALLS_ROLLOUT", "enabled");
@@ -467,7 +468,7 @@ async fn jit_pitfalls_trace_serialization_failure_is_fail_open() {
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn jit_pitfalls_suppression_insert_failure_is_fail_open() {
-    let _guard = JIT_PITFALLS_ENV_LOCK.lock().unwrap();
+    let _guard = crate::test_helpers::jit_env_write_guard();
     unsafe {
         std::env::remove_var("DJINN_JIT_PITFALLS");
         std::env::set_var("DJINN_JIT_PITFALLS_ROLLOUT", "off");
@@ -603,7 +604,7 @@ async fn jit_pitfalls_suppression_insert_failure_is_fail_open() {
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn jit_pitfalls_off_by_default_no_hint() {
-    let _guard = JIT_PITFALLS_ENV_LOCK.lock().unwrap();
+    let _guard = crate::test_helpers::jit_env_write_guard();
     // SAFETY: single-threaded section guarded by the env-lock mutex.
     unsafe {
         std::env::remove_var("DJINN_JIT_PITFALLS_ROLLOUT");
@@ -654,7 +655,7 @@ async fn jit_pitfalls_off_by_default_no_hint() {
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn jit_pitfalls_kill_switch_overrides_legacy_opt_in() {
-    let _guard = JIT_PITFALLS_ENV_LOCK.lock().unwrap();
+    let _guard = crate::test_helpers::jit_env_write_guard();
     // SAFETY: single-threaded section guarded by the env-lock mutex.
     unsafe {
         std::env::set_var("DJINN_JIT_PITFALLS", "1");
@@ -710,7 +711,7 @@ async fn jit_pitfalls_kill_switch_overrides_legacy_opt_in() {
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn jit_pitfalls_on_first_write_appends_then_not_again() {
-    let _guard = JIT_PITFALLS_ENV_LOCK.lock().unwrap();
+    let _guard = crate::test_helpers::jit_env_write_guard();
     // SAFETY: single-threaded section guarded by the env-lock mutex.
     unsafe {
         std::env::remove_var("DJINN_JIT_PITFALLS");
@@ -789,7 +790,7 @@ async fn jit_pitfalls_on_first_write_appends_then_not_again() {
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn jit_pitfalls_on_miss_leaves_write_succeeding() {
-    let _guard = JIT_PITFALLS_ENV_LOCK.lock().unwrap();
+    let _guard = crate::test_helpers::jit_env_write_guard();
     // SAFETY: single-threaded section guarded by the env-lock mutex.
     unsafe {
         std::env::remove_var("DJINN_JIT_PITFALLS");
@@ -841,7 +842,7 @@ async fn jit_pitfalls_on_miss_leaves_write_succeeding() {
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn jit_pitfalls_on_missing_project_id_leaves_write_succeeding() {
-    let _guard = JIT_PITFALLS_ENV_LOCK.lock().unwrap();
+    let _guard = crate::test_helpers::jit_env_write_guard();
     // SAFETY: single-threaded section guarded by the env-lock mutex.
     unsafe {
         std::env::remove_var("DJINN_JIT_PITFALLS");
@@ -882,7 +883,7 @@ async fn jit_pitfalls_on_missing_project_id_leaves_write_succeeding() {
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn jit_pitfalls_on_edit_first_modification_appends() {
-    let _guard = JIT_PITFALLS_ENV_LOCK.lock().unwrap();
+    let _guard = crate::test_helpers::jit_env_write_guard();
     // SAFETY: single-threaded section guarded by the env-lock mutex.
     unsafe {
         std::env::remove_var("DJINN_JIT_PITFALLS");
@@ -945,8 +946,13 @@ async fn jit_pitfalls_on_edit_first_modification_appends() {
 /// when invoked with a worker role. This proves the widened signature
 /// compiles and is callable through the worker-role plumbing path without
 /// changing runtime behavior.
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn write_accepts_worker_role_plumbing() {
+    // Lives in this file but is NOT a rollout-gate test: it drives the real
+    // write path, so it must hold the shared read side or it can bump the
+    // outcome counters while a JIT test above is asserting their deltas.
+    let _jit_env = crate::test_helpers::jit_env_read_guard();
     let worktree = crate::test_helpers::test_tempdir("djinn-ext-write-worker-");
     tokio::fs::create_dir_all(worktree.path().join("src"))
         .await

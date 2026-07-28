@@ -9,8 +9,10 @@ use super::*;
 /// Windowed (Range) read that does not cover the edit match span denies
 /// the worker, leaves `edit_forced` empty in `gateguard_snapshot`, and
 /// does NOT mutate the file.
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn windowed_read_denies_worker_edit_and_keeps_gateguard_clean() {
+    let _jit_env = crate::test_helpers::jit_env_read_guard();
     let (worktree, state) = setup_worktree("gg-win-edit-");
     let file = worktree.path().join("svc.rs");
     tokio::fs::write(&file, "AAAA\nBBBB\n").await.expect("seed");
@@ -72,8 +74,10 @@ async fn windowed_read_denies_worker_edit_and_keeps_gateguard_clean() {
 
 /// Identical uncovered/windowed retries for `call_edit` keep denying
 /// until a covering non-truncated read occurs.
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn identical_windowed_read_retries_keep_denying_for_edit() {
+    let _jit_env = crate::test_helpers::jit_env_read_guard();
     let (worktree, state) = setup_worktree("gg-win-retry-");
     let file = worktree.path().join("svc.rs");
     tokio::fs::write(&file, "AAAA\nBBBB\n").await.expect("seed");
@@ -151,8 +155,10 @@ async fn identical_windowed_read_retries_keep_denying_for_edit() {
 /// After a windowed-read denial, a covering non-truncated full-file read
 /// transitions the denial to the normal first-edit FORCE investigation
 /// prompt (not continued UNCOVERED denial).
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn full_read_after_windowed_denial_transitions_edit_to_investigation() {
+    let _jit_env = crate::test_helpers::jit_env_read_guard();
     let (worktree, state) = setup_worktree("gg-win-full-");
     let file = worktree.path().join("svc.rs");
     tokio::fs::write(&file, "let a = services;\n")
@@ -248,8 +254,10 @@ async fn full_read_after_windowed_denial_transitions_edit_to_investigation() {
 
 /// Windowed (Range) read denies worker write to existing file.
 /// Write overwrites the entire file so requires full coverage.
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn windowed_read_denies_worker_write_and_keeps_gateguard_clean() {
+    let _jit_env = crate::test_helpers::jit_env_read_guard();
     let (worktree, state) = setup_worktree("gg-win-write-");
     let file = worktree.path().join("svc.rs");
     tokio::fs::write(&file, "line one\nline two\nline three\n")
@@ -311,8 +319,10 @@ async fn windowed_read_denies_worker_write_and_keeps_gateguard_clean() {
 
 /// After a windowed-read denial on write, a full non-truncated read
 /// transitions to the first-edit FORCE investigation prompt.
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn full_read_after_windowed_denial_transitions_write_to_investigation() {
+    let _jit_env = crate::test_helpers::jit_env_read_guard();
     let (worktree, state) = setup_worktree("gg-win-wtrans-");
     let file = worktree.path().join("svc.rs");
     tokio::fs::write(&file, "let a = services;\n")
@@ -407,8 +417,10 @@ async fn full_read_after_windowed_denial_transitions_write_to_investigation() {
 
 /// Windowed (Range) read denies worker patch update. The conservative
 /// gate uses `0..usize::MAX` so only `ReadCoverage::Full` can pass.
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn windowed_read_denies_worker_patch_update_and_keeps_gateguard_clean() {
+    let _jit_env = crate::test_helpers::jit_env_read_guard();
     let (worktree, state) = setup_worktree("gg-win-pupd-");
     let file = worktree.path().join("svc.rs");
     tokio::fs::write(&file, "existing content\n")
@@ -472,8 +484,10 @@ async fn windowed_read_denies_worker_patch_update_and_keeps_gateguard_clean() {
 
 /// Truncated read denies worker patch delete. The file must not be
 /// deleted, and `edit_forced` must remain empty.
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn truncated_read_denies_worker_patch_delete_no_mutation() {
+    let _jit_env = crate::test_helpers::jit_env_read_guard();
     let (worktree, state) = setup_worktree("gg-trunc-pdel-");
     let file = worktree.path().join("doomed.rs");
     tokio::fs::write(&file, "I must not be deleted\n")
@@ -532,8 +546,10 @@ async fn truncated_read_denies_worker_patch_delete_no_mutation() {
 
 /// Windowed (Range) read denies worker patch delete. Same behavior as
 /// truncated: conservatively requires full-file coverage for delete ops.
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn windowed_read_denies_worker_patch_delete_no_mutation() {
+    let _jit_env = crate::test_helpers::jit_env_read_guard();
     let (worktree, state) = setup_worktree("gg-win-pdel-");
     let file = worktree.path().join("doomed.rs");
     tokio::fs::write(&file, "line one\nline two\n")
@@ -595,8 +611,10 @@ async fn windowed_read_denies_worker_patch_delete_no_mutation() {
 
 /// After a truncated patch denial, a full non-truncated re-read
 /// transitions the patch gate to the investigation prompt.
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn full_read_after_truncated_denial_transitions_patch_to_investigation() {
+    let _jit_env = crate::test_helpers::jit_env_read_guard();
     let (worktree, state) = setup_worktree("gg-trunc-ptrans-");
     let file = worktree.path().join("svc.rs");
     tokio::fs::write(&file, "let a = services;\n")
@@ -679,8 +697,10 @@ async fn full_read_after_truncated_denial_transitions_patch_to_investigation() {
 /// inserts the path into `edit_forced`. Then verify that a covering
 /// non-truncated read + first-edit investigation is the *only* path
 /// that populates `edit_forced`.
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn gateguard_snapshot_proves_no_edit_forced_from_deficient_reads() {
+    let _jit_env = crate::test_helpers::jit_env_read_guard();
     let (worktree, state) = setup_worktree("gg-snap-proof-");
     let file = worktree.path().join("svc.rs");
     tokio::fs::write(&file, "AAAA\nBBBB\nCCCC\n")
