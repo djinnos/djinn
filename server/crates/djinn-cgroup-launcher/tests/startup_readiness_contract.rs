@@ -98,43 +98,6 @@ fn the_filesystem_type_check_precedes_the_controller_check() {
     );
 }
 
-/// The startup bootstrap is what turns the rendered mountpoint into a delegated
-/// cgroup2 root. Unprivileged, `mount(2)` is denied — and that has to surface as
-/// a NAMED readiness failure naming the path and the errno, not as an opaque
-/// EPERM discovered per-command after the pod has taken work.
-///
-/// Task 7deu: this replaces the `clone3` preflight. The launcher no longer has a
-/// syscall-availability dependency to probe — `fork(2)` and `write(2)` are not
-/// intercepted by any profile in use — so the only startup precondition left is
-/// whether the delegated root can be established at all.
-#[test]
-fn an_unprivileged_bootstrap_is_a_named_readiness_failure_carrying_the_errno() {
-    if unsafe { libc::geteuid() } == 0 {
-        // The privileged lane proves the succeeding path; here there is nothing
-        // to assert about a root that is allowed to mount.
-        return;
-    }
-    let scratch = Scratch::new("bootstrap");
-    let root = scratch.0.join("delegated");
-
-    let error = Bootstrap::new(&root)
-        .run()
-        .expect_err("an unprivileged process cannot mount cgroup2");
-
-    match error {
-        Error::CgroupMountFailed { path, errno } => {
-            assert_eq!(path, root.display().to_string());
-            assert_eq!(errno, libc::EPERM);
-            let rendered = Error::CgroupMountFailed { path, errno }.to_string();
-            assert!(
-                rendered.contains("CAP_SYS_ADMIN"),
-                "the operator must be told which capability is missing: {rendered}"
-            );
-        }
-        other => panic!("expected a named mount failure, got: {other}"),
-    }
-}
-
 /// The spawn seam verifies cgroup membership instead of assuming it, and a
 /// child it cannot place never reaches `execve`.
 ///

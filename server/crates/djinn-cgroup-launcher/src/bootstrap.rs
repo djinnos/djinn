@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::Error;
+use crate::{Error, assert_cgroup2_filesystem};
 
 /// Identity capabilities retained by the launcher to prepare brokered children.
 pub const RETAINED_CAPABILITY_NAMES: &[&str] = &["CHOWN", "SETGID", "SETUID", "SETPCAP"];
@@ -24,6 +24,7 @@ impl Bootstrap {
 
     /// Vacate the delegated root and delegate exactly the CPU controller.
     pub fn run(&self) -> Result<(), Error> {
+        assert_cgroup2_filesystem(&self.root)?;
         self.vacate_root()?;
         self.delegate_cpu()
     }
@@ -55,12 +56,11 @@ impl Bootstrap {
 
     fn delegate_cpu(&self) -> Result<(), Error> {
         let control = self.root.join("cgroup.subtree_control");
-        let enabled = std::fs::read_to_string(&control).map_err(|error| {
-            Error::CgroupDelegationFailed {
+        let enabled =
+            std::fs::read_to_string(&control).map_err(|error| Error::CgroupDelegationFailed {
                 detail: "read cgroup.subtree_control",
                 errno: error.raw_os_error().unwrap_or(0),
-            }
-        })?;
+            })?;
         let mut directives: Vec<String> = enabled
             .split_ascii_whitespace()
             .filter(|controller| *controller != DELEGATED_CONTROLLER)

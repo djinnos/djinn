@@ -27,12 +27,12 @@ use crate::invocation_journal::{
     invocation_journal_volume, worker_invocation_journal_env, worker_invocation_journal_mount,
 };
 use crate::launcher::{
-    launcher_cgroup_mountpoint_volume, launcher_ipc_volume, launcher_sidecar_container,
-    pod_host_users, pod_security_context, worker_launcher_env, worker_launcher_ipc_mount,
-    worker_resources, worker_security_context, RoleResourceClass,
+    RoleResourceClass, launcher_ipc_volume, launcher_sidecar_container, pod_host_users,
+    pod_security_context, worker_launcher_env, worker_launcher_ipc_mount, worker_resources,
+    worker_security_context,
 };
 use crate::sidecar::{
-    sidecar_conn_env, sidecar_container, sidecar_dshm_volume, BackingServiceSpec,
+    BackingServiceSpec, sidecar_conn_env, sidecar_container, sidecar_dshm_volume,
 };
 
 /// Label key for the task-run id (Djinn's primary correlator).
@@ -237,6 +237,10 @@ pub fn build_task_run_job(
     // to build-capable so a pod that might compile is never under-provisioned.
     role: Option<RoleKind>,
 ) -> Job {
+    assert!(
+        !config.cgroup_launcher_mode.renders_sidecar() || config.task_run_cgroup_writable_enabled,
+        "required cgroup launcher requires runtimeClassName: djinn-cgroup-writable"
+    );
     let task_run_id_str = task_run_id.to_string();
     let labels = job_labels(&task_run_id_str);
     let job_name = format!("djinn-taskrun-{task_run_id}");
@@ -535,7 +539,9 @@ pub fn build_task_run_job(
         (!config.tolerations.is_empty()).then(|| config.tolerations.clone());
 
     let pod_spec = PodSpec {
-        runtime_class_name: config.task_run_cgroup_writable_enabled.then_some("djinn-cgroup-writable".to_string()),
+        runtime_class_name: config
+            .task_run_cgroup_writable_enabled
+            .then_some(crate::launcher::TASK_RUN_CGROUP_RUNTIME_CLASS.to_string()),
         service_account_name: Some(config.service_account.clone()),
         // jqvg: the task-run Pod runs repository-controlled code (agent shell
         // commands, `build.rs`, test targets, npm `postinstall`). Nothing in
@@ -1515,7 +1521,6 @@ mod tests {
             VOLUME_WORKSPACE,
             crate::env_config::VOLUME_ENV_CONFIG,
             crate::launcher::VOLUME_LAUNCHER_IPC,
-            crate::launcher::VOLUME_LAUNCHER_CGROUP,
             crate::invocation_journal::VOLUME_INVOCATION_JOURNAL,
             // The launcher's writable /tmp, $HOME and /var/tmp:
             // `readOnlyRootFilesystem` takes the image's copies away from a
@@ -3359,12 +3364,14 @@ mod tests {
                 .as_ref()
                 .is_some_and(|pvc| pvc.claim_name == cfg.projects_pvc)
         }));
-        assert!(!pod.containers[0]
-            .volume_mounts
-            .as_ref()
-            .unwrap()
-            .iter()
-            .any(|mount| mount.name == "read-sources"));
+        assert!(
+            !pod.containers[0]
+                .volume_mounts
+                .as_ref()
+                .unwrap()
+                .iter()
+                .any(|mount| mount.name == "read-sources")
+        );
     }
 
     // ── qut0: v1 leases enforcement rendering ─────────────────────────────
@@ -3554,7 +3561,6 @@ mod tests {
         );
         for absent in [
             crate::launcher::VOLUME_LAUNCHER_IPC,
-            crate::launcher::VOLUME_LAUNCHER_CGROUP,
             // The brokered child's scratch surfaces and the one-way
             // private-dependency channel exist only because a command runs in
             // the launcher's mount namespace. With no launcher, the pod keeps
@@ -3649,7 +3655,7 @@ mod tests {
             .volumes
             .iter()
             .flatten()
-            .find(|v| v.name == crate::launcher::VOLUME_LAUNCHER_CGROUP)
+            .find(|v| v.name == crate::launcher::VOLUME_LAUNCHER_IPC)
             .expect("the armed render must declare the cgroup mountpoint volume");
         assert!(
             cgroup_volume.empty_dir.is_some(),
@@ -3668,7 +3674,7 @@ mod tests {
                     .volume_mounts
                     .iter()
                     .flatten()
-                    .any(|mount| mount.name == crate::launcher::VOLUME_LAUNCHER_CGROUP)
+                    .any(|mount| mount.name == crate::launcher::VOLUME_LAUNCHER_IPC)
             })
             .map(|container| container.name.as_str())
             .collect();
@@ -3846,13 +3852,11 @@ mod tests {
             pod.volumes
                 .iter()
                 .flatten()
-                .any(|v| v.name == crate::launcher::VOLUME_LAUNCHER_CGROUP),
+                .any(|v| v.name == crate::launcher::VOLUME_LAUNCHER_IPC),
             "the armed render must declare the `launcher-cgroup` mountpoint volume"
         );
-        assert!(
-            mount_names(launcher).contains(&crate::launcher::VOLUME_LAUNCHER_CGROUP.to_string())
-        );
-        assert!(!mount_names(worker).contains(&crate::launcher::VOLUME_LAUNCHER_CGROUP.to_string()));
+        assert!(mount_names(launcher).contains(&crate::launcher::VOLUME_LAUNCHER_IPC.to_string()));
+        assert!(!mount_names(worker).contains(&crate::launcher::VOLUME_LAUNCHER_IPC.to_string()));
 
         // Backing sidecar gets neither IPC nor cgroup nor workspace access.
         let svc = pod
@@ -3865,7 +3869,6 @@ mod tests {
         let svc_mounts = mount_names(svc);
         for forbidden in [
             crate::launcher::VOLUME_LAUNCHER_IPC,
-            crate::launcher::VOLUME_LAUNCHER_CGROUP,
             VOLUME_WORKSPACE,
             VOLUME_MIRROR,
         ] {

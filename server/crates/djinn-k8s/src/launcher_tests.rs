@@ -9,9 +9,7 @@
 
 use super::*;
 
-use djinn_cgroup_launcher::bootstrap::{
-    BOOTSTRAP_ONLY_CAPABILITY_NAMES, RETAINED_CAPABILITY_NAMES,
-};
+use djinn_cgroup_launcher::bootstrap::RETAINED_CAPABILITY_NAMES;
 use djinn_runtime::RoleKind;
 
 /// The classifier itself is proven exhaustively in `djinn-runtime` (one
@@ -156,28 +154,6 @@ fn capabilities_use_the_api_accepted_spelling_alongside_no_privilege_escalation(
     }
 }
 
-/// The bootstrap capabilities are named in one place and are exactly the
-/// ones the launcher crate drops at runtime. If the render adds a
-/// bootstrap-only capability the runtime does not shed, a task-run pod ships
-/// holding it — which for SYS_ADMIN is a node-wide escape primitive.
-#[test]
-fn every_bootstrap_only_capability_is_one_the_launcher_drops_at_runtime() {
-    let add = launcher_capabilities().add.unwrap();
-    for capability in LAUNCHER_BOOTSTRAP_ONLY_CAPABILITIES {
-        assert!(
-            add.iter().any(|granted| granted == capability),
-            "{capability} is declared bootstrap-only but is not granted"
-        );
-    }
-    // The permanent set is what `child::prepare_child` needs and nothing
-    // more; anything else granted must be on the bootstrap-only list.
-    let permanent: Vec<&String> = add
-        .iter()
-        .filter(|granted| !LAUNCHER_BOOTSTRAP_ONLY_CAPABILITIES.contains(&granted.as_str()))
-        .collect();
-    assert_eq!(permanent, vec!["CHOWN", "SETGID", "SETUID", "SETPCAP"]);
-}
-
 /// The rendered grant and the runtime `capset` must be the same set.
 ///
 /// This is the guard for the third v0.7.x rollback. The launcher retains exactly
@@ -200,7 +176,6 @@ fn the_rendered_grant_is_exactly_what_the_runtime_retains_plus_bootstrap_only() 
 
     let expected: Vec<String> = RETAINED_CAPABILITY_NAMES
         .iter()
-        .chain(BOOTSTRAP_ONLY_CAPABILITY_NAMES)
         .map(|capability| (*capability).to_string())
         .collect();
     assert_eq!(

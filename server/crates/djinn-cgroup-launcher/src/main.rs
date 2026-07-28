@@ -11,8 +11,7 @@
 //! Configuration is read from the environment the Job renders
 //! (`djinn-k8s::launcher`): the delegated cgroup root, control socket path, the
 //! worker-private credential path, the expected delegated-root owner uid, and the
-//! unleased/leased broker quotas. Anything missing/invalid, a cgroup2 mount the
-//! launcher cannot establish, a capability it cannot drop, or a delegated cgroup
+//! unleased/leased broker quotas. Anything missing/invalid or a delegated cgroup
 //! that fails the [`Readiness`](djinn_cgroup_launcher::Readiness) contract, exits
 //! non-zero with a NAMED error BEFORE the broker accepts a single connection.
 //! Every one of those conditions is a readiness failure, never a per-command

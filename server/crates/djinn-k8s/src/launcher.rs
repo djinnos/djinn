@@ -47,9 +47,7 @@ pub use djinn_cgroup_launcher::child::{ARTIFACT_GID, CHILD_UID};
 // The capability lists the runtime actually `capset`s to. The render derives the
 // container's `capabilities.add` from these so the manifest cannot grant a
 // capability the runtime discards, nor omit one the runtime needs.
-use djinn_cgroup_launcher::bootstrap::{
-    BOOTSTRAP_ONLY_CAPABILITY_NAMES, RETAINED_CAPABILITY_NAMES,
-};
+use djinn_cgroup_launcher::bootstrap::RETAINED_CAPABILITY_NAMES;
 use djinn_cgroup_launcher::{
     CgroupMode, Error as LauncherError, LeasedQuota, Readiness, UnleasedQuota,
 };
@@ -139,6 +137,8 @@ pub const LAUNCHER_CREDENTIAL_PATH: &str = "/var/run/djinn/launcher/credential";
 
 /// Kubelet-delegated writable cgroup root supplied by the RuntimeClass.
 pub const LAUNCHER_CGROUP_ROOT: &str = "/sys/fs/cgroup";
+/// RuntimeClass that delegates the writable cgroup hierarchy to task-run Pods.
+pub const TASK_RUN_CGROUP_RUNTIME_CLASS: &str = "djinn-cgroup-writable";
 
 /// Whether an enforcement task-run Pod renders the cgroup-launcher sidecar.
 ///
@@ -156,11 +156,8 @@ pub const LAUNCHER_CGROUP_ROOT: &str = "/sys/fs/cgroup";
 ///
 /// What this module now renders is that profile:
 ///
-/// * [`launcher_capabilities`] adds `SYS_ADMIN` and `SYS_RESOURCE` to the
-///   launcher container, and the launcher **gives them back** — it `capset`s
-///   them away permanently once the mount and delegation are established, before
-///   the broker binds its socket. No user-controlled code ever runs while they
-///   are held.
+/// * [`launcher_capabilities`] grants only the residual identity capabilities
+///   required to broker children; the RuntimeClass supplies cgroup delegation.
 /// * `seccompProfile: RuntimeDefault` is sufficient. The launcher no longer uses
 ///   `clone3`: it forks, places the child by writing `cgroup.procs`, verifies the
 ///   placement, and only then releases the child to `execve`. `fork(2)` and
@@ -169,13 +166,9 @@ pub const LAUNCHER_CGROUP_ROOT: &str = "/sys/fs/cgroup";
 ///   because no seccomp delivery mechanism exists in the deployment repo. This
 ///   was measured, not assumed: `seccompProfile: Unconfined` does **not** unblock
 ///   the mount.
-/// * `appArmorProfile: Unconfined` on the launcher container is what does. The
-///   runtime's default AppArmor profile carries a flat `deny mount,` and denies
-///   with `EACCES` — the errno that took v0.7.5 down on its first task pod. See
-///   [`launcher_security_context`] for the one-variable-at-a-time evidence and an
-///   honest account of the confinement this gives up.
-/// * [`VOLUME_LAUNCHER_CGROUP`] supplies the writable mountpoint, not the
-///   delegation. [`pod_host_users`] is deliberately unset: a user namespace
+/// * The default AppArmor profile remains in force because the launcher makes
+///   no mount syscall.
+/// * The RuntimeClass supplies the delegated root. [`pod_host_users`] is deliberately unset: a user namespace
 ///   leaves the launcher's own cgroup owned by an unmapped uid, which breaks the
 ///   delegation one step after the mount.
 ///
@@ -310,7 +303,12 @@ pub fn worker_security_context() -> SecurityContext {
 fn launcher_capabilities() -> Capabilities {
     Capabilities {
         drop: Some(vec!["ALL".to_string()]),
-        add: Some(RETAINED_CAPABILITY_NAMES.iter().map(|capability| (*capability).to_string()).collect()),
+        add: Some(
+            RETAINED_CAPABILITY_NAMES
+                .iter()
+                .map(|capability| (*capability).to_string())
+                .collect(),
+        ),
     }
 }
 
@@ -368,51 +366,6 @@ pub fn launcher_ipc_volume() -> Volume {
             size_limit: Some(Quantity("1Mi".to_string())),
         }),
         ..Volume::default()
-    }
-}
-
-/// The launcher's writable cgroup **mountpoint** — not the delegation.
-///
-/// # Read this before "fixing" it back into a delegated root (task grkq)
-///
-/// A previous `launcher_cgroup_volume()` returned an `EmptyDirVolumeSource` and
-/// the launcher was expected to `open` it as its delegated cgroup root. An
-/// emptyDir is an ordinary directory on the node filesystem: no
-/// `cgroup.subtree_control`, no `cpu.max`, none of the cgroup2 control files.
-/// The sidecar died in `NativeCgroupFs::open` on every task-run Pod, the broker
-/// socket never bound, and every shell command in every task run failed.
-///
-/// This volume is NOT that. It supplies exactly one thing: a directory the
-/// launcher is allowed to write a *mountpoint* into, because
-/// `readOnlyRootFilesystem: true` forbids creating one on the image rootfs
-/// (`readOnlyRootFilesystem` does not extend to emptyDir/tmpfs volumes). The
-/// delegated cgroup v2 tree is then established by the launcher itself, with
-/// `mount(2)`, inside its own cgroup namespace — see
-/// `djinn_cgroup_launcher::bootstrap`. `tests/rendered_launcher_delegation.rs`
-/// asserts precisely this distinction: the rendered volume must materialize into
-/// something the launcher can mount ONTO, and must NOT be accepted as a
-/// delegated root on its own.
-///
-/// Memory-backed so the mountpoint never touches disk; it holds no data, only a
-/// directory inode that a filesystem is mounted over.
-pub fn launcher_cgroup_mountpoint_volume() -> Volume {
-    Volume {
-        name: VOLUME_LAUNCHER_CGROUP.to_string(),
-        empty_dir: Some(EmptyDirVolumeSource {
-            medium: Some("Memory".to_string()),
-            size_limit: Some(Quantity("1Mi".to_string())),
-        }),
-        ..Volume::default()
-    }
-}
-
-/// Launcher-side mount of [`launcher_cgroup_mountpoint_volume`]. Rendered into
-/// the launcher container ONLY — never the worker, and never a backing service.
-pub fn launcher_cgroup_mount() -> VolumeMount {
-    VolumeMount {
-        name: VOLUME_LAUNCHER_CGROUP.to_string(),
-        mount_path: LAUNCHER_CGROUP_ROOT.to_string(),
-        ..VolumeMount::default()
     }
 }
 
@@ -615,6 +568,8 @@ pub enum RenderValidationError {
          bounded only by the node."
     )]
     UnsupportedLeaseQuota { limit: String, min: u32, max: u32 },
+    #[error("cgroup launcher mode is `required`, but task-run RuntimeClass assignment is disabled")]
+    MissingDelegatedRuntimeClass,
 }
 
 /// Map a supported/unsupported cgroup-delegation profile string onto the
@@ -706,6 +661,9 @@ pub fn validate_enforcement_render(config: &KubernetesConfig) -> Result<(), Rend
     //    enforces the runtime half (`bootstrap::Bootstrap::run`, the capability
     //    drop, and `NativeCgroupFs::open`) before it binds its control socket.
     if config.cgroup_launcher_mode.renders_sidecar() {
+        if !config.task_run_cgroup_writable_enabled {
+            return Err(RenderValidationError::MissingDelegatedRuntimeClass);
+        }
         let container = launcher_sidecar_container(config, "render-validation", false, false);
         let security = container.security_context.as_ref().ok_or(
             RenderValidationError::ArmedRenderCannotDelegate {
@@ -720,12 +678,6 @@ pub fn validate_enforcement_render(config: &KubernetesConfig) -> Result<(), Rend
             .iter()
             .map(String::as_str)
             .collect();
-        if !added.contains(&"SYS_ADMIN") {
-            return Err(RenderValidationError::ArmedRenderCannotDelegate {
-                reason: "the launcher container is not granted SYS_ADMIN, so its own \
-                         `mount -t cgroup2` fails with EPERM",
-            });
-        }
         // The `CAP_`-prefixed spelling is what the API server rejects alongside
         // `allowPrivilegeEscalation: false`. Catching it here turns a 422 at
         // submission into a named refusal.
@@ -736,17 +688,6 @@ pub fn validate_enforcement_render(config: &KubernetesConfig) -> Result<(), Rend
             return Err(RenderValidationError::ArmedRenderCannotDelegate {
                 reason: "a capability is spelled with the `CAP_` prefix; the API server rejects \
                          `CAP_SYS_ADMIN` together with allowPrivilegeEscalation: false",
-            });
-        }
-        let mounts_cgroup_root = container
-            .volume_mounts
-            .iter()
-            .flatten()
-            .any(|mount| mount.mount_path == LAUNCHER_CGROUP_ROOT);
-        if !mounts_cgroup_root {
-            return Err(RenderValidationError::ArmedRenderCannotDelegate {
-                reason: "no writable volume is mounted at the cgroup root path, and \
-                         readOnlyRootFilesystem forbids creating the mountpoint on the rootfs",
             });
         }
         // A CPU limit on the launcher container becomes an ancestor clamp on
@@ -771,22 +712,6 @@ pub fn validate_enforcement_render(config: &KubernetesConfig) -> Result<(), Rend
                 reason: "the pod sets hostUsers: false, which leaves the launcher's own cgroup \
                          owned by an uid unmapped inside the user namespace, so the delegated \
                          root cannot be written",
-            });
-        }
-        // The container runtime's default AppArmor profile carries a flat
-        // `deny mount,` and denies with EACCES. Without opting out, the
-        // launcher's first syscall fails and the pod fails closed. This is
-        // defect 2, asserted on the render rather than trusted.
-        let apparmor_unconfined = container
-            .security_context
-            .as_ref()
-            .and_then(|context| context.app_armor_profile.as_ref())
-            .is_some_and(|profile| profile.type_ == "Unconfined");
-        if !apparmor_unconfined {
-            return Err(RenderValidationError::ArmedRenderCannotDelegate {
-                reason: "the launcher container does not set appArmorProfile: Unconfined, so the \
-                         runtime's default profile denies mount(2) with EACCES and the delegated \
-                         root is never established",
             });
         }
         // 5. The lease must map onto a quota the launcher crate accepts, or a
