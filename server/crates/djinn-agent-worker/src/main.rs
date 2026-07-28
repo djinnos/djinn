@@ -76,6 +76,7 @@ mod checkpoint_safety;
 mod launcher_handshake;
 mod lifecycle;
 pub mod warm_base_census;
+pub mod warm_build_lease;
 pub mod warm_step_budget;
 mod worker_services;
 
@@ -1747,6 +1748,7 @@ async fn warm_cargo_and_continue<F, Fut>(
     project_root: &Path,
     policy: &cargo_cache_policy::CargoCachePolicy,
     observed_indexing: Option<Duration>,
+    boundary: impl AsyncFnOnce(),
     continuation: F,
 ) -> Fut::Output
 where
@@ -1754,6 +1756,10 @@ where
     Fut: std::future::Future,
 {
     warm_cargo_target_base(project_id, project_root, policy, observed_indexing).await;
+    // THE cargo→graph boundary. Everything after this point is SCIP indexing
+    // and publication — not a build — so the warm's build slot is handed back
+    // here rather than at Job termination. See `warm_build_lease`.
+    boundary().await;
     continuation().await
 }
 
@@ -1792,6 +1798,47 @@ async fn observed_indexing_cost(db: &Database, project_id: &str) -> Option<Durat
         .filter(|ms| *ms > 0)
         .max()?;
     Some(Duration::from_millis(u64::try_from(worst_ms).ok()?))
+}
+
+/// Hand this warm Pod's build slot back now that its cargo phase is over.
+///
+/// Best-effort by construction: a warm that cannot release early must still
+/// produce a graph, and every failure mode leaves the slot exactly where it is
+/// today — owned by the host-side reclaim. See `warm_build_lease` for the
+/// exactly-once and leak-freedom argument.
+async fn release_warm_build_lease_at_graph_boundary(project_id: &str, db: &Database) {
+    let Some(lease) = warm_build_lease::WarmBuildLease::from_env() else {
+        tracing::debug!(
+            project_id,
+            "warm: no durable build lease projected; nothing to release at the graph boundary"
+        );
+        return;
+    };
+    let consumer_id = lease.key().consumer_id.clone();
+    match lease.release_once(db).await {
+        warm_build_lease::WarmLeaseRelease::Released => info!(
+            project_id,
+            consumer_id,
+            "warm: build slot released at the cargo→graph boundary; the SCIP phase \
+             no longer holds build capacity"
+        ),
+        warm_build_lease::WarmLeaseRelease::AlreadyTerminal => info!(
+            project_id,
+            consumer_id, "warm: build lease was already terminal; no slot to release"
+        ),
+        warm_build_lease::WarmLeaseRelease::AlreadyReleasedInPod => tracing::debug!(
+            project_id,
+            consumer_id,
+            "warm: build lease already released by this Pod"
+        ),
+        warm_build_lease::WarmLeaseRelease::Failed(error) => warn!(
+            project_id,
+            consumer_id,
+            error = %error,
+            "warm: could not release the build slot early; the graph phase will keep \
+             holding it until the host reclaims it. The warm continues."
+        ),
+    }
 }
 
 /// Convert the prune primitive's bounded error taxonomy into the telemetry
@@ -3727,6 +3774,7 @@ async fn run_warm_graph_body(project_id: &str) -> Result<()> {
         &lifecycle_root,
         &policy,
         observed_indexing,
+        async || release_warm_build_lease_at_graph_boundary(project_id, &ctx.db).await,
         || async {
             // Architect-only warm path: this subcommand binary is dispatched
             // exclusively by `K8sGraphWarmer`, which is wired into the
@@ -6067,6 +6115,7 @@ warning: something
         *WARM_CARGO_INJECTED_LOCK_FAILURE.lock().expect("injection") =
             Some(WarmLockOperationFailure::Probe);
         let mut graph_warmed = false;
+        let mut boundary_reached = false;
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -6076,10 +6125,72 @@ warning: something
                 fixture.path(),
                 &policy,
                 None,
+                async || boundary_reached = true,
                 || async { graph_warmed = true },
             ));
+        assert!(
+            boundary_reached,
+            "the cargo→graph boundary must be reached even when Cargo fails — a warm \
+             that cannot compile still holds a build slot it should hand back"
+        );
         assert!(graph_warmed, "graph warming continues after Cargo failure");
     }
+
+    /// The build slot must be handed back BEFORE the graph phase, not after.
+    ///
+    /// This is the whole capacity win: measured on 2026-07-27 the warm held one
+    /// of three build slots for 6h44m and 60.7% of that hold was the SCIP phase.
+    /// Releasing after the graph phase instead of before it is indistinguishable
+    /// from the old behaviour, and nothing else in this crate would notice — so
+    /// assert the ORDER, not merely that the hook ran.
+    #[test]
+    fn the_build_slot_is_released_before_the_graph_phase_not_after_it() {
+        use crate::cargo_incremental_prune::WarmLockOperationFailure;
+        use std::sync::{Arc, Mutex};
+
+        // `WARM_CARGO_INJECTED_LOCK_FAILURE` is process-global and CONSUMED by
+        // whichever warm reaches `acquire_warm_base_lock` first, so every test
+        // that arms it must hold this mutex — otherwise it steals a sibling
+        // test's lock acquisition and that sibling fails with a bogus
+        // `["failed"]` phase trace.
+        let _serial = WARM_CARGO_ORDERING_MUTEX.lock().expect("ordering mutex");
+        let fixture = tempfile::tempdir().expect("fixture");
+        let policy = cargo_cache_policy::CargoCachePolicy::default();
+        let project = format!("warm-boundary-order-{}", std::process::id());
+        *WARM_CARGO_INJECTED_LOCK_FAILURE.lock().expect("injection") =
+            Some(WarmLockOperationFailure::Probe);
+
+        let order: Arc<Mutex<Vec<&'static str>>> = Arc::new(Mutex::new(Vec::new()));
+        let boundary_order = order.clone();
+        let graph_order = order.clone();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime")
+            .block_on(warm_cargo_and_continue(
+                &project,
+                fixture.path(),
+                &policy,
+                None,
+                async || boundary_order.lock().expect("order").push("release"),
+                || async {
+                    graph_order.lock().expect("order").push("graph");
+                },
+            ));
+
+        // The warm above consumed the armed failure, but clear it anyway so a
+        // future edit that short-circuits before the acquire cannot leak it.
+        *WARM_CARGO_INJECTED_LOCK_FAILURE.lock().expect("injection") = None;
+
+        assert_eq!(
+            order.lock().expect("order").as_slice(),
+            ["release", "graph"],
+            "the build slot must be released at the cargo→graph boundary; releasing \
+             after the graph phase gives back nothing the Job termination would not \
+             have given back anyway"
+        );
+    }
+
     #[test]
 
     fn warm_cargo_ordering_lock_and_prune_errors_use_bounded_telemetry_kinds() {
