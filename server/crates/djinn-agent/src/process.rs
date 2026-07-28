@@ -527,11 +527,18 @@ impl LeaseInvocationRunner {
             invocation_id: uuid::Uuid::now_v7().to_string(),
         };
         let lease = LeaseIdentity::TaskInvocation(identity.clone());
-        if let Some(journal) = &self.journal {
-            journal
-                .record_at(&identity, None, false, self.clock.now())
-                .map_err(LeaseInvocationError::Launcher)?;
-        }
+        // NOT journalled here. The journal exists to recover a lease that this
+        // pod may have created at the coordinator; an invocation that never
+        // escalates never calls `queue_lease`, so it owns no durable coordinator
+        // state and there is nothing to recover. Writing here anyway made every
+        // cheap command (`git status`, a grep) leave a record that the terminal
+        // path below could not clear — the clear is gated on `queued` — and the
+        // pod-local recovery sweep then read that permanently-unresolved record
+        // as an orphan and fired the exact-pod watchdog against its OWN pod.
+        // With a 300s `WATCHDOG_GRACE` and a 300s sweep tick, every worker pod
+        // deleted itself ~600s after start, mid-session, and its task bounced
+        // `in_progress -> open` forever. The write-ahead record is now taken at
+        // the escalation point below, immediately before the `queue_lease` RPC.
         // Resolve the durable admission decision ONCE, before the leaf exists.
         //
         // This read used to happen only after a successful bind, which made it
@@ -626,6 +633,17 @@ impl LeaseInvocationRunner {
                 // are the only evidence available in the pod.
                 let queued_deadlines = self.lease_deadlines(&config);
                 queue_deadline_ms = queued_deadlines.queue_deadline_ms;
+                // Write-ahead: the record must be durable BEFORE the request
+                // goes out, so a pod that dies mid-`queue_lease` still leaves
+                // evidence a successor can reconcile. This is the first point
+                // at which durable coordinator state can exist for this
+                // invocation, and therefore the earliest point at which the
+                // record is anything but garbage.
+                if let Some(journal) = &self.journal {
+                    journal
+                        .record_at(&identity, None, false, self.clock.now())
+                        .map_err(LeaseInvocationError::Launcher)?;
+                }
                 match await_lease_or_terminal(
                     self.services.queue_lease(LeaseQueueRequest {
                         identity: lease.clone(),
@@ -963,7 +981,11 @@ impl LeaseInvocationRunner {
             }
             tokio::task::yield_now().await;
         };
-        if let Some(journal) = &self.journal {
+        // Gated on `queued` for the same reason as the write-ahead record: a
+        // non-escalated invocation has no record to advance to terminal, and an
+        // unconditional write here would simply re-create the leaked record the
+        // clear below cannot remove.
+        if queued && let Some(journal) = &self.journal {
             journal
                 .record_at(&identity, fence.clone(), true, self.clock.now())
                 .map_err(LeaseInvocationError::Launcher)?;
