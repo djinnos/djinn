@@ -22,9 +22,11 @@ name: Release
 #   * workflow_dispatch         — manual rebuild with optional explicit tag.
 #
 # Binaries (djinn-server, djinn-agent-worker, djinn-cgroup-launcher) build in
-# dedicated jobs so they can share Swatinem/rust-cache; the image jobs COPY
-# the pre-built artifacts. runtime FROMs runtime-base at the current commit's
-# sha tag so the two stay coherent.
+# dedicated jobs and the image jobs COPY the pre-built artifacts. Those jobs
+# deliberately carry NO Swatinem/rust-cache: the `release-bins` family was
+# retired for budget (see the `image-builder` job below), so a release
+# cold-compiles. runtime FROMs runtime-base at the current commit's sha tag so
+# the two stay coherent.
 
 on:
   push:
@@ -49,10 +51,14 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
   RUSTC_WRAPPER: ""
-  # Explicit cargo default, present so the cargo-relevant env here is
-  # byte-identical to quality-gate.yml's — Swatinem/rust-cache hashes
-  # CARGO_*/RUST* env vars into its key, and the release-bins cache is
-  # warmed by quality-gate's cache-warm-x86_64-release job on main.
+  # Explicit cargo default. This workflow restores NO rust-cache (the
+  # `release-bins` family is retired and there is no `cache-warm-x86_64-release`
+  # job — the only warm owners are `cache-warm-x86_64-test` and
+  # `cache-warm-aarch64`, both in quality-gate.yml), so this var currently
+  # feeds no cache key. It is pinned anyway to keep the cargo-relevant env here
+  # byte-identical to quality-gate.yml's: Swatinem/rust-cache hashes
+  # CARGO_*/RUST* env vars into its key, so if a release cache is ever
+  # reintroduced, a drifted default here would silently key it apart.
   CARGO_BUILD_BUILD_DIR: target
 
 jobs:
@@ -265,9 +271,21 @@ jobs:
       # No Rust cache here on purpose. The release-bins family was retired:
       # it held ~1.53 GB of a 10 GB repo-wide budget to serve ~1.9 releases
       # a day, while CI runs ~298 times a day and its cache was starved by
-      # the same budget. Releases now cold-compile (~22 min); the budget
-      # went to cache-workspace-crates on server-test, which every CI run
-      # reads. Revisit if release cadence rises or the budget grows.
+      # the same budget. Releases now cold-compile (~22 min).
+      #
+      # Where the freed budget went: NOT to `cache-workspace-crates`. That was
+      # the original plan, but the option was measured worthless and removed
+      # (see the long note on `cache-warm-x86_64-test` in quality-gate.yml —
+      # cargo fingerprints workspace crates by mtime and `actions/checkout`
+      # restamps them, so restored workspace artifacts arrive dirty). The
+      # budget now funds the check-mode dependency family on `server-test`,
+      # which `Server Clippy` reads on every PR.
+      #
+      # Note also that a release could not share the CI families even if the
+      # budget were free: this workflow sets RUSTFLAGS to
+      # `-C link-arg=-fuse-ld=mold` against CI's `-D warnings`, and RUSTFLAGS
+      # feeds `-C metadata` on every unit. Revisit only if release cadence
+      # rises enough to justify a family of its own.
       # Worker FIRST so its deps resolve WITHOUT qdrant (default features);
       # the server build then layers only the qdrant-extra deps on top,
       # reusing every shared non-qdrant artifact already on disk.

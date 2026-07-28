@@ -326,6 +326,47 @@ jobs:
         run: bash -c "$CI_RUNNER_DISK_PREFLIGHT"
       - name: Build test binaries (populate cache)
         run: cargo nextest run --workspace --all-targets --features qdrant --no-run
+      # Deposit the CHECK-mode dependency units. `cargo clippy` is `cargo
+      # check`: workspace crates go through clippy-driver
+      # (RUSTC_WORKSPACE_WRAPPER), but their dependencies compile with ordinary
+      # rustc under `--emit=metadata`, which is CompileMode::Check and is
+      # hashed into every unit's `-C metadata`. Check-mode units are therefore
+      # a DISJOINT set from the codegen units the step above deposits — the
+      # step above cannot serve `Server Clippy` at all. Measured on a local
+      # `server/target/debug/deps`: 2861 unit hashes carry a `.rlib` (codegen)
+      # against 4763 that are `.rmeta`-only (check), with zero overlap.
+      #
+      # The selection here MUST stay byte-identical to the `Clippy` step in
+      # `server-clippy`. `server/Cargo.toml` has a root `[package]`, so
+      # `workspace_default_members` is 1 of 33 and a bare `cargo clippy`
+      # selects `djinn-server` alone. Under resolver 2 feature unification is
+      # computed over the SELECTED package set, so warming with `--workspace`
+      # would resolve a different feature union on shared dependencies, give
+      # them different `-C metadata`, and miss the consumer entirely while
+      # still looking like a populated cache. If the lint lane's selection or
+      # features change, change this line in the same commit.
+      #
+      # `-- -D warnings` is deliberately omitted: it reaches only the selected
+      # workspace units, which rust-cache prunes from the entry anyway. The
+      # workflow-level `RUSTFLAGS: -D warnings` still applies to every unit in
+      # both jobs, so the dependency fingerprints match.
+      #
+      # `--keep-going` because this step exists to DEPOSIT, not to gate. Cargo
+      # aborts the whole run at the first failing unit by default, so one crate
+      # with a lint error would discard the rest of the check family from the
+      # deposit and leave every consumer re-paying for it. Cargo still exits
+      # non-zero when any unit failed, and `cache-on-failure: true` above means
+      # the partial deposit is saved either way.
+      - name: Build check-mode deps (populate cache)
+        run: cargo clippy --all-targets --features qdrant --keep-going
+      # Both artifact sets now coexist in server/target. Recorded so the disk
+      # headroom cost of this job is a measured number rather than an estimate
+      # before anyone adds a third (`--all-features`) warm pass for
+      # server-sqlx-freshness.
+      - name: Report warm footprint
+        if: always()
+        run: |-
+          echo "::notice::warm-footprint target=$(du -sh target 2>/dev/null | cut -f1) free=$(df -h --output=avail . | tail -1 | tr -d ' ')"
       - name: Log cache family and restore status
         run: |-
           echo "cache-family=server-test"
@@ -375,6 +416,56 @@ jobs:
           echo "::notice::cache-family=server-aarch64-check shared-key=server-aarch64-check cache-hit=${{ steps.rust-cache.outputs.cache-hit }}"
       - name: cargo check (aarch64)
         run: cargo check -p djinn-sandbox --all-targets --target aarch64-unknown-linux-gnu
+  # Gives `refs/heads/main` ownership of the pnpm store cache. Without a
+  # main-branch entry the `ui-frontend` lane below — which is
+  # `github.event_name != 'push'`, so it NEVER ran on main — made every PR and
+  # every merge-queue ref miss, cold-install, and then write its own 252 MB
+  # copy under its own scope. Measured 2026-07-27: ELEVEN entries carrying the
+  # byte-identical key `node-cache-Linux-x64-pnpm-e23d1dc7…`, on eleven
+  # different `refs/pull/*/merge` and `gh-readonly-queue/*` refs, none on
+  # main — 2.7 GB, 27% of the repo's 10 GB budget, and not one of them able to
+  # serve any other branch, because GitHub scopes a cache to the ref that
+  # wrote it. That duplication is what pushed the repo over quota and started
+  # LRU-evicting the rust families CI actually depends on.
+  #
+  # A branch CAN read caches written by its base branch, so one main-owned
+  # entry serves every PR. `actions/setup-node` skips its save when the
+  # primary key hit exactly, so PRs stop writing entirely; only a PR that
+  # actually changes `ui/pnpm-lock.yaml` misses and writes, which is both rare
+  # and self-limiting.
+  #
+  # This deliberately uses setup-node's built-in cache rather than
+  # `actions/cache/restore`: `scripts/ci-cache-policy.test.mjs` requires every
+  # `actions/cache*` step to name a family declared in its CACHE_OWNERS map,
+  # and that map is about the Rust families whose single-writer discipline it
+  # exists to enforce. Routing pnpm through it would mean encoding a
+  # `hashFiles()` expression as a family name and weakening the check for the
+  # families it was written to protect.
+  cache-warm-ui:
+    name: Cache Warm UI (pnpm)
+    needs:
+      - preflight
+    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && needs.preflight.outputs.ui == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: ui
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: ui/pnpm-lock.yaml
+      # Install only. This job exists to write the store, not to re-run the
+      # checks in `ui-frontend`; duplicating those would cost a second full
+      # lane on every main push for no added signal.
+      - name: Populate the pnpm store cache
+        run: pnpm install --frozen-lockfile
   # One runner for every cheap guard lane. Each lane was previously its own
   # job doing ~15s of scripting behind ~30s of runner spin-up and a full
   # fetch-depth: 0 clone; merging them frees four to five concurrent job
@@ -498,9 +589,21 @@ jobs:
           # The dedicated `server-quality` family is gone. After #2342 moved
           # server-sqlx-freshness and memory-eval onto server-test, it served
           # exactly one job — this one — while holding ~2.5 GB of a 10 GB
-          # repo-wide budget. Clippy only substitutes clippy-driver for
-          # WORKSPACE crates (RUSTC_WORKSPACE_WRAPPER); dependencies build
-          # with ordinary rustc, so a codegen-warm family serves them.
+          # repo-wide budget.
+          #
+          # Clippy only substitutes clippy-driver for WORKSPACE crates
+          # (RUSTC_WORKSPACE_WRAPPER) and their dependencies do build with
+          # ordinary rustc — but NOT into the same artifacts. `cargo clippy` is
+          # `cargo check`, so those dependencies compile under `--emit=metadata`
+          # (CompileMode::Check), which is hashed into `-C metadata`. A
+          # codegen-warm family therefore does NOT serve them: the two unit
+          # sets are disjoint (measured 2861 `.rlib` vs 4763 `.rmeta`-only
+          # hashes, zero overlap). This job is on `server-test` because
+          # `cache-warm-x86_64-test` now deposits BOTH families into that one
+          # entry — see its `Build check-mode deps` step, whose package
+          # selection and features must stay identical to the `Clippy` step
+          # below. The census steps around that step verify the deposit is
+          # actually being restored rather than silently rebuilt.
           shared-key: server-test
           cache-on-failure: true
           cache-all-crates: true
@@ -538,8 +641,26 @@ jobs:
       - name: Runner disk headroom preflight
         # Body/thresholds: CI_RUNNER_DISK_PREFLIGHT at the top of this file.
         run: bash -c "$CI_RUNNER_DISK_PREFLIGHT"
+      # Standing instrumentation, not a one-off probe. A cache family can be
+      # restored, report `cache-hit=true`, and still serve none of what this
+      # lane compiles — that is exactly the state this lane was in until
+      # `cache-warm-x86_64-test` began depositing check-mode units, and nothing
+      # in the log distinguished it from a working cache. The delta below is
+      # the number of compilation units clippy had to build that the restore
+      # did not supply. Near-zero means the warm is serving this lane; several
+      # thousand means the two selections have drifted apart again (see the
+      # resolver-2 note on the warm job) and the lane is silently cold.
+      - name: Fingerprint census (restored)
+        id: fingerprints-restored
+        run: echo "count=$(ls target/debug/.fingerprint 2>/dev/null | wc -l)" >> "$GITHUB_OUTPUT"
       - name: Clippy
         run: cargo clippy --all-targets --features qdrant -- -D warnings
+      - name: Fingerprint census (after clippy)
+        if: always()
+        run: |-
+          before='${{ steps.fingerprints-restored.outputs.count }}'
+          after=$(ls target/debug/.fingerprint 2>/dev/null | wc -l)
+          echo "::notice::clippy-fingerprints restored=${before:-0} after=${after} built=$((after - ${before:-0}))"
   launcher-kernel-boundary:
     name: Launcher Kernel Boundary
     needs: preflight

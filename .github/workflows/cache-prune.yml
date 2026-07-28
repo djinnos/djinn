@@ -1,0 +1,72 @@
+name: Cache Prune
+# Reclaim GitHub Actions cache budget.
+#
+# The repo cap is 10 GB and eviction is LRU across the whole repo, so dead
+# entries do not merely idle — they evict the live rust families that every CI
+# run reads. Nothing else deletes them: Swatinem/rust-cache never removes the
+# entry it supersedes, and a cache written from a PR or merge-queue ref outlives
+# the ref that alone could read it. Measured 2026-07-27 the repo sat at 10.15 GB
+# against the cap, actively evicting, with ~5 GB of it provably unreadable.
+#
+# Scheduled rather than one-off on purpose: both accumulation mechanisms are
+# continuous, so a manual sweep only resets the clock.
+#
+# `scripts/prune-actions-caches.mjs` holds the rules and the reasoning.
+on:
+  schedule:
+    # 04:20 UTC daily — off the peak of the merge queue, and after the nightly
+    # workflows have written whatever they are going to write.
+    - cron: '20 4 * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: List what would be deleted without deleting it
+        type: boolean
+        default: false
+      keep:
+        description: Newest entries to retain per rust cache family
+        type: string
+        default: '2'
+
+# The token needs `actions: write` to delete a cache. Everything else stays
+# read-only: this workflow must never be able to touch repository contents.
+permissions:
+  contents: read
+  actions: write
+
+# A second concurrent prune would race the first on the same entries. Deletes
+# are idempotent (the script tolerates a 404), but serialising keeps the log
+# readable and the reclaimed-bytes figure honest.
+concurrency:
+  group: cache-prune
+  cancel-in-progress: false
+
+jobs:
+  prune:
+    name: Prune Actions caches
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Prune
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |-
+          node scripts/prune-actions-caches.mjs \
+            --keep '${{ inputs.keep || '2' }}' \
+            ${{ inputs.dry_run && '--dry-run' || '' }}
+      - name: Report remaining budget
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |-
+          total=$(gh api "/repos/${{ github.repository }}/actions/caches?per_page=100" --paginate --slurp \
+            --jq '[.[].actions_caches[].size_in_bytes] | add // 0')
+          count=$(gh api "/repos/${{ github.repository }}/actions/caches?per_page=100" --paginate --slurp \
+            --jq '[.[].actions_caches[]] | length')
+          gb=$(awk "BEGIN { printf \"%.2f\", ${total}/1073741824 }")
+          echo "::notice::cache-budget ${gb} GB across ${count} entries (repo cap 10 GB, LRU eviction)"
