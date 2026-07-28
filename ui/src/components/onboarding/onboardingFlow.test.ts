@@ -17,6 +17,8 @@ const ready = {
   hasModels: true,
   projectNeedingImage: null,
   projectError: null,
+  hasProposal: true,
+  proposalError: null,
   serverStatus: "connected" as const,
 };
 
@@ -38,6 +40,7 @@ describe("resolveOnboardingDestination", () => {
         hasProject: null,
         hasProvider: null,
         hasModels: null,
+        hasProposal: null,
       }),
     ).toBe("connection-error");
     expect(
@@ -93,6 +96,19 @@ describe("resolveOnboardingDestination", () => {
     expect(
       resolveOnboardingDestination({ ...ready, projectNeedingImage: project }),
     ).toBe("image");
+  });
+
+  it("requires the first draft proposal after the environment is ready", () => {
+    expect(
+      resolveOnboardingDestination({ ...ready, hasProposal: false }),
+    ).toBe("proposal");
+    expect(
+      resolveOnboardingDestination({
+        ...ready,
+        hasProposal: null,
+        proposalError: "offline",
+      }),
+    ).toBe("proposal-error");
   });
 
   it("opens the app only when every required setup fact is complete", () => {

@@ -83,7 +83,7 @@ describe("ProjectImageOnboarding", () => {
     mocks.fetchDevcontainerStatus.mockResolvedValue({ needs_image: false });
   });
 
-  it("creates a reusable detected image and assigns it before entering Djinn", async () => {
+  it("creates a reusable detected image and assigns it before the first proposal", async () => {
     const user = userEvent.setup();
     const onFinished = vi.fn();
     render(<ProjectImageOnboarding project={project} onFinished={onFinished} />);
@@ -137,7 +137,12 @@ describe("ProjectImageOnboarding", () => {
       screen.getByText(/finish any required build in the background/i),
     ).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: /enter djinn/i }));
+    expect(
+      screen.getByText(/repositories.*gear.*environment/i),
+    ).toBeInTheDocument();
+    await user.click(
+      screen.getByRole("button", { name: /continue to first proposal/i }),
+    );
     expect(onFinished).toHaveBeenCalledOnce();
   });
 

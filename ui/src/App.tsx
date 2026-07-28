@@ -29,8 +29,11 @@ import { useProviderGateStore } from "@/stores/providerGateStore";
 import { useModelGateStore } from "@/stores/modelGateStore";
 import { FirstRunOnboarding } from "@/components/onboarding/FirstRunOnboarding";
 import { useProjectGateStore } from "@/stores/projectGateStore";
+import { useProposalGateStore } from "@/stores/proposalGateStore";
+import { useProjects } from "@/stores/useProjectStore";
 import { RepositoryOnboarding } from "@/components/RepositoryOnboarding";
 import { ProjectImageOnboarding } from "@/components/onboarding/ProjectImageOnboarding";
+import { FirstProposalOnboarding } from "@/components/onboarding/FirstProposalOnboarding";
 import { OnboardingGateStatus } from "@/components/onboarding/OnboardingGateStatus";
 import { resolveOnboardingDestination } from "@/components/onboarding/onboardingFlow";
 import { useDispatchPauseHydration } from "@/hooks/useDispatchPauseHydration";
@@ -128,6 +131,13 @@ function AuthenticatedApp() {
     clearPendingProject,
     refresh: refreshProjectGate,
   } = useProjectGateStore();
+  const {
+    hasProposal,
+    error: proposalGateError,
+    refresh: refreshProposalGate,
+    markComplete: markProposalComplete,
+  } = useProposalGateStore();
+  const projects = useProjects();
   const [hasConnectedOnce, setHasConnectedOnce] = useState(false);
   useProjectsBootstrap(status);
   useDispatchPauseHydration(status);
@@ -138,8 +148,15 @@ function AuthenticatedApp() {
       void refreshGate();
       void refreshModelGate();
       void refreshProjectGate();
+      void refreshProposalGate();
     }
-  }, [status, refreshGate, refreshModelGate, refreshProjectGate]);
+  }, [
+    status,
+    refreshGate,
+    refreshModelGate,
+    refreshProjectGate,
+    refreshProposalGate,
+  ]);
 
   // Latch "the server was reachable at least once" during render (React's
   // sanctioned adjust-state-while-rendering pattern) so it can be read below
@@ -161,6 +178,8 @@ function AuthenticatedApp() {
     hasModels,
     projectNeedingImage,
     projectError: projectGateError,
+    hasProposal,
+    proposalError: proposalGateError,
     serverStatus: status,
   });
 
@@ -182,6 +201,15 @@ function AuthenticatedApp() {
       <OnboardingGateStatus
         error={projectGateError}
         onRetry={() => void refreshProjectGate()}
+      />
+    );
+  }
+
+  if (onboardingDestination === "proposal-error") {
+    return (
+      <OnboardingGateStatus
+        error={proposalGateError}
+        onRetry={() => void refreshProposalGate()}
       />
     );
   }
@@ -215,6 +243,18 @@ function AuthenticatedApp() {
     );
   }
 
+  if (onboardingDestination === "proposal") {
+    const project = projects[0];
+    if (!project) return <OnboardingGateStatus />;
+
+    return (
+      <FirstProposalOnboarding
+        project={project}
+        onFinished={markProposalComplete}
+      />
+    );
+  }
+
   return <MainLayout />;
 }
 
@@ -222,7 +262,7 @@ export default function App() {
   // Gate 1: Authentication (currently passthrough until server exposes /auth)
   return (
     <AuthGate>
-      {/* Required setup: Repository → Models → Environment → app. */}
+      {/* Required setup: Repository → Models → Environment → First proposal → app. */}
       <AuthenticatedApp />
     </AuthGate>
   );
