@@ -12,6 +12,7 @@ use djinn_slot::lifecycle::retry::retry_task_transition_on_locked;
 
 pub(crate) struct PostSessionParams {
     pub(crate) task_id: String,
+    pub(crate) authenticated_session_id: String,
     pub(crate) project_path: String,
     pub(crate) role: Arc<dyn AgentRole>,
     pub(crate) app_state: AgentContext,
@@ -27,6 +28,7 @@ pub(crate) fn spawn_post_session_work(params: PostSessionParams) {
     tokio::spawn(async move {
         let PostSessionParams {
             task_id,
+            authenticated_session_id,
             project_path,
             role,
             app_state,
@@ -59,6 +61,7 @@ pub(crate) fn spawn_post_session_work(params: PostSessionParams) {
                 &final_output.finalize_payload,
                 final_output.finalize_tool_name.as_deref().unwrap_or(""),
                 &task_id,
+                &authenticated_session_id,
                 &app_state,
             )
             .await;
