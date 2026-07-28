@@ -5,6 +5,7 @@ import { render, screen, userEvent, waitFor } from "@/test/test-utils";
 
 const mocks = vi.hoisted(() => ({
   createStarterProposal: vi.fn(),
+  startStarterProposalRefinement: vi.fn(),
 }));
 
 vi.mock("@/api/proposals", () => ({
@@ -12,6 +13,7 @@ vi.mock("@/api/proposals", () => ({
     "A developer or agent can start from a clean checkout and run the documented setup, build, lint, and test workflows deterministically, with CI parity and no undocumented manual steps.",
   AGENTIC_READY_TITLE: "Make the development environment agent-ready",
   createStarterProposal: mocks.createStarterProposal,
+  startStarterProposalRefinement: mocks.startStarterProposalRefinement,
 }));
 
 import { FirstProposalOnboarding } from "./FirstProposalOnboarding";
@@ -30,7 +32,10 @@ describe("FirstProposalOnboarding", () => {
       id: "proposal-1",
       shortId: "PROP-1",
       title: "Reliable draft autosave",
+      refinementStarted: true,
+      refinementError: null,
     });
+    mocks.startStarterProposalRefinement.mockResolvedValue(undefined);
   });
 
   it("defaults to a safe agentic-ready environment proposal", async () => {
@@ -51,7 +56,7 @@ describe("FirstProposalOnboarding", () => {
     expect(screen.getByText("Graduate")).toBeInTheDocument();
     expect(screen.getByText("djinnos/example")).toBeInTheDocument();
     expect(
-      screen.getByText(/does not start agents or change code/i),
+      screen.getByText(/automatically starts the refinement tribunal/i),
     ).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: /Agentic-ready environment/i }),
@@ -79,16 +84,54 @@ describe("FirstProposalOnboarding", () => {
     );
     expect(
       await screen.findByRole("heading", {
-        name: "Your first proposal is ready",
+        name: "Draft created · refinement started",
       }),
     ).toHaveFocus();
-    expect(screen.getByText(/nothing runs yet/i)).toBeInTheDocument();
-    expect(screen.getByText(/proposals in the sidebar/i)).toBeInTheDocument();
+    expect(screen.getByText(/tribunal is refining it automatically/i)).toBeInTheDocument();
+    expect(screen.getByText(/proposal tour opens/i)).toBeInTheDocument();
 
     await user.click(
       screen.getByRole("button", { name: "Open your proposal" }),
     );
     expect(onFinished).toHaveBeenCalledOnce();
+  });
+
+  it("retries refinement on the existing proposal without creating a duplicate", async () => {
+    const user = userEvent.setup();
+    mocks.createStarterProposal.mockResolvedValueOnce({
+      id: "proposal-1",
+      shortId: "PROP-1",
+      title: "Agent-ready environment",
+      refinementStarted: false,
+      refinementError: "No plan model is available",
+    });
+    render(
+      <FirstProposalOnboarding project={project} onFinished={vi.fn()} />,
+      { wrapperOptions: { routerProps: { initialEntries: ["/"] } } },
+    );
+
+    await user.click(
+      screen.getByRole("button", { name: "Create agent-ready draft" }),
+    );
+    expect(
+      await screen.findByRole("heading", {
+        name: "Draft created · refinement needs attention",
+      }),
+    ).toHaveFocus();
+    expect(screen.getByText("No plan model is available")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Retry refinement" }));
+    await waitFor(() =>
+      expect(mocks.startStarterProposalRefinement).toHaveBeenCalledWith(
+        "proposal-1",
+      ),
+    );
+    expect(mocks.createStarterProposal).toHaveBeenCalledTimes(1);
+    expect(
+      await screen.findByRole("heading", {
+        name: "Draft created · refinement started",
+      }),
+    ).toBeInTheDocument();
   });
 
   it("keeps the flexible outcome form as the custom path", async () => {

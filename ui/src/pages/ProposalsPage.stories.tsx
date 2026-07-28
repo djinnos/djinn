@@ -233,3 +233,11 @@ export const DetailOpen: Story = {
     setMcpToolResponder(populatedResponder);
   },
 };
+
+/** The replayable first-visit spotlight tour over the real proposal controls. */
+export const FirstVisitTour: Story = {
+  args: { initialPath: "/proposals/prop-refine?tour=1" },
+  beforeEach: () => {
+    setMcpToolResponder(populatedResponder);
+  },
+};

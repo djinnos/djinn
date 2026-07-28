@@ -56,6 +56,7 @@ import {
 import { ProposalSignoffs } from "@/components/proposals/ProposalSignoffs";
 import { ProposalKickoff } from "@/components/proposals/ProposalKickoff";
 import { ProposalRefinement } from "@/components/proposals/ProposalRefinement";
+import { ProposalDetailTour } from "@/components/proposals/ProposalDetailTour";
 import { ReadinessPanel } from "@/components/proposals/ReadinessPanel";
 import { ProposalHistory } from "@/components/proposals/ProposalHistory";
 import { Badge } from "@/components/ui/badge";
@@ -680,6 +681,7 @@ function ProposalDetailView({
     [projects, detail.targets]
   );
   const driftState = proposalDriftState(proposal);
+  const forceTour = new URLSearchParams(location.search).get("tour") === "1";
 
   useEffect(() => {
     const blockId = new URLSearchParams(
@@ -736,7 +738,10 @@ function ProposalDetailView({
     <div className="min-h-0 flex-1 overflow-y-auto">
       <div className="mx-auto max-w-3xl space-y-6 p-6">
         {/* Header */}
-        <div className="flex items-start justify-between gap-4">
+        <div
+          className="flex flex-col items-start gap-4 sm:flex-row sm:justify-between"
+          data-proposal-tour="overview"
+        >
           <div className="min-w-0">
             <h2 className="text-xl font-semibold">{proposal.title}</h2>
             <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
@@ -773,7 +778,11 @@ function ProposalDetailView({
               )}
             </div>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <ProposalDetailTour
+              userId={me?.id ?? null}
+              forceOpen={forceTour}
+            />
             <CopyButton
               text={proposalAsMarkdown(proposal)}
               label="Copy spec"
@@ -891,7 +900,12 @@ function ProposalDetailView({
         )}
 
         {/* Spec body — read-only; editing happens via djinn in chat. */}
-        <div className="space-y-2" ref={specContainerRef} data-testid="proposal-spec">
+        <div
+          className="space-y-2"
+          ref={specContainerRef}
+          data-testid="proposal-spec"
+          data-proposal-tour="spec"
+        >
           <Label className="text-xs uppercase text-muted-foreground">Spec</Label>
           {proposal.body_format === "mdx" ? (
             <BlockRenderer body={proposal.body || ""} />
@@ -910,37 +924,43 @@ function ProposalDetailView({
         {/* Tribunal: refinement kickoff / status ribbon, and — once converged —
             the review card (verdict / spec diff / debate trail tabs plus the
             human accept / another-round / reject actions). */}
-        <ProposalRefinement
-          proposalId={proposal.id}
-          status={detail.refinement}
-          authorUserId={proposal.author_user_id}
-          signoffUserIds={detail.signoffs.map((signoff) => signoff.user_id)}
-          gateStatus={detail.gate_status}
-          debateTrail={detail.debate_trail}
-          revisions={detail.revisions}
-          canStart={
-            (proposal.status === "draft" || proposal.status === "in_review") &&
-            !detail.refinement?.active
-          }
-          onChanged={onChanged}
-        />
+        <div data-proposal-tour="refinement">
+          <ProposalRefinement
+            proposalId={proposal.id}
+            status={detail.refinement}
+            authorUserId={proposal.author_user_id}
+            signoffUserIds={detail.signoffs.map((signoff) => signoff.user_id)}
+            gateStatus={detail.gate_status}
+            debateTrail={detail.debate_trail}
+            revisions={detail.revisions}
+            canStart={
+              (proposal.status === "draft" || proposal.status === "in_review") &&
+              !detail.refinement?.active
+            }
+            onChanged={onChanged}
+          />
+        </div>
 
         {/* Readiness gate: per-condition checklist (DoR, judge verdict,
             unresolved blocking debate entries, evidence spike) rendered
             straight from gate_status — no client-side recomputation. */}
-        <ReadinessPanel
-          proposalId={proposal.id}
-          gateStatus={detail.gate_status}
-          refinement={detail.refinement}
-          debateTrail={detail.debate_trail}
-          onChanged={onChanged}
-        />
+        <div data-proposal-tour="readiness">
+          <ReadinessPanel
+            proposalId={proposal.id}
+            gateStatus={detail.gate_status}
+            refinement={detail.refinement}
+            debateTrail={detail.debate_trail}
+            onChanged={onChanged}
+          />
+        </div>
 
-        <Separator />
+        <div className="space-y-6" data-proposal-tour="approval">
+          <Separator />
 
-        <ProposalSignoffs detail={detail} onChanged={onChanged} />
+          <ProposalSignoffs detail={detail} onChanged={onChanged} />
 
-        <ProposalKickoff detail={detail} onChanged={onChanged} />
+          <ProposalKickoff detail={detail} onChanged={onChanged} />
+        </div>
 
         <Separator />
 

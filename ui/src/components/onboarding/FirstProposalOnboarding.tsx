@@ -3,6 +3,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
 import {
   AiProgrammingIcon,
+  Alert02Icon,
   ArrowRight01Icon,
   CheckmarkCircle04Icon,
   FileEditIcon,
@@ -16,6 +17,7 @@ import {
   AGENTIC_READY_OUTCOME,
   AGENTIC_READY_TITLE,
   createStarterProposal,
+  startStarterProposalRefinement,
   type CreatedStarterProposal,
   type StarterProposalInput,
   type StarterProposalKind,
@@ -56,16 +58,41 @@ export function FirstProposalOnboarding({
       void queryClient.invalidateQueries({ queryKey: ["proposals"] });
     },
   });
+  const refinementRetry = useMutation({
+    mutationFn: (proposalId: string) =>
+      startStarterProposalRefinement(proposalId),
+    onSuccess: () => {
+      setCreated((current) =>
+        current
+          ? {
+              ...current,
+              refinementStarted: true,
+              refinementError: null,
+            }
+          : current,
+      );
+      void queryClient.invalidateQueries({ queryKey: ["proposals"] });
+    },
+  });
 
   if (created) {
+    const refinementFailed = !created.refinementStarted;
     return (
-      <OnboardingShell current="proposal" complete>
+      <OnboardingShell current="proposal" complete={!refinementFailed}>
         <div className="flex flex-col items-center gap-5 text-center">
-          <div className="flex h-12 w-12 items-center justify-center rounded-full bg-primary/15">
+          <div
+            className={`flex h-12 w-12 items-center justify-center rounded-full ${
+              refinementFailed ? "bg-destructive/15" : "bg-primary/15"
+            }`}
+          >
             <HugeiconsIcon
-              icon={CheckmarkCircle04Icon}
+              icon={
+                refinementFailed ? Alert02Icon : CheckmarkCircle04Icon
+              }
               size={26}
-              className="text-primary"
+              className={
+                refinementFailed ? "text-destructive" : "text-primary"
+              }
             />
           </div>
           <div>
@@ -74,27 +101,61 @@ export function FirstProposalOnboarding({
               tabIndex={-1}
               className="text-xl font-semibold outline-none"
             >
-              Your first proposal is ready
+              {refinementFailed
+                ? "Draft created · refinement needs attention"
+                : "Draft created · refinement started"}
             </h1>
             <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
               {created.shortId ? `${created.shortId} · ` : ""}
-              {created.title} is now a draft. Nothing runs yet: refine it,
-              review the plan, and graduate it only when the work is ready for
-              agents.
+              {refinementFailed ? (
+                <>
+                  {created.title} is safe, but Djinn could not start the
+                  Advocate/Adversary/Judge tribunal automatically.
+                </>
+              ) : (
+                <>
+                  {created.title} is now a draft and the
+                  Advocate/Adversary/Judge tribunal is refining it
+                  automatically. It will stop for your review before any code
+                  work can begin.
+                </>
+              )}
             </p>
+            {refinementFailed && (
+              <p className="mt-2 text-xs text-destructive">
+                {refinementRetry.error instanceof Error
+                  ? refinementRetry.error.message
+                  : created.refinementError}
+              </p>
+            )}
           </div>
-          <Button
-            className="px-8"
-            onClick={() => {
-              onFinished();
-              navigate(`/proposals/${created.id}`);
-            }}
-          >
-            Open your proposal
-            <HugeiconsIcon icon={ArrowRight01Icon} size={15} />
-          </Button>
+          <div className="flex flex-wrap justify-center gap-2">
+            {refinementFailed && (
+              <Button
+                className="px-8"
+                disabled={refinementRetry.isPending}
+                onClick={() => refinementRetry.mutate(created.id)}
+              >
+                {refinementRetry.isPending
+                  ? "Starting refinement…"
+                  : "Retry refinement"}
+              </Button>
+            )}
+            <Button
+              className="px-8"
+              variant={refinementFailed ? "outline" : "default"}
+              onClick={() => {
+                onFinished();
+                navigate(`/proposals/${created.id}`);
+              }}
+            >
+              Open your proposal
+              <HugeiconsIcon icon={ArrowRight01Icon} size={15} />
+            </Button>
+          </div>
           <p className="text-xs text-muted-foreground">
-            Find it later under Proposals in the sidebar.
+            The proposal tour opens on your first visit and explains refinement,
+            readiness, sign-offs, and graduation.
           </p>
         </div>
       </OnboardingShell>
@@ -154,7 +215,7 @@ export function FirstProposalOnboarding({
             icon={Legal01Icon}
             number="2"
             title="Refine"
-            description="Planning and review agents challenge assumptions."
+            description="The agent tribunal starts automatically and challenges the brief."
           />
           <ProposalStage
             icon={Task01Icon}
@@ -211,8 +272,8 @@ export function FirstProposalOnboarding({
                   What this proposal will harden
                 </p>
                 <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
-                  Djinn creates the reviewable brief first. No CI or code
-                  changes happen until you refine and approve it.
+                  Djinn creates the reviewable brief, then automatically starts
+                  refinement. No CI or code changes happen until you approve it.
                 </p>
               </div>
               <div className="grid gap-2.5 md:grid-cols-3">
@@ -286,8 +347,9 @@ export function FirstProposalOnboarding({
         </Button>
 
         <p className="text-center text-xs text-muted-foreground">
-          Creating a draft does not start agents or change code. You stay in
-          control of refinement, approval, and graduation.
+          Creating a draft automatically starts the refinement tribunal. It
+          reviews the proposal only—no code changes begin until you approve and
+          graduate it.
         </p>
       </div>
     </OnboardingShell>

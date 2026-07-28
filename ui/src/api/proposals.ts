@@ -14,6 +14,8 @@ export interface CreatedStarterProposal {
   id: string;
   shortId: string | null;
   title: string;
+  refinementStarted: boolean;
+  refinementError: string | null;
 }
 
 export const AGENTIC_READY_TITLE =
@@ -63,11 +65,30 @@ export async function createStarterProposal({
   if (response.error) throw new Error(response.error);
   if (!response.id) throw new Error("Djinn created the proposal without returning its ID");
 
+  let refinementError: string | null = null;
+  try {
+    await startStarterProposalRefinement(response.id);
+  } catch (error) {
+    refinementError =
+      error instanceof Error ? error.message : "Unknown refinement error";
+  }
+
   return {
     id: response.id,
     shortId: response.short_id ?? null,
     title: response.title ?? title.trim(),
+    refinementStarted: refinementError === null,
+    refinementError,
   };
+}
+
+export async function startStarterProposalRefinement(
+  proposalId: string,
+): Promise<void> {
+  const response = await callMcpTool("proposal_refinement_start", {
+    proposal_id: proposalId,
+  });
+  if (response.error) throw new Error(response.error);
 }
 
 export function starterProposalBody(outcome: string, repository: string): string {

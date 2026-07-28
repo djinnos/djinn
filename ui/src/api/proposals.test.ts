@@ -9,6 +9,7 @@ import {
   agenticReadyProposalBody,
   createStarterProposal,
   hasAnyProposal,
+  startStarterProposalRefinement,
   starterProposalBody,
 } from "./proposals";
 
@@ -40,12 +41,17 @@ describe("proposal onboarding API", () => {
     });
   });
 
-  it("creates a targeted draft without starting implementation", async () => {
-    vi.mocked(callMcpTool).mockResolvedValueOnce({
-      id: "proposal-1",
-      short_id: "PROP-1",
-      title: "Reliable draft autosave",
-    } as never);
+  it("creates a targeted draft and starts refinement automatically", async () => {
+    vi.mocked(callMcpTool)
+      .mockResolvedValueOnce({
+        id: "proposal-1",
+        short_id: "PROP-1",
+        title: "Reliable draft autosave",
+      } as never)
+      .mockResolvedValueOnce({
+        proposal_id: "proposal-1",
+        refinement: { active: true },
+      } as never);
 
     await expect(
       createStarterProposal({
@@ -58,6 +64,8 @@ describe("proposal onboarding API", () => {
       id: "proposal-1",
       shortId: "PROP-1",
       title: "Reliable draft autosave",
+      refinementStarted: true,
+      refinementError: null,
     });
 
     expect(callMcpTool).toHaveBeenCalledWith(
@@ -80,14 +88,26 @@ describe("proposal onboarding API", () => {
     expect(body).toContain("## Outcome");
     expect(body).toContain("## Non-goals");
     expect(body).toContain("Do not start implementation");
+    expect(callMcpTool).toHaveBeenNthCalledWith(
+      2,
+      "proposal_refinement_start",
+      {
+        proposal_id: "proposal-1",
+      },
+    );
   });
 
   it("creates a concrete agentic-ready environment draft", async () => {
-    vi.mocked(callMcpTool).mockResolvedValueOnce({
-      id: "proposal-agentic",
-      short_id: "PROP-2",
-      title: AGENTIC_READY_TITLE,
-    } as never);
+    vi.mocked(callMcpTool)
+      .mockResolvedValueOnce({
+        id: "proposal-agentic",
+        short_id: "PROP-2",
+        title: AGENTIC_READY_TITLE,
+      } as never)
+      .mockResolvedValueOnce({
+        proposal_id: "proposal-agentic",
+        refinement: { active: true },
+      } as never);
 
     await createStarterProposal({
       project,
@@ -118,6 +138,42 @@ describe("proposal onboarding API", () => {
     expect(body).toContain("## Non-goals");
     expect(body).toContain("Do not hide failures");
     expect(body).toContain("No undocumented interactive or manual step");
+  });
+
+  it("preserves the draft and reports a retryable refinement failure", async () => {
+    vi.mocked(callMcpTool)
+      .mockResolvedValueOnce({
+        id: "proposal-safe",
+        short_id: "PROP-3",
+        title: "Safe proposal",
+      } as never)
+      .mockResolvedValueOnce({
+        error: "No plan model is available",
+      } as never);
+
+    await expect(
+      createStarterProposal({
+        project,
+        title: "Safe proposal",
+        outcome: "A sufficiently detailed and bounded custom proposal outcome.",
+      }),
+    ).resolves.toMatchObject({
+      id: "proposal-safe",
+      refinementStarted: false,
+      refinementError: "No plan model is available",
+    });
+
+    vi.mocked(callMcpTool).mockResolvedValueOnce({
+      proposal_id: "proposal-safe",
+      refinement: { active: true },
+    } as never);
+    await expect(
+      startStarterProposalRefinement("proposal-safe"),
+    ).resolves.toBeUndefined();
+    expect(callMcpTool).toHaveBeenLastCalledWith(
+      "proposal_refinement_start",
+      { proposal_id: "proposal-safe" },
+    );
   });
 
   it("makes the safety boundary explicit in the starter body", () => {
