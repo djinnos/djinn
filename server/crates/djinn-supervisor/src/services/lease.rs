@@ -1,5 +1,59 @@
 //! Owned, serde-safe v1 lease protocol contracts.
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
+
+/// How long anything may hold a position in the ONE build-lease FIFO before the
+/// coordinator terminalizes it as `deadline_expired`.
+///
+/// # Why one constant for two populations
+///
+/// [`grant_next`](../../../../djinn_db/repositories/build_lease) reads only the
+/// queue HEAD and grants nothing when the head does not fit. Head-of-line
+/// blocking is deliberate (it is what keeps a heavy warm Job from starving
+/// behind an unbroken stream of weight-1 dispatches), and its cost is that
+/// every queued row waits for the row in front of it — across consumer kinds.
+///
+/// So the two deadlines are not independent knobs. A dispatch row sits in the
+/// FIFO for up to this long; an invocation queued behind it therefore has to be
+/// willing to wait at least as long, or it expires first, degrades to the
+/// launcher's 250m unleased quota, and — because the degrade is one-way — runs
+/// its whole compile at ~1/16th of the leased quota.
+///
+/// Production ran with 30 MINUTES for dispatch and 30 SECONDS for invocations.
+/// Denied dispatch attempts re-queued every ~30s for hours (279 denials in 3h),
+/// so there was almost always a weight-1 dispatch row ahead of every zero-weight
+/// invocation, and the invocation's own deadline always expired first: two live
+/// task-run pods launched 7 and 5 lease invocations and ZERO escalated, while a
+/// sampled leaf held `cpu.max = 25000 100000` after burning 52.8 CPU-seconds
+/// (211x the 0.25 CPU-s escalation threshold).
+///
+/// Both consumers derive their deadline from this value so the two can no
+/// longer drift apart. Waiting longer is free for the invocation: a queued
+/// invocation's child keeps running (clamped) the whole time, and the command's
+/// own timeout still bounds it — the only thing the queue deadline decides is
+/// whether the escalation is still allowed to land when the FIFO reaches it.
+pub const BUILD_LEASE_QUEUE_DEADLINE: Duration = Duration::from_secs(30 * 60);
+
+/// [`BUILD_LEASE_QUEUE_DEADLINE`] in whole milliseconds, for the coordinator's
+/// epoch-millisecond deadline arithmetic.
+pub const BUILD_LEASE_QUEUE_DEADLINE_MS: i64 = 30 * 60 * 1000;
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod queue_deadline_tests {
+    use super::*;
+
+    /// The millisecond projection and the `Duration` are one value expressed
+    /// two ways; a hand-edited drift between them would silently reinstate the
+    /// mismatch this constant exists to remove.
+    #[test]
+    fn millisecond_projection_matches_the_duration() {
+        assert_eq!(
+            BUILD_LEASE_QUEUE_DEADLINE_MS,
+            i64::try_from(BUILD_LEASE_QUEUE_DEADLINE.as_millis()).unwrap()
+        );
+    }
+}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskInvocationLeaseIdentity {
     pub task_id: String,

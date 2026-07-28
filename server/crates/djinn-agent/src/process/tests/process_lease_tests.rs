@@ -294,6 +294,12 @@ struct ScriptedServices {
     // `Lift` so the lease-state-machine tests exercise the successful lift path;
     // the epoch-gating tests override it to `Shadow` / `Unleased`.
     lift_decision: Mutex<djinn_supervisor::services::InvocationLiftDecision>,
+    /// When set, `queue_lease` stops replaying a script and behaves like the
+    /// real coordinator FIFO: the invocation waits `.1` behind the row ahead of
+    /// it, and the answer is decided by the deadline the RUNNER sent. That is
+    /// the only way a test can exercise the queue timeout as a decision rather
+    /// than as a scripted constant. See `queue_deadline_tests`.
+    fifo_wait: Mutex<Option<(Arc<TestClock>, Duration)>>,
 }
 
 impl ScriptedServices {
@@ -319,10 +325,18 @@ impl ScriptedServices {
             status_entered: Notify::new(),
             status_resume: Notify::new(),
             lift_decision: Mutex::new(djinn_supervisor::services::InvocationLiftDecision::Lift),
+            fifo_wait: Mutex::new(None),
         }
     }
     fn set_lift_decision(&self, decision: djinn_supervisor::services::InvocationLiftDecision) {
         *self.lift_decision.lock().unwrap() = decision;
+    }
+    /// Answer `queue_lease` the way the coordinator does: advance the shared
+    /// wall clock by `wait` (the time this invocation spent behind the FIFO
+    /// head), then grant it or terminalize it against the queue deadline the
+    /// runner itself computed.
+    fn honour_queue_deadline(&self, clock: Arc<TestClock>, wait: Duration) {
+        *self.fifo_wait.lock().unwrap() = Some((clock, wait));
     }
     fn pop(script: &Mutex<VecDeque<LeaseResult>>) -> LeaseResult {
         script
@@ -338,13 +352,28 @@ impl SupervisorServices for ScriptedServices {
     fn cancel(&self) -> &CancellationToken {
         &self.cancel
     }
-    async fn queue_lease(&self, _: LeaseQueueRequest) -> LeaseResult {
+    async fn queue_lease(&self, request: LeaseQueueRequest) -> LeaseResult {
         self.queue_calls.record();
         self.queue_entered.notify_waiters();
         if self.pause_queue.load(Ordering::SeqCst) {
-            std::future::pending().await
+            return std::future::pending().await;
+        }
+        let fifo = self.fifo_wait.lock().unwrap().clone();
+        let Some((clock, wait)) = fifo else {
+            return Self::pop(&self.queue);
+        };
+        // The wait this position spent behind the head of the shared FIFO.
+        clock.advance_wall(wait);
+        let deadline = request.deadlines.queue_deadline_ms;
+        // Exactly `expire_queued_tx`: a non-positive deadline is NO deadline,
+        // and a position whose deadline has passed is terminalized instead of
+        // granted.
+        if deadline > 0 && epoch_ms(clock.now()) >= deadline {
+            LeaseResult::LeaseWaitTimeout {
+                timeout_credit: None,
+            }
         } else {
-            Self::pop(&self.queue)
+            granted(1)
         }
     }
     async fn grant_lease(&self, _: LeaseGrantRequest) -> LeaseResult {
@@ -1403,5 +1432,7 @@ mod admission_composition_tests;
 mod broker_lift_tests;
 #[path = "process_lease_degrade_tests.rs"]
 mod lease_degrade_tests;
+#[path = "process_lease_queue_deadline_tests.rs"]
+mod queue_deadline_tests;
 #[path = "process_lease_recovery_tests.rs"]
 mod recovery_tests;

@@ -20,8 +20,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use djinn_supervisor::services::{
-    LeaseAbandonRequest, LeaseDeadlines, LeaseGrantRequest, LeaseIdentity, LeaseReleaseRequest,
-    LeaseResult, LeaseState, LeaseStatusRequest, TaskDispatchLeaseIdentity,
+    BUILD_LEASE_QUEUE_DEADLINE_MS, LeaseAbandonRequest, LeaseDeadlines, LeaseGrantRequest,
+    LeaseIdentity, LeaseReleaseRequest, LeaseResult, LeaseState, LeaseStatusRequest,
+    TaskDispatchLeaseIdentity,
 };
 
 use crate::build_admission::{BuildSlotAuthority, DispatchSlotOutcome};
@@ -261,7 +262,14 @@ impl BuildSlotAuthority for BuildLeaseDispatchAuthority {
 /// inside the window keeps its original FIFO position; only a genuinely
 /// abandoned one expires. Too short would silently drop positions under load,
 /// which is the starvation this design exists to avoid.
-const DISPATCH_QUEUE_DEADLINE_MS: i64 = 30 * 60 * 1000;
+///
+/// Derived from the shared [`BUILD_LEASE_QUEUE_DEADLINE_MS`] rather than
+/// restated here: this row sits in the SAME head-of-line-blocking FIFO as the
+/// invocation leases queued behind it, so the two deadlines are one decision.
+/// When they were independent (30 minutes here, 30 seconds in
+/// `djinn-agent`), every invocation expired behind a dispatch row and ran its
+/// whole compile at the 250m unleased quota.
+const DISPATCH_QUEUE_DEADLINE_MS: i64 = BUILD_LEASE_QUEUE_DEADLINE_MS;
 
 struct LeaseQueueRequestShim;
 
