@@ -236,7 +236,7 @@ async fn partial_config_updates_fail_closed_onto_the_emergency_authority() {
         BuildAdmissionMode::Enforce,
         true,
         BuildAdmissionReadiness::Healthy,
-        InvocationAuthorityObservation::default(),
+        InvocationAuthorityObservation { enforcing: false },
     );
     assert_eq!(snapshot.state, HandoffState::IllegalModeCombo);
     assert_eq!(

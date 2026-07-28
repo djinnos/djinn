@@ -49,12 +49,15 @@ use djinn_provider::github_app::AppConfig as GitHubAppConfig;
 use djinn_provider::github_app::CredentialSourceState;
 use djinn_provider::repos::CredentialRepository;
 use djinn_runtime::GraphWarmerService;
+use djinn_supervisor::services::{InvocationLiftDecision, evaluate_invocation_lift};
 use djinn_supervisor::{AllowAllValidator, ConnectionRegistry, ServeHandle, serve_on_tcp};
 use djinn_workspace::{MirrorManager, WorkspaceStore, mirrors_root, workspaces_root};
 
 #[cfg(test)]
 mod admission_epoch_arming_tests;
 mod canonical_graph_refresh_planner;
+#[cfg(test)]
+mod handoff_warning_observation_tests;
 mod provider_catalog_refresh;
 mod settings;
 
@@ -900,21 +903,53 @@ impl AppState {
         Arc::new(build_in_process_graph_warmer(self.clone())) as Arc<dyn GraphWarmerService>
     }
 
+    /// Read the durable handoff row once and project the invocation (v1)
+    /// authority from that exact same read.
+    ///
+    /// Every production `evaluate_handoff` call site used to pass
+    /// `InvocationAuthorityObservation::default()`, i.e. `enforcing: false`
+    /// hard-coded, so the server always believed v1 was not enforcing. The
+    /// consequence was a permanent, unclearable `stale_epoch` warning for every
+    /// phase of the forward cutover — byte-identical to a genuine incomplete
+    /// epoch, which made the runbook's stale-epoch detector unreadable.
+    ///
+    /// The observation is the launcher's own projection,
+    /// [`evaluate_invocation_lift`], applied to the row: v1 is enforcing exactly
+    /// when it lifts the cgroup quota. `Shadow` observes without enforcing and
+    /// `Unleased` is no authority at all, so neither counts.
+    ///
+    /// Reading once and handing the *same* row to both halves also closes a
+    /// torn-read window in which the projection and the warning would disagree
+    /// about which epoch they described.
+    async fn read_handoff_with_invocation_observation(
+        &self,
+    ) -> (
+        Result<Option<djinn_db::AdmissionHandoffRow>, ()>,
+        InvocationAuthorityObservation,
+    ) {
+        let row = AdmissionHandoffRepository::new(self.db().clone())
+            .read()
+            .await
+            .map_err(|_| ());
+        let invocation = InvocationAuthorityObservation {
+            enforcing: evaluate_invocation_lift(row.clone()) == InvocationLiftDecision::Lift,
+        };
+        (row, invocation)
+    }
+
     /// Read the durable handoff row before journal recovery can weaken any emergency gate.
     /// A storage failure remains fail-closed through the existing readiness gates.
     async fn initialize_build_admission_handoff(&self) {
         let Some(admission) = self.inner.build_admission.clone() else {
             return;
         };
+        let (row, invocation) = self.read_handoff_with_invocation_observation().await;
         let snapshot = evaluate_handoff(
-            AdmissionHandoffRepository::new(self.db().clone())
-                .read()
-                .await
-                .map_err(|_| ()),
+            row,
             admission.mode(),
             admission.mode() == BuildAdmissionMode::Enforce,
             admission.readiness(),
-            InvocationAuthorityObservation::default(),
+            invocation,
         );
         match snapshot.emergency {
             EmergencyAuthorityDecision::RequiredFailClosed => admission.require_enforcement(),
@@ -939,12 +974,9 @@ impl AppState {
     async fn publish_handoff_warning(&self) -> Option<HandoffWarningReason> {
         let admission = self.inner.build_admission.clone()?;
         let emergency_enforcing = admission.mode() == BuildAdmissionMode::Enforce;
-        let invocation = InvocationAuthorityObservation::default();
+        let (row, invocation) = self.read_handoff_with_invocation_observation().await;
         let snapshot = evaluate_handoff(
-            AdmissionHandoffRepository::new(self.db().clone())
-                .read()
-                .await
-                .map_err(|_| ()),
+            row,
             admission.mode(),
             emergency_enforcing,
             admission.readiness(),
@@ -1292,15 +1324,13 @@ impl AppState {
     /// Re-read the durable row after topology has made the emergency controller
     /// healthy Enforce, then acknowledge its exact emergency epoch.
     async fn finalize_build_admission_handoff(&self, admission: &BuildAdmissionController) {
+        let (row, invocation) = self.read_handoff_with_invocation_observation().await;
         let mut snapshot = evaluate_handoff(
-            AdmissionHandoffRepository::new(self.db().clone())
-                .read()
-                .await
-                .map_err(|_| ()),
+            row,
             admission.mode(),
             admission.mode() == BuildAdmissionMode::Enforce,
             admission.readiness(),
-            InvocationAuthorityObservation::default(),
+            invocation,
         );
         match snapshot.emergency {
             EmergencyAuthorityDecision::MayDisable => {
@@ -1329,15 +1359,13 @@ impl AppState {
                 // The gates moved, so the earlier projection is stale: re-read so
                 // a now-healthy controller can acknowledge in this same pass
                 // instead of waiting for the next tick.
+                let (row, invocation) = self.read_handoff_with_invocation_observation().await;
                 snapshot = evaluate_handoff(
-                    AdmissionHandoffRepository::new(self.db().clone())
-                        .read()
-                        .await
-                        .map_err(|_| ()),
+                    row,
                     admission.mode(),
                     admission.mode() == BuildAdmissionMode::Enforce,
                     admission.readiness(),
-                    InvocationAuthorityObservation::default(),
+                    invocation,
                 );
                 if snapshot.emergency != EmergencyAuthorityDecision::RequiredFailClosed {
                     return;

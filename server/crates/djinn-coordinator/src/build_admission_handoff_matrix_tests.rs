@@ -489,7 +489,7 @@ async fn handoff_crash_matrix_preserves_authority_and_epoch_guards() {
             BuildAdmissionMode::Enforce,
             true,
             BuildAdmissionReadiness::Healthy,
-            InvocationAuthorityObservation::default(),
+            InvocationAuthorityObservation { enforcing: false },
         )
         .state,
         HandoffState::IncompleteEpoch,

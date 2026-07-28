@@ -10,7 +10,16 @@ use djinn_db::{AdmissionHandoffPhase, AdmissionHandoffRow};
 use crate::build_admission::{BuildAdmissionMode, BuildAdmissionReadiness};
 
 /// Observation supplied by the invocation authority (or a deterministic fake).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+///
+/// **Deliberately not `Default`.** Every production call site once passed
+/// `::default()` — `enforcing: false` hard-coded — so the server never read the
+/// real v1 authority and emitted a permanent, unclearable `stale_epoch` warning
+/// throughout the forward cutover. Requiring the field to be named forces each
+/// caller to state where its value came from: production derives it from
+/// `evaluate_invocation_lift` over the durable row, and any caller that
+/// genuinely cannot observe v1 must write `enforcing: false` with a comment
+/// saying why.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct InvocationAuthorityObservation {
     pub enforcing: bool,
 }
@@ -336,7 +345,7 @@ mod tests {
             BuildAdmissionMode::Enforce,
             true,
             BuildAdmissionReadiness::Healthy,
-            InvocationAuthorityObservation::default(),
+            InvocationAuthorityObservation { enforcing: false },
         );
         assert_eq!(baseline.state, HandoffState::EmergencyPrimary);
         assert_eq!(
@@ -356,7 +365,7 @@ mod tests {
             BuildAdmissionMode::Enforce,
             true,
             BuildAdmissionReadiness::Healthy,
-            InvocationAuthorityObservation::default(),
+            InvocationAuthorityObservation { enforcing: false },
         );
         assert_eq!(shadow.state, HandoffState::Shadow);
         assert_eq!(
@@ -398,7 +407,7 @@ mod tests {
                 BuildAdmissionMode::Enforce,
                 true,
                 BuildAdmissionReadiness::Healthy,
-                InvocationAuthorityObservation::default(),
+                InvocationAuthorityObservation { enforcing: false },
             );
             assert_eq!(
                 illegal.state,
@@ -411,7 +420,7 @@ mod tests {
                 "illegal combo must fail closed for {v0:?}/{v1:?}"
             );
             assert_eq!(
-                illegal.warning_reason(true, InvocationAuthorityObservation::default()),
+                illegal.warning_reason(true, InvocationAuthorityObservation { enforcing: false }),
                 Some(HandoffWarningReason::StaleEpoch)
             );
         }
@@ -423,7 +432,7 @@ mod tests {
                 BuildAdmissionMode::Enforce,
                 true,
                 BuildAdmissionReadiness::Healthy,
-                InvocationAuthorityObservation::default(),
+                InvocationAuthorityObservation { enforcing: false },
             )
             .emergency,
             EmergencyAuthorityDecision::RequiredFailClosed
@@ -499,7 +508,7 @@ mod tests {
                 BuildAdmissionMode::Enforce,
                 true,
                 BuildAdmissionReadiness::Healthy,
-                InvocationAuthorityObservation::default(),
+                InvocationAuthorityObservation { enforcing: false },
             );
             assert_eq!(snapshot.state, state);
             assert_eq!(snapshot.emergency, decision);
@@ -536,7 +545,7 @@ mod tests {
                 BuildAdmissionReadiness::Healthy,
                 // The invocation authority is not lifting, exactly as
                 // `evaluate_invocation_lift` projects a non-enforcing v1.
-                InvocationAuthorityObservation::default(),
+                InvocationAuthorityObservation { enforcing: false },
             );
             assert_eq!(snapshot.state, HandoffState::InvocationPrimary);
             assert_ne!(
@@ -617,7 +626,7 @@ mod tests {
                     BuildAdmissionMode::Enforce,
                     true,
                     BuildAdmissionReadiness::Healthy,
-                    InvocationAuthorityObservation::default()
+                    InvocationAuthorityObservation { enforcing: false }
                 )
                 .emergency,
                 EmergencyAuthorityDecision::RequiredFailClosed
@@ -632,7 +641,7 @@ mod tests {
             BuildAdmissionMode::Observe,
             false,
             BuildAdmissionReadiness::Healthy,
-            InvocationAuthorityObservation::default(),
+            InvocationAuthorityObservation { enforcing: false },
         );
         assert_eq!(standalone.state, HandoffState::MissingRow);
         assert_eq!(
@@ -664,7 +673,7 @@ mod tests {
                 BuildAdmissionMode::Enforce,
                 readiness.is_healthy(),
                 readiness,
-                InvocationAuthorityObservation::default(),
+                InvocationAuthorityObservation { enforcing: false },
             );
             assert_eq!(
                 snapshot.emergency_acknowledgement_allowed,
@@ -688,7 +697,7 @@ mod tests {
             );
             assert_eq!(snapshot.warning_reason(true, invocation), None, "{phase:?}");
             assert_eq!(
-                snapshot.warning_reason(true, InvocationAuthorityObservation::default()),
+                snapshot.warning_reason(true, InvocationAuthorityObservation { enforcing: false }),
                 Some(HandoffWarningReason::StaleEpoch)
             );
         }
@@ -697,10 +706,10 @@ mod tests {
             BuildAdmissionMode::Enforce,
             true,
             BuildAdmissionReadiness::Healthy,
-            InvocationAuthorityObservation::default(),
+            InvocationAuthorityObservation { enforcing: false },
         );
         assert_eq!(
-            unreadable.warning_reason(true, InvocationAuthorityObservation::default()),
+            unreadable.warning_reason(true, InvocationAuthorityObservation { enforcing: false }),
             Some(HandoffWarningReason::EpochUnreadable)
         );
         let overlap = evaluate_handoff(
