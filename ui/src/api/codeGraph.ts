@@ -127,6 +127,12 @@ export interface CodeGraphWorkspace {
   root?: string;
   language?: string;
   status?: string;
+  /** Nodes this workspace contributes to the served graph. `0`/undefined
+   * means the galaxy currently shows nothing for it. */
+  nodeCount?: number;
+  /** Commit the workspace's nodes came from. For a salvaged workspace this
+   * trails the rest of the graph — that difference IS the staleness. */
+  commitSha?: string;
 }
 
 type RouteSelector =
@@ -156,6 +162,12 @@ function nonEmptyString(value: unknown): string | undefined {
     : undefined;
 }
 
+function finiteNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value)
+    ? value
+    : undefined;
+}
+
 function normalizeWorkspaceEntry(value: unknown): CodeGraphWorkspace | null {
   if (!isRecord(value)) return null;
   const slug = nonEmptyString(value.slug ?? value.workspace_slug ?? value.id);
@@ -168,6 +180,8 @@ function normalizeWorkspaceEntry(value: unknown): CodeGraphWorkspace | null {
     root: nonEmptyString(value.root ?? value.root_path ?? value.path),
     language: nonEmptyString(value.language ?? value.indexer),
     status: nonEmptyString(value.status ?? value.warm_status),
+    nodeCount: finiteNumber(value.node_count),
+    commitSha: nonEmptyString(value.commit_sha),
   };
 }
 
@@ -180,6 +194,13 @@ export interface CoverageGapWorkspace {
   /** indexer_failed | timed_out | unsupported_language. */
   status: string;
   detail?: string;
+  /** Candidate source files found under the workspace root. */
+  discoveredFiles?: number;
+  /** Files this workspace actually contributed to the merged graph — `0` on
+   * every gap status, which is why staleness has to come from elsewhere. */
+  indexedFiles?: number;
+  /** When the last index attempt for this workspace ran (ISO-8601 UTC). */
+  attemptedAt?: string;
 }
 
 /** Parsed `coverage` op payload — the pieces the galaxy HUD needs. */
@@ -198,6 +219,9 @@ function normalizeCoverageGap(value: unknown): CoverageGapWorkspace | null {
     language: nonEmptyString(value.language) ?? "unknown",
     status: nonEmptyString(value.status) ?? "indexer_failed",
     detail: nonEmptyString(value.detail),
+    discoveredFiles: finiteNumber(value.discovered_files),
+    indexedFiles: finiteNumber(value.indexed_files),
+    attemptedAt: nonEmptyString(value.warmed_at),
   };
 }
 
@@ -212,12 +236,43 @@ export function parseCoverageResponse(value: unknown): CodeGraphCoverage {
           (w) => isRecord(w) && (w.is_gap === true || w.status === "timed_out"),
         )
       : [];
+  // `unindexed_source_roots` names the gaps but carries no extent/timing; the
+  // full `workspaces` table does. Merge the two on (slug, language) so the
+  // banner can say WHEN the attempt was and how much it covered, instead of a
+  // bare "not indexed" that reads as permanent.
+  const detailBySlugLang = new Map<string, Record<string, unknown>>();
+  if (Array.isArray(value.workspaces)) {
+    for (const entry of value.workspaces) {
+      if (!isRecord(entry)) continue;
+      const slug = nonEmptyString(entry.workspace_slug ?? entry.slug);
+      if (!slug) continue;
+      detailBySlugLang.set(
+        `${slug}::${nonEmptyString(entry.language) ?? "unknown"}`,
+        entry,
+      );
+    }
+  }
   const gaps = rootsRaw.flatMap((entry) => {
     const g = normalizeCoverageGap(entry);
-    return g ? [g] : [];
+    if (!g) return [];
+    const row = detailBySlugLang.get(`${g.slug}::${g.language}`);
+    const full = row ? normalizeCoverageGap(row) : null;
+    if (!full) return [g];
+    // The gap entry stays authoritative for identity and status; the
+    // workspaces row only fills fields the gap entry does not carry.
+    return [
+      {
+        ...g,
+        detail: g.detail ?? full.detail,
+        discoveredFiles: g.discoveredFiles ?? full.discoveredFiles,
+        indexedFiles: g.indexedFiles ?? full.indexedFiles,
+        attemptedAt: g.attemptedAt ?? full.attemptedAt,
+      },
+    ];
   });
   const hasGaps =
-    value.has_gaps === true || (value.has_gaps === undefined && gaps.length > 0);
+    value.has_gaps === true ||
+    (value.has_gaps === undefined && gaps.length > 0);
   return { hasGaps, gaps };
 }
 
@@ -308,29 +363,23 @@ export function fetchNeighbors(
 export function fetchImpact(
   project: string,
   key: string,
-  args: Pick<CodeGraphArgs, "limit" | "group_by" | "min_confidence" | "direction"> = {},
+  args: Pick<
+    CodeGraphArgs,
+    "limit" | "group_by" | "min_confidence" | "direction"
+  > = {},
 ) {
   return callCodeGraph(project, "impact", { key, ...args });
 }
 
-export function fetchRouteMap(
-  project: string,
-  args: RouteMapArgs = {},
-) {
+export function fetchRouteMap(project: string, args: RouteMapArgs = {}) {
   return callCodeGraph(project, "route_map", args);
 }
 
-export function fetchShapeCheck(
-  project: string,
-  args: ShapeCheckArgs,
-) {
+export function fetchShapeCheck(project: string, args: ShapeCheckArgs) {
   return callCodeGraph(project, "shape_check", args);
 }
 
-export function fetchApiImpact(
-  project: string,
-  args: ApiImpactArgs,
-) {
+export function fetchApiImpact(project: string, args: ApiImpactArgs) {
   return callCodeGraph(project, "api_impact", args);
 }
 
