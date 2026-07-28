@@ -72,6 +72,45 @@
         stale
     }
 
+    /// Seed one exact current run in one of the durable park states. The park
+    /// kind is data supplied by the caller, so this fixture does not recreate
+    /// the evaluator's evidence ordering.
+    async fn seed_parked_cross_surface_run(
+        repo: &ProposalRepository,
+        proposal_id: &str,
+        key: &str,
+        kind: djinn_core::refinement_liveness::RefinementParkKind,
+    ) -> String {
+        let (run_id, generation) = match repo
+            .reap_and_admit(djinn_db::AdmitRefinementRunRequest {
+                proposal_id: proposal_id.to_owned(),
+                idempotency_key: key.into(),
+                source: djinn_db::RefinementAdmissionSource::Demand {
+                    demand_id: key.into(),
+                },
+                heartbeat_grace_millis: 60_000,
+            })
+            .await
+            .unwrap()
+        {
+            djinn_db::RefinementAdmissionOutcome::Admitted {
+                run_id,
+                generation,
+                ..
+            } => (run_id, generation),
+            djinn_db::RefinementAdmissionOutcome::Existing { .. } => unreachable!(),
+        };
+        assert!(repo
+            .park_refinement_run(djinn_db::ParkRefinementRunRequest {
+                run_id: run_id.clone(),
+                generation,
+                kind,
+            })
+            .await
+            .unwrap());
+        run_id
+    }
+
     #[test]
     fn exact_status_serializes_every_shared_liveness_evidence_class() {
         let cases = [
@@ -287,6 +326,98 @@
         assert!(!status.active);
         assert_eq!(sqlx::query_scalar::<_, String>("SELECT status FROM sessions WHERE id = $1").bind(&prior_session).fetch_one(db.pool()).await.unwrap(), "running");
         assert_ne!(status.stop_reason.as_deref(), Some("operator_stop"));
+    }
+
+    /// Both durable park forms must project as the same live exact run across
+    /// status, the repository-backed doctor, and the board aggregate.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn parked_exact_runs_are_live_across_status_doctor_and_board() {
+        let cases = [
+            (
+                "operator awaiting-review park",
+                djinn_core::refinement_liveness::RefinementParkKind::AwaitingReview,
+                RefinementLivenessEvidence::AwaitingReviewPark,
+                "awaiting_review_park",
+            ),
+            (
+                "between-phase awaiting-evidence park",
+                djinn_core::refinement_liveness::RefinementParkKind::AwaitingEvidence,
+                RefinementLivenessEvidence::AwaitingEvidencePark,
+                "awaiting_evidence_park",
+            ),
+        ];
+
+        for (name, kind, expected_evidence, expected_status_evidence) in cases {
+            let (_server, db) = test_server().await;
+            let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+            let proposal = repo
+                .create(ProposalCreateInput {
+                    title: "Parked exact-run projection",
+                    body: "body",
+                    acceptance_criteria: Some("[]"),
+                    status: Some("draft"),
+                    body_format: None,
+                })
+                .await
+                .unwrap();
+            let run_id = seed_parked_cross_surface_run(
+                &repo,
+                &proposal.id,
+                &format!("parked-cross-surface-{name}"),
+                kind,
+            )
+            .await;
+
+            let exact = repo
+                .load_refinement_run_snapshot(djinn_db::LoadRefinementRunSnapshotRequest {
+                    run_id: run_id.clone(),
+                    heartbeat_grace_millis: 60_000,
+                })
+                .await
+                .unwrap()
+                .unwrap();
+            let expected = djinn_core::refinement_liveness::evaluate_refinement_liveness(
+                &exact.snapshot,
+                exact.observed_at,
+            );
+            assert_eq!(expected, exact.liveness, "{name}: repository snapshot");
+            assert_eq!(
+                expected,
+                RefinementLivenessResult::Live {
+                    evidence: expected_evidence,
+                },
+                "{name}: shared evaluator result"
+            );
+
+            let status = build_refinement_status(&repo, &proposal.id).await.unwrap();
+            assert_eq!(status.run_id.as_deref(), Some(run_id.as_str()), "{name}: status run");
+            assert_eq!(status.liveness.as_deref(), Some("live"), "{name}: status liveness");
+            assert_eq!(
+                status.liveness_evidence.as_deref(),
+                Some(expected_status_evidence),
+                "{name}: status evidence"
+            );
+            assert!(status.active, "{name}: status active");
+
+            let (events_tx, _events_rx) = tokio::sync::broadcast::channel(16);
+            let doctor_source = std::sync::Arc::new(
+                djinn_coordinator::doctor::ProposalRepositoryRefinementPhantomActiveSource::new(
+                    db, events_tx,
+                ),
+            );
+            assert!(
+                doctor_stale_run_ids(doctor_source).is_empty(),
+                "{name}: doctor must not report a live park"
+            );
+            assert_eq!(
+                repo.load_board_refinement_lifecycle_aggregate(60_000)
+                    .await
+                    .unwrap()
+                    .stale_run_count,
+                0,
+                "{name}: board phantom count"
+            );
+        }
     }
 
     /// Exercise status, doctor, board health, and both admissions against the historic
