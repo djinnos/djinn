@@ -1287,6 +1287,37 @@ fn resolve_cargo_workspace_dir(
 /// same way before it compiles — without matching mtimes the base's fingerprints
 /// won't match task-run's fresh clone and reuse never hits.
 ///
+/// # The base's `debug/incremental` is retained across cycles
+///
+/// This used to prune `debug/incremental` unconditionally before every compile,
+/// which was strictly lose-lose. Pruning does not invalidate artifacts or
+/// fingerprints, so the base still reused its `.rlib`/`.rmeta`; the only effect
+/// was that every unit cargo *did* have to rebuild paid a full rustc codegen
+/// instead of a partial one, because its query cache had just been deleted. And
+/// the disk was never actually saved: the compile below immediately regenerates
+/// the directory (measured at 13 GB for djinn's own base), which then sits on
+/// the PVC until the next cycle deletes it. We paid the space and threw away the
+/// speedup.
+///
+/// Retaining it is safe because nothing else consumes this directory:
+///
+/// * Task-run pods never see it — `cargo_target_seed::classify_cargo_target_path`
+///   returns `Skip` for anything under `incremental`, so it is neither hardlinked
+///   (which would corrupt the shared base) nor copied (which would cost more than
+///   it saves for a throwaway run dir).
+/// * warm↔task-run fingerprint parity is unaffected. Parity depends on the
+///   *value* `CARGO_INCREMENTAL=1` being identical on both sides (it folds into
+///   `-C metadata`), not on whether this directory is populated.
+/// * The warm holds the per-variant `WarmBaseLock` for the whole cycle, so it is
+///   the sole writer.
+///
+/// Disk is bounded by the coordinator's cache-cleanup sweep outside this Pod,
+/// whose first pressure rung removes exactly this directory once free space
+/// falls below the low watermark — a demand-driven reclaim instead of an
+/// unconditional one. The only in-Pod prune left is the self-heal below, which
+/// fires when a cycle compiled nothing at all so a poisoned incremental cache
+/// cannot wedge the base indefinitely.
+///
 /// Best-effort throughout: a missing cargo workspace (non-Rust repo) or any
 /// compile failure logs and returns — it never fails the graph warm.
 async fn warm_cargo_target_base(
@@ -1308,12 +1339,6 @@ async fn warm_cargo_target_base(
     // above deliberately preserves the graph warmer's inexpensive non-Rust
     // path. For Rust workspaces, acquire before any stamp or compiler can
     // touch the base and retain the guard through the final gated sweep.
-    // Start the observable attempt before the primitive opens or probes the
-    // lock file. The terminal counter/event below remains exactly-once.
-    info!(
-        project_id,
-        "cargo_metrics: warm incremental prune attempt started"
-    );
     let mold_jobs = cargo_build_jobs_variant();
     let _warm_base_guard = match acquire_warm_base_lock(project_id, mold_jobs) {
         Ok(guard) => {
@@ -1326,34 +1351,6 @@ async fn warm_cargo_target_base(
             return;
         }
     };
-    #[cfg(test)]
-    let prune_result = match WARM_CARGO_TEST_ROOT
-        .lock()
-        .expect("warm test root poisoned")
-        .clone()
-    {
-        Some(root) => cargo_incremental_prune::prune_warm_incremental_for_root(
-            project_id,
-            Path::new(&std::env::var_os(CARGO_TARGET_DIR_ENV).unwrap_or_default()),
-            &root,
-        ),
-        None => cargo_incremental_prune::prune_warm_incremental_for_jobs(project_id, mold_jobs),
-    };
-    #[cfg(not(test))]
-    let prune_result =
-        cargo_incremental_prune::prune_warm_incremental_for_jobs(project_id, mold_jobs);
-    match prune_result {
-        Ok(result) => {
-            warm_cargo_test_phase(result.outcome.as_str());
-            record_warm_incremental_prune_success(project_id, result)
-        }
-        Err(error) => {
-            warm_cargo_test_phase("failed");
-            record_warm_incremental_prune_failure(project_id, error.kind);
-            warn!(project_id, error = %error, "cargo warm: incremental prune failed; skipping Cargo warm");
-            return;
-        }
-    }
 
     // Canonicalize once so every structured event and metric for this warm
     // shares the same absolute workspace_dir. Cargo fingerprints embed
@@ -1541,6 +1538,28 @@ async fn warm_cargo_target_base(
         "cargo warm: warm-base convergence delta for this cycle"
     );
 
+    // Self-heal: a cycle in which NOTHING compiled is the one signature a
+    // poisoned incremental cache produces, and it is the only case where
+    // retaining the cache could wedge the base indefinitely. rustc validates and
+    // discards its own cache on mismatch, so this is a backstop rather than the
+    // expected path — but without it a persistent ICE would repeat every cycle
+    // forever. Dropping the directory here means the NEXT cycle starts from a
+    // clean incremental cache; we deliberately do not re-run the compile in
+    // this cycle, because the warm Job's deadline has no room for a second full
+    // pass (the tail-reserve clamp already truncates the test step under load).
+    //
+    // Truncated steps are excluded: a step killed at its budget proves nothing
+    // about cache health, and discarding a 13 GB cache every time the deadline
+    // bites would reinstate the unconditional prune under a different name.
+    if !any_step_ok && !any_step_truncated {
+        warn!(
+            project_id,
+            "cargo warm: no step compiled; discarding the incremental cache so \
+             the next cycle starts clean"
+        );
+        prune_warm_incremental_state(project_id, mold_jobs);
+    }
+
     // Prune the warm base of everything the compile above did not touch. Safe by
     // construction *only when the compile phase actually ran to completion*:
     // cargo-sweep removes whole artifact files older than the stamp, and its
@@ -1554,8 +1573,8 @@ async fn warm_cargo_target_base(
     // the failure mode this task was opened for, and the base ping-ponged
     // instead of converging. Truncation therefore skips the sweep: the base
     // keeps last cycle's artifacts and the next cycle resumes from more
-    // progress. Disk is still bounded by the incremental prune above and by the
-    // cache-cleanup sweep outside this Pod.
+    // progress. Disk is still bounded by the cache-cleanup sweep outside this
+    // Pod, whose first pressure rung reclaims `debug/incremental` on demand.
     // Truncation is checked before "nothing succeeded" because it is the more
     // specific and more actionable explanation: a cycle whose only compile step
     // was killed at its budget satisfies both predicates, and reporting it as
@@ -1721,6 +1740,54 @@ fn warm_cargo_take_injected_lock_failure()
 
 #[cfg(not(test))]
 fn warm_cargo_test_phase(_: &'static str) {}
+
+/// Discard the warm base's `debug/incremental` through the checked prune
+/// primitive, recording the same terminal telemetry the flow has always
+/// emitted. Callers must already hold the warm base lock for `mold_jobs`.
+///
+/// This is the self-heal path only — see `warm_cargo_target_base` for why the
+/// base otherwise retains its incremental cache across cycles. A prune failure
+/// is logged and swallowed: the cycle's compile has already happened by the
+/// time this runs, so there is nothing left to fail closed on, and the
+/// coordinator's pressure sweep can still reclaim the directory.
+fn prune_warm_incremental_state(project_id: &str, mold_jobs: usize) {
+    info!(
+        project_id,
+        "cargo_metrics: warm incremental prune attempt started"
+    );
+    #[cfg(test)]
+    let prune_result = match WARM_CARGO_TEST_ROOT
+        .lock()
+        .expect("warm test root poisoned")
+        .clone()
+    {
+        Some(root) => cargo_incremental_prune::prune_warm_incremental_for_root(
+            project_id,
+            Path::new(&std::env::var_os(CARGO_TARGET_DIR_ENV).unwrap_or_default()),
+            &root,
+        ),
+        None => cargo_incremental_prune::prune_warm_incremental_for_jobs(project_id, mold_jobs),
+    };
+    #[cfg(not(test))]
+    let prune_result =
+        cargo_incremental_prune::prune_warm_incremental_for_jobs(project_id, mold_jobs);
+    match prune_result {
+        Ok(result) => {
+            warm_cargo_test_phase(result.outcome.as_str());
+            record_warm_incremental_prune_success(project_id, result);
+        }
+        Err(error) => {
+            warm_cargo_test_phase("failed");
+            record_warm_incremental_prune_failure(project_id, error.kind);
+            warn!(
+                project_id,
+                error = %error,
+                "cargo warm: self-heal incremental prune failed; the pressure \
+                 sweep remains the reclaim path"
+            );
+        }
+    }
+}
 
 /// Production acquires through this terminal recorder. Tests replace only the
 /// probe/acquire filesystem operation in the same acquisition seam; they do
@@ -5910,9 +5977,18 @@ warning: something
         );
     }
 
+    /// A healthy cycle must retain the base's incremental cache.
+    ///
+    /// The fixture seeds `debug/incremental/stale` and asserts it is still there
+    /// afterwards, because the phase list alone cannot distinguish "we stopped
+    /// pruning" from "the prune ran and the recorder label changed". Pruning
+    /// this directory never saved disk — the compile regenerates it immediately
+    /// (13 GB on djinn's own base) and it then sits on the PVC until the next
+    /// cycle — while costing a full rustc codegen for every unit that did need
+    /// rebuilding. Reclaim is the coordinator pressure sweep's job.
     #[cfg(unix)]
     #[test]
-    fn warm_cargo_ordering_recorder_observes_prune_stamp_compile_and_end_sweep() {
+    fn healthy_warm_cycle_retains_the_incremental_cache_and_never_prunes() {
         use std::os::unix::fs::PermissionsExt;
         let _serial = WARM_LIFECYCLE_TEST_MUTEX.blocking_lock();
         let fixture = tempfile::tempdir().expect("workspace fixture");
@@ -5977,7 +6053,111 @@ warning: something
         }
         assert_eq!(
             *WARM_CARGO_PHASES.lock().expect("recorder"),
-            ["lock", "pruned", "stamp", "compile", "end-sweep"]
+            ["lock", "stamp", "compile", "end-sweep"],
+            "a healthy cycle must not prune the incremental cache"
+        );
+        // The side effect, not the label: the cache the previous cycle left
+        // behind is what this cycle's rustc gets to reuse.
+        assert_eq!(
+            std::fs::read(target.join("debug/incremental/stale")).expect("incremental retained"),
+            b"stale",
+            "a healthy warm cycle must leave debug/incremental intact"
+        );
+        let _ = std::fs::remove_dir_all(target);
+    }
+
+    /// The self-heal backstop: a cycle in which nothing compiled discards the
+    /// incremental cache so the next cycle starts clean.
+    ///
+    /// Without this, retaining the cache would let one poisoned session wedge
+    /// the base indefinitely — rustc validates its own cache and normally
+    /// recovers, but "normally" is not a guarantee to hang a shared build base
+    /// on. The prune happens AFTER the compile, not before: the next cycle pays
+    /// for it, not this one, because the warm Job's deadline has no room for a
+    /// second full pass.
+    #[cfg(unix)]
+    #[test]
+    fn warm_cycle_that_compiled_nothing_discards_the_incremental_cache() {
+        use std::os::unix::fs::PermissionsExt;
+        let _serial = WARM_LIFECYCLE_TEST_MUTEX.blocking_lock();
+        let fixture = tempfile::tempdir().expect("workspace fixture");
+        std::fs::write(
+            fixture.path().join("Cargo.toml"),
+            "[package]\nname=\"ordering-red\"\nversion=\"0.1.0\"\nedition=\"2024\"\n",
+        )
+        .expect("manifest");
+        // Every cargo invocation fails, so no warm step succeeds and none is
+        // truncated — the exact predicate the self-heal is gated on.
+        let cargo = fixture.path().join("cargo");
+        std::fs::write(&cargo, "#!/bin/sh\nexit 1\n").expect("fake cargo");
+        let mut permissions = std::fs::metadata(&cargo)
+            .expect("cargo metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&cargo, permissions).expect("fake cargo executable");
+        let project = format!("warm-ordering-red-{}", std::process::id());
+        let warm_root = fixture.path().join("warm-base");
+        let target = warm_root.join(&project);
+        std::fs::create_dir_all(target.join("debug/incremental")).expect("warm target");
+        std::fs::write(target.join("debug/incremental/poisoned"), b"poisoned")
+            .expect("incremental fixture");
+        let previous_target = std::env::var_os(CARGO_TARGET_DIR_ENV);
+        let previous_path = std::env::var_os("PATH").expect("PATH");
+        unsafe { std::env::set_var(CARGO_TARGET_DIR_ENV, &target) };
+        *WARM_CARGO_TEST_ROOT.lock().expect("warm test root") = Some(warm_root);
+        unsafe {
+            std::env::set_var(
+                "PATH",
+                format!(
+                    "{}:{}",
+                    fixture.path().display(),
+                    previous_path.to_string_lossy()
+                ),
+            )
+        };
+        WARM_CARGO_PHASES.lock().expect("recorder").clear();
+        let policy = cargo_cache_policy::CargoCachePolicy {
+            workspace: false,
+            features: Vec::new(),
+            all_features: false,
+            warm_commands: vec![cargo_cache_policy::CargoWarmCommand {
+                label: "check",
+                args: vec!["check".to_string()],
+                feature_args: Vec::new(),
+            }],
+        };
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime")
+            .block_on(warm_cargo_target_base(
+                &project,
+                fixture.path(),
+                &policy,
+                None,
+            ));
+        *WARM_CARGO_TEST_ROOT.lock().expect("warm test root") = None;
+        unsafe { std::env::set_var("PATH", previous_path) };
+        match previous_target {
+            Some(value) => unsafe { std::env::set_var(CARGO_TARGET_DIR_ENV, value) },
+            None => unsafe { std::env::remove_var(CARGO_TARGET_DIR_ENV) },
+        }
+        let phases = WARM_CARGO_PHASES.lock().expect("recorder").clone();
+        assert!(
+            phases.contains(&"pruned"),
+            "a cycle that compiled nothing must self-heal the cache: {phases:?}"
+        );
+        // The prune must follow the compile, never precede it: this cycle keeps
+        // whatever reuse it had, and only the next one starts clean.
+        let compile = phases.iter().position(|phase| *phase == "compile");
+        let pruned = phases.iter().position(|phase| *phase == "pruned");
+        assert!(
+            compile < pruned,
+            "the self-heal prune must run after the compile: {phases:?}"
+        );
+        assert!(
+            !target.join("debug/incremental").exists(),
+            "the poisoned incremental cache must be gone"
         );
         let _ = std::fs::remove_dir_all(target);
     }
@@ -6092,10 +6272,15 @@ warning: something
             }
         }
 
+        // No `pruned`: a step killed at its budget proves nothing about the
+        // incremental cache's health, so it must not trigger the self-heal.
+        // Discarding the cache every time the deadline bites would reinstate
+        // the unconditional prune under another name.
         assert_eq!(
             *WARM_CARGO_PHASES.lock().expect("recorder"),
-            ["lock", "pruned", "stamp", "compile"],
-            "a truncated compile step must not reach the tail sweep"
+            ["lock", "stamp", "compile"],
+            "a truncated compile step must not reach the tail sweep, and must \
+             not discard the incremental cache"
         );
 
         let logs = logs.take();
