@@ -3037,7 +3037,7 @@ mod tests {
     // * No-op compatibility for missing/empty `lifecycle.pre_task`.
     // * Ordered execution of multiple commands with a realistic generic
     //   non-djinn command shape that reads an injected service connection
-    //   env var such as `TEST_POSTGRES_URL` and writes an observable
+    //   env var such as `DJINN_FIXTURE_SERVICE_URL` and writes an observable
     //   marker — with no dependency on djinn-core template bootstrap code.
     // * Best-effort failure continuation, blocking failure
     //   stop-before-session, and environmental non-attempt/no-session
@@ -3118,7 +3118,7 @@ mod tests {
 
     /// AC2: Ordered execution of multiple commands with a realistic
     /// generic non-djinn command shape.  The first command reads an
-    /// injected service connection env var (`TEST_POSTGRES_URL`) and
+    /// injected service connection env var (`DJINN_FIXTURE_SERVICE_URL`) and
     /// writes an observable marker file; the second command verifies the
     /// marker was written.  No djinn-core template bootstrap code is
     /// invoked — the commands are plain `/bin/sh -c` scripts.
@@ -3128,7 +3128,7 @@ mod tests {
         // the value being a real Postgres URL — we only prove the env var
         // is visible inside the pre-task command's shell.
         let sentinel_url = "postgres://test-user:test-pass@127.0.0.1:5432/testdb?sslmode=disable";
-        let _guard = TestEnvGuard::set("TEST_POSTGRES_URL", sentinel_url);
+        let _guard = TestEnvGuard::set("DJINN_FIXTURE_SERVICE_URL", sentinel_url).await;
 
         let tmp = tempfile::tempdir().expect("tempdir");
         let marker = tmp.path().join("pretask-connected.marker");
@@ -3142,7 +3142,7 @@ mod tests {
                     PreTaskCommand {
                         name: Some("check-db-connection".into()),
                         command: format!(
-                            "printf '%s' \"${{TEST_POSTGRES_URL}}\" > {}",
+                            "printf '%s' \"${{DJINN_FIXTURE_SERVICE_URL}}\" > {}",
                             marker.to_string_lossy()
                         ),
                         timeout_seconds: 30,
@@ -3190,7 +3190,7 @@ mod tests {
         let marker_content = std::fs::read_to_string(&marker).unwrap();
         assert_eq!(
             marker_content, sentinel_url,
-            "the TEST_POSTGRES_URL env var value should be visible inside the pre-task shell"
+            "the DJINN_FIXTURE_SERVICE_URL env var value should be visible inside the pre-task shell"
         );
 
         // Activity events: one per started command, both with the stable
@@ -3503,7 +3503,7 @@ mod tests {
         // Inject a secret-looking env var with a value longer than 4 chars
         // (the redaction threshold).
         let secret_value = "sk-generic-api-key-1234567890";
-        let _guard = TestEnvGuard::set("GENERIC_API_KEY", secret_value);
+        let _guard = TestEnvGuard::set("GENERIC_API_KEY", secret_value).await;
 
         let tmp = tempfile::tempdir().expect("tempdir");
         let cfg = EnvironmentConfig {
@@ -3689,7 +3689,7 @@ mod tests {
     //
     // Proves a non-djinn-shaped target repo can prepare a test database
     // purely through `EnvironmentConfig.lifecycle.pre_task` plus an injected
-    // service connection env var (`TEST_POSTGRES_URL`), without invoking
+    // service connection env var (`DJINN_FIXTURE_SERVICE_URL`), without invoking
     // djinn-core template bootstrap or any djinn-db-specific branch.
     //
     // The fixture models a generic repo carrying `schema.sql` and a
@@ -3701,7 +3701,7 @@ mod tests {
 
     /// AC: A worker regression models a non-djinn target repo database
     /// preparation command declared through `EnvironmentConfig.lifecycle.pre_task`,
-    /// consuming an injected `TEST_POSTGRES_URL` env var.  The command runs
+    /// consuming an injected `DJINN_FIXTURE_SERVICE_URL` env var.  The command runs
     /// from the repo root and is driven by generic config only — no
     /// djinn-db/template-bootstrap special case or target-repo code path
     /// is added to core runtime code.
@@ -3723,13 +3723,13 @@ mod tests {
         )
         .expect("write schema.sql");
 
-        // prepare-test-db.sh — shell helper that consumes $TEST_POSTGRES_URL
+        // prepare-test-db.sh — shell helper that consumes $DJINN_FIXTURE_SERVICE_URL
         // and "runs" the schema.  In a real repo this might be
-        //   psql "$TEST_POSTGRES_URL" -f schema.sql
+        //   psql "$DJINN_FIXTURE_SERVICE_URL" -f schema.sql
         // or `rails db:prepare` or `npx prisma db push`.
         //
         // The deterministic stand-in:
-        //   1. Reads TEST_POSTGRES_URL from the environment.
+        //   1. Reads DJINN_FIXTURE_SERVICE_URL from the environment.
         //   2. Verifies schema.sql exists at the repo root.
         //   3. Writes a proof marker containing the connection string,
         //      the resolved repo root, and the schema content — proving
@@ -3744,7 +3744,7 @@ mod tests {
                 r#"#!/bin/sh
 set -e
 # Read the injected connection env var (produced by the service sidecar).
-CONN_URL="${{TEST_POSTGRES_URL:?TEST_POSTGRES_URL not set}}"
+CONN_URL="${{DJINN_FIXTURE_SERVICE_URL:?DJINN_FIXTURE_SERVICE_URL not set}}"
 REPO_ROOT="$(pwd)"
 
 # Verify the schema file is present at the repo root.
@@ -3768,7 +3768,7 @@ EOF
 
         // ---- 2. Inject the service connection env var -------------------
         let sentinel_url = "postgres://test-user:test-pass@127.0.0.1:5432/testdb?sslmode=disable";
-        let _guard = TestEnvGuard::set("TEST_POSTGRES_URL", sentinel_url);
+        let _guard = TestEnvGuard::set("DJINN_FIXTURE_SERVICE_URL", sentinel_url).await;
 
         // ---- 3. Declare the pre-task command through pure config ---------
         // No djinn-core template bootstrap, no djinn-db branch — just a
@@ -3838,7 +3838,7 @@ EOF
         let marker_content = std::fs::read_to_string(&proof_marker).expect("read marker");
         assert!(
             marker_content.contains(sentinel_url),
-            "marker must contain the injected TEST_POSTGRES_URL value; got: {marker_content}"
+            "marker must contain the injected DJINN_FIXTURE_SERVICE_URL value; got: {marker_content}"
         );
         assert!(
             marker_content.contains(&format!("repo_root={}", repo_root.path().display())),
@@ -3945,7 +3945,7 @@ EOF
 
     /// AC: Multi-command database preparation — a generic repo declares
     /// a two-step preparation (schema application + seed data) through
-    /// `lifecycle.pre_task`, both consuming `TEST_POSTGRES_URL`.  The
+    /// `lifecycle.pre_task`, both consuming `DJINN_FIXTURE_SERVICE_URL`.  The
     /// second command depends on the first (verifies the proof marker
     /// written by the first).  This proves sequential multi-command
     /// database preparation is config-driven with no djinn special case.
@@ -3970,7 +3970,7 @@ EOF
 
         // Step 1: apply schema, write proof.
         let step1_cmd = format!(
-            "test -n \"$TEST_POSTGRES_URL\" && test -f schema.sql && echo schema_applied > {marker}",
+            "test -n \"$DJINN_FIXTURE_SERVICE_URL\" && test -f schema.sql && echo schema_applied > {marker}",
             marker = proof_marker.to_string_lossy(),
         );
 
@@ -3981,7 +3981,7 @@ EOF
         );
 
         let sentinel_url = "postgres://app:secret@db.example.com:5432/myapp";
-        let _guard = TestEnvGuard::set("TEST_POSTGRES_URL", sentinel_url);
+        let _guard = TestEnvGuard::set("DJINN_FIXTURE_SERVICE_URL", sentinel_url).await;
 
         let cfg = EnvironmentConfig {
             lifecycle: djinn_stack::environment::LifecycleHooks {
@@ -4069,7 +4069,7 @@ EOF
         let empty_repo = tempfile::tempdir().expect("tempdir");
 
         let sentinel_url = "postgres://test:test@127.0.0.1:5432/empty";
-        let _guard = TestEnvGuard::set("TEST_POSTGRES_URL", sentinel_url);
+        let _guard = TestEnvGuard::set("DJINN_FIXTURE_SERVICE_URL", sentinel_url).await;
 
         // Same command shape as the success test, but in a repo root that
         // has no schema.sql — the script should fail.
@@ -4118,20 +4118,55 @@ EOF
     /// Sets a variable on construction and restores the original value
     /// (or removes it) on drop.  This prevents test env mutations from
     /// leaking across tests when running in the same binary.
+    /// Sets a process-global env var for the lifetime of one test.
+    ///
+    /// The scope is TEMPORAL, not thread-local: the variable is visible to every
+    /// other test running in parallel in this binary, and Drop restores it on a
+    /// schedule those tests cannot observe. So the KEY must be one that nothing
+    /// else in the process reads.
+    ///
+    /// This is not hypothetical. These fixtures used to inject a sentinel URL
+    /// under `TEST_POSTGRES_URL` — which is exactly the variable
+    /// `djinn_db::test_database_base_url()` reads to locate the real test
+    /// Postgres. Every DB-backed test that called `Database::open_in_memory()`
+    /// inside the guard's window resolved its "test database" to the sentinel's
+    /// `db.example.com:5432` and died with `ConnectionRefused`. That produced
+    /// 0-8 failures per run of this crate's suite, scaling with `--test-threads`
+    /// and landing on whichever tests happened to overlap — the classic shape of
+    /// a flake blamed on the DB or on whatever PR was in flight. Use a key with
+    /// a `DJINN_FIXTURE_` prefix unless the test is specifically about a real
+    /// variable's production meaning.
     struct TestEnvGuard {
         key: String,
         original: Option<String>,
+        /// Held for the guard's whole lifetime, and released only after Drop has
+        /// restored the variable.
+        ///
+        /// A unique key stops this guard from corrupting another test's *reads*,
+        /// but `set_var` is unsound in a multithreaded process regardless of key:
+        /// glibc may reallocate `environ`, so a concurrent `execve` can hand a
+        /// child a torn environment. Several tests here spawn `sh -c`, and a
+        /// child that loses `PATH` fails to resolve the shell at all — which
+        /// surfaced as `nondjinn_multistep_db_preparation_fixture` failing its
+        /// `all_succeeded()` assertion for no attributable reason. Serializing
+        /// against the same mutex the warm tests use (they mutate `PATH`) keeps
+        /// mutation and process spawning from overlapping.
+        _serial: tokio::sync::MutexGuard<'static, ()>,
     }
 
     impl TestEnvGuard {
-        fn set(key: &str, value: &str) -> Self {
+        async fn set(key: &str, value: &str) -> Self {
+            let serial = crate::WARM_LIFECYCLE_TEST_MUTEX.lock().await;
             let original = std::env::var(key).ok();
-            // SAFETY: single-test-binary; each test that mutates env does
-            // so within its own body and restores via Drop.
+            // SAFETY: the process-wide mutex above is held for the guard's
+            // lifetime, so no sibling test mutates the environment or spawns a
+            // child concurrently with this write. See the type-level note: the
+            // key must also be one nothing else in the process reads.
             unsafe { std::env::set_var(key, value) };
             Self {
                 key: key.to_string(),
                 original,
+                _serial: serial,
             }
         }
     }
@@ -4368,7 +4403,7 @@ EOF
     #[tokio::test]
     async fn pretask_activity_output_tail_bounded_with_redaction_after_serialization() {
         let secret_value = "sk-compat-regression-long-secret-key-1234567890";
-        let _guard = TestEnvGuard::set("COMPAT_REGRESSION_SECRET", secret_value);
+        let _guard = TestEnvGuard::set("COMPAT_REGRESSION_SECRET", secret_value).await;
 
         let tmp = tempfile::tempdir().expect("tempdir");
         // ~24 KiB of non-secret filler (each line ~80 chars, 300 lines)
