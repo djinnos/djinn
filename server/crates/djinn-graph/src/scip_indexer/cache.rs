@@ -55,22 +55,54 @@ impl ToolVersionRecord {
     }
 }
 
+/// Placeholder substituted for the planned `--output` path so a run's absolute
+/// output location never enters the key.
+const OUTPUT_PLACEHOLDER: &str = "$SCIP_OUTPUT";
+
+/// Placeholder substituted for the generated indexer config path. Same
+/// rationale as [`OUTPUT_PLACEHOLDER`] and then some: the config path is
+/// derived from the output root, which differs between the server pod, the
+/// warm Job pod, and every local checkout. Feeding the raw path into the key
+/// would make the key environment-specific; feeding a *randomised* temp path
+/// (the obvious way to write a scratch config) would make it change on every
+/// single run, so the SCIP cache — which has no eviction and retains every
+/// generation — would never hit again. The config's effect on the index is
+/// captured by [`CommandShape::config_digest`] instead.
+const CONFIG_PLACEHOLDER: &str = "$SCIP_INDEXER_CONFIG";
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct CommandShape {
     pub binary_name: String,
     pub args: Vec<String>,
     pub working_directory: WorkspaceIdentity,
+    /// SHA-256 of the generated indexer config file's contents, when the plan
+    /// has one. Content-addressed on purpose: identical feature config across
+    /// runs yields an identical key (cache still hits), and any change to the
+    /// declared feature set yields a different key (correct cold re-index).
+    ///
+    /// `skip_serializing_if` is load-bearing, not cosmetic: it keeps the
+    /// serialized ingredients byte-identical for every plan without a config,
+    /// so shipping this field does not invalidate a single existing cache
+    /// entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_digest: Option<String>,
 }
 
 impl CommandShape {
     pub(crate) fn from_plan(plan: &PlannedIndexerCommand) -> Self {
         let output = plan.output_path.to_string_lossy();
+        let config_path = plan
+            .config_file
+            .as_ref()
+            .map(|config| config.path.to_string_lossy().into_owned());
         let args = plan
             .args
             .iter()
             .map(|arg| {
                 if arg == output.as_ref() {
-                    "$SCIP_OUTPUT".to_string()
+                    OUTPUT_PLACEHOLDER.to_string()
+                } else if config_path.as_deref() == Some(arg.as_str()) {
+                    CONFIG_PLACEHOLDER.to_string()
                 } else {
                     arg.clone()
                 }
@@ -80,6 +112,10 @@ impl CommandShape {
             binary_name: plan.indexer.binary_name().to_string(),
             args,
             working_directory: WorkspaceIdentity::from_plan(plan),
+            config_digest: plan
+                .config_file
+                .as_ref()
+                .map(|config| hex_sha256(config.contents.as_bytes())),
         }
     }
 }
@@ -653,7 +689,44 @@ mod tests {
             workspace_rel_root: PathBuf::from("ui"),
             workspace_slug: "ui".to_string(),
             output_path,
+            config_file: None,
         }
+    }
+
+    /// A rust-analyzer plan carrying a generated Cargo-feature config at
+    /// `config_path`, mirroring exactly what `plan_indexer_commands` builds.
+    fn rust_plan_with_config(
+        output_path: PathBuf,
+        config_path: &str,
+        contents: &str,
+    ) -> PlannedIndexerCommand {
+        let config_file = super::super::IndexerConfigFile {
+            path: PathBuf::from(config_path),
+            contents: contents.to_string(),
+        };
+        PlannedIndexerCommand {
+            indexer: SupportedIndexer::RustAnalyzer,
+            binary_path: PathBuf::from("/usr/bin/rust-analyzer"),
+            args: SupportedIndexer::RustAnalyzer
+                .command_args(&output_path, Some(&config_file.path)),
+            working_directory: PathBuf::from("/abs/tmp/work/repo/server"),
+            workspace_root: PathBuf::from("/abs/tmp/work/repo/server"),
+            workspace_rel_root: PathBuf::from("server"),
+            workspace_slug: "server".to_string(),
+            output_path,
+            config_file: Some(config_file),
+        }
+    }
+
+    fn rust_ingredients(plan: &PlannedIndexerCommand) -> CacheKeyIngredients {
+        CacheKeyIngredients::from_plan(
+            plan,
+            "rust-analyzer 1.97.1",
+            BTreeMap::from([("src/lib.rs".to_string(), "source-a".to_string())]),
+            BTreeMap::from([("Cargo.toml".to_string(), "config-a".to_string())]),
+            BTreeMap::from([("Cargo.lock".to_string(), "lock-a".to_string())]),
+            BTreeMap::new(),
+        )
     }
 
     fn base_ingredients() -> CacheKeyIngredients {
@@ -763,6 +836,92 @@ mod tests {
         let mut second = first.clone();
         second.command = CommandShape::from_plan(&plan);
         assert_eq!(key(&first), key(&second));
+    }
+
+    // -----------------------------------------------------------------
+    // rust-analyzer Cargo-feature config: cache-key determinism.
+    //
+    // The whole point of routing the feature selection through a config
+    // FILE is that the file's path must not leak into the cache key. The
+    // SCIP cache has no eviction and a full cold index of the Rust
+    // workspace costs ~an hour, so a key that changes per run would be a
+    // permanent, silent, unbounded regression.
+    // -----------------------------------------------------------------
+
+    /// Two runs with the SAME feature config but different absolute config
+    /// paths (different output roots — server pod vs warm Job pod vs a local
+    /// checkout, or simply a different temp dir) must produce the SAME key.
+    #[test]
+    fn identical_feature_config_at_different_paths_yields_an_identical_cache_key() {
+        let contents = r#"{"cargo":{"features":["alpha"],"noDefaultFeatures":false}}"#;
+        let first = rust_plan_with_config(
+            PathBuf::from("/run/one/out/server.scip"),
+            "/run/one/out/.indexer-config/server-rust-analyzer.json",
+            contents,
+        );
+        let second = rust_plan_with_config(
+            PathBuf::from("/cache/xdg/proj/graph/server.scip"),
+            "/cache/xdg/proj/graph/.indexer-config/server-rust-analyzer.json",
+            contents,
+        );
+
+        assert_ne!(
+            first.args, second.args,
+            "precondition: the raw argv genuinely differs between the two runs"
+        );
+        assert_eq!(
+            key(&rust_ingredients(&first)),
+            key(&rust_ingredients(&second)),
+            "an unstable config path must never enter the SCIP cache key"
+        );
+    }
+
+    /// Changing the declared feature list changes the config CONTENT, which
+    /// must change the key — the index really is different, so a cold
+    /// re-index is the correct outcome.
+    #[test]
+    fn changing_the_feature_list_changes_the_cache_key() {
+        let path = "/run/one/out/.indexer-config/server-rust-analyzer.json";
+        let output = PathBuf::from("/run/one/out/server.scip");
+        let alpha = rust_plan_with_config(
+            output.clone(),
+            path,
+            r#"{"cargo":{"features":["alpha"],"noDefaultFeatures":false}}"#,
+        );
+        let alpha_beta = rust_plan_with_config(
+            output.clone(),
+            path,
+            r#"{"cargo":{"features":["alpha","beta"],"noDefaultFeatures":false}}"#,
+        );
+        let all = rust_plan_with_config(
+            output,
+            path,
+            r#"{"cargo":{"features":"all","noDefaultFeatures":false}}"#,
+        );
+
+        let alpha_key = key(&rust_ingredients(&alpha));
+        assert_ne!(alpha_key, key(&rust_ingredients(&alpha_beta)));
+        assert_ne!(alpha_key, key(&rust_ingredients(&all)));
+        assert_ne!(
+            key(&rust_ingredients(&alpha_beta)),
+            key(&rust_ingredients(&all))
+        );
+    }
+
+    /// A plan with no config must serialise byte-identically to how it did
+    /// before `config_digest` existed, so shipping this field does not
+    /// invalidate a single already-cached entry.
+    #[test]
+    fn absent_config_leaves_the_serialized_ingredients_unchanged() {
+        let ingredients = base_ingredients();
+        assert_eq!(ingredients.command.config_digest, None);
+        let json: serde_json::Value =
+            serde_json::from_slice(&serde_json::to_vec(&ingredients).expect("serialize"))
+                .expect("parse");
+        assert!(
+            json["command"].get("config_digest").is_none(),
+            "config_digest must be omitted entirely when there is no config: {json}"
+        );
     }
 
     #[test]

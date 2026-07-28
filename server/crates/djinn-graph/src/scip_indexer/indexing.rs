@@ -8,6 +8,7 @@ use std::time::Duration;
 use crate::process;
 use serde::{Deserialize, Serialize};
 
+use super::rust_analyzer_config;
 use super::workspaces::{discover_workspaces, visit_dirs};
 use super::{
     ExecutedIndexerCommand, IndexerAvailability, IndexingRun, PlannedIndexerCommand, ScipArtifact,
@@ -88,15 +89,35 @@ pub(crate) fn plan_indexer_commands(
                         output_root,
                         &workspace.slug,
                     );
+                    // Cargo feature parity: give rust-analyzer the feature set
+                    // the warm base compiled with, from configuration only.
+                    // Every other indexer plans `None` and is untouched.
+                    let config_file = if availability.indexer == SupportedIndexer::RustAnalyzer {
+                        let selection = rust_analyzer_config::feature_selection_for_workspace(
+                            declared_workspaces,
+                            &workspace.root,
+                        );
+                        rust_analyzer_config::config_file_for_workspace(
+                            output_root,
+                            &workspace.slug,
+                            &selection,
+                        )
+                    } else {
+                        None
+                    };
+                    let args = availability
+                        .indexer
+                        .command_args(&output_path, config_file.as_ref().map(|c| c.path.as_path()));
                     PlannedIndexerCommand {
                         indexer: availability.indexer,
                         binary_path: binary_path.clone(),
-                        args: availability.indexer.command_args(&output_path),
+                        args,
                         working_directory: working_directory.clone(),
                         workspace_root: working_directory,
                         workspace_rel_root: workspace.root,
                         workspace_slug: workspace.slug,
                         output_path,
+                        config_file,
                     }
                 })
                 .collect::<Vec<_>>()
@@ -564,7 +585,23 @@ async fn execute_plan_with_cache(
         return PlanExecution::DeadlineExhausted(detail);
     }
 
-    // Cache miss (or cache unavailable): invoke the indexer.
+    // Cache miss (or cache unavailable): invoke the indexer. The generated
+    // indexer config (rust-analyzer Cargo feature parity) is materialised only
+    // here — a cache hit never touches the disk — and the guard removes it when
+    // the invocation ends, including on panic unwind.
+    let _config = match rust_analyzer_config::MaterializedConfig::write(plan.config_file.as_ref()) {
+        Ok(guard) => guard,
+        Err(error) => {
+            tracing::warn!(
+                indexer = plan.indexer.binary_name(),
+                workspace = %plan.workspace_root.display(),
+                error = %error,
+                "failed to write generated indexer config; skipping invocation"
+            );
+            // Running anyway would point `--config-path` at a missing file.
+            return PlanExecution::Ran(Err(error));
+        }
+    };
     let cmd = plan.build_command();
     let result = run_indexer_with_progress(&plan, cmd, timeout).await;
 
@@ -1771,6 +1808,7 @@ mod tests {
             workspace_rel_root: PathBuf::from("server"),
             workspace_slug: "server".to_string(),
             output_path: output_root.join("repo-rust-server.scip"),
+            config_file: None,
         };
         let planned_ts = PlannedIndexerCommand {
             indexer: SupportedIndexer::TypeScript,
@@ -1787,6 +1825,7 @@ mod tests {
             workspace_rel_root: PathBuf::from("desktop"),
             workspace_slug: "desktop".to_string(),
             output_path: output_root.join("repo-typescript-desktop.scip"),
+            config_file: None,
         };
         fs::write(&planned_rust.output_path, b"rust-index").expect("write rust output");
         fs::write(&planned_ts.output_path, b"ts-index").expect("write ts output");
@@ -1880,6 +1919,7 @@ mod tests {
             workspace_rel_root: PathBuf::new(),
             workspace_slug: "root".to_string(),
             output_path: output_root.join("example-go.scip"),
+            config_file: None,
         };
         fs::write(&planned.output_path, b"go-index").expect("write planned output");
         let nested = output_root.join("nested").join("manual.scip");
@@ -2051,6 +2091,7 @@ mod tests {
             workspace_rel_root: PathBuf::from(workspace),
             workspace_slug: workspace.replace('/', "-"),
             output_path: PathBuf::from(workspace).join("out.scip"),
+            config_file: None,
         }
     }
 
@@ -2687,6 +2728,7 @@ mod tests {
             workspace_rel_root: PathBuf::new(),
             workspace_slug: "repo".to_string(),
             output_path: output_path.clone(),
+            config_file: None,
         };
 
         // Compute the cache key (tool version detection will fail for the
@@ -2735,6 +2777,7 @@ mod tests {
                     workspace_rel_root: PathBuf::from("ui"),
                     workspace_slug: "ui".to_string(),
                 },
+                config_digest: None,
             },
             super::super::cache::WorkspaceIdentity {
                 workspace_rel_root: PathBuf::from("ui"),
@@ -2773,6 +2816,7 @@ mod tests {
                     workspace_rel_root: PathBuf::from("ui"),
                     workspace_slug: "ui".to_string(),
                 },
+                config_digest: None,
             },
             super::super::cache::WorkspaceIdentity {
                 workspace_rel_root: PathBuf::from("ui"),
@@ -2872,6 +2916,7 @@ mod tests {
             workspace_rel_root: PathBuf::from(slug),
             workspace_slug: slug.to_string(),
             output_path: PathBuf::from(slug).join("out.scip"),
+            config_file: None,
         }
     }
 
@@ -3051,6 +3096,7 @@ mod tests {
                 workspace_rel_root: PathBuf::from("server"),
                 workspace_slug: "server".to_string(),
                 output_path: PathBuf::from("server/rust.scip"),
+                config_file: None,
             },
             PlannedIndexerCommand {
                 indexer: SupportedIndexer::TypeScript,
@@ -3061,6 +3107,7 @@ mod tests {
                 workspace_rel_root: PathBuf::from("server"),
                 workspace_slug: "server".to_string(),
                 output_path: PathBuf::from("server/ts.scip"),
+                config_file: None,
             },
         ];
         let declared = vec![
@@ -3258,6 +3305,202 @@ mod tests {
         assert!(
             divergence.found_but_undeclared.is_empty(),
             "server is declared and discovered, so no undeclared side: {divergence:?}"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // rust-analyzer Cargo feature parity.
+    //
+    // `rust-analyzer scip` with no feature configuration analyses with
+    // DEFAULT features while the warm cargo base compiles with the
+    // project's declared feature set. Resolver-2 unification makes those
+    // two feature sets produce different `-C metadata` for every shared
+    // dependency, so the SCIP prelude cannot reuse a single warm-base
+    // unit. `--config-path` closes the gap, sourced only from
+    // `EnvironmentConfig.workspaces[*].cargo_features`.
+    // -------------------------------------------------------------------
+
+    fn declared_rust_workspace(root: &str, features: &[&str], all: bool) -> djinn_stack::Workspace {
+        djinn_stack::Workspace {
+            slug: None,
+            name: None,
+            tags: Vec::new(),
+            root: root.to_string(),
+            language: "rust".to_string(),
+            toolchain: None,
+            version: None,
+            package_manager: None,
+            cargo_features: features.iter().map(|f| (*f).to_string()).collect(),
+            cargo_all_features: all,
+        }
+    }
+
+    /// Fixture: a repo with a Rust workspace at `server/` and a TypeScript
+    /// workspace at `ui/`, plus both indexers on PATH.
+    fn polyglot_fixture() -> (
+        tempfile::TempDir,
+        PathBuf,
+        PathBuf,
+        Vec<IndexerAvailability>,
+    ) {
+        let tmp = tempdir_in_tmp();
+        let project_root = tmp.path().join("djinn");
+        fs::create_dir_all(project_root.join("server")).expect("create server dir");
+        fs::write(
+            project_root.join("server/Cargo.toml"),
+            "[workspace]\nmembers = []\n",
+        )
+        .expect("write rust workspace");
+        fs::create_dir_all(project_root.join("ui")).expect("create ui dir");
+        fs::write(project_root.join("ui/tsconfig.json"), "{}\n").expect("write tsconfig");
+        let output_root = project_root.join(".task-runtime/scip");
+        let available = vec![
+            IndexerAvailability {
+                indexer: SupportedIndexer::RustAnalyzer,
+                binary: "rust-analyzer".to_string(),
+                path: Some(PathBuf::from("/tooling/rust-analyzer")),
+            },
+            IndexerAvailability {
+                indexer: SupportedIndexer::TypeScript,
+                binary: "scip-typescript".to_string(),
+                path: Some(PathBuf::from("/tooling/scip-typescript")),
+            },
+        ];
+        (tmp, project_root, output_root, available)
+    }
+
+    fn plan_for(
+        plans: &[PlannedIndexerCommand],
+        indexer: SupportedIndexer,
+    ) -> &PlannedIndexerCommand {
+        plans
+            .iter()
+            .find(|plan| plan.indexer == indexer)
+            .unwrap_or_else(|| panic!("no {indexer:?} plan in {plans:?}"))
+    }
+
+    /// A declared Rust workspace with Cargo features must produce a
+    /// `--config-path` argument and a plan-carried config file whose JSON
+    /// names exactly the declared features.
+    #[test]
+    fn rust_plan_gets_a_config_path_when_the_workspace_declares_features() {
+        let (_tmp, project_root, output_root, available) = polyglot_fixture();
+        let declared = vec![declared_rust_workspace("server", &["alpha", "beta"], false)];
+
+        let plans = plan_indexer_commands(&project_root, &output_root, &available, Some(&declared));
+        let rust = plan_for(&plans, SupportedIndexer::RustAnalyzer);
+
+        let config = rust
+            .config_file
+            .as_ref()
+            .expect("rust plan carries a config");
+        let position = rust
+            .args
+            .iter()
+            .position(|arg| arg == "--config-path")
+            .expect("--config-path must be present");
+        assert_eq!(
+            rust.args.get(position + 1).map(String::as_str),
+            Some(config.path.to_string_lossy().as_ref()),
+            "--config-path must point at the plan's config file"
+        );
+        let value: serde_json::Value = serde_json::from_str(&config.contents).expect("config json");
+        assert_eq!(
+            value["cargo"]["features"],
+            serde_json::json!(["alpha", "beta"])
+        );
+        assert_eq!(
+            value["cargo"]["noDefaultFeatures"],
+            serde_json::json!(false)
+        );
+    }
+
+    /// `cargo_all_features` maps to the `"all"` sentinel.
+    #[test]
+    fn rust_plan_maps_all_features_to_the_all_sentinel() {
+        let (_tmp, project_root, output_root, available) = polyglot_fixture();
+        let declared = vec![declared_rust_workspace("server", &[], true)];
+
+        let plans = plan_indexer_commands(&project_root, &output_root, &available, Some(&declared));
+        let config = plan_for(&plans, SupportedIndexer::RustAnalyzer)
+            .config_file
+            .as_ref()
+            .expect("rust plan carries a config");
+        let value: serde_json::Value = serde_json::from_str(&config.contents).expect("config json");
+        assert_eq!(value["cargo"]["features"], serde_json::json!("all"));
+    }
+
+    /// NO-OP GUARANTEE: with no declared features (and with no declared
+    /// workspaces at all) the rust-analyzer argv must be byte-identical to
+    /// the pre-change one, so no project's SCIP cache is invalidated by
+    /// merely shipping this.
+    #[test]
+    fn rust_plan_is_unchanged_without_declared_cargo_features() {
+        let (_tmp, project_root, output_root, available) = polyglot_fixture();
+        let no_features = vec![declared_rust_workspace("server", &[], false)];
+
+        for declared in [None, Some(no_features.as_slice())] {
+            let plans = plan_indexer_commands(&project_root, &output_root, &available, declared);
+            let rust = plan_for(&plans, SupportedIndexer::RustAnalyzer);
+            assert!(
+                rust.config_file.is_none(),
+                "no declared features must mean no config file: {rust:?}"
+            );
+            assert_eq!(
+                rust.args,
+                vec![
+                    "scip".to_string(),
+                    ".".to_string(),
+                    "--output".to_string(),
+                    rust.output_path.to_string_lossy().into_owned(),
+                ],
+                "argv must match the pre-feature-parity shape exactly"
+            );
+        }
+    }
+
+    /// Only rust-analyzer is affected. A declared Rust workspace with
+    /// features must not leak a config into the TypeScript plan, and a
+    /// non-Rust declared workspace must never contribute Cargo features.
+    #[test]
+    fn only_the_rust_analyzer_plan_receives_a_config() {
+        let (_tmp, project_root, output_root, available) = polyglot_fixture();
+        let declared = vec![
+            declared_rust_workspace("server", &["alpha"], false),
+            declared_workspace(Some("ui"), "ui"),
+        ];
+
+        let plans = plan_indexer_commands(&project_root, &output_root, &available, Some(&declared));
+        for plan in &plans {
+            match plan.indexer {
+                SupportedIndexer::RustAnalyzer => assert!(plan.config_file.is_some()),
+                _ => assert!(
+                    plan.config_file.is_none()
+                        && !plan.args.iter().any(|arg| arg == "--config-path"),
+                    "{:?} must be untouched: {plan:?}",
+                    plan.indexer
+                ),
+            }
+        }
+    }
+
+    /// Features declared for a DIFFERENT Rust workspace root must not be
+    /// applied to this one — the lookup keys on the workspace root.
+    #[test]
+    fn features_are_scoped_to_the_matching_workspace_root() {
+        let (_tmp, project_root, output_root, available) = polyglot_fixture();
+        let declared = vec![declared_rust_workspace(
+            "some/other/crate",
+            &["alpha"],
+            false,
+        )];
+
+        let plans = plan_indexer_commands(&project_root, &output_root, &available, Some(&declared));
+        assert!(
+            plan_for(&plans, SupportedIndexer::RustAnalyzer)
+                .config_file
+                .is_none(),
+            "a non-matching declared root must not supply features"
         );
     }
 }
