@@ -46,6 +46,18 @@ pub const ANNOTATION_FENCING_TOKEN: &str = "djinn.app/fencing-token";
 pub const GATE_AUTHORIZATION_KEY: &str = "authorization";
 pub const VOLUME_WARM_GATE: &str = "warm-gate";
 
+/// Env key under which the warm Pod's bounded wait for another Pod's in-flight
+/// semantic index is projected.
+///
+/// **The key is the contract, and the reader named it.**
+/// `djinn_graph::semantic_index_claim` looks up exactly this string to size the
+/// wait it takes when the SCIP Job already holds this tree's claim. A key
+/// rendered under any other name renders fine, passes every manifest test, and
+/// is read by nobody — leaving the operator lever inert and the default in
+/// force forever. `djinn_server::scip_index_watcher` asserts this constant
+/// equals the one the reader uses, from the crate that can see both.
+pub const WARM_SCIP_CLAIM_WAIT_ENV: &str = "DJINN_SCIP_CLAIM_WAIT_SECONDS";
+
 /// Durable build-lease consumer id (the lease's `warm_request_id`), projected
 /// into the WARMER container so the in-Pod worker can hand the build slot back
 /// the moment its cargo phase ends.
@@ -203,6 +215,14 @@ exec {bin} warm-graph "{project_id}"
         env_var(
             "DJINN_WARM_JOB_DEADLINE_SECONDS",
             &config.warm_job_timeout_seconds.to_string(),
+        ),
+        // How long this Pod may wait for the standalone SCIP Job's in-flight
+        // index of the same tree before indexing inline itself. The warm Pod's
+        // environment is exactly what this manifest puts in it, so an
+        // unrendered lever is an unsettable one.
+        env_var(
+            WARM_SCIP_CLAIM_WAIT_ENV,
+            &config.scip_claim_wait_seconds.to_string(),
         ),
     ];
     // Forward the server's DB connection so `bootstrap_warm_database` in

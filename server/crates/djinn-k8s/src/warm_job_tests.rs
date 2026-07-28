@@ -198,6 +198,13 @@ fn builds_warm_job_manifest_with_expected_shape() {
         envs.get("DJINN_WARM_JOB_DEADLINE_SECONDS").copied(),
         Some(cfg.warm_job_timeout_seconds.to_string().as_str()),
     );
+    // The bounded wait for another Pod's in-flight semantic index of the same
+    // tree. Rendered here or settable nowhere: the warm Pod's environment is
+    // exactly what this manifest puts in it.
+    assert_eq!(
+        envs.get(WARM_SCIP_CLAIM_WAIT_ENV).copied(),
+        Some(cfg.scip_claim_wait_seconds.to_string().as_str()),
+    );
     // DJINN_SERVER_ADDR is intentionally absent — `warm-graph` lives
     // on a disjoint subcommand whose `WorkerDefaultArgs` are not
     // parsed, so any residual envs would only be noise.

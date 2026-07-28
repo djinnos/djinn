@@ -42,6 +42,7 @@ pub mod repo_graph;
 pub mod route_extraction;
 pub mod scip_indexer;
 pub mod scip_parser;
+pub mod semantic_index_claim;
 pub mod warm_sentinel;
 pub mod ykcg_parity;
 

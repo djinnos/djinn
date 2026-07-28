@@ -677,6 +677,36 @@ pub async fn run_warm_graph_command<C: WarmContext>(
     Ok(())
 }
 
+/// What one [`run_scip_index_command`] invocation actually did.
+///
+/// Returned rather than logged so the skip is **observable**: a test can assert
+/// that the standalone Job declined to duplicate an in-flight index without
+/// having to infer it from the absence of a side effect, and a caller that
+/// stopped consulting the cross-Pod claim could no longer produce
+/// [`Self::SkippedConcurrentIndex`] at all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScipIndexOutcome {
+    /// The indexers ran; `artifacts` semantic artifacts are now in the shared
+    /// content-addressed cache.
+    Indexed { artifacts: usize },
+    /// Another live process holds the semantic-index claim for this exact tree,
+    /// so this run did nothing. Nothing was published either way — this Job
+    /// never touches `repo_graph_cache`, `repo_graph_generation` or
+    /// `repo_graph_current`.
+    SkippedConcurrentIndex { holder: String },
+}
+
+impl ScipIndexOutcome {
+    /// Closed-enum label, safe for logs and metrics.
+    #[must_use]
+    pub fn reason(&self) -> &'static str {
+        match self {
+            Self::Indexed { .. } => "indexed",
+            Self::SkippedConcurrentIndex { .. } => "skipped_concurrent_index",
+        }
+    }
+}
+
 /// Scratch directory for one indexer run's raw `.scip` output.
 ///
 /// The durable product of an indexer run is the content-addressed SCIP cache
@@ -716,9 +746,20 @@ fn indexer_output_tempdir(prefix: &str) -> std::io::Result<tempfile::TempDir> {
 /// for the warm Job's `execute_plan_with_cache` even though the two Pods cloned
 /// to different absolute paths.
 ///
-/// Consequently no change to [`ensure_canonical_graph`] is required, and none
-/// is made: the warm pipeline still runs the indexers, it just finds them
-/// already computed.
+/// The warm pipeline still runs the indexers; it just finds them already
+/// computed.
+///
+/// # Why the two Pods have to agree before either starts
+///
+/// "Already computed" only holds if this Job **finished** before the warm
+/// started. Nothing made that true: the `indexer_lock` below is an in-process
+/// mutex and the two runs are separate Pods, so on 2026-07-28 they indexed the
+/// same workspace at the same commit concurrently, at 10.2 GB and 9.5 GB RSS.
+/// [`crate::semantic_index_claim`] is the cross-Pod exclusion that closes that
+/// gap: an advisory `flock` on the shared `/cache` PVC keyed by
+/// `(project, commit)`. This Job skips when the claim is held — it publishes
+/// nothing, so skipping is free — and the warm path instead waits a bounded
+/// time and then indexes regardless.
 ///
 /// # Degradation
 ///
@@ -737,7 +778,7 @@ fn indexer_output_tempdir(prefix: &str) -> std::io::Result<tempfile::TempDir> {
 pub async fn run_scip_index_command<C: WarmContext>(
     ctx: &C,
     project_id: &str,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<ScipIndexOutcome> {
     use djinn_db::ProjectRepository;
 
     let repo = ProjectRepository::new(ctx.db().clone(), ctx.event_bus());
@@ -766,9 +807,61 @@ pub async fn run_scip_index_command<C: WarmContext>(
     let _ = handle.reset_to_origin_main().await;
     let commit_sha = handle.commit_sha().to_string();
 
-    // Serialize against any in-process indexer fan-out, matching the warm path.
+    // Serialize against any in-process indexer fan-out. This is an *in-process*
+    // mutex and it does nothing about the other Pod: the cross-Pod exclusion is
+    // the claim taken below.
     let indexer_lock = ctx.indexer_lock();
     let _guard = indexer_lock.lock().await;
+
+    // --- Cross-Pod exclusion -------------------------------------------------
+    //
+    // This Job and the warm Job are separate Pods, so `indexer_lock` cannot
+    // serialise them; on 2026-07-28 both ran `rust-analyzer scip` over the same
+    // workspace at the same commit, peaking at 10.2 GB and 9.5 GB RSS at once.
+    // The claim is an advisory `flock` on the shared `/cache` PVC keyed by the
+    // same tree the artifact cache is keyed by — see
+    // [`crate::semantic_index_claim`].
+    //
+    // This Job may SKIP on contention, and the warm path may not, because this
+    // Job publishes nothing: it never touches `repo_graph_cache`,
+    // `repo_graph_generation` or `repo_graph_current`, so declining to run
+    // cannot move the served graph. The holder is indexing the identical tree
+    // into the identical content-addressed cache, so its artifacts are the ones
+    // this run would have produced.
+    //
+    // Exiting 0 (rather than failing) is deliberate: the scheduler's ledger is
+    // the retained succeeded-Job set, so a skip records this revision as
+    // covered — which it is, by the holder. If the holder's run fails, the warm
+    // path re-indexes inline exactly as it does today.
+    let cache_store = crate::scip_indexer::cache::ScipCacheStore::from_environment();
+    let claim =
+        crate::semantic_index_claim::try_claim(cache_store.cache_root(), project_id, &commit_sha);
+    let _claim = match claim {
+        crate::semantic_index_claim::ClaimOutcome::HeldByAnother { holder } => {
+            tracing::info!(
+                project_id,
+                commit_sha,
+                holder = %holder,
+                "run_scip_index_command: another process is already indexing this \
+                 exact tree into the shared SCIP cache; skipping rather than \
+                 running a duplicate index. No graph state is touched either way."
+            );
+            return Ok(ScipIndexOutcome::SkippedConcurrentIndex { holder });
+        }
+        crate::semantic_index_claim::ClaimOutcome::Unavailable { reason } => {
+            // Fail OPEN. An unusable coordination surface must never be read as
+            // "someone else has it" — that would silently stop indexing.
+            tracing::warn!(
+                project_id,
+                commit_sha,
+                reason = %reason,
+                "run_scip_index_command: cross-Pod claim unavailable; indexing \
+                 anyway (duplicate work is possible, a missing index is not)"
+            );
+            None
+        }
+        crate::semantic_index_claim::ClaimOutcome::Held(guard) => Some(guard),
+    };
 
     let output_temp =
         indexer_output_tempdir("djinn-scip-index-").context("create scip-index tempdir")?;
@@ -806,7 +899,9 @@ pub async fn run_scip_index_command<C: WarmContext>(
     // `output_temp` drops here: the raw `.scip` files were transient. The
     // durable product is the content-addressed cache the indexers wrote
     // through, which is exactly what the warm Job reads back.
-    Ok(())
+    Ok(ScipIndexOutcome::Indexed {
+        artifacts: run.artifacts.len(),
+    })
 }
 
 pub async fn ensure_canonical_graph<C: WarmContext>(
@@ -946,12 +1041,49 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
         }
     }
 
+    let sentinel_cache_root = crate::scip_indexer::cache::ScipCacheStore::from_environment();
+
+    // --- Cross-Pod exclusion (semantic_index_claim) ---
+    //
+    // `indexer_lock` above is in-process only. The standalone SCIP Job runs the
+    // same `rust-analyzer scip` fan-out over the same workspace in a DIFFERENT
+    // Pod, so nothing in this process can serialise the two — and on 2026-07-28
+    // nothing did: both indexed the same commit concurrently at ~10 GB RSS
+    // each, which is precisely the duplicate the Job split exists to avoid.
+    //
+    // Taken BEFORE the sentinel recovery below, not after: recovery sweeps
+    // orphaned `.tmp` files out of the shared cache root, which would be
+    // another Pod's in-flight staging if one is mid-write.
+    //
+    // The warm path may never skip — it is the only producer of the served
+    // graph. So on contention it WAITS: when the holder finishes, this run's
+    // own fan-out finds a content-addressed cache hit for every workspace at
+    // this tree, which is the reuse the split was supposed to deliver. If the
+    // budget expires, or coordination is unavailable at all, it indexes inline
+    // exactly as it did before this existed.
+    let index_claim = crate::semantic_index_claim::claim_waiting(
+        sentinel_cache_root.cache_root(),
+        project_id,
+        &commit_sha,
+        crate::semantic_index_claim::wait_budget_from_env(),
+    )
+    .await;
+    if let crate::semantic_index_claim::ClaimOutcome::Unavailable { reason } = &index_claim {
+        tracing::warn!(
+            project_id,
+            commit_sha = %commit_sha,
+            reason = %reason,
+            "ensure_canonical_graph: cross-Pod index claim unavailable; \
+             proceeding to index (fail open)"
+        );
+    }
+    let index_claim = index_claim.into_guard();
+
     // --- Crash-sentinel contract (warm_sentinel) ---
     // Before entering the file-based cache-mutating section, check whether a
     // previous warm run crashed mid-mutation. If so, force a full rebuild
     // (skip parse cache reuse), clean up orphaned tmp artifacts, and log a
     // clear recovery message. See `warm_sentinel` module-level docs.
-    let sentinel_cache_root = crate::scip_indexer::cache::ScipCacheStore::from_environment();
     let force_full_rebuild =
         crate::warm_sentinel::observe_and_recover(sentinel_cache_root.cache_root());
     if force_full_rebuild {
@@ -1010,6 +1142,12 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
 
     // Record this run's elapsed timings for the next warm's adaptive budget.
     persist_indexer_timings_best_effort(ctx, project_id, &run.timings).await;
+
+    // The claim covers the indexer fan-out only. Everything after this point
+    // (parse, graph build, publication) contends for nothing the SCIP Job
+    // touches, so holding it longer would just make a waiting Job wait for
+    // work that cannot help it.
+    drop(index_claim);
 
     let output_dir_for_blocking = output_dir.clone();
     let artifacts = run.artifacts;
@@ -4593,6 +4731,255 @@ edition = "2024"
         // --- Parity gate: cold and warm blobs must match ---
         crate::graph_parity::assert_graph_artifact_blob_parity(&cold_blob, &warm_blob)
             .expect("incremental == full parity violation: cold and warm blobs must match");
+    }
+
+    /// A git project with the minimum shape the RustAnalyzer indexer's
+    /// workspace discovery accepts, so the fake indexer actually runs.
+    async fn make_rust_project(tmp: &std::path::Path) -> std::path::PathBuf {
+        let project_root = make_project(tmp).await;
+        tokio::fs::write(
+            project_root.join("Cargo.toml"),
+            "[package]\nname = \"claim_fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[workspace]\n",
+        )
+        .await
+        .expect("write Cargo.toml");
+        tokio::fs::create_dir_all(project_root.join("src"))
+            .await
+            .expect("create src dir");
+        tokio::fs::write(
+            project_root.join("src/lib.rs"),
+            "pub fn answer() -> u32 { 42 }\n",
+        )
+        .await
+        .expect("write src/lib.rs");
+        for args in [
+            vec!["add".to_string(), "-A".to_string()],
+            vec![
+                "commit".to_string(),
+                "-q".to_string(),
+                "-m".to_string(),
+                "rust fixture".to_string(),
+            ],
+        ] {
+            let out = djinn_git::run_git_command_in(&project_root, args)
+                .await
+                .expect("git");
+            assert_eq!(out.code, 0, "git fixture step failed: {out:?}");
+        }
+        project_root
+    }
+
+    /// **The standalone SCIP Job must not duplicate an index another Pod is
+    /// already running.**
+    ///
+    /// This is the production gap, exercised through the production entry
+    /// point: `run_scip_index_command` takes `ctx.indexer_lock()`, an
+    /// *in-process* mutex, while the warm run it collides with lives in another
+    /// Pod. On 2026-07-28 the two ran `rust-analyzer scip` over the same
+    /// workspace at the same commit simultaneously, at 10.2 GB and 9.5 GB RSS.
+    ///
+    /// Both halves are asserted, because "it skipped" and "it can still index"
+    /// are different claims: a `run_scip_index_command` whose body did nothing
+    /// at all would satisfy the first on its own.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn the_scip_job_declines_to_duplicate_an_index_another_pod_is_running() {
+        let _env_lock = lock_pipeline_env().await;
+        let tmp = workspace_tempdir("scip-claim-skip-");
+        let project_root = make_rust_project(tmp.path()).await;
+
+        let (fake_bin, fixture_path) = write_fake_rust_analyzer(tmp.path());
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        let joined_path =
+            std::env::join_paths(std::iter::once(fake_bin).chain(std::env::split_paths(&path)))
+                .expect("join PATH");
+        let _path_guard = EnvVarGuard::set("PATH", joined_path);
+        let _fixture_guard = EnvVarGuard::set("DJINN_TEST_SCIP_FIXTURE", &fixture_path);
+
+        let cache_root = tmp.path().join("scip-cache");
+        let _cache_guard = EnvVarGuard::set("DJINN_SCIP_CACHE_DIR", &cache_root);
+        let _root_guard = EnvVarGuard::set("DJINN_PROJECT_ROOT", &project_root);
+
+        let db = create_test_db();
+        let ctx = TestWarmContext::new(db.clone());
+        let proj_repo = ProjectRepository::new(db.clone(), EventBus::noop());
+        let project = proj_repo
+            .create("test-scip-claim", "test", "test-scip-claim")
+            .await
+            .expect("create project");
+        let commit_sha = djinn_git::head_commit_sha(&project_root)
+            .await
+            .expect("resolve HEAD commit");
+
+        // Stand in for the warm Pod: hold the cross-Pod claim for this exact
+        // tree. Nothing in this process shares state with the command below
+        // except the shared cache directory — which is the point.
+        let holder = crate::semantic_index_claim::try_claim(&cache_root, &project.id, &commit_sha);
+        assert!(
+            matches!(holder, crate::semantic_index_claim::ClaimOutcome::Held(_)),
+            "test setup failed to take the claim: {holder:?}"
+        );
+
+        let outcome = run_scip_index_command(&ctx, &project.id)
+            .await
+            .expect("scip-index command");
+        assert!(
+            matches!(outcome, ScipIndexOutcome::SkippedConcurrentIndex { .. }),
+            "the SCIP Job must decline while another process holds this tree's \
+             claim, got {outcome:?}"
+        );
+        // A skip must remain invisible to the served graph.
+        let cache_repo = RepoGraphCacheRepository::new(db.clone());
+        assert!(
+            cache_repo
+                .get(&project.id, &commit_sha)
+                .await
+                .expect("query graph cache")
+                .is_none(),
+            "the SCIP Job must never write repo_graph_cache — skipped or not"
+        );
+
+        // Release, and the very same call indexes. Without this the assertion
+        // above would also pass for a command that never indexes anything.
+        drop(holder);
+        let outcome = run_scip_index_command(&ctx, &project.id)
+            .await
+            .expect("scip-index command");
+        match outcome {
+            ScipIndexOutcome::Indexed { artifacts } => assert!(
+                artifacts > 0,
+                "an uncontended run must produce artifacts for the shared cache"
+            ),
+            other => panic!("uncontended run must index, got {other:?}"),
+        }
+        assert!(
+            cache_repo
+                .get(&project.id, &commit_sha)
+                .await
+                .expect("query graph cache")
+                .is_none(),
+            "indexing must still not publish a graph — that is the warm path's job"
+        );
+    }
+
+    /// **The warm path takes the claim, and never skips because of it.**
+    ///
+    /// Two properties in one run, because they constrain each other:
+    ///
+    /// 1. The warm path really participates in the cross-Pod protocol — proved
+    ///    by the claim file it can only have created by taking the claim, and
+    ///    by that claim being free again afterwards (a warm that died holding
+    ///    it would still free it; a warm that never took it would leave no
+    ///    file).
+    /// 2. Contention can never stop the warm from publishing. The warm is the
+    ///    only producer of the served graph, so the degradation for "someone
+    ///    else is indexing" must be a bounded wait and then an inline index —
+    ///    never a skip, and never a stale or empty publication.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn the_warm_path_takes_the_claim_and_publishes_even_when_it_cannot_get_it() {
+        let _env_lock = lock_pipeline_env().await;
+        let tmp = workspace_tempdir("warm-claim-");
+        let project_root = make_rust_project(tmp.path()).await;
+
+        let (fake_bin, fixture_path) = write_fake_rust_analyzer(tmp.path());
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        let joined_path =
+            std::env::join_paths(std::iter::once(fake_bin).chain(std::env::split_paths(&path)))
+                .expect("join PATH");
+        let _path_guard = EnvVarGuard::set("PATH", joined_path);
+        let _fixture_guard = EnvVarGuard::set("DJINN_TEST_SCIP_FIXTURE", &fixture_path);
+
+        let cache_root = tmp.path().join("scip-cache");
+        let _cache_guard = EnvVarGuard::set("DJINN_SCIP_CACHE_DIR", &cache_root);
+        // Zero budget: the waiting behaviour itself is covered by
+        // `semantic_index_claim`'s own tests; what matters here is that a warm
+        // which cannot get the claim still indexes and still publishes.
+        let _wait_guard = EnvVarGuard::set(crate::semantic_index_claim::WAIT_ENV, "0");
+
+        let db = create_test_db();
+        let ctx = TestWarmContext::new(db.clone());
+        let proj_repo = ProjectRepository::new(db.clone(), EventBus::noop());
+        let project = proj_repo
+            .create("test-warm-claim", "test", "test-warm-claim")
+            .await
+            .expect("create project");
+        let cache_repo = RepoGraphCacheRepository::new(db.clone());
+        let commit_sha = djinn_git::head_commit_sha(&project_root)
+            .await
+            .expect("resolve HEAD commit");
+        let claim_file =
+            crate::semantic_index_claim::claim_path(&cache_root, &project.id, &commit_sha);
+
+        clear_test_caches().await;
+        ensure_canonical_graph(
+            &ctx,
+            &project.id,
+            &project_root,
+            ArchitectWarmToken::for_tests(),
+        )
+        .await
+        .expect("uncontended warm");
+
+        assert!(
+            claim_file.exists(),
+            "the warm path did not take the cross-Pod claim at all — {} was \
+             never created, so nothing serialises it against the SCIP Job",
+            claim_file.display(),
+        );
+        let reclaimed =
+            crate::semantic_index_claim::try_claim(&cache_root, &project.id, &commit_sha);
+        assert!(
+            matches!(
+                reclaimed,
+                crate::semantic_index_claim::ClaimOutcome::Held(_)
+            ),
+            "the warm path must release its claim when its indexer phase ends, \
+             got {reclaimed:?}"
+        );
+        assert!(
+            cache_repo
+                .get(&project.id, &commit_sha)
+                .await
+                .expect("query graph cache")
+                .is_some(),
+            "the uncontended warm must publish a graph"
+        );
+
+        // Now hold the claim (as another Pod would) and force a rebuild. The
+        // warm must publish anyway.
+        let _holder = reclaimed;
+        clear_test_caches().await;
+        cache_repo
+            .upsert(RepoGraphCacheInsert {
+                project_id: &project.id,
+                commit_sha: &commit_sha,
+                graph_blob: b"poisoned blob that forces a rebuild",
+            })
+            .await
+            .expect("poison cache row");
+        clear_test_caches().await;
+
+        ensure_canonical_graph(
+            &ctx,
+            &project.id,
+            &project_root,
+            ArchitectWarmToken::for_tests(),
+        )
+        .await
+        .expect("contended warm must still succeed");
+
+        let republished = cache_repo
+            .get(&project.id, &commit_sha)
+            .await
+            .expect("query graph cache")
+            .expect("contended warm must still publish")
+            .graph_blob;
+        assert_ne!(
+            republished, b"poisoned blob that forces a rebuild",
+            "a warm that could not take the claim must still rebuild and \
+             republish — contention may cost duplicated work, never a stale graph"
+        );
     }
 
     fn write_fake_rust_analyzer(tmp: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {

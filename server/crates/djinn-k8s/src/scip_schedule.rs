@@ -82,6 +82,11 @@ pub enum ScipIndexDecision {
     SkipInventoryUnavailable,
     /// A non-terminal SCIP Job already exists for this project.
     SkipInFlight,
+    /// A non-terminal **warm** Job already exists for this project. The warm
+    /// Job runs the same `rust-analyzer scip` fan-out inline, so dispatching
+    /// here would put two ~10 GB indexers on one node to compute the same
+    /// artifacts. See the gate's rationale on [`decide`].
+    SkipWarmInFlight,
     /// The last successful index already covers this exact revision. **This is
     /// the change-detection gate** and it is checked before the cadence, so an
     /// unchanged head never dispatches no matter how much time has passed.
@@ -114,6 +119,7 @@ impl ScipIndexDecision {
             Self::SkipUnknownRevision => "unknown_revision",
             Self::SkipInventoryUnavailable => "inventory_unavailable",
             Self::SkipInFlight => "in_flight",
+            Self::SkipWarmInFlight => "warm_in_flight",
             Self::SkipHeadUnchanged { .. } => "head_unchanged",
             Self::SkipHeadNotQuiescent { .. } => "head_not_quiescent",
             Self::SkipCadence { .. } => "cadence",
@@ -126,6 +132,11 @@ impl ScipIndexDecision {
 pub struct ScipJobObservation {
     /// At least one SCIP Job for this project is neither succeeded nor failed.
     pub in_flight: bool,
+    /// At least one **warm** Job for this project is neither succeeded nor
+    /// failed. Read through the same `djinn.app/warm=true` predicate the warm
+    /// dispatcher itself uses ([`crate::graph_warmer::WarmJobLister`]), so the
+    /// two populations cannot drift apart in what "in flight" means.
+    pub warm_in_flight: bool,
     /// Revision of the most recently *succeeded* SCIP Job, read off its
     /// [`ANNOTATION_SCIP_REVISION`] annotation. `None` when no succeeded Job is
     /// retained — first run, or the ledger aged out.
@@ -166,11 +177,36 @@ pub trait MirrorHeadSource: Send + Sync {
 ///
 /// Ordering is load-bearing:
 /// 1. unknown head and unreadable inventory fail closed;
-/// 2. in-flight coalesces;
+/// 2. in-flight coalesces — a SCIP Job, and equally a **warm** Job;
 /// 3. **head-unchanged wins over the cadence**, because the requirement is
 ///    "every 3 hours *and only if* the head advanced", not "or";
 /// 4. **head-not-quiescent** skips — see below;
 /// 5. the cadence floor rate-limits an advancing head.
+///
+/// # Why an in-flight warm Job blocks a dispatch
+///
+/// The warm Job runs the identical `rust-analyzer scip` fan-out inline. On
+/// 2026-07-28 the first successful standalone run overlapped a warm by ~57
+/// seconds and both indexed the same workspace at the same commit, peaking at
+/// 10.2 GB and 9.5 GB RSS simultaneously — the split's entire purpose is that
+/// the warm *skips* the index, and instead the node paid for it twice.
+///
+/// Not dispatching into a running warm is the cheapest possible fix for the
+/// common case, and it is stateless: it reads the same cluster inventory this
+/// module already reads. It is **not** sufficient on its own — a warm Job
+/// created one second after this list is racy, and the warm dispatcher is
+/// driven by a 60s `mirror_fetcher` tick — so the authoritative exclusion is
+/// `djinn_graph::semantic_index_claim`, a cross-Pod `flock` on the shared cache
+/// PVC that both Pods take around their indexer fan-out. This gate keeps the
+/// leaseless 16Gi Pod from being created at all in the case that gate can see.
+///
+/// It cannot wedge: it is re-evaluated every tick and a warm Job is bounded by
+/// its own `activeDeadlineSeconds`, so "warm in flight" is self-clearing state
+/// owned by the apiserver, not something this module has to reclaim. It does
+/// mean a project whose warm Job is almost always running dispatches SCIP
+/// rarely — which is the correct trade: while a warm is indexing this project
+/// inline, a standalone index of it is either the same work twice or a second
+/// ~10 GB indexer on the same node.
 ///
 /// # The quiescence gate, and why the benefit is conditional
 ///
@@ -215,6 +251,9 @@ pub fn decide(
     };
     if observation.in_flight {
         return ScipIndexDecision::SkipInFlight;
+    }
+    if observation.warm_in_flight {
+        return ScipIndexDecision::SkipWarmInFlight;
     }
     if observation.last_indexed_revision.as_deref() == Some(head) {
         return ScipIndexDecision::SkipHeadUnchanged {
@@ -408,12 +447,32 @@ impl MirrorHeadSource for GitMirrorHeadSource {
 /// Production inventory backed by a live `kube::Client`.
 pub struct KubeClientScipJobInventory {
     client: kube::Client,
+    /// The warm-Job predicate, deliberately **reused** rather than
+    /// reimplemented: "is a warm in flight" must mean the same thing here as it
+    /// does to the dispatcher that creates warm Jobs, or the two views drift
+    /// and this gate stops gating.
+    warm: Arc<dyn crate::graph_warmer::WarmJobLister>,
 }
 
 impl KubeClientScipJobInventory {
     #[must_use]
     pub fn new(client: kube::Client) -> Self {
-        Self { client }
+        Self {
+            warm: Arc::new(crate::graph_warmer::KubeClientWarmJobLister::new(
+                client.clone(),
+            )),
+            client,
+        }
+    }
+
+    /// Construct with an explicit warm-Job lister. Exists so the warm gate can
+    /// be exercised without a cluster.
+    #[must_use]
+    pub fn with_warm_lister(
+        client: kube::Client,
+        warm: Arc<dyn crate::graph_warmer::WarmJobLister>,
+    ) -> Self {
+        Self { client, warm }
     }
 }
 
@@ -431,12 +490,46 @@ impl ScipJobInventory for KubeClientScipJobInventory {
             .list(&ListParams::default().labels(&selector))
             .await
             .map_err(|e| e.to_string())?;
-        Ok(observe_from_jobs(&list.items, Utc::now()))
+        observe_including_warm(
+            &list.items,
+            self.warm.as_ref(),
+            namespace,
+            project_id,
+            Utc::now(),
+        )
+        .await
     }
 }
 
-/// Fold a retained Job list into an observation. Split out of the apiserver
-/// call so the projection is testable from fixtures.
+/// Fold the SCIP-Job projection together with the warm-Job predicate.
+///
+/// Split from the apiserver call so everything except the single `list` line is
+/// testable without a cluster — in particular that the production inventory
+/// *does* consult the warm population, which is the difference between this
+/// gate existing and this gate being inert.
+pub(crate) async fn observe_including_warm(
+    scip_jobs: &[Job],
+    warm: &dyn crate::graph_warmer::WarmJobLister,
+    namespace: &str,
+    project_id: &str,
+    now: DateTime<Utc>,
+) -> Result<ScipJobObservation, String> {
+    let mut observation = observe_from_jobs(scip_jobs, now);
+    // An unreadable warm population is an unreadable inventory: `decide` turns
+    // that into `SkipInventoryUnavailable`, because dispatching on unknown
+    // state is the only branch here that can cost anything.
+    observation.warm_in_flight = warm
+        .has_in_flight_warm(namespace, project_id)
+        .await
+        .map_err(|e| format!("list warm Jobs: {e}"))?;
+    Ok(observation)
+}
+
+/// Fold a retained **SCIP** Job list into an observation. Split out of the
+/// apiserver call so the projection is testable from fixtures.
+///
+/// Leaves `warm_in_flight` at its default: warm Jobs are a different label
+/// selector and a different population, folded in by the caller.
 #[must_use]
 pub fn observe_from_jobs(jobs: &[Job], now: DateTime<Utc>) -> ScipJobObservation {
     let mut observation = ScipJobObservation::default();
@@ -517,6 +610,7 @@ mod tests {
             in_flight,
             last_indexed_revision: last.map(str::to_string),
             since_last_dispatch: since,
+            ..ScipJobObservation::default()
         }
     }
 
@@ -743,6 +837,55 @@ mod tests {
         );
     }
 
+    /// **The duplicate-index gate.** A warm Job in flight is already running
+    /// the same `rust-analyzer scip` fan-out over the same workspace; a SCIP
+    /// Job created now puts two ~10 GB indexers on one node to produce the same
+    /// artifacts. That is what happened on 2026-07-28.
+    ///
+    /// It must hold under conditions that would otherwise be a textbook
+    /// dispatch — advanced head, quiescent tree, cadence long satisfied — or
+    /// the gate is not a gate.
+    #[test]
+    fn a_warm_job_in_flight_blocks_the_dispatch() {
+        let mut warming = observed(false, Some(OLD), Some(THREE_HOURS));
+        warming.warm_in_flight = true;
+        assert_eq!(
+            decide(Some(HEAD), QUIET, Some(&warming), THREE_HOURS, QUIESCENCE),
+            ScipIndexDecision::SkipWarmInFlight,
+        );
+        assert_eq!(
+            ScipIndexDecision::SkipWarmInFlight.reason(),
+            "warm_in_flight"
+        );
+        assert!(
+            ScipIndexDecision::SkipWarmInFlight
+                .dispatch_revision()
+                .is_none()
+        );
+
+        // The identical observation WITHOUT a warm in flight dispatches, so the
+        // assertion above is about the warm flag and nothing else.
+        warming.warm_in_flight = false;
+        assert!(matches!(
+            decide(Some(HEAD), QUIET, Some(&warming), THREE_HOURS, QUIESCENCE),
+            ScipIndexDecision::Dispatch { .. }
+        ));
+    }
+
+    /// The warm gate must create no Kubernetes object. Asserting the decision
+    /// alone would stay green if `tick_project` dispatched regardless.
+    #[tokio::test]
+    async fn a_warm_in_flight_tick_creates_no_job() {
+        let mut warming = observed(false, Some(OLD), Some(THREE_HOURS));
+        warming.warm_in_flight = true;
+        let (decision, created) = run_tick(Ok(warming), Some(HEAD)).await;
+        assert_eq!(decision, ScipIndexDecision::SkipWarmInFlight);
+        assert!(
+            created.is_empty(),
+            "a warm-gated tick must create no leaseless 16Gi Pod"
+        );
+    }
+
     // ---- inventory projection ---------------------------------------------
 
     fn scip_job(revision: &str, succeeded: bool, failed: bool, age_secs: i64) -> Job {
@@ -866,6 +1009,79 @@ mod tests {
     fn empty_inventory_is_a_first_run_not_an_error() {
         let observation = observe_from_jobs(&[], now());
         assert_eq!(observation, ScipJobObservation::default());
+    }
+
+    /// A recording warm lister: proves the production inventory *asks*, and
+    /// with which arguments. A gate that never queries would pass every
+    /// decision test above and gate nothing in the cluster.
+    struct RecordingWarmLister {
+        answer: Result<bool, ()>,
+        seen: Mutex<Vec<(String, String)>>,
+    }
+
+    #[async_trait]
+    impl crate::graph_warmer::WarmJobLister for RecordingWarmLister {
+        async fn has_in_flight_warm(
+            &self,
+            namespace: &str,
+            project_id: &str,
+        ) -> Result<bool, kube::Error> {
+            self.seen
+                .lock()
+                .expect("lock")
+                .push((namespace.to_string(), project_id.to_string()));
+            self.answer.map_err(|()| {
+                kube::Error::Api(kube::error::ErrorResponse {
+                    status: "Failure".into(),
+                    message: "apiserver unreachable".into(),
+                    reason: "InternalError".into(),
+                    code: 500,
+                })
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn the_production_inventory_consults_the_warm_population() {
+        let lister = RecordingWarmLister {
+            answer: Ok(true),
+            seen: Mutex::new(Vec::new()),
+        };
+        let observation = observe_including_warm(
+            &[scip_job(OLD, true, false, 40_000)],
+            &lister,
+            "ns",
+            "proj",
+            now(),
+        )
+        .await
+        .expect("observation");
+        assert!(
+            observation.warm_in_flight,
+            "the warm answer must reach the observation `decide` reads"
+        );
+        assert_eq!(observation.last_indexed_revision.as_deref(), Some(OLD));
+        assert_eq!(
+            lister.seen.lock().expect("lock").as_slice(),
+            [("ns".to_string(), "proj".to_string())],
+            "the warm population must be queried for THIS namespace and project"
+        );
+
+        // An unreadable warm population is an unreadable inventory, and an
+        // unreadable inventory never dispatches.
+        let failing = RecordingWarmLister {
+            answer: Err(()),
+            seen: Mutex::new(Vec::new()),
+        };
+        let error = observe_including_warm(&[], &failing, "ns", "proj", now()).await;
+        assert!(
+            error.is_err(),
+            "a warm list failure must not read as absent"
+        );
+        assert_eq!(
+            decide(Some(HEAD), QUIET, None, THREE_HOURS, QUIESCENCE),
+            ScipIndexDecision::SkipInventoryUnavailable,
+        );
     }
 
     // ---- scheduler side effect --------------------------------------------

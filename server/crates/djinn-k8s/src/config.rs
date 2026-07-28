@@ -7,6 +7,18 @@ use serde::{Deserialize, Serialize};
 
 use crate::launcher::CgroupLauncherMode;
 
+/// The measured end-to-end cost of one complete production warm Job
+/// (2026-07-27): 5442s — 1798s of cargo and 3644s of graph phase, of which the
+/// SCIP index was 3523s.
+///
+/// Public because it is the floor two independent decisions are checked
+/// against: [`KubernetesConfig::warm_job_timeout_seconds`] must exceed it, and
+/// any time the warm path is allowed to *wait* (see
+/// `djinn_graph::semantic_index_claim::DEFAULT_WAIT_SECONDS`) has to fit in
+/// what is left over, because a wait that does not pay off still has to be
+/// followed by the whole warm.
+pub const MEASURED_FULL_WARM_SECONDS: i64 = 5_442;
+
 /// Configuration for `KubernetesRuntime`.
 ///
 /// Loaded once at djinn-server boot and cloned into the runtime. Fields
@@ -238,6 +250,23 @@ pub struct KubernetesConfig {
     /// case where the artifact is still current when it lands. `0` disables the
     /// gate. See [`crate::scip_schedule::decide`].
     pub scip_quiescence_seconds: u64,
+    /// How long the **warm** Pod waits for another Pod's in-flight semantic
+    /// index of the same tree before indexing inline itself, in seconds.
+    /// Default `900`.
+    ///
+    /// Projected into the warm Job under
+    /// [`crate::warm_job::WARM_SCIP_CLAIM_WAIT_ENV`], which is the key
+    /// `djinn_graph::semantic_index_claim` reads. Rendering it is what makes
+    /// this an operator lever at all: the warm Pod's environment is exactly
+    /// what this manifest puts in it, so a value that is never rendered is a
+    /// value that can never be set.
+    ///
+    /// The bound exists because the wait can be a total loss — the holder may
+    /// outlast it — and the warm still has to run every phase itself
+    /// afterwards, inside the same `activeDeadlineSeconds`. `0` disables
+    /// waiting; the warm then indexes immediately, duplicating the in-flight
+    /// run exactly as it did before the claim existed.
+    pub scip_claim_wait_seconds: u64,
     /// `spec.nodeSelector` applied to both task-run and warm Pods. Empty map
     /// leaves the field unset (any node tolerating the Pod's other constraints
     /// is eligible). Operators typically use this together with `tolerations`
@@ -352,6 +381,11 @@ impl KubernetesConfig {
             // is the only thing that lets it create a Job.
             scip_index_enabled: false,
             scip_quiescence_seconds: crate::scip_job::MEASURED_SCIP_PHASE_SECONDS as u64,
+            // 900s. Must equal `djinn_graph::semantic_index_claim`'s own
+            // default, which applies wherever this manifest is not what builds
+            // the environment; `djinn_server::scip_index_watcher` asserts the
+            // two agree, from the crate that can see both.
+            scip_claim_wait_seconds: 900,
             node_selector: BTreeMap::new(),
             tolerations: Vec::new(),
             // v1 leases enforcement contract. Both fail render validation if set
@@ -408,6 +442,7 @@ impl KubernetesConfig {
     /// | `DJINN_K8S_SCIP_JOB_TIMEOUT_SECONDS` | `scip_job_timeout_seconds` | `7200` (parsed as `i64`) |
     /// | `DJINN_K8S_SCIP_INDEX_ENABLED` | `scip_index_enabled` | `false` — the arming switch |
     /// | `DJINN_K8S_SCIP_QUIESCENCE_SECONDS` | `scip_quiescence_seconds` | `3523` (the measured phase cost; `0` disables) |
+    /// | `DJINN_K8S_SCIP_CLAIM_WAIT_SECONDS` | `scip_claim_wait_seconds` | `900` (warm's bounded wait for an in-flight index of the same tree; `0` disables waiting) |
     /// | `DJINN_K8S_NODE_SELECTOR` | `node_selector` | `{}` (parsed as a JSON object of string→string) |
     /// | `DJINN_K8S_TOLERATIONS` | `tolerations` | `[]` (parsed as a JSON array of k8s `Toleration` objects) |
     /// | `DJINN_K8S_CGROUP_DELEGATION_PROFILE` | `cgroup_delegation_profile` | `cgroup-v2-cpu-only` |
@@ -563,6 +598,16 @@ impl KubernetesConfig {
                     value = %v,
                     error = %e,
                     "DJINN_K8S_SCIP_QUIESCENCE_SECONDS not a valid u64 — keeping default"
+                ),
+            }
+        }
+        if let Ok(v) = std::env::var("DJINN_K8S_SCIP_CLAIM_WAIT_SECONDS") {
+            match v.parse::<u64>() {
+                Ok(n) => cfg.scip_claim_wait_seconds = n,
+                Err(e) => tracing::warn!(
+                    value = %v,
+                    error = %e,
+                    "DJINN_K8S_SCIP_CLAIM_WAIT_SECONDS not a valid u64 — keeping default"
                 ),
             }
         }
@@ -731,9 +776,6 @@ mod tests {
     /// The floor is therefore the measured requirement, not the cargo estimate.
     #[test]
     fn warm_job_timeout_default_accommodates_the_whole_warm_job() {
-        /// The measured end-to-end cost of the 2026-07-27 production warm.
-        const MEASURED_FULL_WARM_SECONDS: i64 = 5442;
-
         let cfg = KubernetesConfig::for_testing();
         assert!(
             cfg.warm_job_timeout_seconds >= MEASURED_FULL_WARM_SECONDS,

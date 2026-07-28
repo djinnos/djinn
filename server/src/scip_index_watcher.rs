@@ -197,6 +197,62 @@ mod tests {
         assert_eq!(parse_interval(None), Duration::from_secs(DEFAULT_TICK_SECS));
     }
 
+    /// **The warm path's claim wait has to fit inside the warm Job's own
+    /// deadline.**
+    ///
+    /// When a SCIP Job is already indexing this exact tree, the warm path waits
+    /// for it rather than starting a duplicate ~10 GB index. That wait can be a
+    /// total loss — the holder may run past the budget — in which case the warm
+    /// still has to do every phase itself. So the budget plus one whole
+    /// measured warm must fit in `activeDeadlineSeconds`, or the mitigation for
+    /// a wasteful warm becomes a warm that publishes no graph at all.
+    ///
+    /// This lives here because it is the only crate that can see both numbers:
+    /// the budget is `djinn-graph`'s, the deadline is `djinn-k8s`'s.
+    #[test]
+    fn the_claim_wait_budget_fits_inside_the_warm_job_deadline() {
+        let cfg = djinn_k8s::KubernetesConfig::for_testing();
+        let wait = djinn_graph::semantic_index_claim::DEFAULT_WAIT_SECONDS as i64;
+        let worst_case = wait + djinn_k8s::config::MEASURED_FULL_WARM_SECONDS;
+        assert!(
+            worst_case <= cfg.warm_job_timeout_seconds,
+            "a warm that waits its full {wait}s claim budget, gains nothing and \
+             then runs the whole {}s warm itself needs {worst_case}s, but \
+             activeDeadlineSeconds is {}s — the Pod would be SIGKILLed before \
+             publishing",
+            djinn_k8s::config::MEASURED_FULL_WARM_SECONDS,
+            cfg.warm_job_timeout_seconds,
+        );
+        // …and the budget is not zero, which would silently disable the wait
+        // and leave the duplicate index in place.
+        assert!(wait > 0);
+    }
+
+    /// **The rendered key must be the key the reader reads, and the two
+    /// defaults must agree.**
+    ///
+    /// The warm Pod's environment is exactly what `build_warm_job` puts in it,
+    /// so a claim-wait rendered under any other name is an operator lever that
+    /// silently does nothing — the failure mode this repository has already
+    /// paid for with `DJINN_SCIP_JOB_DEADLINE_SECONDS`. Only this crate can see
+    /// both the writer (`djinn-k8s`) and the reader (`djinn-graph`), so the
+    /// contract is asserted here instead of being duplicated as a literal.
+    #[test]
+    fn the_warm_job_renders_the_claim_wait_under_the_key_the_worker_reads() {
+        assert_eq!(
+            djinn_k8s::warm_job::WARM_SCIP_CLAIM_WAIT_ENV,
+            djinn_graph::semantic_index_claim::WAIT_ENV,
+            "the warm Job renders one key and the in-Pod claim reads another; \
+             the wait would be unconfigurable and the default silently permanent"
+        );
+        assert_eq!(
+            djinn_k8s::KubernetesConfig::for_testing().scip_claim_wait_seconds,
+            djinn_graph::semantic_index_claim::DEFAULT_WAIT_SECONDS,
+            "the rendered default and the compiled-in default must agree, or a \
+             warm Pod and an in-process warm wait for different lengths of time"
+        );
+    }
+
     /// The loop tick must be shorter than the cadence floor, or the effective
     /// cadence becomes the tick rather than the configured interval.
     #[test]

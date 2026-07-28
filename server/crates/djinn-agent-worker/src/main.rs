@@ -3741,9 +3741,18 @@ async fn run_scip_index_body(project_id: &str) -> Result<()> {
         ),
     }
 
-    djinn_graph::canonical_graph::run_scip_index_command(&ctx, project_id)
+    let outcome = djinn_graph::canonical_graph::run_scip_index_command(&ctx, project_id)
         .await
-        .with_context(|| format!("run_scip_index_command({project_id})"))
+        .with_context(|| format!("run_scip_index_command({project_id})"))?;
+    // A skip is a success: the Job publishes nothing either way, and exiting 0
+    // lets the scheduler's retained-Job ledger record this revision as covered
+    // — which it is, by whichever Pod holds the claim.
+    info!(
+        project_id,
+        outcome = outcome.reason(),
+        "scip-index command finished"
+    );
+    Ok(())
 }
 
 async fn run_warm_graph(project_id: &str) -> Result<()> {
