@@ -10,6 +10,7 @@
 //!
 //! `std::process::Command` avoids this by not touching the reactor at all.
 
+use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
 use std::future::Future;
 use std::io::{self, Write};
@@ -131,6 +132,21 @@ pub struct InvocationJournal {
     directory: PathBuf,
     pod_uid: String,
     update_lock: Mutex<()>,
+    /// Invocations this process is executing RIGHT NOW.
+    ///
+    /// A durable record exists for the whole life of an escalated command, and
+    /// the recovery sweep cannot tell from the file alone whether that command
+    /// is still running or was orphaned by a dead predecessor. Reading it as an
+    /// orphan is how the exact-pod watchdog came to terminate the very pod that
+    /// was doing the work: any `cargo build`/`cargo test` outliving the 300s
+    /// `WATCHDOG_GRACE` got its own Pod deleted mid-compile, which on this
+    /// workspace is most of them.
+    ///
+    /// Liveness is only ever asserted by the process that owns the invocation,
+    /// so this stays a fail-safe signal: a reconstructed pod starts with an
+    /// empty set and therefore still reaps every record a predecessor left
+    /// behind.
+    live: Mutex<HashSet<String>>,
 }
 impl InvocationJournal {
     /// Open (creating if needed) the pod-local journal directory.
@@ -162,7 +178,36 @@ impl InvocationJournal {
             directory,
             pod_uid,
             update_lock: Mutex::new(()),
+            live: Mutex::new(HashSet::new()),
         })
+    }
+
+    /// Assert that this process is executing `identity` right now, so the
+    /// recovery sweep leaves its record (and this Pod) alone. Balanced by
+    /// [`InvocationJournal::finish_live`], which the runner calls from a drop
+    /// guard so every early return and `?` still releases the claim.
+    fn begin_live(&self, identity: &TaskInvocationLeaseIdentity) {
+        self.live
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(identity.invocation_id.clone());
+    }
+
+    fn finish_live(&self, invocation_id: &str) {
+        self.live
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(invocation_id);
+    }
+
+    /// True while this process owns a running invocation with that id. Only the
+    /// owning process ever reports `true`, so a reconstructed Pod still reaps a
+    /// predecessor's records.
+    fn is_live(&self, invocation_id: &str) -> bool {
+        self.live
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(invocation_id)
     }
     fn record_at(
         &self,
@@ -318,6 +363,24 @@ fn parse_unresolved(content: &str) -> io::Result<UnresolvedInvocation> {
     })
 }
 
+/// Releases an invocation's liveness claim on every exit path from
+/// `LeaseInvocationRunner::output` — natural return, `?`, or cancellation.
+///
+/// The claim MUST be released even when the command fails, otherwise a stale
+/// claim would suppress the watchdog forever and re-open the orphan hole the
+/// journal exists to close. A drop guard is the only shape that survives the
+/// `?`s scattered through the invocation loop.
+struct LiveInvocationGuard {
+    journal: Arc<InvocationJournal>,
+    invocation_id: String,
+}
+
+impl Drop for LiveInvocationGuard {
+    fn drop(&mut self) {
+        self.journal.finish_live(&self.invocation_id);
+    }
+}
+
 /// Explicit recovery seams keep restart grace and watchdog delivery testable.
 pub struct InvocationRecovery<'a> {
     pub journal: &'a InvocationJournal,
@@ -341,6 +404,16 @@ impl<'a> InvocationRecovery<'a> {
         Fut: Future<Output = ()>,
     {
         for record in self.journal.unresolved()? {
+            // A record whose invocation is still executing in THIS process is
+            // not evidence of an orphan — it is evidence of work in progress.
+            // Skipped before the status RPC because there is nothing to
+            // reconcile and nothing to reap: the command owns the record and
+            // will resolve it at terminal. Without this, any escalated command
+            // outliving `WATCHDOG_GRACE` (every non-trivial `cargo` build on
+            // this workspace) made the sweep delete its own Pod mid-compile.
+            if self.journal.is_live(&record.identity.invocation_id) {
+                continue;
+            }
             let lease = LeaseIdentity::TaskInvocation(record.identity.clone());
             // Always query the coordinator's durable view. An unavailable reply
             // is ambiguous and never proves that local descendants are gone.
@@ -586,6 +659,10 @@ impl LeaseInvocationRunner {
         let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
         let mut deadline = self.clock.now_instant() + config.timeout;
         let (mut queued, mut fence, mut credit_used, mut lease_error) = (false, None, false, None);
+        // Held from escalation until this invocation leaves `output`. Never
+        // read: it exists purely for its `Drop`, which releases the liveness
+        // claim on every exit path.
+        let mut _live_guard: Option<LiveInvocationGuard> = None;
         let mut unavailable_responses = 0_u8;
         // Set when this invocation can no longer be escalated: either the
         // durable queue ended without capacity for it (`lease_failure`), or the
@@ -640,6 +717,14 @@ impl LeaseInvocationRunner {
                 // invocation, and therefore the earliest point at which the
                 // record is anything but garbage.
                 if let Some(journal) = &self.journal {
+                    // Claim liveness BEFORE the record exists, so there is no
+                    // instant in which a durable record is visible to the sweep
+                    // without its owner being known.
+                    journal.begin_live(&identity);
+                    _live_guard = Some(LiveInvocationGuard {
+                        journal: journal.clone(),
+                        invocation_id: identity.invocation_id.clone(),
+                    });
                     journal
                         .record_at(&identity, None, false, self.clock.now())
                         .map_err(LeaseInvocationError::Launcher)?;
