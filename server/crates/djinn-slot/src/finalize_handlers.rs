@@ -109,7 +109,7 @@ pub async fn handle_budget_park(
 }
 
 /// Log structured work-submission activity for a worker session.
-pub(crate) async fn handle_submit_work(
+pub async fn handle_submit_work(
     payload: &serde_json::Value,
     task_id: &str,
     authenticated_session_id: &str,

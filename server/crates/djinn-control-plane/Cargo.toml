@@ -62,7 +62,7 @@ tokio-util = "0.7"
 insta = { version = "1", features = ["json", "redactions"] }
 uuid = { version = "1", features = ["v7"] }
 sqlx = { version = "0.8", default-features = false, features = ["postgres", "runtime-tokio-rustls"] }
-djinn-slot = { path = "../djinn-slot" }
+djinn-slot = { path = "../djinn-slot", features = ["test-support"] }
 wiremock = "0.6"
 
 [lints]
