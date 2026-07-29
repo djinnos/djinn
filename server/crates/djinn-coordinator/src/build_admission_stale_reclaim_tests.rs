@@ -1,3 +1,7 @@
+// djinn:allow-oversize — 56886 bytes against the 51200 guard (lines are still
+// under). This is a flat test module whose fixtures are shared by every case,
+// so splitting it means extracting those helpers first rather than moving a
+// `mod tests` block; worth doing, but not as a drive-by in an unrelated fix.
 //! Regression coverage for stale durable occupancy whose Kubernetes objects
 //! are gone (production symptom: 318 occupying `admission_journal` rows against
 //! a namespace holding zero Jobs, with `djinn_build_slots_in_use` reading 318
