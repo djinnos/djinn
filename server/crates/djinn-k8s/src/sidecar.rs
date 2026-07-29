@@ -503,7 +503,6 @@ mod tests {
             crate::job::VOLUME_WORKSPACE,
             crate::job::VOLUME_MIRROR,
             crate::launcher::VOLUME_LAUNCHER_IPC,
-            crate::launcher::VOLUME_LAUNCHER_CGROUP,
         ] {
             assert!(
                 !mounts.iter().any(|m| m.name == forbidden),

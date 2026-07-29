@@ -535,19 +535,8 @@ pub enum Error {
         actual: i64,
         expected: i64,
     },
-    #[error(
-        "could not mount a private cgroup2 filesystem at {path} (errno {errno}); the launcher \
-         establishes its own delegated root and needs CAP_SYS_ADMIN plus a writable mountpoint \
-         to do so"
-    )]
-    CgroupMountFailed { path: String, errno: i32 },
     #[error("could not {detail} on the delegated cgroup root (errno {errno})")]
     CgroupDelegationFailed { detail: &'static str, errno: i32 },
-    #[error(
-        "could not drop the bootstrap capabilities after establishing the delegated cgroup root \
-         (errno {errno}); refusing to serve while CAP_SYS_ADMIN is still held"
-    )]
-    CapabilityDropFailed { errno: i32 },
     #[error("could not place child {pid} into the invocation cgroup (errno {errno})")]
     CgroupPlacementFailed { pid: i32, errno: i32 },
     #[error(
@@ -802,7 +791,7 @@ pub fn is_cgroup2_filesystem(path: &Path) -> Result<bool, Error> {
 /// read: a delegated root that is not a cgroup2 mount can never satisfy any
 /// later check, and saying so by name is the difference between a diagnosable
 /// startup failure and an opaque `ENOENT`.
-fn assert_cgroup2_filesystem(path: &Path) -> Result<(), Error> {
+pub(crate) fn assert_cgroup2_filesystem(path: &Path) -> Result<(), Error> {
     let actual = statfs_type(path)?;
     if actual != CGROUP2_SUPER_MAGIC {
         return Err(Error::DelegatedRootIsNotCgroupFs {

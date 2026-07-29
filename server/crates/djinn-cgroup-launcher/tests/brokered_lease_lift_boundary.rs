@@ -21,8 +21,8 @@
 //! Nothing in the lane could see it, because nothing in the lane spoke the
 //! protocol. This file does:
 //!
-//! 1. the launcher establishes its own delegated cgroup2 root and drops
-//!    `CAP_SYS_ADMIN`, exactly as the sidecar does;
+//! 1. the launcher prepares the writable delegated cgroup2 root supplied by the
+//!    container runtime, exactly as the sidecar does;
 //! 2. a **real** [`UnixBrokerServer`] serves a **real** [`UnixBrokerClient`]
 //!    over a Unix socket, through `authenticate` / `READY` / `BEGIN` / `CREATE`;
 //! 3. the leaf is born at the unleased quota — read back **from the kernel**,
@@ -41,17 +41,19 @@
 //!
 //! # Where it runs
 //!
-//! uid 0 plus a cgroup-v2 hierarchy it may mount and delegate, so the proof is
-//! `#[ignore]`d and executed by the `launcher-kernel-boundary` CI lane.
+//! uid 0 plus a writable delegated cgroup-v2 root supplied in a private cgroup
+//! namespace, so the proof is `#[ignore]`d and executed by the
+//! `launcher-kernel-boundary` CI lane.
 //! [`the_brokered_lift_lane_is_wired`] is NOT ignored and fails the ordinary
 //! shard if that lane stops running this binary.
 //!
 //! # Why it is its own binary
 //!
-//! `Bootstrap::run` is irreversible and process-wide: once `CAP_SYS_ADMIN` is
-//! gone nothing later in the same process can mount. Sharing a process with
-//! `delegated_cpu_lease_lifecycle` would make whichever proof ran second fail
-//! for a reason that has nothing to do with what it asserts.
+//! `Bootstrap::run` consumes the process-wide delegated root by moving the
+//! launcher into its init leaf and enabling the CPU controller. Sharing a
+//! process and root with `delegated_cpu_lease_lifecycle` would make whichever
+//! proof ran second fail for a reason that has nothing to do with what it
+//! asserts.
 
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -170,17 +172,22 @@ fn a_refused_lift_is_distinguishable_from_every_other_refusal() {
 // ═════════ privileged proof: the BROKER accepts the lift, kernel-measured ════
 
 /// Bootstrap, serve the real protocol, and watch `cpu.max` move in the kernel.
-#[ignore = "privileged: needs uid 0 and a cgroup-v2 hierarchy it may mount and delegate \
+#[ignore = "privileged: needs uid 0 and a writable delegated cgroup-v2 root \
             (CI job launcher-kernel-boundary)"]
 #[test]
 fn the_brokered_lift_control_moves_cpu_max_from_unleased_to_leased() {
     require_root();
-    let root = scratch_dir("brokered-lift");
+    // `--cgroupns=private` makes this the container's cgroup namespace root:
+    // the real cgroup-v2 subtree delegated to the container. Production gets
+    // the same writable shape here from the cgroup-writable RuntimeClass.
+    let root = PathBuf::from("/sys/fs/cgroup");
 
-    // ── 1. The launcher establishes its own delegated root ──────────────────
+    // ── 1. The launcher prepares the runtime-delegated root ─────────────────
     Bootstrap::new(&root).run().unwrap_or_else(|error| {
         panic!(
-            "the launcher could not establish its delegated cgroup root at {}: {error}",
+            "the launcher could not prepare the runtime-delegated cgroup root at {}: {error}. \
+             The proof requires a privileged container with a private cgroup namespace and a \
+             writable cgroup2 root",
             root.display()
         )
     });
@@ -379,8 +386,9 @@ fn require_root() {
     let euid = unsafe { libc::geteuid() };
     assert_eq!(
         euid, 0,
-        "the brokered lift proof must run as uid 0 (uid {euid} cannot mount cgroup2). It runs in \
-         the `{PRIVILEGED_LANE_JOB}` CI lane; reproduce it locally with: \
+        "the brokered lift proof must run as uid 0 (current uid is {euid}) against a \
+         container-runtime-supplied writable delegated cgroup2 root. It runs in the \
+         `{PRIVILEGED_LANE_JOB}` CI lane; reproduce it locally with: \
          `cargo test -p djinn-cgroup-launcher --test brokered_lease_lift_boundary --no-run` then \
          `docker run --rm --privileged --cgroupns=private -v \"$PWD:$PWD\" ubuntu:24.04 \
          bash -c 'mkdir -p /workspace && exec \"$0\" --ignored --test-threads 1' <the binary>`"
@@ -389,13 +397,6 @@ fn require_root() {
         Path::new("/workspace").is_dir(),
         "/workspace is missing: the rendered CommandSpec cwd must exist before a child can exec"
     );
-}
-
-fn scratch_dir(label: &str) -> PathBuf {
-    let base = PathBuf::from(format!("/tmp/djinn-goxi-{label}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&base);
-    std::fs::create_dir_all(&base).expect("create scratch dir");
-    base
 }
 
 fn read_trimmed(path: &Path) -> String {

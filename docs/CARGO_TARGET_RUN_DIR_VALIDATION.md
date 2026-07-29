@@ -23,6 +23,30 @@ cargo test -p djinn-k8s same_project_task_runs_get_distinct_private_cargo_target
 
 That test constructs two same-project task-run Jobs and proves their `CARGO_TARGET_DIR` values are distinct `/cache/cargo-target-runs/<task_run_id>` paths, not the shared warm base.
 
+## Retained scope after wrapper retirement (op33)
+
+The nquz run-directory sweeper survives wrapper retirement. It remains the
+owner of the ordinary `/cache/cargo-target-runs/<task_run_id>` lifecycle:
+live task runs and running-session guards are protected, eligible stale UUID
+directories are removed, and a repeated sweep treats an already-absent path as
+an idempotent outcome. The count-and-byte joint cap also remains active after
+the ordinary sweep and retains protected live directories when the cap cannot
+be met safely.
+
+This boundary is independent of the retired wrapper's packaging, deployment,
+and protocol assets. The coordinator's nquz disk dimension remains
+observe-only: it records a would-defer only after ordinary admission has
+granted a build, so it does not deny or otherwise change admission policy.
+
+The stable cleanup vocabulary is intentionally bounded: worker teardown emits
+`removed` or `already_absent`; the coordinator sweep summary emits `completed`
+(or its existing bounded error/cap outcome). Paths, task-run IDs, and error
+text belong in structured logs rather than telemetry labels.
+
+Warm-check benchmarking, any future cheap compile gate, and cache replacement
+are separate work. They are not prerequisites for, nor changes to, the retained
+nquz sweeper, warm-base behavior, quotas, or admission policy.
+
 ## Concurrent same-project lock-contention check
 
 1. Pick a Rust project whose normal worker verification runs Cargo.
