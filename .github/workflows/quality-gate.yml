@@ -273,13 +273,24 @@ jobs:
             scripts/test-tiltfile-config.sh \
             scripts/test-wrap-agent-runtime-image.sh \
             scripts/test-helm-github-app-render.sh \
-            scripts/test-helm-chart-contracts.sh
+            scripts/test-helm-chart-contracts.sh \
+            scripts/test-deploy-contracts.sh
       - name: Test content-addressed warm builds
         run: bash scripts/test-tilt-warm-restart.sh
       - name: Test isolated Tilt configuration
         run: KUBECONFIG=/dev/null sh scripts/test-tiltfile-config.sh
       - name: Test runtime-base self-healing wrapper
         run: bash scripts/test-wrap-agent-runtime-image.sh
+      # deploy/node/k3s/tests/ and deploy/runbooks/tests/ were unreachable from
+      # any workflow until this step existed: scripts/test-helm-chart-contracts.sh
+      # globs only the chart's own tests directory, so four suites had never run
+      # in CI once — including deploy/runbooks/tests/bzpt-production-activation.sh,
+      # which was an acceptance criterion of proposal d308. These need nothing
+      # but bash, which is why they are hosted here rather than on a Rust lane.
+      # The runner globs directories and fails on an empty roster, so a new
+      # suite dropped into either directory runs here with no edit to this file.
+      - name: Test deploy contracts (node, runbooks)
+        run: bash scripts/test-deploy-contracts.sh
       - name: Lint local and default Helm values
         run: |
           helm lint deploy/helm/djinn
@@ -630,11 +641,24 @@ jobs:
       SQLX_OFFLINE: "true"
     steps:
       - uses: actions/checkout@v4
+      # For the deploy render-gate contract at the end of this job. That suite
+      # needs BOTH `helm` and a BUILT `render-gate` binary
+      # (server/crates/djinn-k8s), so it cannot go on local-dev-contracts: that
+      # lane has helm but no Rust, and would pay for a cold toolchain and a cold
+      # djinn-k8s build. Here the `server-test` rust-cache family is already
+      # restored, so the build is incremental. Pinned to the same v3.12.3
+      # local-dev-contracts installs — two lanes rendering the same chart on
+      # different helm majors is a contract that means nothing.
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.12.3
       - run: rustup toolchain install
         working-directory: server
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: server
+          # NOTE: the `azure/setup-helm@v4` step above this one is for the
+          # deploy render-gate contract at the END of this job, not for clippy.
           # The dedicated `server-quality` family is gone. After #2342 moved
           # server-sqlx-freshness and memory-eval onto server-test, it served
           # exactly one job — this one — while holding ~2.5 GB of a 10 GB
@@ -759,6 +783,17 @@ jobs:
           before='${{ steps.fingerprints-restored.outputs.count }}'
           after=$(ls target/debug/.fingerprint 2>/dev/null | wc -l)
           echo "::notice::clippy-fingerprints restored=${before:-0} after=${after} built=$((after - ${before:-0}))"
+      # deploy/preflight/tests/ had never executed in CI. It is a DEPLOY
+      # contract, not a Rust one, and it is hosted on this lane only because it
+      # must `cargo build -p djinn-k8s --bin render-gate` and shell out to
+      # `helm`: this is the cheapest lane in the file that already has both a
+      # warm Rust cache and (as of the setup-helm step above) helm. Runs last so
+      # a failure here is never confused with a clippy failure, and so it cannot
+      # delay the lint signal. The directory is globbed by the runner, not
+      # enumerated, so a second preflight suite needs no edit here.
+      - name: Test deploy render-gate contract
+        working-directory: ${{ github.workspace }}
+        run: bash scripts/test-deploy-contracts.sh deploy/preflight/tests
   launcher-kernel-boundary:
     name: Launcher Kernel Boundary
     needs: preflight
