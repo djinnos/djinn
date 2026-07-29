@@ -105,6 +105,7 @@ fn observe_config() -> BuildAdmissionConfig {
     BuildAdmissionConfig {
         mode: BuildAdmissionMode::Observe,
         cap: 3,
+        pod_limit: None,
     }
 }
 

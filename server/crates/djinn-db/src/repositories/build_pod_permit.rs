@@ -97,6 +97,19 @@ impl BuildPodPermitRepository {
         Self { db }
     }
 
+    /// Verify that the canonical global pool row can be read without acquiring
+    /// or otherwise mutating a permit. A missing relation is intentionally an
+    /// error, while a missing singleton row is a successful `false` result.
+    pub async fn global_pool_is_readable(&self) -> DbResult<bool> {
+        self.db.ensure_initialized().await?;
+        Ok(sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM build_pod_permit_pools WHERE pool_key = $1)",
+        )
+        .bind(POOL_KEY)
+        .fetch_one(self.db.pool())
+        .await?)
+    }
+
     /// Atomically acquire one permit below `limit`.
     ///
     /// The `global` pool row is locked before the task-run lookup/count/insert.
