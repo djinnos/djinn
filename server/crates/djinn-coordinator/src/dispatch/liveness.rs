@@ -138,6 +138,78 @@ impl DbTaskStatus {
     /// so [`classify`] additionally consults
     /// [`LivenessEvidence::handed_off_from_session_held_status`] before
     /// convicting — see the precedence-3 comment there.
+    ///
+    /// # `InTaskReview` and `InLeadIntervention` are settled here despite NOT being handoffs
+    ///
+    /// This is the one place where the list is knowingly wider than its own
+    /// definition, and it must not be "tidied" without the evidence below.
+    ///
+    /// `needs_task_review` / `needs_lead_intervention` are QUEUE statuses — a
+    /// worker really did hand the task to somebody else. `in_task_review` /
+    /// `in_lead_intervention` are CLAIM statuses: only a live session holds
+    /// them ([`is_session_held_status`] names exactly these plus
+    /// `in_progress`). A reviewer's own handoff destinations are `approved`
+    /// (approve) and `open` (reject) — never `in_task_review`. So a session
+    /// exiting with its task still at `in_task_review` handed nothing on, and
+    /// by this doc's own rule should be convicted.
+    ///
+    /// Concretely, that lets one real failure through. A reviewer that ends
+    /// without calling `submit_review` maps to a non-terminal
+    /// `StageOutcome::Failed` (`supervisor_impl/stage.rs`, the `""` arm of
+    /// `reviewer_stage_outcome`) which deliberately performs NO transition, so
+    /// the task stays `in_task_review`. That path is reached from the
+    /// reply loop's `Ok(())` branch, so `final_result_ok` is true and
+    /// `session_settlement_for_stage_outcome` settles the session
+    /// **`completed`**, not `failed` — the pod exits 0. The exit classifier
+    /// therefore sees `Succeeded` / exit 0 / session `running` / task
+    /// `in_task_review`, and only this `is_settled` entry keeps it out of
+    /// precedence 3. It falls through every later branch (`Succeeded` is not
+    /// absent-or-failed, and not running) and lands on `Live`.
+    ///
+    /// # Why narrowing it is NOT safe today
+    ///
+    /// The exit classifier cannot tell that abandonment apart from a healthy
+    /// reviewer, because of the write ordering in the supervisor stage:
+    ///
+    /// 1. the session row is settled first, which publishes
+    ///    `session.completed` and drives `classify_session_exit_liveness`;
+    /// 2. the reviewer's `task_review_approve` / `task_review_reject`
+    ///    transition is issued only afterwards, on a separate RPC.
+    ///
+    /// At the instant the event fires, both cases are byte-identical on every
+    /// axis this classifier reads: task at `in_task_review`, last transition
+    /// `needs_task_review → in_task_review` (INTO a session-held status, so
+    /// `handed_off_from_session_held_status` is false for both). Everything
+    /// the reviewer decided — the transition, `task_runs`, `task_attempts`,
+    /// the acceptance-criteria array — is written after the session row, by
+    /// construction. Un-settling `InTaskReview` would therefore convict every
+    /// reviewer whose transition is still in flight: the same false-positive
+    /// class #2748 removed at `open`, reintroduced on a different status.
+    ///
+    /// The gates that DO close this race live in the stuck scan
+    /// (`session_recovery.rs`: `pool.has_session` + the background-work
+    /// tracker) and are not portable here — in the pod topology the
+    /// post-session work registers on the agent's context, not the
+    /// coordinator's tracker, and the transition is issued by the pod-side
+    /// supervisor loop rather than by `spawn_post_session_work` at all.
+    ///
+    /// # What is lost, and what it would take to reclaim it
+    ///
+    /// Only signal. The verdict is observational — the caller in `actor.rs`
+    /// discards the result, and the attempt-terminalizing step is gated on
+    /// `failed`/`interrupted`, which a no-verdict reviewer exit is not. The
+    /// operational hole is already closed elsewhere: the attempt is
+    /// terminalized `Crashed` by the supervisor runner, `task_runs` records
+    /// `failed`, and the stuck scan releases `in_task_review →
+    /// needs_task_review` on its 30 s tick with no age threshold.
+    ///
+    /// To decide this properly, split the reviewer sessions whose persisted
+    /// evidence shows `db_task_status = in_task_review` by how the task later
+    /// left that status: `task_review_approve`/`task_review_reject` by
+    /// `agent-supervisor` is a race and must stay exonerated;
+    /// `release_task_review` by `coordinator` is a genuine abandonment. If the
+    /// second group is material, the fix is to move the session settlement
+    /// after the transition — only then can this list be narrowed.
     pub fn is_settled(&self) -> bool {
         matches!(
             self,
@@ -991,6 +1063,162 @@ mod tests {
                 "{not_held} is not session-held"
             );
         }
+    }
+
+    /// Wire string for a [`DbTaskStatus`], via its own serde rename — so this
+    /// stays honest if a variant is renamed.
+    fn wire(status: DbTaskStatus) -> String {
+        serde_json::to_value(status)
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_owned))
+            .unwrap_or_default()
+    }
+
+    /// TRIPWIRE. `is_settled` claims to list recorded handoffs, but two of its
+    /// entries are CLAIM statuses that only a live session holds — the exact
+    /// set [`is_session_held_status`] names. That overlap is deliberate and
+    /// load-bearing: see the `is_settled` doc for why narrowing it is unsafe
+    /// while the supervisor settles the session row BEFORE issuing the
+    /// reviewer's transition.
+    ///
+    /// If this fails, someone changed one of the two lists. Read that doc
+    /// before "fixing" the test — the two helpers are one axis, and moving
+    /// either one moves the false-positive rate of the violation branch.
+    #[test]
+    fn is_settled_overlaps_session_held_on_exactly_the_two_claim_statuses() {
+        let all = [
+            DbTaskStatus::Open,
+            DbTaskStatus::InProgress,
+            DbTaskStatus::NeedsTaskReview,
+            DbTaskStatus::InTaskReview,
+            DbTaskStatus::Approved,
+            DbTaskStatus::PrDraft,
+            DbTaskStatus::PrReview,
+            DbTaskStatus::NeedsLeadIntervention,
+            DbTaskStatus::InLeadIntervention,
+            DbTaskStatus::Closed,
+        ];
+
+        let overlap: Vec<String> = all
+            .into_iter()
+            .filter(|s| s.is_settled() && is_session_held_status(&wire(*s)))
+            .map(wire)
+            .collect();
+
+        assert_eq!(
+            overlap,
+            vec!["in_task_review", "in_lead_intervention"],
+            "a session-held status is a CLAIM, not a handoff destination; these \
+             two are excused anyway only because the exit classifier races the \
+             supervisor's transition RPC (see DbTaskStatus::is_settled)"
+        );
+
+        // The third session-held status is NOT excused — that asymmetry is the
+        // whole reason the overlap above is suspicious rather than principled.
+        assert!(
+            !DbTaskStatus::InProgress.is_settled(),
+            "in_progress is session-held AND unsettled; in_task_review is \
+             session-held AND settled — the two lists disagree"
+        );
+    }
+
+    /// CHARACTERIZATION of the hole, built from the real traced path rather
+    /// than from guesswork.
+    ///
+    /// A reviewer that ends without calling `submit_review` returns a
+    /// non-terminal `StageOutcome::Failed` that performs NO task transition,
+    /// yet settles its session `completed` (the settlement keys on the reply
+    /// loop's `Ok(())`, not on the outcome), so the pod exits 0. The exit
+    /// classifier consequently sees precisely this packet — and returns
+    /// `Live` with no outcome at all. The abandonment is invisible in the
+    /// liveness ledger.
+    ///
+    /// This is asserted, not endorsed. It is pinned so that any future change
+    /// to `is_settled` or to the precedence order surfaces here with the
+    /// reasoning attached, instead of silently flipping a production
+    /// false-positive rate nobody measured.
+    #[test]
+    fn no_verdict_reviewer_exit_is_invisible_to_the_exit_classifier() {
+        // Exactly what classify_session_exit_liveness builds for a "completed"
+        // session whose task never left in_task_review.
+        let ev = LivenessEvidence {
+            pod_phase: Some(PodPhase::Succeeded),
+            activity: ActivitySignal::Idle,
+            db_session_status: Some(DbSessionStatus::Running),
+            db_task_status: Some(DbTaskStatus::InTaskReview),
+            claim_ttl_remaining: None,
+            extension_budget_exhausted: false,
+            hard_runtime_deadline_exceeded: false,
+            exit_code: Some(0),
+            // Last transition was needs_task_review → in_task_review, i.e. INTO
+            // a session-held status: a claim, which proves nothing.
+            handed_off_from_session_held_status: false,
+        };
+
+        let result = classify(&ev);
+        assert_eq!(
+            result.verdict,
+            Verdict::Live,
+            "a reviewer that abandoned its post is currently recorded as live"
+        );
+        assert_eq!(result.outcome, None, "and carries no outcome at all");
+        assert_eq!(result.reason, None);
+
+        // The single term keeping it out of the violation branch.
+        assert!(
+            DbTaskStatus::InTaskReview.is_settled(),
+            "is_settled is the only guard standing between this packet and \
+             ProtocolViolation/clean_exit_nonterminal"
+        );
+
+        // And every later branch is structurally unreachable for a clean exit:
+        // Succeeded is neither absent-or-failed (precedence 4) nor running
+        // (precedence 5), so `Live` is the fall-through, not a judgement.
+        let mut crashed = ev.clone();
+        crashed.pod_phase = Some(PodPhase::Failed);
+        crashed.exit_code = Some(1);
+        assert_eq!(
+            classify(&crashed).verdict,
+            Verdict::Dead,
+            "the same packet with a Failed pod DOES reach precedence 4 — only \
+             the clean-exit shape falls all the way through"
+        );
+    }
+
+    /// Explicit regression for #2748: a reviewer that rejected work back to the
+    /// rework queue did exactly what the protocol asks and must stay
+    /// exonerated. The task rests at `open` (unsettled), so the ONLY thing
+    /// separating it from a stranded worker is the recorded handoff off a
+    /// session-held status.
+    #[test]
+    fn reviewer_reject_handoff_to_open_stays_exonerated() {
+        // in_task_review → open, driven by TransitionAction::TaskReviewReject.
+        let mut ev = live_evidence();
+        ev.pod_phase = Some(PodPhase::Succeeded);
+        ev.exit_code = Some(0);
+        ev.activity = ActivitySignal::Idle;
+        ev.db_session_status = Some(DbSessionStatus::Running);
+        ev.db_task_status = Some(DbTaskStatus::Open);
+        ev.handed_off_from_session_held_status = true;
+
+        let result = classify(&ev);
+        assert_ne!(
+            result.verdict,
+            Verdict::ProtocolViolation,
+            "a rejecting reviewer parks the task at `open` on purpose"
+        );
+        assert_ne!(result.reason, Some(LivenessReason::CleanExitNonterminal));
+
+        // The discriminator must be the handoff evidence, not the status: drop
+        // it and the very same packet convicts.
+        let mut stranded = ev.clone();
+        stranded.handed_off_from_session_held_status = false;
+        assert_eq!(
+            classify(&stranded).verdict,
+            Verdict::ProtocolViolation,
+            "without the recorded handoff the same resting status IS the \
+             stranded-worker shape the detector exists for"
+        );
     }
 
     #[test]
