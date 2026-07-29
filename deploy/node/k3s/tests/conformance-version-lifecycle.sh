@@ -675,8 +675,10 @@ run_launcher_phase() {
   make_cgroup_shims "$dir/bin" "$LAUNCHER_ROOT"
   payload=${payload//root=\/sys\/fs\/cgroup/root=$LAUNCHER_ROOT}
   payload=${payload//\/proc\/self\/cgroup/$proc}
+  # Under xtrace, exactly as the node-side probe runs, so a failing assertion
+  # names itself in the transcript this program reports.
   set +e
-  env PATH="$dir/bin:$PATH" sh -eu -c "$payload" >"$dir/out" 2>"$LAUNCHER_ERR"
+  env PATH="$dir/bin:$PATH" sh -eux -c "$payload" >"$dir/out" 2>"$LAUNCHER_ERR"
   LAUNCHER_STATUS=$?
   set -e
 }
@@ -692,8 +694,10 @@ if [ -z "$launcher_payload" ] || [ -z "$worker_payload" ]; then
 else
   # The delegation write must exist, and must precede the leaf it enables. A
   # leaf created first is born without cpu.max and stays that way.
-  delegate_line=$(printf '%s\n' "$launcher_payload" | grep -Fn "$delegate_write" | cut -d: -f1 | head -1)
-  leaf_line=$(printf '%s\n' "$launcher_payload" | grep -Fn 'mkdir "$launcher_leaf"' | cut -d: -f1 | head -1)
+  # Every extraction below tolerates a no-match so a missing step is REPORTED as
+  # a failure rather than aborting this program under `set -e`.
+  delegate_line=$(printf '%s\n' "$launcher_payload" | grep -Fn "$delegate_write" | cut -d: -f1 | head -1 || true)
+  leaf_line=$(printf '%s\n' "$launcher_payload" | grep -Fn 'mkdir "$launcher_leaf"' | cut -d: -f1 | head -1 || true)
   if [ -z "$delegate_line" ]; then
     fail 'the launcher phase never writes +cpu to the delegated root cgroup.subtree_control'
   elif [ -z "$leaf_line" ]; then
@@ -708,7 +712,7 @@ else
   # is that crate's INIT_LEAF constant, not a name invented here.
   BOOTSTRAP_RS="$REPO_DIR/server/crates/djinn-cgroup-launcher/src/bootstrap.rs"
   if [ -r "$BOOTSTRAP_RS" ]; then
-    init_leaf_name=$(sed -n 's/.*INIT_LEAF: &str = "\([^"]*\)".*/\1/p' "$BOOTSTRAP_RS" | head -1)
+    init_leaf_name=$(sed -n 's/.*INIT_LEAF: &str = "\([^"]*\)".*/\1/p' "$BOOTSTRAP_RS" | head -1 || true)
     if [ -z "$init_leaf_name" ]; then
       fail 'could not read INIT_LEAF out of the launcher bootstrap'
     elif printf '%s\n' "$launcher_payload" | grep -Fq "init_leaf=\"\$root/$init_leaf_name\""; then
@@ -726,6 +730,13 @@ else
   fi
 
   # The denial must be aimed at a file the launcher phase proved into existence.
+  # Both phases have to carry the guard: the whole-file text search in section 10
+  # cannot tell one occurrence from the other.
+  if printf '%s\n' "$launcher_payload" | grep -Fq "$leaf_cpu_max_guard"; then
+    ok 'launcher phase proves the delegated leaf has a cpu.max'
+  else
+    fail 'launcher phase never proves the delegated leaf has a cpu.max'
+  fi
   if printf '%s\n' "$worker_payload" | grep -Fq "$leaf_cpu_max_guard"; then
     ok 'worker phase requires the leaf cpu.max to EXIST before trying to write it'
   else
@@ -759,7 +770,7 @@ else
     "$(cat "$SHIPPED_LEAF/cpu.max" 2>/dev/null || true)"
 
   # (b) Non-vacuity: delete just the delegation write and the phase must FAIL.
-  no_delegate=$(printf '%s\n' "$launcher_payload" | grep -Fv "$delegate_write")
+  no_delegate=$(printf '%s\n' "$launcher_payload" | grep -Fv "$delegate_write" || true)
   if [ "$(printf '%s\n' "$no_delegate" | wc -l)" -eq "$(printf '%s\n' "$launcher_payload" | wc -l)" ]; then
     fail 'the delegation write was not removable, so the non-vacuity case proves nothing'
   fi
@@ -775,7 +786,7 @@ else
   #     cpu.max — which is exactly the node state that aborted the worker.
   prefix_payload=$(printf '%s\n' "$launcher_payload" |
     grep -Fv -e "$delegate_write" -e 'cgroup.subtree_control")" = cpu ]' \
-      -e "$leaf_cpu_max_guard" -e '25000 100000' -e '400000 100000')
+      -e "$leaf_cpu_max_guard" -e '25000 100000' -e '400000 100000' || true)
   run_launcher_phase prefix "$prefix_payload"
   expect_eq 'pre-fix launcher phase status' 0 "$LAUNCHER_STATUS"
   PREFIX_LEAF="$LAUNCHER_ROOT/.djinn-launcher-leaf"
