@@ -2619,6 +2619,23 @@ impl CoordinatorActor {
         // Use Running to represent the state when the pod exited — this
         // is what triggers the protocol-violation classifier path.
         evidence.db_session_status = Some(DbSessionStatus::Running);
+        // ── Recover the signal the status fold discards ─────────────────
+        // `session_status` has three values and the fold above collapses them
+        // onto two pod phases plus a sentinel exit code. Everything about WHY
+        // the run failed is lost there, so a worker whose provider returned
+        // `server_is_overloaded` arrives indistinguishable from a worker that
+        // segfaulted: both are `(Failed, 1)`.
+        //
+        // The reason is not actually unavailable — the slot supervisor-runner
+        // already classified the task-run report and stashed the typed class on
+        // the health tracker's per-task side-channel before the session was
+        // finalized. Peek (never take) that signal: the dispatch-reappearance
+        // path owns it and consumes it for its own cooldown/streak decision, and
+        // stealing it here would silently disable A3/A6 backoff.
+        evidence.transient_provider_fault = self
+            .health
+            .peek_task_provider_failure(task_id)
+            .is_some_and(|signal| signal.transient);
 
         // ── 3. Classify ────────────────────────────────────────────────
         let result = super::liveness::classify(&evidence);
@@ -2722,20 +2739,37 @@ impl CoordinatorActor {
         if matches!(session_status, "failed" | "interrupted")
             && result.outcome != Some(LivenessOutcome::KillNoop)
         {
-            let (attempt_outcome, failure_class, summary) = if session_status == "interrupted" {
-                (
-                    TaskAttemptOutcome::Interrupted,
-                    "environmental_interrupt",
-                    "session interrupted by infrastructure (deploy/rollout/pod-eviction/reap) \
+            let (attempt_outcome, failure_class, summary) =
+                if result.reason == Some(super::liveness::LivenessReason::TransientProviderFault) {
+                    // The run died on the PROVIDER, not on itself. That is the same
+                    // shape of non-event as an infra kill: the task was never
+                    // actually attempted end-to-end, so it earns the environmental
+                    // treatment — terminalize so nothing wedges the respawn guard,
+                    // but contribute no dispatch-failure streak, no quality strike,
+                    // and no reopen_class penalty. Charging it as a `Crashed`
+                    // attempt is what walked task `nr41` toward its force-close on
+                    // 2026-07-29 for a three-second OpenAI outage.
+                    (
+                        TaskAttemptOutcome::Interrupted,
+                        "transient_provider_fault",
+                        "session ended on a transient upstream provider fault (5xx / overload / \
+                     mid-flight stream death) while task nonterminal — environmental \
+                     non-attempt, retry when the provider recovers",
+                    )
+                } else if session_status == "interrupted" {
+                    (
+                        TaskAttemptOutcome::Interrupted,
+                        "environmental_interrupt",
+                        "session interrupted by infrastructure (deploy/rollout/pod-eviction/reap) \
                      while task nonterminal — environmental non-attempt, no dispatch penalty",
-                )
-            } else {
-                (
-                    TaskAttemptOutcome::Crashed,
-                    "session_exit_nonterminal",
-                    "session exited failed while task nonterminal",
-                )
-            };
+                    )
+                } else {
+                    (
+                        TaskAttemptOutcome::Crashed,
+                        "session_exit_nonterminal",
+                        "session exited failed while task nonterminal",
+                    )
+                };
             self.terminalize_recovery_attempt(
                 task_id,
                 role,
@@ -2928,6 +2962,7 @@ fn build_liveness_evidence(
         hard_runtime_deadline_exceeded,
         exit_code: None,
         handed_off_from_session_held_status,
+        transient_provider_fault: false,
     }
 }
 
@@ -3223,6 +3258,7 @@ mod liveness_foundation_tests {
             exit_code: Some(0),
 
             handed_off_from_session_held_status: false,
+            transient_provider_fault: false,
         };
 
         let result = super::super::liveness::classify(&evidence);
@@ -3254,6 +3290,7 @@ mod liveness_foundation_tests {
             exit_code: Some(137),
 
             handed_off_from_session_held_status: false,
+            transient_provider_fault: false,
         };
 
         let result = super::super::liveness::classify(&evidence);
@@ -3453,6 +3490,7 @@ mod liveness_foundation_tests {
             exit_code: None,
 
             handed_off_from_session_held_status: false,
+            transient_provider_fault: false,
         };
 
         let result = super::super::liveness::classify(&evidence);

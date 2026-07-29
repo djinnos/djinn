@@ -674,3 +674,152 @@ async fn pending_start_timeout_escalates_to_termination_at_retry_cap() {
         Some("agent_failure")
     );
 }
+
+/// (e) A round whose role session actually RAN but died on a transient upstream
+/// provider fault must be parked and retried, not scored and force-closed.
+///
+/// Production, 2026-07-29, task `nr41` (adversary, refinement round 3):
+///
+/// ```text
+/// supervisor dispatch: task-run complete  outcome: Failed {
+///   stage: "refinement",
+///   reason: "reply loop error: provider stream event failed:
+///            display=server_is_overloaded: Our servers are currently overloaded.
+///            Please try again later. ... Caused by: provider internal error (status 500)",
+///   provider_failure: Some(Failure), ... }
+/// ```
+///
+/// Ten seconds after the session started, the slot freed. The loop found a
+/// session row, concluded the Adversary had run, read an empty debate trail,
+/// and scored the round as an explicit dry pass — then force-closed the task.
+/// The round was consumed and the run had no live work left.
+///
+/// An empty debate trail after a provider outage is the provider's silence, not
+/// the Adversary's verdict. Nothing may be inferred from it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn transient_provider_fault_parks_the_round_for_retry_instead_of_scoring_it() {
+    let db = crate::test_helpers::create_test_db();
+    let fixture = seed_refinement_fixture(&db).await;
+    let (events_tx, _events_rx) = tokio::sync::broadcast::channel::<DjinnEventEnvelope>(256);
+
+    let task_id = seed_refinement_task_row(&db, &fixture.project_id, &fixture.user_id).await;
+
+    // The role session genuinely started — this is what makes the case
+    // indistinguishable from a completed round without the provider signal.
+    SessionRepository::new(db.clone(), EventBus::noop())
+        .create(CreateSessionParams {
+            project_id: &fixture.project_id,
+            task_id: Some(&task_id),
+            model: TEST_MODEL,
+            agent_type: "adversary",
+            metadata_json: None,
+            task_run_id: None,
+            pricing: None,
+            cost_basis: None,
+        })
+        .await
+        .expect("materialize the session that the provider then killed");
+
+    // The pool no longer reports the task running: the slot freed when the
+    // task-run reported `Failed`.
+    let (pool, _counts) = spawn_counting_pool(vec![]);
+    let mut actor = build_refinement_actor(&db, &events_tx, pool);
+
+    // The slot supervisor-runner's typed classification of that task-run,
+    // recorded on the health tracker's per-task side-channel exactly as
+    // `apply_provider_breaker_feedback` records it in production.
+    actor.health.note_task_provider_failure(
+        &task_id,
+        djinn_provider::catalog::health::TaskFailureSignal {
+            throttle: false,
+            transient: true,
+            retry_after_ms: None,
+        },
+    );
+
+    seed_running_refinement_dispatched_at(
+        &mut actor,
+        &fixture.proposal_id,
+        &task_id,
+        ago(Duration::from_secs(30)),
+    );
+    let round_before = actor.active_refinements[&fixture.proposal_id].current_round;
+
+    actor.drive_active_refinements().await;
+
+    assert!(
+        actor.active_refinements.contains_key(&fixture.proposal_id),
+        "a transient provider fault is retryable — the tribunal must survive it"
+    );
+    assert!(
+        !actor.refinement_sessions.contains_key(&fixture.proposal_id),
+        "the dead session must be cleared so the SAME phase re-dispatches"
+    );
+    assert_eq!(
+        actor.active_refinements[&fixture.proposal_id].dispatch_failures, 1,
+        "the parked round must count against the bounded retry cap, so a provider \
+         that is down for good still terminates the loop instead of looping forever"
+    );
+    assert_eq!(
+        actor.active_refinements[&fixture.proposal_id].current_round, round_before,
+        "the round must NOT be consumed: the Adversary never formed an opinion, so \
+         there is no pass to score"
+    );
+    assert_eq!(
+        actor.active_refinements[&fixture.proposal_id].stop_reason, None,
+        "parking is not stopping"
+    );
+    assert_eq!(
+        actor.health.peek_task_provider_failure(&task_id),
+        None,
+        "the refinement loop owns cleanup of the side-channel entry for a task it \
+         force-closes, since no dispatch reappearance will ever collect it"
+    );
+}
+
+/// The guard for (e): with no provider signal, the identical situation still
+/// takes the ordinary outcome path. If this regressed, the test above would
+/// pass for the wrong reason — every finished round would look like a park.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_finished_round_without_a_provider_fault_is_still_scored() {
+    let db = crate::test_helpers::create_test_db();
+    let fixture = seed_refinement_fixture(&db).await;
+    let (events_tx, _events_rx) = tokio::sync::broadcast::channel::<DjinnEventEnvelope>(256);
+
+    let task_id = seed_refinement_task_row(&db, &fixture.project_id, &fixture.user_id).await;
+    SessionRepository::new(db.clone(), EventBus::noop())
+        .create(CreateSessionParams {
+            project_id: &fixture.project_id,
+            task_id: Some(&task_id),
+            model: TEST_MODEL,
+            agent_type: "adversary",
+            metadata_json: None,
+            task_run_id: None,
+            pricing: None,
+            cost_basis: None,
+        })
+        .await
+        .expect("materialize a session that ran to completion");
+
+    let (pool, _counts) = spawn_counting_pool(vec![]);
+    let mut actor = build_refinement_actor(&db, &events_tx, pool);
+    // Deliberately NO `note_task_provider_failure` here.
+
+    seed_running_refinement_dispatched_at(
+        &mut actor,
+        &fixture.proposal_id,
+        &task_id,
+        ago(Duration::from_secs(30)),
+    );
+
+    actor.drive_active_refinements().await;
+
+    assert_eq!(
+        actor
+            .active_refinements
+            .get(&fixture.proposal_id)
+            .map(|state| state.dispatch_failures),
+        Some(0),
+        "an ordinary finished round must not be charged to the dispatch-failure cap"
+    );
+}

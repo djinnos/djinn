@@ -4447,6 +4447,7 @@ fn hard_cap_takes_precedence_over_slow_extension_eligible() {
         exit_code: None,
 
         handed_off_from_session_held_status: false,
+        transient_provider_fault: false,
     };
 
     let result = classify(&evidence);
@@ -4491,6 +4492,7 @@ fn absent_pod_with_active_activity_is_not_dead() {
         exit_code: None,
 
         handed_off_from_session_held_status: false,
+        transient_provider_fault: false,
     };
 
     let result = classify(&evidence);
@@ -4524,6 +4526,7 @@ fn running_pod_active_signal_is_live_regardless_of_claim_ttl() {
         exit_code: None,
 
         handed_off_from_session_held_status: false,
+        transient_provider_fault: false,
     };
 
     let result = classify(&evidence);
@@ -4557,6 +4560,7 @@ fn pending_pod_capacity_crunch_spared_by_classifier() {
         exit_code: None,
 
         handed_off_from_session_held_status: false,
+        transient_provider_fault: false,
     };
 
     let result = classify(&evidence);
@@ -4592,6 +4596,7 @@ fn pending_pod_past_hard_cap_still_not_dead() {
         exit_code: None,
 
         handed_off_from_session_held_status: false,
+        transient_provider_fault: false,
     };
 
     // Even with hard_runtime_deadline_exceeded, the classifier applies the
@@ -4608,6 +4613,7 @@ fn pending_pod_past_hard_cap_still_not_dead() {
         exit_code: None,
 
         handed_off_from_session_held_status: false,
+        transient_provider_fault: false,
     };
     let result = classify(&evidence_no_hard_cap);
     assert_ne!(

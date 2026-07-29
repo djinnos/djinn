@@ -503,16 +503,25 @@ async fn apply_provider_breaker_feedback(
                     .record_failure(creator_scope, model_id);
                 (false, false, None)
             }
-            // A transient provider-side fault (5xx / transport death) feeds the
-            // SAME gentle consecutive-failure breaker a `Failure` does — model
-            // health and auto-disable behaviour are deliberately unchanged, so a
-            // model that 5xx's on every dispatch still demotes. The ONLY thing
-            // the new class changes is task attribution downstream: the
+            // A transient provider-side fault (5xx / transport death) is a LOAD
+            // signal about the upstream, not a health signal about the model, so
+            // it gets its own much longer breaker ladder
+            // (`record_transient_failure`, `TRANSIENT_BREAKER_THRESHOLD`) rather
+            // than the three-strike one. The fault stays fully visible in
+            // `model_health` — `consecutive_failures` and `total_failures` move
+            // exactly as a `Failure` would — but a burst of
+            // `server_is_overloaded` no longer auto-disables the user's
+            // preferred model (2026-07-29, task `nr41`: `openai/gpt-5.6-sol`
+            // reached `auto_disabled: true`, 15 consecutive failures and 6
+            // disable-TTL trips, off an OpenAI capacity blip, taking the
+            // tribunal's adversary role down with it). A model whose backend is
+            // actually gone still demotes, just twenty strikes in rather than
+            // three. Task attribution is unchanged from the previous commit: the
             // coordinator must not blame the task for the provider's outage.
             djinn_runtime::ProviderFailureClass::Transient { retry_after_ms } => {
                 app_state
                     .health_tracker
-                    .record_failure(creator_scope, model_id);
+                    .record_transient_failure(creator_scope, model_id);
                 (false, true, retry_after_ms)
             }
             djinn_runtime::ProviderFailureClass::AuthInvalid => {

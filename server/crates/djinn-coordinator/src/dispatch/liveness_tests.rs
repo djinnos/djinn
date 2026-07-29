@@ -13,6 +13,7 @@ fn live_evidence() -> LivenessEvidence {
         exit_code: None,
 
         handed_off_from_session_held_status: false,
+        transient_provider_fault: false,
     }
 }
 
@@ -120,6 +121,126 @@ fn nonzero_exit_on_nonterminal_task_is_protocol_violation() {
     assert_eq!(result.verdict, Verdict::ProtocolViolation);
     assert_eq!(result.outcome, Some(LivenessOutcome::Crash));
     assert_eq!(result.reason, Some(LivenessReason::NonzeroExitNonterminal));
+}
+
+/// Production shape of the 2026-07-29 `nr41` failure: refinement round 3's
+/// Adversary died on `reply loop error: provider stream event failed:
+/// display=server_is_overloaded ... provider internal error (status 500)`.
+/// The session was recorded `failed`, which the exit path folds to
+/// `(PodPhase::Failed, exit 1)` on an `in_progress` task — the exact input
+/// that produced `verdict: "protocol_violation", outcome: Some(Crash),
+/// reason: Some(NonzeroExitNonterminal)` and terminalized the live attempt.
+///
+/// With the provider signal preserved, the same input must classify as a
+/// retryable environmental death instead.
+#[test]
+fn transient_provider_fault_is_not_a_protocol_violation() {
+    let mut ev = live_evidence();
+    ev.pod_phase = Some(PodPhase::Failed);
+    ev.exit_code = Some(1);
+    ev.db_task_status = Some(DbTaskStatus::InProgress);
+    ev.db_session_status = Some(DbSessionStatus::Running);
+    ev.transient_provider_fault = true;
+
+    let result = classify(&ev);
+    assert_ne!(
+        result.verdict,
+        Verdict::ProtocolViolation,
+        "an upstream 500 violates no protocol — the session did its part"
+    );
+    assert_ne!(
+        result.outcome,
+        Some(LivenessOutcome::Crash),
+        "the provider crashed, not the run"
+    );
+    assert_ne!(result.reason, Some(LivenessReason::NonzeroExitNonterminal));
+    assert_eq!(result.verdict, Verdict::Dead);
+    assert_eq!(result.outcome, Some(LivenessOutcome::DeadReclaimed));
+    assert_eq!(result.reason, Some(LivenessReason::TransientProviderFault));
+    assert!(!result.extension_eligible);
+}
+
+/// The guard must not be weakened: without the provider signal, the very
+/// same evidence is still convicted. If this ever passes for the wrong
+/// reason — e.g. because the new rung swallowed the branch — the test above
+/// would be meaningless.
+#[test]
+fn genuine_nonzero_crash_without_a_provider_fault_is_still_convicted() {
+    let mut ev = live_evidence();
+    ev.pod_phase = Some(PodPhase::Failed);
+    ev.exit_code = Some(1);
+    ev.db_task_status = Some(DbTaskStatus::InProgress);
+    ev.db_session_status = Some(DbSessionStatus::Running);
+    ev.transient_provider_fault = false;
+
+    let result = classify(&ev);
+    assert_eq!(result.verdict, Verdict::ProtocolViolation);
+    assert_eq!(result.outcome, Some(LivenessOutcome::Crash));
+    assert_eq!(result.reason, Some(LivenessReason::NonzeroExitNonterminal));
+}
+
+/// The new rung is scoped to an EXITED pod. A provider fault noted while the
+/// pod is still running (a mid-session blip the worker recovered from) must
+/// not force a `Dead` verdict on a live session.
+#[test]
+fn transient_provider_fault_does_not_kill_a_still_running_pod() {
+    let mut ev = live_evidence();
+    ev.pod_phase = Some(PodPhase::Running);
+    ev.activity = ActivitySignal::Active;
+    ev.transient_provider_fault = true;
+
+    let result = classify(&ev);
+    assert_eq!(
+        result.verdict,
+        Verdict::Live,
+        "a running, active pod stays live regardless of a past provider blip"
+    );
+}
+
+/// Terminal task state still outranks everything, including the new rung.
+#[test]
+fn terminal_task_wins_over_transient_provider_fault() {
+    let mut ev = live_evidence();
+    ev.pod_phase = Some(PodPhase::Failed);
+    ev.exit_code = Some(1);
+    ev.db_task_status = Some(DbTaskStatus::Closed);
+    ev.transient_provider_fault = true;
+
+    let result = classify(&ev);
+    assert_eq!(result.outcome, Some(LivenessOutcome::KillNoop));
+}
+
+/// The two exoneration terms are independent and must compose. #2748's
+/// handoff evidence answers "was the task moved deliberately?"; this change's
+/// provider evidence answers "did something external kill the run?". A round
+/// that died on an upstream 500 leaves the task exactly where it was, so it
+/// has NO handoff evidence — and must still be exonerated.
+#[test]
+fn transient_provider_fault_exonerates_without_any_handoff_evidence() {
+    let mut ev = live_evidence();
+    ev.pod_phase = Some(PodPhase::Failed);
+    ev.exit_code = Some(1);
+    ev.db_task_status = Some(DbTaskStatus::InProgress);
+    ev.db_session_status = Some(DbSessionStatus::Running);
+    ev.handed_off_from_session_held_status = false;
+    ev.transient_provider_fault = true;
+
+    let result = classify(&ev);
+    assert_eq!(result.reason, Some(LivenessReason::TransientProviderFault));
+
+    // …and the converse still holds: handoff evidence alone, with no provider
+    // fault, keeps taking #2748's path rather than being relabelled.
+    let mut handoff = live_evidence();
+    handoff.pod_phase = Some(PodPhase::Succeeded);
+    handoff.exit_code = Some(0);
+    handoff.db_task_status = Some(DbTaskStatus::Open);
+    handoff.db_session_status = Some(DbSessionStatus::Running);
+    handoff.handed_off_from_session_held_status = true;
+    handoff.transient_provider_fault = false;
+
+    let result = classify(&handoff);
+    assert_ne!(result.verdict, Verdict::ProtocolViolation);
+    assert_ne!(result.reason, Some(LivenessReason::TransientProviderFault));
 }
 
 #[test]
@@ -524,6 +645,9 @@ fn no_verdict_reviewer_exit_is_invisible_to_the_exit_classifier() {
         // Last transition was needs_task_review → in_task_review, i.e. INTO
         // a session-held status: a claim, which proves nothing.
         handed_off_from_session_held_status: false,
+        // The reviewer exited 0 with no provider error at all — this scenario
+        // is about an abandoned post, not an upstream fault.
+        transient_provider_fault: false,
     };
 
     let result = classify(&ev);

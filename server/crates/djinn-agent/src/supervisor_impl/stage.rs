@@ -228,8 +228,10 @@ fn classify_provider_failure(err: &anyhow::Error) -> Option<ProviderFailureClass
         // `ProviderError::retryable()` has always known this; folding it into
         // `Failure` threw that knowledge away at the wire boundary and let three
         // unrelated OpenAI outages look like one reproducible task fault (2gq7).
-        // Breaker feedback is unchanged (the host still calls `record_failure`);
-        // only task attribution differs.
+        // The host feeds this class to `record_transient_failure`: still fully
+        // visible in `model_health`, but on a 20-strike ladder instead of the
+        // 3-strike one, so an upstream capacity blip cannot auto-disable the
+        // model while a permanently-dead backend still demotes.
         ProviderError::ProviderInternal { .. } => Some(ProviderFailureClass::Transient {
             retry_after_ms: provider_err.retry_after_ms(),
         }),
