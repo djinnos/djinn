@@ -1,3 +1,4 @@
+[
   {
     "name": "task_show",
     "description": "Show details of a work item including recent activity and blockers.",
