@@ -13,11 +13,11 @@ use anyhow::Result;
 /// Consumed by both Linux Landlock backends.
 pub mod confidential;
 
+#[cfg(target_os = "linux")]
+pub mod chat_shell;
 pub mod linux;
 #[cfg(target_os = "macos")]
 pub mod macos;
-#[cfg(target_os = "linux")]
-pub mod chat_shell;
 // Re-exports used by the chat handler in commits 5 and 6; suppress the
 // unused-import warning until the rewire lands.
 #[cfg(target_os = "linux")]
