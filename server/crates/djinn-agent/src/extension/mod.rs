@@ -48,11 +48,29 @@ use tokio_util::sync::CancellationToken;
 pub(crate) struct ToolCancellation {
     pub(crate) session: CancellationToken,
     pub(crate) global: CancellationToken,
+    /// Trusted reply-loop session context, never decoded from tool input.
+    pub(crate) authenticated_session_id: Option<String>,
 }
 
 impl ToolCancellation {
     pub(crate) fn new(session: CancellationToken, global: CancellationToken) -> Self {
-        Self { session, global }
+        Self {
+            session,
+            global,
+            authenticated_session_id: None,
+        }
+    }
+
+    pub(crate) fn with_authenticated_session(
+        session: CancellationToken,
+        global: CancellationToken,
+        authenticated_session_id: &str,
+    ) -> Self {
+        Self {
+            session,
+            global,
+            authenticated_session_id: Some(authenticated_session_id.to_owned()),
+        }
     }
 
     /// A pair of never-cancelled tokens, for tests and non-cancelling callers.

@@ -46,6 +46,7 @@ pub(crate) mod ci;
 #[allow(dead_code)]
 pub(crate) mod ci_artifact;
 mod code_intel;
+mod evidence_exec;
 pub(crate) mod gate_guard;
 mod jit_pitfalls;
 // Retained for test coverage; production dispatch goes through djinn-mcp-extension.
@@ -220,6 +221,17 @@ pub(super) async fn dispatch_tool_call(
         "shell" => {
             let root = state.working_root_for(worktree_path);
             call_shell(state, &call.arguments, &root, session_role, cancel).await
+        }
+        "evidence_exec" => {
+            let root = state.working_root_for(worktree_path);
+            evidence_exec::call_evidence_exec(
+                state,
+                &call.arguments,
+                &root,
+                session_task_id,
+                cancel.authenticated_session_id.as_deref(),
+            )
+            .await
         }
         "read" => {
             let root = state.working_root_for(worktree_path);
