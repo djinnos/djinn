@@ -13,13 +13,21 @@ use crate::tools::proposal_ops::{
     ProposalRefinementStatusModel,
 };
 use djinn_core::{
-    models::NeedsEvidenceClaim,
+    models::{EvidenceFindings, NeedsEvidenceClaim},
     refinement_liveness::{
         RefinementLivenessEvidence, RefinementLivenessResult, RefinementParkKind,
         RefinementRunState,
     },
 };
-use djinn_db::{ProposalRepository, TaskRepository};
+use djinn_db::{
+    EvidenceRepository, ProposalDebateTrailCreateInput, ProposalRepository, TaskRepository,
+};
+
+use crate::tools::evidence_findings::{
+    EvidenceCompletionV1, finalize_evidence_completion_v1_in_transaction,
+    render_evidence_judge_projection,
+};
+use crate::tools::evidence_plan::EvidencePlanIdentity;
 
 // ── Param struct ─────────────────────────────────────────────────────────────
 
@@ -720,4 +728,73 @@ pub async fn check_needs_evidence_cap(
     repo.needs_evidence_cap_status_for_current_run(proposal_id)
         .await
         .map_err(|e| format!("failed to check needs-evidence cap: {e}"))
+}
+
+/// Atomically persist V1 and its legacy-compatible debate row for the exact
+/// proposal-linked evidence spike. The transaction is committed only after both
+/// inserts have succeeded, so either insertion failure rolls both back.
+pub async fn complete_linked_refinement_evidence_v1(
+    repo: &ProposalRepository,
+    proposal_id: &str,
+    spike_task_id: &str,
+    identity: &EvidencePlanIdentity,
+    completion: EvidenceCompletionV1,
+) -> Result<(), String> {
+    let proposal = repo
+        .get(proposal_id)
+        .await
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "proposal not found".to_string())?;
+    if proposal.linked_spike_task_id.as_deref() != Some(spike_task_id) {
+        return Err("proposal is not linked to this evidence spike".to_string());
+    }
+    let claim = NeedsEvidenceClaim::parse_stored(proposal.needs_evidence_claim.as_deref())
+        .map_err(|error| format!("invalid linked evidence claim: {error}"))?
+        .ok_or_else(|| "linked evidence spike has no structured claim".to_string())?;
+    let evidence = EvidenceRepository::new(repo.db().clone());
+    repo.db()
+        .ensure_initialized()
+        .await
+        .map_err(|error| error.to_string())?;
+    let mut tx = repo
+        .db()
+        .pool()
+        .begin()
+        .await
+        .map_err(|error| error.to_string())?;
+    let projection =
+        finalize_evidence_completion_v1_in_transaction(&evidence, &mut tx, identity, completion)
+            .await
+            .map_err(|error| error.to_string())?;
+    let rendered =
+        render_evidence_judge_projection(&projection.payload).map_err(|error| error.to_string())?;
+    let legacy = EvidenceFindings {
+        answer: rendered.clone(),
+        evidence: vec![rendered.clone()],
+        code_paths_inspected: Vec::new(),
+        confidence: 0.0,
+        residual_risks: vec!["Structured V1 projection is authoritative.".to_string()],
+        recommendation_for_advocate:
+            "Use the structured projection and its gaps when resuming refinement.".to_string(),
+    };
+    let metadata = serde_json::to_value(legacy).map_err(|error| error.to_string())?;
+    repo.add_debate_trail_entry_in_tx(
+        &mut tx,
+        ProposalDebateTrailCreateInput {
+            proposal_id,
+            kind: "evidence_findings",
+            body: &rendered,
+            blocking: false,
+            agent_role: "spike",
+            author_kind: "agent",
+            author_model: None,
+            source_task_id: Some(spike_task_id),
+            against_revision_seq: claim.against_revision_seq,
+            round: claim.round,
+            body_metadata: Some(&metadata),
+        },
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    tx.commit().await.map_err(|error| error.to_string())
 }

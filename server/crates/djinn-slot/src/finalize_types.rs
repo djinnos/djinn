@@ -3,6 +3,7 @@
 //! Extracted from `djinn-agent::roles::finalize` so the slot crate can parse
 //! finalize tool payloads without depending on djinn-agent.
 
+use djinn_control_plane::tools::evidence_findings::EvidenceCompletionV1;
 use serde::Deserialize;
 
 /// Per-criterion verdict from a reviewer's `submit_review` call.
@@ -23,6 +24,7 @@ pub struct TaskGroomingEntry {
 
 /// Payload for a worker submitting completed work.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SubmitWork {
     pub task_id: String,
     pub commit_title: String,
@@ -31,6 +33,8 @@ pub struct SubmitWork {
     pub files_changed: Vec<String>,
     #[serde(default)]
     pub remaining_concerns: Vec<String>,
+    /// Available only to the exact linked refinement-evidence spike.
+    pub evidence_completion: Option<EvidenceCompletionV1>,
 }
 
 /// Payload for a reviewer submitting their review outcome.
