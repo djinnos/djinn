@@ -1412,6 +1412,7 @@ mod doctor_stranded_ready_e2e;
 mod intervention;
 mod pause_is_not_fault;
 mod proposal_spec_integrity_rollout_contract;
+mod provider_fault_attribution;
 mod session_reaping;
 mod status_and_stuck;
 mod terminal_gate_latest_row;

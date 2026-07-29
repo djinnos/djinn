@@ -154,14 +154,36 @@ const CODEX_EMPTY_QUOTA_RETRY_AFTER_MS: u64 = 20 * 60 * 1000;
 /// `record_failure` / `record_stall` for the task creator's `(scope, model)`
 /// bucket.
 ///
+/// The class is also the coordinator's ONLY evidence about whom to blame for a
+/// failed session, so the split is not merely a breaker concern: only the
+/// task-attributable class ([`ProviderFailureClass::Failure`]) may arm the
+/// coordinator's third-strike planner-remediation escalation. A provider-side
+/// fault that reproduces independently of the request body must not.
+///
 /// Mapping (mirrors the coordinator's throttle→stall / quiet-failure→failure
 /// intent):
-/// - `Authentication` | `InvalidRequest` | `InvalidOutput` |
-///   `ProviderInternal{5xx}` → [`ProviderFailureClass::Failure`]. These are
-///   "quiet but broken" — a bad/expired credential, a request the provider
-///   keeps rejecting, or a flapping backend. Fed to the gentler
-///   consecutive-failure breaker so a single transient blip doesn't demote the
-///   user's preferred model; only repeats trip it.
+/// - `InvalidRequest` | `InvalidOutput` → [`ProviderFailureClass::Failure`].
+///   The TASK-attributable class: a request this provider keeps rejecting (the
+///   poisoned resume transcript — an assistant `tool_calls` message replayed
+///   without its tool results — 400s identically on every redispatch) or output
+///   we cannot parse. Fed to the gentler consecutive-failure breaker so a
+///   single blip doesn't demote the user's preferred model; only repeats trip
+///   it. Because redispatch genuinely reproduces it, this is the only class
+///   that arms the coordinator's planner-remediation escalation.
+/// - `ProviderInternal{..}` | `Transport` | `ExhaustedTransport` →
+///   [`ProviderFailureClass::Transient`]. A 5xx (`server_error` /
+///   `server_is_overloaded`, including the in-stream `response.failed` form
+///   that `ProviderError::from_stream_error` maps to a synthetic 500) or a hard
+///   network death: the PROVIDER is broken, not the task. Breaker feedback is
+///   deliberately unchanged from `Failure` — the host still calls
+///   `record_failure`, so a model that dies on every dispatch still
+///   auto-disables — but the coordinator spares the two task-blaming counters
+///   (planner-remediation streak, terminal dispatch-failure streak) exactly as
+///   it does for a throttle. Incident (task `2gq7`, 2026-07-29): three
+///   independent OpenAI 500s on three consecutive sessions were folded into
+///   `Failure`, tripped the third-strike escalation, and minted a "Planner
+///   remediation" task asserting a poisoned transcript that never existed.
+/// - `Authentication` → [`ProviderFailureClass::AuthInvalid`] (see below).
 /// - `RateLimit` | `EmptyCompletion` → [`ProviderFailureClass::Throttle`]. A
 ///   throttle/quota signal; fed to the immediate-failover breaker
 ///   (`record_stall`) so dispatch moves to the next model at once with a
@@ -179,13 +201,6 @@ const CODEX_EMPTY_QUOTA_RETRY_AFTER_MS: u64 = 20 * 60 * 1000;
 ///   old `None`) stops a *throttle* from being miscounted as a broken provider
 ///   via `record_failure`, which polluted health stats and escalated the
 ///   auto-disable cooldown for what is merely an account over quota.
-/// - `Transport` → [`ProviderFailureClass::Failure`]. A hard network death
-///   (connection refused / instant timeout / broken stream) that kills the
-///   session with no work done — quiet-but-broken, just like a 5xx. Fed to the
-///   gentle consecutive-failure breaker so a one-off blip is absorbed (a
-///   successful session resets the counter via `record_success`) but a model
-///   that dies on every dispatch finally auto-disables instead of being
-///   re-selected forever (the kimi-for-coding/k2p7 incident).
 /// - `ContextOverflow` → `None`. Excluded by design: handled by reactive
 ///   compaction (the conversation is too big, not a model-health problem).
 ///   Tripping the breaker on it would needlessly demote a healthy model.
@@ -199,9 +214,25 @@ fn classify_provider_failure(err: &anyhow::Error) -> Option<ProviderFailureClass
         // immediately (failover at once) and surfaces the revocation, rather than
         // probing the dead model three times like a "quiet but broken" failure.
         ProviderError::Authentication => Some(ProviderFailureClass::AuthInvalid),
-        ProviderError::InvalidRequest
-        | ProviderError::InvalidOutput
-        | ProviderError::ProviderInternal { .. } => Some(ProviderFailureClass::Failure),
+        // The TASK-attributable class: the provider rejected THIS request (the
+        // poisoned resume transcript) or answered with something we cannot
+        // parse. Redispatch reproduces it identically, so this — and only this
+        // — is what may arm the coordinator's planner-remediation escalation.
+        ProviderError::InvalidRequest | ProviderError::InvalidOutput => {
+            Some(ProviderFailureClass::Failure)
+        }
+        // A provider-side 5xx (`server_error` / `server_is_overloaded`,
+        // including the in-stream `response.failed` form `from_stream_error`
+        // maps to a synthetic 500) is the PROVIDER being broken, not the task:
+        // the same transcript succeeds on the next healthy backend.
+        // `ProviderError::retryable()` has always known this; folding it into
+        // `Failure` threw that knowledge away at the wire boundary and let three
+        // unrelated OpenAI outages look like one reproducible task fault (2gq7).
+        // Breaker feedback is unchanged (the host still calls `record_failure`);
+        // only task attribution differs.
+        ProviderError::ProviderInternal { .. } => Some(ProviderFailureClass::Transient {
+            retry_after_ms: provider_err.retry_after_ms(),
+        }),
         ProviderError::RateLimit { .. } => Some(ProviderFailureClass::Throttle {
             retry_after_ms: provider_err.retry_after_ms(),
         }),
@@ -218,18 +249,21 @@ fn classify_provider_failure(err: &anyhow::Error) -> Option<ProviderFailureClass
             retry_after_ms: Some(CODEX_EMPTY_QUOTA_RETRY_AFTER_MS),
         }),
         // A hard transport failure (connection refused, instant timeout, broken
-        // stream) that kills the session is "quiet but broken" the same way a 5xx
-        // is: the model produced no work and exited fast, invisible to the
-        // coordinator's stall detector. Feed it to the GENTLE consecutive-failure
-        // breaker (`record_failure`), NOT the immediate-failover one — a single
-        // network blip on an otherwise-healthy model must not demote it. The
-        // breaker only trips after the configured run of consecutive failures, and
-        // any successful session calls `record_success` (resets the counter), so a
+        // stream) that kills the session is the same shape as a 5xx: the model
+        // produced no work and exited fast, invisible to the coordinator's stall
+        // detector, and the fault is the network/backend rather than anything
+        // about this task. Feed it to the GENTLE consecutive-failure breaker
+        // (`record_failure`), NOT the immediate-failover one — a single network
+        // blip on an otherwise-healthy model must not demote it. The breaker only
+        // trips after the configured run of consecutive failures, and any
+        // successful session calls `record_success` (resets the counter), so a
         // transient blip is absorbed while a model that dies on EVERY dispatch
         // (the kimi-for-coding/k2p7 incident: instant Transport death, 0 tokens,
         // re-dispatched forever, absent from model_health) finally auto-disables.
         ProviderError::Transport | ProviderError::ExhaustedTransport(_) => {
-            Some(ProviderFailureClass::Failure)
+            Some(ProviderFailureClass::Transient {
+                retry_after_ms: None,
+            })
         }
         // ContextOverflow is handled by reactive compaction (the conversation is
         // too big), not a model-health problem — stays `None` so the breaker
@@ -1752,20 +1786,95 @@ mod tests {
 
     #[test]
     fn quiet_failures_map_to_failure_class() {
-        // Invalid-request / invalid-output / 5xx are "quiet but broken"
-        // → gentle consecutive-failure breaker.
-        for e in [
-            ProviderError::InvalidRequest,
-            ProviderError::InvalidOutput,
-            ProviderError::ProviderInternal { status: 500 },
-            ProviderError::ProviderInternal { status: 503 },
-        ] {
+        // Invalid-request / invalid-output are "quiet but broken" AND
+        // task-attributable (the provider rejected THIS request body, or
+        // answered with something unparseable) → gentle consecutive-failure
+        // breaker, and the only class allowed to arm the coordinator's
+        // planner-remediation escalation.
+        for e in [ProviderError::InvalidRequest, ProviderError::InvalidOutput] {
             assert_eq!(
                 classify_provider_failure(&typed(e.clone())),
                 Some(ProviderFailureClass::Failure),
                 "{e:?} should map to Failure",
             );
         }
+    }
+
+    #[test]
+    fn provider_5xx_maps_to_transient_not_failure() {
+        // Incident (task `2gq7`, 2026-07-29): three independent OpenAI 500s
+        // (`server_is_overloaded` / `server_error`) on three consecutive
+        // sessions were folded into `Failure`, which the coordinator reads as
+        // "the redispatched worker reproduces the same failure each time" and
+        // escalates on the third strike — minting a Planner remediation task
+        // that blamed a poisoned resume transcript that never existed.
+        // `ProviderError::retryable()` already knew a 5xx is transient; the
+        // wire class must now carry that knowledge to the host.
+        for status in [500u16, 502, 503, 529] {
+            assert_eq!(
+                classify_provider_failure(&typed(ProviderError::ProviderInternal { status })),
+                Some(ProviderFailureClass::Transient {
+                    retry_after_ms: None
+                }),
+                "a {status} is the provider's fault, not the task's",
+            );
+        }
+
+        // The production shape of 2gq7's second failure: an in-stream
+        // `server_error` event on a 200 response (OpenAI request id
+        // f7bd36f8-6250-455d-8235-738cab51183c), which `from_stream_error` maps
+        // to a synthetic 500.
+        let stream_500 =
+            ProviderError::from_stream_error(Some("server_error"), "An error occurred");
+        assert_eq!(
+            classify_provider_failure(&typed(stream_500)),
+            Some(ProviderFailureClass::Transient {
+                retry_after_ms: None
+            }),
+            "an in-stream `server_error` event is a transient provider fault",
+        );
+
+        // …and it survives the context/stream wrapping the production error
+        // path applies, exactly as the auth/transport cases do.
+        let wrapped = anyhow::Error::new(ProviderError::ProviderInternal { status: 500 })
+            .context("provider API error 500: {\"code\":\"server_error\"}")
+            .context("provider stream event failed: display=...; fs_diag; env_diag");
+        assert_eq!(
+            classify_provider_failure(&wrapped),
+            Some(ProviderFailureClass::Transient {
+                retry_after_ms: None
+            }),
+        );
+    }
+
+    /// End-to-end for the capacity signal that actually killed `2gq7`'s first
+    /// and third sessions: `server_is_overloaded` from the ChatGPT Codex
+    /// CONSUMER backend. `from_stream_error` classifies it as a `RateLimit`
+    /// (plan capacity shedding, not a broken model), and the wire class must
+    /// therefore be `Throttle` — the host's IMMEDIATE-failover path
+    /// (`record_stall`), so dispatch moves to the user's next model at once
+    /// instead of re-probing a saturated endpoint. Like `Transient`, it is
+    /// exempt from the planner-remediation escalation.
+    #[test]
+    fn overload_stream_event_maps_to_throttle_for_immediate_failover() {
+        let overloaded = ProviderError::from_stream_error(
+            Some("server_is_overloaded"),
+            "Our servers are currently overloaded",
+        );
+        assert_eq!(
+            overloaded,
+            ProviderError::RateLimit {
+                retry_after_ms: None
+            },
+            "an overload code is a throttle, not a provider-internal fault",
+        );
+        assert_eq!(
+            classify_provider_failure(&typed(overloaded)),
+            Some(ProviderFailureClass::Throttle {
+                retry_after_ms: None
+            }),
+            "an overload must fail over immediately, not retry the same saturated model",
+        );
     }
 
     #[test]
@@ -1988,10 +2097,15 @@ mod tests {
         // stream, 0 tokens) previously classified to `None`, so the per-(scope,
         // model) breaker never tripped and dispatch re-selected the dead model
         // forever (also never surfacing it in model_health). A Transport death
-        // must now feed the GENTLE consecutive-failure breaker (`Failure`).
+        // must feed the GENTLE consecutive-failure breaker — which it still does
+        // as `Transient` (the host maps `Transient` onto the same
+        // `record_failure` call `Failure` uses), while no longer telling the
+        // coordinator that the TASK is at fault.
         assert_eq!(
             classify_provider_failure(&anyhow::Error::new(ProviderError::Transport)),
-            Some(ProviderFailureClass::Failure),
+            Some(ProviderFailureClass::Transient {
+                retry_after_ms: None
+            }),
             "a hard transport death must feed the consecutive-failure breaker",
         );
 
@@ -2006,7 +2120,9 @@ mod tests {
         );
         assert_eq!(
             classify_provider_failure(&from_streaming),
-            Some(ProviderFailureClass::Failure),
+            Some(ProviderFailureClass::Transient {
+                retry_after_ms: None
+            }),
             "a transport error wrapped through the streaming loop must still feed the breaker",
         );
     }

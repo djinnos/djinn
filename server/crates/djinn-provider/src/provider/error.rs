@@ -127,8 +127,13 @@ impl ProviderError {
     /// `code` string, fall back to a body scan for context-overflow phrasing,
     /// and default an unrecognised/absent code to a transient provider-internal
     /// failure: the failure was real, so it should feed the breaker as a 5xx
-    /// `Failure` rather than be dropped as an untyped/legacy string error
-    /// (which classifies as `None` and never reaches the breaker).
+    /// rather than be dropped as an untyped/legacy string error (which
+    /// classifies as `None` and never reaches the breaker).
+    ///
+    /// Overload codes (`server_is_overloaded`, `overloaded_error`) are the
+    /// exception to that default: they are classified as
+    /// [`ProviderError::RateLimit`], matching the 529 status path. Capacity
+    /// shedding is a throttle to fail over from, not a backend that is broken.
     pub fn from_stream_error(code: Option<&str>, message: &str) -> Self {
         let code = code.unwrap_or("").to_ascii_lowercase();
         if code.contains("rate_limit") || code.contains("quota") {
@@ -148,6 +153,33 @@ impl ProviderError {
             ProviderError::Authentication
         } else if code.contains("invalid_request") || code.contains("invalid_prompt") {
             ProviderError::InvalidRequest
+        } else if code.contains("overload") {
+            // Capacity shedding, not a provider-internal fault. OpenAI's
+            // `server_is_overloaded` and Anthropic's `overloaded_error` both
+            // match this substring, mirroring how `from_status` already treats
+            // the 529 "overloaded" status as a rate limit rather than a 5xx.
+            //
+            // This matters because of WHERE these arrive from: the `openai`
+            // provider id resolves through `effective_oauth_provider_id` to
+            // `chatgpt_codex`, whose requests go to the ChatGPT CONSUMER
+            // subscription backend (`https://chatgpt.com/backend-api/codex`),
+            // not the OpenAI API. Task `2gq7`'s sessions (94,752 and 35,672
+            // prompt tokens, many concurrent sessions on one consumer plan)
+            // were shed by that backend while the same plan served local
+            // `codex` fine, and `model_health` showed the model succeeding 5
+            // times against 15 failures. That is plan capacity, not a broken
+            // model — so it must feed the immediate-failover throttle path
+            // (`record_stall` → next model at once) rather than back off and
+            // re-probe a saturated endpoint.
+            //
+            // A stream error event carries no `Retry-After`, so no reset window
+            // is known and the ordinary escalating ladder applies. We
+            // deliberately do NOT synthesize one: `CODEX_EMPTY_QUOTA_...` exists
+            // for the empty-200 OVER-QUOTA signature, which is a different
+            // (clock-based) condition from momentary overload.
+            ProviderError::RateLimit {
+                retry_after_ms: None,
+            }
         } else {
             // `server_error`, `internal_error`, an empty code, or any code we
             // don't specifically recognise: treat as a transient provider-side
@@ -470,6 +502,58 @@ mod tests {
         assert!(
             ProviderError::from_stream_error(Some("server_error"), "boom").retryable(),
             "server_error must be retryable"
+        );
+    }
+
+    #[test]
+    fn overload_codes_are_throttles_not_provider_internal() {
+        // An overload code is CAPACITY SHEDDING, not a broken backend. Task
+        // `2gq7`'s sessions died on `server_is_overloaded` from the ChatGPT
+        // Codex CONSUMER backend (`openai` → `chatgpt_codex` →
+        // chatgpt.com/backend-api/codex), while the same subscription served
+        // local `codex` fine and `model_health` showed the model succeeding.
+        // Classifying it as a throttle routes it to the immediate-failover
+        // breaker path instead of re-probing a saturated endpoint.
+        for code in ["server_is_overloaded", "overloaded_error"] {
+            assert_eq!(
+                ProviderError::from_stream_error(Some(code), "Our servers are currently overloaded"),
+                ProviderError::RateLimit {
+                    retry_after_ms: None
+                },
+                "{code} is a capacity throttle",
+            );
+        }
+
+        // No `Retry-After` exists on a stream error event, and we must NOT
+        // synthesize a quota window here — that is the empty-200 over-quota
+        // signature, a different condition.
+        assert!(
+            ProviderError::from_stream_error(Some("server_is_overloaded"), "")
+                .retry_after_ms()
+                .is_none(),
+            "an overload carries no provider-stated reset window"
+        );
+
+        // REGRESSION GUARD: the new arm must not swallow genuine provider
+        // faults. `2gq7`'s second failure was a real `server_error` (OpenAI
+        // request id f7bd36f8-6250-455d-8235-738cab51183c) and must keep
+        // classifying as a 5xx (→ `ProviderFailureClass::Transient`).
+        for code in ["server_error", "internal_error"] {
+            assert_eq!(
+                ProviderError::from_stream_error(Some(code), "An error occurred"),
+                ProviderError::ProviderInternal { status: 500 },
+                "{code} is a provider-internal fault, not a throttle",
+            );
+        }
+
+        // 529 ("overloaded") is already a rate limit on the STATUS path; the
+        // stream-code path now agrees with it.
+        assert_eq!(
+            ProviderError::from_status(529, "overloaded"),
+            ProviderError::RateLimit {
+                retry_after_ms: None
+            },
+            "the status and stream-code paths must classify an overload the same way"
         );
     }
 

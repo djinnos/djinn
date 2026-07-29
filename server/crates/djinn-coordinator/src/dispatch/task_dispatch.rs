@@ -2644,25 +2644,41 @@ impl CoordinatorActor {
                             // reappearance) and the per-(scope,model) breaker still
                             // fails over; only the terminal-close counter is spared.
                             let throttle = provider_failure.is_some_and(|f| f.throttle);
+                            // A transient provider-side fault (5xx
+                            // `server_error` / `server_is_overloaded`, or a hard
+                            // transport death) is the PROVIDER's fault, not the
+                            // task's — the identical transcript succeeds on the
+                            // next healthy backend. It is therefore spared the
+                            // two task-blaming counters exactly as a throttle
+                            // is, while the escalating cooldown and the
+                            // per-(scope,model) breaker failover still apply.
+                            let transient = provider_failure.is_some_and(|f| f.transient);
 
                             // Second-strike Planner escalation for provider-error
-                            // FAILED sessions. A genuine (non-throttle) typed
-                            // provider failure that recurs for the same task is the
-                            // poisoned-transcript-400 / dead-credential / persistent
-                            // server-fault class: redispatch reproduces it
-                            // identically, so riding the backoff ladder toward the
-                            // streak-10 terminal close just burns attempts with
-                            // nobody deciding what to do. The cycling gate (trigger
-                            // B) below excludes provider faults by design, and the
-                            // stall-cancel escalation only covers coordinator stall
-                            // kills — so without this the failure has no Planner
-                            // path. Count consecutive such failures (reset when the
-                            // task's status advances, mirroring the stall streak)
-                            // and hand the task to the Planner on the
-                            // FAILURE_ESCALATION_THRESHOLD-th strike instead of
-                            // another doomed redispatch.
+                            // FAILED sessions. Only a TASK-ATTRIBUTABLE typed
+                            // provider failure qualifies: the poisoned-transcript
+                            // 400 / unparseable-output class, which redispatch
+                            // reproduces identically, so riding the backoff ladder
+                            // toward the streak-10 terminal close just burns
+                            // attempts with nobody deciding what to do. Throttles
+                            // and transient provider faults are excluded — task
+                            // `2gq7` (2026-07-29) failed three sessions on three
+                            // INDEPENDENT OpenAI 500s and the third strike minted a
+                            // "Planner remediation" task whose reason asserted a
+                            // poisoned resume transcript that never existed; the
+                            // model's own health breaker had meanwhile already
+                            // auto-disabled it, which is where that fault belonged.
+                            // The cycling gate (trigger B) below excludes provider
+                            // faults by design, and the stall-cancel escalation only
+                            // covers coordinator stall kills — so without this the
+                            // failure has no Planner path. Count consecutive such
+                            // failures (reset when the task's status advances,
+                            // mirroring the stall streak) and hand the task to the
+                            // Planner on the FAILURE_ESCALATION_THRESHOLD-th strike
+                            // instead of another doomed redispatch.
                             if provider_failure.is_some()
                                 && !throttle
+                                && !transient
                                 && self
                                     .maybe_escalate_provider_failure_streak(&task, role)
                                     .await
@@ -2737,9 +2753,10 @@ impl CoordinatorActor {
                             // After MAX consecutive same-role failures the task is
                             // structurally doomed (e.g. its run can never complete);
                             // fail it terminally instead of looping forever. Skipped
-                            // for throttles (A3): a transient quota window must never
-                            // terminally close the task.
-                            if !throttle && next_streak >= MAX_DISPATCH_FAILURES {
+                            // for throttles (A3) and transient provider faults: a
+                            // quota window or a provider outage must never terminally
+                            // close the task.
+                            if !throttle && !transient && next_streak >= MAX_DISPATCH_FAILURES {
                                 self.terminally_fail_task(
                                     &task,
                                     role,
@@ -2761,9 +2778,15 @@ impl CoordinatorActor {
                             }
 
                             // A3: leave the terminal streak at its current value on a
-                            // throttle (don't persist the advanced `next_streak`).
-                            let stored_streak =
-                                stored_streak_after_failure(current_streak, next_streak, throttle);
+                            // throttle or a transient provider fault (don't persist
+                            // the advanced `next_streak`) — the provider failed, the
+                            // task did not.
+                            let stored_streak = stored_streak_after_failure(
+                                current_streak,
+                                next_streak,
+                                throttle,
+                                transient,
+                            );
                             if stored_streak > 0 {
                                 self.dispatch_failure_streak
                                     .insert(task.id.clone(), stored_streak);
@@ -2808,6 +2831,7 @@ impl CoordinatorActor {
                                 role,
                                 streak = stored_streak,
                                 throttle,
+                                transient,
                                 provider_backoff = provider_failure.is_some(),
                                 cooldown_secs = effective_cooldown.as_secs(),
                                 "CoordinatorActor: repeated task failure — backing off dispatch"

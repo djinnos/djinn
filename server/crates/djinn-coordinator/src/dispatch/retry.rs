@@ -619,6 +619,68 @@ impl CoordinatorActor {
             .await
     }
 
+    /// Is the model this task last ran on currently auto-disabled by its own
+    /// health breaker, for the task creator's scope?
+    ///
+    /// The `(scope, model)` breaker trips only after a run of consecutive
+    /// failures on THAT model across every task using it — which makes a tripped
+    /// breaker positive evidence that the failures belong to the model rather
+    /// than to any one task's transcript. Trigger D exists for the opposite
+    /// situation (a task whose own request the provider keeps rejecting), so it
+    /// must stand down while the breaker is blaming the model.
+    ///
+    /// Uses the two pieces of state the coordinator already owns: the
+    /// `HealthTracker` it shares with the slot runners (the same handle
+    /// `is_throttle_cooling` / `is_available` are consulted through on the
+    /// dispatch path) and the task's most recent session for this role, whose
+    /// `model_id` names the model that just failed. Fails OPEN (returns `false`,
+    /// i.e. escalation proceeds) when there is no session yet or the lookup
+    /// errors — this is a backstop over the call-site classification, never the
+    /// primary gate.
+    async fn provider_breaker_blames_model(
+        &self,
+        task: &djinn_core::models::Task,
+        role: &'static str,
+    ) -> bool {
+        let session_repo = djinn_db::SessionRepository::new(
+            self.db.clone(),
+            crate::events::event_bus_for(&self.events_tx),
+        );
+        let model_id = match session_repo.latest_model_for_task_role(&task.id, role).await {
+            Ok(Some(model)) if !model.trim().is_empty() => model,
+            Ok(_) => return false,
+            Err(e) => {
+                tracing::warn!(
+                    task_id = %task.short_id,
+                    role,
+                    error = %e,
+                    "CoordinatorActor: provider-failure escalation could not resolve the last \
+                     model for the task; proceeding without the breaker guard"
+                );
+                return false;
+            }
+        };
+        // Same scope the dispatch path keys the breaker on: the task creator
+        // (`tasks.created_by_user_id`), passed as `Some(..)` exactly as
+        // `dispatch_ready_tasks` does, so we read the very bucket the failing
+        // dispatch wrote to.
+        let scope = Some(task.created_by_user_id.as_str());
+        let health = self.health.model_health(scope, &model_id);
+        if health.auto_disabled {
+            tracing::info!(
+                task_id = %task.short_id,
+                role,
+                model_id = %model_id,
+                consecutive_failures = health.consecutive_failures,
+                cooldown_seconds_remaining = health.cooldown_seconds_remaining,
+                "CoordinatorActor: skipping provider-failure planner escalation — the model's \
+                 health breaker is auto-disabled for this scope, so the fault is the model's, \
+                 not the task's"
+            );
+        }
+        health.auto_disabled
+    }
+
     /// Trigger D: consecutive provider-error FAILED sessions without progress.
     ///
     /// A session that dies on a terminal provider/session error — the
@@ -639,13 +701,28 @@ impl CoordinatorActor {
     /// when an intervention was routed (the caller skips the ordinary backoff
     /// ladder for this reappearance); `false` while still below threshold.
     ///
-    /// Callers gate this on a genuine, non-throttle typed provider failure — a
-    /// transient throttle must decay on the cooldown ladder, not escalate.
+    /// Callers gate this on a genuine, TASK-ATTRIBUTABLE typed provider failure
+    /// — neither a throttle nor a transient provider fault (5xx / transport
+    /// death), both of which must decay on the cooldown ladder rather than
+    /// escalate (see [`crate::types::stored_streak_after_failure`]).
+    ///
+    /// Defense in depth: independently of that call-site gate, this refuses to
+    /// escalate while the model the task last ran on is auto-disabled by its own
+    /// health breaker for the task creator's scope. A tripped model-wide breaker
+    /// is direct evidence the fault belongs to the MODEL, not the task — during
+    /// the `2gq7` incident `model_health` already showed
+    /// `openai/gpt-5.6-sol` auto-disabled with 7 consecutive failures while the
+    /// coordinator was minting a planner-remediation task blaming the task's
+    /// transcript. This backstop holds even if a future classification regresses
+    /// or a version-skewed worker reports the coarser old class.
     pub(crate) async fn maybe_escalate_provider_failure_streak(
         &mut self,
         task: &djinn_core::models::Task,
         role: &'static str,
     ) -> bool {
+        if self.provider_breaker_blames_model(task, role).await {
+            return false;
+        }
         let strike_count = {
             let streak = self
                 .provider_failure_streak
@@ -679,11 +756,15 @@ impl CoordinatorActor {
         );
         let intervention_reason = format!(
             "Task failed on {strike_count} consecutive sessions with a terminal \
-             provider/session error and no durable status progress between them (status \
-             `{}`). The redispatched worker reproduces the same failure each time (e.g. a \
-             poisoned resume transcript that the provider rejects, or an unusable \
-             credential), so it is being handed to the Planner to decompose, rescope, or \
-             close rather than redispatched again.",
+             REQUEST-attributable provider error (the provider rejected this task's request \
+             body, or returned output that could not be parsed) and no durable status \
+             progress between them (status `{}`). Transient provider faults — 5xx / \
+             overloaded backends, transport deaths — and throttles are excluded from this \
+             streak and decay on the redispatch cooldown ladder instead, so the failure \
+             above is one the redispatched worker reproduces from the task's own state (for \
+             example a poisoned resume transcript the provider keeps rejecting). It is being \
+             handed to the Planner to decompose, rescope, or close rather than redispatched \
+             again.",
             task.status
         );
 
