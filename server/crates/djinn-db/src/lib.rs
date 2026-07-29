@@ -96,6 +96,10 @@ pub use repositories::{
         QueueBuildLeaseInput, QueueBuildLeaseResult, ReclaimAbsentBuildLeaseInput,
         ReclaimAbsentBuildLeaseOutcome,
     },
+    build_pod_permit::{
+        AcquireBuildPodPermitResult, BindBuildPodPermitResult, BuildPodPermitRepository,
+        BuildPodPermitRow, BuildPodPermitState, ReleaseBuildPodPermitResult,
+    },
     chat_interruption_notice::{
         ChatInterruptionNotice, ChatInterruptionNoticeRepository, CreateChatInterruptionNotice,
     },

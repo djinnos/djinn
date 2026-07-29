@@ -4,6 +4,7 @@ pub mod agent;
 pub mod audit_sampler;
 pub mod build_admission_denial;
 pub mod build_lease;
+pub mod build_pod_permit;
 pub mod chat_interruption_notice;
 pub mod code_chunk;
 pub mod commit_file_changes;
