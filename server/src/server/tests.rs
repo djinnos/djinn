@@ -14,6 +14,8 @@ mod metrics_debug_dispatch;
 mod misc;
 #[path = "tests/oauth.rs"]
 mod oauth;
+#[path = "tests/readiness.rs"]
+mod readiness;
 #[path = "tests/router.rs"]
 mod router;
 #[path = "tests/startup_reconnectability.rs"]
