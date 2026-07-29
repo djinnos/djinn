@@ -33,6 +33,7 @@ fn uid_input(input: &ReserveAdmissionInput, object_uid: &str) -> UidFencedAdmiss
     UidFencedAdmissionInput {
         key: input.key.clone(),
         object_uid: object_uid.into(),
+        object_name: None,
     }
 }
 
@@ -734,5 +735,62 @@ async fn a_terminal_callback_retires_a_create_whose_uid_was_never_observed() {
         .await
         .is_err(),
         "a terminal callback for a different object must not rewrite the row"
+    );
+}
+
+/// The object identity a Live row is judged by must describe a real Kubernetes
+/// object, and it may only be finalized by the transition that binds the UID.
+///
+/// A task-run reservation records a provisional `task-run-{task_id}-{gen}`
+/// because its slot is bought before the task-run exists. Left that way, every
+/// LIST/GET the reconciler makes about the row asks about a name no object can
+/// bear, and the authoritative `NotFound` that comes back reads as proof of
+/// deletion while the pod is running. A warm reservation is the opposite case:
+/// it committed to its real name before the POST and `mark_create_started`
+/// fenced on it, so nothing may overwrite it.
+#[tokio::test]
+async fn mark_live_finalizes_a_provisional_object_name_and_never_rewrites_a_committed_one() {
+    let db = Database::open_in_memory().unwrap();
+    let repo = AdmissionJournalRepository::new(db);
+
+    let task = input(AdmissionDomain::TaskObservation, "provisional", 0);
+    repo.reserve(&task).await.unwrap();
+    repo.mark_create_started(&create_started(&task))
+        .await
+        .unwrap();
+    let live = repo
+        .mark_live(&UidFencedAdmissionInput {
+            key: task.key.clone(),
+            object_uid: "task-run-42".into(),
+            object_name: Some("djinn-taskrun-task-run-42".into()),
+        })
+        .await
+        .unwrap();
+    assert_eq!(live.state, AdmissionState::Live);
+    assert_eq!(live.object_name, "djinn-taskrun-task-run-42");
+    assert_eq!(live.object_uid.as_deref(), Some("task-run-42"));
+
+    // Replayed on an already-Live row, the callback is a no-op: a settled
+    // identity may never be rewritten out from under a reclamation that has
+    // already read it.
+    let replayed = repo
+        .mark_live(&UidFencedAdmissionInput {
+            key: task.key.clone(),
+            object_uid: "task-run-42".into(),
+            object_name: Some("djinn-taskrun-something-else".into()),
+        })
+        .await
+        .unwrap();
+    assert_eq!(replayed.object_name, "djinn-taskrun-task-run-42");
+
+    let warm = input(AdmissionDomain::WarmBuild, "committed", 0);
+    repo.reserve(&warm).await.unwrap();
+    repo.mark_create_started(&create_started(&warm))
+        .await
+        .unwrap();
+    let warm_live = repo.mark_live(&uid_input(&warm, "k8s-uid")).await.unwrap();
+    assert_eq!(
+        warm_live.object_name, warm.object_name,
+        "a name committed before the POST is the truth already"
     );
 }

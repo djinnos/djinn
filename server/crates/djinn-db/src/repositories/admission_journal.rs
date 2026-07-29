@@ -160,6 +160,21 @@ pub struct CreateStartedInput {
 pub struct UidFencedAdmissionInput {
     pub key: AdmissionJournalKey,
     pub object_uid: String,
+    /// The Kubernetes object name this generation actually created, when the
+    /// reservation could not yet know it.
+    ///
+    /// A warm reservation commits to a deterministic Job name before the POST
+    /// and passes `None` here: its recorded name is already the real one, and
+    /// rewriting it would erase the identity `mark_create_started` fenced.
+    ///
+    /// A task-run reservation cannot. Its slot is acquired before the task-run
+    /// exists, so it records a provisional `task-run-{task_id}-{generation}`
+    /// that no Kubernetes object will ever bear. Left that way, every LIST/GET
+    /// the reconciler makes about the row is a question about a name that
+    /// cannot match — an authoritative `NotFound` that reads as proof of
+    /// deletion while the pod runs. The live callback is the first moment the
+    /// real name is known, so it is the moment the row stops lying.
+    pub object_name: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -362,7 +377,18 @@ impl AdmissionJournalRepository {
         }
         let result = match row.state {
             AdmissionState::CreateInFlight | AdmissionState::CreateUnknown => {
-                update_state(&mut tx, &input.key, "live", Some(&input.object_uid)).await?
+                // `object_name` is finalized on the SAME transition that binds
+                // the UID, and only on the transition INTO Live. An already-Live
+                // row keeps the name it was adopted or marked live under, so a
+                // replayed callback can never rewrite a settled identity out
+                // from under a reclamation that already read it.
+                enter_live(
+                    &mut tx,
+                    &input.key,
+                    &input.object_uid,
+                    input.object_name.as_deref(),
+                )
+                .await?
             }
             AdmissionState::Live => row,
             state => return Err(invalid_state("mark live", state)),
@@ -978,6 +1004,32 @@ async fn update_state(
 ) -> DbResult<AdmissionJournalRow> {
     let row = sqlx::query_as::<_, JournalDbRow>(&format!("UPDATE admission_journal SET state = $1, object_uid = COALESCE($2, object_uid), updated_at = now(), terminal_at = CASE WHEN $3 THEN now() ELSE terminal_at END WHERE domain = $4 AND work_id = $5 AND generation = $6 RETURNING {JOURNAL_COLUMNS}"))
         .bind(state).bind(object_uid).bind(state == "terminal").bind(key.domain.as_str()).bind(&key.work_id).bind(key.generation).fetch_one(&mut **tx).await?;
+    row.try_into()
+}
+
+/// Move one generation into `live`, binding its UID and — when the reservation
+/// could not know it — the Kubernetes object name it actually created.
+///
+/// `COALESCE` on the name so that passing `None` is exactly `update_state`:
+/// a reservation that already committed to a real name keeps it.
+async fn enter_live(
+    tx: &mut Transaction<'_, Postgres>,
+    key: &AdmissionJournalKey,
+    object_uid: &str,
+    object_name: Option<&str>,
+) -> DbResult<AdmissionJournalRow> {
+    let row = sqlx::query_as::<_, JournalDbRow>(&format!(
+        "UPDATE admission_journal SET state = 'live', object_uid = $1, \
+         object_name = COALESCE($2, object_name), updated_at = now() \
+         WHERE domain = $3 AND work_id = $4 AND generation = $5 RETURNING {JOURNAL_COLUMNS}"
+    ))
+    .bind(object_uid)
+    .bind(object_name)
+    .bind(key.domain.as_str())
+    .bind(&key.work_id)
+    .bind(key.generation)
+    .fetch_one(&mut **tx)
+    .await?;
     row.try_into()
 }
 
