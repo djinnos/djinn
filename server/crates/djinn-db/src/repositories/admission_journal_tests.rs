@@ -794,3 +794,83 @@ async fn mark_live_finalizes_a_provisional_object_name_and_never_rewrites_a_comm
         "a name committed before the POST is the truth already"
     );
 }
+
+/// `creator_server_epoch` records who CREATED the object, and adoption never
+/// rewrites it.
+///
+/// This is worth pinning explicitly because the opposite was believed, and the
+/// belief mattered: `BuildAdmissionReconciler` passes its own
+/// `server_epoch()` into every `adopt_live` call, which reads as "adoption
+/// transfers ownership to the adopting process". If it did, adoption would move
+/// the pre-Live reclamation fence in `is_reclaimable` — the clause that refuses
+/// to retire a row under the current process's own epoch, and for a
+/// `task_observation` row the ONLY protection a live work item has, because the
+/// LIST and GET clauses are structurally vacuous for it.
+///
+/// It does not. `update_state` writes `state`, `object_uid`, `updated_at` and
+/// `terminal_at` and touches no other column, so the epoch supplied here is
+/// consumed by the INSERT arm alone — the case where an orphan Kubernetes
+/// object has no journal row and there is no predecessor value to preserve.
+/// Both halves are asserted below, because "the field is not written" is only
+/// meaningful next to a case where it is.
+#[tokio::test]
+async fn adoption_preserves_the_creator_epoch_and_stamps_only_a_row_it_creates() {
+    let repo = AdmissionJournalRepository::new(Database::open_in_memory().unwrap());
+
+    // A predecessor's unresolved create, adopted by a later process.
+    let created_by_predecessor = input(AdmissionDomain::TaskObservation, "adopted-row", 0);
+    assert_eq!(created_by_predecessor.creator_server_epoch, "epoch-1");
+    repo.reserve(&created_by_predecessor).await.unwrap();
+    repo.mark_create_started(&create_started(&created_by_predecessor))
+        .await
+        .unwrap();
+    repo.mark_create_unknown(&created_by_predecessor.key)
+        .await
+        .unwrap();
+
+    let adopted = repo
+        .adopt_live(&AdoptLiveAdmissionInput {
+            key: created_by_predecessor.key.clone(),
+            workload_kind: AdmissionWorkloadKind::Task,
+            creator_server_epoch: "epoch-2-the-adopting-process".into(),
+            object_name: created_by_predecessor.object_name.clone(),
+            object_uid: "uid-observed-by-the-adopter".into(),
+        })
+        .await
+        .expect("an unresolved create whose object is live is adoptable");
+    assert_eq!(adopted.state, AdmissionState::Live);
+    assert_eq!(
+        adopted.object_uid.as_deref(),
+        Some("uid-observed-by-the-adopter"),
+        "adoption records the UID it observed"
+    );
+    assert_eq!(
+        adopted.creator_server_epoch, "epoch-1",
+        "adoption must not transfer ownership away from the process that created the object"
+    );
+
+    // The INSERT arm: an orphan object with no journal row at all. Here the
+    // adopting process IS the only process on record, so its epoch is the
+    // honest answer — and, being a fresh row, there is nothing it can shield
+    // that was not already this process's to shield.
+    let orphan = AdmissionJournalKey {
+        domain: AdmissionDomain::WarmBuild,
+        work_id: "orphan-object-with-no-row".into(),
+        generation: 0,
+    };
+    let inserted = repo
+        .adopt_live(&AdoptLiveAdmissionInput {
+            key: orphan.clone(),
+            workload_kind: AdmissionWorkloadKind::Warm,
+            creator_server_epoch: "epoch-2-the-adopting-process".into(),
+            object_name: "djinn-warm-orphan".into(),
+            object_uid: "uid-orphan".into(),
+        })
+        .await
+        .expect("an object with no row is adopted by inserting one");
+    assert_eq!(inserted.state, AdmissionState::Live);
+    assert_eq!(
+        inserted.creator_server_epoch, "epoch-2-the-adopting-process",
+        "a row adoption itself creates belongs to the adopting process"
+    );
+}
