@@ -484,6 +484,51 @@ async fn image_build_jobs_are_recognised_and_never_block_the_inventory_gate() {
     );
 }
 
+/// A SCIP code-graph index Job shares the namespace with admission workloads.
+/// It takes no build lease and carries no admission identity — its CPU is
+/// accounted through `djinn.io/capacity-reserved` / `protected_mcpu` instead —
+/// so it must never be mistaken for an unclassifiable build workload. In
+/// production on 2026-07-29 one healthy rust-analyzer index marked the gate
+/// pending and kept Enforce fail-closed for its whole 4335s budget, denying
+/// every worker, reviewer, and planner dispatch with `controller_not_admitting`.
+#[tokio::test]
+async fn scip_index_jobs_are_recognised_and_never_block_the_inventory_gate() {
+    // Exactly the labels the real Job carries (djinn-k8s/src/scip_job.rs).
+    let scip_index = record(
+        "djinn-scip-019ea3bd-a305-73e3-806c-4edcc96ebfe2-f13d031f3551",
+        Some("uid-scip-index"),
+        &[
+            ("djinn.app/component", "scip-index"),
+            ("djinn.app/scip-index", "true"),
+            ("djinn.io/capacity-reserved", "true"),
+            (
+                "djinn.app/project-id",
+                "019ea3bd-a305-73e3-806c-4edcc96ebfe2",
+            ),
+        ],
+    );
+    let inventory = Arc::new(FakeInventory::new(vec![
+        scip_index,
+        labeled("real-work", "uid-work", "work", "0"),
+    ]));
+    let controller = controller(BuildAdmissionMode::Enforce, 3).await;
+    let report = BuildAdmissionReconciler::new(controller.clone(), inventory)
+        .reconcile()
+        .await;
+
+    assert!(
+        report.blockers.is_empty(),
+        "a SCIP index must not block the gate: {:?}",
+        report.blockers
+    );
+    assert_eq!(report.adopted, 1, "only the admission workload is adopted");
+    assert_ne!(
+        controller.readiness(),
+        BuildAdmissionReadiness::InventoryPending,
+        "the inventory gate must complete while a code-graph index is running"
+    );
+}
+
 /// A degraded API server answers `Uncertain`, which is not evidence. The row
 /// keeps occupying until a probe can actually answer.
 #[tokio::test]
