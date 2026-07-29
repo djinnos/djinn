@@ -788,7 +788,7 @@ impl CoordinatorActor {
         &mut self,
         proposal_id: &str,
         accept: bool,
-        _feedback: Option<String>,
+        feedback: Option<String>,
     ) -> Result<(), String> {
         let Some((run_id, state)) = self
             .active_refinements
@@ -805,29 +805,17 @@ impl CoordinatorActor {
             return Err("human review requires an exact durable refinement run".into());
         }
 
-        // The head may have changed after the Judge parked the tribunal. Check
-        // readiness before asking the repository to atomically terminalize the
-        // exact parked generation.
-        if accept {
-            let readiness = self.evaluate_proposal_readiness(proposal_id).await;
-            if !readiness.as_ref().is_some_and(|result| result.ready) {
-                let context = readiness
-                    .as_ref()
-                    .map(Self::format_readiness_context)
-                    .unwrap_or_else(|| {
-                        "Current proposal head could not be resolved for shared DoR/lint readiness."
-                            .to_string()
-                    });
-                return Err(format!(
-                    "cannot accept refinement while current-head machine readiness is blocking: {context}"
-                ));
-            }
-        }
-
         let repo = ProposalRepository::new(
             self.db.clone(),
             crate::events::event_bus_for(&self.events_tx),
         );
+
+        // The head may have changed after the Judge parked the tribunal. Check
+        // readiness before asking the repository to atomically terminalize the
+        // exact parked generation.
+        if accept && let Some(blocked) = self.accept_readiness_block(&repo, proposal_id).await {
+            return Err(blocked);
+        }
         let resolved = repo
             .resolve_refinement_human_review(ResolveRefinementHumanReviewRequest {
                 run_id: state.run_id.clone(),
@@ -840,6 +828,33 @@ impl CoordinatorActor {
             return Err("exact refinement run is no longer awaiting human review".into());
         }
 
+        // The reviewer's note is part of the decision, not decoration: it is the
+        // only record of WHY a refined spec was kept or reverted. Persist it on
+        // the same durable lifecycle trail every other human review action uses
+        // (`refinement_awaiting_review`, `verdict_override`).
+        let meta = serde_json::json!({
+            "source": "human_review_resolution",
+            "event": "refinement_review_resolved",
+            "decision": if accept { "accept" } else { "reject" },
+            "accept": accept,
+            "run_id": state.run_id,
+            "generation": state.generation,
+            "reviewer_feedback": feedback
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty()),
+        });
+        if let Err(error) = repo
+            .record_refinement_lifecycle(proposal_id, "refinement_review_resolved", Some(&meta))
+            .await
+        {
+            tracing::warn!(
+                proposal_id = %proposal_id,
+                %error,
+                "failed to persist human refinement review resolution metadata"
+            );
+        }
+
         if let Some(current) = self.active_refinements.get_mut(&run_id) {
             current.resolve_human_review(accept, false);
         }
@@ -848,6 +863,55 @@ impl CoordinatorActor {
             .retain(|_, state| !state.is_complete());
         tracing::info!(proposal_id = %proposal_id, accept, run_id = %run_id, "Human resolved exact refinement review");
         Ok(())
+    }
+
+    /// Why an accept cannot proceed, or `None` when it may.
+    ///
+    /// Deterministic DoR readiness is not the last word: `ReadinessPanel`
+    /// advertises a "Record override…" control, and the composed sign-off gate
+    /// honours a current override. Accept must consult the SAME authority
+    /// (`current_human_gate_authority`) or that escape hatch silently does
+    /// nothing here. Spec-integrity failures stay blocking with or without an
+    /// override, exactly as the composed gate treats them.
+    async fn accept_readiness_block(
+        &self,
+        repo: &ProposalRepository,
+        proposal_id: &str,
+    ) -> Option<String> {
+        let readiness = self.evaluate_proposal_readiness(proposal_id).await;
+        let Some(readiness) = readiness else {
+            return Some(
+                "cannot accept refinement while current-head machine readiness is blocking: \
+                 Current proposal head could not be resolved for shared DoR/lint readiness."
+                    .to_string(),
+            );
+        };
+        if readiness.ready {
+            return None;
+        }
+        let integrity_failed = readiness.failures.iter().any(|failure| {
+            failure.check
+                == djinn_control_plane::tools::proposal_readiness::ReadinessCheck::SpecIntegrity
+        });
+        if !integrity_failed {
+            let proposal = repo.get(proposal_id).await.ok().flatten();
+            if let Some(proposal) = proposal.as_ref()
+                && djinn_control_plane::tools::proposal_tools::signoff::current_human_gate_authority(
+                    repo, proposal,
+                )
+                .await
+            {
+                tracing::info!(
+                    proposal_id,
+                    "accepting refinement over blocking machine readiness under a current human override"
+                );
+                return None;
+            }
+        }
+        Some(format!(
+            "cannot accept refinement while current-head machine readiness is blocking: {}",
+            Self::format_readiness_context(&readiness)
+        ))
     }
 
     /// Stop persistence is exclusively owned by exact run transitions.  This

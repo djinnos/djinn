@@ -118,7 +118,15 @@ async fn current_human_accept_authority(
     }
 }
 
-async fn current_human_gate_authority(
+/// Whether a *current* human authority overrides deterministic readiness for
+/// this proposal's head revision: an explicit `verdict_override` recorded on the
+/// latest revision, or a human-accepted refinement stop on the latest revision.
+///
+/// This is the single authority the composed sign-off/graduation gate consults,
+/// and the same one every other human-review action must consult — a second
+/// implementation is how the "Record override…" escape hatch came to unblock
+/// sign-off but not the tribunal's accept action.
+pub async fn current_human_gate_authority(
     repo: &ProposalRepository,
     proposal: &djinn_core::models::proposal::Proposal,
 ) -> bool {

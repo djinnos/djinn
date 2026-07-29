@@ -514,6 +514,17 @@ fn debug_short_id(task_id: &str) -> String {
     task_id.chars().take(8).collect()
 }
 
+/// Whether a disposable projection is pinned to a human/evidence park. Such a
+/// projection carries the parked round and phase, so it can only ever agree
+/// with the durable ledger while the park is still recorded.
+fn is_parked_projection(state: &super::refinement::RefinementLoopState) -> bool {
+    matches!(
+        state.phase,
+        super::refinement::RefinementPhase::AwaitingHumanReview
+            | super::refinement::RefinementPhase::AwaitingEvidence
+    )
+}
+
 impl CoordinatorActor {
     pub(super) fn new(
         deps: CoordinatorDeps,
@@ -1598,6 +1609,27 @@ impl CoordinatorActor {
             || exact.generation != current.generation
             || !matches!(exact.liveness, RefinementLivenessResult::Live { .. })
         {
+            return;
+        }
+        // A park that the durable ledger has already cleared (a human demanded
+        // another round out of an awaiting-review park) leaves a projection
+        // pinned to the parked phase and the parked round. The durable
+        // dispatcher then reads the run's fresh intent, finds the projection's
+        // phase/round disagree, and discards its own registration — the round
+        // dispatches but its outcome is never processed. The ledger is the
+        // authority here: drop the superseded projection and let the dispatcher
+        // rebuild it from the intent's real coordinates.
+        if self.active_refinements.get(run_id).is_some_and(|state| {
+            state.generation == exact.generation && is_parked_projection(state)
+        }) && exact.snapshot.park.is_none()
+        {
+            self.active_refinements.remove(run_id);
+            self.refinement_sessions.remove(run_id);
+            tracing::info!(
+                run_id,
+                generation = exact.generation,
+                "durable refinement park was cleared; dropped the superseded parked projection"
+            );
             return;
         }
         // A replay is only a wake hint. Preserve an already-advanced projection
