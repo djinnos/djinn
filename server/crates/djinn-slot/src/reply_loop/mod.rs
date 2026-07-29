@@ -44,3 +44,8 @@ pub use turn::{ReplyLoopContext, run_reply_loop};
 #[cfg(test)]
 #[allow(clippy::await_holding_lock)]
 mod tests;
+
+/// Bounded retry of transient MID-STREAM provider errors (see
+/// `streaming::MAX_STREAM_EVENT_RETRIES`).
+#[cfg(test)]
+mod streaming_retry_tests;
