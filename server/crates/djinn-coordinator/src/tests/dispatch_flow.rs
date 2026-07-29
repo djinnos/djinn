@@ -168,6 +168,7 @@ async fn dispatch_exhaustion_cap_hands_pr_to_poller_and_force_closes_no_pr() {
                 "worker",
                 &[String::from("m-a"), String::from("m-b")],
                 &[],
+                false,
             )
             .await;
     }
@@ -178,6 +179,7 @@ async fn dispatch_exhaustion_cap_hands_pr_to_poller_and_force_closes_no_pr() {
                 "worker",
                 &[String::from("m-a"), String::from("m-b")],
                 &[],
+                false,
             )
             .await;
     }
@@ -229,6 +231,7 @@ async fn single_candidate_exhaustion_surfaces_dedup_operator_signal() {
                 "worker",
                 std::slice::from_ref(&model),
                 &[],
+                false,
             )
             .await;
     }
@@ -242,6 +245,7 @@ async fn single_candidate_exhaustion_surfaces_dedup_operator_signal() {
             "worker",
             std::slice::from_ref(&model),
             &[],
+            false,
         )
         .await;
     let entries = repo.list_activity(&single_task.id).await.unwrap();
@@ -266,6 +270,7 @@ async fn single_candidate_exhaustion_surfaces_dedup_operator_signal() {
             "worker",
             std::slice::from_ref(&model),
             &[],
+            false,
         )
         .await;
     let entries = repo.list_activity(&single_task.id).await.unwrap();
@@ -290,6 +295,7 @@ async fn single_candidate_exhaustion_surfaces_dedup_operator_signal() {
                     String::from("zai/glm-5.2"),
                 ],
                 &[],
+                false,
             )
             .await;
     }

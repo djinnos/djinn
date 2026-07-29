@@ -150,6 +150,23 @@ pub(super) struct CoordinatorActor {
     /// successful stage transition to a different dispatch role.
     // Persisted in dispatch_state — see epic n6xw and proposal 8ipw
     pub(super) dispatch_failure_streak: HashMap<String, u32>,
+    /// Task UUID → count of consecutive failover-chain exhaustions in which the
+    /// model-health breaker was open for **every** candidate, so nothing was
+    /// actually attempted.
+    ///
+    /// Deliberately NOT `dispatch_failure_streak`: those exhaustions are not the
+    /// task's fault and must never advance terminal-close accounting (a
+    /// scope-wide provider outage or one revoked credential would otherwise
+    /// force-close every ready task of that user once the ladder reached
+    /// [`crate::types::MAX_DISPATCH_FAILURES`]). This counter exists only to
+    /// escalate the retry cadence — it feeds `escalating_dispatch_cooldown` so
+    /// the coordinator backs off instead of re-walking the task every tick.
+    ///
+    /// Ephemeral (restart-safe-to-lose): losing it only restarts the blameless
+    /// backoff ladder at its first rung, which is harmless. Cleared on a
+    /// successful dispatch, on a planned-completion settle, and whenever a
+    /// genuinely attempted (blameable) exhaustion is recorded for the task.
+    pub(super) breaker_open_backoff_streak: HashMap<String, u32>,
     /// Shared tracker for in-flight background tasks.
     pub(super) background_work_tracker: BackgroundWorkTracker,
     /// Cached source for the stranded-ready doctor check. Refreshed each tick
@@ -627,6 +644,7 @@ impl CoordinatorActor {
             provisional_admissions: HashMap::new(),
             dispatch_cooldowns: HashMap::new(),
             dispatch_failure_streak: HashMap::new(),
+            breaker_open_backoff_streak: HashMap::new(),
             background_work_tracker,
             stranded_ready_source: Some(Arc::clone(&stranded_ready_source)),
             closed_parent_open_children_source: Some(Arc::clone(

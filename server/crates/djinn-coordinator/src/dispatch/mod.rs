@@ -45,3 +45,9 @@ pub(crate) use outcome::DispatchOutcome;
 #[allow(unused_imports)]
 pub(crate) use retry::PostInterventionHistory;
 pub(crate) use retry::RemediationKind;
+
+/// Threshold at which a task blocked by an all-candidates-open health breaker
+/// gets its operator-visible activity entry. Test-only re-export so the
+/// blameless-exhaustion regression suite asserts against the real constant.
+#[cfg(test)]
+pub(crate) use task_dispatch::BREAKER_OPEN_EXHAUSTION_SIGNAL_THRESHOLD;

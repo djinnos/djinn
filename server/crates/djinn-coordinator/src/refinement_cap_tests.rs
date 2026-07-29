@@ -151,6 +151,7 @@ pub(crate) fn build_refinement_actor(
         provisional_admissions: HashMap::new(),
         dispatch_cooldowns: HashMap::new(),
         dispatch_failure_streak: HashMap::new(),
+        breaker_open_backoff_streak: HashMap::new(),
         background_work_tracker: BackgroundWorkTracker::default(),
         auto_merge_tracker: AutoMergeTracker::default(),
         consolidation_runner: Arc::new(DbConsolidationRunner::new(db.clone())),
