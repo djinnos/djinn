@@ -547,7 +547,10 @@ fn validate_evidence_argv(argv: &[String]) -> Result<&'static str, EvidenceError
         "jq" => jq_args(args),
         "file" => options_only(
             args,
-            &["-b", "-i", "-L", "-z", "--brief", "--mime", "--mime-type"],
+            // `-z` / `--uncompress` may invoke decompression helpers, which
+            // is a transitive process-spawn surface. Evidence policy permits
+            // only direct inspection by the pinned `file` binary.
+            &["-b", "-i", "-L", "--brief", "--mime", "--mime-type"],
         ),
         "stat" => options_with_values(args, &["-L", "--dereference"], &["-c", "--format"]),
         "du" => options_with_values(
@@ -1232,6 +1235,7 @@ mod tests {
             vec!["tr", "--help"],
             vec!["jq", "--from-file", "script.jq", "input.json"],
             vec!["file", "-m", "magic", "README.md"],
+            vec!["file", "-z", "archive.gz"],
             vec!["stat", "--printf", "%n", "README.md"],
             vec!["du", "--time", "README.md"],
             vec!["tree", "../outside"],
