@@ -617,8 +617,7 @@ fn a_recent_task_edit_cannot_reset_the_clock() {
 /// basis says so, so the reported number can be discounted.
 #[test]
 fn fallback_reports_low_confidence_and_its_basis() {
-    let (at, confidence, basis) =
-        strand_clock("2026-07-27T09:00:00.000Z", None, None, None, None);
+    let (at, confidence, basis) = strand_clock("2026-07-27T09:00:00.000Z", None, None, None, None);
     assert_eq!(at, "2026-07-27T09:00:00.000Z");
     assert_eq!(confidence, "low");
     assert_eq!(basis, "task_updated_at");

@@ -516,7 +516,10 @@ mod tests {
         // breaker path instead of re-probing a saturated endpoint.
         for code in ["server_is_overloaded", "overloaded_error"] {
             assert_eq!(
-                ProviderError::from_stream_error(Some(code), "Our servers are currently overloaded"),
+                ProviderError::from_stream_error(
+                    Some(code),
+                    "Our servers are currently overloaded"
+                ),
                 ProviderError::RateLimit {
                     retry_after_ms: None
                 },
