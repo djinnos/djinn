@@ -2828,101 +2828,71 @@ impl ProposalRepository {
     /// `linked_spike_task_id` / `needs_evidence_claim` untouched for downstream
     /// recovery/resolution code.
     pub async fn persist_terminal_linked_spike_evidence_lifecycle(
-        &self,
-        proposal_id: &str,
-        spike_task_id: &str,
-        spike_task_status: &str,
+        &self, proposal_id: &str, spike_task_id: &str, spike_task_status: &str,
         spike_task_close_reason: Option<&str>,
     ) -> Result<TerminalLinkedEvidenceSpikeOutcome> {
         self.db.ensure_initialized().await?;
-
-        let Some(proposal) = self.get(proposal_id).await? else {
-            return Ok(TerminalLinkedEvidenceSpikeOutcome::NotLinked);
+        if !evidence_spike_task_is_terminal(spike_task_status) { return Ok(TerminalLinkedEvidenceSpikeOutcome::NotTerminal); }
+        // This lock serializes live close and recovery, and rechecks the current
+        // claim before either consumer can record a lifecycle revision.
+        let mut tx = self.db.pool().begin().await?;
+        let proposal = sqlx::query("SELECT linked_spike_task_id, needs_evidence_claim, latest_revision_seq FROM proposals WHERE id = $1 FOR UPDATE")
+            .bind(proposal_id).fetch_optional(&mut *tx).await?;
+        let Some(proposal) = proposal else { tx.commit().await?; return Ok(TerminalLinkedEvidenceSpikeOutcome::NotLinked); };
+        let linked: Option<String> = proposal.try_get("linked_spike_task_id")?;
+        if linked.as_deref() != Some(spike_task_id) { tx.commit().await?; return Ok(TerminalLinkedEvidenceSpikeOutcome::NotLinked); }
+        let claim_raw: Option<String> = proposal.try_get("needs_evidence_claim")?;
+        let seq: i32 = proposal.try_get("latest_revision_seq")?;
+        let (judge_task_id, round, against_revision_seq) = match NeedsEvidenceClaim::parse_stored(claim_raw.as_deref()) {
+            Ok(Some(claim)) => (claim.created_by_task_id, claim.round, claim.against_revision_seq),
+            Ok(None) | Err(_) => (String::new(), 0, 0),
         };
-        if proposal.linked_spike_task_id.as_deref() != Some(spike_task_id) {
-            return Ok(TerminalLinkedEvidenceSpikeOutcome::NotLinked);
+        if let Some(event_kind) = sqlx::query_scalar::<_, String>(
+            "SELECT event_kind FROM proposal_revisions WHERE proposal_id = $1 AND event_kind IN ('refinement_evidence_received', 'refinement_evidence_failed') AND event_metadata->'metadata'->>'proposal_id' = $1 AND event_metadata->'metadata'->>'spike_task_id' = $2 ORDER BY created_at DESC, id DESC LIMIT 1")
+            .bind(proposal_id).bind(spike_task_id).fetch_optional(&mut *tx).await? {
+            tx.commit().await?;
+            return Ok(TerminalLinkedEvidenceSpikeOutcome::AlreadyRecorded { event_kind });
         }
-
-        let (judge_task_id, round, against_revision_seq) =
-            match NeedsEvidenceClaim::parse_stored(proposal.needs_evidence_claim.as_deref()) {
-                Ok(Some(claim)) => (
-                    claim.created_by_task_id,
-                    claim.round,
-                    claim.against_revision_seq,
-                ),
-                Ok(None) | Err(_) => (String::new(), 0, 0),
-            };
-
-        if let Some(existing) = self
-            .existing_evidence_terminal_lifecycle_event(proposal_id, spike_task_id)
-            .await?
-        {
-            return Ok(TerminalLinkedEvidenceSpikeOutcome::AlreadyRecorded {
-                event_kind: existing,
-            });
-        }
-
-        if !evidence_spike_task_is_terminal(spike_task_status) {
-            return Ok(TerminalLinkedEvidenceSpikeOutcome::NotTerminal);
-        }
-
-        if evidence_spike_task_completed_successfully(spike_task_status, spike_task_close_reason) {
-            if let Some(findings) = self
-                .current_evidence_findings_for_linked_spike(proposal_id, spike_task_id)
-                .await?
-            {
-                self.record_evidence_received_with_findings(&judge_task_id, &findings)
-                    .await?;
-                return Ok(TerminalLinkedEvidenceSpikeOutcome::EvidenceReceived);
-            }
-
-            let reason = "missing_valid_findings".to_owned();
-            self.record_evidence_failed(
-                proposal_id,
-                spike_task_id,
-                &judge_task_id,
-                round,
-                against_revision_seq,
-                &reason,
-            )
-            .await?;
-            return Ok(TerminalLinkedEvidenceSpikeOutcome::EvidenceFailed { reason });
-        }
-
-        let reason = evidence_spike_failure_reason(spike_task_status, spike_task_close_reason);
-        self.record_evidence_failed(
-            proposal_id,
-            spike_task_id,
-            &judge_task_id,
-            round,
-            against_revision_seq,
-            &reason,
-        )
-        .await?;
-        Ok(TerminalLinkedEvidenceSpikeOutcome::EvidenceFailed { reason })
+        let success = evidence_spike_task_completed_successfully(spike_task_status, spike_task_close_reason);
+        let findings = if success { self.current_committed_evidence_findings_in_tx(&mut tx, proposal_id, spike_task_id, round, against_revision_seq).await? } else { None };
+        let (event_kind, metadata, outcome) = if let Some((entry_id, findings_metadata)) = findings {
+            (evidence_lifecycle_kind::EVIDENCE_RECEIVED,
+             EvidenceLifecycleMetadata::received_with_findings(proposal_id, spike_task_id, &judge_task_id, round, against_revision_seq, Some(&entry_id), Some(&findings_metadata)).to_event_metadata(),
+             TerminalLinkedEvidenceSpikeOutcome::EvidenceReceived)
+        } else {
+            let reason = if success { "missing_valid_findings".to_owned() } else { evidence_spike_failure_reason(spike_task_status, spike_task_close_reason) };
+            (evidence_lifecycle_kind::EVIDENCE_FAILED,
+             EvidenceLifecycleMetadata::failed(proposal_id, spike_task_id, &judge_task_id, round, against_revision_seq, &reason).to_event_metadata(),
+             TerminalLinkedEvidenceSpikeOutcome::EvidenceFailed { reason })
+        };
+        self.insert_lightweight_lifecycle_event_in_tx(&mut tx, proposal_id, seq, event_kind, Some(&metadata)).await?;
+        tx.commit().await?;
+        Ok(outcome)
     }
 
-    async fn existing_evidence_terminal_lifecycle_event(
-        &self,
-        proposal_id: &str,
-        spike_task_id: &str,
-    ) -> Result<Option<String>> {
-        for revision in self.revisions(proposal_id).await?.iter().rev() {
-            if revision.event_kind != evidence_lifecycle_kind::EVIDENCE_RECEIVED
-                && revision.event_kind != evidence_lifecycle_kind::EVIDENCE_FAILED
-            {
-                continue;
-            }
-            if let Ok(Some(meta)) =
-                EvidenceLifecycleMetadata::parse_event_metadata(revision.event_metadata.as_deref())
-                && meta.proposal_id == proposal_id
-                && meta.spike_task_id == spike_task_id
-            {
-                return Ok(Some(revision.event_kind.clone()));
-            }
+    /// A frozen-plan spike must have a committed V1 projection as well as its
+    /// exact compatibility row. Pre-plan linked spikes retain legacy behavior.
+    async fn current_committed_evidence_findings_in_tx(
+        &self, tx: &mut Transaction<'_, Postgres>, proposal_id: &str, spike_task_id: &str,
+        round: i32, against_revision_seq: i32,
+    ) -> Result<Option<(String, String)>> {
+        let has_plan = sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM evidence_plans WHERE spike_task_id = $1)")
+            .bind(spike_task_id).fetch_one(&mut **tx).await?;
+        if has_plan {
+            let committed_v1 = sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS(SELECT 1 FROM evidence_plans p JOIN evidence_finalized_projections f ON f.plan_id = p.id WHERE p.spike_task_id = $1 AND f.version = 1 AND f.payload->>'schema_version' = '1' AND f.payload->>'plan_id' = p.id AND jsonb_typeof(f.payload->'checks') = 'array' AND jsonb_typeof(f.payload->'findings') = 'array' AND jsonb_typeof(f.payload->'gaps') = 'array')")
+                .bind(spike_task_id).fetch_one(&mut **tx).await?;
+            if !committed_v1 { return Ok(None); }
         }
-        Ok(None)
+        let row = sqlx::query("SELECT id, body_metadata::text AS body_metadata FROM proposal_debate_trail WHERE proposal_id = $1 AND kind = 'evidence_findings' AND source_task_id = $2 AND round = $3 AND against_revision_seq = $4 ORDER BY created_at DESC, updated_at DESC, id DESC LIMIT 1")
+            .bind(proposal_id).bind(spike_task_id).bind(round).bind(against_revision_seq).fetch_optional(&mut **tx).await?;
+        let Some(row) = row else { return Ok(None) };
+        let Some(metadata) = row.try_get::<Option<String>, _>("body_metadata")? else { return Ok(None) };
+        let valid = EvidenceFindings::parse_stored(Some(&metadata)).ok().flatten().is_some_and(|findings| findings.validate().is_ok());
+        if !valid { return Ok(None); }
+        Ok(Some((row.try_get("id")?, metadata)))
     }
+
 
     /// Freeze or un-freeze a build. Frozen builds stay `building` but their
     /// epics' tasks are held out of dispatch (see `build_ready_where`).

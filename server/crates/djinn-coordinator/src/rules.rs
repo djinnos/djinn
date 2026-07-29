@@ -262,6 +262,13 @@ impl CoordinatorActor {
                     outcome = "AlreadyRecorded",
                     "CoordinatorActor: linked evidence spike terminal lifecycle already recorded"
                 );
+                // A process can crash after the lifecycle transaction commits
+                // but before clearing the link. Mirror recovery: only an
+                // already-recorded receipt is resumable; failures remain blocked.
+                if event_kind == "refinement_evidence_received" {
+                    self.resume_refinement_after_evidence_received(&proposal.id, &task.id)
+                        .await;
+                }
             }
             Ok(TerminalLinkedEvidenceSpikeOutcome::NotLinked) => tracing::debug!(
                 proposal_id = %proposal.id,
