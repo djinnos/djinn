@@ -101,6 +101,7 @@ fn spawn_counting_pool(running: Vec<String>) -> (SlotPoolHandle, Arc<Mutex<PoolC
                             duration_seconds: 0,
                             idle_seconds: 0,
                             activity_tracked: true,
+                            worker_activity_observed: true,
                             project_id: None,
                             token_count: 0,
                             turn_count: 0,

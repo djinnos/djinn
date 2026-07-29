@@ -75,6 +75,24 @@ pub struct RunningTaskInfo {
     /// Stall detection uses this to tell a genuinely-hung first call (aggressive
     /// cap) from a productive session that merely went quiet (full role budget).
     pub activity_tracked: bool,
+    /// Whether a REAL worker liveness signal has landed for this task — i.e.
+    /// the reply loop (in-process) or the pod's bridged `touch_activity` RPC
+    /// moved the tracker timestamp past the value the pool seeded at slot
+    /// reservation.
+    ///
+    /// This exists because [`Self::activity_tracked`] cannot answer that
+    /// question: the pool seeds the host `ActivityTracker` the moment a slot is
+    /// reserved (so a brand-new dispatch is not misread as a hung first call),
+    /// which is BEFORE `runtime.prepare` has even created the Kubernetes Job.
+    /// Between reservation and the worker's startup handshake the pod may be
+    /// `Pending` — unschedulable on CPU/memory requests, blocked by a
+    /// DiskPressure taint, or pulling its image — and `idle_seconds` is
+    /// measuring that scheduling delay, not an idle agent.
+    ///
+    /// `false` therefore means "`idle_seconds` is time-since-reservation, and
+    /// the pod may never have run"; `true` means the worker has spoken at least
+    /// once, so `idle_seconds` is a genuine idle measurement.
+    pub worker_activity_observed: bool,
     /// Project UUID the task belongs to, tracked in the pool so project-scoped
     /// queries can filter running tasks without depending on a DB session row
     /// (which does not exist during pre-session lifecycle stages).
