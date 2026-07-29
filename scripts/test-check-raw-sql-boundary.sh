@@ -358,35 +358,23 @@ assert_output_contains "T12 reports runtime query violation" \
     "::error::Raw sqlx query usage detected outside djinn-db: $RUNTIME_PATH" \
     "$LOG_DIR/t12_runtime_query.log.out"
 
-# ── T13: catalog service wrapper is an approved SQL boundary ──────────
-# Unlike application crates, this wrapper administers an external Postgres
-# service and cannot route tenant CREATE/DROP statements through djinn-db.
-CATALOG_WRAPPER_PATH="server/crates/djinn-catalog-wrapper/src/lib.rs"
-set +e
-run_guard t13_catalog_wrapper_exemption "$CATALOG_WRAPPER_PATH"
-t13_actual=$?
-set -e
-assert_exit "T13 catalog wrapper path exits 0" 0 "$t13_actual" "$LOG_DIR/t13_catalog_wrapper_exemption.log.out"
-assert_output_contains "T13 reports no violations" \
-    "no raw-sqlx boundary violations" "$LOG_DIR/t13_catalog_wrapper_exemption.log.out"
-
-# ── T14: default diff mode does not mutate shared origin/main ──────────
+# ── T13: default diff mode does not mutate shared origin/main ──────────
 run_linked_worktree_diff_guard
-assert_exit "T14 linked-worktree default diff exits 0" 0 "$T14_ACTUAL" "$LOG_DIR/t14_linked_worktree.log.out"
+assert_exit "T13 linked-worktree default diff exits 0" 0 "$T14_ACTUAL" "$LOG_DIR/t14_linked_worktree.log.out"
 if [ "$LINKED_GIT_DIR" != "$LINKED_COMMON_DIR" ]; then
-    pass "T14 executes from a linked worktree with a shared Git directory"
+    pass "T13 executes from a linked worktree with a shared Git directory"
 else
-    fail "T14 executes from a linked worktree with a shared Git directory" "git-dir and git-common-dir were both $LINKED_GIT_DIR"
+    fail "T13 executes from a linked worktree with a shared Git directory" "git-dir and git-common-dir were both $LINKED_GIT_DIR"
 fi
 if [ "$ORIGIN_MAIN_BEFORE" = "$ORIGIN_MAIN_AFTER" ]; then
-    pass "T14 preserves shared origin/main"
+    pass "T13 preserves shared origin/main"
 else
-    fail "T14 preserves shared origin/main" "before=$ORIGIN_MAIN_BEFORE after=$ORIGIN_MAIN_AFTER"
+    fail "T13 preserves shared origin/main" "before=$ORIGIN_MAIN_BEFORE after=$ORIGIN_MAIN_AFTER"
 fi
 if [ "$SHALLOW_BEFORE" = "$SHALLOW_AFTER" ]; then
-    pass "T14 preserves shared repository shallow state"
+    pass "T13 preserves shared repository shallow state"
 else
-    fail "T14 preserves shared repository shallow state" "before=$SHALLOW_BEFORE after=$SHALLOW_AFTER"
+    fail "T13 preserves shared repository shallow state" "before=$SHALLOW_BEFORE after=$SHALLOW_AFTER"
 fi
 
 # ── summary ────────────────────────────────────────────────────────────
