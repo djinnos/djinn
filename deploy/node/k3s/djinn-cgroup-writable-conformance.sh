@@ -271,10 +271,44 @@ wait_for_probe() {
   fi
 }
 
+# Prove the probe actually RAN on the requested node, not merely that it was
+# requested there. PodStatus has no node-name field of any kind — it carries
+# `hostIP`, `hostIPs` and `nominatedNodeName` — so a selector asking status for
+# one renders empty forever and can never equal a node name. The two
+# observations that do exist are the binding this program wrote
+# (`.spec.nodeName`) and the host the admitting kubelet reported
+# (`.status.hostIP`), cross-checked against the Node object's own InternalIP so
+# the kubelet doing the reporting is provably this node's.
 verify_node_identity() {
-  local identity
-  identity=$("$KUBECTL" get pod "$PROBE_NAME" -o 'jsonpath={.spec.nodeName}|{.status.nodeName}')
-  [[ "$identity" == "$NODE_NAME|$NODE_NAME" ]] || die "probe node identity mismatch: $identity"
+  local bound_node host_ip node_internal_ips address observed='' matched=0
+
+  bound_node=$("$KUBECTL" get pod "$PROBE_NAME" -o 'jsonpath={.spec.nodeName}')
+  [[ "$bound_node" == "$NODE_NAME" ]] ||
+    die "probe node identity mismatch: pod spec.nodeName=[$bound_node] requested node=[$NODE_NAME]"
+
+  host_ip=$("$KUBECTL" get pod "$PROBE_NAME" -o 'jsonpath={.status.hostIP}')
+  node_internal_ips=$("$KUBECTL" get node "$NODE_NAME" \
+    -o 'jsonpath={range .status.addresses[?(@.type=="InternalIP")]}{.address}{"\n"}{end}')
+
+  # Fail closed on each side independently. A probe the kubelet never admitted
+  # and a node that publishes no InternalIP both render empty, and empty must
+  # never compare equal to empty: that silent pass is the defect being fixed.
+  [[ -n "$host_ip" ]] ||
+    die "probe node identity mismatch: pod status.hostIP is empty, so no kubelet has reported a host for this probe (requested node=[$NODE_NAME])"
+  [[ -n "$node_internal_ips" ]] ||
+    die "probe node identity mismatch: node=[$NODE_NAME] publishes no InternalIP address (pod status.hostIP=[$host_ip])"
+
+  # A node may publish several InternalIP addresses — a dual-stack node
+  # publishes one per family — while the kubelet writes only the primary into
+  # status.hostIP. Membership of a whole address, never a substring test: an
+  # address is a prefix of longer addresses in the same subnet.
+  while IFS= read -r address; do
+    [[ -n "$address" ]] || continue
+    observed="${observed:+$observed }$address"
+    if [[ "$address" == "$host_ip" ]]; then matched=1; fi
+  done <<<"$node_internal_ips"
+  [[ $matched -eq 1 ]] ||
+    die "probe node identity mismatch: pod status.hostIP=[$host_ip] is not an InternalIP of node=[$NODE_NAME] (node InternalIPs=[$observed])"
 }
 
 # Runs as the root launcher phase of the sole probe process. It proves that the

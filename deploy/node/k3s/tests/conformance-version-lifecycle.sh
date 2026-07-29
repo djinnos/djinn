@@ -44,16 +44,46 @@ set -euo pipefail
 printf 'restart %s\n' "\$*" >>'$log'
 cp '$post_live' '$live'
 EOF
+  # The `get` arms render jsonpath selectors the way the real apiserver does.
+  # Crucially, a selector naming a field the Pod API does not have renders
+  # EMPTY rather than a node name, so a comparison against a nonexistent field
+  # fails here for exactly the reason it failed on the production node.
+  # Per-case identity observations come from the environment:
+  #   DJINN_FIXTURE_POD_NODE_NAME       .spec.nodeName on the probe
+  #   DJINN_FIXTURE_POD_HOST_IP         .status.hostIP on the probe
+  #   DJINN_FIXTURE_NODE_INTERNAL_IPS   the node's InternalIP addresses
   cat >"$dir/kubectl" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "\$*" >>'$log'
+selector=\${*: -1}
+pod_node_name=\${DJINN_FIXTURE_POD_NODE_NAME-$NODE}
+pod_host_ip=\${DJINN_FIXTURE_POD_HOST_IP-10.10.0.7}
+node_internal_ips=\${DJINN_FIXTURE_NODE_INTERNAL_IPS-10.10.0.7}
 case "\$1" in
   label) exit 0 ;;
   get)
-    if [ "\$2" = node ]; then exit 0; fi
-    if [ "\$2" = pod ] && [ "\${*: -2}" = '-o json' ]; then exit 0; fi
-    if [ "\$2" = pod ]; then printf '$NODE|$NODE'; exit 0; fi
+    if [ "\$2" = node ]; then
+      case "\$selector" in
+        # A {range} over InternalIP addresses emits one address per line.
+        *status.addresses*)
+          for address in \$node_internal_ips; do printf '%s\n' "\$address"; done ;;
+        # The eligibility label read must render empty: this program removed
+        # the label before anything else, and ensure_unlabeled proves it.
+        *) : ;;
+      esac
+      exit 0
+    fi
+    if [ "\$2" = pod ]; then
+      if [ "\$selector" = json ]; then exit 0; fi
+      rendered=\${selector#jsonpath=}
+      rendered=\${rendered//\\{.spec.nodeName\\}/\$pod_node_name}
+      rendered=\${rendered//\\{.status.hostIP\\}/\$pod_host_ip}
+      # PodStatus has no nodeName field. The apiserver renders it as nothing.
+      rendered=\${rendered//\\{.status.nodeName\\}/}
+      printf '%s' "\$rendered"
+      exit 0
+    fi
     ;;
   apply) cat >'$manifest'; exit 0 ;;
   wait) exit 0 ;;
@@ -152,6 +182,18 @@ else
   fail 'v3 success did not label the node'
 fi
 assert_probe_manifest v3
+# The identity proof must actually be performed on the passing path, otherwise
+# section 6's rejections would be guarding a check nothing ever reaches.
+if grep -Fq 'get pod' "$LOG" && grep -Fq 'jsonpath={.status.hostIP}' "$LOG"; then
+  ok 'v3 success read the host the kubelet reported for the probe'
+else
+  fail 'v3 success never read the probe status.hostIP'
+fi
+if grep -Fq '{range .status.addresses[?(@.type=="InternalIP")]}' "$LOG"; then
+  ok "v3 success cross-checked the node's own InternalIP"
+else
+  fail 'v3 success never read the node InternalIP'
+fi
 
 # ---------------------------------------------------------------------------
 # 2. The version-2 node keeps working, unchanged asset and all.
@@ -273,7 +315,86 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 6. Fixture mode: the success transcript is exact and every failure case,
+# 6. Node identity. The check must prove the probe RAN on the requested node,
+#    not merely that it was requested there. PodStatus has no `nodeName`
+#    field, so the only available cross-check is the admitting kubelet's
+#    reported `.status.hostIP` against the Node object's own InternalIP.
+#    Every empty observation must fail closed: an empty-vs-empty comparison
+#    that passes is precisely the defect these cases exist to forbid.
+# ---------------------------------------------------------------------------
+assert_identity_rejected() {
+  local name=$1
+  shift
+  assert_restored_after_restart "$name"
+  if grep -Fq 'probe node identity mismatch' "$CASE_DIR/stderr"; then
+    ok "$name reports a node identity mismatch"
+  else
+    fail "$name diagnosis: $(cat "$CASE_DIR/stderr")"
+  fi
+  local needle
+  for needle in "$@"; do
+    if grep -Fq "$needle" "$CASE_DIR/stderr"; then
+      ok "$name reports the observed value [$needle]"
+    else
+      fail "$name omitted [$needle] from: $(cat "$CASE_DIR/stderr")"
+    fi
+  done
+  # An unproven host must abort before any cgroup authorization observation.
+  if grep -q '^exec ' "$LOG"; then
+    fail "$name ran the cgroup probe on an unproven host"
+  else
+    ok "$name aborted before the cgroup probe"
+  fi
+}
+
+# The real production node publishes one InternalIP per address family while
+# the kubelet writes only the primary into status.hostIP. Whole-string equality
+# against the node's address list would reject this healthy node outright.
+run_case identity-dual-stack live-v3-vps-preinstall.toml live-v3-vps.toml 0 \
+  DJINN_FIXTURE_NODE_INTERNAL_IPS='10.10.0.7 fd00::7' \
+  DJINN_FIXTURE_POD_HOST_IP=10.10.0.7
+expect_eq 'identity-dual-stack status' 0 "$STATUS"
+expect_eq 'identity-dual-stack stdout' "$PASS_LINE" "$(cat "$CASE_DIR/stdout")"
+
+# The node lookup renders empty: no InternalIP is published at all.
+run_case identity-node-ip-empty live-v3-vps-preinstall.toml live-v3-vps.toml 0 \
+  DJINN_FIXTURE_NODE_INTERNAL_IPS=
+assert_identity_rejected identity-node-ip-empty \
+  'publishes no InternalIP address' 'status.hostIP=[10.10.0.7]'
+
+# The kubelet never reported a host for the probe.
+run_case identity-host-ip-empty live-v3-vps-preinstall.toml live-v3-vps.toml 0 \
+  DJINN_FIXTURE_POD_HOST_IP=
+assert_identity_rejected identity-host-ip-empty \
+  'status.hostIP is empty' 'requested node=[fixture-node]'
+
+# BOTH sides empty. A comparison of one empty rendering against another must
+# never satisfy the check; this is the exact hole `{.status.nodeName}` opened.
+run_case identity-both-empty live-v3-vps-preinstall.toml live-v3-vps.toml 0 \
+  DJINN_FIXTURE_POD_HOST_IP= DJINN_FIXTURE_NODE_INTERNAL_IPS=
+assert_identity_rejected identity-both-empty 'status.hostIP is empty'
+
+# A kubelet on some other host reported this probe.
+run_case identity-foreign-host-ip live-v3-vps-preinstall.toml live-v3-vps.toml 0 \
+  DJINN_FIXTURE_POD_HOST_IP=10.10.0.9
+assert_identity_rejected identity-foreign-host-ip \
+  'status.hostIP=[10.10.0.9]' 'node InternalIPs=[10.10.0.7]'
+
+# Address membership is compared whole. A substring test would accept this,
+# because 10.10.0.7 is a substring of the node's only address 10.10.0.71.
+run_case identity-substring-near-miss live-v3-vps-preinstall.toml live-v3-vps.toml 0 \
+  DJINN_FIXTURE_POD_HOST_IP=10.10.0.7 DJINN_FIXTURE_NODE_INTERNAL_IPS=10.10.0.71
+assert_identity_rejected identity-substring-near-miss \
+  'status.hostIP=[10.10.0.7]' 'node InternalIPs=[10.10.0.71]'
+
+# The binding half still has to hold on its own.
+run_case identity-bound-elsewhere live-v3-vps-preinstall.toml live-v3-vps.toml 0 \
+  DJINN_FIXTURE_POD_NODE_NAME=other-node
+assert_identity_rejected identity-bound-elsewhere \
+  'spec.nodeName=[other-node]' 'requested node=[fixture-node]'
+
+# ---------------------------------------------------------------------------
+# 7. Fixture mode: the success transcript is exact and every failure case,
 #    including the new version-mismatch case, removes eligibility only.
 # ---------------------------------------------------------------------------
 run_fixture_case() {
@@ -316,7 +437,7 @@ run_fixture_case handler-removed
 run_fixture_case version-mismatch
 
 # ---------------------------------------------------------------------------
-# 7. Load-bearing text a reviewer will diff, and sole ownership of the label.
+# 8. Load-bearing text a reviewer will diff, and sole ownership of the label.
 # ---------------------------------------------------------------------------
 conformance_text=$(cat "$CONFORMANCE")
 assert_contains() {
@@ -332,6 +453,18 @@ assert_contains 'WORKER_PROBE' "WORKER_PROBE='set -eu"
 assert_contains 'worker denial helper' 'must_deny() { if sh -c "$1"; then'
 assert_contains 'wait_for_probe' 'wait_for_probe() {'
 assert_contains 'verify_node_identity' 'verify_node_identity() {'
+# Both halves of the identity proof, by the fields that actually exist.
+assert_contains 'identity reads the probe binding' 'jsonpath={.spec.nodeName}'
+assert_contains 'identity reads the reported host' 'jsonpath={.status.hostIP}'
+assert_contains 'identity cross-checks the node InternalIP' \
+  '{range .status.addresses[?(@.type=="InternalIP")]}'
+# The regression guard for this whole change: PodStatus has no nodeName field,
+# so any selector naming one renders empty and can never prove a thing.
+case "$conformance_text" in
+  *'.status.nodeName'*)
+    fail 'conformance reads .status.nodeName, a field the Pod API does not have' ;;
+  *) ok 'preserved: conformance never reads the nonexistent .status.nodeName' ;;
+esac
 assert_contains 'probe-only RuntimeClass' "PROBE_RUNTIME_CLASS='djinn-cgroup-writable-probe'"
 assert_contains 'probe manifest uses the probe-only class' 'runtimeClassName: $PROBE_RUNTIME_CLASS'
 assert_contains 'probe stays node-bound' 'nodeName: $NODE_NAME'
@@ -348,7 +481,7 @@ owners=$(grep -rl 'label node' "$NODE_DIR" --include='*.sh' | grep -v "$SCRIPT_D
 expect_eq 'sole label owner under deploy/node' "$CONFORMANCE" "$owners"
 
 # ---------------------------------------------------------------------------
-# 8. Non-vacuity: the pre-change script restarts k3s on the very fixture the
+# 9. Non-vacuity: the pre-change script restarts k3s on the very fixture the
 #    preflight now refuses. Skipped once the baseline ref carries the preflight.
 # ---------------------------------------------------------------------------
 baseline_ref=${DJINN_CONFORMANCE_BASELINE_REF:-origin/main}

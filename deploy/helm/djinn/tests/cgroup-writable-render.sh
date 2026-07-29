@@ -431,13 +431,30 @@ printf '%s\n' "\$*" >>'$log'
 case "\$1" in
   label) exit 0 ;;
   get)
-    if [ "\$2" = node ]; then exit 0; fi
-    if [ "\$2" = pod ] && [ "\${*: -2}" = '-o json' ]; then
+    selector=\${*: -1}
+    if [ "\$2" = node ]; then
+      case "\$selector" in
+        # The node's own InternalIP, which the identity check compares the
+        # probe's reported host against. The label read stays empty: this
+        # program removed eligibility before anything else ran.
+        *status.addresses*) printf '%s\n' '10.10.0.7' ;;
+        *) : ;;
+      esac
+      exit 0
+    fi
+    if [ "\$2" = pod ] && [ "\$selector" = json ]; then
       if [ "${case_name}" = sandbox ]; then printf '%s' 'Warning FailedCreatePodSandBox runc-cgroupwritable'; fi
       exit 0
     fi
     if [ "\$2" = pod ]; then
-      if [ "${case_name}" = wrong-node ]; then printf 'fixture-node|other-node'; else printf 'fixture-node|fixture-node'; fi
+      # wrong-node models a probe bound to a different node than the one
+      # requested. Every other case reports the requested binding and a host
+      # that is the requested node's own InternalIP.
+      if [ "${case_name}" = wrong-node ]; then pod_node_name=other-node; else pod_node_name=fixture-node; fi
+      rendered=\${selector#jsonpath=}
+      rendered=\${rendered//\\{.spec.nodeName\\}/\$pod_node_name}
+      rendered=\${rendered//\\{.status.hostIP\\}/10.10.0.7}
+      printf '%s' "\$rendered"
       exit 0
     fi
     ;;
