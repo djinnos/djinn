@@ -10,7 +10,8 @@ use djinn_control_plane::tools::{
 };
 use djinn_core::models::NeedsEvidenceClaim;
 use djinn_db::{
-    EvidenceRepository, ProposalCreateInput, ProposalRepository, SessionRepository, TaskRepository,
+    CreateTaskAttemptParams, EvidenceRepository, ProposalCreateInput, ProposalRepository,
+    SessionRepository, TaskAttemptRepository, TaskRepository,
     repositories::session::CreateSessionParams,
     test_support::structured_evidence_handoff_counts_for_test,
 };
@@ -312,16 +313,42 @@ async fn evidence_findings_contract() {
     }))
     .await;
     let base = completion_payload(&h, true, false);
+    let attempt_repo = TaskAttemptRepository::new(h.db.clone());
+    let attempt = attempt_repo
+        .create_or_get_pending(CreateTaskAttemptParams {
+            id: "019fa49d-ffff-7000-8000-000000000001",
+            task_id: &h.task_id,
+            role: "worker",
+            dispatch_key: "evidence-findings-rejection-contract",
+            session_id: Some(&h.session_id),
+            attempt_seq: None,
+            dispatch_owner_incarnation_id: None,
+            dispatch_group_id: None,
+        })
+        .await
+        .expect("seed pending lifecycle attempt");
+    let baseline_attempt = serde_json::to_value(&attempt).expect("serialize attempt baseline");
     let baseline_activity = TaskRepository::new(h.db.clone(), h.ctx.event_bus.clone())
         .list_activity(&h.task_id)
         .await
         .unwrap()
         .len();
+    let baseline_proposal = serde_json::to_value(
+        ProposalRepository::new(h.db.clone(), h.ctx.event_bus.clone())
+            .get(&h.proposal_id)
+            .await
+            .unwrap()
+            .unwrap(),
+    )
+    .expect("serialize proposal lifecycle baseline");
     for rejection in fixture.rejections {
         let mut payload = base.clone();
         let mut session = h.session_id.as_str();
         match rejection.as_str() {
             "unknown_completion_field" => payload["evidence_completion"]["unknown"] = true.into(),
+            "unknown_terminal_result_field" => {
+                payload["evidence_completion"]["terminal_results"][0]["unknown"] = true.into()
+            }
             "unknown_finding_field" => {
                 payload["evidence_completion"]["findings"][0]["unknown"] = true.into()
             }
@@ -408,11 +435,20 @@ async fn evidence_findings_contract() {
             .unwrap()
             .unwrap();
         assert_eq!(
-            proposal.linked_spike_task_id.as_deref(),
-            Some(h.task_id.as_str()),
-            "{rejection}"
+            serde_json::to_value(proposal).unwrap(),
+            baseline_proposal,
+            "proposal lifecycle changed for {rejection}"
         );
-        assert!(proposal.needs_evidence_claim.is_some(), "{rejection}");
+        let persisted_attempt = attempt_repo
+            .get(&attempt.id)
+            .await
+            .unwrap()
+            .expect("pending attempt remains present");
+        assert_eq!(
+            serde_json::to_value(persisted_attempt).unwrap(),
+            baseline_attempt,
+            "attempt lifecycle changed for {rejection}"
+        );
     }
 }
 
@@ -440,16 +476,26 @@ async fn evidence_judge_projection_contract() {
         }
         if snapshot_case == "resolved" || snapshot_case == "partial_timeout" {
             for required in [
+                h.plan_id.as_str(),
                 "captured-contract-commit",
+                "captured-contract-worktree",
                 "rust:handle_submit_work",
                 "cargo",
                 "test",
                 "/workspace/djinn/server",
                 "launch_state",
                 "process_state",
+                "launched_at",
+                "2026-01-02T03:04:05Z",
+                "finished_at",
+                "2026-01-02T03:04:06Z",
                 "exit_code",
                 "signal",
                 "runner_failure",
+                "elapsed_millis",
+                "1000",
+                "timeout_millis",
+                "30000",
                 "timed_out",
                 "sha256:stdout-contract-digest",
                 "contract stdout excerpt",
@@ -470,6 +516,7 @@ async fn evidence_judge_projection_contract() {
                 "unanchored prose must not render positively"
             );
         }
+        rendered = rendered.replace(&h.plan_id, "<plan-id>");
         insta::assert_snapshot!(format!("evidence_judge_{snapshot_case}"), rendered);
     }
 }

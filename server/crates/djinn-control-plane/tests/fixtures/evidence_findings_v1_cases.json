@@ -10,6 +10,7 @@
   ],
   "rejections": [
     "unknown_completion_field",
+    "unknown_terminal_result_field",
     "unknown_finding_field",
     "unknown_anchor_field",
     "unknown_invocation_field",

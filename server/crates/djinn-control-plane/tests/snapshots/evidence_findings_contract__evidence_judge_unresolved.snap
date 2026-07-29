@@ -3,6 +3,7 @@ source: crates/djinn-control-plane/tests/evidence_findings_contract.rs
 expression: rendered
 ---
 Evidence completion: unresolved
+plan_id=<plan-id> captured_commit_sha=captured-contract-commit worktree_fingerprint=captured-contract-worktree
 No anchored findings were established; this is not positive evidence.
 check code [code] terminal=true health=ok
 check graph [graph] terminal=true health=ok
