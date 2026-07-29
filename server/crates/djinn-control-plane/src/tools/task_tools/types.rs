@@ -1057,6 +1057,9 @@ pub struct BoardHealthBuildLease {
 /// Absent when the lease ledger could not be read.
 #[derive(Serialize, Deserialize, schemars::JsonSchema, Default)]
 pub struct BoardHealthBuildCapacity {
+    /// Always `build_leases`, so the payload names its own authority.
+    #[serde(default)]
+    pub authority: String,
     /// Weighted `SUM` over the occupying lease states, across every consumer
     /// kind (dispatch, invocation and warm all contend for one cap).
     pub occupancy: i64,
@@ -1065,9 +1068,20 @@ pub struct BoardHealthBuildCapacity {
     /// True only when `admission_handoff.v1_mode = 'enforce'`. While the v1
     /// authority is off or shadowing it writes no dispatch rows and cannot be
     /// denying anything, so a full pool is not attributed to it.
-    pub enforcing: bool,
-    /// `occupancy >= cap` with a positive cap.
+    ///
+    /// **Renamed from `enforcing`.** The bare name read as "build admission is
+    /// enforcing", which is a different authority entirely. On 2026-07-29 this
+    /// block reported `{occupancy: 1, cap: 3, enforcing: true, at_capacity:
+    /// false}` for five hours while the build-admission controller denied every
+    /// single dispatch before capacity was measured. See `build_admission`.
+    pub lease_authority_enforcing: bool,
+    /// `occupancy >= cap` with a positive cap. Reached only AFTER the
+    /// build-admission controller's readiness gate passes, so `false` here is
+    /// not evidence that a dispatch can proceed.
     pub at_capacity: bool,
+    /// Human-readable restatement of the authority boundary.
+    #[serde(default)]
+    pub note: String,
 }
 
 /// The build-admission JOURNAL authority — the **other** gate, and the one

@@ -481,11 +481,26 @@ pub(super) fn lease_gate(ledger: &LeaseLedger, task_id: &str) -> LeaseGateOutcom
         journal_gate(journal);
 
     let at_capacity = capacity.cap > 0 && capacity.occupancy >= capacity.cap;
+    // `enforcing` used to be the bare field name. During the 2026-07-29 outage
+    // this block read `{occupancy: 1, cap: 3, enforcing: true, at_capacity:
+    // false}` — an operator reasonably concluded capacity was fine and looked
+    // elsewhere, while the JOURNAL authority was denying every dispatch before
+    // capacity was ever measured. Both nouns in the old payload pointed at the
+    // lease authority without ever saying so. Every key here now names which
+    // authority it speaks for.
     let build_capacity = serde_json::json!({
+        "authority": "build_leases",
         "occupancy": capacity.occupancy,
         "cap":       capacity.cap,
-        "enforcing": capacity.enforcing,
+        "lease_authority_enforcing": capacity.enforcing,
         "at_capacity": at_capacity,
+        "note": "LEASE authority only (`build_leases` / `build_lease_caps`, armed by \
+                 `admission_handoff.v1_mode`). `lease_authority_enforcing` says whether \
+                 THIS authority is armed and says NOTHING about the build-admission \
+                 controller, whose mode is process configuration. A dispatch must clear \
+                 both; see `build_admission` for the other one. These numbers are only \
+                 reached AFTER the controller's readiness gate passes, so \
+                 `at_capacity: false` here is not evidence that a dispatch can proceed.",
     });
 
     let lease = by_task.get(task_id);
@@ -916,7 +931,7 @@ mod tests {
         let ledger = observed(Vec::new(), capacity(9, 3, false));
         let gate = gate(&ledger, "task-1");
         assert_eq!(gate["gate_verdict"], VERDICT_UNEXPLAINED);
-        assert_eq!(gate["build_capacity"]["enforcing"], false);
+        assert_eq!(gate["build_capacity"]["lease_authority_enforcing"], false);
         assert_eq!(gate["build_capacity"]["at_capacity"], true);
     }
 
@@ -1002,7 +1017,7 @@ mod tests {
     fn journal_reason_survives_a_non_enforcing_lease_authority() {
         let ledger = observed_with_journal(Vec::new(), capacity(0, 3, false), journal(1, 1));
         let gate = gate(&ledger, "task-1");
-        assert_eq!(gate["build_capacity"]["enforcing"], false);
+        assert_eq!(gate["build_capacity"]["lease_authority_enforcing"], false);
         assert_eq!(gate["gate_verdict"], VERDICT_BLOCKED);
         assert!(
             gate["reasons"]
@@ -1010,6 +1025,45 @@ mod tests {
                 .unwrap()
                 .contains(&serde_json::json!("admission_create_unknown_pending"))
         );
+    }
+
+    /// **`build_capacity` must name its own authority.**
+    ///
+    /// The exact payload from 2026-07-29: `{occupancy: 1, cap: 3, enforcing:
+    /// true, at_capacity: false}`. Every number was correct. Read by an
+    /// operator it said "capacity is fine, look elsewhere" — while the
+    /// build-admission controller was denying every dispatch with
+    /// `controller_not_admitting` before capacity was ever measured.
+    ///
+    /// The unqualified key `enforcing` is the specific misreading: it invites
+    /// "build admission is enforcing and finds room", which is a claim about a
+    /// different authority. It must not come back.
+    #[test]
+    fn build_capacity_cannot_be_mistaken_for_the_admission_authority() {
+        let ledger = observed_with_journal(Vec::new(), capacity(1, 3, true), journal(1, 1));
+        let gate = gate(&ledger, "task-1");
+        let capacity_block = &gate["build_capacity"];
+
+        assert_eq!(capacity_block["authority"], "build_leases");
+        assert_eq!(capacity_block["lease_authority_enforcing"], true);
+        assert!(
+            capacity_block.get("enforcing").is_none(),
+            "the unqualified `enforcing` key is what was misread for five hours"
+        );
+        let note = capacity_block["note"].as_str().unwrap_or_default();
+        assert!(
+            note.contains("LEASE authority only"),
+            "the payload must state its own bound: {note}"
+        );
+        assert!(
+            note.contains("build_admission"),
+            "the note must point at the other authority: {note}"
+        );
+        // The two authorities disagree in exactly the outage's shape, and the
+        // payload now carries both answers side by side.
+        assert_eq!(capacity_block["at_capacity"], false);
+        assert_eq!(gate["build_admission"]["create_unknown_settled"], 1);
+        assert_eq!(gate["gate_verdict"], VERDICT_BLOCKED);
     }
 
     /// An unreadable `admission_journal` must be declared, not silently read

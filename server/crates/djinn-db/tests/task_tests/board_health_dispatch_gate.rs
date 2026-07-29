@@ -122,7 +122,7 @@ async fn queued_dispatch_lease_is_reported_as_a_capacity_denial() {
     assert_eq!(gate["build_lease"]["state"], "queued");
     assert_eq!(gate["build_lease"]["consumer_id"], format!("{}:3", task.id));
     assert_eq!(gate["build_capacity"]["cap"], 1);
-    assert_eq!(gate["build_capacity"]["enforcing"], true);
+    assert_eq!(gate["build_capacity"]["lease_authority_enforcing"], true);
 }
 
 /// The #2661 tombstone shape: the newest `task_dispatch` attempt is terminal.
@@ -224,7 +224,7 @@ async fn an_unarmed_authority_is_not_blamed_for_a_full_pool() {
 
     let gate = gate_for(&repo, &victim.id).await;
     assert_eq!(gate["gate_verdict"], "unexplained");
-    assert_eq!(gate["build_capacity"]["enforcing"], false);
+    assert_eq!(gate["build_capacity"]["lease_authority_enforcing"], false);
     assert_eq!(
         gate["build_capacity"]["at_capacity"], true,
         "the numbers are still reported; they are simply not blamed"
