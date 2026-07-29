@@ -80,6 +80,11 @@ const EXPECTED_PROOFS_KEY: &str = "LEASE_LIFECYCLE_EXPECTED_PROOFS";
 /// Wall-clock window each measurement is taken over. Long enough that CFS period
 /// boundaries (100ms) average out, short enough to keep the lane quick.
 const WINDOW: Duration = Duration::from_secs(2);
+/// `cpu.stat` and `Instant` are sampled on opposite sides of scheduler and CFS
+/// period boundaries. Allow a small bounded accounting skew: the kernel's
+/// `cpu.max` read above still proves the quota, while a material overrun remains
+/// a failure.
+const CPU_STAT_SCHEDULING_SLACK: Duration = Duration::from_millis(10);
 /// Unleased quota under test: the shipped default.
 const UNLEASED_MILLICORES: u16 = UnleasedQuota::DEFAULT_MILLICORES;
 /// Leased quota under test: the shipped default, four cores.
@@ -401,15 +406,16 @@ fn the_delegated_lease_throttles_and_lifts_measured_on_cpu_stat() {
         leased.usage_usec,
         unleased.usage_usec
     );
-    let ceiling = quota_usec(LEASED_MILLICORES, leased.wall);
+    let ceiling = quota_usec(LEASED_MILLICORES, leased.wall + CPU_STAT_SCHEDULING_SLACK);
     assert!(
         leased.usage_usec <= ceiling,
         "after the lift the leaf burned {} usec, above the {}m lease's {ceiling} usec ceiling \
-         over {:?}. The lift must raise the quota, not remove it: an unbounded leaf lets one \
-         build take the whole node.",
+         over {:?} plus {:?} bounded cpu.stat scheduling slack. The lift must raise the quota, \
+         not remove it: an unbounded leaf lets one build take the whole node.",
         leased.usage_usec,
         LEASED_MILLICORES,
-        leased.wall
+        leased.wall,
+        CPU_STAT_SCHEDULING_SLACK
     );
     assert_eq!(
         leased.nr_throttled, 0,

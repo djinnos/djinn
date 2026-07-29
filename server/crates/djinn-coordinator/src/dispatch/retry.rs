@@ -646,7 +646,10 @@ impl CoordinatorActor {
             self.db.clone(),
             crate::events::event_bus_for(&self.events_tx),
         );
-        let model_id = match session_repo.latest_model_for_task_role(&task.id, role).await {
+        let model_id = match session_repo
+            .latest_model_for_task_role(&task.id, role)
+            .await
+        {
             Ok(Some(model)) if !model.trim().is_empty() => model,
             Ok(_) => return false,
             Err(e) => {
