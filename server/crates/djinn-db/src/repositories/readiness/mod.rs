@@ -652,6 +652,14 @@ pub struct NewReadinessEvent {
 pub struct ReadinessRunDetail {
     pub run: ReadinessRunRow,
     pub areas: Vec<ReadinessRunDetailArea>,
+    /// Persisted aggregation output, ordered by frozen area identity.
+    pub area_scores: Vec<ReadinessAreaScoreRow>,
+    /// Absent until aggregation persists the run's single project score.
+    pub project_score: Option<ReadinessProjectScoreRow>,
+    /// One canonical persisted suggestion per run/dedupe key.
+    pub suggestions: Vec<ReadinessRemediationSuggestionRow>,
+    /// Append-only lifecycle history ordered by creation time and identity.
+    pub events: Vec<ReadinessRunEventRow>,
 }
 #[derive(Clone, Debug, PartialEq)]
 pub struct ReadinessRunDetailArea {
@@ -709,7 +717,8 @@ impl ReadinessRepository {
     pub fn new(db: Database) -> Self {
         Self { db }
     }
-    /// Reads frozen composition, full attempt history, and current accepted output.
+    /// Reads frozen composition, full attempt history, current accepted output, and
+    /// persisted lifecycle and aggregation projections in explicit stable order.
     pub async fn run_detail(&self, run_id: &str) -> Result<Option<ReadinessRunDetail>> {
         self.db.ensure_initialized().await?;
         let Some(run) = sqlx::query_as("SELECT id,project_id,idempotency_key,status,repository_snapshot,skill_name,skill_version,expected_area_count,created_at,completed_at FROM readiness_runs WHERE id=$1").bind(run_id).fetch_optional(self.db.pool()).await? else { return Ok(None); };
@@ -717,6 +726,15 @@ impl ReadinessRepository {
         let attempts: Vec<ReadinessAreaAttemptRow> = sqlx::query_as("SELECT a.id,a.run_id,a.area_id,a.attempt_number,a.correlation_key,a.status,a.payload_digest,a.created_at,a.terminal_at FROM readiness_area_attempts a JOIN readiness_composition_areas area ON area.id=a.area_id WHERE a.run_id=$1 ORDER BY area.area_key,area.id,a.attempt_number,a.id").bind(run_id).fetch_all(self.db.pool()).await?;
         let findings: Vec<ReadinessGuardrailFindingRow> = sqlx::query_as("SELECT f.id,f.run_id,f.area_id,f.attempt_id,f.guardrail_key,f.status,f.severity,f.confidence,f.accepted,f.evidence,f.created_at FROM readiness_guardrail_findings f JOIN readiness_composition_areas area ON area.id=f.area_id AND area.current_attempt_id=f.attempt_id WHERE f.run_id=$1 AND f.accepted=true ORDER BY area.area_key,area.id,f.guardrail_key,f.id").bind(run_id).fetch_all(self.db.pool()).await?;
         let outputs: Vec<ReadinessAreaResultOutputRow> = sqlx::query_as("SELECT output.run_id,output.area_id,output.attempt_id,output.result,output.created_at FROM readiness_area_result_outputs output JOIN readiness_composition_areas area ON area.id=output.area_id AND area.current_attempt_id=output.attempt_id WHERE output.run_id=$1 ORDER BY area.area_key,area.id,output.attempt_id").bind(run_id).fetch_all(self.db.pool()).await?;
+        let area_scores: Vec<ReadinessAreaScoreRow> = sqlx::query_as("SELECT run_id,area_id,score,applicable_weight,covered_weight,status,created_at FROM readiness_area_scores WHERE run_id=$1 ORDER BY area_id").bind(run_id).fetch_all(self.db.pool()).await?;
+        let project_score: Option<ReadinessProjectScoreRow> = sqlx::query_as(
+            "SELECT run_id,score,band,created_at FROM readiness_project_scores WHERE run_id=$1",
+        )
+        .bind(run_id)
+        .fetch_optional(self.db.pool())
+        .await?;
+        let suggestions: Vec<ReadinessRemediationSuggestionRow> = sqlx::query_as("SELECT id,run_id,dedupe_key,suggestion,created_at FROM readiness_remediation_suggestions WHERE run_id=$1 ORDER BY dedupe_key,id").bind(run_id).fetch_all(self.db.pool()).await?;
+        let events: Vec<ReadinessRunEventRow> = sqlx::query_as("SELECT id,run_id,event_kind,payload,created_at FROM readiness_run_events WHERE run_id=$1 ORDER BY created_at,id").bind(run_id).fetch_all(self.db.pool()).await?;
         let mut attempts_by_area: std::collections::HashMap<String, Vec<_>> =
             std::collections::HashMap::new();
         for attempt in attempts {
@@ -770,6 +788,10 @@ impl ReadinessRepository {
         Ok(Some(ReadinessRunDetail {
             run,
             areas: detail_areas,
+            area_scores,
+            project_score,
+            suggestions,
+            events,
         }))
     }
     pub async fn materialize_kickoff(
