@@ -38,14 +38,15 @@ pub struct InventoryReport {
     pub adopted: usize,
     pub released: usize,
     /// Occupying rows in a pre-Live state that were retired because their
-    /// Kubernetes object was proven absent.
+    /// Kubernetes object was proven absent, or proven already finished.
     pub reclaimed: usize,
-    /// Rows whose object was proven absent, counted before any reclamation.
-    /// This is the size of the stale population, not the size of the fix.
+    /// Rows whose object was proven absent — or proven finished — counted
+    /// before any reclamation. This is the size of the stale population, not
+    /// the size of the fix.
     pub stale: usize,
     /// Reclamations refused because the row changed after its absence proof.
     pub fenced: usize,
-    /// Named per-row reclamation failures, bounded by
+    /// Named per-row journal failures (retirement or adoption), bounded by
     /// [`MAX_NAMED_RECLAIM_FAILURES`]. See `reclaim_failure_count` for the
     /// exact total.
     ///
@@ -55,7 +56,7 @@ pub struct InventoryReport {
     /// not fail the whole pass and must not gate Enforce on the namespace's
     /// history instead of its current state.
     pub reclaim_failures: Vec<String>,
-    /// Exact number of per-row reclamation failures, named or not.
+    /// Exact number of per-row journal failures, named or not.
     pub reclaim_failure_count: usize,
     /// Pass-level failures. A non-empty `blockers` means the pass could not be
     /// trusted at all (unusable listing, unreadable journal, failed seeding)
@@ -69,15 +70,21 @@ pub struct InventoryReport {
 pub const MAX_NAMED_RECLAIM_FAILURES: usize = 5;
 
 impl InventoryReport {
-    /// Record one per-row reclamation failure without failing the pass.
-    fn reclaim_failure(&mut self, row: &AdmissionJournalRow, error: &str) {
+    /// Record one per-row journal failure without failing the pass.
+    fn row_failure(&mut self, label: &str, error: &str) {
         self.reclaim_failure_count += 1;
         if self.reclaim_failures.len() < MAX_NAMED_RECLAIM_FAILURES {
-            self.reclaim_failures.push(format!(
-                "{}:{}:{}: {error}",
-                row.key.work_id, row.key.generation, row.object_name
-            ));
+            self.reclaim_failures.push(format!("{label}: {error}"));
         }
+    }
+
+    /// Record one per-row reclamation failure without failing the pass.
+    fn reclaim_failure(&mut self, row: &AdmissionJournalRow, error: &str) {
+        let label = format!(
+            "{}:{}:{}",
+            row.key.work_id, row.key.generation, row.object_name
+        );
+        self.row_failure(&label, error);
     }
 }
 fn identity(key: &AdmissionJournalKey) -> String {
@@ -217,7 +224,23 @@ impl BuildAdmissionReconciler {
     ///
     /// * the row's creator epoch is not this process, so no in-process dispatch
     ///   can still be mid-create for it — the only process that could have
-    ///   finished this create is gone;
+    ///   finished this create is gone. This clause looks redundant against the
+    ///   settle window below and is NOT: the two clauses below are
+    ///   *structurally vacuous* for `task_observation` rows. Only warm Jobs are
+    ///   stamped with an admission identity (`stamp_admission_identity` is
+    ///   called from the warm path alone), a task-run Job is named
+    ///   `djinn-taskrun-{task_run_id}` while its journal row records
+    ///   `object_name = task-run-{task_id}-{reopen}`, and `classify` maps a
+    ///   real task-run Job to a work id that is the task-RUN id. So the LIST
+    ///   never contains the row's `object_name` and the GET always answers
+    ///   `Absent` — even while the task-run is running happily. For those rows
+    ///   the creator epoch is the only evidence that no live work depends on
+    ///   the row, and dropping it would retire the admission row of every
+    ///   task-run whose POST→session-started gap exceeds the settle window (a
+    ///   pending pod or a slow image pull), releasing capacity for work that is
+    ///   still running. The 2026-07-29 board halt was NOT caused by this fence:
+    ///   it was caused by `seed_from_recovery` ARMING `CreateUnknownHealth`
+    ///   from rows this fence is right to refuse. See the arming comment there;
     /// * the row has settled, so the API server can no longer be admitting a
     ///   create the dead process POSTed;
     /// * the authoritative LIST that just succeeded contains no object under
@@ -248,6 +271,53 @@ impl BuildAdmissionReconciler {
             == ObjectPresence::Absent
     }
 
+    /// Retire one pre-Live occupying row whose Kubernetes evidence is
+    /// conclusive: either its object is provably absent, or its object exists
+    /// and has already finished. Both are proofs that no lifecycle callback is
+    /// coming, and `reclaim_absent_object` is the only journal primitive that
+    /// can terminalize a pre-Live row (`mark_terminal` accepts a create whose
+    /// UID was never observed, but a pre-Live row that was superseded by a
+    /// later generation is rejected by the latest-generation fence every
+    /// lifecycle mutation carries).
+    ///
+    /// The write is fenced by a compare-and-set on the full observed identity,
+    /// so anything that changed between the proof and the write yields
+    /// `Fenced` and writes nothing.
+    async fn retire_pre_live_row(&self, out: &mut InventoryReport, row: &AdmissionJournalRow) {
+        out.stale += 1;
+        let input = ReclaimAbsentInput {
+            key: row.key.clone(),
+            observed_state: row.state,
+            observed_creator_server_epoch: row.creator_server_epoch.clone(),
+            observed_object_name: row.object_name.clone(),
+            observed_object_uid: row.object_uid.clone(),
+        };
+        match self
+            .controller
+            .journal()
+            .reclaim_absent_object(&input)
+            .await
+        {
+            Ok(ReclaimAbsentOutcome::Reclaimed(_)) => {
+                out.reclaimed += 1;
+                self.controller.release_notifier().notify_one();
+            }
+            Ok(ReclaimAbsentOutcome::AlreadyTerminal(_)) => {}
+            Ok(ReclaimAbsentOutcome::Fenced { reason }) => {
+                out.fenced += 1;
+                tracing::warn!(
+                    work_id = %row.key.work_id,
+                    generation = row.key.generation,
+                    object = %row.object_name,
+                    %reason,
+                    "build_admission: refused to reclaim an admission row that changed \
+                     after its absence proof"
+                );
+            }
+            Err(error) => self.record_reclaim_failure(out, row, &error),
+        }
+    }
+
     /// Classify one failed retirement of a single occupying row.
     ///
     /// A rejected transition is a decision about that one row: its own identity
@@ -271,6 +341,46 @@ impl BuildAdmissionReconciler {
                 object = %row.object_name,
                 %error,
                 "build_admission: one occupying row could not be retired; reclamation continues"
+            );
+            return;
+        }
+        self.controller.mark_journal_unhealthy();
+        out.blockers.push(error.to_string());
+    }
+
+    /// Classify one failed adoption of a single live Kubernetes object.
+    ///
+    /// Symmetric with [`Self::record_reclaim_failure`], and for the same
+    /// reason. `adopt_live` returns `InvalidTransition("inventory identity
+    /// collision")` for a routine identity mismatch — an object whose
+    /// admission labels resolve to a journal key that already holds a
+    /// different object name or UID. That is a decision about one object.
+    /// Treating it as a pass-level blocker cost the whole pass: it marked the
+    /// journal unhealthy (failing Enforce closed on `JournalUnhealthy`) and,
+    /// because the tail seed used to run only when `blockers` was empty, it
+    /// also froze `journal_recovered`, `journal_healthy`,
+    /// `create_unknown_pending` and `over_cap` at whatever they last were —
+    /// four gates held hostage by one mislabelled object, indefinitely.
+    fn record_adopt_failure(
+        &self,
+        out: &mut InventoryReport,
+        workload: &ClassifiedWorkload,
+        error: &djinn_db::Error,
+    ) {
+        if matches!(error, djinn_db::Error::InvalidTransition(_)) {
+            out.row_failure(
+                &format!(
+                    "{}:{}:{}",
+                    workload.key.work_id, workload.key.generation, workload.object.name
+                ),
+                &error.to_string(),
+            );
+            tracing::warn!(
+                work_id = %workload.key.work_id,
+                generation = workload.key.generation,
+                object = %workload.object.name,
+                %error,
+                "build_admission: one live object could not be adopted; the pass continues"
             );
             return;
         }
@@ -319,6 +429,9 @@ impl BuildAdmissionReconciler {
         }
         for c in &cs {
             if c.object.terminal {
+                // Adopting a finished object into `Live` would be a lie. The
+                // row loop below retires the pre-Live row this object belongs
+                // to instead — see the `finished` branch there.
                 continue;
             }
             let Some(uid) = c.object.uid.as_ref() else {
@@ -335,10 +448,7 @@ impl BuildAdmissionReconciler {
             };
             match self.controller.journal().adopt_live(&x).await {
                 Ok(_) => out.adopted += 1,
-                Err(e) => {
-                    self.controller.mark_journal_unhealthy();
-                    out.blockers.push(e.to_string());
-                }
+                Err(e) => self.record_adopt_failure(&mut out, c, &e),
             }
         }
         let active = match self
@@ -460,72 +570,75 @@ impl BuildAdmissionReconciler {
             // object is gone. Those rows occupy the shared cap forever, which
             // is how a fleet accumulates a stale population large enough to
             // deny every admission the moment the cap is armed.
+            let classified = by.get(&id).copied();
+            // The object EXISTS and has already FINISHED, under this row's own
+            // admission identity and its own recorded name. That row was
+            // previously in a hole with no exit at all: adoption skips a
+            // terminal object (adopting a finished Job into `Live` would be a
+            // lie), reclamation refuses it (`classified.is_some()` — the
+            // object is not absent, so the absence proof cannot be made), and
+            // the `Live` branch's completion handling never applies because
+            // the row is not `Live`. So the create landed, the workload ran,
+            // the workload finished, and the row occupied capacity forever
+            // while every pass reported `stale:0`.
+            //
+            // A finished object is a strictly stronger proof than absence: the
+            // work is over, and no lifecycle callback is coming for a row that
+            // never went Live. Retire it.
+            let finished =
+                classified.is_some_and(|c| c.object.terminal && c.object.name == row.object_name);
+            if finished {
+                self.retire_pre_live_row(&mut out, row).await;
+                continue;
+            }
             if !self
-                .is_reclaimable(row, &by.get(&id).copied(), &listed_names, &settled)
+                .is_reclaimable(row, &classified, &listed_names, &settled)
                 .await
             {
                 continue;
             }
-            out.stale += 1;
-            let input = ReclaimAbsentInput {
-                key: row.key.clone(),
-                observed_state: row.state,
-                observed_creator_server_epoch: row.creator_server_epoch.clone(),
-                observed_object_name: row.object_name.clone(),
-                observed_object_uid: row.object_uid.clone(),
-            };
-            match self
-                .controller
-                .journal()
-                .reclaim_absent_object(&input)
-                .await
-            {
-                Ok(ReclaimAbsentOutcome::Reclaimed(_)) => {
-                    out.reclaimed += 1;
-                    self.controller.release_notifier().notify_one();
-                }
-                Ok(ReclaimAbsentOutcome::AlreadyTerminal(_)) => {}
-                Ok(ReclaimAbsentOutcome::Fenced { reason }) => {
-                    out.fenced += 1;
-                    tracing::warn!(
-                        work_id = %row.key.work_id,
-                        generation = row.key.generation,
-                        object = %row.object_name,
-                        %reason,
-                        "build_admission: refused to reclaim an admission row that changed \
-                         after its absence proof"
-                    );
-                }
-                Err(error) => self.record_reclaim_failure(&mut out, row, &error),
-            }
+            self.retire_pre_live_row(&mut out, row).await;
         }
-        if out.blockers.is_empty() {
-            let rows = match self.controller.journal().list_active_rows().await {
-                Ok(rows) => rows,
-                Err(error) => {
-                    self.controller.mark_journal_unhealthy();
-                    self.controller.mark_inventory_pending();
-                    out.blockers.push(error.to_string());
-                    self.controller.publish_metrics().await;
-                    return out;
-                }
-            };
-            let recovery = AdmissionRecoveryResult {
-                retired_reserved: 0,
-                marked_create_unknown: 0,
-                active_rows: rows,
-            };
-            if let Err(error) = self
-                .controller
-                .seed_from_recovery(&recovery, &mut |_| true)
-                .await
-            {
+        // The tail seed re-derives `journal_recovered`, `journal_healthy`,
+        // `create_unknown_pending` and `over_cap` from the journal. It is the
+        // ONLY in-process re-derivation of those four gates, and it only
+        // READS: whatever this pass could or could not do to Kubernetes, the
+        // journal's current contents are still the journal's current contents.
+        //
+        // It used to run only `if out.blockers.is_empty()`, which meant any
+        // standing blocker — one unclassifiable Job, one duplicate identity,
+        // one adoption collision — froze all four gates at their last values
+        // for as long as the blocker stood. A gate that had latched closed
+        // could never re-open, because the only code that could re-open it was
+        // gated on the condition being absent. Only `mark_inventory_ready`
+        // belongs behind `blockers`: that gate is a statement about THIS
+        // pass's Kubernetes evidence, and it is the one that must stay
+        // fail-closed when the evidence is incomplete.
+        let rows = match self.controller.journal().list_active_rows().await {
+            Ok(rows) => rows,
+            Err(error) => {
                 self.controller.mark_journal_unhealthy();
                 self.controller.mark_inventory_pending();
                 out.blockers.push(error.to_string());
-            } else {
-                self.controller.mark_inventory_ready();
+                self.controller.publish_metrics().await;
+                return out;
             }
+        };
+        let recovery = AdmissionRecoveryResult {
+            retired_reserved: 0,
+            marked_create_unknown: 0,
+            active_rows: rows,
+        };
+        if let Err(error) = self
+            .controller
+            .seed_from_recovery(&recovery, &mut |_| true)
+            .await
+        {
+            self.controller.mark_journal_unhealthy();
+            self.controller.mark_inventory_pending();
+            out.blockers.push(error.to_string());
+        } else if out.blockers.is_empty() {
+            self.controller.mark_inventory_ready();
         } else {
             self.controller.mark_inventory_pending();
         }

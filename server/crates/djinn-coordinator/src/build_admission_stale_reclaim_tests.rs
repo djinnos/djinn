@@ -17,14 +17,15 @@ use std::time::Duration;
 use async_trait::async_trait;
 use djinn_core::events::EventBus;
 use djinn_db::{
-    AdmissionDomain, AdmissionJournalKey, AdmissionJournalRepository, AdmissionState,
-    AdmissionWorkloadKind, CreateStartedInput, Database, ImageRepository, ProjectRepository,
-    ReserveAdmissionInput, TerminalAdmissionInput, UidFencedAdmissionInput,
+    AdmissionDomain, AdmissionJournalKey, AdmissionJournalRepository, AdmissionJournalRow,
+    AdmissionState, AdmissionWorkloadKind, CreateStartedInput, Database, ImageRepository,
+    ProjectRepository, ReserveAdmissionInput, TerminalAdmissionInput, UidFencedAdmissionInput,
 };
 use djinn_k8s::{
     K8sGraphWarmer, KubernetesConfig, ObjectPresence, UidGetResult, WarmAdmission,
-    WarmAdmissionError, WarmAdmissionRequest, WarmJobDispatcher, WarmJobManifest, WarmJobWatcher,
-    WarmTerminalOutcome, WorkloadInventory, WorkloadObjectKind, WorkloadRecord, warm_work_id,
+    WarmAdmissionError, WarmAdmissionRequest, WarmAdmissionTransition, WarmJobDispatcher,
+    WarmJobManifest, WarmJobWatcher, WarmTerminalOutcome, WorkloadInventory, WorkloadObjectKind,
+    WorkloadRecord, warm_work_id,
 };
 use djinn_runtime::GraphWarmerService;
 use tokio::sync::RwLock;
@@ -265,6 +266,46 @@ fn warm_request(id: &str) -> WarmAdmissionRequest {
     }
 }
 
+/// A Kubernetes object carrying the admission identity of `row`, under the
+/// exact name the row recorded. This is what the dispatch path stamps on a warm
+/// Job (`stamp_admission_identity`), so `classify` resolves it back to the
+/// row's own journal key.
+fn admission_labeled_object(
+    row: &AdmissionJournalRow,
+    terminal: bool,
+    uid: &str,
+) -> WorkloadRecord {
+    let domain = match row.key.domain {
+        AdmissionDomain::TaskObservation => "task_observation",
+        AdmissionDomain::WarmBuild => "warm_build",
+        AdmissionDomain::InvocationBuild => "invocation_build",
+    };
+    WorkloadRecord {
+        kind: WorkloadObjectKind::Job,
+        name: row.object_name.clone(),
+        uid: Some(uid.to_owned()),
+        labels: [
+            (
+                djinn_k8s::LABEL_ADMISSION_DOMAIN.to_string(),
+                domain.to_string(),
+            ),
+            (
+                djinn_k8s::LABEL_ADMISSION_WORK_ID.to_string(),
+                row.key.work_id.clone(),
+            ),
+            (
+                djinn_k8s::LABEL_ADMISSION_GENERATION.to_string(),
+                row.key.generation.to_string(),
+            ),
+        ]
+        .into_iter()
+        .collect(),
+        terminal,
+        images: vec!["djinn:test".into()],
+        commands: vec!["djinn-warm".into()],
+    }
+}
+
 /// The production build-admission entry point the warm trait wraps, so the
 /// bounded decision (and its occupancy arithmetic) is directly observable.
 fn build_request(id: &str) -> BuildAdmissionRequest {
@@ -487,9 +528,26 @@ async fn reclamation_never_releases_work_that_is_still_fenced() {
 }
 
 /// A row created by THIS process may be mid-create right now, and an API server
-/// that cannot answer is not evidence of anything. Neither may be reclaimed.
+/// that cannot answer is not evidence of anything. Neither may be reclaimed —
+/// and neither may wedge the board.
+///
+/// The second half of that sentence is the 2026-07-29 outage, and this test
+/// used to certify the bug rather than catch it. It constructed exactly the
+/// production state (a live controller's own `CreateUnknown` row, an empty
+/// namespace, a zero settle window so only the epoch fence remains), asserted
+/// `reclaimed == 0`, and stopped — never once looking at `readiness()`. It was
+/// the label, not the side effect.
+///
+/// The side effect: the tail `seed_from_recovery` in every reconciliation pass
+/// counted that row into `create_unknown_pending`, which `readiness()` reports
+/// as `CreateUnknownHealth`, which denies EVERY admission before any capacity
+/// is measured. `finish_task_run_build_admission` writes a `CreateUnknown` row
+/// for every task-run the moment the slot pool accepts it, so any 120s pass
+/// landing inside a normal dispatch's POST→session window halted the entire
+/// board — while `is_reclaimable` (correctly) refused to retire the row that
+/// armed the gate. Arming and reclamation must agree on the same population.
 #[tokio::test]
-async fn current_epoch_and_unsettled_rows_are_never_reclaimed() {
+async fn current_epoch_and_unsettled_rows_are_never_reclaimed_and_never_wedge_the_board() {
     let db = Database::open_in_memory().unwrap();
     let journal = Arc::new(AdmissionJournalRepository::new(db.clone()));
 
@@ -523,6 +581,23 @@ async fn current_epoch_and_unsettled_rows_are_never_reclaimed() {
         "a row this process created may still be mid-create"
     );
     assert_eq!(journal.count_task_or_warm_occupancy().await.unwrap(), 1);
+    // The row the reconciler may not touch must not arm a gate the reconciler
+    // is the only thing that could clear. This is the whole outage.
+    assert_eq!(
+        controller.readiness(),
+        BuildAdmissionReadiness::Healthy,
+        "this process's own in-flight create is not a RECOVERED unknown; it must \
+         not fail Enforce closed against work this process is actively doing"
+    );
+    let admitted = controller
+        .admit(build_request("board-keeps-running"))
+        .await
+        .expect("a decision, not an error");
+    assert!(
+        matches!(admitted, BuildAdmissionDecision::Permitted { .. }),
+        "the board must keep dispatching while one of its own creates is in \
+         flight: {admitted:?}"
+    );
 
     // Same rows, seen by a replacement process, but inside the settle window:
     // the API server could still be admitting a create the dead process POSTed.
@@ -545,6 +620,15 @@ async fn current_epoch_and_unsettled_rows_are_never_reclaimed() {
         "an unsettled row is not yet safe to judge by a listing"
     );
     assert_eq!(journal.count_task_or_warm_occupancy().await.unwrap(), 1);
+    // The fail-closed direction, unchanged: the SAME row seen by a process
+    // that did not create it IS a recovered unknown — nobody is mid-creating
+    // it, nothing in this process is waiting on it, and only reconciliation
+    // can resolve it. That must still gate Enforce.
+    assert_eq!(
+        successor.readiness(),
+        BuildAdmissionReadiness::CreateUnknownHealth,
+        "a predecessor's unresolved create must still fail Enforce closed"
+    );
 }
 
 /// The 2026-07-28 production wedge, end to end: the startup pass alone is not
@@ -916,5 +1000,300 @@ async fn one_unreclaimable_row_costs_one_row_and_the_sweep_continues() {
         journal.count_task_or_warm_occupancy().await.unwrap(),
         1,
         "only the unreclaimable row keeps occupying"
+    );
+}
+
+/// A pre-Live row whose object EXISTS and has already FINISHED had no exit at
+/// all, and one of them wedges the board permanently.
+///
+/// Adoption skips a terminal object (adopting a finished Job into `Live` would
+/// be a lie), reclamation refuses it (the object is not absent, so the absence
+/// proof cannot be made), and the `Live` branch's completion handling never
+/// applies because the row is not `Live`. So the create landed, the workload
+/// ran, the workload finished — and the row occupied the shared cap forever
+/// while every pass reported `stale:0` and readiness stayed
+/// `CreateUnknownHealth`.
+///
+/// This is not exotic. Every dispatched task-run is put into `CreateUnknown`
+/// ("slot-pool accepted create without object UID") until its UID callback
+/// lands, and every warm Job whose `job_uid()` could not be observed is too. A
+/// single lost UID callback on a workload that then completed normally is
+/// enough, and a restart does not clear it: recovery retains an existing
+/// `create_unknown` row verbatim.
+#[tokio::test]
+async fn a_pre_live_row_whose_object_already_finished_is_retired() {
+    let db = Database::open_in_memory().unwrap();
+    let journal = Arc::new(AdmissionJournalRepository::new(db.clone()));
+    accumulate_production_stale_population(&db, &journal, 1, 0).await;
+    let rows = journal.list_active_rows().await.unwrap();
+    assert_eq!(rows.len(), 1);
+    let row = rows[0].clone();
+    assert_eq!(row.state, AdmissionState::CreateUnknown);
+
+    // The create DID land: the Job exists under the name the journal recorded,
+    // carries this row's admission identity, and has already completed.
+    let finished = admission_labeled_object(&row, true, "the-create-did-land");
+
+    let controller = Arc::clone(&replacement(&db, &journal, 3).await.controller);
+    controller
+        .recover_all_predecessors_and_seed()
+        .await
+        .unwrap();
+    controller.mark_topology_ready();
+    assert_eq!(
+        controller.readiness(),
+        BuildAdmissionReadiness::CreateUnknownHealth,
+        "the unresolved create must fail Enforce closed before reconciliation"
+    );
+
+    // An hour-long settle window, so nothing here can be attributed to the
+    // absence path: this row's object is PRESENT, and the only proof available
+    // is that it has finished.
+    let report = BuildAdmissionReconciler::with_settle_window(
+        Arc::clone(&controller),
+        Arc::new(NamespaceInventory::holding(vec![finished])),
+        Duration::from_secs(3600),
+    )
+    .reconcile()
+    .await;
+
+    assert!(
+        report.blockers.is_empty(),
+        "unexpected blockers: {:?}",
+        report.blockers
+    );
+    assert_eq!(
+        report.adopted, 0,
+        "a finished object must never be adopted into Live"
+    );
+    assert_eq!(
+        report.reclaimed, 1,
+        "a finished object is a stronger proof than absence: no lifecycle \
+         callback is coming for a row that never went Live"
+    );
+    assert_eq!(
+        journal.count_task_or_warm_occupancy().await.unwrap(),
+        0,
+        "the row must stop occupying the shared cap"
+    );
+    assert_eq!(
+        controller.readiness(),
+        BuildAdmissionReadiness::Healthy,
+        "retiring the row must clear the gate it armed"
+    );
+}
+
+/// One standing blocker must not freeze four gates forever.
+///
+/// The tail `seed_from_recovery` is the ONLY in-process re-derivation of
+/// `journal_recovered`, `journal_healthy`, `create_unknown_pending` and
+/// `over_cap`, and it used to run only when `blockers` was empty. So any
+/// standing blocker — one unclassifiable Job in the namespace is enough, and it
+/// stands for as long as that object exists — pinned all four gates at
+/// whatever they last were. A gate that had latched closed could never re-open,
+/// because the only code that could re-open it was gated on the blocker being
+/// absent.
+///
+/// Here the reclamation the pass performs is real and the blocker is unrelated
+/// to it, so `CreateUnknownHealth` after the pass would be a gate reporting a
+/// row that no longer exists.
+#[tokio::test]
+async fn a_standing_blocker_cannot_freeze_the_journal_derived_gates() {
+    let db = Database::open_in_memory().unwrap();
+    let journal = Arc::new(AdmissionJournalRepository::new(db.clone()));
+    accumulate_production_stale_population(&db, &journal, 1, 0).await;
+
+    // A workload this reconciler cannot classify. It is a genuine pass-level
+    // blocker — the inventory is not fully understood, so Enforce must stay
+    // fail-closed on the INVENTORY gate — and it says nothing whatsoever about
+    // the journal.
+    let unclassifiable = WorkloadRecord {
+        kind: WorkloadObjectKind::Job,
+        name: "djinn-something-new".into(),
+        uid: Some("uid-something-new".into()),
+        labels: [(
+            "djinn.app/component".to_string(),
+            "a-component-this-build-does-not-know".to_string(),
+        )]
+        .into_iter()
+        .collect(),
+        terminal: false,
+        images: vec!["djinn:test".into()],
+        commands: vec!["something".into()],
+    };
+
+    let controller = Arc::clone(&replacement(&db, &journal, 3).await.controller);
+    controller
+        .recover_all_predecessors_and_seed()
+        .await
+        .unwrap();
+    controller.mark_topology_ready();
+    assert_eq!(
+        controller.readiness(),
+        BuildAdmissionReadiness::CreateUnknownHealth
+    );
+
+    let report = BuildAdmissionReconciler::with_settle_window(
+        Arc::clone(&controller),
+        Arc::new(NamespaceInventory::holding(vec![unclassifiable])),
+        Duration::ZERO,
+    )
+    .reconcile()
+    .await;
+
+    assert!(
+        !report.blockers.is_empty(),
+        "an unclassifiable workload is still a pass-level blocker"
+    );
+    assert_eq!(
+        report.reclaimed, 1,
+        "the blocker is about one object; the settled orphan is still retired"
+    );
+    assert_eq!(journal.count_task_or_warm_occupancy().await.unwrap(), 0);
+    assert_eq!(
+        controller.readiness(),
+        BuildAdmissionReadiness::InventoryPending,
+        "the inventory gate must stay fail-closed on incomplete Kubernetes \
+         evidence — but the journal-derived gates must re-derive from the \
+         journal, which the pass only READ. CreateUnknownHealth here would mean \
+         a gate frozen at a value the retired row no longer justifies, with no \
+         code path left that could ever clear it"
+    );
+}
+
+/// An adoption identity collision costs one object, not the whole pass.
+///
+/// `adopt_live` returns `InvalidTransition("inventory identity collision")` for
+/// a routine mismatch — an object whose admission labels resolve to a journal
+/// key that already records a different object name. Reclamation has treated
+/// that class of rejection as a per-row fact since #2597; adoption did not. It
+/// marked the journal unhealthy (failing Enforce closed on `JournalUnhealthy`,
+/// which is a claim about the DATABASE) and pushed a pass-level blocker, which
+/// then also froze the journal-derived gates.
+#[tokio::test]
+async fn an_adoption_identity_collision_costs_one_object_not_the_whole_pass() {
+    let db = Database::open_in_memory().unwrap();
+    let journal = Arc::new(AdmissionJournalRepository::new(db.clone()));
+    accumulate_production_stale_population(&db, &journal, 1, 0).await;
+    let row = journal.list_active_rows().await.unwrap()[0].clone();
+
+    // A live object carrying this row's admission identity under a DIFFERENT
+    // name: the row cannot adopt it, and the object is not the row's object.
+    let mut colliding = admission_labeled_object(&row, false, "uid-collides");
+    colliding.name = format!("{}-renamed", row.object_name);
+
+    let controller = Arc::clone(&replacement(&db, &journal, 3).await.controller);
+    controller
+        .recover_all_predecessors_and_seed()
+        .await
+        .unwrap();
+    controller.mark_topology_ready();
+
+    let report = BuildAdmissionReconciler::with_settle_window(
+        Arc::clone(&controller),
+        Arc::new(NamespaceInventory::holding(vec![colliding])),
+        Duration::ZERO,
+    )
+    .reconcile()
+    .await;
+
+    assert!(
+        report.blockers.is_empty(),
+        "a rejected adoption is a decision about one object: {:?}",
+        report.blockers
+    );
+    assert_eq!(report.adopted, 0);
+    assert_eq!(report.reclaim_failure_count, 1);
+    assert!(
+        report.reclaim_failures[0].contains("inventory identity collision"),
+        "the failure must name the row and its cause: {:?}",
+        report.reclaim_failures
+    );
+    assert_eq!(
+        controller.readiness(),
+        BuildAdmissionReadiness::CreateUnknownHealth,
+        "a mislabelled object is not evidence that the journal is unhealthy; the \
+         only gate that may still be closed is the one the unresolved create \
+         genuinely arms"
+    );
+}
+
+/// Adopting one of THIS process's own creates must not hand back a gate that
+/// only a predecessor's row armed.
+///
+/// This is the fail-open edge of counting only recovered unknowns. The tail
+/// seed re-seeds every active row on every pass, including this process's own,
+/// and `transition` decrements `create_unknown_pending` when a seeded row with
+/// `create_unknown_outstanding` is adopted into Live. If that flag were set for
+/// rows that never contributed to the count, one healthy own-epoch dispatch
+/// going Live would clear a gate a predecessor's unresolved create is still
+/// holding — admitting against occupancy nobody has proven.
+#[tokio::test]
+async fn adopting_this_process_own_create_cannot_clear_a_predecessors_gate() {
+    let db = Database::open_in_memory().unwrap();
+    let journal = Arc::new(AdmissionJournalRepository::new(db.clone()));
+    accumulate_production_stale_population(&db, &journal, 1, 0).await;
+
+    // Observe, so this process can still start work of its own while the
+    // recovered unknown holds the gate closed.
+    let controller = Arc::new(BuildAdmissionController::new(
+        Arc::clone(&journal),
+        BuildAdmissionMode::Observe,
+        3,
+        REPLACEMENT_EPOCH,
+    ));
+    controller
+        .recover_all_predecessors_and_seed()
+        .await
+        .unwrap();
+    controller.mark_inventory_ready();
+    controller.mark_topology_ready();
+    assert_eq!(
+        controller.readiness(),
+        BuildAdmissionReadiness::CreateUnknownHealth
+    );
+
+    // This process starts a create of its own and cannot confirm the UID.
+    let permit = WarmAdmission::admit(controller.as_ref(), warm_request("own-create"))
+        .await
+        .expect("Observe never denies");
+    controller
+        .transition(&permit, WarmAdmissionTransition::CreateStarted)
+        .await
+        .unwrap();
+    controller
+        .transition(
+            &permit,
+            WarmAdmissionTransition::CreateUnknown {
+                diagnostic: "connection reset while awaiting the create response".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+    // A reconciliation pass re-seeds every active row, this one included.
+    let report = BuildAdmissionReconciler::with_settle_window(
+        Arc::clone(&controller),
+        Arc::new(NamespaceInventory::empty()),
+        Duration::from_secs(3600),
+    )
+    .reconcile()
+    .await;
+    assert_eq!(report.reclaimed, 0, "nothing has settled yet");
+
+    // The own create resolves. It must hand back only what it took.
+    controller
+        .transition(
+            &permit,
+            WarmAdmissionTransition::Live {
+                uid: "the-uid-arrived-late".into(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        controller.readiness(),
+        BuildAdmissionReadiness::CreateUnknownHealth,
+        "the predecessor's unresolved create still occupies and still gates"
     );
 }

@@ -447,6 +447,27 @@ impl AdmissionJournalRepository {
                     "Kubernetes UID does not match admission row".into(),
                 ));
             }
+            // A create whose object UID was never observed still ends.
+            //
+            // This arm used to fall through to the catch-all and be rejected,
+            // which left `CreateUnknown` with no lifecycle exit whatsoever:
+            // `mark_live` needs a UID that will never arrive,
+            // `mark_definitive_create_failure` accepts only
+            // Reserved/CreateInFlight, and `mark_terminal` — the one callback
+            // that actually observed the work end — refused the row. The only
+            // thing that could retire it was reconciliation proving the object
+            // absent, and until then it occupied the shared cap.
+            //
+            // There is no UID fence to apply here and nothing to contradict: a
+            // `CreateUnknown` row carries no `object_uid` (only `mark_live`
+            // and `adopt_live` write one, and both leave the row `Live`), so
+            // the terminal observation's UID is the first and only identity
+            // the row has ever had. The latest-generation fence in
+            // `current_row_for_update` still applies, so a late callback for a
+            // superseded generation is still rejected.
+            AdmissionState::CreateUnknown => {
+                update_state(&mut tx, &input.key, "terminal", input.object_uid.as_deref()).await?
+            }
             state => return Err(invalid_state("mark terminal", state)),
         };
         tx.commit().await?;
@@ -521,7 +542,9 @@ impl AdmissionJournalRepository {
         self.db.ensure_initialized().await?;
         let mut tx = self.db.pool().begin().await?;
         let retired_reserved = sqlx::query("UPDATE admission_journal SET state = 'terminal', terminal_at = now(), updated_at = now() WHERE creator_server_epoch = $1 AND state = 'reserved'").bind(predecessor_epoch).execute(&mut *tx).await?.rows_affected();
-        let marked_create_unknown = sqlx::query("UPDATE admission_journal SET state = 'create_unknown', updated_at = now() WHERE creator_server_epoch = $1 AND state = 'create_in_flight'").bind(predecessor_epoch).execute(&mut *tx).await?.rows_affected();
+        // `updated_at` is deliberately NOT touched. See
+        // [`Self::recover_all_predecessors`].
+        let marked_create_unknown = sqlx::query("UPDATE admission_journal SET state = 'create_unknown' WHERE creator_server_epoch = $1 AND state = 'create_in_flight'").bind(predecessor_epoch).execute(&mut *tx).await?.rows_affected();
         let rows = active_rows(&mut *tx).await?;
         tx.commit().await?;
         Ok(AdmissionRecoveryResult {
@@ -557,8 +580,28 @@ impl AdmissionJournalRepository {
         .execute(&mut *tx)
         .await?
         .rows_affected();
+        // `updated_at` is deliberately NOT touched here.
+        //
+        // This UPDATE is a RELABEL, not a write to the work item: the row is
+        // being reclassified from "a create this process is attempting" to "a
+        // create nobody is attempting any more", and nothing about the
+        // Kubernetes object changed. `updated_at` is what
+        // `list_active_rows_with_settlement` measures the 300s reclaim settle
+        // window against, and that window exists to answer exactly one
+        // question — could the API server still be admitting a create someone
+        // POSTed? For a row this recovery just adopted, that create was POSTed
+        // by a process that is already gone, so the answer is decided by when
+        // the ROW was last written, not by when this process happened to boot.
+        //
+        // Stamping `now()` here re-armed the window on every restart, which is
+        // why the 2026-07-29 board halt survived its own remedy: the operator
+        // restarted the server, recovery relabelled the wedged row and reset
+        // its clock, and the reconciliation pass that would otherwise have
+        // retired it immediately had to wait out a fresh 300s window (the pass
+        // at t+296.2s missed by 3.8 seconds, costing another full 120s tick).
+        // A restart must not be able to make a stale row look fresh.
         let marked_create_unknown = sqlx::query(
-            "UPDATE admission_journal SET state = 'create_unknown', updated_at = now() \
+            "UPDATE admission_journal SET state = 'create_unknown' \
              WHERE creator_server_epoch <> $1 AND state = 'create_in_flight'",
         )
         .bind(current_server_epoch)
