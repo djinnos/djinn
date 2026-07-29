@@ -654,6 +654,41 @@ async fn arming_observation_records_pressure_without_changing_any_grant() {
 }
 
 #[tokio::test]
+async fn observation_remains_non_denying_under_the_reference_cap() {
+    let db = Database::open_in_memory().unwrap();
+    let volume = fixture_volume();
+    let controller = BuildAdmissionController::new(
+        Arc::new(AdmissionJournalRepository::new(db.clone())),
+        BuildAdmissionMode::Observe,
+        1,
+        "epoch",
+    );
+
+    arm_disk_observation(&db, &controller, seams_for(&volume, Ok(snapshot(GIB)))).await;
+
+    // Pressure is observed only after the ordinary reference cap has admitted
+    // the first build. The disk signal records a would-defer, but does not
+    // alter that grant or reserve run-dir resources.
+    let first = controller.admit(worker_request("cap-first")).await.unwrap();
+    assert!(matches!(first, BuildAdmissionDecision::Permitted { .. }));
+    assert_eq!(controller.disk_would_defer_observation_count().await, 1);
+
+    // Observe mode intentionally keeps dispatch non-denying even when the
+    // reference cap is one. The second admitted build receives another
+    // would-defer observation rather than a policy-changing denial.
+    let second = controller
+        .admit(worker_request("cap-second"))
+        .await
+        .unwrap();
+    assert!(matches!(second, BuildAdmissionDecision::Permitted { .. }));
+    assert_eq!(
+        controller.disk_would_defer_observation_count().await,
+        2,
+        "every permitted build is observed without changing dispatch policy"
+    );
+}
+
+#[tokio::test]
 async fn arming_observation_on_a_healthy_volume_records_nothing() {
     let db = Database::open_in_memory().unwrap();
     let volume = fixture_volume();
