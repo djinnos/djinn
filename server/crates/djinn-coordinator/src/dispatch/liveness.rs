@@ -132,6 +132,12 @@ impl DbTaskStatus {
     /// `Open` and `InProgress` are NOT settled: a pod that exits while the task
     /// is still queued or still claimed left nothing behind, which is the
     /// genuine inconsistency this detector is for.
+    ///
+    /// Status alone is not the whole test, though. `Open` is ALSO where a
+    /// reviewer's rejection parks a task (`TransitionAction::TaskReviewReject`),
+    /// so [`classify`] additionally consults
+    /// [`LivenessEvidence::handed_off_from_session_held_status`] before
+    /// convicting — see the precedence-3 comment there.
     pub fn is_settled(&self) -> bool {
         matches!(
             self,
@@ -179,6 +185,38 @@ pub struct LivenessEvidence {
     /// (code 0) from nonzero exit. `None` when the pod is still running or
     /// absent.
     pub exit_code: Option<i32>,
+    /// Positive evidence that the task was **handed off** by a live session:
+    /// its most recent recorded status transition moved it OUT of a status that
+    /// only a running session holds (see [`is_session_held_status`]).
+    ///
+    /// A task can sit on a non-settled status (`open` / `in_progress`) for two
+    /// opposite reasons, and the status alone cannot tell them apart:
+    ///
+    /// * `in_task_review → open` — a reviewer explicitly rejected and queued the
+    ///   task for rework. The reviewer completed its protocol exactly as
+    ///   designed; the task is dispatchable and nothing is stranded.
+    /// * `open → in_progress` (and then nothing) — a worker claimed the task and
+    ///   exited without ever handing it on. The task now claims to be in
+    ///   progress with no session behind it: genuinely stranded.
+    ///
+    /// `true` exonerates: some session deliberately moved the task off an
+    /// active status. `false` is the fail-safe default and preserves the
+    /// pre-existing verdict.
+    #[serde(default)]
+    pub handed_off_from_session_held_status: bool,
+}
+
+/// Whether `status` is one that only a LIVE session holds.
+///
+/// These are the statuses whose meaning is "a session is working on this right
+/// now". A transition OUT of one of them is a session's deliberate handoff; a
+/// transition INTO one is a claim, which proves nothing about how the session
+/// ended.
+pub fn is_session_held_status(status: &str) -> bool {
+    matches!(
+        status,
+        "in_progress" | "in_task_review" | "in_lead_intervention"
+    )
 }
 
 // ─── Stable outcome kinds ───────────────────────────────────────────────────
@@ -339,8 +377,9 @@ pub struct ClassificationResult {
 /// 2. **Hard runtime cap exceeded** → `Dead` with `Timeout` outcome (forbids
 ///    extension)
 /// 3. **Protocol violation** → inconsistent clean/nonzero exit on a task that
-///    is positively known to be unsettled (still `open`/`in_progress`) with a
-///    session row positively known to still be running
+///    is positively known to be unsettled (still `open`/`in_progress`), with a
+///    session row positively known to still be running, and with no evidence
+///    that a session deliberately handed the task off to that status
 /// 4. **Dead** → absent/failed pod with no recent activity
 /// 5. **Slow** → activity signal absent/idle, pod running, below hard cap
 /// 6. **Live** → default when other conditions don't match
@@ -401,7 +440,16 @@ pub fn classify(evidence: &LivenessEvidence) -> ClassificationResult {
         .as_ref()
         .is_some_and(|s| !s.is_settled());
 
-    if pod_exited && session_nonterminal && task_unsettled {
+    // A non-settled status is not by itself evidence of abandonment. The task's
+    // own transition record decides: if the last status change moved the task
+    // OUT of a session-held status, a session handed it on deliberately
+    // (`in_task_review → open` is the reviewer-rejection path, which the
+    // supervisor drives on EVERY explicit reject verdict — see
+    // `TransitionAction::TaskReviewReject`). Only a task left sitting where its
+    // session found it — claimed and unmoved — is genuinely stranded.
+    let handed_off = evidence.handed_off_from_session_held_status;
+
+    if pod_exited && session_nonterminal && task_unsettled && !handed_off {
         // Classify the type of protocol violation based on exit code
         let reason = match evidence.exit_code {
             Some(0) => LivenessReason::CleanExitNonterminal,
@@ -520,6 +568,8 @@ mod tests {
             extension_budget_exhausted: false,
             hard_runtime_deadline_exceeded: false,
             exit_code: None,
+
+            handed_off_from_session_held_status: false,
         }
     }
 
@@ -892,6 +942,54 @@ mod tests {
             let result = classify(&crashed);
             assert_eq!(result.verdict, Verdict::ProtocolViolation, "{status:?}");
             assert_eq!(result.outcome, Some(LivenessOutcome::Crash));
+        }
+    }
+
+    /// A non-settled status is ambiguous on its own. The task's own transition
+    /// record disambiguates: a last transition OUT of a session-held status
+    /// means a live session put the task there deliberately (the reviewer
+    /// rejection path, `in_task_review → open`), so the exiting session
+    /// completed its protocol and must NOT be convicted.
+    #[test]
+    fn handoff_off_a_session_held_status_exonerates_an_unsettled_task() {
+        for status in [DbTaskStatus::Open, DbTaskStatus::InProgress] {
+            let mut ev = live_evidence();
+            ev.pod_phase = Some(PodPhase::Succeeded);
+            ev.exit_code = Some(0);
+            ev.db_session_status = Some(DbSessionStatus::Running);
+            ev.db_task_status = Some(status);
+            ev.handed_off_from_session_held_status = true;
+
+            let result = classify(&ev);
+            assert_ne!(
+                result.verdict,
+                Verdict::ProtocolViolation,
+                "{status:?} reached by a deliberate handoff is not a violation"
+            );
+            assert_ne!(result.reason, Some(LivenessReason::CleanExitNonterminal));
+        }
+    }
+
+    /// The statuses that only a live session holds. A transition OUT of one of
+    /// these is a handoff; a transition INTO one is just a claim.
+    #[test]
+    fn session_held_statuses_are_the_active_ones() {
+        for held in ["in_progress", "in_task_review", "in_lead_intervention"] {
+            assert!(is_session_held_status(held), "{held} is session-held");
+        }
+        for not_held in [
+            "open",
+            "needs_task_review",
+            "approved",
+            "pr_draft",
+            "pr_review",
+            "needs_lead_intervention",
+            "closed",
+        ] {
+            assert!(
+                !is_session_held_status(not_held),
+                "{not_held} is not session-held"
+            );
         }
     }
 
