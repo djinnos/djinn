@@ -28,6 +28,7 @@ mod mcp_handler;
 mod oauth;
 mod org_sync;
 mod project_tools;
+mod readiness;
 mod state;
 mod static_ui;
 pub mod usage_analytics;
@@ -63,6 +64,7 @@ pub fn router(state: AppState, serve_ui: bool) -> Router {
         .merge(crate::mirror_fetcher::router())
         .merge(org_sync::router())
         .merge(project_tools::router())
+        .merge(readiness::router())
         .merge(usage_analytics::router())
         .merge(users::router());
     if serve_ui {
