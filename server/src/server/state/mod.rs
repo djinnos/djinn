@@ -1414,8 +1414,8 @@ impl AppState {
     /// Re-walk the build-admission startup gates after a live promotion reset
     /// them.
     ///
-    /// [`BuildAdmissionController::require_enforcement`] clears the journal,
-    /// inventory, and topology gates so a configured Off/Observe process cannot
+    /// [`BuildAdmissionController::require_enforcement`] clears the pod-permit,
+    /// journal, inventory, and topology gates so a configured Off/Observe process cannot
     /// weaken a durable emergency epoch on the strength of checks it never ran.
     /// That is right at startup, where the gates are walked immediately
     /// afterwards — but the same promotion also happens on the periodic handoff
@@ -1429,6 +1429,7 @@ impl AppState {
     /// stays fail-closed at `TopologyPending`, preserving the single-active
     /// writer invariant.
     async fn reestablish_build_admission_gates(&self, admission: &BuildAdmissionController) {
+        self.initialize_build_pod_permit_prerequisites().await;
         self.initialize_build_admission_recovery().await;
         self.initialize_build_admission_inventory().await;
         if self
@@ -5088,7 +5089,7 @@ mod build_admission_config_tests {
         let state = state_for_admission_config(BuildAdmissionConfig {
             mode: BuildAdmissionMode::Enforce,
             cap: 3,
-            pod_limit: None,
+            pod_limit: Some(1),
         });
         let admission = state
             .inner
@@ -5102,7 +5103,12 @@ mod build_admission_config_tests {
             "Enforce starts fail-closed before journal recovery"
         );
 
-        // Journal recovery runs first and, on an empty journal, must NOT mark
+        // Pod-permit prerequisites run before journal recovery in production.
+        // They are healthy in this fixture, but the higher-priority journal gate
+        // remains the visible readiness reason until recovery completes.
+        state.initialize_build_pod_permit_prerequisites().await;
+
+        // Journal recovery runs next and, on an empty journal, must NOT mark
         // the controller healthy: the inventory gate keeps admission closed.
         state.initialize_build_admission_recovery().await;
         assert_eq!(
@@ -5644,7 +5650,7 @@ mod build_admission_config_tests {
             BuildAdmissionConfig {
                 mode: BuildAdmissionMode::Observe,
                 cap: 3,
-                pod_limit: None,
+                pod_limit: Some(1),
             },
         );
         let repository = handoff_repository(&state);
@@ -5659,6 +5665,7 @@ mod build_admission_config_tests {
         // fail-closed, so the configured-Observe controller is promoted to
         // Enforce with every startup gate reset.
         state.initialize_build_admission_handoff().await;
+        state.initialize_build_pod_permit_prerequisites().await;
         let controller = admission(&state).clone();
         assert_eq!(
             controller.mode(),
