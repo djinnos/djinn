@@ -6,8 +6,7 @@
 //! A brokered command does not run in the worker container. `clone3` /
 //! `CLONE_INTO_CGROUP` puts it in the **launcher container's** mount namespace,
 //! so the only paths it can reach are the ones the *launcher* mounts. Before
-//! this module the launcher mounted exactly two volumes — `launcher-ipc` and
-//! `launcher-cgroup` — and nothing else. Measured inside a rendered launcher
+//! this module the launcher mounted exactly two volumes — `launcher-ipc` — and nothing else. Measured inside a rendered launcher
 //! container on the production node:
 //!
 //! ```text
@@ -155,7 +154,7 @@ use crate::job::{
     CACHE_MOUNT_DIR, MIRROR_MOUNT_DIR, VOLUME_CACHE, VOLUME_MIRROR, VOLUME_WORKSPACE,
     WORKSPACE_MOUNT_DIR,
 };
-use crate::launcher::{launcher_cgroup_mount, worker_launcher_ipc_mount};
+use crate::launcher::worker_launcher_ipc_mount;
 
 /// Volume supplying the launcher container a writable `/tmp`.
 pub const VOLUME_LAUNCHER_TMP: &str = "launcher-tmp";
@@ -189,16 +188,12 @@ pub const LAUNCHER_HOME_DIR: &str = "/home/djinn";
 /// Two groups, and the distinction is the whole point of this module:
 ///
 /// * the launcher's OWN surfaces — the IPC volume carrying the broker socket
-///   and the worker-private credential, and the writable *mountpoint* the
-///   launcher mounts its delegated cgroup2 root onto (a mountpoint, not a
-///   delegated root; see [`crate::launcher::launcher_cgroup_mountpoint_volume`]
-///   for why that distinction is the difference between working and
-///   CrashLoopBackOff);
+///   and the worker-private credential; the RuntimeClass supplies the cgroup root.
 /// * the CHILD's surfaces — [`launcher_data_mounts`], which exist purely
 ///   because a brokered command executes in this container's mount namespace
 ///   and not the worker's.
 pub fn launcher_volume_mounts(mirror_read_only: bool, cache_read_only: bool) -> Vec<VolumeMount> {
-    let mut mounts = vec![worker_launcher_ipc_mount(), launcher_cgroup_mount()];
+    let mut mounts = vec![worker_launcher_ipc_mount()];
     mounts.extend(launcher_data_mounts(mirror_read_only, cache_read_only));
     mounts
 }
