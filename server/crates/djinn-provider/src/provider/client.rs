@@ -840,7 +840,13 @@ impl ApiClient {
 }
 
 /// Calculate exponential backoff delay with jitter for a given attempt (1-based).
-fn backoff_delay_ms(attempt: u32) -> u64 {
+///
+/// Public so retry paths *outside* the HTTP client — notably the reply loop's
+/// bounded restart of a round killed by a transient **mid-stream** provider
+/// error, which the `'retry` loop above cannot reach once the SSE stream is
+/// established on a 200 — use the exact same exponential-with-jitter schedule
+/// instead of inventing a parallel one.
+pub fn backoff_delay_ms(attempt: u32) -> u64 {
     let base = INITIAL_BACKOFF_MS as f64 * BACKOFF_MULTIPLIER.powi(attempt as i32 - 1);
     let capped = base.min(MAX_BACKOFF_MS as f64);
     // Jitter: 0.8x to 1.2x
