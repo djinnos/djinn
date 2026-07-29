@@ -82,6 +82,8 @@ async fn typescript_and_rust_service_flow_projects_terminal_detail_and_scores() 
     let query = ReadinessQueryService::new(db.clone());
     let detail = query_detail(&query, &project_id, &kickoff.run.id, &owner_id).await;
     assert_eq!(detail.run.status, "completed");
+    assert_eq!(detail.run.skill_name, READINESS_SKILL_NAME);
+    assert_eq!(detail.run.skill_version, READINESS_SKILL_VERSION);
     assert_eq!(detail.run.expected_area_count, Some(2));
     assert_eq!(detail.areas.len(), 2);
     assert_eq!(
@@ -115,6 +117,7 @@ async fn typescript_and_rust_service_flow_projects_terminal_detail_and_scores() 
         auth_finding.evidence,
         serde_json::json!({"path":"apps/web/auth.ts","line":42})
     );
+    assert_eq!(auth_finding.confidence, 0.91);
     assert_eq!(
         frontend_detail.accepted_outputs[0].result["findings"][3]["gap_reason"],
         "session expiry is not enforced"
@@ -267,6 +270,8 @@ async fn post_terminal_kickoff_uses_new_snapshot_and_preserves_first_detail() {
         second.run.repository_snapshot,
         "4444444444444444444444444444444444444444"
     );
+    assert_eq!(second.run.skill_name, READINESS_SKILL_NAME);
+    assert_eq!(second.run.skill_version, READINESS_SKILL_VERSION);
     assert_eq!(
         query_detail(&query, &project_id, &first.run.id, &owner_id).await,
         before,
