@@ -527,7 +527,301 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 8. Fixture mode: the success transcript is exact and every failure case,
+# 8. CPU controller delegation. A child of the delegated root is born with the
+#    core interface files only. `cpu.max` exists in it exactly when the parent
+#    already enables the cpu controller in its own `cgroup.subtree_control`. The
+#    launcher phase never performed that write, so on the production node
+#    `.djinn-launcher-leaf` came up with an empty `cgroup.controllers` and no
+#    `cpu.max` at all; the worker phase then aborted outright at
+#    `launcher_cpu_max=$(cat "$launcher_leaf/cpu.max")` under `set -eu`, and the
+#    leaf-`cpu.max` denial it was walking towards could only ever have failed
+#    with ENOENT — a failure that says nothing about the worker's authority,
+#    because a write to a missing path fails for root too.
+#
+#    The launcher phase is lifted verbatim out of the script and executed against
+#    a fake delegated root with PATH shims that model the kernel behaviours it
+#    depends on, so these cases cannot drift from the shipped text.
+# ---------------------------------------------------------------------------
+EMBEDDED_QUOTE="'\\''"
+BARE_QUOTE="'"
+
+# Lift one single-quoted probe payload out of the script and undo the '\''
+# sequences bash uses to embed a single quote inside a single-quoted literal.
+extract_probe_payload() {
+  local name=$1 line collecting=0 out=''
+  while IFS= read -r line; do
+    if [ "$collecting" -eq 0 ]; then
+      case "$line" in
+        "$name=$BARE_QUOTE"*) collecting=1; line=${line#"$name=$BARE_QUOTE"} ;;
+        *) continue ;;
+      esac
+    fi
+    case "$line" in
+      # A line ending in an embedded quote is not the end of the literal.
+      *"$EMBEDDED_QUOTE") out="${out}${line}"$'\n' ;;
+      *"$BARE_QUOTE") out="${out}${line%"$BARE_QUOTE"}"$'\n'; break ;;
+      *) out="${out}${line}"$'\n' ;;
+    esac
+  done <"$CONFORMANCE"
+  printf '%s' "${out//"$EMBEDDED_QUOTE"/"$BARE_QUOTE"}"
+}
+
+# Three kernel behaviours the launcher phase depends on, and nothing else:
+#   * `stat -fc %T` on a cgroup2 mount reports cgroup2fs;
+#   * `cgroup.subtree_control` renders the ENABLED set rather than the directive
+#     last written into it, so `printf +cpu >` reads back as `cpu`;
+#   * a child cgroup is born with the core interface files, and gains the cpu
+#     controller's own files — `cpu.max` among them — only when its parent
+#     already enables cpu. Both file lists are the ones observed on the node.
+#     Its interface files are not dirents an `rmdir` has to clear first, so a
+#     childless, unpopulated cgroup is removable exactly as kernfs allows.
+# `cgroup.procs` of the delegated root additionally loses every pid migrated
+# into a descendant, which is what makes vacating the root observable at all.
+make_cgroup_shims() {
+  local dir=$1 root=$2 real_cat real_mkdir real_rmdir real_stat
+  real_cat=$(command -v cat)
+  real_mkdir=$(command -v mkdir)
+  real_rmdir=$(command -v rmdir)
+  real_stat=$(command -v stat)
+  mkdir -p "$dir"
+  cat >"$dir/stat" <<EOF
+#!/usr/bin/env bash
+if [ "\${1-}" = -fc ] && [ "\${2-}" = %T ]; then echo cgroup2fs; exit 0; fi
+exec '$real_stat' "\$@"
+EOF
+  cat >"$dir/cat" <<EOF
+#!/usr/bin/env bash
+set -uo pipefail
+root='$root'
+case "\${1-}" in
+  */cgroup.subtree_control)
+    enabled=''
+    for token in \$('$real_cat' "\$1"); do
+      case "\$token" in
+        -*) : ;;
+        *) enabled="\${enabled:+\$enabled }\${token#+}" ;;
+      esac
+    done
+    [ -z "\$enabled" ] || printf '%s\n' "\$enabled"
+    exit 0 ;;
+  "\$root/cgroup.procs")
+    migrated=\$('$real_cat' "\$root"/*/cgroup.procs 2>/dev/null || true)
+    for pid in \$('$real_cat' "\$1"); do
+      case " \$migrated " in *" \$pid "*) ;; *) printf '%s\n' "\$pid" ;; esac
+    done
+    exit 0 ;;
+esac
+exec '$real_cat' "\$@"
+EOF
+  cat >"$dir/mkdir" <<EOF
+#!/usr/bin/env bash
+set -uo pipefail
+target=\${1-}
+'$real_mkdir' "\$target"
+for file in cgroup.controllers cgroup.events cgroup.freeze cgroup.kill \\
+  cgroup.max.depth cgroup.max.descendants cgroup.pressure cgroup.procs \\
+  cgroup.stat cgroup.subtree_control cgroup.threads cgroup.type \\
+  io.pressure memory.pressure; do
+  : >"\$target/\$file"
+done
+printf 'domain\n' >"\$target/cgroup.type"
+case " \$('$dir/cat' "\$(dirname "\$target")/cgroup.subtree_control") " in
+  *" cpu "*)
+    printf 'cpu\n' >"\$target/cgroup.controllers"
+    for file in cpu.idle cpu.max.burst cpu.pressure cpu.stat cpu.stat.local \\
+      cpu.uclamp.max cpu.uclamp.min cpu.weight cpu.weight.nice; do
+      : >"\$target/\$file"
+    done
+    printf 'max 100000\n' >"\$target/cpu.max" ;;
+esac
+EOF
+  cat >"$dir/rmdir" <<EOF
+#!/usr/bin/env bash
+set -uo pipefail
+target=\${1-}
+# A cgroup with descendant directories, or with processes still in it, must not
+# be removable; its own interface files must not stand in the way.
+if [ -n "\$(find "\$target" -mindepth 1 -maxdepth 1 -type d -print -quit)" ]; then
+  printf 'rmdir: failed to remove %s: Device or resource busy\n' "\$target" >&2
+  exit 1
+fi
+if [ -s "\$target/cgroup.procs" ]; then
+  printf 'rmdir: failed to remove %s: Device or resource busy\n' "\$target" >&2
+  exit 1
+fi
+find "\$target" -mindepth 1 -maxdepth 1 -type f -delete
+exec '$real_rmdir' "\$target"
+EOF
+  chmod +x "$dir/stat" "$dir/cat" "$dir/mkdir" "$dir/rmdir"
+}
+
+LAUNCHER_ROOT='' LAUNCHER_STATUS=0 LAUNCHER_ERR=''
+run_launcher_phase() {
+  local name=$1 payload=$2 dir proc
+  dir="$WORK/cgroup-$name"
+  LAUNCHER_ROOT="$dir/root"
+  LAUNCHER_ERR="$dir/err"
+  proc="$dir/proc-self-cgroup"
+  rm -rf "$dir"
+  mkdir -p "$LAUNCHER_ROOT"
+  printf 'cpuset cpu io memory hugetlb pids rdma misc\n' >"$LAUNCHER_ROOT/cgroup.controllers"
+  : >"$LAUNCHER_ROOT/cgroup.subtree_control"
+  printf 'domain\n' >"$LAUNCHER_ROOT/cgroup.type"
+  printf 'max 100000\n' >"$LAUNCHER_ROOT/cpu.max"
+  # One occupant: a shell `>` redirect truncates, while the kernel ignores the
+  # offset on cgroup.procs and takes one pid per write.
+  printf '4242\n' >"$LAUNCHER_ROOT/cgroup.procs"
+  printf '0::/\n' >"$proc"
+  make_cgroup_shims "$dir/bin" "$LAUNCHER_ROOT"
+  payload=${payload//root=\/sys\/fs\/cgroup/root=$LAUNCHER_ROOT}
+  payload=${payload//\/proc\/self\/cgroup/$proc}
+  set +e
+  env PATH="$dir/bin:$PATH" sh -eu -c "$payload" >"$dir/out" 2>"$LAUNCHER_ERR"
+  LAUNCHER_STATUS=$?
+  set -e
+}
+
+launcher_payload=$(extract_probe_payload LAUNCHER_PROBE)
+worker_payload=$(extract_probe_payload WORKER_PROBE)
+delegate_write='printf +cpu > "$root/cgroup.subtree_control"'
+leaf_cpu_max_guard='[ -f "$launcher_leaf/cpu.max" ]'
+worker_leaf_read='launcher_cpu_max=$(cat "$launcher_leaf/cpu.max")'
+
+if [ -z "$launcher_payload" ] || [ -z "$worker_payload" ]; then
+  fail 'could not lift the launcher/worker probe payloads out of the conformance script'
+else
+  # The delegation write must exist, and must precede the leaf it enables. A
+  # leaf created first is born without cpu.max and stays that way.
+  delegate_line=$(printf '%s\n' "$launcher_payload" | grep -Fn "$delegate_write" | cut -d: -f1 | head -1)
+  leaf_line=$(printf '%s\n' "$launcher_payload" | grep -Fn 'mkdir "$launcher_leaf"' | cut -d: -f1 | head -1)
+  if [ -z "$delegate_line" ]; then
+    fail 'the launcher phase never writes +cpu to the delegated root cgroup.subtree_control'
+  elif [ -z "$leaf_line" ]; then
+    fail 'the launcher phase never creates the retained launcher leaf'
+  elif [ "$delegate_line" -lt "$leaf_line" ]; then
+    ok 'launcher phase delegates the cpu controller before creating the launcher leaf'
+  else
+    fail "launcher phase creates the leaf (line $leaf_line) before delegating cpu (line $delegate_line)"
+  fi
+
+  # The sequence mirrors Bootstrap in the launcher crate. The holding-leaf name
+  # is that crate's INIT_LEAF constant, not a name invented here.
+  BOOTSTRAP_RS="$REPO_DIR/server/crates/djinn-cgroup-launcher/src/bootstrap.rs"
+  if [ -r "$BOOTSTRAP_RS" ]; then
+    init_leaf_name=$(sed -n 's/.*INIT_LEAF: &str = "\([^"]*\)".*/\1/p' "$BOOTSTRAP_RS" | head -1)
+    if [ -z "$init_leaf_name" ]; then
+      fail 'could not read INIT_LEAF out of the launcher bootstrap'
+    elif printf '%s\n' "$launcher_payload" | grep -Fq "init_leaf=\"\$root/$init_leaf_name\""; then
+      ok "launcher phase vacates the root into the crate's own INIT_LEAF [$init_leaf_name]"
+    else
+      fail "launcher phase does not use the crate's INIT_LEAF [$init_leaf_name]"
+    fi
+    if printf '%s\n' "$worker_payload" | grep -Fq "/proc/self/cgroup)\" = /$init_leaf_name ]"; then
+      ok "worker phase asserts it now sits in the holding leaf [/$init_leaf_name]"
+    else
+      fail "worker phase does not assert the post-bootstrap cgroup path [/$init_leaf_name]"
+    fi
+  else
+    printf 'SKIP launcher INIT_LEAF cross-check: %s is unavailable\n' "$BOOTSTRAP_RS"
+  fi
+
+  # The denial must be aimed at a file the launcher phase proved into existence.
+  if printf '%s\n' "$worker_payload" | grep -Fq "$leaf_cpu_max_guard"; then
+    ok 'worker phase requires the leaf cpu.max to EXIST before trying to write it'
+  else
+    fail 'worker phase writes the leaf cpu.max without first proving the file exists'
+  fi
+
+  # (a) The shipped launcher phase, executed.
+  run_launcher_phase shipped "$launcher_payload"
+  expect_eq 'shipped launcher phase status' 0 "$LAUNCHER_STATUS"
+  if [ "$LAUNCHER_STATUS" -ne 0 ]; then
+    fail "shipped launcher phase transcript: $(cat "$LAUNCHER_ERR")"
+  fi
+  if grep -Fq cpu "$LAUNCHER_ROOT/cgroup.subtree_control"; then
+    ok 'shipped launcher phase enabled cpu in the delegated root cgroup.subtree_control'
+  else
+    fail 'shipped launcher phase left cgroup.subtree_control empty'
+  fi
+  if [ -d "$LAUNCHER_ROOT/init" ] && [ -s "$LAUNCHER_ROOT/init/cgroup.procs" ]; then
+    ok 'shipped launcher phase vacated the delegated root into the holding leaf'
+  else
+    fail 'shipped launcher phase left the delegated root occupied'
+  fi
+  SHIPPED_LEAF="$LAUNCHER_ROOT/.djinn-launcher-leaf"
+  if [ -f "$SHIPPED_LEAF/cpu.max" ]; then
+    ok 'shipped launcher phase produced a launcher leaf that HAS a cpu.max'
+  else
+    fail 'shipped launcher phase produced a launcher leaf with no cpu.max'
+  fi
+  # The measured node values: the birth clamp, then the lift over it.
+  expect_eq 'shipped launcher leaf cpu.max after the lift' '400000 100000' \
+    "$(cat "$SHIPPED_LEAF/cpu.max" 2>/dev/null || true)"
+
+  # (b) Non-vacuity: delete just the delegation write and the phase must FAIL.
+  no_delegate=$(printf '%s\n' "$launcher_payload" | grep -Fv "$delegate_write")
+  if [ "$(printf '%s\n' "$no_delegate" | wc -l)" -eq "$(printf '%s\n' "$launcher_payload" | wc -l)" ]; then
+    fail 'the delegation write was not removable, so the non-vacuity case proves nothing'
+  fi
+  run_launcher_phase no-delegate "$no_delegate"
+  if [ "$LAUNCHER_STATUS" -ne 0 ]; then
+    ok 'a launcher phase that skips the delegation write FAILS'
+  else
+    fail 'a launcher phase that skips the delegation write still passed'
+  fi
+
+  # (c) The pre-fix launcher phase: no delegation write, no readback of it and
+  #     no cpu.max guard. It succeeds, and the leaf it leaves behind has no
+  #     cpu.max — which is exactly the node state that aborted the worker.
+  prefix_payload=$(printf '%s\n' "$launcher_payload" |
+    grep -Fv -e "$delegate_write" -e 'cgroup.subtree_control")" = cpu ]' \
+      -e "$leaf_cpu_max_guard" -e '25000 100000' -e '400000 100000')
+  run_launcher_phase prefix "$prefix_payload"
+  expect_eq 'pre-fix launcher phase status' 0 "$LAUNCHER_STATUS"
+  PREFIX_LEAF="$LAUNCHER_ROOT/.djinn-launcher-leaf"
+  if [ -d "$PREFIX_LEAF" ] && [ ! -e "$PREFIX_LEAF/cpu.max" ]; then
+    ok 'pre-fix launcher phase leaves a launcher leaf with no cpu.max at all'
+  else
+    fail 'pre-fix launcher phase did not reproduce the leaf-without-cpu.max state'
+  fi
+  if [ -s "$PREFIX_LEAF/cgroup.controllers" ]; then
+    fail "pre-fix leaf cgroup.controllers is not empty: [$(cat "$PREFIX_LEAF/cgroup.controllers")]"
+  else
+    ok 'pre-fix leaf cgroup.controllers is empty, as observed on the node'
+  fi
+
+  # (d) The vacuity proof for the denial, using the worker's own hard read
+  #     against each tree. Against the pre-fix leaf it aborts with ENOENT under
+  #     `set -eu` — the write that follows could never have been an
+  #     authorization observation. Against the shipped leaf the file exists, so
+  #     the denial that follows can only be about authority.
+  assert_worker_leaf_read() {
+    local name=$1 leaf=$2 expect=$3 out status
+    set +e
+    out=$(sh -eu -c "launcher_leaf='$leaf'
+$worker_leaf_read
+[ -n \"\$launcher_cpu_max\" ]" 2>&1)
+    status=$?
+    set -e
+    if [ "$expect" = pass ] && [ "$status" -eq 0 ]; then
+      ok "worker leaf cpu.max read succeeds against $name"
+    elif [ "$expect" = abort ] && [ "$status" -ne 0 ]; then
+      case "$out" in
+        *'No such file or directory'*)
+          ok "worker leaf cpu.max read aborts against $name [$out]" ;;
+        *)
+          fail "worker leaf cpu.max read against $name failed for another reason: [$out]" ;;
+      esac
+    else
+      fail "worker leaf cpu.max read against $name: expected to $expect, exit=$status [$out]"
+    fi
+  }
+  assert_worker_leaf_read 'the pre-fix leaf' "$PREFIX_LEAF" abort
+  assert_worker_leaf_read 'the shipped leaf' "$SHIPPED_LEAF" pass
+fi
+
+# ---------------------------------------------------------------------------
+# 9. Fixture mode: the success transcript is exact and every failure case,
 #    including the new version-mismatch case, removes eligibility only.
 # ---------------------------------------------------------------------------
 run_fixture_case() {
@@ -570,7 +864,7 @@ run_fixture_case handler-removed
 run_fixture_case version-mismatch
 
 # ---------------------------------------------------------------------------
-# 9. Load-bearing text a reviewer will diff, and sole ownership of the label.
+# 10. Load-bearing text a reviewer will diff, and sole ownership of the label.
 # ---------------------------------------------------------------------------
 conformance_text=$(cat "$CONFORMANCE")
 assert_contains() {
@@ -582,8 +876,17 @@ assert_contains() {
 assert_contains 'LAUNCHER_PROBE' "LAUNCHER_PROBE='set -eu"
 assert_contains 'launcher private root' '[ ! -d "$root/system.slice" ]'
 assert_contains 'launcher retained leaf' 'launcher_leaf="$root/.djinn-launcher-leaf"'
+assert_contains 'launcher vacates the delegated root' 'init_leaf="$root/init"'
+assert_contains 'launcher delegates the cpu controller' 'printf +cpu > "$root/cgroup.subtree_control"'
+assert_contains 'launcher proves the leaf has a cpu.max' '[ -f "$launcher_leaf/cpu.max" ]'
+assert_contains 'launcher writes the measured birth clamp' '25000 100000'
+assert_contains 'launcher lifts the measured clamp' '400000 100000'
 assert_contains 'WORKER_PROBE' "WORKER_PROBE='set -eu"
 assert_contains 'worker denial helper' 'must_deny() { if sh -c "$1"; then'
+assert_contains 'worker cannot revoke the delegation' \
+  'must_deny "printf %s -cpu > \"$root/cgroup.subtree_control\""'
+assert_contains 'worker cannot extend the delegation' \
+  'must_deny "printf %s +memory > \"$root/cgroup.subtree_control\""'
 assert_contains 'wait_for_probe' 'wait_for_probe() {'
 assert_contains 'verify_node_identity' 'verify_node_identity() {'
 # Both halves of the identity proof, by the fields that actually exist.
@@ -623,7 +926,7 @@ owners=$(grep -rl 'label node' "$NODE_DIR" --include='*.sh' | grep -v "$SCRIPT_D
 expect_eq 'sole label owner under deploy/node' "$CONFORMANCE" "$owners"
 
 # ---------------------------------------------------------------------------
-# 10. Non-vacuity: the pre-change script restarts k3s on the very fixture the
+# 11. Non-vacuity: the pre-change script restarts k3s on the very fixture the
 #     preflight now refuses. Skipped once the baseline carries the preflight.
 # ---------------------------------------------------------------------------
 baseline_ref=${DJINN_CONFORMANCE_BASELINE_REF:-origin/main}
