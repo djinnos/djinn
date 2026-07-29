@@ -449,6 +449,22 @@ async fn a_running_task_run_keeps_its_admission_row_and_its_dispatch_slot() {
         "no Live row may be retired while its object is in the listing"
     );
 
+    // Documented cost of keeping the dispatcher's row: the SAME Job is also
+    // adopted under the identity `classify` gives it — the task-RUN id — so one
+    // running task-run now shows as two LIFECYCLE rows for the life of the run
+    // instead of one. That is a gauge (`djinn_build_slots_in_use`), not
+    // capacity: the cap is compared against `build_leases` alone, asserted just
+    // below, and no gate reads this count. Collapsing the two would mean
+    // stamping the admission identity onto the task-run Job so `adopt_live`
+    // merges into the dispatcher's row instead of inserting its own — which
+    // needs the admission key threaded through the slot-pool seam.
+    assert_eq!(report.adopted, 1);
+    assert_eq!(
+        harness.ledger_rows().await,
+        2,
+        "the dispatcher's row and the adopted row are two identities for one Job"
+    );
+
     // ...and the capacity it bought must still be held, so the lease reclaimer
     // finds no proof of ownerlessness.
     let lease_report = BuildLeaseReclaimer::with_settle_window(
