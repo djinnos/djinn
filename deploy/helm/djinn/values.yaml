@@ -92,14 +92,14 @@ buildAdmission:
 # is lifted to the pod's full CPU limit only once it demonstrates it is actually
 # CPU-hungry.
 #
-#   required  (default) — render the cgroup-launcher sidecar. The launcher
+#   required            — render the cgroup-launcher sidecar. The launcher
 #                         establishes its own delegated cgroup v2 root at
 #                         startup, which needs `SYS_ADMIN` plus an AppArmor
 #                         opt-out for the duration of that bootstrap; it drops
 #                         the capability irreversibly out of its bounding set
 #                         before the broker accepts any work, which is the only
 #                         layer under it and is verified at runtime.
-#   disabled            — explicit local/development compatibility: no sidecar,
+#   disabled  (default) — explicit local/development compatibility: no sidecar,
 #                         cgroup leaf, or lease; shell commands run in-process
 #                         at the pod's own quota.
 #
@@ -116,11 +116,37 @@ buildAdmission:
 # Every precondition fails CLOSED: an unusable render is refused at dispatch
 # before a Job is submitted, and a launcher that cannot establish its delegation
 # exits non-zero before binding its socket.
+#
+# WHY THE DEFAULT IS `disabled` — READ BEFORE CHANGING IT
+# -------------------------------------------------------
+# `required` is not a value this chart can default to on its own, because an
+# armed launcher is only half of a pair. `validate_enforcement_render` refuses
+# to dispatch when `cgroupLauncher.mode: required` is paired with
+# `cgroupWritable.taskRuns.enabled: false`, and that pairing was this file's
+# default through v0.7.25: a fresh `helm install` with stock values could not
+# dispatch a single task on any node, and production went down for exactly that
+# reason on 2026-07-29. The two knobs must move together or not at all.
+#
+# Arming is therefore an explicit, three-line act with node prerequisites:
+#
+#   cgroupLauncher:  { mode: required }
+#   cgroupWritable:  { runtimeClass: { enabled: true }, taskRuns: { enabled: true } }
+#
+# and only after the nodes pass
+# `deploy/node/k3s/djinn-cgroup-writable-conformance.sh` and carry
+# `djinn.io/cgroup-writable=true` — otherwise the RuntimeClass assignment
+# leaves task-run Pods unschedulable, which is a slower failure but a failure
+# all the same. Defaulting the OTHER way (arming everything out of the box)
+# would ship precisely that.
+#
+# `deploy/preflight/render-gate.sh` runs the real dispatch validator against a
+# real render; run it against the values you are about to deploy before you
+# deploy them.
 cgroupLauncher:
-  # Production task-runs must use the brokered invocation-leaf path. Set this
-  # explicitly to `disabled` only for local/development environments where the
-  # launcher runtime profile is intentionally unavailable.
-  mode: required
+  # Production task-runs should use the brokered invocation-leaf path, but must
+  # opt in together with `cgroupWritable` above. The stock default is the
+  # prerequisite-free profile that any cluster can actually dispatch.
+  mode: disabled
 
 # -----------------------------------------------------------------------------
 # Writable cgroup preparation rollout
@@ -134,6 +160,11 @@ cgroupLauncher:
 # only makes the class available; it neither changes launcher privileges nor
 # assigns it to task-run Pods. taskRuns may only be enabled together with
 # runtimeClass in the activation release.
+#
+# `taskRuns.enabled` is also the other half of `cgroupLauncher.mode` above:
+# `required` + `taskRuns.enabled: false` is refused at dispatch
+# (`RenderValidationError::MissingDelegatedRuntimeClass`) and produces zero
+# Jobs, which is the outage this default pairing caused on 2026-07-29.
 cgroupWritable:
   runtimeClass:
     enabled: false
