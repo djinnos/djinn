@@ -22,7 +22,10 @@ pub mod macos;
 // unused-import warning until the rewire lands.
 #[cfg(target_os = "linux")]
 #[allow(unused_imports)]
-pub use chat_shell::{ChatShellError, ChatShellRequest, ChatShellResult, ChatShellSandbox};
+pub use chat_shell::{
+    ChatShellError, ChatShellRequest, ChatShellResult, ChatShellSandbox, EVIDENCE_MAX_OUTPUT_BYTES,
+    EVIDENCE_MAX_TIMEOUT, EvidenceError, EvidenceRequest, EvidenceSandbox,
+};
 
 /// The `TMPDIR` every sandboxed shell command is given, overriding whatever the
 /// pod inherited.
