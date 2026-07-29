@@ -630,6 +630,70 @@ impl CoordinatorActor {
         self.build_admission.as_deref()
     }
 
+    /// The durable consumer kind for a task dispatch denial. Matches
+    /// `build_leases.consumer_kind` so the two ledgers can be read together.
+    const DENIAL_CONSUMER_KIND: &'static str = "task_dispatch";
+
+    /// Write down why this task was denied.
+    ///
+    /// Best-effort by design: a denial is already a "leave the task queued"
+    /// outcome, and failing to record the reason must not change it. A failed
+    /// write is logged at `warn` because the missing row is itself the class of
+    /// blindness this path exists to end.
+    async fn record_task_run_denial(
+        &self,
+        task_id: &str,
+        cause: &crate::build_admission::DenialCause,
+        occupancy: Option<i64>,
+        cap: i64,
+        server_epoch: &str,
+    ) {
+        let record = djinn_db::BuildAdmissionDenialRecord {
+            consumer_kind: Self::DENIAL_CONSUMER_KIND.to_owned(),
+            consumer_id: task_id.to_owned(),
+            cause: cause.name().to_owned(),
+            readiness: cause
+                .readiness()
+                .map(|readiness| readiness.as_str().to_owned()),
+            detail: cause.detail().map(str::to_owned),
+            // Deliberately propagated as-is. `None` means the denial never
+            // measured occupancy, and writing 0 instead would recreate the
+            // exact confusion #2661 removed from the log.
+            occupancy,
+            cap,
+            server_epoch: server_epoch.to_owned(),
+        };
+        if let Err(error) = djinn_db::BuildAdmissionDenialRepository::new(self.db.clone())
+            .record(&record)
+            .await
+        {
+            tracing::warn!(
+                task_id,
+                %error,
+                "failed to persist the build-admission denial cause; board_health will \
+                 report `unexplained` for this task"
+            );
+        }
+    }
+
+    /// Drop this task's denial record now that it has been admitted.
+    ///
+    /// Without this the table becomes the #2661 tombstone in a new location: a
+    /// denial row that outlives its condition, replayed as a live reason
+    /// forever.
+    async fn clear_task_run_denial(&self, task_id: &str) {
+        if let Err(error) = djinn_db::BuildAdmissionDenialRepository::new(self.db.clone())
+            .clear(Self::DENIAL_CONSUMER_KIND, task_id)
+            .await
+        {
+            tracing::warn!(
+                task_id,
+                %error,
+                "failed to clear a stale build-admission denial record after a permit"
+            );
+        }
+    }
+
     /// Reserve and durably mark a task-run create before the pool side effect.
     /// A controller denial is deliberately neutral: callers leave the task queued.
     pub(crate) async fn begin_task_run_build_admission(
@@ -659,6 +723,7 @@ impl CoordinatorActor {
                 // turn an ambiguous accepted create into a false pre-create
                 // failure before the retry reaches the pool.
                 if idempotent {
+                    self.clear_task_run_denial(task_id).await;
                     return Ok(Some(permit));
                 }
                 if let Err(error) = controller
@@ -686,6 +751,7 @@ impl CoordinatorActor {
                     tracing::warn!(task_id, role, %error, "build admission CreateStarted failed; deferring pool create");
                     return Err(());
                 }
+                self.clear_task_run_denial(task_id).await;
                 Ok(Some(permit))
             }
             Ok(BuildAdmissionDecision::Denied {
@@ -699,6 +765,12 @@ impl CoordinatorActor {
                 // permanently tombstoned dispatch lease spent 40 minutes
                 // looking like a full pool at `occupancy=0 cap=3`. The cause
                 // is what tells those two apart.
+                //
+                // `readiness` is now on the SAME line as the cause. During the
+                // 2026-07-29 outage it existed only on an adjacent line that
+                // nobody had reason to correlate, which is what made
+                // `controller_not_admitting` unactionable for five hours.
+                let readiness = cause.readiness().map(|readiness| readiness.as_str());
                 tracing::info!(
                     task_id,
                     role,
@@ -706,8 +778,20 @@ impl CoordinatorActor {
                         .map_or_else(|| "unmeasured".to_owned(), |value| value.to_string()),
                     cap,
                     cause = %cause,
+                    readiness = readiness.unwrap_or("n/a"),
                     "build admission denied; leaving task queued"
                 );
+                // ...and it is written down, because a log line on a node is
+                // not a surface any projection can join against. See
+                // `djinn_db::BuildAdmissionDenialRepository`.
+                self.record_task_run_denial(
+                    task_id,
+                    &cause,
+                    occupancy,
+                    cap,
+                    controller.server_epoch(),
+                )
+                .await;
                 Err(())
             }
             Ok(BuildAdmissionDecision::Unclassified) => {

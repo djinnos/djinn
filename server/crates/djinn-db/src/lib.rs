@@ -86,6 +86,7 @@ pub use repositories::{
         MergedChangeRow, RecordOutcomeParams, SampleFrameRow, SamplePolicyRow, SelectionRow,
         UnmaterializedSelection, UpsertMergedChangeParams,
     },
+    build_admission_denial::{BuildAdmissionDenialRecord, BuildAdmissionDenialRepository},
     build_lease::{
         BuildLeaseConsumerKind, BuildLeaseKey, BuildLeaseRepository, BuildLeaseRow,
         BuildLeaseSnapshot, BuildLeaseState, BuildLeaseTerminalReason, GrantNextBuildLeaseResult,

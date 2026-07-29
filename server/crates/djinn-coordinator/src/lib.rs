@@ -169,9 +169,9 @@ mod worker_lifecycle;
 pub use handle::CoordinatorHandle;
 pub use types::{
     AutoMergeTracker, BackgroundWorkTracker, BreakerDebugEntry, CoordinatorDebugSnapshot,
-    CoordinatorDeps, CoordinatorError, CoordinatorStatus, DebugCooldown, DebugDispatchState,
-    DebugFailureStreak, DebugInflightEntry, DebugSlot, DebugTotals, DispatchPauseView,
-    PrCleanupConfig,
+    CoordinatorDeps, CoordinatorError, CoordinatorStatus, DebugBuildAdmission, DebugCooldown,
+    DebugDispatchState, DebugFailureStreak, DebugInflightEntry, DebugSlot, DebugTotals,
+    DispatchPauseView, PrCleanupConfig,
 };
 pub use worker_lifecycle::{
     CheckpointLifecycleConfig, CheckpointLifecycleMetadata, CheckpointRequestReason,

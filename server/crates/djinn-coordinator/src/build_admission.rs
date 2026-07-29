@@ -338,7 +338,18 @@ pub enum DenialCause {
     AtCapacity,
     /// The controller itself is not admitting -- not yet recovered, or
     /// draining. Nothing was measured and nothing was acquired.
-    ControllerNotAdmitting,
+    ///
+    /// `readiness` is which gate is closed. Without it this variant is the
+    /// least actionable string in the system: on 2026-07-29 five hours of logs
+    /// read `cause: "controller_not_admitting"`, and the field that said WHICH
+    /// gate (`readiness=create_unknown_health`) was on a different, adjacent
+    /// log line that nobody had a reason to correlate. The two travel together
+    /// now, and the pair is what gets persisted.
+    ///
+    /// `Display` is unchanged (`controller_not_admitting`) on purpose: it is
+    /// the string operators and runbooks already grep for. The readiness rides
+    /// alongside as structured data instead of mutating that identity.
+    ControllerNotAdmitting { readiness: BuildAdmissionReadiness },
     /// The build-slot authority answered with something that is not a capacity
     /// answer. `detail` is its own words.
     AuthorityUnavailable { detail: String },
@@ -348,10 +359,44 @@ impl std::fmt::Display for DenialCause {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::AtCapacity => f.write_str("at_capacity"),
-            Self::ControllerNotAdmitting => f.write_str("controller_not_admitting"),
+            Self::ControllerNotAdmitting { .. } => f.write_str("controller_not_admitting"),
             Self::AuthorityUnavailable { detail } => {
                 write!(f, "authority_unavailable: {detail}")
             }
+        }
+    }
+}
+
+impl DenialCause {
+    /// The bare cause name, without the `AuthorityUnavailable` detail suffix.
+    ///
+    /// This is what goes in `build_admission_denials.cause`, which is
+    /// CHECK-constrained to the three names; `Display` is the log form.
+    #[must_use]
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::AtCapacity => "at_capacity",
+            Self::ControllerNotAdmitting { .. } => "controller_not_admitting",
+            Self::AuthorityUnavailable { .. } => "authority_unavailable",
+        }
+    }
+
+    /// The closed readiness gate, when the controller is the one refusing.
+    #[must_use]
+    pub fn readiness(&self) -> Option<BuildAdmissionReadiness> {
+        match self {
+            Self::ControllerNotAdmitting { readiness } => Some(*readiness),
+            _ => None,
+        }
+    }
+
+    /// The capacity authority's own words, when it is the one that answered
+    /// with something that is not a capacity answer.
+    #[must_use]
+    pub fn detail(&self) -> Option<&str> {
+        match self {
+            Self::AuthorityUnavailable { detail } => Some(detail),
+            _ => None,
         }
     }
 }
@@ -441,6 +486,12 @@ impl BuildAdmissionReadiness {
     }
 }
 
+impl std::fmt::Display for BuildAdmissionReadiness {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Snake_case label for an admission domain, stable enough to appear in an
 /// operator-facing identity string.
 const fn domain_label(domain: AdmissionDomain) -> &'static str {
@@ -500,6 +551,44 @@ pub struct BuildAdmissionHealthReport {
     /// Seconds since the last blocker-free reconciliation pass, or `None` if no
     /// pass has ever completed in this process.
     pub seconds_since_last_reconcile: Option<i64>,
+}
+
+/// [`BuildAdmissionHealthReport`] plus the capacity facts an HTTP surface can
+/// afford to read.
+///
+/// # Why this exists on top of the health report
+///
+/// On 2026-07-29 the controller latched `CreateUnknownHealth` and denied every
+/// dispatch on the board for five hours. `/debug/dispatch-state` — the endpoint
+/// whose entire purpose is answering "why is nothing dispatching" — omitted
+/// build admission completely, and every field it DID report was healthy.
+///
+/// The health report is the shared answer and is deliberately synchronous, so
+/// the doctor check keeps working when the database is the problem. Occupancy
+/// is not free: it consults the capacity authority. Rather than duplicate the
+/// report's fields, this type EMBEDS it, so the doctor and the debug endpoint
+/// can never disagree about readiness, mode or which rows are blocking.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BuildAdmissionDebugSnapshot {
+    /// The same report the `build_admission_health` doctor check consumes.
+    pub health: BuildAdmissionHealthReport,
+    /// Every currently-failing readiness gate, in fail-closed priority order.
+    /// Empty exactly when `health.readiness` is `Healthy`. The report carries
+    /// only the highest-priority one, because that is what `admit()` acts on.
+    pub unsatisfied_gates: Vec<&'static str>,
+    /// The cap actually in force, resolved from the capacity authority.
+    pub effective_cap: i64,
+    /// The constructor's fallback cap, used only when no authority is
+    /// installed. Reported so a disagreement with `effective_cap` is visible.
+    pub configured_cap: i64,
+    /// Build slots the capacity authority reports in use, or `None` when no
+    /// authority is installed or it could not be read. `None` is NOT zero.
+    pub occupancy: Option<i64>,
+    /// This process's admission epoch, for comparison against
+    /// `admission_journal.creator_server_epoch`.
+    pub server_epoch: String,
+    /// Requests currently parked in the queued-lifecycle map.
+    pub queued: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -895,6 +984,73 @@ impl BuildAdmissionController {
             blocking_identities_elided,
             seconds_since_last_reconcile: self.seconds_since_last_reconcile(),
         }
+    }
+
+    /// [`Self::health_report`] plus the capacity facts an HTTP operator
+    /// surface can afford to read.
+    ///
+    /// It EXTENDS the health report rather than restating it: the doctor check
+    /// and `/debug/dispatch-state` must never be able to disagree about
+    /// readiness, mode or which rows are blocking. The extra fields are the
+    /// ones `health_report` deliberately excludes because it has to stay
+    /// synchronous for the `DoctorCheck::run` seam — reading occupancy
+    /// consults the capacity authority and is therefore async.
+    pub async fn debug_snapshot(&self) -> BuildAdmissionDebugSnapshot {
+        BuildAdmissionDebugSnapshot {
+            health: self.health_report(),
+            unsatisfied_gates: self.unsatisfied_readiness_gates(),
+            effective_cap: self.effective_cap(),
+            configured_cap: self.cap,
+            // `None` for "no authority installed" and for "the authority could
+            // not be read" alike. Both are honestly unmeasured, and neither may
+            // render as `0`: a fabricated zero occupancy is exactly what made a
+            // tombstoned lease indistinguishable from a full pool for forty
+            // minutes (#2661).
+            occupancy: match self.slot_authority.as_ref() {
+                None => None,
+                Some(authority) => authority.occupancy().await,
+            },
+            server_epoch: self.creator_server_epoch.clone(),
+            queued: self
+                .queued_lifecycle
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .len(),
+        }
+    }
+
+    /// Every currently-failing readiness gate, not just the first.
+    ///
+    /// [`Self::readiness`] answers with the highest-priority failure because
+    /// that is what `admit()` acts on, and [`Self::health_report`] carries
+    /// that one answer. An operator needs the whole set: clearing one gate,
+    /// finding the board still wedged, and having no way to see the second is
+    /// how a five-hour outage becomes a ten-hour one.
+    #[must_use]
+    pub fn unsatisfied_readiness_gates(&self) -> Vec<&'static str> {
+        let mut gates = Vec::new();
+        if self.draining.load(Ordering::Acquire) {
+            gates.push(BuildAdmissionReadiness::ShutdownDraining.as_str());
+        }
+        if !self.journal_recovered.load(Ordering::Acquire) {
+            gates.push(BuildAdmissionReadiness::JournalRecoveryIncomplete.as_str());
+        }
+        if !self.journal_healthy.load(Ordering::Acquire) {
+            gates.push(BuildAdmissionReadiness::JournalUnhealthy.as_str());
+        }
+        if self.create_unknown_pending.load(Ordering::Acquire) > 0 {
+            gates.push(BuildAdmissionReadiness::CreateUnknownHealth.as_str());
+        }
+        if self.over_cap.load(Ordering::Acquire) {
+            gates.push(BuildAdmissionReadiness::SeededOccupancyAboveCap.as_str());
+        }
+        if !self.inventory_ready.load(Ordering::Acquire) {
+            gates.push(BuildAdmissionReadiness::InventoryPending.as_str());
+        }
+        if !self.topology_ready.load(Ordering::Acquire) {
+            gates.push(BuildAdmissionReadiness::TopologyPending.as_str());
+        }
+        gates
     }
 
     /// Replace the set of identities holding the CreateUnknown gate closed.
@@ -1380,15 +1536,22 @@ impl BuildAdmissionController {
         &self,
         request: BuildAdmissionRequest,
     ) -> Result<BuildAdmissionDecision, WarmAdmissionError> {
-        if self.mode() == BuildAdmissionMode::Enforce && (!self.is_ready() || self.is_draining()) {
+        let readiness = self.readiness();
+        if self.mode() == BuildAdmissionMode::Enforce && (!readiness.is_healthy() || self.is_draining())
+        {
             // The cap reported with a denial is the one that WOULD have been
             // enforced, resolved from the single capacity authority. Reporting
             // the constructor's configured value here made v0 and v1 disagree
             // in the operator's log about which number was in force.
+            //
+            // The readiness travels WITH the cause. `controller_not_admitting`
+            // on its own is the least actionable string in the system: it says
+            // the controller refused without saying which of seven gates is
+            // closed, which is why 2026-07-29 needed node access to diagnose.
             return Ok(BuildAdmissionDecision::Denied {
                 occupancy: None,
                 cap: self.effective_cap(),
-                cause: DenialCause::ControllerNotAdmitting,
+                cause: DenialCause::ControllerNotAdmitting { readiness },
             });
         }
         // Capture an observe-only copy before any field of `request` is moved.
@@ -3773,6 +3936,110 @@ mod tests {
             creator_server_epoch: epoch.into(),
             object_name: format!("warm-{work_id}-{generation}"),
         }
+    }
+
+    /// **The 2026-07-29 visibility gap.** The controller's readiness lives in
+    /// process-local atomics on the leader, so no durable query can reach it.
+    /// For five hours the only way to learn that `CreateUnknownHealth` was
+    /// denying every dispatch on the board was to ssh the node and grep
+    /// container logs for the `readiness=` field.
+    ///
+    /// `debug_snapshot` is what `/debug/dispatch-state` reports instead.
+    #[tokio::test]
+    async fn debug_snapshot_names_the_gate_that_is_denying_every_dispatch() {
+        let journal = Arc::new(AdmissionJournalRepository::new(
+            Database::open_in_memory().unwrap(),
+        ));
+        let controller =
+            BuildAdmissionController::new_closed(Arc::clone(&journal), 3, "this-epoch");
+
+        let snapshot = controller.debug_snapshot().await;
+        assert_eq!(
+            snapshot.health.readiness.as_str(),
+            "journal_recovery_incomplete"
+        );
+        assert!(!snapshot.health.readiness.is_healthy());
+        assert_eq!(snapshot.health.mode, BuildAdmissionMode::Enforce);
+        assert_eq!(snapshot.configured_cap, 3);
+        assert_eq!(snapshot.server_epoch, "this-epoch");
+        assert!(
+            snapshot.occupancy.is_none(),
+            "no capacity authority is installed; `None` must never render as 0 — \
+             a fabricated zero is what made a wedged controller look like a full pool"
+        );
+
+        // Latch the gate that actually wedged the board.
+        controller.journal_recovered.store(true, Ordering::Release);
+        controller.mark_inventory_ready();
+        controller.mark_topology_ready();
+        controller
+            .create_unknown_pending
+            .store(1, Ordering::Release);
+
+        let snapshot = controller.debug_snapshot().await;
+        assert_eq!(snapshot.health.readiness.as_str(), "create_unknown_health");
+        assert_eq!(snapshot.health.create_unknown_pending, 1);
+        assert_eq!(snapshot.unsatisfied_gates, vec!["create_unknown_health"]);
+        assert!(!snapshot.health.readiness.is_healthy());
+
+        controller
+            .create_unknown_pending
+            .store(0, Ordering::Release);
+        let snapshot = controller.debug_snapshot().await;
+        assert_eq!(snapshot.health.readiness.as_str(), "healthy");
+        assert!(snapshot.health.readiness.is_healthy());
+        assert!(snapshot.unsatisfied_gates.is_empty());
+    }
+
+    /// `readiness()` answers with the highest-priority failing gate because
+    /// that is what `admit()` acts on. `unsatisfied_gates` must report the
+    /// whole set: clearing one gate, finding the board still wedged, and
+    /// having no way to see the second is how a five-hour outage becomes a
+    /// ten-hour one.
+    ///
+    /// This also guards the two from drifting apart — they are separate
+    /// hand-written ladders over the same atomics.
+    #[tokio::test]
+    async fn unsatisfied_gates_reports_every_failing_gate_and_agrees_with_readiness() {
+        let journal = Arc::new(AdmissionJournalRepository::new(
+            Database::open_in_memory().unwrap(),
+        ));
+        let controller = BuildAdmissionController::new_closed(journal, 3, "this-epoch");
+
+        // A freshly closed controller fails recovery, inventory and topology
+        // at once. `readiness()` names only the first.
+        let snapshot = controller.debug_snapshot().await;
+        assert_eq!(
+            snapshot.health.readiness.as_str(),
+            "journal_recovery_incomplete"
+        );
+        assert_eq!(
+            snapshot.unsatisfied_gates,
+            vec![
+                "journal_recovery_incomplete",
+                "inventory_pending",
+                "topology_pending"
+            ],
+            "three gates are closed; reporting only the first hides two of them"
+        );
+        assert_eq!(
+            snapshot.unsatisfied_gates.first().copied(),
+            Some(snapshot.health.readiness.as_str()),
+            "the ladders must not drift: the first unsatisfied gate IS the readiness"
+        );
+
+        // Clearing the first leaves the other two, and the readiness advances.
+        controller.journal_recovered.store(true, Ordering::Release);
+        let snapshot = controller.debug_snapshot().await;
+        assert_eq!(snapshot.health.readiness.as_str(), "inventory_pending");
+        assert_eq!(
+            snapshot.unsatisfied_gates,
+            vec!["inventory_pending", "topology_pending"]
+        );
+        assert_eq!(
+            snapshot.unsatisfied_gates.first().copied(),
+            Some(snapshot.health.readiness.as_str())
+        );
     }
 
     #[tokio::test]

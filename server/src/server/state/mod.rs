@@ -2155,6 +2155,17 @@ impl AppState {
         &self.inner.health_tracker
     }
 
+    /// The build-admission controller, when admission is not `Off`.
+    ///
+    /// Exposed so operator surfaces can report the controller's readiness. Its
+    /// state lives in process-local atomics on the leader, so no durable query
+    /// can reach it: on 2026-07-29 that made a five-hour, board-wide dispatch
+    /// outage diagnosable only by grepping container logs on the node.
+    #[must_use]
+    pub fn build_admission(&self) -> Option<Arc<BuildAdmissionController>> {
+        self.inner.build_admission.clone()
+    }
+
     /// Immutable retrieval-health config parsed once at startup.
     pub fn retrieval_config(&self) -> djinn_core::doctor::RetrievalHealthConfig {
         self.inner.retrieval_config
