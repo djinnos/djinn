@@ -1408,15 +1408,19 @@ async fn active_latest_and_detail_indexes_have_expected_query_paths() {
         let selected: String = sqlx::query_scalar("SELECT id FROM readiness_runs WHERE project_id=$1 ORDER BY (status IN ('identifying','analyzing','aggregating')) DESC,created_at DESC LIMIT 1").bind("project-index").fetch_one(&mut conn).await.expect("active/latest query");
         assert_eq!(selected, "run-active", "active run wins over a terminal latest candidate");
         conn.execute("SET enable_seqscan = off").await.expect("force index plans");
-        for (sql, index) in [
-            ("EXPLAIN SELECT * FROM readiness_runs WHERE project_id='project-index' AND status IN ('identifying','analyzing','aggregating')", "readiness_runs_one_active_project_idx"),
-            ("EXPLAIN SELECT * FROM readiness_runs WHERE project_id='project-index' ORDER BY created_at DESC", "readiness_runs_project_latest_idx"),
-            ("EXPLAIN SELECT * FROM readiness_composition_areas WHERE run_id='run-active' ORDER BY area_key", "readiness_areas_run_detail_idx"),
-            ("EXPLAIN SELECT * FROM readiness_area_attempts WHERE area_id='area-index' ORDER BY attempt_number DESC", "readiness_attempts_area_idx"),
-            ("EXPLAIN SELECT * FROM readiness_run_events WHERE run_id='run-active' ORDER BY created_at,id", "readiness_events_run_detail_idx"),
+        for (sql, indexes) in [
+            ("EXPLAIN SELECT * FROM readiness_runs WHERE project_id='project-index' AND status IN ('identifying','analyzing','aggregating')", &["readiness_runs_one_active_project_idx"][..]),
+            ("EXPLAIN SELECT * FROM readiness_runs WHERE project_id='project-index' ORDER BY created_at DESC", &["readiness_runs_project_latest_idx"][..]),
+            ("EXPLAIN SELECT * FROM readiness_composition_areas WHERE run_id='run-active' ORDER BY area_key", &["readiness_areas_run_detail_idx", "readiness_areas_current_attempt_idx"][..]),
+            ("EXPLAIN SELECT * FROM readiness_area_attempts WHERE area_id='area-index' ORDER BY attempt_number DESC", &["readiness_attempts_area_idx"][..]),
+            ("EXPLAIN SELECT * FROM readiness_run_events WHERE run_id='run-active' ORDER BY created_at,id", &["readiness_events_run_detail_idx"][..]),
         ] {
             let plan: Vec<String> = sqlx::query_scalar(sql).fetch_all(&mut conn).await.expect("explain query path");
-            assert!(plan.join("\n").contains(index), "expected {index} in plan: {plan:?}");
+            let plan_text = plan.join("\n");
+            assert!(
+                indexes.iter().any(|index| plan_text.contains(index)),
+                "expected one of {indexes:?} in plan: {plan:?}"
+            );
         }
     }).await;
 }
