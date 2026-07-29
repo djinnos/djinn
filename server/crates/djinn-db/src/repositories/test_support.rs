@@ -10,7 +10,6 @@ mod refinement_read_only;
 
 pub use refinement_read_only::*;
 
-<<<<<<< HEAD
 /// Durable rows written by the structured evidence hand-off.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StructuredEvidenceHandoffCountsForTest {
@@ -71,7 +70,8 @@ pub async fn reject_evidence_findings_debates_for_test(db: &Database) {
     .execute(db.pool())
     .await
     .expect("failed to install evidence-findings debate fault");
-=======
+}
+
 /// Populate a current attempt's persisted projection for a cross-crate detail
 /// read test. This fixture lives at the database boundary so consumer tests do
 /// not bypass repository ownership with direct readiness-table SQL.
@@ -136,7 +136,6 @@ pub async fn seed_readiness_detail_projection_for_test(
         .commit()
         .await
         .expect("commit readiness projection fixture");
->>>>>>> origin/main
 }
 
 /// Refinement test fields.
