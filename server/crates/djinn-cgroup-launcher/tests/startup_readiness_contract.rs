@@ -15,7 +15,6 @@
 
 use std::path::PathBuf;
 
-use djinn_cgroup_launcher::bootstrap::Bootstrap;
 use djinn_cgroup_launcher::{
     CGROUP2_SUPER_MAGIC, CommandSpec, Error, Invocation, NativeCgroupFs, NativeCgroupSpawn,
     SpawnIntoCgroup,
