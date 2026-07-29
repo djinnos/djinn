@@ -313,7 +313,11 @@
             .await
             .unwrap();
         let error = resp2.get("error").and_then(|v| v.as_str()).unwrap();
-        assert_eq!(error, "AlreadyActive");
+        assert_eq!(
+            error,
+            "A tribunal round is already running for this proposal. \
+             Wait for it to finish (or stop it) before starting another."
+        );
     }
 
     // ── DoR readiness findings available in refinement status ─────────────────
@@ -675,7 +679,12 @@
 
         assert_eq!(resp.get("accepted").and_then(|v| v.as_bool()), Some(false));
         let error = resp.get("error").and_then(|v| v.as_str()).unwrap();
-        assert_eq!(error, "AlreadyActive");
+        assert_eq!(
+            error,
+            "A tribunal round is already running for this proposal. \
+             Wait for it to finish (or stop it) before starting another.",
+            "a genuinely running run must still be refused, in plain words"
+        );
 
         let revisions = repo.revisions(&proposal.id).await.unwrap();
         assert_eq!(

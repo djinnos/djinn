@@ -335,7 +335,11 @@ impl ProposalRepository {
             tx.commit().await?;
             return Ok((outcome, false));
         }
-        let current = sqlx::query("SELECT id, generation FROM refinement_runs WHERE proposal_id = $1 AND state IN ('running', 'parked') ORDER BY generation DESC LIMIT 1")
+        // `FOR UPDATE` is the anti-race with `resolve_refinement_human_review`,
+        // which locks the same row before terminalizing an awaiting-review park.
+        // Without it a human demand and a human accept/reject could both observe
+        // the park and each apply their own transition.
+        let current = sqlx::query("SELECT id, generation, park_kind FROM refinement_runs WHERE proposal_id = $1 AND state IN ('running', 'parked') ORDER BY generation DESC LIMIT 1 FOR UPDATE")
             .bind(&request.proposal_id).fetch_optional(&mut *tx).await?;
         // A successor can have generation > 1 solely because terminal history
         // exists. Telemetry must instead follow the actual durable reap write.
@@ -343,6 +347,7 @@ impl ProposalRepository {
         let generation = if let Some(row) = current {
             let run_id: String = row.get("id");
             let generation: i32 = row.get("generation");
+            let park_kind: Option<String> = row.get("park_kind");
             let snapshot =
                 load_snapshot_in_transaction(&mut tx, &run_id, request.heartbeat_grace_millis)
                     .await
@@ -365,6 +370,46 @@ impl ProposalRepository {
                     // No stale generation was reaped on this path, so the
                     // phantom-reap counter must not advance.
                     return Ok((outcome, false));
+                }
+                // A human demand is the documented way out of an awaiting-review
+                // park ("...or is parked awaiting human review"). The park is a
+                // human decision boundary, not work in flight: clearing it and
+                // admitting the next round on the SAME run and generation is the
+                // only transition that keeps the parked run's history, captured
+                // snapshot, and durable owner intact. Every non-parked live run
+                // still fails closed below — the guard is not weakened for work
+                // that is genuinely running.
+                //
+                // An `awaiting_evidence` park deliberately does NOT admit here:
+                // it is waiting on an in-flight evidence spike task that owns its
+                // own resume path, and unparking it would strand that spike.
+                if matches!(&request.source, RefinementAdmissionSource::Demand { .. }) {
+                    // A retried demand must not mint a second round. The run row
+                    // idempotency check above cannot see this case because a
+                    // resumed park creates no new run.
+                    if let Some(intent_id) =
+                        demand_intent_id(&mut tx, &run_id, &request.idempotency_key).await?
+                    {
+                        let outcome = RefinementAdmissionOutcome::Existing {
+                            run_id,
+                            intent_id,
+                            generation,
+                        };
+                        tx.commit().await?;
+                        return Ok((outcome, false));
+                    }
+                    if park_kind.as_deref() == Some("awaiting_review") {
+                        let intent_id =
+                            resume_awaiting_review_park(&mut tx, &request, &run_id, generation)
+                                .await?;
+                        let outcome = RefinementAdmissionOutcome::Admitted {
+                            run_id,
+                            intent_id,
+                            generation,
+                        };
+                        tx.commit().await?;
+                        return Ok((outcome, false));
+                    }
                 }
                 return Err(RefinementAdmissionError::AlreadyActive {
                     proposal_id: request.proposal_id,
@@ -621,6 +666,80 @@ async fn reap_stale_run(
     )
     .await?;
     Ok(())
+}
+
+/// Idempotency suffix for the dispatch intent a human demand admits against an
+/// already-existing run. Distinct from `FIRST_INTENT_IDEMPOTENCY_SUFFIX`, which
+/// keys the first intent of a brand new run.
+const DEMAND_INTENT_IDEMPOTENCY_SUFFIX: &str = "/demand-round";
+
+/// The intent a previous attempt of this exact demand already created, if any.
+async fn demand_intent_id(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    run_id: &str,
+    idempotency_key: &str,
+) -> std::result::Result<Option<String>, RefinementAdmissionError> {
+    Ok(sqlx::query_scalar::<_, String>(
+        "SELECT id FROM refinement_dispatch_intents WHERE run_id = $1 AND idempotency_key = $2",
+    )
+    .bind(run_id)
+    .bind(format!(
+        "{idempotency_key}{DEMAND_INTENT_IDEMPOTENCY_SUFFIX}"
+    ))
+    .fetch_optional(&mut **tx)
+    .await?)
+}
+
+/// Clear an awaiting-review park and admit the next round on the exact same run
+/// and generation. Returns the newly-created dispatch intent.
+///
+/// The unpark is a compare-and-swap on `state = 'parked' AND park_kind =
+/// 'awaiting_review'`: a concurrent `resolve_refinement_human_review` that won
+/// the row lock first leaves the run terminal, and this CAS then matches zero
+/// rows rather than producing a second transition out of the same park.
+async fn resume_awaiting_review_park(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    request: &AdmitRefinementRunRequest,
+    run_id: &str,
+    generation: i32,
+) -> std::result::Result<String, RefinementAdmissionError> {
+    let unparked = sqlx::query(
+        "UPDATE refinement_runs SET state = 'running', park_kind = NULL, parked_at = NULL, \
+         heartbeat_at = to_char(transaction_timestamp() AT TIME ZONE 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'), \
+         updated_at = to_char(transaction_timestamp() AT TIME ZONE 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') \
+         WHERE id = $1 AND generation = $2 AND state = 'parked' AND park_kind = 'awaiting_review'",
+    )
+    .bind(run_id)
+    .bind(generation)
+    .execute(&mut **tx)
+    .await?;
+    if unparked.rows_affected() != 1 {
+        return Err(RefinementAdmissionError::AdmissionConflict);
+    }
+    let next_round = sqlx::query_scalar::<_, Option<i32>>(
+        "SELECT max(round) FROM refinement_dispatch_intents WHERE run_id = $1",
+    )
+    .bind(run_id)
+    .fetch_one(&mut **tx)
+    .await?
+    .unwrap_or(0)
+    .checked_add(1)
+    .ok_or(RefinementAdmissionError::AdmissionConflict)?;
+    let intent_id = uuid::Uuid::now_v7().to_string();
+    sqlx::query(
+        "INSERT INTO refinement_dispatch_intents (id, run_id, round, phase, role, idempotency_key) \
+         VALUES ($1, $2, $3, 'adversary_attack', 'adversary', $4)",
+    )
+    .bind(&intent_id)
+    .bind(run_id)
+    .bind(next_round)
+    .bind(format!(
+        "{}{DEMAND_INTENT_IDEMPOTENCY_SUFFIX}",
+        request.idempotency_key
+    ))
+    .execute(&mut **tx)
+    .await?;
+    Ok(intent_id)
 }
 
 async fn insert_admission(

@@ -3,6 +3,7 @@ import { render, screen, userEvent } from "@/test/test-utils";
 import { fetchUsers, type OrgUser } from "@/api/users";
 import type {
   ProposalDebateTrailRow,
+  ProposalGateStatus,
   ProposalRefinementStatus,
 } from "@/api/types";
 import type { ProposalHistoryEntry } from "@/lib/proposalQueries";
@@ -1177,5 +1178,115 @@ describe("ProposalRefinement", () => {
     // No stale states
     expect(screen.queryByText("Refinement in progress")).not.toBeInTheDocument();
     expect(screen.queryByText("Active")).not.toBeInTheDocument();
+  });
+
+  // ── Accept must not be offered when it cannot succeed ────────────────────
+  //
+  // The backend rejects accept while current-head DoR readiness blocks, but the
+  // card offered Accept unconditionally — the user only learned this from a
+  // toast dump of a Rust error (proposal y6q4).
+
+  function blockingGate(
+    overrides: Partial<ProposalGateStatus> = {},
+  ): ProposalGateStatus {
+    return {
+      ready: false,
+      dor_ready: false,
+      dor_failures: [
+        {
+          check: "acceptance_criteria_count",
+          message: "At least one acceptance criterion is required",
+        },
+        {
+          check: "problem_coverage",
+          message: "The body must state the problem being solved",
+        },
+      ],
+      judge_verdict_body: null,
+      judge_verdict_id: null,
+      judge_needs_work: true,
+      adversary_dry_count: 0,
+      unresolved_blocking_count: 0,
+      unresolved_blocking_ids: [],
+      needs_evidence: null,
+      human_override_active: false,
+      blocked_explanations: ["proposal not ready for review"],
+      ...overrides,
+    };
+  }
+
+  it("disables Accept and names the failing checks when DoR blocks with no override", () => {
+    render(
+      <ProposalRefinement
+        proposalId={proposalId}
+        status={reviewStatus()}
+        gateStatus={blockingGate()}
+        canStart={false}
+        onChanged={vi.fn()}
+      />,
+    );
+
+    expect(
+      screen.getByRole("button", { name: "Accept refined spec" }),
+    ).toBeDisabled();
+    expect(screen.getByTestId("accept-blocked-by-dor")).toBeInTheDocument();
+    // The specific failing checks are shown inline, not hidden behind a toast.
+    expect(
+      screen.getByText("At least one acceptance criterion is required", {
+        exact: false,
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("The body must state the problem being solved", {
+        exact: false,
+      }),
+    ).toBeInTheDocument();
+    // Reject stays available — reverting is always a legal way out.
+    expect(
+      screen.getByRole("button", { name: "Reject and revert" }),
+    ).toBeEnabled();
+  });
+
+  it("re-enables Accept when a current human override is active", () => {
+    render(
+      <ProposalRefinement
+        proposalId={proposalId}
+        status={reviewStatus()}
+        gateStatus={blockingGate({ human_override_active: true })}
+        canStart={false}
+        onChanged={vi.fn()}
+      />,
+    );
+
+    expect(
+      screen.getByRole("button", { name: "Accept refined spec" }),
+    ).toBeEnabled();
+    expect(
+      screen.queryByTestId("accept-blocked-by-dor"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("leaves Accept enabled when DoR is ready", () => {
+    render(
+      <ProposalRefinement
+        proposalId={proposalId}
+        status={reviewStatus()}
+        gateStatus={blockingGate({
+          ready: true,
+          dor_ready: true,
+          dor_failures: [],
+          blocked_explanations: [],
+        })}
+        canStart={false}
+        onChanged={vi.fn()}
+      />,
+    );
+
+    expect(
+      screen.getByRole("button", { name: "Accept refined spec" }),
+    ).toBeEnabled();
+    expect(
+      screen.queryByTestId("accept-blocked-by-dor"),
+    ).not.toBeInTheDocument();
   });
 });

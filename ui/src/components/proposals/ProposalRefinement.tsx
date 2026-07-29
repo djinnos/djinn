@@ -133,6 +133,14 @@ export function ProposalRefinement({
     [revisions, status?.snapshot_revision_seq],
   );
 
+  // Accept is rejected server-side while deterministic DoR readiness blocks the
+  // current head — unless a current human override exists, which the composed
+  // gate (and now the accept path) honours. Mirror that decision here so the
+  // button is never offered in a state where it cannot succeed.
+  const acceptBlockedByDor =
+    !!gateStatus && !gateStatus.dor_ready && !gateStatus.human_override_active;
+  const dorFailures = gateStatus?.dor_failures ?? [];
+
   const handleResolve = useCallback(
     async (decision: "accept" | "reject") => {
       setBusy(true);
@@ -428,12 +436,47 @@ export function ProposalRefinement({
                 another tribunal round.
               </p>
             </div>
+            {acceptBlockedByDor && (
+              <div
+                className="space-y-1 rounded-md border border-destructive/40 bg-destructive/5 p-2"
+                data-testid="accept-blocked-by-dor"
+              >
+                <p className="text-xs font-medium text-foreground">
+                  Accept is blocked: the current spec still fails machine
+                  readiness.
+                </p>
+                {dorFailures.length > 0 ? (
+                  <ul className="list-disc space-y-0.5 pl-4 text-xs text-muted-foreground">
+                    {dorFailures.map((failure) => (
+                      <li key={failure.check}>
+                        <span className="font-mono">{failure.check}</span> —{" "}
+                        {failure.message}
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="text-xs text-muted-foreground">
+                    No specific check was reported. Reload the proposal to
+                    refresh the readiness gate.
+                  </p>
+                )}
+                <p className="text-xs text-muted-foreground">
+                  Send feedback for another round to fix these, or record a
+                  verdict override in the readiness panel to accept anyway.
+                </p>
+              </div>
+            )}
             <div className="flex flex-wrap items-center gap-2">
               <Button
                 size="sm"
                 variant="default"
-                disabled={busy}
+                disabled={busy || acceptBlockedByDor}
                 onClick={() => handleResolve("accept")}
+                title={
+                  acceptBlockedByDor
+                    ? "Machine readiness is blocking. Fix the failing checks or record a verdict override first."
+                    : undefined
+                }
               >
                 Accept refined spec
               </Button>

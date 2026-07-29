@@ -2031,7 +2031,13 @@ impl ProposalRepository {
     /// Return the latest human demand-round reviewer feedback for the proposal's
     /// current head revision.
     ///
-    /// Demand-round feedback is recorded on `refinement_start` lifecycle rows.
+    /// Demand-round feedback is recorded on a `refinement_demand_round`
+    /// lifecycle row, or (historically) on a `refinement_start` row. A demand
+    /// that resumes an existing run must NOT write `refinement_start`: that
+    /// event kind is also the current-run boundary used to scope debate-trail
+    /// reads (`latest_refinement_start_at`), so writing one would hide the
+    /// run's earlier rounds from the outcome processor.
+    ///
     /// Because those rows carry `seq = proposals.latest_revision_seq`, this
     /// helper deliberately filters to the current seq so feedback from a prior
     /// proposal revision is not reused by a later tribunal round.
@@ -2049,7 +2055,7 @@ impl ProposalRepository {
             r#"SELECT event_metadata::text FROM proposal_revisions
                WHERE proposal_id = $1
                  AND seq = $2
-                 AND event_kind = 'refinement_start'
+                 AND event_kind IN ('refinement_demand_round', 'refinement_start')
                  AND event_metadata IS NOT NULL
                ORDER BY created_at DESC, id DESC"#,
         )
