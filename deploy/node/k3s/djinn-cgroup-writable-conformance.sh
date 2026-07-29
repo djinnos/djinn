@@ -415,13 +415,39 @@ render_manifest | "$KUBECTL" apply -f - >/dev/null
 wait_for_probe
 verify_node_identity
 # A single exec process performs both phases so the retained launcher leaf and
-# all worker checks necessarily use one private cgroup namespace/root. fsGroup
-# supplies supplementary group 1000; setpriv preserves that sole group, changes
-# uid/gid, enables no-new-privileges, clears every capability set, and execs the
-# worker checks without any path back to launcher authority.
+# all worker checks necessarily use one private cgroup namespace/root. setpriv
+# changes uid/gid, replaces the supplementary group set outright, enables
+# no-new-privileges, clears every capability set, and execs the worker checks
+# without any path back to launcher authority.
+#
+# The supplementary set is stated explicitly, never inherited. The launcher
+# phase runs as `runAsUser: 0`, so its own supplementary set is `0 1000` — group
+# 0 from root plus the pod's fsGroup. `--keep-groups` therefore carried root's
+# group 0 across the transition and the worker identity became `0 1000`, which
+# is an identity no rendered worker ever has: worker_security_context() in
+# server/crates/djinn-k8s/src/launcher.rs pins the worker container to
+# runAsUser/runAsGroup 1000 with runAsNonRoot, and the pod securityContext there
+# supplies fsGroup 1000, so a real worker's supplementary set is exactly `1000`
+# (asserted in server/crates/djinn-k8s/src/job.rs). `--groups` sets that set by
+# setgroups(2) rather than preserving it, and setpriv rejects it alongside
+# --keep-groups/--clear-groups/--init-groups, so it cannot append: whatever the
+# launcher held, the worker holds exactly 1000. Verified against the setpriv in
+# $PROBE_IMAGE (util-linux 2.39.3, Ubuntu 24.04), not assumed.
 COMBINED_PROBE="$LAUNCHER_PROBE
-exec setpriv --reuid=1000 --regid=1000 --keep-groups --nnp --inh-caps=-all --ambient-caps=-all --bounding-set=-all /bin/sh -ceu \"\$1\""
-"$KUBECTL" exec "$PROBE_NAME" -c conformance -- /bin/sh -ceu "$COMBINED_PROBE" probe "$WORKER_PROBE" >/dev/null || die 'launcher/worker cgroup conformance failed'
+exec setpriv --reuid=1000 --regid=1000 --groups=1000 --nnp --inh-caps=-all --ambient-caps=-all --bounding-set=-all /bin/sh -ceux \"\$1\""
+# Both phases run under `sh -ceux`, and everything the probe emits on either
+# stream is captured rather than discarded. On success the capture is dropped so
+# stdout stays exactly the PASS line; on failure the whole xtrace goes to stderr
+# so the failing assertion names itself. A `>/dev/null` here is what kept three
+# earlier defects in this program invisible: the operator saw only
+# "conformance failed" and had to re-run the exec by hand to learn which
+# assertion had never passed.
+probe_transcript=''
+if ! probe_transcript=$("$KUBECTL" exec "$PROBE_NAME" -c conformance -- \
+  /bin/sh -ceux "$COMBINED_PROBE" probe "$WORKER_PROBE" 2>&1); then
+  printf '%s\n' "$probe_transcript" >&2
+  die 'launcher/worker cgroup conformance failed'
+fi
 
 "$KUBECTL" label node "$NODE_NAME" "$LABEL=true" --overwrite >/dev/null
 printf 'PASS node=%s handler=runc-cgroupwritable cgroup_root=/ writable=true isolated=true worker_denials=true\n' "$NODE_NAME"

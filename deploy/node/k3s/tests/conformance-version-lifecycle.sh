@@ -87,7 +87,15 @@ case "\$1" in
     ;;
   apply) cat >'$manifest'; exit 0 ;;
   wait) exit 0 ;;
-  exec) exit $exec_status ;;
+  # The probe emits on BOTH streams, exactly as \`sh -ceux\` does: assertions on
+  # stdout, the xtrace on stderr. A passing run must forward neither, so the
+  # PASS line stays the whole of stdout; a failing run must forward both, or the
+  # operator is told only that conformance failed and has to re-run the exec by
+  # hand to learn which assertion never passed.
+  exec)
+    printf '%s\n' 'probe-emitted-on-stdout'
+    printf '%s\n' 'probe-xtrace: + [ 0 1000 = 1000 ]' >&2
+    exit $exec_status ;;
   delete) exit 0 ;;
 esac
 exit 0
@@ -193,6 +201,19 @@ if grep -Fq '{range .status.addresses[?(@.type=="InternalIP")]}' "$LOG"; then
   ok "v3 success cross-checked the node's own InternalIP"
 else
   fail 'v3 success never read the node InternalIP'
+fi
+# The PASS-line contract: a successful run forwards nothing the probe wrote on
+# either stream, so capturing the transcript for the failure path cannot change
+# what an operator or an automation parses out of a passing run.
+if grep -Fq 'probe-emitted-on-stdout' "$CASE_DIR/stdout" || grep -Fq 'probe-xtrace' "$CASE_DIR/stdout"; then
+  fail "v3 success leaked probe output onto stdout: $(cat "$CASE_DIR/stdout")"
+else
+  ok 'v3 success keeps the PASS line as the whole of stdout'
+fi
+if [ -s "$CASE_DIR/stderr" ]; then
+  fail "v3 success wrote to stderr: $(cat "$CASE_DIR/stderr")"
+else
+  ok 'v3 success forwards no probe transcript on stderr either'
 fi
 
 # ---------------------------------------------------------------------------
@@ -307,6 +328,22 @@ fi
 run_case probe-failure live-v3-vps-preinstall.toml live-v3-vps.toml 1
 assert_restored_after_restart probe-failure
 if grep -q '^delete pod ' "$LOG"; then ok 'probe-failure deleted the probe'; else fail 'probe-failure left the probe'; fi
+# A failing probe must name the assertion that failed. Suppressing the exec with
+# `>/dev/null` is why three defects in this program stayed invisible: the
+# operator saw only the summary line and had to re-run the exec by hand under
+# `set -x` to find the assertion that had never once passed.
+for stream_marker in 'probe-xtrace: + [ 0 1000 = 1000 ]' 'probe-emitted-on-stdout'; do
+  if grep -Fq "$stream_marker" "$CASE_DIR/stderr"; then
+    ok "probe-failure surfaced the probe transcript [$stream_marker]"
+  else
+    fail "probe-failure suppressed [$stream_marker]: $(cat "$CASE_DIR/stderr")"
+  fi
+done
+if grep -Fq 'launcher/worker cgroup conformance failed' "$CASE_DIR/stderr"; then
+  ok 'probe-failure still reports the summary diagnosis'
+else
+  fail "probe-failure lost its summary diagnosis: $(cat "$CASE_DIR/stderr")"
+fi
 unlabels=$(grep -Fc 'label node fixture-node djinn.io/cgroup-writable- --overwrite' "$LOG" || true)
 if [ "$unlabels" -ge 2 ]; then
   ok 'probe-failure removed eligibility again in cleanup'
@@ -394,7 +431,103 @@ assert_identity_rejected identity-bound-elsewhere \
   'spec.nodeName=[other-node]' 'requested node=[fixture-node]'
 
 # ---------------------------------------------------------------------------
-# 7. Fixture mode: the success transcript is exact and every failure case,
+# 7. Worker identity: the supplementary group SET. The launcher phase runs as
+#    `runAsUser: 0`, so its own supplementary set is `0 1000` — root's group 0
+#    plus the pod's fsGroup. No rendered task-run worker ever has that set:
+#    worker_security_context() in server/crates/djinn-k8s/src/launcher.rs pins
+#    the worker container to runAsUser/runAsGroup 1000 with runAsNonRoot and the
+#    pod securityContext there to fsGroup 1000 (asserted in
+#    server/crates/djinn-k8s/src/job.rs), so a real worker's supplementary set
+#    is exactly `1000` and nothing else. The probe must
+#    therefore STATE the worker group set, never inherit the launcher's, and the
+#    assertion must reject the inherited shape rather than tolerate it.
+# ---------------------------------------------------------------------------
+setpriv_line=$(grep -F 'exec setpriv ' "$CONFORMANCE" || true)
+if [ -z "$setpriv_line" ]; then
+  fail 'no setpriv launcher-to-worker transition found in the conformance script'
+fi
+case "$setpriv_line" in
+  *--groups=1000*)
+    ok 'worker transition states the supplementary group set explicitly' ;;
+  *)
+    fail "worker transition does not set --groups=1000: [$setpriv_line]" ;;
+esac
+# setpriv rejects --groups alongside --keep-groups/--clear-groups/--init-groups,
+# so this is not merely redundant with the assertion above: --keep-groups is the
+# defect, and it is the one shape that would silently reintroduce group 0.
+case "$setpriv_line" in
+  *--keep-groups*)
+    fail "worker transition uses --keep-groups, which carries the launcher's group 0 into the worker identity: [$setpriv_line]" ;;
+  *)
+    ok 'worker transition never inherits the launcher supplementary groups' ;;
+esac
+
+# The assertion itself, executed. The line is lifted verbatim out of
+# WORKER_PROBE (un-escaping the '\'' sequences bash uses to embed a single quote
+# inside a single-quoted literal) and pointed at a fixture status file, so these
+# cases exercise the same expression the worker phase runs on the node — it
+# cannot drift from the script without this section noticing.
+groups_assertion=$(grep -F '/^Groups:/' "$CONFORMANCE" || true)
+if [ -z "$groups_assertion" ]; then
+  fail 'WORKER_PROBE carries no Groups: assertion at all'
+else
+  embedded_quote="'\\''"
+  bare_quote="'"
+  groups_assertion=${groups_assertion//"$embedded_quote"/"$bare_quote"}
+  assert_groups_fixture() {
+    local name=$1 status_line=$2 expect=$3 fixture snippet observed
+    fixture="$WORK/status-$name"
+    # Shaped exactly like the kernel's /proc/<pid>/status rendering: a tab after
+    # the key, a space after every GID including the last.
+    printf 'Name:\tsh\nUid:\t1000\t1000\t1000\t1000\nGid:\t1000\t1000\t1000\t1000\n%s\nNoNewPrivs:\t1\n' \
+      "$status_line" >"$fixture"
+    snippet=${groups_assertion//\/proc\/self\/status/$fixture}
+    set +e
+    sh -eu -c "$snippet" >/dev/null 2>&1
+    observed=$?
+    set -e
+    if [ "$expect" = pass ] && [ "$observed" -eq 0 ]; then
+      ok "worker Groups assertion accepts the rendered worker set [$status_line]"
+    elif [ "$expect" = fail ] && [ "$observed" -ne 0 ]; then
+      ok "worker Groups assertion rejects [$status_line]"
+    else
+      fail "worker Groups assertion on [$status_line]: expected to $expect, exit=$observed"
+    fi
+  }
+  # The set a rendered worker actually has, trailing space included.
+  assert_groups_fixture rendered-worker "$(printf 'Groups:\t1000 ')" pass
+  # What --keep-groups produced on the production node: root's group 0 leaked
+  # through the transition and the worker ran with `0 1000`. This must FAIL.
+  # Relaxing it would make the probe certify a worker identity production never
+  # has, which is the entire class of defect this program exists to exclude.
+  assert_groups_fixture leaked-root-group "$(printf 'Groups:\t0 1000 ')" fail
+  # Neither may a bare root group, a reordering, nor an empty set pass.
+  assert_groups_fixture only-root-group "$(printf 'Groups:\t0 ')" fail
+  assert_groups_fixture reordered-with-root "$(printf 'Groups:\t1000 0 ')" fail
+  assert_groups_fixture empty-group-set "$(printf 'Groups:\t')" fail
+fi
+
+# The load-bearing property of --groups is that it REPLACES the set by
+# setgroups(2) and cannot append to it. setpriv enforces that by refusing
+# --groups alongside --keep-groups at all, which is observable without any
+# privilege. The diagnostic wording differs between util-linux releases, so only
+# the refusal is asserted.
+if command -v setpriv >/dev/null 2>&1; then
+  set +e
+  setpriv_exclusivity=$(setpriv --groups=1000 --keep-groups /bin/true 2>&1)
+  setpriv_exclusivity_status=$?
+  set -e
+  if [ "$setpriv_exclusivity_status" -ne 0 ] && [ -n "$setpriv_exclusivity" ]; then
+    ok "setpriv refuses --groups alongside --keep-groups, so --groups cannot append [$setpriv_exclusivity]"
+  else
+    fail "setpriv accepted --groups with --keep-groups (exit=$setpriv_exclusivity_status): --groups may not be replacing the set"
+  fi
+else
+  printf 'SKIP setpriv group-flag exclusivity: setpriv is not installed\n'
+fi
+
+# ---------------------------------------------------------------------------
+# 8. Fixture mode: the success transcript is exact and every failure case,
 #    including the new version-mismatch case, removes eligibility only.
 # ---------------------------------------------------------------------------
 run_fixture_case() {
@@ -437,7 +570,7 @@ run_fixture_case handler-removed
 run_fixture_case version-mismatch
 
 # ---------------------------------------------------------------------------
-# 8. Load-bearing text a reviewer will diff, and sole ownership of the label.
+# 9. Load-bearing text a reviewer will diff, and sole ownership of the label.
 # ---------------------------------------------------------------------------
 conformance_text=$(cat "$CONFORMANCE")
 assert_contains() {
@@ -465,6 +598,15 @@ case "$conformance_text" in
     fail 'conformance reads .status.nodeName, a field the Pod API does not have' ;;
   *) ok 'preserved: conformance never reads the nonexistent .status.nodeName' ;;
 esac
+# The probe transcript must stay captured. Discarding the exec is what hid the
+# three preceding defects in this program from every operator who ran it.
+case "$conformance_text" in
+  *'"$WORKER_PROBE" >/dev/null'*)
+    fail 'conformance discards the probe transcript again' ;;
+  *) ok 'preserved: the probe transcript is captured, not discarded' ;;
+esac
+assert_contains 'probe transcript reaches stderr on failure' "printf '%s\\n' \"\$probe_transcript\" >&2"
+assert_contains 'both probe phases run under xtrace' '/bin/sh -ceux'
 assert_contains 'probe-only RuntimeClass' "PROBE_RUNTIME_CLASS='djinn-cgroup-writable-probe'"
 assert_contains 'probe manifest uses the probe-only class' 'runtimeClassName: $PROBE_RUNTIME_CLASS'
 assert_contains 'probe stays node-bound' 'nodeName: $NODE_NAME'
@@ -481,8 +623,8 @@ owners=$(grep -rl 'label node' "$NODE_DIR" --include='*.sh' | grep -v "$SCRIPT_D
 expect_eq 'sole label owner under deploy/node' "$CONFORMANCE" "$owners"
 
 # ---------------------------------------------------------------------------
-# 9. Non-vacuity: the pre-change script restarts k3s on the very fixture the
-#    preflight now refuses. Skipped once the baseline ref carries the preflight.
+# 10. Non-vacuity: the pre-change script restarts k3s on the very fixture the
+#     preflight now refuses. Skipped once the baseline carries the preflight.
 # ---------------------------------------------------------------------------
 baseline_ref=${DJINN_CONFORMANCE_BASELINE_REF:-origin/main}
 baseline_path='deploy/node/k3s/djinn-cgroup-writable-conformance.sh'
