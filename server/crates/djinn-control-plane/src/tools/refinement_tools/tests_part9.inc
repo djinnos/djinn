@@ -76,12 +76,13 @@
     /// kind is data supplied by the caller, so this fixture does not recreate
     /// the evaluator's evidence ordering.
     async fn seed_parked_cross_surface_run(
+        db: &Database,
         repo: &ProposalRepository,
         proposal_id: &str,
         key: &str,
         kind: djinn_core::refinement_liveness::RefinementParkKind,
     ) -> String {
-        let (run_id, generation) = match repo
+        let (run_id, intent_id, generation) = match repo
             .reap_and_admit(djinn_db::AdmitRefinementRunRequest {
                 proposal_id: proposal_id.to_owned(),
                 idempotency_key: key.into(),
@@ -95,19 +96,44 @@
         {
             djinn_db::RefinementAdmissionOutcome::Admitted {
                 run_id,
+                intent_id,
                 generation,
                 ..
-            } => (run_id, generation),
+            } => (run_id, intent_id, generation),
             djinn_db::RefinementAdmissionOutcome::Existing { .. } => unreachable!(),
         };
+        // Admission creates a pending intent. Claim and consume that exact
+        // source intent with the production park transition, rather than
+        // parking only the run row and leaving alternate live intent evidence.
         assert!(repo
-            .park_refinement_run(djinn_db::ParkRefinementRunRequest {
+            .claim_refinement_intent(djinn_db::ClaimRefinementIntentRequest {
                 run_id: run_id.clone(),
+                intent_id: intent_id.clone(),
                 generation,
+                owner: "parked-cross-surface-fixture".into(),
+                lease_millis: 60_000,
+            })
+            .await
+            .unwrap()
+            .is_some());
+        assert!(repo
+            .park_refinement_run_from_intent(djinn_db::ParkRefinementRunFromIntentRequest {
+                source: djinn_db::SourceIntentTransitionRequest {
+                    run_id: run_id.clone(),
+                    intent_id,
+                    generation,
+                    expected_round: 1,
+                    expected_phase: djinn_core::refinement_liveness::RefinementPhase::AdversaryAttack,
+                    expected_role: djinn_core::refinement_liveness::RefinementRole::Adversary,
+                },
                 kind,
             })
             .await
             .unwrap());
+        // The park transition intentionally preserves the most recent durable
+        // heartbeat. Age it so this fixture has no fallback live evidence.
+        djinn_db::test_support::elapse_refinement_run_wall_clock_for_test(db, &run_id, 3_600)
+            .await;
         run_id
     }
 
@@ -361,6 +387,7 @@
                 .await
                 .unwrap();
             let run_id = seed_parked_cross_surface_run(
+                &db,
                 &repo,
                 &proposal.id,
                 &format!("parked-cross-surface-{name}"),
@@ -381,6 +408,29 @@
                 exact.observed_at,
             );
             assert_eq!(expected, exact.liveness, "{name}: repository snapshot");
+            assert_eq!(
+                exact.snapshot.park.as_ref().map(|park| park.kind),
+                Some(kind),
+                "{name}: selected durable park evidence"
+            );
+            assert!(
+                exact.snapshot.intents.iter().all(|intent| {
+                    matches!(
+                        intent.state,
+                        djinn_core::refinement_liveness::RefinementIntentState::Completed
+                    )
+                }),
+                "{name}: source intent must be completed, not alternate live evidence"
+            );
+            assert!(exact.snapshot.tasks.is_empty(), "{name}: no task fallback evidence");
+            assert!(exact.snapshot.sessions.is_empty(), "{name}: no session fallback evidence");
+            assert!(exact.snapshot.between_phase.is_none(), "{name}: no handoff fallback evidence");
+            assert!(
+                exact.snapshot.heartbeat.as_ref().is_none_or(|heartbeat| {
+                    heartbeat.heartbeat_at.0 + heartbeat.grace_millis <= exact.observed_at.0
+                }),
+                "{name}: no fresh-heartbeat fallback evidence"
+            );
             assert_eq!(
                 expected,
                 RefinementLivenessResult::Live {
