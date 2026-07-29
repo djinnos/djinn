@@ -31,8 +31,18 @@ pub fn tool_submit_work() -> RmcpTool {
                     "type": "array",
                     "items": {"type": "string"},
                     "description": "Any outstanding concerns or caveats for the reviewer"
+                },
+                "evidence_completion": {
+                    "type": "object", "additionalProperties": false,
+                    "required": ["schema_version", "plan_id", "terminal_results", "findings"],
+                    "properties": {
+                        "schema_version": {"type": "integer", "const": 1}, "plan_id": {"type": "string"},
+                        "terminal_results": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["check_id", "method", "terminal"], "properties": {"check_id": {"type": "string"}, "method": {"type": "string", "enum": ["code", "graph", "command"]}, "terminal": {"type": "boolean"}}}},
+                        "findings": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["check_id", "summary", "anchor"], "properties": {"check_id": {"type": "string"}, "summary": {"type": "string"}, "anchor": {"type": "object", "additionalProperties": false}}}}
+                    }
                 }
-            }
+            },
+            "additionalProperties": false
         }),
     )
 }
