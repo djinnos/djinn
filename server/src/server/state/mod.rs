@@ -4720,14 +4720,10 @@ mod build_admission_config_tests {
         use djinn_agent::actors::coordinator::BuildAdmissionReadiness;
 
         let missing_row_db = Database::open_in_memory().expect("test database");
-        missing_row_db
-            .ensure_initialized()
+        BuildPodPermitRepository::new(missing_row_db.clone())
+            .delete_global_pool_for_test()
             .await
-            .expect("migrations");
-        sqlx::query("DELETE FROM build_pod_permit_pools WHERE pool_key = 'global'")
-            .execute(missing_row_db.pool())
-            .await
-            .expect("delete singleton pool");
+            .expect("delete canonical pool through repository test seam");
         let missing_row = state_for_admission_config_with_db(
             missing_row_db,
             BuildAdmissionConfig {
@@ -4746,14 +4742,10 @@ mod build_admission_config_tests {
         );
 
         let unavailable_db = Database::open_in_memory().expect("test database");
-        unavailable_db
-            .ensure_initialized()
+        BuildPodPermitRepository::new(unavailable_db.clone())
+            .drop_pool_relation_for_test()
             .await
-            .expect("migrations");
-        sqlx::query("DROP TABLE build_pod_permit_pools")
-            .execute(unavailable_db.pool())
-            .await
-            .expect("drop pool relation to inject repository error");
+            .expect("drop pool relation through repository test seam");
         let unavailable = state_for_admission_config_with_db(
             unavailable_db,
             BuildAdmissionConfig {

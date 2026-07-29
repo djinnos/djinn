@@ -61,12 +61,22 @@ pub struct BuildPodPermitRow {
 /// durable storage.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AcquireBuildPodPermitResult {
-    Acquired { row: BuildPodPermitRow, idempotent: bool },
-    PoolFull { active_count: i64, limit: i64 },
+    Acquired {
+        row: BuildPodPermitRow,
+        idempotent: bool,
+    },
+    PoolFull {
+        active_count: i64,
+        limit: i64,
+    },
     /// A task run has one durable permit lifecycle and a released permit is not
     /// resurrected under its old identity.
-    AlreadyReleased { row: BuildPodPermitRow },
-    InvalidLimit { limit: i64 },
+    AlreadyReleased {
+        row: BuildPodPermitRow,
+    },
+    InvalidLimit {
+        limit: i64,
+    },
     Unavailable,
 }
 
@@ -110,6 +120,33 @@ impl BuildPodPermitRepository {
         .await?)
     }
 
+    /// Remove the canonical pool singleton for prerequisite-gate fixtures.
+    ///
+    /// This test-only seam keeps callers outside `djinn-db` from bypassing the
+    /// repository raw-SQL boundary merely to simulate a partial migration.
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn delete_global_pool_for_test(&self) -> DbResult<()> {
+        self.db.ensure_initialized().await?;
+        sqlx::query("DELETE FROM build_pod_permit_pools WHERE pool_key = $1")
+            .bind(POOL_KEY)
+            .execute(self.db.pool())
+            .await?;
+        Ok(())
+    }
+
+    /// Drop the pool relation for prerequisite-gate error fixtures.
+    ///
+    /// This is deliberately test-support-only: production callers can only
+    /// observe the repository error through [`Self::global_pool_is_readable`].
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn drop_pool_relation_for_test(&self) -> DbResult<()> {
+        self.db.ensure_initialized().await?;
+        sqlx::query("DROP TABLE build_pod_permit_pools")
+            .execute(self.db.pool())
+            .await?;
+        Ok(())
+    }
+
     /// Atomically acquire one permit below `limit`.
     ///
     /// The `global` pool row is locked before the task-run lookup/count/insert.
@@ -142,7 +179,9 @@ impl BuildPodPermitRepository {
         .fetch_optional(&mut *tx)
         .await?;
         if pool.is_none() {
-            return Err(DbError::Internal("build pod permit global pool is missing".into()));
+            return Err(DbError::Internal(
+                "build pod permit global pool is missing".into(),
+            ));
         }
 
         if let Some(row) = fetch_tx(&mut tx, task_run_id).await? {
