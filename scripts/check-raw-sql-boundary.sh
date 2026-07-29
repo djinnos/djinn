@@ -3,9 +3,7 @@
 #
 # Direct sqlx query usage for Djinn's application database MUST live inside
 # `server/crates/djinn-db/`. Other application crates should go through
-# djinn-db's repository/query layer. The catalog wrapper is also excluded: it
-# administers isolated databases in an external catalog service and therefore
-# cannot route those service-control statements through Djinn's repository.
+# djinn-db's repository/query layer.
 # This guard fails when changed Rust files outside approved boundaries
 # introduce raw sqlx query calls (sqlx::query, sqlx::query!, etc.).
 #
@@ -92,8 +90,7 @@ esac
 # ── Scope / filter helpers ─────────────────────────────────────────────
 
 # is_in_scope_rs_file returns 0 if the path is a Rust source file we should
-# inspect. Generated paths, the djinn-db crate, and the external-service catalog
-# wrapper are excluded.
+# inspect. Generated paths and the djinn-db crate are excluded.
 is_in_scope_rs_file() {
     path=$1
 
@@ -115,12 +112,10 @@ is_in_scope_rs_file() {
             ;;
     esac
 
-    # Exclude the approved SQL boundaries. djinn-db owns Djinn's application
-    # database queries. djinn-catalog-wrapper intentionally issues DDL against
-    # separately cataloged tenant services; those statements do not belong in
-    # Djinn's application repository layer.
+    # Exclude the approved SQL boundary. djinn-db owns Djinn's application
+    # database queries.
     case "$path" in
-        server/crates/djinn-db/*|server/crates/djinn-catalog-wrapper/*)
+        server/crates/djinn-db/*)
             return 1
             ;;
     esac
