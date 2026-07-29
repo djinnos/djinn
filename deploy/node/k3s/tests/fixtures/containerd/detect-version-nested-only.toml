@@ -1,0 +1,11 @@
+# Only a table-scoped `version` key exists. Top-level TOML keys precede the
+# first table header, so this file declares no configuration version and must
+# resolve to the containerd v1.x default.
+root = "/var/lib/rancher/k3s/agent/containerd"
+
+[plugins."io.containerd.grpc.v1.cri"]
+  version = 3
+
+[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc]
+  runtime_type = "io.containerd.runc.v2"
+  version = 3

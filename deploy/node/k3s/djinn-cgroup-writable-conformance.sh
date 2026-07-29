@@ -8,10 +8,19 @@ set -Eeuo pipefail
 LABEL='djinn.io/cgroup-writable'
 HANDLER='runc-cgroupwritable'
 RUNTIME_CLASS='djinn-cgroup-writable'
-RUNTIME_TABLE='[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc-cgroupwritable]'
+# Resolved from the live containerd configuration's own `version` key before
+# anything is written. There is no default: a node whose generation cannot be
+# resolved gets no template and no restart.
+RUNTIME_TABLE=''
+CONFIG_VERSION=''
+TEMPLATE_BASENAME=''
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-TEMPLATE_SOURCE=${DJINN_CGROUP_TEMPLATE_SOURCE:-"$SCRIPT_DIR/containerd/config.toml.tmpl"}
-TEMPLATE_PATH=${DJINN_CGROUP_TEMPLATE_PATH:-/var/lib/rancher/k3s/agent/etc/containerd/config.toml.tmpl}
+VERSION_LIB=${DJINN_CGROUP_VERSION_LIB:-"$SCRIPT_DIR/containerd-config-version.sh"}
+TEMPLATE_DIR=${DJINN_CGROUP_TEMPLATE_DIR:-"$SCRIPT_DIR/containerd"}
+INSTALL_DIR=${DJINN_CGROUP_INSTALL_DIR:-/var/lib/rancher/k3s/agent/etc/containerd}
+# Both paths default to the version-resolved basename inside those directories.
+TEMPLATE_SOURCE=${DJINN_CGROUP_TEMPLATE_SOURCE:-}
+TEMPLATE_PATH=${DJINN_CGROUP_TEMPLATE_PATH:-}
 LIVE_CONFIG_PATH=${DJINN_CGROUP_LIVE_CONFIG_PATH:-/var/lib/rancher/k3s/agent/etc/containerd/config.toml}
 KUBECTL=${DJINN_KUBECTL:-kubectl}
 K3S_RESTART_CMD=${DJINN_K3S_RESTART_CMD:-'systemctl restart k3s'}
@@ -23,6 +32,9 @@ FIXTURE_LOG=${DJINN_CGROUP_FIXTURE_LOG:-}
 NODE_NAME=''
 PROBE_NAME=''
 SUCCESS=0
+TEMPLATE_INSTALLED=0
+TEMPLATE_BACKUP=''
+BACKUP_DIR=''
 
 usage() {
   cat >&2 <<'USAGE'
@@ -30,13 +42,21 @@ usage: djinn-cgroup-writable-conformance.sh --node NODE
 
 Environment seams (for hermetic fixture tests):
   DJINN_CGROUP_FIXTURE_MODE=1
-  DJINN_CGROUP_FIXTURE_CASE=success|timeout|wrong-node|sandbox|isolation|readonly|mutation-success|handler-removed
+  DJINN_CGROUP_FIXTURE_CASE=success|timeout|wrong-node|sandbox|isolation|readonly|mutation-success|handler-removed|version-mismatch
   DJINN_CGROUP_FIXTURE_LOG=PATH
 
 Production seams: DJINN_KUBECTL, DJINN_K3S_RESTART_CMD,
 DJINN_CGROUP_TEMPLATE_SOURCE, DJINN_CGROUP_TEMPLATE_PATH,
-DJINN_CGROUP_LIVE_CONFIG_PATH, DJINN_CGROUP_PROBE_IMAGE, and
-DJINN_CGROUP_TIMEOUT.
+DJINN_CGROUP_TEMPLATE_DIR, DJINN_CGROUP_INSTALL_DIR,
+DJINN_CGROUP_VERSION_LIB, DJINN_CGROUP_LIVE_CONFIG_PATH,
+DJINN_CGROUP_PROBE_IMAGE, and DJINN_CGROUP_TIMEOUT.
+
+The containerd CRI configuration generation is resolved from the live
+configuration's own top-level `version` key, never from a k3s version string.
+Version 2 (or an absent key) selects config.toml.tmpl and the
+io.containerd.grpc.v1.cri namespace; version 3 selects config-v3.toml.tmpl and
+the io.containerd.cri.v1.runtime namespace; any other value aborts before the
+template is written and before k3s is restarted.
 USAGE
 }
 
@@ -61,13 +81,28 @@ run_fixture() {
       printf 'PASS node=%s handler=runc-cgroupwritable cgroup_root=/ writable=true isolated=true worker_denials=true\n' "$NODE_NAME"
       SUCCESS=1
       ;;
-    timeout|wrong-node|sandbox|isolation|readonly|mutation-success|handler-removed)
+    timeout|wrong-node|sandbox|isolation|readonly|mutation-success|handler-removed|version-mismatch)
       fixture_log "failure=$FIXTURE_CASE"
       fixture_log "cleanup node=$NODE_NAME"
       die "fixture $FIXTURE_CASE"
       ;;
     *) die "unknown fixture case: $FIXTURE_CASE" ;;
   esac
+}
+
+# A node must never be left running an unproven base template. Whenever the
+# template was installed and conformance did not succeed, put the previous
+# bytes back (or remove the file when there were none) and restart k3s again so
+# containerd re-renders from the restored source.
+restore_template() {
+  [[ $TEMPLATE_INSTALLED -eq 1 ]] || return 0
+  TEMPLATE_INSTALLED=0
+  if [[ -n "$TEMPLATE_BACKUP" ]]; then
+    cp -p "$TEMPLATE_BACKUP" "$TEMPLATE_PATH" || return 0
+  else
+    rm -f "$TEMPLATE_PATH" || return 0
+  fi
+  eval "$K3S_RESTART_CMD" >/dev/null 2>&1 || true
 }
 
 cleanup() {
@@ -80,16 +115,20 @@ cleanup() {
   if [[ $SUCCESS -ne 1 && -n "$NODE_NAME" && -z "$FIXTURE_MODE" ]]; then
     "$KUBECTL" label node "$NODE_NAME" "$LABEL-" --overwrite >/dev/null 2>&1 || true
   fi
+  if [[ $SUCCESS -ne 1 ]]; then
+    restore_template || true
+  fi
+  if [[ -n "$BACKUP_DIR" ]]; then
+    rm -rf "$BACKUP_DIR" || true
+  fi
   exit "$status"
 }
 trap cleanup EXIT
 
 require_command() { command -v "$1" >/dev/null 2>&1 || die "required command missing: $1"; }
 
-validate_live_runtime_table() {
-  [[ -r "$LIVE_CONFIG_PATH" ]] || die "live containerd config is not readable: $LIVE_CONFIG_PATH"
-  local actual expected
-  actual=$(awk -v header="$RUNTIME_TABLE" '
+extract_runtime_table() {
+  awk -v header="$RUNTIME_TABLE" '
     $0 == header { in_table=1 }
     in_table {
       if (seen && /^\[/) exit
@@ -97,9 +136,75 @@ validate_live_runtime_table() {
       sub(/[[:space:]]*#.*/, "")
       if ($0 !~ /^[[:space:]]*$/) print
     }
-  ' "$LIVE_CONFIG_PATH")
-  expected=$(printf '%s\n  runtime_type = "io.containerd.runc.v2"\n  cgroup_writable = true' "$RUNTIME_TABLE")
+  ' "$1"
+}
+
+expected_runtime_table() {
+  printf '%s\n  runtime_type = "io.containerd.runc.v2"\n  cgroup_writable = true' "$RUNTIME_TABLE"
+}
+
+# Resolve the containerd configuration generation and prove that the template
+# about to be installed, the destination filename and the table this program
+# will later validate all describe that same generation. Every step here is a
+# pure read: nothing is written and k3s is not restarted, so a node whose
+# generation has no matching asset in this repository is left exactly as found.
+preflight_version_tuple() {
+  local other_version other_table source_table destination_basename source_basename
+  CONFIG_VERSION=$(djinn_containerd_detect_version "$LIVE_CONFIG_PATH") ||
+    die "cannot resolve the containerd config version from $LIVE_CONFIG_PATH"
+  TEMPLATE_BASENAME=$(djinn_containerd_template_basename_for_version "$CONFIG_VERSION") ||
+    die "no managed template for containerd config version $CONFIG_VERSION"
+  RUNTIME_TABLE=$(djinn_containerd_runtime_table_for_version "$CONFIG_VERSION") ||
+    die "no runtime table for containerd config version $CONFIG_VERSION"
+  : "${TEMPLATE_SOURCE:=$TEMPLATE_DIR/$TEMPLATE_BASENAME}"
+  : "${TEMPLATE_PATH:=$INSTALL_DIR/$TEMPLATE_BASENAME}"
+  [[ -r "$TEMPLATE_SOURCE" ]] || die "managed template source is not readable: $TEMPLATE_SOURCE"
+
+  # k3s reads one template filename per configuration generation. A path whose
+  # basename asserts a generation must assert the detected one; a basename that
+  # asserts nothing (an operator or test seam) is not a contradiction.
+  destination_basename=${TEMPLATE_PATH##*/}
+  source_basename=${TEMPLATE_SOURCE##*/}
+  case "$destination_basename" in
+    config.toml.tmpl | config-v3.toml.tmpl)
+      [[ "$destination_basename" == "$TEMPLATE_BASENAME" ]] ||
+        die "destination $destination_basename contradicts containerd config version $CONFIG_VERSION (expected $TEMPLATE_BASENAME)" ;;
+  esac
+  case "$source_basename" in
+    config.toml.tmpl | config-v3.toml.tmpl)
+      [[ "$source_basename" == "$TEMPLATE_BASENAME" ]] ||
+        die "template source $source_basename contradicts containerd config version $CONFIG_VERSION (expected $TEMPLATE_BASENAME)" ;;
+  esac
+
+  # The template's own text is the claim that matters: a v2 template on a v3
+  # node renders a namespace containerd 2.x ignores entirely, which is exactly
+  # how an armed launcher reaches a node that cannot run the handler.
+  if [[ "$CONFIG_VERSION" == 2 ]]; then other_version=3; else other_version=2; fi
+  other_table=$(djinn_containerd_runtime_table_for_version "$other_version")
+  ! grep -Fq "$other_table" "$TEMPLATE_SOURCE" ||
+    die "template source $TEMPLATE_SOURCE declares the version-$other_version runtime table on a version-$CONFIG_VERSION node"
+  source_table=$(extract_runtime_table "$TEMPLATE_SOURCE")
+  [[ "$source_table" == "$(expected_runtime_table)" ]] ||
+    die "template source $TEMPLATE_SOURCE does not contain the exact $HANDLER runtime table for containerd config version $CONFIG_VERSION"
+}
+
+validate_live_runtime_table() {
+  [[ -r "$LIVE_CONFIG_PATH" ]] || die "live containerd config is not readable: $LIVE_CONFIG_PATH"
+  local actual expected
+  actual=$(extract_runtime_table "$LIVE_CONFIG_PATH")
+  expected=$(expected_runtime_table)
   [[ "$actual" == "$expected" ]] || die "live containerd config does not contain the exact $HANDLER runtime table"
+}
+
+install_template() {
+  BACKUP_DIR=$(mktemp -d)
+  if [[ -e "$TEMPLATE_PATH" ]]; then
+    TEMPLATE_BACKUP="$BACKUP_DIR/previous"
+    cp -p "$TEMPLATE_PATH" "$TEMPLATE_BACKUP"
+  fi
+  # Armed before the write so a partial install is still restored.
+  TEMPLATE_INSTALLED=1
+  install -D -m 0644 "$TEMPLATE_SOURCE" "$TEMPLATE_PATH"
 }
 
 ensure_unlabeled() {
@@ -244,12 +349,18 @@ require_command "$KUBECTL"
 require_command install
 require_command awk
 require_command systemctl
-[[ -r "$TEMPLATE_SOURCE" ]] || die "managed template source is not readable: $TEMPLATE_SOURCE"
+[[ -r "$VERSION_LIB" ]] || die "containerd config version library is not readable: $VERSION_LIB"
+# shellcheck source=containerd-config-version.sh
+. "$VERSION_LIB"
+
+# Resolve and cross-check the whole version tuple first. It reads only; an
+# inconsistent node fails here with no template written and no k3s restart.
+preflight_version_tuple
 
 # Remove eligibility before touching either the template or k3s. The EXIT trap
 # repeats this on all unsuccessful paths, including restarts and timeouts.
 ensure_unlabeled
-install -D -m 0644 "$TEMPLATE_SOURCE" "$TEMPLATE_PATH"
+install_template
 eval "$K3S_RESTART_CMD" >/dev/null
 validate_live_runtime_table
 

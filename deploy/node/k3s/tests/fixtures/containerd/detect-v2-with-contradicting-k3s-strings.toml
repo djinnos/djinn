@@ -1,0 +1,12 @@
+# The mirror image of the version-3 fixture: the version strings claim the
+# containerd 2.x node, the declared generation is 2, and 2 must win.
+# k3s v1.35.5+k3s1 / containerd 2.2.3-k3s1
+k3s_version = "v1.35.5+k3s1"
+containerd_version = "2.2.3-k3s1"
+version = 2
+
+[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc]
+  runtime_type = "io.containerd.runc.v2"
+
+# A v3 namespace mentioned in a comment is still not a v3 configuration:
+# [plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.runc]
