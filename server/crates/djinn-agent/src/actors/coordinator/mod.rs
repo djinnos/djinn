@@ -17,9 +17,9 @@ pub use djinn_coordinator::build_admission::{
 pub use djinn_coordinator::build_admission_handoff;
 pub use djinn_coordinator::{
     AutoMergeTracker, BackgroundWorkTracker, BreakerDebugEntry, CoordinatorDebugSnapshot,
-    CoordinatorError, CoordinatorHandle, CoordinatorStatus, DebugCooldown, DebugDispatchState,
-    DebugFailureStreak, DebugInflightEntry, DebugSlot, DebugTotals, DispatchPauseView,
-    PR_REVIEW_FEEDBACK_EVENT, PrCleanupConfig, record_supervisor_rework_reopen,
+    CoordinatorError, CoordinatorHandle, CoordinatorStatus, DebugBuildAdmission, DebugCooldown,
+    DebugDispatchState, DebugFailureStreak, DebugInflightEntry, DebugSlot, DebugTotals,
+    DispatchPauseView, PR_REVIEW_FEEDBACK_EVENT, PrCleanupConfig, record_supervisor_rework_reopen,
 };
 
 // Re-export public submodules.
