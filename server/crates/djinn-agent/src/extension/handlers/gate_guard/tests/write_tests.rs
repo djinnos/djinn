@@ -6,8 +6,10 @@ use super::*;
 
 // ─── AC 1: truncated read denies worker write, edit_forced unset ─────
 
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn truncated_read_denies_worker_write() {
+    let _jit_env = crate::test_helpers::jit_env_read_guard();
     let (worktree, state) = setup_worktree("gg-write-trunc-");
     let file = worktree.path().join("svc.rs");
     tokio::fs::write(&file, "existing content\n")
@@ -62,8 +64,10 @@ async fn truncated_read_denies_worker_write() {
 
 // ─── AC 2: first covered write returns investigation prompt ──────────
 
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn first_covered_worker_write_returns_investigation_prompt() {
+    let _jit_env = crate::test_helpers::jit_env_read_guard();
     let (worktree, state) = setup_worktree("gg-write-first-");
     let file = worktree.path().join("svc.rs");
     tokio::fs::write(&file, "let a = services;\n")
@@ -126,8 +130,10 @@ async fn first_covered_worker_write_returns_investigation_prompt() {
 
 // ─── AC 2: retry after re-read is allowed ───────────────────────────
 
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn worker_write_allowed_after_investigation_and_reread() {
+    let _jit_env = crate::test_helpers::jit_env_read_guard();
     let (worktree, state) = setup_worktree("gg-write-retry-");
     let file = worktree.path().join("svc.rs");
     tokio::fs::write(&file, "let a = services;\n")
@@ -192,8 +198,10 @@ async fn worker_write_allowed_after_investigation_and_reread() {
 
 // ─── AC 2: third/subsequent writes are not re-gated ──────────────────
 
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn worker_subsequent_writes_not_regated_after_investigation() {
+    let _jit_env = crate::test_helpers::jit_env_read_guard();
     let (worktree, state) = setup_worktree("gg-write-steady-");
     let file = worktree.path().join("svc.rs");
     tokio::fs::write(&file, "let a = services;\n")
@@ -276,8 +284,10 @@ async fn worker_subsequent_writes_not_regated_after_investigation() {
 
 // ─── AC 3/4: non-worker roles bypass GateGuard for write ─────────────
 
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn reviewer_bypasses_gate_guard_for_write() {
+    let _jit_env = crate::test_helpers::jit_env_read_guard();
     let (worktree, state) = setup_worktree("gg-write-reviewer-");
     let file = worktree.path().join("svc.rs");
     tokio::fs::write(&file, "let a = services;\n")
@@ -326,8 +336,10 @@ async fn reviewer_bypasses_gate_guard_for_write() {
 
 // ─── AC 4: new file write bypasses GateGuard ─────────────────────────
 
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn new_file_write_bypasses_gate_guard() {
+    let _jit_env = crate::test_helpers::jit_env_read_guard();
     let (worktree, state) = setup_worktree("gg-write-newfile-");
     let session_id = worktree.path().display().to_string();
 
@@ -367,8 +379,10 @@ async fn new_file_write_bypasses_gate_guard() {
 
 // ─── Identical truncated write retries keep denying ───────────────────
 
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn identical_truncated_write_retries_keep_denying() {
+    let _jit_env = crate::test_helpers::jit_env_read_guard();
     let (worktree, state) = setup_worktree("gg-write-retry-trunc-");
     let file = worktree.path().join("svc.rs");
     tokio::fs::write(&file, "existing\n").await.expect("seed");
@@ -430,8 +444,10 @@ async fn identical_truncated_write_retries_keep_denying() {
 
 // ─── AC 3: truncated read denies worker patch update ──────────────────
 
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn truncated_read_denies_worker_patch_update() {
+    let _jit_env = crate::test_helpers::jit_env_read_guard();
     let (worktree, state) = setup_worktree("gg-patch-trunc-");
     let file = worktree.path().join("svc.rs");
     tokio::fs::write(&file, "existing content\n")
@@ -484,8 +500,10 @@ async fn truncated_read_denies_worker_patch_update() {
 
 // ─── AC 3: first covered patch update returns investigation prompt ────
 
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn first_covered_worker_patch_update_returns_investigation_prompt() {
+    let _jit_env = crate::test_helpers::jit_env_read_guard();
     let (worktree, state) = setup_worktree("gg-patch-first-");
     let file = worktree.path().join("svc.rs");
     tokio::fs::write(&file, "let a = services;\n")
@@ -547,8 +565,10 @@ async fn first_covered_worker_patch_update_returns_investigation_prompt() {
 
 // ─── AC 3: patch retry after re-read is allowed ──────────────────────
 
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn worker_patch_allowed_after_investigation_and_reread() {
+    let _jit_env = crate::test_helpers::jit_env_read_guard();
     let (worktree, state) = setup_worktree("gg-patch-retry-");
     let file = worktree.path().join("svc.rs");
     tokio::fs::write(&file, "let a = services;\n")
@@ -612,8 +632,10 @@ async fn worker_patch_allowed_after_investigation_and_reread() {
 
 // ─── AC 3: non-worker roles bypass GateGuard for patch ───────────────
 
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn reviewer_bypasses_gate_guard_for_patch() {
+    let _jit_env = crate::test_helpers::jit_env_read_guard();
     let (worktree, state) = setup_worktree("gg-patch-reviewer-");
     let file = worktree.path().join("svc.rs");
     tokio::fs::write(&file, "let a = services;\n")
@@ -661,8 +683,10 @@ async fn reviewer_bypasses_gate_guard_for_patch() {
 
 // ─── AC 4: add-file patch operation bypasses GateGuard ────────────────
 
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn add_file_patch_bypasses_gate_guard() {
+    let _jit_env = crate::test_helpers::jit_env_read_guard();
     let (worktree, state) = setup_worktree("gg-patch-addfile-");
     let session_id = worktree.path().display().to_string();
 
@@ -700,8 +724,10 @@ async fn add_file_patch_bypasses_gate_guard() {
 
 // ─── AC 4: missing role bypasses GateGuard for write and patch ────────
 
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn missing_role_bypasses_gate_guard_for_write() {
+    let _jit_env = crate::test_helpers::jit_env_read_guard();
     let (worktree, state) = setup_worktree("gg-write-norole-");
     let file = worktree.path().join("svc.rs");
     tokio::fs::write(&file, "let a = services;\n")
@@ -734,8 +760,10 @@ async fn missing_role_bypasses_gate_guard_for_write() {
     assert_eq!(response["ok"], serde_json::json!(true));
 }
 
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn missing_role_bypasses_gate_guard_for_patch() {
+    let _jit_env = crate::test_helpers::jit_env_read_guard();
     let (worktree, state) = setup_worktree("gg-patch-norole-");
     let file = worktree.path().join("svc.rs");
     tokio::fs::write(&file, "let a = services;\n")

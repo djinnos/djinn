@@ -1,7 +1,9 @@
 use super::*;
 
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn write_rejects_symlink_escape_outside_worktree() {
+    let _jit_env = crate::test_helpers::jit_env_read_guard();
     let worktree = crate::test_helpers::test_tempdir("djinn-ext-worktree-");
     let outside = crate::test_helpers::test_tempdir("djinn-ext-outside-");
     let link = worktree.path().join("escape-link");
@@ -32,8 +34,10 @@ async fn write_rejects_symlink_escape_outside_worktree() {
 /// the dispatcher hands us a `project_id`. Verifies the write-nudge
 /// wire-up end-to-end: threshold (`co_edits >= 2`), exclusion filter,
 /// and top-5 cap.
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn call_write_emits_related_files_when_coupling_data_exists() {
+    let _jit_env = crate::test_helpers::jit_env_read_guard();
     use djinn_db::{CommitFileChange, CommitFileChangeRepository};
 
     let db = create_test_db();
@@ -124,8 +128,10 @@ async fn call_write_emits_related_files_when_coupling_data_exists() {
 /// coupling data for the project — the field is omitted rather than
 /// serialized as `null` or `[]` to keep the JSON shape stable for
 /// day-one projects.
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn call_write_omits_related_files_when_coupling_empty() {
+    let _jit_env = crate::test_helpers::jit_env_read_guard();
     let db = create_test_db();
     let project = create_test_project(&db).await;
     let worktree = crate::test_helpers::test_tempdir("djinn-ext-coupling-empty-");
