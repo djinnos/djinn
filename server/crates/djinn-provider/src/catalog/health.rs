@@ -1,3 +1,4 @@
+// djinn:allow-oversize — per-(scope, model) breaker state: typed-failure, throttle, stall and transient ladders share one mutex-guarded catalog.
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
