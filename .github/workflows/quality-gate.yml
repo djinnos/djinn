@@ -633,7 +633,15 @@ jobs:
     needs: preflight
     if: needs.preflight.outputs.clippy == 'true' && github.event_name != 'push'
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    # Raised from 25 when the deploy render-gate contract moved onto this lane.
+    # Measured on run 30479829505: Clippy 3m21s, render-gate 7m42s, job 11m50s
+    # (this lane was ~4m9s before). The render-gate step is slower than its
+    # ~1m local build because `cargo clippy` emits CHECK-mode artifacts for the
+    # workspace crates, so `cargo build -p djinn-k8s` recompiles the whole
+    # djinn-db -> djinn-core -> djinn-k8s chain in build mode; only the
+    # third-party deps come from the restored cache. 25 minutes left too little
+    # margin for a cold-cache run on top of that.
+    timeout-minutes: 35
     defaults:
       run:
         working-directory: server
