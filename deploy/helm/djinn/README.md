@@ -217,6 +217,15 @@ has labeled eligible nodes. That installs `RuntimeClass/djinn-cgroup-writable`
 with its existing handler and node selector, but does not assign it to task-run
 Pods or change launcher privileges.
 
+The same value also installs `RuntimeClass/djinn-cgroup-writable-probe`: the
+same `runc-cgroupwritable` handler with no `scheduling` block. The two always
+appear and disappear together. Node conformance uses the probe class because it
+runs on a node that does not yet carry `djinn.io/cgroup-writable=true`; the
+task-run class's merged `nodeSelector` becomes a NodeAffinity predicate the
+kubelet enforces even for a Pod bound by `spec.nodeName`, so a probe naming it
+could never be admitted, and conformance could never pass. Task-run Pods use
+`djinn-cgroup-writable` only — the probe class is never assigned to them.
+
 `cgroupWritable.taskRuns.enabled=true` requires
 `cgroupWritable.runtimeClass.enabled=true`; Helm rejects the unsafe inverse
 pair. Task-run assignment is reserved for the later activation release.

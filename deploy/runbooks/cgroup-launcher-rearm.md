@@ -58,11 +58,12 @@ numbered steps, strictly in this order. Do not reorder these steps.
 
 `CGROUP_REARM_STEP: 0 (preparation) — install RuntimeClass, launcher disarmed`
 
-The Step 1 conformance probe Pod sets `runtimeClassName: djinn-cgroup-writable`
-on itself. Kubernetes rejects a Pod that references a `RuntimeClass` object
-that does not yet exist. Therefore the `RuntimeClass` MUST be installed
-**before** conformance runs, via a preparation Helm upgrade that leaves the
-launcher disarmed and leaves task-runs off the delegated cgroup path:
+The Step 1 conformance probe Pod sets
+`runtimeClassName: djinn-cgroup-writable-probe` on itself. Kubernetes rejects
+a Pod that references a `RuntimeClass` object that does not yet exist.
+Therefore the `RuntimeClass` objects MUST be installed **before** conformance
+runs, via a preparation Helm upgrade that leaves the launcher disarmed and
+leaves task-runs off the delegated cgroup path:
 
 ```bash
 helm upgrade djinn deploy/helm/djinn \
@@ -73,17 +74,32 @@ helm upgrade djinn deploy/helm/djinn \
   --set cgroupLauncher.mode=disabled
 ```
 
-After this preparation upgrade: `RuntimeClass/djinn-cgroup-writable` exists
-in the cluster, but no task-run is scheduled onto it
-(`cgroupWritable.taskRuns.enabled: false`) and the launcher is not demanding
-it (`cgroupLauncher.mode` is not `required`). This is the only state in which
-it is safe to run the Step 1 conformance probe.
+After this preparation upgrade both classes exist in the cluster, but no
+task-run is scheduled onto either (`cgroupWritable.taskRuns.enabled: false`)
+and the launcher is not demanding one (`cgroupLauncher.mode` is not
+`required`). This is the only state in which it is safe to run the Step 1
+conformance probe.
+
+The single value renders a pair, and the pair is not redundant:
+
+* `djinn-cgroup-writable` is the **task-run** class. It carries
+  `scheduling.nodeSelector: {djinn.io/cgroup-writable: "true"}`, which the
+  RuntimeClass admission controller merges into every Pod that names it. That
+  selector is what keeps ordinary task-run Pods off unconformed nodes.
+* `djinn-cgroup-writable-probe` is the **conformance-probe** class. Same
+  containerd handler, no `scheduling` block at all. Conformance runs against a
+  node that does *not* yet carry the eligibility marker — earning it is the
+  point — so a probe naming the task-run class would be rejected by the
+  kubelet with `Predicate NodeAffinity failed`. `spec.nodeName` bypasses the
+  scheduler, not the kubelet's own admission predicate. Before the split, that
+  was a deadlock: the marker gated the probe that earns the marker, and
+  conformance could never pass.
 
 ```bash
-kubectl get runtimeclass djinn-cgroup-writable
+kubectl get runtimeclass djinn-cgroup-writable djinn-cgroup-writable-probe
 ```
 
-Do not proceed to Step 1 until this command shows the `RuntimeClass` object.
+Do not proceed to Step 1 until this command shows both `RuntimeClass` objects.
 
 ### Step 1: conformance install and node restart
 
@@ -98,8 +114,8 @@ systemctl restart k3s
 ```
 
 The conformance probe Pod references
-`runtimeClassName: djinn-cgroup-writable`, which now exists because of the
-preparation upgrade above.
+`runtimeClassName: djinn-cgroup-writable-probe`, which now exists because of
+the preparation upgrade above.
 
 After the restart, wait for the probe to complete and inspect its logs for
 the explicit PASS line:
