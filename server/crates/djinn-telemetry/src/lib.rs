@@ -207,6 +207,11 @@ const BUILD_ADMISSION_TRANSITION_OUTCOMES: [&str; 4] =
     ["accepted", "rejected", "reclaimed", "reclaim_fenced"];
 const BUILD_ADMISSION_OCCUPANCY_OVER_CAP: &str = "djinn_build_admission_occupancy_over_cap";
 const BUILD_ADMISSION_STALE_ROWS: &str = "djinn_build_admission_stale_rows";
+/// Seconds since the last blocker-free build-admission reconciliation pass.
+/// `-1` means no pass has ever completed in this process — a louder condition
+/// than a large age, not a quieter one.
+const BUILD_ADMISSION_SECONDS_SINCE_RECONCILE: &str =
+    "djinn_build_admission_seconds_since_reconcile";
 const BUILD_ADMISSION_HANDOFF_WARNING: &str = "djinn_build_admission_handoff_warning";
 const BUILD_ADMISSION_HANDOFF_WARNING_REASONS: [&str; 3] =
     ["unexpected_overlap", "stale_epoch", "epoch_unreadable"];
@@ -1969,6 +1974,13 @@ fn register_metrics() {
          the shape that wedges every admission once the cap is armed."
     );
     metrics::describe_gauge!(
+        BUILD_ADMISSION_SECONDS_SINCE_RECONCILE,
+        "Seconds since the last blocker-free build-admission reconciliation pass; \
+         -1 means no pass has ever completed in this process. A value that keeps \
+         climbing past the configured cadence means the reconciliation loop is \
+         dead or hung, and occupying admission rows are no longer being reclaimed."
+    );
+    metrics::describe_gauge!(
         BUILD_ADMISSION_HANDOFF_WARNING,
         "Current bounded emergency-to-invocation admission handoff warning; one means active."
     );
@@ -3229,6 +3241,17 @@ pub mod build_admission {
         metrics::gauge!(super::BUILD_ADMISSION_JOURNAL_DEGRADED, "effective_mode" => effective_mode, "effective_cap" => cap.clone()).set(f64::from(journal_degraded));
         metrics::gauge!(super::BUILD_ADMISSION_CREATE_UNKNOWN_HEALTH, "effective_mode" => effective_mode, "effective_cap" => cap.clone()).set(f64::from(create_unknown));
         metrics::gauge!(super::BUILD_ADMISSION_OCCUPANCY_OVER_CAP, "effective_mode" => effective_mode, "effective_cap" => cap).set(f64::from(occupancy_over_cap));
+    }
+
+    /// Set how long ago the last blocker-free reconciliation pass completed.
+    ///
+    /// `None` (no pass has ever completed in this process) is exported as `-1`
+    /// rather than omitted: a missing series is indistinguishable from a
+    /// process that never started, which is the exact ambiguity that made the
+    /// dead-reconciler failure mode invisible.
+    pub fn set_seconds_since_reconcile(effective_mode: &'static str, seconds: Option<i64>) {
+        metrics::gauge!(super::BUILD_ADMISSION_SECONDS_SINCE_RECONCILE, "effective_mode" => effective_mode)
+            .set(seconds.unwrap_or(-1) as f64);
     }
 
     /// Set the absolute count of occupying rows whose object was proven absent
