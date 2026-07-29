@@ -32,4 +32,4 @@ expression: section
 - `proposal_block_patch(block_mdx, id, operation, selector, expected_latest_revision_seq?, native_skill_name?, native_skill_version?, note?)`
 - `get_block_catalog()`
 - `proposal_blocks()`
-- `submit_work(commit_title, summary, task_id, files_changed?, remaining_concerns?)`
+- `submit_work(commit_title, summary, task_id, evidence_completion?, files_changed?, remaining_concerns?)`

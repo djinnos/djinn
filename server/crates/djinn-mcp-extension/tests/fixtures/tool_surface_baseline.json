@@ -2474,11 +2474,161 @@
     "destructive": false,
     "idempotent": false,
     "inputSchema": {
+      "additionalProperties": false,
       "properties": {
         "commit_title": {
           "description": "Short imperative-mood git commit subject line, max 72 characters. Example: 'add rate limiting to auth middleware'",
           "maxLength": 72,
           "type": "string"
+        },
+        "evidence_completion": {
+          "additionalProperties": false,
+          "properties": {
+            "findings": {
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "anchor": {
+                    "oneOf": [
+                      {
+                        "additionalProperties": false,
+                        "properties": {
+                          "captured_commit_sha": {
+                            "type": "string"
+                          },
+                          "end_line": {
+                            "minimum": 0,
+                            "type": "integer"
+                          },
+                          "kind": {
+                            "const": "code",
+                            "type": "string"
+                          },
+                          "path": {
+                            "type": "string"
+                          },
+                          "start_line": {
+                            "minimum": 0,
+                            "type": "integer"
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "path",
+                          "start_line",
+                          "end_line",
+                          "captured_commit_sha"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "additionalProperties": false,
+                        "properties": {
+                          "graph_identity": {
+                            "type": "string"
+                          },
+                          "kind": {
+                            "const": "graph",
+                            "type": "string"
+                          },
+                          "node_id": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "node_id",
+                          "graph_identity"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "additionalProperties": false,
+                        "properties": {
+                          "invocation": {
+                            "additionalProperties": false,
+                            "properties": {
+                              "invocation_id": {
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "invocation_id"
+                            ],
+                            "type": "object"
+                          },
+                          "kind": {
+                            "const": "command",
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "invocation"
+                        ],
+                        "type": "object"
+                      }
+                    ]
+                  },
+                  "check_id": {
+                    "type": "string"
+                  },
+                  "summary": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "check_id",
+                  "summary",
+                  "anchor"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "plan_id": {
+              "type": "string"
+            },
+            "schema_version": {
+              "const": 1,
+              "type": "integer"
+            },
+            "terminal_results": {
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "check_id": {
+                    "type": "string"
+                  },
+                  "method": {
+                    "enum": [
+                      "code",
+                      "graph",
+                      "command"
+                    ],
+                    "type": "string"
+                  },
+                  "terminal": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "check_id",
+                  "method",
+                  "terminal"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "schema_version",
+            "plan_id",
+            "terminal_results",
+            "findings"
+          ],
+          "type": "object"
         },
         "files_changed": {
           "description": "List of files modified during this session",

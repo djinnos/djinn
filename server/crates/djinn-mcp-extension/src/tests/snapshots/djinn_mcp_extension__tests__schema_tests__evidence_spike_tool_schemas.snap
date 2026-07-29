@@ -1264,8 +1264,158 @@ expression: tool_schemas_evidence_spike()
             "type": "string"
           },
           "description": "Any outstanding concerns or caveats for the reviewer"
+        },
+        "evidence_completion": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "schema_version",
+            "plan_id",
+            "terminal_results",
+            "findings"
+          ],
+          "properties": {
+            "schema_version": {
+              "type": "integer",
+              "const": 1
+            },
+            "plan_id": {
+              "type": "string"
+            },
+            "terminal_results": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "check_id",
+                  "method",
+                  "terminal"
+                ],
+                "properties": {
+                  "check_id": {
+                    "type": "string"
+                  },
+                  "method": {
+                    "type": "string",
+                    "enum": [
+                      "code",
+                      "graph",
+                      "command"
+                    ]
+                  },
+                  "terminal": {
+                    "type": "boolean"
+                  }
+                }
+              }
+            },
+            "findings": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "check_id",
+                  "summary",
+                  "anchor"
+                ],
+                "properties": {
+                  "check_id": {
+                    "type": "string"
+                  },
+                  "summary": {
+                    "type": "string"
+                  },
+                  "anchor": {
+                    "oneOf": [
+                      {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [
+                          "kind",
+                          "path",
+                          "start_line",
+                          "end_line",
+                          "captured_commit_sha"
+                        ],
+                        "properties": {
+                          "kind": {
+                            "type": "string",
+                            "const": "code"
+                          },
+                          "path": {
+                            "type": "string"
+                          },
+                          "start_line": {
+                            "type": "integer",
+                            "minimum": 0
+                          },
+                          "end_line": {
+                            "type": "integer",
+                            "minimum": 0
+                          },
+                          "captured_commit_sha": {
+                            "type": "string"
+                          }
+                        }
+                      },
+                      {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [
+                          "kind",
+                          "node_id",
+                          "graph_identity"
+                        ],
+                        "properties": {
+                          "kind": {
+                            "type": "string",
+                            "const": "graph"
+                          },
+                          "node_id": {
+                            "type": "string"
+                          },
+                          "graph_identity": {
+                            "type": "string"
+                          }
+                        }
+                      },
+                      {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [
+                          "kind",
+                          "invocation"
+                        ],
+                        "properties": {
+                          "kind": {
+                            "type": "string",
+                            "const": "command"
+                          },
+                          "invocation": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": [
+                              "invocation_id"
+                            ],
+                            "properties": {
+                              "invocation_id": {
+                                "type": "string"
+                              }
+                            }
+                          }
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          }
         }
-      }
+      },
+      "additionalProperties": false
     },
     "readOnly": false,
     "destructive": false,

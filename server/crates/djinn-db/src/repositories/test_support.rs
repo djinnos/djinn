@@ -10,6 +10,68 @@ mod refinement_read_only;
 
 pub use refinement_read_only::*;
 
+/// Durable rows written by the structured evidence hand-off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StructuredEvidenceHandoffCountsForTest {
+    pub finalized_projections: i64,
+    pub compatibility_debates: i64,
+}
+
+/// Count both durable outputs of a structured evidence hand-off.
+///
+/// **Not for production use.** Panics on SQL errors.
+pub async fn structured_evidence_handoff_counts_for_test(
+    db: &Database,
+    plan_id: &str,
+    proposal_id: &str,
+) -> StructuredEvidenceHandoffCountsForTest {
+    db.ensure_initialized().await.unwrap();
+    let finalized_projections = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM evidence_finalized_projections WHERE plan_id = $1",
+    )
+    .bind(plan_id)
+    .fetch_one(db.pool())
+    .await
+    .expect("failed to count finalized evidence projections");
+    let compatibility_debates = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM proposal_debate_trail WHERE proposal_id = $1 AND kind = 'evidence_findings'",
+    )
+    .bind(proposal_id)
+    .fetch_one(db.pool())
+    .await
+    .expect("failed to count evidence compatibility debates");
+    StructuredEvidenceHandoffCountsForTest {
+        finalized_projections,
+        compatibility_debates,
+    }
+}
+
+/// Reject every finalized evidence projection insert to exercise transaction rollback.
+///
+/// **Not for production use.** Panics on SQL errors.
+pub async fn reject_evidence_projection_inserts_for_test(db: &Database) {
+    db.ensure_initialized().await.unwrap();
+    sqlx::query(
+        "ALTER TABLE evidence_finalized_projections ADD CONSTRAINT reject_structured_handoff_projection CHECK (false)",
+    )
+    .execute(db.pool())
+    .await
+    .expect("failed to install finalized evidence projection fault");
+}
+
+/// Reject evidence-findings debate inserts to exercise transaction rollback.
+///
+/// **Not for production use.** Panics on SQL errors.
+pub async fn reject_evidence_findings_debates_for_test(db: &Database) {
+    db.ensure_initialized().await.unwrap();
+    sqlx::query(
+        "ALTER TABLE proposal_debate_trail ADD CONSTRAINT reject_structured_handoff_debate CHECK (kind <> 'evidence_findings')",
+    )
+    .execute(db.pool())
+    .await
+    .expect("failed to install evidence-findings debate fault");
+}
+
 /// Populate a current attempt's persisted projection for a cross-crate detail
 /// read test. This fixture lives at the database boundary so consumer tests do
 /// not bypass repository ownership with direct readiness-table SQL.
