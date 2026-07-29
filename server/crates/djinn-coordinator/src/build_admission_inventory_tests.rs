@@ -338,6 +338,85 @@ async fn uid_and_generation_mismatch_or_uncertain_get_retain_live_occupancy() {
     );
 }
 
+/// The task-run completion proof is a POSITIVE identity match on the task-run
+/// id, and it must never reach a warm row.
+///
+/// A warm Job's name is `deterministic_warm_job_name(project, request)` and IS
+/// reused across generations, which is precisely what the UID fence exists to
+/// guard. A finished object under a warm row's name says nothing about that
+/// row, and neither does a finished object that declares itself to be a
+/// DIFFERENT task-run than the one the row recorded.
+#[tokio::test]
+async fn a_finished_object_only_terminalizes_the_row_whose_identity_it_carries() {
+    let controller = controller(BuildAdmissionMode::Enforce, 4).await;
+
+    // A live warm generation whose deterministic name a finished successor
+    // object now also bears.
+    let warm = AdmissionJournalKey {
+        domain: AdmissionDomain::WarmBuild,
+        work_id: "warm-work".into(),
+        generation: 1,
+    };
+    controller
+        .journal()
+        .adopt_live(&AdoptLiveAdmissionInput {
+            key: warm.clone(),
+            workload_kind: AdmissionWorkloadKind::Warm,
+            creator_server_epoch: "old".into(),
+            object_name: "djinn-warm-project-request".into(),
+            object_uid: "warm-uid-of-generation-1".into(),
+        })
+        .await
+        .unwrap();
+    let mut reused_warm_name = record(
+        "djinn-warm-project-request",
+        Some("warm-uid-of-generation-2"),
+        &[("djinn.app/warm", "true")],
+    );
+    reused_warm_name.terminal = true;
+
+    // A live task-run whose Job name is in the listing, finished, but declaring
+    // a different task-run id.
+    let task = AdmissionJournalKey {
+        domain: AdmissionDomain::TaskObservation,
+        work_id: "task-work".into(),
+        generation: 0,
+    };
+    adopt_live(&controller, task.clone(), "djinn-taskrun-mine", "run-mine").await;
+    let mut impostor = record(
+        "djinn-taskrun-mine",
+        Some("k8s-uid"),
+        &[("djinn.app/task-run-id", "run-someone-else")],
+    );
+    impostor.terminal = true;
+
+    let inventory = Arc::new(FakeInventory::new(vec![reused_warm_name, impostor]));
+    let report = BuildAdmissionReconciler::new(controller.clone(), inventory)
+        .reconcile()
+        .await;
+
+    assert_eq!(
+        report.released, 0,
+        "a finished object may only retire the row whose identity it carries"
+    );
+    let states: Vec<_> = controller
+        .journal()
+        .list_active_rows()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|row| (row.key, row.state))
+        .collect();
+    assert!(
+        states.contains(&(warm, AdmissionState::Live)),
+        "the live warm generation must survive its name being reused: {states:?}"
+    );
+    assert!(
+        states.contains(&(task, AdmissionState::Live)),
+        "the live task-run must survive another run's Job finishing: {states:?}"
+    );
+}
+
 #[tokio::test]
 async fn authoritative_uid_not_found_releases_and_emits_wakeup() {
     let controller = controller(BuildAdmissionMode::Enforce, 4).await;
