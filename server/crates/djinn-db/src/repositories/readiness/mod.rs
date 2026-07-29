@@ -674,6 +674,34 @@ pub struct ReadinessAreaResultOutputRow {
     pub result: serde_json::Value,
     pub created_at: String,
 }
+/// Internal row shape for detail reads, which additionally carries the
+/// persisted identity used to mark the current attempt.
+#[derive(FromRow)]
+struct ReadinessCompositionAreaDetailRow {
+    id: String,
+    run_id: String,
+    area_key: String,
+    composition: serde_json::Value,
+    path_scopes: serde_json::Value,
+    frozen_at: String,
+    status: String,
+    current_attempt_id: Option<String>,
+}
+
+impl From<ReadinessCompositionAreaDetailRow> for ReadinessCompositionAreaRow {
+    fn from(row: ReadinessCompositionAreaDetailRow) -> Self {
+        Self {
+            id: row.id,
+            run_id: row.run_id,
+            area_key: row.area_key,
+            composition: row.composition,
+            path_scopes: row.path_scopes,
+            frozen_at: row.frozen_at,
+            status: row.status,
+        }
+    }
+}
+
 pub struct ReadinessRepository {
     db: Database,
 }
@@ -685,19 +713,21 @@ impl ReadinessRepository {
     pub async fn run_detail(&self, run_id: &str) -> Result<Option<ReadinessRunDetail>> {
         self.db.ensure_initialized().await?;
         let Some(run) = sqlx::query_as("SELECT id,project_id,idempotency_key,status,repository_snapshot,skill_name,skill_version,expected_area_count,created_at,completed_at FROM readiness_runs WHERE id=$1").bind(run_id).fetch_optional(self.db.pool()).await? else { return Ok(None); };
-        let areas: Vec<(ReadinessCompositionAreaRow, Option<String>)> = sqlx::query_as("SELECT id,run_id,area_key,composition,path_scopes,frozen_at,status,current_attempt_id FROM readiness_composition_areas WHERE run_id=$1 ORDER BY area_key,id").bind(run_id).fetch_all(self.db.pool()).await?;
-        let attempts: Vec<(ReadinessAreaAttemptRow, bool)> = sqlx::query_as("SELECT a.id,a.run_id,a.area_id,a.attempt_number,a.correlation_key,a.status,a.payload_digest,a.created_at,a.terminal_at,a.id=area.current_attempt_id AS is_current FROM readiness_area_attempts a JOIN readiness_composition_areas area ON area.id=a.area_id WHERE a.run_id=$1 ORDER BY area.area_key,area.id,a.attempt_number,a.id").bind(run_id).fetch_all(self.db.pool()).await?;
+        let areas: Vec<ReadinessCompositionAreaDetailRow> = sqlx::query_as("SELECT id,run_id,area_key,composition,path_scopes,frozen_at,status,current_attempt_id FROM readiness_composition_areas WHERE run_id=$1 ORDER BY area_key,id").bind(run_id).fetch_all(self.db.pool()).await?;
+        let attempts: Vec<ReadinessAreaAttemptRow> = sqlx::query_as("SELECT a.id,a.run_id,a.area_id,a.attempt_number,a.correlation_key,a.status,a.payload_digest,a.created_at,a.terminal_at FROM readiness_area_attempts a JOIN readiness_composition_areas area ON area.id=a.area_id WHERE a.run_id=$1 ORDER BY area.area_key,area.id,a.attempt_number,a.id").bind(run_id).fetch_all(self.db.pool()).await?;
         let findings: Vec<ReadinessGuardrailFindingRow> = sqlx::query_as("SELECT f.id,f.run_id,f.area_id,f.attempt_id,f.guardrail_key,f.status,f.severity,f.confidence,f.accepted,f.evidence,f.created_at FROM readiness_guardrail_findings f JOIN readiness_composition_areas area ON area.id=f.area_id AND area.current_attempt_id=f.attempt_id WHERE f.run_id=$1 AND f.accepted=true ORDER BY area.area_key,area.id,f.guardrail_key,f.id").bind(run_id).fetch_all(self.db.pool()).await?;
         let outputs: Vec<ReadinessAreaResultOutputRow> = sqlx::query_as("SELECT output.run_id,output.area_id,output.attempt_id,output.result,output.created_at FROM readiness_area_result_outputs output JOIN readiness_composition_areas area ON area.id=output.area_id AND area.current_attempt_id=output.attempt_id WHERE output.run_id=$1 ORDER BY area.area_key,area.id,output.attempt_id").bind(run_id).fetch_all(self.db.pool()).await?;
         let mut attempts_by_area: std::collections::HashMap<String, Vec<_>> = std::collections::HashMap::new();
-        for (attempt, is_current) in attempts { attempts_by_area.entry(attempt.area_id.clone()).or_default().push(ReadinessRunDetailAttempt { attempt, is_current }); }
+        for attempt in attempts { attempts_by_area.entry(attempt.area_id.clone()).or_default().push(attempt); }
         let mut findings_by_area: std::collections::HashMap<String, Vec<_>> = std::collections::HashMap::new();
         for finding in findings { findings_by_area.entry(finding.area_id.clone()).or_default().push(finding); }
         let mut outputs_by_area: std::collections::HashMap<String, Vec<_>> = std::collections::HashMap::new();
         for output in outputs { outputs_by_area.entry(output.area_id.clone()).or_default().push(output); }
         let mut detail_areas = Vec::with_capacity(areas.len());
-        for (area, current_attempt_id) in areas {
-            let attempts = attempts_by_area.remove(&area.id).unwrap_or_default();
+        for area_detail in areas {
+            let current_attempt_id = area_detail.current_attempt_id.clone();
+            let area = ReadinessCompositionAreaRow::from(area_detail);
+            let attempts = attempts_by_area.remove(&area.id).unwrap_or_default().into_iter().map(|attempt| ReadinessRunDetailAttempt { is_current: current_attempt_id.as_deref() == Some(attempt.id.as_str()), attempt }).collect::<Vec<_>>();
             if current_attempt_id.is_some() && attempts.iter().filter(|attempt| attempt.is_current).count() != 1 { return Err(Error::InvalidData(format!("readiness area {} has an invalid current attempt relation", area.id))); }
             detail_areas.push(ReadinessRunDetailArea { accepted_findings: findings_by_area.remove(&area.id).unwrap_or_default(), accepted_outputs: outputs_by_area.remove(&area.id).unwrap_or_default(), area, attempts });
         }
