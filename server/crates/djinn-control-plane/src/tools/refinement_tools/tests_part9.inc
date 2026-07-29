@@ -162,6 +162,120 @@
         }
     }
 
+    /// This matrix derives every expected category from the shared evaluator;
+    /// fixture metadata chooses durable evidence without recreating precedence.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn temporal_exact_run_matrix_projects_identically_across_read_surfaces() {
+        #[derive(Clone, Copy)]
+        enum Fixture { Session, Handoff, Heartbeat, ExpiredClaim, PriorOnly, Terminal, Stale }
+        let cases = [
+            ("exact-run live session", Fixture::Session, "live_session", false),
+            // Pending intent is the evaluator's earlier category; the exact
+            // snapshot below also proves the correlated handoff is present.
+            ("between-phase handoff", Fixture::Handoff, "pending_intent", false),
+            ("heartbeat within grace", Fixture::Heartbeat, "fresh_heartbeat", false),
+            ("expired claimed intent", Fixture::ExpiredClaim, "stale", true),
+            ("prior-run-only live session", Fixture::PriorOnly, "stale", true),
+            ("terminal current run", Fixture::Terminal, "terminal", false),
+            ("truly stale current run", Fixture::Stale, "stale", true),
+        ];
+
+        for (name, fixture, category, stale) in cases {
+            let (_server, db) = test_server().await;
+            let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+            let proposal = repo.create(ProposalCreateInput {
+                title: "Temporal exact-run matrix", body: "body", acceptance_criteria: Some("[]"),
+                status: Some("draft"), body_format: None,
+            }).await.unwrap();
+            let admit = |key: &str| djinn_db::AdmitRefinementRunRequest {
+                proposal_id: proposal.id.clone(), idempotency_key: key.into(),
+                source: djinn_db::RefinementAdmissionSource::Demand { demand_id: key.into() },
+                heartbeat_grace_millis: 60_000,
+            };
+            let (mut run_id, intent_id, generation) = match repo.reap_and_admit(admit("temporal-current")).await.unwrap() {
+                djinn_db::RefinementAdmissionOutcome::Admitted { run_id, intent_id, generation, .. } => (run_id, intent_id, generation),
+                djinn_db::RefinementAdmissionOutcome::Existing { .. } => unreachable!(),
+            };
+            match fixture {
+                Fixture::Session => {
+                    djinn_db::test_support::make_refinement_run_phantom_for_test(&db, &run_id).await;
+                    let (project_id, task_id) = seed_status_task(&db, &run_id, "closed").await;
+                    seed_live_status_session(&db, &project_id, &task_id).await;
+                }
+                Fixture::Handoff => {}
+                Fixture::Heartbeat => {
+                    djinn_db::test_support::make_refinement_run_phantom_for_test(&db, &run_id).await;
+                    sqlx::query("UPDATE refinement_runs SET heartbeat_at = to_char(transaction_timestamp() AT TIME ZONE 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') WHERE id = $1")
+                        .bind(&run_id).execute(db.pool()).await.unwrap();
+                }
+                Fixture::ExpiredClaim => {
+                    assert!(repo.claim_refinement_intent(djinn_db::ClaimRefinementIntentRequest {
+                        run_id: run_id.clone(), intent_id, generation,
+                        owner: "temporal-matrix".into(), lease_millis: 60_000,
+                    }).await.unwrap().is_some());
+                    djinn_db::test_support::elapse_refinement_run_wall_clock_for_test(&db, &run_id, 3_600).await;
+                }
+                Fixture::PriorOnly => {
+                    djinn_db::test_support::make_refinement_run_phantom_for_test(&db, &run_id).await;
+                    let (project_id, task_id) = seed_status_task(&db, &run_id, "closed").await;
+                    seed_live_status_session(&db, &project_id, &task_id).await;
+                    assert!(repo.terminal_refinement_run(djinn_db::TerminalRefinementRunRequest {
+                        run_id: run_id.clone(), generation,
+                        reason: djinn_core::refinement_liveness::RefinementStopReason::OperatorStop { actor: "temporal-matrix".into(), reason: None },
+                    }).await.unwrap());
+                    run_id = match repo.reap_and_admit(admit("temporal-successor")).await.unwrap() {
+                        djinn_db::RefinementAdmissionOutcome::Admitted { run_id, .. } => run_id,
+                        djinn_db::RefinementAdmissionOutcome::Existing { .. } => unreachable!(),
+                    };
+                    djinn_db::test_support::make_refinement_run_phantom_for_test(&db, &run_id).await;
+                }
+                Fixture::Terminal => {
+                    assert!(repo.terminal_refinement_run(djinn_db::TerminalRefinementRunRequest {
+                        run_id: run_id.clone(), generation,
+                        reason: djinn_core::refinement_liveness::RefinementStopReason::OperatorStop { actor: "temporal-matrix".into(), reason: None },
+                    }).await.unwrap());
+                }
+                Fixture::Stale => djinn_db::test_support::make_refinement_run_phantom_for_test(&db, &run_id).await,
+            }
+
+            let exact = repo.load_refinement_run_snapshot(djinn_db::LoadRefinementRunSnapshotRequest {
+                run_id: run_id.clone(), heartbeat_grace_millis: 60_000,
+            }).await.unwrap().unwrap();
+            let expected = djinn_core::refinement_liveness::evaluate_refinement_liveness(&exact.snapshot, exact.observed_at);
+            assert_eq!(expected, exact.liveness, "{name}: repository shared evaluator");
+            assert!(match category {
+                "live_session" => matches!(expected, RefinementLivenessResult::Live { evidence: RefinementLivenessEvidence::LiveSession { .. } }),
+                "pending_intent" => matches!(expected, RefinementLivenessResult::Live { evidence: RefinementLivenessEvidence::PendingIntent { .. } }),
+                "fresh_heartbeat" => matches!(expected, RefinementLivenessResult::Live { evidence: RefinementLivenessEvidence::FreshHeartbeat { .. } }),
+                "terminal" => matches!(expected, RefinementLivenessResult::Terminal { .. }),
+                "stale" => matches!(expected, RefinementLivenessResult::Stale { .. }),
+                _ => unreachable!(),
+            }, "{name}: shared category");
+            if matches!(fixture, Fixture::Handoff) {
+                assert!(exact.snapshot.between_phase.is_some(), "{name}: durable handoff");
+            }
+
+            let status = build_refinement_status(&repo, &proposal.id).await.unwrap();
+            assert_eq!(status.run_id.as_deref(), Some(run_id.as_str()), "{name}: status run");
+            let status_liveness = if matches!(expected, RefinementLivenessResult::Live { .. }) {
+                "live"
+            } else {
+                category
+            };
+            assert_eq!(status.liveness.as_deref(), Some(status_liveness), "{name}: status category");
+            assert_eq!(
+                status.liveness_evidence.as_deref(),
+                matches!(expected, RefinementLivenessResult::Live { .. }).then_some(category),
+                "{name}: status evidence",
+            );
+            assert_eq!(status.active, !stale && category != "terminal", "{name}: status active");
+            let (events_tx, _events_rx) = tokio::sync::broadcast::channel(16);
+            let source = std::sync::Arc::new(djinn_coordinator::doctor::ProposalRepositoryRefinementPhantomActiveSource::new(db.clone(), events_tx));
+            assert_eq!(doctor_stale_run_ids(source).contains(&run_id), stale, "{name}: doctor projection");
+            assert_eq!(repo.load_board_refinement_lifecycle_aggregate(60_000).await.unwrap().stale_run_count, i64::from(stale), "{name}: board projection");
+        }
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn exact_status_observes_repository_intent_task_session_and_heartbeat_evidence() {
         let (_server, db) = test_server().await;
