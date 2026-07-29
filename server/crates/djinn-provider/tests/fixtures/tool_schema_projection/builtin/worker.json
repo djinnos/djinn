@@ -397,6 +397,74 @@
     "concurrent_safe": true
   },
   {
+    "name": "ci_artifact",
+    "description": "Read a bounded GitHub Actions artifact. `list` lists artifacts and `fetch` renders one exact artifact. Select optional positive `run_id` or `pr_number`, never both; fetch requires non-empty `artifact`.",
+    "inputSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "action"
+      ],
+      "properties": {
+        "action": {
+          "type": "string",
+          "enum": [
+            "list",
+            "fetch"
+          ]
+        },
+        "run_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "pr_number": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "artifact": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "allOf": [
+        {
+          "not": {
+            "required": [
+              "run_id",
+              "pr_number"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "action": {
+                "const": "fetch"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "artifact"
+            ]
+          },
+          "else": {
+            "not": {
+              "required": [
+                "artifact"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "readOnly": true,
+    "destructive": false,
+    "idempotent": true,
+    "openWorld": false,
+    "concurrent_safe": true
+  },
+  {
     "name": "github_search",
     "description": "Search GitHub code across public repositories using the GitHub Code Search API. Returns compact, navigable matches with snippets, file paths, URLs, and metadata. Each result has a result_id for reference. Use github_fetch_file to inspect the full file of a promising result.",
     "inputSchema": {
@@ -484,6 +552,20 @@
           "description": "Lines of context around each match (default 3)"
         }
       }
+    },
+    "readOnly": true,
+    "destructive": false,
+    "idempotent": true,
+    "openWorld": false,
+    "concurrent_safe": true
+  },
+  {
+    "name": "output_list",
+    "description": "List durable metadata for truncated outputs owned by the current trusted session.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "required": []
     },
     "readOnly": true,
     "destructive": false,
@@ -766,8 +848,158 @@
             "type": "string"
           },
           "description": "Any outstanding concerns or caveats for the reviewer"
+        },
+        "evidence_completion": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "schema_version",
+            "plan_id",
+            "terminal_results",
+            "findings"
+          ],
+          "properties": {
+            "schema_version": {
+              "type": "integer",
+              "const": 1
+            },
+            "plan_id": {
+              "type": "string"
+            },
+            "terminal_results": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "check_id",
+                  "method",
+                  "terminal"
+                ],
+                "properties": {
+                  "check_id": {
+                    "type": "string"
+                  },
+                  "method": {
+                    "type": "string",
+                    "enum": [
+                      "code",
+                      "graph",
+                      "command"
+                    ]
+                  },
+                  "terminal": {
+                    "type": "boolean"
+                  }
+                }
+              }
+            },
+            "findings": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "check_id",
+                  "summary",
+                  "anchor"
+                ],
+                "properties": {
+                  "check_id": {
+                    "type": "string"
+                  },
+                  "summary": {
+                    "type": "string"
+                  },
+                  "anchor": {
+                    "oneOf": [
+                      {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [
+                          "kind",
+                          "path",
+                          "start_line",
+                          "end_line",
+                          "captured_commit_sha"
+                        ],
+                        "properties": {
+                          "kind": {
+                            "type": "string",
+                            "const": "code"
+                          },
+                          "path": {
+                            "type": "string"
+                          },
+                          "start_line": {
+                            "type": "integer",
+                            "minimum": 0
+                          },
+                          "end_line": {
+                            "type": "integer",
+                            "minimum": 0
+                          },
+                          "captured_commit_sha": {
+                            "type": "string"
+                          }
+                        }
+                      },
+                      {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [
+                          "kind",
+                          "node_id",
+                          "graph_identity"
+                        ],
+                        "properties": {
+                          "kind": {
+                            "type": "string",
+                            "const": "graph"
+                          },
+                          "node_id": {
+                            "type": "string"
+                          },
+                          "graph_identity": {
+                            "type": "string"
+                          }
+                        }
+                      },
+                      {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [
+                          "kind",
+                          "invocation"
+                        ],
+                        "properties": {
+                          "kind": {
+                            "type": "string",
+                            "const": "command"
+                          },
+                          "invocation": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": [
+                              "invocation_id"
+                            ],
+                            "properties": {
+                              "invocation_id": {
+                                "type": "string"
+                              }
+                            }
+                          }
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          }
         }
-      }
+      },
+      "additionalProperties": false
     },
     "readOnly": false,
     "destructive": false,

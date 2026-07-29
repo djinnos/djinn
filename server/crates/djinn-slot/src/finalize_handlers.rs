@@ -1,10 +1,12 @@
 use crate::finalize_types::{AcVerdict, SubmitDecision, SubmitGrooming, SubmitReview, SubmitWork};
 use crate::host::SlotContext;
-use djinn_db::TaskRepository;
+use djinn_control_plane::tools::evidence_plan::EvidencePlanIdentity;
+use djinn_control_plane::tools::refinement_helpers::complete_linked_refinement_evidence_v1;
 use djinn_db::repositories::task_rejected_submission_integrity::{
     RecordTaskRejectedSubmissionParams, TaskRejectedSubmissionIntegrityRepository,
 };
 use djinn_db::repositories::task_run::TaskRunRepository;
+use djinn_db::{EvidenceRepository, ProposalRepository, TaskRepository};
 
 /// Process the structured finalize tool payload captured by the reply loop (ADR-036).
 ///
@@ -113,10 +115,7 @@ pub(crate) async fn handle_submit_work(
     authenticated_session_id: &str,
     app_state: &SlotContext,
 ) -> bool {
-    // This boundary deliberately receives identity separately from the
-    // agent-controlled JSON payload. A subsequent finalization slice consumes
-    // the server-owned value; this slice only establishes the boundary.
-    let _ = authenticated_session_id;
+    // This boundary receives task/session identity separately from agent JSON.
     let work = match serde_json::from_value::<SubmitWork>(payload.clone()) {
         Ok(w) => w,
         Err(e) => {
@@ -128,6 +127,50 @@ pub(crate) async fn handle_submit_work(
             return false;
         }
     };
+    let proposals = ProposalRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+    let linked = match proposals.find_by_linked_spike(task_id).await {
+        Ok(linked) => linked,
+        Err(error) => {
+            tracing::warn!(task_id = %task_id, error = %error, "finalize_handlers: failed linked-spike lookup");
+            return false;
+        }
+    };
+    match (linked, work.evidence_completion) {
+        (Some(proposal), Some(completion)) => {
+            let evidence = EvidenceRepository::new(app_state.db.clone());
+            let plan = match evidence
+                .hydrate_by_identity(task_id, authenticated_session_id)
+                .await
+            {
+                Ok(Some(hydration)) => hydration.plan,
+                Ok(None) => return false,
+                Err(error) => {
+                    tracing::warn!(task_id = %task_id, error = %error, "finalize_handlers: failed frozen-plan lookup");
+                    return false;
+                }
+            };
+            let identity = EvidencePlanIdentity {
+                spike_task_id: task_id.to_owned(),
+                session_id: authenticated_session_id.to_owned(),
+                captured_commit_sha: plan.captured_commit_sha,
+                worktree_fingerprint: plan.worktree_fingerprint,
+            };
+            if let Err(error) = complete_linked_refinement_evidence_v1(
+                &proposals,
+                &proposal.id,
+                task_id,
+                &identity,
+                completion,
+            )
+            .await
+            {
+                tracing::warn!(task_id = %task_id, error = %error, "finalize_handlers: structured evidence hand-off failed");
+                return false;
+            }
+        }
+        (Some(_), None) | (None, Some(_)) => return false,
+        (None, None) => {}
+    }
     let activity_payload = serde_json::json!({
         "commit_title": work.commit_title,
         "summary": work.summary,
