@@ -1445,3 +1445,8 @@ mod hold_cycle_ceiling;
 
 #[cfg(test)]
 mod incarnation_lease_liveness;
+
+/// Pod-`Pending` time must not be counted as agent idle time by the stall
+/// watchdog (and the negative control that proves the watchdog still works).
+#[cfg(test)]
+mod stall_pod_pending;
