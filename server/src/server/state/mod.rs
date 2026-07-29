@@ -1185,6 +1185,19 @@ impl AppState {
         self.initialize_build_admission_inventory().await;
     }
 
+    /// Publish the build-admission gauges, including the reconciliation-age
+    /// signal, without running a reconciliation pass.
+    ///
+    /// The reconciliation loop calls this after every tick so the age gauge
+    /// keeps being written even when the pass itself fails: a gauge that stops
+    /// being written is indistinguishable from a process that never started,
+    /// and that ambiguity is exactly what hid the dead reconciler.
+    pub(crate) async fn publish_build_admission_metrics(&self) {
+        if let Some(admission) = self.inner.build_admission.clone() {
+            admission.publish_metrics().await;
+        }
+    }
+
     /// Run the broad Kubernetes build-capable inventory and advance the
     /// Enforce readiness gate.
     ///
@@ -1235,6 +1248,14 @@ impl AppState {
                 .reconcile()
                 .await;
             if report.blockers.is_empty() {
+                // A pass that RAN and a pass that SUCCEEDED are different facts,
+                // and only the second one means occupancy is being reclaimed.
+                // This is the single point that knows the difference, so it is
+                // the one that stamps the "last successful reconcile" signal the
+                // `build_admission_health` doctor check reads. Nothing anywhere
+                // asserted this before, which is why a dead reconciler was
+                // indistinguishable from a working one for five hours.
+                admission.note_reconcile_success();
                 tracing::info!(
                     mode = ?admission.mode(),
                     adopted = report.adopted,
@@ -1265,6 +1286,10 @@ impl AppState {
         match warmer.list_taskrun_jobs().await {
             Ok(jobs) => {
                 admission.mark_inventory_ready();
+                // The non-reconciler path (in-process runtime, or a warmer with
+                // no workload inventory) still proves the inventory, so it is
+                // still a completed pass by the only definition this signal has.
+                admission.note_reconcile_success();
                 admission.publish_metrics().await;
                 tracing::info!(
                     mode = ?admission.mode(),
@@ -2559,6 +2584,36 @@ impl AppState {
         // `TopologyPending` (and their dispatch subsystems never start).
         self.confirm_build_admission_topology().await;
 
+        // Periodic build-admission reconciliation. THE ORDER OF THESE TWO
+        // STATEMENTS IS LOAD-BEARING and this loop is deliberately the very
+        // first thing started after the gate above.
+        //
+        // The line above opens the topology gate, which is the last gate
+        // standing between this process and admitting work for the whole
+        // board. This spawn used to sit ~90 lines lower, behind roughly a dozen
+        // AWAITED initializers (a Zot preflight that can `exit(1)`, a stale
+        // session sweep, a pricing backfill, the coordinator itself). A hang or
+        // panic in ANY of them produced a fully-admitting leader with no
+        // reconciler — silently, forever — and because
+        // `leadership::run_with_leadership` awaits `on_acquire()` inline, the
+        // advisory-lock liveness ping stopped too. Admission open and
+        // reclamation absent is precisely the combination that halts the board.
+        //
+        // Spawning this early is safe because the loop SUPPRESSES ITS OWN FIRST
+        // TICK (see `build_admission_reconcile::run_loop`): `initialize()` runs
+        // a full reconciliation pass on every pod before leadership is even
+        // contested, and `confirm_build_admission_topology` can run another via
+        // the handoff path, so the first real pass is one cadence away either
+        // way. Moving the spawn earlier only shortens the window in which a
+        // pass has just run — it cannot create a duplicate one.
+        //
+        // The startup pass alone cannot reclaim an occupying row that has not
+        // yet settled past the reclaim settle window, and a rolling deploy is
+        // precisely what creates such a row seconds before the successor's only
+        // pass runs. Writes the durable journal, so leader-only for the same
+        // reason as the loops below.
+        crate::build_admission_reconcile::spawn(self.clone());
+
         // Observe-only disk dimension (proposal nquz). Runs after the topology
         // gate because it writes the shared run-dir ledger and inventories the
         // shared cache PVC — leader-only work. It never mutates the volume and
@@ -2637,14 +2692,10 @@ impl AppState {
         );
         crate::mirror_fetcher::spawn(self.clone());
 
-        // Periodic build-admission reconciliation. The startup pass above
-        // cannot reclaim an occupying row that has not yet settled past the
-        // reclaim settle window — and a rolling deploy is precisely what
-        // creates such a row, seconds before the successor's only pass ran.
-        // Left alone, one `CreateUnknown` row from the outgoing pod fails
-        // every admission closed until the next restart. Writes the durable
-        // journal, so leader-only for the same reason as the loops above.
-        crate::build_admission_reconcile::spawn(self.clone());
+        // NOTE: `build_admission_reconcile::spawn` deliberately no longer lives
+        // here. It is now the first statement after the topology gate opens, so
+        // no awaited initializer between the two can leave a fully-admitting
+        // leader with no reconciler. See the comment at that call site.
 
         // Standalone SCIP-index driver (leader-only, same reasoning as
         // mirror_fetcher: it creates cluster objects). The real scheduler is
@@ -5112,6 +5163,94 @@ mod build_admission_config_tests {
         assert_eq!(
             seams.volume_id,
             djinn_coordinator::run_dir_observe::volume_id_from_env()
+        );
+    }
+
+    /// L5. A leader must never be able to reach a fully-admitting state with no
+    /// reconciler.
+    ///
+    /// `confirm_build_admission_topology` opens the LAST gate standing between
+    /// this process and admitting work for the whole board. The reconciler
+    /// spawn used to sit ~90 lines further down, behind roughly a dozen awaited
+    /// initializers — one of which can `std::process::exit(1)` and any of which
+    /// can hang or panic. This pins the ordering at the composition site, which
+    /// is the only place the property is expressible: the two statements are
+    /// both fire-and-forget from the type system's point of view.
+    #[test]
+    fn the_reconciler_is_spawned_immediately_after_the_topology_gate_opens() {
+        let source = include_str!("mod.rs");
+        // Assembled at runtime so these assertions do not match their own
+        // literals inside the file they read.
+        let topology = format!("self.confirm_build_admission_{}().await", "topology");
+        let spawn = format!(
+            "crate::build_admission_reconcile::{}(self.clone())",
+            "spawn"
+        );
+        assert_eq!(
+            source.matches(spawn.as_str()).count(),
+            1,
+            "exactly one production spawn site"
+        );
+
+        let leader = source
+            .find("pub async fn become_leader")
+            .expect("become_leader exists");
+        let gate = source[leader..]
+            .find(topology.as_str())
+            .expect("become_leader opens the topology gate");
+        let spawned = source[leader..]
+            .find(spawn.as_str())
+            .expect("become_leader spawns the reconciler");
+        assert!(
+            spawned > gate,
+            "the reconciler must be spawned AFTER leadership is confirmed"
+        );
+
+        // Nothing may be awaited between the two. An `.await` there is exactly
+        // the hazard: it can hang or panic, and the leader is already admitting.
+        let between = &source[leader + gate + topology.len()..leader + spawned];
+        assert!(
+            !between.contains(".await"),
+            "no awaited initializer may sit between the topology gate opening and \
+             the reconciler spawn; found: {between}"
+        );
+
+        // And it must precede the heavyweight leader initializers it used to
+        // sit behind — including the one that can terminate the process.
+        for later in [
+            "run_zot_retention_preflight",
+            "interrupt_stale_sessions_on_startup",
+            "self.initialize_agents().await",
+        ] {
+            let position = source[leader..]
+                .find(later)
+                .unwrap_or_else(|| panic!("{later} is part of become_leader"));
+            assert!(
+                spawned < position,
+                "the reconciler must be spawned before {later}"
+            );
+        }
+    }
+
+    /// L6. `begin_draining` has no clearing path on the production shutdown
+    /// path by design, so its single caller must genuinely be shutdown. Pins the
+    /// convention that used to be the only thing making the latch safe.
+    #[test]
+    fn draining_is_begun_only_after_the_http_server_has_stopped() {
+        let main_source = include_str!("../../main.rs");
+        let call = format!("begin_build_admission_{}().await", "draining");
+        assert_eq!(
+            main_source.matches(call.as_str()).count(),
+            1,
+            "exactly one production drain caller"
+        );
+        let serve = main_source
+            .find("server::run(router")
+            .expect("main serves HTTP");
+        let drain = main_source.find(call.as_str()).expect("main drains");
+        assert!(
+            drain > serve,
+            "draining may only begin after the HTTP server future has resolved"
         );
     }
 

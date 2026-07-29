@@ -588,6 +588,17 @@ impl CoordinatorActor {
                 db.clone(),
             )),
         );
+        // Leader-local build-admission health. This constructor runs only on
+        // the pod that won coordinator leadership, so the controller handle
+        // below is the one that actually decides admission — a standby never
+        // registers this check at all, which reads as "not registered" rather
+        // than as a check that silently always passes.
+        crate::doctor::register_build_admission_health_check(
+            djinn_core::doctor::registry(),
+            Arc::new(crate::doctor::ControllerBuildAdmissionHealthSource::new(
+                build_admission.clone(),
+            )),
+        );
 
         Self {
             receiver,
