@@ -39,7 +39,8 @@ pub mod test_support {
         reject_refinement_successor_for_test, reject_refinement_terminal_audit_for_test,
         rename_note_confidence_column_for_test, replace_legacy_proposal_head_for_test,
         seed_board_health_mismatch_candidate, seed_chat_session_row, seed_project,
-        seed_session_row, seed_session_row_with_id, seed_task_row,
+        seed_readiness_detail_projection_for_test, seed_session_row, seed_session_row_with_id,
+        seed_task_row,
     };
 }
 

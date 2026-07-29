@@ -129,34 +129,59 @@ pub struct ReadinessEventDto {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ReadinessQueryError {
-    ProjectNotFound { project_id: String },
-    AuthenticatedOwnerNotFound { user_id: String },
-    UnauthorizedOwner { project_id: String, user_id: String },
-    RunNotFound { run_id: String },
+    ProjectNotFound {
+        project_id: String,
+    },
+    AuthenticatedOwnerNotFound {
+        user_id: String,
+    },
+    UnauthorizedOwner {
+        project_id: String,
+        user_id: String,
+    },
+    RunNotFound {
+        run_id: String,
+    },
     RunProjectMismatch {
         project_id: String,
         run_id: String,
         actual_project_id: String,
     },
-    Persistence { detail: String },
+    Persistence {
+        detail: String,
+    },
 }
 
 impl fmt::Display for ReadinessQueryError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::ProjectNotFound { project_id } => write!(f, "readiness project not found: {project_id}"),
+            Self::ProjectNotFound { project_id } => {
+                write!(f, "readiness project not found: {project_id}")
+            }
             Self::AuthenticatedOwnerNotFound { user_id } => {
                 write!(f, "authenticated readiness owner not found: {user_id}")
             }
-            Self::UnauthorizedOwner { project_id, user_id } => {
-                write!(f, "authenticated user {user_id} does not own project {project_id}")
+            Self::UnauthorizedOwner {
+                project_id,
+                user_id,
+            } => {
+                write!(
+                    f,
+                    "authenticated user {user_id} does not own project {project_id}"
+                )
             }
             Self::RunNotFound { run_id } => write!(f, "readiness run not found: {run_id}"),
-            Self::RunProjectMismatch { project_id, run_id, actual_project_id } => write!(
+            Self::RunProjectMismatch {
+                project_id,
+                run_id,
+                actual_project_id,
+            } => write!(
                 f,
                 "readiness run {run_id} belongs to project {actual_project_id}, not {project_id}"
             ),
-            Self::Persistence { detail } => write!(f, "readiness query persistence failed: {detail}"),
+            Self::Persistence { detail } => {
+                write!(f, "readiness query persistence failed: {detail}")
+            }
         }
     }
 }
@@ -178,7 +203,8 @@ impl ReadinessQueryService {
         &self,
         query: ReadinessProjectQuery,
     ) -> Result<Option<ReadinessRunSummary>, ReadinessQueryError> {
-        self.authorize(&query.project_id, &query.authenticated_owner_id).await?;
+        self.authorize(&query.project_id, &query.authenticated_owner_id)
+            .await?;
         ReadinessRepository::new(self.db.clone())
             .active_or_latest_for_project(&query.project_id)
             .await
@@ -190,7 +216,8 @@ impl ReadinessQueryService {
         &self,
         query: ReadinessRunQuery,
     ) -> Result<ReadinessRunDetailDto, ReadinessQueryError> {
-        self.authorize(&query.project_id, &query.authenticated_owner_id).await?;
+        self.authorize(&query.project_id, &query.authenticated_owner_id)
+            .await?;
         let detail = ReadinessRepository::new(self.db.clone())
             .run_detail(&query.run_id)
             .await
@@ -208,12 +235,18 @@ impl ReadinessQueryService {
         Ok(detail.into())
     }
 
-    async fn authorize(&self, project_id: &str, authenticated_owner_id: &str) -> Result<(), ReadinessQueryError> {
+    async fn authorize(
+        &self,
+        project_id: &str,
+        authenticated_owner_id: &str,
+    ) -> Result<(), ReadinessQueryError> {
         let project = ProjectRepository::new(self.db.clone(), djinn_core::events::EventBus::noop())
             .get(project_id)
             .await
             .map_err(persistence_error)?
-            .ok_or_else(|| ReadinessQueryError::ProjectNotFound { project_id: project_id.into() })?;
+            .ok_or_else(|| ReadinessQueryError::ProjectNotFound {
+                project_id: project_id.into(),
+            })?;
         let owner = UserRepository::new(self.db.clone())
             .get_by_id(authenticated_owner_id)
             .await
@@ -221,7 +254,10 @@ impl ReadinessQueryService {
             .ok_or_else(|| ReadinessQueryError::AuthenticatedOwnerNotFound {
                 user_id: authenticated_owner_id.into(),
             })?;
-        if project.github_owner.eq_ignore_ascii_case(&owner.github_login) {
+        if project
+            .github_owner
+            .eq_ignore_ascii_case(&owner.github_login)
+        {
             Ok(())
         } else {
             Err(ReadinessQueryError::UnauthorizedOwner {
@@ -252,67 +288,97 @@ impl From<ReadinessRunDetail> for ReadinessRunDetailDto {
     fn from(detail: ReadinessRunDetail) -> Self {
         Self {
             run: detail.run.into(),
-            areas: detail.areas.into_iter().map(|area| ReadinessAreaDto {
-                id: area.area.id,
-                area_key: area.area.area_key,
-                composition: area.area.composition,
-                path_scopes: area.area.path_scopes,
-                frozen_at: area.area.frozen_at,
-                status: area.area.status,
-                attempts: area.attempts.into_iter().map(|attempt| ReadinessAttemptDto {
-                    id: attempt.attempt.id,
-                    attempt_number: attempt.attempt.attempt_number,
-                    status: attempt.attempt.status,
-                    payload_digest: attempt.attempt.payload_digest,
-                    created_at: attempt.attempt.created_at,
-                    terminal_at: attempt.attempt.terminal_at,
-                    is_current: attempt.is_current,
-                }).collect(),
-                accepted_findings: area.accepted_findings.into_iter().map(|finding| ReadinessFindingDto {
-                    id: finding.id,
-                    attempt_id: finding.attempt_id,
-                    guardrail_key: finding.guardrail_key,
-                    status: finding.status,
-                    severity: finding.severity,
-                    confidence: finding.confidence,
-                    evidence: finding.evidence,
-                    created_at: finding.created_at,
-                }).collect(),
-                accepted_outputs: area.accepted_outputs.into_iter().map(|output| ReadinessOutputDto {
-                    attempt_id: output.attempt_id,
-                    result: output.result,
-                    created_at: output.created_at,
-                }).collect(),
-            }).collect(),
-            area_scores: detail.area_scores.into_iter().map(|score| ReadinessAreaScoreDto {
-                area_id: score.area_id,
-                score: score.score,
-                applicable_weight: score.applicable_weight,
-                covered_weight: score.covered_weight,
-                status: score.status,
-                created_at: score.created_at,
-            }).collect(),
+            areas: detail
+                .areas
+                .into_iter()
+                .map(|area| ReadinessAreaDto {
+                    id: area.area.id,
+                    area_key: area.area.area_key,
+                    composition: area.area.composition,
+                    path_scopes: area.area.path_scopes,
+                    frozen_at: area.area.frozen_at,
+                    status: area.area.status,
+                    attempts: area
+                        .attempts
+                        .into_iter()
+                        .map(|attempt| ReadinessAttemptDto {
+                            id: attempt.attempt.id,
+                            attempt_number: attempt.attempt.attempt_number,
+                            status: attempt.attempt.status,
+                            payload_digest: attempt.attempt.payload_digest,
+                            created_at: attempt.attempt.created_at,
+                            terminal_at: attempt.attempt.terminal_at,
+                            is_current: attempt.is_current,
+                        })
+                        .collect(),
+                    accepted_findings: area
+                        .accepted_findings
+                        .into_iter()
+                        .map(|finding| ReadinessFindingDto {
+                            id: finding.id,
+                            attempt_id: finding.attempt_id,
+                            guardrail_key: finding.guardrail_key,
+                            status: finding.status,
+                            severity: finding.severity,
+                            confidence: finding.confidence,
+                            evidence: finding.evidence,
+                            created_at: finding.created_at,
+                        })
+                        .collect(),
+                    accepted_outputs: area
+                        .accepted_outputs
+                        .into_iter()
+                        .map(|output| ReadinessOutputDto {
+                            attempt_id: output.attempt_id,
+                            result: output.result,
+                            created_at: output.created_at,
+                        })
+                        .collect(),
+                })
+                .collect(),
+            area_scores: detail
+                .area_scores
+                .into_iter()
+                .map(|score| ReadinessAreaScoreDto {
+                    area_id: score.area_id,
+                    score: score.score,
+                    applicable_weight: score.applicable_weight,
+                    covered_weight: score.covered_weight,
+                    status: score.status,
+                    created_at: score.created_at,
+                })
+                .collect(),
             project_score: detail.project_score.map(|score| ReadinessProjectScoreDto {
                 score: score.score,
                 band: score.band,
                 created_at: score.created_at,
             }),
-            suggestions: detail.suggestions.into_iter().map(|suggestion| ReadinessSuggestionDto {
-                id: suggestion.id,
-                dedupe_key: suggestion.dedupe_key,
-                suggestion: suggestion.suggestion,
-                created_at: suggestion.created_at,
-            }).collect(),
-            events: detail.events.into_iter().map(|event| ReadinessEventDto {
-                id: event.id,
-                event_kind: event.event_kind,
-                payload: event.payload,
-                created_at: event.created_at,
-            }).collect(),
+            suggestions: detail
+                .suggestions
+                .into_iter()
+                .map(|suggestion| ReadinessSuggestionDto {
+                    id: suggestion.id,
+                    dedupe_key: suggestion.dedupe_key,
+                    suggestion: suggestion.suggestion,
+                    created_at: suggestion.created_at,
+                })
+                .collect(),
+            events: detail
+                .events
+                .into_iter()
+                .map(|event| ReadinessEventDto {
+                    id: event.id,
+                    event_kind: event.event_kind,
+                    payload: event.payload,
+                    created_at: event.created_at,
+                })
+                .collect(),
         }
     }
 }
 
 fn persistence_error(error: impl fmt::Display) -> ReadinessQueryError {
-    ReadinessQueryError::Persistence { detail: error.to_string() }
+    ReadinessQueryError::Persistence {
+        detail: error.to_string(),
+    }
 }
