@@ -74,14 +74,22 @@ async fn two_area_service_flow_persists_worked_terminal_readiness_detail() {
 
     assert_eq!(
         repository
-            .ingest_area_result(callback(&kickoff.run.id, frontend, frontend_result()))
+            .ingest_area_result(callback(
+                &kickoff.run.id,
+                frontend,
+                frontend_result(&frontend.area.id),
+            ))
             .await
             .expect("accept TypeScript callback"),
         ReadinessCallbackOutcome::Accepted
     );
     assert_eq!(
         repository
-            .ingest_area_result(callback(&kickoff.run.id, backend, backend_result()))
+            .ingest_area_result(callback(
+                &kickoff.run.id,
+                backend,
+                backend_result(&backend.area.id),
+            ))
             .await
             .expect("accept Rust callback"),
         ReadinessCallbackOutcome::Accepted
@@ -91,7 +99,7 @@ async fn two_area_service_flow_persists_worked_terminal_readiness_detail() {
         .aggregate_run(&kickoff.run.id, "readiness-service-flow-aggregator")
         .await
         .expect("terminalize complete run");
-    assert_eq!(aggregation.status, "completed");
+    assert_eq!(aggregation.status, "completed_with_errors");
     assert_eq!(aggregation.area_scores.len(), 2);
     assert_close(aggregation.project_score.score, 7.0 / 9.0);
     assert_eq!(aggregation.project_score.band, "ready");
@@ -106,7 +114,7 @@ async fn two_area_service_flow_persists_worked_terminal_readiness_detail() {
         .expect("read terminal detail only through service boundary");
 
     assert_eq!(detail.run.id, kickoff.run.id);
-    assert_eq!(detail.run.status, "completed");
+    assert_eq!(detail.run.status, "completed_with_errors");
     assert_eq!(detail.run.expected_area_count, Some(2));
     assert_eq!(detail.areas.len(), 2);
 
@@ -144,7 +152,7 @@ async fn two_area_service_flow_persists_worked_terminal_readiness_detail() {
     assert_eq!(frontend_detail.accepted_outputs.len(), 1);
     assert_eq!(
         frontend_detail.accepted_outputs[0].result,
-        frontend_result()
+        frontend_result(&frontend.area.id)
     );
     assert_eq!(
         frontend_detail.accepted_outputs[0].result["warnings"][0]["reason"],
@@ -177,13 +185,16 @@ async fn two_area_service_flow_persists_worked_terminal_readiness_detail() {
     assert_finding(
         backend_detail,
         "backend-secrets",
-        "missing",
+        "analysis_error",
         "low",
         0.85,
         serde_json::json!([{"path":"server/src/config.rs","line":9}]),
     );
     assert_eq!(backend_detail.accepted_outputs.len(), 1);
-    assert_eq!(backend_detail.accepted_outputs[0].result, backend_result());
+    assert_eq!(
+        backend_detail.accepted_outputs[0].result,
+        backend_result(&backend.area.id)
+    );
     assert_eq!(
         backend_detail.accepted_outputs[0].result["warnings"][0]["reason"],
         "secret rotation is not configured"
@@ -212,6 +223,21 @@ async fn two_area_service_flow_persists_worked_terminal_readiness_detail() {
     let project_score = detail.project_score.expect("terminal project score");
     assert_close(project_score.score, 7.0 / 9.0);
     assert_eq!(project_score.band, "ready");
+
+    assert_eq!(detail.suggestions.len(), 1);
+    let suggestion = &detail.suggestions[0];
+    assert_eq!(suggestion.dedupe_key, "shared-auth-remediation");
+    let mut contributing_area_ids = vec![backend.area.id.clone(), frontend.area.id.clone()];
+    contributing_area_ids.sort();
+    assert_eq!(
+        suggestion.suggestion,
+        serde_json::json!({
+            "dedupe_key": "shared-auth-remediation",
+            "action": "Apply shared authentication remediation",
+            "area_ids": contributing_area_ids,
+            "guardrail_ids": ["backend-auth", "frontend-auth"]
+        })
+    );
 }
 
 const SNAPSHOT: &str = "d34db33fd34db33fd34db33fd34db33fd34db33f";
@@ -283,7 +309,7 @@ fn callback(
     }
 }
 
-fn frontend_result() -> serde_json::Value {
+fn frontend_result(area_id: &str) -> serde_json::Value {
     serde_json::json!({
         "findings": [
             {"guardrail_key":"frontend-auth","status":"covered","severity":"high","confidence":0.95,"evidence":[{"path":"web/auth.ts","line":12}]},
@@ -291,19 +317,29 @@ fn frontend_result() -> serde_json::Value {
         ],
         "unsupported": [],
         "warnings": [{"reason":"legacy form remains outside migration scope"}],
-        "remediation_suggestions": []
+        "remediation_suggestions": [{
+            "dedupe_key": "shared-auth-remediation",
+            "action": "Configure shared authentication remediation",
+            "area_id": area_id,
+            "guardrail_id": "frontend-auth"
+        }]
     })
 }
 
-fn backend_result() -> serde_json::Value {
+fn backend_result(area_id: &str) -> serde_json::Value {
     serde_json::json!({
         "findings": [
             {"guardrail_key":"backend-auth","status":"covered","severity":"high","confidence":0.90,"evidence":[{"path":"server/src/auth.rs","line":48}]},
-            {"guardrail_key":"backend-secrets","status":"missing","severity":"low","confidence":0.85,"evidence":[{"path":"server/src/config.rs","line":9}]}
+            {"guardrail_key":"backend-secrets","status":"analysis_error","severity":"low","confidence":0.85,"evidence":[{"path":"server/src/config.rs","line":9}]}
         ],
         "unsupported": [],
         "warnings": [{"reason":"secret rotation is not configured"}],
-        "remediation_suggestions": []
+        "remediation_suggestions": [{
+            "action": "Apply shared authentication remediation",
+            "dedupe_key": "shared-auth-remediation",
+            "area_ids": [area_id, area_id],
+            "guardrail_ids": ["frontend-auth", "backend-auth", "backend-auth"]
+        }]
     })
 }
 

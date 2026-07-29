@@ -1288,11 +1288,14 @@ impl ReadinessRepository {
             .bind(owner).bind(run_id).execute(&mut *tx).await?;
         let mut area_scores = Vec::with_capacity(current.len());
         let mut project_areas = Vec::with_capacity(current.len());
-        let has_errors = current.iter().any(|(_, _, status)| status != "succeeded");
+        let mut has_errors = current.iter().any(|(_, _, status)| status != "succeeded");
         for (area_id, attempt_id, _) in current {
             let findings: Vec<(String, String, f64)> = sqlx::query_as(
                 "SELECT status,severity,confidence FROM readiness_guardrail_findings WHERE attempt_id=$1 AND accepted=true ORDER BY guardrail_key",
             ).bind(&attempt_id).fetch_all(&mut *tx).await?;
+            has_errors |= findings
+                .iter()
+                .any(|(status, _, _)| status == "analysis_error");
             let (score, applicable_weight, covered_weight, status) =
                 readiness_area_score(&findings);
             let row: ReadinessAreaScoreRow = sqlx::query_as("INSERT INTO readiness_area_scores (run_id,area_id,score,applicable_weight,covered_weight,status) VALUES ($1,$2,$3,$4,$5,$6) RETURNING run_id,area_id,score,applicable_weight,covered_weight,status,created_at")
