@@ -3951,6 +3951,31 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn pod_permit_prerequisites_gate_readiness_until_explicitly_ready() {
+        let controller = BuildAdmissionController::new_closed(
+            Arc::new(AdmissionJournalRepository::new(
+                Database::open_in_memory().unwrap(),
+            )),
+            1,
+            "epoch",
+        );
+
+        // Satisfy every pre-existing startup gate first, so this assertion
+        // names the pod-permit gate rather than a higher-priority failure.
+        controller.mark_ready();
+        controller.mark_pod_permit_prerequisites_missing();
+        assert_eq!(
+            controller.readiness(),
+            BuildAdmissionReadiness::PodPermitPrerequisitesMissing
+        );
+        assert!(!controller.is_ready());
+
+        controller.mark_pod_permit_prerequisites_ready();
+        assert_eq!(controller.readiness(), BuildAdmissionReadiness::Healthy);
+        assert!(controller.is_ready());
+    }
+
     fn predecessor_input(
         work_id: &str,
         generation: i64,

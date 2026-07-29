@@ -4696,6 +4696,83 @@ mod build_admission_config_tests {
     }
 
     #[tokio::test]
+    async fn absent_or_invalid_pod_limit_keeps_compile_readiness_closed() {
+        use djinn_agent::actors::coordinator::BuildAdmissionReadiness;
+
+        for pod_limit in [None, Some("invalid")] {
+            let config = BuildAdmissionConfig::parse(None, Some("4"), pod_limit)
+                .expect("the task-run cap remains independently valid");
+            assert_eq!(config.pod_limit, None, "{pod_limit:?}");
+            let state = state_for_admission_config(config);
+            state.initialize_build_pod_permit_prerequisites().await;
+            let admission = admission(&state);
+            assert_eq!(
+                admission.readiness(),
+                BuildAdmissionReadiness::PodPermitPrerequisitesMissing,
+                "{pod_limit:?} must not report healthy compile prerequisites"
+            );
+            assert!(!admission.is_ready());
+        }
+    }
+
+    #[tokio::test]
+    async fn missing_pool_row_or_repository_error_keeps_compile_readiness_closed() {
+        use djinn_agent::actors::coordinator::BuildAdmissionReadiness;
+
+        let missing_row_db = Database::open_in_memory().expect("test database");
+        missing_row_db
+            .ensure_initialized()
+            .await
+            .expect("migrations");
+        sqlx::query("DELETE FROM build_pod_permit_pools WHERE pool_key = 'global'")
+            .execute(missing_row_db.pool())
+            .await
+            .expect("delete singleton pool");
+        let missing_row = state_for_admission_config_with_db(
+            missing_row_db,
+            BuildAdmissionConfig {
+                mode: BuildAdmissionMode::Observe,
+                cap: 3,
+                pod_limit: Some(1),
+            },
+        );
+        missing_row
+            .initialize_build_pod_permit_prerequisites()
+            .await;
+        assert_eq!(
+            admission(&missing_row).readiness(),
+            BuildAdmissionReadiness::PodPermitPrerequisitesMissing,
+            "a missing canonical pool row must not report healthy prerequisites"
+        );
+
+        let unavailable_db = Database::open_in_memory().expect("test database");
+        unavailable_db
+            .ensure_initialized()
+            .await
+            .expect("migrations");
+        sqlx::query("DROP TABLE build_pod_permit_pools")
+            .execute(unavailable_db.pool())
+            .await
+            .expect("drop pool relation to inject repository error");
+        let unavailable = state_for_admission_config_with_db(
+            unavailable_db,
+            BuildAdmissionConfig {
+                mode: BuildAdmissionMode::Observe,
+                cap: 3,
+                pod_limit: Some(1),
+            },
+        );
+        unavailable
+            .initialize_build_pod_permit_prerequisites()
+            .await;
+        assert_eq!(
+            admission(&unavailable).readiness(),
+            BuildAdmissionReadiness::PodPermitPrerequisitesMissing,
+            "a repository error must be collapsed to closed prerequisites"
+        );
+    }
+
+    #[tokio::test]
     async fn off_state_composition_retains_a_standby_handoff_controller() {
         let state = state_for_admission_config(BuildAdmissionConfig {
             mode: BuildAdmissionMode::Off,
