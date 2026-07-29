@@ -61,12 +61,22 @@ pub struct BuildPodPermitRow {
 /// durable storage.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AcquireBuildPodPermitResult {
-    Acquired { row: BuildPodPermitRow, idempotent: bool },
-    PoolFull { active_count: i64, limit: i64 },
+    Acquired {
+        row: BuildPodPermitRow,
+        idempotent: bool,
+    },
+    PoolFull {
+        active_count: i64,
+        limit: i64,
+    },
     /// A task run has one durable permit lifecycle and a released permit is not
     /// resurrected under its old identity.
-    AlreadyReleased { row: BuildPodPermitRow },
-    InvalidLimit { limit: i64 },
+    AlreadyReleased {
+        row: BuildPodPermitRow,
+    },
+    InvalidLimit {
+        limit: i64,
+    },
     Unavailable,
 }
 
@@ -129,7 +139,9 @@ impl BuildPodPermitRepository {
         .fetch_optional(&mut *tx)
         .await?;
         if pool.is_none() {
-            return Err(DbError::Internal("build pod permit global pool is missing".into()));
+            return Err(DbError::Internal(
+                "build pod permit global pool is missing".into(),
+            ));
         }
 
         if let Some(row) = fetch_tx(&mut tx, task_run_id).await? {
