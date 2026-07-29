@@ -5,11 +5,101 @@
 //! becoming terminal is deliberately not represented as a release: its
 //! `job_created` permit remains active until fenced release metadata is set.
 
+use std::path::{Path, PathBuf};
+
 use sqlx::postgres::{PgConnection, PgPoolOptions};
 use sqlx::{Connection, Executor};
 
+const MIGRATION_VERSION: u64 = 162;
+const MIGRATION_FILE: &str = "162_build_pod_permits.sql";
+const MIGRATION_OPERATOR_ID: &str = "00000000-0000-7000-8000-000000000162";
+const CREATOR_CONTRACT_VERSION: u64 = 142;
+
 fn base_database_url() -> String {
     djinn_db::test_database_base_url()
+}
+
+fn migrations_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("migrations_postgres")
+}
+
+fn migration_entries(dir: &Path) -> Vec<(u64, PathBuf)> {
+    let mut entries: Vec<(u64, PathBuf)> = std::fs::read_dir(dir)
+        .expect("read migrations dir")
+        .map(|entry| {
+            let path = entry.expect("migration dir entry").path();
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("");
+            let version = name
+                .split_once('_')
+                .and_then(|(prefix, _)| prefix.parse::<u64>().ok())
+                .unwrap_or(0);
+            (version, path)
+        })
+        .filter(|(_, path)| {
+            path.extension().and_then(|extension| extension.to_str()) == Some("sql")
+        })
+        .collect();
+    entries.sort_by(|(left_version, left_path), (right_version, right_path)| {
+        left_version.cmp(right_version).then_with(|| {
+            left_path
+                .file_name()
+                .unwrap_or_default()
+                .cmp(right_path.file_name().unwrap_or_default())
+        })
+    });
+    entries
+}
+
+async fn seed_migration_operator(conn: &mut PgConnection) {
+    conn.execute(
+        format!(
+            "INSERT INTO users (id, github_id, github_login) VALUES \
+             ('{MIGRATION_OPERATOR_ID}', 9000000162, 'permit-migration-operator') ON CONFLICT DO NOTHING"
+        )
+        .as_str(),
+    )
+    .await
+    .expect("seed designated migration operator");
+}
+
+/// Apply the complete pre-162 schema without using the embedded migrator, so
+/// representative live rows can exist before the additive permit migration.
+async fn apply_prior_migrations(conn: &mut PgConnection) {
+    conn.execute(
+        format!(
+            "SELECT set_config('djinn.migration_designated_operator_user_id', '{MIGRATION_OPERATOR_ID}', false)"
+        )
+        .as_str(),
+    )
+    .await
+    .expect("set designated operator GUC");
+
+    for (version, path) in migration_entries(&migrations_dir()) {
+        if version >= MIGRATION_VERSION {
+            break;
+        }
+        if version == 0 {
+            continue;
+        }
+        if version == CREATOR_CONTRACT_VERSION {
+            seed_migration_operator(conn).await;
+        }
+        let sql = std::fs::read_to_string(&path).expect("read prior migration sql");
+        conn.execute(sql.as_str())
+            .await
+            .unwrap_or_else(|error| panic!("apply migration {} failed: {error}", path.display()));
+    }
+}
+
+async fn apply_permit_migration(conn: &mut PgConnection) {
+    let sql = std::fs::read_to_string(migrations_dir().join(MIGRATION_FILE))
+        .expect("read permit migration sql");
+    conn.execute(sql.as_str())
+        .await
+        .expect("apply permit migration after prior migrations");
 }
 
 fn server_prefix(base: &str) -> String {
@@ -108,8 +198,84 @@ async fn active_permit_count(pool: &sqlx::PgPool) -> i64 {
         .expect("count active build-pod permits")
 }
 
+async fn seed_preexisting_build_lease_and_admission_data(pool: &sqlx::PgPool) {
+    sqlx::query(
+        "UPDATE build_lease_caps \
+         SET cap = 7, updated_at = '2025-01-02T03:04:05Z' \
+         WHERE singleton",
+    )
+    .execute(pool)
+    .await
+    .expect("seed pre-existing build lease cap");
+    sqlx::query(
+        "INSERT INTO build_leases \
+         (consumer_kind, consumer_id, immutable_identity, fencing_token, state, \
+          bound_pod_uid, weight, created_at, updated_at, granted_at) \
+         VALUES ('task_dispatch', 'preexisting-task', 'preexisting-identity', 741, 'active', \
+                 'preexisting-pod', 2, '2025-01-02T03:04:05Z', '2025-01-02T03:04:06Z', \
+                 '2025-01-02T03:04:06Z')",
+    )
+    .execute(pool)
+    .await
+    .expect("seed pre-existing build lease");
+    sqlx::query(
+        "INSERT INTO admission_journal \
+         (domain, work_id, generation, workload_kind, state, creator_server_epoch, \
+          object_name, object_uid, created_at, updated_at) \
+         VALUES ('invocation_build', 'preexisting-work', 3, 'invocation', 'live', \
+                 'preexisting-epoch', 'preexisting-job', 'preexisting-job-uid', \
+                 '2025-01-02T03:04:05Z', '2025-01-02T03:04:06Z')",
+    )
+    .execute(pool)
+    .await
+    .expect("seed pre-existing admission journal row");
+    sqlx::query(
+        "UPDATE admission_handoff \
+         SET phase = 'invocation_primary', epoch = 7, v0_mode = 'disabled', \
+             v1_mode = 'enforce', cap = 7, updated_at = '2025-01-02T03:04:07Z' \
+         WHERE name = 'build'",
+    )
+    .execute(pool)
+    .await
+    .expect("seed pre-existing admission handoff");
+}
+
+async fn existing_build_lease_and_admission_snapshot(pool: &sqlx::PgPool) -> Vec<String> {
+    let lease: String = sqlx::query_scalar(
+        "SELECT concat_ws('|', consumer_kind, consumer_id, immutable_identity, fencing_token, \
+                state, bound_pod_uid, weight, created_at::text, updated_at::text, granted_at::text) \
+         FROM build_leases WHERE consumer_id = 'preexisting-task'",
+    )
+    .fetch_one(pool)
+    .await
+    .expect("read pre-existing build lease");
+    let lease_cap: String = sqlx::query_scalar(
+        "SELECT concat_ws('|', cap, updated_at::text) FROM build_lease_caps WHERE singleton",
+    )
+    .fetch_one(pool)
+    .await
+    .expect("read pre-existing build lease cap");
+    let journal: String = sqlx::query_scalar(
+        "SELECT concat_ws('|', domain, work_id, generation, workload_kind, state, \
+                creator_server_epoch, object_name, object_uid, created_at::text, updated_at::text) \
+         FROM admission_journal \
+         WHERE domain = 'invocation_build' AND work_id = 'preexisting-work' AND generation = 3",
+    )
+    .fetch_one(pool)
+    .await
+    .expect("read pre-existing admission journal row");
+    let handoff: String = sqlx::query_scalar(
+        "SELECT concat_ws('|', name, phase, epoch, v0_mode, v1_mode, cap, updated_at::text) \
+         FROM admission_handoff WHERE name = 'build'",
+    )
+    .fetch_one(pool)
+    .await
+    .expect("read pre-existing admission handoff");
+    vec![lease, lease_cap, journal, handoff]
+}
+
 #[tokio::test]
-async fn migration_162_enforces_build_pod_permit_contract() {
+async fn migration_162_embedded_fresh_database_enforces_build_pod_permit_contract() {
     with_temp_database("build_pod_permits", |db_url| async move {
         let creator_id =
             djinn_db::test_support::apply_all_migrations_to_fresh_database(&db_url).await;
@@ -243,6 +409,78 @@ async fn migration_162_enforces_build_pod_permit_contract() {
         .await
         .expect("explicitly release terminal-but-present Job permit");
         assert_eq!(active_permit_count(&pool).await, 2);
+
+        pool.close().await;
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn migration_162_upgrades_prior_schema_without_rewriting_existing_admission_data() {
+    with_temp_database("upgrade_build_pod_permits", |db_url| async move {
+        let mut conn = PgConnection::connect(&db_url)
+            .await
+            .expect("connect prior migration database");
+        apply_prior_migrations(&mut conn).await;
+
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&db_url)
+            .await
+            .expect("connect prior schema pool");
+        seed_preexisting_build_lease_and_admission_data(&pool).await;
+        let before = existing_build_lease_and_admission_snapshot(&pool).await;
+        pool.close().await;
+
+        apply_permit_migration(&mut conn).await;
+        drop(conn);
+
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&db_url)
+            .await
+            .expect("connect upgraded database");
+        assert_eq!(
+            existing_build_lease_and_admission_snapshot(&pool).await,
+            before,
+            "the additive permit migration must not rewrite existing build-lease or admission rows"
+        );
+
+        let permit_table: Option<String> =
+            sqlx::query_scalar("SELECT to_regclass('public.build_pod_permits')::text")
+                .fetch_one(&pool)
+                .await
+                .expect("inspect permit table");
+        let pool_table: Option<String> =
+            sqlx::query_scalar("SELECT to_regclass('public.build_pod_permit_pools')::text")
+                .fetch_one(&pool)
+                .await
+                .expect("inspect permit pool table");
+        assert_eq!(permit_table.as_deref(), Some("build_pod_permits"));
+        assert_eq!(pool_table.as_deref(), Some("build_pod_permit_pools"));
+
+        let initialized_pool: (String, String) = sqlx::query_as(
+            "SELECT pool_key, created_at::text FROM build_pod_permit_pools WHERE pool_key = 'global'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("read initialized singleton pool");
+
+        // Replay the exact migration initialization statement. Its conflict
+        // action must neither add another row nor replace the existing row.
+        sqlx::query(
+            "INSERT INTO build_pod_permit_pools (pool_key) VALUES ('global') \
+             ON CONFLICT (pool_key) DO NOTHING",
+        )
+        .execute(&pool)
+        .await
+        .expect("replay permit pool initialization");
+        let pools: Vec<(String, String)> =
+            sqlx::query_as("SELECT pool_key, created_at::text FROM build_pod_permit_pools ORDER BY pool_key")
+                .fetch_all(&pool)
+                .await
+                .expect("read pools after initialization replay");
+        assert_eq!(pools, vec![initialized_pool]);
 
         pool.close().await;
     })
