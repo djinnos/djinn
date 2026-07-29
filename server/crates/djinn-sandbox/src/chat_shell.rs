@@ -539,7 +539,10 @@ fn validate_evidence_argv(argv: &[String]) -> Result<&'static str, EvidenceError
                 "-b", "-d", "-f", "-g", "-h", "-M", "-n", "-r", "-R", "-s", "-u",
             ],
         ),
-        "uniq" => options_with_values(args, &["-c", "-d", "-u", "-i"], &["-f", "-s", "-w"]),
+        // GNU uniq treats its second positional operand as an output file.
+        // Do not leave that distinction to Landlock: evidence policy must
+        // reject the write surface before a child process is spawned.
+        "uniq" => uniq_args(args),
         "tr" => options_only(args, &["-c", "-C", "-d", "-s", "-t", "-cd", "-ds", "-sd"]),
         "jq" => jq_args(args),
         "file" => options_only(
@@ -586,6 +589,44 @@ fn options_with_values(args: &[String], flags: &[&str], values: &[&str]) -> Resu
         Ok(())
     }
 }
+
+/// Validate the read-only subset of `uniq [OPTION]... [INPUT [OUTPUT]]`.
+///
+/// The sole optional positional operand is the input file. A second operand
+/// is an output file in GNU uniq, so accepting it would expose a write mode.
+fn uniq_args(args: &[String]) -> Result<(), String> {
+    let mut need_value = false;
+    let mut options_ended = false;
+    let mut positional_count = 0;
+
+    for arg in args {
+        if need_value {
+            need_value = false;
+            continue;
+        }
+        if !options_ended && arg == "--" {
+            options_ended = true;
+        } else if !options_ended && ["-f", "-s", "-w"].contains(&arg.as_str()) {
+            need_value = true;
+        } else if !options_ended && ["-c", "-d", "-u", "-i"].contains(&arg.as_str()) {
+            continue;
+        } else if !options_ended && arg.starts_with('-') {
+            return Err(format!("unknown option {arg}"));
+        } else {
+            positional_count += 1;
+            if positional_count > 1 {
+                return Err("uniq output operand is not allowed".into());
+            }
+        }
+    }
+
+    if need_value {
+        Err("option missing value".into())
+    } else {
+        Ok(())
+    }
+}
+
 fn grep_args(args: &[String]) -> Result<(), String> {
     options_only(
         args,
@@ -1181,9 +1222,18 @@ mod tests {
             vec!["/bin/sh", "-c", "id"],
             vec!["git", "status"],
             vec!["cat", "/etc/passwd"],
+            vec!["ls", "--color=always"],
             vec!["grep", "needle", ">", "out"],
+            vec!["head", "-q", "README.md"],
+            vec!["tail", "--follow", "README.md"],
+            vec!["wc", "--files0-from", "inputs"],
             vec!["sort", "-o", "out", "in"],
+            vec!["uniq", "input", "output"],
+            vec!["tr", "--help"],
             vec!["jq", "--from-file", "script.jq", "input.json"],
+            vec!["file", "-m", "magic", "README.md"],
+            vec!["stat", "--printf", "%n", "README.md"],
+            vec!["du", "--time", "README.md"],
             vec!["tree", "../outside"],
         ] {
             let argv = argv.into_iter().map(str::to_owned).collect::<Vec<_>>();
