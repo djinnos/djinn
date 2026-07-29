@@ -53,6 +53,7 @@ pub(crate) struct ToolCancellation {
 }
 
 impl ToolCancellation {
+    #[cfg(test)]
     pub(crate) fn new(session: CancellationToken, global: CancellationToken) -> Self {
         Self {
             session,

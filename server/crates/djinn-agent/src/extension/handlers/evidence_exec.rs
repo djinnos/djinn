@@ -68,7 +68,7 @@ pub(super) async fn call_evidence_exec(
         .canonicalize()
         .map_err(|error| format!("evidence_exec cannot canonicalize clone root: {error}"))?;
     let cwd = canonical_cwd(&clone_root, request.cwd.as_deref())?;
-    let identity = evidence_identity(task_id, session_id, &clone_root)?;
+    let identity = evidence_identity(task_id, session_id, &clone_root).await?;
     let repository = EvidenceRepository::new(state.db.clone());
 
     // This preflight is before the sandbox boundary.  Rejected plan/check/method
@@ -94,7 +94,7 @@ pub(super) async fn call_evidence_exec(
     }
 
     let timeout = Duration::from_millis(timeout_ms);
-    let launch_started = std::time::Instant::now();
+    let launch_started = tokio::time::Instant::now();
     let execution = EvidenceSandbox::new(clone_root.clone())
         .run(EvidenceRequest {
             argv: request.argv.clone(),
@@ -156,19 +156,16 @@ fn canonical_cwd(clone_root: &Path, requested: Option<&str>) -> Result<PathBuf, 
     Ok(canonical)
 }
 
-fn evidence_identity(
+async fn evidence_identity(
     task_id: &str,
     session_id: &str,
     clone_root: &Path,
 ) -> Result<EvidencePlanIdentity, String> {
-    let repository = git2::Repository::discover(clone_root)
-        .map_err(|error| format!("evidence_exec cannot open checked-out clone: {error}"))?;
-    let commit = repository
-        .head()
-        .and_then(|head| head.peel_to_commit())
-        .map_err(|error| format!("evidence_exec cannot resolve checked-out commit: {error}"))?
-        .id()
-        .to_string();
+    // All repository access goes through djinn-git. The agent does not own
+    // raw git capability, even when deriving server-owned evidence identity.
+    let commit = djinn_git::head_commit_sha(clone_root)
+        .await
+        .map_err(|error| format!("evidence_exec cannot resolve checked-out commit: {error}"))?;
     let mut fingerprint = Sha256::new();
     fingerprint.update(clone_root.as_os_str().as_encoded_bytes());
     fingerprint.update(b"\0");
