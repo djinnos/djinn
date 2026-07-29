@@ -1,0 +1,10 @@
+# containerd v1.x wrote no top-level `version` key at all; the absent key means
+# the v2 CRI namespace, not an unresolvable configuration.
+root = "/var/lib/rancher/k3s/agent/containerd"
+state = "/run/k3s/containerd"
+
+[plugins."io.containerd.grpc.v1.cri"]
+  sandbox_image = "rancher/mirrored-pause:3.6"
+
+[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc]
+  runtime_type = "io.containerd.runc.v2"

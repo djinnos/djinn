@@ -1,0 +1,33 @@
+# Djinn managed-k3s containerd template, CRI configuration version 3.
+#
+# Source/version pin: k3s-io/k3s v1.35.5+k3s1 embeds containerd 2.2.3-k3s1,
+# whose generated configuration declares `version = 3` and moves the CRI
+# runtime settings from the v2 `io.containerd.grpc.v1.cri` plugin namespace to
+# `io.containerd.cri.v1.runtime`. K3s reads the version-3 override template
+# from its own filename, so this template is installed on managed nodes as:
+#   /var/lib/rancher/k3s/agent/etc/containerd/config-v3.toml.tmpl
+# K3s renders the live configuration consumed by containerd at:
+#   /var/lib/rancher/k3s/agent/etc/containerd/config.toml
+#
+# The version-2 sibling (config.toml.tmpl) is unchanged and still serves
+# containerd v1.x nodes. Which of the two is installed is resolved from the
+# live file's top-level `version` key, never from a k3s version string.
+#
+# Retain the k3s-generated base template so its default `runc` runtime and
+# every unrelated runtime setting remain unchanged. The conformance script
+# must inspect the rendered live file above, rather than this source template.
+{{ template "base" . }}
+
+# Dedicated handler for RuntimeClass/djinn-cgroup-writable. `cgroup_writable`
+# is a CRI runtime property and intentionally belongs on this runtime entry,
+# not in the options table below.
+[plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.runc-cgroupwritable]
+  runtime_type = "io.containerd.runc.v2"
+  cgroup_writable = true
+
+# The kubelet on these nodes uses the systemd cgroup driver, and the base
+# `runc` handler is configured to match it. A handler left at the cgroupfs
+# default would place its containers under a cgroup parent the kubelet does not
+# manage, so this sub-table must mirror the base handler exactly.
+[plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.runc-cgroupwritable.options]
+  SystemdCgroup = true

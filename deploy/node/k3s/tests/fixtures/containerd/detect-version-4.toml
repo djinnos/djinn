@@ -1,0 +1,6 @@
+# A generation this repository has no template for. Nothing may be installed
+# and nothing may be restarted on such a node.
+version = 4
+
+[plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.runc]
+  runtime_type = "io.containerd.runc.v2"

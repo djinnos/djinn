@@ -1,0 +1,12 @@
+# Every k3s/containerd version string in this file contradicts the generation
+# the file itself declares. Detection must ignore all of them and answer 3.
+# k3s v1.31.5+k3s1 / containerd v1.7.23-k3s2
+k3s_version = "v1.31.5+k3s1"
+containerd_version = "v1.7.23-k3s2"
+version = 3
+
+[plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.runc]
+  runtime_type = "io.containerd.runc.v2"
+
+# A v2 namespace mentioned in a comment is still not a v2 configuration:
+# [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc]
