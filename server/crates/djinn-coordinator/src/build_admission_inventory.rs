@@ -181,6 +181,23 @@ fn classify(r: &WorkloadRecord) -> Result<Option<ClassifiedWorkload>, String> {
     {
         return Ok(None);
     }
+    // SCIP code-graph index Jobs are the same shape of exception as image
+    // builds above, for the same reason. `djinn.io/capacity-reserved` is how
+    // their CPU is accounted (folded into `protected_mcpu` and subtracted from
+    // build capacity by proposal 8ixk); they take NO build lease and carry no
+    // admission identity, so there is nothing here to adopt. Falling through to
+    // the unclassifiable catch-all would keep Enforce fail-closed for the whole
+    // index run — a 4335s budget — during which every worker, reviewer, and
+    // planner dispatch is denied `controller_not_admitting`. Observed in
+    // production 2026-07-29: one healthy rust-analyzer index blocked the board
+    // for its entire duration.
+    if l.get("djinn.app/component")
+        .is_some_and(|value| value == "scip-index")
+        || l.get("djinn.app/scip-index").is_some_and(|v| v == "true")
+        || r.name.starts_with("djinn-scip-")
+    {
+        return Ok(None);
+    }
     if (r.name.starts_with("djinn-") || l.keys().any(|k| k.starts_with("djinn.app/")))
         && !r.terminal
         && !r.images.is_empty()
