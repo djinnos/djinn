@@ -1,4 +1,8 @@
 {{- if .Values.cgroupWritable.runtimeClass.enabled }}
+# The task-run class. Its scheduling.nodeSelector is what keeps ordinary
+# task-run Pods off nodes that have not passed node conformance: the
+# RuntimeClass admission controller merges the selector into every Pod that
+# names this class, so an unconformed node is never a candidate.
 apiVersion: node.k8s.io/v1
 kind: RuntimeClass
 metadata:
@@ -7,4 +11,30 @@ handler: runc-cgroupwritable
 scheduling:
   nodeSelector:
     djinn.io/cgroup-writable: "true"
+---
+# The conformance-probe class. Same containerd handler, deliberately NO
+# scheduling block.
+#
+# Node conformance runs on a node that does not yet carry
+# djinn.io/cgroup-writable=true — proving the node should become eligible is
+# the whole point of the probe, and the conformance program removes the marker
+# before every risky operation. A probe Pod naming the task-run class above is
+# therefore unrunnable: the merged nodeSelector becomes a NodeAffinity
+# predicate, and `spec.nodeName` does not exempt a Pod from it. nodeName
+# bypasses the scheduler, but the kubelet re-evaluates NodeAffinity at
+# admission and rejects the Pod with
+# `Predicate NodeAffinity failed: node(s) didn't match Pod's node
+# affinity/selector`. That is a deadlock: the marker gates the probe that
+# earns the marker.
+#
+# Splitting handler selection from the scheduling constraint resolves it. This
+# class grants no reach a probe did not already have: it is usable only where
+# the containerd handler exists, and elsewhere the sandbox simply fails to
+# create. It is gated by the same cgroupWritable.runtimeClass.enabled value as
+# the class above so the two always appear and disappear together.
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: djinn-cgroup-writable-probe
+handler: runc-cgroupwritable
 {{- end }}

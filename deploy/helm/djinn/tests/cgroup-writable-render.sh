@@ -71,23 +71,94 @@ def documents(text):
 def runtime_classes(text):
     return [doc for doc in documents(text) if '\nkind: RuntimeClass\n' in f'\n{doc}']
 
+
+TASK_RUN_CLASS = 'djinn-cgroup-writable'
+PROBE_CLASS = 'djinn-cgroup-writable-probe'
+
+
+def runtime_class_named(text, name):
+    """Return the single RuntimeClass document whose metadata.name is `name`.
+
+    The trailing newline matters: 'name: djinn-cgroup-writable' is a prefix of
+    'name: djinn-cgroup-writable-probe', so a substring test would happily
+    hand back the wrong object and certify the wrong scheduling contract.
+    """
+    matches = [doc for doc in runtime_classes(text) if f'\n  name: {name}\n' in f'\n{doc}\n']
+    assert len(matches) == 1, f'expected exactly one RuntimeClass named {name}, got {len(matches)}'
+    return matches[0]
+
+
+def effective(doc):
+    """Drop comment lines so an assertion reads the spec, not the prose.
+
+    The probe class's rationale necessarily mentions the very words its own
+    negative assertions forbid ('nodeSelector', the eligibility marker), and a
+    comment is not a scheduling constraint.
+    """
+    return '\n'.join(line for line in doc.splitlines() if not line.lstrip().startswith('#'))
+
+
 base, preparation, activation, armed = (
     Path(path).read_text(encoding='utf-8') for path in sys.argv[1:5]
 )
 fixtures = Path(sys.argv[5])
-assert not runtime_classes(base), 'disabled defaults rendered RuntimeClass'
+assert not runtime_classes(base), 'disabled defaults rendered a RuntimeClass'
+for absent in (TASK_RUN_CLASS, PROBE_CLASS):
+    assert absent not in base, f'disabled defaults rendered {absent}'
 assert 'runtimeClassName:' not in base, 'disabled defaults assigned RuntimeClass to a PodSpec'
+
+# Enabling the single gate must render BOTH classes: the constrained task-run
+# class and the unconstrained probe class. They exist for opposite reasons and
+# must never be separately switchable — a probe class without its task-run
+# class would be an ungated handler, and a task-run class without its probe
+# class is the deadlock this pair was split to remove (node conformance cannot
+# run on a node that does not yet carry the marker conformance itself earns).
 classes = runtime_classes(preparation)
-assert len(classes) == 1, f'preparation render expected one RuntimeClass, got {len(classes)}'
-manifest = classes[0]
+assert len(classes) == 2, f'preparation render expected two RuntimeClasses, got {len(classes)}'
+
+task_run_class = runtime_class_named(preparation, TASK_RUN_CLASS)
 for exact in (
-    'name: djinn-cgroup-writable',
+    f'name: {TASK_RUN_CLASS}',
     'handler: runc-cgroupwritable',
+    'scheduling:',
+    'nodeSelector:',
     'djinn.io/cgroup-writable: "true"',
 ):
-    assert exact in manifest, f'missing RuntimeClass contract: {exact}'
+    assert exact in effective(task_run_class), f'missing task-run RuntimeClass contract: {exact}'
+
+probe_class = runtime_class_named(preparation, PROBE_CLASS)
+probe_spec = effective(probe_class)
+for exact in (f'name: {PROBE_CLASS}', 'handler: runc-cgroupwritable'):
+    assert exact in probe_spec, f'missing probe RuntimeClass contract: {exact}'
+for forbidden in ('scheduling:', 'nodeSelector:', 'djinn.io/cgroup-writable'):
+    assert forbidden not in probe_spec, (
+        f'probe RuntimeClass carries {forbidden!r}; the RuntimeClass admission controller '
+        'would merge it into the probe Pod as a NodeAffinity predicate, which the kubelet '
+        'rejects on the very unlabeled node conformance exists to evaluate — spec.nodeName '
+        'bypasses the scheduler, not the kubelet admission predicate'
+    )
+
 assert 'runtimeClassName:' not in preparation, 'preparation must not assign RuntimeClass to task-run PodSpecs'
-assert len(runtime_classes(activation)) == 1, 'activation must retain the RuntimeClass'
+assert len(runtime_classes(activation)) == 2, 'activation must retain both RuntimeClasses'
+runtime_class_named(activation, TASK_RUN_CLASS)
+runtime_class_named(activation, PROBE_CLASS)
+assert len(runtime_classes(armed)) == 2, 'armed must retain both RuntimeClasses'
+
+# No chart-rendered PodSpec may ever name the probe class. The probe class is
+# reachable only from the node conformance program.
+for label, rendered in (
+    ('chart defaults', base),
+    ('preparation', preparation),
+    ('activation', activation),
+    ('armed', armed),
+):
+    for line in rendered.splitlines():
+        stripped = line.strip()
+        if stripped.startswith('runtimeClassName:'):
+            assert stripped == f'runtimeClassName: {TASK_RUN_CLASS}', (
+                f'{label}: rendered PodSpec names {stripped!r}; task-run Pods must use the '
+                f'node-selected {TASK_RUN_CLASS} class only'
+            )
 
 
 def server_env(rendered, name):
@@ -183,6 +254,9 @@ def validate_release_contract(contract):
     assert security['readOnlyRootFilesystem'] is True
     assert security['seccompProfile'] == {'type': 'RuntimeDefault'}
     assert caps['drop'] == ['ALL']
+    if pod.get('runtimeClassName') == PROBE_CLASS:
+        fail('task-run PodSpec assigned the conformance probe RuntimeClass, '
+             'which carries no eligibility nodeSelector', contract)
     for volume in pod['volumes']:
         if 'hostPath' in volume and volume['hostPath'].get('path') == '/sys/fs/cgroup':
             fail('enabled task-run PodSpec contains a /sys/fs/cgroup hostPath', contract)
@@ -200,7 +274,7 @@ def validate_release_contract(contract):
 
     if generation != 'privilege-free':
         fail('unknown runtime image generation', contract)
-    if not enabled or pod.get('runtimeClassName') != 'djinn-cgroup-writable':
+    if not enabled or pod.get('runtimeClassName') != TASK_RUN_CLASS:
         fail('privilege-free launcher is not atomically paired with task-run RuntimeClass assignment', contract)
     assert sidecar['imageGeneration'] == 'privilege-free'
     assert sidecar['env']['DJINN_LAUNCHER_CGROUP_ROOT'] == '/sys/fs/cgroup'
@@ -226,6 +300,7 @@ validate_release_contract(rollback_contract)
 for fixture, expected in (
     ('privilege-free-without-runtimeclass.json', 'RuntimeClass assignment'),
     ('enabled-task-run-hostpath.json', '/sys/fs/cgroup hostPath'),
+    ('probe-class-task-run.json', 'conformance probe RuntimeClass'),
 ):
     try:
         validate_release_contract(json.loads((fixtures / fixture).read_text(encoding='utf-8')))
@@ -281,8 +356,18 @@ expected = '''[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc-cgro
 assert expected in template.read_text(encoding='utf-8'), 'pinned runtime table changed'
 conformance_text = conformance.read_text(encoding='utf-8')
 assert "RUNTIME_TABLE=" in conformance_text, 'conformance no longer validates live table'
-assert "RUNTIME_CLASS='djinn-cgroup-writable'" in conformance_text
-assert 'runtimeClassName: $RUNTIME_CLASS' in conformance_text
+# The probe must name the unconstrained probe class. Naming the task-run class
+# is the deadlock: its merged nodeSelector becomes a NodeAffinity predicate the
+# kubelet enforces even for a Pod bound by spec.nodeName, so the probe can only
+# run on a node already carrying the marker that only a passing probe earns.
+assert "PROBE_RUNTIME_CLASS='djinn-cgroup-writable-probe'" in conformance_text, \
+    'conformance no longer pins the probe-only RuntimeClass'
+assert 'runtimeClassName: $PROBE_RUNTIME_CLASS' in conformance_text, \
+    'conformance probe manifest no longer uses the probe-only RuntimeClass'
+assert "RUNTIME_CLASS='djinn-cgroup-writable'" not in conformance_text, \
+    'conformance reintroduced the node-selected task-run RuntimeClass'
+# spec.nodeName binding is what makes the probe an observation of ONE node.
+assert 'nodeName: $NODE_NAME' in conformance_text, 'conformance probe is no longer node-bound'
 # This asserts the failure branch of must_deny itself, instead of merely
 # checking for filenames. The fakes below model each named successful write.
 must_deny = re.search(r'must_deny\(\) \{([^\n]+)\}', conformance_text)
@@ -358,7 +443,13 @@ case "\$1" in
     ;;
   apply)
     cat >'$manifest'
-    grep -F 'runtimeClassName: djinn-cgroup-writable' '$manifest' >/dev/null
+    # Exact-match: 'runtimeClassName: djinn-cgroup-writable' is a PREFIX of the
+    # probe class line, so a substring grep cannot tell the two apart.
+    grep -Fx '  runtimeClassName: djinn-cgroup-writable-probe' '$manifest' >/dev/null
+    if grep -Fx '  runtimeClassName: djinn-cgroup-writable' '$manifest' >/dev/null; then
+      printf 'probe used the node-selected task-run RuntimeClass\n' >&2
+      exit 1
+    fi
     grep -F 'nodeName: fixture-node' '$manifest' >/dev/null
     exit 0 ;;
   wait)
