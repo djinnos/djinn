@@ -1,0 +1,301 @@
+# cgroup launcher re-arm runbook
+
+## Background
+
+Proposal d308 replaced the cgroup launcher's self-mount with a
+kubelet-delegated cgroup delivered through `RuntimeClass/djinn-cgroup-writable`
+(handler `runc-cgroupwritable`). Since v0.7.25, arming
+`cgroupLauncher.mode: required` while `cgroupWritable.taskRuns.enabled: false`
+is refused at dispatch. On 2026-07-29 that combination was live in production
+and caused a total production outage: every task-run dispatch was refused
+because the launcher demanded the delegated cgroup but no task-run was
+permitted to receive it.
+
+This runbook re-arms `cgroupLauncher.mode: required` safely, on the single
+production node, without repeating that outage.
+
+`CGROUP_REARM_RUNBOOK: cgroup-launcher-rearm`
+
+## Outage declaration
+
+`CGROUP_REARM_OUTAGE_DECLARATION: systemctl restart k3s bounces the entire single-node production cluster.`
+
+This is a single-node production cluster. There is no second control plane
+and no second node to fail over to. Restarting the `k3s` service stops the
+API server, the scheduler, the kubelet, and every running Pod's supervising
+kubelet-managed process tree on that one node — including all in-flight
+task-run Pods and every platform service Pod (server, coordinator, admission,
+ingress). Treat the restart in Step 1 as a full-cluster outage window, not a
+node-local blip.
+
+## Required dispatch pause and drain
+
+`CGROUP_REARM_DRAIN_REQUIRED: dispatch must be paused and in-flight task-runs drained before systemctl restart k3s`
+
+Because the Step 1 restart bounces the entire cluster (see the outage
+declaration above), dispatch of new task-runs MUST be paused and all
+in-flight task-runs MUST be drained (allowed to finish or be safely
+terminated) before that restart executes. Do not restart `k3s` while
+dispatch is active or while task-run Pods are still running.
+
+```bash
+# Required before Step 1's systemctl restart k3s:
+djinn dispatch pause --reason "cgroup-launcher-rearm: node restart for conformance"
+djinn dispatch pause-status   # confirm paused
+# Wait for in-flight task-run Pods to drain, e.g.:
+kubectl get pods -n djinn-taskruns -o wide --watch
+```
+
+Do not proceed to Step 1's restart until the pause is confirmed and the
+task-run Pod list is empty.
+
+## Step order
+
+The re-arm proceeds through a mandatory preparation upgrade followed by six
+numbered steps, strictly in this order. Do not reorder these steps.
+
+### Preparation: install the RuntimeClass with the launcher still disarmed
+
+`CGROUP_REARM_STEP: 0 (preparation) — install RuntimeClass, launcher disarmed`
+
+The Step 1 conformance probe Pod sets `runtimeClassName: djinn-cgroup-writable`
+on itself. Kubernetes rejects a Pod that references a `RuntimeClass` object
+that does not yet exist. Therefore the `RuntimeClass` MUST be installed
+**before** conformance runs, via a preparation Helm upgrade that leaves the
+launcher disarmed and leaves task-runs off the delegated cgroup path:
+
+```bash
+helm upgrade djinn deploy/helm/djinn \
+  --namespace djinn \
+  --reuse-values \
+  --set cgroupWritable.runtimeClass.enabled=true \
+  --set cgroupWritable.taskRuns.enabled=false \
+  --set cgroupLauncher.mode=disabled
+```
+
+After this preparation upgrade: `RuntimeClass/djinn-cgroup-writable` exists
+in the cluster, but no task-run is scheduled onto it
+(`cgroupWritable.taskRuns.enabled: false`) and the launcher is not demanding
+it (`cgroupLauncher.mode` is not `required`). This is the only state in which
+it is safe to run the Step 1 conformance probe.
+
+```bash
+kubectl get runtimeclass djinn-cgroup-writable
+```
+
+Do not proceed to Step 1 until this command shows the `RuntimeClass` object.
+
+### Step 1: conformance install and node restart
+
+`CGROUP_REARM_STEP: 1 — conformance install + systemctl restart k3s`
+
+Confirm the dispatch pause and drain (above) are complete. Then install the
+conformance probe and restart `k3s` on the node:
+
+```bash
+kubectl apply -f deploy/node/cgroup-writable-conformance-probe.yaml
+systemctl restart k3s
+```
+
+The conformance probe Pod references
+`runtimeClassName: djinn-cgroup-writable`, which now exists because of the
+preparation upgrade above.
+
+After the restart, wait for the probe to complete and inspect its logs for
+the explicit PASS line:
+
+```bash
+kubectl wait --for=condition=Ready pod/cgroup-writable-conformance-probe --timeout=300s
+kubectl logs pod/cgroup-writable-conformance-probe | grep -F 'CONFORMANCE: PASS'
+```
+
+`CGROUP_REARM_CONFORMANCE_PASS_MARKER: CONFORMANCE: PASS`
+
+Do not proceed past this step without that literal PASS line. If it is
+absent, or a FAIL line appears instead, stop here and follow the rollback
+branch below — do not label the node and do not continue arming.
+
+### Step 2: label the node
+
+`CGROUP_REARM_STEP: 2 — label node djinn.io/cgroup-writable=true`
+
+Only after the conformance PASS line from Step 1:
+
+```bash
+kubectl label node <node-name> djinn.io/cgroup-writable=true --overwrite
+```
+
+Do not apply this label before conformance has printed PASS. The label is
+the platform's signal that the node's containerd template genuinely serves
+the delegated cgroup handler; applying it earlier is a false attestation.
+
+### Step 3: enable the RuntimeClass toggle for the record
+
+`CGROUP_REARM_STEP: 3 — cgroupWritable.runtimeClass.enabled: true`
+
+```bash
+helm upgrade djinn deploy/helm/djinn \
+  --namespace djinn \
+  --reuse-values \
+  --set cgroupWritable.runtimeClass.enabled=true
+```
+
+This was already set to `true` by the preparation upgrade and remains `true`
+here; this upgrade is idempotent and exists to make the value an explicit,
+reviewed part of the release history at the point of re-arm, not only of the
+preparation step.
+
+### Step 4: enable task-runs on the delegated cgroup
+
+`CGROUP_REARM_STEP: 4 — cgroupWritable.taskRuns.enabled: true`
+
+```bash
+helm upgrade djinn deploy/helm/djinn \
+  --namespace djinn \
+  --reuse-values \
+  --set cgroupWritable.taskRuns.enabled=true
+```
+
+Task-run Pods scheduled after this upgrade receive
+`runtimeClassName: djinn-cgroup-writable`. The launcher is still not
+`required` yet, so a task-run that (for any reason) does not land on the
+delegated cgroup is not refused at dispatch.
+
+### Step 5: arm the launcher
+
+`CGROUP_REARM_STEP: 5 — cgroupLauncher.mode: required`
+
+```bash
+helm upgrade djinn deploy/helm/djinn \
+  --namespace djinn \
+  --reuse-values \
+  --set cgroupLauncher.mode=required
+```
+
+This is the step that reproduced the 2026-07-29 outage when it was applied
+while `cgroupWritable.taskRuns.enabled` was `false`. Do not run this step
+out of order relative to Step 4.
+
+Resume dispatch only after Step 6 verification below passes:
+
+```bash
+djinn dispatch resume
+```
+
+### Step 6: verification
+
+`CGROUP_REARM_STEP: 6 — verification`
+
+`CGROUP_REARM_VERIFICATION_REQUIRES_KERNEL_EVIDENCE: a status field or cache-hit flag is not acceptable evidence`
+
+Verification MUST use direct kernel evidence from a live, Running task-run
+Pod, not a status field, not a Helm/Kubernetes condition, and not a cached
+"warmed" or "enabled" flag. Reading `cat cpu.max` by itself is also NOT
+acceptable evidence, because it only shows the configured ceiling, not that
+the kernel is enforcing and accounting against it. Required evidence:
+
+1. A Running task-run Pod whose `spec.runtimeClassName` is
+   `djinn-cgroup-writable`:
+
+   ```bash
+   kubectl get pod <taskrun-pod> -n djinn-taskruns -o jsonpath='{.status.phase} {.spec.runtimeClassName}{"\n"}'
+   # expect: Running djinn-cgroup-writable
+   ```
+
+2. At birth, the launcher's cgroup leaf reports `cpu.max` of
+   `25000 100000`, and `cpu.stat`'s `nr_throttled` is accumulating (not
+   frozen) under load:
+
+   ```bash
+   cat /sys/fs/cgroup/<launcher-leaf>/cpu.max
+   # expect: 25000 100000
+   cat /sys/fs/cgroup/<launcher-leaf>/cpu.stat
+   # record nr_periods, nr_throttled, throttled_usec
+   ```
+
+3. After the fenced lift, `cpu.max` reads exactly `400000 100000`:
+
+   ```bash
+   cat /sys/fs/cgroup/<launcher-leaf>/cpu.max
+   # expect: 400000 100000
+   ```
+
+4. Over a wall-clock window of at least 100 further `nr_periods` after the
+   lift, `cpu.stat`'s `nr_throttled` and `throttled_usec` are UNCHANGED from
+   their values immediately after the lift — i.e. read `cpu.stat` at the
+   lift, wait, and read it again; `nr_periods` must have advanced by at
+   least 100 while `nr_throttled` and `throttled_usec` stay flat:
+
+   ```bash
+   cat /sys/fs/cgroup/<launcher-leaf>/cpu.stat > /tmp/cpu-stat-at-lift
+   sleep <window covering >=100 more periods>
+   cat /sys/fs/cgroup/<launcher-leaf>/cpu.stat > /tmp/cpu-stat-after-window
+   diff /tmp/cpu-stat-at-lift /tmp/cpu-stat-after-window
+   # nr_periods must differ by >= 100; nr_throttled and throttled_usec must be identical
+   ```
+
+`cat cpu.max` alone never satisfies this step. Measuring `cpu.stat` across a
+wall-clock window is the only acceptable evidence that the fenced lift is
+real and that the workload is no longer being throttled.
+
+Only after all four evidence items are collected and attached to the change
+record may dispatch be resumed (see Step 5) and the re-arm be declared
+complete.
+
+## Rollback / recovery branch
+
+`CGROUP_REARM_ROLLBACK: restore the prior containerd template byte-for-byte and restart k3s again`
+
+If conformance fails (Step 1) — the PASS line is absent, or a FAIL line
+appears — after the `systemctl restart k3s` has already occurred, the node's
+containerd configuration template has already been overwritten and the
+cluster is already in the outage window from that restart. Do not claim the
+cluster "returns to the pre-existing config" by only removing the
+`djinn.io/cgroup-writable` label: the label was never applied at this point
+(Step 2 does not run before a PASS), and the containerd template on disk is
+still the new one. A merely-unlabeled node with the new containerd template
+still in place is not a recovered node.
+
+Recovery requires an explicit restore of the prior containerd template, not
+just an unlabel:
+
+```bash
+# 1. Restore the prior containerd config template byte-for-byte from the
+#    retained pre-change backup taken before Step 1:
+cp /var/lib/rancher/k3s/agent/etc/containerd/config.toml.tmpl.pre-rearm-backup \
+   /var/lib/rancher/k3s/agent/etc/containerd/config.toml.tmpl
+
+# 2. Confirm the restored file is byte-identical to the retained backup:
+cmp /var/lib/rancher/k3s/agent/etc/containerd/config.toml.tmpl.pre-rearm-backup \
+    /var/lib/rancher/k3s/agent/etc/containerd/config.toml.tmpl
+
+# 3. Restart k3s again to load the restored template. This is a second
+#    full-cluster bounce; dispatch must remain paused across it.
+systemctl restart k3s
+
+# 4. Do not label the node djinn.io/cgroup-writable=true. If it was
+#    already applied in a prior partial attempt, remove it:
+kubectl label node <node-name> djinn.io/cgroup-writable- || true
+```
+
+Only after `cmp` in step 2 confirms a byte-for-byte match, and the second
+`systemctl restart k3s` has completed, is the node's containerd
+configuration actually restored. Keep dispatch paused until this restore is
+confirmed; do not resume dispatch on a node in an unknown containerd state.
+Do not retry Step 1 conformance until the restore is confirmed complete.
+
+## Summary of ordering
+
+1. Dispatch paused and drained (required before any restart).
+2. Preparation Helm upgrade: `cgroupWritable.runtimeClass.enabled=true`,
+   `cgroupWritable.taskRuns.enabled=false`, launcher disarmed.
+3. Step 1: conformance install, `systemctl restart k3s`, PASS line required.
+4. Step 2: label the node — only after PASS.
+5. Step 3: `cgroupWritable.runtimeClass.enabled: true` (confirmed).
+6. Step 4: `cgroupWritable.taskRuns.enabled: true`.
+7. Step 5: `cgroupLauncher.mode: required`.
+8. Step 6: verification by kernel evidence (`cpu.max` at birth, at lift, and
+   `cpu.stat` invariance across a wall-clock window), then dispatch resume.
+
+If Step 1 fails: restore the prior containerd template byte-for-byte (with
+`cmp` confirmation) and restart `k3s` again before any retry.
