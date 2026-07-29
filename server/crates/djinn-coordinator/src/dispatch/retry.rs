@@ -619,6 +619,68 @@ impl CoordinatorActor {
             .await
     }
 
+    /// Is the model this task last ran on currently auto-disabled by its own
+    /// health breaker, for the task creator's scope?
+    ///
+    /// The `(scope, model)` breaker trips only after a run of consecutive
+    /// failures on THAT model across every task using it — which makes a tripped
+    /// breaker positive evidence that the failures belong to the model rather
+    /// than to any one task's transcript. Trigger D exists for the opposite
+    /// situation (a task whose own request the provider keeps rejecting), so it
+    /// must stand down while the breaker is blaming the model.
+    ///
+    /// Uses the two pieces of state the coordinator already owns: the
+    /// `HealthTracker` it shares with the slot runners (the same handle
+    /// `is_throttle_cooling` / `is_available` are consulted through on the
+    /// dispatch path) and the task's most recent session for this role, whose
+    /// `model_id` names the model that just failed. Fails OPEN (returns `false`,
+    /// i.e. escalation proceeds) when there is no session yet or the lookup
+    /// errors — this is a backstop over the call-site classification, never the
+    /// primary gate.
+    async fn provider_breaker_blames_model(
+        &self,
+        task: &djinn_core::models::Task,
+        role: &'static str,
+    ) -> bool {
+        let session_repo = djinn_db::SessionRepository::new(
+            self.db.clone(),
+            crate::events::event_bus_for(&self.events_tx),
+        );
+        let model_id = match session_repo.latest_model_for_task_role(&task.id, role).await {
+            Ok(Some(model)) if !model.trim().is_empty() => model,
+            Ok(_) => return false,
+            Err(e) => {
+                tracing::warn!(
+                    task_id = %task.short_id,
+                    role,
+                    error = %e,
+                    "CoordinatorActor: provider-failure escalation could not resolve the last \
+                     model for the task; proceeding without the breaker guard"
+                );
+                return false;
+            }
+        };
+        // Same scope the dispatch path keys the breaker on: the task creator
+        // (`tasks.created_by_user_id`), passed as `Some(..)` exactly as
+        // `dispatch_ready_tasks` does, so we read the very bucket the failing
+        // dispatch wrote to.
+        let scope = Some(task.created_by_user_id.as_str());
+        let health = self.health.model_health(scope, &model_id);
+        if health.auto_disabled {
+            tracing::info!(
+                task_id = %task.short_id,
+                role,
+                model_id = %model_id,
+                consecutive_failures = health.consecutive_failures,
+                cooldown_seconds_remaining = health.cooldown_seconds_remaining,
+                "CoordinatorActor: skipping provider-failure planner escalation — the model's \
+                 health breaker is auto-disabled for this scope, so the fault is the model's, \
+                 not the task's"
+            );
+        }
+        health.auto_disabled
+    }
+
     /// Trigger D: consecutive provider-error FAILED sessions without progress.
     ///
     /// A session that dies on a terminal provider/session error — the
@@ -639,13 +701,28 @@ impl CoordinatorActor {
     /// when an intervention was routed (the caller skips the ordinary backoff
     /// ladder for this reappearance); `false` while still below threshold.
     ///
-    /// Callers gate this on a genuine, non-throttle typed provider failure — a
-    /// transient throttle must decay on the cooldown ladder, not escalate.
+    /// Callers gate this on a genuine, TASK-ATTRIBUTABLE typed provider failure
+    /// — neither a throttle nor a transient provider fault (5xx / transport
+    /// death), both of which must decay on the cooldown ladder rather than
+    /// escalate (see [`crate::types::stored_streak_after_failure`]).
+    ///
+    /// Defense in depth: independently of that call-site gate, this refuses to
+    /// escalate while the model the task last ran on is auto-disabled by its own
+    /// health breaker for the task creator's scope. A tripped model-wide breaker
+    /// is direct evidence the fault belongs to the MODEL, not the task — during
+    /// the `2gq7` incident `model_health` already showed
+    /// `openai/gpt-5.6-sol` auto-disabled with 7 consecutive failures while the
+    /// coordinator was minting a planner-remediation task blaming the task's
+    /// transcript. This backstop holds even if a future classification regresses
+    /// or a version-skewed worker reports the coarser old class.
     pub(crate) async fn maybe_escalate_provider_failure_streak(
         &mut self,
         task: &djinn_core::models::Task,
         role: &'static str,
     ) -> bool {
+        if self.provider_breaker_blames_model(task, role).await {
+            return false;
+        }
         let strike_count = {
             let streak = self
                 .provider_failure_streak
@@ -679,11 +756,15 @@ impl CoordinatorActor {
         );
         let intervention_reason = format!(
             "Task failed on {strike_count} consecutive sessions with a terminal \
-             provider/session error and no durable status progress between them (status \
-             `{}`). The redispatched worker reproduces the same failure each time (e.g. a \
-             poisoned resume transcript that the provider rejects, or an unusable \
-             credential), so it is being handed to the Planner to decompose, rescope, or \
-             close rather than redispatched again.",
+             REQUEST-attributable provider error (the provider rejected this task's request \
+             body, or returned output that could not be parsed) and no durable status \
+             progress between them (status `{}`). Transient provider faults — 5xx / \
+             overloaded backends, transport deaths — and throttles are excluded from this \
+             streak and decay on the redispatch cooldown ladder instead, so the failure \
+             above is one the redispatched worker reproduces from the task's own state (for \
+             example a poisoned resume transcript the provider keeps rejecting). It is being \
+             handed to the Planner to decompose, rescope, or close rather than redispatched \
+             again.",
             task.status
         );
 
@@ -1438,13 +1519,31 @@ impl CoordinatorActor {
             // Below the bound, redispatch with forced model rotation instead of
             // consuming the final strike (dispatch-time exclusion in
             // task_dispatch.rs drops the models that just failed).
+            //
+            // Cumulative decline bound (task 6tlg): `non_attempt_models` excludes
+            // infra outcomes (a session that exits `failed` is booked `crashed`)
+            // AND is deduplicated by model, so a task whose every session dies the
+            // same infrastructure death holds this counter at a fixed value below
+            // the threshold indefinitely — 6tlg recorded ten consecutive declines
+            // reading `non_attempt_count: 1` over nine hours. The gy53 hold-cycle
+            // ceiling above cannot catch that: it reads the arbitration ledger's
+            // prospective cycle, which a guard that declines BEFORE creating an
+            // arbitration row never advances. Bound the decline on the durable
+            // markers this rung itself writes, scoped to the current intervention
+            // epoch so a genuine Planner intervention re-arms the budget.
+            let prior_declines = self
+                .no_attempted_remediation_decline_count(&task.id, task.intervention_count)
+                .await;
             if !final_disposition
-                && !history.any_submitted
-                && history.non_attempt_models.len() < NON_ATTEMPT_PARK_THRESHOLD
+                && should_decline_no_attempted_remediation_park(
+                    history.any_submitted,
+                    history.non_attempt_models.len(),
+                    prior_declines,
+                )
             {
                 self.record_park_redispatch_marker(
                     task,
-                    "no_attempted_remediation",
+                    NO_ATTEMPTED_REMEDIATION_KIND,
                     None,
                     history.non_attempt_models.len(),
                 )
@@ -1453,6 +1552,8 @@ impl CoordinatorActor {
                     task_id = %task.short_id,
                     intervention_count = task.intervention_count,
                     non_attempt_models = ?history.non_attempt_models,
+                    prior_declines,
+                    decline_bound = MAX_PARK_REDISPATCH_DECLINES,
                     "uv3p: human-park rung declined to park — no post-intervention session reached submit_work yet; redispatching with forced model rotation instead of parking"
                 );
                 return false;
@@ -2755,6 +2856,35 @@ impl CoordinatorActor {
     /// Has the hold-cycle ceiling already been recorded for this task?
     /// Fail-open (returns `false`) on a query error: a duplicate audit entry is
     /// far cheaper than losing the record entirely.
+    /// How many `no_attempted_remediation` park declines this task already
+    /// recorded in the CURRENT intervention epoch (task 6tlg).
+    ///
+    /// Reads the rung's own durable [`PARK_REDISPATCH_MARKER`] rows, so the
+    /// count advances exactly once per trip around the loop it bounds — unlike
+    /// the model-deduplicated, infra-excluding `non_attempt_models` the decline
+    /// itself measures, which can be pinned below its threshold forever.
+    ///
+    /// A read error returns 0, which fails OPEN toward the pre-existing decline
+    /// behavior: a DB blip must never park a task on evidence nobody read. The
+    /// `limit` sits an order of magnitude above the bound so a task cannot
+    /// escape it by burying its declines under newer markers of another kind.
+    async fn no_attempted_remediation_decline_count(
+        &self,
+        task_id: &str,
+        intervention_count: i64,
+    ) -> usize {
+        self.task_repo()
+            .query_activity(ActivityQuery {
+                task_id: Some(task_id.to_owned()),
+                event_type: Some(PARK_REDISPATCH_MARKER.to_string()),
+                limit: 50,
+                ..ActivityQuery::default()
+            })
+            .await
+            .map(|entries| no_attempted_remediation_declines(&entries, intervention_count))
+            .unwrap_or(0)
+    }
+
     async fn hold_cycle_ceiling_already_recorded(&self, task_id: &str) -> bool {
         self.task_repo()
             .query_activity(ActivityQuery {

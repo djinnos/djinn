@@ -26,6 +26,19 @@ pub(super) struct SlotPool {
     slot_models: HashMap<usize, String>,
     task_projects: HashMap<String, String>,
     task_started: HashMap<String, Instant>,
+    /// Per-task handle on the host `ActivityTracker` entry the pool SEEDS at
+    /// slot reservation, paired with the seeded timestamp.
+    ///
+    /// The seed is bookkeeping, not liveness: it is written before
+    /// `runtime.prepare` creates the task-run Job, so it exists while the pod
+    /// is still `Pending`. Retaining the `(handle, seed_value)` pair lets
+    /// `session_for_task` / `get_status` report
+    /// [`RunningTaskInfo::worker_activity_observed`] exactly — the atomic's
+    /// value differs from the seed if and only if a real `touch_activity`
+    /// (in-process reply loop, or the worker pod's bridged RPC) has landed.
+    /// Comparing timestamps this way is exact; comparing elapsed seconds would
+    /// race the clock's one-second granularity.
+    task_activity_seed: HashMap<String, (std::sync::Arc<std::sync::atomic::AtomicU64>, u64)>,
     draining_slots: HashSet<usize>,
     retired_slots: HashSet<usize>,
     /// Task IDs whose settlement and mapping release are deferred because the
@@ -73,6 +86,7 @@ impl SlotPool {
             slot_models: HashMap::new(),
             task_projects: HashMap::new(),
             task_started: HashMap::new(),
+            task_activity_seed: HashMap::new(),
             draining_slots: HashSet::new(),
             retired_slots: HashSet::new(),
             pending_teardown_tasks: HashSet::new(),
@@ -239,6 +253,30 @@ impl SlotPool {
             }
         }
     }
+    /// Whether a real worker liveness signal has landed for `task_id` since the
+    /// pool seeded the tracker at slot reservation.
+    ///
+    /// `true` when the seeded atomic has moved (a `touch_activity` landed), or
+    /// when a tracker entry exists that the pool never seeded (the in-process
+    /// reply-loop path registers its own). `false` while the entry is still the
+    /// untouched reservation seed — the window in which the pod may be
+    /// `Pending` and `idle_seconds` is measuring scheduling delay.
+    fn worker_activity_observed(&self, task_id: &str) -> bool {
+        match self.task_activity_seed.get(task_id) {
+            Some((seed_handle, seeded_at)) => match self.ctx.activity_handle(task_id) {
+                // The in-process reply loop calls `register_activity`, which
+                // REPLACES the tracker entry with a fresh atomic. A different
+                // handle is therefore itself proof the run reached the reply
+                // loop.
+                Some(live) if !std::sync::Arc::ptr_eq(&live, seed_handle) => true,
+                // Same entry: a `touch_activity` moved it off the seeded value.
+                Some(live) => live.load(std::sync::atomic::Ordering::Relaxed) != *seeded_at,
+                None => false,
+            },
+            // No seed retained: any tracker entry is a genuine registration.
+            None => self.ctx.idle_seconds(task_id).is_some(),
+        }
+    }
     fn session_for_task(&self, task_id: &str) -> Option<super::types::RunningTaskInfo> {
         let slot_id = self.task_to_slot.get(task_id)?;
         let model_id = self.slot_models.get(slot_id)?.clone();
@@ -276,6 +314,7 @@ impl SlotPool {
             duration_seconds,
             idle_seconds,
             activity_tracked: tracked_idle.is_some(),
+            worker_activity_observed: self.worker_activity_observed(task_id),
             project_id,
             token_count,
             turn_count,
@@ -402,7 +441,18 @@ impl SlotPool {
                     agent_type: String::new(),
                 },
             );
-            self.ctx.register_activity(&task_owned);
+            // Seed the host `ActivityTracker` so a freshly-reserved slot is not
+            // misread as a hung first call. This is bookkeeping, NOT liveness:
+            // it runs before `runtime.prepare` creates the task-run Job, so the
+            // pod behind it may sit `Pending` for minutes (unschedulable
+            // CPU/memory request, DiskPressure taint, image pull). Retain the
+            // seeded handle+value so `worker_activity_observed` can tell that
+            // scheduling window apart from a genuinely idle agent — see
+            // `RunningTaskInfo::worker_activity_observed`.
+            let seed_handle = self.ctx.register_activity(&task_owned);
+            let seeded_at = seed_handle.load(std::sync::atomic::Ordering::Relaxed);
+            self.task_activity_seed
+                .insert(task_owned.clone(), (seed_handle, seeded_at));
             return Ok(());
         }
     }
@@ -455,6 +505,7 @@ impl SlotPool {
                     self.task_to_slot.remove(&task_id);
                     self.task_started.remove(&task_id);
                     self.task_projects.remove(&task_id);
+                    self.task_activity_seed.remove(&task_id);
                     self.ctx.deregister_activity(&task_id);
                 }
                 if self.draining_slots.remove(&slot_id) {
@@ -574,6 +625,7 @@ impl SlotPool {
         self.task_to_slot.remove(task_id);
         self.task_started.remove(task_id);
         self.task_projects.remove(task_id);
+        self.task_activity_seed.remove(task_id);
         self.ctx.deregister_activity(task_id);
         if self.draining_slots.remove(&slot_id) {
             self.retired_slots.insert(slot_id);
@@ -848,6 +900,7 @@ impl SlotPool {
                     duration_seconds,
                     idle_seconds,
                     activity_tracked: tracked_idle.is_some(),
+                    worker_activity_observed: self.worker_activity_observed(task_id),
                     project_id,
                     token_count: 0,
                     turn_count: 0,

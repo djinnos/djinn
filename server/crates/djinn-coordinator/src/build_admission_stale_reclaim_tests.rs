@@ -1,3 +1,7 @@
+// djinn:allow-oversize — 56886 bytes against the 51200 guard (lines are still
+// under). This is a flat test module whose fixtures are shared by every case,
+// so splitting it means extracting those helpers first rather than moving a
+// `mod tests` block; worth doing, but not as a drive-by in an unrelated fix.
 //! Regression coverage for stale durable occupancy whose Kubernetes objects
 //! are gone (production symptom: 318 occupying `admission_journal` rows against
 //! a namespace holding zero Jobs, with `djinn_build_slots_in_use` reading 318
@@ -733,7 +737,9 @@ async fn a_settled_create_unknown_row_is_reclaimed_by_a_later_pass_and_unwedges_
             denied,
             BuildAdmissionDecision::Denied {
                 occupancy: None,
-                cause: DenialCause::ControllerNotAdmitting,
+                cause: DenialCause::ControllerNotAdmitting {
+                    readiness: BuildAdmissionReadiness::CreateUnknownHealth
+                },
                 ..
             }
         ),
@@ -1296,5 +1302,166 @@ async fn adopting_this_process_own_create_cannot_clear_a_predecessors_gate() {
         controller.readiness(),
         BuildAdmissionReadiness::CreateUnknownHealth,
         "the predecessor's unresolved create still occupies and still gates"
+    );
+}
+
+/// The whole hazard, in one fixture: a standby pod's reconciliation pass must
+/// not be able to retire the admission row of a task-run that is running on the
+/// leader.
+///
+/// `AppState::initialize` runs on EVERY pod, standbys included, before
+/// leadership is contested, and it used to run the full mutating reconciler
+/// there. The chart's default topology (`buildAdmission.mode: observe` with a
+/// surging `RollingUpdate`) puts two server pods side by side on every deploy,
+/// so that pass genuinely ran against a live leader's journal.
+///
+/// Nothing else in `is_reclaimable` stops it. For a `task_observation` row the
+/// LIST and GET clauses are structurally vacuous — the running Job is named
+/// `djinn-taskrun-{task_run_id}` while the row records
+/// `object_name = task-run-{task_id}-{reopen}`, so the listing never contains
+/// the row's name and the direct GET answers `Absent` while the task-run is
+/// running happily. The 300s settle window is exceeded by any pending pod or
+/// slow image pull. That leaves the creator-epoch fence as the only protection
+/// the row has — and a standby clears it trivially, because the leader's epoch
+/// is not the standby's.
+///
+/// The second half is the load-bearing part: it runs the SAME pass with the
+/// mutating scope against the SAME fixture and watches the row die. Without it
+/// the observe assertions above would be indistinguishable from a fixture in
+/// which nothing was ever at risk.
+#[tokio::test]
+async fn a_standby_pass_leaves_a_live_task_runs_row_alone_where_a_mutating_pass_would_retire_it() {
+    const LEADER_EPOCH: &str = "epoch-of-the-pod-holding-the-advisory-lock";
+    const STANDBY_EPOCH: &str = "epoch-of-the-surged-standby-pod";
+    const TASK_ID: &str = "019f7000-0000-7000-8000-000000000001";
+    const TASK_RUN_ID: &str = "019f7000-0000-7000-8000-0000000000ff";
+
+    // The leader dispatches a task-run: the slot pool accepts the create and
+    // the journal records `CreateUnknown` until the ("session","started")
+    // callback supplies a UID. This is the ordinary intermediate state of a
+    // healthy dispatch, not a fault.
+    let db = Database::open_in_memory().unwrap();
+    db.ensure_initialized().await.unwrap();
+    let journal = Arc::new(AdmissionJournalRepository::new(db.clone()));
+    let key = AdmissionJournalKey {
+        domain: AdmissionDomain::TaskObservation,
+        work_id: TASK_ID.into(),
+        generation: 0,
+    };
+    let object_name = format!("task-run-{TASK_ID}-0");
+    journal
+        .reserve(&ReserveAdmissionInput {
+            key: key.clone(),
+            workload_kind: AdmissionWorkloadKind::Task,
+            creator_server_epoch: LEADER_EPOCH.into(),
+            object_name: object_name.clone(),
+        })
+        .await
+        .unwrap();
+    journal
+        .mark_create_started(&CreateStartedInput {
+            key: key.clone(),
+            creator_server_epoch: LEADER_EPOCH.into(),
+            object_name: object_name.clone(),
+        })
+        .await
+        .unwrap();
+    journal.mark_create_unknown(&key).await.unwrap();
+
+    // The work is alive: the namespace holds the task-run's Job, running. Note
+    // the name it actually carries, and that it is NOT the row's `object_name`
+    // — that mismatch is why the absence proof is vacuous here.
+    let running_job = WorkloadRecord {
+        kind: WorkloadObjectKind::Job,
+        name: format!("djinn-taskrun-{TASK_RUN_ID}"),
+        uid: Some(format!("uid-{TASK_RUN_ID}")),
+        labels: [("djinn.app/task-run-id".to_string(), TASK_RUN_ID.to_string())]
+            .into_iter()
+            .collect(),
+        terminal: false,
+        images: vec!["djinn:test".into()],
+        commands: vec![],
+    };
+
+    // The standby boots under its own epoch and runs the startup pass. Zero
+    // settle window and the full production evidence: every fence except the
+    // creator epoch is already open.
+    let standby = Arc::clone(
+        &attach_capacity(
+            &db,
+            BuildAdmissionController::new(
+                Arc::clone(&journal),
+                BuildAdmissionMode::Enforce,
+                3,
+                STANDBY_EPOCH,
+            ),
+            3,
+        )
+        .await
+        .controller,
+    );
+    let observed = BuildAdmissionReconciler::with_settle_window(
+        Arc::clone(&standby),
+        Arc::new(NamespaceInventory::holding(vec![running_job.clone()])),
+        Duration::ZERO,
+    )
+    .observe()
+    .await;
+
+    assert!(
+        observed.blockers.is_empty(),
+        "the standby's evidence is complete: {:?}",
+        observed.blockers
+    );
+    assert_eq!(
+        (observed.reclaimed, observed.released, observed.adopted),
+        (0, 0, 0),
+        "a pod that has not confirmed the topology gate must write nothing"
+    );
+    let rows = journal.list_active_rows().await.unwrap();
+    assert_eq!(
+        rows.len(),
+        1,
+        "the standby must not have inserted an adoption row either: {rows:?}"
+    );
+    assert_eq!(rows[0].state, AdmissionState::CreateUnknown);
+    assert_eq!(
+        rows[0].creator_server_epoch, LEADER_EPOCH,
+        "ownership of a live row stays with the process that created it"
+    );
+
+    // The observe pass is not a no-op: it still re-derived this process's own
+    // gates from the journal, and it is still fail-CLOSED — the leader's
+    // unresolved create gates the standby exactly as a predecessor's would.
+    standby.mark_inventory_ready();
+    standby.mark_topology_ready();
+    assert_eq!(
+        standby.readiness(),
+        BuildAdmissionReadiness::CreateUnknownHealth,
+        "the read-only tail seed must still arm the startup gates"
+    );
+
+    // Same fixture, same evidence, mutating scope: the row dies. This is what
+    // the standby used to do, and it is fail-OPEN — the task-run is still
+    // running while its durable occupancy has been handed back.
+    let mutated = BuildAdmissionReconciler::with_settle_window(
+        Arc::clone(&standby),
+        Arc::new(NamespaceInventory::holding(vec![running_job])),
+        Duration::ZERO,
+    )
+    .reconcile()
+    .await;
+    assert_eq!(
+        mutated.reclaimed, 1,
+        "the fixture must be one in which a mutating pass really does retire \
+         the live task-run's row, or the assertions above prove nothing"
+    );
+    assert_eq!(
+        journal
+            .generation_state(AdmissionDomain::TaskObservation, TASK_ID, 0)
+            .await
+            .unwrap(),
+        Some(AdmissionState::Terminal),
+        "a mutating pass retires a row whose work is still running"
     );
 }

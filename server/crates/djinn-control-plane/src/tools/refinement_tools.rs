@@ -46,6 +46,64 @@ fn err_refinement_status(error: impl Into<String>) -> ProposalRefinementStatusRe
     }
 }
 
+/// A rejected admission, rendered for a human but still machine-triageable.
+///
+/// `message` is what reaches an error toast, so it says what happened and what
+/// to do next. `code` keeps the stable machine-readable classification as a
+/// SEPARATE field — before this existed, the raw Rust variant name
+/// (`"AlreadyActive"`) was the entire user-facing string.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdmissionRejection {
+    pub code: &'static str,
+    pub message: String,
+}
+
+impl std::fmt::Display for AdmissionRejection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+/// Render every [`RefinementAdmissionError`] variant as an actionable sentence.
+pub fn admission_rejection(error: &RefinementAdmissionError) -> AdmissionRejection {
+    match error {
+        RefinementAdmissionError::AlreadyActive { .. } => AdmissionRejection {
+            code: "already_active",
+            message: "A tribunal round is already running for this proposal. \
+                      Wait for it to finish (or stop it) before starting another."
+                .to_owned(),
+        },
+        RefinementAdmissionError::GenerationConflict { .. } => AdmissionRejection {
+            code: "generation_conflict",
+            message: "This proposal's refinement run was replaced while the request was \
+                      in flight. Reload the proposal and try again."
+                .to_owned(),
+        },
+        RefinementAdmissionError::AdmissionConflict => AdmissionRejection {
+            code: "admission_conflict",
+            message: "Another refinement request for this proposal committed at the same \
+                      moment. Reload the proposal and try again."
+                .to_owned(),
+        },
+        RefinementAdmissionError::Database(_) => AdmissionRejection {
+            code: "persistence",
+            message: "Could not reach the database to record the refinement request. \
+                      Try again; if it keeps failing the server needs attention."
+                .to_owned(),
+        },
+        RefinementAdmissionError::ProposalNotFound { proposal_id } => AdmissionRejection {
+            code: "proposal_not_found",
+            message: format!(
+                "Proposal {proposal_id} no longer exists, so refinement cannot be admitted."
+            ),
+        },
+        RefinementAdmissionError::InvalidRequest(detail) => AdmissionRejection {
+            code: "invalid_request",
+            message: format!("The refinement request was rejected as invalid: {detail}."),
+        },
+    }
+}
+
 /// The sole control-plane admission path. The repository serializes liveness,
 /// stale reaping, generation replacement, and the first durable dispatch intent;
 /// coordinator delivery is only a post-commit hint.
@@ -55,7 +113,7 @@ pub(crate) async fn admit_refinement_run(
     proposal_id: &str,
     source: RefinementAdmissionSource,
     explicit_owner_user_id: Option<&str>,
-) -> Result<bool, String> {
+) -> Result<bool, AdmissionRejection> {
     // Every admission source — explicit start, demanded round, and
     // committed-revision resume alike — must leave the run attributed.
     // `proposals.refinement_owner_user_id` is the ONLY attribution
@@ -75,7 +133,7 @@ pub(crate) async fn admit_refinement_run(
         None => repo
             .get(proposal_id)
             .await
-            .map_err(|_| "Persistence".to_owned())?
+            .map_err(|error| admission_rejection(&RefinementAdmissionError::Database(error)))?
             .and_then(|proposal| {
                 proposal
                     .refinement_owner_user_id
@@ -101,13 +159,15 @@ pub(crate) async fn admit_refinement_run(
             heartbeat_grace_millis: 60_000,
         })
         .await
-        .map_err(|error| match error {
-            RefinementAdmissionError::AlreadyActive { .. } => "AlreadyActive".to_owned(),
-            RefinementAdmissionError::AdmissionConflict
-            | RefinementAdmissionError::GenerationConflict { .. } => "AdmissionConflict".to_owned(),
-            RefinementAdmissionError::Database(_) => "Persistence".to_owned(),
-            RefinementAdmissionError::InvalidRequest(_)
-            | RefinementAdmissionError::ProposalNotFound { .. } => "InvalidState".to_owned(),
+        .map_err(|error| {
+            let rejection = admission_rejection(&error);
+            tracing::info!(
+                proposal_id,
+                code = rejection.code,
+                %error,
+                "refinement admission rejected"
+            );
+            rejection
         })?;
     let run_id = match outcome {
         RefinementAdmissionOutcome::Admitted { run_id, .. }
@@ -119,7 +179,7 @@ pub(crate) async fn admit_refinement_run(
     if let Some(attributed_user) = attributed_user.as_deref() {
         repo.start_refinement_with_owner(proposal_id, Some(attributed_user))
             .await
-            .map_err(|_| "Persistence".to_owned())?;
+            .map_err(|error| admission_rejection(&RefinementAdmissionError::Database(error)))?;
     }
     Ok(match server.state.coordinator().await {
         Some(coordinator) => coordinator.wake_refinement_run(run_id).await.is_err(),
@@ -284,7 +344,7 @@ impl DjinnMcpServer {
         .await
         {
             Ok(pending) => pending,
-            Err(error) => return Json(err_refinement_start(error)),
+            Err(rejection) => return Json(err_refinement_start(rejection.message)),
         };
 
         let refinement = ProposalRefinementStatusModel {
@@ -447,15 +507,42 @@ impl DjinnMcpServer {
         .await
         {
             Ok(pending) => pending,
-            Err(error) => {
+            Err(rejection) => {
                 return Json(DemandRoundResponse {
                     proposal_id: Some(proposal.id),
                     accepted: false,
                     refinement: Some(current_refinement),
-                    error: Some(error),
+                    error: Some(rejection.message),
                 });
             }
         };
+
+        // Carry the human's note into the round that was just admitted.
+        // `ProposalRepository::latest_current_revision_reviewer_feedback` — the
+        // only path by which a tribunal role sees reviewer feedback — reads it
+        // from a current-revision row tagged `human_demand_round`. Nothing ever
+        // wrote that row, so every demanded round ran without the feedback that
+        // motivated it. The row is deliberately NOT a `refinement_start`: that
+        // kind doubles as the current-run boundary for debate-trail scoping.
+        if let Some(reason) = p.reason.as_deref().map(str::trim).filter(|s| !s.is_empty())
+            && let Err(error) = repo
+                .record_refinement_lifecycle(
+                    &proposal.id,
+                    "refinement_demand_round",
+                    Some(&serde_json::json!({
+                        "source": "human_demand_round",
+                        "reviewer_feedback": reason,
+                        "reason": reason,
+                    })),
+                )
+                .await
+        {
+            tracing::warn!(
+                proposal_id = %proposal.id,
+                %error,
+                "failed to record demanded-round reviewer feedback; the round runs without it"
+            );
+        }
 
         let refinement = ProposalRefinementStatusModel {
             active: true,

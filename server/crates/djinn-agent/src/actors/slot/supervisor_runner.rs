@@ -162,6 +162,7 @@ async fn apply_handshake_timeout_failover(
         &task.id,
         djinn_provider::catalog::health::TaskFailureSignal {
             throttle: true,
+            transient: false,
             retry_after_ms: None,
         },
     );
@@ -489,31 +490,52 @@ async fn apply_provider_breaker_feedback(
             .record_success(creator_scope, model_id);
     }
     if let Some(class) = provider_failure_class_for_report(report) {
-        let (is_throttle, retry_after_ms) = match class {
+        let (is_throttle, is_transient, retry_after_ms) = match class {
             djinn_runtime::ProviderFailureClass::Throttle { retry_after_ms } => {
                 app_state
                     .health_tracker
                     .record_stall(creator_scope, model_id, false);
-                (true, retry_after_ms)
+                (true, false, retry_after_ms)
             }
             djinn_runtime::ProviderFailureClass::Failure => {
                 app_state
                     .health_tracker
                     .record_failure(creator_scope, model_id);
-                (false, None)
+                (false, false, None)
+            }
+            // A transient provider-side fault (5xx / transport death) is a LOAD
+            // signal about the upstream, not a health signal about the model, so
+            // it gets its own much longer breaker ladder
+            // (`record_transient_failure`, `TRANSIENT_BREAKER_THRESHOLD`) rather
+            // than the three-strike one. The fault stays fully visible in
+            // `model_health` — `consecutive_failures` and `total_failures` move
+            // exactly as a `Failure` would — but a burst of
+            // `server_is_overloaded` no longer auto-disables the user's
+            // preferred model (2026-07-29, task `nr41`: `openai/gpt-5.6-sol`
+            // reached `auto_disabled: true`, 15 consecutive failures and 6
+            // disable-TTL trips, off an OpenAI capacity blip, taking the
+            // tribunal's adversary role down with it). A model whose backend is
+            // actually gone still demotes, just twenty strikes in rather than
+            // three. Task attribution is unchanged from the previous commit: the
+            // coordinator must not blame the task for the provider's outage.
+            djinn_runtime::ProviderFailureClass::Transient { retry_after_ms } => {
+                app_state
+                    .health_tracker
+                    .record_transient_failure(creator_scope, model_id);
+                (false, true, retry_after_ms)
             }
             djinn_runtime::ProviderFailureClass::AuthInvalid => {
                 if refresh_oauth_credential_after_401(model_id, app_state).await {
                     app_state
                         .health_tracker
                         .record_stall(creator_scope, model_id, false);
-                    (true, None)
+                    (true, false, None)
                 } else {
                     app_state
                         .health_tracker
                         .record_stall(creator_scope, model_id, true);
                     surface_credential_revocation(app_state, creator_scope, model_id).await;
-                    (true, None)
+                    (true, false, None)
                 }
             }
         };
@@ -521,6 +543,7 @@ async fn apply_provider_breaker_feedback(
             task_id,
             djinn_provider::catalog::health::TaskFailureSignal {
                 throttle: is_throttle,
+                transient: is_transient,
                 retry_after_ms,
             },
         );
@@ -727,6 +750,7 @@ pub(super) async fn dispatch_task_runtime(
             &task.id,
             djinn_provider::catalog::health::TaskFailureSignal {
                 throttle: true,
+                transient: false,
                 retry_after_ms: None,
             },
         );

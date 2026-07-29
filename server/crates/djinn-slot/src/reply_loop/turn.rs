@@ -1018,6 +1018,11 @@ pub async fn run_reply_loop(
             let mut stream_state = match consume_provider_stream(StreamLoopContext {
                 provider,
                 stream,
+                // Exact inputs behind `stream`, so a transient mid-stream
+                // provider failure can re-issue the identical request.
+                request_conversation: request_conversation.as_ref(),
+                request_tools: tools,
+                request_tool_choice: tool_choice,
                 tool_metadata: &tool_metadata,
                 dispatch: &dispatch_ctx,
                 phase_tracker: &phase_tracker,
@@ -2600,6 +2605,9 @@ mod tests {
         let state = consume_provider_stream(StreamLoopContext {
             provider: &provider,
             stream,
+            request_conversation: &conversation,
+            request_tools: &[],
+            request_tool_choice: None,
             tool_metadata: &tool_metadata,
             dispatch: &dispatch_ctx,
             phase_tracker: &phase_tracker,
@@ -2706,9 +2714,13 @@ mod tests {
         let mut total_cache_write = 0;
         let mut total_reasoning_out = 0;
 
+        let restart_conversation = Conversation::new();
         let mut state = consume_provider_stream(StreamLoopContext {
             provider: &provider,
             stream,
+            request_conversation: &restart_conversation,
+            request_tools: &[],
+            request_tool_choice: None,
             tool_metadata: &tool_metadata,
             dispatch: &dispatch_ctx,
             phase_tracker: &phase_tracker,

@@ -35,9 +35,9 @@ pub(super) struct InflightDispatch {
 // Types that are pure DTOs and shared between slot and coordinator sides.
 
 pub use djinn_orchestration_types::coordinator::{
-    BackgroundWorkTracker, BreakerDebugEntry, CoordinatorDebugSnapshot, DebugCooldown,
-    DebugDispatchState, DebugFailureStreak, DebugInflightEntry, DebugSlot, DebugTotals,
-    DispatchPauseView,
+    BackgroundWorkTracker, BreakerDebugEntry, CoordinatorDebugSnapshot, DebugBuildAdmission,
+    DebugCooldown, DebugDispatchState, DebugFailureStreak, DebugInflightEntry, DebugSlot,
+    DebugTotals, DispatchPauseView,
 };
 
 /// State of the PR-poller's mechanical clean-merge fast path for one task.
@@ -634,6 +634,22 @@ pub(super) use crate::dispatch::cycling_intervention::{
     PriorSessionDisposition, should_route_cycling_intervention,
 };
 
+/// Threshold companion of the bound above. Referenced by tests and doc links
+/// rather than by non-test dispatch code, so the re-export carries the same
+/// `unused_imports` allowance the sibling test-only re-exports use.
+#[allow(unused_imports)]
+pub(super) use crate::dispatch::park_redispatch_bound::MAX_PARK_REDISPATCH_DECLINES;
+/// The cumulative bound on the park rung's `no_attempted_remediation` decline
+/// lives in [`crate::dispatch::park_redispatch_bound`] next to its only
+/// production caller (task 6tlg: the decline's own counter cannot grow when
+/// every session dies the same infra death, so the rung redispatched ten times
+/// with `non_attempt_count` pinned at 1). Re-exported here so `use types::*`
+/// call sites are unchanged.
+pub(super) use crate::dispatch::park_redispatch_bound::{
+    NO_ATTEMPTED_REMEDIATION_KIND, no_attempted_remediation_declines,
+    should_decline_no_attempted_remediation_park,
+};
+
 /// A task that becomes dispatch-ready again (with no active session) within
 /// this window of its last dispatch is treated as a failed attempt and backed
 /// off. Wide enough to catch SLOW failures — e.g. a worker that runs ~30s and
@@ -675,17 +691,29 @@ pub(super) fn dispatch_cooldown_for_failure(streak: u32, had_provider_failure: b
 /// failed reappearance.
 ///
 /// A structural failure advances the streak toward [`MAX_DISPATCH_FAILURES`]
-/// (the task may be undispatchable). A `throttle` (rate-limit) reappearance is a
-/// transient provider fault, not a fault of the task — so it must NOT advance
-/// the terminal counter (else a healthy task whose only problem was a quota blip
-/// gets terminally closed). The task still backs off via the escalating cooldown
-/// and the breaker still fails over; only the terminal-close counter is spared.
+/// (the task may be undispatchable). A PROVIDER-attributable reappearance is
+/// not a fault of the task and must NOT advance the terminal counter (else a
+/// healthy task whose only problem was someone else's outage gets terminally
+/// closed). Two classes qualify:
+///
+/// - `throttle` — a rate-limit / quota window (A3).
+/// - `transient` — a provider-side 5xx (`server_error` /
+///   `server_is_overloaded`) or a hard transport death. Task `2gq7`
+///   (2026-07-29) failed three sessions on three independent OpenAI 500s;
+///   marching those up the terminal ladder walks a perfectly healthy task
+///   toward the force-close at [`MAX_DISPATCH_FAILURES`] for an outage it did
+///   not cause.
+///
+/// In both cases the task still backs off via the escalating cooldown and the
+/// per-`(scope, model)` breaker still fails over; only the terminal-close
+/// counter is spared.
 pub(super) fn stored_streak_after_failure(
     current_streak: u32,
     next_streak: u32,
     throttle: bool,
+    transient: bool,
 ) -> u32 {
-    if throttle {
+    if throttle || transient {
         current_streak
     } else {
         next_streak
@@ -805,12 +833,12 @@ mod cooldown_tests {
         let current = 4;
         let next = 5;
         assert_eq!(
-            stored_streak_after_failure(current, next, false),
+            stored_streak_after_failure(current, next, false, false),
             next,
-            "a non-throttle failure advances the terminal streak"
+            "a non-throttle, non-transient failure advances the terminal streak"
         );
         assert_eq!(
-            stored_streak_after_failure(current, next, true),
+            stored_streak_after_failure(current, next, true, false),
             current,
             "a throttle must NOT advance the terminal streak"
         );
@@ -820,8 +848,29 @@ mod cooldown_tests {
         // (gated on `!throttle && next_streak >= MAX`) never fires.
         let just_below = MAX_DISPATCH_FAILURES - 1;
         assert_eq!(
-            stored_streak_after_failure(just_below, MAX_DISPATCH_FAILURES, true),
+            stored_streak_after_failure(just_below, MAX_DISPATCH_FAILURES, true, false),
             just_below
+        );
+    }
+
+    #[test]
+    fn transient_provider_fault_does_not_advance_terminal_streak() {
+        // A transient provider-side 5xx / transport death is the provider's
+        // fault, not the task's: it is spared the terminal counter exactly as a
+        // throttle is, so an hour of `server_is_overloaded` cannot march a
+        // healthy task toward the force-close at MAX_DISPATCH_FAILURES.
+        let current = 4;
+        let next = 5;
+        assert_eq!(
+            stored_streak_after_failure(current, next, false, true),
+            current,
+            "a transient provider fault must NOT advance the terminal streak"
+        );
+        let just_below = MAX_DISPATCH_FAILURES - 1;
+        assert_eq!(
+            stored_streak_after_failure(just_below, MAX_DISPATCH_FAILURES, false, true),
+            just_below,
+            "a transient fault at the cap boundary keeps the stored streak below MAX"
         );
     }
 

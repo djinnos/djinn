@@ -288,6 +288,24 @@ impl CoordinatorActor {
                 }
             };
 
+            // ── Anchor the idle clock to pod-Running ────────────────────────
+            // The slot pool seeds the host ActivityTracker at slot RESERVATION,
+            // before `runtime.prepare` has created the task-run Job. Everything
+            // between that seed and the pod actually running — scheduling on
+            // CPU/memory requests, a DiskPressure taint, an image pull, in-pod
+            // stage init — is infrastructure latency, not an idle agent, yet it
+            // lands in `idle_seconds` verbatim. Left unanchored it silently eats
+            // the 30-minute budget and, past it, terminalizes the attempt
+            // `TimedOut`, feeds the model breaker, and (on the second strike)
+            // tells the Planner to rescope a task whose only problem was that
+            // the cluster was full.
+            //
+            // `sessions.started_at` is the pod-Running witness: that row is
+            // written by the worker from INSIDE the pod (supervisor stage
+            // `session_create`), so it cannot exist before the pod ran. An agent
+            // cannot have been idle longer than its own session has existed.
+            let idle = anchor_idle_to_pod_running(idle, parse_iso_elapsed(&session.started_at));
+
             // Pick the idle clock and threshold. A session with a live
             // ActivityTracker signal falls under the role's full idle budget —
             // covering long quiet stretches (a multi-minute build, a long
@@ -2619,6 +2637,23 @@ impl CoordinatorActor {
         // Use Running to represent the state when the pod exited — this
         // is what triggers the protocol-violation classifier path.
         evidence.db_session_status = Some(DbSessionStatus::Running);
+        // ── Recover the signal the status fold discards ─────────────────
+        // `session_status` has three values and the fold above collapses them
+        // onto two pod phases plus a sentinel exit code. Everything about WHY
+        // the run failed is lost there, so a worker whose provider returned
+        // `server_is_overloaded` arrives indistinguishable from a worker that
+        // segfaulted: both are `(Failed, 1)`.
+        //
+        // The reason is not actually unavailable — the slot supervisor-runner
+        // already classified the task-run report and stashed the typed class on
+        // the health tracker's per-task side-channel before the session was
+        // finalized. Peek (never take) that signal: the dispatch-reappearance
+        // path owns it and consumes it for its own cooldown/streak decision, and
+        // stealing it here would silently disable A3/A6 backoff.
+        evidence.transient_provider_fault = self
+            .health
+            .peek_task_provider_failure(task_id)
+            .is_some_and(|signal| signal.transient);
 
         // ── 3. Classify ────────────────────────────────────────────────
         let result = super::liveness::classify(&evidence);
@@ -2722,20 +2757,37 @@ impl CoordinatorActor {
         if matches!(session_status, "failed" | "interrupted")
             && result.outcome != Some(LivenessOutcome::KillNoop)
         {
-            let (attempt_outcome, failure_class, summary) = if session_status == "interrupted" {
-                (
-                    TaskAttemptOutcome::Interrupted,
-                    "environmental_interrupt",
-                    "session interrupted by infrastructure (deploy/rollout/pod-eviction/reap) \
+            let (attempt_outcome, failure_class, summary) =
+                if result.reason == Some(super::liveness::LivenessReason::TransientProviderFault) {
+                    // The run died on the PROVIDER, not on itself. That is the same
+                    // shape of non-event as an infra kill: the task was never
+                    // actually attempted end-to-end, so it earns the environmental
+                    // treatment — terminalize so nothing wedges the respawn guard,
+                    // but contribute no dispatch-failure streak, no quality strike,
+                    // and no reopen_class penalty. Charging it as a `Crashed`
+                    // attempt is what walked task `nr41` toward its force-close on
+                    // 2026-07-29 for a three-second OpenAI outage.
+                    (
+                        TaskAttemptOutcome::Interrupted,
+                        "transient_provider_fault",
+                        "session ended on a transient upstream provider fault (5xx / overload / \
+                     mid-flight stream death) while task nonterminal — environmental \
+                     non-attempt, retry when the provider recovers",
+                    )
+                } else if session_status == "interrupted" {
+                    (
+                        TaskAttemptOutcome::Interrupted,
+                        "environmental_interrupt",
+                        "session interrupted by infrastructure (deploy/rollout/pod-eviction/reap) \
                      while task nonterminal — environmental non-attempt, no dispatch penalty",
-                )
-            } else {
-                (
-                    TaskAttemptOutcome::Crashed,
-                    "session_exit_nonterminal",
-                    "session exited failed while task nonterminal",
-                )
-            };
+                    )
+                } else {
+                    (
+                        TaskAttemptOutcome::Crashed,
+                        "session_exit_nonterminal",
+                        "session exited failed while task nonterminal",
+                    )
+                };
             self.terminalize_recovery_attempt(
                 task_id,
                 role,
@@ -2812,12 +2864,27 @@ impl CoordinatorActor {
 ///
 /// This is a standalone pure helper (no `&self`) so it can be unit-tested
 /// without constructing a full [`CoordinatorActor`].
-fn build_liveness_evidence(
+pub(crate) fn build_liveness_evidence(
     pool_info: Option<&RunningTaskInfo>,
     db_state: &CurrentLivenessState,
 ) -> LivenessEvidence {
     // ── Pod phase ─────────────────────────────────────────────────────
+    // Pool membership alone is NOT pod-Running: a reserved slot exists from the
+    // moment the coordinator hands the task to the pool, which is before
+    // `runtime.prepare` creates the Job. Reporting `Running` there made the
+    // classifier's `Pending` handling unreachable and fed it a phase it could
+    // never contradict. Derive the phase from two independent witnesses that a
+    // Pod actually started:
+    //   * `worker_activity_observed` — the worker completed its startup
+    //     handshake and bridged a real `touch_activity` (or the in-process
+    //     reply loop registered), and
+    //   * an in-pod `sessions` row (`active_session_id`), which the worker
+    //     writes from inside the Pod.
+    // With neither, the Pod is still being scheduled/pulled — `Pending`.
     let pod_phase = match pool_info {
+        Some(info) if !info.worker_activity_observed && db_state.active_session_id.is_none() => {
+            PodPhase::Pending
+        }
         Some(_) => PodPhase::Running,
         None => PodPhase::Absent,
     };
@@ -2928,6 +2995,7 @@ fn build_liveness_evidence(
         hard_runtime_deadline_exceeded,
         exit_code: None,
         handed_off_from_session_held_status,
+        transient_provider_fault: false,
     }
 }
 
@@ -3034,6 +3102,40 @@ fn resolve_stall_clock(
     }
 }
 
+/// Clamp a pool-reported idle measurement to the age of the session it belongs
+/// to, so time the pod spent NOT running is never counted as agent idle time.
+///
+/// WHY THIS EXISTS: `SlotPool::dispatch` seeds the host `ActivityTracker` the
+/// instant a slot is reserved — before `runtime.prepare` creates the task-run
+/// Job. Until the worker's first `touch_activity` bridges back, `idle_seconds`
+/// is simply "seconds since reservation", which includes every second the Pod
+/// spent `Pending` (unschedulable on its CPU/memory request, held off by a
+/// DiskPressure taint, pulling its image) plus in-pod stage init. The idle-stall
+/// watchdog consumed that number verbatim, so a slow-to-schedule Pod arrived at
+/// its first sweep already past `STALL_TIMEOUT_SECS` and was killed as an
+/// `idle_stall` — blaming the TASK for cluster capacity.
+///
+/// `session_age_secs` comes from `sessions.started_at`, which the worker writes
+/// from INSIDE the Pod (supervisor stage `session_create`). Its existence is
+/// therefore proof the Pod reached `Running`, and its age is an upper bound on
+/// how long the agent could possibly have been idle. Taking the minimum keeps
+/// real stall detection intact — a genuinely hung agent in a Running Pod has a
+/// session that keeps ageing, so it still crosses the threshold on schedule —
+/// while making pre-Running time uncountable.
+///
+/// `None` (unparseable `started_at`) leaves the measurement untouched: absence
+/// of the witness is not evidence, and the caller already logs the parse
+/// failure on the fallback path.
+pub(crate) fn anchor_idle_to_pod_running(
+    measured_idle_secs: u64,
+    session_age_secs: Option<u64>,
+) -> u64 {
+    match session_age_secs {
+        Some(age) => measured_idle_secs.min(age),
+        None => measured_idle_secs,
+    }
+}
+
 fn session_predates_task_status(session_started_at: &str, task_updated_at: &str) -> Option<bool> {
     let session_elapsed = parse_iso_elapsed(session_started_at)?;
     let task_updated_elapsed = parse_iso_elapsed(task_updated_at)?;
@@ -3096,6 +3198,7 @@ mod liveness_foundation_tests {
             duration_seconds: 60,
             idle_seconds: 5,
             activity_tracked: true,
+            worker_activity_observed: true,
             project_id: Some("proj-1".to_owned()),
             token_count: 1000,
             turn_count: 5,
@@ -3223,6 +3326,7 @@ mod liveness_foundation_tests {
             exit_code: Some(0),
 
             handed_off_from_session_held_status: false,
+            transient_provider_fault: false,
         };
 
         let result = super::super::liveness::classify(&evidence);
@@ -3254,6 +3358,7 @@ mod liveness_foundation_tests {
             exit_code: Some(137),
 
             handed_off_from_session_held_status: false,
+            transient_provider_fault: false,
         };
 
         let result = super::super::liveness::classify(&evidence);
@@ -3453,6 +3558,7 @@ mod liveness_foundation_tests {
             exit_code: None,
 
             handed_off_from_session_held_status: false,
+            transient_provider_fault: false,
         };
 
         let result = super::super::liveness::classify(&evidence);

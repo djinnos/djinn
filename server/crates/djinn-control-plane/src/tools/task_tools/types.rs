@@ -1057,6 +1057,9 @@ pub struct BoardHealthBuildLease {
 /// Absent when the lease ledger could not be read.
 #[derive(Serialize, Deserialize, schemars::JsonSchema, Default)]
 pub struct BoardHealthBuildCapacity {
+    /// Always `build_leases`, so the payload names its own authority.
+    #[serde(default)]
+    pub authority: String,
     /// Weighted `SUM` over the occupying lease states, across every consumer
     /// kind (dispatch, invocation and warm all contend for one cap).
     pub occupancy: i64,
@@ -1065,9 +1068,105 @@ pub struct BoardHealthBuildCapacity {
     /// True only when `admission_handoff.v1_mode = 'enforce'`. While the v1
     /// authority is off or shadowing it writes no dispatch rows and cannot be
     /// denying anything, so a full pool is not attributed to it.
-    pub enforcing: bool,
-    /// `occupancy >= cap` with a positive cap.
+    ///
+    /// **Renamed from `enforcing`.** The bare name read as "build admission is
+    /// enforcing", which is a different authority entirely. On 2026-07-29 this
+    /// block reported `{occupancy: 1, cap: 3, enforcing: true, at_capacity:
+    /// false}` for five hours while the build-admission controller denied every
+    /// single dispatch before capacity was measured. See `build_admission`.
+    pub lease_authority_enforcing: bool,
+    /// `occupancy >= cap` with a positive cap. Reached only AFTER the
+    /// build-admission controller's readiness gate passes, so `false` here is
+    /// not evidence that a dispatch can proceed.
     pub at_capacity: bool,
+    /// Human-readable restatement of the authority boundary.
+    #[serde(default)]
+    pub note: String,
+}
+
+/// The build-admission JOURNAL authority — the **other** gate, and the one
+/// that wedged the board for five hours on 2026-07-29.
+///
+/// Not the same thing as [`BoardHealthBuildCapacity`]. That one is the lease
+/// FIFO and is the only authority that ever measures occupancy. This one is
+/// `admission_journal`, owned by the `BuildAdmissionController`, and it fails
+/// **closed on a readiness gate before occupancy is measured at all** — so
+/// `build_capacity` can report a completely healthy pool while every single
+/// dispatch is being denied with `cause: "controller_not_admitting"`.
+#[derive(Serialize, Deserialize, schemars::JsonSchema, Default)]
+pub struct BoardHealthBuildAdmission {
+    /// Always `admission_journal`, so the payload names its own authority.
+    #[serde(default)]
+    pub authority: String,
+    /// Rows currently in `create_unknown`, healthy in-flight creates included.
+    pub create_unknown_active: i64,
+    /// Of those, the ones untouched for longer than `settle_window_seconds`.
+    /// This is the population that cannot be explained as a normal
+    /// POST→session window, and the one that arms `CreateUnknownHealth`.
+    pub create_unknown_settled: i64,
+    /// The reclaim settle window in seconds (mirrors
+    /// `DEFAULT_RECLAIM_SETTLE_WINDOW`).
+    pub settle_window_seconds: i64,
+    /// Distinct `creator_server_epoch` values across the active population.
+    /// More than one means at least one row is definitely a predecessor's,
+    /// which is the population that actually arms the gate since #2746.
+    pub distinct_creator_epochs: i64,
+    /// `updated_at` of the oldest active `create_unknown` row.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub oldest_create_unknown_at: Option<String>,
+    /// Human-readable restatement of what these counts do and do not prove.
+    #[serde(default)]
+    pub note: String,
+}
+
+/// The dispatcher's OWN recorded denial for this task.
+///
+/// Every other field on `dispatch_gate` is a re-derivation of what the
+/// dispatcher probably decided. This one is what it actually decided, written
+/// by the process that decided it (`build_admission_denials`, migration 161).
+///
+/// Before that table existed, `DenialCause` was consumed at exactly one site —
+/// a `tracing::info!` line — and thrown away. On 2026-07-29 the dispatcher knew
+/// on every tick, for five hours, precisely why it was refusing every task, and
+/// `board_health` reported `unexplained` the whole time.
+#[derive(Serialize, Deserialize, schemars::JsonSchema, Default)]
+pub struct BoardHealthBuildAdmissionDenial {
+    /// `at_capacity`, `controller_not_admitting` or `authority_unavailable`.
+    pub cause: String,
+    /// The closed readiness gate, for `controller_not_admitting`. This is the
+    /// field that existed only in container logs during the outage.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub readiness: Option<String>,
+    /// The capacity authority's own words, for `authority_unavailable`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    /// Occupancy as MEASURED. `null` — never `0` — when the denial never
+    /// consulted it, which is true of every readiness denial.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub occupancy: Option<i64>,
+    /// The cap that would have been enforced.
+    pub cap: i64,
+    /// The deciding process's admission epoch.
+    #[serde(default)]
+    pub server_epoch: String,
+    /// Start of the uninterrupted denial streak.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub first_denied_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub denied_at: Option<String>,
+    /// Consecutive denials in this streak.
+    pub denial_count: i64,
+    /// Seconds since `denied_at`.
+    pub age_seconds: i64,
+    /// True while the record is recent enough to be blamed. A stale record is
+    /// still reported — a denial row that outlives its condition is the #2661
+    /// tombstone, and reporting-without-blaming is how it stays visible
+    /// without becoming a false reason.
+    pub fresh: bool,
+    /// The staleness bound `fresh` is measured against.
+    pub freshness_window_seconds: i64,
+    #[serde(default)]
+    pub note: String,
 }
 
 /// What the dispatch-gate verdict actually covers.
@@ -1127,8 +1226,21 @@ pub struct BoardHealthDispatchGate {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub build_lease: Option<BoardHealthBuildLease>,
     /// Pool-wide build capacity, when the lease ledger was readable.
+    ///
+    /// **Read this together with `build_admission`.** They are different
+    /// authorities; a healthy `build_capacity` is not evidence that a dispatch
+    /// is possible.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub build_capacity: Option<BoardHealthBuildCapacity>,
+    /// The build-admission journal authority, when `admission_journal` was
+    /// readable. This is the gate that denies before capacity is measured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build_admission: Option<BoardHealthBuildAdmission>,
+    /// The dispatcher's own recorded `DenialCause` for this task, when it has
+    /// one. Absent means the most recent decision was not a denial: the
+    /// permitted path deletes the row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build_admission_denial: Option<BoardHealthBuildAdmissionDenial>,
     /// Final gate verdict — `blocked` when an evaluated gate fired,
     /// `unexplained` when none did.
     ///
@@ -1142,7 +1254,8 @@ pub struct BoardHealthDispatchGate {
     pub gate_verdict: Option<String>,
     /// Machine-readable gate reasons (`no_eligible_model`,
     /// `image_not_ready`, `build_lease_queued`, `build_lease_terminal`,
-    /// `build_lease_occupied_without_session`, `build_pool_at_capacity`).
+    /// `build_lease_occupied_without_session`, `build_pool_at_capacity`,
+    /// `admission_create_unknown_pending`).
     /// Always present in the serialized output (may be an empty array) so
     /// clients can rely on the key existing. Read it together with
     /// `coverage`: empty means "no EVALUATED gate fired".

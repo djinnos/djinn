@@ -1,3 +1,4 @@
+// djinn:allow-oversize — per-(scope, model) breaker state: typed-failure, throttle, stall and transient ladders share one mutex-guarded catalog.
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -7,6 +8,32 @@ use serde::{Deserialize, Serialize};
 
 /// Number of consecutive failures before circuit breaker trips.
 const CIRCUIT_BREAKER_THRESHOLD: u32 = 3;
+
+/// Number of consecutive **transient upstream** faults
+/// ([`HealthTracker::record_transient_failure`]) before the breaker trips.
+///
+/// Deliberately far above [`CIRCUIT_BREAKER_THRESHOLD`], because a transient
+/// upstream fault is a *load* signal, not a *model-health* signal. A provider
+/// answering `server_is_overloaded` (HTTP 500/502/503/504) or dropping a stream
+/// mid-flight says nothing about whether the model can do the work — the
+/// identical request succeeds minutes later. Counting those on the ordinary
+/// three-strike ladder means an upstream capacity blip demotes the user's
+/// preferred model and, via the escalating cooldown, keeps it demoted long after
+/// the provider recovered.
+///
+/// Incident (2026-07-29, task `nr41`): a run of OpenAI `server_is_overloaded`
+/// 500s pushed `openai/gpt-5.6-sol` to `auto_disabled: true` at 15 consecutive
+/// failures with 6 disable-TTL trips — 30 total failures against 6 successes —
+/// which is the tribunal's own adversary model being disabled for someone else's
+/// outage. At this threshold that run does not trip the breaker at all.
+///
+/// It is still *finite*, and that is deliberate: a model whose backend is
+/// permanently gone (the kimi-for-coding/`k2p7` signature — instant transport
+/// death, zero tokens, re-dispatched forever) must eventually be demoted rather
+/// than re-selected indefinitely. Twenty consecutive transient faults with no
+/// intervening success is no longer "the provider is busy"; it is a dead
+/// endpoint.
+const TRANSIENT_BREAKER_THRESHOLD: u32 = 20;
 /// Initial cooldown after first circuit-breaker trip: 5 seconds.
 const INITIAL_COOLDOWN: Duration = Duration::from_secs(5);
 /// Maximum escalating cooldown: 4 hours.
@@ -217,6 +244,16 @@ struct ModelState {
     /// actually exhaust increment this counter via
     /// `HealthTracker::apply_breaker_check_for`.
     breaker_eligible_consecutive_failures: u32,
+    /// Consecutive TRANSIENT upstream faults (5xx / transport death) with no
+    /// intervening success, counted on their own much longer ladder
+    /// ([`TRANSIENT_BREAKER_THRESHOLD`]) instead of the three-strike one.
+    ///
+    /// Kept separate from `breaker_eligible_consecutive_failures` so that an
+    /// upstream capacity blip cannot demote a healthy model, while a genuinely
+    /// dead endpoint still eventually trips. Reset to 0 by any success, and by
+    /// any genuine (`record_failure`) trip — once the breaker has fired for a
+    /// real fault, this streak is moot. Runtime-only, like the throttle streak.
+    transient_consecutive_failures: u32,
     total_failures: u32,
     total_successes: u32,
     disable_ttl_trips: u32,
@@ -343,9 +380,28 @@ pub struct TaskFailureSignal {
     /// The failure was a rate-limit / quota throttle (not a structural failure).
     /// A3: a throttle reappearance must NOT advance the terminal streak.
     pub throttle: bool,
+    /// The failure was a TRANSIENT provider-side fault — a 5xx
+    /// (`server_error` / `server_is_overloaded`) or a hard transport death
+    /// (`ProviderFailureClass::Transient`).
+    ///
+    /// Like `throttle`, this is a fault of the provider rather than of the task:
+    /// the same transcript redispatched onto a healthy backend succeeds. The
+    /// coordinator therefore spares BOTH task-blaming counters for it — the
+    /// third-strike planner-remediation `provider_failure_streak` and the
+    /// terminal `dispatch_failure_streak` — while the escalating redispatch
+    /// cooldown and the per-`(scope, model)` breaker failover still apply.
+    ///
+    /// Kept as a second flag rather than folding the pair into an enum so the
+    /// change stays additive at every call site; `throttle` and `transient` are
+    /// mutually exclusive in practice (a class maps to at most one of them).
+    /// Incident: task `2gq7`, 2026-07-29 — three independent OpenAI 500s were
+    /// indistinguishable from a reproducible task fault, so the third one minted
+    /// a bogus "Planner remediation" task.
+    pub transient: bool,
     /// Provider-stated reset window (`Retry-After` / rate-limit-reset), if any.
     /// A6: floors the escalating redispatch cooldown so a multi-hour quota
-    /// window isn't probed on the fixed ladder. Only meaningful for throttles.
+    /// window isn't probed on the fixed ladder. Meaningful for throttles and,
+    /// when a provider states one, for transient faults.
     pub retry_after_ms: Option<u64>,
 }
 
@@ -397,6 +453,35 @@ impl HealthTracker {
     /// consumed).
     pub fn take_task_provider_failure(&self, task_id: &str) -> Option<TaskFailureSignal> {
         self.task_failures.lock().unwrap().remove(task_id)
+    }
+
+    /// Read the most recent provider-failure signal for a task **without**
+    /// clearing it.
+    ///
+    /// [`take_task_provider_failure`](Self::take_task_provider_failure) is the
+    /// dispatch-reappearance reader and is deliberately consuming, so exactly
+    /// one redispatch decision can be made per failure. Two other observers need
+    /// the same fact and must not steal it from that reader (nor from each
+    /// other):
+    ///
+    /// * session-exit liveness classification, which must not convict a session
+    ///   of a protocol violation when the provider, not the session, died; and
+    /// * the refinement tribunal loop, which must park and retry a round rather
+    ///   than count it as a completed (dry) round.
+    ///
+    /// Neither owns the signal, so both peek. The refinement loop clears it
+    /// explicitly once it has parked the round, because a refinement task is
+    /// force-closed rather than redispatched and would otherwise leak the entry.
+    pub fn peek_task_provider_failure(&self, task_id: &str) -> Option<TaskFailureSignal> {
+        self.task_failures.lock().unwrap().get(task_id).copied()
+    }
+
+    /// Drop a task's provider-failure signal without reading it. For owners that
+    /// terminate the task themselves (the refinement loop force-closes its round
+    /// tasks), so the side-channel does not accumulate entries for task ids that
+    /// will never reappear on the dispatch path.
+    pub fn clear_task_provider_failure(&self, task_id: &str) {
+        self.task_failures.lock().unwrap().remove(task_id);
     }
 
     /// Record a failure **observation** — increments the consecutive/total
@@ -489,6 +574,7 @@ impl HealthTracker {
         let state = map.entry(HealthKey::new(scope, model_id)).or_default();
         state.consecutive_failures = 0;
         state.breaker_eligible_consecutive_failures = 0;
+        state.transient_consecutive_failures = 0;
         state.total_successes += 1;
         // A productive session is proof the model recovered — reset the
         // escalating-cooldown tier and clear the rolling trip window so the next
@@ -545,6 +631,86 @@ impl HealthTracker {
                 trips_in_window = state.trips_in_window(now),
                 hard_disabled,
                 "model circuit-breaker tripped"
+            );
+            if hard_disabled {
+                tracing::error!(
+                    model_id = %key.model_id,
+                    scope = ?key.scope,
+                    trips_in_window = TRIP_RATE_CEILING,
+                    window_hours = TRIP_RATE_WINDOW.as_secs() / 3600,
+                    "model breaker hit trip-rate ceiling — HARD-DISABLED until a human \
+                     re-enables it via model_health(enable)"
+                );
+            }
+        }
+    }
+
+    /// Record a **transient upstream** fault — a provider-side 5xx
+    /// (`server_is_overloaded` / `server_error`, 502/503/504) or a hard
+    /// transport/stream death, i.e. [`crate::catalog::health`]'s view of
+    /// `ProviderFailureClass::Transient`.
+    ///
+    /// Counters move exactly as they do for [`record_failure`] *except* the
+    /// breaker-eligible one: the fault is fully visible in `model_health`
+    /// (`consecutive_failures`, `total_failures`) but is charged to
+    /// `transient_consecutive_failures`, which trips only at
+    /// [`TRANSIENT_BREAKER_THRESHOLD`] instead of [`CIRCUIT_BREAKER_THRESHOLD`].
+    ///
+    /// Why this is not [`record_failure`]: an overloaded upstream is a LOAD
+    /// signal, not a model-health signal. Three of them in a row is an ordinary
+    /// afternoon at a busy provider, and demoting the user's preferred model for
+    /// it — then holding it demoted on the escalating cooldown ladder — is the
+    /// 2026-07-29 `nr41` incident, where `openai/gpt-5.6-sol` reached
+    /// `auto_disabled: true` with 6 disable-TTL trips off a burst of
+    /// `server_is_overloaded` 500s and took the tribunal's adversary role with
+    /// it.
+    ///
+    /// Why this is not [`record_stall`] (the `Throttle` treatment): a stall trips
+    /// the breaker IMMEDIATELY with a five-minute floor. That is right for a
+    /// quota window — which resets on a clock and where instant failover to
+    /// another account/model is the only useful move — but wrong for a load
+    /// blip, where the very next dispatch usually succeeds. Routing overload
+    /// through `Throttle` would still leave the model `auto_disabled`, just for
+    /// a shorter time.
+    ///
+    /// Genuine failure detection is untouched: `Authentication`,
+    /// `InvalidRequest` and `InvalidOutput` continue through
+    /// [`record_failure`]/[`record_stall`] and still trip at three strikes.
+    pub fn record_transient_failure(&self, scope: Option<&str>, model_id: &str) {
+        let now = SystemClock::new().now_instant();
+        let mut map = self.inner.lock().unwrap();
+        let key = HealthKey::new(scope, model_id);
+        let state = map.entry(key.clone()).or_default();
+        state.consecutive_failures += 1;
+        state.transient_consecutive_failures += 1;
+        state.total_failures += 1;
+
+        // If the previous cooldown expired, clear the flag so we can re-trip.
+        if state.auto_disabled && state.is_available(now) {
+            state.auto_disabled = false;
+            state.cooldown_until = None;
+        }
+
+        if !state.auto_disabled
+            && state.transient_consecutive_failures >= TRANSIENT_BREAKER_THRESHOLD
+        {
+            let cooldown = state.compute_cooldown();
+            state.auto_disabled = true;
+            state.cooldown_until = Some(now + cooldown);
+            state.disable_ttl_trips += 1;
+            let hard_disabled = state.register_trip(now);
+            djinn_telemetry::breaker::increment_trip();
+            tracing::warn!(
+                model_id = %key.model_id,
+                scope = ?key.scope,
+                consecutive_failures = state.consecutive_failures,
+                transient_consecutive_failures = state.transient_consecutive_failures,
+                cooldown_secs = cooldown.as_secs(),
+                disable_ttl_trips = state.disable_ttl_trips,
+                trips_in_window = state.trips_in_window(now),
+                hard_disabled,
+                "model circuit-breaker tripped on a sustained run of TRANSIENT upstream faults \
+                 — this endpoint is not merely busy"
             );
             if hard_disabled {
                 tracing::error!(

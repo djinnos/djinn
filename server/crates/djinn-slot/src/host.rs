@@ -382,6 +382,18 @@ impl SlotContext {
         let last = ts.load(Ordering::Relaxed);
         Some(now.saturating_sub(last))
     }
+    /// The live tracker handle for `task_id`, if any.
+    ///
+    /// Exposed so the slot pool can tell its OWN reservation seed apart from a
+    /// real worker registration: `register_activity` replaces the entry with a
+    /// fresh atomic, so a handle that is no longer pointer-equal to the seeded
+    /// one is itself proof the run reached the reply loop. See
+    /// `RunningTaskInfo::worker_activity_observed`.
+    pub fn activity_handle(&self, task_id: &str) -> Option<Arc<AtomicU64>> {
+        recover_lock(&self.active_tasks, "active_tasks")
+            .get(task_id)
+            .cloned()
+    }
     pub fn register_background_work(&self, task_id: &str) {
         recover_lock(&self.background_work_tasks, "background_work_tasks")
             .insert(task_id.to_string());

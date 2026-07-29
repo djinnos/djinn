@@ -21,6 +21,20 @@ use djinn_db::repositories::task_arbitration::TaskArbitrationRepository;
 use djinn_db::{DispatchStateRepository, DispatchStateUpsert};
 use djinn_k8s::{WarmAdmission, WarmAdmissionPermit, WarmAdmissionTransition};
 
+/// Consecutive failover-chain exhaustions in which the model-health breaker was
+/// open for EVERY candidate — nothing attempted — after which the coordinator
+/// surfaces a durable, operator-visible activity entry.
+///
+/// This class of exhaustion never advances `dispatch_failure_streak` and can
+/// never force-close the task (see
+/// [`CoordinatorActor::apply_breaker_open_exhaustion_backoff`]), so without a
+/// signal the task would sit on a silently decaying backoff for the whole
+/// outage. Mirrors [`SINGLE_CANDIDATE_EXHAUSTION_SIGNAL_THRESHOLD`]'s intent and
+/// value: past the first couple of cooldown rungs (60s + 120s) a one-off
+/// provider blip has been absorbed, so a breaker that is still open for every
+/// candidate is worth an operator's attention. Emitted once per climb.
+pub(crate) const BREAKER_OPEN_EXHAUSTION_SIGNAL_THRESHOLD: u32 = 3;
+
 fn record_dispatch_attempt(outcome: &'static str) {
     djinn_telemetry::dispatch::increment_attempt(outcome);
 }
@@ -616,6 +630,70 @@ impl CoordinatorActor {
         self.build_admission.as_deref()
     }
 
+    /// The durable consumer kind for a task dispatch denial. Matches
+    /// `build_leases.consumer_kind` so the two ledgers can be read together.
+    const DENIAL_CONSUMER_KIND: &'static str = "task_dispatch";
+
+    /// Write down why this task was denied.
+    ///
+    /// Best-effort by design: a denial is already a "leave the task queued"
+    /// outcome, and failing to record the reason must not change it. A failed
+    /// write is logged at `warn` because the missing row is itself the class of
+    /// blindness this path exists to end.
+    async fn record_task_run_denial(
+        &self,
+        task_id: &str,
+        cause: &crate::build_admission::DenialCause,
+        occupancy: Option<i64>,
+        cap: i64,
+        server_epoch: &str,
+    ) {
+        let record = djinn_db::BuildAdmissionDenialRecord {
+            consumer_kind: Self::DENIAL_CONSUMER_KIND.to_owned(),
+            consumer_id: task_id.to_owned(),
+            cause: cause.name().to_owned(),
+            readiness: cause
+                .readiness()
+                .map(|readiness| readiness.as_str().to_owned()),
+            detail: cause.detail().map(str::to_owned),
+            // Deliberately propagated as-is. `None` means the denial never
+            // measured occupancy, and writing 0 instead would recreate the
+            // exact confusion #2661 removed from the log.
+            occupancy,
+            cap,
+            server_epoch: server_epoch.to_owned(),
+        };
+        if let Err(error) = djinn_db::BuildAdmissionDenialRepository::new(self.db.clone())
+            .record(&record)
+            .await
+        {
+            tracing::warn!(
+                task_id,
+                %error,
+                "failed to persist the build-admission denial cause; board_health will \
+                 report `unexplained` for this task"
+            );
+        }
+    }
+
+    /// Drop this task's denial record now that it has been admitted.
+    ///
+    /// Without this the table becomes the #2661 tombstone in a new location: a
+    /// denial row that outlives its condition, replayed as a live reason
+    /// forever.
+    async fn clear_task_run_denial(&self, task_id: &str) {
+        if let Err(error) = djinn_db::BuildAdmissionDenialRepository::new(self.db.clone())
+            .clear(Self::DENIAL_CONSUMER_KIND, task_id)
+            .await
+        {
+            tracing::warn!(
+                task_id,
+                %error,
+                "failed to clear a stale build-admission denial record after a permit"
+            );
+        }
+    }
+
     /// Reserve and durably mark a task-run create before the pool side effect.
     /// A controller denial is deliberately neutral: callers leave the task queued.
     pub(crate) async fn begin_task_run_build_admission(
@@ -645,6 +723,7 @@ impl CoordinatorActor {
                 // turn an ambiguous accepted create into a false pre-create
                 // failure before the retry reaches the pool.
                 if idempotent {
+                    self.clear_task_run_denial(task_id).await;
                     return Ok(Some(permit));
                 }
                 if let Err(error) = controller
@@ -672,6 +751,7 @@ impl CoordinatorActor {
                     tracing::warn!(task_id, role, %error, "build admission CreateStarted failed; deferring pool create");
                     return Err(());
                 }
+                self.clear_task_run_denial(task_id).await;
                 Ok(Some(permit))
             }
             Ok(BuildAdmissionDecision::Denied {
@@ -685,6 +765,12 @@ impl CoordinatorActor {
                 // permanently tombstoned dispatch lease spent 40 minutes
                 // looking like a full pool at `occupancy=0 cap=3`. The cause
                 // is what tells those two apart.
+                //
+                // `readiness` is now on the SAME line as the cause. During the
+                // 2026-07-29 outage it existed only on an adjacent line that
+                // nobody had reason to correlate, which is what made
+                // `controller_not_admitting` unactionable for five hours.
+                let readiness = cause.readiness().map(|readiness| readiness.as_str());
                 tracing::info!(
                     task_id,
                     role,
@@ -692,8 +778,20 @@ impl CoordinatorActor {
                         .map_or_else(|| "unmeasured".to_owned(), |value| value.to_string()),
                     cap,
                     cause = %cause,
+                    readiness = readiness.unwrap_or("n/a"),
                     "build admission denied; leaving task queued"
                 );
+                // ...and it is written down, because a log line on a node is
+                // not a surface any projection can join against. See
+                // `djinn_db::BuildAdmissionDenialRepository`.
+                self.record_task_run_denial(
+                    task_id,
+                    &cause,
+                    occupancy,
+                    cap,
+                    controller.server_epoch(),
+                )
+                .await;
                 Err(())
             }
             Ok(BuildAdmissionDecision::Unclassified) => {
@@ -1062,6 +1160,7 @@ impl CoordinatorActor {
         // continuation dispatch so they cannot advance Trigger-B or terminal
         // close accounting during recovery/refactor paths.
         self.dispatch_failure_streak.remove(task_id);
+        self.breaker_open_backoff_streak.remove(task_id);
         self.provider_failure_streak.remove(task_id);
         self.dispatch_cooldowns.remove(task_id);
         self.last_dispatched.remove(task_id);
@@ -1433,6 +1532,17 @@ impl CoordinatorActor {
     /// observations from an unrelated exhaustion cannot leak in via any
     /// shared buffer (the previous `HealthTracker::pending_breaker_observations`
     /// global buffer was removed specifically to prevent that).
+    ///
+    /// **Blameless exhaustion**: `breaker_open_for_all_candidates` says the chain
+    /// exhausted because the model-health breaker was open for *every* candidate,
+    /// so no candidate was ever attempted. That is a property of the provider
+    /// fleet, not of the task, and it must NOT advance the terminal-close
+    /// accounting — see [`Self::apply_breaker_open_exhaustion_backoff`] for the
+    /// outage arithmetic this prevents. The flag is passed explicitly by the call
+    /// site rather than inferred from `exhausted_observations.is_empty()`: an
+    /// empty observation list is only a *proxy* for "nothing was attempted" and
+    /// could become true for unrelated reasons, whereas the parameter documents
+    /// the caller's intent at the point where the breaker state was read.
     pub(crate) async fn apply_chain_exhaustion_side_effects(
         &mut self,
         task: &djinn_core::models::Task,
@@ -1443,6 +1553,9 @@ impl CoordinatorActor {
         // cooldown accounting is unchanged for multi-candidate lanes.
         candidate_models: &[String],
         exhausted_observations: &[djinn_provider::catalog::HealthKey],
+        // `true` when the health breaker was open for EVERY candidate, i.e. the
+        // chain exhausted without a single dispatch being attempted.
+        breaker_open_for_all_candidates: bool,
     ) {
         // Apply deferred breaker checks for THIS chain's observed failures
         // only.  Observations from a fallback-rescued chain (which were
@@ -1450,10 +1563,27 @@ impl CoordinatorActor {
         // leak here, and observations from an unrelated exhaustion cannot
         // leak in via a global buffer. The breaker trip happens at most
         // once per chain-exhausted failover attempt.
+        //
+        // On the breaker-open-for-all path this loop is a no-op: every
+        // candidate was skipped before `dispatch_fn` ran, so
+        // `try_dispatch_to_pool` recorded no failure observation and the list
+        // is empty. Kept above the branch so the ordering (breaker checks,
+        // then accounting) is identical on both paths.
         for key in exhausted_observations {
             self.health
                 .apply_breaker_check_for(key.scope.as_deref(), &key.model_id);
         }
+
+        if breaker_open_for_all_candidates {
+            self.apply_breaker_open_exhaustion_backoff(task, role, candidate_models)
+                .await;
+            return;
+        }
+
+        // A genuinely attempted exhaustion: whatever provider outage was
+        // suppressing this task has cleared enough to let a dispatch through,
+        // so the blameless ladder starts over next time it is needed.
+        self.breaker_open_backoff_streak.remove(&task.id);
 
         let streak = {
             let s = self
@@ -1525,6 +1655,185 @@ impl CoordinatorActor {
                 )
                 .await;
             }
+        }
+    }
+
+    /// Back off — but do not blame — a failover chain that exhausted because the
+    /// model-health breaker was open for **every** candidate.
+    ///
+    /// Nothing was attempted: `try_dispatch_to_pool` skipped each candidate at
+    /// its `is_available` gate, so there is no evidence whatsoever about *this
+    /// task*. The exhaustion is a statement about the provider fleet — a 429
+    /// storm, an outage, or one revoked credential — and the breaker is
+    /// scope-wide, so every ready task of that user exhausts identically.
+    ///
+    /// Routing this through [`Self::apply_chain_exhaustion_side_effects`]'s
+    /// ordinary streak was a fleet-wide, data-shaped bug: the escalating ladder
+    /// (60+120+240+480+960+1800×4 s) reaches [`MAX_DISPATCH_FAILURES`] in ~2.5h,
+    /// at which point every affected task was force-closed with "all failover
+    /// candidates exhausted after multiple attempts" — while breaker cooldowns
+    /// run to 4h and a hard-disabled breaker never auto-recovers at all. The
+    /// streak is durable, so a coordinator restart did not save the tasks either.
+    ///
+    /// So: escalating cooldown yes (otherwise the coordinator re-walks every
+    /// ready task each tick for the whole outage), failure streak no, terminal
+    /// close never. The task resumes on its own the moment the breaker closes.
+    ///
+    /// Silence would be the other failure mode — a loud wrong behaviour turned
+    /// quiet. Following the single-candidate-exhaustion precedent, an
+    /// operator-visible activity entry is emitted **once** as the blameless
+    /// streak crosses [`BREAKER_OPEN_EXHAUSTION_SIGNAL_THRESHOLD`], so a task
+    /// parked behind an open breaker is visibly stuck and says why.
+    async fn apply_breaker_open_exhaustion_backoff(
+        &mut self,
+        task: &djinn_core::models::Task,
+        role: &str,
+        candidate_models: &[String],
+    ) {
+        // Blameless ladder: escalates the retry cadence only. Deliberately a
+        // different map from `dispatch_failure_streak` so it can never reach
+        // the terminal-close comparison, and deliberately not persisted — the
+        // worst a restart costs is one extra 60s rung.
+        let streak = {
+            let s = self
+                .breaker_open_backoff_streak
+                .entry(task.id.clone())
+                .or_insert(0);
+            *s = s.saturating_add(1);
+            *s
+        };
+        let cooldown = escalating_dispatch_cooldown(streak);
+        tracing::warn!(
+            task_id = %task.short_id,
+            role,
+            breaker_backoff_streak = streak,
+            cooldown_secs = cooldown.as_secs(),
+            candidate_models = candidate_models.len(),
+            dispatch_failure_streak = self
+                .dispatch_failure_streak
+                .get(&task.id)
+                .copied()
+                .unwrap_or(0),
+            "CoordinatorActor: model-health breaker open for every candidate — backing off \
+             dispatch WITHOUT advancing the failure streak (nothing was attempted, so the \
+             task is not at fault and must not be force-closed)"
+        );
+        self.dispatch_cooldowns
+            .insert(task.id.clone(), SystemClock::new().now_instant() + cooldown);
+        // `failure_streak: None` leaves the durable streak untouched — the
+        // write-through helper carries the stored value forward. Only the
+        // cooldown moves.
+        self.persist_durable_dispatch_state_update(
+            &task.id,
+            Some(&task.short_id),
+            "breaker_open_exhaustion_backoff",
+            DurableDispatchStateUpdate {
+                cooldown_until: Some(dispatch_wall_clock_after(cooldown)),
+                last_dispatched: Some(None),
+                ..Default::default()
+            },
+        )
+        .await;
+
+        if streak == BREAKER_OPEN_EXHAUSTION_SIGNAL_THRESHOLD {
+            self.emit_breaker_open_exhaustion_signal(task, role, candidate_models, streak)
+                .await;
+        }
+    }
+
+    /// Emit a durable, operator-visible task activity entry stating that every
+    /// candidate model for a role lane is circuit-breaker disabled, so the task
+    /// is parked on a blameless backoff until provider health recovers.
+    ///
+    /// Deduplicated on the exact body exactly as
+    /// [`Self::emit_single_candidate_exhaustion_signal`] is, so re-entry at the
+    /// same streak never double-posts.
+    async fn emit_breaker_open_exhaustion_signal(
+        &self,
+        task: &djinn_core::models::Task,
+        role: &str,
+        candidate_models: &[String],
+        streak: u32,
+    ) {
+        let models = if candidate_models.is_empty() {
+            "(none resolved)".to_owned()
+        } else {
+            candidate_models
+                .iter()
+                .map(|m| format!("`{m}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let body = format!(
+            "Every candidate model for role lane `{role}` is currently disabled by the \
+             model-health circuit breaker, so {streak} consecutive dispatch cycles for this \
+             task ended without a single dispatch being attempted. Candidates: {models}. \
+             This is a provider-health condition (outage, throttling storm, or a revoked \
+             credential), not a fault of this task: the task is on a blameless escalating \
+             backoff, its dispatch failure streak was NOT advanced, and it has NOT been \
+             closed — it resumes automatically once a breaker closes. To clear it, restore \
+             the provider credential / quota, or re-enable a model via model_health(enable) \
+             if a breaker is hard-disabled."
+        );
+        let repo = self.task_repo();
+        // Best-effort dedup — on a read failure post anyway (a duplicate beats a
+        // silently-dropped operator signal).
+        match repo.list_activity(&task.id).await {
+            Ok(entries) => {
+                let already_present = entries.iter().any(|entry| {
+                    entry.event_type == "breaker_open_dispatch_blocked"
+                        && serde_json::from_str::<serde_json::Value>(&entry.payload)
+                            .ok()
+                            .and_then(|v| {
+                                v.get("body")
+                                    .and_then(serde_json::Value::as_str)
+                                    .map(str::to_owned)
+                            })
+                            .as_deref()
+                            == Some(body.as_str())
+                });
+                if already_present {
+                    return;
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    task_id = %task.short_id,
+                    error = %e,
+                    "CoordinatorActor: failed to read activity for breaker-open exhaustion \
+                     dedup; posting signal anyway"
+                );
+            }
+        }
+        let payload = serde_json::json!({
+            "body": body,
+            "role": role,
+            "candidate_models": candidate_models,
+            "consecutive_blocked_cycles": streak,
+        });
+        if let Err(e) = repo
+            .log_activity(
+                Some(&task.id),
+                "coordinator",
+                "system",
+                "breaker_open_dispatch_blocked",
+                &payload.to_string(),
+            )
+            .await
+        {
+            tracing::warn!(
+                task_id = %task.short_id,
+                error = %e,
+                "CoordinatorActor: failed to persist breaker-open dispatch-blocked signal"
+            );
+        } else {
+            tracing::warn!(
+                task_id = %task.short_id,
+                role,
+                streak,
+                "CoordinatorActor: every candidate model is breaker-disabled for \
+                 {streak} consecutive cycles — surfaced operator signal (task NOT closed)"
+            );
         }
     }
 
@@ -2335,25 +2644,41 @@ impl CoordinatorActor {
                             // reappearance) and the per-(scope,model) breaker still
                             // fails over; only the terminal-close counter is spared.
                             let throttle = provider_failure.is_some_and(|f| f.throttle);
+                            // A transient provider-side fault (5xx
+                            // `server_error` / `server_is_overloaded`, or a hard
+                            // transport death) is the PROVIDER's fault, not the
+                            // task's — the identical transcript succeeds on the
+                            // next healthy backend. It is therefore spared the
+                            // two task-blaming counters exactly as a throttle
+                            // is, while the escalating cooldown and the
+                            // per-(scope,model) breaker failover still apply.
+                            let transient = provider_failure.is_some_and(|f| f.transient);
 
                             // Second-strike Planner escalation for provider-error
-                            // FAILED sessions. A genuine (non-throttle) typed
-                            // provider failure that recurs for the same task is the
-                            // poisoned-transcript-400 / dead-credential / persistent
-                            // server-fault class: redispatch reproduces it
-                            // identically, so riding the backoff ladder toward the
-                            // streak-10 terminal close just burns attempts with
-                            // nobody deciding what to do. The cycling gate (trigger
-                            // B) below excludes provider faults by design, and the
-                            // stall-cancel escalation only covers coordinator stall
-                            // kills — so without this the failure has no Planner
-                            // path. Count consecutive such failures (reset when the
-                            // task's status advances, mirroring the stall streak)
-                            // and hand the task to the Planner on the
-                            // FAILURE_ESCALATION_THRESHOLD-th strike instead of
-                            // another doomed redispatch.
+                            // FAILED sessions. Only a TASK-ATTRIBUTABLE typed
+                            // provider failure qualifies: the poisoned-transcript
+                            // 400 / unparseable-output class, which redispatch
+                            // reproduces identically, so riding the backoff ladder
+                            // toward the streak-10 terminal close just burns
+                            // attempts with nobody deciding what to do. Throttles
+                            // and transient provider faults are excluded — task
+                            // `2gq7` (2026-07-29) failed three sessions on three
+                            // INDEPENDENT OpenAI 500s and the third strike minted a
+                            // "Planner remediation" task whose reason asserted a
+                            // poisoned resume transcript that never existed; the
+                            // model's own health breaker had meanwhile already
+                            // auto-disabled it, which is where that fault belonged.
+                            // The cycling gate (trigger B) below excludes provider
+                            // faults by design, and the stall-cancel escalation only
+                            // covers coordinator stall kills — so without this the
+                            // failure has no Planner path. Count consecutive such
+                            // failures (reset when the task's status advances,
+                            // mirroring the stall streak) and hand the task to the
+                            // Planner on the FAILURE_ESCALATION_THRESHOLD-th strike
+                            // instead of another doomed redispatch.
                             if provider_failure.is_some()
                                 && !throttle
+                                && !transient
                                 && self
                                     .maybe_escalate_provider_failure_streak(&task, role)
                                     .await
@@ -2428,9 +2753,10 @@ impl CoordinatorActor {
                             // After MAX consecutive same-role failures the task is
                             // structurally doomed (e.g. its run can never complete);
                             // fail it terminally instead of looping forever. Skipped
-                            // for throttles (A3): a transient quota window must never
-                            // terminally close the task.
-                            if !throttle && next_streak >= MAX_DISPATCH_FAILURES {
+                            // for throttles (A3) and transient provider faults: a
+                            // quota window or a provider outage must never terminally
+                            // close the task.
+                            if !throttle && !transient && next_streak >= MAX_DISPATCH_FAILURES {
                                 self.terminally_fail_task(
                                     &task,
                                     role,
@@ -2452,9 +2778,15 @@ impl CoordinatorActor {
                             }
 
                             // A3: leave the terminal streak at its current value on a
-                            // throttle (don't persist the advanced `next_streak`).
-                            let stored_streak =
-                                stored_streak_after_failure(current_streak, next_streak, throttle);
+                            // throttle or a transient provider fault (don't persist
+                            // the advanced `next_streak`) — the provider failed, the
+                            // task did not.
+                            let stored_streak = stored_streak_after_failure(
+                                current_streak,
+                                next_streak,
+                                throttle,
+                                transient,
+                            );
                             if stored_streak > 0 {
                                 self.dispatch_failure_streak
                                     .insert(task.id.clone(), stored_streak);
@@ -2499,6 +2831,7 @@ impl CoordinatorActor {
                                 role,
                                 streak = stored_streak,
                                 throttle,
+                                transient,
                                 provider_backoff = provider_failure.is_some(),
                                 cooldown_secs = effective_cooldown.as_secs(),
                                 "CoordinatorActor: repeated task failure — backing off dispatch"
@@ -3073,6 +3406,10 @@ impl CoordinatorActor {
                             role: role.to_owned(),
                         },
                     );
+                    // A dispatch got through, so any breaker-outage backoff
+                    // ladder this task was climbing is over — reset it so a
+                    // future, unrelated outage starts back at the first rung.
+                    self.breaker_open_backoff_streak.remove(&task.id);
                     self.persist_durable_dispatch_state_update(
                         &task.id,
                         Some(&task.short_id),
@@ -3196,11 +3533,18 @@ impl CoordinatorActor {
                     // breaker side effects apply ONLY to failures from THIS
                     // dispatch attempt — not from a fallback-rescued or
                     // unrelated earlier chain (AC2).
+                    //
+                    // `breaker_open_for_all_candidates` is threaded through
+                    // explicitly: when it holds, no candidate was attempted, so
+                    // the exhaustion says nothing about this task and must back
+                    // off WITHOUT advancing the streak that force-closes at
+                    // MAX_DISPATCH_FAILURES.
                     self.apply_chain_exhaustion_side_effects(
                         &task,
                         role,
                         model_ids,
                         &exhausted_observations,
+                        breaker_open_for_all_candidates,
                     )
                     .await;
                 }
@@ -3717,6 +4061,7 @@ mod inflight_ledger_tests {
             provisional_admissions: HashMap::new(),
             dispatch_cooldowns: HashMap::new(),
             dispatch_failure_streak: HashMap::new(),
+            breaker_open_backoff_streak: HashMap::new(),
             background_work_tracker: BackgroundWorkTracker::default(),
             stranded_ready_source: None,
             closed_parent_open_children_source: None,
@@ -5087,6 +5432,7 @@ mod failover_chain_tests {
             provisional_admissions: HashMap::new(),
             dispatch_cooldowns: HashMap::new(),
             dispatch_failure_streak: HashMap::new(),
+            breaker_open_backoff_streak: HashMap::new(),
             background_work_tracker: BackgroundWorkTracker::default(),
             stranded_ready_source: None,
             closed_parent_open_children_source: None,
@@ -6220,6 +6566,7 @@ mod failover_chain_tests {
                 "worker",
                 &[String::from("m-a"), String::from("m-b")],
                 &exhausted_observations,
+                false,
             )
             .await;
 
@@ -6275,6 +6622,7 @@ mod failover_chain_tests {
                 "worker",
                 &[String::from("m-a"), String::from("m-b")],
                 &exhausted_observations2,
+                false,
             )
             .await;
 
@@ -6405,6 +6753,7 @@ mod failover_chain_tests {
                     "worker",
                     &[String::from("m-a"), String::from("m-b")],
                     &exhausted_observations,
+                    false,
                 )
                 .await;
 
@@ -6457,6 +6806,7 @@ mod failover_chain_tests {
                 "worker",
                 &[String::from("m-a"), String::from("m-b")],
                 &exhausted_observations,
+                false,
             )
             .await;
 
@@ -6826,6 +7176,7 @@ mod failover_chain_tests {
                 "worker",
                 &[String::from("m-a"), String::from("m-b")],
                 &exhausted_unrelated,
+                false,
             )
             .await;
 
@@ -7063,6 +7414,7 @@ mod failover_chain_tests {
                 "worker",
                 &[String::from("m-a"), String::from("m-b")],
                 &exhausted_observations,
+                false,
             )
             .await;
 
@@ -7130,6 +7482,7 @@ mod failover_chain_tests {
                     "worker",
                     &[String::from("m-a"), String::from("m-b")],
                     &exhausted_observations,
+                    false,
                 )
                 .await;
 
@@ -7652,6 +8005,7 @@ mod monitored_reopen_no_eligible_model_tests {
             provisional_admissions: HashMap::new(),
             dispatch_cooldowns: HashMap::new(),
             dispatch_failure_streak: HashMap::new(),
+            breaker_open_backoff_streak: HashMap::new(),
             background_work_tracker: BackgroundWorkTracker::default(),
             stranded_ready_source: None,
             closed_parent_open_children_source: None,
@@ -8239,6 +8593,7 @@ mod build_admission_route_tests {
             provisional_admissions: HashMap::new(),
             dispatch_cooldowns: HashMap::new(),
             dispatch_failure_streak: HashMap::new(),
+            breaker_open_backoff_streak: HashMap::new(),
             background_work_tracker: BackgroundWorkTracker::default(),
             stranded_ready_source: None,
             closed_parent_open_children_source: None,

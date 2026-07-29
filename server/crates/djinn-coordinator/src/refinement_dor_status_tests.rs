@@ -841,3 +841,212 @@ async fn human_accept_rejected_when_corrupt_head_recomputed() {
         "refinement must remain active (not resolved) after rejected accept"
     );
 }
+
+// ── Human review resolution: feedback and the override escape hatch ─────────
+
+/// Admit a durable run for `proposal_id` and park it awaiting human review.
+/// Returns `(run_id, generation)`.
+async fn park_awaiting_review(db: &djinn_db::Database, proposal_id: &str) -> (String, i32) {
+    let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+    let admitted = repo
+        .admit_refinement_run(djinn_db::AdmitRefinementRunRequest {
+            proposal_id: proposal_id.to_owned(),
+            idempotency_key: uuid::Uuid::now_v7().to_string(),
+            source: djinn_db::RefinementAdmissionSource::ExplicitStart {
+                actor: "human".into(),
+            },
+            heartbeat_grace_millis: 60_000,
+        })
+        .await
+        .expect("admit run");
+    let (run_id, generation) = match admitted {
+        djinn_db::RefinementAdmissionOutcome::Admitted {
+            run_id, generation, ..
+        }
+        | djinn_db::RefinementAdmissionOutcome::Existing {
+            run_id, generation, ..
+        } => (run_id, generation),
+    };
+    assert!(
+        repo.park_refinement_run(djinn_db::ParkRefinementRunRequest {
+            run_id: run_id.clone(),
+            generation,
+            kind: djinn_core::refinement_liveness::RefinementParkKind::AwaitingReview,
+        })
+        .await
+        .expect("park run"),
+        "fixture must park the run awaiting review"
+    );
+    (run_id, generation)
+}
+
+/// Install the disposable awaiting-review projection the resolve path requires.
+fn install_awaiting_review_projection(
+    actor: &mut super::super::actor::CoordinatorActor,
+    proposal_id: &str,
+    run_id: &str,
+    generation: i32,
+    head_seq: i32,
+) {
+    let mut state = crate::refinement::RefinementLoopState::new(proposal_id, head_seq)
+        .with_run_identity(run_id.to_owned(), generation)
+        .with_attributed_user(None);
+    state.phase = crate::refinement::RefinementPhase::AwaitingHumanReview;
+    actor.active_refinements.insert(run_id.to_owned(), state);
+}
+
+/// Read back the reviewer feedback persisted for a resolved human review.
+async fn persisted_review_feedback(
+    db: &djinn_db::Database,
+    proposal_id: &str,
+) -> Option<(bool, Option<String>)> {
+    let revisions = ProposalRepository::new(db.clone(), EventBus::noop())
+        .revisions(proposal_id)
+        .await
+        .expect("read revisions");
+    revisions
+        .iter()
+        .rev()
+        .find(|revision| revision.event_kind == "refinement_review_resolved")
+        .and_then(|revision| revision.event_metadata.as_deref())
+        .and_then(|meta| serde_json::from_str::<serde_json::Value>(meta).ok())
+        .map(|meta| {
+            (
+                meta.get("accept").and_then(serde_json::Value::as_bool) == Some(true),
+                meta.get("reviewer_feedback")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned),
+            )
+        })
+}
+
+/// Regression: `resolve_refinement_review` took `_feedback` and never read it,
+/// so the reviewer's note — the only record of WHY a refined spec was kept —
+/// was silently discarded even though the MCP tool description promises
+/// "Optional `feedback` is recorded".
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn resolving_a_review_persists_the_reviewer_feedback() {
+    let db = crate::test_helpers::create_test_db();
+    let (proposal_id, _) = seed_ready_proposal(&db).await;
+    let (events_tx, _events_rx) = tokio::sync::broadcast::channel::<DjinnEventEnvelope>(256);
+    let pool = spawn_test_pool(&db, 4);
+    let mut actor = build_refinement_actor(&db, &events_tx, pool);
+    let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+    let head_seq = repo
+        .get(&proposal_id)
+        .await
+        .expect("read proposal")
+        .expect("proposal exists")
+        .latest_revision_seq;
+    let (run_id, generation) = park_awaiting_review(&db, &proposal_id).await;
+    install_awaiting_review_projection(&mut actor, &proposal_id, &run_id, generation, head_seq);
+
+    let feedback = "Accepted; the AC wording still reads a bit loose for round 4.";
+    actor
+        .resolve_refinement_review(&proposal_id, true, Some(feedback.to_owned()))
+        .await
+        .expect("accept must succeed against a ready head");
+
+    let persisted = persisted_review_feedback(&db, &proposal_id)
+        .await
+        .expect("a human review resolution must leave a durable audit row");
+    assert!(persisted.0, "the recorded decision must be the accept");
+    assert_eq!(
+        persisted.1.as_deref(),
+        Some(feedback),
+        "the reviewer's feedback must read back verbatim"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rejecting_a_review_persists_the_reviewer_feedback() {
+    let db = crate::test_helpers::create_test_db();
+    let (proposal_id, _) = seed_ready_proposal(&db).await;
+    let (events_tx, _events_rx) = tokio::sync::broadcast::channel::<DjinnEventEnvelope>(256);
+    let pool = spawn_test_pool(&db, 4);
+    let mut actor = build_refinement_actor(&db, &events_tx, pool);
+    let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+    let head_seq = repo
+        .get(&proposal_id)
+        .await
+        .expect("read proposal")
+        .expect("proposal exists")
+        .latest_revision_seq;
+    let (run_id, generation) = park_awaiting_review(&db, &proposal_id).await;
+    install_awaiting_review_projection(&mut actor, &proposal_id, &run_id, generation, head_seq);
+
+    let feedback = "Reverting: the tribunal rewrote the problem statement.";
+    actor
+        .resolve_refinement_review(&proposal_id, false, Some(feedback.to_owned()))
+        .await
+        .expect("reject must succeed");
+
+    let persisted = persisted_review_feedback(&db, &proposal_id)
+        .await
+        .expect("a rejected review must also leave a durable audit row");
+    assert!(!persisted.0, "the recorded decision must be the reject");
+    assert_eq!(persisted.1.as_deref(), Some(feedback));
+}
+
+/// Regression: `ReadinessPanel` offers a "Record override…" control and the
+/// composed sign-off gate honours a current override, but the accept path
+/// called `evaluate_proposal_readiness` directly and never consulted it — so
+/// the advertised escape hatch could not actually unblock accept.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn accept_is_rejected_when_dor_blocks_and_allowed_under_a_current_override() {
+    let db = crate::test_helpers::create_test_db();
+    // This fixture's proposal is created with empty acceptance criteria, so DoR
+    // blocks on a non-integrity check — exactly the shape an override covers.
+    let fixture = seed_refinement_fixture(&db).await;
+    let proposal_id = fixture.proposal_id.clone();
+    let (events_tx, _events_rx) = tokio::sync::broadcast::channel::<DjinnEventEnvelope>(256);
+    let pool = spawn_test_pool(&db, 4);
+    let mut actor = build_refinement_actor(&db, &events_tx, pool);
+    let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+    let head_seq = repo
+        .get(&proposal_id)
+        .await
+        .expect("read proposal")
+        .expect("proposal exists")
+        .latest_revision_seq;
+    let (run_id, generation) = park_awaiting_review(&db, &proposal_id).await;
+    install_awaiting_review_projection(&mut actor, &proposal_id, &run_id, generation, head_seq);
+
+    let blocked = actor
+        .resolve_refinement_review(&proposal_id, true, None)
+        .await
+        .expect_err("accept must be rejected while DoR blocks with no override");
+    assert!(
+        blocked.contains("machine readiness is blocking"),
+        "unexpected rejection: {blocked}"
+    );
+    assert!(
+        actor.active_refinements.contains_key(&run_id),
+        "a rejected accept must leave the parked run intact"
+    );
+
+    // Record the same override the "Record override…" control writes.
+    repo.record_refinement_lifecycle(
+        &proposal_id,
+        "verdict_override",
+        Some(&serde_json::json!({
+            "source": "human_verdict_override",
+            "override_by": fixture.user_id,
+            "override_reason": "Accepting a spike spec without formal ACs",
+            "override_on_revision_seq": head_seq,
+        })),
+    )
+    .await
+    .expect("record verdict override");
+
+    actor
+        .resolve_refinement_review(&proposal_id, true, Some("Overridden.".to_owned()))
+        .await
+        .expect("a current human override must unblock accept");
+
+    let persisted = persisted_review_feedback(&db, &proposal_id)
+        .await
+        .expect("the accepted review must be audited");
+    assert!(persisted.0);
+    assert_eq!(persisted.1.as_deref(), Some("Overridden."));
+}

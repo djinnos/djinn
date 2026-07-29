@@ -37,7 +37,8 @@ pub(super) async fn admit_committed_revision_resume(
         RefinementAdmissionSource::Revision { revision_id },
         None,
     )
-    .await?;
+    .await
+    .map_err(|rejection| rejection.message)?;
     if pending_dispatch {
         // The intent was committed by reap_and_admit and remains retryable;
         // ProposalSingleResponse has no dispatch field to extend compatibly.

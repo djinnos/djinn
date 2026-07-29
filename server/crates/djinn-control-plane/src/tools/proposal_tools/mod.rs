@@ -55,7 +55,7 @@ mod lifecycle;
 mod mdx;
 mod params;
 mod revision_admission;
-pub(crate) mod signoff;
+pub mod signoff;
 
 // Re-export CRUD tool parameter types from `params.rs` so the public module path
 // `crate::tools::proposal_tools::{...}` stays stable for existing dispatch and

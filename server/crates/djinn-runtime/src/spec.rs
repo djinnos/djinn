@@ -711,16 +711,30 @@ pub enum ResumeSelectionReason {
 /// (`supervisor_runner.rs`) maps the class back onto `record_failure` /
 /// `record_stall` using the task creator's scope. Only the classes the breaker
 /// actually acts on are represented — failures the breaker deliberately ignores
-/// (ContextOverflow, EmptyCompletion) and untyped/legacy errors carry `None` so
-/// they never trip it. A hard `Transport` death folds into `Failure` (gentle
+/// (ContextOverflow) and untyped/legacy errors carry `None` so they never trip
+/// it. A hard `Transport` death folds into `Transient` (gentle
 /// consecutive-failure breaker) so a model that dies instantly on every dispatch
 /// auto-disables instead of being re-selected forever.
+///
+/// The class is ALSO the coordinator's only evidence about *who* a failed
+/// session should be blamed on, so the split between `Failure` and `Transient`
+/// matters beyond the breaker: `Failure` is the task-attributable class (a
+/// poisoned resume transcript the provider 400s, output we cannot parse) and is
+/// the only one that arms the third-strike planner-remediation escalation;
+/// `Transient` and `Throttle` are provider-attributable and must decay on the
+/// cooldown ladder instead.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ProviderFailureClass {
-    /// Auth / persistent-invalid-request / invalid-output / 5xx provider
-    /// internal — a "quiet but broken" failure. Feeds the gentler
+    /// Persistent-invalid-request / invalid-output — a "quiet but broken"
+    /// failure the REQUEST is responsible for (the poisoned resume transcript
+    /// the provider 400s, a body we cannot parse). Feeds the gentler
     /// consecutive-failure breaker (`record_failure`): a one-off may be
     /// transient, so it only demotes the model after it repeats.
+    ///
+    /// This is the task-attributable class, and therefore the ONLY one that
+    /// arms the coordinator's third-strike planner-remediation escalation.
+    /// Provider-side faults that reproduce independently of the request body
+    /// (5xx, transport death) belong to [`Self::Transient`].
     Failure,
     /// Rate-limit / quota (throttle). Feeds the immediate-failover breaker
     /// (`record_stall`), matching the coordinator's throttle→stall intent: a
@@ -749,6 +763,51 @@ pub enum ProviderFailureClass {
     /// owner to reconnect). Added last to preserve the bincode discriminants of
     /// `Failure`/`Throttle` on the worker→host report wire.
     AuthInvalid,
+    /// Transient PROVIDER-side fault — a 5xx (`server_error` /
+    /// `server_is_overloaded`, incl. the in-stream `response.failed` form) or a
+    /// hard network/transport death. The provider is broken, not the task: the
+    /// same transcript redispatched onto a healthy backend succeeds, so this
+    /// class must never be read as evidence that the task itself is
+    /// undispatchable.
+    ///
+    /// Breaker behaviour differs from [`Self::Failure`] in exactly one way: the
+    /// host feeds this class to `record_transient_failure`, whose ladder is
+    /// `TRANSIENT_BREAKER_THRESHOLD` (20) rather than the three-strike
+    /// `CIRCUIT_BREAKER_THRESHOLD`. The fault stays fully visible in
+    /// `model_health` — `consecutive_failures` and `total_failures` move exactly
+    /// as a `Failure` would — but an upstream capacity blip no longer
+    /// auto-disables the model, while a backend that is permanently gone still
+    /// demotes. An overloaded provider is a statement about LOAD, not about
+    /// whether the model can do the work (task `nr41`, 2026-07-29:
+    /// `openai/gpt-5.6-sol` reached `auto_disabled: true` with 15 consecutive
+    /// failures and 6 disable-TTL trips off an OpenAI 500 burst, taking the
+    /// tribunal's own adversary role down with it).
+    ///
+    /// The larger change is *task attribution* — the coordinator spares the two
+    /// task-blaming counters
+    /// (the planner-remediation `provider_failure_streak` and the terminal
+    /// `dispatch_failure_streak`) for this class, exactly as it already does for
+    /// [`Self::Throttle`], while the escalating redispatch cooldown and the
+    /// per-`(scope, model)` failover still apply. Incident (task `2gq7`,
+    /// 2026-07-29): three independent OpenAI 500s across three sessions armed
+    /// the third-strike escalation and minted a "Planner remediation" task whose
+    /// reason asserted a poisoned resume transcript that never existed.
+    ///
+    /// `retry_after_ms` carries a provider-stated reset window when one was
+    /// supplied (rare on a 5xx; `None` otherwise) and floors the redispatch
+    /// cooldown the same way a throttle's does. `#[serde(default)]` keeps the
+    /// field additive over the wire, like `Throttle`'s.
+    ///
+    /// Appended LAST — after `AuthInvalid` — for exactly the reason
+    /// `AuthInvalid` was: the report frame rides a positional,
+    /// non-self-describing bincode wire, so inserting or reordering a variant
+    /// would shift the discriminants of `Failure`/`Throttle`/`AuthInvalid` and
+    /// mis-decode reports from a version-skewed worker mid-deploy. A worker that
+    /// EMITS `Transient` therefore requires a version-matched host.
+    Transient {
+        #[serde(default)]
+        retry_after_ms: Option<u64>,
+    },
 }
 
 /// Terminal outcome of a task-run.
@@ -1317,6 +1376,114 @@ mod tests {
             ),
             other => panic!("unexpected outcome: {other:?}"),
         }
+    }
+
+    #[test]
+    fn failed_outcome_transient_bincode_roundtrip() {
+        // The `Transient` class (provider-side 5xx / transport death) must
+        // survive the worker→host report wire, including its optional
+        // provider-stated reset window.
+        for retry_after_ms in [None, Some(90_000u64)] {
+            let report = TaskRunReport {
+                task_run_id: "run-4".to_string(),
+                outcome: TaskRunOutcome::Failed {
+                    stage: "planner".to_string(),
+                    reason: "server_is_overloaded: Our servers are currently overloaded"
+                        .to_string(),
+                    provider_failure: Some(ProviderFailureClass::Transient { retry_after_ms }),
+                    error_class: None,
+                    hint: None,
+                    body_excerpt: None,
+                },
+                stages_completed: vec![RoleKind::Planner],
+            };
+
+            let bytes = bincode::serialize(&report).expect("serialize");
+            let back: TaskRunReport = bincode::deserialize(&bytes).expect("deserialize");
+
+            match back.outcome {
+                TaskRunOutcome::Failed {
+                    provider_failure, ..
+                } => assert_eq!(
+                    provider_failure,
+                    Some(ProviderFailureClass::Transient { retry_after_ms }),
+                    "the transient class must round-trip verbatim"
+                ),
+                other => panic!("unexpected outcome: {other:?}"),
+            }
+        }
+    }
+
+    /// Wire-compat guard for [`ProviderFailureClass`].
+    ///
+    /// bincode is positional and non-self-describing: an enum is encoded as its
+    /// variant INDEX (u32 LE), so inserting or reordering a variant silently
+    /// re-points every previously-encoded byte sequence at a different variant.
+    /// A version-skewed worker mid-deploy would then have its `Throttle` decoded
+    /// as `AuthInvalid` (or worse). `Transient` was therefore appended LAST,
+    /// after `AuthInvalid`, exactly as `AuthInvalid` was appended after
+    /// `Throttle`.
+    ///
+    /// This pins the pre-existing indices as literal bytes. If someone inserts a
+    /// variant anywhere but the end, these assertions fail rather than shipping
+    /// a mid-deploy mis-decode.
+    #[test]
+    fn provider_failure_class_wire_discriminants_are_append_only() {
+        // Encoded form of each variant, exactly as an older worker emits it.
+        const FAILURE: [u8; 4] = [0, 0, 0, 0];
+        const THROTTLE_NONE: [u8; 5] = [1, 0, 0, 0, 0];
+        const AUTH_INVALID: [u8; 4] = [2, 0, 0, 0];
+        const TRANSIENT_NONE: [u8; 5] = [3, 0, 0, 0, 0];
+
+        assert_eq!(
+            bincode::serialize(&ProviderFailureClass::Failure).unwrap(),
+            FAILURE.to_vec(),
+            "Failure must stay variant index 0"
+        );
+        assert_eq!(
+            bincode::serialize(&ProviderFailureClass::Throttle {
+                retry_after_ms: None
+            })
+            .unwrap(),
+            THROTTLE_NONE.to_vec(),
+            "Throttle must stay variant index 1"
+        );
+        assert_eq!(
+            bincode::serialize(&ProviderFailureClass::AuthInvalid).unwrap(),
+            AUTH_INVALID.to_vec(),
+            "AuthInvalid must stay variant index 2"
+        );
+        assert_eq!(
+            bincode::serialize(&ProviderFailureClass::Transient {
+                retry_after_ms: None
+            })
+            .unwrap(),
+            TRANSIENT_NONE.to_vec(),
+            "Transient is the newest variant and must be appended LAST, at index 3"
+        );
+
+        // And the decode direction: bytes minted by a worker that predates
+        // `Transient` still land on the variant they were written as.
+        assert_eq!(
+            bincode::deserialize::<ProviderFailureClass>(&FAILURE).unwrap(),
+            ProviderFailureClass::Failure
+        );
+        assert_eq!(
+            bincode::deserialize::<ProviderFailureClass>(&THROTTLE_NONE).unwrap(),
+            ProviderFailureClass::Throttle {
+                retry_after_ms: None
+            }
+        );
+        assert_eq!(
+            bincode::deserialize::<ProviderFailureClass>(&AUTH_INVALID).unwrap(),
+            ProviderFailureClass::AuthInvalid
+        );
+        assert_eq!(
+            bincode::deserialize::<ProviderFailureClass>(&TRANSIENT_NONE).unwrap(),
+            ProviderFailureClass::Transient {
+                retry_after_ms: None
+            }
+        );
     }
 
     fn loop_guard_outcome(kind: LoopGuardKind) -> TaskRunOutcome {

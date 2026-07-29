@@ -6,6 +6,10 @@ pub(crate) mod cycling_intervention;
 pub(crate) mod lane_resolution_log;
 pub(crate) mod liveness;
 mod outcome;
+/// Cumulative bound on the park rung's `no_attempted_remediation` decline, so a
+/// guard whose counter cannot grow stops redispatching forever. Re-exported
+/// through `crate::types`.
+pub(crate) mod park_redispatch_bound;
 pub(crate) mod post_intervention_lane;
 /// Pre-dispatch respawn guard: consults attempt-history before fresh
 /// spawn/admission and records guard-deferred audit rows.
@@ -45,3 +49,9 @@ pub(crate) use outcome::DispatchOutcome;
 #[allow(unused_imports)]
 pub(crate) use retry::PostInterventionHistory;
 pub(crate) use retry::RemediationKind;
+
+/// Threshold at which a task blocked by an all-candidates-open health breaker
+/// gets its operator-visible activity entry. Test-only re-export so the
+/// blameless-exhaustion regression suite asserts against the real constant.
+#[cfg(test)]
+pub(crate) use task_dispatch::BREAKER_OPEN_EXHAUSTION_SIGNAL_THRESHOLD;

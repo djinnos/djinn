@@ -10,6 +10,7 @@ mod refinement_read_only;
 
 pub use refinement_read_only::*;
 
+<<<<<<< HEAD
 /// Durable rows written by the structured evidence hand-off.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StructuredEvidenceHandoffCountsForTest {
@@ -70,6 +71,72 @@ pub async fn reject_evidence_findings_debates_for_test(db: &Database) {
     .execute(db.pool())
     .await
     .expect("failed to install evidence-findings debate fault");
+=======
+/// Populate a current attempt's persisted projection for a cross-crate detail
+/// read test. This fixture lives at the database boundary so consumer tests do
+/// not bypass repository ownership with direct readiness-table SQL.
+///
+/// **Not for production use.** Panics on SQL errors.
+pub async fn seed_readiness_detail_projection_for_test(
+    db: &Database,
+    run_id: &str,
+    area_id: &str,
+    attempt_id: &str,
+) {
+    db.ensure_initialized().await.unwrap();
+    let mut transaction = db.pool().begin().await.unwrap();
+    sqlx::query("UPDATE readiness_area_attempts SET status='succeeded', terminal_at='2026-01-01T00:00:00.000Z' WHERE id=$1")
+        .bind(attempt_id)
+        .execute(&mut *transaction)
+        .await
+        .expect("terminal readiness attempt");
+    sqlx::query("UPDATE readiness_composition_areas SET status='succeeded' WHERE id=$1")
+        .bind(area_id)
+        .execute(&mut *transaction)
+        .await
+        .expect("terminal readiness area");
+    sqlx::query("INSERT INTO readiness_guardrail_findings (id,run_id,area_id,attempt_id,guardrail_key,status,severity,confidence,accepted,evidence) VALUES ('query-finding',$1,$2,$3,'auth','covered','high',0.9,true,'{\"path\":\"web/auth.ts\"}')")
+        .bind(run_id)
+        .bind(area_id)
+        .bind(attempt_id)
+        .execute(&mut *transaction)
+        .await
+        .expect("readiness finding");
+    sqlx::query("INSERT INTO readiness_area_result_outputs (run_id,area_id,attempt_id,result) VALUES ($1,$2,$3,'{\"warnings\":[\"preserved\"]}')")
+        .bind(run_id)
+        .bind(area_id)
+        .bind(attempt_id)
+        .execute(&mut *transaction)
+        .await
+        .expect("readiness output");
+    sqlx::query("INSERT INTO readiness_area_scores (run_id,area_id,score,applicable_weight,covered_weight,status) VALUES ($1,$2,0.75,4,3,'supported')")
+        .bind(run_id)
+        .bind(area_id)
+        .execute(&mut *transaction)
+        .await
+        .expect("readiness area score");
+    sqlx::query(
+        "INSERT INTO readiness_project_scores (run_id,score,band) VALUES ($1,0.75,'ready')",
+    )
+    .bind(run_id)
+    .execute(&mut *transaction)
+    .await
+    .expect("readiness project score");
+    sqlx::query("INSERT INTO readiness_remediation_suggestions (id,run_id,dedupe_key,suggestion) VALUES ('query-suggestion',$1,'auth-remediation','{\"action\":\"add auth\"}')")
+        .bind(run_id)
+        .execute(&mut *transaction)
+        .await
+        .expect("readiness suggestion");
+    sqlx::query("INSERT INTO readiness_run_events (id,run_id,event_kind,payload) VALUES ('query-event',$1,'fixture_completed','{\"source\":\"test\"}')")
+        .bind(run_id)
+        .execute(&mut *transaction)
+        .await
+        .expect("readiness event");
+    transaction
+        .commit()
+        .await
+        .expect("commit readiness projection fixture");
+>>>>>>> origin/main
 }
 
 /// Refinement test fields.

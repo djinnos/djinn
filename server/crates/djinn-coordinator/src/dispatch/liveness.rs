@@ -138,6 +138,78 @@ impl DbTaskStatus {
     /// so [`classify`] additionally consults
     /// [`LivenessEvidence::handed_off_from_session_held_status`] before
     /// convicting — see the precedence-3 comment there.
+    ///
+    /// # `InTaskReview` and `InLeadIntervention` are settled here despite NOT being handoffs
+    ///
+    /// This is the one place where the list is knowingly wider than its own
+    /// definition, and it must not be "tidied" without the evidence below.
+    ///
+    /// `needs_task_review` / `needs_lead_intervention` are QUEUE statuses — a
+    /// worker really did hand the task to somebody else. `in_task_review` /
+    /// `in_lead_intervention` are CLAIM statuses: only a live session holds
+    /// them ([`is_session_held_status`] names exactly these plus
+    /// `in_progress`). A reviewer's own handoff destinations are `approved`
+    /// (approve) and `open` (reject) — never `in_task_review`. So a session
+    /// exiting with its task still at `in_task_review` handed nothing on, and
+    /// by this doc's own rule should be convicted.
+    ///
+    /// Concretely, that lets one real failure through. A reviewer that ends
+    /// without calling `submit_review` maps to a non-terminal
+    /// `StageOutcome::Failed` (`supervisor_impl/stage.rs`, the `""` arm of
+    /// `reviewer_stage_outcome`) which deliberately performs NO transition, so
+    /// the task stays `in_task_review`. That path is reached from the
+    /// reply loop's `Ok(())` branch, so `final_result_ok` is true and
+    /// `session_settlement_for_stage_outcome` settles the session
+    /// **`completed`**, not `failed` — the pod exits 0. The exit classifier
+    /// therefore sees `Succeeded` / exit 0 / session `running` / task
+    /// `in_task_review`, and only this `is_settled` entry keeps it out of
+    /// precedence 3. It falls through every later branch (`Succeeded` is not
+    /// absent-or-failed, and not running) and lands on `Live`.
+    ///
+    /// # Why narrowing it is NOT safe today
+    ///
+    /// The exit classifier cannot tell that abandonment apart from a healthy
+    /// reviewer, because of the write ordering in the supervisor stage:
+    ///
+    /// 1. the session row is settled first, which publishes
+    ///    `session.completed` and drives `classify_session_exit_liveness`;
+    /// 2. the reviewer's `task_review_approve` / `task_review_reject`
+    ///    transition is issued only afterwards, on a separate RPC.
+    ///
+    /// At the instant the event fires, both cases are byte-identical on every
+    /// axis this classifier reads: task at `in_task_review`, last transition
+    /// `needs_task_review → in_task_review` (INTO a session-held status, so
+    /// `handed_off_from_session_held_status` is false for both). Everything
+    /// the reviewer decided — the transition, `task_runs`, `task_attempts`,
+    /// the acceptance-criteria array — is written after the session row, by
+    /// construction. Un-settling `InTaskReview` would therefore convict every
+    /// reviewer whose transition is still in flight: the same false-positive
+    /// class #2748 removed at `open`, reintroduced on a different status.
+    ///
+    /// The gates that DO close this race live in the stuck scan
+    /// (`session_recovery.rs`: `pool.has_session` + the background-work
+    /// tracker) and are not portable here — in the pod topology the
+    /// post-session work registers on the agent's context, not the
+    /// coordinator's tracker, and the transition is issued by the pod-side
+    /// supervisor loop rather than by `spawn_post_session_work` at all.
+    ///
+    /// # What is lost, and what it would take to reclaim it
+    ///
+    /// Only signal. The verdict is observational — the caller in `actor.rs`
+    /// discards the result, and the attempt-terminalizing step is gated on
+    /// `failed`/`interrupted`, which a no-verdict reviewer exit is not. The
+    /// operational hole is already closed elsewhere: the attempt is
+    /// terminalized `Crashed` by the supervisor runner, `task_runs` records
+    /// `failed`, and the stuck scan releases `in_task_review →
+    /// needs_task_review` on its 30 s tick with no age threshold.
+    ///
+    /// To decide this properly, split the reviewer sessions whose persisted
+    /// evidence shows `db_task_status = in_task_review` by how the task later
+    /// left that status: `task_review_approve`/`task_review_reject` by
+    /// `agent-supervisor` is a race and must stay exonerated;
+    /// `release_task_review` by `coordinator` is a genuine abandonment. If the
+    /// second group is material, the fix is to move the session settlement
+    /// after the transition — only then can this list be narrowed.
     pub fn is_settled(&self) -> bool {
         matches!(
             self,
@@ -204,6 +276,34 @@ pub struct LivenessEvidence {
     /// pre-existing verdict.
     #[serde(default)]
     pub handed_off_from_session_held_status: bool,
+    /// Positive evidence that the run died on a **transient upstream provider
+    /// fault** — a 5xx (`server_is_overloaded` / `server_error`), a 502/503/504,
+    /// or a stream that died mid-flight — rather than on anything this session
+    /// or task did.
+    ///
+    /// This is the signal the exit path used to throw away. A session's terminal
+    /// status has three values (`completed` / `failed` / `interrupted`) and the
+    /// exit path folds them onto two pod phases plus a sentinel exit code, so
+    /// "the worker crashed" and "the worker's provider 500'd" arrive here as the
+    /// identical `(Failed, 1)` pair. The classifier then convicted both of a
+    /// protocol violation with a `Crash` outcome, terminalized the live attempt,
+    /// and let the task be reclaimed and force-closed — which is how a
+    /// three-second OpenAI outage killed refinement round 3 of task `nr41` on
+    /// 2026-07-29.
+    ///
+    /// Distinct from [`Self::handed_off_from_session_held_status`], which
+    /// exonerates by showing the task was moved somewhere DELIBERATELY. This one
+    /// exonerates by naming an external CAUSE. A transient provider fault leaves
+    /// the task exactly where the session found it — there is no handoff to
+    /// find — so neither term subsumes the other.
+    ///
+    /// Carrying it as its own term rather than as another `exit_code` value is
+    /// deliberate: an exit code describes the process, and the process really
+    /// did exit nonzero. What changed is WHO is at fault, and that is a separate
+    /// fact, so it gets a separate field. `false` is the fail-safe default —
+    /// absent evidence preserves the pre-existing verdict exactly.
+    #[serde(default)]
+    pub transient_provider_fault: bool,
 }
 
 /// Whether `status` is one that only a LIVE session holds.
@@ -281,6 +381,12 @@ pub enum LivenessReason {
     /// The claim-extension budget is exhausted — no more slow extensions
     /// available.
     SlowExtensionBudgetExhausted,
+    /// The run ended because its **upstream provider** failed transiently (5xx
+    /// / overloaded / mid-flight stream death), not because the session or the
+    /// task misbehaved. Retryable: the identical work succeeds on the next
+    /// healthy backend, so the attempt must be recorded as environmental rather
+    /// than as a crash or a protocol violation.
+    TransientProviderFault,
     /// No specific reason (e.g. successful completion, live session).
     None,
 }
@@ -292,6 +398,7 @@ impl LivenessReason {
             Self::NonzeroExitNonterminal => "nonzero_exit_nonterminal",
             Self::HardRuntimeExceeded => "hard_runtime_exceeded",
             Self::SlowExtensionBudgetExhausted => "slow_extension_budget_exhausted",
+            Self::TransientProviderFault => "transient_provider_fault",
             Self::None => "none",
         }
     }
@@ -383,6 +490,13 @@ pub struct ClassificationResult {
 /// 4. **Dead** → absent/failed pod with no recent activity
 /// 5. **Slow** → activity signal absent/idle, pod running, below hard cap
 /// 6. **Live** → default when other conditions don't match
+///
+/// One extra rung sits between 2 and 3: a pod that exited on a **transient
+/// upstream provider fault** ([`LivenessEvidence::transient_provider_fault`]) is
+/// never a protocol violation, because nothing about the protocol was violated —
+/// the provider was down. It classifies `Dead` / `DeadReclaimed` with
+/// [`LivenessReason::TransientProviderFault`] so the run is reclaimed and
+/// redispatched instead of convicted and force-closed.
 pub fn classify(evidence: &LivenessEvidence) -> ClassificationResult {
     // ── 1. Terminal task state → noop ────────────────────────────────────
     if evidence
@@ -406,6 +520,44 @@ pub fn classify(evidence: &LivenessEvidence) -> ClassificationResult {
             evidence: evidence.clone(),
             outcome: Some(LivenessOutcome::Timeout),
             reason: Some(LivenessReason::HardRuntimeExceeded),
+            extension_eligible: false,
+        };
+    }
+
+    // ── 2b. Transient upstream provider fault ───────────────────────────
+    // A pod that exited because its PROVIDER failed transiently violated no
+    // protocol: the session did exactly what it was supposed to do until an
+    // upstream 500 / overload / mid-flight stream death took the conversation
+    // away from it. Convicting it here is not a cosmetic mislabel — the
+    // `ProtocolViolation` verdict is what terminalizes the live attempt as a
+    // `Crash`, which in turn lets the task be reclaimed and force-closed
+    // (2026-07-29, task `nr41`, refinement round 3: `server_is_overloaded` →
+    // `protocol_violation` → `Crash` → `dead` → force_closed, all inside one
+    // second).
+    //
+    // This rung outranks the protocol-violation rung rather than being folded
+    // into it because the two answer different questions. Precedence 3 asks "is
+    // the recorded state structurally inconsistent?" and its terms are all
+    // POSITIVE evidence of inconsistency. A transient provider fault is positive
+    // evidence of a CAUSE, and a known cause is precisely what makes the
+    // inconsistency explicable. So it must be consulted first, not appended as
+    // another exoneration term.
+    //
+    // The verdict is `Dead`/`DeadReclaimed`: the pod really is gone and its
+    // resources really must be reclaimed. What differs from a crash is the
+    // reason, and the reason is what downstream reads to decide the attempt is
+    // environmental (no dispatch penalty, no quality strike) and the work is
+    // redispatchable.
+    if matches!(
+        evidence.pod_phase,
+        Some(PodPhase::Succeeded) | Some(PodPhase::Failed)
+    ) && evidence.transient_provider_fault
+    {
+        return ClassificationResult {
+            verdict: Verdict::Dead,
+            evidence: evidence.clone(),
+            outcome: Some(LivenessOutcome::DeadReclaimed),
+            reason: Some(LivenessReason::TransientProviderFault),
             extension_eligible: false,
         };
     }
@@ -554,572 +706,5 @@ pub fn classify(evidence: &LivenessEvidence) -> ClassificationResult {
 // ─── Tests ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Helper to build a minimal "all-green" evidence packet.
-    fn live_evidence() -> LivenessEvidence {
-        LivenessEvidence {
-            pod_phase: Some(PodPhase::Running),
-            activity: ActivitySignal::Active,
-            db_session_status: Some(DbSessionStatus::Running),
-            db_task_status: Some(DbTaskStatus::InProgress),
-            claim_ttl_remaining: Some(Duration::from_secs(600)),
-            extension_budget_exhausted: false,
-            hard_runtime_deadline_exceeded: false,
-            exit_code: None,
-
-            handed_off_from_session_held_status: false,
-        }
-    }
-
-    // ── Precedence 1: terminal task state → noop ─────────────────────────
-
-    #[test]
-    fn terminal_task_closed_produces_kill_noop() {
-        let mut ev = live_evidence();
-        ev.db_task_status = Some(DbTaskStatus::Closed);
-
-        let result = classify(&ev);
-        assert_eq!(result.verdict, Verdict::Live); // verdict moot
-        assert_eq!(result.outcome, Some(LivenessOutcome::KillNoop));
-        assert_eq!(result.reason, Some(LivenessReason::None));
-        assert!(!result.extension_eligible);
-    }
-
-    #[test]
-    fn terminal_task_wins_over_hard_runtime() {
-        let mut ev = live_evidence();
-        ev.db_task_status = Some(DbTaskStatus::Closed);
-        ev.hard_runtime_deadline_exceeded = true;
-
-        let result = classify(&ev);
-        assert_eq!(result.outcome, Some(LivenessOutcome::KillNoop));
-        // Terminal task should NOT produce Timeout even though hard cap is set
-        assert_ne!(result.outcome, Some(LivenessOutcome::Timeout));
-    }
-
-    #[test]
-    fn terminal_task_wins_over_dead_signals() {
-        let mut ev = live_evidence();
-        ev.db_task_status = Some(DbTaskStatus::Closed);
-        ev.pod_phase = Some(PodPhase::Absent);
-        ev.activity = ActivitySignal::NeverActive;
-
-        let result = classify(&ev);
-        assert_eq!(result.outcome, Some(LivenessOutcome::KillNoop));
-    }
-
-    #[test]
-    fn terminal_task_wins_over_protocol_violation() {
-        let mut ev = live_evidence();
-        ev.db_task_status = Some(DbTaskStatus::Closed);
-        ev.pod_phase = Some(PodPhase::Succeeded);
-        ev.db_session_status = Some(DbSessionStatus::Running); // would be protocol violation if not terminal task
-        ev.exit_code = Some(0);
-
-        let result = classify(&ev);
-        assert_eq!(result.outcome, Some(LivenessOutcome::KillNoop));
-    }
-
-    // ── Precedence 2: hard runtime cap ───────────────────────────────────
-
-    #[test]
-    fn hard_runtime_cap_produces_dead_timeout() {
-        let mut ev = live_evidence();
-        ev.hard_runtime_deadline_exceeded = true;
-
-        let result = classify(&ev);
-        assert_eq!(result.verdict, Verdict::Dead);
-        assert_eq!(result.outcome, Some(LivenessOutcome::Timeout));
-        assert_eq!(result.reason, Some(LivenessReason::HardRuntimeExceeded));
-        assert!(!result.extension_eligible);
-    }
-
-    #[test]
-    fn hard_runtime_cap_forbids_extension_even_when_slow() {
-        let mut ev = live_evidence();
-        ev.hard_runtime_deadline_exceeded = true;
-        ev.activity = ActivitySignal::Idle;
-        ev.extension_budget_exhausted = false;
-
-        let result = classify(&ev);
-        assert_eq!(result.verdict, Verdict::Dead);
-        assert!(!result.extension_eligible);
-    }
-
-    // ── Precedence 3: protocol violation ─────────────────────────────────
-
-    #[test]
-    fn clean_exit_on_nonterminal_task_is_protocol_violation() {
-        let mut ev = live_evidence();
-        ev.pod_phase = Some(PodPhase::Succeeded);
-        ev.exit_code = Some(0);
-        // Task not terminal, session still running
-        ev.db_task_status = Some(DbTaskStatus::InProgress);
-        ev.db_session_status = Some(DbSessionStatus::Running);
-
-        let result = classify(&ev);
-        assert_eq!(result.verdict, Verdict::ProtocolViolation);
-        assert_eq!(result.outcome, Some(LivenessOutcome::Success));
-        assert_eq!(result.reason, Some(LivenessReason::CleanExitNonterminal));
-    }
-
-    #[test]
-    fn nonzero_exit_on_nonterminal_task_is_protocol_violation() {
-        let mut ev = live_evidence();
-        ev.pod_phase = Some(PodPhase::Failed);
-        ev.exit_code = Some(137);
-        ev.db_task_status = Some(DbTaskStatus::InProgress);
-        ev.db_session_status = Some(DbSessionStatus::Running);
-
-        let result = classify(&ev);
-        assert_eq!(result.verdict, Verdict::ProtocolViolation);
-        assert_eq!(result.outcome, Some(LivenessOutcome::Crash));
-        assert_eq!(result.reason, Some(LivenessReason::NonzeroExitNonterminal));
-    }
-
-    #[test]
-    fn succeeded_pod_unknown_exit_still_clean_violation() {
-        let mut ev = live_evidence();
-        ev.pod_phase = Some(PodPhase::Succeeded);
-        ev.exit_code = None; // unknown
-        ev.db_task_status = Some(DbTaskStatus::InProgress);
-        ev.db_session_status = Some(DbSessionStatus::Running);
-
-        let result = classify(&ev);
-        assert_eq!(result.verdict, Verdict::ProtocolViolation);
-        assert_eq!(result.reason, Some(LivenessReason::CleanExitNonterminal));
-    }
-
-    #[test]
-    fn terminal_session_with_exited_pod_is_not_protocol_violation() {
-        // If the session is already terminal, the pod exit is expected
-        let mut ev = live_evidence();
-        ev.pod_phase = Some(PodPhase::Succeeded);
-        ev.exit_code = Some(0);
-        ev.db_session_status = Some(DbSessionStatus::Completed);
-        ev.activity = ActivitySignal::Active;
-
-        let result = classify(&ev);
-        assert_ne!(result.verdict, Verdict::ProtocolViolation);
-    }
-
-    // ── Precedence 4: Dead ───────────────────────────────────────────────
-
-    #[test]
-    fn absent_pod_with_no_activity_is_dead() {
-        let mut ev = live_evidence();
-        ev.pod_phase = Some(PodPhase::Absent);
-        ev.activity = ActivitySignal::Idle;
-
-        let result = classify(&ev);
-        assert_eq!(result.verdict, Verdict::Dead);
-        assert_eq!(result.outcome, Some(LivenessOutcome::DeadReclaimed));
-    }
-
-    #[test]
-    fn failed_pod_with_terminal_session_and_no_activity_is_dead() {
-        let mut ev = live_evidence();
-        ev.pod_phase = Some(PodPhase::Failed);
-        ev.exit_code = Some(1);
-        ev.activity = ActivitySignal::Idle;
-        // Session already terminated — pod exit is expected, not a violation
-        ev.db_session_status = Some(DbSessionStatus::Failed);
-
-        let result = classify(&ev);
-        assert_eq!(result.verdict, Verdict::Dead);
-        assert_eq!(result.outcome, Some(LivenessOutcome::Crash));
-        assert_eq!(result.reason, Some(LivenessReason::NonzeroExitNonterminal));
-    }
-
-    #[test]
-    fn failed_pod_with_running_session_is_protocol_violation() {
-        // A Failed pod while the DB session is still Running is structurally
-        // inconsistent — the protocol-violation check fires before Dead.
-        let mut ev = live_evidence();
-        ev.pod_phase = Some(PodPhase::Failed);
-        ev.exit_code = Some(137);
-        ev.activity = ActivitySignal::Idle;
-        ev.db_session_status = Some(DbSessionStatus::Running);
-
-        let result = classify(&ev);
-        assert_eq!(result.verdict, Verdict::ProtocolViolation);
-        assert_eq!(result.outcome, Some(LivenessOutcome::Crash));
-        assert_eq!(result.reason, Some(LivenessReason::NonzeroExitNonterminal));
-    }
-
-    #[test]
-    fn no_pod_phase_with_never_active_is_dead() {
-        let mut ev = live_evidence();
-        ev.pod_phase = None;
-        ev.activity = ActivitySignal::NeverActive;
-
-        let result = classify(&ev);
-        assert_eq!(result.verdict, Verdict::Dead);
-    }
-
-    #[test]
-    fn absent_pod_with_active_activity_is_not_dead() {
-        let mut ev = live_evidence();
-        ev.pod_phase = Some(PodPhase::Absent);
-        ev.activity = ActivitySignal::Active;
-
-        let result = classify(&ev);
-        // Active activity overrides absent pod — session may be between pod
-        // transitions. Classifier returns Live since no higher-precedence
-        // condition matches.
-        assert_ne!(result.verdict, Verdict::Dead);
-    }
-
-    // ── Precedence 5: Slow + extension eligibility ───────────────────────
-
-    #[test]
-    fn running_pod_with_idle_activity_is_slow() {
-        let mut ev = live_evidence();
-        ev.pod_phase = Some(PodPhase::Running);
-        ev.activity = ActivitySignal::Idle;
-
-        let result = classify(&ev);
-        assert_eq!(result.verdict, Verdict::Slow);
-        assert!(result.extension_eligible);
-        assert_eq!(result.outcome, None);
-        assert_eq!(result.reason, None);
-    }
-
-    #[test]
-    fn slow_with_exhausted_budget_is_not_extension_eligible() {
-        let mut ev = live_evidence();
-        ev.pod_phase = Some(PodPhase::Running);
-        ev.activity = ActivitySignal::Idle;
-        ev.extension_budget_exhausted = true;
-
-        let result = classify(&ev);
-        assert_eq!(result.verdict, Verdict::Slow);
-        assert!(!result.extension_eligible);
-        assert_eq!(result.outcome, Some(LivenessOutcome::SlowExtended));
-        assert_eq!(
-            result.reason,
-            Some(LivenessReason::SlowExtensionBudgetExhausted)
-        );
-    }
-
-    #[test]
-    fn running_pod_with_never_active_is_slow() {
-        let mut ev = live_evidence();
-        ev.pod_phase = Some(PodPhase::Running);
-        ev.activity = ActivitySignal::NeverActive;
-
-        let result = classify(&ev);
-        assert_eq!(result.verdict, Verdict::Slow);
-        assert!(result.extension_eligible);
-    }
-
-    // ── Live default ─────────────────────────────────────────────────────
-
-    #[test]
-    fn all_green_is_live() {
-        let ev = live_evidence();
-        let result = classify(&ev);
-        assert_eq!(result.verdict, Verdict::Live);
-        assert_eq!(result.outcome, None);
-        assert_eq!(result.reason, None);
-        assert!(!result.extension_eligible);
-    }
-
-    #[test]
-    fn pending_pod_with_active_signal_is_live() {
-        let mut ev = live_evidence();
-        ev.pod_phase = Some(PodPhase::Pending);
-
-        let result = classify(&ev);
-        assert_eq!(result.verdict, Verdict::Live);
-    }
-
-    #[test]
-    fn unknown_pod_with_active_signal_is_live() {
-        let mut ev = live_evidence();
-        ev.pod_phase = Some(PodPhase::Unknown);
-
-        let result = classify(&ev);
-        assert_eq!(result.verdict, Verdict::Live);
-    }
-
-    // ── Edge cases ───────────────────────────────────────────────────────
-
-    #[test]
-    fn no_task_status_is_not_terminal() {
-        let mut ev = live_evidence();
-        ev.db_task_status = None;
-        ev.pod_phase = Some(PodPhase::Running);
-        ev.activity = ActivitySignal::Active;
-
-        let result = classify(&ev);
-        assert_eq!(result.verdict, Verdict::Live);
-        assert_ne!(result.outcome, Some(LivenessOutcome::KillNoop));
-    }
-
-    /// Absence is not guilt. A violation needs POSITIVE evidence on both axes,
-    /// so a missing session row can no longer convict an exited pod — the
-    /// asymmetry that made unknown evidence land in `ProtocolViolation`
-    /// deterministically.
-    #[test]
-    fn no_session_status_with_exited_pod_is_not_a_protocol_violation() {
-        let mut ev = live_evidence();
-        ev.pod_phase = Some(PodPhase::Succeeded);
-        ev.exit_code = Some(0);
-        ev.db_session_status = None; // no session row
-
-        let result = classify(&ev);
-        assert_ne!(result.verdict, Verdict::ProtocolViolation);
-        assert_ne!(result.outcome, Some(LivenessOutcome::ProtocolViolation));
-    }
-
-    /// The mirror image: a missing task row must not convict either. Before
-    /// this, `db_task_status = None` failed precedence 1's `is_some_and` guard
-    /// AND satisfied this branch, so it was a guaranteed violation.
-    #[test]
-    fn no_task_status_with_exited_pod_is_not_a_protocol_violation() {
-        let mut ev = live_evidence();
-        ev.pod_phase = Some(PodPhase::Succeeded);
-        ev.exit_code = Some(0);
-        ev.db_session_status = Some(DbSessionStatus::Running);
-        ev.db_task_status = None; // no task row
-
-        let result = classify(&ev);
-        assert_ne!(result.verdict, Verdict::ProtocolViolation);
-    }
-
-    /// A session that exits with its task parked at a recorded handoff did its
-    /// job. Every `is_settled` status must be exonerated, on both a clean and a
-    /// crashing exit.
-    #[test]
-    fn exit_at_a_recorded_handoff_is_not_a_protocol_violation() {
-        for status in [
-            DbTaskStatus::NeedsTaskReview,
-            DbTaskStatus::InTaskReview,
-            DbTaskStatus::Approved,
-            DbTaskStatus::PrDraft,
-            DbTaskStatus::PrReview,
-            DbTaskStatus::NeedsLeadIntervention,
-            DbTaskStatus::InLeadIntervention,
-        ] {
-            for (phase, code) in [(PodPhase::Succeeded, 0), (PodPhase::Failed, 1)] {
-                let mut ev = live_evidence();
-                ev.pod_phase = Some(phase);
-                ev.exit_code = Some(code);
-                ev.db_session_status = Some(DbSessionStatus::Running);
-                ev.db_task_status = Some(status);
-
-                let result = classify(&ev);
-                assert_ne!(
-                    result.verdict,
-                    Verdict::ProtocolViolation,
-                    "{status:?} is a recorded handoff, not a structural inconsistency"
-                );
-            }
-        }
-    }
-
-    /// The detector must keep firing on the shape it exists for: a pod that
-    /// exited leaving its task still claimed or still queued, with the session
-    /// row never settled.
-    #[test]
-    fn exit_leaving_the_task_unsettled_is_still_a_protocol_violation() {
-        for status in [DbTaskStatus::Open, DbTaskStatus::InProgress] {
-            let mut clean = live_evidence();
-            clean.pod_phase = Some(PodPhase::Succeeded);
-            clean.exit_code = Some(0);
-            clean.db_session_status = Some(DbSessionStatus::Running);
-            clean.db_task_status = Some(status);
-            let result = classify(&clean);
-            assert_eq!(result.verdict, Verdict::ProtocolViolation, "{status:?}");
-            assert_eq!(result.reason, Some(LivenessReason::CleanExitNonterminal));
-
-            let mut crashed = clean.clone();
-            crashed.pod_phase = Some(PodPhase::Failed);
-            crashed.exit_code = Some(1);
-            let result = classify(&crashed);
-            assert_eq!(result.verdict, Verdict::ProtocolViolation, "{status:?}");
-            assert_eq!(result.outcome, Some(LivenessOutcome::Crash));
-        }
-    }
-
-    /// A non-settled status is ambiguous on its own. The task's own transition
-    /// record disambiguates: a last transition OUT of a session-held status
-    /// means a live session put the task there deliberately (the reviewer
-    /// rejection path, `in_task_review → open`), so the exiting session
-    /// completed its protocol and must NOT be convicted.
-    #[test]
-    fn handoff_off_a_session_held_status_exonerates_an_unsettled_task() {
-        for status in [DbTaskStatus::Open, DbTaskStatus::InProgress] {
-            let mut ev = live_evidence();
-            ev.pod_phase = Some(PodPhase::Succeeded);
-            ev.exit_code = Some(0);
-            ev.db_session_status = Some(DbSessionStatus::Running);
-            ev.db_task_status = Some(status);
-            ev.handed_off_from_session_held_status = true;
-
-            let result = classify(&ev);
-            assert_ne!(
-                result.verdict,
-                Verdict::ProtocolViolation,
-                "{status:?} reached by a deliberate handoff is not a violation"
-            );
-            assert_ne!(result.reason, Some(LivenessReason::CleanExitNonterminal));
-        }
-    }
-
-    /// The statuses that only a live session holds. A transition OUT of one of
-    /// these is a handoff; a transition INTO one is just a claim.
-    #[test]
-    fn session_held_statuses_are_the_active_ones() {
-        for held in ["in_progress", "in_task_review", "in_lead_intervention"] {
-            assert!(is_session_held_status(held), "{held} is session-held");
-        }
-        for not_held in [
-            "open",
-            "needs_task_review",
-            "approved",
-            "pr_draft",
-            "pr_review",
-            "needs_lead_intervention",
-            "closed",
-        ] {
-            assert!(
-                !is_session_held_status(not_held),
-                "{not_held} is not session-held"
-            );
-        }
-    }
-
-    #[test]
-    fn no_session_status_with_running_pod_is_live() {
-        let mut ev = live_evidence();
-        ev.pod_phase = Some(PodPhase::Running);
-        ev.db_session_status = None;
-        ev.activity = ActivitySignal::Active;
-
-        let result = classify(&ev);
-        assert_eq!(result.verdict, Verdict::Live);
-    }
-
-    #[test]
-    fn evidence_is_echoed_in_result() {
-        let ev = live_evidence();
-        let result = classify(&ev);
-        // The evidence should be cloned into the result for audit
-        assert_eq!(result.evidence.pod_phase, ev.pod_phase);
-        assert_eq!(result.evidence.activity, ev.activity);
-    }
-
-    // ── Serialization round-trips ────────────────────────────────────────
-
-    #[test]
-    fn verdict_serde_round_trip() {
-        for v in [
-            Verdict::Live,
-            Verdict::Slow,
-            Verdict::Dead,
-            Verdict::ProtocolViolation,
-        ] {
-            let json = serde_json::to_string(&v).unwrap();
-            let back: Verdict = serde_json::from_str(&json).unwrap();
-            assert_eq!(v, back);
-        }
-    }
-
-    #[test]
-    fn outcome_serde_round_trip() {
-        let outcomes = [
-            LivenessOutcome::Success,
-            LivenessOutcome::Crash,
-            LivenessOutcome::Timeout,
-            LivenessOutcome::DeadReclaimed,
-            LivenessOutcome::ProtocolViolation,
-            LivenessOutcome::KillNoop,
-            LivenessOutcome::SlowExtended,
-        ];
-        for o in outcomes {
-            let json = serde_json::to_string(&o).unwrap();
-            let back: LivenessOutcome = serde_json::from_str(&json).unwrap();
-            assert_eq!(o, back);
-        }
-    }
-
-    #[test]
-    fn reason_as_str_matches_expected() {
-        assert_eq!(
-            LivenessReason::CleanExitNonterminal.as_str(),
-            "clean_exit_nonterminal"
-        );
-        assert_eq!(
-            LivenessReason::NonzeroExitNonterminal.as_str(),
-            "nonzero_exit_nonterminal"
-        );
-        assert_eq!(
-            LivenessReason::HardRuntimeExceeded.as_str(),
-            "hard_runtime_exceeded"
-        );
-        assert_eq!(
-            LivenessReason::SlowExtensionBudgetExhausted.as_str(),
-            "slow_extension_budget_exhausted"
-        );
-        assert_eq!(LivenessReason::None.as_str(), "none");
-    }
-
-    #[test]
-    fn classification_result_serde_round_trip() {
-        let ev = live_evidence();
-        let result = classify(&ev);
-        let json = serde_json::to_string(&result).unwrap();
-        let back: ClassificationResult = serde_json::from_str(&json).unwrap();
-        assert_eq!(result.verdict, back.verdict);
-        assert_eq!(result.outcome, back.outcome);
-        assert_eq!(result.reason, back.reason);
-        assert_eq!(result.extension_eligible, back.extension_eligible);
-    }
-
-    // ── Display impls ────────────────────────────────────────────────────
-
-    #[test]
-    fn verdict_display() {
-        assert_eq!(Verdict::Live.to_string(), "live");
-        assert_eq!(Verdict::Slow.to_string(), "slow");
-        assert_eq!(Verdict::Dead.to_string(), "dead");
-        assert_eq!(Verdict::ProtocolViolation.to_string(), "protocol_violation");
-    }
-
-    #[test]
-    fn outcome_display() {
-        assert_eq!(LivenessOutcome::Success.to_string(), "success");
-        assert_eq!(LivenessOutcome::Crash.to_string(), "crash");
-        assert_eq!(LivenessOutcome::Timeout.to_string(), "timeout");
-        assert_eq!(LivenessOutcome::DeadReclaimed.to_string(), "dead_reclaimed");
-        assert_eq!(
-            LivenessOutcome::ProtocolViolation.to_string(),
-            "protocol_violation"
-        );
-        assert_eq!(LivenessOutcome::KillNoop.to_string(), "kill_noop");
-        assert_eq!(LivenessOutcome::SlowExtended.to_string(), "slow_extended");
-    }
-
-    // ── DbStatus helpers ─────────────────────────────────────────────────
-
-    #[test]
-    fn db_session_status_terminal() {
-        assert!(DbSessionStatus::Completed.is_terminal());
-        assert!(DbSessionStatus::Interrupted.is_terminal());
-        assert!(DbSessionStatus::Failed.is_terminal());
-        assert!(!DbSessionStatus::Running.is_terminal());
-        assert!(!DbSessionStatus::Paused.is_terminal());
-    }
-
-    #[test]
-    fn db_task_status_terminal() {
-        assert!(DbTaskStatus::Closed.is_terminal());
-        assert!(!DbTaskStatus::Open.is_terminal());
-        assert!(!DbTaskStatus::InProgress.is_terminal());
-        assert!(!DbTaskStatus::Approved.is_terminal());
-    }
-}
+#[path = "liveness_tests.rs"]
+mod tests;

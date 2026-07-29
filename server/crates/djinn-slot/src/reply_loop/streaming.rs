@@ -13,8 +13,9 @@ use futures::StreamExt;
 use futures::stream::FuturesUnordered;
 
 use djinn_core::events::DjinnEventEnvelope;
-use djinn_provider::message::ContentBlock;
-use djinn_provider::provider::{LlmProvider, StreamEvent};
+use djinn_provider::message::{ContentBlock, Conversation};
+use djinn_provider::provider::client::backoff_delay_ms;
+use djinn_provider::provider::{LlmProvider, ProviderError, StreamEvent, ToolChoice};
 
 use super::budget::record_provider_usage;
 use super::error_handling::{
@@ -172,9 +173,18 @@ impl StreamTurnState {
     }
 }
 
+pub(super) type ProviderStream =
+    Pin<Box<dyn futures::Stream<Item = anyhow::Result<StreamEvent>> + Send>>;
+
 pub(super) struct StreamLoopContext<'a> {
     pub provider: &'a dyn LlmProvider,
-    pub stream: Pin<Box<dyn futures::Stream<Item = anyhow::Result<StreamEvent>> + Send>>,
+    pub stream: ProviderStream,
+    /// The exact request inputs that produced [`Self::stream`], so a round
+    /// killed by a *transient* mid-stream provider error can be re-issued
+    /// verbatim. See [`consume_provider_stream`]'s retry branch.
+    pub request_conversation: &'a Conversation,
+    pub request_tools: &'a [serde_json::Value],
+    pub request_tool_choice: Option<ToolChoice>,
     pub tool_metadata: &'a ToolRuntimeMetadataMap,
     pub dispatch: &'a ToolDispatchContext<'a>,
     pub phase_tracker: &'a Arc<Mutex<super::phase::SessionPhaseTracker>>,
@@ -205,11 +215,84 @@ const TOUCH_ACTIVITY_RPC_INTERVAL_SECS: u64 = 30;
 /// Throttle interval for the mid-flight session-row token flush.
 const TOKEN_FLUSH_INTERVAL_SECS: u64 = 30;
 
+/// Additional attempts granted to a round killed by a **transient** mid-stream
+/// provider error (e.g. an OpenAI `server_is_overloaded` SSE `error` event).
+///
+/// The HTTP-level retry in `djinn_provider::provider::client` only covers
+/// request *establishment*: once the provider answers `200 OK` and the SSE
+/// stream is open, its `'retry` loop has already been broken out of, so an
+/// error arriving as a stream *event* had no retry path at all and terminated
+/// the whole agent session on the first occurrence.
+///
+/// Deliberately smaller than the client's `MAX_RETRIES` (3): each attempt here
+/// re-issues a full LLM request, and the surrounding reply loop still has its
+/// own recovery paths above this one.
+pub(super) const MAX_STREAM_EVENT_RETRIES: u32 = 2;
+
+/// Whether the round consumed so far can be safely thrown away and re-issued.
+///
+/// A retry re-sends the identical request, so it is only safe while **nothing
+/// observable has happened yet this round**: no text streamed to the transcript
+/// event bus, no tool call recorded or dispatched (tool execution has real side
+/// effects), no thinking emitted, and no usage folded into the session
+/// counters. `saw_round_event` is the load-bearing flag — it is set on the very
+/// first successfully-decoded event, before any of the per-event handling below
+/// runs — and the remaining checks are explicit belt-and-braces so a future
+/// change to that flag's meaning cannot silently make retries unsafe.
+fn round_is_safely_restartable(state: &StreamTurnState, inflight_tool_futures: usize) -> bool {
+    !state.saw_round_event
+        && state.turn_text.is_empty()
+        && state.turn_thinking.is_empty()
+        && state.turn_tool_calls.is_empty()
+        && state.turn_provider_state.is_empty()
+        && state.turn_unresolved_thinking.is_empty()
+        && state.streaming_dispatched.is_empty()
+        && state.streaming_results.is_empty()
+        && state.turn_tokens_in == 0
+        && state.turn_tokens_out == 0
+        && inflight_tool_futures == 0
+}
+
+/// Delay before re-issuing a round killed by `error`, or `None` when the round
+/// must fail exactly as it does today.
+///
+/// Retryability is decided *solely* by [`ProviderError::retryable`] — the same
+/// predicate the HTTP client and the supervisor's failure classifier use — so
+/// `RateLimit` / `ProviderInternal{5xx}` / `Transport` / `ExhaustedTransport` /
+/// `EmptyCompletion` are retried while `Authentication` / `InvalidRequest` /
+/// `ContextOverflow` / `InvalidOutput` are not. An error with no typed
+/// `ProviderError` source is never retried.
+fn transient_round_restart_delay(
+    error: &anyhow::Error,
+    attempts_used: u32,
+    state: &StreamTurnState,
+    inflight_tool_futures: usize,
+) -> Option<std::time::Duration> {
+    if attempts_used >= MAX_STREAM_EVENT_RETRIES {
+        return None;
+    }
+    if !round_is_safely_restartable(state, inflight_tool_futures) {
+        return None;
+    }
+    let provider_error = error.downcast_ref::<ProviderError>()?;
+    if !provider_error.retryable() {
+        return None;
+    }
+    // Same exponential-with-jitter schedule as the client's request retry,
+    // floored by a server-supplied Retry-After when the provider sent one.
+    let attempt = attempts_used + 1;
+    let delay_ms = backoff_delay_ms(attempt).max(provider_error.retry_after_ms().unwrap_or(0));
+    Some(std::time::Duration::from_millis(delay_ms))
+}
+
 pub(super) async fn consume_provider_stream(
     mut ctx: StreamLoopContext<'_>,
 ) -> anyhow::Result<StreamTurnState> {
     let mut state = StreamTurnState::new();
     let mut streaming_inflight: FuturesUnordered<StreamingFut<'_>> = FuturesUnordered::new();
+    // Attempts already spent restarting this round after a transient
+    // mid-stream provider error (see `MAX_STREAM_EVENT_RETRIES`).
+    let mut stream_event_retries: u32 = 0;
     loop {
         // A concurrent-safe side tool may have temporarily taken phase
         // ownership. Every select iteration waits for the provider again, so
@@ -246,6 +329,71 @@ pub(super) async fn consume_provider_stream(
                         break;
                     }
                     Err(e) => {
+                        // A transient provider failure that arrived as a stream
+                        // *event* (HTTP 200 was already returned, so the client's
+                        // request-establishment retry cannot help) gets a bounded
+                        // restart of the whole round — but only while the round is
+                        // still safely restartable. Otherwise fall through to the
+                        // unchanged terminal path.
+                        if let Some(delay) = transient_round_restart_delay(
+                            &e,
+                            stream_event_retries,
+                            &state,
+                            streaming_inflight.len(),
+                        ) {
+                            stream_event_retries += 1;
+                            tracing::warn!(
+                                task_id = %ctx.task_id,
+                                session_id = %ctx.session_id,
+                                attempt = stream_event_retries,
+                                max_attempts = MAX_STREAM_EVENT_RETRIES,
+                                delay_ms = delay.as_millis() as u64,
+                                error = %e,
+                                "provider stream event failed with a retryable error before any \
+                                 output was emitted; retrying"
+                            );
+                            tokio::select! {
+                                biased;
+                                _ = ctx.cancel.cancelled() => {
+                                    state.interrupted = Some("session cancelled");
+                                    break;
+                                }
+                                _ = ctx.global_cancel.cancelled() => {
+                                    state.interrupted = Some("supervisor shutting down");
+                                    break;
+                                }
+                                _ = tokio::time::sleep(delay) => {}
+                            }
+                            // Re-issue the identical request. Copy the `&'a`
+                            // inputs out first so `ctx.stream` can be reassigned.
+                            let provider = ctx.provider;
+                            let request_conversation = ctx.request_conversation;
+                            let request_tools = ctx.request_tools;
+                            let request_tool_choice = ctx.request_tool_choice;
+                            match provider
+                                .stream(request_conversation, request_tools, request_tool_choice)
+                                .await
+                            {
+                                Ok(restarted) => {
+                                    ctx.stream = restarted;
+                                    // Nothing was emitted (asserted by
+                                    // `round_is_safely_restartable`), so the
+                                    // round starts from a clean slate.
+                                    state = StreamTurnState::new();
+                                    continue;
+                                }
+                                Err(restart_error) => {
+                                    tracing::warn!(
+                                        task_id = %ctx.task_id,
+                                        session_id = %ctx.session_id,
+                                        attempt = stream_event_retries,
+                                        error = %restart_error,
+                                        "retry of the provider stream failed to start; \
+                                         surfacing the original mid-stream error"
+                                    );
+                                }
+                            }
+                        }
                         let diag = runtime_fs_diagnostics(ctx.project_path, ctx.worktree_path);
                         let env_diag = runtime_env_diagnostics(ctx.session_id, ctx.project_path, ctx.worktree_path);
                         let detail = format!(

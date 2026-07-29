@@ -150,6 +150,23 @@ pub(super) struct CoordinatorActor {
     /// successful stage transition to a different dispatch role.
     // Persisted in dispatch_state — see epic n6xw and proposal 8ipw
     pub(super) dispatch_failure_streak: HashMap<String, u32>,
+    /// Task UUID → count of consecutive failover-chain exhaustions in which the
+    /// model-health breaker was open for **every** candidate, so nothing was
+    /// actually attempted.
+    ///
+    /// Deliberately NOT `dispatch_failure_streak`: those exhaustions are not the
+    /// task's fault and must never advance terminal-close accounting (a
+    /// scope-wide provider outage or one revoked credential would otherwise
+    /// force-close every ready task of that user once the ladder reached
+    /// [`crate::types::MAX_DISPATCH_FAILURES`]). This counter exists only to
+    /// escalate the retry cadence — it feeds `escalating_dispatch_cooldown` so
+    /// the coordinator backs off instead of re-walking the task every tick.
+    ///
+    /// Ephemeral (restart-safe-to-lose): losing it only restarts the blameless
+    /// backoff ladder at its first rung, which is harmless. Cleared on a
+    /// successful dispatch, on a planned-completion settle, and whenever a
+    /// genuinely attempted (blameable) exhaustion is recorded for the task.
+    pub(super) breaker_open_backoff_streak: HashMap<String, u32>,
     /// Shared tracker for in-flight background tasks.
     pub(super) background_work_tracker: BackgroundWorkTracker,
     /// Cached source for the stranded-ready doctor check. Refreshed each tick
@@ -497,6 +514,17 @@ fn debug_short_id(task_id: &str) -> String {
     task_id.chars().take(8).collect()
 }
 
+/// Whether a disposable projection is pinned to a human/evidence park. Such a
+/// projection carries the parked round and phase, so it can only ever agree
+/// with the durable ledger while the park is still recorded.
+fn is_parked_projection(state: &super::refinement::RefinementLoopState) -> bool {
+    matches!(
+        state.phase,
+        super::refinement::RefinementPhase::AwaitingHumanReview
+            | super::refinement::RefinementPhase::AwaitingEvidence
+    )
+}
+
 impl CoordinatorActor {
     pub(super) fn new(
         deps: CoordinatorDeps,
@@ -627,6 +655,7 @@ impl CoordinatorActor {
             provisional_admissions: HashMap::new(),
             dispatch_cooldowns: HashMap::new(),
             dispatch_failure_streak: HashMap::new(),
+            breaker_open_backoff_streak: HashMap::new(),
             background_work_tracker,
             stranded_ready_source: Some(Arc::clone(&stranded_ready_source)),
             closed_parent_open_children_source: Some(Arc::clone(
@@ -1580,6 +1609,27 @@ impl CoordinatorActor {
             || exact.generation != current.generation
             || !matches!(exact.liveness, RefinementLivenessResult::Live { .. })
         {
+            return;
+        }
+        // A park that the durable ledger has already cleared (a human demanded
+        // another round out of an awaiting-review park) leaves a projection
+        // pinned to the parked phase and the parked round. The durable
+        // dispatcher then reads the run's fresh intent, finds the projection's
+        // phase/round disagree, and discards its own registration — the round
+        // dispatches but its outcome is never processed. The ledger is the
+        // authority here: drop the superseded projection and let the dispatcher
+        // rebuild it from the intent's real coordinates.
+        if self.active_refinements.get(run_id).is_some_and(|state| {
+            state.generation == exact.generation && is_parked_projection(state)
+        }) && exact.snapshot.park.is_none()
+        {
+            self.active_refinements.remove(run_id);
+            self.refinement_sessions.remove(run_id);
+            tracing::info!(
+                run_id,
+                generation = exact.generation,
+                "durable refinement park was cleared; dropped the superseded parked projection"
+            );
             return;
         }
         // A replay is only a wake hint. Preserve an already-advanced projection

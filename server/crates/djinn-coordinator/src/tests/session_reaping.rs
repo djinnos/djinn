@@ -3347,17 +3347,22 @@ async fn slow_extension_granted_with_evidence_and_claim_extension() {
         })
         .await
         .unwrap();
-    // Keep the session WITHIN its claim window (recent started_at → non-zero
-    // claim TTL → `extension_budget_exhausted == false`), so the classifier
-    // marks it extension-eligible: this is the in-window case that earns the
-    // one coordinator-gated grace extension. The stall itself is driven by the
-    // aged activity tracker below (idle > 30 min), NOT by `started_at`, so the
-    // idle gate still fires. A session past its claim TTL would instead be
-    // egregiously stale and killed on the first tick (see
+    // Keep the session WITHIN its claim window (started_at far short of the
+    // 3-hour HARD_RUNTIME_CAP_SECS → non-zero claim TTL →
+    // `extension_budget_exhausted == false`), so the classifier marks it
+    // extension-eligible: this is the in-window case that earns the one
+    // coordinator-gated grace extension. A session past its claim TTL would
+    // instead be egregiously stale and killed on the first tick (see
     // `slow_extension_budget_exhaustion_falls_through_to_kill` / the stall
     // teardown tests).
+    //
+    // The age must also COVER the aged activity tracker below: the stall sweep
+    // anchors the idle clock to pod-Running (`anchor_idle_to_pod_running`), and
+    // an in-pod `sessions` row two minutes old would prove the pod had only
+    // been running two minutes — making a 35-minute idle reading impossible and
+    // clamping it away. 40 minutes keeps the 35-minute idle honest.
     session_repo
-        .backdate_started_at(&session.id, "2 minutes")
+        .backdate_started_at(&session.id, "40 minutes")
         .await
         .unwrap();
 
@@ -4447,6 +4452,7 @@ fn hard_cap_takes_precedence_over_slow_extension_eligible() {
         exit_code: None,
 
         handed_off_from_session_held_status: false,
+        transient_provider_fault: false,
     };
 
     let result = classify(&evidence);
@@ -4491,6 +4497,7 @@ fn absent_pod_with_active_activity_is_not_dead() {
         exit_code: None,
 
         handed_off_from_session_held_status: false,
+        transient_provider_fault: false,
     };
 
     let result = classify(&evidence);
@@ -4524,6 +4531,7 @@ fn running_pod_active_signal_is_live_regardless_of_claim_ttl() {
         exit_code: None,
 
         handed_off_from_session_held_status: false,
+        transient_provider_fault: false,
     };
 
     let result = classify(&evidence);
@@ -4557,6 +4565,7 @@ fn pending_pod_capacity_crunch_spared_by_classifier() {
         exit_code: None,
 
         handed_off_from_session_held_status: false,
+        transient_provider_fault: false,
     };
 
     let result = classify(&evidence);
@@ -4592,6 +4601,7 @@ fn pending_pod_past_hard_cap_still_not_dead() {
         exit_code: None,
 
         handed_off_from_session_held_status: false,
+        transient_provider_fault: false,
     };
 
     // Even with hard_runtime_deadline_exceeded, the classifier applies the
@@ -4608,6 +4618,7 @@ fn pending_pod_past_hard_cap_still_not_dead() {
         exit_code: None,
 
         handed_off_from_session_held_status: false,
+        transient_provider_fault: false,
     };
     let result = classify(&evidence_no_hard_cap);
     assert_ne!(
@@ -5197,6 +5208,15 @@ async fn stall_timeout_terminalizes_attempt_as_timed_out() {
         .unwrap();
 
     let attempt_id = seed_pending_attempt(&db, &task.id, "worker").await;
+
+    // Age the session row to match the idle time simulated below. The stall
+    // sweep anchors the idle clock to pod-Running via the in-pod `sessions`
+    // row, so a row created "now" would prove the pod had only just started and
+    // the 2000s of simulated idle would be clamped away as scheduling latency.
+    session_repo
+        .backdate_started_at(&session.id, "40 minutes")
+        .await
+        .unwrap();
 
     // Deterministic clock so we can push monotonic idle time past the 300s
     // first-call cap without sleeping.
@@ -5918,11 +5938,14 @@ async fn slow_verdict_with_concurrent_terminal_transition_does_not_grant_extensi
         })
         .await
         .unwrap();
-    // Keep the session within its claim window so the Slow verdict (if reached)
-    // would normally be extension-eligible. The stall is driven by aged activity
-    // tracker, not started_at.
+    // Keep the session within its claim window (well short of the 3-hour
+    // HARD_RUNTIME_CAP_SECS) so the Slow verdict (if reached) would normally be
+    // extension-eligible, while still being OLDER than the 35-minute idle the
+    // aged activity tracker reports below — the stall sweep clamps idle to the
+    // session's own age (`anchor_idle_to_pod_running`), so a two-minute-old
+    // session could not be 35 minutes idle.
     session_repo
-        .backdate_started_at(&session.id, "2 minutes")
+        .backdate_started_at(&session.id, "40 minutes")
         .await
         .unwrap();
 

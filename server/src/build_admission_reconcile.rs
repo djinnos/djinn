@@ -41,6 +41,15 @@
 //! [`crate::graph_retention`] — it is started exclusively from `become_leader`
 //! and runs until the process-wide `CancellationToken` fires.
 //!
+//! Spawn-site discipline was not enough on its own. The *same* mutating pass
+//! was also reachable from `AppState::initialize`, which runs on every pod
+//! before leadership is contested, and from the every-pod handoff warning tick
+//! by way of `reestablish_build_admission_gates`. Both of those now run
+//! observe-only: the scope is derived from the topology-confirmation flag
+//! rather than from the call site, so the invariant this section asserts holds
+//! for reasons a future caller cannot accidentally undo. See
+//! [`djinn_coordinator::build_admission_inventory::ReconcileScope`].
+//!
 //! ## Fail-closed semantics are unchanged
 //!
 //! A pass that cannot prove the inventory marks the controller
@@ -195,13 +204,21 @@ where
 {
     let mut ticker = tokio::time::interval(interval);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
-    // The first tick fires immediately; consume it. `AppState::initialize` runs
-    // a reconciliation pass on every pod before `become_leader` is even called,
-    // and the leader's own promotion path can run another, so reconciling again
-    // in the same breath would only duplicate API-server traffic during the
-    // leadership transition. This suppression is what makes it safe to spawn
-    // this loop as early as we do — see `become_leader`.
-    ticker.tick().await;
+    // The first tick fires immediately, and it is DELIBERATELY not suppressed.
+    //
+    // It used to be. The justification was that `AppState::initialize` had
+    // already run a full reconciliation pass on this pod, so a pass here would
+    // only duplicate API-server traffic during the leadership transition. That
+    // justification is gone: `initialize` runs on every pod including standbys,
+    // so its pass is now observe-only (see
+    // `AppState::initialize_build_admission_inventory`) and reclaims nothing.
+    //
+    // Suppressing the first tick on top of that would leave a freshly promoted
+    // leader with NO mutating pass for a full cadence — and the population that
+    // matters most is exactly the one a promotion creates: the predecessor's
+    // orphaned rows, which nothing else in the process retires. The first tick
+    // is now the leader's first mutating pass, and it runs the moment the
+    // topology gate opens.
     loop {
         tokio::select! {
             () = cancel.cancelled() => {
@@ -453,12 +470,18 @@ mod tests {
         );
     }
 
-    /// The loop suppresses its very first tick because a reconciliation pass
-    /// has just run elsewhere. Pin that, because `become_leader` now spawns
-    /// this loop immediately after the topology gate opens and the safety of
-    /// that move rests on this suppression.
+    /// The loop's first tick must NOT be suppressed.
+    ///
+    /// This loop is spawned from `become_leader`, immediately after the
+    /// topology gate opens, and it is now the freshly promoted leader's FIRST
+    /// mutating reconciliation pass: the startup pass in `AppState::initialize`
+    /// runs on every pod and is therefore observe-only, so it reclaims nothing.
+    /// Suppressing this tick would leave the predecessor's orphaned rows —
+    /// precisely the population a promotion creates, and the population that
+    /// halted the board for five hours on 2026-07-29 — occupying capacity for a
+    /// full cadence with nothing else in the process able to retire them.
     #[tokio::test(start_paused = true)]
-    async fn the_first_immediate_tick_is_suppressed() {
+    async fn the_first_tick_runs_a_pass_immediately() {
         let passes = Arc::new(AtomicUsize::new(0));
         let cancel = CancellationToken::new();
         let loop_passes = Arc::clone(&passes);
@@ -477,14 +500,16 @@ mod tests {
             )
             .await
         });
+        // Well inside the 60s cadence: anything counted here can only be the
+        // immediate first tick.
         tokio::time::sleep(Duration::from_secs(30)).await;
         tokio::task::yield_now().await;
         let observed = passes.load(Ordering::SeqCst);
         cancel.cancel();
         let _ = handle.await;
         assert_eq!(
-            observed, 0,
-            "the immediate first tick must be consumed without running a pass"
+            observed, 1,
+            "a newly promoted leader must reconcile at once, not one cadence later"
         );
     }
 

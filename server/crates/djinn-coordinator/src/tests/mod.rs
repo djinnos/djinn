@@ -459,6 +459,7 @@ fn coordinator_actor_for_tests(
         provisional_admissions: HashMap::new(),
         dispatch_cooldowns: HashMap::new(),
         dispatch_failure_streak: HashMap::new(),
+        breaker_open_backoff_streak: HashMap::new(),
         background_work_tracker: BackgroundWorkTracker::default(),
         auto_merge_tracker: AutoMergeTracker::default(),
         consolidation_runner: Arc::new(consolidation::DbConsolidationRunner::new(db.clone())),
@@ -1403,6 +1404,7 @@ async fn planner_intervention_markers(
     .collect()
 }
 
+mod breaker_open_exhaustion;
 mod deploy_interruptions_environmental;
 mod dispatch_flow;
 mod doctor_proposal_spec_integrity_sweep_e2e;
@@ -1410,6 +1412,7 @@ mod doctor_stranded_ready_e2e;
 mod intervention;
 mod pause_is_not_fault;
 mod proposal_spec_integrity_rollout_contract;
+mod provider_fault_attribution;
 mod session_reaping;
 mod status_and_stuck;
 mod terminal_gate_latest_row;
@@ -1443,3 +1446,8 @@ mod hold_cycle_ceiling;
 
 #[cfg(test)]
 mod incarnation_lease_liveness;
+
+/// Pod-`Pending` time must not be counted as agent idle time by the stall
+/// watchdog (and the negative control that proves the watchdog still works).
+#[cfg(test)]
+mod stall_pod_pending;
