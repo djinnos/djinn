@@ -55,7 +55,10 @@ async fn final_unit_is_acquired_by_exactly_one_synchronized_contender() {
     let repo = Arc::new(BuildPodPermitRepository::new(db));
     assert!(matches!(
         repo.acquire("existing", 2).await,
-        AcquireBuildPodPermitResult::Acquired { idempotent: false, .. }
+        AcquireBuildPodPermitResult::Acquired {
+            idempotent: false,
+            ..
+        }
     ));
 
     let barrier = Arc::new(Barrier::new(3));
@@ -90,29 +93,48 @@ async fn permit_lifecycle_is_idempotent_fenced_and_never_revoked_by_lower_limit(
     };
     assert!(matches!(
         repo.acquire("first", 1).await,
-        AcquireBuildPodPermitResult::Acquired { idempotent: true, .. }
+        AcquireBuildPodPermitResult::Acquired {
+            idempotent: true,
+            ..
+        }
     ));
-    assert!(matches!(repo.acquire("second", 1).await, AcquireBuildPodPermitResult::PoolFull { .. }));
-    assert_eq!(repo.active("first").await.unwrap().unwrap().state, BuildPodPermitState::Acquired);
+    assert!(matches!(
+        repo.acquire("second", 1).await,
+        AcquireBuildPodPermitResult::PoolFull { .. }
+    ));
+    assert_eq!(
+        repo.active("first").await.unwrap().unwrap().state,
+        BuildPodPermitState::Acquired
+    );
 
     assert!(matches!(
-        repo.bind_or_refresh_job_uid("first", &first.permit_id, first.fencing_token, "job-a").await.unwrap(),
+        repo.bind_or_refresh_job_uid("first", &first.permit_id, first.fencing_token, "job-a")
+            .await
+            .unwrap(),
         BindBuildPodPermitResult::Bound(_)
     ));
     assert!(matches!(
-        repo.bind_or_refresh_job_uid("first", &first.permit_id, first.fencing_token, "job-a").await.unwrap(),
+        repo.bind_or_refresh_job_uid("first", &first.permit_id, first.fencing_token, "job-a")
+            .await
+            .unwrap(),
         BindBuildPodPermitResult::AlreadyBound(_)
     ));
     assert!(matches!(
-        repo.release("first", &first.permit_id, first.fencing_token + 1, "absent").await.unwrap(),
+        repo.release("first", &first.permit_id, first.fencing_token + 1, "absent")
+            .await
+            .unwrap(),
         ReleaseBuildPodPermitResult::Rejected
     ));
     assert!(matches!(
-        repo.release("first", &first.permit_id, first.fencing_token, "absent").await.unwrap(),
+        repo.release("first", &first.permit_id, first.fencing_token, "absent")
+            .await
+            .unwrap(),
         ReleaseBuildPodPermitResult::Released(_)
     ));
     assert!(matches!(
-        repo.release("first", &first.permit_id, first.fencing_token, "absent").await.unwrap(),
+        repo.release("first", &first.permit_id, first.fencing_token, "absent")
+            .await
+            .unwrap(),
         ReleaseBuildPodPermitResult::AlreadyReleased(_)
     ));
 }
