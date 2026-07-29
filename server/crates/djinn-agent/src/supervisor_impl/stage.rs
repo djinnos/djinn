@@ -1817,19 +1817,18 @@ mod tests {
             );
         }
 
-        // The exact production shape of the 2gq7 failures: an in-stream
-        // `server_is_overloaded` error event on a 200 response, which
-        // `from_stream_error` maps to a synthetic 500.
-        let overloaded = ProviderError::from_stream_error(
-            Some("server_is_overloaded"),
-            "Our servers are currently overloaded",
-        );
+        // The production shape of 2gq7's second failure: an in-stream
+        // `server_error` event on a 200 response (OpenAI request id
+        // f7bd36f8-6250-455d-8235-738cab51183c), which `from_stream_error` maps
+        // to a synthetic 500.
+        let stream_500 =
+            ProviderError::from_stream_error(Some("server_error"), "An error occurred");
         assert_eq!(
-            classify_provider_failure(&typed(overloaded)),
+            classify_provider_failure(&typed(stream_500)),
             Some(ProviderFailureClass::Transient {
                 retry_after_ms: None
             }),
-            "the in-stream `server_is_overloaded` event that killed 2gq7's sessions is transient",
+            "an in-stream `server_error` event is a transient provider fault",
         );
 
         // …and it survives the context/stream wrapping the production error
@@ -1842,6 +1841,36 @@ mod tests {
             Some(ProviderFailureClass::Transient {
                 retry_after_ms: None
             }),
+        );
+    }
+
+    /// End-to-end for the capacity signal that actually killed `2gq7`'s first
+    /// and third sessions: `server_is_overloaded` from the ChatGPT Codex
+    /// CONSUMER backend. `from_stream_error` classifies it as a `RateLimit`
+    /// (plan capacity shedding, not a broken model), and the wire class must
+    /// therefore be `Throttle` — the host's IMMEDIATE-failover path
+    /// (`record_stall`), so dispatch moves to the user's next model at once
+    /// instead of re-probing a saturated endpoint. Like `Transient`, it is
+    /// exempt from the planner-remediation escalation.
+    #[test]
+    fn overload_stream_event_maps_to_throttle_for_immediate_failover() {
+        let overloaded = ProviderError::from_stream_error(
+            Some("server_is_overloaded"),
+            "Our servers are currently overloaded",
+        );
+        assert_eq!(
+            overloaded,
+            ProviderError::RateLimit {
+                retry_after_ms: None
+            },
+            "an overload code is a throttle, not a provider-internal fault",
+        );
+        assert_eq!(
+            classify_provider_failure(&typed(overloaded)),
+            Some(ProviderFailureClass::Throttle {
+                retry_after_ms: None
+            }),
+            "an overload must fail over immediately, not retry the same saturated model",
         );
     }
 

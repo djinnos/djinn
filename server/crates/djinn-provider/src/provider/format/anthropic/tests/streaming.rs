@@ -403,8 +403,9 @@ async fn test_stream_raw_eof_before_message_stop_yields_error() {
 #[tokio::test]
 async fn test_streamed_overloaded_error_event_surfaces_typed_provider_error() {
     // Anthropic signals overload as a 200 SSE `error` event. It must surface as
-    // a typed retryable `ProviderError::ProviderInternal` (server-side), NOT be
-    // dropped to an "empty turn".
+    // a typed retryable `ProviderError::RateLimit` — capacity shedding, so the
+    // host fails over to the next model at once — and NOT be dropped to an
+    // "empty turn".
     let body = concat!(
         "event: message_start\n",
         "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":7}}}\n\n",
@@ -432,7 +433,12 @@ async fn test_streamed_overloaded_error_event_surfaces_typed_provider_error() {
     let pe = err
         .downcast_ref::<ProviderError>()
         .expect("typed ProviderError must be downcastable from the stream error");
-    assert_eq!(*pe, ProviderError::ProviderInternal { status: 500 });
+    assert_eq!(
+        *pe,
+        ProviderError::RateLimit {
+            retry_after_ms: None
+        }
+    );
     assert!(pe.retryable(), "overloaded_error must be retryable");
     // Human-readable detail rides along as anyhow context.
     let text = err.to_string();
@@ -492,11 +498,33 @@ fn test_classify_anthropic_error_event_rate_limit_carries_retry_after() {
 }
 
 #[test]
-fn test_classify_anthropic_error_event_overloaded_maps_to_internal() {
+fn test_classify_anthropic_error_event_overloaded_maps_to_rate_limit() {
+    // `overloaded_error` is Anthropic's capacity-shedding signal — the same
+    // condition OpenAI reports as `server_is_overloaded`. It is a THROTTLE, not
+    // a broken backend: the host must fail over to the next model immediately
+    // (`record_stall`) rather than re-probe a saturated endpoint. Anthropic also
+    // states 529 (== overloaded) on the status path, which `from_status`
+    // already classifies as a rate limit; the stream-event path now agrees.
     let data = r#"{"type":"error","error":{"type":"overloaded_error","message":"overloaded"}}"#;
     let (class, _msg) = classify_anthropic_error_event(data);
-    assert_eq!(class, ProviderError::ProviderInternal { status: 500 });
+    assert_eq!(
+        class,
+        ProviderError::RateLimit {
+            retry_after_ms: None
+        }
+    );
     assert!(class.retryable());
+
+    // And an `error.retry_after` now rides along, because the RateLimit arm is
+    // the one that folds it in.
+    let with_reset = r#"{"type":"error","error":{"type":"overloaded_error","message":"overloaded","retry_after":30}}"#;
+    let (class, _msg) = classify_anthropic_error_event(with_reset);
+    assert_eq!(
+        class,
+        ProviderError::RateLimit {
+            retry_after_ms: Some(30_000)
+        }
+    );
 }
 
 #[tokio::test]
