@@ -578,6 +578,36 @@ async fn aggregators_are_fenced_and_persist_one_terminal_score_set() {
     assert_eq!(persisted_status, "completed");
     let counts: (i64, i64, i64) = sqlx::query_as("SELECT (SELECT count(*) FROM readiness_area_scores WHERE run_id=$1), (SELECT count(*) FROM readiness_project_scores WHERE run_id=$1), (SELECT count(*) FROM readiness_run_events WHERE run_id=$1 AND event_kind='readiness_aggregated')").bind(&kickoff.run.id).fetch_one(db.pool()).await.expect("one aggregation set");
     assert_eq!(counts, (2, 1, 1));
+    let terminal_detail = repo
+        .run_detail(&kickoff.run.id)
+        .await
+        .expect("terminal detail")
+        .expect("terminal run");
+    assert_eq!(terminal_detail.run.status, "completed");
+    assert_eq!(terminal_detail.area_scores.len(), 2);
+    assert!(
+        terminal_detail
+            .area_scores
+            .windows(2)
+            .all(|scores| scores[0].area_id <= scores[1].area_id)
+    );
+    assert!(terminal_detail.project_score.is_some());
+    assert_eq!(terminal_detail.suggestions.len(), 1);
+    assert_eq!(
+        terminal_detail
+            .events
+            .iter()
+            .filter(|event| event.event_kind == "readiness_aggregated")
+            .count(),
+        1
+    );
+    assert_eq!(
+        terminal_detail,
+        repo.run_detail(&kickoff.run.id)
+            .await
+            .expect("repeat terminal detail")
+            .expect("terminal run")
+    );
     let (missing_status, missing_score): (String, f64) = sqlx::query_as("SELECT f.status,s.score FROM readiness_guardrail_findings f JOIN readiness_area_scores s ON s.area_id=f.area_id WHERE f.run_id=$1 AND f.status='missing'").bind(&kickoff.run.id).fetch_one(db.pool()).await.expect("persisted missing finding");
     assert_eq!((missing_status.as_str(), missing_score), ("missing", 0.0));
     let suggestion: serde_json::Value = sqlx::query_scalar("SELECT suggestion FROM readiness_remediation_suggestions WHERE run_id=$1 AND dedupe_key='auth'").bind(&kickoff.run.id).fetch_one(db.pool()).await.expect("merged suggestion");
@@ -788,6 +818,10 @@ async fn run_detail_is_deterministic_and_excludes_historical_accepted_output() {
         .expect("exists");
     assert_eq!(first, second);
     assert_eq!(first.run.repository_snapshot, "snapshot-detail");
+    assert!(first.area_scores.is_empty());
+    assert!(first.project_score.is_none());
+    assert!(first.suggestions.is_empty());
+    assert!(first.events.is_empty());
     assert_eq!(
         first
             .areas
@@ -821,6 +855,100 @@ async fn run_detail_is_deterministic_and_excludes_historical_accepted_output() {
     assert_eq!(
         front.accepted_outputs[0].result["errors"][0]["message"],
         "preserved"
+    );
+}
+
+#[tokio::test]
+async fn run_detail_includes_ordered_terminal_aggregation_suggestions_and_events() {
+    let db = Database::ephemeral().await.expect("postgres");
+    let project = "readiness-terminal-detail";
+    djinn_db::test_support::seed_project(&db, project, project).await;
+    let repo = ReadinessRepository::new(db.clone());
+    let run = repo
+        .create_run(CreateReadinessRun {
+            project_id: project.into(),
+            idempotency_key: "terminal-detail".into(),
+            repository_snapshot: "snapshot-terminal".into(),
+            skill_name: "skill-terminal".into(),
+            skill_version: "2.0.0".into(),
+        })
+        .await
+        .expect("run");
+    for (area_id, area_key, attempt_id) in [
+        ("terminal-z", "zeta", "terminal-z-attempt"),
+        ("terminal-a", "alpha", "terminal-a-attempt"),
+    ] {
+        sqlx::query("INSERT INTO readiness_composition_areas (id,run_id,area_key,composition,path_scopes) VALUES ($1,$2,$3,'{}','[]')")
+            .bind(area_id).bind(&run.id).bind(area_key).execute(db.pool()).await.expect("area");
+        sqlx::query("INSERT INTO readiness_area_attempts (id,run_id,area_id,attempt_number,correlation_key) VALUES ($1,$2,$3,1,$4)")
+            .bind(attempt_id).bind(&run.id).bind(area_id).bind(format!("key-{area_id}")).execute(db.pool()).await.expect("attempt");
+        sqlx::query("UPDATE readiness_composition_areas SET current_attempt_id=$1 WHERE id=$2")
+            .bind(attempt_id)
+            .bind(area_id)
+            .execute(db.pool())
+            .await
+            .expect("current attempt");
+    }
+    for (area_id, score, status) in [
+        ("terminal-z", 0.5, "supported"),
+        ("terminal-a", 0.0, "unsupported"),
+    ] {
+        sqlx::query("INSERT INTO readiness_area_scores (run_id,area_id,score,applicable_weight,covered_weight,status) VALUES ($1,$2,$3,2,1,$4)")
+            .bind(&run.id).bind(area_id).bind(score).bind(status).execute(db.pool()).await.expect("area score");
+    }
+    sqlx::query(
+        "INSERT INTO readiness_project_scores (run_id,score,band) VALUES ($1,0.5,'emerging')",
+    )
+    .bind(&run.id)
+    .execute(db.pool())
+    .await
+    .expect("project score");
+    for (id, key) in [("suggestion-z", "z-key"), ("suggestion-a", "a-key")] {
+        sqlx::query("INSERT INTO readiness_remediation_suggestions (id,run_id,dedupe_key,suggestion) VALUES ($1,$2,$3,'{}')")
+            .bind(id).bind(&run.id).bind(key).execute(db.pool()).await.expect("canonical suggestion");
+    }
+    for id in ["event-z", "event-a"] {
+        sqlx::query("INSERT INTO readiness_run_events (id,run_id,event_kind,payload,created_at) VALUES ($1,$2,'lifecycle','{}','2026-01-01T00:00:00.000Z')")
+            .bind(id).bind(&run.id).execute(db.pool()).await.expect("event");
+    }
+    sqlx::query("UPDATE readiness_runs SET status='completed',completed_at='2026-01-01T00:00:01.000Z' WHERE id=$1")
+        .bind(&run.id).execute(db.pool()).await.expect("terminal run");
+
+    let first = repo
+        .run_detail(&run.id)
+        .await
+        .expect("detail")
+        .expect("run");
+    let second = repo
+        .run_detail(&run.id)
+        .await
+        .expect("detail")
+        .expect("run");
+    assert_eq!(first, second);
+    assert_eq!(
+        first
+            .area_scores
+            .iter()
+            .map(|score| (score.area_id.as_str(), score.status.as_str()))
+            .collect::<Vec<_>>(),
+        vec![("terminal-a", "unsupported"), ("terminal-z", "supported")]
+    );
+    assert_eq!(first.project_score.expect("project score").band, "emerging");
+    assert_eq!(
+        first
+            .suggestions
+            .iter()
+            .map(|suggestion| suggestion.dedupe_key.as_str())
+            .collect::<Vec<_>>(),
+        vec!["a-key", "z-key"]
+    );
+    assert_eq!(
+        first
+            .events
+            .iter()
+            .map(|event| event.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["event-a", "event-z"]
     );
 }
 
