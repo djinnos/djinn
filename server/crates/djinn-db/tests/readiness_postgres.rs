@@ -896,6 +896,21 @@ async fn run_detail_includes_ordered_terminal_aggregation_suggestions_and_events
         sqlx::query("INSERT INTO readiness_area_scores (run_id,area_id,score,applicable_weight,covered_weight,status) VALUES ($1,$2,$3,2,1,$4)")
             .bind(&run.id).bind(area_id).bind(score).bind(status).execute(db.pool()).await.expect("area score");
     }
+    for (area_id, attempt_id) in [
+        ("terminal-z", "terminal-z-attempt"),
+        ("terminal-a", "terminal-a-attempt"),
+    ] {
+        sqlx::query("UPDATE readiness_area_attempts SET status='succeeded',terminal_at='2026-01-01T00:00:00.000Z' WHERE id=$1")
+            .bind(attempt_id)
+            .execute(db.pool())
+            .await
+            .expect("terminal attempt");
+        sqlx::query("UPDATE readiness_composition_areas SET status='succeeded' WHERE id=$1")
+            .bind(area_id)
+            .execute(db.pool())
+            .await
+            .expect("terminal area");
+    }
     sqlx::query(
         "INSERT INTO readiness_project_scores (run_id,score,band) VALUES ($1,0.5,'emerging')",
     )
