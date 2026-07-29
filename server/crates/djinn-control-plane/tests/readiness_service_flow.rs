@@ -10,7 +10,7 @@ use djinn_control_plane::{
         READINESS_SKILL_NAME, READINESS_SKILL_VERSION, ReadinessKickoffRequest,
         ReadinessKickoffService, ReadinessSkillPinError, ReadinessSkillPinResolver,
     },
-    readiness_query::{ReadinessQueryService, ReadinessRunQuery},
+    readiness_query::{ReadinessProjectQuery, ReadinessQueryService, ReadinessRunQuery},
 };
 use djinn_core::events::EventBus;
 use djinn_db::{
@@ -349,7 +349,129 @@ async fn library_only_unsupported_app_guardrails_do_not_penalize_readiness() {
     assert_eq!(project_score.band, "strong");
 }
 
+#[tokio::test]
+async fn terminal_run_rerun_uses_new_context_without_mutating_prior_detail() {
+    let db = Database::ephemeral().await.expect("real postgres database");
+    let (project_id, owner_id) = seed_owned_project_with_snapshot(&db).await;
+    let kickoff_service = ReadinessKickoffService::new(db.clone(), AvailablePin);
+    let query_service = ReadinessQueryService::new(db.clone());
+
+    let first = kickoff_service
+        .kickoff(ReadinessKickoffRequest {
+            project_id: project_id.clone(),
+            authenticated_owner_id: owner_id.clone(),
+            idempotency_key: "terminal-run".into(),
+        })
+        .await
+        .expect("start first run against the initial immutable context");
+    let repository = ReadinessRepository::new(db.clone());
+    let fanout = repository
+        .complete_identification(&first.run.id, &owner_id, library_identification())
+        .await
+        .expect("complete first-run identification");
+    let library = fanout.first().expect("first-run library work");
+    assert_eq!(
+        repository
+            .ingest_area_result(callback(&first.run.id, library, library_result()))
+            .await
+            .expect("accept first-run callback"),
+        ReadinessCallbackOutcome::Accepted
+    );
+    assert_eq!(
+        repository
+            .aggregate_run(&first.run.id, "terminal-rerun-aggregator")
+            .await
+            .expect("terminalize first run")
+            .status,
+        "completed"
+    );
+
+    let first_detail = query_service
+        .run_detail(ReadinessRunQuery {
+            project_id: project_id.clone(),
+            run_id: first.run.id.clone(),
+            authenticated_owner_id: owner_id.clone(),
+        })
+        .await
+        .expect("capture complete first terminal detail through service boundary");
+
+    RepoGraphCacheRepository::new(db.clone())
+        .upsert(RepoGraphCacheInsert {
+            project_id: &project_id,
+            commit_sha: RERUN_SNAPSHOT,
+            graph_blob: b"new persisted service-flow graph",
+        })
+        .await
+        .expect("persist newer immutable repository snapshot");
+
+    let second = kickoff_service
+        .kickoff(ReadinessKickoffRequest {
+            project_id: project_id.clone(),
+            authenticated_owner_id: owner_id.clone(),
+            idempotency_key: "terminal-rerun".into(),
+        })
+        .await
+        .expect("start a distinct run after the first reaches terminal state");
+    assert_ne!(second.run.id, first.run.id);
+    assert_ne!(second.identification_task.id, first.identification_task.id);
+    assert_eq!(second.run.status, "identifying");
+    assert_eq!(second.run.repository_snapshot, RERUN_SNAPSHOT);
+    assert_eq!(second.run.skill_name, READINESS_SKILL_NAME);
+    assert_eq!(second.run.skill_version, READINESS_SKILL_VERSION);
+
+    let second_task_context: serde_json::Value =
+        serde_json::from_str(&second.identification_task.description)
+            .expect("identification task has structured immutable context");
+    assert_eq!(second_task_context["run_id"], second.run.id);
+    assert_eq!(second_task_context["repository_snapshot"], RERUN_SNAPSHOT);
+    assert_eq!(second_task_context["skill_name"], READINESS_SKILL_NAME);
+    assert_eq!(
+        second_task_context["skill_version"],
+        READINESS_SKILL_VERSION
+    );
+
+    let redelivery = kickoff_service
+        .kickoff(ReadinessKickoffRequest {
+            project_id: project_id.clone(),
+            authenticated_owner_id: owner_id.clone(),
+            idempotency_key: "terminal-rerun".into(),
+        })
+        .await
+        .expect("redeliver the second kickoff key");
+    assert_eq!(redelivery.run.id, second.run.id);
+    assert_eq!(
+        redelivery.identification_task.id, second.identification_task.id,
+        "same-key redelivery must not create duplicate identification work"
+    );
+    assert_eq!(
+        query_service
+            .active_or_latest(ReadinessProjectQuery {
+                project_id: project_id.clone(),
+                authenticated_owner_id: owner_id.clone(),
+            })
+            .await
+            .expect("read active rerun through service boundary")
+            .expect("second run remains active")
+            .id,
+        second.run.id
+    );
+
+    assert_eq!(
+        query_service
+            .run_detail(ReadinessRunQuery {
+                project_id,
+                run_id: first.run.id,
+                authenticated_owner_id: owner_id,
+            })
+            .await
+            .expect("reread first terminal detail through service boundary"),
+        first_detail,
+        "a later kickoff must not mutate any persisted first-run detail"
+    );
+}
+
 const SNAPSHOT: &str = "d34db33fd34db33fd34db33fd34db33fd34db33f";
+const RERUN_SNAPSHOT: &str = "f00dbabef00dbabef00dbabef00dbabef00dbabe";
 
 async fn seed_owned_project_with_snapshot(db: &Database) -> (String, String) {
     let project = ProjectRepository::new(db.clone(), EventBus::noop())
