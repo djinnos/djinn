@@ -24,6 +24,7 @@ use djinn_agent::file_time::FileTime;
 use djinn_agent::lsp::LspManager;
 use djinn_agent::roles::RoleRegistry;
 use djinn_agent::runtime_bridge::{K8sTokenReviewValidator, RuntimeKind, runtime_kind};
+use djinn_coordinator::build_admission_inventory::ReconcileScope;
 use djinn_coordinator::build_lease::BuildLeaseService;
 use djinn_coordinator::build_lease_reclaim::BuildLeaseReclaimer;
 use djinn_coordinator::build_slot_authority::BuildLeaseDispatchAuthority;
@@ -260,6 +261,22 @@ impl StartupReconnectabilityMeasurement {
     /// without re-deriving it separately from the count emitted in tracing.
     pub(crate) fn reconnectable_task_run_ids(&self) -> &HashSet<String> {
         &self.reconnectable_task_run_ids
+    }
+}
+
+/// The single rule deciding whether a build-admission reconciliation pass may
+/// write the durable admission journal.
+///
+/// A free function so the rule itself is testable without an `AppState`: the
+/// hazard being fenced off is a standby writing the shared ledger, and "the
+/// standby case maps to Observe" is the assertion that matters. See
+/// [`AppState::initialize_build_admission_inventory`] for why the decision
+/// cannot live at the call sites.
+fn reconcile_scope_for(topology_confirmed: bool) -> ReconcileScope {
+    if topology_confirmed {
+        ReconcileScope::Mutate
+    } else {
+        ReconcileScope::Observe
     }
 }
 
@@ -1220,11 +1237,38 @@ impl AppState {
     /// re-runs this on a leader-only timer via
     /// [`Self::reconcile_build_admission_inventory`], because a row that had
     /// not settled during the startup pass is otherwise never looked at again.
+    ///
+    /// ## Only the leader may run the MUTATING pass
+    ///
+    /// The scope comes from [`Self::build_admission_reconcile_scope`] rather
+    /// than from the call site, because the call sites are not all leader-only
+    /// and were never audited as if they were:
+    ///
+    /// * [`Self::initialize`] runs on **every** pod, standbys included, before
+    ///   leadership is contested;
+    /// * `reestablish_build_admission_gates` is reached from
+    ///   `finalize_build_admission_handoff`, which the handoff warning loop
+    ///   ticks on **every** pod (that loop's own comment argues it is safe
+    ///   because the emergency *acknowledgement* is readiness-gated — true, and
+    ///   it says nothing about the full reconciliation the branch above it
+    ///   performs).
+    ///
+    /// A mutating pass from a standby is not benign. `is_reclaimable`'s LIST
+    /// and GET clauses are structurally vacuous for `task_observation` rows, so
+    /// the creator-epoch fence is the only thing protecting a settled row — and
+    /// a standby clears that fence trivially, because the leader's epoch is not
+    /// its own. A standby could therefore retire the admission row of a
+    /// task-run still running on the leader, under-counting durable occupancy:
+    /// fail-open, silently, with no operator-visible signal.
+    ///
+    /// Deriving the scope from the topology flag rather than the call site also
+    /// means a future caller cannot reintroduce the hazard by forgetting.
     async fn initialize_build_admission_inventory(&self) {
         let Some(admission) = self.inner.build_admission.clone() else {
             // Off: no controller, no readiness coupling.
             return;
         };
+        let scope = self.build_admission_reconcile_scope();
         let warmer = self.inner.graph_warmer.read().await.clone();
         let Some(warmer) = warmer else {
             admission.mark_inventory_pending();
@@ -1245,7 +1289,7 @@ impl AppState {
                     admission.clone(),
                     inventory,
                 )
-                .reconcile()
+                .reconcile_with(scope)
                 .await;
             if report.blockers.is_empty() {
                 // A pass that RAN and a pass that SUCCEEDED are different facts,
@@ -1258,6 +1302,7 @@ impl AppState {
                 admission.note_reconcile_success();
                 tracing::info!(
                     mode = ?admission.mode(),
+                    ?scope,
                     adopted = report.adopted,
                     released = report.released,
                     reclaimed = report.reclaimed,
@@ -1275,6 +1320,7 @@ impl AppState {
             } else {
                 tracing::error!(
                     mode = ?admission.mode(),
+                    ?scope,
                     reclaim_failures = report.reclaim_failure_count,
                     named_reclaim_failures = ?report.reclaim_failures,
                     blockers = ?report.blockers,
@@ -1308,6 +1354,23 @@ impl AppState {
                 );
             }
         }
+    }
+
+    /// Which reconciliation scope this process is entitled to right now.
+    ///
+    /// `build_admission_topology_confirmed` is set by exactly one writer,
+    /// [`Self::confirm_build_admission_topology`], which runs only from
+    /// [`Self::become_leader`] — i.e. only after this process won the
+    /// coordinator advisory lock. That flag IS the single-active-writer fact,
+    /// and it is the same one the topology readiness gate is re-asserted from,
+    /// so the journal writer and the admission gate can never disagree about
+    /// who the active process is.
+    fn build_admission_reconcile_scope(&self) -> ReconcileScope {
+        reconcile_scope_for(
+            self.inner
+                .build_admission_topology_confirmed
+                .load(Ordering::Acquire),
+        )
     }
 
     /// Re-walk the build-admission startup gates after a live promotion reset
@@ -2599,13 +2662,16 @@ impl AppState {
         // advisory-lock liveness ping stopped too. Admission open and
         // reclamation absent is precisely the combination that halts the board.
         //
-        // Spawning this early is safe because the loop SUPPRESSES ITS OWN FIRST
-        // TICK (see `build_admission_reconcile::run_loop`): `initialize()` runs
-        // a full reconciliation pass on every pod before leadership is even
-        // contested, and `confirm_build_admission_topology` can run another via
-        // the handoff path, so the first real pass is one cadence away either
-        // way. Moving the spawn earlier only shortens the window in which a
-        // pass has just run — it cannot create a duplicate one.
+        // The loop's first tick fires IMMEDIATELY, and this spawn site is why
+        // that is now correct rather than merely wasteful. `initialize()` runs
+        // on every pod including standbys, so its reconciliation pass is
+        // observe-only and retires nothing (see
+        // `initialize_build_admission_inventory`). This spawn — the first
+        // statement after the topology gate opens — is therefore the first
+        // point at which THIS process is entitled to write the shared journal,
+        // and its immediate first pass is the one that retires the
+        // predecessor's orphans. Suppressing it would cost a full cadence at
+        // exactly the moment the stale population is largest.
         //
         // The startup pass alone cannot reclaim an occupying row that has not
         // yet settled past the reclaim settle window, and a rolling deploy is
@@ -5230,6 +5296,100 @@ mod build_admission_config_tests {
                 "the reconciler must be spawned before {later}"
             );
         }
+    }
+
+    /// The rule itself: a process that has not confirmed the single-active
+    /// topology gate gets an observe-only pass, and only a confirmed leader may
+    /// write the shared admission journal.
+    #[test]
+    fn only_a_confirmed_leader_reconciles_with_the_mutating_scope() {
+        assert_eq!(reconcile_scope_for(true), ReconcileScope::Mutate);
+        assert_eq!(
+            reconcile_scope_for(false),
+            ReconcileScope::Observe,
+            "a standby — every pod before leadership is won, and every pod that \
+             never wins it — must not write the durable admission journal"
+        );
+    }
+
+    /// Composition: the scope is derived from the topology flag, never chosen
+    /// at a call site.
+    ///
+    /// `initialize_build_admission_inventory` is reachable from
+    /// `initialize()` (every pod, before leadership is contested) and from
+    /// `reestablish_build_admission_gates` (reached from the handoff warning
+    /// tick, which also runs on every pod). Auditing those call sites is what
+    /// failed; deriving the scope from the one fact that identifies the active
+    /// writer is what cannot.
+    #[test]
+    fn the_reconcile_scope_is_derived_from_topology_confirmation_not_the_call_site() {
+        let source = include_str!("mod.rs");
+        // Assembled at runtime so these assertions do not match their own
+        // literals inside the file they read.
+        let mutate = format!("ReconcileScope::{}", "Mutate");
+        let flag = format!("build_admission_topology_{}", "confirmed");
+        let decision = format!("fn reconcile_scope_{}(", "for");
+
+        let decision_at = source.find(decision.as_str()).expect("the rule exists");
+        let body_end = source[decision_at..]
+            .find("\n}\n")
+            .expect("the rule has a body");
+        let body = &source[decision_at..decision_at + body_end];
+        assert!(
+            body.contains(mutate.as_str()),
+            "the rule is the only place that may hand out the mutating scope"
+        );
+
+        // Nowhere else in the production half of this file may construct it.
+        let production = &source[..decision_at + body_end];
+        assert_eq!(
+            production.matches(mutate.as_str()).count(),
+            1,
+            "the mutating scope must be constructed only by the rule"
+        );
+
+        // And the seam that runs the pass must ask the rule rather than decide.
+        let seam = source
+            .find("async fn initialize_build_admission_inventory")
+            .expect("the seam exists");
+        let seam_body = &source[seam..];
+        let asked = seam_body
+            .find("let scope = self.build_admission_reconcile_scope()")
+            .expect("the inventory seam derives its scope from the rule");
+        let used = seam_body
+            .find(".reconcile_with(scope)")
+            .expect("the inventory seam passes that scope to the reconciler");
+        assert!(
+            asked < used,
+            "the scope must be derived before the pass runs"
+        );
+
+        // The rule reads the topology flag, and that flag has exactly one
+        // writer — `confirm_build_admission_topology`, which only
+        // `become_leader` calls.
+        let store = format!(".store(true, Ordering::{})", "Release");
+        let confirm = source
+            .find("async fn confirm_build_admission_topology")
+            .expect("the topology seam exists");
+        let confirm_end = confirm
+            + source[confirm..]
+                .find("\n    }\n")
+                .expect("the topology seam has a body");
+        assert!(
+            source[confirm..confirm_end].contains(store.as_str()),
+            "leadership confirmation is what sets the flag"
+        );
+        let accessor = source
+            .find("fn build_admission_reconcile_scope")
+            .expect("the accessor exists");
+        let accessor_end = accessor
+            + source[accessor..]
+                .find("\n    }\n")
+                .expect("the accessor has a body");
+        assert!(
+            source[accessor..accessor_end].contains(flag.as_str()),
+            "the scope must be read from the topology-confirmation flag and nothing else"
+        );
     }
 
     /// L6. `begin_draining` has no clearing path on the production shutdown

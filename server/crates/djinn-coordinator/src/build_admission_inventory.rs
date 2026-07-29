@@ -234,6 +234,46 @@ fn finished_as_its_own_task_run(
         .is_some_and(|(terminal, declared)| *terminal && declared.as_deref() == Some(task_run_id))
 }
 
+/// Whether a reconciliation pass may WRITE the durable admission journal.
+///
+/// Reconciliation is two different jobs wearing one name. Reading Kubernetes,
+/// classifying what it found, and re-deriving this process's own in-memory
+/// readiness gates from the journal is safe on any pod: it is all reads, and
+/// every gate it sets is process-local. Retiring rows and adopting objects is
+/// not — those are writes to the shared durable ledger, and the single-active
+/// topology gate exists precisely to make sure only one process performs them.
+///
+/// The two were fused, so [`BuildAdmissionReconciler::reconcile`] was a
+/// mutating pass that `AppState::initialize` ran on **every** pod, standbys
+/// included, before leadership was even contested. See the "Why leader-only"
+/// section of `djinn_server::build_admission_reconcile` for the invariant that
+/// contradicts, and [`BuildAdmissionReconciler::is_reclaimable`] for why it
+/// mattered: for a `task_observation` row the LIST and GET clauses are
+/// structurally vacuous, so the creator-epoch fence is the *only* thing
+/// standing between a settled row and retirement — and a standby passes that
+/// fence trivially, because the leader's epoch is not its own. A standby could
+/// therefore retire the admission row of a task-run that was still running on
+/// the leader, which under-counts durable occupancy: fail-OPEN.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReconcileScope {
+    /// Read Kubernetes, read the journal, and re-derive this process's own
+    /// readiness gates. Writes nothing durable. Safe on any pod, and
+    /// deliberately still fail-CLOSED: an unusable listing or an unreadable
+    /// journal leaves `InventoryPending` exactly as it would in [`Self::Mutate`].
+    Observe,
+    /// Everything [`Self::Observe`] does, plus the journal writes — adoption of
+    /// live objects and retirement of rows whose objects are provably gone.
+    /// Only legitimate on the process that holds the coordinator advisory lock.
+    Mutate,
+}
+
+impl ReconcileScope {
+    /// Whether this pass is allowed to write the durable admission journal.
+    fn may_write(self) -> bool {
+        matches!(self, Self::Mutate)
+    }
+}
+
 pub struct BuildAdmissionReconciler {
     controller: Arc<BuildAdmissionController>,
     inventory: Arc<dyn WorkloadInventory>,
@@ -433,7 +473,20 @@ impl BuildAdmissionReconciler {
         out.blockers.push(error.to_string());
     }
 
+    /// A full, mutating reconciliation pass. Leader-only — see
+    /// [`ReconcileScope`].
     pub async fn reconcile(&self) -> InventoryReport {
+        self.reconcile_with(ReconcileScope::Mutate).await
+    }
+
+    /// A read-only pass: the same evidence gathering and the same process-local
+    /// readiness gates, with every journal write suppressed. This is what a pod
+    /// that has not confirmed the single-active topology gate runs.
+    pub async fn observe(&self) -> InventoryReport {
+        self.reconcile_with(ReconcileScope::Observe).await
+    }
+
+    pub async fn reconcile_with(&self, scope: ReconcileScope) -> InventoryReport {
         let _g = self.serial.lock().await;
         if self.controller.mode() == BuildAdmissionMode::Off {
             return InventoryReport::default();
@@ -482,29 +535,48 @@ impl BuildAdmissionReconciler {
                 Err(e) => out.blockers.push(e),
             }
         }
-        for c in &cs {
-            if c.object.terminal {
-                // Adopting a finished object into `Live` would be a lie. The
-                // row loop below retires the pre-Live row this object belongs
-                // to instead — see the `finished` branch there.
-                continue;
+        // Adoption WRITES the journal — it inserts a row for an orphan object
+        // that has none, and moves an existing pre-Live row to `Live` — so an
+        // observe-only pass skips it. Note that it does NOT restamp an existing
+        // row's `creator_server_epoch`: `update_state` never touches that
+        // column, so the `creator_server_epoch` supplied here is consumed only
+        // by the INSERT arm, where there is no predecessor value to preserve.
+        // The pre-Live reclamation fence is therefore never transferred by
+        // adoption; see `adopt_live` and its tests.
+        if scope.may_write() {
+            for c in &cs {
+                if c.object.terminal {
+                    // Adopting a finished object into `Live` would be a lie. The
+                    // row loop below retires the pre-Live row this object belongs
+                    // to instead — see the `finished` branch there.
+                    continue;
+                }
+                let Some(uid) = c.object.uid.as_ref() else {
+                    out.blockers
+                        .push(format!("{}: unstable UID", c.object.name));
+                    continue;
+                };
+                let x = AdoptLiveAdmissionInput {
+                    key: c.key.clone(),
+                    workload_kind: c.kind,
+                    creator_server_epoch: self.controller.server_epoch().into(),
+                    object_name: c.object.name.clone(),
+                    object_uid: uid.clone(),
+                };
+                match self.controller.journal().adopt_live(&x).await {
+                    Ok(_) => out.adopted += 1,
+                    Err(e) => self.record_adopt_failure(&mut out, c, &e),
+                }
             }
-            let Some(uid) = c.object.uid.as_ref() else {
-                out.blockers
-                    .push(format!("{}: unstable UID", c.object.name));
-                continue;
-            };
-            let x = AdoptLiveAdmissionInput {
-                key: c.key.clone(),
-                workload_kind: c.kind,
-                creator_server_epoch: self.controller.server_epoch().into(),
-                object_name: c.object.name.clone(),
-                object_uid: uid.clone(),
-            };
-            match self.controller.journal().adopt_live(&x).await {
-                Ok(_) => out.adopted += 1,
-                Err(e) => self.record_adopt_failure(&mut out, c, &e),
-            }
+        }
+        if !scope.may_write() {
+            // Everything from here to the tail seed exists to justify and
+            // perform a retirement, so an observe-only pass has nothing left to
+            // do but re-derive its own gates from the journal — which the tail
+            // seed below does, read-only. Skipping the settlement listing and
+            // the per-row absence probes also keeps a standby from spending
+            // API-server GETs on evidence it may not act on.
+            return self.seed_and_publish(out, scope).await;
         }
         let active = match self
             .controller
@@ -654,6 +726,20 @@ impl BuildAdmissionReconciler {
             }
             self.retire_pre_live_row(&mut out, row).await;
         }
+        self.seed_and_publish(out, scope).await
+    }
+
+    /// The read-only tail of every pass, whatever its scope.
+    ///
+    /// Split out so an observe-only pass reaches it too: re-deriving this
+    /// process's own readiness gates from the journal is the part a standby
+    /// genuinely needs, and it is all reads. A standby that skipped it would
+    /// carry stale gates into its own promotion.
+    async fn seed_and_publish(
+        &self,
+        mut out: InventoryReport,
+        scope: ReconcileScope,
+    ) -> InventoryReport {
         // The tail seed re-derives `journal_recovered`, `journal_healthy`,
         // `create_unknown_pending` and `over_cap` from the journal. It is the
         // ONLY in-process re-derivation of those four gates, and it only
@@ -707,8 +793,18 @@ impl BuildAdmissionReconciler {
         // Publish the size of the stale population itself, loudly when it is
         // large enough to have wedged the cap. Discovering this by reading
         // thousands of per-transition warn lines is not an operating model.
-        self.controller
-            .publish_reconciliation(out.stale, out.released + out.reclaimed, out.fenced);
+        //
+        // Only a mutating pass may publish it. An observe-only pass never looks
+        // for stale rows at all, so its zeros mean "did not measure" rather
+        // than "measured zero", and a gauge that reports the second when it
+        // means the first is exactly how a wedge stays invisible.
+        if scope.may_write() {
+            self.controller.publish_reconciliation(
+                out.stale,
+                out.released + out.reclaimed,
+                out.fenced,
+            );
+        }
         out
     }
 }
