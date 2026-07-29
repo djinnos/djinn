@@ -21,6 +21,7 @@
 //! task.
 
 use super::*;
+use djinn_core::models::SessionStatus;
 use djinn_db::ActivityQuery;
 use djinn_provider::catalog::health::TaskFailureSignal;
 
@@ -308,7 +309,7 @@ async fn auto_disabled_model_breaker_blocks_the_escalation() {
     // The task's last reviewer session ran on this model.
     let model_id = "openai/gpt-5.6-sol";
     let session_repo = SessionRepository::new(db.clone(), crate::events::event_bus_for(&tx));
-    session_repo
+    let session = session_repo
         .create(CreateSessionParams {
             project_id: &task.project_id,
             task_id: Some(&task.id),
@@ -319,6 +320,12 @@ async fn auto_disabled_model_breaker_blocks_the_escalation() {
             pricing: None,
             cost_basis: None,
         })
+        .await
+        .unwrap();
+    // Terminate it: a live session would make the task ineligible for dispatch
+    // and the pass would never reach the reappearance branch at all.
+    session_repo
+        .update(&session.id, SessionStatus::Failed, 0, 0, 0, 0, None)
         .await
         .unwrap();
 
