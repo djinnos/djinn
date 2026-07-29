@@ -240,6 +240,115 @@ async fn two_area_service_flow_persists_worked_terminal_readiness_detail() {
     );
 }
 
+#[tokio::test]
+async fn library_only_unsupported_app_guardrails_do_not_penalize_readiness() {
+    let db = Database::ephemeral().await.expect("real postgres database");
+    let (project_id, owner_id) = seed_owned_project_with_snapshot(&db).await;
+    let kickoff = ReadinessKickoffService::new(db.clone(), AvailablePin)
+        .kickoff(ReadinessKickoffRequest {
+            project_id: project_id.clone(),
+            authenticated_owner_id: owner_id.clone(),
+            idempotency_key: "library-only-unsupported-guardrails".into(),
+        })
+        .await
+        .expect("owner kickoff with persisted snapshot");
+
+    let repository = ReadinessRepository::new(db.clone());
+    let fanout = repository
+        .complete_identification(&kickoff.run.id, &owner_id, library_identification())
+        .await
+        .expect("freeze and fan out the library area");
+    assert_eq!(fanout.len(), 1);
+    let library = fanout.first().expect("library fanout");
+    assert_eq!(library.area.area_key, "library");
+    assert_eq!(library.attempt.attempt_number, 1);
+    assert_eq!(
+        repository
+            .ingest_area_result(callback(&kickoff.run.id, library, library_result()))
+            .await
+            .expect("accept correlated library callback"),
+        ReadinessCallbackOutcome::Accepted
+    );
+
+    let aggregation = repository
+        .aggregate_run(&kickoff.run.id, "library-only-service-flow-aggregator")
+        .await
+        .expect("terminalize complete library run");
+    assert_eq!(aggregation.status, "completed");
+    assert_eq!(aggregation.area_scores.len(), 1);
+    assert_close(aggregation.project_score.score, 1.0);
+    assert_eq!(aggregation.project_score.band, "strong");
+
+    let detail = ReadinessQueryService::new(db)
+        .run_detail(ReadinessRunQuery {
+            project_id,
+            run_id: kickoff.run.id.clone(),
+            authenticated_owner_id: owner_id,
+        })
+        .await
+        .expect("read library detail only through service boundary");
+    assert_eq!(detail.run.id, kickoff.run.id);
+    assert_eq!(detail.run.status, "completed");
+    assert_eq!(detail.run.expected_area_count, Some(1));
+    assert_eq!(detail.areas.len(), 1);
+    let library_detail = &detail.areas[0];
+    assert_eq!(library_detail.area_key, "library");
+    assert_eq!(
+        library_detail.composition["roles"],
+        serde_json::json!(["library"])
+    );
+    assert_eq!(
+        library_detail.composition["key_libraries"],
+        serde_json::json!(["serde"])
+    );
+    assert_eq!(
+        library_detail.path_scopes,
+        serde_json::json!(["crates/sdk/"])
+    );
+    assert_current_success(library_detail);
+    assert_finding(
+        library_detail,
+        "library-public-api",
+        "covered",
+        "critical",
+        0.96,
+        serde_json::json!([{"path":"crates/sdk/src/lib.rs","line":18}]),
+    );
+    assert_finding(
+        library_detail,
+        "app-session-auth",
+        "unsupported",
+        "critical",
+        1.0,
+        serde_json::json!([{"path":"crates/sdk/src/lib.rs","line":1}]),
+    );
+    assert_eq!(library_detail.accepted_outputs.len(), 1);
+    assert_eq!(
+        library_detail.accepted_outputs[0].result["unsupported"],
+        serde_json::json!([{
+            "guardrail_key": "app-session-auth",
+            "reason": "session authentication applies to applications, not this library",
+            "evidence": [{"path":"crates/sdk/src/lib.rs","line":1}]
+        }])
+    );
+
+    // Worked arithmetic: public API coverage=5/5. The app-only critical
+    // guardrail is explicitly unsupported, so it contributes neither its five
+    // points to the numerator nor to the denominator: 5/5, not 5/10.
+    let library_score = detail
+        .area_scores
+        .iter()
+        .find(|score| score.area_id == library_detail.id)
+        .expect("library score");
+    assert_close(library_score.score, 1.0);
+    assert_eq!(library_score.applicable_weight, 5);
+    assert_close(library_score.covered_weight, 5.0);
+    assert_eq!(library_score.status, "supported");
+    let project_score = detail.project_score.expect("terminal project score");
+    assert_close(project_score.score, 1.0);
+    assert_eq!(project_score.band, "strong");
+}
+
 const SNAPSHOT: &str = "d34db33fd34db33fd34db33fd34db33fd34db33f";
 
 async fn seed_owned_project_with_snapshot(db: &Database) -> (String, String) {
@@ -293,6 +402,21 @@ fn two_area_identification() -> ReadinessIdentificationOutput {
     }
 }
 
+fn library_identification() -> ReadinessIdentificationOutput {
+    ReadinessIdentificationOutput {
+        areas: vec![ReadinessIdentifiedArea {
+            area_key: "library".into(),
+            path_scopes: vec!["crates/sdk/".into()],
+            languages: vec!["Rust".into()],
+            roles: vec!["library".into()],
+            frameworks: vec![],
+            key_libraries: vec!["serde".into()],
+            confidence: 0.98,
+            evidence: vec!["crates/sdk/Cargo.toml".into()],
+        }],
+    }
+}
+
 fn callback(
     run_id: &str,
     fanout: &ReadinessAreaFanout,
@@ -340,6 +464,22 @@ fn backend_result(area_id: &str) -> serde_json::Value {
             "area_ids": [area_id, area_id],
             "guardrail_ids": ["frontend-auth", "backend-auth", "backend-auth"]
         }]
+    })
+}
+
+fn library_result() -> serde_json::Value {
+    serde_json::json!({
+        "findings": [
+            {"guardrail_key":"library-public-api","status":"covered","severity":"critical","confidence":0.96,"evidence":[{"path":"crates/sdk/src/lib.rs","line":18}]},
+            {"guardrail_key":"app-session-auth","status":"unsupported","severity":"critical","confidence":1.0,"evidence":[{"path":"crates/sdk/src/lib.rs","line":1}]}
+        ],
+        "unsupported": [{
+            "guardrail_key": "app-session-auth",
+            "reason": "session authentication applies to applications, not this library",
+            "evidence": [{"path":"crates/sdk/src/lib.rs","line":1}]
+        }],
+        "warnings": [],
+        "remediation_suggestions": []
     })
 }
 
