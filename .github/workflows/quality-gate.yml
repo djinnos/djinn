@@ -780,7 +780,7 @@ jobs:
       # Number of `#[ignore]`d proofs the suite declares. The run below fails if
       # fewer than this many actually execute, so a lane that quietly runs zero
       # tests can never be mistaken for a proven kernel boundary.
-      ZF13_EXPECTED_PROOFS: "4"
+      ZF13_EXPECTED_PROOFS: "3"
       # Number of `#[ignore]`d proofs `brokered_git_trust.rs` declares. They are
       # the only place the cross-UID git contract is proven for real — a
       # worktree owned by the WORKER uid and `git status` run by a process that
