@@ -22,10 +22,11 @@ pub mod test_support {
     pub use crate::repositories::test_support::{
         HousekeepingFixture, HousekeepingFixtureExpectedCounts, HousekeepingFixtureProject,
         RefinementLifecycleAuditRowForTest, RefinementRunAuditForTest,
-        RefinementRunReadOnlySnapshotForTest, UsageTestSessionSeed, UsageTestTaskSeed,
-        add_blocker_edge, apply_all_migrations_to_fresh_database,
-        backdate_coordinator_incarnation_lease, backdate_task_attempt_created_at,
-        backdate_task_updated_at, build_multi_project_housekeeping_fixture, close_task_at,
+        RefinementRunReadOnlySnapshotForTest, StructuredEvidenceHandoffCountsForTest,
+        UsageTestSessionSeed, UsageTestTaskSeed, add_blocker_edge,
+        apply_all_migrations_to_fresh_database, backdate_coordinator_incarnation_lease,
+        backdate_task_attempt_created_at, backdate_task_updated_at,
+        build_multi_project_housekeeping_fixture, close_task_at,
         corrupt_credential_encrypted_value, corrupt_refinement_task_role_for_test,
         delete_proposal_lint_result_for_revision_for_test, delete_proposal_lint_results_for_test,
         delete_session_row, drop_table_cascade_for_test, drop_table_for_test,
@@ -35,11 +36,13 @@ pub mod test_support {
         make_refinement_run_phantom_for_test, nullify_note_confidence_for_test,
         override_debate_trail_body_metadata, proposal_lint_revision_id_for_test,
         refinement_run_audit_for_test, refinement_run_read_only_snapshot_for_test,
-        reject_admission_create_started_for_test, reject_new_task_arbitrations_for_test,
+        reject_admission_create_started_for_test, reject_evidence_findings_debates_for_test,
+        reject_evidence_projection_inserts_for_test, reject_new_task_arbitrations_for_test,
         reject_refinement_successor_for_test, reject_refinement_terminal_audit_for_test,
         rename_note_confidence_column_for_test, replace_legacy_proposal_head_for_test,
         seed_board_health_mismatch_candidate, seed_chat_session_row, seed_project,
         seed_session_row, seed_session_row_with_id, seed_task_row,
+        structured_evidence_handoff_counts_for_test,
     };
 }
 

@@ -125,8 +125,7 @@ deny = [
 	# sqlx: only database-owner crates may declare it directly. The live
 	# workspace currently has djinn-server, djinn-agent, djinn-control-plane,
 	# djinn-core, djinn-db, djinn-memory, and djinn-provider as direct
-	# dependents; djinn-slot uses sqlx in focused transaction rollback tests,
-	# and workspace-hack is included for hakari unification.
+	# dependents; workspace-hack is included for hakari unification.
 	{ crate = "sqlx", wrappers = [
 		"djinn-server",
 		"djinn-agent",
@@ -135,7 +134,6 @@ deny = [
 		"djinn-db",
 		"djinn-memory",
 		"djinn-provider",
-		"djinn-slot",
 		"workspace-hack",
 	] },
 

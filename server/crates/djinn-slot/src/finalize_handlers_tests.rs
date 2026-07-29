@@ -12,6 +12,10 @@ use djinn_db::{
     CreateTaskAttemptParams, EvidenceRepository, ProposalCreateInput, ProposalRepository,
     SessionRepository, TaskAttemptRepository, TaskRepository,
     repositories::session::CreateSessionParams,
+    test_support::{
+        reject_evidence_findings_debates_for_test, reject_evidence_projection_inserts_for_test,
+        structured_evidence_handoff_counts_for_test,
+    },
 };
 
 const AUTHENTICATED_SESSION_ID: &str = "server-authenticated-session-123";
@@ -145,22 +149,20 @@ fn structured_handoff_payload(plan_id: &str) -> serde_json::Value {
 }
 
 async fn assert_structured_handoff_unchanged(fixture: &StructuredHandoffFixture) {
-    let projection_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM evidence_finalized_projections WHERE plan_id = $1",
+    let counts = structured_evidence_handoff_counts_for_test(
+        &fixture.db,
+        &fixture.plan_id,
+        &fixture.proposal_id,
     )
-    .bind(&fixture.plan_id)
-    .fetch_one(fixture.db.pool())
-    .await
-    .expect("count finalized projections");
-    let debate_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM proposal_debate_trail WHERE proposal_id = $1 AND kind = 'evidence_findings'",
-    )
-    .bind(&fixture.proposal_id)
-    .fetch_one(fixture.db.pool())
-    .await
-    .expect("count compatibility debate rows");
-    assert_eq!(projection_count, 0, "no finalized projection may remain");
-    assert_eq!(debate_count, 0, "no compatibility debate row may remain");
+    .await;
+    assert_eq!(
+        counts.finalized_projections, 0,
+        "no finalized projection may remain"
+    );
+    assert_eq!(
+        counts.compatibility_debates, 0,
+        "no compatibility debate row may remain"
+    );
 
     let task_repo = TaskRepository::new(fixture.db.clone(), fixture.ctx.event_bus.clone());
     assert!(
@@ -225,12 +227,7 @@ async fn refinement_evidence_structured_handoff_rejects_malformed_or_identity_in
 #[tokio::test]
 async fn refinement_evidence_structured_handoff_rolls_back_projection_insertion_failure() {
     let fixture = structured_handoff_fixture().await;
-    sqlx::query(
-        "ALTER TABLE evidence_finalized_projections ADD CONSTRAINT reject_structured_handoff_projection CHECK (false)",
-    )
-    .execute(fixture.db.pool())
-    .await
-    .expect("install deterministic projection insert fault");
+    reject_evidence_projection_inserts_for_test(&fixture.db).await;
 
     assert!(
         !handle_submit_work(
@@ -248,12 +245,7 @@ async fn refinement_evidence_structured_handoff_rolls_back_projection_insertion_
 async fn refinement_evidence_structured_handoff_rolls_back_compatibility_debate_insertion_failure()
 {
     let fixture = structured_handoff_fixture().await;
-    sqlx::query(
-        "ALTER TABLE proposal_debate_trail ADD CONSTRAINT reject_structured_handoff_debate CHECK (kind <> 'evidence_findings')",
-    )
-    .execute(fixture.db.pool())
-    .await
-    .expect("install deterministic compatibility debate insert fault");
+    reject_evidence_findings_debates_for_test(&fixture.db).await;
 
     assert!(
         !handle_submit_work(
