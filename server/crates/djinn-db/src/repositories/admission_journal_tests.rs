@@ -619,3 +619,120 @@ async fn settlement_flags_rows_against_the_database_clock() {
     );
     assert!(repo.list_active_rows_with_settlement(-1).await.is_err());
 }
+
+/// Recovery RELABELS a predecessor's create; it does not touch the work item,
+/// so it must not touch the settle clock.
+///
+/// `updated_at` is what `list_active_rows_with_settlement` measures the reclaim
+/// settle window against, and that window exists to answer one question: could
+/// the API server still be admitting a create somebody POSTed? Stamping `now()`
+/// on the relabel answers it with this process's boot time instead of the row's
+/// own age, so a stale row looked freshly created on every restart. That is why
+/// the 2026-07-29 board halt survived its own remedy — the restart reset the
+/// clock on the very row the restart had made reclaimable, and the board stayed
+/// down another ten minutes.
+#[tokio::test]
+async fn recovery_relabels_a_predecessor_create_without_resetting_the_settle_clock() {
+    let repo = AdmissionJournalRepository::new(Database::open_in_memory().unwrap());
+    let flight = input(AdmissionDomain::WarmBuild, "settle-clock", 0);
+    repo.reserve(&flight).await.unwrap();
+    let before = repo
+        .mark_create_started(&create_started(&flight))
+        .await
+        .unwrap();
+    assert_eq!(before.state, AdmissionState::CreateInFlight);
+
+    let report = repo
+        .recover_all_predecessors("replacement-epoch")
+        .await
+        .unwrap();
+    assert_eq!(report.marked_create_unknown, 1);
+    let after = report
+        .active_rows
+        .iter()
+        .find(|row| row.key == flight.key)
+        .expect("the recovered row is still active");
+    assert_eq!(after.state, AdmissionState::CreateUnknown);
+    assert_eq!(
+        after.updated_at, before.updated_at,
+        "a state relabel is not a write to the work item; the settle clock must \
+         keep measuring the age of the CREATE, not the age of the recovery"
+    );
+
+    // The same must hold for the single-epoch variant.
+    let single = input(AdmissionDomain::WarmBuild, "settle-clock-single", 0);
+    repo.reserve(&single).await.unwrap();
+    let before_single = repo
+        .mark_create_started(&create_started(&single))
+        .await
+        .unwrap();
+    let single_report = repo.recover_predecessor_epoch("epoch-1").await.unwrap();
+    let after_single = single_report
+        .active_rows
+        .iter()
+        .find(|row| row.key == single.key)
+        .expect("the recovered row is still active");
+    assert_eq!(after_single.state, AdmissionState::CreateUnknown);
+    assert_eq!(after_single.updated_at, before_single.updated_at);
+}
+
+/// A create whose object UID was never observed still ends, and the callback
+/// that observed it ending must be able to say so.
+///
+/// `CreateUnknown` used to have no lifecycle exit at all: `mark_live` needs a
+/// UID that will never arrive, `mark_definitive_create_failure` accepts only
+/// Reserved/CreateInFlight, and `mark_terminal` rejected the row outright. The
+/// only thing that could retire it was reconciliation proving the object
+/// absent — and until then it occupied the shared cap. Every dispatched
+/// task-run passes through `CreateUnknown` on its way to `Live`, so one lost
+/// UID callback on a workload that then completed normally was permanent.
+#[tokio::test]
+async fn a_terminal_callback_retires_a_create_whose_uid_was_never_observed() {
+    let repo = AdmissionJournalRepository::new(Database::open_in_memory().unwrap());
+    let unknown = input(AdmissionDomain::TaskObservation, "no-uid-ever", 0);
+    repo.reserve(&unknown).await.unwrap();
+    repo.mark_create_started(&create_started(&unknown))
+        .await
+        .unwrap();
+    repo.mark_create_unknown(&unknown.key).await.unwrap();
+    assert_eq!(repo.count_task_or_warm_occupancy().await.unwrap(), 1);
+
+    let retired = repo
+        .mark_terminal(&TerminalAdmissionInput {
+            key: unknown.key.clone(),
+            object_uid: Some("observed-only-at-the-end".into()),
+        })
+        .await
+        .expect("a terminal observation must be able to retire an unresolved create");
+    assert_eq!(retired.state, AdmissionState::Terminal);
+    assert_eq!(
+        retired.object_uid.as_deref(),
+        Some("observed-only-at-the-end"),
+        "the terminal observation's UID is the first identity the row ever had"
+    );
+    assert_eq!(
+        repo.count_task_or_warm_occupancy().await.unwrap(),
+        0,
+        "the row must stop occupying the shared cap"
+    );
+
+    // Replaying the same callback is idempotent, and a contradicting UID is
+    // still refused.
+    assert!(
+        repo.mark_terminal(&TerminalAdmissionInput {
+            key: unknown.key.clone(),
+            object_uid: Some("observed-only-at-the-end".into()),
+        })
+        .await
+        .is_ok()
+    );
+    assert!(
+        repo.mark_terminal(&TerminalAdmissionInput {
+            key: unknown.key.clone(),
+            object_uid: Some("a-different-object".into()),
+        })
+        .await
+        .is_err(),
+        "a terminal callback for a different object must not rewrite the row"
+    );
+}

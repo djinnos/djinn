@@ -1975,13 +1975,53 @@ impl BuildAdmissionController {
         seed_filter: &mut impl FnMut(&AdmissionJournalRow) -> bool,
     ) -> Result<AdmissionSeedReport, WarmAdmissionError> {
         let mut seeded = 0u64;
-        // The CreateUnknown startup gate reflects every active recovered row,
-        // not only the ones seeded into memory: an unseeded CreateUnknown row
-        // still occupies durable capacity and still gates Enforce readiness.
+        // The CreateUnknown startup gate counts RECOVERED unknowns — rows whose
+        // creator process is gone — and deliberately nothing else.
+        //
+        // `CreateUnknown` means two entirely different things depending on who
+        // wrote the row:
+        //
+        // * A PREDECESSOR's row is a genuine unknown. The process that POSTed
+        //   the create died without learning the outcome, nothing in this
+        //   process is waiting on it, and only reconciliation against the API
+        //   server can resolve it. Enforce must fail closed until it does.
+        // * THIS process's own row is the ordinary intermediate state of a
+        //   healthy dispatch. `finish_task_run_build_admission` writes
+        //   `CreateUnknown` ("slot-pool accepted create without object UID")
+        //   for *every* task-run the moment the pool accepts it, and it stays
+        //   that way until the `("session","started")` callback supplies the
+        //   UID. A warm Job is the same between its POST and `job_uid()`.
+        //
+        // Counting the second kind is what halted the board for five hours on
+        // 2026-07-29. This seed runs at the tail of EVERY periodic
+        // reconciliation pass (see `build_admission_inventory::reconcile`,
+        // 120s since #2711), so a tick that lands inside one normal dispatch's
+        // POST→session window armed `CreateUnknownHealth` against the live
+        // process's own healthy in-flight work — denying every admission
+        // before any capacity was measured. It normally cleared on the next
+        // tick; that day the worker never registered a session, so `mark_live`
+        // never ran and the row stayed. And `is_reclaimable` refuses to retire
+        // a row under this process's own epoch (correctly — see
+        // `BuildAdmissionReconciler::is_reclaimable`), so the gate had no
+        // reachable clearing path at all. Only a restart, which reclassifies
+        // the row as a predecessor's, could clear it.
+        //
+        // Arming and reclamation must therefore agree on the same population:
+        // the gate is armed by exactly the rows the reclaimer is allowed to
+        // retire. A row this process is mid-creating is not a *recovered*
+        // unknown, and it is not evidence that this process cannot be trusted
+        // to admit.
+        let is_recovered_unknown = |row: &AdmissionJournalRow| {
+            row.state == AdmissionState::CreateUnknown
+                && row.creator_server_epoch != self.creator_server_epoch
+        };
+        // Every active recovered row counts, not only the ones seeded into
+        // memory: an unseeded recovered CreateUnknown row still occupies
+        // durable capacity and still gates Enforce readiness.
         let create_unknown_rows = recovery
             .active_rows
             .iter()
-            .filter(|row| row.state == AdmissionState::CreateUnknown)
+            .filter(|row| is_recovered_unknown(row))
             .count() as u64;
         {
             let mut permits = self.permits.lock().await;
@@ -2014,7 +2054,13 @@ impl BuildAdmissionController {
                         object_name: row.object_name.clone(),
                         durable: true,
                         released: false,
-                        create_unknown_outstanding: row.state == AdmissionState::CreateUnknown,
+                        // Exactly the rows that armed the gate above. This flag
+                        // is what `transition` decrements the gate on when the
+                        // row is adopted into Live, so seeding it for a row
+                        // that never contributed to the count would let one
+                        // healthy own-epoch dispatch clear a gate a
+                        // predecessor's row is still holding — fail-open.
+                        create_unknown_outstanding: is_recovered_unknown(row),
                         // A recovered row's capacity was acquired by the
                         // predecessor process, but the lease row it acquired
                         // survives the restart in `build_leases` and is
