@@ -314,6 +314,17 @@ verify_node_identity() {
 # Runs as the root launcher phase of the sole probe process. It proves that the
 # runtime gave this container a private cgroup-v2 root; no hostPath or host
 # fallback is involved. The same process then permanently becomes the worker.
+#
+# The delegation sequence mirrors Bootstrap::run in
+# server/crates/djinn-cgroup-launcher/src/bootstrap.rs: vacate the delegated
+# root into the `init` holding leaf (INIT_LEAF there), then enable exactly the
+# cpu controller in the root's own cgroup.subtree_control. That write is the
+# capability every CPU lease rests on and it was missing here entirely. Without
+# it a child leaf is born carrying the core interface files only — `cgroup.*`
+# and the pressure files, no `cpu.max` — so no lease is representable on the
+# node, and the worker's `cpu.max` denial below would be aimed at a file that
+# does not exist. Such a denial proves nothing about authorization: the write
+# fails with ENOENT for anybody, root included.
 LAUNCHER_PROBE='set -eu
 root=/sys/fs/cgroup
 [ "$(stat -fc %T "$root")" = cgroup2fs ]
@@ -326,10 +337,38 @@ child="$root/.djinn-conformance-child"
 mkdir "$child"
 rmdir "$child"
 [ ! -e "$child" ]
+# Vacate the delegated root into the holding leaf, as Bootstrap::vacate_root
+# does. A pid read out of cgroup.procs can exit before it is written, and the
+# container init respawns its own child, so the migration is retried and the
+# OUTCOME is what gets asserted: a root with no processes left in it. Not one
+# migration is allowed to be merely attempted.
+init_leaf="$root/init"
+mkdir "$init_leaf"
+attempt=0
+until [ -z "$(cat "$root/cgroup.procs")" ]; do
+  attempt=$((attempt + 1))
+  [ "$attempt" -le 8 ]
+  while read -r pid; do printf %s "$pid" > "$init_leaf/cgroup.procs" || true; done < "$root/cgroup.procs"
+done
+# Delegate exactly the cpu controller, as Bootstrap::delegate_cpu does. The
+# kernel renders the ENABLED set back, so the readback is `cpu`, not `+cpu`.
+printf +cpu > "$root/cgroup.subtree_control"
+[ "$(cat "$root/cgroup.subtree_control")" = cpu ]
 # Retain a launcher-owned leaf so worker denials exercise an existing object.
 launcher_leaf="$root/.djinn-launcher-leaf"
 mkdir "$launcher_leaf"
-[ -d "$launcher_leaf" ]'
+[ -d "$launcher_leaf" ]
+# Delegation is the only reason this leaf has a cpu.max at all, so assert the
+# file into existence here rather than discovering its absence in the worker
+# phase, where a missing file reads as a denial.
+[ -f "$launcher_leaf/cpu.max" ]
+# The capability the whole lease depends on, end to end: the birth clamp the
+# launcher writes on a child leaf, and the lift that follows it. Both values are
+# the ones measured on the managed node.
+printf '\''25000 100000\n'\'' > "$launcher_leaf/cpu.max"
+[ "$(cat "$launcher_leaf/cpu.max")" = "25000 100000" ]
+printf '\''400000 100000\n'\'' > "$launcher_leaf/cpu.max"
+[ "$(cat "$launcher_leaf/cpu.max")" = "400000 100000" ]'
 
 # Runs after setpriv irreversibly enters the worker identity in the launcher
 # process and its private delegated cgroup namespace. Verify the effective
@@ -349,7 +388,12 @@ apparmor=$(cat /proc/self/attr/current)
 [ -n "$apparmor" ]
 [ "$apparmor" != unconfined ]
 [ "$(stat -fc %T "$root")" = cgroup2fs ]
-[ "$(awk -F: '\''$1 == "0" && $2 == "" { print $3 }'\'' /proc/self/cgroup)" = / ]
+# The launcher phase vacated the delegated root into the holding leaf, so every
+# process in this container — including the one that just became the worker —
+# now sits in `init`. The path stays namespace-relative and rooted at this
+# container'\''s own cgroup: a leaked host cgroup namespace renders the node'\''s full
+# /kubepods... path here, which this equality still excludes.
+[ "$(awk -F: '\''$1 == "0" && $2 == "" { print $3 }'\'' /proc/self/cgroup)" = /init ]
 ls "$root" >/dev/null
 cat "$root/cgroup.controllers" >/dev/null
 must_deny() { if sh -c "$1"; then echo "unexpected worker mutation: $1" >&2; exit 1; fi; }
@@ -367,9 +411,21 @@ must_deny "printf '\''%s\\n'\'' \"$root_cpu_max\" > \"$root/cpu.max\""
 must_deny "printf \"\$\$\" > \"$root/cgroup.procs\""
 must_deny "printf 1 > \"$root/cgroup.procs\""
 must_deny "printf 1 > \"$root/cgroup.kill\""
+# The worker must not be able to change, extend or revoke the delegation the
+# launcher performed.
+must_deny "printf %s -cpu > \"$root/cgroup.subtree_control\""
+must_deny "printf %s +memory > \"$root/cgroup.subtree_control\""
+# This file exists only because the launcher phase delegated the cpu controller
+# first. Assert that before writing it, so the denial can never degrade into
+# ENOENT: a write to a missing path fails for everyone and would certify nothing
+# about the worker'\''s authority. The value written back is the one just read, so
+# the only thing that can reject it is authorization.
+[ -f "$launcher_leaf/cpu.max" ]
 launcher_cpu_max=$(cat "$launcher_leaf/cpu.max")
 [ -n "$launcher_cpu_max" ]
 must_deny "printf '\''%s\\n'\'' \"$launcher_cpu_max\" > \"$launcher_leaf/cpu.max\""
+# Re-read after the denial: a denied write must not have changed the leaf.
+[ "$(cat "$launcher_leaf/cpu.max")" = "$launcher_cpu_max" ]
 must_deny "printf \"\$\$\" > \"$launcher_leaf/cgroup.procs\""
 must_deny "printf 1 > \"$launcher_leaf/cgroup.kill\""
 must_deny "rmdir \"$launcher_leaf\""
