@@ -146,7 +146,11 @@ impl AgentToolDispatcher {
             mcp_registry: registry_static,
             output_stash: Mutex::new(OutputStash::with_session_id(session_id)),
             allowed_schemas,
-            cancel: crate::extension::ToolCancellation::new(cancel, global_cancel),
+            cancel: crate::extension::ToolCancellation::with_authenticated_session(
+                cancel,
+                global_cancel,
+                session_id,
+            ),
         }
     }
 }
