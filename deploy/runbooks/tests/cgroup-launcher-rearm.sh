@@ -4,6 +4,14 @@
 #
 # This test requires no cluster, no kubectl, no helm, and no credentials. It
 # only reads the runbook markdown and asserts textual/ordering properties.
+#
+# WHAT A PASS HERE DOES AND DOES NOT MEAN. This check asserts that the runbook
+# CONTAINS and ORDERS the re-arm's verification rules. It does not observe
+# production and cannot: it reads one markdown file. A pass means the rollout
+# evidence contract is written down in the required order; it never means a
+# Pod was Running, a cgroup was read, 100 periods elapsed, or the board
+# dispatched for an hour. Those are post-merge operator observations, attested
+# in the change record, and no repository check can stand in for them.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -90,6 +98,31 @@ validate() {
   require_line "$document" 'nr_throttled/throttled_usec invariance over >=100 further nr_periods' \
     'nr_throttled and throttled_usec must be identical' || return 1
 
+  # --- Existence: the five rollout-evidence rules, as an ordered contract. ---
+  # These assert the DOCUMENT states them. Nothing here observes production;
+  # see the header. The markers exist so ordering is checkable without
+  # depending on prose that may legitimately be reworded.
+  require_line "$document" 'verification evidence is declared operator-collected post-merge, not CI-observed' \
+    'CGROUP_REARM_VERIFICATION_EVIDENCE_IS_OPERATOR_COLLECTED:' || return 1
+  require_line "$document" 'rule 1: exact cpu.max expectations (25000 100000 at birth, 400000 100000 after a fenced lift)' \
+    'CGROUP_REARM_VERIFY_ORDER_1_CPU_MAX:' || return 1
+  require_line "$document" 'rule 2: wrong-fence invariant (wrong fence token rejected, cpu.max left clamped)' \
+    'CGROUP_REARM_VERIFY_ORDER_2_WRONG_FENCE:' || return 1
+  require_line "$document" 'rule 3: 100-period cpu.stat sampling rule over a wall-clock window' \
+    'CGROUP_REARM_VERIFY_ORDER_3_HUNDRED_PERIODS:' || return 1
+  require_line "$document" 'rule 4: one-hour observation rule (board dispatches remain > 0 for the hour after the arm)' \
+    'CGROUP_REARM_VERIFY_ORDER_4_ONE_HOUR_DISPATCH:' || return 1
+  require_line "$document" 'rule 5: abort/rollback to cgroupLauncher.mode: disabled on any failure above' \
+    'CGROUP_REARM_VERIFY_ORDER_5_ABORT_ROLLBACK:' || return 1
+  # The preparation step also runs `--set cgroupLauncher.mode=disabled`, so that
+  # flag alone proves nothing about rule 5. Pin the abort instruction itself.
+  require_line "$document" 'rule 5 instructs an abort-and-roll-back on failure' \
+    'abort the re-arm and roll the launcher back' || return 1
+  require_line "$document" 'rule 2 states why the wrong-fence check is the non-vacuity check' \
+    'looks identical to a working clamp' || return 1
+  require_line "$document" 'rule 5 forbids leaving production armed on unproven delegation' \
+    'never be left armed on unproven delegation' || return 1
+
   # --- Ordering: preparation, then steps 0..6 strictly ascending. ---
   require_before "$document" 'step 0 (RuntimeClass install) must precede step 1 (conformance)' \
     'CGROUP_REARM_STEP: 0' 'CGROUP_REARM_STEP: 1 —' || return 1
@@ -103,6 +136,29 @@ validate() {
     'CGROUP_REARM_STEP: 4 —' 'CGROUP_REARM_STEP: 5 —' || return 1
   require_before "$document" 'step 5 must precede step 6' \
     'CGROUP_REARM_STEP: 5 —' 'CGROUP_REARM_STEP: 6 —' || return 1
+
+  # --- Ordering: the five evidence rules, inside the verification step. ---
+  # The rules are a sequence, not a set. cpu.max expectations come first
+  # because everything after them is stated relative to those values; the
+  # wrong-fence invariant must follow them (it is what makes the birth value
+  # non-vacuous); the 100-period window measures the lift the previous rules
+  # established; the one-hour dispatch observation only exists after the arm;
+  # and abort/rollback closes the sequence by covering the failure of any of
+  # them. The whole block must sit after the arm step, never before it.
+  # 'step 5 must precede step 6' above already pins the verification section
+  # after the arm step; it is not repeated here.
+  require_before "$document" 'the evidence rules must sit inside the verification step (step 6)' \
+    'CGROUP_REARM_STEP: 6 —' 'CGROUP_REARM_VERIFY_ORDER_1_CPU_MAX:' || return 1
+  require_before "$document" 'rule 1 (cpu.max expectations) must precede rule 2 (wrong-fence invariant)' \
+    'CGROUP_REARM_VERIFY_ORDER_1_CPU_MAX:' 'CGROUP_REARM_VERIFY_ORDER_2_WRONG_FENCE:' || return 1
+  require_before "$document" 'rule 2 (wrong-fence invariant) must precede rule 3 (100-period sampling)' \
+    'CGROUP_REARM_VERIFY_ORDER_2_WRONG_FENCE:' 'CGROUP_REARM_VERIFY_ORDER_3_HUNDRED_PERIODS:' || return 1
+  require_before "$document" 'rule 3 (100-period sampling) must precede rule 4 (one-hour dispatch observation)' \
+    'CGROUP_REARM_VERIFY_ORDER_3_HUNDRED_PERIODS:' 'CGROUP_REARM_VERIFY_ORDER_4_ONE_HOUR_DISPATCH:' || return 1
+  require_before "$document" 'rule 4 (one-hour dispatch observation) must precede rule 5 (abort/rollback)' \
+    'CGROUP_REARM_VERIFY_ORDER_4_ONE_HOUR_DISPATCH:' 'CGROUP_REARM_VERIFY_ORDER_5_ABORT_ROLLBACK:' || return 1
+  require_before "$document" 'the operator-collected disclaimer must precede the evidence rules it governs' \
+    'CGROUP_REARM_VERIFICATION_EVIDENCE_IS_OPERATOR_COLLECTED:' 'CGROUP_REARM_VERIFY_ORDER_1_CPU_MAX:' || return 1
 
   # --- Ordering: the RuntimeClass must exist before conformance can reference it. ---
   # The preparation step is where runtimeClass.enabled=true is first set; it must
@@ -136,17 +192,20 @@ validate() {
 }
 
 expect_rejected() {
-  local name=$1 document="$WORK/$1.md"
+  local name=$1 document="$WORK/$1.md" diagnostics="$WORK/$1.err"
   shift
   cp "$RUNBOOK" "$document"
   local mutator=$1
   shift
   "$mutator" "$document" "$@"
-  if validate "$document" >/dev/null 2>&1; then
+  if validate "$document" >"$diagnostics" 2>&1; then
     fail "negative fixture '$name' unexpectedly passed"
     return 1
   fi
-  printf 'REJECTED (expected): %s\n' "$name"
+  # Print the rejection reason, not just the fixture name: a fixture that
+  # fails for an unrelated reason is a fixture that proves nothing, and that
+  # is only visible if the assertion that fired is named in the output.
+  printf 'REJECTED (expected): %-44s %s\n' "$name" "$(head -n1 "$diagnostics")"
 }
 
 delete_matching_line() {
@@ -172,6 +231,36 @@ swap_matching_lines() {
     END {
       tmp = lines[a]; lines[a] = lines[b]; lines[b] = tmp
       for (i = 1; i <= NR; i++) print lines[i]
+    }
+  ' "$document" >"$temporary"
+  mv "$temporary" "$document"
+}
+
+# Relocates the whole block [section_start, section_end) so that it begins at
+# the line currently holding destination_pattern, which must appear BEFORE the
+# block. Deletes nothing: it only moves a section, which is exactly the way a
+# reordering regression arrives in a document.
+move_section_before() {
+  local document=$1 section_start=$2 section_end=$3 destination=$4 temporary="$document.tmp"
+  local start_line end_line destination_line
+  start_line=$(first_line "$document" "$section_start")
+  end_line=$(first_line "$document" "$section_end")
+  destination_line=$(first_line "$document" "$destination")
+  if [[ -z "$start_line" || -z "$end_line" || -z "$destination_line" ]]; then
+    fail "move_section_before: pattern not found in $document"
+    return 1
+  fi
+  if [[ "$destination_line" -ge "$start_line" || "$end_line" -le "$start_line" ]]; then
+    fail "move_section_before: destination must precede the block in $document"
+    return 1
+  fi
+  awk -v s="$start_line" -v e="$end_line" -v d="$destination_line" '
+    { lines[NR] = $0 }
+    END {
+      for (i = 1; i < d; i++) print lines[i]
+      for (i = s; i < e; i++) print lines[i]
+      for (i = d; i < s; i++) print lines[i]
+      for (i = e; i <= NR; i++) print lines[i]
     }
   ' "$document" >"$temporary"
   mv "$temporary" "$document"
@@ -210,6 +299,28 @@ expect_rejected verification-lift-cpu-max delete_matching_line '400000 100000'
 expect_rejected verification-throttle-invariance delete_matching_line \
   'nr_throttled and throttled_usec must be identical'
 
+# --- Existence fixtures for the five rollout-evidence rules. Deleting any one
+# rule must fail validation and NAME that rule, so the rules are individually
+# load-bearing rather than collectively satisfied by the section existing.
+expect_rejected verification-operator-collected-disclaimer delete_matching_line \
+  'CGROUP_REARM_VERIFICATION_EVIDENCE_IS_OPERATOR_COLLECTED:'
+expect_rejected verification-rule-1-cpu-max delete_matching_line \
+  'CGROUP_REARM_VERIFY_ORDER_1_CPU_MAX:'
+expect_rejected verification-rule-2-wrong-fence delete_matching_line \
+  'CGROUP_REARM_VERIFY_ORDER_2_WRONG_FENCE:'
+expect_rejected verification-rule-2-non-vacuity-rationale delete_matching_line \
+  'looks identical to a working clamp'
+expect_rejected verification-rule-3-hundred-periods delete_matching_line \
+  'CGROUP_REARM_VERIFY_ORDER_3_HUNDRED_PERIODS:'
+expect_rejected verification-rule-4-one-hour-dispatch delete_matching_line \
+  'CGROUP_REARM_VERIFY_ORDER_4_ONE_HOUR_DISPATCH:'
+expect_rejected verification-rule-5-abort-rollback delete_matching_line \
+  'CGROUP_REARM_VERIFY_ORDER_5_ABORT_ROLLBACK:'
+expect_rejected verification-rule-5-abort-instruction delete_matching_line \
+  'abort the re-arm and roll the launcher back'
+expect_rejected verification-rule-5-unproven-delegation delete_matching_line \
+  'never be left armed on unproven delegation'
+
 # --- Ordering fixtures: swapping step markers must fail validation even
 # though no content is deleted. This is the specific adversary objection:
 # the RuntimeClass must exist (step 0) before conformance can reference it
@@ -223,8 +334,43 @@ expect_rejected reorder-step-5-after-step-6 swap_step_5_and_6
 swap_drain_after_step_1() { swap_matching_lines "$1" 'CGROUP_REARM_DRAIN_REQUIRED:' 'CGROUP_REARM_STEP: 1 —'; }
 expect_rejected reorder-drain-after-restart swap_drain_after_step_1
 
+# The swap above also drags step 1's marker above step 0's, so it is rejected
+# by the step-ordering check before the drain check is ever reached. Relocating
+# only the drain marker leaves every step marker in place, so the drain rule is
+# the sole assertion that can fire.
+relocate_drain_marker_to_end() {
+  local document=$1 marker='CGROUP_REARM_DRAIN_REQUIRED:'
+  local relocated
+  relocated=$(grep -F -- "$marker" "$document" | head -n1)
+  delete_matching_line "$document" "$marker"
+  printf '\n%s\n' "$relocated" >>"$document"
+}
+expect_rejected relocate-drain-after-restart relocate_drain_marker_to_end
+
 swap_pass_after_step_2() { swap_matching_lines "$1" 'CGROUP_REARM_CONFORMANCE_PASS_MARKER:' 'CGROUP_REARM_STEP: 2 —'; }
 expect_rejected reorder-label-before-pass swap_pass_after_step_2
+
+# --- Ordering fixtures for the evidence rules. Nothing is deleted; only the
+# sequence changes. Moving the entire verification section above the arm step
+# is the realistic regression: every rule is still present and a set-based
+# check would still pass, but the document now tells an operator to verify a
+# launcher that has not been armed yet.
+move_verification_before_arm() {
+  move_section_before "$1" \
+    '### Step 6: verification' \
+    '## Rollback / recovery branch' \
+    '### Step 5: arm the launcher'
+}
+expect_rejected reorder-verification-before-arm move_verification_before_arm
+
+swap_rule_1_and_2() { swap_matching_lines "$1" 'CGROUP_REARM_VERIFY_ORDER_1_CPU_MAX:' 'CGROUP_REARM_VERIFY_ORDER_2_WRONG_FENCE:'; }
+expect_rejected reorder-wrong-fence-before-cpu-max swap_rule_1_and_2
+
+swap_rule_3_and_4() { swap_matching_lines "$1" 'CGROUP_REARM_VERIFY_ORDER_3_HUNDRED_PERIODS:' 'CGROUP_REARM_VERIFY_ORDER_4_ONE_HOUR_DISPATCH:'; }
+expect_rejected reorder-one-hour-before-hundred-periods swap_rule_3_and_4
+
+swap_rule_4_and_5() { swap_matching_lines "$1" 'CGROUP_REARM_VERIFY_ORDER_4_ONE_HOUR_DISPATCH:' 'CGROUP_REARM_VERIFY_ORDER_5_ABORT_ROLLBACK:'; }
+expect_rejected reorder-abort-before-one-hour swap_rule_4_and_5
 
 # --- Regression fixture: reintroducing the banned 'label node' substring
 # (e.g. an operator-facing manual mutation command) must fail validation,

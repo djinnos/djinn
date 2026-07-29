@@ -1537,7 +1537,8 @@ impl BuildAdmissionController {
         request: BuildAdmissionRequest,
     ) -> Result<BuildAdmissionDecision, WarmAdmissionError> {
         let readiness = self.readiness();
-        if self.mode() == BuildAdmissionMode::Enforce && (!readiness.is_healthy() || self.is_draining())
+        if self.mode() == BuildAdmissionMode::Enforce
+            && (!readiness.is_healthy() || self.is_draining())
         {
             // The cap reported with a denial is the one that WOULD have been
             // enforced, resolved from the single capacity authority. Reporting

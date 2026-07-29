@@ -1,8 +1,8 @@
-//! Real-Postgres consumer service flows for persisted readiness analysis.
+//! Real-Postgres end-to-end readiness service flow.
 //!
-//! Consumer setup and reads deliberately cross only the kickoff/query service
-//! boundary. Architect callback simulation uses the repository API so this test
-//! never reaches into readiness tables directly.
+//! Consumer entry points remain the kickoff and query services. Repository calls
+//! below model the correlated Architect callbacks that those consumer surfaces do
+//! not own.
 
 use async_trait::async_trait;
 use djinn_control_plane::{
@@ -10,7 +10,7 @@ use djinn_control_plane::{
         READINESS_SKILL_NAME, READINESS_SKILL_VERSION, ReadinessKickoffRequest,
         ReadinessKickoffService, ReadinessSkillPinError, ReadinessSkillPinResolver,
     },
-    readiness_query::{ReadinessQueryService, ReadinessRunQuery},
+    readiness_query::{ReadinessProjectQuery, ReadinessQueryService, ReadinessRunQuery},
 };
 use djinn_core::events::EventBus;
 use djinn_db::{
@@ -22,10 +22,10 @@ use djinn_db::{
 };
 
 #[derive(Clone)]
-struct FixturePinResolver;
+struct AvailablePin;
 
 #[async_trait]
-impl ReadinessSkillPinResolver for FixturePinResolver {
+impl ReadinessSkillPinResolver for AvailablePin {
     async fn resolve_exact(
         &self,
         name: &'static str,
@@ -38,17 +38,27 @@ impl ReadinessSkillPinResolver for FixturePinResolver {
 }
 
 #[tokio::test]
-async fn typescript_and_rust_service_flow_projects_terminal_detail_and_scores() {
+async fn two_area_service_flow_persists_worked_terminal_readiness_detail() {
     let db = Database::ephemeral().await.expect("real postgres database");
-    let (project_id, owner_id) = seed_project_and_owner(&db, "readiness-service-flow").await;
-    seed_snapshot(&db, &project_id, "1111111111111111111111111111111111111111").await;
+    let (project_id, owner_id) = seed_owned_project_with_snapshot(&db).await;
 
-    let kickoff = kickoff(&db, &project_id, &owner_id, "first-flow").await;
+    let kickoff = ReadinessKickoffService::new(db.clone(), AvailablePin)
+        .kickoff(ReadinessKickoffRequest {
+            project_id: project_id.clone(),
+            authenticated_owner_id: owner_id.clone(),
+            idempotency_key: "two-area-service-flow".into(),
+        })
+        .await
+        .expect("owner kickoff with persisted snapshot");
+    assert_eq!(kickoff.run.repository_snapshot, SNAPSHOT);
+    assert_eq!(kickoff.run.skill_name, READINESS_SKILL_NAME);
+    assert_eq!(kickoff.run.skill_version, READINESS_SKILL_VERSION);
+
     let repository = ReadinessRepository::new(db.clone());
     let fanout = repository
-        .complete_identification(&kickoff.run.id, &owner_id, two_area_composition())
+        .complete_identification(&kickoff.run.id, &owner_id, two_area_identification())
         .await
-        .expect("freeze TypeScript and Rust areas");
+        .expect("freeze and fan out two identified areas");
     assert_eq!(fanout.len(), 2);
 
     let frontend = fanout
@@ -59,279 +69,474 @@ async fn typescript_and_rust_service_flow_projects_terminal_detail_and_scores() 
         .iter()
         .find(|item| item.area.area_key == "backend")
         .expect("Rust backend fanout");
-    assert_eq!(
-        repository
-            .ingest_area_result(callback(&kickoff.run.id, frontend, frontend_result()))
-            .await
-            .expect("accept frontend correlation"),
-        ReadinessCallbackOutcome::Accepted
-    );
-    assert_eq!(
-        repository
-            .ingest_area_result(callback(&kickoff.run.id, backend, backend_result()))
-            .await
-            .expect("accept backend correlation"),
-        ReadinessCallbackOutcome::Accepted
-    );
-    let aggregation = repository
-        .aggregate_run(&kickoff.run.id, "fixture-aggregator")
-        .await
-        .expect("terminal aggregation");
-    assert_eq!(aggregation.status, "completed");
+    assert_eq!(frontend.attempt.attempt_number, 1);
+    assert_eq!(backend.attempt.attempt_number, 1);
 
-    let query = ReadinessQueryService::new(db.clone());
-    let detail = query_detail(&query, &project_id, &kickoff.run.id, &owner_id).await;
-    assert_eq!(detail.run.status, "completed");
-    assert_eq!(detail.run.skill_name, READINESS_SKILL_NAME);
-    assert_eq!(detail.run.skill_version, READINESS_SKILL_VERSION);
+    assert_eq!(
+        repository
+            .ingest_area_result(callback(
+                &kickoff.run.id,
+                frontend,
+                frontend_result(&frontend.area.id),
+            ))
+            .await
+            .expect("accept TypeScript callback"),
+        ReadinessCallbackOutcome::Accepted
+    );
+    assert_eq!(
+        repository
+            .ingest_area_result(callback(
+                &kickoff.run.id,
+                backend,
+                backend_result(&backend.area.id),
+            ))
+            .await
+            .expect("accept Rust callback"),
+        ReadinessCallbackOutcome::Accepted
+    );
+
+    let aggregation = repository
+        .aggregate_run(&kickoff.run.id, "readiness-service-flow-aggregator")
+        .await
+        .expect("terminalize complete run");
+    assert_eq!(aggregation.status, "completed_with_errors");
+    assert_eq!(aggregation.area_scores.len(), 2);
+    assert_close(aggregation.project_score.score, 7.0 / 9.0);
+    assert_eq!(aggregation.project_score.band, "ready");
+
+    let detail = ReadinessQueryService::new(db)
+        .run_detail(ReadinessRunQuery {
+            project_id,
+            run_id: kickoff.run.id.clone(),
+            authenticated_owner_id: owner_id,
+        })
+        .await
+        .expect("read terminal detail only through service boundary");
+
+    assert_eq!(detail.run.id, kickoff.run.id);
+    assert_eq!(detail.run.status, "completed_with_errors");
     assert_eq!(detail.run.expected_area_count, Some(2));
     assert_eq!(detail.areas.len(), 2);
-    assert_eq!(
-        detail
-            .areas
-            .iter()
-            .map(|area| area.area_key.as_str())
-            .collect::<Vec<_>>(),
-        vec!["backend", "frontend"]
-    );
 
     let frontend_detail = detail
         .areas
         .iter()
         .find(|area| area.area_key == "frontend")
-        .expect("frontend detail");
+        .expect("frozen frontend projection");
     assert_eq!(
         frontend_detail.composition["languages"],
         serde_json::json!(["TypeScript"])
     );
-    assert_eq!(frontend_detail.attempts.len(), 1);
-    assert!(frontend_detail.attempts[0].is_current);
-    assert_eq!(frontend_detail.attempts[0].status, "succeeded");
-    assert_eq!(frontend_detail.accepted_findings.len(), 4);
-    let auth_finding = frontend_detail
-        .accepted_findings
-        .iter()
-        .find(|finding| finding.guardrail_key == "frontend-auth")
-        .expect("accepted auth evidence");
     assert_eq!(
-        auth_finding.evidence,
-        serde_json::json!({"path":"apps/web/auth.ts","line":42})
+        frontend_detail.composition["roles"],
+        serde_json::json!(["frontend"])
     );
-    assert_eq!(auth_finding.confidence, 0.91);
+    assert_eq!(frontend_detail.path_scopes, serde_json::json!(["web/"]));
+    assert_current_success(frontend_detail);
+    assert_finding(
+        frontend_detail,
+        "frontend-auth",
+        "covered",
+        "high",
+        0.95,
+        serde_json::json!([{"path":"web/auth.ts","line":12}]),
+    );
+    assert_finding(
+        frontend_detail,
+        "frontend-inputs",
+        "partial",
+        "medium",
+        0.80,
+        serde_json::json!([{"path":"web/forms.ts","line":31}]),
+    );
+    assert_eq!(frontend_detail.accepted_outputs.len(), 1);
     assert_eq!(
-        frontend_detail.accepted_outputs[0].result["findings"][3]["gap_reason"],
-        "session expiry is not enforced"
+        frontend_detail.accepted_outputs[0].result,
+        frontend_result(&frontend.area.id)
     );
     assert_eq!(
-        frontend_detail.accepted_outputs[0].result["warnings"][0]["warning"],
-        "legacy cookie migration remains"
-    );
-    assert_eq!(
-        frontend_detail.accepted_outputs[0].result["errors"][0]["message"],
-        "non-fatal source-map lookup failed"
+        frontend_detail.accepted_outputs[0].result["warnings"][0]["reason"],
+        "legacy form remains outside migration scope"
     );
 
-    // frontend: (critical 5 * 1) + (high 3 * .5) + (medium 2 * .5) +
-    // (low 1 * 0) = 7.5 / 11. backend: (high 3 + medium 2) = 5 / 5.
+    let backend_detail = detail
+        .areas
+        .iter()
+        .find(|area| area.area_key == "backend")
+        .expect("frozen backend projection");
+    assert_eq!(
+        backend_detail.composition["languages"],
+        serde_json::json!(["Rust"])
+    );
+    assert_eq!(
+        backend_detail.composition["roles"],
+        serde_json::json!(["backend"])
+    );
+    assert_eq!(backend_detail.path_scopes, serde_json::json!(["server/"]));
+    assert_current_success(backend_detail);
+    assert_finding(
+        backend_detail,
+        "backend-auth",
+        "covered",
+        "high",
+        0.90,
+        serde_json::json!([{"path":"server/src/auth.rs","line":48}]),
+    );
+    assert_finding(
+        backend_detail,
+        "backend-secrets",
+        "analysis_error",
+        "low",
+        0.85,
+        serde_json::json!([{"path":"server/src/config.rs","line":9}]),
+    );
+    assert_eq!(backend_detail.accepted_outputs.len(), 1);
+    assert_eq!(
+        backend_detail.accepted_outputs[0].result,
+        backend_result(&backend.area.id)
+    );
+    assert_eq!(
+        backend_detail.accepted_outputs[0].result["warnings"][0]["reason"],
+        "secret rotation is not configured"
+    );
+
+    // Worked arithmetic: frontend=(3 + 2 * 0.5)/(3 + 2)=4/5;
+    // backend=(3 + 1 * 0)/(3 + 1)=3/4; project=(4 + 3)/(5 + 4)=7/9.
     let frontend_score = detail
         .area_scores
         .iter()
         .find(|score| score.area_id == frontend_detail.id)
         .expect("frontend score");
-    assert_eq!(
-        (
-            frontend_score.applicable_weight,
-            frontend_score.covered_weight,
-            frontend_score.status.as_str()
-        ),
-        (11, 7.5, "supported")
-    );
-    assert_float_eq(frontend_score.score, 7.5 / 11.0);
+    assert_close(frontend_score.score, 4.0 / 5.0);
+    assert_eq!(frontend_score.applicable_weight, 5);
+    assert_close(frontend_score.covered_weight, 4.0);
+    assert_eq!(frontend_score.status, "supported");
     let backend_score = detail
         .area_scores
         .iter()
-        .find(|score| score.area_id == backend.area.id)
+        .find(|score| score.area_id == backend_detail.id)
         .expect("backend score");
-    assert_eq!(
-        (
-            backend_score.applicable_weight,
-            backend_score.covered_weight,
-            backend_score.score
-        ),
-        (5, 5.0, 1.0)
-    );
-    // Project arithmetic is applicable-weighted: (7.5 + 5) / (11 + 5) = .78125.
+    assert_close(backend_score.score, 3.0 / 4.0);
+    assert_eq!(backend_score.applicable_weight, 4);
+    assert_close(backend_score.covered_weight, 3.0);
+    assert_eq!(backend_score.status, "supported");
     let project_score = detail.project_score.expect("terminal project score");
-    assert_float_eq(project_score.score, 12.5 / 16.0);
+    assert_close(project_score.score, 7.0 / 9.0);
     assert_eq!(project_score.band, "ready");
 
-    assert_eq!(
-        detail.suggestions.len(),
-        1,
-        "dedupe key has one canonical suggestion"
-    );
+    assert_eq!(detail.suggestions.len(), 1);
     let suggestion = &detail.suggestions[0];
-    assert_eq!(suggestion.dedupe_key, "rotate-auth-secret");
-    assert_eq!(suggestion.suggestion["action"], "rotate shared auth secret");
-    let mut expected_area_ids = vec![backend.area.id.clone(), frontend.area.id.clone()];
-    expected_area_ids.sort();
+    assert_eq!(suggestion.dedupe_key, "shared-auth-remediation");
+    let mut contributing_area_ids = vec![backend.area.id.clone(), frontend.area.id.clone()];
+    contributing_area_ids.sort();
     assert_eq!(
-        suggestion.suggestion["area_ids"],
-        serde_json::json!(expected_area_ids)
-    );
-    assert_eq!(
-        suggestion.suggestion["guardrail_ids"],
-        serde_json::json!(["backend-auth", "frontend-auth"])
-    );
-    assert!(
-        detail
-            .events
-            .iter()
-            .any(|event| event.event_kind == "readiness_aggregated")
+        suggestion.suggestion,
+        serde_json::json!({
+            "dedupe_key": "shared-auth-remediation",
+            "action": "Apply shared authentication remediation",
+            "area_ids": contributing_area_ids,
+            "guardrail_ids": ["backend-auth", "frontend-auth"]
+        })
     );
 }
 
 #[tokio::test]
-async fn library_only_service_flow_marks_application_guardrails_unsupported() {
+async fn library_only_unsupported_app_guardrails_do_not_penalize_readiness() {
     let db = Database::ephemeral().await.expect("real postgres database");
-    let (project_id, owner_id) = seed_project_and_owner(&db, "readiness-library-only").await;
-    seed_snapshot(&db, &project_id, "2222222222222222222222222222222222222222").await;
-    let kickoff = kickoff(&db, &project_id, &owner_id, "library-only").await;
+    let (project_id, owner_id) = seed_owned_project_with_snapshot(&db).await;
+    let kickoff = ReadinessKickoffService::new(db.clone(), AvailablePin)
+        .kickoff(ReadinessKickoffRequest {
+            project_id: project_id.clone(),
+            authenticated_owner_id: owner_id.clone(),
+            idempotency_key: "library-only-unsupported-guardrails".into(),
+        })
+        .await
+        .expect("owner kickoff with persisted snapshot");
+
     let repository = ReadinessRepository::new(db.clone());
     let fanout = repository
-        .complete_identification(&kickoff.run.id, &owner_id, library_composition())
+        .complete_identification(&kickoff.run.id, &owner_id, library_identification())
         .await
-        .expect("freeze library composition");
+        .expect("freeze and fan out the library area");
+    assert_eq!(fanout.len(), 1);
     let library = fanout.first().expect("library fanout");
+    assert_eq!(library.area.area_key, "library");
+    assert_eq!(library.attempt.attempt_number, 1);
     assert_eq!(
         repository
             .ingest_area_result(callback(&kickoff.run.id, library, library_result()))
             .await
-            .expect("accept library result"),
+            .expect("accept correlated library callback"),
+        ReadinessCallbackOutcome::Accepted
+    );
+
+    let aggregation = repository
+        .aggregate_run(&kickoff.run.id, "library-only-service-flow-aggregator")
+        .await
+        .expect("terminalize complete library run");
+    assert_eq!(aggregation.status, "completed");
+    assert_eq!(aggregation.area_scores.len(), 1);
+    assert_close(aggregation.project_score.score, 1.0);
+    assert_eq!(aggregation.project_score.band, "strong");
+
+    let detail = ReadinessQueryService::new(db)
+        .run_detail(ReadinessRunQuery {
+            project_id,
+            run_id: kickoff.run.id.clone(),
+            authenticated_owner_id: owner_id,
+        })
+        .await
+        .expect("read library detail only through service boundary");
+    assert_eq!(detail.run.id, kickoff.run.id);
+    assert_eq!(detail.run.status, "completed");
+    assert_eq!(detail.run.expected_area_count, Some(1));
+    assert_eq!(detail.areas.len(), 1);
+    let library_detail = &detail.areas[0];
+    assert_eq!(library_detail.area_key, "library");
+    assert_eq!(
+        library_detail.composition["roles"],
+        serde_json::json!(["library"])
+    );
+    assert_eq!(
+        library_detail.composition["key_libraries"],
+        serde_json::json!(["serde"])
+    );
+    assert_eq!(
+        library_detail.path_scopes,
+        serde_json::json!(["crates/sdk/"])
+    );
+    assert_current_success(library_detail);
+    assert_finding(
+        library_detail,
+        "library-public-api",
+        "covered",
+        "critical",
+        0.96,
+        serde_json::json!([{"path":"crates/sdk/src/lib.rs","line":18}]),
+    );
+    assert_finding(
+        library_detail,
+        "app-session-auth",
+        "unsupported",
+        "critical",
+        1.0,
+        serde_json::json!([{"path":"crates/sdk/src/lib.rs","line":1}]),
+    );
+    assert_eq!(library_detail.accepted_outputs.len(), 1);
+    assert_eq!(
+        library_detail.accepted_outputs[0].result["unsupported"],
+        serde_json::json!([{
+            "guardrail_key": "app-session-auth",
+            "reason": "session authentication applies to applications, not this library",
+            "evidence": [{"path":"crates/sdk/src/lib.rs","line":1}]
+        }])
+    );
+
+    // Worked arithmetic: public API coverage=5/5. The app-only critical
+    // guardrail is explicitly unsupported, so it contributes neither its five
+    // points to the numerator nor to the denominator: 5/5, not 5/10.
+    let library_score = detail
+        .area_scores
+        .iter()
+        .find(|score| score.area_id == library_detail.id)
+        .expect("library score");
+    assert_close(library_score.score, 1.0);
+    assert_eq!(library_score.applicable_weight, 5);
+    assert_close(library_score.covered_weight, 5.0);
+    assert_eq!(library_score.status, "supported");
+    let project_score = detail.project_score.expect("terminal project score");
+    assert_close(project_score.score, 1.0);
+    assert_eq!(project_score.band, "strong");
+}
+
+#[tokio::test]
+async fn terminal_run_rerun_uses_new_context_without_mutating_prior_detail() {
+    let db = Database::ephemeral().await.expect("real postgres database");
+    let (project_id, owner_id) = seed_owned_project_with_snapshot(&db).await;
+    let kickoff_service = ReadinessKickoffService::new(db.clone(), AvailablePin);
+    let query_service = ReadinessQueryService::new(db.clone());
+
+    let first = kickoff_service
+        .kickoff(ReadinessKickoffRequest {
+            project_id: project_id.clone(),
+            authenticated_owner_id: owner_id.clone(),
+            idempotency_key: "terminal-run".into(),
+        })
+        .await
+        .expect("start first run against the initial immutable context");
+    let repository = ReadinessRepository::new(db.clone());
+    let fanout = repository
+        .complete_identification(&first.run.id, &owner_id, library_identification())
+        .await
+        .expect("complete first-run identification");
+    let library = fanout.first().expect("first-run library work");
+    assert_eq!(
+        repository
+            .ingest_area_result(callback(&first.run.id, library, library_result()))
+            .await
+            .expect("accept first-run callback"),
         ReadinessCallbackOutcome::Accepted
     );
     assert_eq!(
         repository
-            .aggregate_run(&kickoff.run.id, "fixture-aggregator")
+            .aggregate_run(&first.run.id, "terminal-rerun-aggregator")
             .await
-            .expect("aggregate unsupported guardrail")
+            .expect("terminalize first run")
             .status,
         "completed"
     );
 
-    let detail = query_detail(
-        &ReadinessQueryService::new(db),
-        &project_id,
-        &kickoff.run.id,
-        &owner_id,
-    )
-    .await;
-    assert_eq!(detail.areas[0].accepted_findings[0].status, "unsupported");
-    assert_eq!(
-        detail.areas[0].accepted_outputs[0].result["unsupported"][0]["reason"],
-        "application authentication is not applicable to this library"
-    );
-    let area_score = &detail.area_scores[0];
-    assert_eq!(
-        (
-            area_score.applicable_weight,
-            area_score.covered_weight,
-            area_score.score,
-            area_score.status.as_str()
-        ),
-        (0, 0.0, 0.0, "unsupported")
-    );
-    let project_score = detail.project_score.expect("project score");
-    assert_eq!(
-        (project_score.score, project_score.band.as_str()),
-        (0.0, "blocked")
-    );
-}
+    let first_detail = query_service
+        .run_detail(ReadinessRunQuery {
+            project_id: project_id.clone(),
+            run_id: first.run.id.clone(),
+            authenticated_owner_id: owner_id.clone(),
+        })
+        .await
+        .expect("capture complete first terminal detail through service boundary");
 
-#[tokio::test]
-async fn post_terminal_kickoff_uses_new_snapshot_and_preserves_first_detail() {
-    let db = Database::ephemeral().await.expect("real postgres database");
-    let (project_id, owner_id) = seed_project_and_owner(&db, "readiness-rerun").await;
-    seed_snapshot(&db, &project_id, "3333333333333333333333333333333333333333").await;
-    let first = kickoff(&db, &project_id, &owner_id, "first-terminal").await;
-    complete_library_run(&db, &first.run.id, &owner_id).await;
-    let query = ReadinessQueryService::new(db.clone());
-    let before = query_detail(&query, &project_id, &first.run.id, &owner_id).await;
-    let before_bytes = serde_json::to_vec(&before).expect("serialize immutable first detail");
+    RepoGraphCacheRepository::new(db.clone())
+        .upsert(RepoGraphCacheInsert {
+            project_id: &project_id,
+            commit_sha: RERUN_SNAPSHOT,
+            graph_blob: b"new persisted service-flow graph",
+        })
+        .await
+        .expect("persist newer immutable repository snapshot");
 
-    tokio::time::sleep(std::time::Duration::from_millis(2)).await;
-    seed_snapshot(&db, &project_id, "4444444444444444444444444444444444444444").await;
-    let second = kickoff(&db, &project_id, &owner_id, "second-terminal").await;
-    assert_ne!(
-        first.run.id, second.run.id,
-        "new key after terminal appends a run"
-    );
-    assert_eq!(
-        second.run.repository_snapshot,
-        "4444444444444444444444444444444444444444"
-    );
+    let second = kickoff_service
+        .kickoff(ReadinessKickoffRequest {
+            project_id: project_id.clone(),
+            authenticated_owner_id: owner_id.clone(),
+            idempotency_key: "terminal-rerun".into(),
+        })
+        .await
+        .expect("start a distinct run after the first reaches terminal state");
+    assert_ne!(second.run.id, first.run.id);
+    assert_ne!(second.identification_task.id, first.identification_task.id);
+    assert_eq!(second.run.status, "identifying");
+    assert_eq!(second.run.repository_snapshot, RERUN_SNAPSHOT);
     assert_eq!(second.run.skill_name, READINESS_SKILL_NAME);
     assert_eq!(second.run.skill_version, READINESS_SKILL_VERSION);
-    assert_eq!(
-        query_detail(&query, &project_id, &first.run.id, &owner_id).await,
-        before,
-        "prior completed projection remains value-equal"
-    );
-    assert_eq!(
-        serde_json::to_vec(&query_detail(&query, &project_id, &first.run.id, &owner_id).await)
-            .expect("serialize repeated detail"),
-        before_bytes,
-        "prior completed projection remains byte-for-byte equal"
-    );
-}
 
-async fn complete_library_run(db: &Database, run_id: &str, owner_id: &str) {
-    let repository = ReadinessRepository::new(db.clone());
-    let fanout = repository
-        .complete_identification(run_id, owner_id, library_composition())
-        .await
-        .expect("freeze library area");
-    let library = fanout.first().expect("library area");
-    repository
-        .ingest_area_result(callback(run_id, library, library_result()))
-        .await
-        .expect("accept library callback");
-    repository
-        .aggregate_run(run_id, "fixture-aggregator")
-        .await
-        .expect("terminalize library run");
-}
+    let second_task_context: serde_json::Value =
+        serde_json::from_str(&second.identification_task.description)
+            .expect("identification task has structured immutable context");
+    assert_eq!(second_task_context["run_id"], second.run.id);
+    assert_eq!(second_task_context["repository_snapshot"], RERUN_SNAPSHOT);
+    assert_eq!(second_task_context["skill_name"], READINESS_SKILL_NAME);
+    assert_eq!(
+        second_task_context["skill_version"],
+        READINESS_SKILL_VERSION
+    );
 
-async fn kickoff(
-    db: &Database,
-    project_id: &str,
-    owner_id: &str,
-    idempotency_key: &str,
-) -> djinn_db::ReadinessKickoffMaterialization {
-    ReadinessKickoffService::new(db.clone(), FixturePinResolver)
+    let redelivery = kickoff_service
         .kickoff(ReadinessKickoffRequest {
-            project_id: project_id.into(),
-            authenticated_owner_id: owner_id.into(),
-            idempotency_key: idempotency_key.into(),
+            project_id: project_id.clone(),
+            authenticated_owner_id: owner_id.clone(),
+            idempotency_key: "terminal-rerun".into(),
         })
         .await
-        .expect("owner kickoff with persisted context")
+        .expect("redeliver the second kickoff key");
+    assert_eq!(redelivery.run.id, second.run.id);
+    assert_eq!(
+        redelivery.identification_task.id, second.identification_task.id,
+        "same-key redelivery must not create duplicate identification work"
+    );
+    assert_eq!(
+        query_service
+            .active_or_latest(ReadinessProjectQuery {
+                project_id: project_id.clone(),
+                authenticated_owner_id: owner_id.clone(),
+            })
+            .await
+            .expect("read active rerun through service boundary")
+            .expect("second run remains active")
+            .id,
+        second.run.id
+    );
+
+    assert_eq!(
+        query_service
+            .run_detail(ReadinessRunQuery {
+                project_id,
+                run_id: first.run.id,
+                authenticated_owner_id: owner_id,
+            })
+            .await
+            .expect("reread first terminal detail through service boundary"),
+        first_detail,
+        "a later kickoff must not mutate any persisted first-run detail"
+    );
 }
 
-async fn query_detail(
-    query: &ReadinessQueryService,
-    project_id: &str,
-    run_id: &str,
-    owner_id: &str,
-) -> djinn_control_plane::readiness_query::ReadinessRunDetailDto {
-    query
-        .run_detail(ReadinessRunQuery {
-            project_id: project_id.into(),
-            run_id: run_id.into(),
-            authenticated_owner_id: owner_id.into(),
+const SNAPSHOT: &str = "d34db33fd34db33fd34db33fd34db33fd34db33f";
+const RERUN_SNAPSHOT: &str = "f00dbabef00dbabef00dbabef00dbabef00dbabe";
+
+async fn seed_owned_project_with_snapshot(db: &Database) -> (String, String) {
+    let project = ProjectRepository::new(db.clone(), EventBus::noop())
+        .create(
+            "readiness-service-flow",
+            "readiness-flow-owner",
+            "service-flow",
+        )
+        .await
+        .expect("create project");
+    let owner = UserRepository::new(db.clone())
+        .upsert_from_github(603_001, "readiness-flow-owner", None, None)
+        .await
+        .expect("create owner");
+    RepoGraphCacheRepository::new(db.clone())
+        .upsert(RepoGraphCacheInsert {
+            project_id: &project.id,
+            commit_sha: SNAPSHOT,
+            graph_blob: b"persisted service-flow graph",
         })
         .await
-        .expect("owner queries terminal detail")
+        .expect("persist immutable repository snapshot");
+    (project.id, owner.id)
+}
+
+fn two_area_identification() -> ReadinessIdentificationOutput {
+    ReadinessIdentificationOutput {
+        areas: vec![
+            ReadinessIdentifiedArea {
+                area_key: "frontend".into(),
+                path_scopes: vec!["web/".into()],
+                languages: vec!["TypeScript".into()],
+                roles: vec!["frontend".into()],
+                frameworks: vec!["React".into()],
+                key_libraries: vec!["zod".into()],
+                confidence: 0.94,
+                evidence: vec!["web/package.json".into()],
+            },
+            ReadinessIdentifiedArea {
+                area_key: "backend".into(),
+                path_scopes: vec!["server/".into()],
+                languages: vec!["Rust".into()],
+                roles: vec!["backend".into()],
+                frameworks: vec!["Axum".into()],
+                key_libraries: vec!["sqlx".into()],
+                confidence: 0.97,
+                evidence: vec!["server/Cargo.toml".into()],
+            },
+        ],
+    }
+}
+
+fn library_identification() -> ReadinessIdentificationOutput {
+    ReadinessIdentificationOutput {
+        areas: vec![ReadinessIdentifiedArea {
+            area_key: "library".into(),
+            path_scopes: vec!["crates/sdk/".into()],
+            languages: vec!["Rust".into()],
+            roles: vec!["library".into()],
+            frameworks: vec![],
+            key_libraries: vec!["serde".into()],
+            confidence: 0.98,
+            evidence: vec!["crates/sdk/Cargo.toml".into()],
+        }],
+    }
 }
 
 fn callback(
@@ -350,104 +555,85 @@ fn callback(
     }
 }
 
-fn two_area_composition() -> ReadinessIdentificationOutput {
-    ReadinessIdentificationOutput {
-        areas: vec![
-            identified_area("frontend", "apps/web/**", "TypeScript", "frontend"),
-            identified_area("backend", "crates/api/**", "Rust", "backend"),
-        ],
-    }
-}
-
-fn library_composition() -> ReadinessIdentificationOutput {
-    ReadinessIdentificationOutput {
-        areas: vec![identified_area(
-            "library",
-            "crates/library/**",
-            "Rust",
-            "library",
-        )],
-    }
-}
-
-fn identified_area(
-    area_key: &str,
-    path_scope: &str,
-    language: &str,
-    role: &str,
-) -> ReadinessIdentifiedArea {
-    ReadinessIdentifiedArea {
-        area_key: area_key.into(),
-        path_scopes: vec![path_scope.into()],
-        languages: vec![language.into()],
-        roles: vec![role.into()],
-        frameworks: Vec::new(),
-        key_libraries: Vec::new(),
-        confidence: 0.95,
-        evidence: vec![format!("{path_scope} composition manifest")],
-    }
-}
-
-fn frontend_result() -> serde_json::Value {
+fn frontend_result(area_id: &str) -> serde_json::Value {
     serde_json::json!({
         "findings": [
-            {"guardrail_key":"frontend-auth","status":"covered","severity":"critical","confidence":0.91,"evidence":{"path":"apps/web/auth.ts","line":42}},
-            {"guardrail_key":"frontend-csrf","status":"partial","severity":"high","confidence":0.88,"evidence":{"path":"apps/web/csrf.ts"}},
-            {"guardrail_key":"frontend-audit","status":"covered","severity":"medium","confidence":0.69,"evidence":{"path":"apps/web/audit.ts"}},
-            {"guardrail_key":"frontend-session-expiry","status":"missing","severity":"low","confidence":0.96,"gap_reason":"session expiry is not enforced","evidence":{"path":"apps/web/session.ts"}}
+            {"guardrail_key":"frontend-auth","status":"covered","severity":"high","confidence":0.95,"evidence":[{"path":"web/auth.ts","line":12}]},
+            {"guardrail_key":"frontend-inputs","status":"partial","severity":"medium","confidence":0.80,"evidence":[{"path":"web/forms.ts","line":31}]}
         ],
         "unsupported": [],
-        "warnings": [{"warning":"legacy cookie migration remains"}],
-        "errors": [{"message":"non-fatal source-map lookup failed"}],
-        "remediation_suggestions": [{"dedupe_key":"rotate-auth-secret","action":"rotate shared auth secret","guardrail_id":"frontend-auth"}]
+        "warnings": [{"reason":"legacy form remains outside migration scope"}],
+        "remediation_suggestions": [{
+            "dedupe_key": "shared-auth-remediation",
+            "action": "Configure shared authentication remediation",
+            "area_id": area_id,
+            "guardrail_id": "frontend-auth"
+        }]
     })
 }
 
-fn backend_result() -> serde_json::Value {
+fn backend_result(area_id: &str) -> serde_json::Value {
     serde_json::json!({
         "findings": [
-            {"guardrail_key":"backend-auth","status":"covered","severity":"high","confidence":0.95,"evidence":{"path":"crates/api/src/auth.rs"}},
-            {"guardrail_key":"backend-audit","status":"covered","severity":"medium","confidence":0.95,"evidence":{"path":"crates/api/src/audit.rs"}}
+            {"guardrail_key":"backend-auth","status":"covered","severity":"high","confidence":0.90,"evidence":[{"path":"server/src/auth.rs","line":48}]},
+            {"guardrail_key":"backend-secrets","status":"analysis_error","severity":"low","confidence":0.85,"evidence":[{"path":"server/src/config.rs","line":9}]}
         ],
         "unsupported": [],
-        "warnings": [{"warning":"rotation job ownership is shared"}],
-        "remediation_suggestions": [{"dedupe_key":"rotate-auth-secret","action":"rotate shared auth secret","guardrail_id":"backend-auth"}]
+        "warnings": [{"reason":"secret rotation is not configured"}],
+        "remediation_suggestions": [{
+            "action": "Apply shared authentication remediation",
+            "dedupe_key": "shared-auth-remediation",
+            "area_ids": [area_id, area_id],
+            "guardrail_ids": ["frontend-auth", "backend-auth", "backend-auth"]
+        }]
     })
 }
 
 fn library_result() -> serde_json::Value {
     serde_json::json!({
-        "findings": [{"guardrail_key":"application-auth","status":"unsupported","severity":"critical","confidence":1.0,"evidence":{"path":"crates/library/src/lib.rs"}}],
-        "unsupported": [{"guardrail_key":"application-auth","reason":"application authentication is not applicable to this library"}],
-        "warnings": [{"warning":"library-only composition"}],
+        "findings": [
+            {"guardrail_key":"library-public-api","status":"covered","severity":"critical","confidence":0.96,"evidence":[{"path":"crates/sdk/src/lib.rs","line":18}]},
+            {"guardrail_key":"app-session-auth","status":"unsupported","severity":"critical","confidence":1.0,"evidence":[{"path":"crates/sdk/src/lib.rs","line":1}]}
+        ],
+        "unsupported": [{
+            "guardrail_key": "app-session-auth",
+            "reason": "session authentication applies to applications, not this library",
+            "evidence": [{"path":"crates/sdk/src/lib.rs","line":1}]
+        }],
+        "warnings": [],
         "remediation_suggestions": []
     })
 }
 
-async fn seed_project_and_owner(db: &Database, name: &str) -> (String, String) {
-    let project = ProjectRepository::new(db.clone(), EventBus::noop())
-        .create(name, "readiness-flow-owner", name)
-        .await
-        .expect("fixture project");
-    let owner = UserRepository::new(db.clone())
-        .upsert_from_github(701_001, "readiness-flow-owner", None, None)
-        .await
-        .expect("fixture owner");
-    (project.id, owner.id)
+fn assert_current_success(area: &djinn_control_plane::readiness_query::ReadinessAreaDto) {
+    assert_eq!(area.status, "succeeded");
+    assert_eq!(area.attempts.len(), 1);
+    assert_eq!(area.attempts[0].attempt_number, 1);
+    assert_eq!(area.attempts[0].status, "succeeded");
+    assert!(area.attempts[0].is_current);
+    assert!(area.attempts[0].payload_digest.is_some());
 }
 
-async fn seed_snapshot(db: &Database, project_id: &str, commit_sha: &str) {
-    RepoGraphCacheRepository::new(db.clone())
-        .upsert(RepoGraphCacheInsert {
-            project_id,
-            commit_sha,
-            graph_blob: b"persisted fixture graph",
-        })
-        .await
-        .expect("persist immutable snapshot");
+fn assert_finding(
+    area: &djinn_control_plane::readiness_query::ReadinessAreaDto,
+    guardrail_key: &str,
+    status: &str,
+    severity: &str,
+    confidence: f64,
+    evidence: serde_json::Value,
+) {
+    let finding = area
+        .accepted_findings
+        .iter()
+        .find(|finding| finding.guardrail_key == guardrail_key)
+        .expect("accepted finding");
+    assert_eq!(finding.status, status);
+    assert_eq!(finding.severity, severity);
+    assert_close(finding.confidence, confidence);
+    assert_eq!(finding.evidence, evidence);
 }
 
-fn assert_float_eq(actual: f64, expected: f64) {
+fn assert_close(actual: f64, expected: f64) {
     assert!(
         (actual - expected).abs() < f64::EPSILON,
         "expected {expected}, got {actual}"

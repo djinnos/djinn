@@ -58,11 +58,12 @@ numbered steps, strictly in this order. Do not reorder these steps.
 
 `CGROUP_REARM_STEP: 0 (preparation) — install RuntimeClass, launcher disarmed`
 
-The Step 1 conformance probe Pod sets `runtimeClassName: djinn-cgroup-writable`
-on itself. Kubernetes rejects a Pod that references a `RuntimeClass` object
-that does not yet exist. Therefore the `RuntimeClass` MUST be installed
-**before** conformance runs, via a preparation Helm upgrade that leaves the
-launcher disarmed and leaves task-runs off the delegated cgroup path:
+The Step 1 conformance probe Pod sets
+`runtimeClassName: djinn-cgroup-writable-probe` on itself. Kubernetes rejects
+a Pod that references a `RuntimeClass` object that does not yet exist.
+Therefore the `RuntimeClass` objects MUST be installed **before** conformance
+runs, via a preparation Helm upgrade that leaves the launcher disarmed and
+leaves task-runs off the delegated cgroup path:
 
 ```bash
 helm upgrade djinn deploy/helm/djinn \
@@ -73,17 +74,32 @@ helm upgrade djinn deploy/helm/djinn \
   --set cgroupLauncher.mode=disabled
 ```
 
-After this preparation upgrade: `RuntimeClass/djinn-cgroup-writable` exists
-in the cluster, but no task-run is scheduled onto it
-(`cgroupWritable.taskRuns.enabled: false`) and the launcher is not demanding
-it (`cgroupLauncher.mode` is not `required`). This is the only state in which
-it is safe to run the Step 1 conformance probe.
+After this preparation upgrade both classes exist in the cluster, but no
+task-run is scheduled onto either (`cgroupWritable.taskRuns.enabled: false`)
+and the launcher is not demanding one (`cgroupLauncher.mode` is not
+`required`). This is the only state in which it is safe to run the Step 1
+conformance probe.
+
+The single value renders a pair, and the pair is not redundant:
+
+* `djinn-cgroup-writable` is the **task-run** class. It carries
+  `scheduling.nodeSelector: {djinn.io/cgroup-writable: "true"}`, which the
+  RuntimeClass admission controller merges into every Pod that names it. That
+  selector is what keeps ordinary task-run Pods off unconformed nodes.
+* `djinn-cgroup-writable-probe` is the **conformance-probe** class. Same
+  containerd handler, no `scheduling` block at all. Conformance runs against a
+  node that does *not* yet carry the eligibility marker — earning it is the
+  point — so a probe naming the task-run class would be rejected by the
+  kubelet with `Predicate NodeAffinity failed`. `spec.nodeName` bypasses the
+  scheduler, not the kubelet's own admission predicate. Before the split, that
+  was a deadlock: the marker gated the probe that earns the marker, and
+  conformance could never pass.
 
 ```bash
-kubectl get runtimeclass djinn-cgroup-writable
+kubectl get runtimeclass djinn-cgroup-writable djinn-cgroup-writable-probe
 ```
 
-Do not proceed to Step 1 until this command shows the `RuntimeClass` object.
+Do not proceed to Step 1 until this command shows both `RuntimeClass` objects.
 
 ### Step 1: conformance install and node restart
 
@@ -98,8 +114,8 @@ systemctl restart k3s
 ```
 
 The conformance probe Pod references
-`runtimeClassName: djinn-cgroup-writable`, which now exists because of the
-preparation upgrade above.
+`runtimeClassName: djinn-cgroup-writable-probe`, which now exists because of
+the preparation upgrade above.
 
 After the restart, wait for the probe to complete and inspect its logs for
 the explicit PASS line:
@@ -185,7 +201,9 @@ This is the step that reproduced the 2026-07-29 outage when it was applied
 while `cgroupWritable.taskRuns.enabled` was `false`. Do not run this step
 out of order relative to Step 4.
 
-Resume dispatch only after Step 6 verification below passes:
+Resume dispatch only after Step 6's kernel-evidence rules (1 through 4) hold.
+Step 6's rule 5 then observes live dispatch for an hour after this resume, and
+rule 6 governs abort and rollback throughout:
 
 ```bash
 djinn dispatch resume
@@ -197,11 +215,23 @@ djinn dispatch resume
 
 `CGROUP_REARM_VERIFICATION_REQUIRES_KERNEL_EVIDENCE: a status field or cache-hit flag is not acceptable evidence`
 
+`CGROUP_REARM_VERIFICATION_EVIDENCE_IS_OPERATOR_COLLECTED: the observations below are post-merge operator rollout evidence, collected on the production node by the operator performing the re-arm; no repository check and no CI job observes production state`
+
 Verification MUST use direct kernel evidence from a live, Running task-run
 Pod, not a status field, not a Helm/Kubernetes condition, and not a cached
 "warmed" or "enabled" flag. Reading `cat cpu.max` by itself is also NOT
 acceptable evidence, because it only shows the configured ceiling, not that
-the kernel is enforcing and accounting against it. Required evidence:
+the kernel is enforcing and accounting against it.
+
+The repository check `deploy/runbooks/tests/cgroup-launcher-rearm.sh` asserts
+only that this document contains the six evidence rules below and orders
+them as written. It reads this file and nothing else: it never contacts a
+cluster, never reads a cgroup, and never observes production. A green check
+means the rollout evidence contract is present and correctly ordered — never
+that the evidence was collected. Collecting it is the operator's obligation
+during the rollout, and the change record is where it is attested.
+
+Required evidence, in this order:
 
 1. A Running task-run Pod whose `spec.runtimeClassName` is
    `djinn-cgroup-writable`:
@@ -211,7 +241,11 @@ the kernel is enforcing and accounting against it. Required evidence:
    # expect: Running djinn-cgroup-writable
    ```
 
-2. At birth, the launcher's cgroup leaf reports `cpu.max` of
+2. Exact `cpu.max` expectations, at birth and after the fenced lift.
+
+   `CGROUP_REARM_VERIFY_ORDER_1_CPU_MAX: launcher leaf born at 25000 100000; after a fenced lift exactly 400000 100000`
+
+   At birth, the launcher's cgroup leaf reports `cpu.max` of exactly
    `25000 100000`, and `cpu.stat`'s `nr_throttled` is accumulating (not
    frozen) under load:
 
@@ -222,14 +256,41 @@ the kernel is enforcing and accounting against it. Required evidence:
    # record nr_periods, nr_throttled, throttled_usec
    ```
 
-3. After the fenced lift, `cpu.max` reads exactly `400000 100000`:
+   After the fenced lift, `cpu.max` reads exactly `400000 100000` — that
+   value, not merely "some value higher than birth":
 
    ```bash
    cat /sys/fs/cgroup/<launcher-leaf>/cpu.max
    # expect: 400000 100000
    ```
 
-4. Over a wall-clock window of at least 100 further `nr_periods` after the
+3. Wrong-fence invariant: a lift presented with the wrong fence token is
+   rejected, and the leaf is left clamped.
+
+   `CGROUP_REARM_VERIFY_ORDER_2_WRONG_FENCE: a lift presented with the wrong fence token is rejected and leaves cpu.max clamped at 25000 100000`
+
+   This is the non-vacuity check for the whole step. Without it, a launcher
+   leaf that simply never lifts at all looks identical to a working clamp —
+   both read `25000 100000`, and rule 2's birth reading alone cannot tell
+   them apart. Present a lift carrying a fence token that does not match the
+   leaf's current fence, confirm the lift is refused, and confirm the leaf is
+   still clamped afterwards:
+
+   ```bash
+   # Present a lift whose fence token deliberately does not match the leaf's
+   # current fence; the launcher must refuse it.
+   cat /sys/fs/cgroup/<launcher-leaf>/cpu.max
+   # expect (still clamped, refusal did not widen the leaf): 25000 100000
+   ```
+
+   A wrong-fence lift that is accepted, or that moves `cpu.max` off
+   `25000 100000`, is a FAIL: abort and follow rule 6 below.
+
+4. 100-period sampling rule, read from `cpu.stat` over a wall-clock window.
+
+   `CGROUP_REARM_VERIFY_ORDER_3_HUNDRED_PERIODS: nr_throttled and throttled_usec unchanged across at least 100 further nr_periods, read from cpu.stat over a wall-clock window`
+
+   Over a wall-clock window of at least 100 further `nr_periods` after the
    lift, `cpu.stat`'s `nr_throttled` and `throttled_usec` are UNCHANGED from
    their values immediately after the lift — i.e. read `cpu.stat` at the
    lift, wait, and read it again; `nr_periods` must have advanced by at
@@ -243,13 +304,58 @@ the kernel is enforcing and accounting against it. Required evidence:
    # nr_periods must differ by >= 100; nr_throttled and throttled_usec must be identical
    ```
 
-`cat cpu.max` alone never satisfies this step. Measuring `cpu.stat` across a
-wall-clock window is the only acceptable evidence that the fenced lift is
-real and that the workload is no longer being throttled.
+   `cat cpu.max` alone never satisfies this step. Measuring `cpu.stat` across
+   a wall-clock window is the only acceptable evidence that the fenced lift
+   is real and that the workload is no longer being throttled. A window that
+   advanced fewer than 100 `nr_periods` is not a shorter version of this
+   rule; it is no evidence at all.
 
-Only after all four evidence items are collected and attached to the change
-record may dispatch be resumed (see Step 5) and the re-arm be declared
-complete.
+5. One-hour observation rule: board dispatches remain greater than zero for
+   the hour following the arm.
+
+   `CGROUP_REARM_VERIFY_ORDER_4_ONE_HOUR_DISPATCH: board dispatches remain greater than zero for the hour following the arm`
+
+   The 2026-07-29 outage was a dispatch refusal, not a kernel fault — kernel
+   readings from one Pod cannot detect it. For at least one hour after
+   dispatch is resumed, confirm the board keeps dispatching: task-runs
+   continue to be admitted and started, and the number of dispatches observed
+   across that hour is greater than zero.
+
+   ```bash
+   djinn dispatch pause-status   # expect: not paused
+   # Sample across the full hour; dispatches over the window must be > 0.
+   kubectl get pods -n djinn-taskruns --watch
+   ```
+
+   Zero dispatches across that hour is a FAIL even if every kernel reading
+   above was perfect — that is precisely the shape the outage took.
+
+6. Abort and rollback behavior when any rule above fails.
+
+   `CGROUP_REARM_VERIFY_ORDER_5_ABORT_ROLLBACK: if any rule above fails, roll the launcher back to cgroupLauncher.mode: disabled and do not leave production armed on unproven delegation`
+
+   If any of rules 2 through 5 fails — a wrong `cpu.max` at birth or after
+   the lift, a wrong-fence lift that is not rejected, `nr_throttled` or
+   `throttled_usec` moving across the 100-period window, or zero board
+   dispatches across the hour — abort the re-arm and roll the launcher back:
+
+   ```bash
+   helm upgrade djinn deploy/helm/djinn \
+     --namespace djinn \
+     --reuse-values \
+     --set cgroupLauncher.mode=disabled
+   ```
+
+   Production must never be left armed on unproven delegation. A partially
+   collected evidence set is a failure, not a pass with a caveat: roll back,
+   record which rule failed, and do not re-arm until that rule can be
+   satisfied.
+
+Rules 1 through 4 are collected while dispatch is still paused. Dispatch is
+resumed (see Step 5) only once all four hold; rule 5's one-hour observation
+then runs against live dispatch, and rule 6 applies throughout. The re-arm is
+declared complete only after all six evidence items are collected and
+attached to the change record.
 
 ## Rollback / recovery branch
 
@@ -307,8 +413,15 @@ Do not retry Step 1 conformance until the restore is confirmed complete.
 5. Step 3: `cgroupWritable.runtimeClass.enabled: true` (confirmed).
 6. Step 4: `cgroupWritable.taskRuns.enabled: true`.
 7. Step 5: `cgroupLauncher.mode: required`.
-8. Step 6: verification by kernel evidence (`cpu.max` at birth, at lift, and
-   `cpu.stat` invariance across a wall-clock window), then dispatch resume.
+8. Step 6: verification, whose six evidence rules are ordered as written —
+   the Running task-run Pod, the exact `cpu.max` values at birth and after
+   the fenced lift, the wrong-fence invariant, the 100-period `cpu.stat`
+   sampling window, the one-hour dispatch observation after resume, and the
+   abort/rollback behavior that returns the launcher to disabled.
 
 If Step 1 fails: restore the prior containerd template byte-for-byte (with
 `cmp` confirmation) and restart `k3s` again before any retry.
+
+All of Step 6's observations are operator rollout evidence collected after
+this document merges. The repository check asserts the presence and order of
+the rules only; it makes no claim about production state.
