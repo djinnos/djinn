@@ -930,6 +930,40 @@ impl WarmDispatch {
                 )
                 .await
         {
+            // Record the create outcome BEFORE returning.
+            //
+            // This early return used to leave the admission row exactly where
+            // `CreateStarted` put it: `create_in_flight`, under the live
+            // server epoch, with the Job already POSTed. Nothing observes a
+            // `create_in_flight` row — it is not a recovered unknown and no
+            // reconciliation pass can judge it — so the leak is invisible for
+            // the whole life of the process, and then the next restart's
+            // `recover_all_predecessors` relabels it `create_unknown`, where
+            // it occupies the cap and gates readiness until reconciliation can
+            // prove its object absent. A leak whose bill arrives at the next
+            // deploy is the worst possible shape for one.
+            //
+            // The create genuinely IS unknown here: the POST returned (or its
+            // response was lost), the object may well exist under the
+            // deterministic name, and we simply could not confirm a unique
+            // bound Pod for it. `CreateUnknown` is the honest record, and it
+            // is the state reconciliation knows how to resolve in either
+            // direction — adoption if the object shows up, retirement once its
+            // absence is proven.
+            if let (Some(admission), Some(permit)) = (self.admission.as_ref(), permit.as_ref())
+                && let Err(error) = admission
+                    .transition(
+                        permit,
+                        WarmAdmissionTransition::CreateUnknown {
+                            diagnostic: "Kubernetes create was POSTed but no unique bound Pod \
+                                         could be confirmed for the leased candidate"
+                                .to_string(),
+                        },
+                    )
+                    .await
+            {
+                warn!(project_id, error = %error, "K8sGraphWarmer: failed to record unconfirmed create outcome");
+            }
             self.schedule_admission_retry(project_id, notify.clone());
             return;
         }
