@@ -1438,13 +1438,31 @@ impl CoordinatorActor {
             // Below the bound, redispatch with forced model rotation instead of
             // consuming the final strike (dispatch-time exclusion in
             // task_dispatch.rs drops the models that just failed).
+            //
+            // Cumulative decline bound (task 6tlg): `non_attempt_models` excludes
+            // infra outcomes (a session that exits `failed` is booked `crashed`)
+            // AND is deduplicated by model, so a task whose every session dies the
+            // same infrastructure death holds this counter at a fixed value below
+            // the threshold indefinitely — 6tlg recorded ten consecutive declines
+            // reading `non_attempt_count: 1` over nine hours. The gy53 hold-cycle
+            // ceiling above cannot catch that: it reads the arbitration ledger's
+            // prospective cycle, which a guard that declines BEFORE creating an
+            // arbitration row never advances. Bound the decline on the durable
+            // markers this rung itself writes, scoped to the current intervention
+            // epoch so a genuine Planner intervention re-arms the budget.
+            let prior_declines = self
+                .no_attempted_remediation_decline_count(&task.id, task.intervention_count)
+                .await;
             if !final_disposition
-                && !history.any_submitted
-                && history.non_attempt_models.len() < NON_ATTEMPT_PARK_THRESHOLD
+                && should_decline_no_attempted_remediation_park(
+                    history.any_submitted,
+                    history.non_attempt_models.len(),
+                    prior_declines,
+                )
             {
                 self.record_park_redispatch_marker(
                     task,
-                    "no_attempted_remediation",
+                    NO_ATTEMPTED_REMEDIATION_KIND,
                     None,
                     history.non_attempt_models.len(),
                 )
@@ -1453,6 +1471,8 @@ impl CoordinatorActor {
                     task_id = %task.short_id,
                     intervention_count = task.intervention_count,
                     non_attempt_models = ?history.non_attempt_models,
+                    prior_declines,
+                    decline_bound = MAX_PARK_REDISPATCH_DECLINES,
                     "uv3p: human-park rung declined to park — no post-intervention session reached submit_work yet; redispatching with forced model rotation instead of parking"
                 );
                 return false;
@@ -2755,6 +2775,35 @@ impl CoordinatorActor {
     /// Has the hold-cycle ceiling already been recorded for this task?
     /// Fail-open (returns `false`) on a query error: a duplicate audit entry is
     /// far cheaper than losing the record entirely.
+    /// How many `no_attempted_remediation` park declines this task already
+    /// recorded in the CURRENT intervention epoch (task 6tlg).
+    ///
+    /// Reads the rung's own durable [`PARK_REDISPATCH_MARKER`] rows, so the
+    /// count advances exactly once per trip around the loop it bounds — unlike
+    /// the model-deduplicated, infra-excluding `non_attempt_models` the decline
+    /// itself measures, which can be pinned below its threshold forever.
+    ///
+    /// A read error returns 0, which fails OPEN toward the pre-existing decline
+    /// behavior: a DB blip must never park a task on evidence nobody read. The
+    /// `limit` sits an order of magnitude above the bound so a task cannot
+    /// escape it by burying its declines under newer markers of another kind.
+    async fn no_attempted_remediation_decline_count(
+        &self,
+        task_id: &str,
+        intervention_count: i64,
+    ) -> usize {
+        self.task_repo()
+            .query_activity(ActivityQuery {
+                task_id: Some(task_id.to_owned()),
+                event_type: Some(PARK_REDISPATCH_MARKER.to_string()),
+                limit: 50,
+                ..ActivityQuery::default()
+            })
+            .await
+            .map(|entries| no_attempted_remediation_declines(&entries, intervention_count))
+            .unwrap_or(0)
+    }
+
     async fn hold_cycle_ceiling_already_recorded(&self, task_id: &str) -> bool {
         self.task_repo()
             .query_activity(ActivityQuery {

@@ -634,6 +634,22 @@ pub(super) use crate::dispatch::cycling_intervention::{
     PriorSessionDisposition, should_route_cycling_intervention,
 };
 
+/// Threshold companion of the bound above. Referenced by tests and doc links
+/// rather than by non-test dispatch code, so the re-export carries the same
+/// `unused_imports` allowance the sibling test-only re-exports use.
+#[allow(unused_imports)]
+pub(super) use crate::dispatch::park_redispatch_bound::MAX_PARK_REDISPATCH_DECLINES;
+/// The cumulative bound on the park rung's `no_attempted_remediation` decline
+/// lives in [`crate::dispatch::park_redispatch_bound`] next to its only
+/// production caller (task 6tlg: the decline's own counter cannot grow when
+/// every session dies the same infra death, so the rung redispatched ten times
+/// with `non_attempt_count` pinned at 1). Re-exported here so `use types::*`
+/// call sites are unchanged.
+pub(super) use crate::dispatch::park_redispatch_bound::{
+    NO_ATTEMPTED_REMEDIATION_KIND, no_attempted_remediation_declines,
+    should_decline_no_attempted_remediation_park,
+};
+
 /// A task that becomes dispatch-ready again (with no active session) within
 /// this window of its last dispatch is treated as a failed attempt and backed
 /// off. Wide enough to catch SLOW failures — e.g. a worker that runs ~30s and
