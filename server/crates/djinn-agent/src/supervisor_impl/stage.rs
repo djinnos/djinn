@@ -1574,7 +1574,9 @@ pub(crate) async fn execute_stage(
 
     spawn_post_session_work(PostSessionParams {
         task_id: task.id.clone(),
-        authenticated_session_id: session_id.clone(),
+        // Finalization identity is server-owned: do not derive it from the
+        // agent-controlled finalize payload.
+        authenticated_session_id: session_record.id.clone(),
         project_path,
         role: role.clone(),
         app_state: agent_context.clone(),
