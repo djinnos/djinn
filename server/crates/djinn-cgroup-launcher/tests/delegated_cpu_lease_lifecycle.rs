@@ -159,14 +159,14 @@ fn assert_rendered_required_job_contract() {
     let contract = rendered_contract();
     for (key, expected) in [
         ("seccomp_profile", "RuntimeDefault"),
-        ("launcher_apparmor_profile", "Unconfined"),
+        ("launcher_apparmor_profile", "RuntimeDefault"),
         ("worker_allow_privilege_escalation", "false"),
         ("launcher_allow_privilege_escalation", "false"),
         ("launcher_capabilities_drop", "ALL"),
-        (
-            "launcher_capabilities_add",
-            "CHOWN,SETGID,SETUID,SETPCAP,SYS_ADMIN,SYS_RESOURCE",
-        ),
+        ("launcher_capabilities_add", "CHOWN,SETGID,SETUID,SETPCAP"),
+        ("launcher_cgroup_root", "/sys/fs/cgroup"),
+        ("launcher_cgroup_source", "runtimeclass"),
+        ("launcher_cgroup_volume", "none"),
         ("launcher_cpu_limit", "none"),
         ("launcher_cpu_request", "50m"),
         ("launcher_memory_request", "64Mi"),
@@ -372,6 +372,15 @@ fn the_delegated_lease_throttles_and_lifts_measured_on_cpu_stat() {
         read_trimmed(&cpu_max_path),
         "25000 100000",
         "the birth quota must be the 250m line production measured"
+    );
+    assert!(matches!(
+        launcher.fenced_lift(&mut leaf, 0x7de_u64 ^ 1),
+        Err(djinn_cgroup_launcher::Error::FenceMismatch)
+    ));
+    assert_eq!(
+        read_trimmed(&cpu_max_path),
+        "25000 100000",
+        "a rejected fence must leave the actual kernel cpu.max clamped"
     );
     launcher
         .fenced_lift(&mut leaf, 0x7de_u64)
