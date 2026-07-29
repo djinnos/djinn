@@ -7,7 +7,18 @@ set -Eeuo pipefail
 
 LABEL='djinn.io/cgroup-writable'
 HANDLER='runc-cgroupwritable'
-RUNTIME_CLASS='djinn-cgroup-writable'
+# The probe names the probe-only RuntimeClass, never the task-run one.
+#
+# Both classes carry the same containerd handler; only the task-run class
+# carries `scheduling.nodeSelector: {djinn.io/cgroup-writable: "true"}`, which
+# the RuntimeClass admission controller merges into every Pod naming it. This
+# program runs with that marker deliberately absent (see ensure_unlabeled), so
+# a probe naming the task-run class is rejected by the kubelet with
+# `Predicate NodeAffinity failed` — `spec.nodeName` bypasses the scheduler but
+# not the kubelet's own admission predicate. Naming the unconstrained probe
+# class keeps handler selection and the eligibility gate separate, which is the
+# only way this program can observe a node that is not yet eligible.
+PROBE_RUNTIME_CLASS='djinn-cgroup-writable-probe'
 # Resolved from the live containerd configuration's own `version` key before
 # anything is written. There is no default: a node whose generation cannot be
 # resolved gets no template and no restart.
@@ -224,7 +235,7 @@ metadata:
     app.kubernetes.io/name: djinn-cgroup-writable-conformance
 spec:
   restartPolicy: Never
-  runtimeClassName: $RUNTIME_CLASS
+  runtimeClassName: $PROBE_RUNTIME_CLASS
   nodeName: $NODE_NAME
   securityContext:
     fsGroup: 1000

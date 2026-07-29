@@ -29,7 +29,7 @@ expect_eq() {
 }
 
 make_stubs() {
-  local dir=$1 log=$2 post_live=$3 live=$4 exec_status=$5
+  local dir=$1 log=$2 post_live=$3 live=$4 exec_status=$5 manifest=${6:-/dev/null}
   mkdir -p "$dir"
   cat >"$dir/id" <<'EOF'
 #!/usr/bin/env bash
@@ -55,7 +55,7 @@ case "\$1" in
     if [ "\$2" = pod ] && [ "\${*: -2}" = '-o json' ]; then exit 0; fi
     if [ "\$2" = pod ]; then printf '$NODE|$NODE'; exit 0; fi
     ;;
-  apply) cat >/dev/null; exit 0 ;;
+  apply) cat >'$manifest'; exit 0 ;;
   wait) exit 0 ;;
   exec) exit $exec_status ;;
   delete) exit 0 ;;
@@ -67,17 +67,19 @@ EOF
 
 # Every case is described by the live configuration the node starts with, the
 # one k3s renders after a restart, and the template wiring under test.
-CASE_DIR='' STATUS=0 LOG='' LIVE='' DEST=''
+CASE_DIR='' STATUS=0 LOG='' LIVE='' DEST='' MANIFEST=''
 run_case() {
   local name=$1 pre_live=$2 post_live=$3 exec_status=$4
   shift 4
   CASE_DIR="$WORK/$name"
   LOG="$CASE_DIR/log"
   LIVE="$CASE_DIR/live.toml"
+  MANIFEST="$CASE_DIR/manifest.yaml"
   mkdir -p "$CASE_DIR/install"
   : >"$LOG"
+  : >"$MANIFEST"
   cp "$FIXTURES/$pre_live" "$LIVE"
-  make_stubs "$CASE_DIR/bin" "$LOG" "$FIXTURES/$post_live" "$LIVE" "$exec_status"
+  make_stubs "$CASE_DIR/bin" "$LOG" "$FIXTURES/$post_live" "$LIVE" "$exec_status" "$MANIFEST"
   set +e
   env PATH="$CASE_DIR/bin:$PATH" \
     DJINN_KUBECTL=kubectl \
@@ -91,6 +93,34 @@ run_case() {
 }
 
 restarts() { grep -c '^restart ' "$LOG" || true; }
+
+# The applied probe manifest decides whether this program can observe a node
+# that is not yet eligible. `djinn-cgroup-writable` carries
+# `scheduling.nodeSelector: {djinn.io/cgroup-writable: "true"}`, which the
+# RuntimeClass admission controller merges into any Pod naming it; the kubelet
+# then evaluates that as a NodeAffinity predicate and rejects the Pod, even
+# though `spec.nodeName` already bypassed the scheduler. The probe must name
+# the unconstrained `djinn-cgroup-writable-probe` class and stay node-bound.
+# Exact-line matching is required: the task-run class name is a PREFIX of the
+# probe class name.
+assert_probe_manifest() {
+  local name=$1
+  if grep -Fxq '  runtimeClassName: djinn-cgroup-writable-probe' "$MANIFEST"; then
+    ok "$name probe names the unconstrained probe RuntimeClass"
+  else
+    fail "$name probe does not name djinn-cgroup-writable-probe: [$(grep -F 'runtimeClassName' "$MANIFEST" || true)]"
+  fi
+  if grep -Fxq '  runtimeClassName: djinn-cgroup-writable' "$MANIFEST"; then
+    fail "$name probe names the node-selected task-run RuntimeClass, which the kubelet rejects on an unlabeled node"
+  else
+    ok "$name probe avoids the node-selected task-run RuntimeClass"
+  fi
+  if grep -Fxq "  nodeName: $NODE" "$MANIFEST"; then
+    ok "$name probe is bound to the exact node by spec.nodeName"
+  else
+    fail "$name probe is not bound with spec.nodeName"
+  fi
+}
 
 expect_failed() {
   local name=$1
@@ -121,6 +151,7 @@ if grep -Fxq 'label node fixture-node djinn.io/cgroup-writable=true --overwrite'
 else
   fail 'v3 success did not label the node'
 fi
+assert_probe_manifest v3
 
 # ---------------------------------------------------------------------------
 # 2. The version-2 node keeps working, unchanged asset and all.
@@ -139,6 +170,7 @@ if [ -e "$CASE_DIR/install/config-v3.toml.tmpl" ]; then
 else
   ok 'v2 wrote no version-3 template filename'
 fi
+assert_probe_manifest v2
 
 # ---------------------------------------------------------------------------
 # 3. Preflight aborts: zero writes and zero restarts.
@@ -300,6 +332,14 @@ assert_contains 'WORKER_PROBE' "WORKER_PROBE='set -eu"
 assert_contains 'worker denial helper' 'must_deny() { if sh -c "$1"; then'
 assert_contains 'wait_for_probe' 'wait_for_probe() {'
 assert_contains 'verify_node_identity' 'verify_node_identity() {'
+assert_contains 'probe-only RuntimeClass' "PROBE_RUNTIME_CLASS='djinn-cgroup-writable-probe'"
+assert_contains 'probe manifest uses the probe-only class' 'runtimeClassName: $PROBE_RUNTIME_CLASS'
+assert_contains 'probe stays node-bound' 'nodeName: $NODE_NAME'
+case "$conformance_text" in
+  *"RUNTIME_CLASS='djinn-cgroup-writable'"*)
+    fail 'conformance reintroduced the node-selected task-run RuntimeClass for the probe' ;;
+  *) ok 'preserved: probe never names the node-selected task-run RuntimeClass' ;;
+esac
 pass_format_count=$(grep -Fc \
   "printf 'PASS node=%s handler=runc-cgroupwritable cgroup_root=/ writable=true isolated=true worker_denials=true\\n'" \
   "$CONFORMANCE" || true)
