@@ -11,9 +11,10 @@ use djinn_core::models::TaskExecutionContext;
 use djinn_db::{
     Database, UserRepository,
     repositories::readiness::{
-        CreateReadinessRun, MaterializeReadinessKickoff, ReadinessAreaResultCallback,
-        ReadinessCallbackOutcome, ReadinessIdentificationOutput, ReadinessIdentifiedArea,
-        ReadinessRepository, RetryReadinessAreaAttempt,
+        CreateReadinessAreaAttempt, CreateReadinessCompositionArea, CreateReadinessRun,
+        MaterializeReadinessKickoff, NewReadinessEvent, NewReadinessFinding,
+        ReadinessAreaResultCallback, ReadinessCallbackOutcome, ReadinessIdentificationOutput,
+        ReadinessIdentifiedArea, ReadinessRepository, RetryReadinessAreaAttempt,
     },
 };
 use sqlx::postgres::PgConnection;
@@ -23,6 +24,7 @@ const MIGRATION_VERSION: u64 = 155;
 const MIGRATION_FILE: &str = "155_readiness_persistence.sql";
 const FINDING_CONFIDENCE_MIGRATION_FILE: &str = "157_readiness_finding_confidence.sql";
 const RESULT_OUTPUTS_MIGRATION_FILE: &str = "159_readiness_result_outputs.sql";
+const CURRENT_ATTEMPT_MIGRATION_FILE: &str = "160_readiness_current_attempt.sql";
 const DESIGNATED_OPERATOR_ID: &str = "00000000-0000-7000-8000-000000000155";
 
 fn migrations_dir() -> PathBuf {
@@ -725,6 +727,181 @@ async fn area_callback_timeout_success_race_and_invalid_output_are_postgres_tran
     assert_eq!(invalid_state, ("invalid".into(), 0, 0));
 }
 
+#[tokio::test]
+async fn run_detail_is_deterministic_and_excludes_historical_accepted_output() {
+    let db = Database::ephemeral().await.expect("postgres");
+    let project = "readiness-detail";
+    djinn_db::test_support::seed_project(&db, project, project).await;
+    let repo = ReadinessRepository::new(db.clone());
+    let run = repo
+        .create_run(CreateReadinessRun {
+            project_id: project.into(),
+            idempotency_key: "detail".into(),
+            repository_snapshot: "snapshot-detail".into(),
+            skill_name: "skill-detail".into(),
+            skill_version: "2.0.0".into(),
+        })
+        .await
+        .expect("run");
+    for (area, key) in [("detail-front", "frontend"), ("detail-back", "backend")] {
+        sqlx::query("INSERT INTO readiness_composition_areas (id,run_id,area_key,composition,path_scopes) VALUES ($1,$2,$3,'{}','[]')").bind(area).bind(&run.id).bind(key).execute(db.pool()).await.expect("area");
+    }
+    for (id, area, number) in [
+        ("old", "detail-front", 1),
+        ("current", "detail-front", 2),
+        ("back-current", "detail-back", 1),
+    ] {
+        sqlx::query("INSERT INTO readiness_area_attempts (id,run_id,area_id,attempt_number,correlation_key) VALUES ($1,$2,$3,$4,$5)").bind(id).bind(&run.id).bind(area).bind(number).bind(format!("key-{id}")).execute(db.pool()).await.expect("attempt");
+    }
+    for (area, attempt) in [("detail-front", "current"), ("detail-back", "back-current")] {
+        sqlx::query("UPDATE readiness_composition_areas SET current_attempt_id=$1 WHERE id=$2")
+            .bind(attempt)
+            .bind(area)
+            .execute(db.pool())
+            .await
+            .expect("current");
+    }
+    for (id, attempt, key) in [
+        ("old-finding", "old", "old"),
+        ("current-finding", "current", "current"),
+    ] {
+        sqlx::query("INSERT INTO readiness_guardrail_findings (id,run_id,area_id,attempt_id,guardrail_key,status,severity,confidence,accepted,evidence) VALUES ($1,$2,'detail-front',$3,$4,'covered','high',0.9,true,'{}')").bind(id).bind(&run.id).bind(attempt).bind(key).execute(db.pool()).await.expect("finding");
+    }
+    for (attempt, output) in [
+        ("old", serde_json::json!({"warnings":["historical"]})),
+        (
+            "current",
+            serde_json::json!({"warnings":["current"],"errors":[{"message":"preserved"}],"unsupported":[{"reason":"kept"}]}),
+        ),
+    ] {
+        sqlx::query("INSERT INTO readiness_area_result_outputs (run_id,area_id,attempt_id,result) VALUES ($1,'detail-front',$2,$3)").bind(&run.id).bind(attempt).bind(output).execute(db.pool()).await.expect("output");
+    }
+    let first = repo
+        .run_detail(&run.id)
+        .await
+        .expect("detail")
+        .expect("exists");
+    let second = repo
+        .run_detail(&run.id)
+        .await
+        .expect("detail")
+        .expect("exists");
+    assert_eq!(first, second);
+    assert_eq!(first.run.repository_snapshot, "snapshot-detail");
+    assert_eq!(
+        first
+            .areas
+            .iter()
+            .map(|area| area.area.area_key.as_str())
+            .collect::<Vec<_>>(),
+        vec!["backend", "frontend"]
+    );
+    let front = first
+        .areas
+        .iter()
+        .find(|area| area.area.id == "detail-front")
+        .expect("front");
+    assert_eq!(
+        front
+            .attempts
+            .iter()
+            .map(|attempt| (attempt.attempt.id.as_str(), attempt.is_current))
+            .collect::<Vec<_>>(),
+        vec![("old", false), ("current", true)]
+    );
+    assert_eq!(
+        front
+            .accepted_findings
+            .iter()
+            .map(|finding| finding.guardrail_key.as_str())
+            .collect::<Vec<_>>(),
+        vec!["current"]
+    );
+    assert_eq!(front.accepted_outputs.len(), 1);
+    assert_eq!(
+        front.accepted_outputs[0].result["errors"][0]["message"],
+        "preserved"
+    );
+}
+
+#[tokio::test]
+async fn create_attempt_persists_current_identity_for_run_detail() {
+    let db = Database::ephemeral().await.expect("postgres");
+    let project = "readiness-detail-create-attempt";
+    djinn_db::test_support::seed_project(&db, project, project).await;
+    let repo = ReadinessRepository::new(db);
+    let run = repo
+        .create_run(CreateReadinessRun {
+            project_id: project.into(),
+            idempotency_key: "detail-create-attempt".into(),
+            repository_snapshot: "snapshot-detail".into(),
+            skill_name: "skill-detail".into(),
+            skill_version: "2.0.0".into(),
+        })
+        .await
+        .expect("run");
+    let area = repo
+        .create_area(CreateReadinessCompositionArea {
+            run_id: run.id.clone(),
+            area_key: "backend".into(),
+            composition: serde_json::json!({"languages": ["Rust"]}),
+            path_scopes: serde_json::json!(["server/**"]),
+        })
+        .await
+        .expect("area");
+    let attempt = repo
+        .create_attempt(CreateReadinessAreaAttempt {
+            run_id: run.id.clone(),
+            area_id: area.id.clone(),
+            attempt_number: 1,
+            correlation_key: "detail-create-attempt-key".into(),
+        })
+        .await
+        .expect("attempt");
+    repo.accept_result(
+        &attempt,
+        &[NewReadinessFinding {
+            guardrail_key: "auth".into(),
+            status: "covered".into(),
+            severity: "high".into(),
+            confidence: 0.9,
+            evidence: serde_json::json!({"files": ["server/src/auth.rs"]}),
+        }],
+        &[],
+        NewReadinessEvent {
+            event_kind: "detail_create_attempt_accepted".into(),
+            payload: serde_json::json!({}),
+        },
+    )
+    .await
+    .expect("accept result");
+
+    let detail = repo
+        .run_detail(&run.id)
+        .await
+        .expect("detail")
+        .expect("run exists");
+    assert_eq!(detail.areas.len(), 1);
+    assert_eq!(
+        detail.areas[0]
+            .attempts
+            .iter()
+            .filter(|attempt| attempt.is_current)
+            .count(),
+        1
+    );
+    assert_eq!(detail.areas[0].attempts[0].attempt.id, attempt.id);
+    assert!(detail.areas[0].attempts[0].is_current);
+    assert_eq!(
+        detail.areas[0]
+            .accepted_findings
+            .iter()
+            .map(|finding| finding.guardrail_key.as_str())
+            .collect::<Vec<_>>(),
+        vec!["auth"]
+    );
+}
+
 #[derive(sqlx::FromRow)]
 struct PersistedAreaTask {
     project_id: String,
@@ -882,6 +1059,7 @@ async fn apply_readiness_migration(conn: &mut PgConnection) {
         MIGRATION_FILE,
         FINDING_CONFIDENCE_MIGRATION_FILE,
         RESULT_OUTPUTS_MIGRATION_FILE,
+        CURRENT_ATTEMPT_MIGRATION_FILE,
     ] {
         let path = migrations_dir().join(migration);
         conn.execute(
@@ -1230,15 +1408,19 @@ async fn active_latest_and_detail_indexes_have_expected_query_paths() {
         let selected: String = sqlx::query_scalar("SELECT id FROM readiness_runs WHERE project_id=$1 ORDER BY (status IN ('identifying','analyzing','aggregating')) DESC,created_at DESC LIMIT 1").bind("project-index").fetch_one(&mut conn).await.expect("active/latest query");
         assert_eq!(selected, "run-active", "active run wins over a terminal latest candidate");
         conn.execute("SET enable_seqscan = off").await.expect("force index plans");
-        for (sql, index) in [
-            ("EXPLAIN SELECT * FROM readiness_runs WHERE project_id='project-index' AND status IN ('identifying','analyzing','aggregating')", "readiness_runs_one_active_project_idx"),
-            ("EXPLAIN SELECT * FROM readiness_runs WHERE project_id='project-index' ORDER BY created_at DESC", "readiness_runs_project_latest_idx"),
-            ("EXPLAIN SELECT * FROM readiness_composition_areas WHERE run_id='run-active' ORDER BY area_key", "readiness_areas_run_detail_idx"),
-            ("EXPLAIN SELECT * FROM readiness_area_attempts WHERE area_id='area-index' ORDER BY attempt_number DESC", "readiness_attempts_area_idx"),
-            ("EXPLAIN SELECT * FROM readiness_run_events WHERE run_id='run-active' ORDER BY created_at,id", "readiness_events_run_detail_idx"),
+        for (sql, indexes) in [
+            ("EXPLAIN SELECT * FROM readiness_runs WHERE project_id='project-index' AND status IN ('identifying','analyzing','aggregating')", &["readiness_runs_one_active_project_idx"][..]),
+            ("EXPLAIN SELECT * FROM readiness_runs WHERE project_id='project-index' ORDER BY created_at DESC", &["readiness_runs_project_latest_idx"][..]),
+            ("EXPLAIN SELECT * FROM readiness_composition_areas WHERE run_id='run-active' ORDER BY area_key", &["readiness_areas_run_detail_idx", "readiness_areas_current_attempt_idx"][..]),
+            ("EXPLAIN SELECT * FROM readiness_area_attempts WHERE area_id='area-index' ORDER BY attempt_number DESC", &["readiness_attempts_area_idx"][..]),
+            ("EXPLAIN SELECT * FROM readiness_run_events WHERE run_id='run-active' ORDER BY created_at,id", &["readiness_events_run_detail_idx"][..]),
         ] {
             let plan: Vec<String> = sqlx::query_scalar(sql).fetch_all(&mut conn).await.expect("explain query path");
-            assert!(plan.join("\n").contains(index), "expected {index} in plan: {plan:?}");
+            let plan_text = plan.join("\n");
+            assert!(
+                indexes.iter().any(|index| plan_text.contains(index)),
+                "expected one of {indexes:?} in plan: {plan:?}"
+            );
         }
     }).await;
 }

@@ -86,6 +86,13 @@ impl RenderedContext {
             .unwrap_or_else(|| panic!("rendered security context is missing `{key}`"))
     }
 
+    /// Whether the rendered contract names a key. This makes removal of the
+    /// old bootstrap-capability contract explicit rather than treating a missing
+    /// fixture value as an accidental parse failure.
+    pub fn contains(&self, key: &str) -> bool {
+        self.values.contains_key(key)
+    }
+
     pub fn u32(&self, key: &str) -> u32 {
         self.get(key)
             .parse()

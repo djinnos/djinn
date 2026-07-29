@@ -9,8 +9,11 @@
 
 use super::*;
 
+use std::collections::BTreeMap;
+
 use djinn_cgroup_launcher::bootstrap::RETAINED_CAPABILITY_NAMES;
 use djinn_runtime::RoleKind;
+use uuid::Uuid;
 
 /// The classifier itself is proven exhaustively in `djinn-runtime` (one
 /// home, shared with the coordinator's build-admission cap). What this crate
@@ -340,18 +343,156 @@ fn recognized_but_nonconforming_cgroup_profiles_are_rejected_by_the_launcher_con
 /// rendered security context. This test is what keeps that fixture honest:
 /// it rebuilds the REAL manifest values and asserts every fixture line, so
 /// changing the render without updating the fixture fails here instead of
-/// silently proving a boundary nobody ships.
+/// silently proving a boundary nobody ships. It renders the complete Job rather
+/// than only a standalone SecurityContext, so the fixture's RuntimeClass claim
+/// cannot survive a missing `runtimeClassName`.
 #[test]
-fn rendered_security_context_uses_runtime_default_without_apparmor_override() {
-    let launcher = launcher_security_context();
-    assert_eq!(launcher.app_armor_profile, None);
-    assert_eq!(launcher.seccomp_profile.unwrap().type_, "RuntimeDefault");
-    assert_eq!(
-        launcher.capabilities.unwrap().add.unwrap(),
-        RETAINED_CAPABILITY_NAMES
+fn rendered_security_context_matches_the_adversarial_proof_fixture() {
+    let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../djinn-cgroup-launcher/tests/fixtures/rendered-security-context.env");
+    let fixture_contents = std::fs::read_to_string(&fixture_path)
+        .unwrap_or_else(|error| panic!("read fixture {fixture_path:?}: {error}"));
+    let fixture: BTreeMap<_, _> = fixture_contents
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(|line| line.split_once('=').expect("fixture lines are key=value"))
+        .collect();
+    let value = |key| {
+        *fixture
+            .get(key)
+            .unwrap_or_else(|| panic!("fixture contains {key}"))
+    };
+
+    let config = KubernetesConfig::for_testing();
+    let job = crate::job::build_task_run_job(
+        &config,
+        &Uuid::nil(),
+        "fixture-project",
+        "fixture-secret",
+        "registry.example/djinn:fixture",
+        &[],
+        None,
+        false,
+        None,
+    );
+    let pod = job
+        .spec
+        .and_then(|spec| spec.template.spec)
+        .expect("rendered Job has PodSpec");
+    let worker = pod
+        .containers
+        .iter()
+        .find(|container| container.name == "worker")
+        .expect("rendered Job has worker");
+    let launcher = pod
+        .init_containers
+        .iter()
+        .flatten()
+        .find(|container| container.name == LAUNCHER_CONTAINER_NAME)
+        .expect("armed Job has launcher");
+    let launcher_security = launcher
+        .security_context
+        .as_ref()
+        .expect("launcher security");
+    let launcher_env = launcher.env.as_ref().expect("launcher environment");
+    let env = |name| {
+        launcher_env
             .iter()
-            .map(|capability| (*capability).to_string())
-            .collect::<Vec<_>>()
+            .find(|variable| variable.name == name)
+            .and_then(|variable| variable.value.as_deref())
+            .unwrap_or_else(|| panic!("launcher renders {name}"))
+    };
+
+    assert_eq!(
+        pod.runtime_class_name.as_deref(),
+        Some(value("task_run_runtime_class"))
+    );
+    assert_eq!(value("launcher_cgroup_source"), "runtimeclass");
+    assert_eq!(value("launcher_cgroup_volume"), "none");
+    assert_eq!(
+        env("DJINN_LAUNCHER_CGROUP_ROOT"),
+        value("launcher_cgroup_root")
+    );
+    assert_eq!(
+        env("DJINN_LAUNCHER_EXPECTED_UID"),
+        value("launcher_expected_uid")
+    );
+    assert_eq!(
+        env("DJINN_LAUNCHER_UNLEASED_MILLICORES"),
+        value("unleased_millicores")
+    );
+    assert_eq!(
+        env("DJINN_LAUNCHER_LEASED_MILLICORES"),
+        value("launcher_lease_quota_millicores")
+    );
+    assert_eq!(
+        launcher_security.app_armor_profile, None,
+        "default AppArmor has no override"
+    );
+    assert_eq!(value("launcher_apparmor_profile"), "RuntimeDefault");
+    assert_eq!(
+        launcher_security.seccomp_profile.as_ref().unwrap().type_,
+        value("seccomp_profile")
+    );
+    assert_eq!(
+        launcher_security.capabilities.as_ref().unwrap().add,
+        Some(
+            value("launcher_capabilities_add")
+                .split(',')
+                .map(str::to_string)
+                .collect()
+        )
+    );
+    assert_eq!(
+        worker
+            .security_context
+            .as_ref()
+            .unwrap()
+            .seccomp_profile
+            .as_ref()
+            .unwrap()
+            .type_,
+        value("seccomp_profile")
+    );
+    assert_eq!(
+        launcher
+            .resources
+            .as_ref()
+            .unwrap()
+            .requests
+            .as_ref()
+            .unwrap()["cpu"]
+            .0,
+        value("launcher_cpu_request")
+    );
+    assert!(
+        launcher
+            .resources
+            .as_ref()
+            .unwrap()
+            .limits
+            .as_ref()
+            .unwrap()
+            .get("cpu")
+            .is_none(),
+        "fixture's launcher_cpu_limit=none permits no ancestor clamp"
+    );
+    assert!(
+        pod.init_containers
+            .iter()
+            .flatten()
+            .chain(pod.containers.iter())
+            .flat_map(|container| container.volume_mounts.iter().flatten())
+            .all(|mount| mount.mount_path != value("launcher_cgroup_root")),
+        "the RuntimeClass cgroup is never supplied through a container mount"
+    );
+    assert!(
+        pod.volumes
+            .iter()
+            .flatten()
+            .all(|volume| volume.host_path.is_none()),
+        "the rendered Job contains no hostPath volume"
     );
 }
 
