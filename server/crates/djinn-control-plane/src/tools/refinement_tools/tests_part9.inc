@@ -470,6 +470,104 @@
         }
     }
 
+    /// The remaining durable intent and task forms must agree across every
+    /// read-only consumer. Fixtures select durable state only; expected
+    /// liveness always comes from the shared evaluator over the exact snapshot.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn intent_and_queued_task_exact_runs_are_live_across_status_doctor_and_board() {
+        enum Fixture {
+            PendingIntent,
+            ClaimedIntent,
+            MaterializedIntentWithClosedRoleTask,
+            QueuedOpenRoleTask,
+        }
+
+        let cases = [
+            ("pending dispatch intent", Fixture::PendingIntent, "pending_intent"),
+            ("unexpired claimed intent", Fixture::ClaimedIntent, "claimed_intent"),
+            ("same-run materialized intent with closed role task", Fixture::MaterializedIntentWithClosedRoleTask, "materialized_intent"),
+            ("queued open role task", Fixture::QueuedOpenRoleTask, "queued_task"),
+        ];
+
+        for (name, fixture, expected_status_evidence) in cases {
+            let (_server, db) = test_server().await;
+            let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+            let proposal = repo.create(ProposalCreateInput {
+                title: "Intent and task exact-run projection", body: "body",
+                acceptance_criteria: Some("[]"), status: Some("draft"), body_format: None,
+            }).await.unwrap();
+            let (run_id, intent_id, generation) = match repo.reap_and_admit(djinn_db::AdmitRefinementRunRequest {
+                proposal_id: proposal.id.clone(), idempotency_key: format!("intent-cross-surface-{name}"),
+                source: djinn_db::RefinementAdmissionSource::Demand { demand_id: format!("intent-cross-surface-{name}") },
+                heartbeat_grace_millis: 60_000,
+            }).await.unwrap() {
+                djinn_db::RefinementAdmissionOutcome::Admitted { run_id, intent_id, generation, .. } => (run_id, intent_id, generation),
+                djinn_db::RefinementAdmissionOutcome::Existing { .. } => unreachable!(),
+            };
+
+            match fixture {
+                Fixture::PendingIntent => {}
+                Fixture::ClaimedIntent => {
+                    assert!(repo.claim_refinement_intent(djinn_db::ClaimRefinementIntentRequest {
+                        run_id: run_id.clone(), intent_id: intent_id.clone(), generation,
+                        owner: "cross-surface-claimer".into(), lease_millis: 60_000,
+                    }).await.unwrap().is_some());
+                }
+                Fixture::MaterializedIntentWithClosedRoleTask => {
+                    let owner = "cross-surface-materializer".to_owned();
+                    let lease = repo.claim_refinement_intent(djinn_db::ClaimRefinementIntentRequest {
+                        run_id: run_id.clone(), intent_id: intent_id.clone(), generation,
+                        owner: owner.clone(), lease_millis: 60_000,
+                    }).await.unwrap().unwrap();
+                    let project_id = uuid::Uuid::now_v7().to_string();
+                    djinn_db::test_support::seed_project(&db, &project_id, "refinement intent fixture").await;
+                    let task_id = djinn_db::test_support::seed_task_row(&db, djinn_db::test_support::UsageTestTaskSeed {
+                        project_id: &project_id, status: "closed", close_reason: None, total_reopen_count: 0,
+                    }).await;
+                    sqlx::query("UPDATE tasks SET refinement_run_id = $1, refinement_intent_id = $2, refinement_generation = $3, refinement_round = $4, refinement_phase = 'adversary_attack', refinement_role = 'adversary' WHERE id = $5")
+                        .bind(&run_id).bind(&intent_id).bind(generation).bind(lease.round).bind(&task_id)
+                        .execute(db.pool()).await.unwrap();
+                    assert!(repo.acknowledge_refinement_task_materialization(djinn_db::AcknowledgeRefinementTaskMaterializationRequest {
+                        run_id: run_id.clone(), intent_id: intent_id.clone(), generation, task_id: task_id.clone(), owner,
+                    }).await.unwrap());
+                }
+                Fixture::QueuedOpenRoleTask => {
+                    let project_id = uuid::Uuid::now_v7().to_string();
+                    djinn_db::test_support::seed_project(&db, &project_id, "refinement task fixture").await;
+                    let task_id = djinn_db::test_support::seed_task_row(&db, djinn_db::test_support::UsageTestTaskSeed {
+                        project_id: &project_id, status: "queued", close_reason: None, total_reopen_count: 0,
+                    }).await;
+                    sqlx::query("UPDATE tasks SET refinement_run_id = $1, refinement_intent_id = $2, refinement_generation = $3, refinement_round = 1, refinement_phase = 'adversary_attack', refinement_role = 'adversary' WHERE id = $4")
+                        .bind(&run_id).bind(&intent_id).bind(generation).bind(&task_id)
+                        .execute(db.pool()).await.unwrap();
+                    // The completed source intent and old heartbeat leave the queued task as the sole evidence.
+                    // Terminal intent rows require their terminal timestamp under the durable schema.
+                    sqlx::query("UPDATE refinement_dispatch_intents SET state = 'completed', terminal_at = to_char(transaction_timestamp() AT TIME ZONE 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'), updated_at = to_char(transaction_timestamp() AT TIME ZONE 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') WHERE id = $1")
+                        .bind(&intent_id).execute(db.pool()).await.unwrap();
+                    djinn_db::test_support::elapse_refinement_run_wall_clock_for_test(&db, &run_id, 3_600).await;
+                }
+            }
+
+            let exact = repo.load_refinement_run_snapshot(djinn_db::LoadRefinementRunSnapshotRequest {
+                run_id: run_id.clone(), heartbeat_grace_millis: 60_000,
+            }).await.unwrap().unwrap();
+            let expected = djinn_core::refinement_liveness::evaluate_refinement_liveness(&exact.snapshot, exact.observed_at);
+            assert_eq!(expected, exact.liveness, "{name}: repository snapshot");
+            assert!(matches!(expected, RefinementLivenessResult::Live { .. }), "{name}: evaluator result");
+
+            let status = build_refinement_status(&repo, &proposal.id).await.unwrap();
+            assert_eq!(status.run_id.as_deref(), Some(run_id.as_str()), "{name}: status run");
+            assert_eq!(status.liveness.as_deref(), Some("live"), "{name}: status liveness");
+            assert_eq!(status.liveness_evidence.as_deref(), Some(expected_status_evidence), "{name}: status evidence");
+            assert!(status.active, "{name}: status active");
+
+            let (events_tx, _events_rx) = tokio::sync::broadcast::channel(16);
+            let doctor_source = std::sync::Arc::new(djinn_coordinator::doctor::ProposalRepositoryRefinementPhantomActiveSource::new(db, events_tx));
+            assert!(doctor_stale_run_ids(doctor_source).is_empty(), "{name}: doctor finding");
+            assert_eq!(repo.load_board_refinement_lifecycle_aggregate(60_000).await.unwrap().stale_run_count, 0, "{name}: board phantom count");
+        }
+    }
+
     /// Exercise status, doctor, board health, and both admissions against the historic
     /// 09no/96fy shape. The live session belongs only to a terminal prior run.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
