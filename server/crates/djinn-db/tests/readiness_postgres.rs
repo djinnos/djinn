@@ -926,7 +926,7 @@ async fn run_detail_includes_ordered_terminal_aggregation_suggestions_and_events
         sqlx::query("INSERT INTO readiness_run_events (id,run_id,event_kind,payload,created_at) VALUES ($1,$2,'lifecycle','{}','2026-01-01T00:00:00.000Z')")
             .bind(id).bind(&run.id).execute(db.pool()).await.expect("event");
     }
-    sqlx::query("UPDATE readiness_runs SET status='completed',completed_at='2026-01-01T00:00:01.000Z' WHERE id=$1")
+    sqlx::query("UPDATE readiness_runs SET expected_area_count=2,status='completed',completed_at='2026-01-01T00:00:01.000Z' WHERE id=$1")
         .bind(&run.id).execute(db.pool()).await.expect("terminal run");
 
     let first = repo
