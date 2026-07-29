@@ -92,6 +92,9 @@ pub struct HydratedEvidenceFindingV1 {
     pub anchor: HydratedEvidenceAnchorV1,
 }
 
+// Flat Command fields preserve the frozen serialized EvidenceCompletionV1
+// projection shape; this enum is serialized only at hand-off.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum HydratedEvidenceAnchorV1 {
