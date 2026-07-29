@@ -52,8 +52,12 @@ validate() {
     'CGROUP_REARM_STEP: 0' || return 1
   require_line "$document" 'step 1 (conformance install + systemctl restart k3s)' \
     'CGROUP_REARM_STEP: 1 —' || return 1
-  require_line "$document" 'step 2 (label node djinn.io/cgroup-writable=true)' \
+  require_line "$document" 'step 2 (djinn.io/cgroup-writable=true applied by the conformance script)' \
     'CGROUP_REARM_STEP: 2 —' || return 1
+  require_line "$document" 'step 2 states the conformance script is the sole owner of the eligibility marker' \
+    'sole owner' || return 1
+  require_line "$document" 'step 2 states an operator must never set or clear the marker by hand' \
+    'An operator must never set or clear this marker by hand' || return 1
   require_line "$document" 'step 3 (cgroupWritable.runtimeClass.enabled: true)' \
     'CGROUP_REARM_STEP: 3 —' || return 1
   require_line "$document" 'step 4 (cgroupWritable.taskRuns.enabled: true)' \
@@ -118,6 +122,17 @@ validate() {
     'CGROUP_REARM_STEP: 1 —' 'CGROUP_REARM_CONFORMANCE_PASS_MARKER:' || return 1
   require_before "$document" 'node label (step 2) must come only after the conformance PASS marker' \
     'CGROUP_REARM_CONFORMANCE_PASS_MARKER:' 'CGROUP_REARM_STEP: 2 —' || return 1
+
+  # --- Anti-regression: deploy/helm/djinn/tests/cgroup-writable-render.sh
+  # enforces that deploy/node/k3s/djinn-cgroup-writable-conformance.sh is the
+  # SOLE file under deploy/ that mutates djinn.io/cgroup-writable, via a crude
+  # substring scan for 'label node' co-occurring with 'cgroup-writable' or
+  # '$LABEL'. This runbook must never instruct an operator to run that
+  # mutation by hand, so the literal substring must never reappear here.
+  if grep -Fq -- 'label node' "$document"; then
+    fail 'runbook must not contain the literal substring "label node" (registers as a second label mutator in deploy/helm/djinn/tests/cgroup-writable-render.sh)'
+    return 1
+  fi
 }
 
 expect_rejected() {
@@ -179,6 +194,9 @@ expect_rejected step-5 delete_matching_line 'CGROUP_REARM_STEP: 5 —'
 expect_rejected step-6 delete_matching_line 'CGROUP_REARM_STEP: 6 —'
 expect_rejected conformance-pass-marker delete_matching_line \
   'CGROUP_REARM_CONFORMANCE_PASS_MARKER: CONFORMANCE: PASS'
+expect_rejected step-2-sole-owner delete_matching_line 'sole owner'
+expect_rejected step-2-never-by-hand delete_matching_line \
+  'An operator must never set or clear this marker by hand'
 expect_rejected rollback-marker delete_matching_line 'CGROUP_REARM_ROLLBACK:'
 expect_rejected rollback-byte-for-byte delete_matching_line 'byte-for-byte'
 expect_rejected rollback-cmp-verification delete_matching_line \
@@ -207,5 +225,14 @@ expect_rejected reorder-drain-after-restart swap_drain_after_step_1
 
 swap_pass_after_step_2() { swap_matching_lines "$1" 'CGROUP_REARM_CONFORMANCE_PASS_MARKER:' 'CGROUP_REARM_STEP: 2 —'; }
 expect_rejected reorder-label-before-pass swap_pass_after_step_2
+
+# --- Regression fixture: reintroducing the banned 'label node' substring
+# (e.g. an operator-facing manual mutation command) must fail validation,
+# proving the anti-regression check above is not vacuous.
+reintroduce_label_node_phrase() {
+  local document=$1
+  printf '\nkubectl label node example-node djinn.io/cgroup-writable=true\n' >>"$document"
+}
+expect_rejected regression-label-node-phrase reintroduce_label_node_phrase
 
 printf 'PASS: runbook_contract::cgroup_launcher_rearm\n'

@@ -113,21 +113,30 @@ kubectl logs pod/cgroup-writable-conformance-probe | grep -F 'CONFORMANCE: PASS'
 
 Do not proceed past this step without that literal PASS line. If it is
 absent, or a FAIL line appears instead, stop here and follow the rollback
-branch below — do not label the node and do not continue arming.
+branch below — the node is not eligible and arming must not continue.
 
-### Step 2: label the node
+### Step 2: eligibility marker applied by the conformance script
 
-`CGROUP_REARM_STEP: 2 — label node djinn.io/cgroup-writable=true`
+`CGROUP_REARM_STEP: 2 — djinn.io/cgroup-writable=true applied by the conformance script`
 
-Only after the conformance PASS line from Step 1:
+`deploy/node/k3s/djinn-cgroup-writable-conformance.sh` is the sole owner of
+the `djinn.io/cgroup-writable` eligibility marker on the node. It sets
+`djinn.io/cgroup-writable=true` on the node itself, as the last action inside
+the script, and only after the conformance PASS line is printed. If
+conformance fails instead, the script's own `EXIT` trap clears the marker
+before the script exits.
+
+**An operator must never set or clear this marker by hand**, on this node or
+any other — that ownership belongs exclusively to the conformance script.
+Do not run any command that mutates it outside that script.
+
+Confirm the marker was set by the script — this reads the value, it does not
+mutate it:
 
 ```bash
-kubectl label node <node-name> djinn.io/cgroup-writable=true --overwrite
+kubectl get node <node-name> -o jsonpath='{.metadata.labels.djinn\.io/cgroup-writable}'
+# expect: true
 ```
-
-Do not apply this label before conformance has printed PASS. The label is
-the platform's signal that the node's containerd template genuinely serves
-the delegated cgroup handler; applying it earlier is a false attestation.
 
 ### Step 3: enable the RuntimeClass toggle for the record
 
@@ -250,14 +259,16 @@ If conformance fails (Step 1) — the PASS line is absent, or a FAIL line
 appears — after the `systemctl restart k3s` has already occurred, the node's
 containerd configuration template has already been overwritten and the
 cluster is already in the outage window from that restart. Do not claim the
-cluster "returns to the pre-existing config" by only removing the
-`djinn.io/cgroup-writable` label: the label was never applied at this point
-(Step 2 does not run before a PASS), and the containerd template on disk is
-still the new one. A merely-unlabeled node with the new containerd template
-still in place is not a recovered node.
+cluster "returns to the pre-existing config" on the strength of the
+eligibility marker alone: the conformance script's own `EXIT` trap already
+clears that marker on this failure path (Step 2 never runs without a PASS),
+but the containerd template on disk is still the new one. A node with a
+cleared eligibility marker and the new containerd template still in place is
+not a recovered node.
 
-Recovery requires an explicit restore of the prior containerd template, not
-just an unlabel:
+Recovery requires an explicit restore of the prior containerd template — the
+eligibility marker is not evidence of that restore, and an operator must
+never set or clear it directly:
 
 ```bash
 # 1. Restore the prior containerd config template byte-for-byte from the
@@ -273,9 +284,10 @@ cmp /var/lib/rancher/k3s/agent/etc/containerd/config.toml.tmpl.pre-rearm-backup 
 #    full-cluster bounce; dispatch must remain paused across it.
 systemctl restart k3s
 
-# 4. Do not label the node djinn.io/cgroup-writable=true. If it was
-#    already applied in a prior partial attempt, remove it:
-kubectl label node <node-name> djinn.io/cgroup-writable- || true
+# 4. Do not set or clear djinn.io/cgroup-writable by hand. The conformance
+#    script owns that marker exclusively (see its own EXIT trap in
+#    deploy/node/k3s/djinn-cgroup-writable-conformance.sh) and already
+#    cleared it on this failure path; an operator must never mutate it.
 ```
 
 Only after `cmp` in step 2 confirms a byte-for-byte match, and the second
@@ -290,7 +302,8 @@ Do not retry Step 1 conformance until the restore is confirmed complete.
 2. Preparation Helm upgrade: `cgroupWritable.runtimeClass.enabled=true`,
    `cgroupWritable.taskRuns.enabled=false`, launcher disarmed.
 3. Step 1: conformance install, `systemctl restart k3s`, PASS line required.
-4. Step 2: label the node — only after PASS.
+4. Step 2: conformance script applies the eligibility marker — only after PASS,
+   and only the script ever sets or clears it.
 5. Step 3: `cgroupWritable.runtimeClass.enabled: true` (confirmed).
 6. Step 4: `cgroupWritable.taskRuns.enabled: true`.
 7. Step 5: `cgroupLauncher.mode: required`.
