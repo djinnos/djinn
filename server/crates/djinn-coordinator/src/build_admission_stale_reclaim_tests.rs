@@ -826,6 +826,7 @@ async fn pre_ymx9_generation_history(
             .mark_live(&UidFencedAdmissionInput {
                 key: key.clone(),
                 object_uid: object_uid.clone(),
+                object_name: None,
             })
             .await
             .unwrap();

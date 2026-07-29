@@ -2100,15 +2100,18 @@ impl BuildAdmissionController {
                 .await
                 .map(|_| ())
                 .map_err(unavailable),
-            WarmAdmissionTransition::Live { uid } => self
-                .journal
-                .mark_live(&UidFencedAdmissionInput {
-                    key: state.key.clone(),
-                    object_uid: uid,
-                })
-                .await
-                .map(|_| ())
-                .map_err(unavailable),
+            WarmAdmissionTransition::Live { uid } => {
+                let object_name = live_object_name(&state.key, &uid);
+                self.journal
+                    .mark_live(&UidFencedAdmissionInput {
+                        key: state.key.clone(),
+                        object_uid: uid,
+                        object_name,
+                    })
+                    .await
+                    .map(|_| ())
+                    .map_err(unavailable)
+            }
             WarmAdmissionTransition::CreateUnknown { .. } => self
                 .journal
                 .mark_create_unknown(&state.key)
@@ -2532,6 +2535,43 @@ fn unavailable(error: impl std::fmt::Display) -> WarmAdmissionError {
 
 fn permit_key(key: &AdmissionJournalKey) -> String {
     admission_generation_key(key)
+}
+
+/// The Kubernetes object name a generation going Live must be judged against,
+/// when its reservation could not have known it.
+///
+/// # Why `task_observation` is the only domain that needs this
+///
+/// A warm or invocation reservation commits to a deterministic object name
+/// BEFORE the POST — `mark_create_started` fences on exactly that name — so its
+/// row already carries the truth and `None` leaves it untouched.
+///
+/// A task-run reservation cannot. The dispatch slot is acquired before the
+/// task-run exists, so the row records the provisional
+/// `task-run-{task_id}-{generation}` while the Job the dispatch goes on to
+/// create is `djinn-taskrun-{task_run_id}`. Nothing ever rewrote it, and the
+/// consequence is not a cosmetic mismatch: it makes every Kubernetes clause the
+/// reconciler evaluates about a task row VACUOUS. The authoritative LIST can
+/// never contain that name, and a GET on it is an authoritative `Ok(None)` —
+/// `NotFound`, the same answer a genuinely deleted Job gives. So the `Live`
+/// branch of `BuildAdmissionReconciler` proved a running task-run's object
+/// absent and retired its row, and `BuildLeaseReclaimer` — for which
+/// `generation_state == Terminal` is the ONE proof that a dispatch lease is
+/// ownerless — then handed that still-running task-run's build slot to another
+/// task.
+///
+/// `uid` is the `task_run_id` here, not a Kubernetes UID: the whole
+/// `task_observation` domain is keyed on it (`live_task_run_build_admission`,
+/// `terminal_task_run_build_admission`, `task_run_permit_for_runtime_id`), and
+/// `taskrun_job_name` is the same derivation `build_lease_reclaim` uses to name
+/// a task-run's Job from it.
+fn live_object_name(key: &AdmissionJournalKey, uid: &str) -> Option<String> {
+    match key.domain {
+        AdmissionDomain::TaskObservation => {
+            (!uid.trim().is_empty()).then(|| djinn_k8s::taskrun_job_name(uid))
+        }
+        AdmissionDomain::WarmBuild | AdmissionDomain::InvocationBuild => None,
+    }
 }
 
 /// Generation-free identity for one work item. Shares the `{domain:?}:{work_id}:`
@@ -3875,6 +3915,7 @@ mod tests {
                     generation: 0,
                 },
                 object_uid: "uid-live".into(),
+                object_name: None,
             })
             .await
             .unwrap();
@@ -4018,6 +4059,7 @@ mod tests {
                         generation: 0,
                     },
                     object_uid: format!("uid-{work}"),
+                    object_name: None,
                 })
                 .await
                 .unwrap();
@@ -4265,6 +4307,7 @@ mod tests {
                         generation: 0,
                     },
                     object_uid: format!("uid-{work}"),
+                    object_name: None,
                 })
                 .await
                 .unwrap();
