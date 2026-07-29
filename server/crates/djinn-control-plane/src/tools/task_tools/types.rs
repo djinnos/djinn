@@ -1119,6 +1119,56 @@ pub struct BoardHealthBuildAdmission {
     pub note: String,
 }
 
+/// The dispatcher's OWN recorded denial for this task.
+///
+/// Every other field on `dispatch_gate` is a re-derivation of what the
+/// dispatcher probably decided. This one is what it actually decided, written
+/// by the process that decided it (`build_admission_denials`, migration 161).
+///
+/// Before that table existed, `DenialCause` was consumed at exactly one site —
+/// a `tracing::info!` line — and thrown away. On 2026-07-29 the dispatcher knew
+/// on every tick, for five hours, precisely why it was refusing every task, and
+/// `board_health` reported `unexplained` the whole time.
+#[derive(Serialize, Deserialize, schemars::JsonSchema, Default)]
+pub struct BoardHealthBuildAdmissionDenial {
+    /// `at_capacity`, `controller_not_admitting` or `authority_unavailable`.
+    pub cause: String,
+    /// The closed readiness gate, for `controller_not_admitting`. This is the
+    /// field that existed only in container logs during the outage.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub readiness: Option<String>,
+    /// The capacity authority's own words, for `authority_unavailable`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    /// Occupancy as MEASURED. `null` — never `0` — when the denial never
+    /// consulted it, which is true of every readiness denial.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub occupancy: Option<i64>,
+    /// The cap that would have been enforced.
+    pub cap: i64,
+    /// The deciding process's admission epoch.
+    #[serde(default)]
+    pub server_epoch: String,
+    /// Start of the uninterrupted denial streak.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub first_denied_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub denied_at: Option<String>,
+    /// Consecutive denials in this streak.
+    pub denial_count: i64,
+    /// Seconds since `denied_at`.
+    pub age_seconds: i64,
+    /// True while the record is recent enough to be blamed. A stale record is
+    /// still reported — a denial row that outlives its condition is the #2661
+    /// tombstone, and reporting-without-blaming is how it stays visible
+    /// without becoming a false reason.
+    pub fresh: bool,
+    /// The staleness bound `fresh` is measured against.
+    pub freshness_window_seconds: i64,
+    #[serde(default)]
+    pub note: String,
+}
+
 /// What the dispatch-gate verdict actually covers.
 ///
 /// This block exists because an empty `reasons` used to be indistinguishable
@@ -1186,6 +1236,11 @@ pub struct BoardHealthDispatchGate {
     /// readable. This is the gate that denies before capacity is measured.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub build_admission: Option<BoardHealthBuildAdmission>,
+    /// The dispatcher's own recorded `DenialCause` for this task, when it has
+    /// one. Absent means the most recent decision was not a denial: the
+    /// permitted path deletes the row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build_admission_denial: Option<BoardHealthBuildAdmissionDenial>,
     /// Final gate verdict — `blocked` when an evaluated gate fired,
     /// `unexplained` when none did.
     ///

@@ -733,7 +733,9 @@ async fn a_settled_create_unknown_row_is_reclaimed_by_a_later_pass_and_unwedges_
             denied,
             BuildAdmissionDecision::Denied {
                 occupancy: None,
-                cause: DenialCause::ControllerNotAdmitting,
+                cause: DenialCause::ControllerNotAdmitting {
+                    readiness: BuildAdmissionReadiness::CreateUnknownHealth
+                },
                 ..
             }
         ),

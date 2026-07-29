@@ -331,6 +331,145 @@ async fn an_in_flight_create_unknown_row_is_reported_but_not_blamed() {
     assert_eq!(gate["build_admission"]["create_unknown_settled"], 0);
 }
 
+/// **The #2661 follow-up, end to end.** The dispatcher records why it refused;
+/// `board_health` reads it back.
+///
+/// Written through the real repository so the migration, the CHECK constraints
+/// and the read query are all exercised together.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_persisted_denial_cause_becomes_the_reason_for_a_stranded_task() {
+    let db = create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let repo = TaskRepository::new(db.clone(), event_bus_for(&tx));
+    let task = stranded_task(&db, &repo, "Denied by the controller").await;
+
+    // Everything else is healthy: an armed, empty lease pool and a clean
+    // journal. This is the 2026-07-29 shape.
+    arm_lease_authority(&db, 3).await;
+
+    djinn_db::BuildAdmissionDenialRepository::new(db.clone())
+        .record(&djinn_db::BuildAdmissionDenialRecord {
+            consumer_kind: "task_dispatch".to_owned(),
+            consumer_id: task.id.clone(),
+            cause: "controller_not_admitting".to_owned(),
+            readiness: Some("create_unknown_health".to_owned()),
+            detail: None,
+            // A readiness denial measures nothing.
+            occupancy: None,
+            cap: 3,
+            server_epoch: "epoch-under-test".to_owned(),
+        })
+        .await
+        .unwrap();
+
+    let gate = gate_for(&repo, &task.id).await;
+    assert_eq!(gate["gate_verdict"], "blocked", "{gate:#}");
+    assert!(
+        gate["reasons"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!(
+                "build_admission_denied_controller_not_admitting"
+            )),
+        "the dispatcher's own reason must reach the projection: {:?}",
+        gate["reasons"]
+    );
+    let denial = &gate["build_admission_denial"];
+    assert_eq!(denial["cause"], "controller_not_admitting");
+    // The field that existed only in container logs on the node.
+    assert_eq!(denial["readiness"], "create_unknown_health");
+    assert_eq!(denial["server_epoch"], "epoch-under-test");
+    assert_eq!(denial["denial_count"], 1);
+    assert_eq!(denial["fresh"], true);
+    assert!(
+        denial["occupancy"].is_null(),
+        "a readiness denial measured no occupancy; `null`, never 0"
+    );
+
+    // A repeat denial keeps the streak start and counts the tick.
+    djinn_db::BuildAdmissionDenialRepository::new(db.clone())
+        .record(&djinn_db::BuildAdmissionDenialRecord {
+            consumer_kind: "task_dispatch".to_owned(),
+            consumer_id: task.id.clone(),
+            cause: "controller_not_admitting".to_owned(),
+            readiness: Some("create_unknown_health".to_owned()),
+            detail: None,
+            occupancy: None,
+            cap: 3,
+            server_epoch: "epoch-under-test".to_owned(),
+        })
+        .await
+        .unwrap();
+    let gate = gate_for(&repo, &task.id).await;
+    assert_eq!(
+        gate["build_admission_denial"]["denial_count"], 2,
+        "repeat denials count the streak rather than resetting it"
+    );
+    assert_eq!(
+        gate["build_admission_denial"]["first_denied_at"], denial["first_denied_at"],
+        "the streak start must survive a repeat"
+    );
+}
+
+/// **Neutralisation guard: this table must not become the #2661 tombstone.**
+///
+/// #2661 was a spent row replayed forever. A denial record that outlived its
+/// condition would be the same bug in a new table, so the permitted path
+/// deletes it — and after that this section must claim nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn clearing_a_denial_stops_it_being_reported_as_a_reason() {
+    let db = create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let repo = TaskRepository::new(db.clone(), event_bus_for(&tx));
+    let task = stranded_task(&db, &repo, "Denied then admitted").await;
+    arm_lease_authority(&db, 3).await;
+
+    let denials = djinn_db::BuildAdmissionDenialRepository::new(db.clone());
+    denials
+        .record(&djinn_db::BuildAdmissionDenialRecord {
+            consumer_kind: "task_dispatch".to_owned(),
+            consumer_id: task.id.clone(),
+            cause: "at_capacity".to_owned(),
+            readiness: None,
+            detail: None,
+            occupancy: Some(3),
+            cap: 3,
+            server_epoch: "epoch-under-test".to_owned(),
+        })
+        .await
+        .unwrap();
+    let gate = gate_for(&repo, &task.id).await;
+    assert_eq!(gate["gate_verdict"], "blocked");
+    assert_eq!(gate["build_admission_denial"]["occupancy"], 3);
+
+    // The permitted path.
+    denials.clear("task_dispatch", &task.id).await.unwrap();
+
+    let gate = gate_for(&repo, &task.id).await;
+    assert!(
+        gate["build_admission_denial"].is_null(),
+        "a cleared denial must leave nothing behind: {gate:#}"
+    );
+    assert!(
+        !gate["reasons"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|reason| reason
+                .as_str()
+                .is_some_and(|reason| reason.starts_with("build_admission_denied_"))),
+        "a cleared denial must not survive as a reason: {:?}",
+        gate["reasons"]
+    );
+    // The gate is still EVALUATED — absence is an answer, not a gap.
+    assert!(
+        gate["coverage"]["evaluated_gates"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("build_admission_denial"))
+    );
+}
+
 /// Defect 2. `bx1f` was reported stranded for 18.2 h although its blocker only
 /// merged eight hours earlier. It had never been dispatched (no open
 /// transition, no session), so the clock fell back to creation time and the

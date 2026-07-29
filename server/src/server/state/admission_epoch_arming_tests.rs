@@ -375,7 +375,9 @@ async fn unconfirmed_topology_still_fails_closed_and_never_lifts() {
         BuildAdmissionDecision::Denied {
             occupancy: None,
             cap: 3,
-            cause: DenialCause::ControllerNotAdmitting
+            cause: DenialCause::ControllerNotAdmitting {
+                readiness: BuildAdmissionReadiness::TopologyPending
+            }
         },
         "an unconfirmed topology MUST fail closed"
     );
@@ -569,7 +571,9 @@ async fn seeding_a_live_observe_deployment_does_not_wedge_admission() {
         BuildAdmissionDecision::Denied {
             occupancy: None,
             cap: 3,
-            cause: DenialCause::ControllerNotAdmitting
+            cause: DenialCause::ControllerNotAdmitting {
+                readiness: BuildAdmissionReadiness::TopologyPending
+            }
         },
         "re-seeding must not reproduce the incident's self-contradictory denial"
     );
@@ -638,7 +642,9 @@ async fn a_standby_promotion_never_re_asserts_the_topology_gate() {
         BuildAdmissionDecision::Denied {
             occupancy: None,
             cap: 3,
-            cause: DenialCause::ControllerNotAdmitting
+            cause: DenialCause::ControllerNotAdmitting {
+                readiness: BuildAdmissionReadiness::TopologyPending
+            }
         },
         "a promoted standby must fail closed"
     );

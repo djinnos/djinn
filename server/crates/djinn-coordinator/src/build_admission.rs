@@ -338,7 +338,18 @@ pub enum DenialCause {
     AtCapacity,
     /// The controller itself is not admitting -- not yet recovered, or
     /// draining. Nothing was measured and nothing was acquired.
-    ControllerNotAdmitting,
+    ///
+    /// `readiness` is which gate is closed. Without it this variant is the
+    /// least actionable string in the system: on 2026-07-29 five hours of logs
+    /// read `cause: "controller_not_admitting"`, and the field that said WHICH
+    /// gate (`readiness=create_unknown_health`) was on a different, adjacent
+    /// log line that nobody had a reason to correlate. The two travel together
+    /// now, and the pair is what gets persisted.
+    ///
+    /// `Display` is unchanged (`controller_not_admitting`) on purpose: it is
+    /// the string operators and runbooks already grep for. The readiness rides
+    /// alongside as structured data instead of mutating that identity.
+    ControllerNotAdmitting { readiness: BuildAdmissionReadiness },
     /// The build-slot authority answered with something that is not a capacity
     /// answer. `detail` is its own words.
     AuthorityUnavailable { detail: String },
@@ -348,10 +359,44 @@ impl std::fmt::Display for DenialCause {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::AtCapacity => f.write_str("at_capacity"),
-            Self::ControllerNotAdmitting => f.write_str("controller_not_admitting"),
+            Self::ControllerNotAdmitting { .. } => f.write_str("controller_not_admitting"),
             Self::AuthorityUnavailable { detail } => {
                 write!(f, "authority_unavailable: {detail}")
             }
+        }
+    }
+}
+
+impl DenialCause {
+    /// The bare cause name, without the `AuthorityUnavailable` detail suffix.
+    ///
+    /// This is what goes in `build_admission_denials.cause`, which is
+    /// CHECK-constrained to the three names; `Display` is the log form.
+    #[must_use]
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::AtCapacity => "at_capacity",
+            Self::ControllerNotAdmitting { .. } => "controller_not_admitting",
+            Self::AuthorityUnavailable { .. } => "authority_unavailable",
+        }
+    }
+
+    /// The closed readiness gate, when the controller is the one refusing.
+    #[must_use]
+    pub fn readiness(&self) -> Option<BuildAdmissionReadiness> {
+        match self {
+            Self::ControllerNotAdmitting { readiness } => Some(*readiness),
+            _ => None,
+        }
+    }
+
+    /// The capacity authority's own words, when it is the one that answered
+    /// with something that is not a capacity answer.
+    #[must_use]
+    pub fn detail(&self) -> Option<&str> {
+        match self {
+            Self::AuthorityUnavailable { detail } => Some(detail),
+            _ => None,
         }
     }
 }
@@ -1491,15 +1536,22 @@ impl BuildAdmissionController {
         &self,
         request: BuildAdmissionRequest,
     ) -> Result<BuildAdmissionDecision, WarmAdmissionError> {
-        if self.mode() == BuildAdmissionMode::Enforce && (!self.is_ready() || self.is_draining()) {
+        let readiness = self.readiness();
+        if self.mode() == BuildAdmissionMode::Enforce && (!readiness.is_healthy() || self.is_draining())
+        {
             // The cap reported with a denial is the one that WOULD have been
             // enforced, resolved from the single capacity authority. Reporting
             // the constructor's configured value here made v0 and v1 disagree
             // in the operator's log about which number was in force.
+            //
+            // The readiness travels WITH the cause. `controller_not_admitting`
+            // on its own is the least actionable string in the system: it says
+            // the controller refused without saying which of seven gates is
+            // closed, which is why 2026-07-29 needed node access to diagnose.
             return Ok(BuildAdmissionDecision::Denied {
                 occupancy: None,
                 cap: self.effective_cap(),
-                cause: DenialCause::ControllerNotAdmitting,
+                cause: DenialCause::ControllerNotAdmitting { readiness },
             });
         }
         // Capture an observe-only copy before any field of `request` is moved.
