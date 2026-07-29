@@ -55,6 +55,7 @@ workspace-hack.workspace = true
 
 [dev-dependencies]
 axum = "0.8"
+sqlx = { version = "0.8", default-features = false, features = ["postgres", "runtime-tokio-rustls"] }
 djinn-db = { path = "../djinn-db", features = ["test-support"] }
 djinn-slot = { path = ".", features = ["test-support"] }
 tokio = { version = "1", features = ["test-util", "macros", "rt-multi-thread"] }

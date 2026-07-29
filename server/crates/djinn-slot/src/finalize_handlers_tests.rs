@@ -1,9 +1,271 @@
-use crate::finalize_handlers::{apply_ac_verdicts, handle_budget_park, process_finalize_payload};
+use crate::finalize_handlers::{
+    apply_ac_verdicts, handle_budget_park, handle_submit_work, process_finalize_payload,
+};
 use crate::finalize_types::AcVerdict;
 use crate::test_helpers;
-use djinn_db::TaskRepository;
+use djinn_control_plane::tools::evidence_plan::{
+    EvidenceMethod, EvidencePlanCapture, EvidencePlanCheckInput, EvidencePlanIdentity,
+    capture_evidence_plan,
+};
+use djinn_core::models::NeedsEvidenceClaim;
+use djinn_db::{
+    CreateTaskAttemptParams, EvidenceRepository, ProposalCreateInput, ProposalRepository,
+    SessionRepository, TaskAttemptRepository, TaskRepository,
+    repositories::session::CreateSessionParams,
+};
 
 const AUTHENTICATED_SESSION_ID: &str = "server-authenticated-session-123";
+
+struct StructuredHandoffFixture {
+    db: djinn_db::Database,
+    ctx: crate::host::SlotContext,
+    task_id: String,
+    session_id: String,
+    proposal_id: String,
+    plan_id: String,
+    attempt_id: String,
+}
+
+async fn structured_handoff_fixture() -> StructuredHandoffFixture {
+    let crate::test_helpers::ContextFixture {
+        db,
+        ctx,
+        project,
+        epic: _,
+        task,
+    } = crate::test_helpers::seed_context_fixture().await;
+    let session = SessionRepository::new(db.clone(), ctx.event_bus.clone())
+        .create(CreateSessionParams {
+            project_id: &project.id,
+            task_id: Some(&task.id),
+            model: "test-model",
+            agent_type: "worker",
+            metadata_json: None,
+            task_run_id: None,
+            pricing: None,
+            cost_basis: None,
+        })
+        .await
+        .expect("create authenticated spike session");
+    let proposals = ProposalRepository::new(db.clone(), ctx.event_bus.clone());
+    let proposal = proposals
+        .create(ProposalCreateInput {
+            title: "structured handoff",
+            body: "test proposal",
+            acceptance_criteria: None,
+            status: None,
+            body_format: None,
+        })
+        .await
+        .expect("create proposal");
+    proposals
+        .set_structured_needs_evidence_spike(
+            &proposal.id,
+            &task.id,
+            &NeedsEvidenceClaim {
+                question: "Does the handoff roll back?".to_owned(),
+                target_subsystem: "finalize handler".to_owned(),
+                spec_unknown_anchor: "atomic handoff".to_owned(),
+                insufficient_in_session_research: "requires durable writes".to_owned(),
+                expected_findings: "structured evidence".to_owned(),
+                round: 1,
+                against_revision_seq: 1,
+                created_by_task_id: task.id.clone(),
+            },
+        )
+        .await
+        .expect("link spike");
+    let identity = EvidencePlanIdentity {
+        spike_task_id: task.id.clone(),
+        session_id: session.id.clone(),
+        captured_commit_sha: "captured-commit".to_owned(),
+        worktree_fingerprint: "captured-worktree".to_owned(),
+    };
+    let plan_id = capture_evidence_plan(
+        &EvidenceRepository::new(db.clone()),
+        identity,
+        EvidencePlanCapture {
+            checks: vec![EvidencePlanCheckInput {
+                check_id: "code-check".to_owned(),
+                question: "Is the boundary atomic?".to_owned(),
+                method: EvidenceMethod::Code,
+            }],
+        },
+    )
+    .await
+    .expect("capture frozen plan");
+    let attempt_id = uuid::Uuid::now_v7().to_string();
+    TaskAttemptRepository::new(db.clone())
+        .create_or_get_pending(CreateTaskAttemptParams {
+            id: &attempt_id,
+            task_id: &task.id,
+            role: "worker",
+            dispatch_key: "structured-handoff-test",
+            session_id: Some(&session.id),
+            attempt_seq: None,
+            dispatch_owner_incarnation_id: None,
+            dispatch_group_id: None,
+        })
+        .await
+        .expect("create pending attempt");
+    StructuredHandoffFixture {
+        db,
+        ctx,
+        task_id: task.id,
+        session_id: session.id,
+        proposal_id: proposal.id,
+        plan_id,
+        attempt_id,
+    }
+}
+
+fn structured_handoff_payload(plan_id: &str) -> serde_json::Value {
+    serde_json::json!({
+        "commit_title": "record structured evidence",
+        "summary": "the handoff is atomic",
+        "files_changed": [],
+        "remaining_concerns": [],
+        "evidence_completion": {
+            "schema_version": 1,
+            "plan_id": plan_id,
+            "terminal_results": [{"check_id": "code-check", "method": "code", "terminal": true}],
+            "findings": [{
+                "check_id": "code-check",
+                "summary": "the transaction owns both inserts",
+                "anchor": {
+                    "kind": "code",
+                    "path": "server/crates/djinn-slot/src/finalize_handlers.rs",
+                    "start_line": 158,
+                    "end_line": 169,
+                    "captured_commit_sha": "captured-commit"
+                }
+            }]
+        }
+    })
+}
+
+async fn assert_structured_handoff_unchanged(fixture: &StructuredHandoffFixture) {
+    let projection_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM evidence_finalized_projections WHERE plan_id = $1",
+    )
+    .bind(&fixture.plan_id)
+    .fetch_one(fixture.db.pool())
+    .await
+    .expect("count finalized projections");
+    let debate_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM proposal_debate_trail WHERE proposal_id = $1 AND kind = 'evidence_findings'",
+    )
+    .bind(&fixture.proposal_id)
+    .fetch_one(fixture.db.pool())
+    .await
+    .expect("count compatibility debate rows");
+    assert_eq!(projection_count, 0, "no finalized projection may remain");
+    assert_eq!(debate_count, 0, "no compatibility debate row may remain");
+
+    let task_repo = TaskRepository::new(fixture.db.clone(), fixture.ctx.event_bus.clone());
+    assert!(
+        task_repo
+            .list_activity(&fixture.task_id)
+            .await
+            .expect("list task activity")
+            .iter()
+            .all(|entry| entry.event_type != "work_submitted"),
+        "failed handoffs must not log work_submitted"
+    );
+    let attempt = TaskAttemptRepository::new(fixture.db.clone())
+        .get(&fixture.attempt_id)
+        .await
+        .expect("load attempt")
+        .expect("pending attempt exists");
+    assert_eq!(attempt.outcome, "pending", "attempt must not advance");
+    let proposal = ProposalRepository::new(fixture.db.clone(), fixture.ctx.event_bus.clone())
+        .get(&fixture.proposal_id)
+        .await
+        .expect("load linked proposal")
+        .expect("linked proposal exists");
+    assert_eq!(
+        proposal.linked_spike_task_id.as_deref(),
+        Some(fixture.task_id.as_str())
+    );
+    assert!(
+        proposal.needs_evidence_claim.is_some(),
+        "lifecycle linkage remains"
+    );
+}
+
+#[tokio::test]
+async fn refinement_evidence_structured_handoff_rejects_malformed_or_identity_invalid_input() {
+    let fixture = structured_handoff_fixture().await;
+    let mut malformed = structured_handoff_payload(&fixture.plan_id);
+    malformed["evidence_completion"]["unexpected"] = serde_json::json!(true);
+    assert!(
+        !handle_submit_work(
+            &malformed,
+            &fixture.task_id,
+            &fixture.session_id,
+            &fixture.ctx
+        )
+        .await
+    );
+    assert_structured_handoff_unchanged(&fixture).await;
+
+    let valid = structured_handoff_payload(&fixture.plan_id);
+    assert!(
+        !handle_submit_work(
+            &valid,
+            &fixture.task_id,
+            "different-authenticated-session",
+            &fixture.ctx
+        )
+        .await
+    );
+    assert_structured_handoff_unchanged(&fixture).await;
+}
+
+#[tokio::test]
+async fn refinement_evidence_structured_handoff_rolls_back_projection_insertion_failure() {
+    let fixture = structured_handoff_fixture().await;
+    sqlx::query(
+        "ALTER TABLE evidence_finalized_projections ADD CONSTRAINT reject_structured_handoff_projection CHECK (false)",
+    )
+    .execute(fixture.db.pool())
+    .await
+    .expect("install deterministic projection insert fault");
+
+    assert!(
+        !handle_submit_work(
+            &structured_handoff_payload(&fixture.plan_id),
+            &fixture.task_id,
+            &fixture.session_id,
+            &fixture.ctx,
+        )
+        .await
+    );
+    assert_structured_handoff_unchanged(&fixture).await;
+}
+
+#[tokio::test]
+async fn refinement_evidence_structured_handoff_rolls_back_compatibility_debate_insertion_failure()
+{
+    let fixture = structured_handoff_fixture().await;
+    sqlx::query(
+        "ALTER TABLE proposal_debate_trail ADD CONSTRAINT reject_structured_handoff_debate CHECK (kind <> 'evidence_findings')",
+    )
+    .execute(fixture.db.pool())
+    .await
+    .expect("install deterministic compatibility debate insert fault");
+
+    assert!(
+        !handle_submit_work(
+            &structured_handoff_payload(&fixture.plan_id),
+            &fixture.task_id,
+            &fixture.session_id,
+            &fixture.ctx,
+        )
+        .await
+    );
+    assert_structured_handoff_unchanged(&fixture).await;
+}
 
 #[test]
 fn apply_ac_verdicts_sets_met_flags_from_payload() {
