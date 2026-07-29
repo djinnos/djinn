@@ -4,7 +4,11 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CHART_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+# DJINN_CHART_DIR lets a caller point the SAME contract at a mutated copy of the
+# chart. deploy/preflight/tests/render-gate.sh uses it to prove this script
+# actually rejects a values.yaml that restores the undispatchable default
+# pairing, rather than merely describing it.
+CHART_DIR="${DJINN_CHART_DIR:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 REPO_DIR="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
 FIXTURES="$SCRIPT_DIR/fixtures/cgroup-writable"
 CONFORMANCE="$REPO_DIR/deploy/node/k3s/djinn-cgroup-writable-conformance.sh"
@@ -32,6 +36,11 @@ helm template cgroup-writable-preparation "$CHART_DIR" --is-upgrade \
   --set cgroupWritable.runtimeClass.enabled=true >"$WORK/preparation.yaml"
 helm template cgroup-writable-activation "$CHART_DIR" --is-upgrade \
   --set cgroupWritable.runtimeClass.enabled=true,cgroupWritable.taskRuns.enabled=true >"$WORK/activation.yaml"
+# The fully armed production pairing: an armed launcher together with the
+# task-run RuntimeClass assignment it cannot dispatch without.
+helm template cgroup-writable-armed "$CHART_DIR" --is-upgrade \
+  --set cgroupLauncher.mode=required \
+  --set cgroupWritable.runtimeClass.enabled=true,cgroupWritable.taskRuns.enabled=true >"$WORK/armed.yaml"
 for invalid in \
   'cgroupWritable.runtimeClass.enabled=not-a-bool' \
   'cgroupWritable.taskRuns.enabled=not-a-bool'; do
@@ -49,7 +58,7 @@ for invalid in \
     exit 1
   fi
 done
-python3 - "$WORK/default.yaml" "$WORK/preparation.yaml" "$WORK/activation.yaml" "$FIXTURES" <<'PY'
+python3 - "$WORK/default.yaml" "$WORK/preparation.yaml" "$WORK/activation.yaml" "$WORK/armed.yaml" "$FIXTURES" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -62,8 +71,10 @@ def documents(text):
 def runtime_classes(text):
     return [doc for doc in documents(text) if '\nkind: RuntimeClass\n' in f'\n{doc}']
 
-base, preparation, activation = (Path(path).read_text(encoding='utf-8') for path in sys.argv[1:4])
-fixtures = Path(sys.argv[4])
+base, preparation, activation, armed = (
+    Path(path).read_text(encoding='utf-8') for path in sys.argv[1:5]
+)
+fixtures = Path(sys.argv[5])
 assert not runtime_classes(base), 'disabled defaults rendered RuntimeClass'
 assert 'runtimeClassName:' not in base, 'disabled defaults assigned RuntimeClass to a PodSpec'
 classes = runtime_classes(preparation)
@@ -79,15 +90,68 @@ assert 'runtimeClassName:' not in preparation, 'preparation must not assign Runt
 assert len(runtime_classes(activation)) == 1, 'activation must retain the RuntimeClass'
 
 
-def server_activation(rendered):
-    marker = 'name: DJINN_K8S_TASK_RUN_CGROUP_WRITABLE_ENABLED\n              value: '
-    assert marker in rendered, 'server render omitted task-run activation environment'
+def server_env(rendered, name):
+    marker = f'name: {name}\n              value: '
+    assert marker in rendered, f'server render omitted {name}'
     return rendered.split(marker, 1)[1].splitlines()[0].strip().strip('"')
+
+
+def server_activation(rendered):
+    return server_env(rendered, 'DJINN_K8S_TASK_RUN_CGROUP_WRITABLE_ENABLED')
 
 
 assert server_activation(base) == 'false', 'disabled render armed task-run activation'
 assert server_activation(preparation) == 'false', 'preparation render armed task-run activation'
 assert server_activation(activation) == 'true', 'activation render omitted task-run activation'
+
+
+def assert_dispatchable(rendered, label):
+    """Reject a render djinn-server would refuse to dispatch.
+
+    THIS FILE USED TO CERTIFY THE OPPOSITE. It asserted the default render sets
+    DJINN_K8S_TASK_RUN_CGROUP_WRITABLE_ENABLED=false and never asked which
+    cgroupLauncher.mode was rendered beside it. Stock values shipped `required`
+    with `false` — the exact pairing `validate_enforcement_render` refuses — so
+    the "correct default render" this test approved was one under which a fresh
+    install creates zero Jobs. That is what took production down on 2026-07-29,
+    with CI green throughout.
+
+    The authoritative gate is `deploy/preflight/render-gate.sh`, which runs the
+    real validator over a real render. This assertion is the hermetic, helm-only
+    half: it keeps the chart-contract lane, which needs no Rust toolchain, from
+    ever reintroducing the pairing.
+    """
+    mode = server_env(rendered, 'DJINN_K8S_CGROUP_LAUNCHER_MODE')
+    enabled = server_activation(rendered)
+    assert not (mode == 'required' and enabled == 'false'), (
+        f'{label}: undispatchable render — cgroupLauncher.mode={mode} paired with '
+        f'cgroupWritable.taskRuns.enabled={enabled} is refused at dispatch as '
+        f'RenderValidationError::MissingDelegatedRuntimeClass, so no Job is ever created'
+    )
+
+
+for label, rendered in (
+    ('chart defaults', base),
+    ('preparation', preparation),
+    ('activation', activation),
+    ('armed', armed),
+):
+    assert_dispatchable(rendered, label)
+
+# Non-vacuity: flip ONLY the launcher mode in the default render and the same
+# check must reject it. Without this, a check that never fires reads identically
+# to one that passes.
+armed_default = base.replace(
+    'name: DJINN_K8S_CGROUP_LAUNCHER_MODE\n              value: "disabled"',
+    'name: DJINN_K8S_CGROUP_LAUNCHER_MODE\n              value: "required"',
+)
+assert armed_default != base, 'default render no longer states the launcher mode this check reads'
+try:
+    assert_dispatchable(armed_default, 'synthetic armed default')
+except AssertionError:
+    pass
+else:
+    raise AssertionError('undispatchable required/false pairing was accepted')
 
 
 def fail(message, contract):
