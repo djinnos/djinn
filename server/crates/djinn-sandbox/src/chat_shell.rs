@@ -108,6 +108,11 @@ const OUTPUT_CAP_BYTES: usize = 1024 * 1024;
 /// Wall-clock timeout for the whole shell invocation.
 const WALL_CLOCK_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Evidence callers may choose a smaller bound, never a larger one.
+pub const EVIDENCE_MAX_TIMEOUT: Duration = Duration::from_secs(30);
+/// Evidence callers may choose a smaller capture limit, never a larger one.
+pub const EVIDENCE_MAX_OUTPUT_BYTES: usize = OUTPUT_CAP_BYTES;
+
 /// Truncation footer appended to stdout/stderr when the cap is hit.
 const TRUNCATION_FOOTER: &[u8] = b"\n[...truncated at 1 MiB...]\n";
 
@@ -214,105 +219,161 @@ impl ChatShellSandbox {
     pub async fn run(&self, req: ChatShellRequest) -> Result<ChatShellResult, ChatShellError> {
         validate_argv(&req.argv)?;
         let cwd = resolve_cwd(&self.clone_root, req.cwd.as_deref())?;
-
-        let namespaces_ok = probe_namespaces();
-
-        // File-content reads are granted over everything EXCEPT the task-run
-        // Pod's credential/token mounts (task jqvg). Computed here in the
-        // parent because it walks the filesystem with `read_dir`; `pre_exec`
-        // only opens the resulting paths.
-        let read_file_cover =
-            crate::confidential::read_file_cover(&crate::confidential::present_confidential_roots(
-                crate::confidential::CONFIDENTIAL_ROOTS,
-            ));
-
-        let mut cmd = Command::new(&req.argv[0]);
-        cmd.args(&req.argv[1..])
-            .current_dir(&cwd)
-            .stdin(if req.stdin.is_some() {
-                Stdio::piped()
-            } else {
-                Stdio::null()
-            })
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-
-        // Env scrub: clear everything, then set a minimal allowlist.
-        cmd.env_clear();
-        cmd.env("PATH", "/usr/bin:/bin:/usr/local/bin");
-        cmd.env("HOME", "/tmp");
-        cmd.env("LANG", "C.UTF-8");
-        cmd.env("LC_ALL", "C.UTF-8");
-        cmd.env("TERM", "dumb");
-        cmd.env("GIT_TERMINAL_PROMPT", "0");
-        cmd.env("GIT_ASKPASS", "/bin/true");
-
-        // pre_exec runs in the forked child pre-execve. It must only perform
-        // async-signal-safe work: direct syscalls, no allocator-heavy paths,
-        // no tracing, no anyhow. Failure maps to io::Error.
-        //
-        // SAFETY: see module-level doc comment. The tracing crate, the
-        // allocator, and Landlock ruleset construction are invoked via APIs
-        // that only make syscalls in this path — no user-space locks from
-        // the tokio runtime or the logging subsystem are held.
-        unsafe {
-            cmd.pre_exec(move || {
-                if namespaces_ok {
-                    enter_namespaces()?;
-                }
-                apply_landlock(&read_file_cover)?;
-                apply_seccomp()?;
-                apply_rlimits()?;
-                Ok(())
-            });
-        }
-
-        let started = SystemClock::new().now_instant();
-        let mut child = cmd.spawn().map_err(ChatShellError::SpawnFailed)?;
-
-        if let Some(stdin_bytes) = req.stdin
-            && let Some(mut stdin) = child.stdin.take()
-        {
-            use tokio::io::AsyncWriteExt;
-            // Best-effort: a read-only child might close stdin early.
-            let _ = stdin.write_all(&stdin_bytes).await;
-            let _ = stdin.shutdown().await;
-        }
-
-        let stdout = child.stdout.take().expect("stdout piped");
-        let stderr = child.stderr.take().expect("stderr piped");
-
-        let stdout_task = tokio::spawn(read_capped(stdout));
-        let stderr_task = tokio::spawn(read_capped(stderr));
-
-        let wait_fut = child.wait();
-        let wait_result = tokio::time::timeout(WALL_CLOCK_TIMEOUT, wait_fut).await;
-
-        let (exit_status, timed_out) = match wait_result {
-            Ok(Ok(status)) => (Some(status), false),
-            Ok(Err(e)) => return Err(ChatShellError::SpawnFailed(e)),
-            Err(_) => {
-                // Timeout: kill the child, then reap.
-                let _ = child.start_kill();
-                let _ = child.wait().await;
-                (None, true)
-            }
-        };
-
-        let (stdout_bytes, stdout_trunc) =
-            stdout_task.await.unwrap_or_else(|_| (Vec::new(), false));
-        let (stderr_bytes, stderr_trunc) =
-            stderr_task.await.unwrap_or_else(|_| (Vec::new(), false));
-
-        Ok(ChatShellResult {
-            exit_code: exit_status.and_then(|s| s.code()),
-            stdout: stdout_bytes,
-            stderr: stderr_bytes,
-            truncated: stdout_trunc || stderr_trunc,
-            timed_out,
-            elapsed: started.elapsed(),
-        })
+        run_isolated(
+            &req.argv[0],
+            &req.argv[1..],
+            &cwd,
+            req.stdin,
+            WALL_CLOCK_TIMEOUT,
+            OUTPUT_CAP_BYTES,
+            probe_namespaces(),
+        )
+        .await
     }
+}
+
+/// Closed, read-only executor for reviewed refinement-evidence commands.
+/// It has a typed request without stdin and fails closed without namespaces.
+pub struct EvidenceSandbox {
+    clone_root: PathBuf,
+}
+
+impl EvidenceSandbox {
+    pub fn new(clone_root: PathBuf) -> Self {
+        let _ = probe_namespaces();
+        Self { clone_root }
+    }
+
+    pub async fn run(&self, req: EvidenceRequest) -> Result<ChatShellResult, EvidenceError> {
+        let executable = validate_evidence_argv(&req.argv)?;
+        let cwd = resolve_cwd(&self.clone_root, req.cwd.as_deref()).map_err(EvidenceError::Core)?;
+        if req.timeout.is_zero() || req.timeout > EVIDENCE_MAX_TIMEOUT {
+            return Err(EvidenceError::TimeoutOutOfBounds);
+        }
+        if req.output_limit == 0 || req.output_limit > EVIDENCE_MAX_OUTPUT_BYTES {
+            return Err(EvidenceError::OutputLimitOutOfBounds);
+        }
+        require_evidence_namespaces(probe_namespaces())?;
+        run_isolated(
+            executable,
+            &req.argv[1..],
+            &cwd,
+            None,
+            req.timeout,
+            req.output_limit,
+            true,
+        )
+        .await
+        .map_err(EvidenceError::Core)
+    }
+}
+
+/// Evidence request deliberately has no stdin or executable-path field.
+pub struct EvidenceRequest {
+    pub argv: Vec<String>,
+    pub cwd: Option<PathBuf>,
+    pub timeout: Duration,
+    pub output_limit: usize,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum EvidenceError {
+    #[error("invalid evidence argv: {0}")]
+    InvalidArgv(String),
+    #[error("evidence namespace isolation is unavailable")]
+    NamespaceUnavailable,
+    #[error("evidence timeout exceeds server bound")]
+    TimeoutOutOfBounds,
+    #[error("evidence output limit exceeds server bound")]
+    OutputLimitOutOfBounds,
+    #[error(transparent)]
+    Core(#[from] ChatShellError),
+}
+
+/// Keep evidence namespace handling independently testable and fail closed.
+fn require_evidence_namespaces(available: bool) -> Result<(), EvidenceError> {
+    if available {
+        Ok(())
+    } else {
+        Err(EvidenceError::NamespaceUnavailable)
+    }
+}
+
+/// Shared Linux process/isolation core. Policy is selected before this boundary.
+async fn run_isolated(
+    program: &str,
+    args: &[String],
+    cwd: &Path,
+    stdin_bytes: Option<Vec<u8>>,
+    timeout: Duration,
+    output_cap: usize,
+    namespaces_ok: bool,
+) -> Result<ChatShellResult, ChatShellError> {
+    let read_file_cover = crate::confidential::read_file_cover(
+        &crate::confidential::present_confidential_roots(crate::confidential::CONFIDENTIAL_ROOTS),
+    );
+    let mut cmd = Command::new(program);
+    cmd.args(args)
+        .current_dir(cwd)
+        .stdin(if stdin_bytes.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    cmd.env_clear();
+    cmd.env("PATH", "/usr/bin:/bin:/usr/local/bin");
+    cmd.env("HOME", "/tmp");
+    cmd.env("LANG", "C.UTF-8");
+    cmd.env("LC_ALL", "C.UTF-8");
+    cmd.env("TERM", "dumb");
+    cmd.env("GIT_TERMINAL_PROMPT", "0");
+    cmd.env("GIT_ASKPASS", "/bin/true");
+    unsafe {
+        cmd.pre_exec(move || {
+            if namespaces_ok {
+                enter_namespaces()?;
+            }
+            apply_landlock(&read_file_cover)?;
+            apply_seccomp()?;
+            apply_rlimits()?;
+            Ok(())
+        });
+    }
+    let started = SystemClock::new().now_instant();
+    let mut child = cmd.spawn().map_err(ChatShellError::SpawnFailed)?;
+    if let Some(stdin_bytes) = stdin_bytes
+        && let Some(mut stdin) = child.stdin.take()
+    {
+        use tokio::io::AsyncWriteExt;
+        let _ = stdin.write_all(&stdin_bytes).await;
+        let _ = stdin.shutdown().await;
+    }
+    let stdout = child.stdout.take().expect("stdout piped");
+    let stderr = child.stderr.take().expect("stderr piped");
+    let stdout_task = tokio::spawn(read_capped(stdout, output_cap));
+    let stderr_task = tokio::spawn(read_capped(stderr, output_cap));
+    let wait_result = tokio::time::timeout(timeout, child.wait()).await;
+    let (exit_status, timed_out) = match wait_result {
+        Ok(Ok(status)) => (Some(status), false),
+        Ok(Err(e)) => return Err(ChatShellError::SpawnFailed(e)),
+        Err(_) => {
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+            (None, true)
+        }
+    };
+    let (stdout, stdout_trunc) = stdout_task.await.unwrap_or_else(|_| (Vec::new(), false));
+    let (stderr, stderr_trunc) = stderr_task.await.unwrap_or_else(|_| (Vec::new(), false));
+    Ok(ChatShellResult {
+        exit_code: exit_status.and_then(|s| s.code()),
+        stdout,
+        stderr,
+        truncated: stdout_trunc || stderr_trunc,
+        timed_out,
+        elapsed: started.elapsed(),
+    })
 }
 
 /// Shell invocation request.
@@ -386,6 +447,189 @@ fn validate_argv(argv: &[String]) -> Result<(), ChatShellError> {
         _ => {}
     }
     Ok(())
+}
+
+// ─── Closed evidence argv policy ──────────────────────────────────────────────
+
+/// Resolve only reviewed names to server-owned executable locations. These are
+/// deliberately not discovered through PATH and are never caller supplied.
+fn validate_evidence_argv(argv: &[String]) -> Result<&'static str, EvidenceError> {
+    let (name, executable) = match argv.first().map(String::as_str) {
+        Some("cat") => ("cat", "/usr/bin/cat"),
+        Some("ls") => ("ls", "/usr/bin/ls"),
+        Some("grep") => ("grep", "/usr/bin/grep"),
+        Some("head") => ("head", "/usr/bin/head"),
+        Some("tail") => ("tail", "/usr/bin/tail"),
+        Some("wc") => ("wc", "/usr/bin/wc"),
+        Some("sort") => ("sort", "/usr/bin/sort"),
+        Some("uniq") => ("uniq", "/usr/bin/uniq"),
+        Some("tr") => ("tr", "/usr/bin/tr"),
+        Some("jq") => ("jq", "/usr/bin/jq"),
+        Some("file") => ("file", "/usr/bin/file"),
+        Some("stat") => ("stat", "/usr/bin/stat"),
+        Some("du") => ("du", "/usr/bin/du"),
+        Some("tree") => ("tree", "/usr/bin/tree"),
+        Some(other) => {
+            return Err(EvidenceError::InvalidArgv(format!(
+                "unreviewed executable {other}"
+            )));
+        }
+        None => return Err(EvidenceError::InvalidArgv("empty argv".into())),
+    };
+    let args = &argv[1..];
+    for arg in args {
+        if arg.contains('\0')
+            || arg.contains('\n')
+            || arg.contains('\r')
+            || [">", "<", "|", ";", "&", "`", "$(", "${"]
+                .iter()
+                .any(|s| arg.contains(s))
+        {
+            return Err(EvidenceError::InvalidArgv(
+                "shell/redirection syntax".into(),
+            ));
+        }
+        if arg.starts_with('/') || arg.split('/').any(|part| part == "..") {
+            return Err(EvidenceError::InvalidArgv("path escapes clone".into()));
+        }
+        if matches!(
+            arg.as_str(),
+            "-o" | "--output"
+                | "--output-file"
+                | "--in-place"
+                | "--config"
+                | "--rcfile"
+                | "--plugin"
+                | "--pager"
+                | "--pre"
+                | "--exec"
+                | "--command"
+                | "--from-file"
+                | "--argfile"
+                | "--rawfile"
+                | "--slurpfile"
+        ) {
+            return Err(EvidenceError::InvalidArgv(format!(
+                "forbidden option {arg}"
+            )));
+        }
+    }
+    let valid = match name {
+        "cat" => options_only(args, &[]),
+        "ls" => options_only(
+            args,
+            &[
+                "-a",
+                "-l",
+                "-h",
+                "-1",
+                "-la",
+                "-al",
+                "--all",
+                "--long",
+                "--human-readable",
+            ],
+        ),
+        "grep" => grep_args(args),
+        "head" | "tail" => count_args(args),
+        "wc" => options_only(args, &["-l", "-w", "-c", "-m", "-L", "-lw", "-lc"]),
+        "sort" => options_only(
+            args,
+            &[
+                "-b", "-d", "-f", "-g", "-h", "-M", "-n", "-r", "-R", "-s", "-u",
+            ],
+        ),
+        "uniq" => options_with_values(args, &["-c", "-d", "-u", "-i"], &["-f", "-s", "-w"]),
+        "tr" => options_only(args, &["-c", "-C", "-d", "-s", "-t", "-cd", "-ds", "-sd"]),
+        "jq" => jq_args(args),
+        "file" => options_only(
+            args,
+            &["-b", "-i", "-L", "-z", "--brief", "--mime", "--mime-type"],
+        ),
+        "stat" => options_with_values(args, &["-L", "--dereference"], &["-c", "--format"]),
+        "du" => options_with_values(
+            args,
+            &["-a", "-h", "-s", "-x", "-sh", "-hs"],
+            &["--max-depth"],
+        ),
+        "tree" => options_with_values(args, &["-a", "-d", "-h"], &["-L"]),
+        _ => unreachable!(),
+    };
+    valid.map_err(EvidenceError::InvalidArgv)?;
+    Ok(executable)
+}
+
+fn options_only(args: &[String], allowed: &[&str]) -> Result<(), String> {
+    for arg in args {
+        if arg.starts_with('-') && arg != "--" && !allowed.contains(&arg.as_str()) {
+            return Err(format!("unknown option {arg}"));
+        }
+    }
+    Ok(())
+}
+fn options_with_values(args: &[String], flags: &[&str], values: &[&str]) -> Result<(), String> {
+    let mut need_value = false;
+    for arg in args {
+        if need_value {
+            need_value = false;
+            continue;
+        }
+        if values.contains(&arg.as_str()) {
+            need_value = true;
+        } else if arg.starts_with('-') && arg != "--" && !flags.contains(&arg.as_str()) {
+            return Err(format!("unknown option {arg}"));
+        }
+    }
+    if need_value {
+        Err("option missing value".into())
+    } else {
+        Ok(())
+    }
+}
+fn grep_args(args: &[String]) -> Result<(), String> {
+    options_only(
+        args,
+        &[
+            "-E", "-F", "-i", "-n", "-H", "-h", "-v", "-w", "-x", "-c", "-l",
+        ],
+    )?;
+    if args.iter().any(|arg| !arg.starts_with('-')) {
+        Ok(())
+    } else {
+        Err("grep requires pattern".into())
+    }
+}
+fn count_args(args: &[String]) -> Result<(), String> {
+    let mut need_count = false;
+    for arg in args {
+        if need_count {
+            if arg.parse::<u64>().is_err() {
+                return Err("count must be numeric".into());
+            }
+            need_count = false;
+        } else if arg == "-n" {
+            need_count = true;
+        } else if arg.starts_with("-n") && arg.len() > 2 {
+            if arg[2..].parse::<u64>().is_err() {
+                return Err("count must be numeric".into());
+            }
+        } else if arg.starts_with('-') && arg != "--" {
+            return Err(format!("unknown option {arg}"));
+        }
+    }
+    if need_count {
+        Err("-n missing count".into())
+    } else {
+        Ok(())
+    }
+}
+fn jq_args(args: &[String]) -> Result<(), String> {
+    options_only(args, &["-r", "-c", "-M", "-S", "-e", "-s"])?;
+    if args.iter().any(|arg| !arg.starts_with('-')) {
+        Ok(())
+    } else {
+        Err("jq requires filter".into())
+    }
 }
 
 fn validate_git(argv: &[String]) -> Result<(), ChatShellError> {
@@ -626,7 +870,7 @@ fn set_rlimit(resource: libc::__rlimit_resource_t, value: u64) -> io::Result<()>
 
 /// Read from a pipe into a capped buffer; keep draining past the cap so
 /// the child doesn't block on a full pipe. Returns `(bytes, truncated)`.
-async fn read_capped<R: AsyncReadExt + Unpin>(mut reader: R) -> (Vec<u8>, bool) {
+async fn read_capped<R: AsyncReadExt + Unpin>(mut reader: R, output_cap: usize) -> (Vec<u8>, bool) {
     let mut out = Vec::with_capacity(8192);
     let mut chunk = [0u8; 8192];
     let mut truncated = false;
@@ -634,8 +878,8 @@ async fn read_capped<R: AsyncReadExt + Unpin>(mut reader: R) -> (Vec<u8>, bool) 
         match reader.read(&mut chunk).await {
             Ok(0) => break,
             Ok(n) => {
-                if out.len() < OUTPUT_CAP_BYTES {
-                    let take = (OUTPUT_CAP_BYTES - out.len()).min(n);
+                if out.len() < output_cap {
+                    let take = (output_cap - out.len()).min(n);
                     out.extend_from_slice(&chunk[..take]);
                     if take < n {
                         truncated = true;
@@ -892,5 +1136,102 @@ mod tests {
         // intentionally a placeholder. The commit-6 adversarial tests (per
         // the plan's §Verification, `test_shell_sandbox_denies_network`
         // and friends) exercise the 30s path end-to-end.
+    }
+
+    #[test]
+    fn evidence_namespace_requirement_fails_closed() {
+        assert!(matches!(
+            require_evidence_namespaces(false),
+            Err(EvidenceError::NamespaceUnavailable)
+        ));
+        assert!(require_evidence_namespaces(true).is_ok());
+    }
+
+    #[test]
+    fn evidence_policy_maps_every_reviewed_utility_to_a_pinned_binary() {
+        let cases = [
+            ("cat", vec!["README.md"]),
+            ("ls", vec!["-la", "."]),
+            ("grep", vec!["-n", "needle", "README.md"]),
+            ("head", vec!["-n", "5", "README.md"]),
+            ("tail", vec!["-n5", "README.md"]),
+            ("wc", vec!["-l", "README.md"]),
+            ("sort", vec!["-r", "README.md"]),
+            ("uniq", vec!["-c", "README.md"]),
+            ("tr", vec!["-d", "x", "README.md"]),
+            ("jq", vec!["-r", ".name", "package.json"]),
+            ("file", vec!["-b", "README.md"]),
+            ("stat", vec!["-c", "%s", "README.md"]),
+            ("du", vec!["-sh", "."]),
+            ("tree", vec!["-L", "2", "."]),
+        ];
+        for (tool, args) in cases {
+            let argv = std::iter::once(tool)
+                .chain(args)
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            let binary = validate_evidence_argv(&argv).unwrap_or_else(|e| panic!("{tool}: {e}"));
+            assert!(binary.starts_with('/'), "{tool} did not resolve absolutely");
+        }
+    }
+
+    #[test]
+    fn evidence_policy_rejects_paths_and_spawn_output_surfaces() {
+        for argv in [
+            vec!["/bin/sh", "-c", "id"],
+            vec!["git", "status"],
+            vec!["cat", "/etc/passwd"],
+            vec!["grep", "needle", ">", "out"],
+            vec!["sort", "-o", "out", "in"],
+            vec!["jq", "--from-file", "script.jq", "input.json"],
+            vec!["tree", "../outside"],
+        ] {
+            let argv = argv.into_iter().map(str::to_owned).collect::<Vec<_>>();
+            assert!(validate_evidence_argv(&argv).is_err(), "accepted {argv:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn evidence_request_enforces_cwd_and_caller_bounds_before_spawn() {
+        let (_dir, chat) = tempclone();
+        let sandbox = EvidenceSandbox {
+            clone_root: chat.clone_root,
+        };
+        let request = |cwd, timeout, output_limit| EvidenceRequest {
+            argv: vec!["ls".into()],
+            cwd,
+            timeout,
+            output_limit,
+        };
+        assert!(matches!(
+            sandbox
+                .run(request(
+                    Some(PathBuf::from("/etc")),
+                    Duration::from_secs(1),
+                    1
+                ))
+                .await,
+            Err(EvidenceError::Core(ChatShellError::CwdOutsideClone))
+        ));
+        assert!(matches!(
+            sandbox
+                .run(request(
+                    None,
+                    EVIDENCE_MAX_TIMEOUT + Duration::from_secs(1),
+                    1
+                ))
+                .await,
+            Err(EvidenceError::TimeoutOutOfBounds)
+        ));
+        assert!(matches!(
+            sandbox
+                .run(request(
+                    None,
+                    Duration::from_secs(1),
+                    EVIDENCE_MAX_OUTPUT_BYTES + 1
+                ))
+                .await,
+            Err(EvidenceError::OutputLimitOutOfBounds)
+        ));
     }
 }
