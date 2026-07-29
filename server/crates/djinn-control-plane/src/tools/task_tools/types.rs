@@ -1070,6 +1070,41 @@ pub struct BoardHealthBuildCapacity {
     pub at_capacity: bool,
 }
 
+/// The build-admission JOURNAL authority — the **other** gate, and the one
+/// that wedged the board for five hours on 2026-07-29.
+///
+/// Not the same thing as [`BoardHealthBuildCapacity`]. That one is the lease
+/// FIFO and is the only authority that ever measures occupancy. This one is
+/// `admission_journal`, owned by the `BuildAdmissionController`, and it fails
+/// **closed on a readiness gate before occupancy is measured at all** — so
+/// `build_capacity` can report a completely healthy pool while every single
+/// dispatch is being denied with `cause: "controller_not_admitting"`.
+#[derive(Serialize, Deserialize, schemars::JsonSchema, Default)]
+pub struct BoardHealthBuildAdmission {
+    /// Always `admission_journal`, so the payload names its own authority.
+    #[serde(default)]
+    pub authority: String,
+    /// Rows currently in `create_unknown`, healthy in-flight creates included.
+    pub create_unknown_active: i64,
+    /// Of those, the ones untouched for longer than `settle_window_seconds`.
+    /// This is the population that cannot be explained as a normal
+    /// POST→session window, and the one that arms `CreateUnknownHealth`.
+    pub create_unknown_settled: i64,
+    /// The reclaim settle window in seconds (mirrors
+    /// `DEFAULT_RECLAIM_SETTLE_WINDOW`).
+    pub settle_window_seconds: i64,
+    /// Distinct `creator_server_epoch` values across the active population.
+    /// More than one means at least one row is definitely a predecessor's,
+    /// which is the population that actually arms the gate since #2746.
+    pub distinct_creator_epochs: i64,
+    /// `updated_at` of the oldest active `create_unknown` row.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub oldest_create_unknown_at: Option<String>,
+    /// Human-readable restatement of what these counts do and do not prove.
+    #[serde(default)]
+    pub note: String,
+}
+
 /// What the dispatch-gate verdict actually covers.
 ///
 /// This block exists because an empty `reasons` used to be indistinguishable
@@ -1127,8 +1162,16 @@ pub struct BoardHealthDispatchGate {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub build_lease: Option<BoardHealthBuildLease>,
     /// Pool-wide build capacity, when the lease ledger was readable.
+    ///
+    /// **Read this together with `build_admission`.** They are different
+    /// authorities; a healthy `build_capacity` is not evidence that a dispatch
+    /// is possible.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub build_capacity: Option<BoardHealthBuildCapacity>,
+    /// The build-admission journal authority, when `admission_journal` was
+    /// readable. This is the gate that denies before capacity is measured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build_admission: Option<BoardHealthBuildAdmission>,
     /// Final gate verdict — `blocked` when an evaluated gate fired,
     /// `unexplained` when none did.
     ///
@@ -1142,7 +1185,8 @@ pub struct BoardHealthDispatchGate {
     pub gate_verdict: Option<String>,
     /// Machine-readable gate reasons (`no_eligible_model`,
     /// `image_not_ready`, `build_lease_queued`, `build_lease_terminal`,
-    /// `build_lease_occupied_without_session`, `build_pool_at_capacity`).
+    /// `build_lease_occupied_without_session`, `build_pool_at_capacity`,
+    /// `admission_create_unknown_pending`).
     /// Always present in the serialized output (may be an empty array) so
     /// clients can rely on the key existing. Read it together with
     /// `coverage`: empty means "no EVALUATED gate fired".

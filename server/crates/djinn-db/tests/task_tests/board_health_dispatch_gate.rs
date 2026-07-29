@@ -231,6 +231,106 @@ async fn an_unarmed_authority_is_not_blamed_for_a_full_pool() {
     );
 }
 
+/// Insert an `admission_journal` row in `create_unknown`, backdated so it sits
+/// either inside or outside the reclaim settle window.
+async fn insert_create_unknown_row(db: &Database, work_id: &str, epoch: &str, age: &str) {
+    sqlx::query(
+        "INSERT INTO admission_journal \
+         (domain, work_id, generation, workload_kind, state, creator_server_epoch, \
+          object_name, created_at, updated_at) \
+         VALUES ('task_observation', $1, 0, 'task', 'create_unknown', $2, $3, \
+                 now() - $4::interval, now() - $4::interval)",
+    )
+    .bind(work_id)
+    .bind(epoch)
+    .bind(format!("task-run-{work_id}-0"))
+    .bind(age)
+    .execute(db.pool())
+    .await
+    .unwrap();
+}
+
+/// **The 2026-07-29 outage, end to end against Postgres.**
+///
+/// A single `admission_journal` row stuck in `create_unknown` armed
+/// `CreateUnknownHealth`, and `admit()` denied every dispatch on the board with
+/// `cause: "controller_not_admitting"` — before occupancy was ever measured.
+/// The lease authority was simultaneously idle, so this section reported
+/// `gate_verdict: "unexplained"`, `reasons: []`, and a healthy-looking
+/// `build_capacity`, once every thirty seconds, for five hours.
+///
+/// This test also exercises the real aggregate SQL (`make_interval`, the
+/// `FILTER` clause, `to_char`), which the in-module unit tests cannot.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_settled_create_unknown_row_is_named_as_a_denial_reason() {
+    let db = create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let repo = TaskRepository::new(db.clone(), event_bus_for(&tx));
+    let task = stranded_task(&db, &repo, "Wedged behind CreateUnknownHealth").await;
+
+    // The lease authority is armed and entirely healthy: 0 of 3 occupied.
+    arm_lease_authority(&db, 3).await;
+    // One journal row, settled well past the 300s reclaim window.
+    insert_create_unknown_row(&db, "dead-work-1", "predecessor-epoch", "30 minutes").await;
+
+    let gate = gate_for(&repo, &task.id).await;
+    assert_eq!(
+        gate["gate_verdict"], "blocked",
+        "the journal authority explains the strand: {gate:#}"
+    );
+    assert!(
+        gate["reasons"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("admission_create_unknown_pending")),
+        "expected admission_create_unknown_pending, got {:?}",
+        gate["reasons"]
+    );
+    assert_eq!(gate["build_admission"]["create_unknown_active"], 1);
+    assert_eq!(gate["build_admission"]["create_unknown_settled"], 1);
+    assert_eq!(gate["build_admission"]["distinct_creator_epochs"], 1);
+    assert!(
+        gate["build_admission"]["oldest_create_unknown_at"]
+            .as_str()
+            .is_some_and(|at| at.ends_with('Z')),
+        "the oldest row's timestamp must be reported so the latch can be aged"
+    );
+    // The misleading part of the original payload: capacity looked fine.
+    assert_eq!(gate["build_capacity"]["at_capacity"], false);
+    assert!(
+        gate["coverage"]["evaluated_gates"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("build_admission_create_unknown"))
+    );
+}
+
+/// **Neutralisation guard.** Every healthy task-run holds a `create_unknown`
+/// row between the pool accepting the create and the `("session","started")`
+/// callback. A row inside the settle window must be REPORTED but must never
+/// produce a reason, or ordinary dispatch would permanently blame itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_in_flight_create_unknown_row_is_reported_but_not_blamed() {
+    let db = create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let repo = TaskRepository::new(db.clone(), event_bus_for(&tx));
+    let task = stranded_task(&db, &repo, "Healthy in-flight neighbour").await;
+
+    arm_lease_authority(&db, 3).await;
+    // Ten seconds old: this is a normal POST→session window.
+    insert_create_unknown_row(&db, "live-work-1", "this-epoch", "10 seconds").await;
+
+    let gate = gate_for(&repo, &task.id).await;
+    assert_eq!(gate["gate_verdict"], "unexplained");
+    assert!(
+        gate["reasons"].as_array().unwrap().is_empty(),
+        "an in-flight create must not fabricate a denial reason: {:?}",
+        gate["reasons"]
+    );
+    assert_eq!(gate["build_admission"]["create_unknown_active"], 1);
+    assert_eq!(gate["build_admission"]["create_unknown_settled"], 0);
+}
+
 /// Defect 2. `bx1f` was reported stranded for 18.2 h although its blocker only
 /// merged eight hours earlier. It had never been dispatched (no open
 /// transition, no session), so the clock fell back to creation time and the

@@ -33,6 +33,31 @@
 //!    `build_lease_caps.cap` is the pool occupancy the dispatcher itself
 //!    consults. That is durable, joinable evidence and it is now surfaced.
 //!
+//! # Two authorities, and why both must be read
+//!
+//! A build dispatch passes through **two independent gates** that this section
+//! must not conflate:
+//!
+//! * the **lease authority** (`build_leases` + `build_lease_caps`, armed by
+//!   `admission_handoff.v1_mode`), which is the weighted FIFO and the only one
+//!   that ever measures occupancy; and
+//! * the **journal authority** (`admission_journal`), owned by the
+//!   `BuildAdmissionController`, which fails **closed on a readiness gate
+//!   before any capacity is measured at all**.
+//!
+//! On 2026-07-29 the board stopped dispatching for five hours on the second
+//! one: an `admission_journal` row stuck in `create_unknown` armed
+//! `CreateUnknownHealth`, and `admit()` returned
+//! `Denied { occupancy: None, cause: ControllerNotAdmitting }` for every task.
+//! This section read only the lease authority, so it reported a healthy pool
+//! (`occupancy: 1, cap: 3, at_capacity: false`) and `gate_verdict:
+//! "unexplained"` with `reasons: []` — once every thirty seconds, for five
+//! hours, about a board that was completely wedged. The only surface that
+//! named the cause was a `readiness=` field in a container log.
+//!
+//! The journal authority is now read here too. What it can and cannot prove is
+//! spelled out on [`AdmissionJournalSignal`].
+//!
 //! # What is NOT available
 //!
 //! `BuildAdmissionDecision::Denied` carries a [`DenialCause`] as of #2661, but
@@ -43,6 +68,11 @@
 //! the ledger state this module reads. Persisting the cause on the denial path
 //! is tracked as follow-up; until then this module reports ledger facts and
 //! declines to invent the rest.
+//!
+//! The controller's readiness is likewise **process-local** — an
+//! `AtomicBool`/`AtomicU64` set on the leader — so no query from here can read
+//! it. That is precisely why the durable `create_unknown` population is read
+//! instead: it is the one readiness input that leaves a row behind.
 //!
 //! [`DenialCause`]: https://github.com/djinnos/djinn/pull/2661
 
@@ -62,13 +92,26 @@ pub(super) const EVALUATED_GATES: &[&str] = &[
     "owner_credential",
     "model_health",
     "build_lease_admission",
+    "build_admission_create_unknown",
 ];
 
 /// Gates the real dispatcher applies that this section cannot see.
 ///
 /// Not exhaustive and deliberately not silent: every entry here is a way a task
-/// can be left queued while this section reports `unexplained`. Sourced from
-/// the per-task gate sequence in `djinn-coordinator`'s `dispatch/task_dispatch.rs`.
+/// can be left queued while this section reports `unexplained`.
+///
+/// The first group is the per-task gate sequence in `djinn-coordinator`'s
+/// `dispatch/task_dispatch.rs`. The second group is the
+/// `BuildAdmissionReadiness` ladder: **every** one of those states makes
+/// `admit()` return `ControllerNotAdmitting` for every task on the board,
+/// before occupancy is measured. That entire group was missing from this list
+/// until 2026-07-29, when the board spent five hours wedged behind one of
+/// them while this section reported `unexplained` — the hole was exactly where
+/// the outage was.
+///
+/// Only `create_unknown_health` left a durable row and so moved into
+/// [`EVALUATED_GATES`] (as `build_admission_create_unknown`). The rest are
+/// process-local atomics on the leader and stay honestly unevaluated.
 pub(super) const UNEVALUATED_GATES: &[&str] = &[
     "per_user_lane_concurrency_cap",
     "per_user_model_concurrency_cap",
@@ -82,6 +125,14 @@ pub(super) const UNEVALUATED_GATES: &[&str] = &[
     "creator_attribution",
     "github_app_credentials",
     "legacy_settings_migration_hold",
+    // BuildAdmissionReadiness, fail-closed priority order. See
+    // `djinn_coordinator::build_admission::BuildAdmissionReadiness`.
+    "build_admission_shutdown_draining",
+    "build_admission_journal_recovery_incomplete",
+    "build_admission_journal_unhealthy",
+    "build_admission_seeded_occupancy_above_cap",
+    "build_admission_inventory_pending",
+    "build_admission_topology_pending",
 ];
 
 /// Lease states that occupy build capacity. Mirrors the partial index in
@@ -115,16 +166,77 @@ pub(super) struct LeaseCapacity {
     pub enforcing: bool,
 }
 
+/// The reclaim settle window, mirrored from
+/// `djinn_coordinator::build_admission_inventory::DEFAULT_RECLAIM_SETTLE_WINDOW`.
+///
+/// `djinn-db` sits below `djinn-coordinator` and cannot import the constant, so
+/// it is restated with the reference. It is not a tuning knob here: it is the
+/// threshold that separates a `create_unknown` row that is the ordinary
+/// intermediate state of a healthy in-flight dispatch (POST accepted, session
+/// callback not yet delivered) from one that reconciliation itself would
+/// consider settled.
+const RECLAIM_SETTLE_WINDOW_SECONDS: i64 = 300;
+
+/// The durable half of the build-admission controller's readiness.
+///
+/// # What this proves, and what it does not
+///
+/// A row in `admission_journal.state = 'create_unknown'` means a create was
+/// POSTed and its object UID was never learned. It occupies journal capacity
+/// for as long as it lasts, and the controller's `create_unknown_pending` gate
+/// — which returns `BuildAdmissionReadiness::CreateUnknownHealth` and denies
+/// **every** enforced admission before occupancy is measured — is seeded by
+/// counting exactly this population.
+///
+/// It does **not** prove the gate is currently armed. Three reasons, all of
+/// them stated in the payload rather than papered over:
+///
+/// 1. The controller's mode (`buildAdmission.mode`) is process configuration,
+///    not a durable row. Under `off`/`observe` the readiness gate denies
+///    nothing.
+/// 2. Since #2746 only rows belonging to a **predecessor** epoch arm the gate;
+///    this section cannot know the live process's `creator_server_epoch`, so
+///    `distinct_creator_epochs` is reported and the inference is left to the
+///    reader.
+/// 3. The gate itself is an in-memory `AtomicU64` on the leader.
+///
+/// So the reason this signal contributes is scoped to what the rows do prove:
+/// a `create_unknown` row untouched for longer than the reclaim settle window
+/// is, by construction, no longer a healthy POST→session window.
+#[derive(Clone, Debug, Default)]
+pub(super) struct AdmissionJournalSignal {
+    /// All rows currently in `create_unknown`, healthy in-flight ones included.
+    pub create_unknown_active: i64,
+    /// Of those, the ones untouched for longer than the reclaim settle window.
+    /// This is the population that cannot be explained as normal dispatch.
+    pub create_unknown_settled: i64,
+    /// Distinct `creator_server_epoch` values across the active population.
+    /// More than one means at least one row is definitely a predecessor's.
+    pub distinct_creator_epochs: i64,
+    /// `updated_at` of the oldest active `create_unknown` row.
+    pub oldest_create_unknown_at: Option<String>,
+}
+
+/// What this section managed to learn about the `admission_journal` authority.
+#[derive(Clone, Debug)]
+pub(super) enum JournalSignal {
+    Observed(AdmissionJournalSignal),
+    Unobservable { detail: &'static str },
+}
+
 /// What this section managed to learn about the build-lease ledger.
 ///
 /// `Unobservable` is a first-class outcome on purpose. Falling back to "no
 /// rows" on a failed read is exactly the mistake this module exists to undo: it
-/// would let an unread ledger masquerade as a clean one.
+/// would let an unread ledger masquerade as a clean one. The journal authority
+/// is carried in the same value but fails independently: an unreadable
+/// `admission_journal` must not silence the lease evidence, or vice versa.
 #[derive(Clone, Debug)]
 pub(super) enum LeaseLedger {
     Observed {
         by_task: HashMap<String, DispatchLeaseRow>,
         capacity: LeaseCapacity,
+        journal: JournalSignal,
     },
     Unobservable {
         detail: &'static str,
@@ -145,13 +257,24 @@ pub(super) struct LeaseGateOutcome {
     /// Why the gate could not be evaluated, surfaced in `coverage` so an
     /// unreadable ledger is visible rather than merely absent.
     pub unevaluated_detail: Option<&'static str>,
+    /// The `admission_journal` readiness evidence as JSON, or `null` when that
+    /// authority could not be read.
+    pub build_admission: serde_json::Value,
+    /// False when `admission_journal` could not be read, which moves
+    /// `build_admission_create_unknown` from evaluated to unevaluated.
+    pub journal_evaluated: bool,
+    /// Why the journal gate could not be evaluated.
+    pub journal_unevaluated_detail: Option<&'static str>,
 }
 
-/// Load the `task_dispatch` lease ledger and the pool capacity in two queries.
+/// Load the `task_dispatch` lease ledger, the pool capacity, and the
+/// `admission_journal` readiness evidence.
 ///
-/// Both are runtime `sqlx::query` calls (no offline-cache entries), matching
-/// the rest of the board-health sections. Either failing yields
-/// [`LeaseLedger::Unobservable`] — never a silently empty ledger.
+/// All are runtime `sqlx::query` calls (no offline-cache entries), matching the
+/// rest of the board-health sections. Either lease query failing yields
+/// [`LeaseLedger::Unobservable`] — never a silently empty ledger. The journal
+/// query failing degrades only the journal gate, because the two are separate
+/// authorities and an outage in one is not evidence about the other.
 pub(super) async fn load_lease_ledger(pool: &sqlx::PgPool) -> LeaseLedger {
     // Newest attempt per task. `consumer_id` is `{task_id}:{generation}` (see
     // `djinn-coordinator`'s `build_lease::identity`), and task ids never
@@ -226,7 +349,103 @@ pub(super) async fn load_lease_ledger(pool: &sqlx::PgPool) -> LeaseLedger {
         })
         .collect();
 
-    LeaseLedger::Observed { by_task, capacity }
+    LeaseLedger::Observed {
+        by_task,
+        capacity,
+        journal: load_journal_signal(pool).await,
+    }
+}
+
+/// Count the durable `create_unknown` population that seeds the controller's
+/// `CreateUnknownHealth` readiness gate.
+///
+/// One aggregate over `admission_journal` (migration 121). No migration and no
+/// new write path: `create_unknown` is already a state the lifecycle writes,
+/// and `admission_journal_occupancy_idx` already covers `(domain, state)` for
+/// the occupying states.
+async fn load_journal_signal(pool: &sqlx::PgPool) -> JournalSignal {
+    // `state = 'create_unknown'` is by construction active: `terminal` is a
+    // distinct state and the schema's terminal check enforces the split.
+    let sql = r#"SELECT
+             COUNT(*)::BIGINT AS create_unknown_active,
+             COUNT(*) FILTER (
+                 WHERE updated_at < now() - make_interval(secs => $1)
+             )::BIGINT AS create_unknown_settled,
+             COUNT(DISTINCT creator_server_epoch)::BIGINT AS distinct_creator_epochs,
+             to_char(MIN(updated_at) AT TIME ZONE 'utc',
+                     'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS oldest_create_unknown_at
+           FROM admission_journal
+          WHERE state = 'create_unknown'"#;
+
+    let Ok(row) = sqlx::query(sql)
+        .bind(RECLAIM_SETTLE_WINDOW_SECONDS as f64)
+        .fetch_one(pool)
+        .await
+    else {
+        return JournalSignal::Unobservable {
+            detail: "admission_journal could not be read",
+        };
+    };
+
+    JournalSignal::Observed(AdmissionJournalSignal {
+        create_unknown_active: row.try_get("create_unknown_active").unwrap_or(0),
+        create_unknown_settled: row.try_get("create_unknown_settled").unwrap_or(0),
+        distinct_creator_epochs: row.try_get("distinct_creator_epochs").unwrap_or(0),
+        oldest_create_unknown_at: row.try_get("oldest_create_unknown_at").ok().flatten(),
+    })
+}
+
+/// Apply the `admission_journal` readiness gate.
+///
+/// The reason fires on `create_unknown_settled`, not on `create_unknown_active`.
+/// That distinction is the whole design: `finish_task_run_build_admission`
+/// writes `create_unknown` for **every** task-run the instant the slot pool
+/// accepts the create, and it stays that way until the `("session","started")`
+/// callback supplies the object UID. Firing on the active count would emit a
+/// denial reason during every healthy dispatch — the precise class of
+/// fabricated reason this module exists to remove. A row untouched for longer
+/// than the reclaim settle window cannot be that healthy window.
+fn journal_gate(
+    journal: &JournalSignal,
+) -> (
+    serde_json::Value,
+    Vec<&'static str>,
+    bool,
+    Option<&'static str>,
+) {
+    let signal = match journal {
+        JournalSignal::Unobservable { detail } => {
+            return (serde_json::Value::Null, Vec::new(), false, Some(detail));
+        }
+        JournalSignal::Observed(signal) => signal,
+    };
+
+    let settled = signal.create_unknown_settled > 0;
+    let payload = serde_json::json!({
+        "authority": "admission_journal",
+        "create_unknown_active":    signal.create_unknown_active,
+        "create_unknown_settled":   signal.create_unknown_settled,
+        "settle_window_seconds":    RECLAIM_SETTLE_WINDOW_SECONDS,
+        "distinct_creator_epochs":  signal.distinct_creator_epochs,
+        "oldest_create_unknown_at": signal.oldest_create_unknown_at,
+        "note": "The build-admission controller seeds its `CreateUnknownHealth` \
+                 readiness gate from this population, and that gate denies EVERY \
+                 enforced admission with `controller_not_admitting` BEFORE occupancy \
+                 is measured — so `build_capacity` can look entirely healthy while \
+                 nothing dispatches. A settled row (older than \
+                 `settle_window_seconds`) is no longer explainable as a healthy \
+                 POST→session window. Whether the gate is ARMED additionally \
+                 depends on the controller's mode and on the row belonging to a \
+                 predecessor epoch, neither of which is durable; see \
+                 `/debug/dispatch-state` for the live readiness.",
+    });
+
+    let reasons = if settled {
+        vec!["admission_create_unknown_pending"]
+    } else {
+        Vec::new()
+    };
+    (payload, reasons, true, None)
 }
 
 /// Apply the build-lease gate to one task.
@@ -234,7 +453,7 @@ pub(super) async fn load_lease_ledger(pool: &sqlx::PgPool) -> LeaseLedger {
 /// Every reason produced here is a statement about a durable row, never an
 /// inference about what the dispatcher "probably" did.
 pub(super) fn lease_gate(ledger: &LeaseLedger, task_id: &str) -> LeaseGateOutcome {
-    let (by_task, capacity) = match ledger {
+    let (by_task, capacity, journal) = match ledger {
         LeaseLedger::Unobservable { detail } => {
             return LeaseGateOutcome {
                 build_lease: serde_json::Value::Null,
@@ -242,10 +461,24 @@ pub(super) fn lease_gate(ledger: &LeaseLedger, task_id: &str) -> LeaseGateOutcom
                 reasons: Vec::new(),
                 evaluated: false,
                 unevaluated_detail: Some(detail),
+                build_admission: serde_json::Value::Null,
+                journal_evaluated: false,
+                journal_unevaluated_detail: Some(
+                    "build_leases could not be read; the journal authority was not consulted",
+                ),
             };
         }
-        LeaseLedger::Observed { by_task, capacity } => (by_task, capacity),
+        LeaseLedger::Observed {
+            by_task,
+            capacity,
+            journal,
+        } => (by_task, capacity, journal),
     };
+
+    // The journal authority is board-wide, not per-task: `CreateUnknownHealth`
+    // denies EVERY admission, which is exactly what made it invisible per-task.
+    let (build_admission, journal_reasons, journal_evaluated, journal_unevaluated_detail) =
+        journal_gate(journal);
 
     let at_capacity = capacity.cap > 0 && capacity.occupancy >= capacity.cap;
     let build_capacity = serde_json::json!({
@@ -278,13 +511,20 @@ pub(super) fn lease_gate(ledger: &LeaseLedger, task_id: &str) -> LeaseGateOutcom
         return LeaseGateOutcome {
             build_lease,
             build_capacity,
-            reasons: Vec::new(),
+            // The journal authority is independent of the lease authority's
+            // arming: it is what denied every dispatch on 2026-07-29 while the
+            // lease side looked idle. Dropping its reasons here would restore
+            // exactly the blind spot.
+            reasons: journal_reasons,
             evaluated: true,
             unevaluated_detail: None,
+            build_admission,
+            journal_evaluated,
+            journal_unevaluated_detail,
         };
     }
 
-    let mut reasons: Vec<&'static str> = Vec::new();
+    let mut reasons: Vec<&'static str> = journal_reasons;
     match lease {
         // The task holds a FIFO position: layer-1 admission denied it and the
         // ledger says why — the pool was full when it asked.
@@ -313,6 +553,9 @@ pub(super) fn lease_gate(ledger: &LeaseLedger, task_id: &str) -> LeaseGateOutcom
         reasons,
         evaluated: true,
         unevaluated_detail: None,
+        build_admission,
+        journal_evaluated,
+        journal_unevaluated_detail,
     }
 }
 
@@ -452,12 +695,16 @@ pub(super) fn dispatch_gate_json(
         .iter()
         .copied()
         .filter(|gate| lease.evaluated || *gate != "build_lease_admission")
+        .filter(|gate| lease.journal_evaluated || *gate != "build_admission_create_unknown")
         .collect();
     evaluated_gates.sort_unstable();
 
     let mut unevaluated_gates: Vec<&'static str> = UNEVALUATED_GATES.to_vec();
     if !lease.evaluated {
         unevaluated_gates.push("build_lease_admission");
+    }
+    if !lease.journal_evaluated {
+        unevaluated_gates.push("build_admission_create_unknown");
     }
     unevaluated_gates.sort_unstable();
 
@@ -478,6 +725,7 @@ pub(super) fn dispatch_gate_json(
         "credential_available": credential_available,
         "build_lease":          lease.build_lease,
         "build_capacity":       lease.build_capacity,
+        "build_admission":      lease.build_admission,
         "gate_verdict":         gate_verdict,
         "reasons":              reasons,
         "coverage": serde_json::json!({
@@ -485,11 +733,16 @@ pub(super) fn dispatch_gate_json(
             "evaluated_gates":   evaluated_gates,
             "unevaluated_gates": unevaluated_gates,
             "build_lease_unevaluated_detail": lease.unevaluated_detail,
+            "build_admission_unevaluated_detail": lease.journal_unevaluated_detail,
             "note": "`reasons` covers only `evaluated_gates`. An empty `reasons` \
                      yields `unexplained`, which means no evaluated gate fired — \
                      NOT that the dispatcher had no reason. The dispatcher's own \
                      DenialCause (#2661) is logged, never persisted, so it cannot \
-                     be joined here.",
+                     be joined here. Two authorities gate a dispatch: the LEASE \
+                     ledger (`build_capacity`) and the build-admission JOURNAL \
+                     (`build_admission`). The journal one denies before occupancy \
+                     is ever measured, so a healthy `build_capacity` is not \
+                     evidence that dispatch is possible.",
         }),
         // Retained for backward compatibility with the initial board_health
         // contract.
@@ -524,13 +777,35 @@ mod tests {
     }
 
     fn observed(rows: Vec<(&str, DispatchLeaseRow)>, capacity: LeaseCapacity) -> LeaseLedger {
+        observed_with_journal(
+            rows,
+            capacity,
+            JournalSignal::Observed(AdmissionJournalSignal::default()),
+        )
+    }
+
+    fn observed_with_journal(
+        rows: Vec<(&str, DispatchLeaseRow)>,
+        capacity: LeaseCapacity,
+        journal: JournalSignal,
+    ) -> LeaseLedger {
         LeaseLedger::Observed {
             by_task: rows
                 .into_iter()
                 .map(|(id, row)| (id.to_owned(), row))
                 .collect(),
             capacity,
+            journal,
         }
+    }
+
+    fn journal(active: i64, settled: i64) -> JournalSignal {
+        JournalSignal::Observed(AdmissionJournalSignal {
+            create_unknown_active: active,
+            create_unknown_settled: settled,
+            distinct_creator_epochs: if active > 0 { 1 } else { 0 },
+            oldest_create_unknown_at: (active > 0).then(|| "2026-07-29T06:22:57.000Z".to_owned()),
+        })
     }
 
     fn gate(ledger: &LeaseLedger, task_id: &str) -> serde_json::Value {
@@ -667,6 +942,126 @@ mod tests {
         assert!(reasons.contains(&serde_json::json!("no_eligible_model")));
         assert!(reasons.contains(&serde_json::json!("build_lease_queued")));
         assert_eq!(gate["gate_verdict"], VERDICT_BLOCKED);
+    }
+
+    // ── Build-admission journal authority ───────────────────────────────────
+
+    /// **The 2026-07-29 outage, reproduced.** A settled `create_unknown` row
+    /// held `CreateUnknownHealth` and every dispatch was denied with
+    /// `controller_not_admitting`, while the lease authority reported
+    /// `occupancy: 1, cap: 3, at_capacity: false`. This section reported
+    /// `unexplained` with `reasons: []` for five hours.
+    ///
+    /// Before this gate existed the assertions below were unreachable: the
+    /// only surface naming the cause was a `readiness=` field in a container
+    /// log on the node.
+    #[test]
+    fn a_settled_create_unknown_row_names_the_outage() {
+        let ledger = observed_with_journal(Vec::new(), capacity(1, 3, true), journal(1, 1));
+        let gate = gate(&ledger, "task-1");
+        assert_eq!(gate["gate_verdict"], VERDICT_BLOCKED);
+        assert!(
+            gate["reasons"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("admission_create_unknown_pending")),
+            "reasons must name the journal authority: {:?}",
+            gate["reasons"]
+        );
+        // The lease authority is simultaneously healthy. Both facts are true;
+        // only one of them explains the strand.
+        assert_eq!(gate["build_capacity"]["at_capacity"], false);
+        assert_eq!(gate["build_admission"]["create_unknown_settled"], 1);
+        assert_eq!(gate["build_admission"]["authority"], "admission_journal");
+        assert_eq!(
+            gate["build_admission"]["settle_window_seconds"],
+            RECLAIM_SETTLE_WINDOW_SECONDS
+        );
+    }
+
+    /// **Neutralisation guard.** Every healthy task-run passes through
+    /// `create_unknown` between the pool accepting the create and the
+    /// `("session","started")` callback. Firing on the ACTIVE count would emit
+    /// a denial reason during ordinary dispatch — the fabricated-reason bug
+    /// this module exists to remove. Only the settled count may fire.
+    #[test]
+    fn an_in_flight_create_unknown_is_not_a_reason() {
+        let ledger = observed_with_journal(Vec::new(), capacity(1, 3, true), journal(3, 0));
+        let gate = gate(&ledger, "task-1");
+        assert_eq!(gate["gate_verdict"], VERDICT_UNEXPLAINED);
+        assert!(gate["reasons"].as_array().unwrap().is_empty());
+        // ...but the population is still REPORTED, so an operator can see it.
+        assert_eq!(gate["build_admission"]["create_unknown_active"], 3);
+        assert_eq!(gate["build_admission"]["create_unknown_settled"], 0);
+    }
+
+    /// The journal authority denies independently of the lease authority's
+    /// arming. A board with `v1_mode` off or in shadow was still wedged on
+    /// 2026-07-29, so the reason must survive the not-enforcing early return.
+    #[test]
+    fn journal_reason_survives_a_non_enforcing_lease_authority() {
+        let ledger = observed_with_journal(Vec::new(), capacity(0, 3, false), journal(1, 1));
+        let gate = gate(&ledger, "task-1");
+        assert_eq!(gate["build_capacity"]["enforcing"], false);
+        assert_eq!(gate["gate_verdict"], VERDICT_BLOCKED);
+        assert!(
+            gate["reasons"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("admission_create_unknown_pending"))
+        );
+    }
+
+    /// An unreadable `admission_journal` must be declared, not silently read
+    /// as a clean one — and it must not take the lease gate down with it.
+    #[test]
+    fn unobservable_journal_is_declared_unevaluated() {
+        let ledger = observed_with_journal(
+            Vec::new(),
+            capacity(0, 3, true),
+            JournalSignal::Unobservable { detail: "boom" },
+        );
+        let gate = gate(&ledger, "task-1");
+        assert!(gate["build_admission"].is_null());
+        let evaluated = gate["coverage"]["evaluated_gates"].as_array().unwrap();
+        assert!(!evaluated.contains(&serde_json::json!("build_admission_create_unknown")));
+        assert!(evaluated.contains(&serde_json::json!("build_lease_admission")));
+        let unevaluated = gate["coverage"]["unevaluated_gates"].as_array().unwrap();
+        assert!(unevaluated.contains(&serde_json::json!("build_admission_create_unknown")));
+        assert_eq!(
+            gate["coverage"]["build_admission_unevaluated_detail"],
+            "boom"
+        );
+    }
+
+    /// **The coverage hole this change closes.** `UNEVALUATED_GATES` named
+    /// twelve dispatcher gates and zero controller-readiness gates, so an
+    /// operator reading `unexplained` had no way to learn that an entire
+    /// fail-closed ladder existed above them. Every `BuildAdmissionReadiness`
+    /// variant must now be accounted for: `create_unknown_health` as an
+    /// evaluated gate, the rest as declared-unevaluated ones.
+    #[test]
+    fn every_readiness_state_is_accounted_for_in_coverage() {
+        let ledger = observed(Vec::new(), capacity(0, 3, true));
+        let gate = gate(&ledger, "task-1");
+        let evaluated = gate["coverage"]["evaluated_gates"].as_array().unwrap();
+        let unevaluated = gate["coverage"]["unevaluated_gates"].as_array().unwrap();
+
+        assert!(evaluated.contains(&serde_json::json!("build_admission_create_unknown")));
+        // `Healthy` is the absence of a gate, so it has no entry.
+        for state in [
+            "build_admission_shutdown_draining",
+            "build_admission_journal_recovery_incomplete",
+            "build_admission_journal_unhealthy",
+            "build_admission_seeded_occupancy_above_cap",
+            "build_admission_inventory_pending",
+            "build_admission_topology_pending",
+        ] {
+            assert!(
+                unevaluated.contains(&serde_json::json!(state)),
+                "readiness state `{state}` is not declared in coverage"
+            );
+        }
     }
 
     // ── Strand clock ────────────────────────────────────────────────────────
