@@ -469,6 +469,7 @@ mod tests {
             provisional_admissions: std::collections::HashMap::new(),
             dispatch_cooldowns: std::collections::HashMap::new(),
             dispatch_failure_streak: std::collections::HashMap::new(),
+            breaker_open_backoff_streak: std::collections::HashMap::new(),
             background_work_tracker: BackgroundWorkTracker::default(),
             stranded_ready_source: None,
             closed_parent_open_children_source: None,

@@ -459,6 +459,7 @@ fn coordinator_actor_for_tests(
         provisional_admissions: HashMap::new(),
         dispatch_cooldowns: HashMap::new(),
         dispatch_failure_streak: HashMap::new(),
+        breaker_open_backoff_streak: HashMap::new(),
         background_work_tracker: BackgroundWorkTracker::default(),
         auto_merge_tracker: AutoMergeTracker::default(),
         consolidation_runner: Arc::new(consolidation::DbConsolidationRunner::new(db.clone())),
@@ -1403,6 +1404,7 @@ async fn planner_intervention_markers(
     .collect()
 }
 
+mod breaker_open_exhaustion;
 mod deploy_interruptions_environmental;
 mod dispatch_flow;
 mod doctor_proposal_spec_integrity_sweep_e2e;
