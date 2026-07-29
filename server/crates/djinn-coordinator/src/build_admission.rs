@@ -5,10 +5,10 @@
 //! workload classification before dispatch and translates controller facts into
 //! the data-only graph-warmer protocol.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::{
     Arc,
-    atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicI64, AtomicU8, AtomicU64, Ordering},
 };
 use std::time::Instant;
 
@@ -408,6 +408,98 @@ impl BuildAdmissionReadiness {
     pub fn is_healthy(self) -> bool {
         matches!(self, Self::Healthy)
     }
+
+    /// Stable snake_case label. Bounded and closed, so it is safe as a metric
+    /// label, a doctor-finding field, and an operator-facing string all at
+    /// once — an operator reading a finding sees the SAME token the code
+    /// branches on.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::JournalRecoveryIncomplete => "journal_recovery_incomplete",
+            Self::JournalUnhealthy => "journal_unhealthy",
+            Self::CreateUnknownHealth => "create_unknown_health",
+            Self::SeededOccupancyAboveCap => "seeded_occupancy_above_cap",
+            Self::InventoryPending => "inventory_pending",
+            Self::TopologyPending => "topology_pending",
+            Self::ShutdownDraining => "shutdown_draining",
+            Self::Healthy => "healthy",
+        }
+    }
+
+    const fn as_u8(self) -> u8 {
+        match self {
+            Self::JournalRecoveryIncomplete => 0,
+            Self::JournalUnhealthy => 1,
+            Self::CreateUnknownHealth => 2,
+            Self::SeededOccupancyAboveCap => 3,
+            Self::InventoryPending => 4,
+            Self::TopologyPending => 5,
+            Self::ShutdownDraining => 6,
+            Self::Healthy => 7,
+        }
+    }
+}
+
+/// Snake_case label for an admission domain, stable enough to appear in an
+/// operator-facing identity string.
+const fn domain_label(domain: AdmissionDomain) -> &'static str {
+    match domain {
+        AdmissionDomain::TaskObservation => "task_observation",
+        AdmissionDomain::WarmBuild => "warm_build",
+        AdmissionDomain::InvocationBuild => "invocation_build",
+    }
+}
+
+/// The operator-facing identity of one admission-journal row.
+///
+/// Mirrors the `identity=dispatch:{task_id}:{generation}` convention the
+/// sibling `build_lease_reclaim` path already logs, extended with the object
+/// name so the row can be looked up in Kubernetes without a database at all.
+#[must_use]
+pub fn blocking_identity(key: &AdmissionJournalKey, object_name: &str) -> String {
+    format!(
+        "{}:{}:{}@{}",
+        domain_label(key.domain),
+        key.work_id,
+        key.generation,
+        object_name
+    )
+}
+
+/// Sentinel for "no readiness has been reported yet", distinct from every
+/// [`BuildAdmissionReadiness`] discriminant so the very first report always
+/// fires an edge.
+const READINESS_NEVER_REPORTED: u8 = u8::MAX;
+
+/// How many blocking row identities a single report or snapshot names before it
+/// switches to a count. Bounded for the same reason `named_reclaim_failures`
+/// is: a log line and a doctor finding must stay a fixed size no matter how
+/// large the wedge is.
+pub const MAX_NAMED_BLOCKING_IDENTITIES: usize = 16;
+
+/// Operator-facing description of why build admission is (not) open.
+///
+/// Assembled from process-local state only, and cheap enough to build on the
+/// synchronous `DoctorCheck::run` seam: readiness is derived from atomics and
+/// the identity set is a bounded in-memory set.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BuildAdmissionHealthReport {
+    /// The current bounded readiness reason.
+    pub readiness: BuildAdmissionReadiness,
+    /// The configured/effective admission mode.
+    pub mode: BuildAdmissionMode,
+    /// Whether the shutdown-draining latch is set.
+    pub draining: bool,
+    /// How many recovered rows still occupy as CreateUnknown.
+    pub create_unknown_pending: u64,
+    /// Bounded identities of those rows — WHICH rows are wedging the board.
+    pub blocking_identities: Vec<String>,
+    /// Identities elided by [`MAX_NAMED_BLOCKING_IDENTITIES`].
+    pub blocking_identities_elided: usize,
+    /// Seconds since the last blocker-free reconciliation pass, or `None` if no
+    /// pass has ever completed in this process.
+    pub seconds_since_last_reconcile: Option<i64>,
 }
 
 #[derive(Clone, Debug)]
@@ -508,6 +600,33 @@ pub struct BuildAdmissionController {
     /// the durable journal; adopting a seeded CreateUnknown row into Live
     /// decrements it exactly once. Enforce stays closed while it is non-zero.
     create_unknown_pending: AtomicU64,
+    /// WHICH rows are holding [`BuildAdmissionReadiness::CreateUnknownHealth`]
+    /// closed, as bounded `{domain}:{work_id}:{generation}@{object_name}`
+    /// identities.
+    ///
+    /// A count alone is what made the 2026-07-29 outage cost five hours: every
+    /// build-admission log line reported `stale`/`reclaimed`/`create_unknown`
+    /// as NUMBERS, so an operator could see that exactly one row was denying
+    /// every dispatch and had no non-SQL way to learn which one. The sibling
+    /// `build_lease_reclaim` path already logs `identity=dispatch:…`; this is
+    /// the same convention for the admission journal.
+    ///
+    /// Maintained on exactly the edges that maintain `create_unknown_pending`,
+    /// so the two never disagree about whether the gate is held.
+    create_unknown_identities: std::sync::Mutex<BTreeSet<String>>,
+    /// Unix seconds at which a reconciliation pass last completed WITHOUT
+    /// blockers. Zero means "never in this process".
+    ///
+    /// The single most valuable signal added after the outage: nothing anywhere
+    /// asserted that a reconciliation pass had completed within the last N
+    /// seconds, so a reconciler that had silently died looked exactly like one
+    /// that was working. Read by
+    /// [`Self::seconds_since_last_reconcile`], exported as a gauge, and
+    /// surfaced to operators by the `build_admission_health` doctor check.
+    last_reconcile_success_unix: AtomicI64,
+    /// The readiness reason last reported by [`Self::report_readiness_edge`],
+    /// so the loud gate report is edge-triggered rather than once per publish.
+    last_reported_readiness: AtomicU8,
     /// Seeded durable occupancy exceeded the configured cap at recovery.
     /// Cleared when a terminal release brings occupancy back within the cap.
     over_cap: AtomicBool,
@@ -577,6 +696,9 @@ impl BuildAdmissionController {
             journal_recovered: AtomicBool::new(true),
             journal_healthy: AtomicBool::new(true),
             create_unknown_pending: AtomicU64::new(0),
+            create_unknown_identities: std::sync::Mutex::new(BTreeSet::new()),
+            last_reconcile_success_unix: AtomicI64::new(0),
+            last_reported_readiness: AtomicU8::new(READINESS_NEVER_REPORTED),
             over_cap: AtomicBool::new(false),
             over_cap_alarm_active: AtomicBool::new(false),
             inventory_ready: AtomicBool::new(true),
@@ -663,9 +785,16 @@ impl BuildAdmissionController {
         self.journal_recovered.store(true, Ordering::Release);
         self.journal_healthy.store(true, Ordering::Release);
         self.create_unknown_pending.store(0, Ordering::Release);
+        self.clear_blocking_identities();
         self.over_cap.store(false, Ordering::Release);
         self.inventory_ready.store(true, Ordering::Release);
         self.topology_ready.store(true, Ordering::Release);
+        // `readiness()` checks the draining latch FIRST, ahead of every gate
+        // this method satisfies. Leaving the latch set here would make
+        // "mark ready" a method that provably does not make the controller
+        // ready — the exact class of silent contradiction that produced the
+        // 2026-07-19 `occupancy 0 reached cap 3` wedge.
+        self.draining.store(false, Ordering::Release);
     }
 
     /// Promote this controller to emergency Enforce and reset every startup
@@ -677,9 +806,14 @@ impl BuildAdmissionController {
         self.journal_recovered.store(false, Ordering::Release);
         self.journal_healthy.store(true, Ordering::Release);
         self.create_unknown_pending.store(0, Ordering::Release);
+        self.clear_blocking_identities();
         self.over_cap.store(false, Ordering::Release);
         self.inventory_ready.store(false, Ordering::Release);
         self.topology_ready.store(false, Ordering::Release);
+        // The draining latch is deliberately NOT cleared here. This path is
+        // emergency promotion of a possibly-live process; a process that is
+        // genuinely shutting down must not be talked back into admitting work
+        // by a handoff tick that happens to land during teardown.
     }
 
     /// Release emergency authority only after a committed invocation-primary
@@ -742,6 +876,143 @@ impl BuildAdmissionController {
         BuildAdmissionReadiness::Healthy
     }
 
+    /// Bounded, sync, allocation-light description of why admission is (not)
+    /// open, including WHICH rows are responsible.
+    ///
+    /// Deliberately synchronous and journal-free: the `DoctorCheck::run` seam
+    /// is synchronous, and a health report that needs a database round-trip is
+    /// a health report that stops working exactly when the database is the
+    /// problem.
+    #[must_use]
+    pub fn health_report(&self) -> BuildAdmissionHealthReport {
+        let (blocking_identities, blocking_identities_elided) = self.named_blocking_identities();
+        BuildAdmissionHealthReport {
+            readiness: self.readiness(),
+            mode: self.mode(),
+            draining: self.draining.load(Ordering::Acquire),
+            create_unknown_pending: self.create_unknown_pending.load(Ordering::Acquire),
+            blocking_identities,
+            blocking_identities_elided,
+            seconds_since_last_reconcile: self.seconds_since_last_reconcile(),
+        }
+    }
+
+    /// Replace the set of identities holding the CreateUnknown gate closed.
+    /// Called on exactly the edge that stores `create_unknown_pending`.
+    fn set_blocking_identities(&self, identities: BTreeSet<String>) {
+        *self
+            .create_unknown_identities
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = identities;
+    }
+
+    /// Drop one identity as its row is adopted into Live. Called on exactly the
+    /// edge that decrements `create_unknown_pending`, so the count and the
+    /// named set never disagree about whether the gate is still held.
+    fn clear_blocking_identity(&self, identity: &str) {
+        self.create_unknown_identities
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(identity);
+    }
+
+    fn clear_blocking_identities(&self) {
+        self.create_unknown_identities
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
+    }
+
+    /// Report a readiness change exactly once per episode, NAMING the rows
+    /// responsible when the reason is one that has named rows.
+    ///
+    /// Before this, every build-admission line carried counts only. During the
+    /// 2026-07-29 outage an operator could see `create_unknown=1` — one row
+    /// denying every dispatch on the board — and had no way short of raw SQL on
+    /// the production database to learn which row it was. Five hours.
+    fn report_readiness_edge(&self) {
+        let readiness = self.readiness();
+        let previous = self
+            .last_reported_readiness
+            .swap(readiness.as_u8(), Ordering::AcqRel);
+        if previous == readiness.as_u8() {
+            return;
+        }
+        if readiness.is_healthy() {
+            tracing::info!(
+                readiness = readiness.as_str(),
+                mode = ?self.mode(),
+                "build_admission: readiness is healthy; admission is open"
+            );
+            return;
+        }
+        let (identities, elided) = self.named_blocking_identities();
+        tracing::error!(
+            readiness = readiness.as_str(),
+            mode = ?self.mode(),
+            create_unknown_pending = self.create_unknown_pending.load(Ordering::Acquire),
+            blocking_identities = ?identities,
+            blocking_identities_elided = elided,
+            seconds_since_last_reconcile = ?self.seconds_since_last_reconcile(),
+            "build_admission: readiness is NOT healthy; every Enforce admission is \
+             denied until it clears. `blocking_identities` names the admission-journal \
+             rows responsible as {{domain}}:{{work_id}}:{{generation}}@{{object_name}}."
+        );
+    }
+
+    /// The bounded head of the blocking-identity set plus how many were elided.
+    fn named_blocking_identities(&self) -> (Vec<String>, usize) {
+        let guard = self
+            .create_unknown_identities
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let named: Vec<String> = guard
+            .iter()
+            .take(MAX_NAMED_BLOCKING_IDENTITIES)
+            .cloned()
+            .collect();
+        let elided = guard.len().saturating_sub(named.len());
+        (named, elided)
+    }
+
+    /// Record that a reconciliation pass completed with no blockers.
+    ///
+    /// The caller is the composition root that knows whether the pass actually
+    /// proved anything (`server::AppState::initialize_build_admission_inventory`),
+    /// because a pass that RAN and a pass that SUCCEEDED are different facts and
+    /// only the second one means occupancy is being reclaimed.
+    pub fn note_reconcile_success(&self) {
+        self.note_reconcile_success_at(::time::OffsetDateTime::now_utc().unix_timestamp());
+    }
+
+    /// [`Self::note_reconcile_success`] with an injected wall clock, so a test
+    /// can assert on the AGE rather than on the fact that a setter was called.
+    pub fn note_reconcile_success_at(&self, unix_seconds: i64) {
+        self.last_reconcile_success_unix
+            .store(unix_seconds, Ordering::Release);
+    }
+
+    /// Unix seconds of the last blocker-free reconciliation pass, or `None` if
+    /// none has completed in this process.
+    #[must_use]
+    pub fn last_reconcile_success_unix(&self) -> Option<i64> {
+        match self.last_reconcile_success_unix.load(Ordering::Acquire) {
+            0 => None,
+            stamp => Some(stamp),
+        }
+    }
+
+    /// How long ago the last blocker-free reconciliation pass completed.
+    ///
+    /// `None` means no pass has EVER completed in this process, which is a
+    /// louder condition than a large age, not a quieter one — the caller must
+    /// not silently treat it as healthy.
+    #[must_use]
+    pub fn seconds_since_last_reconcile(&self) -> Option<i64> {
+        self.last_reconcile_success_unix()
+            .map(|stamp| (::time::OffsetDateTime::now_utc().unix_timestamp() - stamp).max(0))
+    }
+
     /// The configured admission mode.
     #[must_use]
     pub fn mode(&self) -> BuildAdmissionMode {
@@ -768,6 +1039,31 @@ impl BuildAdmissionController {
         self.finish_all_queued_waits(djinn_telemetry::build_slot_queue::OUTCOME_SHUTDOWN);
         if self.process_metrics_enabled() {
             djinn_telemetry::build_slot_occupancy::set_slots_queued(0);
+        }
+    }
+
+    /// Clear the shutdown-draining latch.
+    ///
+    /// `begin_draining` used to be an ABSOLUTE latch: nothing anywhere stored
+    /// `false`, and neither [`Self::mark_ready`] nor [`Self::require_enforcement`]
+    /// cleared it. That was safe only by convention — one production caller, on
+    /// the shutdown path — while the method stayed reachable on `AppState`. A
+    /// single mistaken call would have denied every admission for the life of
+    /// the process with no in-process recovery of any kind, which is precisely
+    /// the failure shape this whole hardening pass exists to remove.
+    ///
+    /// It is deliberately loud: on the real shutdown path nothing calls this,
+    /// so a line here always means a drain was entered that should not have
+    /// been.
+    pub fn end_draining(&self) {
+        if self.draining.swap(false, Ordering::AcqRel) {
+            tracing::warn!(
+                mode = ?self.mode(),
+                readiness = self.readiness().as_str(),
+                "build_admission: shutdown-draining latch CLEARED; new Enforce \
+                 reservations are unblocked. On a real shutdown nothing clears this, \
+                 so reaching here means the drain was entered outside teardown."
+            );
         }
     }
 
@@ -851,6 +1147,25 @@ impl BuildAdmissionController {
     /// Export bounded admission metrics from the durable journal snapshot.
     /// InvocationBuild rows are intentionally excluded from all v0 views.
     pub async fn publish_metrics(&self) {
+        // Refresh the over-cap GATE before anything about telemetry is decided.
+        //
+        // This used to live further down, inside the metrics body, where its
+        // value was computed correctly on every pass and then thrown away into
+        // a gauge. That left `over_cap` with only ONE downward edge: a durable
+        // terminal transition. A total denial starves itself of exactly that
+        // input — nothing is admitted, so nothing goes terminal, so the gate
+        // that caused the denial can never fall. Re-deriving it here gives the
+        // latch a way down that does not depend on the traffic it is blocking.
+        //
+        // It is deliberately ABOVE the `process_metrics_enabled` early return:
+        // this is admission state, not telemetry, and it must not be silently
+        // disabled by a flag whose entire purpose is to keep test binaries out
+        // of a process-global Prometheus registry.
+        self.refresh_over_cap_gate().await;
+        // Loud, edge-triggered, row-naming readiness report. Also above the
+        // early return: an operator must be able to learn WHY admission is shut
+        // from the log stream alone, in every build.
+        self.report_readiness_edge();
         // Every emission below targets the process-global registry; a
         // controller that has not opted in stays out of it entirely. The body
         // is pure export — a journal read plus gauge writes — so skipping it
@@ -926,15 +1241,16 @@ impl BuildAdmissionController {
         // so there is no cap to exceed. An authority that IS installed but
         // unreadable reports false rather than inventing an alarm: the reachable
         // degradation is already surfaced by the journal/inventory gauges.
-        let over_cap = match self.slot_authority.as_ref() {
-            None => false,
-            Some(authority) => authority
-                .occupancy()
-                .await
-                .is_some_and(|slots| slots > authority.cap()),
-        };
+        // Already re-derived and stored at the top of this method; read the
+        // gate rather than recomputing it, so the gauge and the gate can never
+        // disagree about the same pass.
+        let over_cap = self.over_cap.load(Ordering::Acquire);
         self.report_over_cap_edge(over_cap, occupied);
         djinn_telemetry::build_slot_occupancy::set_slots_in_use(occupied);
+        djinn_telemetry::build_admission::set_seconds_since_reconcile(
+            mode,
+            self.seconds_since_last_reconcile(),
+        );
         djinn_telemetry::build_slot_occupancy::set_slots_queued(queued);
         djinn_telemetry::build_admission::set_health(
             mode,
@@ -946,6 +1262,29 @@ impl BuildAdmissionController {
             self.create_unknown_pending.load(Ordering::Acquire) > 0,
             over_cap,
         );
+    }
+
+    /// Re-derive the over-cap gate from the ONE capacity authority.
+    ///
+    /// Returns the value now in force. Only a READABLE authority moves the
+    /// gate: an installed-but-unreadable authority leaves it exactly as it was
+    /// (conservative in both directions), and no authority at all means this
+    /// controller is not capacity-gated, so there is no cap to exceed.
+    async fn refresh_over_cap_gate(&self) -> bool {
+        match self.slot_authority.as_ref() {
+            None => {
+                self.over_cap.store(false, Ordering::Release);
+                false
+            }
+            Some(authority) => match authority.occupancy().await {
+                Some(slots) => {
+                    let over_cap = slots > authority.cap();
+                    self.over_cap.store(over_cap, Ordering::Release);
+                    over_cap
+                }
+                None => self.over_cap.load(Ordering::Acquire),
+            },
+        }
     }
 
     /// Log the over-cap alarm exactly once per episode, in both directions.
@@ -1815,17 +2154,20 @@ impl BuildAdmissionController {
                 match permits.get_mut(permit) {
                     Some(state) if state.create_unknown_outstanding => {
                         state.create_unknown_outstanding = false;
-                        true
+                        // Carry the identity out so the named set is dropped on
+                        // exactly the edge that decrements the count.
+                        Some(blocking_identity(&state.key, &state.object_name))
                     }
-                    Some(_) | None => false,
+                    Some(_) | None => None,
                 }
             };
-            if cleared {
+            if let Some(identity) = cleared {
                 self.create_unknown_pending
                     .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
                         Some(value.saturating_sub(1))
                     })
                     .ok();
+                self.clear_blocking_identity(&identity);
                 // CreateUnknown resolution changes a bounded health signal;
                 // publish immediately so the gauge reflects the new state
                 // rather than waiting for an unrelated terminal event.
@@ -1975,14 +2317,63 @@ impl BuildAdmissionController {
         seed_filter: &mut impl FnMut(&AdmissionJournalRow) -> bool,
     ) -> Result<AdmissionSeedReport, WarmAdmissionError> {
         let mut seeded = 0u64;
-        // The CreateUnknown startup gate reflects every active recovered row,
-        // not only the ones seeded into memory: an unseeded CreateUnknown row
-        // still occupies durable capacity and still gates Enforce readiness.
+        // The CreateUnknown startup gate counts RECOVERED unknowns — rows whose
+        // creator process is gone — and deliberately nothing else.
+        //
+        // `CreateUnknown` means two entirely different things depending on who
+        // wrote the row:
+        //
+        // * A PREDECESSOR's row is a genuine unknown. The process that POSTed
+        //   the create died without learning the outcome, nothing in this
+        //   process is waiting on it, and only reconciliation against the API
+        //   server can resolve it. Enforce must fail closed until it does.
+        // * THIS process's own row is the ordinary intermediate state of a
+        //   healthy dispatch. `finish_task_run_build_admission` writes
+        //   `CreateUnknown` ("slot-pool accepted create without object UID")
+        //   for *every* task-run the moment the pool accepts it, and it stays
+        //   that way until the `("session","started")` callback supplies the
+        //   UID. A warm Job is the same between its POST and `job_uid()`.
+        //
+        // Counting the second kind is what halted the board for five hours on
+        // 2026-07-29. This seed runs at the tail of EVERY periodic
+        // reconciliation pass (see `build_admission_inventory::reconcile`,
+        // 120s since #2711), so a tick that lands inside one normal dispatch's
+        // POST→session window armed `CreateUnknownHealth` against the live
+        // process's own healthy in-flight work — denying every admission
+        // before any capacity was measured. It normally cleared on the next
+        // tick; that day the worker never registered a session, so `mark_live`
+        // never ran and the row stayed. And `is_reclaimable` refuses to retire
+        // a row under this process's own epoch (correctly — see
+        // `BuildAdmissionReconciler::is_reclaimable`), so the gate had no
+        // reachable clearing path at all. Only a restart, which reclassifies
+        // the row as a predecessor's, could clear it.
+        //
+        // Arming and reclamation must therefore agree on the same population:
+        // the gate is armed by exactly the rows the reclaimer is allowed to
+        // retire. A row this process is mid-creating is not a *recovered*
+        // unknown, and it is not evidence that this process cannot be trusted
+        // to admit.
+        let is_recovered_unknown = |row: &AdmissionJournalRow| {
+            row.state == AdmissionState::CreateUnknown
+                && row.creator_server_epoch != self.creator_server_epoch
+        };
+        // Every active recovered row counts, not only the ones seeded into
+        // memory: an unseeded recovered CreateUnknown row still occupies
+        // durable capacity and still gates Enforce readiness.
         let create_unknown_rows = recovery
             .active_rows
             .iter()
-            .filter(|row| row.state == AdmissionState::CreateUnknown)
+            .filter(|row| is_recovered_unknown(row))
             .count() as u64;
+        // Capture WHICH rows those are, from the same iteration that counts
+        // them, so the count and the named set can never come from different
+        // views of the journal.
+        let create_unknown_identities: BTreeSet<String> = recovery
+            .active_rows
+            .iter()
+            .filter(|row| row.state == AdmissionState::CreateUnknown)
+            .map(|row| blocking_identity(&row.key, &row.object_name))
+            .collect();
         {
             let mut permits = self.permits.lock().await;
             let mut by_key = self.permits_by_key.lock().await;
@@ -2014,7 +2405,13 @@ impl BuildAdmissionController {
                         object_name: row.object_name.clone(),
                         durable: true,
                         released: false,
-                        create_unknown_outstanding: row.state == AdmissionState::CreateUnknown,
+                        // Exactly the rows that armed the gate above. This flag
+                        // is what `transition` decrements the gate on when the
+                        // row is adopted into Live, so seeding it for a row
+                        // that never contributed to the count would let one
+                        // healthy own-epoch dispatch clear a gate a
+                        // predecessor's row is still holding — fail-open.
+                        create_unknown_outstanding: is_recovered_unknown(row),
                         // A recovered row's capacity was acquired by the
                         // predecessor process, but the lease row it acquired
                         // survives the restart in `build_leases` and is
@@ -2052,6 +2449,7 @@ impl BuildAdmissionController {
             self.journal_healthy.store(true, Ordering::Release);
             self.create_unknown_pending
                 .store(create_unknown_rows, Ordering::Release);
+            self.set_blocking_identities(create_unknown_identities);
             // Compare BUILD SLOTS to a build-slot cap.
             //
             // This used to compare `count_task_or_warm_occupancy()` -- a count
@@ -5057,6 +5455,310 @@ mod tests {
             queue_histogram_value(&rendered, "cancelled", "count") - before_cancelled,
             2.0,
             "duplicate cancel must not emit additional observations"
+        );
+    }
+
+    // ─── Recovery-machinery hardening (2026-07-29 five-hour board outage) ───
+
+    /// Fake capacity authority whose occupancy is settable, so the over-cap
+    /// gate can be driven in both directions without a lease service.
+    struct SettableAuthority {
+        occupancy: std::sync::Mutex<Option<i64>>,
+        cap: i64,
+    }
+
+    impl SettableAuthority {
+        fn new(occupancy: Option<i64>, cap: i64) -> Self {
+            Self {
+                occupancy: std::sync::Mutex::new(occupancy),
+                cap,
+            }
+        }
+
+        fn set(&self, occupancy: Option<i64>) {
+            *self.occupancy.lock().unwrap() = occupancy;
+        }
+    }
+
+    #[async_trait]
+    impl BuildSlotAuthority for SettableAuthority {
+        async fn acquire_dispatch_slot(
+            &self,
+            _task_id: &str,
+            _generation: i64,
+        ) -> DispatchSlotOutcome {
+            DispatchSlotOutcome::Granted
+        }
+        async fn release_dispatch_slot(&self, _task_id: &str, _generation: i64) {}
+        async fn abandon_queued_dispatch(&self, _task_id: &str) {}
+        async fn occupancy(&self) -> Option<i64> {
+            *self.occupancy.lock().unwrap()
+        }
+        fn cap(&self) -> i64 {
+            self.cap
+        }
+    }
+
+    fn over_cap_controller(authority: Arc<SettableAuthority>) -> BuildAdmissionController {
+        BuildAdmissionController::new(
+            Arc::new(AdmissionJournalRepository::new(
+                Database::open_in_memory().unwrap(),
+            )),
+            BuildAdmissionMode::Enforce,
+            3,
+            "epoch",
+        )
+        .with_slot_authority(authority)
+    }
+
+    /// L7. The over-cap latch's only downward edge was a durable terminal
+    /// transition — and a total denial admits nothing, so nothing ever goes
+    /// terminal, so the gate that caused the denial could never fall. Meanwhile
+    /// `publish_metrics` computed the correct current value on every single
+    /// pass and threw it away into a gauge.
+    #[tokio::test]
+    async fn the_over_cap_gate_falls_on_its_own_once_occupancy_is_back_within_the_cap() {
+        let authority = Arc::new(SettableAuthority::new(Some(9), 3));
+        let controller = over_cap_controller(Arc::clone(&authority));
+        controller.mark_ready();
+
+        // Latch the gate the way recovery does: a known occupancy above the cap.
+        controller.publish_metrics().await;
+        assert_eq!(
+            controller.readiness(),
+            BuildAdmissionReadiness::SeededOccupancyAboveCap,
+            "a known occupancy above the cap must shut admission"
+        );
+
+        // Occupancy comes back within the cap. No terminal transition happens,
+        // because a denied board produces none.
+        authority.set(Some(1));
+        controller.publish_metrics().await;
+        assert_eq!(
+            controller.readiness(),
+            BuildAdmissionReadiness::Healthy,
+            "the over-cap gate must be able to fall without the terminal traffic it is blocking"
+        );
+    }
+
+    /// An authority that cannot be read is not evidence of anything, in either
+    /// direction: it must not clear a latched gate and it must not raise one.
+    #[tokio::test]
+    async fn an_unreadable_authority_leaves_the_over_cap_gate_exactly_as_it_was() {
+        let authority = Arc::new(SettableAuthority::new(Some(9), 3));
+        let controller = over_cap_controller(Arc::clone(&authority));
+        controller.mark_ready();
+        controller.publish_metrics().await;
+        assert_eq!(
+            controller.readiness(),
+            BuildAdmissionReadiness::SeededOccupancyAboveCap
+        );
+
+        authority.set(None);
+        controller.publish_metrics().await;
+        assert_eq!(
+            controller.readiness(),
+            BuildAdmissionReadiness::SeededOccupancyAboveCap,
+            "an unreadable authority must not clear a latched over-cap gate"
+        );
+
+        let healthy_authority = Arc::new(SettableAuthority::new(None, 3));
+        let healthy = over_cap_controller(Arc::clone(&healthy_authority));
+        healthy.mark_ready();
+        healthy.publish_metrics().await;
+        assert_eq!(
+            healthy.readiness(),
+            BuildAdmissionReadiness::Healthy,
+            "an unreadable authority must not invent an over-cap denial either"
+        );
+    }
+
+    /// L6. `begin_draining` stored `true` and NOTHING anywhere stored `false`.
+    #[tokio::test]
+    async fn the_shutdown_draining_latch_can_be_cleared() {
+        let controller = ungated_controller(BuildAdmissionMode::Enforce, 4);
+        controller.mark_ready();
+        assert_eq!(controller.readiness(), BuildAdmissionReadiness::Healthy);
+
+        controller.begin_draining();
+        assert!(controller.is_draining());
+        assert_eq!(
+            controller.readiness(),
+            BuildAdmissionReadiness::ShutdownDraining
+        );
+
+        controller.end_draining();
+        assert!(!controller.is_draining());
+        assert_eq!(
+            controller.readiness(),
+            BuildAdmissionReadiness::Healthy,
+            "a drain entered outside teardown must be recoverable in-process"
+        );
+        // Idempotent.
+        controller.end_draining();
+        assert_eq!(controller.readiness(), BuildAdmissionReadiness::Healthy);
+    }
+
+    /// `readiness()` checks the draining latch ahead of every gate `mark_ready`
+    /// satisfies, so leaving it set made `mark_ready` a method that provably did
+    /// not make the controller ready.
+    #[tokio::test]
+    async fn mark_ready_clears_the_draining_latch() {
+        let controller = ungated_controller(BuildAdmissionMode::Enforce, 4);
+        controller.begin_draining();
+        controller.mark_ready();
+        assert!(!controller.is_draining());
+        assert_eq!(controller.readiness(), BuildAdmissionReadiness::Healthy);
+    }
+
+    /// Emergency promotion of a possibly-live process must NOT talk a genuinely
+    /// terminating process back into admitting work.
+    #[tokio::test]
+    async fn require_enforcement_does_not_clear_the_draining_latch() {
+        let controller = ungated_controller(BuildAdmissionMode::Observe, 4);
+        controller.begin_draining();
+        controller.require_enforcement();
+        assert!(
+            controller.is_draining(),
+            "a handoff tick landing during teardown must not reopen admission"
+        );
+    }
+
+    /// L4. Nothing anywhere asserted "a reconcile pass completed within the last
+    /// N seconds", and that missing assertion is what turned a five-minute event
+    /// into a five-hour one.
+    #[tokio::test]
+    async fn the_last_successful_reconcile_age_is_readable() {
+        let controller = ungated_controller(BuildAdmissionMode::Enforce, 4);
+        assert_eq!(
+            controller.seconds_since_last_reconcile(),
+            None,
+            "a process that has never reconciled must say so, not report age zero"
+        );
+        assert_eq!(controller.last_reconcile_success_unix(), None);
+
+        let now = ::time::OffsetDateTime::now_utc().unix_timestamp();
+        controller.note_reconcile_success_at(now - 900);
+        assert_eq!(controller.last_reconcile_success_unix(), Some(now - 900));
+        let age = controller
+            .seconds_since_last_reconcile()
+            .expect("a completed pass has an age");
+        assert!(
+            (890..=910).contains(&age),
+            "the reported age must be real elapsed wall time, got {age}"
+        );
+
+        controller.note_reconcile_success();
+        let fresh = controller
+            .seconds_since_last_reconcile()
+            .expect("a completed pass has an age");
+        assert!(
+            fresh <= 2,
+            "a just-completed pass must report ~0s, got {fresh}"
+        );
+    }
+
+    /// Counts alone are what cost five hours: an operator could see that ONE row
+    /// was denying every dispatch and had no non-SQL way to learn which row.
+    #[tokio::test]
+    async fn a_wedging_create_unknown_row_is_named_not_just_counted() {
+        let journal = Arc::new(AdmissionJournalRepository::new(
+            Database::open_in_memory().unwrap(),
+        ));
+        journal
+            .reserve(&predecessor_input("wedger", 7, "old-epoch"))
+            .await
+            .unwrap();
+        journal
+            .mark_create_started(&djinn_db::CreateStartedInput {
+                key: djinn_db::AdmissionJournalKey {
+                    domain: AdmissionDomain::WarmBuild,
+                    work_id: "wedger".into(),
+                    generation: 7,
+                },
+                creator_server_epoch: "old-epoch".into(),
+                object_name: "warm-wedger-7".into(),
+            })
+            .await
+            .unwrap();
+
+        let controller =
+            BuildAdmissionController::new_closed(Arc::clone(&journal), 4, "replacement-epoch");
+        let report = controller
+            .recover_all_predecessors_and_seed()
+            .await
+            .unwrap();
+        assert_eq!(
+            report.readiness,
+            BuildAdmissionReadiness::CreateUnknownHealth,
+            "an orphaned CreateUnknown row shuts admission for the whole board"
+        );
+
+        let health = controller.health_report();
+        assert_eq!(
+            health.readiness,
+            BuildAdmissionReadiness::CreateUnknownHealth
+        );
+        assert_eq!(health.create_unknown_pending, 1);
+        assert_eq!(
+            health.blocking_identities,
+            vec!["warm_build:wedger:7@warm-wedger-7".to_owned()],
+            "the report must name the row, not only count it"
+        );
+        assert_eq!(health.blocking_identities_elided, 0);
+    }
+
+    /// The named set and the count must never disagree about whether the gate is
+    /// still held, or the report would keep accusing an already-adopted row.
+    #[tokio::test]
+    async fn adopting_the_row_into_live_drops_its_name_and_its_count_together() {
+        let journal = Arc::new(AdmissionJournalRepository::new(
+            Database::open_in_memory().unwrap(),
+        ));
+        journal
+            .reserve(&predecessor_input("wedger", 0, "old-epoch"))
+            .await
+            .unwrap();
+        journal
+            .mark_create_started(&djinn_db::CreateStartedInput {
+                key: djinn_db::AdmissionJournalKey {
+                    domain: AdmissionDomain::WarmBuild,
+                    work_id: "wedger".into(),
+                    generation: 0,
+                },
+                creator_server_epoch: "old-epoch".into(),
+                object_name: "warm-wedger-0".into(),
+            })
+            .await
+            .unwrap();
+
+        let controller =
+            BuildAdmissionController::new_closed(Arc::clone(&journal), 4, "replacement-epoch");
+        controller
+            .recover_all_predecessors_and_seed()
+            .await
+            .unwrap();
+        assert_eq!(controller.health_report().blocking_identities.len(), 1);
+
+        let permit = controller
+            .permit_for_key(AdmissionDomain::WarmBuild, "wedger", 0)
+            .await
+            .expect("the recovered row seeded an addressable permit");
+        controller
+            .transition(
+                &permit,
+                WarmAdmissionTransition::Live {
+                    uid: "uid-wedger".into(),
+                },
+            )
+            .await
+            .unwrap();
+
+        let health = controller.health_report();
+        assert_eq!(health.create_unknown_pending, 0);
+        assert!(
+            health.blocking_identities.is_empty(),
+            "an adopted row must stop being named the moment it stops being counted"
         );
     }
 }

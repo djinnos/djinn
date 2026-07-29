@@ -114,6 +114,17 @@ pub struct CurrentLivenessState {
     pub task_run_started_at: Option<String>,
     /// ISO-8601 UTC `ended_at` of the latest task_run (if terminal).
     pub task_run_ended_at: Option<String>,
+    /// `from_status` of the task's MOST RECENT recorded status transition, i.e.
+    /// the status the task was in immediately before it reached
+    /// [`Self::task_status`]. `None` when the task has no recorded transition.
+    ///
+    /// This is the only durable signal that distinguishes a session which
+    /// deliberately handed its task on from one that left the task exactly where
+    /// it found it. A reviewer that rejects moves the task
+    /// `in_task_review → open`; a worker that strands its task moves it
+    /// `open → in_progress` and then leaves it there. Both end on a non-settled
+    /// status, and only this field tells them apart.
+    pub last_transition_from_status: Option<String>,
 }
 
 // ─── Repository ─────────────────────────────────────────────────────────────
@@ -343,6 +354,28 @@ impl LivenessRepository {
             (None, None, None)
         };
 
+        // 6. Load the `from_status` of the task's most recent status transition.
+        //
+        // `TaskRepository::transition` and `set_status` both write an
+        // `activity_log` row whose payload carries `from_status`/`to_status`;
+        // `adoption_handoff` is the one transition that uses a different
+        // `event_type` for the same payload shape. `created_at` is a
+        // millisecond-resolution ISO-8601 string (lexicographic order == time
+        // order); the uuid-v7 `id` breaks ties inside the same millisecond.
+        let last_transition_from_status: Option<String> = sqlx::query_scalar(
+            "SELECT payload->>'from_status'
+                 FROM activity_log
+                 WHERE task_id = $1
+                   AND event_type IN ('status_changed', 'adoption_handoff')
+                   AND payload->>'from_status' IS NOT NULL
+                 ORDER BY created_at DESC, id DESC
+                 LIMIT 1",
+        )
+        .bind(task_id)
+        .fetch_optional(self.db.pool())
+        .await?
+        .flatten();
+
         Ok(CurrentLivenessState {
             task_status,
             task_is_terminal,
@@ -361,6 +394,7 @@ impl LivenessRepository {
             session_started_at,
             task_run_started_at,
             task_run_ended_at,
+            last_transition_from_status,
         })
     }
 

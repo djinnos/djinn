@@ -3899,6 +3899,184 @@ async fn nonzero_exit_is_crash_outcome_distinct_from_clean_violation() {
     assert_eq!(outcome_kind.as_deref(), Some("crash"));
 }
 
+/// A reviewer that REJECTS is not a protocol violator.
+///
+/// `TransitionAction::TaskReviewReject` deliberately lands the task at `open`
+/// (djinn-core `task.rs`), and the supervisor fires it the moment a reviewer
+/// returns an explicit reject verdict. The reviewer process then exits 0 and its
+/// session settles `completed`. Classifying that exit purely on "is the task
+/// status settled?" convicts the reviewer of `clean_exit_nonterminal` for doing
+/// exactly what the protocol asks — the task is queued for rework, not stranded.
+///
+/// The discriminator is the task's own transition record: the last status change
+/// moved it OUT of `in_task_review`, a status only a live session holds. A
+/// session that leaves such a trace handed the task on.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reviewer_reject_exit_is_not_a_protocol_violation() {
+    use djinn_core::models::TransitionAction;
+    use djinn_db::{CreateSessionParams, SessionRepository};
+
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let (task, _note) = create_task_with_note(&db, &tx, "reviewer-reject-exit").await;
+
+    let task_repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+    // Walk the task to the reviewer's own active status.
+    task_repo
+        .set_status(&task.id, "in_task_review")
+        .await
+        .unwrap();
+
+    let run_id = "run-reviewer-reject";
+    TaskRunRepository::new(db.clone())
+        .create(CreateTaskRunParams {
+            id: run_id,
+            project_id: &task.project_id,
+            task_id: &task.id,
+            trigger_type: "manual",
+            status: Some("running"),
+            workspace_path: None,
+            mirror_ref: None,
+            dispatch_group_id: None,
+        })
+        .await
+        .unwrap();
+
+    let session_repo = SessionRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+    let session = session_repo
+        .create(CreateSessionParams {
+            project_id: &task.project_id,
+            task_id: Some(&task.id),
+            model: "openai/gpt-5.5",
+            agent_type: "reviewer",
+            metadata_json: None,
+            task_run_id: Some(run_id),
+            pricing: None,
+            cost_basis: None,
+        })
+        .await
+        .unwrap();
+
+    // The reviewer rejects: the supervisor drives the real state-machine
+    // transition, which lands the task at `open` and records the transition.
+    let rejected = task_repo
+        .transition(
+            &task.id,
+            TransitionAction::TaskReviewReject,
+            "supervisor",
+            "system",
+            Some("acceptance criterion 2 is not covered by a test"),
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        rejected.status, "open",
+        "task_review_reject must land the task at open (rework queue)"
+    );
+
+    let actor = coordinator_actor_for_tests(&db, &tx);
+    let result = actor
+        .classify_session_exit_liveness(
+            &session.id,
+            &task.id,
+            Some(run_id),
+            "completed",
+            "reviewer",
+        )
+        .await
+        .expect("classification must succeed");
+
+    assert_ne!(
+        result.verdict,
+        crate::dispatch::liveness::Verdict::ProtocolViolation,
+        "a reviewer that rejected and handed the task back to the rework queue \
+         must not be classified as a protocol violation"
+    );
+    assert_ne!(
+        result.reason,
+        Some(crate::dispatch::liveness::LivenessReason::CleanExitNonterminal),
+        "reviewer rejection must not be labelled clean_exit_nonterminal"
+    );
+
+    // And nothing may be persisted under the protocol-violation verdict.
+    let liveness_repo = djinn_db::LivenessRepository::new(db.clone());
+    let (verdict, _outcome_kind) = liveness_repo
+        .get_session_liveness_fields(&session.id)
+        .await
+        .unwrap();
+    assert_ne!(
+        verdict.as_deref(),
+        Some("protocol_violation"),
+        "persisted verdict must not be protocol_violation for a rejecting reviewer"
+    );
+}
+
+/// A worker that exits cleanly while its task is still `in_progress` IS a
+/// protocol violation: the task is left claimed by a session that no longer
+/// exists, invisible to dispatch until the recovery scan releases it. This is
+/// the case the detector exists for, and the reviewer-reject exoneration above
+/// must not weaken it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn worker_clean_exit_at_in_progress_is_still_a_protocol_violation() {
+    use djinn_db::{CreateSessionParams, SessionRepository};
+
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let (task, _note) = create_task_with_note(&db, &tx, "worker-stranded-exit").await;
+
+    let task_repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+    // Dispatch claim: `open -> in_progress`. The last recorded status change
+    // moves the task INTO an active status, not out of one.
+    task_repo.set_status(&task.id, "in_progress").await.unwrap();
+
+    let run_id = "run-worker-stranded";
+    TaskRunRepository::new(db.clone())
+        .create(CreateTaskRunParams {
+            id: run_id,
+            project_id: &task.project_id,
+            task_id: &task.id,
+            trigger_type: "manual",
+            status: Some("running"),
+            workspace_path: None,
+            mirror_ref: None,
+            dispatch_group_id: None,
+        })
+        .await
+        .unwrap();
+
+    let session_repo = SessionRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+    let session = session_repo
+        .create(CreateSessionParams {
+            project_id: &task.project_id,
+            task_id: Some(&task.id),
+            model: "openai/gpt-5.5",
+            agent_type: "worker",
+            metadata_json: None,
+            task_run_id: Some(run_id),
+            pricing: None,
+            cost_basis: None,
+        })
+        .await
+        .unwrap();
+
+    let actor = coordinator_actor_for_tests(&db, &tx);
+    let result = actor
+        .classify_session_exit_liveness(&session.id, &task.id, Some(run_id), "completed", "worker")
+        .await
+        .expect("classification must succeed");
+
+    assert_eq!(
+        result.verdict,
+        crate::dispatch::liveness::Verdict::ProtocolViolation,
+        "a worker that exits 0 leaving its task in_progress is still a violation"
+    );
+    assert_eq!(
+        result.reason,
+        Some(crate::dispatch::liveness::LivenessReason::CleanExitNonterminal),
+    );
+}
+
 /// AC 4: Already-terminal race — calling `classify_session_exit_liveness` for
 /// a task that is already closed produces `KillNoop` outcome (not protocol
 /// violation). Terminal state is preserved; only metadata is attached.
@@ -4267,6 +4445,8 @@ fn hard_cap_takes_precedence_over_slow_extension_eligible() {
         extension_budget_exhausted: false,
         hard_runtime_deadline_exceeded: true,
         exit_code: None,
+
+        handed_off_from_session_held_status: false,
     };
 
     let result = classify(&evidence);
@@ -4309,6 +4489,8 @@ fn absent_pod_with_active_activity_is_not_dead() {
         extension_budget_exhausted: false,
         hard_runtime_deadline_exceeded: false,
         exit_code: None,
+
+        handed_off_from_session_held_status: false,
     };
 
     let result = classify(&evidence);
@@ -4340,6 +4522,8 @@ fn running_pod_active_signal_is_live_regardless_of_claim_ttl() {
         extension_budget_exhausted: false,
         hard_runtime_deadline_exceeded: false,
         exit_code: None,
+
+        handed_off_from_session_held_status: false,
     };
 
     let result = classify(&evidence);
@@ -4371,6 +4555,8 @@ fn pending_pod_capacity_crunch_spared_by_classifier() {
         extension_budget_exhausted: false,
         hard_runtime_deadline_exceeded: false,
         exit_code: None,
+
+        handed_off_from_session_held_status: false,
     };
 
     let result = classify(&evidence);
@@ -4404,6 +4590,8 @@ fn pending_pod_past_hard_cap_still_not_dead() {
         extension_budget_exhausted: true,
         hard_runtime_deadline_exceeded: true,
         exit_code: None,
+
+        handed_off_from_session_held_status: false,
     };
 
     // Even with hard_runtime_deadline_exceeded, the classifier applies the
@@ -4418,6 +4606,8 @@ fn pending_pod_past_hard_cap_still_not_dead() {
         extension_budget_exhausted: true,
         hard_runtime_deadline_exceeded: false,
         exit_code: None,
+
+        handed_off_from_session_held_status: false,
     };
     let result = classify(&evidence_no_hard_cap);
     assert_ne!(
