@@ -8,7 +8,7 @@ use djinn_db::{
 use djinn_k8s::{
     LABEL_ADMISSION_DOMAIN, LABEL_ADMISSION_GENERATION, LABEL_ADMISSION_WORK_ID, ObjectPresence,
     UidGetResult, WorkloadInventory, WorkloadObjectKind, WorkloadRecord,
-    has_canonical_warm_signature,
+    has_canonical_warm_signature, job::LABEL_TASK_RUN_ID,
 };
 use std::{
     collections::{HashMap, HashSet},
@@ -189,6 +189,51 @@ fn classify(r: &WorkloadRecord) -> Result<Option<ClassifiedWorkload>, String> {
     }
     Ok(None)
 }
+/// The two facts about a listed object that the `Live` branch's task-run
+/// completion proof needs: whether it has finished, and which task-run it
+/// declares itself to be.
+type ListedTaskRun = (bool, Option<String>);
+
+/// Whether the object this Live task-run row recorded exists, declares itself
+/// to be that exact task-run, and has already finished.
+///
+/// This is a POSITIVE identity match, not an absence of contradiction: the
+/// object listed under the row's name must carry
+/// `djinn.app/task-run-id == row.object_uid`. For a `task_observation` row that
+/// uid IS the `task_run_id` (the whole domain is keyed on it — see
+/// `live_task_run_build_admission`), and the Job the dispatch created stamps
+/// that same id as a label. So this is the task-run's own Job saying it is
+/// over, and it plays exactly the role the UID equality plays for warm.
+///
+/// It deliberately proves nothing about anything else. An object that carries
+/// an admission identity of its own has made a claim about which work item it
+/// belongs to; if that claim is not this row's, it is a different work item and
+/// may not speak for this row — which is what keeps a warm Job's deterministic,
+/// REUSED name from letting a predecessor terminalize a live generation.
+///
+/// Without this, a task-run whose Job has finished but has not yet been deleted
+/// by `ttlSecondsAfterFinished` has no exit for a full hour: the identity-keyed
+/// lookup above misses (a task-run Job carries no admission labels, so
+/// `classify` resolves it to the task-RUN id rather than the row's task id),
+/// and the absence proof cannot be made while the object is still listed. That
+/// hour is held capacity whenever the ordinary terminal callback is gone —
+/// which is every in-flight run across a coordinator restart, because the
+/// successor holds no permit binding for the predecessor's generation.
+fn finished_as_its_own_task_run(
+    row: &AdmissionJournalRow,
+    listed: &HashMap<String, ListedTaskRun>,
+) -> bool {
+    if row.key.domain != AdmissionDomain::TaskObservation {
+        return false;
+    }
+    let Some(task_run_id) = row.object_uid.as_deref() else {
+        return false;
+    };
+    listed
+        .get(&row.object_name)
+        .is_some_and(|(terminal, declared)| *terminal && declared.as_deref() == Some(task_run_id))
+}
+
 pub struct BuildAdmissionReconciler {
     controller: Arc<BuildAdmissionController>,
     inventory: Arc<dyn WorkloadInventory>,
@@ -412,6 +457,16 @@ impl BuildAdmissionReconciler {
         // here is never a reclamation candidate, whatever we could or could not
         // make of that object's labels.
         let listed_names: HashSet<String> = records.iter().map(|r| r.name.clone()).collect();
+        // The same listing indexed by name. See `finished_as_its_own_task_run`.
+        let listed_task_runs: HashMap<String, ListedTaskRun> = records
+            .iter()
+            .map(|r| {
+                (
+                    r.name.clone(),
+                    (r.terminal, r.labels.get(LABEL_TASK_RUN_ID).cloned()),
+                )
+            })
+            .collect();
         for r in records {
             match classify(&r) {
                 Ok(Some(c)) => {
@@ -489,7 +544,7 @@ impl BuildAdmissionReconciler {
                 // reconciliation pass reported them as blockers.
                 let completed = by.get(&id).is_some_and(|c| {
                     c.object.terminal && c.object.uid.as_deref() == row.object_uid.as_deref()
-                });
+                }) || finished_as_its_own_task_run(row, &listed_task_runs);
                 // Absence is proven the same way it always was, plus the LIST
                 // fence a pre-Live row already gets: the authoritative listing
                 // holds no object under this name, and a direct GET — which
