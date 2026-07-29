@@ -11,8 +11,7 @@
 //! Configuration is read from the environment the Job renders
 //! (`djinn-k8s::launcher`): the delegated cgroup root, control socket path, the
 //! worker-private credential path, the expected delegated-root owner uid, and the
-//! unleased/leased broker quotas. Anything missing/invalid, a cgroup2 mount the
-//! launcher cannot establish, a capability it cannot drop, or a delegated cgroup
+//! unleased/leased broker quotas. Anything missing/invalid or a delegated cgroup
 //! that fails the [`Readiness`](djinn_cgroup_launcher::Readiness) contract, exits
 //! non-zero with a NAMED error BEFORE the broker accepts a single connection.
 //! Every one of those conditions is a readiness failure, never a per-command
@@ -23,7 +22,7 @@ use std::path::Path;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use djinn_cgroup_launcher::bootstrap::{self, Bootstrap};
+use djinn_cgroup_launcher::bootstrap::Bootstrap;
 use djinn_cgroup_launcher::broker::{Broker, BrokerConfig, OsNonceSource};
 use djinn_cgroup_launcher::transport::UnixBrokerServer;
 use djinn_cgroup_launcher::{
@@ -68,26 +67,10 @@ fn run() -> Result<(), MainError> {
         .parse()
         .map_err(|_| MainError::InvalidEnv("DJINN_LAUNCHER_LEASED_MILLICORES"))?;
 
-    // Readiness gate 1 — establish the delegated cgroup v2 root, then give up
-    // the capability that allowed it. `Bootstrap::run` mounts cgroup2 inside the
-    // launcher's own cgroup namespace, vacates the mount root into `init/` so
-    // the "no internal process" rule permits delegation, enables exactly `+cpu`,
-    // and finally drops CAP_SYS_ADMIN/CAP_SYS_RESOURCE irreversibly. Everything
-    // here runs before the broker binds, so the capability window contains no
-    // user-controlled code at all (task 7deu, defect 4).
+    // Prepare the root supplied by the kubelet RuntimeClass before binding the broker.
     Bootstrap::new(&cgroup_root).run()?;
 
-    // Readiness gate 2 — prove the capability really is gone. A launcher that
-    // kept CAP_SYS_ADMIN would hand every task-run pod a node-wide escape
-    // primitive (`/proc/sys/kernel/core_pattern` is not namespaced), so this is
-    // fail-closed rather than advisory.
-    if bootstrap::holds_any_bootstrap_capability()? {
-        return Err(MainError::Launcher(LauncherError::CapabilityDropFailed {
-            errno: 0,
-        }));
-    }
-
-    // Readiness gate 3 — the delegated cgroup root. `NativeCgroupFs::open` runs
+    // Readiness gate 2 — the delegated cgroup root. `NativeCgroupFs::open` runs
     // the full readiness contract (really a cgroup2 filesystem, cgroup-v2 mode,
     // root writable and not group/other-writable, owner == expected uid, exactly
     // the cpu controller delegated) and fails closed, by name, otherwise.

@@ -27,9 +27,9 @@ use crate::invocation_journal::{
     invocation_journal_volume, worker_invocation_journal_env, worker_invocation_journal_mount,
 };
 use crate::launcher::{
-    RoleResourceClass, launcher_cgroup_mountpoint_volume, launcher_ipc_volume,
-    launcher_sidecar_container, pod_host_users, pod_security_context, worker_launcher_env,
-    worker_launcher_ipc_mount, worker_resources, worker_security_context,
+    RoleResourceClass, launcher_ipc_volume, launcher_sidecar_container, pod_host_users,
+    pod_security_context, worker_launcher_env, worker_launcher_ipc_mount, worker_resources,
+    worker_security_context,
 };
 use crate::sidecar::{
     BackingServiceSpec, sidecar_conn_env, sidecar_container, sidecar_dshm_volume,
@@ -237,6 +237,10 @@ pub fn build_task_run_job(
     // to build-capable so a pod that might compile is never under-provisioned.
     role: Option<RoleKind>,
 ) -> Job {
+    assert!(
+        !config.cgroup_launcher_mode.renders_sidecar() || config.task_run_cgroup_writable_enabled,
+        "required cgroup launcher requires runtimeClassName: djinn-cgroup-writable"
+    );
     let task_run_id_str = task_run_id.to_string();
     let labels = job_labels(&task_run_id_str);
     let job_name = format!("djinn-taskrun-{task_run_id}");
@@ -463,14 +467,7 @@ pub fn build_task_run_job(
         // Enforcement volumes for the cgroup-launcher sidecar:
         //   * `launcher-ipc` — Memory emptyDir carrying the broker control
         //     socket + worker-private credential (worker + launcher only);
-        //   * `launcher-cgroup` — Memory emptyDir supplying a writable
-        //     MOUNTPOINT, not a delegated cgroup root. The delegation itself is
-        //     established by the launcher's own `mount(2)` inside its cgroup
-        //     namespace; no volume source can supply one, which is what task
-        //     grkq's P0 proved. `readOnlyRootFilesystem: true` is why the
-        //     mountpoint has to come from a volume at all.
         volumes.push(launcher_ipc_volume());
-        volumes.push(launcher_cgroup_mountpoint_volume());
         //   * `invocation-journal` — Memory emptyDir the worker opens its
         //     durable invocation journal in. `ShellLaunchContext::broker_backed`
         //     runs `create_dir_all` on it before the supervisor starts, and its
@@ -505,13 +502,8 @@ pub fn build_task_run_job(
     // The cgroup-launcher is a native sidecar (initContainer + restartPolicy:
     // Always): it comes up before the worker (which dials its broker socket) and
     // is torn down when the worker exits, so the Job still reaches Completed.
-    //
-    // Task grkq: it is rendered ONLY when `cgroup_launcher_mode` arms it. It was
-    // previously unconditional, but its delegated cgroup root was an emptyDir,
-    // so the sidecar died in `NativeCgroupFs::open` on every pod and the broker
-    // socket never bound. `validate_enforcement_render` currently rejects the
-    // armed mode outright, so in practice no task-run pod renders it — see
-    // `CgroupLauncherMode` for the measured reason.
+    // The RuntimeClass supplies its writable delegated cgroup hierarchy; this
+    // manifest deliberately supplies no cgroup volume or mount.
     //
     // Each declared backing service is then ALSO a native sidecar, appended
     // AFTER the launcher.  For evidence-spike runs, `effective_services` is
@@ -542,6 +534,9 @@ pub fn build_task_run_job(
         (!config.tolerations.is_empty()).then(|| config.tolerations.clone());
 
     let pod_spec = PodSpec {
+        runtime_class_name: config
+            .task_run_cgroup_writable_enabled
+            .then_some(crate::launcher::TASK_RUN_CGROUP_RUNTIME_CLASS.to_string()),
         service_account_name: Some(config.service_account.clone()),
         // jqvg: the task-run Pod runs repository-controlled code (agent shell
         // commands, `build.rs`, test targets, npm `postinstall`). Nothing in
@@ -569,12 +564,9 @@ pub fn build_task_run_job(
         // then see the worker's `/proc` entries — so it is set only when the
         // launcher is actually rendered (task grkq).
         share_process_namespace: renders_launcher.then_some(true),
-        // Always None. A user namespace would map the launcher's bootstrap
-        // CAP_SYS_ADMIN away from the non-namespaced sysctls that make it a
-        // node-wide escape primitive, which is why this was once Some(false) —
-        // but it also leaves the launcher's own cgroup owned by an unmapped uid,
-        // so the delegation fails one step after the mount. Measured on the real
-        // node; see `launcher::pod_host_users`.
+        // Always None. A user namespace leaves the kubelet-delegated cgroup
+        // owned by an unmapped uid, preventing the launcher from creating its
+        // holding leaf; see `launcher::pod_host_users`.
         host_users: pod_host_users(config.cgroup_launcher_mode),
         // v1 leases security contract (qut0). The per-container securityContexts
         // set the UIDs now (worker=1000, launcher=0); the pod context ties
@@ -1504,13 +1496,13 @@ mod tests {
             assert_eq!(mount.read_only, *exp_ro);
         }
 
-        // Production/default rendering includes both the IPC volume and the
-        // memory-backed launcher cgroup mountpoint.
+        // Production/default rendering includes IPC and child filesystem
+        // surfaces only; RuntimeClass provides the cgroup hierarchy directly.
         let volumes = pod.volumes.as_ref().expect("volumes set");
         assert_eq!(
             volumes.len(),
-            13,
-            "expected 13 volumes: launcher surfaces, the invocation journal, the launcher's own \
+            12,
+            "expected 12 volumes: launcher surfaces, the invocation journal, the launcher's own \
              /tmp + $HOME + /var/tmp, and the private-dependency git config channel"
         );
         let expected_volume_names = [
@@ -1521,7 +1513,6 @@ mod tests {
             VOLUME_WORKSPACE,
             crate::env_config::VOLUME_ENV_CONFIG,
             crate::launcher::VOLUME_LAUNCHER_IPC,
-            crate::launcher::VOLUME_LAUNCHER_CGROUP,
             crate::invocation_journal::VOLUME_INVOCATION_JOURNAL,
             // The launcher's writable /tmp, $HOME and /var/tmp:
             // `readOnlyRootFilesystem` takes the image's copies away from a
@@ -3393,6 +3384,26 @@ mod tests {
 
     /// The production/default config is required; this helper names that profile
     /// for tests that contrast it with explicit local compatibility mode.
+    #[test]
+    fn armed_launcher_without_runtime_class_fails_closed() {
+        let mut config = KubernetesConfig::for_testing();
+        config.task_run_cgroup_writable_enabled = false;
+        let result = std::panic::catch_unwind(|| {
+            build_task_run_job(
+                &config,
+                &Uuid::now_v7(),
+                "project",
+                "secret",
+                "image",
+                &[],
+                None,
+                false,
+                Some(RoleKind::Worker),
+            )
+        });
+        assert!(result.is_err());
+    }
+
     fn armed_launcher_config() -> KubernetesConfig {
         KubernetesConfig::for_testing()
     }
@@ -3524,8 +3535,8 @@ mod tests {
     /// disabled local arm proves no
     /// launcher container, volume, mount or env leaks into an ordinary task pod
     /// (and `shareProcessNamespace` stays unset); the armed arm proves the
-    /// sidecar still renders correctly — WITHOUT ever re-introducing a
-    /// `launcher-cgroup` volume, which is the regression this task removed.
+    /// sidecar still renders correctly without adding any cgroup volume or
+    /// mount; RuntimeClass provides that hierarchy.
     #[test]
     fn launcher_sidecar_profiles_render_only_the_explicit_disabled_path_without_launcher() {
         let image = "registry.example/proj:tag";
@@ -3562,7 +3573,6 @@ mod tests {
         );
         for absent in [
             crate::launcher::VOLUME_LAUNCHER_IPC,
-            crate::launcher::VOLUME_LAUNCHER_CGROUP,
             // The brokered child's scratch surfaces and the one-way
             // private-dependency channel exist only because a command runs in
             // the launcher's mount namespace. With no launcher, the pod keeps
@@ -3644,46 +3654,18 @@ mod tests {
                 .any(|v| v.name == crate::launcher::VOLUME_LAUNCHER_IPC),
             "the IPC volume renders when armed"
         );
-        // P0 REGRESSION GUARD (tasks grkq → 7deu): the `launcher-cgroup` volume
-        // is a writable MOUNTPOINT, never a delegated cgroup root. An emptyDir
-        // used to be handed to the launcher AS the delegated root, which is not
-        // a cgroup2 tree, so the sidecar CrashLoopBackOffed on every pod. The
-        // volume must therefore be declared (or the volumeMount dangles and the
-        // API server rejects the manifest) AND be mounted only by the launcher,
-        // which then establishes the real delegation with its own `mount(2)`.
-        // `tests/rendered_launcher_delegation.rs` proves the distinction against
-        // the real `NativeCgroupFs`.
-        let cgroup_volume = armed
-            .volumes
-            .iter()
-            .flatten()
-            .find(|v| v.name == crate::launcher::VOLUME_LAUNCHER_CGROUP)
-            .expect("the armed render must declare the cgroup mountpoint volume");
+        // The RuntimeClass supplies `/sys/fs/cgroup`; no cgroup volume or
+        // cgroup mount may appear in any container in the armed Pod.
+        assert!(armed.volumes.iter().flatten().all(|volume| {
+            volume.host_path.is_none() && !volume.name.to_ascii_lowercase().contains("cgroup")
+        }));
         assert!(
-            cgroup_volume.empty_dir.is_some(),
-            "the mountpoint is an emptyDir; it is mounted OVER, not read"
-        );
-        assert!(
-            cgroup_volume.host_path.is_none(),
-            "a hostPath cannot supply a usable delegated root under nsdelegate"
-        );
-        let mounters: Vec<&str> = armed
-            .containers
-            .iter()
-            .chain(armed.init_containers.iter().flatten())
-            .filter(|container| {
-                container
-                    .volume_mounts
-                    .iter()
-                    .flatten()
-                    .any(|mount| mount.name == crate::launcher::VOLUME_LAUNCHER_CGROUP)
-            })
-            .map(|container| container.name.as_str())
-            .collect();
-        assert_eq!(
-            mounters,
-            vec![crate::launcher::LAUNCHER_CONTAINER_NAME],
-            "only the launcher may see the cgroup mountpoint"
+            armed
+                .containers
+                .iter()
+                .chain(armed.init_containers.iter().flatten())
+                .flat_map(|container| container.volume_mounts.iter().flatten())
+                .all(|mount| mount.mount_path != crate::launcher::LAUNCHER_CGROUP_ROOT)
         );
 
         // NOT user-namespaced: `hostUsers: false` leaves the launcher's own
@@ -3753,23 +3735,9 @@ mod tests {
             .expect("launcher securityContext");
         assert_eq!(lsc.run_as_user, Some(0));
         let add = lsc.capabilities.as_ref().unwrap().add.as_ref().unwrap();
-        // Task 7deu: SYS_ADMIN/SYS_RESOURCE are granted for the launcher's
-        // bootstrap phase ONLY — it `capset`s them away before the broker binds
-        // its socket, so no user-controlled code ever runs while they are held.
-        // See `launcher::launcher_capabilities`.
-        // CHOWN is retained past bootstrap so the broker socket can be handed to
-        // the worker uid; chown(2) needs the capability even at euid 0.
-        assert_eq!(
-            add,
-            &[
-                "CHOWN",
-                "SETGID",
-                "SETUID",
-                "SETPCAP",
-                "SYS_ADMIN",
-                "SYS_RESOURCE"
-            ]
-        );
+        // Only the residual identity/socket capabilities are granted. The
+        // RuntimeClass supplies cgroup delegation; no mount capability is needed.
+        assert_eq!(add, &["CHOWN", "SETGID", "SETUID", "SETPCAP"]);
         // The `CAP_`-prefixed spelling is what the API server rejects alongside
         // `allowPrivilegeEscalation: false`.
         assert!(!add.iter().any(|c| c.starts_with("CAP_")));
@@ -3845,23 +3813,17 @@ mod tests {
             .find(|c| c.name == crate::launcher::LAUNCHER_CONTAINER_NAME)
             .unwrap();
         assert!(mount_names(launcher).contains(&crate::launcher::VOLUME_LAUNCHER_IPC.to_string()));
-        // Tasks grkq → 7deu: the cgroup MOUNTPOINT volume is declared and
-        // mounted by the launcher alone. A volumeMount naming a volume the pod
-        // does not declare is a manifest the API server rejects, so both sides
-        // have to move together (see `launcher.rs`). The worker must never see
-        // it: the delegated tree is the launcher's private authority surface.
+        // The RuntimeClass supplies `/sys/fs/cgroup`; neither the launcher nor
+        // worker receives a cgroup volume/mount from this PodSpec.
+        assert!(pod.volumes.iter().flatten().all(|volume| {
+            volume.host_path.is_none() && !volume.name.to_ascii_lowercase().contains("cgroup")
+        }));
         assert!(
-            pod.volumes
+            launcher
+                .volume_mounts
                 .iter()
                 .flatten()
-                .any(|v| v.name == crate::launcher::VOLUME_LAUNCHER_CGROUP),
-            "the armed render must declare the `launcher-cgroup` mountpoint volume"
-        );
-        assert!(
-            mount_names(launcher).contains(&crate::launcher::VOLUME_LAUNCHER_CGROUP.to_string())
-        );
-        assert!(
-            !mount_names(worker).contains(&crate::launcher::VOLUME_LAUNCHER_CGROUP.to_string())
+                .all(|mount| mount.mount_path != crate::launcher::LAUNCHER_CGROUP_ROOT)
         );
 
         // Backing sidecar gets neither IPC nor cgroup nor workspace access.
@@ -3875,7 +3837,6 @@ mod tests {
         let svc_mounts = mount_names(svc);
         for forbidden in [
             crate::launcher::VOLUME_LAUNCHER_IPC,
-            crate::launcher::VOLUME_LAUNCHER_CGROUP,
             VOLUME_WORKSPACE,
             VOLUME_MIRROR,
         ] {

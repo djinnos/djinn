@@ -907,16 +907,16 @@ jobs:
           set -euo pipefail
           # Task 7deu. The same privileged cgroup-v2 container, running the
           # ONLY suite that measures behaviour rather than configuration: the
-          # launcher mounts its own delegated cgroup2 root, drops CAP_SYS_ADMIN
-          # and proves it can no longer mount, spawns a real child into an
-          # invocation leaf, and measures `cpu.stat usage_usec` over a
-          # wall-clock window unleased and then lifted. Reading `cpu.max` back
-          # cannot see any of the defects this replaces — an ancestor CPU limit
-          # clamping every leaf, or a clone flag that truncated to zero so the
-          # child was never in the cgroup at all.
+          # launcher prepares the writable delegated cgroup2 root supplied by
+          # the container runtime, spawns a real child into an invocation leaf,
+          # and measures `cpu.stat usage_usec` over a wall-clock window unleased
+          # and then lifted. Reading `cpu.max` back cannot see any of the defects
+          # this replaces — an ancestor CPU limit clamping every leaf, or a clone
+          # flag that truncated to zero so the child was never in the cgroup at
+          # all.
           #
-          # --test-threads 1 because the proof's capability drop is irreversible
-          # and process-wide.
+          # --test-threads 1 because bootstrap consumes the process-wide
+          # delegated root by moving the launcher and enabling its controller.
           docker run --rm --privileged --cgroupns=private \
             -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" \
             ubuntu:24.04 \
@@ -942,8 +942,8 @@ jobs:
           # accepted lift, asserting `25000 100000` -> `400000 100000` plus the
           # measured throughput multiple on `cpu.stat`.
           #
-          # --test-threads 1 because the proof's capability drop is irreversible
-          # and process-wide.
+          # --test-threads 1 because bootstrap consumes the process-wide
+          # delegated root by moving the launcher and enabling its controller.
           docker run --rm --privileged --cgroupns=private \
             -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" \
             ubuntu:24.04 \

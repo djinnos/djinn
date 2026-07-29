@@ -7,9 +7,9 @@
 //! hard dependency of the entire feature, and it cost real production time:
 //!
 //! * The container runtime's `RuntimeDefault` seccomp profile answers `clone3`
-//!   with `ENOSYS` for containers **without** `CAP_SYS_ADMIN`. Every launcher
-//!   configuration that did not grant that capability could not launch anything,
-//!   and the failure surfaced as an opaque per-command spawn error.
+//!   with `ENOSYS` in the restricted launcher profile. That made command launch
+//!   depend on a syscall the privilege-free sidecar cannot use, and the failure
+//!   surfaced as an opaque per-command spawn error.
 //! * `libc::CLONE_INTO_CGROUP` is declared `c_int` on glibc with the value
 //!   `0x200000000`, which does not fit; the `libc` crate's blanket
 //!   `allow(overflowing_literals)` truncated it to **0**. The shipped call

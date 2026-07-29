@@ -14,25 +14,24 @@
 //!
 //! So this file asserts **behaviour, measured over a known wall-clock window**:
 //!
-//! 1. the launcher establishes its own delegated cgroup2 root by `mount(2)`;
-//! 2. it drops `CAP_SYS_ADMIN`/`CAP_SYS_RESOURCE` and **cannot mount again**;
-//! 3. a real child, spawned by the production seam, is a member of the
+//! 1. the launcher consumes the real cgroup2 root delegated by its container;
+//! 2. a real child, spawned by the production seam, is a member of the
 //!    invocation leaf;
-//! 4. unleased, it burns *approximately the unleased quota* — two-sided, so it
+//! 3. unleased, it burns *approximately the unleased quota* — two-sided, so it
 //!    fails both if the child escaped the cgroup (usage ≈ 0) and if the quota
 //!    did not bite (usage ≈ 2 cores), and `nr_throttled` is non-zero, which is
 //!    what makes throttle-based heavy detection possible at all;
-//! 5. after a fenced lift it burns *multiples more* in the same window and stops
+//! 4. after a fenced lift it burns *multiples more* in the same window and stops
 //!    being throttled;
-//! 6. a sibling leaf with no child accounts for nothing, so the measurement is
+//! 5. a sibling leaf with no child accounts for nothing, so the measurement is
 //!    attributing CPU to the right cgroup;
-//! 7. a leaf created under an UNARMED lease authority is never clamped at all —
+//! 6. a leaf created under an UNARMED lease authority is never clamped at all —
 //!    `cpu.max` reads `max 100000` and it measures multiples of the clamped
 //!    leaf, while still containing its child.
 //!
-//! # What step 7 adds (goxi launcher blocker 11)
+//! # What step 6 adds (goxi launcher blocker 11)
 //!
-//! Steps 4-5 prove the lease *can* govern CPU. They cannot see whether the lease
+//! Steps 3-4 prove the lease *can* govern CPU. They cannot see whether the lease
 //! is ever *reachable*. Production armed the launcher while the durable
 //! `admission_handoff` row was ABSENT — `djinn-server epoch show` reported
 //! `admission handoff row: <absent>` during the armed window — which
@@ -42,7 +41,7 @@
 //! 250,000 usec escalation threshold, with `cpu.max` never leaving
 //! `25000 100000`. Arming was a ~16x slowdown and rolled back four times.
 //!
-//! Step 7 makes that state measurable: containment without a reachable lift must
+//! Step 6 makes that state measurable: containment without a reachable lift must
 //! cost nothing.
 //!
 //! Nothing here can pass vacuously. There is no `FakeCgroup`, no fake clone, no
@@ -51,7 +50,7 @@
 //!
 //! # Where it runs
 //!
-//! It needs uid 0 and a real cgroup-v2 hierarchy it may mount and delegate, so
+//! It needs uid 0 and a writable, delegated cgroup-v2 hierarchy, so
 //! the proof is `#[ignore]`d for ordinary unprivileged runs and executed by the
 //! `launcher-kernel-boundary` CI lane. [`the_lease_lifecycle_lane_is_wired`] is
 //! NOT ignored and fails the ordinary shard if that lane stops running this
@@ -59,17 +58,15 @@
 //!
 //! # Why it is a single proof
 //!
-//! Step 2 is irreversible: once the launcher has `capset`ed `CAP_SYS_ADMIN`
-//! away, nothing later in the same process can mount anything. Splitting this
-//! into several `#[test]`s sharing one process would make all but the first
-//! fail for a reason that has nothing to do with what they assert.
+//! The proof mutates the cgroup namespace root and leaves the test process in
+//! the bootstrap holding leaf. Keeping the lifecycle in one `#[test]` prevents
+//! concurrent proofs from changing the same hierarchy beneath each other.
 
 use std::collections::BTreeMap;
-use std::ffi::CString;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use djinn_cgroup_launcher::bootstrap::{Bootstrap, INIT_LEAF, holds_any_bootstrap_capability};
+use djinn_cgroup_launcher::bootstrap::{Bootstrap, INIT_LEAF};
 use djinn_cgroup_launcher::{
     CommandSpec, CpuStat, Invocation, Launcher, LauncherConfig, LeaseAuthority, LeasedQuota,
     NativeCgroupFs, NativeCgroupSpawn, UnleasedQuota,
@@ -206,7 +203,7 @@ fn the_asserted_cpu_max_lines_are_the_ones_the_launcher_writes() {
     assert_eq!(
         djinn_cgroup_launcher::unrestricted_cpu_max(),
         "max 100000",
-        "an unarmed leaf's line is what step 7 asserts against the kernel"
+        "an unarmed leaf's line is what step 6 asserts against the kernel"
     );
     // `25000 100000` is the line production measured on a leaf that burned 21.1
     // CPU-seconds and never escalated; `4000000 100000` is what the lift must
@@ -239,8 +236,8 @@ fn the_measured_quotas_are_the_shipped_defaults() {
 
 // ══════════════════ privileged proof: the lease governs CPU ══════════════════
 
-/// Mount, delegate, drop the capability, throttle, lift — all measured.
-#[ignore = "privileged: needs uid 0 and a cgroup-v2 hierarchy it may mount and delegate \
+/// Consume the delegated root, throttle, and lift — all measured.
+#[ignore = "privileged: needs uid 0 and a writable delegated cgroup-v2 hierarchy \
             (CI job launcher-kernel-boundary)"]
 #[test]
 fn the_delegated_lease_throttles_and_lifts_measured_on_cpu_stat() {
@@ -248,13 +245,13 @@ fn the_delegated_lease_throttles_and_lifts_measured_on_cpu_stat() {
     // cpu.stat cannot run against a stale security/resource approximation.
     assert_rendered_required_job_contract();
     require_root();
-    let root = scratch_dir("lease-lifecycle");
+    // `--cgroupns=private` makes this path the container's cgroup namespace
+    // root: the real cgroup-v2 subtree delegated to the container. Production
+    // receives the same shape at this path from the writable-cgroup
+    // RuntimeClass. Bootstrap deliberately does not mount a filesystem here.
+    let root = PathBuf::from("/sys/fs/cgroup");
 
-    // ── 1. The launcher establishes its own delegated root ──────────────────
-    //
-    // This is the step an `emptyDir` could never perform and the reason the
-    // sidecar CrashLoopBackOffed on every task-run Pod. It also drops the
-    // bootstrap capabilities on the way out.
+    // ── 1. The launcher prepares the delegated root ─────────────────────────
     Bootstrap::new(&root).run().unwrap_or_else(|error| {
         panic!(
             "the launcher could not establish its delegated cgroup root at {}: {error}. If this \
@@ -263,22 +260,6 @@ fn the_delegated_lease_throttles_and_lifts_measured_on_cpu_stat() {
             root.display()
         )
     });
-
-    // ── 2. …and can no longer mount anything ────────────────────────────────
-    assert!(
-        !holds_any_bootstrap_capability().expect("read this process's capability set"),
-        "CAP_SYS_ADMIN survived bootstrap; a task-run pod holding it has a node-wide escape \
-         primitive (/proc/sys/kernel/core_pattern is not namespaced)"
-    );
-    let second = scratch_dir("post-drop-mount");
-    let errno = try_mount_cgroup2(&second);
-    assert_eq!(
-        errno,
-        Some(libc::EPERM),
-        "after the capability drop a second cgroup2 mount must fail with EPERM; it returned \
-         {errno:?}, so the drop did not take"
-    );
-    let _ = std::fs::remove_dir_all(&second);
 
     // The launcher's own process is out of the mount root, which is what the
     // "no internal process" rule requires before `+cpu` can be delegated.
@@ -297,7 +278,7 @@ fn the_delegated_lease_throttles_and_lifts_measured_on_cpu_stat() {
         "the delegated root must hold no processes of its own"
     );
 
-    // ── 3. The real launcher, over the real filesystem seam ─────────────────
+    // ── 2. The real launcher, over the real filesystem seam ─────────────────
     let fs = NativeCgroupFs::open(&root, 0)
         .expect("the root the launcher just established must satisfy its own readiness contract");
     let mut launcher = Launcher::new(
@@ -321,7 +302,7 @@ fn the_delegated_lease_throttles_and_lifts_measured_on_cpu_stat() {
         )
         .expect("spawn the probe command into an invocation leaf");
 
-    // A sibling that never gets a child. It is the control for step 6.
+    // A sibling that never gets a child. It is the control for step 5.
     let idle_invocation = Invocation {
         id: "idle".to_owned(),
         fence: 1,
@@ -335,7 +316,7 @@ fn the_delegated_lease_throttles_and_lifts_measured_on_cpu_stat() {
         )
         .expect("spawn the idle control");
 
-    // ── 4. Membership, then the unleased measurement ────────────────────────
+    // ── 3. Membership, then the unleased measurement ────────────────────────
     let members = read_trimmed(&root.join("leased").join("cgroup.procs"));
     assert!(
         members
@@ -374,7 +355,7 @@ fn the_delegated_lease_throttles_and_lifts_measured_on_cpu_stat() {
          defect this task exists to remove."
     );
 
-    // ── 5. The fenced lift, measured the same way ───────────────────────────
+    // ── 4. The fenced lift, measured the same way ───────────────────────────
     //
     // `cpu.max` is read from the KERNEL either side of the lift, not inferred
     // from the measurement. The production symptom of blocker 11 was precisely a
@@ -446,7 +427,7 @@ fn the_delegated_lease_throttles_and_lifts_measured_on_cpu_stat() {
         );
     }
 
-    // ── 6. The control: an idle sibling accounts for essentially nothing ────
+    // ── 5. The control: an idle sibling accounts for essentially nothing ────
     let idle = measure(&mut launcher, &idle_leaf, Duration::from_millis(250));
     assert!(
         idle.usage_usec < expected_unleased / 4,
@@ -459,7 +440,7 @@ fn the_delegated_lease_throttles_and_lifts_measured_on_cpu_stat() {
     //
     // The unarmed leaf has no quota of its own, so it takes whatever the runner
     // will give it. Leaving the lifted 4-core leaf spinning alongside would make
-    // step 7 measure contention rather than the absence of a clamp.
+    // step 6 measure contention rather than the absence of a clamp.
     for (leaf, pid) in [(&mut leaf, child.pid), (&mut { idle_leaf }, idle_child.pid)] {
         launcher.kill(leaf).expect("cgroup.kill");
         let drained = (0..200).any(|_| {
@@ -474,7 +455,7 @@ fn the_delegated_lease_throttles_and_lifts_measured_on_cpu_stat() {
         reap(pid);
     }
 
-    // ── 7. An UNARMED authority never clamps (goxi launcher blocker 11) ─────
+    // ── 6. An UNARMED authority never clamps (goxi launcher blocker 11) ─────
     //
     // Production ran the launcher armed while the durable `admission_handoff`
     // row was ABSENT. `evaluate_invocation_lift` maps that to `Unleased`, the
@@ -672,30 +653,6 @@ fn require_root() {
         "/workspace is missing: the rendered CommandSpec cwd must exist before a child can exec \
          (the privileged lane creates it)"
     );
-}
-
-fn scratch_dir(label: &str) -> PathBuf {
-    let base = PathBuf::from(format!("/tmp/djinn-7deu-{label}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&base);
-    std::fs::create_dir_all(&base).expect("create scratch dir");
-    base
-}
-
-/// Attempt a `cgroup2` mount and return the errno if it failed.
-fn try_mount_cgroup2(target: &Path) -> Option<i32> {
-    use std::os::unix::ffi::OsStrExt;
-    let target = CString::new(target.as_os_str().as_bytes()).expect("path");
-    let fstype = CString::new("cgroup2").expect("literal");
-    let rc = unsafe {
-        libc::mount(
-            fstype.as_ptr(),
-            target.as_ptr(),
-            fstype.as_ptr(),
-            0,
-            std::ptr::null(),
-        )
-    };
-    (rc != 0).then(|| std::io::Error::last_os_error().raw_os_error().unwrap_or(0))
 }
 
 fn read_trimmed(path: &Path) -> String {
