@@ -541,7 +541,8 @@
                         .bind(&run_id).bind(&intent_id).bind(generation).bind(&task_id)
                         .execute(db.pool()).await.unwrap();
                     // The completed source intent and old heartbeat leave the queued task as the sole evidence.
-                    sqlx::query("UPDATE refinement_dispatch_intents SET state = 'completed' WHERE id = $1")
+                    // Terminal intent rows require their terminal timestamp under the durable schema.
+                    sqlx::query("UPDATE refinement_dispatch_intents SET state = 'completed', terminal_at = to_char(transaction_timestamp() AT TIME ZONE 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'), updated_at = to_char(transaction_timestamp() AT TIME ZONE 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') WHERE id = $1")
                         .bind(&intent_id).execute(db.pool()).await.unwrap();
                     djinn_db::test_support::elapse_refinement_run_wall_clock_for_test(&db, &run_id, 3_600).await;
                 }
