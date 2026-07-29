@@ -786,6 +786,7 @@ fn task_failure_signal_is_read_once_and_cleared() {
         "task-1",
         TaskFailureSignal {
             throttle: true,
+            transient: false,
             retry_after_ms: Some(5 * 60 * 60 * 1000),
         },
     );
@@ -810,6 +811,7 @@ fn task_failure_signal_latest_wins_and_is_per_task() {
         "task-a",
         TaskFailureSignal {
             throttle: false,
+            transient: false,
             retry_after_ms: None,
         },
     );
@@ -818,6 +820,7 @@ fn task_failure_signal_latest_wins_and_is_per_task() {
         "task-a",
         TaskFailureSignal {
             throttle: true,
+            transient: false,
             retry_after_ms: Some(1_000),
         },
     );
@@ -825,6 +828,7 @@ fn task_failure_signal_latest_wins_and_is_per_task() {
         "task-b",
         TaskFailureSignal {
             throttle: false,
+            transient: false,
             retry_after_ms: None,
         },
     );

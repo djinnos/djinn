@@ -343,9 +343,28 @@ pub struct TaskFailureSignal {
     /// The failure was a rate-limit / quota throttle (not a structural failure).
     /// A3: a throttle reappearance must NOT advance the terminal streak.
     pub throttle: bool,
+    /// The failure was a TRANSIENT provider-side fault — a 5xx
+    /// (`server_error` / `server_is_overloaded`) or a hard transport death
+    /// (`ProviderFailureClass::Transient`).
+    ///
+    /// Like `throttle`, this is a fault of the provider rather than of the task:
+    /// the same transcript redispatched onto a healthy backend succeeds. The
+    /// coordinator therefore spares BOTH task-blaming counters for it — the
+    /// third-strike planner-remediation `provider_failure_streak` and the
+    /// terminal `dispatch_failure_streak` — while the escalating redispatch
+    /// cooldown and the per-`(scope, model)` breaker failover still apply.
+    ///
+    /// Kept as a second flag rather than folding the pair into an enum so the
+    /// change stays additive at every call site; `throttle` and `transient` are
+    /// mutually exclusive in practice (a class maps to at most one of them).
+    /// Incident: task `2gq7`, 2026-07-29 — three independent OpenAI 500s were
+    /// indistinguishable from a reproducible task fault, so the third one minted
+    /// a bogus "Planner remediation" task.
+    pub transient: bool,
     /// Provider-stated reset window (`Retry-After` / rate-limit-reset), if any.
     /// A6: floors the escalating redispatch cooldown so a multi-hour quota
-    /// window isn't probed on the fixed ladder. Only meaningful for throttles.
+    /// window isn't probed on the fixed ladder. Meaningful for throttles and,
+    /// when a provider states one, for transient faults.
     pub retry_after_ms: Option<u64>,
 }
 
