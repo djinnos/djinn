@@ -770,11 +770,21 @@ pub enum ProviderFailureClass {
     /// class must never be read as evidence that the task itself is
     /// undispatchable.
     ///
-    /// Breaker behaviour is deliberately IDENTICAL to [`Self::Failure`]: the
-    /// host feeds it to the gentle consecutive-failure breaker
-    /// (`record_failure`), so model-health/auto-disable is unchanged and a model
-    /// that 5xx's on every dispatch still auto-disables. What changes is
-    /// *task attribution* — the coordinator spares the two task-blaming counters
+    /// Breaker behaviour differs from [`Self::Failure`] in exactly one way: the
+    /// host feeds this class to `record_transient_failure`, whose ladder is
+    /// `TRANSIENT_BREAKER_THRESHOLD` (20) rather than the three-strike
+    /// `CIRCUIT_BREAKER_THRESHOLD`. The fault stays fully visible in
+    /// `model_health` — `consecutive_failures` and `total_failures` move exactly
+    /// as a `Failure` would — but an upstream capacity blip no longer
+    /// auto-disables the model, while a backend that is permanently gone still
+    /// demotes. An overloaded provider is a statement about LOAD, not about
+    /// whether the model can do the work (task `nr41`, 2026-07-29:
+    /// `openai/gpt-5.6-sol` reached `auto_disabled: true` with 15 consecutive
+    /// failures and 6 disable-TTL trips off an OpenAI 500 burst, taking the
+    /// tribunal's own adversary role down with it).
+    ///
+    /// The larger change is *task attribution* — the coordinator spares the two
+    /// task-blaming counters
     /// (the planner-remediation `provider_failure_streak` and the terminal
     /// `dispatch_failure_streak`) for this class, exactly as it already does for
     /// [`Self::Throttle`], while the escalating redispatch cooldown and the

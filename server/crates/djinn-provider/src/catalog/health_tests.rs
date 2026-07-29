@@ -1088,3 +1088,149 @@ fn apply_breaker_check_for_respects_expired_cooldown() {
         "breaker must re-trip after cooldown expiry + new observation"
     );
 }
+
+// ── Transient upstream faults are a LOAD signal, not a health signal ────────
+
+/// Incident 2026-07-29 (task `nr41`): a burst of OpenAI `server_is_overloaded`
+/// 500s drove `openai/gpt-5.6-sol` to `auto_disabled: true` — 15 consecutive
+/// failures, 6 disable-TTL trips, 30 total failures against 6 successes —
+/// disabling the tribunal's own adversary model for an outage that was not the
+/// model's doing.
+///
+/// A run of transient upstream faults well past the ordinary three-strike
+/// threshold must therefore leave the model available.
+#[test]
+fn repeated_transient_upstream_faults_do_not_auto_disable_a_model() {
+    let ht = HealthTracker::new();
+
+    for _ in 0..(CIRCUIT_BREAKER_THRESHOLD * 4) {
+        ht.record_transient_failure(S, TEST_MODEL);
+    }
+
+    let health = ht.model_health(S, TEST_MODEL);
+    assert!(
+        !health.auto_disabled,
+        "an overloaded upstream must not demote the model: {health:?}"
+    );
+    assert!(ht.is_available(S, TEST_MODEL));
+    assert_eq!(
+        health.disable_ttl_trips, 0,
+        "no trips means no escalating-cooldown ratchet either"
+    );
+    // The faults are still fully visible — this is a re-attribution, not a
+    // suppression. An operator reading model_health sees every one of them.
+    assert_eq!(health.consecutive_failures, CIRCUIT_BREAKER_THRESHOLD * 4);
+    assert_eq!(health.total_failures, CIRCUIT_BREAKER_THRESHOLD * 4);
+    assert_eq!(
+        health.breaker_eligible_consecutive_failures, 0,
+        "transient faults must never become breaker-eligible"
+    );
+}
+
+/// The counterpart guard: genuine typed provider failures (auth, invalid
+/// request, unparseable output — everything that routes through
+/// `record_failure`) must still trip at the ordinary threshold. If this ever
+/// fails, the fix above has been over-applied and real breakage stops demoting
+/// models.
+#[test]
+fn repeated_genuine_failures_still_auto_disable_a_model() {
+    let ht = HealthTracker::new();
+
+    for _ in 0..CIRCUIT_BREAKER_THRESHOLD {
+        ht.record_failure(S, TEST_MODEL);
+    }
+
+    let health = ht.model_health(S, TEST_MODEL);
+    assert!(
+        health.auto_disabled,
+        "genuine failures must still trip the breaker at the ordinary threshold: {health:?}"
+    );
+    assert!(!ht.is_available(S, TEST_MODEL));
+}
+
+/// The transient ladder is longer, not absent. A backend that is permanently
+/// gone (the kimi-for-coding/`k2p7` signature: instant transport death, zero
+/// tokens, re-dispatched forever) must still be demoted eventually rather than
+/// re-selected indefinitely.
+#[test]
+fn a_sustained_run_of_transient_faults_eventually_trips_the_breaker() {
+    let ht = HealthTracker::new();
+
+    for _ in 0..(TRANSIENT_BREAKER_THRESHOLD - 1) {
+        ht.record_transient_failure(S, TEST_MODEL);
+    }
+    assert!(
+        ht.is_available(S, TEST_MODEL),
+        "one short of the transient threshold is still available"
+    );
+
+    ht.record_transient_failure(S, TEST_MODEL);
+    assert!(
+        !ht.is_available(S, TEST_MODEL),
+        "a dead endpoint still demotes — twenty strikes in, not three"
+    );
+}
+
+/// A success proves the provider recovered, so the transient streak resets and
+/// the next outage starts counting from zero rather than inheriting the last
+/// one's progress toward the threshold.
+#[test]
+fn a_success_resets_the_transient_streak() {
+    let ht = HealthTracker::new();
+
+    for _ in 0..(TRANSIENT_BREAKER_THRESHOLD - 1) {
+        ht.record_transient_failure(S, TEST_MODEL);
+    }
+    ht.record_success(S, TEST_MODEL);
+    for _ in 0..(TRANSIENT_BREAKER_THRESHOLD - 1) {
+        ht.record_transient_failure(S, TEST_MODEL);
+    }
+
+    assert!(
+        ht.is_available(S, TEST_MODEL),
+        "the streak restarted after the success, so the threshold is not reached"
+    );
+}
+
+/// The per-task side-channel has three readers with different ownership.
+/// `peek` must be non-destructive so the session-exit classifier and the
+/// refinement loop cannot steal the signal the dispatch-reappearance path
+/// consumes for its A3/A6 backoff.
+#[test]
+fn peek_task_provider_failure_does_not_consume_the_signal() {
+    let ht = HealthTracker::new();
+    let signal = TaskFailureSignal {
+        throttle: false,
+        transient: true,
+        retry_after_ms: None,
+    };
+    ht.note_task_provider_failure("task-1", signal);
+
+    assert_eq!(ht.peek_task_provider_failure("task-1"), Some(signal));
+    assert_eq!(
+        ht.peek_task_provider_failure("task-1"),
+        Some(signal),
+        "peek must be repeatable"
+    );
+    assert_eq!(
+        ht.take_task_provider_failure("task-1"),
+        Some(signal),
+        "the owning reader still receives it"
+    );
+    assert_eq!(ht.peek_task_provider_failure("task-1"), None);
+}
+
+#[test]
+fn clear_task_provider_failure_drops_the_signal() {
+    let ht = HealthTracker::new();
+    ht.note_task_provider_failure(
+        "task-2",
+        TaskFailureSignal {
+            throttle: false,
+            transient: true,
+            retry_after_ms: None,
+        },
+    );
+    ht.clear_task_provider_failure("task-2");
+    assert_eq!(ht.peek_task_provider_failure("task-2"), None);
+}

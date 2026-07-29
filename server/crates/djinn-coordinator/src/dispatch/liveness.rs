@@ -276,6 +276,34 @@ pub struct LivenessEvidence {
     /// pre-existing verdict.
     #[serde(default)]
     pub handed_off_from_session_held_status: bool,
+    /// Positive evidence that the run died on a **transient upstream provider
+    /// fault** — a 5xx (`server_is_overloaded` / `server_error`), a 502/503/504,
+    /// or a stream that died mid-flight — rather than on anything this session
+    /// or task did.
+    ///
+    /// This is the signal the exit path used to throw away. A session's terminal
+    /// status has three values (`completed` / `failed` / `interrupted`) and the
+    /// exit path folds them onto two pod phases plus a sentinel exit code, so
+    /// "the worker crashed" and "the worker's provider 500'd" arrive here as the
+    /// identical `(Failed, 1)` pair. The classifier then convicted both of a
+    /// protocol violation with a `Crash` outcome, terminalized the live attempt,
+    /// and let the task be reclaimed and force-closed — which is how a
+    /// three-second OpenAI outage killed refinement round 3 of task `nr41` on
+    /// 2026-07-29.
+    ///
+    /// Distinct from [`Self::handed_off_from_session_held_status`], which
+    /// exonerates by showing the task was moved somewhere DELIBERATELY. This one
+    /// exonerates by naming an external CAUSE. A transient provider fault leaves
+    /// the task exactly where the session found it — there is no handoff to
+    /// find — so neither term subsumes the other.
+    ///
+    /// Carrying it as its own term rather than as another `exit_code` value is
+    /// deliberate: an exit code describes the process, and the process really
+    /// did exit nonzero. What changed is WHO is at fault, and that is a separate
+    /// fact, so it gets a separate field. `false` is the fail-safe default —
+    /// absent evidence preserves the pre-existing verdict exactly.
+    #[serde(default)]
+    pub transient_provider_fault: bool,
 }
 
 /// Whether `status` is one that only a LIVE session holds.
@@ -353,6 +381,12 @@ pub enum LivenessReason {
     /// The claim-extension budget is exhausted — no more slow extensions
     /// available.
     SlowExtensionBudgetExhausted,
+    /// The run ended because its **upstream provider** failed transiently (5xx
+    /// / overloaded / mid-flight stream death), not because the session or the
+    /// task misbehaved. Retryable: the identical work succeeds on the next
+    /// healthy backend, so the attempt must be recorded as environmental rather
+    /// than as a crash or a protocol violation.
+    TransientProviderFault,
     /// No specific reason (e.g. successful completion, live session).
     None,
 }
@@ -364,6 +398,7 @@ impl LivenessReason {
             Self::NonzeroExitNonterminal => "nonzero_exit_nonterminal",
             Self::HardRuntimeExceeded => "hard_runtime_exceeded",
             Self::SlowExtensionBudgetExhausted => "slow_extension_budget_exhausted",
+            Self::TransientProviderFault => "transient_provider_fault",
             Self::None => "none",
         }
     }
@@ -455,6 +490,13 @@ pub struct ClassificationResult {
 /// 4. **Dead** → absent/failed pod with no recent activity
 /// 5. **Slow** → activity signal absent/idle, pod running, below hard cap
 /// 6. **Live** → default when other conditions don't match
+///
+/// One extra rung sits between 2 and 3: a pod that exited on a **transient
+/// upstream provider fault** ([`LivenessEvidence::transient_provider_fault`]) is
+/// never a protocol violation, because nothing about the protocol was violated —
+/// the provider was down. It classifies `Dead` / `DeadReclaimed` with
+/// [`LivenessReason::TransientProviderFault`] so the run is reclaimed and
+/// redispatched instead of convicted and force-closed.
 pub fn classify(evidence: &LivenessEvidence) -> ClassificationResult {
     // ── 1. Terminal task state → noop ────────────────────────────────────
     if evidence
@@ -478,6 +520,44 @@ pub fn classify(evidence: &LivenessEvidence) -> ClassificationResult {
             evidence: evidence.clone(),
             outcome: Some(LivenessOutcome::Timeout),
             reason: Some(LivenessReason::HardRuntimeExceeded),
+            extension_eligible: false,
+        };
+    }
+
+    // ── 2b. Transient upstream provider fault ───────────────────────────
+    // A pod that exited because its PROVIDER failed transiently violated no
+    // protocol: the session did exactly what it was supposed to do until an
+    // upstream 500 / overload / mid-flight stream death took the conversation
+    // away from it. Convicting it here is not a cosmetic mislabel — the
+    // `ProtocolViolation` verdict is what terminalizes the live attempt as a
+    // `Crash`, which in turn lets the task be reclaimed and force-closed
+    // (2026-07-29, task `nr41`, refinement round 3: `server_is_overloaded` →
+    // `protocol_violation` → `Crash` → `dead` → force_closed, all inside one
+    // second).
+    //
+    // This rung outranks the protocol-violation rung rather than being folded
+    // into it because the two answer different questions. Precedence 3 asks "is
+    // the recorded state structurally inconsistent?" and its terms are all
+    // POSITIVE evidence of inconsistency. A transient provider fault is positive
+    // evidence of a CAUSE, and a known cause is precisely what makes the
+    // inconsistency explicable. So it must be consulted first, not appended as
+    // another exoneration term.
+    //
+    // The verdict is `Dead`/`DeadReclaimed`: the pod really is gone and its
+    // resources really must be reclaimed. What differs from a crash is the
+    // reason, and the reason is what downstream reads to decide the attempt is
+    // environmental (no dispatch penalty, no quality strike) and the work is
+    // redispatchable.
+    if matches!(
+        evidence.pod_phase,
+        Some(PodPhase::Succeeded) | Some(PodPhase::Failed)
+    ) && evidence.transient_provider_fault
+    {
+        return ClassificationResult {
+            verdict: Verdict::Dead,
+            evidence: evidence.clone(),
+            outcome: Some(LivenessOutcome::DeadReclaimed),
+            reason: Some(LivenessReason::TransientProviderFault),
             extension_eligible: false,
         };
     }

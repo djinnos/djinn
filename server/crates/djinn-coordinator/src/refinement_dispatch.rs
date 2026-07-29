@@ -675,6 +675,39 @@ impl CoordinatorActor {
                 return;
             }
 
+            // (c) the session ran, but the PROVIDER died under it. This is a
+            // third case, and reading it as (a) is what broke task `nr41` on
+            // 2026-07-29: an OpenAI `server_is_overloaded` 500 killed the
+            // Adversary ten seconds into round 3, the loop found a session row,
+            // read an empty debate trail, and scored the round as an explicit
+            // dry pass — burning a round, force-closing the task, and leaving
+            // the run with no live work at all.
+            //
+            // A round is only evidence about the proposal if the role got to
+            // form an opinion. When the upstream failed instead, there is no
+            // opinion to record, so the round must be retried rather than
+            // counted. This routes into the SAME bounded retry the never-started
+            // paths use — no new scheduler, and the same
+            // `REFINEMENT_DISPATCH_RETRY_CAP` ceiling so a provider that is down
+            // for good still terminates the loop with an honest reason instead
+            // of looping forever.
+            if self.refinement_round_died_on_transient_provider_fault(&session.task_id) {
+                let over_cap_error = format!(
+                    "role session died on a transient provider fault \
+                     {REFINEMENT_DISPATCH_RETRY_CAP} times (upstream 5xx / overload / \
+                     mid-flight stream death)"
+                );
+                self.retry_or_terminate_unstarted_refinement(
+                    run_id,
+                    &session,
+                    "refinement role session died on a transient provider fault (parked for retry)",
+                    over_cap_error,
+                    false,
+                )
+                .await;
+                return;
+            }
+
             // Session actually ran — clear the dispatch-failure counter and
             // process the outcome, then close the task so finished phase/round
             // tasks don't linger `open` on the board.
@@ -722,6 +755,36 @@ impl CoordinatorActor {
                 true
             }
         }
+    }
+
+    /// Did the just-finished refinement role session die on a **transient
+    /// upstream provider fault** (5xx / `server_is_overloaded` / mid-flight
+    /// stream death) rather than on its own work?
+    ///
+    /// Reads the health tracker's per-task provider-failure side-channel — the
+    /// same typed class the slot supervisor-runner records for every
+    /// `TaskRunOutcome::Failed`, and the same one the ordinary dispatch path
+    /// consults for its A3/A6 backoff. Refinement tasks never travel the
+    /// dispatch-reappearance path (they are force-closed once their round
+    /// resolves), so this reader also owns cleanup: the entry is cleared
+    /// unconditionally, since nothing else will ever collect it for this task id.
+    ///
+    /// Returns `false` when there is no signal at all, which is the fail-safe
+    /// answer: an absent signal means "not a typed provider failure", and the
+    /// round is processed exactly as it was before.
+    fn refinement_round_died_on_transient_provider_fault(&self, task_id: &str) -> bool {
+        let signal = self.health.peek_task_provider_failure(task_id);
+        self.health.clear_task_provider_failure(task_id);
+        let transient = signal.is_some_and(|signal| signal.transient);
+        if transient {
+            tracing::warn!(
+                task_id = %task_id,
+                "Refinement role session died on a transient provider fault — parking the round \
+                 for retry instead of scoring it (an empty debate trail here is the provider's \
+                 silence, not the role's verdict)"
+            );
+        }
+        transient
     }
 
     /// Abandon a dispatched refinement role session that did not execute and
@@ -1132,6 +1195,35 @@ impl CoordinatorActor {
             .await;
             return;
         };
+
+        // ── Step 1b: Provider-health gate ──────────────────────────────────
+        //
+        // Re-dispatching a round straight back into the provider that just
+        // killed it is how a single upstream outage becomes a run of them: the
+        // tribunal burns its `REFINEMENT_DISPATCH_RETRY_CAP` inside a couple of
+        // ticks and terminates for what was a two-minute capacity blip. Gate on
+        // the signal that already tracks exactly this — the per-`(scope, model)`
+        // health breaker — and defer non-terminally while it is cooling.
+        //
+        // Deferral here is free and self-healing: no task row, no spawn budget,
+        // no pool dispatch, and the cooldown expires on its own, so the next
+        // tick re-evaluates. It is deliberately NOT a terminate: a cooling model
+        // is a reason to wait, never a reason to kill the tribunal.
+        let model_health = self.health.model_health(Some(user_id.as_str()), &model_id);
+        if model_health.auto_disabled || model_health.hard_disabled {
+            tracing::info!(
+                proposal_id = %proposal_id,
+                phase = ?phase,
+                user_id = %user_id,
+                model_id = %model_id,
+                consecutive_failures = model_health.consecutive_failures,
+                cooldown_seconds_remaining = model_health.cooldown_seconds_remaining,
+                hard_disabled = model_health.hard_disabled,
+                "Refinement dispatch deferred: the model's health breaker is cooling \
+                 (retryable — no task row, no spawn-budget, no pool dispatch)"
+            );
+            return;
+        }
 
         // ── Step 2: Per-user/model cap admission (check + reserve atomically) ──
         //
