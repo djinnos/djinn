@@ -114,9 +114,13 @@ pub enum HydratedEvidenceAnchorV1 {
         canonical_cwd: String,
         launch_state: String,
         process_state: String,
+        launched_at: Option<String>,
+        finished_at: Option<String>,
         exit_code: Option<i32>,
         signal: Option<i32>,
         runner_failure: Option<String>,
+        elapsed_millis: Option<i64>,
+        timeout_millis: Option<i64>,
         timed_out: bool,
         stdout_digest: Option<String>,
         stdout_excerpt: Option<String>,
@@ -429,9 +433,13 @@ fn build_projection(
                     canonical_cwd: selected.canonical_cwd.clone(),
                     launch_state: selected.launch_state.clone(),
                     process_state: selected.process_state.clone(),
+                    launched_at: selected.launched_at.clone(),
+                    finished_at: selected.finished_at.clone(),
                     exit_code: selected.exit_code,
                     signal: selected.signal,
                     runner_failure: selected.runner_failure.clone(),
+                    elapsed_millis: selected.elapsed_millis,
+                    timeout_millis: selected.timeout_millis,
                     timed_out: selected.timed_out,
                     stdout_digest: selected.stdout_digest.clone(),
                     stdout_excerpt: selected.stdout_excerpt.clone(),
@@ -513,7 +521,27 @@ pub fn render_evidence_judge_projection(
         .ok_or(EvidenceCompletionError::Invalid(
             "stored projection is not V1",
         ))?;
-    let mut out = format!("Evidence completion: {outcome}\n");
+    let plan_id = object
+        .get("plan_id")
+        .and_then(serde_json::Value::as_str)
+        .ok_or(EvidenceCompletionError::Invalid(
+            "stored projection lacks plan identity",
+        ))?;
+    let captured_commit_sha = object
+        .get("captured_commit_sha")
+        .and_then(serde_json::Value::as_str)
+        .ok_or(EvidenceCompletionError::Invalid(
+            "stored projection lacks commit identity",
+        ))?;
+    let worktree_fingerprint = object
+        .get("worktree_fingerprint")
+        .and_then(serde_json::Value::as_str)
+        .ok_or(EvidenceCompletionError::Invalid(
+            "stored projection lacks worktree identity",
+        ))?;
+    let mut out = format!(
+        "Evidence completion: {outcome}\nplan_id={plan_id} captured_commit_sha={captured_commit_sha} worktree_fingerprint={worktree_fingerprint}\n"
+    );
     if outcome == "unresolved" {
         out.push_str("No anchored findings were established; this is not positive evidence.\n");
     }
