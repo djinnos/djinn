@@ -2909,6 +2909,15 @@ fn build_liveness_evidence(
     // extension quantum and breaking the "past-lease → kill now" contract.
     let extension_budget_exhausted = claim_ttl_remaining.map(|t| t.is_zero()).unwrap_or(false);
 
+    // ── Handoff evidence ─────────────────────────────────────────────
+    // The task's last recorded transition moved it OUT of a session-held
+    // status, so a live session put it where it is now. See
+    // `LivenessEvidence::handed_off_from_session_held_status`.
+    let handed_off_from_session_held_status = db_state
+        .last_transition_from_status
+        .as_deref()
+        .is_some_and(super::liveness::is_session_held_status);
+
     LivenessEvidence {
         pod_phase: Some(pod_phase),
         activity,
@@ -2918,6 +2927,7 @@ fn build_liveness_evidence(
         extension_budget_exhausted,
         hard_runtime_deadline_exceeded,
         exit_code: None,
+        handed_off_from_session_held_status,
     }
 }
 
@@ -3071,6 +3081,8 @@ mod liveness_foundation_tests {
             session_started_at: Some(ts.clone()),
             task_run_started_at: Some(ts),
             task_run_ended_at: None,
+
+            last_transition_from_status: None,
         }
     }
 
@@ -3209,6 +3221,8 @@ mod liveness_foundation_tests {
             extension_budget_exhausted: false,
             hard_runtime_deadline_exceeded: false,
             exit_code: Some(0),
+
+            handed_off_from_session_held_status: false,
         };
 
         let result = super::super::liveness::classify(&evidence);
@@ -3238,6 +3252,8 @@ mod liveness_foundation_tests {
             extension_budget_exhausted: false,
             hard_runtime_deadline_exceeded: false,
             exit_code: Some(137),
+
+            handed_off_from_session_held_status: false,
         };
 
         let result = super::super::liveness::classify(&evidence);
@@ -3375,6 +3391,8 @@ mod liveness_foundation_tests {
             session_started_at: None,
             task_run_started_at: None,
             task_run_ended_at: None,
+
+            last_transition_from_status: None,
         };
 
         let evidence = build_liveness_evidence(None, &db);
@@ -3433,6 +3451,8 @@ mod liveness_foundation_tests {
             extension_budget_exhausted: true,
             hard_runtime_deadline_exceeded: false,
             exit_code: None,
+
+            handed_off_from_session_held_status: false,
         };
 
         let result = super::super::liveness::classify(&evidence);
@@ -3676,6 +3696,8 @@ mod session_exit_protocol_violation_tests {
             session_started_at: Some(ts.clone()),
             task_run_started_at: Some(ts),
             task_run_ended_at: None,
+
+            last_transition_from_status: None,
         }
     }
 
@@ -3701,6 +3723,8 @@ mod session_exit_protocol_violation_tests {
             session_started_at: Some(ts.clone()),
             task_run_started_at: Some(ts),
             task_run_ended_at: None,
+
+            last_transition_from_status: None,
         }
     }
 
@@ -4039,6 +4063,8 @@ mod restart_amnesia_tests {
             session_started_at: Some(iso(now - TimeDuration::seconds(session_age_secs))),
             task_run_started_at: Some(iso(now - TimeDuration::seconds(task_run_age_secs))),
             task_run_ended_at: None,
+
+            last_transition_from_status: None,
         }
     }
 
