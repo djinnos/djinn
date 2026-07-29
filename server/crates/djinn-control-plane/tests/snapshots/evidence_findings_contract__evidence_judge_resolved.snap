@@ -1,0 +1,11 @@
+---
+source: crates/djinn-control-plane/tests/evidence_findings_contract.rs
+expression: rendered
+---
+Evidence completion: resolved
+check code [code] terminal=true health=ok
+check graph [graph] terminal=true health=ok
+check command [command] terminal=true health=ok
+finding code: the production submit seam owns finalization anchor={"kind":"code","path":"server/crates/djinn-slot/src/finalize_handlers.rs","end_line":169,"start_line":112,"captured_commit_sha":"captured-contract-commit"}
+finding graph: the finalizer resolves through the control-plane node anchor={"kind":"graph","node_id":"rust:handle_submit_work","graph_identity":"captured-contract-commit"}
+finding command: the immutable command event supplies process health anchor={"argv":["cargo","test","-p","djinn-control-plane","evidence_findings_contract"],"kind":"command","health":"ok","signal":null,"exit_code":0,"timed_out":false,"launch_state":"launched","canonical_cwd":"/workspace/djinn/server","invocation_id":"<invocation-id>","process_state":"exited","stderr_digest":"sha256:stderr-contract-digest","stdout_digest":"sha256:stdout-contract-digest","runner_failure":null,"stderr_excerpt":"contract stderr excerpt","stdout_excerpt":"contract stdout excerpt","stderr_truncated":false,"stdout_truncated":true}

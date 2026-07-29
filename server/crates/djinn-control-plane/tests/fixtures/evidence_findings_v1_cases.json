@@ -1,0 +1,31 @@
+{
+  "valid_cases": [
+    {"name":"resolved","observation":{"exit_code":0},"command_finding":true,"expected_outcome":"resolved","expected_command_health":"ok","expected_gaps":[]},
+    {"name":"partial_degraded","observation":{"exit_code":17},"command_finding":true,"expected_outcome":"partial","expected_command_health":"degraded","expected_gaps":["command: degraded"]},
+    {"name":"partial_broken","observation":{"signal":9},"command_finding":true,"expected_outcome":"partial","expected_command_health":"broken","expected_gaps":["command: broken"]},
+    {"name":"partial_error","observation":{"exit_code":0,"runner_failure":"sandbox unavailable"},"command_finding":true,"expected_outcome":"partial","expected_command_health":"error","expected_gaps":["command: error"]},
+    {"name":"partial_timeout","observation":{"exit_code":0,"timed_out":true},"command_finding":true,"expected_outcome":"partial","expected_command_health":"timeout","expected_gaps":["command: timeout"]},
+    {"name":"partial_not_run","command_finding":false,"expected_outcome":"partial","expected_command_health":"not_run","expected_gaps":["command: not_run"]},
+    {"name":"unresolved","command_finding":false,"omit_all_findings":true,"expected_outcome":"unresolved","expected_command_health":"not_run","expected_gaps":["command: not_run"]}
+  ],
+  "rejections": [
+    "unknown_completion_field",
+    "unknown_finding_field",
+    "unknown_anchor_field",
+    "unknown_invocation_field",
+    "prose_only_finding",
+    "code_method_mismatch",
+    "graph_method_mismatch",
+    "command_method_mismatch",
+    "unresolvable_code_anchor",
+    "unresolvable_graph_anchor",
+    "unresolvable_command_anchor",
+    "caller_owned_health",
+    "caller_owned_event_state",
+    "duplicate_check",
+    "omitted_check",
+    "extra_check",
+    "wrong_plan_identity",
+    "wrong_authenticated_session"
+  ]
+}
