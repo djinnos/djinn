@@ -155,9 +155,21 @@ async fn non_positive_limits_and_missing_pool_fail_closed() {
         .execute(db.pool())
         .await
         .unwrap();
+    assert!(
+        !repo
+            .global_pool_is_readable()
+            .await
+            .expect("a missing singleton pool is a readable false result")
+    );
     assert!(matches!(
         repo.acquire("missing-pool", 1).await,
         AcquireBuildPodPermitResult::Unavailable
     ));
     assert_eq!(repo.active_count().await.unwrap(), 0);
+
+    sqlx::query("DROP TABLE build_pod_permit_pools")
+        .execute(db.pool())
+        .await
+        .unwrap();
+    assert!(repo.global_pool_is_readable().await.is_err());
 }

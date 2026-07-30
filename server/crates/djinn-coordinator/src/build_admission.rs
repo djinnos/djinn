@@ -442,6 +442,8 @@ pub enum BuildAdmissionReadiness {
     InventoryPending,
     /// Single-active topology check has not succeeded yet.
     TopologyPending,
+    /// The independently configured build-pod permit pool cannot be used yet.
+    PodPermitPrerequisitesMissing,
     /// Graceful shutdown is draining; new reservations are blocked.
     ShutdownDraining,
     /// Every required gate is healthy; admission may proceed.
@@ -467,6 +469,7 @@ impl BuildAdmissionReadiness {
             Self::SeededOccupancyAboveCap => "seeded_occupancy_above_cap",
             Self::InventoryPending => "inventory_pending",
             Self::TopologyPending => "topology_pending",
+            Self::PodPermitPrerequisitesMissing => "pod_permit_prerequisites_missing",
             Self::ShutdownDraining => "shutdown_draining",
             Self::Healthy => "healthy",
         }
@@ -480,8 +483,9 @@ impl BuildAdmissionReadiness {
             Self::SeededOccupancyAboveCap => 3,
             Self::InventoryPending => 4,
             Self::TopologyPending => 5,
-            Self::ShutdownDraining => 6,
-            Self::Healthy => 7,
+            Self::PodPermitPrerequisitesMissing => 6,
+            Self::ShutdownDraining => 7,
+            Self::Healthy => 8,
         }
     }
 }
@@ -730,6 +734,8 @@ pub struct BuildAdmissionController {
     /// The single-active topology gate (coordinator leadership) is held by
     /// this process.
     topology_ready: AtomicBool,
+    /// The independent pod cap and canonical durable permit pool row were verified at startup.
+    pod_permit_prerequisites_ready: AtomicBool,
     /// Graceful shutdown begins draining before permit release. New Enforce
     /// reservations are blocked while this is set; Observe/Off are unaffected.
     draining: AtomicBool,
@@ -792,6 +798,7 @@ impl BuildAdmissionController {
             over_cap_alarm_active: AtomicBool::new(false),
             inventory_ready: AtomicBool::new(true),
             topology_ready: AtomicBool::new(true),
+            pod_permit_prerequisites_ready: AtomicBool::new(true),
             draining: AtomicBool::new(false),
             released: Notify::new(),
             queued_lifecycle: std::sync::Mutex::new(HashMap::new()),
@@ -878,6 +885,8 @@ impl BuildAdmissionController {
         self.over_cap.store(false, Ordering::Release);
         self.inventory_ready.store(true, Ordering::Release);
         self.topology_ready.store(true, Ordering::Release);
+        self.pod_permit_prerequisites_ready
+            .store(true, Ordering::Release);
         // `readiness()` checks the draining latch FIRST, ahead of every gate
         // this method satisfies. Leaving the latch set here would make
         // "mark ready" a method that provably does not make the controller
@@ -899,6 +908,8 @@ impl BuildAdmissionController {
         self.over_cap.store(false, Ordering::Release);
         self.inventory_ready.store(false, Ordering::Release);
         self.topology_ready.store(false, Ordering::Release);
+        self.pod_permit_prerequisites_ready
+            .store(false, Ordering::Release);
         // The draining latch is deliberately NOT cleared here. This path is
         // emergency promotion of a possibly-live process; a process that is
         // genuinely shutting down must not be talked back into admitting work
@@ -937,6 +948,18 @@ impl BuildAdmissionController {
         self.topology_ready.store(true, Ordering::Release);
     }
 
+    /// Record that compile-scoped pod-permit prerequisites are available.
+    pub fn mark_pod_permit_prerequisites_ready(&self) {
+        self.pod_permit_prerequisites_ready
+            .store(true, Ordering::Release);
+    }
+
+    /// Keep compile-scoped admission closed when pod-permit prerequisites are unavailable.
+    pub fn mark_pod_permit_prerequisites_missing(&self) {
+        self.pod_permit_prerequisites_ready
+            .store(false, Ordering::Release);
+    }
+
     /// Inspect the current bounded readiness reason, derived from the startup
     /// gates in fail-closed priority order.
     #[must_use]
@@ -961,6 +984,9 @@ impl BuildAdmissionController {
         }
         if !self.topology_ready.load(Ordering::Acquire) {
             return BuildAdmissionReadiness::TopologyPending;
+        }
+        if !self.pod_permit_prerequisites_ready.load(Ordering::Acquire) {
+            return BuildAdmissionReadiness::PodPermitPrerequisitesMissing;
         }
         BuildAdmissionReadiness::Healthy
     }
@@ -1049,6 +1075,9 @@ impl BuildAdmissionController {
         }
         if !self.topology_ready.load(Ordering::Acquire) {
             gates.push(BuildAdmissionReadiness::TopologyPending.as_str());
+        }
+        if !self.pod_permit_prerequisites_ready.load(Ordering::Acquire) {
+            gates.push(BuildAdmissionReadiness::PodPermitPrerequisitesMissing.as_str());
         }
         gates
     }
@@ -3920,6 +3949,31 @@ mod tests {
                 .await
                 .is_ok()
         );
+    }
+
+    #[tokio::test]
+    async fn pod_permit_prerequisites_gate_readiness_until_explicitly_ready() {
+        let controller = BuildAdmissionController::new_closed(
+            Arc::new(AdmissionJournalRepository::new(
+                Database::open_in_memory().unwrap(),
+            )),
+            1,
+            "epoch",
+        );
+
+        // Satisfy every pre-existing startup gate first, so this assertion
+        // names the pod-permit gate rather than a higher-priority failure.
+        controller.mark_ready();
+        controller.mark_pod_permit_prerequisites_missing();
+        assert_eq!(
+            controller.readiness(),
+            BuildAdmissionReadiness::PodPermitPrerequisitesMissing
+        );
+        assert!(!controller.is_ready());
+
+        controller.mark_pod_permit_prerequisites_ready();
+        assert_eq!(controller.readiness(), BuildAdmissionReadiness::Healthy);
+        assert!(controller.is_ready());
     }
 
     fn predecessor_input(
