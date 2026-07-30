@@ -79,6 +79,15 @@ buildAdmission:
   maxBuildTaskRuns: 3
 
 # -----------------------------------------------------------------------------
+# Kueue prerequisite topology
+# -----------------------------------------------------------------------------
+# This is deliberately independent from buildAdmission. It is the exact pods
+# quota for Kueue's inert prerequisite queues; task-run and warm Jobs are not
+# selected for Kueue admission until the later cutover release.
+kueue:
+  buildPods: 3
+
+# -----------------------------------------------------------------------------
 # Per-invocation CPU lease (cgroup launcher)
 # -----------------------------------------------------------------------------
 # The other half of the throughput semaphore. `buildAdmission` bounds HOW MANY
