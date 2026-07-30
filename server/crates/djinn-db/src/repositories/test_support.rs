@@ -728,6 +728,23 @@ pub async fn override_debate_trail_body_metadata(
         .expect("failed to override debate trail body_metadata");
 }
 
+/// Count the rows in `table_name`. Test-fixture helper for tests that must
+/// prove a code path wrote NOTHING to a specific relation.
+///
+/// Deliberately per-relation rather than a summed total: a ledger with several
+/// relations lets a write to one hide behind an absent write to another, so the
+/// census that proves "zero writes" has to be taken relation by relation.
+///
+/// **Not for production use.**  Panics on SQL errors.
+pub async fn count_rows_for_test(db: &Database, table_name: &str) -> i64 {
+    db.ensure_initialized().await.unwrap();
+    let (count,): (i64,) = sqlx::query_as(&format!("SELECT count(*) FROM {table_name}"))
+        .fetch_one(db.pool())
+        .await
+        .unwrap_or_else(|error| panic!("count rows in {table_name}: {error}"));
+    count
+}
+
 /// Drop a database table if it exists.  Test-fixture helper for
 /// failure-injection tests that need to simulate a missing-table error
 /// (e.g. the coordinator reentrance `blocker_lookup_error` test).

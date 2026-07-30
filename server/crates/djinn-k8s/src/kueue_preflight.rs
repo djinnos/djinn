@@ -125,6 +125,42 @@ pub fn kueue_disarmed_by_preflight() -> bool {
     KUEUE_DISARMED_BY_PREFLIGHT.load(std::sync::atomic::Ordering::SeqCst)
 }
 
+/// The effective Kueue arming state: `DJINN_KUEUE_ARMED` as the operator set
+/// it, ANDed with the startup preflight's verdict.
+///
+/// This is the ONLY correct way to ask "is Kueue armed" without a
+/// [`crate::KubernetesConfig`] in hand. [`crate::KubernetesConfig::from_env`]
+/// calls it too, so the renderers and every other consumer are reading one
+/// answer rather than two that happen to agree today.
+///
+/// That single-source property is load-bearing, not tidiness. The Kueue cutover
+/// (`37yq`) made the coordinator's build-admission ledger stand down when Kueue
+/// is armed, so arming state now has a consumer that is not a renderer. If that
+/// consumer parsed `DJINN_KUEUE_ARMED` for itself it would skip the latch, and
+/// the two would disagree in exactly the direction that hurts: the preflight
+/// refuses, the renderers correctly fall back to unsuspended Jobs, and the
+/// ledger — believing Kueue is in charge — has already stopped reserving. No
+/// authority owns build capacity at all, which is strictly worse than either
+/// side being wrong alone.
+///
+/// Defaults to disarmed on an absent variable and on an unparseable one: a typo
+/// must never arm Kueue.
+#[must_use]
+pub fn kueue_armed_from_env() -> bool {
+    let Ok(raw) = std::env::var("DJINN_KUEUE_ARMED") else {
+        return false;
+    };
+    let requested = match raw.parse::<bool>() {
+        Ok(armed) => armed,
+        Err(error) => {
+            tracing::warn!(value = %raw, %error, "DJINN_KUEUE_ARMED is not a boolean — keeping Kueue disarmed");
+            return false;
+        }
+    };
+    // The latch is one-way, so this can only ever turn arming OFF.
+    requested && !kueue_disarmed_by_preflight()
+}
+
 /// Clear the latch. Test-only: the latch is one-way in production.
 #[cfg(test)]
 fn rearm_kueue_latch_for_test() {
@@ -450,6 +486,70 @@ mod tests {
         assert!(
             reason.contains("forbidden"),
             "the disarm reason must carry the underlying cause: {reason}"
+        );
+    }
+    /// A preflight refusal must disarm the ledger-facing accessor too, not only
+    /// `KubernetesConfig::from_env` (task `37yq`).
+    ///
+    /// `kueue_armed_from_env` is what the coordinator's build-admission gate
+    /// reads to decide whether the in-process ledger stands down. If it answered
+    /// from the raw environment while the preflight had latched a refusal, the
+    /// two halves would split in the one direction that leaves NOTHING owning
+    /// build capacity: the renderers correctly fall back to unsuspended Jobs
+    /// (Kueue is not managing this namespace) while the ledger, believing Kueue
+    /// took over, has already stopped reserving.
+    ///
+    /// The `armed_before` precondition is what makes this non-vacuous — it
+    /// proves `DJINN_KUEUE_ARMED=true` really does arm this accessor, so the
+    /// assertion below is about the latch and not about a variable that was
+    /// never read. Mutation: drop the `&& !kueue_disarmed_by_preflight()`
+    /// conjunct and this test fails while every renderer test stays green.
+    #[test]
+    fn a_preflight_refusal_also_disarms_the_ledger_facing_accessor() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let saved = std::env::var("DJINN_KUEUE_ARMED").ok();
+        // SAFETY: serialized against sibling tests via ENV_LOCK.
+        unsafe {
+            std::env::set_var("DJINN_KUEUE_ARMED", "true");
+        }
+        rearm_kueue_latch_for_test();
+
+        // Observe everything BEFORE asserting: a panic here would skip the
+        // restore below and leave the latch tripped and ENV_LOCK poisoned for
+        // every sibling test.
+        let armed_before = kueue_armed_from_env();
+        let config_armed_before = KubernetesConfig::from_env().kueue_armed;
+        disarm_kueue_globally();
+        let armed_after = kueue_armed_from_env();
+        let config_armed_after = KubernetesConfig::from_env().kueue_armed;
+
+        rearm_kueue_latch_for_test();
+        // SAFETY: serialized against sibling tests via ENV_LOCK.
+        unsafe {
+            match saved {
+                Some(value) => std::env::set_var("DJINN_KUEUE_ARMED", value),
+                None => std::env::remove_var("DJINN_KUEUE_ARMED"),
+            }
+        }
+
+        assert!(
+            armed_before,
+            "DJINN_KUEUE_ARMED=true must arm the accessor before the preflight refuses"
+        );
+        assert!(
+            !armed_after,
+            "a preflight refusal must disarm kueue_armed_from_env despite \
+             DJINN_KUEUE_ARMED=true — otherwise the build-admission ledger stands \
+             down while the renderers are correctly unarmed, and no authority owns \
+             build capacity"
+        );
+        // Both halves must move TOGETHER. Asserting only the accessor would pass
+        // for a build where the two paths disagree in the other direction.
+        assert_eq!(
+            (armed_before, armed_after),
+            (config_armed_before, config_armed_after),
+            "the ledger-facing accessor and KubernetesConfig::from_env must never \
+             disagree about arming"
         );
     }
 }

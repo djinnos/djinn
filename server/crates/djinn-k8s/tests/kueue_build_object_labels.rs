@@ -124,6 +124,7 @@ fn warm_job(config: &KubernetesConfig) -> Job {
     build_warm_job(
         config,
         "project-id",
+        "deadbeef",
         "registry.example/project:current",
         None,
     )
@@ -300,6 +301,7 @@ fn label_scanner_rejects_explicit_job_and_pod_template_fixtures() {
     let rendered = build_warm_job(
         &config,
         "project-id",
+        "deadbeef",
         "registry.example/project:current",
         None,
     );

@@ -126,6 +126,7 @@ pub(crate) fn build_refinement_actor(
         events_tx: events_tx.clone(),
         pool,
         build_admission: None,
+        kueue_armed: false,
         catalog,
         health: HealthTracker::default(),
         role_registry: Arc::new(RoleRegistry::new()),
