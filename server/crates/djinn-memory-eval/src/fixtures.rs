@@ -394,6 +394,59 @@ impl FixturePaths {
     }
 }
 
+// ── Tracked-golden write guard ──────────────────────────────────────────────
+
+/// This crate's own source directory — the tree holding the **tracked**
+/// `fixtures/` and `baselines/` goldens.
+pub fn tracked_crate_root() -> &'static std::path::Path {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+}
+
+/// Fail-closed guard against a **test** writing this crate's tracked goldens.
+///
+/// `baselines/phase1.json` and `fixtures/*.jsonl` are committed goldens. Their
+/// only sanctioned writer is a deliberate `refresh-baseline` (or
+/// `scripts/generate_fixtures.py`) invoked by a human — see the crate README.
+/// When a test writes them instead, `cargo test` silently mutates the working
+/// tree and the next `git add` commits whatever that run happened to produce.
+///
+/// That is not hypothetical. A test named `refresh_baseline_with_committed_
+/// fixtures` did exactly this until PR #2807: on PR #2805 it shipped a baseline
+/// whose `age_bucket_recall` had collapsed to `["under7d"]` (the test passed an
+/// empty note-age map and skipped bad-case records) carrying a fabricated
+/// `refresh_commit`, and only the separate `Memory Eval Phase 1` lane caught it.
+///
+/// This crate is a single `[[bin]]` target, so `cfg!(test)` is true exactly
+/// when the test harness is running and false in the shipped binary. The guard
+/// therefore blocks tests without touching `refresh-baseline`. Tests that
+/// legitimately exercise these writers must point them at a
+/// `tempfile::tempdir()`.
+pub fn reject_tracked_golden_write(
+    target_root: &std::path::Path,
+    artifact: &str,
+) -> anyhow::Result<()> {
+    if !cfg!(test) {
+        return Ok(());
+    }
+    let tracked = tracked_crate_root();
+    let is_tracked_tree = match (target_root.canonicalize(), tracked.canonicalize()) {
+        (Ok(target), Ok(known)) => target == known,
+        _ => target_root == tracked,
+    };
+    if !is_tracked_tree {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "refusing to write the tracked golden `{artifact}` inside {} from a \
+         test: that mutates the working tree and a later `git add` commits it \
+         (see PR #2805). Point the write at a `tempfile::tempdir()`, or \
+         regenerate the committed baseline deliberately with \
+         `cargo run -p djinn-memory-eval -- run` followed by \
+         `cargo run -p djinn-memory-eval -- refresh-baseline`.",
+        tracked.display(),
+    )
+}
+
 // ── Aggregate Phase 1 fixture set ───────────────────────────────────────────
 
 /// The full Phase 1 fixture set. This is the in-memory representation after
