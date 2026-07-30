@@ -5,8 +5,8 @@ use axum::{
     http::{Request, StatusCode, header},
 };
 use djinn_db::{
-    ProjectRepository, ReadinessRepository, RepoGraphCacheInsert, RepoGraphCacheRepository,
-    UserRepository,
+    ProjectRepository, ReadinessAreaResultCallback, ReadinessCallbackOutcome, ReadinessRepository,
+    RepoGraphCacheInsert, RepoGraphCacheRepository, UserRepository,
     repositories::readiness::{ReadinessIdentificationOutput, ReadinessIdentifiedArea},
 };
 use http_body_util::BodyExt;
@@ -95,7 +95,7 @@ async fn readiness_routes_cover_empty_not_found_blank_and_kickoff_reuse() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn readiness_detail_route_scopes_runs_and_serializes_complete_projection() {
+async fn readiness_detail_route_serializes_the_authenticated_two_area_owner_run() {
     let (app, project_ref, db, _project_dir) =
         test_helpers::create_test_app_with_project_and_db().await;
     let project_id = project_id(&db, &project_ref).await;
@@ -111,18 +111,41 @@ async fn readiness_detail_route_scopes_runs_and_serializes_complete_projection()
     let kickoff =
         response_json(post_kickoff(&app, &project_id, Some(&owner), "detail-key").await).await;
     let run_id = kickoff["run"]["id"].as_str().unwrap().to_owned();
-    let fanout = ReadinessRepository::new(db.clone())
-        .complete_identification(&run_id, &owner_id, one_area_identification())
+    let repository = ReadinessRepository::new(db.clone());
+    let fanout = repository
+        .complete_identification(&run_id, &owner_id, two_area_identification())
         .await
-        .expect("seed a materialized readiness area");
-    let area = fanout.first().expect("one area");
-    djinn_db::test_support::seed_readiness_detail_projection_for_test(
-        &db,
-        &run_id,
-        &area.area.id,
-        &area.attempt.id,
-    )
-    .await;
+        .expect("freeze the deterministic two-area run");
+    let frontend = fanout
+        .iter()
+        .find(|area| area.area.area_key == "frontend")
+        .unwrap();
+    let backend = fanout
+        .iter()
+        .find(|area| area.area.area_key == "backend")
+        .unwrap();
+    assert_eq!(
+        repository
+            .ingest_area_result(callback(
+                &run_id,
+                frontend,
+                frontend_result(&frontend.area.id)
+            ))
+            .await
+            .unwrap(),
+        ReadinessCallbackOutcome::Accepted
+    );
+    assert_eq!(
+        repository
+            .ingest_area_result(callback(&run_id, backend, backend_result(&backend.area.id)))
+            .await
+            .unwrap(),
+        ReadinessCallbackOutcome::Accepted
+    );
+    repository
+        .aggregate_run(&run_id, "authenticated-http-fixture")
+        .await
+        .unwrap();
 
     assert_status(
         detail(&app, &project_id, "missing-run", Some(&owner)).await,
@@ -145,25 +168,63 @@ async fn readiness_detail_route_scopes_runs_and_serializes_complete_projection()
     assert_eq!(response.status(), StatusCode::OK);
     let json = response_json(response).await;
     assert_eq!(json["run"]["id"], run_id);
-    assert_eq!(json["areas"][0]["area_key"], "frontend");
-    assert_eq!(json["areas"][0]["attempts"][0]["is_current"], true);
+    assert_eq!(json["areas"].as_array().unwrap().len(), 2);
+    let frontend_json = json["areas"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|area| area["area_key"] == "frontend")
+        .unwrap();
+    let backend_json = json["areas"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|area| area["area_key"] == "backend")
+        .unwrap();
     assert_eq!(
-        json["areas"][0]["accepted_findings"][0]["guardrail_key"],
-        "auth"
+        frontend_json["composition"]["languages"],
+        serde_json::json!(["TypeScript"])
     );
     assert_eq!(
-        json["areas"][0]["accepted_outputs"][0]["result"]["warnings"][0],
-        "preserved"
+        backend_json["composition"]["languages"],
+        serde_json::json!(["Rust"])
     );
-    assert_eq!(json["area_scores"][0]["score"], 0.75);
+    assert_eq!(frontend_json["attempts"][0]["is_current"], true);
+    assert_eq!(backend_json["attempts"][0]["is_current"], true);
+    assert_eq!(
+        frontend_json["accepted_findings"][0]["evidence"][0],
+        serde_json::json!({"path":"web/auth.ts","line":12})
+    );
+    assert_eq!(
+        backend_json["accepted_findings"][0]["evidence"][0],
+        serde_json::json!({"path":"server/src/auth.rs","line":48})
+    );
+    assert!(
+        json["area_scores"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|score| score["score"] == 0.8)
+    );
+    assert!(
+        json["area_scores"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|score| score["score"] == 0.75)
+    );
     assert_eq!(json["project_score"]["band"], "ready");
-    assert_eq!(json["suggestions"][0]["dedupe_key"], "auth-remediation");
+    assert_eq!(json["suggestions"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        json["suggestions"][0]["dedupe_key"],
+        "shared-auth-remediation"
+    );
     assert!(
         json["events"]
             .as_array()
             .expect("events serialize as an array")
             .iter()
-            .any(|event| event["event_kind"] == "fixture_completed")
+            .any(|event| event["event_kind"] == "readiness_aggregated")
     );
 }
 
@@ -186,19 +247,55 @@ async fn seed_snapshot(db: &djinn_db::Database, project_id: &str) {
         .unwrap();
 }
 
-fn one_area_identification() -> ReadinessIdentificationOutput {
+fn two_area_identification() -> ReadinessIdentificationOutput {
     ReadinessIdentificationOutput {
-        areas: vec![ReadinessIdentifiedArea {
-            area_key: "frontend".into(),
-            path_scopes: vec!["web/".into()],
-            languages: vec!["TypeScript".into()],
-            roles: vec!["frontend".into()],
-            frameworks: vec!["React".into()],
-            key_libraries: vec!["zod".into()],
-            confidence: 0.95,
-            evidence: vec!["web/package.json".into()],
-        }],
+        areas: vec![
+            ReadinessIdentifiedArea {
+                area_key: "frontend".into(),
+                path_scopes: vec!["web/".into()],
+                languages: vec!["TypeScript".into()],
+                roles: vec!["frontend".into()],
+                frameworks: vec!["React".into()],
+                key_libraries: vec!["zod".into()],
+                confidence: 0.95,
+                evidence: vec!["web/package.json".into()],
+            },
+            ReadinessIdentifiedArea {
+                area_key: "backend".into(),
+                path_scopes: vec!["server/".into()],
+                languages: vec!["Rust".into()],
+                roles: vec!["backend".into()],
+                frameworks: vec!["Axum".into()],
+                key_libraries: vec!["sqlx".into()],
+                confidence: 0.97,
+                evidence: vec!["server/Cargo.toml".into()],
+            },
+        ],
     }
+}
+
+fn callback(
+    run_id: &str,
+    area: &djinn_db::repositories::readiness::ReadinessAreaFanout,
+    result: Value,
+) -> ReadinessAreaResultCallback {
+    ReadinessAreaResultCallback {
+        run_id: run_id.into(),
+        area_id: area.area.id.clone(),
+        attempt_id: area.attempt.id.clone(),
+        correlation_key: area.attempt.correlation_key.clone(),
+        task_id: area.task.id.clone(),
+        status: "succeeded".into(),
+        result,
+    }
+}
+
+fn frontend_result(area_id: &str) -> Value {
+    serde_json::json!({"findings":[{"guardrail_key":"frontend-auth","status":"covered","severity":"high","confidence":0.95,"evidence":[{"path":"web/auth.ts","line":12}]},{"guardrail_key":"frontend-inputs","status":"partial","severity":"medium","confidence":0.80,"evidence":[{"path":"web/forms.ts","line":31}]}],"unsupported":[{"guardrail_key":"browser-session","reason":"not applicable to this frontend"}],"warnings":[{"reason":"legacy form remains outside migration scope"}],"remediation_suggestions":[{"dedupe_key":"shared-auth-remediation","action":"Apply shared authentication remediation","area_id":area_id,"guardrail_id":"frontend-auth","validation_guidance":"Verify web/auth.ts and server/src/auth.rs after the change."}]})
+}
+
+fn backend_result(area_id: &str) -> Value {
+    serde_json::json!({"findings":[{"guardrail_key":"backend-auth","status":"covered","severity":"high","confidence":0.90,"evidence":[{"path":"server/src/auth.rs","line":48}]},{"guardrail_key":"backend-secrets","status":"analysis_error","severity":"low","confidence":0.85,"evidence":[{"path":"server/src/config.rs","line":9}]}],"errors":[{"reason":"secret rotation is not configured"}],"warnings":[{"reason":"secret rotation is not configured"}],"remediation_suggestions":[{"dedupe_key":"shared-auth-remediation","action":"Apply shared authentication remediation","area_id":area_id,"guardrail_id":"backend-auth","validation_guidance":"Verify web/auth.ts and server/src/auth.rs after the change."}]})
 }
 
 async fn get(

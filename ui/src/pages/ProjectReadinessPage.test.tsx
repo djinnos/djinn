@@ -73,12 +73,18 @@ describe("ProjectReadinessPage terminal HTTP detail", () => {
     expect(screen.getByText("agent-readiness-guardrails v1.0.0")).toBeInTheDocument();
     expect(screen.getByText("Score: 0.7777777777777778 — Band: ready")).toBeInTheDocument();
     expect(screen.getAllByRole("article", { name: /Readiness area/ })).toHaveLength(2);
+    expect(screen.getByRole("article", { name: "Readiness area frontend" })).toHaveTextContent('"languages":["TypeScript"]');
+    expect(screen.getByRole("article", { name: "Readiness area frontend" })).toHaveTextContent("Persisted area score: 0.8");
+    expect(screen.getByRole("article", { name: "Readiness area backend" })).toHaveTextContent('"languages":["Rust"]');
+    expect(screen.getByRole("article", { name: "Readiness area backend" })).toHaveTextContent("Persisted area score: 0.75");
     expect(screen.getByTestId("current-attempt-area-frontend")).toHaveTextContent("#1 — succeeded");
     expect(screen.getByTestId("current-attempt-area-backend")).toHaveTextContent("#1 — succeeded");
     expect(screen.getByText("frontend-auth")).toBeInTheDocument();
     expect(screen.getByText("Confidence: 0.95")).toBeInTheDocument();
+    expect(screen.getByText('Evidence: [{"path":"web/auth.ts","line":12}]')).toBeInTheDocument();
     expect(screen.getByText("backend-secrets")).toBeInTheDocument();
     expect(screen.getByText("Confidence: 0.85")).toBeInTheDocument();
+    expect(screen.getByText('Evidence: [{"path":"server/src/config.rs","line":9}]')).toBeInTheDocument();
     expect(screen.getByLabelText("frontend Unsupported entries")).toHaveTextContent("browser-session");
     expect(screen.getByLabelText("frontend Warnings")).toHaveTextContent("legacy form remains outside migration scope");
     expect(screen.getByLabelText("backend Errors")).toHaveTextContent("secret rotation is not configured");
