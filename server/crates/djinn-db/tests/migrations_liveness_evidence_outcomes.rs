@@ -133,10 +133,9 @@ async fn apply_migration_95(conn: &mut PgConnection) {
 }
 
 /// Assert every column / constraint / index this migration is supposed to
-/// install is present on a fresh database. We rely on the `fresh` and
-/// `prior` tests to share the same `assert_schema` body so any drift is
-/// caught in both code paths.
-async fn assert_liveness_schema(pool: &sqlx::PgPool) {
+/// install is present. The fresh-schema path includes later migrations,
+/// whereas the prior-schema path deliberately stops after migration 95.
+async fn assert_liveness_schema(pool: &sqlx::PgPool, task_scoped_evidence: bool) {
     // ── sessions: new columns ──────────────────────────────────────────────
     for (column, data_type, nullable) in [
         ("liveness_verdict", "text", "YES"),
@@ -306,7 +305,11 @@ async fn assert_liveness_schema(pool: &sqlx::PgPool) {
 
     for (column, data_type, nullable) in [
         ("id", "character varying", "NO"),
-        ("session_id", "character varying", "NO"),
+        (
+            "session_id",
+            "character varying",
+            if task_scoped_evidence { "YES" } else { "NO" },
+        ),
         ("task_id", "character varying", "YES"),
         ("task_run_id", "character varying", "YES"),
         ("verdict", "character varying", "NO"),
@@ -362,11 +365,15 @@ async fn assert_liveness_schema(pool: &sqlx::PgPool) {
     .fetch_all(pool)
     .await
     .expect("inspect liveness_evidence CHECK constraints");
-    for expected in [
+    let mut expected_constraints = vec![
         "liveness_evidence_verdict_check",
         "liveness_evidence_outcome_kind_check",
         "liveness_evidence_outcome_reason_check",
-    ] {
+    ];
+    if task_scoped_evidence {
+        expected_constraints.push("liveness_evidence_owner_check");
+    }
+    for expected in expected_constraints {
         assert!(
             liveness_constraints.iter().any(|c| c == expected),
             "expected constraint {expected} on liveness_evidence, got {liveness_constraints:?}"
@@ -658,7 +665,7 @@ async fn migration_95_applies_on_fresh_database() {
             .expect("connect fresh migration database");
         djinn_db::test_support::apply_all_migrations_to_fresh_database(&db_url).await;
 
-        assert_liveness_schema(&pool).await;
+        assert_liveness_schema(&pool, true).await;
         seed_legacy_rows(&pool).await;
         assert_legacy_rows_readable(&pool).await;
 
@@ -694,7 +701,7 @@ async fn migration_95_applies_after_prior_migrations() {
             .await
             .expect("connect migrated database");
 
-        assert_liveness_schema(&pool).await;
+        assert_liveness_schema(&pool, false).await;
         assert_legacy_rows_readable(&pool).await;
 
         pool.close().await;

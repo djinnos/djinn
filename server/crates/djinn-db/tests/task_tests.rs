@@ -24,6 +24,8 @@ mod closed_task_sync;
 mod existing;
 #[path = "task_tests/filter_matrices.rs"]
 mod filter_matrices;
+#[path = "task_tests/generation.rs"]
+mod generation;
 #[path = "task_tests/state_machine.rs"]
 mod state_machine;
 #[path = "task_tests/sync_terminal_state.rs"]
