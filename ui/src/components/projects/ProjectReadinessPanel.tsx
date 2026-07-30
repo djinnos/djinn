@@ -38,14 +38,18 @@ function renderJson(value: ReadinessJson): string {
   return JSON.stringify(value);
 }
 
+function isReadinessObject(value: ReadinessJson): value is { readonly [key: string]: ReadinessJson } {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 function objectEntries(value: ReadinessJson, key: string): ReadinessJson[] {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) return [];
+  if (!isReadinessObject(value)) return [];
   const candidate = value[key];
   return Array.isArray(candidate) ? [...candidate] : [];
 }
 
 function field(value: ReadinessJson, keys: string[]): ReadinessJson | undefined {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  if (!isReadinessObject(value)) return undefined;
   for (const key of keys) {
     if (key in value) return value[key];
   }
