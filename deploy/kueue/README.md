@@ -221,3 +221,56 @@ followed by the `djinn` chart with `kueue.enabled=true`, then requires
 
 `deploy/kueue/tests/zero-capture-gate.sh` is its hermetic fake-`kubectl`
 contract; it needs no cluster credentials.
+
+## Cutover quiesce / rollback preflight
+
+The zero-capture gate proves the *prerequisite release* is inert. It says
+nothing about whether a cluster may be flipped to Kueue authority **today**.
+That is `preflight.sh`:
+
+```sh
+deploy/kueue/preflight.sh --context <ctx> --mode cutover    # before the flip
+deploy/kueue/preflight.sh --context <ctx> --mode rollback   # before a revert
+```
+
+It is read-only — every kubectl call is a `get`, and its contract fails if a
+mutating verb ever appears in the invocation log. It asserts two things.
+
+**1. The ordering law.** RuntimeClass `djinn-cgroup-writable` must EXIST before
+any namespace carries `djinn.io/kueue-managed`.
+`server/crates/djinn-k8s/src/job.rs` asserts `required cgroup launcher requires
+runtimeClassName: djinn-cgroup-writable` — an `assert!`, i.e. a renderer
+**panic**, not a rejected Job. Label the namespace first and two fail-closed
+gates stack: Kueue holds the Job it captured, and the renderer that would
+produce the next one panics before it can. Every dispatch stops. That is the
+v0.7.25 outage (launcher armed without the RuntimeClass) and the 2026-07-30
+pod-permit outage. Exit code **10** names the RuntimeClass; if the label is
+already applied, the diagnostic says dispatch is wedged *now* rather than
+hypothetically.
+
+**2. The drain fence, symmetrically.** Zero live build-capable task-run Jobs
+(**20**), zero live graph-warm Jobs (**21**), zero Kueue Workloads in the
+namespace (**22**), zero nonterminal `build_leases` rows (**30**). The same
+four populations gate a revert, because reverting across a live fleet strands
+the same work in the mirror image. Exit **40** (ledger unreadable) and **41**
+(Kubernetes API unreadable) are failures, never skips: a population that could
+not be read is not an empty one.
+
+Every live task-run Job counts as build-capable. The Job renderer emits no role
+label — only `djinn.app/task-run-id` and `djinn.app/component` — so the cluster
+cannot be asked which runs will compile, and `RoleResourceClass::for_role`
+already fails safe to build-capable for an unknown role. A parallel selector
+invented here would fence a set no renderer produces.
+
+The ledger connection comes from `DJINN_PREFLIGHT_DATABASE_URL` in the
+environment, never a command-line flag.
+
+`deploy/runbooks/kueue-cutover-quiesce-rollback.md` is the ordered operator
+contract this preflight enforces, and
+`deploy/runbooks/tests/kueue-cutover-quiesce-rollback.sh` checks that the
+runbook still states the laws, orders the steps, and quotes exit codes the
+script actually defines. `deploy/kueue/tests/preflight.sh` is the preflight's
+hermetic fake-`kubectl`/fake-`psql` contract: it covers every pass and fail
+branch with no cluster and no database, asserts the exact exit code of each
+gate, and proves its own read-only assertion by rejecting a mutant that injects
+a `kubectl label namespace` call.
