@@ -296,7 +296,16 @@ impl Reconciler {
     /// Never returns an error: a Workload this process cannot act on must not be
     /// able to end the watch. Failures are logged and the stream continues.
     pub async fn handle(&self, observation: WorkloadObservation) {
+        self.apply_observation(observation).await;
+        // Counted AFTER the observation has been fully applied, never before.
+        // A counter that advances on entry says "the reflector saw this", which
+        // is not the question anyone asks it — every consumer, tests included,
+        // wants "this has landed", and the two differ by exactly the width of
+        // the database round trip.
         self.observations.fetch_add(1, Ordering::SeqCst);
+    }
+
+    async fn apply_observation(&self, observation: WorkloadObservation) {
         match observation {
             WorkloadObservation::SessionRestarted => {
                 self.sessions.fetch_add(1, Ordering::SeqCst);
@@ -741,6 +750,24 @@ mod tests {
             .status
     }
 
+    /// Poll `condition` until it holds, or fail with `what`.
+    ///
+    /// Generously bounded: these tests run alongside 600 others on a loaded
+    /// machine, and a tight budget turns a slow scheduler into a flake — which
+    /// is the failure mode that gets a real assertion deleted.
+    async fn wait_until(what: &str, mut condition: impl FnMut() -> bool) {
+        // `tokio::time::Instant` rather than `std::time::Instant`: the latter is
+        // a workspace-disallowed method (`server/clippy.toml`).
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        while tokio::time::Instant::now() < deadline {
+            if condition() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+        panic!("timed out waiting for: {what}");
+    }
+
     fn durable_reconciler(db: &Database) -> Arc<Reconciler> {
         Arc::new(Reconciler::new(Arc::new(DurableAdmissionSink::new(
             db.clone(),
@@ -915,16 +942,10 @@ mod tests {
         ));
 
         // Let it establish and apply at least one observation.
-        for _ in 0..500 {
-            if reconciler.observations() > 0 {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(2)).await;
-        }
-        assert!(
-            reconciler.observations() > 0,
-            "the reflector must be running before leadership is released"
-        );
+        wait_until("the reflector to apply its first observation", || {
+            reconciler.observations() > 0
+        })
+        .await;
 
         // Leadership released: drop the ONE strong handle. The cancellation
         // token is deliberately NOT fired — this asserts the `Weak` is a real
@@ -1010,15 +1031,15 @@ mod tests {
             Duration::from_millis(1),
         ));
 
-        // Wait for session 1 to have been fully applied.
-        for _ in 0..500 {
-            if reconciler.transitions() >= 2 {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(2)).await;
-        }
+        // Wait for session 1 to have been fully applied. The capture below is
+        // taken against the OBSERVATION count, not the transition count: a
+        // reflector that duplicates on replay would otherwise be allowed to
+        // inflate the baseline and then compare it against itself.
+        wait_until("session 1 to be fully applied", || {
+            reconciler.observations() >= 3
+        })
+        .await;
         let transitions_before = reconciler.transitions();
-        let sessions_before = reconciler.sessions();
         let projected_before = projection
             .get(&task_run_id)
             .await
@@ -1031,17 +1052,13 @@ mod tests {
         assert_eq!(projected_before.admission, "admitted");
         assert_eq!(projected_before.transitions, 1);
 
-        // Wait for the resync to be established and its replay consumed.
-        for _ in 0..500 {
-            if reconciler.sessions() > sessions_before && reconciler.observations() >= 5 {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(2)).await;
-        }
-        assert!(
-            reconciler.sessions() > sessions_before,
-            "the broken stream must be re-established"
-        );
+        // Wait for the resync to be established and its replay consumed: two
+        // `SessionRestarted` edges plus three applied Workloads.
+        wait_until(
+            "the broken stream to be re-established and replayed",
+            || reconciler.sessions() >= 2 && reconciler.observations() >= 5,
+        )
+        .await;
 
         cancel.cancel();
         let exit = tokio::time::timeout(Duration::from_secs(5), reflector)
