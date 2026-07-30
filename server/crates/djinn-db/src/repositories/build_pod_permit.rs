@@ -110,14 +110,14 @@ impl BuildPodResizeIdentity {
             && !self.launcher_container_name.trim().is_empty()
             && !self.launcher_container_id.trim().is_empty()
             && !self.image_digest.trim().is_empty()
-            && matches!(
-                self.observed_launcher_protocol.as_str(),
-                "leaf-v1" | "resize-v2"
-            )
-            && matches!(
-                self.effective_launcher_protocol.as_str(),
-                "leaf-v1" | "resize-v2"
-            )
+            && self
+                .observed_launcher_protocol
+                .parse::<djinn_launcher_protocol::LauncherAuthorityProtocol>()
+                .is_ok()
+            && self
+                .effective_launcher_protocol
+                .parse::<djinn_launcher_protocol::LauncherAuthorityProtocol>()
+                .is_ok()
             && self.admitted_cpu_millicores > 0
     }
 }

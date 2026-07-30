@@ -1220,6 +1220,7 @@ dependencies = [
 name = "djinn-cgroup-launcher"
 version = "0.1.0"
 dependencies = [
+ "djinn-launcher-protocol",
  "libc",
  "thiserror 2.0.18",
  "workspace-hack",
@@ -1363,6 +1364,7 @@ dependencies = [
  "dirs 6.0.0",
  "djinn-core",
  "djinn-db",
+ "djinn-launcher-protocol",
  "djinn-memory",
  "djinn-spec-lint",
  "djinn-stack",
@@ -1527,6 +1529,15 @@ dependencies = [
  "tower-test",
  "tracing",
  "uuid",
+ "workspace-hack",
+]
+
+[[package]]
+name = "djinn-launcher-protocol"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
  "workspace-hack",
 ]
 
