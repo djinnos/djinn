@@ -20,7 +20,7 @@
  *  **path-scoped**
  *    The page's project identity comes from a URL path segment rather than
  *    the global store.  No global selector is needed.
- *    Routes: `/projects/:id/environment`.
+ *    Routes: `/projects/:id/environment`, `/projects/:id/readiness`.
  *
  *  **global**
  *    The page operates across all projects or has no project concept.
@@ -34,10 +34,7 @@
 // ---------------------------------------------------------------------------
 
 export type RouteScope =
-  | "global-project-context"
-  | "url-filtered"
-  | "path-scoped"
-  | "global";
+  "global-project-context" | "url-filtered" | "path-scoped" | "global";
 
 /**
  * A route entry pairs a path pattern with its scope.
@@ -121,6 +118,11 @@ export const ROUTE_SCOPES: readonly RouteScopeEntry[] = [
   // ── path-scoped ─────────────────────────────────────────────────────────
   {
     pattern: "/projects/:id/environment",
+    scope: "path-scoped",
+    note: "Project identity is in the URL path segment",
+  },
+  {
+    pattern: "/projects/:id/readiness",
     scope: "path-scoped",
     note: "Project identity is in the URL path segment",
   },

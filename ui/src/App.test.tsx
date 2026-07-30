@@ -54,6 +54,9 @@ vi.mock("@/pages/ImageEditorPage", () => ({
 vi.mock("@/pages/ProjectEnvironmentPage", () => ({
   ProjectEnvironmentPage: () => <div>ProjectEnvironmentPage</div>,
 }));
+vi.mock("@/pages/ProjectReadinessPage", () => ({
+  ProjectReadinessPage: () => <div>ProjectReadinessPage</div>,
+}));
 vi.mock("@/pages/UsersPage", () => ({
   UsersPage: () => <div>UsersPage</div>,
 }));
@@ -77,68 +80,102 @@ describe("MainLayout — project selector chrome", () => {
   });
 
   it("renders the shared project selector on /agents (global-project-context)", () => {
-    render(<MainLayout />, { wrapperOptions: { routerProps: { initialEntries: ["/agents"] } } });
+    render(<MainLayout />, {
+      wrapperOptions: { routerProps: { initialEntries: ["/agents"] } },
+    });
     const selector = screen.getByLabelText("Select project");
     expect(selector).toBeInTheDocument();
   });
 
   it("renders the shared project selector on /task/:taskId (global-project-context)", () => {
-    render(<MainLayout />, { wrapperOptions: { routerProps: { initialEntries: ["/task/abc-123"] } } });
+    render(<MainLayout />, {
+      wrapperOptions: { routerProps: { initialEntries: ["/task/abc-123"] } },
+    });
     const selector = screen.getByLabelText("Select project");
     expect(selector).toBeInTheDocument();
   });
 
   it("renders the shared project selector on /memory (global-project-context)", () => {
-    render(<MainLayout />, { wrapperOptions: { routerProps: { initialEntries: ["/memory"] } } });
+    render(<MainLayout />, {
+      wrapperOptions: { routerProps: { initialEntries: ["/memory"] } },
+    });
     const selector = screen.getByLabelText("Select project");
     expect(selector).toBeInTheDocument();
   });
 
   it("does NOT render the project selector on /code-graph (galaxy HUD has its own chip)", () => {
-    render(<MainLayout />, { wrapperOptions: { routerProps: { initialEntries: ["/code-graph"] } } });
+    render(<MainLayout />, {
+      wrapperOptions: { routerProps: { initialEntries: ["/code-graph"] } },
+    });
     const selector = screen.queryByLabelText("Select project");
     expect(selector).not.toBeInTheDocument();
   });
 
   it("does NOT render the project selector on /tasks (url-filtered board route)", () => {
-    render(<MainLayout />, { wrapperOptions: { routerProps: { initialEntries: ["/tasks"] } } });
+    render(<MainLayout />, {
+      wrapperOptions: { routerProps: { initialEntries: ["/tasks"] } },
+    });
     const selector = screen.queryByLabelText("Select project");
     expect(selector).not.toBeInTheDocument();
   });
 
   it("does NOT render the project selector on /dependencies (url-filtered board route)", () => {
-    render(<MainLayout />, { wrapperOptions: { routerProps: { initialEntries: ["/dependencies"] } } });
+    render(<MainLayout />, {
+      wrapperOptions: { routerProps: { initialEntries: ["/dependencies"] } },
+    });
     const selector = screen.queryByLabelText("Select project");
     expect(selector).not.toBeInTheDocument();
   });
 
   it("does NOT render the project selector on /admin/usage (url-filtered)", () => {
-    render(<MainLayout />, { wrapperOptions: { routerProps: { initialEntries: ["/admin/usage"] } } });
+    render(<MainLayout />, {
+      wrapperOptions: { routerProps: { initialEntries: ["/admin/usage"] } },
+    });
     const selector = screen.queryByLabelText("Select project");
     expect(selector).not.toBeInTheDocument();
   });
 
   it("does NOT render the project selector on /proposals (global)", () => {
-    render(<MainLayout />, { wrapperOptions: { routerProps: { initialEntries: ["/proposals"] } } });
+    render(<MainLayout />, {
+      wrapperOptions: { routerProps: { initialEntries: ["/proposals"] } },
+    });
     const selector = screen.queryByLabelText("Select project");
     expect(selector).not.toBeInTheDocument();
   });
 
   it("does NOT render the project selector on /chat (global)", () => {
-    render(<MainLayout />, { wrapperOptions: { routerProps: { initialEntries: ["/chat"] } } });
+    render(<MainLayout />, {
+      wrapperOptions: { routerProps: { initialEntries: ["/chat"] } },
+    });
     const selector = screen.queryByLabelText("Select project");
     expect(selector).not.toBeInTheDocument();
   });
 
   it("does NOT render the project selector on /settings (global)", () => {
-    render(<MainLayout />, { wrapperOptions: { routerProps: { initialEntries: ["/settings"] } } });
+    render(<MainLayout />, {
+      wrapperOptions: { routerProps: { initialEntries: ["/settings"] } },
+    });
     const selector = screen.queryByLabelText("Select project");
     expect(selector).not.toBeInTheDocument();
   });
 
   it("does NOT render the project selector on /projects/:id/environment (path-scoped)", () => {
-    render(<MainLayout />, { wrapperOptions: { routerProps: { initialEntries: ["/projects/proj-1/environment"] } } });
+    render(<MainLayout />, {
+      wrapperOptions: {
+        routerProps: { initialEntries: ["/projects/proj-1/environment"] },
+      },
+    });
     const selector = screen.queryByLabelText("Select project");
     expect(selector).not.toBeInTheDocument();
+  });
+
+  it("routes /projects/:id/readiness to the path-scoped readiness page", () => {
+    render(<MainLayout />, {
+      wrapperOptions: {
+        routerProps: { initialEntries: ["/projects/proj-1/readiness"] },
+      },
+    });
+    expect(screen.getByText("ProjectReadinessPage")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Select project")).not.toBeInTheDocument();
   });
 });
