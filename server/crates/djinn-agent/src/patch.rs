@@ -294,6 +294,68 @@ fn resolve_op_path(raw: &str, worktree: &Path) -> PathBuf {
     }
 }
 
+/// Byte offset at which each line of `content` starts, plus a trailing
+/// sentinel equal to `content.len()`.
+///
+/// Indices line up 1:1 with `content.lines()`, so a line index from
+/// [`find_chunk_position`] can be converted to a byte offset directly.
+fn line_byte_offsets(content: &str) -> Vec<usize> {
+    let mut offsets = Vec::new();
+    let mut pos = 0usize;
+    for line in content.split_inclusive('\n') {
+        offsets.push(pos);
+        pos += line.len();
+    }
+    offsets.push(pos);
+    offsets
+}
+
+/// The byte span of `content` that applying `chunks` would touch.
+///
+/// Used by the GateGuard read-coverage check so `apply_patch` gates on the
+/// region the patch actually rewrites instead of declaring the whole file.
+/// Declaring `0..usize::MAX` made the check unsatisfiable for any file whose
+/// read cannot produce `ReadCoverage::Full` — every file over the 2000-line
+/// read cap, and (since reads are now fitted to the tool-result clamp) every
+/// file whose listing exceeds that clamp. Workers escaped the resulting
+/// deadlock by rewriting files with `python3` heredocs through `shell`.
+///
+/// Returns `None` when any chunk cannot be located, in which case the caller
+/// should keep the conservative whole-file requirement — `apply_patch` is
+/// about to reject the patch for the same reason anyway.
+pub(crate) fn update_span(
+    content: &str,
+    chunks: &[Chunk],
+    file_path: &str,
+) -> Option<std::ops::Range<usize>> {
+    if chunks.is_empty() {
+        return None;
+    }
+    let lines: Vec<String> = content.lines().map(String::from).collect();
+    let offsets = line_byte_offsets(content);
+
+    let mut min_line = usize::MAX;
+    let mut max_line = 0usize;
+    for chunk in chunks {
+        let pos = find_chunk_position(&lines, chunk, file_path).ok()?;
+        // Context and Remove lines consume original lines; Add lines do not.
+        // A pure-insertion chunk still requires the worker to have seen the
+        // line it anchors on, hence the `.max(1)`.
+        let consumed = chunk
+            .lines
+            .iter()
+            .filter(|cl| matches!(cl, ChunkLine::Context(_) | ChunkLine::Remove(_)))
+            .count()
+            .max(1);
+        min_line = min_line.min(pos);
+        max_line = max_line.max(pos.saturating_add(consumed).min(lines.len()));
+    }
+
+    let start = *offsets.get(min_line)?;
+    let end = *offsets.get(max_line)?;
+    Some(start..end)
+}
+
 /// Apply all chunks to the file content, returning the modified content.
 fn apply_chunks(content: &str, chunks: &[Chunk], file_path: &str) -> Result<String, String> {
     let mut lines: Vec<String> = content.lines().map(String::from).collect();
@@ -395,7 +457,8 @@ fn find_chunk_position(lines: &[String], chunk: &Chunk, file_path: &str) -> Resu
     Err(format!(
         "could not locate chunk in {file_path}: context anchor '@@ {anchor}' not found in file. \
          The @@ line must contain text that appears VERBATIM in the file. If this is a large \
-         file, a whole-file `read` is TRUNCATED (middle omitted) — don't trust a full read. \
+         file, a whole-file `read` stops at the tool-result budget and reports has_more — \
+         don't assume you saw the whole file. \
          Find the target with the `lsp` tool (operation \"definition\") or output_grep, re-read \
          that exact range with read(offset, limit), and copy the anchor line character-for-character."
     ))
@@ -461,9 +524,9 @@ fn apply_single_chunk(
                     return Err(format!(
                         "context mismatch at line {mismatch_line}: expected '{text}', \
                          found '{actual}'. Your patch context does not match the file on \
-                         disk. If this is a large file, a whole-file `read` is TRUNCATED \
-                         (middle omitted) so you never saw this region — do NOT re-read \
-                         the whole file. Instead re-read just this range with \
+                         disk. If this is a large file, a whole-file `read` stops at the \
+                         tool-result budget (it reports has_more), so you may never have \
+                         seen this region. Re-read just this range with \
                          read(file_path, offset={reread_offset}, limit=60), or jump \
                          straight to the symbol with the `lsp` tool (operation \
                          \"definition\"/\"references\"), then copy the surrounding lines \

@@ -925,12 +925,29 @@ pub(crate) async fn call_apply_patch(
                         }
                     })?;
 
-                // GateGuard: enforce worker read-coverage gate before
-                // mutation. Conservative: require full-file coverage for
-                // update/delete since exact touched spans are not proven
-                // from the patch parser.
-                gate_guard_edit_check(state, session_role, &worktree_key, &resolved, 0..usize::MAX)
-                    .await?;
+                // GateGuard: enforce the worker read-coverage gate before
+                // mutation, against the span the patch actually rewrites.
+                //
+                // A `Delete` destroys the whole file, so whole-file coverage
+                // is the honest requirement there. An `Update` only rewrites
+                // its located chunks; declaring `0..usize::MAX` for those made
+                // the check unsatisfiable for every file too large to read
+                // into a single `ReadCoverage::Full` record, which is the
+                // `apply_patch` deadlock workers were escaping via `shell`
+                // heredocs. Unlocatable chunks fall back to the old
+                // conservative span — `apply_patch` rejects them moments later
+                // for the same reason.
+                let span = match op {
+                    crate::patch::FileOp::Update { chunks, .. } => {
+                        match tokio::fs::read_to_string(&resolved).await {
+                            Ok(content) => crate::patch::update_span(&content, chunks, raw_path)
+                                .unwrap_or(0..usize::MAX),
+                            Err(_) => 0..usize::MAX,
+                        }
+                    }
+                    _ => 0..usize::MAX,
+                };
+                gate_guard_edit_check(state, session_role, &worktree_key, &resolved, span).await?;
             }
             crate::patch::FileOp::Add { .. } => {
                 // New files don't need FileTime assertion

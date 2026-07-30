@@ -45,8 +45,9 @@ pub(crate) async fn gate_guard_edit_check(
             // truncated diagnostic so repeated denials are consistent.
             return Err(format!(
                 "FORCE-TRUNCATED-READ: The latest read of {} was truncated \
-                 and did not observe the full file. You MUST re-read the \
-                 entire file before editing.",
+                 and did not observe the full file. Re-read the region you \
+                 are about to change with read(file_path, offset=<line>, \
+                 limit=<lines>) before editing.",
                 path.display(),
             ));
         }
@@ -56,8 +57,11 @@ pub(crate) async fn gate_guard_edit_check(
             // seen the area it's trying to mutate.
             return Err(format!(
                 "FORCE-UNCOVERED-READ: The latest read of {} does not cover \
-                 the byte range [{}, {}) you are trying to edit. You MUST \
-                 re-read the file with full coverage before editing.",
+                 the byte range [{}, {}) you are trying to edit. Re-read the \
+                 region you are about to change — read(file_path, \
+                 offset=<line>, limit=<lines>) over that range is enough. A \
+                 whole-file read of a large file is cut at the tool-result \
+                 budget and will not extend coverage past where it stopped.",
                 path.display(),
                 span_start,
                 span_end,
