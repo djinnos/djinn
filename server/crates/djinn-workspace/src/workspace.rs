@@ -2677,8 +2677,21 @@ mod tests {
         let (_origin, clone, ws, main_sha) = conflicted_merge_fixture().await;
         let cp = clone.path();
 
+        // Mirror the documented recovery scenario (see enforce_merge_parent's
+        // docs and the `recovers_when_resolution_uncommitted` sibling): the
+        // worker resolves the content and runs `git reset`, which clears
+        // MERGE_HEAD. That clearing is a precondition, not test convenience —
+        // enforce_merge_parent moves the branch with `git reset --soft`, and
+        // git refuses a soft reset while MERGE_HEAD exists. With MERGE_HEAD
+        // still present the auto-commit path records the merge instead, and
+        // this guarantee is never invoked.
         write(cp, "shared.txt", "resolved-both\n");
         write(cp, "tool.sh", "#!/bin/sh\necho tool\n");
+        git(cp, &["add", "-A"]);
+        git(cp, &["reset"]); // unstage + clear MERGE_HEAD, keep worktree
+
+        // The index-only executable intent this test is about: staged AFTER the
+        // merge state is gone, on a disk file that remains 0644.
         git(cp, &["add", "-A"]);
         git(cp, &["update-index", "--chmod=+x", "tool.sh"]);
         assert!(git(cp, &["ls-files", "-s", "tool.sh"]).starts_with("100755"));
