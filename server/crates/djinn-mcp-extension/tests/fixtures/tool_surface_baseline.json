@@ -2195,6 +2195,32 @@
   },
   {
     "concurrent_safe": false,
+    "description": "Set or clear the executable bit on a file in the task worktree. Use this instead of `chmod` in the shell: shell commands run as a different uid than the process that wrote the file, so `chmod` there fails with \"Operation not permitted\". Applies to regular files only. Refuses files carrying setuid/setgid/sticky bits. After committing, verify with `git ls-tree HEAD -- <path>` (expect 100755 or 100644) — not `git ls-files -s`, which shows the index and can report a mode that the commit path has not recorded.",
+    "destructive": false,
+    "idempotent": true,
+    "inputSchema": {
+      "properties": {
+        "executable": {
+          "description": "true to make the file executable (git 100755), false to clear the executable bit (git 100644)",
+          "type": "boolean"
+        },
+        "path": {
+          "description": "Absolute or worktree-relative file path",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "executable"
+      ],
+      "type": "object"
+    },
+    "name": "set_file_mode",
+    "openWorld": false,
+    "readOnly": false
+  },
+  {
+    "concurrent_safe": false,
     "description": "Execute shell commands in the task worktree. Commands always run from the worktree root.",
     "destructive": true,
     "idempotent": false,

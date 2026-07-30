@@ -286,11 +286,19 @@ impl Workspace {
 
         // ── Step 4: Stage eligible paths ─────────────────────────────────
         if !eligible.is_empty() {
+            // A mode lives only in the index entry, so this `add` re-reads it
+            // from DISK and silently reverts a `100755` an agent staged with
+            // `git update-index --chmod=+x` — its only route when the worktree
+            // rejects `chmod`. Capture intent first, restore after.
+            let modes_before = self.capture_index_modes().await;
+
             let mut add_args: Vec<&str> = vec!["add", "--"];
             for path in &eligible {
                 add_args.push(path.as_str());
             }
             self.run_git(&add_args, &[]).await?;
+
+            self.restore_dropped_executable_modes(&modes_before).await;
         }
 
         // ── Step 5: Check staged content ─────────────────────────────────
@@ -345,6 +353,73 @@ impl Workspace {
             .run_git(&["diff", "--name-only", "HEAD", "MERGE_HEAD", "--"], &[])
             .await?;
         Ok(paths.lines().map(str::to_string).collect())
+    }
+
+    /// Snapshot staged executable-mode intent, for restoration after a restage.
+    ///
+    /// Best-effort: an unreadable index yields an empty map, which makes the
+    /// paired restore a no-op rather than a failed commit.
+    async fn capture_index_modes(&self) -> djinn_git::IndexModes {
+        self.run_git(&["ls-files", "-s"], &[])
+            .await
+            .map(|output| djinn_git::parse_index_modes(&output))
+            .unwrap_or_default()
+    }
+
+    /// Re-mark any path whose staged executable bit a restage dropped.
+    ///
+    /// A file mode lives only in the git index entry, never in the blob, so
+    /// every `git add` re-reads it from disk. An agent that could not `chmod`
+    /// (inode-metadata ops are owner-only; `write`/`edit` files belong to the
+    /// worker at uid 1000 while the agent's shell runs at 1001) can only stage
+    /// `100755` via `git update-index --chmod=+x` — and without this, the next
+    /// `add` throws that away. Production task `tv9g` lost nine sessions to it.
+    ///
+    /// Only the losing direction is restored; a bit the restage found on disk is
+    /// the truth to keep. See [`djinn_git::executable_modes_to_restore`].
+    ///
+    /// Best-effort, and deliberately so: the auto-commit exists to preserve the
+    /// worker's content, and failing it over a permission bit would trade the
+    /// valuable thing for the cheap one. Failures are logged per path.
+    async fn restore_dropped_executable_modes(&self, modes_before: &djinn_git::IndexModes) {
+        if modes_before.is_empty() {
+            return;
+        }
+
+        let modes_after = self.capture_index_modes().await;
+        // HEAD's modes separate staged intent from a deliberate `chmod -x`; see
+        // `executable_modes_to_restore`. An empty map (unborn HEAD, failed read)
+        // means "nothing inherited", the conservative direction.
+        let head_modes = self
+            .run_git(&["ls-tree", "-r", "HEAD"], &[])
+            .await
+            .map(|output| djinn_git::parse_tree_modes(&output))
+            .unwrap_or_default();
+        let to_restore =
+            djinn_git::executable_modes_to_restore(modes_before, &modes_after, &head_modes);
+        if to_restore.is_empty() {
+            return;
+        }
+
+        for path in &to_restore {
+            // Index-only by construction: the mount may forbid `chmod` outright.
+            if let Err(e) = self
+                .run_git(&["update-index", "--chmod=+x", path.as_str()], &[])
+                .await
+            {
+                tracing::warn!(
+                    path = %path,
+                    error = %e,
+                    "commit: failed to restore staged executable mode"
+                );
+            }
+        }
+
+        tracing::info!(
+            restored_count = to_restore.len(),
+            restored_paths = ?to_restore,
+            "commit: restored staged executable modes dropped by restage"
+        );
     }
 
     /// Reject a two-parent commit whose tree silently discards parent-two
@@ -759,7 +834,13 @@ impl Workspace {
 
         // Reflect the worker's on-disk resolution (committed or not) into the
         // index so `write-tree` captures it. Idempotent when the tree is clean.
+        //
+        // `add -A` re-reads modes from disk, so a staged `100755` that only ever
+        // existed in the index would be lost here — and `write-tree` below bakes
+        // the index straight into the commit, with no later chance to fix it.
+        let modes_before = self.capture_index_modes().await;
         self.run_git(&["add", "-A"], &[]).await?;
+        self.restore_dropped_executable_modes(&modes_before).await;
 
         // Already a proper merge? (MERGE_HEAD survived → auto-commit recorded a
         // two-parent merge; or a prior run already landed it.)
@@ -1239,6 +1320,7 @@ fn git_capture(root: &Path, args: &[&str]) -> Result<Vec<u8>, EphemeralWorkspace
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
 
     /// Run `git <args>` in `dir`, panicking with stderr on failure.
@@ -2428,6 +2510,187 @@ mod tests {
         assert!(
             !tree_files.contains("patch.txt"),
             "scratch file must not sneak in via pre-staging, got: {tree_files}"
+        );
+    }
+
+    // ── Index-only executable-mode preservation (tv9g) ─────────────────────
+    //
+    // Every test here asserts the bit at `git ls-tree HEAD`, never
+    // `git ls-files -s`. The index is exactly the thing that reads green on a
+    // mode the commit path is about to discard: asserting it would reproduce
+    // tv9g's four rejected review cycles as a PASSING test.
+
+    /// The git index mode recorded for `path` in the given commit-ish.
+    fn tree_mode(dir: &Path, rev: &str, path: &str) -> String {
+        let out = git(dir, &["ls-tree", rev, "--", path]);
+        out.split_whitespace()
+            .next()
+            .unwrap_or_default()
+            .to_string()
+    }
+
+    /// Stage `path` with an executable INDEX entry while leaving disk at 0644 —
+    /// exactly what an agent can achieve on a mount that rejects `chmod`, and
+    /// the only route it has there. `update-index --chmod=+x` touches the index
+    /// only, so this reproduces the tv9g state without needing a hostile mount.
+    fn stage_executable_index_only(dir: &Path, path: &str) {
+        git(dir, &["add", path]);
+        git(dir, &["update-index", "--chmod=+x", path]);
+        assert!(
+            git(dir, &["ls-files", "-s", path]).starts_with("100755"),
+            "precondition: the index entry must be executable"
+        );
+        let disk_mode = std::fs::metadata(dir.join(path))
+            .expect("stat")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            disk_mode & 0o111,
+            0,
+            "precondition: disk must NOT be executable, or the test proves nothing"
+        );
+    }
+
+    /// The tv9g regression. Before the fix, `commit`'s targeted `git add`
+    /// re-read the mode from disk and the committed tree carried 100644 — the
+    /// defect that survived four review cycles because everyone verified the
+    /// index instead of the tree.
+    #[tokio::test]
+    async fn commit_preserves_an_index_only_executable_bit() {
+        let (_origin, clone, ws) = fixture();
+        let cp = clone.path();
+
+        write(cp, "gate.sh", "#!/usr/bin/env bash\necho hi\n");
+        stage_executable_index_only(cp, "gate.sh");
+
+        let outcome = ws.commit("add gate", TEST_IDENT).await.expect("commit");
+        assert!(outcome.committed(), "the change must commit");
+
+        assert_eq!(
+            tree_mode(cp, "HEAD", "gate.sh"),
+            "100755",
+            "the committed tree must carry the executable bit the agent staged"
+        );
+    }
+
+    /// Neutralization guard: the fix must restore only what was staged, never
+    /// blanket-set `+x`. If this ever reports 100755 the restore has stopped
+    /// being conditional and the test above would pass for the wrong reason.
+    #[tokio::test]
+    async fn commit_leaves_a_plain_file_non_executable() {
+        let (_origin, clone, ws) = fixture();
+        let cp = clone.path();
+
+        write(cp, "plain.rs", "fn main() {}\n");
+
+        let outcome = ws.commit("add plain", TEST_IDENT).await.expect("commit");
+        assert!(outcome.committed());
+        assert_eq!(
+            tree_mode(cp, "HEAD", "plain.rs"),
+            "100644",
+            "a file nobody marked executable must stay 100644"
+        );
+    }
+
+    /// One-directional by design: a bit found on DISK is the truth to keep.
+    /// If the restore ever became symmetric it would clear this, making an
+    /// honest `chmod +x` in the worktree impossible to commit.
+    #[tokio::test]
+    async fn commit_keeps_an_executable_bit_set_on_disk() {
+        let (_origin, clone, ws) = fixture();
+        let cp = clone.path();
+
+        write(cp, "ondisk.sh", "#!/bin/sh\n");
+        std::fs::set_permissions(cp.join("ondisk.sh"), std::fs::Permissions::from_mode(0o755))
+            .expect("chmod");
+
+        let outcome = ws.commit("add ondisk", TEST_IDENT).await.expect("commit");
+        assert!(outcome.committed());
+        assert_eq!(tree_mode(cp, "HEAD", "ondisk.sh"), "100755");
+    }
+
+    /// A path the safety filter EXCLUDES must not be resurrected by the mode
+    /// restore. Restoring a mode for a dropped path would re-add it to the index
+    /// and commit content the filter deliberately refused.
+    #[tokio::test]
+    async fn commit_does_not_resurrect_an_excluded_path_via_mode_restore() {
+        let (_origin, clone, ws) = fixture();
+        let cp = clone.path();
+
+        write(cp, "real.rs", "fn main() {}\n");
+        // `patch.txt` is a root-level scratch prefix the safety config excludes.
+        write(cp, "patch.txt", "scratch\n");
+        stage_executable_index_only(cp, "patch.txt");
+
+        let outcome = ws.commit("work", TEST_IDENT).await.expect("commit");
+        assert!(outcome.committed());
+
+        let tree = git(cp, &["ls-tree", "--name-only", "-r", "HEAD"]);
+        assert!(tree.contains("real.rs"), "got: {tree}");
+        assert!(
+            !tree.contains("patch.txt"),
+            "an excluded scratch path must not be resurrected by the mode restore, got: {tree}"
+        );
+    }
+
+    /// The inverse hazard: an agent that deliberately REMOVES an executable bit
+    /// must not have it silently restored. HEAD already tracks the file
+    /// executable, so the index's 100755 is inherited rather than staged intent —
+    /// the `chmod -x` on disk is the intent. Without the HEAD discriminator the
+    /// mode restore would turn into a one-way ratchet.
+    #[tokio::test]
+    async fn commit_honours_a_deliberate_chmod_minus_x_on_a_tracked_file() {
+        let (_origin, clone, ws) = fixture();
+        let cp = clone.path();
+
+        // Land an executable file first, so HEAD tracks it at 100755.
+        write(cp, "tool.sh", "#!/bin/sh\necho v1\n");
+        std::fs::set_permissions(cp.join("tool.sh"), std::fs::Permissions::from_mode(0o755))
+            .expect("chmod +x");
+        assert!(
+            ws.commit("add tool", TEST_IDENT)
+                .await
+                .expect("commit")
+                .committed()
+        );
+        assert_eq!(tree_mode(cp, "HEAD", "tool.sh"), "100755", "precondition");
+
+        // Now the agent removes the bit on purpose.
+        std::fs::set_permissions(cp.join("tool.sh"), std::fs::Permissions::from_mode(0o644))
+            .expect("chmod -x");
+
+        let outcome = ws.commit("drop +x", TEST_IDENT).await.expect("commit");
+        assert!(outcome.committed(), "a mode-only change must still commit");
+        assert_eq!(
+            tree_mode(cp, "HEAD", "tool.sh"),
+            "100644",
+            "an intentional chmod -x must survive the restage"
+        );
+    }
+
+    /// `enforce_merge_parent` bakes the index straight into a tree via
+    /// `write-tree`, so a mode dropped by its `add -A` has no later chance to be
+    /// fixed. Same guarantee, different commit path.
+    #[tokio::test]
+    async fn enforce_merge_parent_preserves_an_index_only_executable_bit() {
+        let (_origin, clone, ws, main_sha) = conflicted_merge_fixture().await;
+        let cp = clone.path();
+
+        write(cp, "shared.txt", "resolved-both\n");
+        write(cp, "tool.sh", "#!/bin/sh\necho tool\n");
+        git(cp, &["add", "-A"]);
+        git(cp, &["update-index", "--chmod=+x", "tool.sh"]);
+        assert!(git(cp, &["ls-files", "-s", "tool.sh"]).starts_with("100755"));
+
+        ws.enforce_merge_parent(&main_sha, TEST_IDENT)
+            .await
+            .expect("enforce");
+
+        assert_eq!(
+            tree_mode(cp, "HEAD", "tool.sh"),
+            "100755",
+            "the synthesized merge tree must carry the staged executable bit"
         );
     }
 }
