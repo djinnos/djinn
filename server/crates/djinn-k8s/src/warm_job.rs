@@ -115,7 +115,7 @@ pub fn build_warm_job(
     let suffix = Uuid::now_v7();
     let sanitized_project = sanitize_id(project_id);
     let job_name = format!("djinn-warm-{}-{}", sanitized_project, short_uuid(&suffix));
-    let labels = job_labels(project_id);
+    let labels = job_labels(config, project_id);
 
     let project_root = format!("{WORKSPACE_MOUNT_DIR}/{sanitized_project}");
     let mirror_path = format!("{MIRROR_MOUNT_DIR}/{project_id}.git");
@@ -391,6 +391,9 @@ exec {bin} warm-graph "{project_id}"
         spec: Some(JobSpec {
             template,
             backoff_limit: Some(0),
+            // Kueue create-then-admit; `None` when disarmed. See
+            // `KubernetesConfig::kueue_job_suspend`.
+            suspend: config.kueue_job_suspend(),
             ttl_seconds_after_finished: Some(config.warm_job_ttl_seconds),
             // Deadline margin: this ONE deadline covers both halves of the warm
             // Pod's work — `warm_cargo_target_base`'s single default-features
@@ -527,11 +530,16 @@ done"#,
     }
 }
 
-fn job_labels(project_id: &str) -> BTreeMap<String, String> {
+fn job_labels(config: &KubernetesConfig, project_id: &str) -> BTreeMap<String, String> {
     let mut labels = BTreeMap::new();
     labels.insert(LABEL_COMPONENT.into(), COMPONENT_GRAPH_WARM.into());
     labels.insert(LABEL_WARM.into(), "true".into());
     labels.insert(LABEL_PROJECT_ID.into(), sanitize_id(project_id));
+    // Stamped HERE rather than post-render. `stamp_admission_identity`
+    // (`graph_warmer_identity.rs:108`) mutates ONLY `job.metadata.labels`;
+    // following that pattern would leave the Pod template unlabelled and Kueue's
+    // Pod webhook blind. This map is cloned into both locations.
+    config.apply_kueue_build_object_labels(crate::config::KueueQueueKind::Warm, &mut labels);
     labels
 }
 

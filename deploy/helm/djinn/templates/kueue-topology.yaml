@@ -19,9 +19,12 @@ deploy/kueue/README.md). If you set it true without that, `helm install` stops
 with a plain "no matches for kind ResourceFlavor" from the API server — a
 diagnosable error, not a chart that quietly ships less than you asked for.
 
-This topology is INERT either way: no Djinn Job carries a queue name and no
-namespace is Kueue-managed, so nothing is ever admitted through these queues.
-Arming them belongs to the Kueue cutover epic 4c9q.
+This topology is INERT until `kueue.armed` is ALSO true. `kueue.enabled` renders
+the queues; `kueue.armed` labels the Namespace and stamps `suspend` +
+`kueue.x-k8s.io/queue-name` onto build Jobs. Keeping them separate is what makes
+"Kueue installed, topology rendered, nothing captured" representable — the exact
+state `deploy/kueue/zero-capture-gate.sh` verifies. `armed` implies `enabled`;
+`deployment-server.yaml` fails the render on the other combination.
 */ -}}
 {{- if .Values.kueue.enabled -}}
 {{- $kueue := .Values.kueue -}}
@@ -46,7 +49,12 @@ metadata:
   labels:
     {{- include "djinn.labels" . | nindent 4 }}
 spec:
-  queueingStrategy: StrictFIFO
+  # BestEffortFIFO, not StrictFIFO. Three kinds (task-run, warm, SCIP) share a
+  # queue whose default nominal quota is 3 pods, and a warm Pod is long-lived
+  # (measured 5442s end to end). Under StrictFIFO one head-of-line Workload that
+  # cannot fit blocks every smaller Workload behind it; BestEffortFIFO lets the
+  # rest through. Fairness across kinds is not a goal here — throughput is.
+  queueingStrategy: BestEffortFIFO
   resourceGroups:
     - coveredResources: ["pods"]
       flavors:
@@ -69,6 +77,26 @@ apiVersion: kueue.x-k8s.io/v1beta1
 kind: LocalQueue
 metadata:
   name: {{ include "djinn.fullname" . }}-warm
+  namespace: {{ include "djinn.namespace" . }}
+  labels:
+    {{- include "djinn.labels" . | nindent 4 }}
+spec:
+  clusterQueue: {{ $clusterQueueName }}
+---
+{{- /*
+SCIP joins Kueue. rust-analyzer indexing is genuinely CPU-heavy — the measured
+SCIP phase of a production warm was 3644s — so leaving it outside the quota
+would make the ClusterQueue under-count the very load it exists to bound.
+
+Image build deliberately gets NO LocalQueue. It is an upstream dependency of a
+task-run, so sharing this ClusterQueue admits a priority-inversion deadlock: a
+task-run holds a slot waiting on its project image while that image build is
+queued behind it. Adding a `-build` queue here re-introduces that.
+*/ -}}
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: LocalQueue
+metadata:
+  name: {{ include "djinn.fullname" . }}-scip
   namespace: {{ include "djinn.namespace" . }}
   labels:
     {{- include "djinn.labels" . | nindent 4 }}

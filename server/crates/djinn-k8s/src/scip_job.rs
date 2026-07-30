@@ -193,15 +193,21 @@ pub fn scip_index_job_name(project_id: &str, revision: &str) -> String {
 }
 
 /// Labels every SCIP-index resource carries.
-fn job_labels(project_id: &str) -> BTreeMap<String, String> {
-    BTreeMap::from([
+fn job_labels(config: &KubernetesConfig, project_id: &str) -> BTreeMap<String, String> {
+    let mut labels = BTreeMap::from([
         (LABEL_COMPONENT.into(), COMPONENT_SCIP_INDEX.into()),
         (LABEL_SCIP_INDEX.into(), "true".into()),
         (LABEL_PROJECT_ID.into(), sanitize_id(project_id)),
         // 8ixk: this Job takes no build lease, so this label is the ONLY thing
         // that makes its CPU visible to the capacity derivation.
         (LABEL_CAPACITY_RESERVED.into(), "true".into()),
-    ])
+    ]);
+    // SCIP joins Kueue: rust-analyzer indexing is genuinely CPU-heavy, so
+    // excluding it would make the ClusterQueue under-count the very load the
+    // quota exists to bound. Stamped into the one map cloned into both the Job
+    // metadata and the Pod template. No-op unless `config.kueue_armed`.
+    config.apply_kueue_build_object_labels(crate::config::KueueQueueKind::Scip, &mut labels);
+    labels
 }
 
 fn env_var(name: &str, value: &str) -> EnvVar {
@@ -231,7 +237,7 @@ pub fn build_scip_index_job(
 ) -> Job {
     let sanitized_project = sanitize_id(project_id);
     let job_name = scip_index_job_name(project_id, revision);
-    let labels = job_labels(project_id);
+    let labels = job_labels(config, project_id);
     let annotations =
         BTreeMap::from([(ANNOTATION_SCIP_REVISION.to_string(), revision.to_string())]);
 
@@ -435,6 +441,9 @@ exec {bin} scip-index "{project_id}"
                 spec: Some(pod_spec),
             },
             backoff_limit: Some(0),
+            // Kueue create-then-admit; `None` when disarmed. See
+            // `KubernetesConfig::kueue_job_suspend`.
+            suspend: config.kueue_job_suspend(),
             // Retained deliberately longer than the index interval: the
             // retained succeeded-Job inventory IS the change-detection ledger
             // read by [`crate::scip_schedule`]. See

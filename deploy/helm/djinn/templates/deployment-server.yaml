@@ -17,6 +17,25 @@
     {{- fail "buildAdmission.mode=enforce requires server.strategy.type=Recreate or non-overlapping RollingUpdate" -}}
   {{- end -}}
 {{- end -}}
+{{- /*
+Kueue arming invariants. Rendered from this template because it is the one that
+always renders, so both checks fire regardless of `--show-only`.
+*/ -}}
+{{- if .Values.kueue.armed -}}
+  {{- if not .Values.kueue.enabled -}}
+    {{- fail "kueue.armed=true requires kueue.enabled=true: armed implies enabled. Arming stamps suspend: true and a kueue.x-k8s.io/queue-name onto every build Job, but kueue.enabled=false renders no ClusterQueue or LocalQueue for them to be admitted into, so every build Job would hang forever." -}}
+  {{- end -}}
+  {{- /*
+  Mirror of the renderer assertion at server/crates/djinn-k8s/src/job.rs:242.
+  That line is an `assert!` — a coordinator PANIC, not a graceful fail-close —
+  so arming Kueue on top of it stacks two fail-closed gates and wedges ALL
+  dispatch. Surfacing the collision at `helm template` beats discovering it as a
+  crash loop in production (v0.7.25, and again on 2026-07-30).
+  */ -}}
+  {{- if and (eq .Values.cgroupLauncher.mode "required") (not .Values.cgroupWritable.taskRuns.enabled) -}}
+    {{- fail "kueue.armed=true with cgroupLauncher.mode=required requires cgroupWritable.taskRuns.enabled=true (required cgroup launcher requires runtimeClassName: djinn-cgroup-writable). The task-run renderer asserts this at djinn-k8s/src/job.rs:242 and panics the coordinator otherwise; arming Kueue on top of it wedges all dispatch. Enable cgroupWritable.taskRuns (and cgroupWritable.runtimeClass), or set cgroupLauncher.mode=disabled." -}}
+  {{- end -}}
+{{- end -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -402,6 +421,21 @@ spec:
             # atomic activation upgrade.
             - name: DJINN_K8S_TASK_RUN_CGROUP_WRITABLE_ENABLED
               value: {{ .Values.cgroupWritable.taskRuns.enabled | quote }}
+            # Kueue arming. This is the SAME value that labels the Namespace
+            # `djinn.io/kueue-managed` in templates/namespace.yaml, and the two
+            # must never be driven apart: a Job created `suspend: true` in an
+            # unlabelled namespace is never captured by Kueue, so nothing ever
+            # unsuspends it and the build hangs forever.
+            - name: DJINN_KUEUE_ARMED
+              value: {{ .Values.kueue.armed | quote }}
+            # LocalQueue name prefix, so an armed Job's
+            # `kueue.x-k8s.io/queue-name` resolves to a LocalQueue that this
+            # release actually rendered (kueue-topology.yaml names them
+            # `<djinn.fullname>-task-run` / `-warm` / `-scip`). A hard-coded
+            # prefix would silently name a non-existent queue on any release
+            # whose fullname is not `djinn`.
+            - name: DJINN_KUEUE_LOCAL_QUEUE_PREFIX
+              value: {{ include "djinn.fullname" . | quote }}
             - name: DJINN_K8S_MIRROR_PVC
               value: {{ include "djinn.pvcName.mirrors" . | quote }}
             - name: DJINN_K8S_CACHE_PVC
