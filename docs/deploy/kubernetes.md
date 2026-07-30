@@ -35,7 +35,7 @@ bits. Nothing in the chart is AWS-specific.
   managed node images, set them via node group launch-template user data or a
   privileged DaemonSet.
 - **Optional: Kueue**, if you want the Djinn queue topology
-  (`kueue.enabled: true`). Kubernetes **>= 1.29** required. See
+  (`kueue.enabled: true`). Kubernetes **>= 1.30** required. See
   [the prerequisite release](#cluster-prerequisite-releases) below.
 
 ### Cluster prerequisite releases
@@ -59,8 +59,14 @@ helm upgrade --install djinn-prereqs deploy/helm/djinn-prereqs \
 ```
 
 That pins Kueue `0.19.0` (`oci://registry.k8s.io/kueue/charts/kueue`) and
-requires **Kubernetes >= 1.29**. The upstream `Chart.yaml` declares no
+requires **Kubernetes >= 1.30** — verified by installing on 1.30.13 and 1.31.0,
+and by 1.29.14 rejecting the CRDs. The upstream `Chart.yaml` declares no
 `kubeVersion`, so Helm will not enforce it — check `kubectl version` first.
+
+The floor is 1.30 only because Djinn's values disable Kueue's DRA feature
+gates. Kueue 0.19 ships `KueueDRAIntegration` on, which needs
+`resource.k8s.io/v1` (GA in Kubernetes 1.34) and CrashLoopBackOffs below it.
+See [deploy/kueue/README.md](../../deploy/kueue/README.md#minimum-kubernetes-is-130-and-only-because-dra-is-disabled).
 
 The release is **inert**: Djinn's values set a *positive*
 `managedJobsNamespaceSelector` matching only namespaces labelled

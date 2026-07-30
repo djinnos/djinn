@@ -53,8 +53,10 @@ timeout for that fixture's Pod to become `Running`, and requires
 The prerequisite arrives as a **pinned upstream chart**, not a byte-vendored
 manifest: `deploy/kueue/vendor/kueue-v0.10.0.yaml` was retired, and the gate
 now fails if any static Kueue manifest is applied instead. The target cluster
-must be **Kubernetes >= 1.29** (Kueue 0.19); the upstream chart declares no
-`kubeVersion`, so nothing enforces this for you.
+must be **Kubernetes >= 1.30** (measured, not quoted: 1.29 rejects Kueue 0.19's
+CRDs, and the floor is 1.30 rather than 1.34 only because Djinn's values
+disable the DRA feature gates — see `deploy/kueue/README.md`); the upstream
+chart declares no `kubeVersion`, so nothing enforces this for you.
 
 Note the reduced fence, in full, before recording a pass: the per-object
 `djinn.io/kueue-build-object` selector no longer exists, because the upstream

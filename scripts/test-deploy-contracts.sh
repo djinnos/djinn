@@ -40,7 +40,13 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 # hosting lane already installs both (it runs `helm lint` and the chart
 # contracts in the same job), and the suite FAILS rather than skips if either
 # tool is missing.
+#
+# deploy/helm/djinn-prereqs/tests has the same needs as deploy/kueue/tests and
+# for the same reason: it renders the wrapper chart. It lives next to the chart
+# rather than under deploy/kueue/tests because it asserts chart VALUES (the
+# Kueue feature gates that set the Kubernetes floor), not the cutover scoping.
 DEFAULT_DIRS=(
+    deploy/helm/djinn-prereqs/tests
     deploy/kueue/tests
     deploy/node/k3s/tests
     deploy/runbooks/tests

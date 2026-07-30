@@ -21,7 +21,7 @@ cutover epic **4c9q**.
 | Pin recorded in | `deploy/helm/djinn-prereqs/Chart.yaml` + `Chart.lock` |
 | Chart digest | `sha256:2fbaa5b15b54c1149185d7f399c573838c630c10eb35b363763cbbd3327e4333` |
 | Vendored dependency | `deploy/helm/djinn-prereqs/charts/kueue-0.19.0.tgz` |
-| Minimum Kubernetes | **1.29** (Kueue 0.19 requirement; the chart does **not** declare `kubeVersion`, so Helm will not enforce it) |
+| Minimum Kubernetes | **1.30**, and only because Djinn disables Kueue's DRA feature gates — see [Minimum Kubernetes](#minimum-kubernetes-is-130-and-only-because-dra-is-disabled). The chart does **not** declare `kubeVersion`, so Helm will not enforce it |
 
 ### There is no fork any more
 
@@ -37,8 +37,52 @@ It was forced, not opportunistic. Kueue **never published a `0.10.0` chart** —
 the OCI repository goes `0.9.5`, `0.10.3`, `0.11.0` … `0.19.0`. The old pin was
 taken from a GitHub release *asset*, which has no chart equivalent, so "pin the
 same version as a chart" was not an available option. `0.19.0` is the latest
-published chart. Kueue 0.19 requires Kubernetes >= 1.29; the production VPS
-(k3s v1.35.5) and the local kind cluster (1.31.0) both clear it.
+published chart.
+
+### Minimum Kubernetes is 1.30, and only because DRA is disabled
+
+This number was **measured by installing the chart**, not read off a release
+note — the previously documented 1.29 was neither.
+
+Kueue 0.19.0 ships the `KueueDRAIntegration` feature gate **enabled**. With it
+on, the controller-manager builds a ResourceSlice indexer against
+`resource.k8s.io/v1`, and that API group is GA only in Kubernetes **1.34**. On
+anything older the process exits at startup:
+
+```
+"msg":"Unable to setup indexes",
+"error":"could not setup ResourceSlice indexer: no matches for kind
+ \"ResourceSlice\" in version \"resource.k8s.io/v1\""
+```
+
+That is fatal, not degraded. `helm --wait` never returns, the Deployment
+CrashLoopBackOffs, and the release is left with all 11 CRDs Established and
+**both** webhook configurations registered with CA bundles injected, backed by
+a dead controller. Harmless today only because `mjob`/`vjob` are fenced to a
+label nothing applies — a fragile place to be.
+
+Djinn uses no dynamic resource allocation, so `values.yaml` turns the
+integration off (all three gates: the two child gates declare a hard dependency
+on the parent and the manager rejects its own flags if only the parent is
+disabled). That is what restores a sub-1.34 floor.
+
+The floor that remains is **1.30**, set by the CRDs rather than the manager:
+Kueue 0.19's `workloads.kueue.x-k8s.io` uses
+`spec.versions[].selectableFields`, a field that does not exist in the
+CustomResourceDefinition schema before 1.30, so the apply is rejected outright
+on 1.29.
+
+| Cluster | `helm install ... --wait` |
+| --- | --- |
+| kind 1.29.14 | **fails** — `.spec.versions[1].selectableFields: field not declared in schema` |
+| kind 1.30.13 | succeeds, controller Ready |
+| kind 1.31.0 (`scripts/kind/setup-kind.sh` pin) | succeeds, controller Ready |
+| VPS k3s v1.35.5 | above the floor |
+
+Both the production VPS and the local kind cluster clear 1.30. Re-enabling DRA
+would move this floor to 1.34 and take the local kind cluster below it;
+`deploy/helm/djinn-prereqs/tests/feature-gates.sh` fails the build if the gates
+are removed or flipped back on.
 
 ### Offline / hermetic story
 
