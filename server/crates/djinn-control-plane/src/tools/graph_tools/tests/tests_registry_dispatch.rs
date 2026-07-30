@@ -1,3 +1,17 @@
+// djinn:allow-oversize
+//
+// The registry-driven dispatch vertical slice: every operation routed through
+// the registry, asserted against the bridge method it must reach. The value of
+// this suite is that it is exhaustive in one place — a reader checking whether
+// an operation is wired looks here and nowhere else.
+//
+// Deliberately NOT split to satisfy the line count. Until this commit the file
+// was an `.inc` fragment pulled in textually, which hid it from rust-analyzer,
+// rustfmt, and every `*.rs`-filtered CI guard — including this one. It was
+// already well over both thresholds then; the migration made it smaller, not
+// larger. Splitting it now would recreate the `_partN` fragmentation this PR
+// exists to undo, so it is declared oversized instead of re-fragmented.
+
 use super::*;
 
 // vxmw / 5ice: dispatch-level smoke coverage for the registry-driven

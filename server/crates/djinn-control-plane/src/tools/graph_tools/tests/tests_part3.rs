@@ -1,3 +1,15 @@
+// djinn:allow-oversize
+//
+// Graph-staleness and impact-check contract tests — one cohesive suite for one
+// module.
+//
+// Deliberately NOT split to satisfy the line count. Until this commit the file
+// was an `.inc` fragment pulled in textually, which hid it from rust-analyzer,
+// rustfmt, and every `*.rs`-filtered CI guard — including this one. It was
+// already over the byte threshold then; the migration made it smaller, not
+// larger. Splitting it now would recreate the `_partN` fragmentation this PR
+// exists to undo, so it is declared oversized instead of re-fragmented.
+
 use super::*;
 
 fn search_with_top_hit(name: &str) -> CodeGraphResponse {

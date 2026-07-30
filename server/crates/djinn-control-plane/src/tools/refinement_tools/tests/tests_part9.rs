@@ -1,3 +1,17 @@
+// djinn:allow-oversize
+//
+// Cross-surface exact-run liveness regressions: the same run projected
+// identically through status, doctor, and board. The suite's whole point is
+// that these surfaces are asserted together, so splitting it by surface would
+// destroy what it tests.
+//
+// This file is over the BYTE threshold only, and only after this commit: as an
+// `.inc` fragment it was invisible to `cargo fmt`, and rustfmt's first pass
+// over it re-wrapped the long fixture calls that #2817 introduced, growing it
+// from 50448 to 56403 bytes without adding a single statement. It is declared
+// oversized rather than re-fragmented — the growth is formatting the file
+// should have had all along.
+
 use super::*;
 // ── Exact-run status snapshot regressions ─────────────────────────────
 
