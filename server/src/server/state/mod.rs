@@ -1696,14 +1696,6 @@ impl AppState {
         }
     }
 
-    /// Pick the best available [`GraphWarmerService`] implementation and
-    /// cache it on [`AppState`]. Idempotent.
-    ///
-    /// Policy:
-    /// * If `DJINN_RUNTIME=kubernetes` (or unset — default) AND a
-    ///   [`djinn_k8s::KubeClient`] can be constructed → [`K8sGraphWarmer`].
-    /// * Otherwise (explicit `DJINN_RUNTIME=test`, local dev without a
-    ///   cluster) → in-process warmer via [`build_in_process_graph_warmer`].
     /// Verify, against the live cluster, that this pod's namespace is actually
     /// Kueue-managed before any renderer is allowed to arm.
     ///
@@ -1751,6 +1743,14 @@ impl AppState {
         }
     }
 
+    /// Pick the best available [`GraphWarmerService`] implementation and
+    /// cache it on [`AppState`]. Idempotent.
+    ///
+    /// Policy:
+    /// * If `DJINN_RUNTIME=kubernetes` (or unset — default) AND a
+    ///   [`djinn_k8s::KubeClient`] can be constructed → [`K8sGraphWarmer`].
+    /// * Otherwise (explicit `DJINN_RUNTIME=test`, local dev without a
+    ///   cluster) → in-process warmer via [`build_in_process_graph_warmer`].
     async fn initialize_graph_warmer(&self) {
         {
             let existing = self.inner.graph_warmer.read().await;
