@@ -898,15 +898,31 @@ mod tests {
         }
         rearm_kueue_latch_for_test();
 
+        // Observe everything BEFORE asserting anything: a panic here would skip
+        // the restore below, leave DJINN_KUEUE_ARMED set and the latch tripped
+        // for the rest of the process, and poison ENV_LOCK for every sibling
+        // test — turning one real failure into a cascade of misleading ones.
+        let armed_before = KubernetesConfig::from_env().kueue_armed;
+        disarm_kueue_globally();
+        let cfg = KubernetesConfig::from_env();
+        let mut labels = BTreeMap::new();
+        cfg.apply_kueue_build_object_labels(KueueQueueKind::TaskRun, &mut labels);
+
+        rearm_kueue_latch_for_test();
+        // SAFETY: serialized against sibling tests via ENV_LOCK.
+        unsafe {
+            match saved {
+                Some(value) => std::env::set_var("DJINN_KUEUE_ARMED", value),
+                None => std::env::remove_var("DJINN_KUEUE_ARMED"),
+            }
+        }
+
         // Precondition: the env alone does arm, so the assertion below is about
         // the latch and not about a var that was never read.
         assert!(
-            KubernetesConfig::from_env().kueue_armed,
+            armed_before,
             "DJINN_KUEUE_ARMED=true must arm before the preflight refuses"
         );
-
-        disarm_kueue_globally();
-        let cfg = KubernetesConfig::from_env();
         assert!(
             !cfg.kueue_armed,
             "a preflight refusal must disarm despite DJINN_KUEUE_ARMED=true"
@@ -917,21 +933,10 @@ mod tests {
             None,
             "a disarmed config must not render `suspend: true`"
         );
-        let mut labels = BTreeMap::new();
-        cfg.apply_kueue_build_object_labels(KueueQueueKind::TaskRun, &mut labels);
         assert!(
             labels.is_empty(),
             "a disarmed config must not stamp a queue-name label: {labels:?}"
         );
-
-        rearm_kueue_latch_for_test();
-        // SAFETY: serialized against sibling tests via ENV_LOCK.
-        unsafe {
-            match saved {
-                Some(value) => std::env::set_var("DJINN_KUEUE_ARMED", value),
-                None => std::env::remove_var("DJINN_KUEUE_ARMED"),
-            }
-        }
     }
 
     /// `from_env()` honors the env vars it documents.  This is a sanity
