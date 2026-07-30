@@ -1004,5 +1004,130 @@ fn image_status_event(
 }
 
 #[cfg(test)]
-#[path = "watcher_tests.rs"]
-mod tests;
+mod tests {
+    use super::*;
+    use k8s_openapi::api::batch::v1::JobStatus;
+    use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
+
+    fn job_with_status(
+        name: &str,
+        project_id: &str,
+        hash: &str,
+        succeeded: Option<i32>,
+        failed: Option<i32>,
+    ) -> Job {
+        let mut labels = BTreeMap::new();
+        labels.insert(LABEL_BUILD.into(), "true".into());
+        labels.insert(LABEL_PROJECT_ID.into(), project_id.into());
+        labels.insert(LABEL_IMAGE_HASH.into(), hash.into());
+        Job {
+            metadata: ObjectMeta {
+                name: Some(name.into()),
+                labels: Some(labels),
+                ..ObjectMeta::default()
+            },
+            status: Some(JobStatus {
+                succeeded,
+                failed,
+                ..JobStatus::default()
+            }),
+            ..Job::default()
+        }
+    }
+
+    #[test]
+    fn classify_reads_succeeded_first() {
+        let job = job_with_status("j", "p", "h", Some(1), None);
+        assert!(matches!(classify(&job), Some(JobOutcome::Succeeded)));
+    }
+
+    #[test]
+    fn classify_reads_failed_when_succeeded_is_zero() {
+        let job = job_with_status("j", "p", "h", None, Some(2));
+        assert!(matches!(classify(&job), Some(JobOutcome::Failed)));
+    }
+
+    #[test]
+    fn classify_returns_none_while_running() {
+        let job = job_with_status("j", "p", "h", None, None);
+        assert!(classify(&job).is_none());
+    }
+
+    #[test]
+    fn classify_returns_none_when_status_missing() {
+        let mut job = job_with_status("j", "p", "h", None, None);
+        job.status = None;
+        assert!(classify(&job).is_none());
+    }
+
+    #[test]
+    fn image_status_event_ready_shape() {
+        let envelope = image_status_event(
+            "ready",
+            "proj-abc",
+            Some("reg:5000/djinn-project-proj-abc:1a2b3c4d5e6f"),
+            Some("1a2b3c4d5e6f"),
+            None,
+            None,
+            "djinn-build-proj-abc-1a2b3c4d5e6f",
+        );
+        assert_eq!(envelope.entity_type, "project_image");
+        assert_eq!(envelope.action, "ready");
+        assert_eq!(envelope.project_id.as_deref(), Some("proj-abc"));
+        assert_eq!(
+            envelope.payload.get("image_tag").and_then(|v| v.as_str()),
+            Some("reg:5000/djinn-project-proj-abc:1a2b3c4d5e6f")
+        );
+        assert_eq!(
+            envelope.payload.get("image_hash").and_then(|v| v.as_str()),
+            Some("1a2b3c4d5e6f")
+        );
+    }
+
+    #[test]
+    fn truncate_from_end_keeps_tail_and_ellipsizes() {
+        // Under the cap: unchanged.
+        assert_eq!(truncate_from_end("short", 16), "short");
+        // Over the cap: keep the TAIL (failure root cause lives at the end).
+        let long = "0123456789abcdef".repeat(10); // 160 chars
+        let t = truncate_from_end(&long, 10);
+        assert_eq!(t.chars().count(), 11); // 10 + leading "…"
+        assert!(t.starts_with('…'));
+        assert!(t.ends_with("6789abcdef"));
+    }
+
+    #[test]
+    fn truncate_from_end_is_multibyte_safe() {
+        // Two 3-byte UTF-8 chars per cycle; verify char-count-based slicing
+        // doesn't hit a byte boundary that splits a codepoint.
+        let s = "αβγδεζηθικλμ"; // 12 Greek letters
+        let t = truncate_from_end(s, 5);
+        assert_eq!(t.chars().count(), 6); // 5 + '…'
+        assert!(t.starts_with('…'));
+    }
+
+    #[test]
+    fn parse_digest_sentinel_extracts_last_sha256() {
+        let logs = "waiting for buildkitd...\n\
+            buildkitd reachable\n\
+            pushing manifest\n\
+            DJINN_IMAGE_DIGEST=sha256:deadbeefcafef00d\n";
+        assert_eq!(
+            parse_digest_sentinel(logs),
+            Some("sha256:deadbeefcafef00d".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_digest_sentinel_none_when_absent_or_empty() {
+        assert_eq!(parse_digest_sentinel("no digest here\n"), None);
+        // An empty capture (build produced no digest) is rejected.
+        assert_eq!(parse_digest_sentinel("DJINN_IMAGE_DIGEST=\n"), None);
+        // Non-sha256 value rejected.
+        assert_eq!(parse_digest_sentinel("DJINN_IMAGE_DIGEST=garbage\n"), None);
+    }
+}
+
+#[cfg(test)]
+#[path = "watcher_protocol_tests.rs"]
+mod protocol_tests;
