@@ -174,6 +174,12 @@ async fn readiness_detail_route_serializes_the_authenticated_two_area_owner_run(
         "../../../../ui/src/pages/fixtures/readiness_terminal_detail.json"
     ))
     .expect("valid shared browser detail fixture");
+    assert_eq!(
+        stable_browser_detail_contract(&browser_fixture),
+        stable_browser_detail_contract(&json),
+        "the routed page fixture must remain the serialized two-area owner run, \
+         apart from database-generated identifiers, timestamps, and callback digests"
+    );
     assert_eq!(browser_fixture["run"]["status"], json["run"]["status"]);
     assert_eq!(
         browser_fixture["run"]["repository_snapshot"],
@@ -387,6 +393,53 @@ async fn request(
 
 async fn response_json(response: axum::response::Response) -> Value {
     serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap()
+}
+
+/// Retain the DTO fields that are stable across the database-generated run.
+///
+/// The browser imports the JSON fixture as a real HTTP response. Comparing this
+/// normalized route serialization prevents it from becoming an independently
+/// invented component fixture while leaving UUIDs, timestamps, and callback
+/// digests owned by the persistence layer.
+fn stable_browser_detail_contract(detail: &Value) -> Value {
+    let mut detail = detail.clone();
+    let events = detail["events"]
+        .as_array_mut()
+        .expect("readiness detail events are an array");
+    events.retain(|event| event["event_kind"] == "readiness_aggregated");
+    remove_generated_detail_fields(&mut detail);
+    detail
+}
+
+fn remove_generated_detail_fields(value: &mut Value) {
+    match value {
+        Value::Object(object) => {
+            for key in [
+                "id",
+                "project_id",
+                "attempt_id",
+                "area_id",
+                "area_ids",
+                "created_at",
+                "completed_at",
+                "frozen_at",
+                "terminal_at",
+                "payload_digest",
+            ] {
+                object.remove(key);
+            }
+            for nested in object.values_mut() {
+                remove_generated_detail_fields(nested);
+            }
+        }
+        Value::Array(entries) => {
+            for entry in entries.iter_mut() {
+                remove_generated_detail_fields(entry);
+            }
+            entries.sort_by_key(|entry| serde_json::to_string(entry).expect("serializable JSON"));
+        }
+        _ => {}
+    }
 }
 
 async fn assert_status(response: axum::response::Response, status: StatusCode, code: &str) {
