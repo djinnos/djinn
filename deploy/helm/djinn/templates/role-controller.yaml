@@ -41,3 +41,19 @@ rules:
   - apiGroups: [""]
     resources: ["events"]
     verbs: ["get", "list", "watch"]
+  # The Kueue arming preflight reads THIS namespace back at startup to confirm
+  # it really carries `djinn.io/kueue-managed` before any renderer stamps
+  # `suspend: true` onto a build Job
+  # (server/crates/djinn-k8s/src/kueue_preflight.rs).
+  #
+  # Namespaces are cluster-scoped, but the apiserver derives the request's
+  # namespace attribute from the object name for `GET /api/v1/namespaces/<name>`,
+  # so this NAMESPACED rule authorizes reading this namespace and nothing else.
+  # Verified against a real apiserver (kind, k8s v1.34): with only this rule, GET
+  # of the own namespace returns 200 while GET of another namespace and LIST
+  # namespaces both return 403. That is why the preflight needs no ClusterRole,
+  # and TokenReview (role-tokenreview.yaml) remains the server's only
+  # cluster-wide permission.
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get"]

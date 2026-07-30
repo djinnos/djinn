@@ -443,7 +443,9 @@ impl KubernetesConfig {
 
 impl KubernetesConfig {
     /// Minimal default used by unit tests; production deployments load
-    /// from the djinn-server config file.
+    /// their Kubernetes settings from the `DJINN_*` environment projected by
+    /// `deploy/helm/djinn/templates/deployment-server.yaml` via
+    /// [`KubernetesConfig::from_env`].
     pub fn for_testing() -> Self {
         Self {
             namespace: "djinn".into(),
@@ -808,6 +810,13 @@ impl KubernetesConfig {
                 }
             }
         }
+        // Honor a startup preflight refusal. `KubernetesConfig` is not held on
+        // AppState — every renderer rebuilds it from the environment at dispatch
+        // time — so the latch, not a mutated struct, is what makes the refusal
+        // reach all of them. See `crate::kueue_preflight`.
+        if cfg.kueue_armed && crate::kueue_preflight::kueue_disarmed_by_preflight() {
+            cfg.kueue_armed = false;
+        }
         if let Ok(v) = std::env::var("DJINN_KUEUE_LOCAL_QUEUE_PREFIX")
             && !v.is_empty()
         {
@@ -830,10 +839,14 @@ impl KubernetesConfig {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    /// Serializes every test that mutates process env around `from_env()`.
+    /// `pub(crate)` because `kueue_preflight`'s latch test drives `from_env()`
+    /// too and has to take the SAME lock — a second mutex would serialize
+    /// nothing.
+    pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     /// `from_env()` honors the env vars it documents.  This is a sanity
     /// check on the env-var names (regressions would silently fall back to
