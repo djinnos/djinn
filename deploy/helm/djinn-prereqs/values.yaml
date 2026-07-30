@@ -1,0 +1,146 @@
+# Values for the djinn-prereqs wrapper chart.
+#
+# Everything under `kueue:` is passed to the PINNED upstream subchart
+# (oci://registry.k8s.io/kueue/charts/kueue, version in Chart.yaml/Chart.lock).
+# The subchart itself is untouched — this file is the entire repository-owned
+# scoping policy that used to live as hand-edited webhook entries inside
+# deploy/kueue/vendor/kueue-v0.10.0.yaml.
+#
+# Contract: deploy/kueue/tests/webhook-selectors.sh renders THIS chart and
+# asserts the scoping below actually survives into the admission webhooks.
+
+kueue:
+  # Set false to render djinn-prereqs with the Kueue subchart omitted entirely
+  # (Chart.yaml gates the dependency on this key). Nothing else in this chart
+  # depends on it today; the flag exists so a cluster that already runs a
+  # Kueue it manages elsewhere can still take future prerequisites from here.
+  enabled: true
+
+  # -------------------------------------------------------------------------
+  # Djinn scoping policy
+  # -------------------------------------------------------------------------
+  # The upstream chart exposes both knobs only through this one opaque string,
+  # so overriding either means restating the whole default. The body below is
+  # upstream 0.19.0's default `managerConfig.controllerManagerConfigYaml`
+  # VERBATIM, comments included, with exactly two deliberate edits:
+  #
+  #   1. `managedJobsNamespaceSelector` is uncommented and inverted from
+  #      upstream's negative "every namespace except kube-system/kueue-system"
+  #      into a POSITIVE `matchLabels` fence. A namespace must be explicitly
+  #      labelled `djinn.io/kueue-managed: "true"` before ANY Kueue admission
+  #      webhook can select an object in it. No asset in this repository
+  #      applies that label, which is what makes this release inert.
+  #
+  #   2. `integrations.frameworks` drops "pod", "deployment" and "statefulset".
+  #      Those three are the only entries the upstream chart gates a webhook
+  #      registration on (`{{- if has "pod" ... }}` and friends in
+  #      templates/webhook/manifests.yaml), and they are the only ones that
+  #      intercept CREATE on core Kubernetes types. Removing them deletes
+  #      mpod/vpod, mdeployment/vdeployment and mstatefulset/vstatefulset from
+  #      the rendered MutatingWebhookConfiguration and
+  #      ValidatingWebhookConfiguration outright.
+  #
+  #      Everything else in the list is left EXACTLY as upstream ships it. The
+  #      remaining frameworks are CRD-scoped (ray.io, kubeflow.org, jobset,
+  #      appwrapper, trainer), their webhooks render unconditionally whether or
+  #      not the framework is listed, and dropping a name from the list while
+  #      its webhook still registers would point a live admission webhook at a
+  #      handler the manager did not enable. That is a worse failure than the
+  #      unused entries.
+  #
+  # A drift check (deploy/kueue/tests/check-manager-config-drift.py) parses the
+  # subchart's own default out of charts/kueue-<version>.tgz and fails if this
+  # string differs from it in any way other than those two edits. On a version
+  # bump the check tells you exactly what upstream changed underneath you.
+  managerConfig:
+    controllerManagerConfigYaml: |-
+      apiVersion: config.kueue.x-k8s.io/v1beta2
+      kind: Configuration
+      health:
+        healthProbeBindAddress: :8081
+      metrics:
+        bindAddress: :8443
+      # enableClusterQueueResources: true
+      webhook:
+        port: 9443
+      leaderElection:
+        leaderElect: true
+        resourceName: c1f6bfd2.kueue.x-k8s.io
+      controller:
+        groupKindConcurrency:
+          Job.batch: 5
+          Pod: 5
+          Workload.kueue.x-k8s.io: 10
+          LocalQueue.kueue.x-k8s.io: 5
+          ClusterQueue.kueue.x-k8s.io: 5
+          ResourceFlavor.kueue.x-k8s.io: 1
+      clientConnection:
+        qps: 300
+        burst: 500
+      #pprofBindAddress: :8083
+      #waitForPodsReady:
+      #  timeout: 5m
+      #  recoveryTimeout: 3m
+      #  blockAdmission: false
+      #  requeuingStrategy:
+      #    timestamp: Eviction
+      #    backoffLimitCount: null # null indicates infinite requeuing
+      #    backoffBaseSeconds: 60
+      #    backoffMaxSeconds: 3600
+      #manageJobsWithoutQueueName: true
+      # See "Opt-in Namespace Management" for guidance on namespace management:
+      # https://kueue.sigs.k8s.io/docs/tasks/manage/enforce_job_management/opt_in_namespace_management/
+      # DJINN EDIT 1 of 2: positive namespace fence, replacing upstream's
+      # negative kube-system/kueue-system exclusion. Nothing in this repository
+      # applies djinn.io/kueue-managed, so this selects zero namespaces.
+      managedJobsNamespaceSelector:
+        matchLabels:
+          djinn.io/kueue-managed: "true"
+      #internalCertManagement:
+      #  enable: false
+      #  webhookServiceName: ""
+      #  webhookSecretName: ""
+      integrations:
+        frameworks:
+        - "batch/job"
+        - "kubeflow.org/mpijob"
+        - "ray.io/rayjob"
+        - "ray.io/rayservice"
+        - "ray.io/raycluster"
+        - "jobset.x-k8s.io/jobset"
+        - "trainer.kubeflow.org/trainjob"
+      #  - "kubeflow.org/paddlejob"
+      #  - "kubeflow.org/pytorchjob"
+      #  - "kubeflow.org/tfjob"
+      #  - "kubeflow.org/xgboostjob"
+      #  - "kubeflow.org/jaxjob"
+        - "workload.codeflare.dev/appwrapper"
+      #  - "sparkoperator.k8s.io/sparkapplication"
+      # DJINN EDIT 2 of 2: upstream 0.19.0 ships "pod", "deployment" and
+      # "statefulset" ENABLED here. All three are removed so Kueue registers no
+      # admission webhook on core Pod/Deployment/StatefulSet CREATE.
+        - "leaderworkerset.x-k8s.io/leaderworkerset"
+      #  externalFrameworks:
+      #  - "Foo.v1.example.com"
+      #fairSharing:
+      #  preemptionStrategies: [LessThanOrEqualToFinalShare, LessThanInitialShare]
+      #admissionFairSharing:
+      #  usageHalfLifeTime: "168h" # 7 days
+      #  usageSamplingInterval: "5m"
+      #  resourceWeights: # optional, defaults to 1 for all resources if not specified
+      #    cpu: 0    # if you want to completely ignore cpu usage
+      #    memory: 0 # ignore completely memory usage
+      #    example.com/gpu: 100 # and you care only about GPUs usage
+      #resources:
+      #  excludeResourcePrefixes: []
+      #  quotaCheckStrategy: "BlockUndeclared"
+      # transformations:
+      # - input: nvidia.com/mig-4g.5gb
+      #   strategy: Replace | Retain
+      #   outputs:
+      #     example.com/accelerator-memory: 5Gi
+      #     example.com/accelerator-gpc: 4
+      #objectRetentionPolicies:
+      #  workloads:
+      #    afterFinished: null # null indicates infinite retention, 0s means no retention at all
+      #    afterDeactivatedByKueue: null # null indicates infinite retention, 0s means no retention at all

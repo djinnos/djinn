@@ -78,8 +78,18 @@ run_case() {
 run_case success pass 'PASS: zero-capture prerequisite gate completed'
 SUCCESS_LOG="$WORK/success.log"
 CHART_DIR="$(cd "$KUEUE_DIR/../helm/djinn" && pwd)"
-grep -Fq -- "apply -f $KUEUE_DIR/vendor/kueue-v0.10.0.yaml" "$SUCCESS_LOG" || fail 'success did not apply pinned Kueue asset'
+PREREQS_DIR="$(cd "$KUEUE_DIR/../helm/djinn-prereqs" && pwd)"
+# The prerequisite must arrive as the PINNED CHART. The gate used to
+# `kubectl apply -f deploy/kueue/vendor/kueue-v0.10.0.yaml`; that fork is
+# retired, and asserting on a path no consumer installs is the defect this
+# contract now guards against rather than reproduces.
+grep -Fq -- "upgrade --install djinn-prereqs $PREREQS_DIR" "$SUCCESS_LOG" || fail 'success did not install the pinned Kueue prerequisite chart'
+grep -Fq -- '--namespace kueue-system' "$SUCCESS_LOG" || fail 'prerequisite was not installed into its own namespace'
+if grep -Eq -- '(^|[[:space:]])apply -f ' "$SUCCESS_LOG"; then
+    fail 'gate still applies a static Kueue manifest; the byte-vendored fork is retired'
+fi
 grep -Fq -- "upgrade --install djinn-inert-kueue-gate $CHART_DIR" "$SUCCESS_LOG" || fail 'success did not install inert Djinn chart'
+grep -Fq -- 'kueue.enabled=true' "$SUCCESS_LOG" || fail 'success did not request the Kueue queue topology, so it proved nothing about it'
 grep -Fq -- 'migration.designatedOperatorSecret=fake-designated-operator' "$SUCCESS_LOG" || fail 'success did not provide the fresh-install designated operator Secret'
 grep -Fq -- "apply -n djinn -f $SCRIPT_DIR/fixtures/precutover-task-run.yaml" "$SUCCESS_LOG" || fail 'success did not apply pre-cutover fixture'
 grep -Fq -- 'get workloads -n djinn' "$SUCCESS_LOG" || fail 'success did not query namespace Workloads'

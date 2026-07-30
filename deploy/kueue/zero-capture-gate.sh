@@ -11,10 +11,15 @@ CONTEXT="${KUEUE_GATE_CONTEXT:-}"
 TIMEOUT_SECONDS="${KUEUE_GATE_TIMEOUT_SECONDS:-120}"
 POLL_SECONDS="${KUEUE_GATE_POLL_SECONDS:-2}"
 RELEASE="${KUEUE_GATE_RELEASE:-djinn-inert-kueue-gate}"
+PREREQS_RELEASE="${KUEUE_GATE_PREREQS_RELEASE:-djinn-prereqs}"
+PREREQS_NAMESPACE="${KUEUE_GATE_PREREQS_NAMESPACE:-kueue-system}"
 DESIGNATED_OPERATOR_SECRET="${KUEUE_GATE_DESIGNATED_OPERATOR_SECRET:-}"
 NAMESPACE="djinn"
 JOB_NAME="zero-capture-precutover-task-run"
-VENDORED_MANIFEST="$SCRIPT_DIR/vendor/kueue-v0.10.0.yaml"
+# The prerequisite is a PINNED UPSTREAM CHART, not a byte-vendored manifest.
+# Applying a static YAML here would prove the gate against a file no consumer
+# installs; deploy/kueue/vendor/ was retired for exactly that reason.
+PREREQS_CHART="$REPO_ROOT/deploy/helm/djinn-prereqs"
 CHART="$REPO_ROOT/deploy/helm/djinn"
 FIXTURE="$SCRIPT_DIR/tests/fixtures/precutover-task-run.yaml"
 
@@ -22,9 +27,9 @@ usage() {
     cat >&2 <<'EOF'
 Usage: deploy/kueue/zero-capture-gate.sh --context <disposable-context> --designated-operator-secret <secret-name> [options]
 
-Installs the pinned Kueue manifest and inert Djinn chart in the supplied
-context. It never labels the djinn namespace. This is a prerequisite-release
-gate, not a cutover command.
+Installs the pinned Kueue prerequisite chart (deploy/helm/djinn-prereqs) and
+the inert Djinn chart in the supplied context. It never labels the djinn
+namespace. This is a prerequisite-release gate, not a cutover command.
 
 Options:
   --context CONTEXT       Required disposable Kubernetes context.
@@ -38,6 +43,7 @@ Options:
 
 Environment overrides for automation: KUBECTL, HELM, KUEUE_GATE_CONTEXT,
 KUEUE_GATE_TIMEOUT_SECONDS, KUEUE_GATE_POLL_SECONDS, KUEUE_GATE_RELEASE,
+KUEUE_GATE_PREREQS_RELEASE, KUEUE_GATE_PREREQS_NAMESPACE,
 KUEUE_GATE_DESIGNATED_OPERATOR_SECRET.
 EOF
 }
@@ -82,7 +88,12 @@ done
 [[ "$DESIGNATED_OPERATOR_SECRET" =~ ^[a-z0-9]([-.a-z0-9]*[a-z0-9])?$ ]] || fail '--designated-operator-secret must be a valid Kubernetes Secret name'
 [[ "$TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]] || fail '--timeout-seconds must be a positive integer'
 [[ "$POLL_SECONDS" =~ ^[0-9]+$ ]] || fail 'KUEUE_GATE_POLL_SECONDS must be a non-negative integer'
-[ -f "$VENDORED_MANIFEST" ] || fail "pinned Kueue manifest is missing: $VENDORED_MANIFEST"
+[ -d "$PREREQS_CHART" ] || fail "Kueue prerequisite chart is missing: $PREREQS_CHART"
+[ -f "$PREREQS_CHART/Chart.lock" ] || fail "prerequisite chart is unpinned: $PREREQS_CHART/Chart.lock is missing"
+# Vendored so the gate installs the exact reviewed bytes with no registry
+# round-trip: a resolve-at-install-time dependency could hand the target cluster
+# a different chart than the contracts validated.
+ls "$PREREQS_CHART"/charts/kueue-*.tgz >/dev/null 2>&1 || fail "prerequisite chart has no vendored kueue dependency; run: helm dependency update $PREREQS_CHART"
 [ -d "$CHART" ] || fail "Djinn chart is missing: $CHART"
 [ -f "$FIXTURE" ] || fail "pre-cutover fixture is missing: $FIXTURE"
 
@@ -106,10 +117,13 @@ diagnostics() {
     "$KUBECTL" --context "$CONTEXT" get workloads -n "$NAMESPACE" -o wide >&2 || true
 }
 
-printf 'INFO: installing pinned Kueue asset into context %s\n' "$CONTEXT"
-run_kubectl apply -f "$VENDORED_MANIFEST"
+printf 'INFO: installing pinned Kueue prerequisite release %s into context %s\n' "$PREREQS_RELEASE" "$CONTEXT"
+run_helm upgrade --install "$PREREQS_RELEASE" "$PREREQS_CHART" --namespace "$PREREQS_NAMESPACE" --create-namespace --wait --timeout "${TIMEOUT_SECONDS}s"
 printf 'INFO: installing inert Djinn chart release %s\n' "$RELEASE"
-run_helm upgrade --install "$RELEASE" "$CHART" --namespace "$NAMESPACE" --create-namespace --wait --timeout "${TIMEOUT_SECONDS}s" --set-string "migration.designatedOperatorSecret=$DESIGNATED_OPERATOR_SECRET"
+# kueue.enabled=true is what makes this gate meaningful: the Djinn queue
+# topology only renders on request, and the gate exists to prove that rendering
+# it alongside the prerequisite still captures nothing.
+run_helm upgrade --install "$RELEASE" "$CHART" --namespace "$NAMESPACE" --create-namespace --wait --timeout "${TIMEOUT_SECONDS}s" --set kueue.enabled=true --set-string "migration.designatedOperatorSecret=$DESIGNATED_OPERATOR_SECRET"
 
 namespace_label=$(run_kubectl get namespace "$NAMESPACE" -o 'jsonpath={.metadata.labels.djinn\.io/kueue-managed}')
 if [ "$namespace_label" = 'true' ]; then

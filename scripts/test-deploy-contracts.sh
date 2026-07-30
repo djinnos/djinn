@@ -30,8 +30,16 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-# Shell-only by construction. Adding a directory here commits the
-# local-dev-contracts lane to running it with no toolchain beyond bash.
+# Adding a directory here commits the local-dev-contracts lane to running it.
+#
+# deploy/node/k3s/tests and deploy/runbooks/tests are shell-only. deploy/kueue/
+# tests is NOT: since the byte-vendored Kueue fork was replaced by a pinned
+# upstream chart, its contract has to render deploy/helm/djinn-prereqs, so it
+# needs `helm` and python3 with PyYAML. That is deliberate — validating a static
+# file instead of the rendered artifact is the defect the rewrite removed. The
+# hosting lane already installs both (it runs `helm lint` and the chart
+# contracts in the same job), and the suite FAILS rather than skips if either
+# tool is missing.
 DEFAULT_DIRS=(
     deploy/kueue/tests
     deploy/node/k3s/tests

@@ -1,4 +1,35 @@
+{{- /*
+Kueue queue topology (ResourceFlavor + ClusterQueue + two LocalQueues).
+
+These are `kueue.x-k8s.io/v1beta1` objects, so the API server rejects them
+outright on a cluster where Kueue is not installed. Until this guard existed
+the templates rendered UNCONDITIONALLY, which made the whole `djinn` chart
+un-installable on any cluster lacking Kueue CRDs — observed on the production
+VPS.
+
+The guard is an explicit VALUE, deliberately not `.Capabilities.APIVersions`.
+Capability probing returns nothing under `helm template`, which is exactly what
+Tilt uses to render this chart, so a capability guard would silently omit the
+topology in local dev and silently include it in a live install — two different
+manifests from one chart, with no error either way.
+
+An explicit value fails loudly instead. Set `kueue.enabled: true` only after
+installing the prerequisite (`deploy/helm/djinn-prereqs`, see
+deploy/kueue/README.md). If you set it true without that, `helm install` stops
+with a plain "no matches for kind ResourceFlavor" from the API server — a
+diagnosable error, not a chart that quietly ships less than you asked for.
+
+This topology is INERT either way: no Djinn Job carries a queue name and no
+namespace is Kueue-managed, so nothing is ever admitted through these queues.
+Arming them belongs to the Kueue cutover epic 4c9q.
+*/ -}}
+{{- if .Values.kueue.enabled -}}
 {{- $kueue := .Values.kueue -}}
+{{- if not (kindIs "float64" $kueue.buildPods) -}}
+{{- if not (kindIs "int64" $kueue.buildPods) -}}
+{{- fail "kueue.enabled is true but kueue.buildPods is not a number. It is the pods nominalQuota for the ClusterQueue; set a positive integer, or set kueue.enabled=false if the Kueue prerequisite (deploy/helm/djinn-prereqs) is not installed." -}}
+{{- end -}}
+{{- end -}}
 {{- $clusterQueueName := printf "%s-kueue" (include "djinn.fullname" .) | trunc 63 | trimSuffix "-" -}}
 apiVersion: kueue.x-k8s.io/v1beta1
 kind: ResourceFlavor
@@ -43,3 +74,4 @@ metadata:
     {{- include "djinn.labels" . | nindent 4 }}
 spec:
   clusterQueue: {{ $clusterQueueName }}
+{{- end }}

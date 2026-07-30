@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 # Structural render contract: this inert release must not opt control-plane Pods
 # into the Kueue build-object admission selector.
+#
+# NOTE on what this label now means. It used to be read by an objectSelector on
+# the byte-vendored Kueue fork's Job/Pod webhooks. That fork is retired and the
+# pinned upstream chart exposes NO objectSelector hook, so nothing consumes the
+# label today — see the scope-reduction section of deploy/kueue/README.md. The
+# contract is kept because the label is still reserved for the cutover epic 4c9q
+# and control-plane Pods must not carry it when that lands; do not read a pass
+# here as evidence that any admission fence is active.
 # Usage: bash deploy/helm/djinn/tests/kueue-build-object-labels.sh
 set -euo pipefail
 

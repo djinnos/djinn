@@ -41,8 +41,9 @@
     "kueue": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["buildPods"],
+      "required": ["enabled", "buildPods"],
       "properties": {
+        "enabled": { "type": "boolean" },
         "buildPods": { "type": "integer", "minimum": 1 }
       }
     },

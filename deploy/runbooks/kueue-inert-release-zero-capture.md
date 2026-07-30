@@ -41,13 +41,26 @@ running the gate. The harness passes only this name to Helm with
 arguments. The automation equivalent is
 `KUEUE_GATE_DESIGNATED_OPERATOR_SECRET=<secret-name>`.
 
-The harness installs, in this order, the pinned
-`deploy/kueue/vendor/kueue-v0.10.0.yaml` asset and the inert
-`deploy/helm/djinn` chart. It then verifies that namespace `djinn` does **not**
-have `djinn.io/kueue-managed=true`, applies the unchanged
+The harness installs, in this order, the pinned Kueue prerequisite chart
+`deploy/helm/djinn-prereqs` (release `djinn-prereqs`, namespace `kueue-system`)
+and the inert `deploy/helm/djinn` chart with `kueue.enabled=true`. It then
+verifies that namespace `djinn` does **not** have
+`djinn.io/kueue-managed=true`, applies the unchanged
 `deploy/kueue/tests/fixtures/precutover-task-run.yaml`, waits with a bounded
 timeout for that fixture's Pod to become `Running`, and requires
 `kubectl get workloads -n djinn` to return zero items.
+
+The prerequisite arrives as a **pinned upstream chart**, not a byte-vendored
+manifest: `deploy/kueue/vendor/kueue-v0.10.0.yaml` was retired, and the gate
+now fails if any static Kueue manifest is applied instead. The target cluster
+must be **Kubernetes >= 1.29** (Kueue 0.19); the upstream chart declares no
+`kubeVersion`, so nothing enforces this for you.
+
+Note the reduced fence, in full, before recording a pass: the per-object
+`djinn.io/kueue-build-object` selector no longer exists, because the upstream
+chart exposes no hook for it. `mjob`/`vjob` are namespace-fenced only. A pass
+here proves zero capture with **no namespace labelled** — it does not
+generalise to a labelled namespace. See `deploy/kueue/README.md`.
 
 A nonzero exit is a failed prerequisite. Preserve its diagnostic output and do
 not label the namespace or start 4c9q cutover work. A passing target-cluster
