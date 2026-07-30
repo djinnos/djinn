@@ -1031,6 +1031,13 @@ pub struct BoardHealthStrandedThreshold {
 /// record of a layer-1 build-admission attempt. Absent when the task has no
 /// lease row, or when the ledger could not be read (see
 /// `BoardHealthDispatchGateCoverage::unevaluated_gates`).
+///
+/// **Legacy population since the Kueue cutover.** The pre-create dispatch
+/// reservation was stood down and nothing acquires a `task_dispatch` lease any
+/// more, so this block is present only for rows that predate the cutover. Pool
+/// occupancy is unaffected — `BoardHealthBuildCapacity` sums every consumer
+/// kind, and the per-invocation cgroup lease still writes `task_invocation`
+/// rows from inside the task-run Pod.
 #[derive(Serialize, Deserialize, schemars::JsonSchema, Default)]
 pub struct BoardHealthBuildLease {
     /// `{task_id}:{generation}` — the lease key the dispatcher asked for.
@@ -1056,9 +1063,13 @@ pub struct BoardHealthBuildLease {
 /// Pool-wide build capacity as the dispatcher's own authority reads it.
 /// Absent when the lease ledger could not be read.
 ///
-/// Since the Kueue cutover deleted the pre-create admission ledger, this is the
-/// only occupancy authority in the payload: there is no second gate that can
-/// deny before capacity is measured.
+/// The Kueue cutover deleted the pre-create admission ledger, so this is the
+/// only occupancy authority **in this payload**. It is NOT the only gate that
+/// can stop a build: Kueue's ClusterQueue now decides admission, and a Job it
+/// has not admitted stays suspended with nothing recorded in any relation
+/// `board_health` reads. `at_capacity: false` therefore still does not mean a
+/// dispatch can proceed — see `kueue_clusterqueue_admission` in
+/// `BoardHealthDispatchGateCoverage::unevaluated_gates`.
 #[derive(Serialize, Deserialize, schemars::JsonSchema, Default)]
 pub struct BoardHealthBuildCapacity {
     /// Always `build_leases`, so the payload names its own authority.
@@ -1100,6 +1111,12 @@ pub struct BoardHealthBuildCapacity {
 /// a `tracing::info!` line — and thrown away. On 2026-07-29 the dispatcher knew
 /// on every tick, for five hours, precisely why it was refusing every task, and
 /// `board_health` reported `unexplained` the whole time.
+///
+/// **No writer remains.** The Kueue cutover deleted the process that recorded
+/// these rows, so an absent block is now the steady state and says nothing
+/// about whether Kueue admitted the Job. Legacy rows are still surfaced, and a
+/// new writer must not be added — a denial recorded against a deleted authority
+/// would be the replayed tombstone of #2661 in a new table.
 #[derive(Serialize, Deserialize, schemars::JsonSchema, Default)]
 pub struct BoardHealthBuildAdmissionDenial {
     /// `at_capacity`, `controller_not_admitting` or `authority_unavailable`.
@@ -1155,7 +1172,9 @@ pub struct BoardHealthDispatchGateCoverage {
     pub evaluated_gates: Vec<String>,
     /// Gates the dispatcher applies that this section did not consult. Every
     /// entry is a way a task can be left queued while `gate_verdict` is
-    /// `unexplained`.
+    /// `unexplained`. Includes `kueue_clusterqueue_admission`: since the Kueue
+    /// cutover, quota is enforced by a ClusterQueue that leaves no row in any
+    /// relation `board_health` can read.
     #[serde(default)]
     pub unevaluated_gates: Vec<String>,
     /// Human-readable restatement of the bound, carried in the payload so an

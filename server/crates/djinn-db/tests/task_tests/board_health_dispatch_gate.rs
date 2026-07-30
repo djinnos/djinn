@@ -178,6 +178,112 @@ async fn a_full_pool_explains_a_task_with_no_lease_row() {
     assert_eq!(gate["build_capacity"]["at_capacity"], true);
 }
 
+/// Occupy the pool with the consumer kind production still writes.
+///
+/// `task_invocation` is the per-invocation cgroup lease taken from inside the
+/// task-run Pod, which 9oga's non-goals retain. `consumer_id` is the invocation
+/// id and `immutable_identity` is `task:{task_id}:{task_run_id}:{invocation_id}`
+/// — see `djinn-coordinator`'s `build_lease::identity`.
+async fn insert_invocation_lease(db: &Database, task_id: &str, invocation_id: &str, weight: i64) {
+    sqlx::query(
+        "INSERT INTO build_leases \
+         (consumer_kind, consumer_id, immutable_identity, state, weight, \
+          fencing_token, granted_at) \
+         VALUES ('task_invocation', $1, $2, 'active', $3, \
+                 nextval('build_lease_fencing_token_seq'), now())",
+    )
+    .bind(invocation_id)
+    .bind(format!(
+        "task:{task_id}:run-{invocation_id}:{invocation_id}"
+    ))
+    .bind(weight)
+    .execute(db.pool())
+    .await
+    .unwrap();
+}
+
+/// **The Kueue-cutover acceptance criterion (`plcj`).** The gate still returns a
+/// BLOCKING verdict for a genuinely blocked board, derived from a source that
+/// production still writes.
+///
+/// Every other blocking reason in this file is proven with a `task_dispatch`
+/// row, and nothing constructs `LeaseIdentity::TaskDispatch` any more — the
+/// pre-create dispatch reservation was stood down by the cutover, and
+/// `no_dispatch_lease_can_ever_be_acquired_again` fails if a constructor
+/// returns. Those tests therefore still pass while proving only that a legacy
+/// row shape is rendered.
+///
+/// This one fills the pool with `task_invocation` leases, which the
+/// per-invocation cgroup lease writes today, and asserts the verdict flips both
+/// ways against the real ledger: BLOCKED while the pool is full, and back to
+/// `unexplained` once it drains. A gate rewired to a constant `Ok` — or to a
+/// constant `blocked` — fails one half or the other.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pool_filled_by_live_invocation_leases_blocks_the_gate() {
+    let db = create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let repo = TaskRepository::new(db.clone(), event_bus_for(&tx));
+    let victim = stranded_task(&db, &repo, "Victim of a full invocation pool").await;
+    let compiler = stranded_task(&db, &repo, "Task-run holding the cgroup lease").await;
+
+    arm_lease_authority(&db, 2).await;
+    insert_invocation_lease(&db, &compiler.id, "inv-full-pool", 2).await;
+
+    let gate = gate_for(&repo, &victim.id).await;
+    assert_eq!(
+        gate["gate_verdict"], "blocked",
+        "a board whose lease pool is full of LIVE invocation leases is blocked: {gate:#}"
+    );
+    assert!(
+        gate["reasons"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("build_pool_at_capacity")),
+        "expected build_pool_at_capacity, got {:?}",
+        gate["reasons"]
+    );
+    assert_eq!(gate["build_capacity"]["occupancy"], 2);
+    assert_eq!(gate["build_capacity"]["cap"], 2);
+    assert_eq!(gate["build_capacity"]["at_capacity"], true);
+    assert!(
+        gate["build_lease"].is_null(),
+        "the victim holds no lease row of its own; the pool alone explains it"
+    );
+    // The cutover's own blind spot must be declared, not implied by a healthy
+    // number: Kueue suspends a Job it has not admitted, and that leaves no row
+    // in any relation this section reads.
+    assert!(
+        gate["coverage"]["unevaluated_gates"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("kueue_clusterqueue_admission")),
+        "the ClusterQueue gap must be disclosed: {:#}",
+        gate["coverage"]
+    );
+
+    // Drain the pool through the same relation. The verdict must FALL — this is
+    // what a constant verdict cannot do.
+    sqlx::query(
+        "UPDATE build_leases SET state = 'terminal', fencing_token = NULL, \
+         terminal_reason = 'released', terminal_at = now() \
+         WHERE consumer_kind = 'task_invocation' AND consumer_id = 'inv-full-pool'",
+    )
+    .execute(db.pool())
+    .await
+    .unwrap();
+
+    let gate = gate_for(&repo, &victim.id).await;
+    assert_eq!(
+        gate["build_capacity"]["occupancy"], 0,
+        "releasing the invocation lease must move the live occupancy: {gate:#}"
+    );
+    assert_eq!(gate["build_capacity"]["at_capacity"], false);
+    assert_eq!(
+        gate["gate_verdict"], "unexplained",
+        "with the pool drained no evaluated gate fires, so the verdict must fall back"
+    );
+}
+
 /// Neutralisation: with the lease ledger empty and the pool not full, nothing
 /// is claimed. The verdict must be `unexplained` — never `stranded` — and it
 /// must ship the list of gates it did not consult, so an empty `reasons` can be

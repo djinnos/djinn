@@ -79,6 +79,40 @@
 //! confident wrong answer rather than a missing one. `readiness` therefore
 //! arrives here the only honest way — carried on the persisted denial written
 //! by whichever process actually refused.
+//!
+//! # What the Kueue cutover changed under this section (o53p / ubne / plcj)
+//!
+//! Two of the sources above lost their producer, and saying so is the whole
+//! point of this module.
+//!
+//! * **`build_admission_denials` has no writer.** Its only producer was
+//!   `dispatch/task_dispatch.rs`'s `record_task_run_denial`, rendering a
+//!   `DenialCause` from the pre-create `BuildAdmissionController`; both were
+//!   deleted. The relation, the repository and the read below are RETAINED
+//!   deliberately — a `null` denial is the literal truth ("no recorded denial")
+//!   and legacy rows are still surfaced — but the steady state is now `null`,
+//!   and a new writer must NOT be added: a denial recorded against a deleted
+//!   authority is the replayed tombstone of #2661 in a new table.
+//! * **`task_dispatch` build-lease rows are legacy-only.** Nothing constructs
+//!   `LeaseIdentity::TaskDispatch` any more — `djinn-coordinator`'s
+//!   `no_dispatch_lease_can_ever_be_acquired_again` fails if a constructor
+//!   returns — so `build_lease_queued` / `build_lease_terminal` /
+//!   `build_lease_occupied_without_session` can only fire for rows that predate
+//!   the cutover.
+//!
+//! What is NOT inert is the part that answers "can this board dispatch at all":
+//! `build_capacity` is a ledger-wide `SUM(weight)` across EVERY consumer kind,
+//! and `task_invocation` leases are still written, from inside the task-run
+//! Pod, by the per-invocation cgroup lease that 9oga's non-goals retain. So
+//! `build_pool_at_capacity` remains a live, durable blocking reason, and the
+//! integration test `a_pool_filled_by_live_invocation_leases_blocks_the_gate`
+//! asserts it against a real ledger rather than against a legacy row shape.
+//!
+//! The blind spot the cutover OPENED is that Kueue's ClusterQueue now decides
+//! build capacity, and a Job it has not admitted is queued by Kueue with no row
+//! in any relation this section reads. That is why
+//! `kueue_clusterqueue_admission` is listed in [`UNEVALUATED_GATES`] rather
+//! than left for an operator to infer from a healthy-looking `build_capacity`.
 
 use std::collections::HashMap;
 
@@ -110,6 +144,12 @@ pub(super) const EVALUATED_GATES: &[&str] = &[
 /// and leaves no durable row to enumerate against; when it refuses, the reason
 /// arrives on the persisted denial record instead (`build_admission_denial`).
 pub(super) const UNEVALUATED_GATES: &[&str] = &[
+    // The Kueue cutover moved build capacity to a ClusterQueue. A Job Kueue has
+    // not admitted is SUSPENDED by Kueue and leaves no row in any relation this
+    // section reads, so a healthy `build_capacity` block now says strictly less
+    // than it used to. Naming the gap is the only honest option available from
+    // a Postgres read.
+    "kueue_clusterqueue_admission",
     "per_user_lane_concurrency_cap",
     "per_user_model_concurrency_cap",
     "slot_pool_capacity",
@@ -130,6 +170,11 @@ const OCCUPYING_LEASE_STATES: &[&str] = &["granted", "launching", "bound", "acti
 
 /// One `task_dispatch` build-lease row: the dispatcher's own record of a
 /// layer-1 admission attempt for a task.
+///
+/// **Legacy population.** The pre-create dispatch reservation was stood down by
+/// the Kueue cutover and nothing constructs `LeaseIdentity::TaskDispatch` any
+/// more, so this population can only shrink. The rows are still read because a
+/// board wedged behind one from before the cutover must still be explained.
 #[derive(Clone, Debug)]
 pub(super) struct DispatchLeaseRow {
     pub consumer_id: String,
@@ -410,6 +455,13 @@ fn denial_gate(
     let Some(row) = denials.get(task_id) else {
         // No row is a real answer: the permitted path DELETES it. This gate
         // was evaluated and found nothing.
+        //
+        // Post-cutover this is also the steady state, because the writer is
+        // gone (see the module docs). It stays EVALUATED rather than becoming
+        // unevaluated because the claim it makes — "this relation records no
+        // denial for this task" — is still exactly true, and the thing it must
+        // not be mistaken for is disclosed as `kueue_clusterqueue_admission` in
+        // `unevaluated_gates` instead of being smuggled in here.
         return (serde_json::Value::Null, Vec::new(), true, None);
     };
 
@@ -435,7 +487,12 @@ fn denial_gate(
                  admitted, so its presence means the most recent decision was a \
                  denial. A record older than `freshness_window_seconds` is reported \
                  but not blamed: the dispatcher retries a stranded task every tick, \
-                 so a stale row belongs to a task it has stopped considering.",
+                 so a stale row belongs to a task it has stopped considering. \
+                 The Kueue cutover deleted the pre-create controller that WROTE \
+                 these rows, so any record you see here predates it; a `null` is \
+                 now the steady state and is NOT evidence that Kueue admitted \
+                 the Job — see `kueue_clusterqueue_admission` in \
+                 `coverage.unevaluated_gates`.",
     });
 
     let reasons = if fresh {
@@ -502,12 +559,15 @@ pub(super) fn lease_gate(ledger: &LeaseLedger, task_id: &str) -> LeaseGateOutcom
         "at_capacity": at_capacity,
         "note": "LEASE authority only (`build_leases` / `build_lease_caps`, armed by the \
                  durable invocation-lease authority). `lease_authority_enforcing` says whether \
-                 THIS authority is armed and says NOTHING about the build-admission \
-                 controller, whose mode is process configuration. These numbers are \
-                 only reached AFTER the controller agrees to admit at all, so \
-                 `at_capacity: false` here is not evidence that a dispatch can proceed; \
-                 see `build_admission_denial` for what the dispatcher actually \
-                 recorded.",
+                 THIS authority is armed and says NOTHING about any other admission \
+                 authority. `occupancy` is a ledger-wide SUM(weight) across every \
+                 consumer kind, so it is live: `task_invocation` leases are written \
+                 from inside the task-run Pod by the per-invocation cgroup lease. \
+                 It is still NOT sufficient — since the Kueue cutover a Job can sit \
+                 suspended behind a ClusterQueue quota with nothing recorded here — \
+                 so `at_capacity: false` is not evidence that a dispatch can proceed; \
+                 see `build_admission_denial` for what a dispatcher actually recorded, \
+                 and `coverage.unevaluated_gates` for what nothing records at all.",
     });
 
     let lease = by_task.get(task_id);
@@ -759,12 +819,15 @@ pub(super) fn dispatch_gate_json(
             "note": "`reasons` covers only `evaluated_gates`. An empty `reasons` \
                      yields `unexplained`, which means no evaluated gate fired — \
                      NOT that the dispatcher had no reason. `build_capacity` speaks \
-                     for the LEASE ledger alone, and the build-admission controller \
-                     can refuse before occupancy is ever measured, so a healthy \
-                     `build_capacity` is not evidence that dispatch is possible. \
+                     for the LEASE ledger alone, and since the Kueue cutover a Job \
+                     can sit suspended behind a ClusterQueue quota that leaves no \
+                     row in any relation read here, so a healthy `build_capacity` \
+                     is not evidence that dispatch is possible. \
                      `build_admission_denial` is the dispatcher's OWN recorded \
                      `DenialCause` (#2661, migration 161) — the only field here \
-                     that is a decision rather than a re-derivation of one.",
+                     that is a decision rather than a re-derivation of one — but \
+                     the process that wrote it was deleted by the cutover, so a \
+                     `null` there is the steady state rather than an all-clear.",
         }),
         // Retained for backward compatibility with the initial board_health
         // contract.

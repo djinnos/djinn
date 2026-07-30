@@ -6401,3 +6401,7 @@ mod galaxy_artifact_route_tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "kueue_retired_relation_tests.rs"]
+mod kueue_retired_relation_tests;
