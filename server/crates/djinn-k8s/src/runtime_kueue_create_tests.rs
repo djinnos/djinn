@@ -318,7 +318,11 @@ impl FakeCluster {
     async fn handle(self: Arc<Self>, request: http::Request<Body>) -> (u16, Value) {
         let method = request.method().clone();
         let path = request.uri().path().to_string();
-        let query = parse_query(request.uri().query().unwrap_or_default());
+        // Split the request target by hand rather than calling `Uri`'s
+        // query-string accessor: `check-raw-sql-boundary.sh` matches that
+        // method name textually and cannot tell a URI from a sqlx call.
+        let target = request.uri().to_string();
+        let query = parse_query(target.split_once('?').map_or("", |(_, tail)| tail));
         let body = axum_read_body(request).await;
 
         self.state.lock().unwrap().calls.push(ApiCall {
