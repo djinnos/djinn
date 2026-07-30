@@ -85,7 +85,7 @@ async fn persist_evidence_round_trip() {
     let repo = LivenessRepository::new(db.clone());
 
     let snapshot = LivenessEvidenceSnapshot {
-        session_id: session_id.clone(),
+        session_id: Some(session_id.clone()),
         task_id: Some(task_id.clone()),
         task_run_id: Some(task_run_id.clone()),
         verdict: "dead".to_string(),
@@ -265,7 +265,7 @@ async fn record_claim_extension_round_trip() {
 
     // First persist evidence to get a liveness_evidence_id.
     let snapshot = LivenessEvidenceSnapshot {
-        session_id: session_id.clone(),
+        session_id: Some(session_id.clone()),
         task_id: None,
         task_run_id: Some(task_run_id.clone()),
         verdict: "slow".to_string(),
@@ -361,7 +361,7 @@ async fn persist_evidence_terminal_task_noop_outcome() {
     // Note: "none" is not a valid DB CHECK value for outcome_reason;
     // LivenessReason::None maps to NULL in the database.
     let snapshot = LivenessEvidenceSnapshot {
-        session_id: session_id.clone(),
+        session_id: Some(session_id.clone()),
         task_id: Some(task_id.clone()),
         task_run_id: Some(task_run_id.clone()),
         verdict: "live".to_string(),
@@ -386,7 +386,7 @@ async fn persist_evidence_terminal_task_noop_outcome() {
     // repository's perspective; the classifier may decide not to call
     // this again but the repo doesn't enforce that).
     let snapshot2 = LivenessEvidenceSnapshot {
-        session_id: session_id.clone(),
+        session_id: Some(session_id.clone()),
         task_id: Some(task_id.clone()),
         task_run_id: Some(task_run_id.clone()),
         verdict: "live".to_string(),
@@ -417,7 +417,7 @@ async fn multiple_evidence_snapshots_overwrite_denormalized() {
 
     // First snapshot: Slow verdict.
     let s1 = LivenessEvidenceSnapshot {
-        session_id: session_id.clone(),
+        session_id: Some(session_id.clone()),
         task_id: Some(task_id.clone()),
         task_run_id: Some(task_run_id.clone()),
         verdict: "slow".to_string(),
@@ -432,7 +432,7 @@ async fn multiple_evidence_snapshots_overwrite_denormalized() {
 
     // Second snapshot: Dead verdict (overwrites denormalized columns).
     let s2 = LivenessEvidenceSnapshot {
-        session_id: session_id.clone(),
+        session_id: Some(session_id.clone()),
         task_id: Some(task_id.clone()),
         task_run_id: Some(task_run_id.clone()),
         verdict: "dead".to_string(),
@@ -467,7 +467,7 @@ async fn persist_evidence_without_task_run() {
     let repo = LivenessRepository::new(db.clone());
 
     let snapshot = LivenessEvidenceSnapshot {
-        session_id: session_id.clone(),
+        session_id: Some(session_id.clone()),
         task_id: Some(task_id.clone()),
         task_run_id: None,
         verdict: "live".to_string(),
@@ -506,4 +506,68 @@ async fn load_current_state_no_running_sessions() {
     // Liveness fields from session are all None.
     assert_eq!(state.session_liveness_verdict, None);
     assert_eq!(state.session_liveness_outcome_kind, None);
+}
+
+#[tokio::test]
+async fn persist_task_scoped_evidence_skips_ambiguous_denormalization() {
+    let db = Database::open_in_memory().unwrap();
+    let (_, task_id, session_id, task_run_id) = seed_full_fixture(&db).await;
+    let repo = LivenessRepository::new(db.clone());
+    for (outcome_kind, executions) in [
+        ("genuinely_absent", json!([])),
+        (
+            "desync_reconciled",
+            json!([{"session_id":"first"}, {"session_id":"second"}]),
+        ),
+    ] {
+        repo.persist_evidence(&LivenessEvidenceSnapshot {
+            session_id: None,
+            task_id: Some(task_id.clone()),
+            task_run_id: None,
+            verdict: "dead".to_string(),
+            outcome_kind: Some(outcome_kind.to_string()),
+            outcome_reason: None,
+            evidence: json!({"executions": executions}),
+        })
+        .await
+        .unwrap();
+    }
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM liveness_evidence WHERE task_id = $1 AND session_id IS NULL AND task_run_id IS NULL")
+        .bind(&task_id).fetch_one(db.pool()).await.unwrap();
+    assert_eq!(count, 2);
+    assert_eq!(
+        repo.get_session_liveness_fields(&session_id).await.unwrap(),
+        (None, None)
+    );
+    let run_outcome: Option<String> =
+        sqlx::query_scalar("SELECT liveness_outcome_kind FROM task_runs WHERE id = $1")
+            .bind(&task_run_id)
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+    assert_eq!(run_outcome, None);
+}
+
+#[tokio::test]
+async fn persist_evidence_rejects_missing_owner_without_audit_row() {
+    let db = Database::open_in_memory().unwrap();
+    let repo = LivenessRepository::new(db.clone());
+    assert!(
+        repo.persist_evidence(&LivenessEvidenceSnapshot {
+            session_id: None,
+            task_id: None,
+            task_run_id: None,
+            verdict: "live".to_string(),
+            outcome_kind: Some("task_not_found".to_string()),
+            outcome_reason: None,
+            evidence: json!({}),
+        })
+        .await
+        .is_err()
+    );
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM liveness_evidence")
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
 }
