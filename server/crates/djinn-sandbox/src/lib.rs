@@ -24,7 +24,7 @@ pub mod macos;
 #[allow(unused_imports)]
 pub use chat_shell::{
     ChatShellError, ChatShellRequest, ChatShellResult, ChatShellSandbox, EVIDENCE_MAX_OUTPUT_BYTES,
-    EVIDENCE_MAX_TIMEOUT, EvidenceError, EvidenceRequest, EvidenceSandbox,
+    EVIDENCE_MAX_TIMEOUT, EvidenceError, EvidenceProcessObserver, EvidenceRequest, EvidenceSandbox,
 };
 
 /// The `TMPDIR` every sandboxed shell command is given, overriding whatever the
