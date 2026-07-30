@@ -42,7 +42,7 @@ pub struct Image {
     pub status: String,
     pub last_error: Option<String>,
     /// Wire form of the launcher authority protocol this artifact declared in
-    /// its build metadata (migration 165), or `None` for a build made before
+    /// its build metadata (migration 166), or `None` for a build made before
     /// the declaration existed. Read it through
     /// [`Image::declared_launcher_protocol`] rather than matching the string.
     pub launcher_authority_protocol: Option<String>,
@@ -54,7 +54,7 @@ impl Image {
     ///
     /// `Ok(None)` is a legacy image built before the declaration existed — not
     /// an unknown protocol. `Err` is unreachable through this repository
-    /// (migration 165 constrains the column to the two wire forms) but is
+    /// (migration 166 constrains the column to the two wire forms) but is
     /// surfaced rather than defaulted: silently reading an unrecognised value
     /// as `leaf-v1` is precisely what
     /// [`LauncherAuthorityProtocol::from_str`](std::str::FromStr::from_str)
@@ -184,7 +184,7 @@ impl ImageRepository {
     /// controller rebuilds it on the next tick.
     ///
     /// The protocol declaration is cleared alongside the digest: it describes
-    /// an artifact that no longer exists, and migration 165 forbids a declaring
+    /// an artifact that no longer exists, and migration 166 forbids a declaring
     /// row from outliving its digest.
     pub async fn update(
         &self,
@@ -253,7 +253,7 @@ impl ImageRepository {
     /// fails closed and every task run on that image stops dispatching, with
     /// no signal until it does. This refuses the write instead, leaving the
     /// row out of `ready` so the caller can record a diagnostic and rebuild.
-    /// Migration 165 carries the same predicate as a CHECK, so the guarantee
+    /// Migration 166 carries the same predicate as a CHECK, so the guarantee
     /// survives a caller that bypasses this method.
     ///
     /// The requirement is scoped to declaring images on purpose: an undeclared
@@ -840,7 +840,7 @@ mod tests {
         assert_eq!(rows[1].image_id, "img-b");
     }
 
-    // ── launcher authority protocol (migration 165) ───────────────────────
+    // ── launcher authority protocol (migration 166) ───────────────────────
 
     /// **The anti-wedge guard.** A live deployment already holds `images` rows
     /// that are `status = 'ready'` with `registry_digest IS NULL`, built long
@@ -850,7 +850,7 @@ mod tests {
     ///
     /// Making the digest check unconditional — in [`ImageRepository::mark_ready`]
     /// or by dropping the `launcher_authority_protocol IS NULL OR` arm from
-    /// migration 165's `images_declared_protocol_requires_digest_check` — bricks
+    /// migration 166's `images_declared_protocol_requires_digest_check` — bricks
     /// every one of those images on the next deploy. Either mutation fails this
     /// test at the `mark_ready` call below.
     #[tokio::test]
@@ -962,7 +962,7 @@ mod tests {
             assert_eq!(img.effective_launcher_protocol().unwrap(), protocol);
 
             // Editing the config resets the build state; the declaration must
-            // go with the digest, or migration 165's CHECK would reject the row.
+            // go with the digest, or migration 166's CHECK would reject the row.
             repo.update(
                 &id,
                 &format!("Image {protocol}"),
@@ -977,11 +977,11 @@ mod tests {
         }
     }
 
-    /// The Rust guard is not the only door. Migration 165 must carry the same
+    /// The Rust guard is not the only door. Migration 166 must carry the same
     /// two predicates, so a caller that writes the row directly cannot create
     /// the wedge either.
     #[tokio::test]
-    async fn migration_165_constrains_the_column_to_the_wire_set_and_demands_a_digest() {
+    async fn migration_166_constrains_the_column_to_the_wire_set_and_demands_a_digest() {
         let db = Database::open_in_memory().unwrap();
         db.ensure_initialized().await.unwrap();
         let repo = ImageRepository::new(db.clone());
@@ -1026,7 +1026,7 @@ mod tests {
             .execute(db.pool())
             .await
             .is_err(),
-            "migration 165 must refuse a protocol-declaring row with no digest"
+            "migration 166 must refuse a protocol-declaring row with no digest"
         );
     }
 }
