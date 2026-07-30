@@ -15,6 +15,7 @@ mod board_health;
 mod board_health_dispatch_gate;
 mod board_health_stalled_epics;
 mod ci;
+mod generation;
 mod parent_disposition;
 mod queries;
 mod reads;
