@@ -111,7 +111,7 @@ fn enforce_config() -> BuildAdmissionConfig {
     BuildAdmissionConfig {
         mode: BuildAdmissionMode::Enforce,
         cap: 3,
-        pod_limit: None,
+        pod_limit: PodLimitSetting::Absent,
     }
 }
 

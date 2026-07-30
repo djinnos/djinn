@@ -139,13 +139,69 @@ impl HandoffWarningLogState {
     }
 }
 
+/// How the operator's `DJINN_MAX_BUILD_PODS` input resolved.
+///
+/// The three cases used to collapse into a single silent `None`, and that
+/// `None` pinned readiness at `PodPermitPrerequisitesMissing`, which denies
+/// EVERY admission before occupancy is even measured. Production 2026-07-30:
+/// v0.7.28 rolled out with the variable rendered nowhere in `deploy/`, so every
+/// role — worker, planner, lead — plus the graph warmer was denied for ~90
+/// minutes (250 denials per task) while `build_capacity` still reported a
+/// healthy `occupancy: 0, cap: 3, at_capacity: false`. Nothing logged, because
+/// an absent value and a typo'd value were the same value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PodLimitSetting {
+    /// A valid limit: the compile-scoped pod-permit dimension is ARMED and its
+    /// prerequisites (the readable canonical pool row) are load-bearing.
+    Configured(i64),
+    /// The variable is absent. The dimension is NOT armed.
+    Absent,
+    /// The variable is present but empty — overwhelmingly a template that
+    /// rendered an unset value, not something a human typed. Treated exactly
+    /// like [`Self::Absent`] but reported differently, so an operator can tell
+    /// "nobody provisioned it" from "the chart rendered it blank".
+    Empty,
+}
+
+impl PodLimitSetting {
+    /// The armed limit, or `None` when the dimension is not armed.
+    fn limit(self) -> Option<i64> {
+        match self {
+            Self::Configured(limit) => Some(limit),
+            Self::Absent | Self::Empty => None,
+        }
+    }
+
+    /// The operator-facing explanation of an unarmed dimension, or `None` when
+    /// the dimension is armed.
+    ///
+    /// Returned rather than logged inline so a test can assert the exact text
+    /// names the variable, the valid range, and the consequence. A diagnostic
+    /// nobody can assert on is a diagnostic that can be deleted by accident —
+    /// which is how this class of bug survives.
+    fn unarmed_diagnostic(self) -> Option<String> {
+        let observed = match self {
+            Self::Configured(_) => return None,
+            Self::Absent => "is not set",
+            Self::Empty => "is set to an empty value",
+        };
+        Some(format!(
+            "{MAX_BUILD_PODS_ENV} {observed}; it must be an integer from 1 through \
+             {max}. The compile-scoped pod-permit dimension is therefore NOT armed: \
+             it is observed, never enforced, and it must not deny admission. Set \
+             {MAX_BUILD_PODS_ENV} to arm it.",
+            max = BuildAdmissionConfig::MAX_CAP,
+        ))
+    }
+}
+
 /// Immutable build-admission startup policy. It is parsed before composition,
 /// so an environment change only takes effect after a process restart.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct BuildAdmissionConfig {
     mode: BuildAdmissionMode,
     cap: i64,
-    pod_limit: Option<i64>,
+    pod_limit: PodLimitSetting,
 }
 
 impl BuildAdmissionConfig {
@@ -194,7 +250,7 @@ impl BuildAdmissionConfig {
                 _ => Ok(Self {
                     mode: BuildAdmissionMode::Off,
                     cap: 0,
-                    pod_limit: parse_pod_limit(pod_limit),
+                    pod_limit: parse_pod_limit(pod_limit)?,
                 }),
             };
         }
@@ -207,16 +263,45 @@ impl BuildAdmissionConfig {
         Ok(Self {
             mode: explicit_mode.unwrap_or(BuildAdmissionMode::Observe),
             cap,
-            pod_limit: parse_pod_limit(pod_limit),
+            pod_limit: parse_pod_limit(pod_limit)?,
         })
     }
 }
 
-/// Parse the independent optional pod permit cap; invalid values remain unavailable.
-fn parse_pod_limit(value: Option<&str>) -> Option<i64> {
-    value
-        .and_then(|value| value.parse::<i64>().ok())
-        .filter(|limit| (1..=BuildAdmissionConfig::MAX_CAP).contains(limit))
+/// Parse the independent optional pod-permit cap.
+///
+/// Three outcomes, deliberately NOT collapsed into one:
+///
+/// * a valid integer in `1..=MAX_CAP` arms the dimension;
+/// * absent or empty leaves it unarmed — non-fatal, because nobody typed
+///   anything, and a value nobody typed must never be able to take the process
+///   (or, as in the 2026-07-30 incident, all dispatch) down. The caller logs
+///   this at ERROR;
+/// * anything else is a startup ERROR that exits the process. It is only
+///   reachable when a human or a chart explicitly wrote a value, so the
+///   feedback lands on someone who is watching a deploy right now — and it
+///   matches how the sibling `DJINN_MAX_BUILD_TASKRUNS` and
+///   `DJINN_BUILD_ADMISSION_MODE` already refuse to start on a malformed value.
+fn parse_pod_limit(value: Option<&str>) -> Result<PodLimitSetting, String> {
+    let Some(value) = value else {
+        return Ok(PodLimitSetting::Absent);
+    };
+    if value.trim().is_empty() {
+        return Ok(PodLimitSetting::Empty);
+    }
+    let parsed = value.parse::<i64>().map_err(|_| {
+        format!(
+            "{MAX_BUILD_PODS_ENV} must be an integer from 1 through {} (got {value:?})",
+            BuildAdmissionConfig::MAX_CAP
+        )
+    })?;
+    if !(1..=BuildAdmissionConfig::MAX_CAP).contains(&parsed) {
+        return Err(format!(
+            "{MAX_BUILD_PODS_ENV} must be an integer from 1 through {} (got {parsed})",
+            BuildAdmissionConfig::MAX_CAP
+        ));
+    }
+    Ok(PodLimitSetting::Configured(parsed))
 }
 
 /// Production [`WarmCompletionSink`]: converge the server's in-memory
@@ -420,7 +505,9 @@ struct Inner {
     /// sets this, so it can never re-open its own topology gate.
     pub build_admission_topology_confirmed: AtomicBool,
     /// Independently parsed pod-permit cap; never derived from build task runs.
-    pub build_pod_limit: Option<i64>,
+    /// Carries HOW it resolved, not just the value, so an unarmed dimension can
+    /// be reported instead of silently denying every admission.
+    pub build_pod_limit: PodLimitSetting,
     /// Per-model circuit-breaker health tracker.
     pub health_tracker: HealthTracker,
     /// Immutable retrieval-health config parsed once at startup.
@@ -577,7 +664,7 @@ impl AppState {
             BuildAdmissionConfig {
                 mode: BuildAdmissionMode::Observe,
                 cap: BuildAdmissionConfig::DEFAULT_CAP,
-                pod_limit: None,
+                pod_limit: PodLimitSetting::Absent,
             },
         )
     }
@@ -1085,19 +1172,63 @@ impl AppState {
         });
     }
 
-    /// Verify the independent pod-permit prerequisites without changing the disarmed task-dispatch lease path.
+    /// Verify the independent pod-permit prerequisites without changing the
+    /// disarmed task-dispatch lease path.
+    ///
+    /// An UNARMED dimension may not deny. `DJINN_MAX_BUILD_PODS` being absent
+    /// used to close this gate, and closing it denies every admission for every
+    /// role before occupancy is measured — the whole board, not just compile
+    /// work. That is what wedged production for ~90 minutes on 2026-07-30 when
+    /// v0.7.28 shipped a gate whose only input nothing in `deploy/` renders.
+    ///
+    /// So the gate is now conditional on the dimension being armed:
+    ///
+    /// * unarmed (variable absent/empty) — report loudly at ERROR and leave the
+    ///   gate open. The dimension degrades to observe-only. This costs nothing
+    ///   today: the parsed limit is consulted at exactly this one call site and
+    ///   bounds nothing else, so an absent limit never protected any capacity —
+    ///   it only ever denied. The taskrun cap (`DJINN_MAX_BUILD_TASKRUNS`, via
+    ///   the build-lease authority) is the cap that actually holds, and it is
+    ///   untouched here. **If a future change makes pod permits actually issue
+    ///   under this limit, an unarmed dimension must be re-evaluated — it would
+    ///   then be unbounded rather than merely inert.**
+    /// * armed — the canonical pool row is a real precondition for issuing
+    ///   permits under a real limit, so an unreadable pool still fails closed.
+    ///
+    /// Called at startup AND from `reestablish_build_admission_gates` after an
+    /// emergency promotion resets the gates, so the ERROR is logged on the
+    /// transition rather than once per tick.
     async fn initialize_build_pod_permit_prerequisites(&self) {
         let Some(admission) = self.inner.build_admission.clone() else {
             return;
         };
-        let ready = self.inner.build_pod_limit.is_some()
-            && BuildPodPermitRepository::new(self.db().clone())
-                .global_pool_is_readable()
-                .await
-                .unwrap_or(false);
-        if ready {
+        let Some(limit) = self.inner.build_pod_limit.limit() else {
+            if let Some(diagnostic) = self.inner.build_pod_limit.unarmed_diagnostic() {
+                let valid_range = format!("1..={}", BuildAdmissionConfig::MAX_CAP);
+                tracing::error!(
+                    env_var = MAX_BUILD_PODS_ENV,
+                    valid_range,
+                    mode = ?admission.mode(),
+                    "build_admission: {diagnostic}"
+                );
+            }
+            admission.mark_pod_permit_prerequisites_ready();
+            return;
+        };
+        let pool_readable = BuildPodPermitRepository::new(self.db().clone())
+            .global_pool_is_readable()
+            .await
+            .unwrap_or(false);
+        if pool_readable {
             admission.mark_pod_permit_prerequisites_ready();
         } else {
+            tracing::error!(
+                pod_limit = limit,
+                mode = ?admission.mode(),
+                "build_admission: {MAX_BUILD_PODS_ENV}={limit} arms the pod-permit \
+                 dimension but the canonical pool row is unreadable; compile \
+                 admission stays fail-closed until it is readable"
+            );
             admission.mark_pod_permit_prerequisites_missing();
         }
     }
@@ -4357,7 +4488,7 @@ mod build_admission_config_tests {
             BuildAdmissionConfig {
                 mode: BuildAdmissionMode::Observe,
                 cap: 3,
-                pod_limit: None,
+                pod_limit: PodLimitSetting::Absent,
             },
         );
         assert!(matches!(
@@ -4429,7 +4560,7 @@ mod build_admission_config_tests {
             BuildAdmissionConfig {
                 mode: BuildAdmissionMode::Observe,
                 cap: BuildAdmissionConfig::DEFAULT_CAP,
-                pod_limit: None,
+                pod_limit: PodLimitSetting::Absent,
             },
         );
 
@@ -4637,7 +4768,7 @@ mod build_admission_config_tests {
             BuildAdmissionConfig {
                 mode: BuildAdmissionMode::Observe,
                 cap: 3,
-                pod_limit: None
+                pod_limit: PodLimitSetting::Absent
             }
         );
         assert_eq!(
@@ -4645,7 +4776,7 @@ mod build_admission_config_tests {
             BuildAdmissionConfig {
                 mode: BuildAdmissionMode::Off,
                 cap: 0,
-                pod_limit: None
+                pod_limit: PodLimitSetting::Absent
             }
         );
         assert!(BuildAdmissionConfig::parse(Some("observe"), Some("0"), None).is_err());
@@ -4674,48 +4805,161 @@ mod build_admission_config_tests {
             assert_eq!(
                 BuildAdmissionConfig::parse(None, taskruns, Some("7"))
                     .expect("task-run input is not a pod fallback")
-                    .pod_limit,
+                    .pod_limit
+                    .limit(),
                 Some(7),
             );
         }
-        for pods in [
-            None,
-            Some(""),
-            Some("0"),
-            Some("-1"),
-            Some("65"),
-            Some("invalid"),
-        ] {
+        for pods in [None, Some("")] {
             assert_eq!(
                 BuildAdmissionConfig::parse(None, Some("4"), pods)
                     .expect("valid task-run cap")
-                    .pod_limit,
+                    .pod_limit
+                    .limit(),
                 None,
                 "{pods:?}",
             );
         }
     }
 
-    #[tokio::test]
-    async fn absent_or_invalid_pod_limit_keeps_compile_readiness_closed() {
-        use djinn_agent::actors::coordinator::BuildAdmissionReadiness;
+    /// An absent variable and a typo'd one are different operator mistakes and
+    /// must produce different, non-silent outcomes.
+    #[test]
+    fn pod_limit_distinguishes_absent_empty_and_invalid() {
+        assert_eq!(
+            BuildAdmissionConfig::parse(None, None, None)
+                .expect("absent is not a startup failure")
+                .pod_limit,
+            PodLimitSetting::Absent,
+        );
+        assert_eq!(
+            BuildAdmissionConfig::parse(None, None, Some(""))
+                .expect("an empty render is not a startup failure")
+                .pod_limit,
+            PodLimitSetting::Empty,
+        );
+        assert_eq!(
+            BuildAdmissionConfig::parse(None, None, Some("7"))
+                .expect("a valid limit arms the dimension")
+                .pod_limit,
+            PodLimitSetting::Configured(7),
+        );
 
-        for pod_limit in [None, Some("invalid")] {
-            let config = BuildAdmissionConfig::parse(None, Some("4"), pod_limit)
-                .expect("the task-run cap remains independently valid");
-            assert_eq!(config.pod_limit, None, "{pod_limit:?}");
-            let state = state_for_admission_config(config);
-            state.initialize_build_pod_permit_prerequisites().await;
-            let admission = admission(&state);
-            assert_eq!(
-                admission.readiness(),
-                BuildAdmissionReadiness::PodPermitPrerequisitesMissing,
-                "{pod_limit:?} must not report healthy compile prerequisites"
+        // A value somebody explicitly typed and got wrong fails startup with a
+        // message naming the variable and the range. `main` turns this Err into
+        // an ERROR log and `exit(1)`, matching how the sibling
+        // DJINN_MAX_BUILD_TASKRUNS / DJINN_BUILD_ADMISSION_MODE already behave.
+        for pods in ["0", "-1", "65", "999", "invalid", "3.5"] {
+            let error = BuildAdmissionConfig::parse(None, Some("4"), Some(pods))
+                .expect_err("an explicitly invalid pod limit must fail startup");
+            assert!(
+                error.contains(MAX_BUILD_PODS_ENV)
+                    && error.contains("1 through 64")
+                    && error.contains(pods),
+                "{pods:?} produced an unhelpful startup error: {error}"
             );
-            assert!(!admission.is_ready());
         }
     }
 
+    /// The absent/empty diagnostic must name the variable, the valid range, and
+    /// the consequence. Asserted on the exact text so the loud path cannot be
+    /// deleted (or quietly downgraded to a bare `None`) without a red test.
+    #[test]
+    fn unarmed_pod_limit_diagnostic_names_the_variable_and_the_range() {
+        for setting in [PodLimitSetting::Absent, PodLimitSetting::Empty] {
+            let diagnostic = setting
+                .unarmed_diagnostic()
+                .unwrap_or_else(|| panic!("{setting:?} must report why the dimension is unarmed"));
+            assert!(diagnostic.contains(MAX_BUILD_PODS_ENV), "{diagnostic}");
+            assert!(diagnostic.contains("1 through 64"), "{diagnostic}");
+            assert!(diagnostic.contains("NOT armed"), "{diagnostic}");
+        }
+        assert_eq!(
+            PodLimitSetting::Absent.unarmed_diagnostic(),
+            PodLimitSetting::Absent.unarmed_diagnostic()
+        );
+        assert_ne!(
+            PodLimitSetting::Absent.unarmed_diagnostic(),
+            PodLimitSetting::Empty.unarmed_diagnostic(),
+            "absent and empty must not collapse into the same message"
+        );
+        assert_eq!(PodLimitSetting::Configured(3).unarmed_diagnostic(), None);
+    }
+
+    /// Regression for the 2026-07-30 production wedge: v0.7.28 shipped with
+    /// `DJINN_MAX_BUILD_PODS` rendered nowhere in `deploy/`, the gate closed,
+    /// and EVERY role (worker, planner, lead, graph warmer) was denied with
+    /// `pod_permit_prerequisites_missing` for ~90 minutes while `build_capacity`
+    /// still reported `occupancy: 0, cap: 3, at_capacity: false`.
+    ///
+    /// This test previously asserted the opposite (`..._keeps_compile_readiness_closed`).
+    /// Its intent — the gate must close when its precondition is genuinely
+    /// unsatisfied — is preserved by
+    /// `missing_pool_row_or_repository_error_keeps_compile_readiness_closed`
+    /// below, which still fails closed for an ARMED dimension. An UNARMED
+    /// dimension has no precondition to satisfy and must not deny.
+    #[tokio::test]
+    async fn unarmed_pod_limit_degrades_to_observe_instead_of_denying_everything() {
+        use djinn_agent::actors::coordinator::BuildAdmissionReadiness;
+
+        for pod_limit in [None, Some("")] {
+            let config = BuildAdmissionConfig::parse(None, Some("4"), pod_limit)
+                .expect("the task-run cap remains independently valid");
+            assert_eq!(config.pod_limit.limit(), None, "{pod_limit:?}");
+            let state = state_for_admission_config(config);
+            state.initialize_build_pod_permit_prerequisites().await;
+            let admission = admission(&state);
+            assert_ne!(
+                admission.readiness(),
+                BuildAdmissionReadiness::PodPermitPrerequisitesMissing,
+                "{pod_limit:?}: an unprovisioned pod limit must not wedge all dispatch"
+            );
+            assert!(
+                !admission
+                    .unsatisfied_readiness_gates()
+                    .contains(&BuildAdmissionReadiness::PodPermitPrerequisitesMissing.as_str()),
+                "{pod_limit:?}: the unarmed dimension must not appear as a blocking gate"
+            );
+        }
+    }
+
+    /// Enforce is the mode that actually denies, so it is the mode the
+    /// regression has to be proven in: an unarmed pod limit must leave a
+    /// closed-at-birth Enforce controller able to reach `Healthy` once its
+    /// other gates open, instead of being pinned shut forever.
+    #[tokio::test]
+    async fn unarmed_pod_limit_lets_enforce_reach_healthy_readiness() {
+        use djinn_agent::actors::coordinator::BuildAdmissionReadiness;
+
+        let state = state_for_admission_config(BuildAdmissionConfig {
+            mode: BuildAdmissionMode::Enforce,
+            cap: 3,
+            pod_limit: PodLimitSetting::Absent,
+        });
+        let admission = admission(&state);
+        assert!(!admission.is_ready(), "Enforce starts closed");
+
+        // Open every OTHER startup gate first, then run the real prerequisite
+        // check last. That ordering is what makes this non-vacuous: the old
+        // code marked the prerequisites missing here and slammed a fully-open
+        // Enforce controller shut again.
+        admission.mark_ready();
+        state.initialize_build_pod_permit_prerequisites().await;
+
+        assert_eq!(
+            admission.readiness(),
+            BuildAdmissionReadiness::Healthy,
+            "every other gate is open, so an unarmed pod limit must not be the \
+             one thing still denying: {:?}",
+            admission.unsatisfied_readiness_gates()
+        );
+        assert!(admission.is_ready());
+    }
+
+    /// The fail-closed half of the contract, unchanged: once
+    /// `DJINN_MAX_BUILD_PODS` ARMS the dimension, the canonical pool row is a
+    /// real precondition and an unreadable one still denies. Degrading an
+    /// unarmed dimension must not degrade an armed one.
     #[tokio::test]
     async fn missing_pool_row_or_repository_error_keeps_compile_readiness_closed() {
         use djinn_agent::actors::coordinator::BuildAdmissionReadiness;
@@ -4730,7 +4974,7 @@ mod build_admission_config_tests {
             BuildAdmissionConfig {
                 mode: BuildAdmissionMode::Observe,
                 cap: 3,
-                pod_limit: Some(1),
+                pod_limit: PodLimitSetting::Configured(1),
             },
         );
         missing_row
@@ -4752,7 +4996,7 @@ mod build_admission_config_tests {
             BuildAdmissionConfig {
                 mode: BuildAdmissionMode::Observe,
                 cap: 3,
-                pod_limit: Some(1),
+                pod_limit: PodLimitSetting::Configured(1),
             },
         );
         unavailable
@@ -4770,7 +5014,7 @@ mod build_admission_config_tests {
         let state = state_for_admission_config(BuildAdmissionConfig {
             mode: BuildAdmissionMode::Off,
             cap: 3,
-            pod_limit: None,
+            pod_limit: PodLimitSetting::Absent,
         });
 
         // Startup must read a durable handoff row even when standalone v0 is
@@ -4840,7 +5084,7 @@ mod build_admission_config_tests {
             let state = state_for_admission_config(BuildAdmissionConfig {
                 mode: BuildAdmissionMode::Observe,
                 cap: 3,
-                pod_limit: None,
+                pod_limit: PodLimitSetting::Absent,
             });
             let repository = handoff_repository(&state);
             // A real cutover arms the invocation authority to enforce while the
@@ -4874,7 +5118,7 @@ mod build_admission_config_tests {
         let healthy = state_for_admission_config(BuildAdmissionConfig {
             mode: BuildAdmissionMode::Observe,
             cap: 3,
-            pod_limit: None,
+            pod_limit: PodLimitSetting::Absent,
         });
         let healthy_repository = handoff_repository(&healthy);
         let epoch = healthy_repository
@@ -4901,7 +5145,7 @@ mod build_admission_config_tests {
         let unhealthy = state_for_admission_config(BuildAdmissionConfig {
             mode: BuildAdmissionMode::Observe,
             cap: 3,
-            pod_limit: None,
+            pod_limit: PodLimitSetting::Absent,
         });
         let unhealthy_repository = handoff_repository(&unhealthy);
         unhealthy.initialize_build_admission_handoff().await;
@@ -4928,7 +5172,7 @@ mod build_admission_config_tests {
             BuildAdmissionConfig {
                 mode: BuildAdmissionMode::Observe,
                 cap: 3,
-                pod_limit: None,
+                pod_limit: PodLimitSetting::Absent,
             },
         );
         // Initialize the repository-backed fixture before removing its
@@ -4950,7 +5194,7 @@ mod build_admission_config_tests {
             BuildAdmissionConfig {
                 mode: BuildAdmissionMode::Observe,
                 cap: 3,
-                pod_limit: None,
+                pod_limit: PodLimitSetting::Absent,
             },
         );
         first.initialize_build_admission_handoff().await;
@@ -4960,7 +5204,7 @@ mod build_admission_config_tests {
             BuildAdmissionConfig {
                 mode: BuildAdmissionMode::Observe,
                 cap: 3,
-                pod_limit: None,
+                pod_limit: PodLimitSetting::Absent,
             },
         );
         restarted.initialize_build_admission_handoff().await;
@@ -5024,7 +5268,7 @@ mod build_admission_config_tests {
         let first = state_for_admission_config(BuildAdmissionConfig {
             mode: BuildAdmissionMode::Enforce,
             cap: 3,
-            pod_limit: None,
+            pod_limit: PodLimitSetting::Absent,
         });
         let first_admission = first
             .inner
@@ -5044,7 +5288,7 @@ mod build_admission_config_tests {
         let second = state_for_admission_config(BuildAdmissionConfig {
             mode: BuildAdmissionMode::Enforce,
             cap: 3,
-            pod_limit: None,
+            pod_limit: PodLimitSetting::Absent,
         });
         let second_admission = second
             .inner
@@ -5063,7 +5307,7 @@ mod build_admission_config_tests {
         let state = state_for_admission_config(BuildAdmissionConfig {
             mode: BuildAdmissionMode::Enforce,
             cap: 1,
-            pod_limit: None,
+            pod_limit: PodLimitSetting::Absent,
         });
         let admission = state
             .inner
@@ -5089,7 +5333,7 @@ mod build_admission_config_tests {
         let state = state_for_admission_config(BuildAdmissionConfig {
             mode: BuildAdmissionMode::Enforce,
             cap: 3,
-            pod_limit: Some(1),
+            pod_limit: PodLimitSetting::Configured(1),
         });
         let admission = state
             .inner
@@ -5220,7 +5464,7 @@ mod build_admission_config_tests {
         let state = state_for_admission_config(BuildAdmissionConfig {
             mode: BuildAdmissionMode::Observe,
             cap: 4,
-            pod_limit: None,
+            pod_limit: PodLimitSetting::Absent,
         });
         let admission = state
             .inner
@@ -5315,7 +5559,7 @@ mod build_admission_config_tests {
         let state = state_for_admission_config(BuildAdmissionConfig {
             mode: BuildAdmissionMode::Observe,
             cap: 4,
-            pod_limit: None,
+            pod_limit: PodLimitSetting::Absent,
         });
         let volume = tempfile::tempdir().expect("temp volume");
         std::fs::create_dir(volume.path().join("22222222-2222-2222-2222-222222222222"))
@@ -5358,7 +5602,7 @@ mod build_admission_config_tests {
         let state = state_for_admission_config(BuildAdmissionConfig {
             mode: BuildAdmissionMode::Observe,
             cap: 4,
-            pod_limit: None,
+            pod_limit: PodLimitSetting::Absent,
         });
         let admission = state
             .inner
@@ -5650,7 +5894,7 @@ mod build_admission_config_tests {
             BuildAdmissionConfig {
                 mode: BuildAdmissionMode::Observe,
                 cap: 3,
-                pod_limit: Some(1),
+                pod_limit: PodLimitSetting::Configured(1),
             },
         );
         let repository = handoff_repository(&state);
@@ -5742,7 +5986,7 @@ mod build_admission_config_tests {
             BuildAdmissionConfig {
                 mode: BuildAdmissionMode::Observe,
                 cap: 3,
-                pod_limit: None,
+                pod_limit: PodLimitSetting::Absent,
             },
         );
         restarted.initialize_build_admission_handoff().await;
@@ -5776,7 +6020,7 @@ mod build_admission_config_tests {
             BuildAdmissionConfig {
                 mode: BuildAdmissionMode::Enforce,
                 cap: 3,
-                pod_limit: None,
+                pod_limit: PodLimitSetting::Absent,
             },
         );
         let project = ProjectRepository::new(db.clone(), state.event_bus())
