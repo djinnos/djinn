@@ -12,11 +12,40 @@ use sqlx::{Connection, Executor};
 
 const MIGRATION_VERSION: u64 = 162;
 const MIGRATION_FILE: &str = "162_build_pod_permits.sql";
+const RESIZE_MIGRATION_FILE: &str = "163_build_pod_resize_identity.sql";
 const MIGRATION_OPERATOR_ID: &str = "00000000-0000-7000-8000-000000000162";
 const CREATOR_CONTRACT_VERSION: u64 = 142;
 
 fn base_database_url() -> String {
     djinn_db::test_database_base_url()
+}
+
+#[tokio::test]
+async fn migration_163_upgrades_released_162_permits_without_job_uids() {
+    with_temp_database("upgrade_resize_identity", |db_url| async move {
+        let mut conn = PgConnection::connect(&db_url).await.unwrap();
+        apply_prior_migrations(&mut conn).await;
+        apply_permit_migration(&mut conn).await;
+        let pool = PgPoolOptions::new().max_connections(1).connect(&db_url).await.unwrap();
+        seed_task_runs(&pool, MIGRATION_OPERATOR_ID, &["released"]).await;
+        sqlx::query("INSERT INTO build_pod_permits (task_run_id, fencing_token, state, released_at, released_fencing_token, release_reason) VALUES ('released', 9001, 'released', now(), 9001, 'before_job')")
+            .execute(&pool).await.unwrap();
+        pool.close().await;
+        apply_resize_migration(&mut conn).await;
+        let pool = PgPoolOptions::new().max_connections(1).connect(&db_url).await.unwrap();
+        let row: (Option<String>, String) = sqlx::query_as("SELECT job_uid, state FROM build_pod_permits WHERE task_run_id = 'released'")
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!(row, (None, "released".into()));
+        pool.close().await;
+    }).await;
+}
+
+async fn apply_resize_migration(conn: &mut PgConnection) {
+    let sql = std::fs::read_to_string(migrations_dir().join(RESIZE_MIGRATION_FILE))
+        .expect("read resize migration sql");
+    conn.execute(sql.as_str())
+        .await
+        .expect("apply resize migration after migration 162");
 }
 
 fn migrations_dir() -> PathBuf {

@@ -140,6 +140,26 @@ async fn resize_identity_is_write_once_and_lifecycle_is_uid_fenced() {
             TransitionBuildPodResizeLifecycleResult::Transitioned(_)
         ));
     }
+    // A matching UID/fence is not sufficient: stale observers must also echo
+    // the actual durable lifecycle state.
+    assert!(matches!(
+        repo.transition_resize_lifecycle(
+            "resize",
+            &permit.permit_id,
+            permit.fencing_token,
+            "pod-uid",
+            BuildPodPermitState::Lifted,
+            BuildPodPermitState::DropRequired
+        )
+        .await
+        .unwrap(),
+        TransitionBuildPodResizeLifecycleResult::Rejected
+    ));
+    assert_eq!(
+        repo.active("resize").await.unwrap().unwrap().state,
+        BuildPodPermitState::Quarantined,
+        "a stale expected state must not mutate the row"
+    );
     assert!(matches!(
         repo.transition_resize_lifecycle(
             "resize",

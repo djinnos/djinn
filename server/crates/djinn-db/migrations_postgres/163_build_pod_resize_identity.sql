@@ -19,7 +19,11 @@ ALTER TABLE build_pod_permits
     )),
     ADD CONSTRAINT build_pod_permits_job_uid_state_check CHECK (
         (state = 'acquired' AND job_uid IS NULL) OR
-        (state <> 'acquired' AND job_uid IS NOT NULL)
+        (state IN ('job_created', 'birth_confirmed', 'lift_applying', 'lifted',
+                   'drop_required', 'drop_applying', 'quarantined') AND job_uid IS NOT NULL)
+        -- Migration 162 deliberately permits release before a Job is observed.
+        -- Preserve that valid historical shape during this additive upgrade.
+        OR state = 'released'
     ),
     ADD CONSTRAINT build_pod_permits_resize_identity_check CHECK (
         (pod_namespace IS NULL AND pod_name IS NULL AND pod_uid IS NULL
@@ -54,15 +58,15 @@ BEGIN
            OLD.observed_launcher_protocol, OLD.effective_launcher_protocol, OLD.admitted_cpu_millicores)) THEN
         RAISE EXCEPTION 'build pod permit immutable identity or fencing token changed';
     END IF;
-    IF NOT ((OLD.state = 'job_created' AND NEW.state = 'birth_confirmed')
+    IF NOT ((OLD.state = 'acquired' AND NEW.state IN ('job_created', 'released'))
+        OR (OLD.state = 'job_created' AND NEW.state IN ('birth_confirmed', 'released'))
         OR (OLD.state = 'birth_confirmed' AND NEW.state IN ('lift_applying', 'drop_required', 'quarantined', 'released'))
         OR (OLD.state = 'lift_applying' AND NEW.state IN ('lifted', 'drop_required', 'quarantined', 'released'))
         OR (OLD.state = 'lifted' AND NEW.state IN ('drop_required', 'quarantined', 'released'))
         OR (OLD.state = 'drop_required' AND NEW.state IN ('drop_applying', 'quarantined', 'released'))
         OR (OLD.state = 'drop_applying' AND NEW.state IN ('birth_confirmed', 'quarantined', 'released'))
         OR (OLD.state = 'quarantined' AND NEW.state = 'released')
-        OR (OLD.state = NEW.state)
-        OR (OLD.state IN ('acquired', 'job_created') AND NEW.state = 'released')) THEN
+        OR (OLD.state = NEW.state)) THEN
         RAISE EXCEPTION 'illegal build pod resize lifecycle transition';
     END IF;
     RETURN NEW;
