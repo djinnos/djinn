@@ -1,0 +1,45 @@
+{{- $kueue := .Values.kueue -}}
+{{- $clusterQueueName := printf "%s-kueue" (include "djinn.fullname" .) | trunc 63 | trimSuffix "-" -}}
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: ResourceFlavor
+metadata:
+  name: {{ printf "%s-kueue" (include "djinn.fullname" .) | trunc 63 | trimSuffix "-" }}
+  labels:
+    {{- include "djinn.labels" . | nindent 4 }}
+spec: {}
+---
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: ClusterQueue
+metadata:
+  name: {{ $clusterQueueName }}
+  labels:
+    {{- include "djinn.labels" . | nindent 4 }}
+spec:
+  queueingStrategy: StrictFIFO
+  resourceGroups:
+    - coveredResources: ["pods"]
+      flavors:
+        - name: {{ printf "%s-kueue" (include "djinn.fullname" .) | trunc 63 | trimSuffix "-" }}
+          resources:
+            - name: pods
+              nominalQuota: {{ $kueue.buildPods }}
+---
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: LocalQueue
+metadata:
+  name: {{ include "djinn.fullname" . }}-task-run
+  namespace: {{ include "djinn.namespace" . }}
+  labels:
+    {{- include "djinn.labels" . | nindent 4 }}
+spec:
+  clusterQueue: {{ $clusterQueueName }}
+---
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: LocalQueue
+metadata:
+  name: {{ include "djinn.fullname" . }}-warm
+  namespace: {{ include "djinn.namespace" . }}
+  labels:
+    {{- include "djinn.labels" . | nindent 4 }}
+spec:
+  clusterQueue: {{ $clusterQueueName }}
