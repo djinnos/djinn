@@ -197,6 +197,8 @@ mod build_lease_deadline_echo_tests;
 #[cfg(test)]
 mod build_lease_integration_tests;
 #[cfg(test)]
+mod invocation_cpu_boundary_tests;
+#[cfg(test)]
 pub(crate) mod test_helpers;
 #[cfg(test)]
 mod tests;
