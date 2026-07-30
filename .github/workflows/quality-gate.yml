@@ -7,7 +7,15 @@ on:
     branches:
       - main
   merge_group: null
-  workflow_dispatch: null
+  workflow_dispatch:
+    inputs:
+      cargo_timings:
+        description: >-
+          Also run the Cargo Build Timings measurement lane (see that job).
+          Off by default: it is an instrument, not a gate, and it pays a full
+          workspace build.
+        type: boolean
+        default: false
 concurrency:
   group: ${{ github.event_name == 'pull_request' && format('ci-pr-{0}', github.event.pull_request.number) || github.event_name == 'push' && 'ci-main' || github.event_name == 'merge_group' && format('ci-merge-group-{0}', github.event.merge_group.head_sha || github.ref) || format('ci-dispatch-{0}', github.run_id) }}
   cancel-in-progress: ${{ github.event_name != 'merge_group' }}
@@ -857,6 +865,165 @@ jobs:
         run: bash -c "$CI_RUNNER_DISK_PREFLIGHT"
       - name: Test deploy render-gate contract
         run: bash scripts/test-deploy-contracts.sh deploy/preflight/tests
+  # An INSTRUMENT, not a gate. Dispatch-only, off by default, and deliberately
+  # absent from the `quality-gate` rollup: it asserts nothing and must never be
+  # able to block a merge.
+  #
+  # It exists to answer one question that currently blocks every remaining
+  # build-time decision: of the ~5m54s each `server-test` shard spends in
+  # `Build test binaries`, how much is COMPILING and how much is LINKING?
+  #
+  # That split decides between mutually exclusive investments:
+  #   * compile-dominated -> a content-addressed compile cache (sccache with an
+  #     external backend; the GitHub Actions cache is capped at 10 GB and has no
+  #     room) is worth the work. Note sccache does NOT cache linking.
+  #   * link-dominated -> sccache is close to worthless here, and the lever is
+  #     the binary COUNT: `cargo nextest list` reports 175 test binaries against
+  #     only 41 workspace crate compiles, because rustc builds one binary per
+  #     file in `tests/` (djinn-db alone ships 40, djinn-control-plane 32).
+  #     Consolidating them is then the change to make — carefully, because
+  #     separate binaries are separate PROCESSES and merging them widens the
+  #     blast radius of process-global test collisions.
+  #
+  # Guessing this from a job log does not work, and was tried: cargo prints
+  # `Compiling <pkg>` when a unit STARTS, so links of earlier binaries overlap
+  # later compiles, and the anchors straddle two cargo invocations in the same
+  # step. `--timings` emits per-unit start/end and is the only honest source.
+  #
+  # `cargo build --workspace --all-targets` rather than `cargo nextest run
+  # --no-run` because nextest has no `--timings` passthrough. It builds the same
+  # test binaries, so the split it reports is the one the shards pay.
+  #
+  # Restores `server-test` read-only, so the measurement reflects what a real
+  # shard rebuilds from a warm cache — which is the whole point. Measuring a
+  # cold build would answer a question nobody is asking.
+  cargo-build-timings:
+    name: Cargo Build Timings
+    needs: preflight
+    if: github.event_name == 'workflow_dispatch' && inputs.cargo_timings
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    defaults:
+      run:
+        working-directory: server
+    env:
+      SQLX_OFFLINE: "true"
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install
+        working-directory: server
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: server
+          shared-key: server-test
+          cache-on-failure: true
+          cache-all-crates: true
+          save-if: false
+        id: rust-cache
+      - name: Log cache family and restore status
+        run: |-
+          echo "cache-family=server-test"
+          echo "cache-hit=${{ steps.rust-cache.outputs.cache-hit }}"
+          echo "::notice::cache-family=server-test shared-key=server-test cache-hit=${{ steps.rust-cache.outputs.cache-hit }}"
+      - name: Runner disk headroom preflight
+        # Body/thresholds: CI_RUNNER_DISK_PREFLIGHT at the top of this file.
+        # This lane builds the same ~11-12 GiB of test binaries a shard does.
+        run: bash -c "$CI_RUNNER_DISK_PREFLIGHT"
+      - name: Build with --timings
+        run: cargo build --workspace --all-targets --features qdrant --timings
+      # The HTML report is the deliverable. The summary below is a coarse
+      # cross-check so the answer is visible without downloading anything.
+      - name: Summarise unit durations
+        if: always()
+        run: |
+          set -euo pipefail
+          ls -la target/cargo-timings/ || true
+          report=$(ls -t target/cargo-timings/cargo-timing-*.html 2>/dev/null | head -1 || true)
+          if [ -z "$report" ]; then
+            echo "::warning title=No timings report::cargo emitted no cargo-timings HTML; nothing to summarise."
+            exit 0
+          fi
+          echo "::notice title=Timings report::$report (download the cargo-build-timings artifact for the full breakdown)"
+          # WHAT THIS CAN AND CANNOT MEASURE — verified against a real cargo
+          # 1.97.1 report before shipping, because the obvious reading of the
+          # format is wrong in three ways:
+          #
+          #   * there is NO `rmeta_time` field (an earlier draft of this step
+          #     aggregated it and would have printed "100% codegen+link" for
+          #     every possible input — an answer-shaped non-answer);
+          #   * `mode` is the literal string "todo", so grouping by it is
+          #     meaningless;
+          #   * `sections` DOES carry a frontend/codegen split, but only for
+          #     plain library units. Every link-producing unit — every test
+          #     binary, every bin — comes back with `sections: []`.
+          #
+          # So `--timings` cannot isolate LINK time. What it does give is an
+          # exact per-unit duration, which supports the decomposition that
+          # actually drives the decision: time spent on LINK-PRODUCING units
+          # (test binaries and bins, where compile and link are fused and
+          # sccache cannot help the link half) versus LIBRARY units (rlib/rmeta,
+          # which a content-addressed cache can serve outright).
+          #
+          # Read it as: library-dominated -> sccache is worth pursuing.
+          # Binary-dominated -> the 175-binary count is the lever, not caching.
+          python3 - "$report" <<'PY'
+          import json, re, sys, collections
+          html = open(sys.argv[1], encoding='utf8').read()
+          m = re.search(r'const UNIT_DATA = (\[.*?\]);', html, re.S)
+          if not m:
+              print('::warning::could not locate UNIT_DATA in the report; use the HTML directly')
+              raise SystemExit(0)
+          units = json.loads(m.group(1))
+
+          def kind(u):
+              # target looks like ' djinn-db "lib"', ' djinn-db "lib" (test)',
+              # ' some_it "test" (test)', ' djinn-server "bin"'. Anything that
+              # is a (test) harness or a bin gets linked into an executable.
+              t = (u.get('target') or '').strip()
+              if not t:
+                  return 'build-script / dep lib'
+              if '(test)' in t:
+                  return 'test binary (compile+LINK)'
+              if '"bin"' in t:
+                  return 'bin (compile+LINK)'
+              return 'library (rlib/rmeta)'
+
+          total = sum(u.get('duration', 0) for u in units)
+          print(f'units={len(units)}  sum-of-unit-durations={total:.1f}s'
+                f'  (wall clock is lower: units run in parallel)')
+          groups = collections.defaultdict(lambda: [0, 0.0])
+          for u in units:
+              g = groups[kind(u)]
+              g[0] += 1
+              g[1] += u.get('duration', 0)
+          for k, (n, d) in sorted(groups.items(), key=lambda kv: -kv[1][1]):
+              share = f'{100 * d / total:5.1f}%' if total else '    -'
+              print(f'  {k:28s} n={n:4d}  {d:8.1f}s  {share}')
+
+          sect = collections.defaultdict(float)
+          withsec = 0
+          for u in units:
+              secs = u.get('sections') or []
+              if secs:
+                  withsec += 1
+              for name, span in secs:
+                  sect[name] += span['end'] - span['start']
+          print(f'\nfrontend/codegen split, where cargo reports it '
+                f'({withsec}/{len(units)} units): '
+                + (', '.join(f'{k}={v:.1f}s' for k, v in sorted(sect.items())) or 'none'))
+
+          print('\nslowest 20 units:')
+          for u in sorted(units, key=lambda u: -u.get('duration', 0))[:20]:
+              print(f"  {u.get('duration', 0):7.1f}s  {u.get('name'):28s} {kind(u):28s} {(u.get('target') or '').strip()}")
+          PY
+      - name: Upload timings report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cargo-build-timings
+          path: server/target/cargo-timings/
+          if-no-files-found: warn
+          retention-days: 30
   launcher-kernel-boundary:
     name: Launcher Kernel Boundary
     needs: preflight
