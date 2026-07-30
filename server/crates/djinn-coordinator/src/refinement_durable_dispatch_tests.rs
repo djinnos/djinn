@@ -81,7 +81,11 @@ async fn wait_until_pool_releases(pool: &djinn_slot::SlotPoolHandle, task_id: &s
     panic!("observing pool did not release {task_id}");
 }
 
-async fn admit_run(repo: &ProposalRepository, proposal_id: &str, key: &str) -> (String, i32) {
+pub(crate) async fn admit_run(
+    repo: &ProposalRepository,
+    proposal_id: &str,
+    key: &str,
+) -> (String, i32) {
     match repo
         .admit_refinement_run(AdmitRefinementRunRequest {
             proposal_id: proposal_id.into(),
@@ -103,7 +107,11 @@ async fn admit_run(repo: &ProposalRepository, proposal_id: &str, key: &str) -> (
     }
 }
 
-async fn only_intent(repo: &ProposalRepository, run_id: &str, generation: i32) -> String {
+pub(crate) async fn only_intent(
+    repo: &ProposalRepository,
+    run_id: &str,
+    generation: i32,
+) -> String {
     let intents = repo
         .load_dispatchable_refinement_intents(run_id, generation)
         .await

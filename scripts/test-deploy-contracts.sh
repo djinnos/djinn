@@ -33,6 +33,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 # Shell-only by construction. Adding a directory here commits the
 # local-dev-contracts lane to running it with no toolchain beyond bash.
 DEFAULT_DIRS=(
+    deploy/kueue/tests
     deploy/node/k3s/tests
     deploy/runbooks/tests
 )
