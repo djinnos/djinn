@@ -10,10 +10,16 @@
 //!   so it cannot show that `suspend: true` is what holds the Pod back rather
 //!   than the renderer merely writing a key nobody reads.
 //!
-//! The fake models exactly one piece of Kubernetes behaviour beyond storage:
-//! the Job controller's rule that a Job creates Pods only while it is *not*
-//! suspended. That rule is the entire point of the Kueue cutover, so it is the
-//! one thing the test refuses to take on trust.
+//! The fake models exactly two pieces of Kubernetes behaviour beyond storage:
+//!
+//! 1. the Job controller's rule that a Job creates Pods only while it is *not*
+//!    suspended. That rule is the entire point of the Kueue cutover, so it is
+//!    the one thing this file's tests refuse to take on trust;
+//! 2. the Job controller's rule that a nonterminal Job whose Pod disappears
+//!    gets a *replacement* Pod, with a fresh `metadata.uid`. That is what
+//!    `runtime_pod_fence_tests` fences against — and it is honest to model here
+//!    because it is Job-controller behaviour, not Kueue behaviour. It is not a
+//!    substitute for the live-cluster proof.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -36,36 +42,45 @@ use djinn_runtime::SupervisorFlow;
 // ---------------------------------------------------------------------------
 
 /// One recorded apiserver call, for assertions about what actually happened.
+///
+/// `body` is the request body exactly as the client serialised it. Delete
+/// options ride in the DELETE body in the Kubernetes API, so this is the only
+/// place `propagationPolicy` can be observed as something that was actually
+/// *sent* rather than merely constructed.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct ApiCall {
-    method: String,
-    path: String,
+pub(super) struct ApiCall {
+    pub(super) method: String,
+    pub(super) path: String,
+    pub(super) body: Option<Value>,
 }
 
 #[derive(Default)]
-struct ClusterState {
+pub(super) struct ClusterState {
     /// Job name -> stored Job object (as the apiserver would return it).
-    jobs: HashMap<String, Value>,
+    pub(super) jobs: HashMap<String, Value>,
     /// Secret name -> stored Secret object.
-    secrets: HashMap<String, Value>,
-    /// Pod names the modelled Job controller has materialised.
-    pods: Vec<String>,
-    calls: Vec<ApiCall>,
+    pub(super) secrets: HashMap<String, Value>,
+    /// Pod objects the modelled Job controller has materialised, each with its
+    /// own immutable `metadata.uid`.
+    pub(super) pods: Vec<Value>,
+    pub(super) calls: Vec<ApiCall>,
 }
 
-struct FakeCluster {
-    state: StdMutex<ClusterState>,
+pub(super) struct FakeCluster {
+    pub(super) state: StdMutex<ClusterState>,
     uid_seq: AtomicU64,
+    pod_seq: AtomicU64,
     /// When set, every Job create fails with this `(code, reason)` instead of
     /// storing anything. Models a definitively-rejected create.
     job_create_failure: Option<(u16, &'static str)>,
 }
 
 impl FakeCluster {
-    fn new() -> Arc<Self> {
+    pub(super) fn new() -> Arc<Self> {
         Arc::new(Self {
             state: StdMutex::new(ClusterState::default()),
             uid_seq: AtomicU64::new(1),
+            pod_seq: AtomicU64::new(1),
             job_create_failure: None,
         })
     }
@@ -74,6 +89,7 @@ impl FakeCluster {
         Arc::new(Self {
             state: StdMutex::new(ClusterState::default()),
             uid_seq: AtomicU64::new(1),
+            pod_seq: AtomicU64::new(1),
             job_create_failure: Some((code, reason)),
         })
     }
@@ -82,13 +98,13 @@ impl FakeCluster {
         format!("uid-{}", self.uid_seq.fetch_add(1, Ordering::SeqCst))
     }
 
-    fn job_names(&self) -> Vec<String> {
+    pub(super) fn job_names(&self) -> Vec<String> {
         let mut names: Vec<String> = self.state.lock().unwrap().jobs.keys().cloned().collect();
         names.sort();
         names
     }
 
-    fn job(&self, name: &str) -> Option<Value> {
+    pub(super) fn job(&self, name: &str) -> Option<Value> {
         self.state.lock().unwrap().jobs.get(name).cloned()
     }
 
@@ -98,44 +114,169 @@ impl FakeCluster {
         names
     }
 
-    fn pod_count(&self) -> usize {
+    pub(super) fn pod_count(&self) -> usize {
         self.state.lock().unwrap().pods.len()
     }
 
-    fn calls(&self) -> Vec<ApiCall> {
+    /// Every stored Pod's `metadata.uid`, in creation order.
+    pub(super) fn pod_uids(&self) -> Vec<String> {
+        self.state
+            .lock()
+            .unwrap()
+            .pods
+            .iter()
+            .filter_map(|pod| {
+                pod.pointer("/metadata/uid")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+            .collect()
+    }
+
+    pub(super) fn calls(&self) -> Vec<ApiCall> {
         self.state.lock().unwrap().calls.clone()
     }
 
-    /// The Job controller, as far as this test cares: a Job that is not
-    /// suspended has exactly one Pod; a suspended one has none.
+    /// The Job controller, as far as these tests care:
+    ///
+    /// * a suspended Job has no Pod;
+    /// * an unsuspended, *nonterminal* Job always has exactly one Pod — so if
+    ///   its Pod is destroyed, the controller makes a NEW one, with a NEW uid.
     ///
     /// Kueue is what flips `suspend` on an admitted Workload, so
     /// [`Self::unsuspend`] below stands in for the admission this cutover hands
     /// over to it.
-    fn reconcile_job_controller(state: &mut ClusterState, job_name: &str) {
-        let suspended = state
-            .jobs
-            .get(job_name)
-            .and_then(|job| job.pointer("/spec/suspend"))
+    fn reconcile_job_controller(&self, state: &mut ClusterState, job_name: &str) {
+        let Some(job) = state.jobs.get(job_name).cloned() else {
+            return;
+        };
+        let suspended = job
+            .pointer("/spec/suspend")
             .and_then(Value::as_bool)
             .unwrap_or(false);
-        let pod_name = format!("{job_name}-pod");
-        let exists = state.pods.iter().any(|pod| pod == &pod_name);
-        if !suspended && !exists {
-            state.pods.push(pod_name);
+        let terminal = job
+            .pointer("/status/succeeded")
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+            > 0
+            || job
+                .pointer("/status/failed")
+                .and_then(Value::as_u64)
+                .unwrap_or(0)
+                > 0;
+        if suspended || terminal || Self::owned_pod_index(state, job_name).is_some() {
+            return;
         }
+        let job_uid = job
+            .pointer("/metadata/uid")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let labels = job
+            .pointer("/spec/template/metadata/labels")
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+        let pod_name = format!("{job_name}-{}", self.pod_seq.fetch_add(1, Ordering::SeqCst));
+        state.pods.push(json!({
+            "apiVersion": "v1",
+            "kind": "Pod",
+            "metadata": {
+                "name": pod_name,
+                "namespace": "djinn",
+                "uid": self.next_uid(),
+                "resourceVersion": "1",
+                "labels": labels,
+                "ownerReferences": [{
+                    "apiVersion": "batch/v1",
+                    "kind": "Job",
+                    "name": job_name,
+                    "uid": job_uid,
+                    "controller": true,
+                }],
+            },
+            "spec": {"containers": [{"name": "worker", "image": "registry/test:test"}]},
+            "status": {"phase": "Running"},
+        }));
+    }
+
+    fn owned_pod_index(state: &ClusterState, job_name: &str) -> Option<usize> {
+        state.pods.iter().position(|pod| {
+            pod.pointer("/metadata/ownerReferences/0/name")
+                .and_then(Value::as_str)
+                == Some(job_name)
+        })
     }
 
     /// Stand in for Kueue admitting the Workload: clear `suspend` and let the
     /// modelled Job controller run again.
-    fn unsuspend(&self, job_name: &str) {
+    pub(super) fn unsuspend(&self, job_name: &str) {
         let mut state = self.state.lock().unwrap();
         if let Some(job) = state.jobs.get_mut(job_name)
             && let Some(spec) = job.get_mut("spec").and_then(Value::as_object_mut)
         {
             spec.insert("suspend".into(), Value::Bool(false));
         }
-        Self::reconcile_job_controller(&mut state, job_name);
+        self.reconcile_job_controller(&mut state, job_name);
+    }
+
+    /// `kubectl delete pod --force --grace-period=0`: the Pod object vanishes
+    /// immediately, and the Job controller — whose Job is still nonterminal —
+    /// replaces it with a Pod carrying a FRESH uid.
+    ///
+    /// Returns `(destroyed_uid, replacement_uid)`.
+    pub(super) fn force_delete_pod_of(&self, job_name: &str) -> (String, Option<String>) {
+        let mut state = self.state.lock().unwrap();
+        let index = Self::owned_pod_index(&state, job_name).expect("the Job has a Pod to destroy");
+        let destroyed = state.pods.remove(index);
+        let destroyed_uid = destroyed
+            .pointer("/metadata/uid")
+            .and_then(Value::as_str)
+            .expect("stored Pod has a uid")
+            .to_string();
+        self.reconcile_job_controller(&mut state, job_name);
+        let replacement = Self::owned_pod_index(&state, job_name).and_then(|i| {
+            state.pods[i]
+                .pointer("/metadata/uid")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        });
+        (destroyed_uid, replacement)
+    }
+
+    /// TTL-GC of a finished Pod: the object disappears and nothing replaces it.
+    pub(super) fn gc_pod_of(&self, job_name: &str) {
+        let mut state = self.state.lock().unwrap();
+        if let Some(index) = Self::owned_pod_index(&state, job_name) {
+            state.pods.remove(index);
+        }
+    }
+
+    /// TTL-GC of the Job object itself.
+    pub(super) fn gc_job(&self, job_name: &str) {
+        self.state.lock().unwrap().jobs.remove(job_name);
+    }
+
+    /// Drive the Job to its terminal `Failed` condition, as `backoffLimit: 0`
+    /// does on a single Pod failure.
+    pub(super) fn fail_job(&self, job_name: &str, reason: &str) {
+        let mut state = self.state.lock().unwrap();
+        if let Some(job) = state.jobs.get_mut(job_name) {
+            job["status"] = json!({
+                "failed": 1,
+                "conditions": [{"type": "Failed", "status": "True", "reason": reason}],
+            });
+        }
+    }
+
+    /// Drive the Job to its terminal `Complete` condition.
+    pub(super) fn complete_job(&self, job_name: &str) {
+        let mut state = self.state.lock().unwrap();
+        if let Some(job) = state.jobs.get_mut(job_name) {
+            job["status"] = json!({
+                "succeeded": 1,
+                "conditions": [{"type": "Complete", "status": "True"}],
+            });
+        }
     }
 
     fn status_body(code: u16, reason: &str, message: &str) -> Value {
@@ -150,21 +291,92 @@ impl FakeCluster {
         })
     }
 
+    /// Filter stored Pods by a `k=v[,k=v]` label selector, exactly as the
+    /// apiserver does for `GET .../pods?labelSelector=…`.
+    fn select_pods(state: &ClusterState, selector: Option<&str>) -> Vec<Value> {
+        let Some(selector) = selector.filter(|s| !s.is_empty()) else {
+            return state.pods.clone();
+        };
+        state
+            .pods
+            .iter()
+            .filter(|pod| {
+                selector.split(',').all(|term| {
+                    let Some((key, value)) = term.split_once('=') else {
+                        return false;
+                    };
+                    pod.pointer("/metadata/labels")
+                        .and_then(|labels| labels.get(key))
+                        .and_then(Value::as_str)
+                        == Some(value)
+                })
+            })
+            .cloned()
+            .collect()
+    }
+
     async fn handle(self: Arc<Self>, request: http::Request<Body>) -> (u16, Value) {
         let method = request.method().clone();
         let path = request.uri().path().to_string();
+        let query = parse_query(request.uri().query().unwrap_or_default());
         let body = axum_read_body(request).await;
 
         self.state.lock().unwrap().calls.push(ApiCall {
             method: method.to_string(),
             path: path.clone(),
+            body: body.clone(),
         });
 
         let is_job = path.contains("/jobs");
         let is_secret = path.contains("/secrets");
+        let is_pod = path.contains("/pods");
         // `.../jobs` on a create, `.../jobs/<name>` on a get/patch.
         let trailing = path.rsplit('/').next().unwrap_or_default().to_string();
-        let named = !(trailing == "jobs" || trailing == "secrets");
+        let named = !(trailing == "jobs" || trailing == "secrets" || trailing == "pods");
+
+        if is_pod && method == "GET" && !named {
+            let state = self.state.lock().unwrap();
+            let items = Self::select_pods(&state, query.get("labelSelector").map(String::as_str));
+            return (
+                200,
+                json!({
+                    "apiVersion": "v1",
+                    "kind": "PodList",
+                    "metadata": {"resourceVersion": "1"},
+                    "items": items,
+                }),
+            );
+        }
+
+        if is_job && method == "DELETE" && named {
+            let mut state = self.state.lock().unwrap();
+            let Some(job) = state.jobs.remove(&trailing) else {
+                return (
+                    404,
+                    Self::status_body(
+                        404,
+                        "NotFound",
+                        &format!("jobs.batch \"{trailing}\" not found"),
+                    ),
+                );
+            };
+            // Foreground/Background both cascade in the end state this fixture
+            // models; Orphan deliberately does not, so a policy regression is
+            // visible in the surviving Pods as well as in the recorded body.
+            let orphan = body
+                .as_ref()
+                .and_then(|b| b.get("propagationPolicy"))
+                .and_then(Value::as_str)
+                == Some("Orphan");
+            if !orphan {
+                state.pods.retain(|pod| {
+                    pod.pointer("/metadata/ownerReferences/0/name")
+                        .and_then(Value::as_str)
+                        != Some(trailing.as_str())
+                });
+            }
+            return (200, job);
+        }
 
         match (method.as_str(), is_job, is_secret, named) {
             ("POST", true, _, _) => {
@@ -193,7 +405,7 @@ impl FakeCluster {
                 }
                 job["metadata"]["uid"] = Value::String(self.next_uid());
                 state.jobs.insert(name.clone(), job.clone());
-                Self::reconcile_job_controller(&mut state, &name);
+                self.reconcile_job_controller(&mut state, &name);
                 (201, job)
             }
             ("GET", true, _, true) => match self.state.lock().unwrap().jobs.get(&trailing) {
@@ -282,7 +494,7 @@ impl FakeCluster {
         }
     }
 
-    fn client(self: &Arc<Self>) -> kube::Client {
+    pub(super) fn client(self: &Arc<Self>) -> kube::Client {
         let cluster = Arc::clone(self);
         kube::Client::new(
             tower::service_fn(move |request: http::Request<Body>| {
@@ -301,6 +513,49 @@ impl FakeCluster {
             "djinn",
         )
     }
+}
+
+/// Percent-decode a `application/x-www-form-urlencoded` query into its pairs.
+///
+/// Hand-rolled rather than pulled from a crate so the fixture has no dependency
+/// the production crate does not already carry: the only values it ever sees are
+/// the client's own `labelSelector`, whose `/` and `=` arrive percent-encoded.
+fn parse_query(query: &str) -> HashMap<String, String> {
+    fn decode(raw: &str) -> String {
+        let bytes = raw.as_bytes();
+        let mut out = Vec::with_capacity(bytes.len());
+        let mut i = 0;
+        while i < bytes.len() {
+            match bytes[i] {
+                b'%' if i + 2 < bytes.len() => match u8::from_str_radix(&raw[i + 1..i + 3], 16) {
+                    Ok(byte) => {
+                        out.push(byte);
+                        i += 3;
+                    }
+                    Err(_) => {
+                        out.push(bytes[i]);
+                        i += 1;
+                    }
+                },
+                b'+' => {
+                    out.push(b' ');
+                    i += 1;
+                }
+                byte => {
+                    out.push(byte);
+                    i += 1;
+                }
+            }
+        }
+        String::from_utf8_lossy(&out).into_owned()
+    }
+
+    query
+        .split('&')
+        .filter(|pair| !pair.is_empty())
+        .filter_map(|pair| pair.split_once('='))
+        .map(|(key, value)| (decode(key), decode(value)))
+        .collect()
 }
 
 /// Drain a `kube::client::Body` into JSON (empty bodies become `None`).

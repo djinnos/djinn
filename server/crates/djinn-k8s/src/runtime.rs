@@ -278,6 +278,11 @@ fn service_resolution_activity_payload(
 /// grace + report-flush window for a clean exit.
 const INFRA_DEATH_POLL_INTERVAL: Duration = Duration::from_secs(15);
 
+/// Termination grace period on the Job reaped by
+/// [`KubernetesRuntime::reap_lost_fenced_pod`]. Matches `cancel` / `teardown`
+/// so every foreground Job delete this runtime issues offers the same window.
+const INFRA_DEATH_REAP_GRACE_SECONDS: u32 = 30;
+
 /// Kubernetes-backed `SessionRuntime`.
 ///
 /// Owns the cluster-side configuration plus a `kube::Client` acquired from
@@ -1110,10 +1115,25 @@ impl SessionRuntime for KubernetesRuntime {
     /// - The Pod was OBSERVED running and is now gone while the Job is also
     ///   gone (TTL-GC'd after finishing) → the run finished out-of-band and we
     ///   never saw a report; treat as a terminal disappearance.
+    /// - The *fenced* Pod — the immutable UID this watch bound on its first
+    ///   observation — is gone while the Job is still NONTERMINAL. That is a
+    ///   force-delete / node loss / out-of-band eviction, and it is the one arm
+    ///   that also has to *act*: see [`Self::reap_lost_fenced_pod`].
     ///
     /// A `Succeeded` Job is NOT treated as death — a clean run delivers its
     /// terminal report over the stream, which the runner prefers; resolving
     /// here on success would race that and risk a spurious "interrupted".
+    ///
+    /// # The Pod fence
+    ///
+    /// Every observation is bound to one immutable `metadata.uid`, captured the
+    /// first time any Pod appears under this run's label selector. The label
+    /// selector alone is not an identity: after a Pod is force-deleted the Job
+    /// controller creates a *replacement* Pod carrying the very same labels, and
+    /// reading `items.first()` would silently re-target the watch at an object
+    /// this run never launched, never handshook with, and holds no lease on. The
+    /// fence is bound once and never re-bound, so a replacement UID is observed
+    /// but never adopted.
     async fn watch_infra_death(&self, handle: &RunHandle) -> String {
         let Some(job_name) = handle.pod_ref.as_deref() else {
             // No Job reference (shouldn't happen on the K8s path) — never
@@ -1130,6 +1150,9 @@ impl SessionRuntime for KubernetesRuntime {
         // counts as a terminal out-of-band death — a pod that simply hasn't
         // been created yet (scheduling lag) must never trip the watch.
         let mut pod_seen = false;
+        // The immutable Pod identity this run is fenced to. Bound once, on the
+        // first observation that carries a UID; never re-bound.
+        let mut bound_pod_uid: Option<String> = None;
 
         loop {
             // 1. Richest signal first: the Pod's container terminated state,
@@ -1139,38 +1162,82 @@ impl SessionRuntime for KubernetesRuntime {
                 .await
             {
                 Ok(list) => {
-                    if let Some(pod) = list.items.first() {
-                        pod_seen = true;
-                        if let Some(reason) = pod_container_death_reason(pod) {
-                            debug!(
-                                task_run_id = %handle.task_run_id,
-                                job = %job_name,
-                                %reason,
-                                "kubernetes_runtime: infra-death watch — worker container terminated"
-                            );
-                            return reason;
-                        }
-                    } else if pod_seen {
-                        // The Pod was here and is now gone. If the Job is also
-                        // gone (TTL-GC after finishing), the run ended
-                        // out-of-band without a report — terminal.
-                        match jobs.get_opt(job_name).await {
-                            Ok(None) => {
+                    if bound_pod_uid.is_none()
+                        && let Some(uid) = bind_worker_pod_uid(&list.items)
+                    {
+                        debug!(
+                            task_run_id = %handle.task_run_id,
+                            job = %job_name,
+                            pod_uid = %uid,
+                            "kubernetes_runtime: infra-death watch — bound to worker Pod UID"
+                        );
+                        bound_pod_uid = Some(uid);
+                    }
+
+                    match fenced_worker_pod(&list.items, bound_pod_uid.as_deref()) {
+                        Some(pod) => {
+                            pod_seen = true;
+                            if let Some(reason) = pod_container_death_reason(pod) {
                                 debug!(
                                     task_run_id = %handle.task_run_id,
                                     job = %job_name,
-                                    "kubernetes_runtime: infra-death watch — pod and job both gone"
+                                    %reason,
+                                    "kubernetes_runtime: infra-death watch — worker container terminated"
                                 );
-                                return "worker Pod and Job disappeared (TTL-GC after \
-                                        out-of-band termination)"
-                                    .to_string();
-                            }
-                            Ok(Some(_)) | Err(_) => {
-                                // Job still present (or a transient apiserver
-                                // error) — fall through to the Job-status
-                                // check, which decides terminal-ness.
+                                return reason;
                             }
                         }
+                        // The fenced Pod was here and is now gone. Anything else
+                        // still matching the selector is a replacement the Job
+                        // controller minted, which this watch refuses to adopt.
+                        None if pod_seen => {
+                            match jobs.get_opt(job_name).await {
+                                Ok(None) => {
+                                    debug!(
+                                        task_run_id = %handle.task_run_id,
+                                        job = %job_name,
+                                        "kubernetes_runtime: infra-death watch — pod and job both gone"
+                                    );
+                                    return "worker Pod and Job disappeared (TTL-GC after \
+                                            out-of-band termination)"
+                                        .to_string();
+                                }
+                                Ok(Some(job)) => {
+                                    // A Failed Job is the pre-existing arm and
+                                    // owns its own richer reason.
+                                    if let Some(reason) = job_failed_reason(&job) {
+                                        debug!(
+                                            task_run_id = %handle.task_run_id,
+                                            job = %job_name,
+                                            %reason,
+                                            "kubernetes_runtime: infra-death watch — job failed"
+                                        );
+                                        return reason;
+                                    }
+                                    // A cleanly Complete Job whose Pod was
+                                    // TTL-GC'd is NOT a death: the terminal
+                                    // report rides the stream. Keep watching.
+                                    if !job_completed_cleanly(&job) {
+                                        return self
+                                            .reap_lost_fenced_pod(
+                                                handle,
+                                                job_name,
+                                                bound_pod_uid.as_deref(),
+                                                &unadopted_pod_uids(
+                                                    &list.items,
+                                                    bound_pod_uid.as_deref(),
+                                                ),
+                                            )
+                                            .await;
+                                    }
+                                }
+                                Err(_) => {
+                                    // Transient apiserver error — fall through
+                                    // to the Job-status check below.
+                                }
+                            }
+                        }
+                        None => {}
                     }
                 }
                 Err(e) => {
@@ -1243,6 +1310,74 @@ impl SessionRuntime for KubernetesRuntime {
 }
 
 impl KubernetesRuntime {
+    /// Contain a task-run whose fenced Pod was destroyed out-of-band while its
+    /// Job was still nonterminal, and return the death reason the dispatch
+    /// runner terminalises the run with.
+    ///
+    /// The Job is foreground-deleted here rather than left to `teardown`. Both
+    /// halves matter:
+    ///
+    /// * *Foreground*, so the apiserver blocks the Job's own removal on its
+    ///   Pods being fully cleaned up. A background delete returns immediately
+    ///   and hands the surviving replacement Pod — the one this watch just
+    ///   refused to adopt — to the orphan collector, which is exactly the
+    ///   window where it can outlive the run that paid for it.
+    /// * *Here*, because the Job is what holds quota. A retry always mints a
+    ///   fresh `task_run_id`, so the abandoned Job's deterministic name is never
+    ///   reused and nothing ever adopts it; under Kueue its admitted Workload
+    ///   would sit against the ClusterQueue until a human noticed.
+    ///
+    /// A failed delete does not suppress the reason: the run is dead either
+    /// way, and refusing to resolve would pin the dispatch slot on the very
+    /// stall this watch exists to break. The next reconcile can retry the Job.
+    async fn reap_lost_fenced_pod(
+        &self,
+        handle: &RunHandle,
+        job_name: &str,
+        bound_pod_uid: Option<&str>,
+        unadopted_pod_uids: &[String],
+    ) -> String {
+        let ns = &self.config.namespace;
+        let fenced = bound_pod_uid.unwrap_or("<unknown>");
+        match delete_job_foreground(&self.client, ns, job_name, INFRA_DEATH_REAP_GRACE_SECONDS)
+            .await
+        {
+            Ok(()) => {
+                info!(
+                    task_run_id = %handle.task_run_id,
+                    job = %job_name,
+                    namespace = %ns,
+                    pod_uid = %fenced,
+                    unadopted = ?unadopted_pod_uids,
+                    "kubernetes_runtime: infra-death watch — fenced worker Pod vanished under a \
+                     live Job; foreground-deleted the Job so it stops holding quota"
+                );
+            }
+            Err(error) => {
+                warn!(
+                    task_run_id = %handle.task_run_id,
+                    job = %job_name,
+                    namespace = %ns,
+                    pod_uid = %fenced,
+                    %error,
+                    "kubernetes_runtime: infra-death watch — reaping the orphaned task-run Job \
+                     failed; still terminalising the run"
+                );
+            }
+        }
+        let mut reason = format!(
+            "worker Pod {fenced} was deleted while its Job {job_name} was still active \
+             (force delete / node loss); the Job was foreground-deleted"
+        );
+        if !unadopted_pod_uids.is_empty() {
+            reason.push_str(&format!(
+                "; refused to adopt replacement Pod UID(s) {}",
+                unadopted_pod_uids.join(", ")
+            ));
+        }
+        reason
+    }
+
     /// Drop a reserved pending-connection slot — used on `prepare` failure
     /// paths so we don't leak registry entries when Job / Secret creation
     /// errors out after the slot was reserved.  Best-effort; the caller
@@ -1295,6 +1430,74 @@ fn pod_container_death_reason(pod: &Pod) -> Option<String> {
         });
     }
     None
+}
+
+/// The immutable Pod identity a run's infra-death watch fences itself to.
+///
+/// Returns the first non-blank `metadata.uid` in the listed Pods. A Pod without
+/// a UID cannot be fenced on and is skipped rather than treated as the run's
+/// Pod — an unfenced observation is the failure mode this whole module exists to
+/// remove.
+fn bind_worker_pod_uid(pods: &[Pod]) -> Option<String> {
+    pods.iter().find_map(|pod| {
+        pod.metadata
+            .uid
+            .as_deref()
+            .map(str::trim)
+            .filter(|uid| !uid.is_empty())
+            .map(str::to_string)
+    })
+}
+
+/// Select the Pod this run is fenced to, by immutable UID.
+///
+/// THE UID COMPARISON IS THE CONTAINMENT. The label selector matches every Pod
+/// the Job controller ever makes for this run, including the replacement it
+/// mints after the original is force-deleted. Falling back to "the first listed
+/// Pod" would adopt that replacement: the watch would report it healthy, the
+/// run would keep its dispatch slot, and the build lease would still be bound to
+/// a UID that no longer exists anywhere in the cluster.
+///
+/// `bound` is `None` only before any Pod has ever carried a UID, where there is
+/// no fence to enforce yet and positional selection is all that is available.
+fn fenced_worker_pod<'a>(pods: &'a [Pod], bound: Option<&str>) -> Option<&'a Pod> {
+    match bound {
+        Some(uid) => pods
+            .iter()
+            .find(|pod| pod.metadata.uid.as_deref() == Some(uid)),
+        None => pods.first(),
+    }
+}
+
+/// The UIDs of every listed Pod that is NOT the fenced one — the replacements
+/// this watch observed and declined to adopt. Reported in the death reason and
+/// the reap log so a live-cluster investigation can see what was refused.
+fn unadopted_pod_uids(pods: &[Pod], bound: Option<&str>) -> Vec<String> {
+    pods.iter()
+        .filter_map(|pod| pod.metadata.uid.as_deref())
+        .filter(|uid| Some(*uid) != bound)
+        .map(str::to_string)
+        .collect()
+}
+
+/// Whether a `Job` reached its *successful* terminal state.
+///
+/// Distinct from [`job_failed_reason`]: a clean completion is not a death, so a
+/// Pod that disappears under a Complete Job is TTL-GC and must never be reaped
+/// as a containment event. Anything neither complete nor failed is nonterminal —
+/// still holding quota, still owed a Pod.
+fn job_completed_cleanly(job: &Job) -> bool {
+    let Some(status) = job.status.as_ref() else {
+        return false;
+    };
+    if status.succeeded.unwrap_or(0) > 0 {
+        return true;
+    }
+    status.conditions.as_ref().is_some_and(|conditions| {
+        conditions
+            .iter()
+            .any(|condition| condition.type_ == "Complete" && condition.status == "True")
+    })
 }
 
 /// Inspect a `Job` for a terminal `Failed` condition and return its reason.
@@ -3655,3 +3858,7 @@ mod tests {
 #[cfg(test)]
 #[path = "runtime_kueue_create_tests.rs"]
 mod runtime_kueue_create_tests;
+
+#[cfg(test)]
+#[path = "runtime_pod_fence_tests.rs"]
+mod runtime_pod_fence_tests;
