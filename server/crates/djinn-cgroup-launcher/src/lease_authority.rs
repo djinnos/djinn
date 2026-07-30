@@ -8,6 +8,26 @@
 
 use crate::{DEFAULT_PERIOD_US, Error};
 
+/// The component that owns an invocation leaf's CPU quota.
+///
+/// This is intentionally independent from [`LeaseAuthority`], which remains a
+/// per-invocation leaf-v1 armed/unarmed decision. Keeping the axes separate
+/// prevents a resize-v2 leaf from inheriting a leaf-v1 quota mutation.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum LauncherAuthorityProtocol {
+    /// The launcher owns per-leaf quota birth and fenced lift writes.
+    #[default]
+    LeafV1,
+    /// Pod resize owns quota. The launcher must never write leaf `cpu.max`.
+    ResizeV2,
+}
+
+impl LauncherAuthorityProtocol {
+    pub(crate) fn launcher_owns_leaf_quota(self) -> bool {
+        matches!(self, Self::LeafV1)
+    }
+}
+
 /// `cpu.max` line for a leaf with NO quota of its own.
 ///
 /// `max` is cgroup-v2's "no limit at this level"; the enclosing Pod cgroup still

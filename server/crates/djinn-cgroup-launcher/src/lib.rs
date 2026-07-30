@@ -23,7 +23,7 @@ pub mod transport;
 pub use command_path::safe_command_path;
 pub use control_rejection::ControlRejection;
 pub use env::{is_allowed_environment_entry, is_allowed_environment_key};
-pub use lease_authority::{LeaseAuthority, unrestricted_cpu_max};
+pub use lease_authority::{LauncherAuthorityProtocol, LeaseAuthority, unrestricted_cpu_max};
 pub use spawn::{DenySpawn, NativeCgroupSpawn};
 
 pub(crate) const DEFAULT_PERIOD_US: u64 = 100_000;
@@ -126,6 +126,7 @@ pub struct LauncherConfig {
     pub unleased_quota: UnleasedQuota,
     pub leased_quota: LeasedQuota,
     pub expected_uid: u32,
+    authority_protocol: LauncherAuthorityProtocol,
 }
 
 impl LauncherConfig {
@@ -148,7 +149,19 @@ impl LauncherConfig {
             unleased_quota: unleased,
             leased_quota: leased,
             expected_uid,
+            authority_protocol: LauncherAuthorityProtocol::LeafV1,
         })
+    }
+
+    /// Select the immutable quota authority for leaves from this launcher.
+    /// This does not alter the leaf-v1 armed/unarmed invocation decision.
+    pub fn with_authority_protocol(mut self, protocol: LauncherAuthorityProtocol) -> Self {
+        self.authority_protocol = protocol;
+        self
+    }
+
+    pub fn authority_protocol(&self) -> LauncherAuthorityProtocol {
+        self.authority_protocol
     }
 }
 
@@ -266,6 +279,7 @@ pub struct Leaf {
     fd: RawFd,
     invocation: Invocation,
     authority: LeaseAuthority,
+    protocol: LauncherAuthorityProtocol,
     lifted: bool,
     terminal: bool,
 }
@@ -281,6 +295,10 @@ impl Leaf {
     /// life: the birth quota was already committed from it.
     pub fn authority(&self) -> LeaseAuthority {
         self.authority
+    }
+    /// The immutable quota-authority protocol selected at leaf birth.
+    pub fn authority_protocol(&self) -> LauncherAuthorityProtocol {
+        self.protocol
     }
 }
 
@@ -381,15 +399,12 @@ impl<F: CgroupFs, S: SpawnIntoCgroup> Launcher<F, S> {
         command.validate()?;
 
         let fd = self.fs.create_direct_child(name)?;
-        // The birth quota is the ONLY observable effect of the lease authority
-        // for an invocation that is never granted, and it cannot be revised
-        // later: `fenced_lift` is one-way and there is deliberately no unfenced
-        // path back down. An `Unarmed` authority therefore means "no quota at
-        // this level" rather than "the unleased quota forever" — see
-        // [`LeaseAuthority`] for the production incident that distinction
-        // encodes.
-        self.fs
-            .write_leaf(fd, "cpu.max", &self.birth_cpu_max(authority))?;
+        // Under resize-v2 Pod resize owns CPU quota. Do not write even `max`:
+        // it is a launcher mutation and violates the quota-neutral contract.
+        if self.config.authority_protocol.launcher_owns_leaf_quota() {
+            self.fs
+                .write_leaf(fd, "cpu.max", &self.birth_cpu_max(authority))?;
+        }
         // Spawn is deliberately last: all readiness and leaf setup failures
         // occur before the child can execute.
         let child = match self.syscall.spawn_into_cgroup(fd, &invocation, &command) {
@@ -408,6 +423,7 @@ impl<F: CgroupFs, S: SpawnIntoCgroup> Launcher<F, S> {
                 fd,
                 invocation,
                 authority,
+                protocol: self.config.authority_protocol,
                 lifted: false,
                 terminal: false,
             },
@@ -435,8 +451,10 @@ impl<F: CgroupFs, S: SpawnIntoCgroup> Launcher<F, S> {
         if leaf.invocation.fence != fence {
             return Err(Error::FenceMismatch);
         }
-        self.fs
-            .write_leaf(leaf.fd, "cpu.max", &self.config.leased_quota.cpu_max())?;
+        if leaf.protocol.launcher_owns_leaf_quota() {
+            self.fs
+                .write_leaf(leaf.fd, "cpu.max", &self.config.leased_quota.cpu_max())?;
+        }
         leaf.lifted = true;
         Ok(())
     }
@@ -872,6 +890,8 @@ mod tests {
     struct FakeFs {
         readiness: Option<Readiness>,
         files: HashMap<(RawFd, String), String>,
+        writes: Vec<(String, String)>,
+        reads: Vec<String>,
         created: Vec<String>,
         removed: Vec<String>,
         next: i32,
@@ -900,10 +920,12 @@ mod tests {
             Ok(self.next)
         }
         fn write_leaf(&mut self, fd: RawFd, file: &str, value: &str) -> Result<(), Error> {
+            self.writes.push((file.into(), value.into()));
             self.files.insert((fd, file.into()), value.into());
             Ok(())
         }
         fn read_leaf(&mut self, fd: RawFd, file: &str) -> Result<String, Error> {
+            self.reads.push(file.into());
             Ok(self
                 .files
                 .get(&(fd, file.into()))
@@ -1159,6 +1181,87 @@ mod tests {
             !lifted.starts_with("max"),
             "an unbounded lift removes the only remaining ceiling"
         );
+    }
+
+    /// Mutation-sensitive coverage for the resize authority boundary. The fake
+    /// records every filesystem operation, so restoring either birth/lift quota
+    /// write or removing kill/wait-empty makes this test fail.
+    #[test]
+    fn resize_v2_leaves_are_quota_neutral_and_preserve_every_terminal_teardown() {
+        let config = config().with_authority_protocol(LauncherAuthorityProtocol::ResizeV2);
+        let mut launcher = Launcher::new(FakeFs::ready(), FakeSpawn::default(), config).unwrap();
+
+        for name in ["normal-exit", "non-zero-exit", "timeout", "cancellation"] {
+            let invocation = Invocation {
+                id: name.into(),
+                fence: 99,
+            };
+            let (mut leaf, child) = launcher
+                .create_command(name, invocation, LeaseAuthority::Armed, &command())
+                .unwrap();
+            assert_eq!(child.pid, 1, "{name} still spawns the configured child");
+            assert_eq!(leaf.authority_protocol(), LauncherAuthorityProtocol::ResizeV2);
+            launcher.sample(&leaf).unwrap();
+            assert!(matches!(
+                launcher.fenced_lift(&mut leaf, 98),
+                Err(Error::FenceMismatch)
+            ));
+            launcher.fenced_lift(&mut leaf, 99).unwrap();
+            launcher.kill(&mut leaf).unwrap();
+            launcher
+                .fs
+                .files
+                .insert((leaf.fd, "cgroup.events".into()), "populated 0\n".into());
+            launcher.remove(&leaf).unwrap();
+        }
+
+        assert_eq!(launcher.fs.created.len(), 4, "one direct leaf per invocation");
+        assert_eq!(launcher.syscall.exec_calls.len(), 4, "one child per leaf");
+        assert!(
+            launcher
+                .fs
+                .writes
+                .iter()
+                .all(|(file, _)| file != "cpu.max"),
+            "resize-v2 must make zero cpu.max writes at birth, lift, or teardown"
+        );
+        assert_eq!(
+            launcher.fs.writes,
+            vec![("cgroup.kill".into(), "1".into()); 4],
+            "every terminal path remains a cgroup-wide kill"
+        );
+        assert_eq!(
+            launcher
+                .fs
+                .reads
+                .iter()
+                .filter(|file| file.as_str() == "cgroup.events")
+                .count(),
+            4,
+            "every terminal path waits for cgroup.events populated 0 before removal"
+        );
+        assert_eq!(launcher.fs.removed.len(), 4);
+    }
+
+    #[test]
+    fn resize_v2_spawn_failure_removes_the_empty_leaf_without_a_quota_write() {
+        let config = config().with_authority_protocol(LauncherAuthorityProtocol::ResizeV2);
+        let mut launcher = Launcher::new(
+            FakeFs::ready(),
+            FakeSpawn {
+                deny: true,
+                ..FakeSpawn::default()
+            },
+            config,
+        )
+        .unwrap();
+        assert!(matches!(
+            launcher.create_command("refused", invocation(), LeaseAuthority::Armed, &command()),
+            Err(Error::SpawnDenied)
+        ));
+        assert_eq!(launcher.fs.created, vec!["refused"]);
+        assert_eq!(launcher.fs.removed, vec!["refused"]);
+        assert!(launcher.fs.writes.is_empty(), "setup failure cannot restore cpu.max");
     }
 
     #[test]
