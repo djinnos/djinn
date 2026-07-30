@@ -619,6 +619,17 @@ jobs:
       - name: Check applied migrations are immutable
         if: needs.preflight.outputs.migrations == 'true'
         run: ./scripts/check-migrations-immutable.sh
+      # Routed by the same output as the size guard: both police the shape of
+      # Rust source, and `size` is set for any server change. Unlike the size
+      # guard this one scans the whole tree rather than the diff — it is a
+      # grep over tracked *.rs with no build, and a whole-tree scan cannot be
+      # dodged by a base-SHA trick.
+      - name: Self-test include! guard
+        if: needs.preflight.outputs.size == 'true'
+        run: ./scripts/test-check-include-macro.sh
+      - name: Check no include! of hand-written source
+        if: needs.preflight.outputs.size == 'true'
+        run: ./scripts/check-include-macro.sh
       - name: Check raw-SQL boundary
         if: needs.preflight.outputs.rawSql == 'true'
         run: ./scripts/check-raw-sql-boundary.sh
