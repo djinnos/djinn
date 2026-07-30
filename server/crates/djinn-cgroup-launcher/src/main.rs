@@ -10,12 +10,21 @@
 //!
 //! Configuration is read from the environment the Job renders
 //! (`djinn-k8s::launcher`): the delegated cgroup root, control socket path, the
-//! worker-private credential path, the expected delegated-root owner uid, and the
-//! unleased/leased broker quotas. Anything missing/invalid or a delegated cgroup
-//! that fails the [`Readiness`](djinn_cgroup_launcher::Readiness) contract, exits
-//! non-zero with a NAMED error BEFORE the broker accepts a single connection.
-//! Every one of those conditions is a readiness failure, never a per-command
-//! error discovered after the pod has taken work (task grkq).
+//! worker-private credential path, the expected delegated-root owner uid, the
+//! unleased/leased broker quotas, and the quota-authority protocol
+//! ([`AUTHORITY_PROTOCOL_ENV`], optional — absent means `leaf-v1`). Anything
+//! missing/invalid or a delegated cgroup that fails the
+//! [`Readiness`](djinn_cgroup_launcher::Readiness) contract, exits non-zero with
+//! a NAMED error BEFORE the broker accepts a single connection. Every one of
+//! those conditions is a readiness failure, never a per-command error discovered
+//! after the pod has taken work (task grkq).
+//!
+//! The protocol is the ONLY thing here that decides whether the launcher writes
+//! leaf `cpu.max` at all, and it is read from the process environment for one
+//! reason: it is the only surface a Kubernetes Job can change. #2800 landed the
+//! `resize-v2` branches with no caller outside the crate's own tests, so the
+//! mechanism could not fire in production even though every acceptance criterion
+//! was true (task 78v1).
 
 use std::io::Write;
 use std::path::Path;
