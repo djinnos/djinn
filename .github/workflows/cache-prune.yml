@@ -26,7 +26,23 @@ on:
       keep:
         description: Newest entries to retain per rust cache family
         type: string
-        default: '2'
+        # 2 -> 1. Keeping a second entry per family protected nothing: rust-cache
+        # restores by key PREFIX and GitHub returns the newest match, so the
+        # older entry is never read under any circumstance — including the one it
+        # looks like insurance against, a corrupt newest entry (the warm job sets
+        # `cache-on-failure: true`, so a partial deposit is saved and still wins
+        # the prefix match). This script's own header already says only the
+        # newest entry per family is ever read.
+        #
+        # It was not free: measured 2026-07-30, the second copies were 1.67 GB
+        # (server-test) and 0.78 GB (server-aarch64-check) = 2.45 GB of a 10 GB
+        # repo cap that was sitting at 10.49 GB and actively evicting the live
+        # entries CI restores on every run.
+        #
+        # Safe because each family has exactly one writer, on main, in a
+        # push/dispatch-only job (`ci-cache-policy.test.mjs` enforces this), and
+        # an in-flight save is not visible to restores until it completes.
+        default: '1'
 
 # The token needs `actions: write` to delete a cache. Everything else stays
 # read-only: this workflow must never be able to touch repository contents.
@@ -56,17 +72,35 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
         run: |-
+          # Both defaults must agree. `inputs.keep` is empty on the SCHEDULED
+          # run (inputs exist only for workflow_dispatch), so this fallback —
+          # not the `default:` above — is what governs the daily prune. They
+          # were 2 and 2; see the input's comment for why 1.
           node scripts/prune-actions-caches.mjs \
-            --keep '${{ inputs.keep || '2' }}' \
+            --keep '${{ inputs.keep || '1' }}' \
             ${{ inputs.dry_run && '--dry-run' || '' }}
+      # This step failed on every scheduled run from at least 2026-07-28 until
+      # 2026-07-30 with:
+      #
+      #   the `--slurp` option is not supported with `--jq` or `--template`
+      #
+      # A newer `gh` on the runner image began rejecting that flag combination.
+      # The prune itself was unaffected and kept working (run 30429331029
+      # reclaimed 2.46 GB before dying here), so the only symptom was a red
+      # workflow and — worse — the budget notice this step exists to emit never
+      # reaching anyone while the repo sat over its cap.
+      #
+      # Rewritten onto the dedicated cache-usage endpoint rather than re-fixing
+      # the flags: it returns both figures in ONE unpaginated response, so there
+      # is no `--paginate`, no `--slurp`, and nothing left for that
+      # incompatibility to apply to.
       - name: Report remaining budget
         if: always()
         env:
           GH_TOKEN: ${{ github.token }}
         run: |-
-          total=$(gh api "/repos/${{ github.repository }}/actions/caches?per_page=100" --paginate --slurp \
-            --jq '[.[].actions_caches[].size_in_bytes] | add // 0')
-          count=$(gh api "/repos/${{ github.repository }}/actions/caches?per_page=100" --paginate --slurp \
-            --jq '[.[].actions_caches[]] | length')
+          usage=$(gh api "/repos/${{ github.repository }}/actions/cache/usage")
+          total=$(printf '%s' "$usage" | jq -r '.active_caches_size_in_bytes // 0')
+          count=$(printf '%s' "$usage" | jq -r '.active_caches_count // 0')
           gb=$(awk "BEGIN { printf \"%.2f\", ${total}/1073741824 }")
           echo "::notice::cache-budget ${gb} GB across ${count} entries (repo cap 10 GB, LRU eviction)"

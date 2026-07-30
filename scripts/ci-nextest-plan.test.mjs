@@ -484,7 +484,7 @@ describe('planTests', () => {
     assert.equal(plan.coldStart, false);
   });
 
-  it('widens PR to four shards at the test-count threshold with fresh timing', () => {
+  it('widens PR to the max shard count at the test-count threshold with fresh timing', () => {
     const testCases = {};
     for (let i = 0; i < PR_WIDEN_TEST_THRESHOLD; i++) {
       testCases[`t_${i}`] = testCase();
@@ -497,7 +497,7 @@ describe('planTests', () => {
     assert.equal(plan.coldStart, false);
   });
 
-  it('widens PR to four shards at the duration threshold with fresh timing', () => {
+  it('widens PR to the max shard count at the duration threshold with fresh timing', () => {
     const testCases = {};
     const target = Math.ceil(PR_WIDEN_DURATION_THRESHOLD_SECONDS / 100) + 1;
     for (let i = 0; i < target; i++) {
@@ -511,7 +511,7 @@ describe('planTests', () => {
     assert.equal(plan.coldStart, false);
   });
 
-  it('keeps merge-group and full-validation wide at four shards', () => {
+  it('keeps merge-group and full-validation at the wide default shard count', () => {
     const tests = parseDiscovery(JSON.stringify(SUMMARY_ONE));
     const timings = timingMap(tests, 10);
     const mg = planTests({ tests, timings, profile: 'merge-group' });
