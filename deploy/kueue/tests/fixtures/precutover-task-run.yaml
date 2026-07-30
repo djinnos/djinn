@@ -1,0 +1,18 @@
+# This is deliberately an ordinary pre-cutover Job: no queue name and no
+# djinn.io/kueue-build-object label. The zero-capture gate must apply it unchanged.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: zero-capture-precutover-task-run
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: djinn
+        app.kubernetes.io/component: taskrun
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: task-run
+          image: registry.k8s.io/pause:3.9
