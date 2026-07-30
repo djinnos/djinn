@@ -33,9 +33,10 @@ use djinn_coordinator::run_dir_observe::{RunDirObserveSeams, arm_disk_observatio
 use djinn_core::clock::{Clock, SystemClock as SystemClockTrait};
 use djinn_core::models::KnowledgeInjectionConfig;
 use djinn_db::{
-    AdmissionHandoffAuthority, AdmissionHandoffRepository, Database, NoopNoteVectorStore,
-    NoteVectorStore, ProjectRepository, QdrantCodeChunkConfig, QdrantCodeChunkVectorStore,
-    QdrantConfig, QdrantNoteVectorStore, ReadyQuery, SettingsRepository, TaskRepository,
+    AdmissionHandoffAuthority, AdmissionHandoffRepository, BuildPodPermitRepository, Database,
+    NoopNoteVectorStore, NoteVectorStore, ProjectRepository, QdrantCodeChunkConfig,
+    QdrantCodeChunkVectorStore, QdrantConfig, QdrantNoteVectorStore, ReadyQuery,
+    SettingsRepository, TaskRepository,
 };
 use djinn_git::{GitActorHandle, GitError};
 use djinn_image_controller::{
@@ -72,6 +73,7 @@ const MODEL_HEALTH_STATE_KEY: &str = "model_health.state";
 
 const BUILD_ADMISSION_MODE_ENV: &str = "DJINN_BUILD_ADMISSION_MODE";
 const MAX_BUILD_TASKRUNS_ENV: &str = "DJINN_MAX_BUILD_TASKRUNS";
+const MAX_BUILD_PODS_ENV: &str = "DJINN_MAX_BUILD_PODS";
 const HANDOFF_WARNING_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -143,6 +145,7 @@ impl HandoffWarningLogState {
 pub(crate) struct BuildAdmissionConfig {
     mode: BuildAdmissionMode,
     cap: i64,
+    pod_limit: Option<i64>,
 }
 
 impl BuildAdmissionConfig {
@@ -153,10 +156,15 @@ impl BuildAdmissionConfig {
         Self::parse(
             std::env::var(BUILD_ADMISSION_MODE_ENV).ok().as_deref(),
             std::env::var(MAX_BUILD_TASKRUNS_ENV).ok().as_deref(),
+            std::env::var(MAX_BUILD_PODS_ENV).ok().as_deref(),
         )
     }
 
-    fn parse(mode: Option<&str>, cap: Option<&str>) -> Result<Self, String> {
+    fn parse(
+        mode: Option<&str>,
+        cap: Option<&str>,
+        pod_limit: Option<&str>,
+    ) -> Result<Self, String> {
         let explicit_mode = match mode {
             None => None,
             Some("off") => Some(BuildAdmissionMode::Off),
@@ -186,6 +194,7 @@ impl BuildAdmissionConfig {
                 _ => Ok(Self {
                     mode: BuildAdmissionMode::Off,
                     cap: 0,
+                    pod_limit: parse_pod_limit(pod_limit),
                 }),
             };
         }
@@ -198,8 +207,16 @@ impl BuildAdmissionConfig {
         Ok(Self {
             mode: explicit_mode.unwrap_or(BuildAdmissionMode::Observe),
             cap,
+            pod_limit: parse_pod_limit(pod_limit),
         })
     }
+}
+
+/// Parse the independent optional pod permit cap; invalid values remain unavailable.
+fn parse_pod_limit(value: Option<&str>) -> Option<i64> {
+    value
+        .and_then(|value| value.parse::<i64>().ok())
+        .filter(|limit| (1..=BuildAdmissionConfig::MAX_CAP).contains(limit))
 }
 
 /// Production [`WarmCompletionSink`]: converge the server's in-memory
@@ -402,6 +419,8 @@ struct Inner {
     /// be re-asserted by a process that actually holds the lock. A standby never
     /// sets this, so it can never re-open its own topology gate.
     pub build_admission_topology_confirmed: AtomicBool,
+    /// Independently parsed pod-permit cap; never derived from build task runs.
+    pub build_pod_limit: Option<i64>,
     /// Per-model circuit-breaker health tracker.
     pub health_tracker: HealthTracker,
     /// Immutable retrieval-health config parsed once at startup.
@@ -558,6 +577,7 @@ impl AppState {
             BuildAdmissionConfig {
                 mode: BuildAdmissionMode::Observe,
                 cap: BuildAdmissionConfig::DEFAULT_CAP,
+                pod_limit: None,
             },
         )
     }
@@ -675,6 +695,7 @@ impl AppState {
                 provider_catalog_refresh_started: AtomicBool::new(false),
                 handoff_warning_loop_started: AtomicBool::new(false),
                 build_admission_topology_confirmed: AtomicBool::new(false),
+                build_pod_limit: admission_config.pod_limit,
                 health_tracker: HealthTracker::new(),
                 retrieval_config,
                 retrieval_metrics,
@@ -1064,6 +1085,23 @@ impl AppState {
         });
     }
 
+    /// Verify the independent pod-permit prerequisites without changing the disarmed task-dispatch lease path.
+    async fn initialize_build_pod_permit_prerequisites(&self) {
+        let Some(admission) = self.inner.build_admission.clone() else {
+            return;
+        };
+        let ready = self.inner.build_pod_limit.is_some()
+            && BuildPodPermitRepository::new(self.db().clone())
+                .global_pool_is_readable()
+                .await
+                .unwrap_or(false);
+        if ready {
+            admission.mark_pod_permit_prerequisites_ready();
+        } else {
+            admission.mark_pod_permit_prerequisites_missing();
+        }
+    }
+
     /// Recover the durable build-admission journal and seed the controller
     /// before any Kubernetes inventory or task/warm create can run.
     ///
@@ -1376,8 +1414,8 @@ impl AppState {
     /// Re-walk the build-admission startup gates after a live promotion reset
     /// them.
     ///
-    /// [`BuildAdmissionController::require_enforcement`] clears the journal,
-    /// inventory, and topology gates so a configured Off/Observe process cannot
+    /// [`BuildAdmissionController::require_enforcement`] clears the pod-permit,
+    /// journal, inventory, and topology gates so a configured Off/Observe process cannot
     /// weaken a durable emergency epoch on the strength of checks it never ran.
     /// That is right at startup, where the gates are walked immediately
     /// afterwards — but the same promotion also happens on the periodic handoff
@@ -1391,6 +1429,7 @@ impl AppState {
     /// stays fail-closed at `TopologyPending`, preserving the single-active
     /// writer invariant.
     async fn reestablish_build_admission_gates(&self, admission: &BuildAdmissionController) {
+        self.initialize_build_pod_permit_prerequisites().await;
         self.initialize_build_admission_recovery().await;
         self.initialize_build_admission_inventory().await;
         if self
@@ -2621,6 +2660,7 @@ impl AppState {
         // no admission coupling. This must precede `initialize_graph_warmer`
         // because the warmer can create warm jobs under the shared cap.
         self.initialize_build_admission_handoff().await;
+        self.initialize_build_pod_permit_prerequisites().await;
         self.initialize_build_admission_recovery().await;
         self.initialize_build_admission_deferred_recovery().await;
 
@@ -4317,6 +4357,7 @@ mod build_admission_config_tests {
             BuildAdmissionConfig {
                 mode: BuildAdmissionMode::Observe,
                 cap: 3,
+                pod_limit: None,
             },
         );
         assert!(matches!(
@@ -4388,6 +4429,7 @@ mod build_admission_config_tests {
             BuildAdmissionConfig {
                 mode: BuildAdmissionMode::Observe,
                 cap: BuildAdmissionConfig::DEFAULT_CAP,
+                pod_limit: None,
             },
         );
 
@@ -4591,37 +4633,136 @@ mod build_admission_config_tests {
     #[test]
     fn build_admission_defaults_and_legacy_zero_are_deterministic() {
         assert_eq!(
-            BuildAdmissionConfig::parse(None, None).unwrap(),
+            BuildAdmissionConfig::parse(None, None, None).unwrap(),
             BuildAdmissionConfig {
                 mode: BuildAdmissionMode::Observe,
-                cap: 3
+                cap: 3,
+                pod_limit: None
             }
         );
         assert_eq!(
-            BuildAdmissionConfig::parse(None, Some("0")).unwrap(),
+            BuildAdmissionConfig::parse(None, Some("0"), None).unwrap(),
             BuildAdmissionConfig {
                 mode: BuildAdmissionMode::Off,
-                cap: 0
+                cap: 0,
+                pod_limit: None
             }
         );
-        assert!(BuildAdmissionConfig::parse(Some("observe"), Some("0")).is_err());
-        assert!(BuildAdmissionConfig::parse(Some("enforce"), Some("0")).is_err());
+        assert!(BuildAdmissionConfig::parse(Some("observe"), Some("0"), None).is_err());
+        assert!(BuildAdmissionConfig::parse(Some("enforce"), Some("0"), None).is_err());
     }
 
     #[test]
     fn build_admission_rejects_invalid_startup_values() {
         for cap in ["", "-1", "not-a-number", "65"] {
             assert!(
-                BuildAdmissionConfig::parse(None, Some(cap)).is_err(),
+                BuildAdmissionConfig::parse(None, Some(cap), None).is_err(),
                 "{cap}"
             );
         }
         for mode in ["", "Observe", "unknown"] {
             assert!(
-                BuildAdmissionConfig::parse(Some(mode), None).is_err(),
+                BuildAdmissionConfig::parse(Some(mode), None, None).is_err(),
                 "{mode:?}"
             );
         }
+    }
+
+    #[test]
+    fn build_pod_limit_is_independent_of_build_taskruns() {
+        for taskruns in [None, Some("1"), Some("64")] {
+            assert_eq!(
+                BuildAdmissionConfig::parse(None, taskruns, Some("7"))
+                    .expect("task-run input is not a pod fallback")
+                    .pod_limit,
+                Some(7),
+            );
+        }
+        for pods in [
+            None,
+            Some(""),
+            Some("0"),
+            Some("-1"),
+            Some("65"),
+            Some("invalid"),
+        ] {
+            assert_eq!(
+                BuildAdmissionConfig::parse(None, Some("4"), pods)
+                    .expect("valid task-run cap")
+                    .pod_limit,
+                None,
+                "{pods:?}",
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn absent_or_invalid_pod_limit_keeps_compile_readiness_closed() {
+        use djinn_agent::actors::coordinator::BuildAdmissionReadiness;
+
+        for pod_limit in [None, Some("invalid")] {
+            let config = BuildAdmissionConfig::parse(None, Some("4"), pod_limit)
+                .expect("the task-run cap remains independently valid");
+            assert_eq!(config.pod_limit, None, "{pod_limit:?}");
+            let state = state_for_admission_config(config);
+            state.initialize_build_pod_permit_prerequisites().await;
+            let admission = admission(&state);
+            assert_eq!(
+                admission.readiness(),
+                BuildAdmissionReadiness::PodPermitPrerequisitesMissing,
+                "{pod_limit:?} must not report healthy compile prerequisites"
+            );
+            assert!(!admission.is_ready());
+        }
+    }
+
+    #[tokio::test]
+    async fn missing_pool_row_or_repository_error_keeps_compile_readiness_closed() {
+        use djinn_agent::actors::coordinator::BuildAdmissionReadiness;
+
+        let missing_row_db = Database::open_in_memory().expect("test database");
+        BuildPodPermitRepository::new(missing_row_db.clone())
+            .delete_global_pool_for_test()
+            .await
+            .expect("delete canonical pool through repository test seam");
+        let missing_row = state_for_admission_config_with_db(
+            missing_row_db,
+            BuildAdmissionConfig {
+                mode: BuildAdmissionMode::Observe,
+                cap: 3,
+                pod_limit: Some(1),
+            },
+        );
+        missing_row
+            .initialize_build_pod_permit_prerequisites()
+            .await;
+        assert_eq!(
+            admission(&missing_row).readiness(),
+            BuildAdmissionReadiness::PodPermitPrerequisitesMissing,
+            "a missing canonical pool row must not report healthy prerequisites"
+        );
+
+        let unavailable_db = Database::open_in_memory().expect("test database");
+        BuildPodPermitRepository::new(unavailable_db.clone())
+            .drop_pool_relation_for_test()
+            .await
+            .expect("drop pool relation through repository test seam");
+        let unavailable = state_for_admission_config_with_db(
+            unavailable_db,
+            BuildAdmissionConfig {
+                mode: BuildAdmissionMode::Observe,
+                cap: 3,
+                pod_limit: Some(1),
+            },
+        );
+        unavailable
+            .initialize_build_pod_permit_prerequisites()
+            .await;
+        assert_eq!(
+            admission(&unavailable).readiness(),
+            BuildAdmissionReadiness::PodPermitPrerequisitesMissing,
+            "a repository error must be collapsed to closed prerequisites"
+        );
     }
 
     #[tokio::test]
@@ -4629,6 +4770,7 @@ mod build_admission_config_tests {
         let state = state_for_admission_config(BuildAdmissionConfig {
             mode: BuildAdmissionMode::Off,
             cap: 3,
+            pod_limit: None,
         });
 
         // Startup must read a durable handoff row even when standalone v0 is
@@ -4698,6 +4840,7 @@ mod build_admission_config_tests {
             let state = state_for_admission_config(BuildAdmissionConfig {
                 mode: BuildAdmissionMode::Observe,
                 cap: 3,
+                pod_limit: None,
             });
             let repository = handoff_repository(&state);
             // A real cutover arms the invocation authority to enforce while the
@@ -4731,6 +4874,7 @@ mod build_admission_config_tests {
         let healthy = state_for_admission_config(BuildAdmissionConfig {
             mode: BuildAdmissionMode::Observe,
             cap: 3,
+            pod_limit: None,
         });
         let healthy_repository = handoff_repository(&healthy);
         let epoch = healthy_repository
@@ -4757,6 +4901,7 @@ mod build_admission_config_tests {
         let unhealthy = state_for_admission_config(BuildAdmissionConfig {
             mode: BuildAdmissionMode::Observe,
             cap: 3,
+            pod_limit: None,
         });
         let unhealthy_repository = handoff_repository(&unhealthy);
         unhealthy.initialize_build_admission_handoff().await;
@@ -4783,6 +4928,7 @@ mod build_admission_config_tests {
             BuildAdmissionConfig {
                 mode: BuildAdmissionMode::Observe,
                 cap: 3,
+                pod_limit: None,
             },
         );
         // Initialize the repository-backed fixture before removing its
@@ -4804,6 +4950,7 @@ mod build_admission_config_tests {
             BuildAdmissionConfig {
                 mode: BuildAdmissionMode::Observe,
                 cap: 3,
+                pod_limit: None,
             },
         );
         first.initialize_build_admission_handoff().await;
@@ -4813,6 +4960,7 @@ mod build_admission_config_tests {
             BuildAdmissionConfig {
                 mode: BuildAdmissionMode::Observe,
                 cap: 3,
+                pod_limit: None,
             },
         );
         restarted.initialize_build_admission_handoff().await;
@@ -4876,6 +5024,7 @@ mod build_admission_config_tests {
         let first = state_for_admission_config(BuildAdmissionConfig {
             mode: BuildAdmissionMode::Enforce,
             cap: 3,
+            pod_limit: None,
         });
         let first_admission = first
             .inner
@@ -4895,6 +5044,7 @@ mod build_admission_config_tests {
         let second = state_for_admission_config(BuildAdmissionConfig {
             mode: BuildAdmissionMode::Enforce,
             cap: 3,
+            pod_limit: None,
         });
         let second_admission = second
             .inner
@@ -4913,6 +5063,7 @@ mod build_admission_config_tests {
         let state = state_for_admission_config(BuildAdmissionConfig {
             mode: BuildAdmissionMode::Enforce,
             cap: 1,
+            pod_limit: None,
         });
         let admission = state
             .inner
@@ -4938,6 +5089,7 @@ mod build_admission_config_tests {
         let state = state_for_admission_config(BuildAdmissionConfig {
             mode: BuildAdmissionMode::Enforce,
             cap: 3,
+            pod_limit: Some(1),
         });
         let admission = state
             .inner
@@ -4951,7 +5103,12 @@ mod build_admission_config_tests {
             "Enforce starts fail-closed before journal recovery"
         );
 
-        // Journal recovery runs first and, on an empty journal, must NOT mark
+        // Pod-permit prerequisites run before journal recovery in production.
+        // They are healthy in this fixture, but the higher-priority journal gate
+        // remains the visible readiness reason until recovery completes.
+        state.initialize_build_pod_permit_prerequisites().await;
+
+        // Journal recovery runs next and, on an empty journal, must NOT mark
         // the controller healthy: the inventory gate keeps admission closed.
         state.initialize_build_admission_recovery().await;
         assert_eq!(
@@ -5063,6 +5220,7 @@ mod build_admission_config_tests {
         let state = state_for_admission_config(BuildAdmissionConfig {
             mode: BuildAdmissionMode::Observe,
             cap: 4,
+            pod_limit: None,
         });
         let admission = state
             .inner
@@ -5157,6 +5315,7 @@ mod build_admission_config_tests {
         let state = state_for_admission_config(BuildAdmissionConfig {
             mode: BuildAdmissionMode::Observe,
             cap: 4,
+            pod_limit: None,
         });
         let volume = tempfile::tempdir().expect("temp volume");
         std::fs::create_dir(volume.path().join("22222222-2222-2222-2222-222222222222"))
@@ -5199,6 +5358,7 @@ mod build_admission_config_tests {
         let state = state_for_admission_config(BuildAdmissionConfig {
             mode: BuildAdmissionMode::Observe,
             cap: 4,
+            pod_limit: None,
         });
         let admission = state
             .inner
@@ -5490,6 +5650,7 @@ mod build_admission_config_tests {
             BuildAdmissionConfig {
                 mode: BuildAdmissionMode::Observe,
                 cap: 3,
+                pod_limit: Some(1),
             },
         );
         let repository = handoff_repository(&state);
@@ -5504,6 +5665,7 @@ mod build_admission_config_tests {
         // fail-closed, so the configured-Observe controller is promoted to
         // Enforce with every startup gate reset.
         state.initialize_build_admission_handoff().await;
+        state.initialize_build_pod_permit_prerequisites().await;
         let controller = admission(&state).clone();
         assert_eq!(
             controller.mode(),
@@ -5580,6 +5742,7 @@ mod build_admission_config_tests {
             BuildAdmissionConfig {
                 mode: BuildAdmissionMode::Observe,
                 cap: 3,
+                pod_limit: None,
             },
         );
         restarted.initialize_build_admission_handoff().await;
@@ -5613,6 +5776,7 @@ mod build_admission_config_tests {
             BuildAdmissionConfig {
                 mode: BuildAdmissionMode::Enforce,
                 cap: 3,
+                pod_limit: None,
             },
         );
         let project = ProjectRepository::new(db.clone(), state.event_bus())
