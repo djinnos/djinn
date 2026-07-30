@@ -91,8 +91,36 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha,scope=djinn-image-builder
-          cache-to: type=gha,scope=djinn-image-builder,mode=max
+          # NO `type=gha` cache here (or on any build step in this workflow).
+          # It cannot work: GitHub scopes a cache entry to the ref that wrote
+          # it, and a run may read only its own ref or the default branch. This
+          # workflow triggers on TAGS, so every release wrote a cache that no
+          # later release could ever read.
+          #
+          # Measured 2026-07-30 — each tag's 44 blob entries were created and
+          # last-accessed entirely inside that tag's own run:
+          #
+          #   v0.7.25  run 15:45-16:11  created 15:45-15:48  last read 15:50
+          #   v0.7.26  run 18:20-18:46  created 18:21-18:22  last read 18:25
+          #   v0.7.27  run 19:36-20:02  created 19:37-19:39  last read 19:41
+          #
+          # v0.7.26's run never touched v0.7.25's entries. Cost of that
+          # write-only ballast: 0.92 GB per release, ~3 releases/day, against a
+          # 10 GB repo cap that was at 10.49 GB and evicting the `server-test`
+          # family every CI lane restores. That eviction is the reason to remove
+          # this, not the wasted bytes.
+          #
+          # Nothing is lost. Where a job builds the same image twice
+          # (`runtime-base` below), the second build reuses the first's layers
+          # from the buildx BUILDER's own local cache — the builder persists for
+          # the job's lifetime, so intra-run reuse never depended on an exported
+          # cache. Single-build jobs like this one got nothing from it at all.
+          #
+          # Real cross-release reuse needs a ref-independent backend
+          # (`type=registry,ref=...:buildcache` on GHCR, which this workflow
+          # already authenticates to). That is a release-SPEED change with its
+          # own export cost to measure on a production path, deliberately not
+          # bundled into a PR-lane latency change.
 
   buildkitd:
     name: djinn-buildkitd
@@ -129,8 +157,8 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha,scope=djinn-buildkitd
-          cache-to: type=gha,scope=djinn-buildkitd,mode=max
+          # No `type=gha` cache — see the image-builder job above for why it was
+          # provably write-only on a tag-triggered workflow.
 
   runtime-base:
     name: djinn-agent-runtime-base
@@ -166,8 +194,13 @@ jobs:
           platforms: linux/amd64
           load: true
           tags: djinn-agent-runtime-base:validation
-          cache-from: type=gha,scope=djinn-agent-runtime-base
-          cache-to: type=gha,scope=djinn-agent-runtime-base,mode=max
+          # No `type=gha` cache — see the image-builder job for why it was
+          # provably write-only. This job builds runtime-base TWICE (here for
+          # validation, then again to publish below). That second build still
+          # reuses this one's layers: both steps drive the same
+          # docker/setup-buildx-action builder, which keeps its local cache for
+          # the job's lifetime. The exported cache was never what made the
+          # publish step fast.
       - name: Build representative generated Rust image
         uses: docker/build-push-action@v6
         with:
@@ -206,8 +239,9 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha,scope=djinn-agent-runtime-base
-          cache-to: type=gha,scope=djinn-agent-runtime-base,mode=max
+          # No `type=gha` cache. This build's inputs are byte-identical to the
+          # validation build above, so every layer is already in the shared
+          # builder's local cache and this step is a re-tag-and-push.
 
   # ── UI build (parallel with the worker cargo build) ───────────────────
   ui-dist:

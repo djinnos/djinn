@@ -633,14 +633,13 @@ jobs:
     needs: preflight
     if: needs.preflight.outputs.clippy == 'true' && github.event_name != 'push'
     runs-on: ubuntu-latest
-    # Raised from 25 when the deploy render-gate contract moved onto this lane.
-    # Measured on run 30479829505: Clippy 3m21s, render-gate 7m42s, job 11m50s
-    # (this lane was ~4m9s before). The render-gate step is slower than its
-    # ~1m local build because `cargo clippy` emits CHECK-mode artifacts for the
-    # workspace crates, so `cargo build -p djinn-k8s` recompiles the whole
-    # djinn-db -> djinn-core -> djinn-k8s chain in build mode; only the
-    # third-party deps come from the restored cache. 25 minutes left too little
-    # margin for a cold-cache run on top of that.
+    # 25 was raised to 35 while the deploy render-gate contract shared this
+    # lane. That contract now lives in `deploy-render-gate` below, so this job
+    # is back to lint-only: measured 4m9s before the contract arrived, 11m50s
+    # with it (Clippy 3m21s + render-gate 7m42s on run 30479829505), and the
+    # split returns it to ~4m. 35 is retained deliberately — the margin is for
+    # a COLD-cache clippy run, which is a property of this step, not of the
+    # contract that moved out.
     timeout-minutes: 35
     defaults:
       run:
@@ -649,24 +648,11 @@ jobs:
       SQLX_OFFLINE: "true"
     steps:
       - uses: actions/checkout@v4
-      # For the deploy render-gate contract at the end of this job. That suite
-      # needs BOTH `helm` and a BUILT `render-gate` binary
-      # (server/crates/djinn-k8s), so it cannot go on local-dev-contracts: that
-      # lane has helm but no Rust, and would pay for a cold toolchain and a cold
-      # djinn-k8s build. Here the `server-test` rust-cache family is already
-      # restored, so the build is incremental. Pinned to the same v3.12.3
-      # local-dev-contracts installs — two lanes rendering the same chart on
-      # different helm majors is a contract that means nothing.
-      - uses: azure/setup-helm@v4
-        with:
-          version: v3.12.3
       - run: rustup toolchain install
         working-directory: server
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: server
-          # NOTE: the `azure/setup-helm@v4` step above this one is for the
-          # deploy render-gate contract at the END of this job, not for clippy.
           # The dedicated `server-quality` family is gone. After #2342 moved
           # server-sqlx-freshness and memory-eval onto server-test, it served
           # exactly one job — this one — while holding ~2.5 GB of a 10 GB
@@ -791,16 +777,85 @@ jobs:
           before='${{ steps.fingerprints-restored.outputs.count }}'
           after=$(ls target/debug/.fingerprint 2>/dev/null | wc -l)
           echo "::notice::clippy-fingerprints restored=${before:-0} after=${after} built=$((after - ${before:-0}))"
-      # deploy/preflight/tests/ had never executed in CI. It is a DEPLOY
-      # contract, not a Rust one, and it is hosted on this lane only because it
-      # must `cargo build -p djinn-k8s --bin render-gate` and shell out to
-      # `helm`: this is the cheapest lane in the file that already has both a
-      # warm Rust cache and (as of the setup-helm step above) helm. Runs last so
-      # a failure here is never confused with a clippy failure, and so it cannot
-      # delay the lint signal. The directory is globbed by the runner, not
-      # enumerated, so a second preflight suite needs no edit here.
+  # deploy/preflight/tests/ is a DEPLOY contract, not a Rust one, but it must
+  # `cargo build -p djinn-k8s --bin render-gate` and shell out to `helm`, so it
+  # cannot go on local-dev-contracts: that lane has helm but no Rust, and would
+  # pay for a cold toolchain and a cold djinn-k8s build.
+  #
+  # It lived as the LAST STEP of `server-clippy` until this job existed, which
+  # made it a serial tail on the second-longest lane in the file: measured
+  # 7m42s of render-gate behind 3m21s of clippy for an 11m50s job (run
+  # 30479829505), against a ~12m30s `server-test` critical path. Two
+  # independent gates were queued behind one runner for no reason — clippy's
+  # lint signal was delayed by a Helm contract, and the Helm contract could not
+  # start until the lint finished.
+  #
+  # Splitting them is not free: this lane re-pays checkout and a rust-cache
+  # restore (~45s together). It wins anyway because the 7m42s was never
+  # clippy's fault. The old comment blamed it on `cargo clippy` emitting
+  # CHECK-mode artifacts, but that is not the mechanism: check-mode `.rmeta`
+  # and build-mode `.rlib` units coexist in target/ under different `-C
+  # metadata` and neither displaces the other. The real cost is that
+  # `actions/checkout` restamps every workspace source mtime, so cargo
+  # fingerprints the whole djinn-db -> djinn-core -> djinn-k8s chain as dirty
+  # and rebuilds it in build mode on ANY lane — see the `cache-workspace-crates`
+  # note on `cache-warm-x86_64-test`. That cost is unchanged by this split; what
+  # the split removes is paying it in series behind clippy.
+  #
+  # The `server-test` family is restored here for the same reason clippy uses
+  # it: `cache-warm-x86_64-test` deposits both the codegen and the check-mode
+  # dependency layers into that one entry, so the third-party half of the
+  # djinn-k8s chain comes from cache. Restore-only (`save-if: false`) —
+  # `ci-cache-policy.test.mjs` enforces single-writer ownership per family.
+  #
+  # The runner globs deploy/preflight/tests/, so a second suite dropped in
+  # there runs here with no edit to this file.
+  deploy-render-gate:
+    name: Deploy Render Gate
+    needs: preflight
+    # Same routing as `server-clippy` on purpose: this contract's inputs are
+    # the chart and the djinn-k8s binary, and every path that can change either
+    # lands in the router's `rustCore` lane or fails closed into `unknown`
+    # (deploy/** is not a narrow lane, so it selects full validation). Gating
+    # it on its own router output would be a new, weaker guard for the same
+    # set of files.
+    if: needs.preflight.outputs.clippy == 'true' && github.event_name != 'push'
+    runs-on: ubuntu-latest
+    # Measured 7m42s as a clippy step with a warm cache. 20 leaves margin for a
+    # cold-cache djinn-k8s chain without hiding a hang.
+    timeout-minutes: 20
+    env:
+      SQLX_OFFLINE: "true"
+    steps:
+      - uses: actions/checkout@v4
+      # Pinned to the same v3.12.3 local-dev-contracts installs — two lanes
+      # rendering the same chart on different helm majors is a contract that
+      # means nothing.
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.12.3
+      - run: rustup toolchain install
+        working-directory: server
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: server
+          shared-key: server-test
+          cache-on-failure: true
+          cache-all-crates: true
+          save-if: false
+        id: rust-cache
+      - name: Log cache family and restore status
+        run: |-
+          echo "cache-family=server-test"
+          echo "shared-key=server-test"
+          echo "runner-os=${{ runner.os }}"
+          echo "rustc=$(rustc --version || echo 'unknown')"
+          echo "cache-hit=${{ steps.rust-cache.outputs.cache-hit }}"
+          echo "::notice::cache-family=server-test shared-key=server-test cache-hit=${{ steps.rust-cache.outputs.cache-hit }}"
+      - name: Runner disk headroom preflight
+        # Body/thresholds: CI_RUNNER_DISK_PREFLIGHT at the top of this file.
+        run: bash -c "$CI_RUNNER_DISK_PREFLIGHT"
       - name: Test deploy render-gate contract
-        working-directory: ${{ github.workspace }}
         run: bash scripts/test-deploy-contracts.sh deploy/preflight/tests
   launcher-kernel-boundary:
     name: Launcher Kernel Boundary
@@ -2096,6 +2151,7 @@ jobs:
       - ci-contracts
       - server-guards
       - server-clippy
+      - deploy-render-gate
       - server-aarch64-check
       - nextest-plan
       - server-test
@@ -2118,6 +2174,8 @@ jobs:
                || needs.preflight.outputs.capability == 'true'
                || needs.preflight.outputs.boundaries == 'true') }}:${{ needs.server-guards.result }}
           CLIPPY: ${{ needs.preflight.outputs.clippy }}:${{ needs.server-clippy.result }}
+          # Routed by the same output as clippy — see the job's own comment.
+          RENDER_GATE: ${{ needs.preflight.outputs.clippy }}:${{ needs.deploy-render-gate.result }}
           AARCH64: ${{ needs.preflight.outputs.aarch64 }}:${{ needs.server-aarch64-check.result }}
           SERVER_TEST_PLAN: ${{ needs.preflight.outputs.serverTest }}:${{ needs.nextest-plan.result }}
           SERVER_TEST_SHARDS: ${{ needs.preflight.outputs.serverTest }}:${{ needs.server-test.result }}
@@ -2137,7 +2195,8 @@ jobs:
             if [ "$selected" = false ] && [ "$result" = skipped ]; then return; fi
             echo "lane $lane selected=$selected result=$result"; return 1
           }
-          check server-guards "$GUARDS"; check clippy "$CLIPPY"; check aarch64 "$AARCH64"
+          check server-guards "$GUARDS"; check clippy "$CLIPPY"
+          check deploy-render-gate "$RENDER_GATE"; check aarch64 "$AARCH64"
           check server-test-plan "$SERVER_TEST_PLAN"; check server-test-shards "$SERVER_TEST_SHARDS"; check server-test-timing "$SERVER_TEST_TIMING"
           check sqlx-freshness "$SQLX"; check memory-eval "$MEMORY"
           check local-dev-contracts "$TILT_CONTRACTS"; check qa-smoke "$QA_SMOKE"; check ui "$UI"

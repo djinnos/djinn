@@ -14,7 +14,31 @@ export const PROOF_VERSION = 'ci-nextest-plan/v1';
 export const FALLBACK_DURATION_SECONDS = 30;
 export const DEFAULT_MAX_AGE_DAYS = 7;
 export const PR_DEFAULT_SHARDS = 2;
-export const PR_MAX_SHARDS = 4;
+// 4 -> 8. The PR lane's critical path is one `server-test` shard, and only the
+// TEST-RUN half of that job scales with shard count: measured on run
+// 30498632438, a shard was 1m36s setup + 5m54s `Build test binaries` + 4m00s
+// run. The build is the same `--workspace --all-targets` compile in every
+// shard and does not shrink when the shard's test list does, so doubling shards
+// halves ~4m and leaves ~7m30s untouched. At 8 the run half is ~2m and the
+// fixed half dominates; going wider buys progressively less for a full extra
+// runner each time, which is why this stops at 8 rather than 16.
+//
+// The exact-once proof is shard-count agnostic (`planTests` distributes over
+// `shardCount` and `validateExactOnce` checks the partition), so this is a
+// balancing knob, not a coverage one. The suite is 11 633 discovered tests
+// against 8 shards and `planTests` assigns each test to the least-loaded shard,
+// so no shard can come out empty here. Do not read the workflow's
+// `active=false` guard as empty-shard handling: that path fires only for a
+// matrix shardIndex >= the plan's shardCount, which the dynamic matrix (built
+// from `.shards[]`) never produces. A shard row with an empty test list would
+// get `not (binary_id(/./))` and still run — unreachable at this ratio, but it
+// is not the guard's job to catch it.
+//
+// This is deliberately NOT applied to the merge queue below. A queue entry that
+// fails ejects and invalidates the entries speculatively stacked behind it
+// (maximumEntriesToBuild=5, mergingStrategy=HEADGREEN), so the queue's cost
+// function is throughput under contention, not latency of one entry.
+export const PR_MAX_SHARDS = 8;
 export const WIDE_DEFAULT_SHARDS = 4;
 export const COLD_START_SHARDS = 4;
 export const PR_WIDEN_TEST_THRESHOLD = 200;
