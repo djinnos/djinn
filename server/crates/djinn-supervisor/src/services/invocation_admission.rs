@@ -299,6 +299,41 @@ mod tests {
         );
     }
 
+    /// **THE BEHAVIOUR-PRESERVATION PROOF FOR THE KUEUE CUTOVER (S3b).**
+    ///
+    /// The fixture is not a synthetic armed epoch: it is the verbatim durable
+    /// singleton production was running on 2026-07-30 — `phase ForwardOverlap`,
+    /// `epoch 14`, `v0_mode Enforce`, `v1_mode Enforce`, `cap 3`,
+    /// `emergency_ack_epoch 14`, `invocation_ack_epoch 14` — written column by
+    /// column as SQL literals by
+    /// [`AdmissionHandoffRepository::seed_live_production_row_for_test`].
+    ///
+    /// That row must project to [`InvocationLiftDecision::Lift`] BEFORE and
+    /// AFTER the v0↔v1 handoff protocol is retired. `Lift` is what raises
+    /// `cpu.max` for a bound invocation; `Unleased` selects
+    /// `LeaseAuthority::Unarmed` and removes per-invocation CPU containment
+    /// altogether. Neither substitution is acceptable, and neither produces a
+    /// compile error — so this is the assertion that has to carry the change.
+    #[tokio::test]
+    async fn the_live_production_row_lifts_the_per_invocation_cpu_lease() {
+        let db = Database::open_in_memory().expect("ephemeral test database");
+        let row = AdmissionHandoffRepository::new(db.clone())
+            .seed_live_production_row_for_test()
+            .await
+            .expect("write the live production row");
+        assert_eq!(row.epoch, 14, "the fixture is production's epoch");
+        assert_eq!(row.v1_mode, V1Mode::Enforce);
+        assert_eq!(row.cap, Some(3), "cap 3 is production's live reference cap");
+
+        let authority = DurableInvocationLiftAuthority::new(db, "s3b-production-row");
+        assert_eq!(
+            authority.invocation_lift_decision().await,
+            InvocationLiftDecision::Lift,
+            "the live production row must keep arming the per-invocation cgroup \
+             CPU lease; Unleased here means production loses containment"
+        );
+    }
+
     /// The distinction `.map_err(|_| ())` destroyed, and why blocker 13 was
     /// invisible: a read that FAILED (this process cannot see the
     /// `admission_handoff` table — e.g. it was handed a project's `DATABASE_URL`

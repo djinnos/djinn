@@ -230,6 +230,60 @@ impl AdmissionHandoffRepository {
         })
     }
 
+    /// Write the **verbatim live production row**, retired columns and all.
+    ///
+    /// This is the behaviour-preservation fixture for the Kueue cutover's S3b
+    /// slice. It is not a synthetic "armed epoch": it is the exact singleton
+    /// `kubectl -n djinn exec deploy/djinn-server -- djinn-server epoch show`
+    /// printed on 2026-07-30, column for column:
+    ///
+    /// ```text
+    /// phase                 ForwardOverlap
+    /// epoch                 14
+    /// v0_mode               Enforce
+    /// v1_mode               Enforce
+    /// cap                   3
+    /// emergency_ack_epoch   14
+    /// invocation_ack_epoch  14
+    /// ```
+    ///
+    /// It is written by raw SQL rather than by walking the repository's
+    /// transitions ON PURPOSE. Every column is stated as a literal, so the
+    /// fixture keeps asserting compatibility with the row that is durably in
+    /// production even as the code stops writing — and eventually stops
+    /// selecting — the columns of the retired v0↔v1 handoff protocol. A test
+    /// that reconstructed this state by driving `seed_baseline` → `advance` →
+    /// `acknowledge` would silently follow the code as those primitives were
+    /// removed, and would stop proving anything about the live row.
+    ///
+    /// The retired columns are therefore deliberately populated here: until
+    /// `flc5`'s DROP migration retires them, a deployed binary must read this
+    /// exact physical row and still arm the per-invocation cgroup CPU lease.
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn seed_live_production_row_for_test(&self) -> DbResult<AdmissionHandoffRow> {
+        self.db.ensure_initialized().await?;
+        sqlx::query(
+            "INSERT INTO admission_handoff \
+                 (name, phase, epoch, emergency_ack_epoch, invocation_ack_epoch, \
+                  v0_mode, v1_mode, cap) \
+             VALUES ($1, 'forward_overlap', 14, 14, 14, 'enforce', 'enforce', 3) \
+             ON CONFLICT (name) DO UPDATE SET \
+                 phase = EXCLUDED.phase, \
+                 epoch = EXCLUDED.epoch, \
+                 emergency_ack_epoch = EXCLUDED.emergency_ack_epoch, \
+                 invocation_ack_epoch = EXCLUDED.invocation_ack_epoch, \
+                 v0_mode = EXCLUDED.v0_mode, \
+                 v1_mode = EXCLUDED.v1_mode, \
+                 cap = EXCLUDED.cap",
+        )
+        .bind(HANDOFF_NAME)
+        .execute(self.db.pool())
+        .await?;
+        self.read().await?.ok_or_else(|| {
+            DbError::InvalidData("live production fixture absent after seeding".into())
+        })
+    }
+
     /// Remove the singleton to exercise startup behavior for installations
     /// where no durable handoff has been created.
     #[cfg(any(test, feature = "test-support"))]
