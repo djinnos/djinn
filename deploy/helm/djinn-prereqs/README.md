@@ -11,9 +11,26 @@ helm install djinn-prereqs deploy/helm/djinn-prereqs \
   --namespace kueue-system --create-namespace --wait
 ```
 
-Requires **Kubernetes >= 1.29** (a Kueue 0.19 requirement). The upstream
-`Chart.yaml` declares no `kubeVersion`, so Helm will *not* stop you on an older
-cluster — check `kubectl version` yourself.
+Requires **Kubernetes >= 1.30**, measured by installing this chart rather than
+read off a release note. The upstream `Chart.yaml` declares no `kubeVersion`,
+so Helm will *not* stop you on an older cluster — check `kubectl version`
+yourself.
+
+| Cluster | Result |
+| --- | --- |
+| 1.29.14 | **fails** — Kueue 0.19's CRDs use `spec.versions[].selectableFields`, which does not exist before 1.30, so the `workloads.kueue.x-k8s.io` apply is rejected |
+| 1.30.13 | installs, controller Ready |
+| 1.31.0 (the `scripts/kind/setup-kind.sh` pin) | installs, controller Ready |
+| k3s 1.35.5 (production VPS) | above the floor |
+
+The floor is 1.30 **only because `values.yaml` disables Kueue's DRA feature
+gates**. Kueue 0.19 ships `KueueDRAIntegration` on, which makes the manager
+index `resource.k8s.io/v1` ResourceSlices — an API group that is GA only in
+Kubernetes **1.34**. Left at the upstream default the controller exits with
+`could not setup ResourceSlice indexer`, `helm --wait` never returns, and you
+are left with Established CRDs and registered webhooks behind a dead
+controller. Do not remove those gates without moving this number to 1.34;
+`tests/feature-gates.sh` fails if you try.
 
 ## What this release does and does not do
 

@@ -226,8 +226,12 @@ does not own. Only needed if you want the Kueue queue topology
 (`kueue.enabled: true` in your values below); the chart installs fine without
 it, and the topology is inert either way.
 
-Requires **Kubernetes >= 1.29** — `k3s --version`. The upstream chart declares
-no `kubeVersion`, so Helm will not check this for you.
+Requires **Kubernetes >= 1.30** — `k3s --version`. The upstream chart declares
+no `kubeVersion`, so Helm will not check this for you. The production VPS runs
+k3s v1.35.5 and is well clear. That floor holds only because Djinn's values
+disable Kueue's DRA feature gates; with them at the upstream default the
+requirement is 1.34. See
+[deploy/kueue/README.md](../../deploy/kueue/README.md#minimum-kubernetes-is-130-and-only-because-dra-is-disabled).
 
 ```bash
 helm install djinn-prereqs deploy/helm/djinn-prereqs \

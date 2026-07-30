@@ -17,6 +17,52 @@ kueue:
   enabled: true
 
   # -------------------------------------------------------------------------
+  # Kubernetes floor: Dynamic Resource Allocation must be switched OFF
+  # -------------------------------------------------------------------------
+  # Kueue 0.19.0 ships KueueDRAIntegration ENABLED by default, and the manager
+  # builds a ResourceSlice indexer against `resource.k8s.io/v1` unconditionally
+  # when it is on. That API group is GA only in Kubernetes **1.34**; on anything
+  # older `setupIndexes` fails and the process exits:
+  #
+  #   "msg":"Unable to setup indexes","error":"could not setup ResourceSlice
+  #    indexer: no matches for kind \"ResourceSlice\" in version
+  #    \"resource.k8s.io/v1\""
+  #
+  # That is fatal, not degraded: the Deployment CrashLoopBackOffs, `helm --wait`
+  # never returns, and the release is left with all 11 CRDs Established and both
+  # webhook configurations registered behind a dead controller. Verified on a
+  # disposable kind cluster at 1.31.0 — the pin in scripts/kind/setup-kind.sh,
+  # i.e. the canonical local dev cluster, which could not install this chart at
+  # all until this override existed.
+  #
+  # Djinn does not use dynamic resource allocation: no ResourceClaim, no
+  # DeviceClass, no ResourceSlice, no `resourceClaims` in any PodSpec this
+  # repository renders. Turning the integration off costs nothing and restores
+  # a sub-1.34 floor.
+  #
+  # All THREE gates are required. KueueDRAIntegrationExtendedResource and
+  # KueueDRAIntegrationPartitionableDevices default to enabled and each declares
+  # a hard dependency on the parent; disabling only KueueDRAIntegration makes
+  # the manager reject its own flags at startup:
+  #
+  #   "msg":"conflicting feature gates detected","error":"featureGates: Invalid
+  #    value: \"KueueDRAIntegrationExtendedResource\":
+  #    KueueDRAIntegrationExtendedResource requires KueueDRAIntegration to be
+  #    enabled"
+  #
+  # Contract: deploy/helm/djinn-prereqs/tests/feature-gates.sh renders THIS
+  # chart and fails if any of the three is removed or flipped back on, so an
+  # upstream default cannot silently restore the 1.34 floor on a version bump.
+  controllerManager:
+    featureGates:
+      - name: KueueDRAIntegration
+        enabled: false
+      - name: KueueDRAIntegrationExtendedResource
+        enabled: false
+      - name: KueueDRAIntegrationPartitionableDevices
+        enabled: false
+
+  # -------------------------------------------------------------------------
   # Djinn scoping policy
   # -------------------------------------------------------------------------
   # The upstream chart exposes both knobs only through this one opaque string,
@@ -32,13 +78,33 @@ kueue:
   #      applies that label, which is what makes this release inert.
   #
   #   2. `integrations.frameworks` drops "pod", "deployment" and "statefulset".
-  #      Those three are the only entries the upstream chart gates a webhook
-  #      registration on (`{{- if has "pod" ... }}` and friends in
-  #      templates/webhook/manifests.yaml), and they are the only ones that
-  #      intercept CREATE on core Kubernetes types. Removing them deletes
-  #      mpod/vpod, mdeployment/vdeployment and mstatefulset/vstatefulset from
-  #      the rendered MutatingWebhookConfiguration and
-  #      ValidatingWebhookConfiguration outright.
+  #      Those three are the only entries that intercept CREATE on core
+  #      Kubernetes types, and the only ones the upstream chart branches on in
+  #      templates/webhook/manifests.yaml.
+  #
+  #      Read the branch carefully, because it is counter-intuitive and this
+  #      comment used to get it wrong. It is
+  #      `{{- if has "pod" ... }} failurePolicy: Fail {{- else }}
+  #      failurePolicy: Ignore {{- end }}` — a policy switch, NOT a
+  #      registration guard. mpod/vpod, mdeployment/vdeployment and
+  #      mstatefulset/vstatefulset are rendered UNCONDITIONALLY and ARE present
+  #      in the MutatingWebhookConfiguration and ValidatingWebhookConfiguration
+  #      on a live cluster. There is no values hook that removes them. Dropping
+  #      the frameworks flips those six from `failurePolicy: Fail` to
+  #      `failurePolicy: Ignore`, and that is the entire render-visible effect.
+  #
+  #      `Ignore` is what carries the guarantee: the manager does not enable
+  #      the handlers, and an unreachable or handler-less Kueue webhook is
+  #      SKIPPED by the API server instead of blocking CREATE. Combined with
+  #      edit 1's positive namespace fence — which those same webhooks also
+  #      carry — nothing in an unlabelled namespace is intercepted. Do not read
+  #      the shorter framework list as "core Pod CREATE is not intercepted at
+  #      all"; read it as "it is intercepted by a fenced, fail-open webhook".
+  #
+  #      Contract: deploy/helm/djinn-prereqs/tests/feature-gates.sh asserts all
+  #      six webhooks are PRESENT with failurePolicy Ignore, so this text cannot
+  #      drift from the render again. deploy/kueue/tests/check-webhook-selectors.py
+  #      has always described this correctly.
   #
   #      Everything else in the list is left EXACTLY as upstream ships it. The
   #      remaining frameworks are CRD-scoped (ray.io, kubeflow.org, jobset,
@@ -117,8 +183,11 @@ kueue:
         - "workload.codeflare.dev/appwrapper"
       #  - "sparkoperator.k8s.io/sparkapplication"
       # DJINN EDIT 2 of 2: upstream 0.19.0 ships "pod", "deployment" and
-      # "statefulset" ENABLED here. All three are removed so Kueue registers no
-      # admission webhook on core Pod/Deployment/StatefulSet CREATE.
+      # "statefulset" ENABLED here. All three are removed so the manager enables
+      # no handler for core Pod/Deployment/StatefulSet, and the chart renders
+      # mpod/vpod, mdeployment/vdeployment and mstatefulset/vstatefulset with
+      # failurePolicy: Ignore. The webhooks themselves are still registered —
+      # see the note above; there is no values hook that unregisters them.
         - "leaderworkerset.x-k8s.io/leaderworkerset"
       #  externalFrameworks:
       #  - "Foo.v1.example.com"

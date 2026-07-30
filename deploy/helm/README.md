@@ -18,9 +18,12 @@ Phase 2 installs Djinn on top of Kubernetes via three charts:
 - `kubectl` >= 1.29
 - `helm` >= 3.14
 - Only if you set `kueue.enabled: true` on the `djinn` chart: the
-  `djinn-prereqs` release, and a cluster at **Kubernetes >= 1.29** (a Kueue 0.19
+  `djinn-prereqs` release, and a cluster at **Kubernetes >= 1.30** (a Kueue 0.19
   requirement that the upstream chart does not declare, so Helm will not check
-  it). Without it the `djinn` chart still installs — the queue topology is off
+  it; 1.29 rejects its CRDs, and the floor is 1.30 rather than 1.34 only
+  because Djinn's values disable the DRA feature gates — see
+  [deploy/kueue/README.md](../kueue/README.md#minimum-kubernetes-is-130-and-only-because-dra-is-disabled)).
+  Without it the `djinn` chart still installs — the queue topology is off
   by default.
 - A Kubernetes cluster. For production deploys, ensure a StorageClass that
   satisfies `ReadWriteMany` is available (the `mirrors` and `cache` PVCs
