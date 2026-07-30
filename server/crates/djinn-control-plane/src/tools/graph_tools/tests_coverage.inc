@@ -8,8 +8,8 @@
 //   * the `impact_check` verdict (escalated to `needs_spike`, naming `server`).
 
 use djinn_db::{
-    COVERAGE_STATUS_INDEXED, COVERAGE_STATUS_TIMED_OUT, ProjectWorkspaceCoverageRepository,
-    ProjectWorkspaceCoverageUpsert,
+    COVERAGE_STATUS_INDEXED, COVERAGE_STATUS_TIMED_OUT, ProjectRepository,
+    ProjectWorkspaceCoverageRepository, ProjectWorkspaceCoverageUpsert,
 };
 
 const COVERAGE_PROJECT: &str = "proj-coverage";
@@ -17,12 +17,8 @@ const COVERAGE_PROJECT: &str = "proj-coverage";
 /// Seed the two-workspace coverage fixture into `db` (project row + coverage
 /// rows). `server` (rust) timed out; `ui` (typescript) indexed.
 async fn seed_coverage_fixture(db: &Database) {
-    sqlx::query("INSERT INTO projects (id, name, github_owner, github_repo) VALUES ($1,$2,$3,$4)")
-        .bind(COVERAGE_PROJECT)
-        .bind(COVERAGE_PROJECT)
-        .bind("test")
-        .bind("coverage-repo")
-        .execute(db.pool())
+    ProjectRepository::new(db.clone(), EventBus::noop())
+        .create_with_id(COVERAGE_PROJECT, COVERAGE_PROJECT, "test", "coverage-repo")
         .await
         .expect("seed project");
 
@@ -163,12 +159,8 @@ async fn coverage_advisory_absent_when_clean() {
     let db = Database::open_in_memory().expect("db");
     db.ensure_initialized().await.expect("init");
     // Seed only an indexed workspace — no gap.
-    sqlx::query("INSERT INTO projects (id, name, github_owner, github_repo) VALUES ($1,$2,$3,$4)")
-        .bind("proj-clean")
-        .bind("proj-clean")
-        .bind("test")
-        .bind("clean-repo")
-        .execute(db.pool())
+    ProjectRepository::new(db.clone(), EventBus::noop())
+        .create_with_id("proj-clean", "proj-clean", "test", "clean-repo")
         .await
         .expect("seed project");
     ProjectWorkspaceCoverageRepository::new(db.clone())
@@ -274,12 +266,8 @@ async fn impact_check_ignores_unrelated_workspace_gap() {
     let db = Database::open_in_memory().expect("db");
     db.ensure_initialized().await.expect("init");
     // `server` indexed cleanly; only `ui` (typescript) is a gap.
-    sqlx::query("INSERT INTO projects (id, name, github_owner, github_repo) VALUES ($1,$2,$3,$4)")
-        .bind("proj-unrelated")
-        .bind("proj-unrelated")
-        .bind("test")
-        .bind("unrelated-repo")
-        .execute(db.pool())
+    ProjectRepository::new(db.clone(), EventBus::noop())
+        .create_with_id("proj-unrelated", "proj-unrelated", "test", "unrelated-repo")
         .await
         .expect("seed project");
     ProjectWorkspaceCoverageRepository::new(db.clone())

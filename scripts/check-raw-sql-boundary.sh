@@ -7,6 +7,22 @@
 # This guard fails when changed Rust files outside approved boundaries
 # introduce raw sqlx query calls (sqlx::query, sqlx::query!, etc.).
 #
+# Classification is DEFAULT-DENY. "Rust source" is not the same thing as
+# "path ending in .rs": `.inc` files under server/ are `include!`d into a
+# module and compiled verbatim, and nothing stops the next novel extension
+# from appearing. So every changed path under the server source tree is
+# sorted into exactly one of three buckets:
+#
+#   compiled      — inspected for raw sqlx usage (.rs, .inc).
+#   inert         — data/config/docs that are never compiled into a crate;
+#                   skipped silently (.sql, .toml, .json, .md, .snap, ...).
+#   unclassified  — anything else. Inspected ANYWAY and announced with a
+#                   ::warning::, so a novel extension is a visible skip
+#                   rather than an invisible one. Silently dropping a
+#                   compiled file is the failure mode this guard exists to
+#                   prevent; add the extension to one of the two lists
+#                   below to clear the warning.
+#
 # Usage:
 #   BASE_SHA=<sha> ./scripts/check-raw-sql-boundary.sh
 #   ./scripts/check-raw-sql-boundary.sh                      # uses locally available origin/main
@@ -89,23 +105,16 @@ esac
 
 # ── Scope / filter helpers ─────────────────────────────────────────────
 
-# is_in_scope_rs_file returns 0 if the path is a Rust source file we should
-# inspect. Generated paths and the djinn-db crate are excluded.
-is_in_scope_rs_file() {
+# is_in_scope_path returns 0 if the path lives in the territory this guard
+# polices, regardless of extension. Extension-based classification happens
+# separately in classify_path so that an unrecognised extension inside the
+# territory is loud instead of silently dropped.
+is_in_scope_path() {
     path=$1
-
-    # Must be a .rs file.
-    case "$path" in
-        *.rs)
-            ;;
-        *)
-            return 1
-            ;;
-    esac
 
     # Must be under the server source tree.
     case "$path" in
-        server/crates/*.rs|server/src/*.rs)
+        server/crates/*|server/src/*)
             ;;
         *)
             return 1
@@ -128,6 +137,40 @@ is_in_scope_rs_file() {
     esac
 
     return 0
+}
+
+# classify_path prints exactly one of: compiled | inert | unclassified.
+#
+# Callers must have already established that the path is in scope. Keeping
+# the two lists adjacent makes it obvious that anything matching neither
+# falls through to `unclassified` — which is inspected and reported, never
+# skipped.
+classify_path() {
+    path=$1
+
+    # Compiled into a crate. `.inc` files are pulled in with include!() and
+    # are ordinary Rust source as far as rustc is concerned.
+    case "$path" in
+        *.rs|*.inc)
+            echo compiled
+            return 0
+            ;;
+    esac
+
+    # Never compiled into a crate: fixtures, snapshots, schemas, docs,
+    # scripts, and binary blobs that happen to live under server/.
+    case "$path" in
+        *.sql|*.toml|*.json|*.jsonl|*.md|*.mdx|*.yaml|*.yml|*.snap|*.txt \
+        |*.lock|*.csv|*.tsv|*.html|*.css|*.ts|*.tsx|*.js|*.mjs|*.cjs \
+        |*.py|*.sh|*.proto|*.graphql|*.patch|*.diff|*.env|*.png|*.jpg \
+        |*.jpeg|*.gif|*.ico|*.svg|*.webp|*.gz|*.zip|*.tar|*.bin|*.wasm \
+        |*.gitattributes|*.gitignore|*.dockerignore|*Dockerfile)
+            echo inert
+            return 0
+            ;;
+    esac
+
+    echo unclassified
 }
 
 # ── Grep patterns ──────────────────────────────────────────────────────
@@ -160,6 +203,7 @@ SQL_PATTERN='(sqlx::query[!(]|sqlx::query_as[!(]|sqlx::query_scalar[!(]|(^|[^a-z
 check_files() {
     violations=0
     checked=0
+    unclassified=0
 
     while IFS= read -r file || [ -n "$file" ]; do
         [ -n "$file" ] || continue
@@ -168,9 +212,23 @@ check_files() {
             ./*) file=${file#./} ;;
         esac
 
-        is_in_scope_rs_file "$file" || continue
+        is_in_scope_path "$file" || continue
         # Skip deleted / nonexistent files.
         [ -f "$file" ] || continue
+
+        kind=$(classify_path "$file")
+        case "$kind" in
+            inert)
+                continue
+                ;;
+            unclassified)
+                # Fail loud, not silent: we do not know whether this file is
+                # compiled, so we inspect it and say so.
+                unclassified=$((unclassified + 1))
+                printf '::warning::check-raw-sql-boundary: unrecognised extension under the server source tree; inspecting it as if it were compiled Rust: %s\n' "$file" >&2
+                printf '  Add this extension to the compiled or inert list in scripts/check-raw-sql-boundary.sh to silence this warning.\n' >&2
+                ;;
+        esac
 
         checked=$((checked + 1))
 
@@ -198,6 +256,11 @@ check_files() {
         exit 1
     fi
 
+    if [ "$unclassified" -gt 0 ]; then
+        echo "OK: checked $checked compiled source file(s) outside djinn-db ($unclassified with an unrecognised extension, inspected anyway); no raw-sqlx boundary violations."
+        exit 0
+    fi
+
     echo "OK: checked $checked Rust source file(s) outside djinn-db; no raw-sqlx boundary violations."
     exit 0
 }
@@ -207,10 +270,16 @@ check_files() {
 get_changed_files_from_diff() {
     echo "Checking raw-sqlx boundary against base $BASE_SHA ..."
 
-    # Diff to find changed (Added, Modified, Copied) Rust files. We only care
-    # about files that are present in the working tree (so Deleted/Renamed-from
-    # are naturally skipped by subsequent [ -f ] checks).
-    git diff --name-only --diff-filter=ACMR "$BASE_SHA...HEAD" -- '*.rs' || true
+    # Diff to find changed (Added, Modified, Copied, Renamed) files under the
+    # server source tree. We only care about files that are present in the
+    # working tree (so Deleted/Renamed-from are naturally skipped by subsequent
+    # [ -f ] checks).
+    #
+    # The pathspec deliberately does NOT filter by extension. Extension
+    # filtering lives in exactly one place — classify_path — because a second
+    # copy of the rule here is a copy that can silently disagree with it. That
+    # is precisely how `.inc` files went uninspected.
+    git diff --name-only --diff-filter=ACMR "$BASE_SHA...HEAD" -- server/crates server/src || true
 }
 
 resolve_base_sha() {
