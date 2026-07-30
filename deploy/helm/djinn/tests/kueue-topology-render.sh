@@ -88,9 +88,11 @@ for doc in docs:
         forbidden = {resource.lower().split("/", 1)[0] for resource in rule.get("resources", [])} & {"nodes", "persistentvolumes"}
         assert not forbidden, f"forbidden cluster resource RBAC: {forbidden}"
 
-deployments = named("Deployment")
-assert len(deployments) == 1, "expected one controller Deployment"
-containers = deployments[0]["spec"]["template"]["spec"]["containers"]
+server_deployment = next(
+    deployment for deployment in named("Deployment")
+    if deployment.get("metadata", {}).get("name", "").endswith("-server")
+)
+containers = server_deployment["spec"]["template"]["spec"]["containers"]
 server = next(container for container in containers if container["name"] == "djinn-server")
 values = {entry["name"]: entry.get("value") for entry in server["env"]}
 assert values["DJINN_BUILD_ADMISSION_MODE"] == "observe", "buildAdmission mode changed"
