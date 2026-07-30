@@ -1250,6 +1250,56 @@ pub fn render_isolated<T>(f: impl FnOnce() -> T) -> (T, String) {
     )
 }
 
+/// Test support: the `async` counterpart of [`render_isolated`].
+///
+/// [`render_isolated`] takes a closure, which an `async` test body cannot be
+/// wrapped in. This type splits the same mechanism in two: construct it, hold
+/// the guard returned by [`Self::scope`] for the region to capture, and read
+/// [`Self::render`] for a registry containing *only* what was emitted while
+/// the guard was held. Absolute assertions become exact, so a test needs
+/// neither a before/after delta (which a concurrent writer can still land
+/// inside) nor a mutex serializing it against its siblings.
+///
+/// Same soundness rule as [`render_isolated`], and it is the reason the guard
+/// is separate from the recorder: the scope is thread-local. A
+/// `#[tokio::test]` body — including a `multi_thread` one — is polled by
+/// `Runtime::block_on` on the thread that created the guard, so the body's own
+/// straight-line code is captured across `.await` points. Work the body hands
+/// to `tokio::spawn` or `spawn_blocking` runs elsewhere and records to the
+/// process-global recorder instead, where this type will not see it. That
+/// failure mode is loud rather than silent: the expected series is simply
+/// absent from [`Self::render`].
+pub struct IsolatedRecorder {
+    recorder: metrics_exporter_prometheus::PrometheusRecorder,
+}
+
+impl IsolatedRecorder {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            recorder: PrometheusBuilder::new().build_recorder(),
+        }
+    }
+
+    /// Route this thread's `metrics` emissions here until the guard drops.
+    #[must_use]
+    pub fn scope(&self) -> metrics::LocalRecorderGuard<'_> {
+        metrics::set_default_local_recorder(&self.recorder)
+    }
+
+    /// Render everything recorded through this recorder so far.
+    #[must_use]
+    pub fn render(&self) -> String {
+        prioritize_dispatch_attempts(self.recorder.handle().render())
+    }
+}
+
+impl Default for IsolatedRecorder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 fn prioritize_dispatch_attempts(rendered: String) -> String {
     const DISPATCH_HELP: &str = "# HELP djinn_dispatch_attempts_total";
     if rendered.starts_with(DISPATCH_HELP) {

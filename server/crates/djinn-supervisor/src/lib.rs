@@ -5859,10 +5859,6 @@ mod tests {
     /// clone on base_branch.
     #[tokio::test]
     async fn clone_fallback_uses_base_branch_when_task_branch_verified_absent() {
-        // `timed_clone_attempt` records into the process-global Prometheus
-        // recorder; serialize with the telemetry-scrape tests so their
-        // delta assertions are not polluted by this test's samples.
-        let _guard = clone_telemetry_guard().await;
         let tmp = tempfile::tempdir().expect("mirrors tempdir");
         let (mgr, _tip) = build_resume_test_mirror(tmp.path(), false).await;
         let (clock, cancel) = resume_test_clock_and_cancel();
@@ -5888,10 +5884,6 @@ mod tests {
     /// prior cycle's commits stay reachable from the local ref.
     #[tokio::test]
     async fn clone_uses_task_branch_when_present() {
-        // `timed_clone_attempt` records into the process-global Prometheus
-        // recorder; serialize with the telemetry-scrape tests so their
-        // delta assertions are not polluted by this test's samples.
-        let _guard = clone_telemetry_guard().await;
         let tmp = tempfile::tempdir().expect("mirrors tempdir");
         let (mgr, _tip) = build_resume_test_mirror(tmp.path(), false).await;
         let mirror_path = mgr.mirror_path(RESUME_TEST_PROJECT_ID);
@@ -5926,10 +5918,6 @@ mod tests {
     /// probe cannot prove the branch is missing.
     #[tokio::test]
     async fn transient_clone_failure_does_not_fall_back_to_base_branch() {
-        // `timed_clone_attempt` records into the process-global Prometheus
-        // recorder; serialize with the telemetry-scrape tests so their
-        // delta assertions are not polluted by this test's samples.
-        let _guard = clone_telemetry_guard().await;
         let tmp = tempfile::tempdir().expect("mirrors tempdir");
         let (mgr, _tip) = build_resume_test_mirror(tmp.path(), false).await;
 
@@ -6300,20 +6288,20 @@ mod tests {
 
     use djinn_core::clock::TestClock;
 
-    /// The Prometheus recorder is process-global; serialize telemetry-scrape
-    /// tests behind a mutex so each assertion can use a precise delta.
-    ///
-    /// `tokio::sync::Mutex` rather than `std`: every holder is an `async` test
-    /// that awaits while holding the guard for its whole body, and a `std`
-    /// guard held across an await point blocks the executor thread instead of
-    /// the task (clippy::await_holding_lock). The `.expect("poisoned")` goes
-    /// away with it — tokio's mutex has no poisoning, so one panicking test no
-    /// longer fails every sibling that shares the lock.
-    static CLONE_TELEMETRY_MUTEX: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
-    async fn clone_telemetry_guard() -> tokio::sync::MutexGuard<'static, ()> {
-        CLONE_TELEMETRY_MUTEX.lock().await
-    }
+    // The Prometheus recorder installed by `djinn_telemetry::init()` is
+    // process-global, so a before/after delta taken around the operation under
+    // test measures whatever the *whole binary* emitted in that window, not
+    // what the operation emitted. These tests used to serialize behind a
+    // `CLONE_TELEMETRY_MUTEX` / `CLEANUP_TELEMETRY_MUTEX` for that reason, but
+    // a mutex only excludes the tests that hold it: every other test in the
+    // binary that clones or tears down a workspace kept landing samples inside
+    // the delta window (observed as `7.0 vs 4.0`, `17.0 vs 14.0`, `18.0 vs
+    // 15.0` — over by exactly the number of concurrent siblings).
+    //
+    // Each telemetry test now scopes a `djinn_telemetry::IsolatedRecorder` to
+    // its own thread instead. The rendered registry then contains only what
+    // that test emitted, so the assertions are absolute rather than deltas,
+    // no test excludes any other, and the whole group runs in parallel.
 
     /// Count `workspace_clone_seconds_count` samples for a given outcome.
     fn clone_count(rendered: &str, outcome: &str) -> f64 {
@@ -6368,9 +6356,6 @@ mod tests {
     /// injected monotonic clock.
     #[tokio::test]
     async fn timed_clone_attempt_records_one_ok_sample() {
-        let _guard = clone_telemetry_guard().await;
-        djinn_telemetry::init().expect("telemetry init");
-
         let tmp = tempfile::tempdir().expect("mirrors tempdir");
         let (mgr, _tip) = build_resume_test_mirror(tmp.path(), false).await;
         let clock = Arc::new(TestClock::new(
@@ -6378,55 +6363,52 @@ mod tests {
             std::time::Instant::now(),
         ));
         let cancel = CancellationToken::new();
-
-        let before = djinn_telemetry::render().expect("render before");
-        let ok_before = clone_count(&before, "ok");
-        let ok_sum_before = clone_sum(&before, "ok");
         let elapsed = Duration::from_millis(200);
 
-        let clock_clone = clock.clone();
-        timed_clone_attempt(&*clock, &cancel, async move {
-            let result = mgr
-                .clone_ephemeral(RESUME_TEST_PROJECT_ID, RESUME_TEST_BASE)
-                .await;
-            // Advance the TestClock mono time so elapsed is deterministic.
-            clock_clone.advance_mono(elapsed);
-            result
-        })
-        .await
-        .expect("clone must succeed");
+        let recorder = djinn_telemetry::IsolatedRecorder::new();
+        let rendered = {
+            let _metrics = recorder.scope();
+            let clock_clone = clock.clone();
+            timed_clone_attempt(&*clock, &cancel, async move {
+                let result = mgr
+                    .clone_ephemeral(RESUME_TEST_PROJECT_ID, RESUME_TEST_BASE)
+                    .await;
+                // Advance the TestClock mono time so elapsed is deterministic.
+                clock_clone.advance_mono(elapsed);
+                result
+            })
+            .await
+            .expect("clone must succeed");
+            recorder.render()
+        };
 
-        let after = djinn_telemetry::render().expect("render after");
         assert_eq!(
-            clone_count(&after, "ok"),
-            ok_before + 1.0,
+            clone_count(&rendered, "ok"),
+            1.0,
             "one ok clone sample expected"
         );
         assert!(
-            (clone_sum(&after, "ok") - ok_sum_before - elapsed.as_secs_f64()).abs() < 0.001,
-            "ok clone sum delta must equal elapsed"
+            (clone_sum(&rendered, "ok") - elapsed.as_secs_f64()).abs() < 0.001,
+            "ok clone sum must equal elapsed"
         );
-        // Error/cancelled must not increase.
+        // Error/cancelled must not be recorded at all.
         assert_eq!(
-            clone_count(&after, "error"),
-            clone_count(&before, "error"),
-            "error count must not change for a successful clone"
+            clone_count(&rendered, "error"),
+            0.0,
+            "no error sample for a successful clone"
         );
         assert_eq!(
-            clone_count(&after, "cancelled"),
-            clone_count(&before, "cancelled"),
-            "cancelled count must not change for a successful clone"
+            clone_count(&rendered, "cancelled"),
+            0.0,
+            "no cancelled sample for a successful clone"
         );
-        assert_no_identity_labels(&after, "djinn_workspace_clone_seconds");
+        assert_no_identity_labels(&rendered, "djinn_workspace_clone_seconds");
     }
 
     /// A failed clone (missing mirror project) records exactly one `error`
     /// sample when the cancel token is NOT set.
     #[tokio::test]
     async fn timed_clone_attempt_records_one_error_sample() {
-        let _guard = clone_telemetry_guard().await;
-        djinn_telemetry::init().expect("telemetry init");
-
         let tmp = tempfile::tempdir().expect("mirrors tempdir");
         let mgr = MirrorManager::new(tmp.path().to_path_buf());
         let clock = Arc::new(TestClock::new(
@@ -6434,48 +6416,45 @@ mod tests {
             std::time::Instant::now(),
         ));
         let cancel = CancellationToken::new();
-
-        let before = djinn_telemetry::render().expect("render before");
-        let err_before = clone_count(&before, "error");
-        let err_sum_before = clone_sum(&before, "error");
         let elapsed = Duration::from_millis(150);
 
-        let clock_clone = clock.clone();
-        let result = timed_clone_attempt(&*clock, &cancel, async move {
-            let result = mgr
-                .clone_ephemeral("nonexistent-project", RESUME_TEST_BASE)
-                .await;
-            clock_clone.advance_mono(elapsed);
-            result
-        })
-        .await;
-        assert!(result.is_err(), "clone of missing project must fail");
+        let recorder = djinn_telemetry::IsolatedRecorder::new();
+        let rendered = {
+            let _metrics = recorder.scope();
+            let clock_clone = clock.clone();
+            let result = timed_clone_attempt(&*clock, &cancel, async move {
+                let result = mgr
+                    .clone_ephemeral("nonexistent-project", RESUME_TEST_BASE)
+                    .await;
+                clock_clone.advance_mono(elapsed);
+                result
+            })
+            .await;
+            assert!(result.is_err(), "clone of missing project must fail");
+            recorder.render()
+        };
 
-        let after = djinn_telemetry::render().expect("render after");
         assert_eq!(
-            clone_count(&after, "error"),
-            err_before + 1.0,
+            clone_count(&rendered, "error"),
+            1.0,
             "one error clone sample expected"
         );
         assert!(
-            (clone_sum(&after, "error") - err_sum_before - elapsed.as_secs_f64()).abs() < 0.001,
-            "error clone sum delta must equal elapsed"
+            (clone_sum(&rendered, "error") - elapsed.as_secs_f64()).abs() < 0.001,
+            "error clone sum must equal elapsed"
         );
         assert_eq!(
-            clone_count(&after, "ok"),
-            clone_count(&before, "ok"),
-            "ok count must not change for a failed clone"
+            clone_count(&rendered, "ok"),
+            0.0,
+            "no ok sample for a failed clone"
         );
-        assert_no_identity_labels(&after, "djinn_workspace_clone_seconds");
+        assert_no_identity_labels(&rendered, "djinn_workspace_clone_seconds");
     }
 
     /// A clone that resolves (Ok or Err) while the cancel token IS set
     /// records exactly one `cancelled` sample.
     #[tokio::test]
     async fn timed_clone_attempt_records_cancelled_when_token_set() {
-        let _guard = clone_telemetry_guard().await;
-        djinn_telemetry::init().expect("telemetry init");
-
         let tmp = tempfile::tempdir().expect("mirrors tempdir");
         let (mgr, _tip) = build_resume_test_mirror(tmp.path(), false).await;
         let clock = Arc::new(TestClock::new(
@@ -6484,42 +6463,41 @@ mod tests {
         ));
         let cancel = CancellationToken::new();
         cancel.cancel();
-
-        let before = djinn_telemetry::render().expect("render before");
-        let cancel_before = clone_count(&before, "cancelled");
-        let cancel_sum_before = clone_sum(&before, "cancelled");
         let elapsed = Duration::from_millis(100);
 
-        // Even though the clone succeeds, the cancel token is set so the
-        // outcome is `cancelled`.
-        let clock_clone = clock.clone();
-        timed_clone_attempt(&*clock, &cancel, async move {
-            let result = mgr
-                .clone_ephemeral(RESUME_TEST_PROJECT_ID, RESUME_TEST_BASE)
-                .await;
-            clock_clone.advance_mono(elapsed);
-            result
-        })
-        .await
-        .expect("clone itself succeeds");
+        let recorder = djinn_telemetry::IsolatedRecorder::new();
+        let rendered = {
+            let _metrics = recorder.scope();
+            // Even though the clone succeeds, the cancel token is set so the
+            // outcome is `cancelled`.
+            let clock_clone = clock.clone();
+            timed_clone_attempt(&*clock, &cancel, async move {
+                let result = mgr
+                    .clone_ephemeral(RESUME_TEST_PROJECT_ID, RESUME_TEST_BASE)
+                    .await;
+                clock_clone.advance_mono(elapsed);
+                result
+            })
+            .await
+            .expect("clone itself succeeds");
+            recorder.render()
+        };
 
-        let after = djinn_telemetry::render().expect("render after");
         assert_eq!(
-            clone_count(&after, "cancelled"),
-            cancel_before + 1.0,
+            clone_count(&rendered, "cancelled"),
+            1.0,
             "one cancelled clone sample expected when token is set"
         );
         assert!(
-            (clone_sum(&after, "cancelled") - cancel_sum_before - elapsed.as_secs_f64()).abs()
-                < 0.001,
-            "cancelled clone sum delta must equal elapsed"
+            (clone_sum(&rendered, "cancelled") - elapsed.as_secs_f64()).abs() < 0.001,
+            "cancelled clone sum must equal elapsed"
         );
         assert_eq!(
-            clone_count(&after, "ok"),
-            clone_count(&before, "ok"),
-            "ok count must not change when cancel token is set"
+            clone_count(&rendered, "ok"),
+            0.0,
+            "no ok sample when the cancel token is set"
         );
-        assert_no_identity_labels(&after, "djinn_workspace_clone_seconds");
+        assert_no_identity_labels(&rendered, "djinn_workspace_clone_seconds");
     }
 
     /// Multi-attempt fallback: when task_branch clone fails and base_branch
@@ -6528,9 +6506,6 @@ mod tests {
     /// operation actually begins.
     #[tokio::test]
     async fn timed_clone_attempt_multi_attempt_fallback_records_two_samples() {
-        let _guard = clone_telemetry_guard().await;
-        djinn_telemetry::init().expect("telemetry init");
-
         let tmp = tempfile::tempdir().expect("mirrors tempdir");
         let (mgr, _tip) = build_resume_test_mirror(tmp.path(), false).await;
         let clock = Arc::new(TestClock::new(
@@ -6538,60 +6513,59 @@ mod tests {
             std::time::Instant::now(),
         ));
         let cancel = CancellationToken::new();
-
-        let before = djinn_telemetry::render().expect("render before");
-        let ok_before = clone_count(&before, "ok");
-        let err_before = clone_count(&before, "error");
-        let ok_sum_before = clone_sum(&before, "ok");
-        let err_sum_before = clone_sum(&before, "error");
         let err_elapsed = Duration::from_millis(120);
         let ok_elapsed = Duration::from_millis(250);
 
-        // First attempt: task_branch doesn't exist → error.
-        let clock_clone = clock.clone();
-        let first = timed_clone_attempt(&*clock, &cancel, async move {
-            let result = mgr
-                .clone_ephemeral(RESUME_TEST_PROJECT_ID, RESUME_TEST_TASK)
-                .await;
-            clock_clone.advance_mono(err_elapsed);
-            result
-        })
-        .await;
-        assert!(first.is_err(), "task_branch clone must fail (first cycle)");
+        let recorder = djinn_telemetry::IsolatedRecorder::new();
+        let rendered = {
+            let _metrics = recorder.scope();
 
-        // Second attempt (fallback): base_branch exists → ok.
-        let clock_clone2 = clock.clone();
-        timed_clone_attempt(&*clock, &cancel, async move {
-            let (mgr2, _tip2) = build_resume_test_mirror(tmp.path(), false).await;
-            let result = mgr2
-                .clone_ephemeral(RESUME_TEST_PROJECT_ID, RESUME_TEST_BASE)
-                .await;
-            clock_clone2.advance_mono(ok_elapsed);
-            result
-        })
-        .await
-        .expect("base_branch clone must succeed");
+            // First attempt: task_branch doesn't exist → error.
+            let clock_clone = clock.clone();
+            let first = timed_clone_attempt(&*clock, &cancel, async move {
+                let result = mgr
+                    .clone_ephemeral(RESUME_TEST_PROJECT_ID, RESUME_TEST_TASK)
+                    .await;
+                clock_clone.advance_mono(err_elapsed);
+                result
+            })
+            .await;
+            assert!(first.is_err(), "task_branch clone must fail (first cycle)");
 
-        let after = djinn_telemetry::render().expect("render after");
+            // Second attempt (fallback): base_branch exists → ok.
+            let clock_clone2 = clock.clone();
+            timed_clone_attempt(&*clock, &cancel, async move {
+                let (mgr2, _tip2) = build_resume_test_mirror(tmp.path(), false).await;
+                let result = mgr2
+                    .clone_ephemeral(RESUME_TEST_PROJECT_ID, RESUME_TEST_BASE)
+                    .await;
+                clock_clone2.advance_mono(ok_elapsed);
+                result
+            })
+            .await
+            .expect("base_branch clone must succeed");
+            recorder.render()
+        };
+
         assert_eq!(
-            clone_count(&after, "error"),
-            err_before + 1.0,
+            clone_count(&rendered, "error"),
+            1.0,
             "one error sample for the failed task_branch attempt"
         );
         assert_eq!(
-            clone_count(&after, "ok"),
-            ok_before + 1.0,
+            clone_count(&rendered, "ok"),
+            1.0,
             "one ok sample for the successful base_branch fallback attempt"
         );
         assert!(
-            (clone_sum(&after, "error") - err_sum_before - err_elapsed.as_secs_f64()).abs() < 0.001,
-            "error clone sum delta must equal first attempt elapsed"
+            (clone_sum(&rendered, "error") - err_elapsed.as_secs_f64()).abs() < 0.001,
+            "error clone sum must equal first attempt elapsed"
         );
         assert!(
-            (clone_sum(&after, "ok") - ok_sum_before - ok_elapsed.as_secs_f64()).abs() < 0.001,
-            "ok clone sum delta must equal fallback attempt elapsed"
+            (clone_sum(&rendered, "ok") - ok_elapsed.as_secs_f64()).abs() < 0.001,
+            "ok clone sum must equal fallback attempt elapsed"
         );
-        assert_no_identity_labels(&after, "djinn_workspace_clone_seconds");
+        assert_no_identity_labels(&rendered, "djinn_workspace_clone_seconds");
     }
 
     /// `classify_clone_outcome`: Err + not-cancelled → error. This pure
@@ -6620,24 +6594,6 @@ mod tests {
     }
 
     // ── Workspace cleanup telemetry tests (proposal zp5t) ─────────────────
-
-    /// The Prometheus recorder is process-global; serialize telemetry-scrape
-    /// tests behind a mutex so each assertion can use a precise delta.
-    ///
-    /// `tokio::sync::Mutex` for the same reason as [`CLONE_TELEMETRY_MUTEX`]:
-    /// the async holders await while holding it. This one has synchronous
-    /// `#[test]` holders too, hence the two accessors below.
-    static CLEANUP_TELEMETRY_MUTEX: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
-    async fn cleanup_telemetry_guard() -> tokio::sync::MutexGuard<'static, ()> {
-        CLEANUP_TELEMETRY_MUTEX.lock().await
-    }
-
-    /// Synchronous `#[test]` counterpart. Panics if called from inside a
-    /// runtime — async callers must use [`cleanup_telemetry_guard`].
-    fn cleanup_telemetry_guard_blocking() -> tokio::sync::MutexGuard<'static, ()> {
-        CLEANUP_TELEMETRY_MUTEX.blocking_lock()
-    }
 
     /// Count `workspace_cleanup_seconds_count` samples for a given
     /// trigger/outcome pair.
@@ -6752,9 +6708,6 @@ mod tests {
     /// with the classified trigger.
     #[tokio::test]
     async fn timed_teardown_records_one_complete_ok_sample() {
-        let _guard = cleanup_telemetry_guard().await;
-        djinn_telemetry::init().expect("telemetry init");
-
         let tmp = tempfile::tempdir().expect("mirrors tempdir");
         let (mgr, _tip) = build_resume_test_mirror(tmp.path(), false).await;
         let ws = mgr
@@ -6763,59 +6716,54 @@ mod tests {
             .expect("clone");
         let clock = TestClock::new(std::time::SystemTime::UNIX_EPOCH, std::time::Instant::now());
 
-        let before = djinn_telemetry::render().expect("render before");
-        let count_before = cleanup_count(&before, "complete", "ok");
-        let sum_before = cleanup_sum(&before, "complete", "ok");
+        let recorder = djinn_telemetry::IsolatedRecorder::new();
+        let rendered = {
+            let _metrics = recorder.scope();
+            let result = timed_workspace_teardown(&clock, ws, CleanupTrigger::Complete);
+            assert!(result.is_ok(), "teardown must succeed");
+            recorder.render()
+        };
 
-        let result = timed_workspace_teardown(&clock, ws, CleanupTrigger::Complete);
-        assert!(result.is_ok(), "teardown must succeed");
-
-        let after = djinn_telemetry::render().expect("render after");
         assert_eq!(
-            cleanup_count(&after, "complete", "ok"),
-            count_before + 1.0,
+            cleanup_count(&rendered, "complete", "ok"),
+            1.0,
             "one complete/ok cleanup sample expected"
         );
         // The TestClock does not advance during the synchronous teardown, so
         // the recorded duration is ~0. Assert the sum is non-negative (the
         // teardown completed and recorded a valid sample).
-        let sum_delta = cleanup_sum(&after, "complete", "ok") - sum_before;
+        let sum = cleanup_sum(&rendered, "complete", "ok");
         assert!(
-            sum_delta >= 0.0,
-            "complete/ok sum delta must be non-negative, got {sum_delta}"
+            sum >= 0.0,
+            "complete/ok sum must be non-negative, got {sum}"
         );
-        assert_no_cleanup_identity_labels(&after);
+        assert_no_cleanup_identity_labels(&rendered);
     }
 
     /// An attached workspace teardown is a no-op and does NOT emit a sample —
     /// attached directories are never deleted or observed.
     #[test]
     fn timed_teardown_on_attached_emits_nothing() {
-        let _guard = cleanup_telemetry_guard_blocking();
-        djinn_telemetry::init().expect("telemetry init");
-
         let tmp = tempfile::tempdir().expect("tempdir");
         let ws = Workspace::attach_existing(tmp.path(), "main").expect("attach");
         assert!(!ws.is_owned(), "attached workspace must not be owned");
 
         let clock = TestClock::new(std::time::SystemTime::UNIX_EPOCH, std::time::Instant::now());
 
-        let before = djinn_telemetry::render().expect("render before");
-        let complete_ok_before = cleanup_count(&before, "complete", "ok");
-
-        // teardown_owned on Attached returns Ok and does NOT delete.
-        let result = timed_workspace_teardown(&clock, ws, CleanupTrigger::Complete);
+        let (result, rendered) = djinn_telemetry::render_isolated(|| {
+            // teardown_owned on Attached returns Ok and does NOT delete.
+            timed_workspace_teardown(&clock, ws, CleanupTrigger::Complete)
+        });
         assert!(result.is_ok(), "attached teardown must be Ok");
 
-        let after = djinn_telemetry::render().expect("render after");
         // Attached workspaces are never observed: no telemetry sample emitted.
         assert!(
             tmp.path().exists(),
             "attached directory must NOT be deleted"
         );
         assert_eq!(
-            cleanup_count(&after, "complete", "ok"),
-            complete_ok_before,
+            cleanup_count(&rendered, "complete", "ok"),
+            0.0,
             "attached teardown must NOT emit any sample"
         );
     }
@@ -6825,10 +6773,10 @@ mod tests {
     /// it returns, without relying on slow filesystem failures.
     #[test]
     fn cleanup_records_all_eight_returned_operation_outcomes() {
-        let _guard = cleanup_telemetry_guard_blocking();
-        djinn_telemetry::init().expect("telemetry init");
         let clock = TestClock::new(std::time::SystemTime::UNIX_EPOCH, std::time::Instant::now());
         let elapsed = Duration::from_millis(42);
+        let recorder = djinn_telemetry::IsolatedRecorder::new();
+        let _metrics = recorder.scope();
         for (trigger_str, trigger) in [
             ("complete", CleanupTrigger::Complete),
             ("error", CleanupTrigger::Error),
@@ -6836,14 +6784,11 @@ mod tests {
             ("shutdown", CleanupTrigger::Shutdown),
         ] {
             for (outcome_str, succeeds) in [("ok", true), ("error", false)] {
-                let before = djinn_telemetry::render().expect("render before");
-                let count_before = cleanup_count(&before, trigger_str, outcome_str);
-                let sum_before = cleanup_sum(&before, trigger_str, outcome_str);
                 let result = timed_cleanup_operation(&clock, trigger, || {
-                    let during = djinn_telemetry::render().expect("render during teardown");
+                    let during = recorder.render();
                     assert_eq!(
                         cleanup_count(&during, trigger_str, outcome_str),
-                        count_before,
+                        0.0,
                         "sample must wait for returned teardown"
                     );
                     clock.advance_mono(elapsed);
@@ -6858,30 +6803,25 @@ mod tests {
                     succeeds,
                     "injected {trigger_str}/{outcome_str} result must propagate"
                 );
-                let after = djinn_telemetry::render().expect("render after");
-                assert_eq!(
-                    cleanup_count(&after, trigger_str, outcome_str),
-                    count_before + 1.0
-                );
+                let after = recorder.render();
+                assert_eq!(cleanup_count(&after, trigger_str, outcome_str), 1.0);
                 assert!(
-                    (cleanup_sum(&after, trigger_str, outcome_str)
-                        - sum_before
-                        - elapsed.as_secs_f64())
-                    .abs()
+                    (cleanup_sum(&after, trigger_str, outcome_str) - elapsed.as_secs_f64()).abs()
                         < 0.001
                 );
             }
         }
-        assert_no_cleanup_identity_labels(&djinn_telemetry::render().expect("render labels"));
+        assert_no_cleanup_identity_labels(&recorder.render());
     }
 
     #[test]
     fn cleanup_panic_emits_nothing_until_a_later_returned_teardown() {
-        let _guard = cleanup_telemetry_guard_blocking();
-        djinn_telemetry::init().expect("telemetry init");
         let clock = TestClock::new(std::time::SystemTime::UNIX_EPOCH, std::time::Instant::now());
-        let before = djinn_telemetry::render().expect("render before");
-        let count_before = cleanup_count(&before, "complete", "ok");
+        let recorder = djinn_telemetry::IsolatedRecorder::new();
+        // The guard is held across `catch_unwind` deliberately: it drops only
+        // at the end of the test, so the recovered-from panic cannot silently
+        // put the second teardown's sample on the global recorder.
+        let _metrics = recorder.scope();
         let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             timed_cleanup_operation(
                 &clock,
@@ -6891,22 +6831,16 @@ mod tests {
         }));
         assert!(panic.is_err());
         assert_eq!(
-            cleanup_count(
-                &djinn_telemetry::render().expect("render after panic"),
-                "complete",
-                "ok"
-            ),
-            count_before
+            cleanup_count(&recorder.render(), "complete", "ok"),
+            0.0,
+            "a teardown that panicked must emit nothing"
         );
         timed_cleanup_operation(&clock, CleanupTrigger::Complete, || Ok(()))
             .expect("returned teardown");
         assert_eq!(
-            cleanup_count(
-                &djinn_telemetry::render().expect("render after returned teardown"),
-                "complete",
-                "ok"
-            ),
-            count_before + 1.0
+            cleanup_count(&recorder.render(), "complete", "ok"),
+            1.0,
+            "the later returned teardown emits exactly one sample"
         );
     }
 
@@ -6916,9 +6850,6 @@ mod tests {
     /// no-op.
     #[tokio::test]
     async fn teardown_owned_prevents_double_drop() {
-        let _guard = cleanup_telemetry_guard().await;
-        djinn_telemetry::init().expect("telemetry init");
-
         let tmp = tempfile::tempdir().expect("mirrors tempdir");
         let (mgr, _tip) = build_resume_test_mirror(tmp.path(), false).await;
         let ws = mgr
@@ -6929,18 +6860,16 @@ mod tests {
 
         let clock = TestClock::new(std::time::SystemTime::UNIX_EPOCH, std::time::Instant::now());
 
-        let before = djinn_telemetry::render().expect("render before");
-        let count_before = cleanup_count(&before, "complete", "ok");
-
-        // First teardown: records exactly one sample and removes the dir.
-        timed_workspace_teardown(&clock, ws, CleanupTrigger::Complete)
-            .expect("first teardown must succeed");
+        let (_, rendered) = djinn_telemetry::render_isolated(|| {
+            // First teardown: records exactly one sample and removes the dir.
+            timed_workspace_teardown(&clock, ws, CleanupTrigger::Complete)
+                .expect("first teardown must succeed");
+        });
         assert!(!path.exists(), "directory must be removed after teardown");
 
-        let after = djinn_telemetry::render().expect("render after");
         assert_eq!(
-            cleanup_count(&after, "complete", "ok"),
-            count_before + 1.0,
+            cleanup_count(&rendered, "complete", "ok"),
+            1.0,
             "exactly one cleanup sample (no duplicate from Drop)"
         );
     }
@@ -6972,9 +6901,6 @@ mod tests {
     /// emitted if teardown never returns (panic/SIGKILL are out of scope).
     #[tokio::test]
     async fn timed_teardown_records_error_on_failure() {
-        let _guard = cleanup_telemetry_guard().await;
-        djinn_telemetry::init().expect("telemetry init");
-
         let tmp = tempfile::tempdir().expect("mirrors tempdir");
         let (mgr, _tip) = build_resume_test_mirror(tmp.path(), false).await;
         let ws = mgr
@@ -6985,31 +6911,28 @@ mod tests {
 
         let clock = TestClock::new(std::time::SystemTime::UNIX_EPOCH, std::time::Instant::now());
 
-        let before = djinn_telemetry::render().expect("render before");
-        let count_before = cleanup_count(&before, "error", "error");
-        let sum_before = cleanup_sum(&before, "error", "error");
-
         // Externally delete the directory so TempDir::close() returns Err.
         std::fs::remove_dir_all(&ws_path).expect("externally delete dir");
 
-        let result = timed_workspace_teardown(&clock, ws, CleanupTrigger::Error);
+        let (result, rendered) = djinn_telemetry::render_isolated(|| {
+            timed_workspace_teardown(&clock, ws, CleanupTrigger::Error)
+        });
         assert!(
             result.is_err(),
             "teardown must fail on externally deleted dir"
         );
 
-        let after = djinn_telemetry::render().expect("render after");
         assert_eq!(
-            cleanup_count(&after, "error", "error"),
-            count_before + 1.0,
+            cleanup_count(&rendered, "error", "error"),
+            1.0,
             "one error/error cleanup sample expected"
         );
-        let sum_delta = cleanup_sum(&after, "error", "error") - sum_before;
+        let sum = cleanup_sum(&rendered, "error", "error");
         assert!(
-            sum_delta >= 0.0,
-            "error/error sum delta must be non-negative, got {sum_delta}"
+            sum >= 0.0,
+            "error/error sum must be non-negative, got {sum}"
         );
-        assert_no_cleanup_identity_labels(&after);
+        assert_no_cleanup_identity_labels(&rendered);
     }
 
     /// Regression: a persistent push_to_origin failure after WorkerDone must
