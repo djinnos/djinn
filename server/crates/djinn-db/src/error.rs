@@ -24,6 +24,11 @@ pub enum DbError {
     Internal(String),
     InvalidTransition(String),
     SpecLintRejected(SpecLintRejected),
+    DispatchGenerationRevoked {
+        task_id: String,
+        supplied_generation: i64,
+        current_generation: i64,
+    },
 }
 
 impl fmt::Display for DbError {
@@ -35,6 +40,7 @@ impl fmt::Display for DbError {
             Self::Internal(msg) => write!(f, "{msg}"),
             Self::InvalidTransition(msg) => write!(f, "invalid transition: {msg}"),
             Self::SpecLintRejected(rejection) => write!(f, "{}", rejection.code),
+            Self::DispatchGenerationRevoked { .. } => write!(f, "dispatch_generation_revoked"),
         }
     }
 }
@@ -47,7 +53,8 @@ impl std::error::Error for DbError {
             Self::InvalidData(_)
             | Self::Internal(_)
             | Self::InvalidTransition(_)
-            | Self::SpecLintRejected(_) => None,
+            | Self::SpecLintRejected(_)
+            | Self::DispatchGenerationRevoked { .. } => None,
         }
     }
 }

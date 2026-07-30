@@ -4,8 +4,8 @@ use djinn_core::models::provider::Pricing;
 use djinn_core::models::{ModelLane, SessionRecord, SessionStatus};
 use serde_json::Value;
 
-use crate::Result;
 use crate::database::Database;
+use crate::{Error, Result};
 
 // Inlined SESSION_COLS projection for each `query_as!(SessionRecord, ...)`
 // call site.  `query_as!` requires a string-literal SQL argument; concat!()
@@ -39,6 +39,18 @@ pub struct CreateSessionParams<'a> {
     /// (subscription/coding-plan), or `"unpriced"` (uncatalogued/missing).
     /// When `None`, defaults to `"unpriced"` in `create()`.
     pub cost_basis: Option<&'a str>,
+}
+
+/// Inputs for a task-execution session that must still belong to the admitted
+/// execution generation. The task id here is authoritative; `session.task_id`
+/// is deliberately not used by the guarded operation.
+pub struct CreateTaskExecutionSessionParams<'a> {
+    /// Canonical task UUID whose generation is guarded.
+    pub task_id: &'a str,
+    /// Generation allocated during dispatch admission.
+    pub execution_generation: i64,
+    /// The ordinary session attributes to persist on a successful guard.
+    pub session: CreateSessionParams<'a>,
 }
 
 impl SessionRepository {
@@ -133,6 +145,83 @@ impl SessionRepository {
             task_id = ?session.task_id,
             "SessionRepository: emitted session.started SSE event"
         );
+        Ok(session)
+    }
+
+    /// Creates a task-execution session only if its admitted generation remains current.
+    /// The task row lock serializes this operation with generation allocation and kill fencing.
+    pub async fn create_task_execution_session(
+        &self,
+        params: CreateTaskExecutionSessionParams<'_>,
+    ) -> Result<SessionRecord> {
+        self.db.ensure_initialized().await?;
+        let id = uuid::Uuid::now_v7().to_string();
+        let _ = params.session.metadata_json;
+        let created_by_user_id = djinn_core::auth_context::current_user_id();
+        let mut tx = self.db.pool().begin().await?;
+        let current_generation: Option<i64> =
+            sqlx::query_scalar("SELECT execution_generation FROM tasks WHERE id = $1 FOR UPDATE")
+                .bind(params.task_id)
+                .fetch_optional(&mut *tx)
+                .await?;
+        let current_generation = current_generation
+            .ok_or_else(|| Error::InvalidData(format!("task not found: {}", params.task_id)))?;
+        if current_generation != params.execution_generation {
+            return Err(Error::DispatchGenerationRevoked {
+                task_id: params.task_id.to_owned(),
+                supplied_generation: params.execution_generation,
+                current_generation,
+            });
+        }
+
+        sqlx::query!(
+            "INSERT INTO sessions
+                (id, project_id, task_id, model_id, agent_type, status,
+                 created_by_user_id, task_run_id,
+                 input_price_per_million_snapshot, output_price_per_million_snapshot,
+                 cache_read_price_per_million_snapshot, cache_write_price_per_million_snapshot,
+                 cost_basis)
+             VALUES ($1, $2, $3, $4, $5, 'running', $6, $7, $8, $9, $10, $11, $12)",
+            id,
+            params.session.project_id,
+            params.task_id,
+            params.session.model,
+            params.session.agent_type,
+            created_by_user_id,
+            params.session.task_run_id,
+            params.session.pricing.map(|p| p.input_per_million),
+            params.session.pricing.map(|p| p.output_per_million),
+            params.session.pricing.map(|p| p.cache_read_per_million),
+            params.session.pricing.map(|p| p.cache_write_per_million),
+            params.session.cost_basis.unwrap_or("unpriced"),
+        )
+        .execute(&mut *tx)
+        .await?;
+        if let Some(run_id) = params.session.task_run_id {
+            sqlx::query!("UPDATE task_runs SET status = 'running', ended_at = NULL WHERE id = $1 AND status = 'starting'", run_id)
+                .execute(&mut *tx).await?;
+        }
+        let session = sqlx::query_as!(
+            SessionRecord,
+            r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
+            status AS "status!", tokens_in, tokens_out, cache_read_tokens, cache_write_tokens,
+            task_run_id, title, parked_reason AS "parked_reason?", cost_usd,
+            input_price_per_million_snapshot, output_price_per_million_snapshot,
+            cache_read_price_per_million_snapshot, cache_write_price_per_million_snapshot,
+            cost_basis, billing_source FROM sessions WHERE id = $1"#,
+            id
+        )
+        .fetch_one(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        self.events.send(DjinnEventEnvelope {
+            entity_type: "session",
+            action: "started",
+            payload: serde_json::to_value(&session).unwrap_or_default(),
+            id: None,
+            project_id: None,
+            from_sync: false,
+        });
         Ok(session)
     }
 

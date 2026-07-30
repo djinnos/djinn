@@ -267,8 +267,8 @@ pub use repositories::{
     },
     service::{ServicePreset, ServicePresetRepository},
     session::{
-        CreateSessionParams, ExtractionBackfillCandidate, OrphanSessionCandidate,
-        SessionRepository, SessionStatusSnapshot,
+        CreateSessionParams, CreateTaskExecutionSessionParams, ExtractionBackfillCandidate,
+        OrphanSessionCandidate, SessionRepository, SessionStatusSnapshot,
     },
     session_auth::{CreateUserAuthSession, SessionAuthRepository, UserAuthSessionRecord},
     session_compaction_boundary::{
