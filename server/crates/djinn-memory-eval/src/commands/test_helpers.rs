@@ -8,7 +8,12 @@ use crate::report::{self, BaselineMetadata, Phase1Baseline};
 use crate::run;
 
 /// Write a Phase1Fixtures to a temp directory structure on disk.
+///
+/// Panics if `crate_root` is this crate's own source tree — the committed
+/// `fixtures/*.jsonl` are tracked goldens regenerated only by
+/// `scripts/generate_fixtures.py`.
 pub fn write_fixtures_to_disk(crate_root: &std::path::Path, fixtures: &Phase1Fixtures) {
+    reject_tracked_golden_write(crate_root, FixturePaths::FIXTURES_DIR).unwrap();
     let fixtures_dir = crate_root.join(FixturePaths::FIXTURES_DIR);
     std::fs::create_dir_all(&fixtures_dir).unwrap();
     std::fs::write(
@@ -29,7 +34,11 @@ pub fn write_fixtures_to_disk(crate_root: &std::path::Path, fixtures: &Phase1Fix
 }
 
 /// Write a Phase1Baseline to a temp directory on disk.
+///
+/// Panics if `crate_root` is this crate's own source tree — see
+/// [`reject_tracked_golden_write`].
 pub fn write_baseline_to_disk(crate_root: &std::path::Path, baseline: &Phase1Baseline) {
+    reject_tracked_golden_write(crate_root, FixturePaths::PHASE1_BASELINE).unwrap();
     let baselines_dir = crate_root.join(FixturePaths::BASELINES_DIR);
     std::fs::create_dir_all(&baselines_dir).unwrap();
     let json = serde_json::to_string_pretty(baseline).unwrap();
