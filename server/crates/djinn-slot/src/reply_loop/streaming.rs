@@ -226,8 +226,32 @@ const TOKEN_FLUSH_INTERVAL_SECS: u64 = 30;
 ///
 /// Deliberately smaller than the client's `MAX_RETRIES` (3): each attempt here
 /// re-issues a full LLM request, and the surrounding reply loop still has its
-/// own recovery paths above this one.
+/// own recovery paths above this one. This shallow budget applies to
+/// retryable **fault** classes (transport, provider-internal 5xx, empty
+/// completion); throttle-class failures get the deeper
+/// [`MAX_THROTTLE_STREAM_EVENT_RETRIES`] instead.
 pub(super) const MAX_STREAM_EVENT_RETRIES: u32 = 2;
+
+/// Additional attempts granted when the mid-stream failure is a **throttle**
+/// ([`ProviderError::is_throttle`]: rate limit / quota / overload).
+///
+/// The shallow budget above adds up to ~3 seconds of total patience (1s + 2s
+/// backoff), which is the wrong order of magnitude for capacity shedding:
+/// real overload episodes last minutes. The overnight `server_is_overloaded`
+/// incident killed planner sessions ~11 seconds after start — all three
+/// requests burned inside a single burst that the retry was nominally
+/// "handling". Ten attempts on the shared `backoff_delay_ms` schedule
+/// (1, 2, 4, 8, 16, then 30s at the cap ≈ 3 minutes of waiting in total)
+/// actually reaches the client's 30-second backoff ceiling and spans a
+/// realistic episode, while staying far below the coordinator's 30-minute
+/// session-stall budget.
+///
+/// A deep wait is only safe because the waits stay cancellation-responsive
+/// (every sleep sits in a `tokio::select!` with both cancel tokens) and
+/// because each retry iteration refreshes the activity clocks (see
+/// [`touch_stream_activity`]) so the coordinator's stall poller cannot
+/// mistake a deliberate backoff for a hung first call.
+pub(super) const MAX_THROTTLE_STREAM_EVENT_RETRIES: u32 = 10;
 
 /// Whether the round consumed so far can be safely thrown away and re-issued.
 ///
@@ -253,8 +277,9 @@ fn round_is_safely_restartable(state: &StreamTurnState, inflight_tool_futures: u
         && inflight_tool_futures == 0
 }
 
-/// Delay before re-issuing a round killed by `error`, or `None` when the round
-/// must fail exactly as it does today.
+/// Delay before re-issuing a round killed by `error` plus the class-dependent
+/// attempt budget (surfaced for logging), or `None` when the round must fail
+/// exactly as it does today.
 ///
 /// Retryability is decided *solely* by [`ProviderError::retryable`] — the same
 /// predicate the HTTP client and the supervisor's failure classifier use — so
@@ -262,15 +287,22 @@ fn round_is_safely_restartable(state: &StreamTurnState, inflight_tool_futures: u
 /// `EmptyCompletion` are retried while `Authentication` / `InvalidRequest` /
 /// `ContextOverflow` / `InvalidOutput` are not. An error with no typed
 /// `ProviderError` source is never retried.
+///
+/// *Patience* is decided separately, by [`ProviderError::is_throttle`]:
+/// throttle-class failures (capacity shedding that routinely lasts minutes)
+/// get [`MAX_THROTTLE_STREAM_EVENT_RETRIES`] attempts so the schedule can
+/// wait an episode out, while every other retryable class keeps the shallow
+/// [`MAX_STREAM_EVENT_RETRIES`]. Both budgets are compared against the
+/// round's single shared attempt counter, so an error that changes class
+/// mid-episode can never enlarge the patience already spent: a transport
+/// fault arriving after three throttle waits is already over the shallow
+/// budget and fails immediately.
 fn transient_round_restart_delay(
     error: &anyhow::Error,
     attempts_used: u32,
     state: &StreamTurnState,
     inflight_tool_futures: usize,
-) -> Option<std::time::Duration> {
-    if attempts_used >= MAX_STREAM_EVENT_RETRIES {
-        return None;
-    }
+) -> Option<(std::time::Duration, u32)> {
     if !round_is_safely_restartable(state, inflight_tool_futures) {
         return None;
     }
@@ -278,11 +310,79 @@ fn transient_round_restart_delay(
     if !provider_error.retryable() {
         return None;
     }
-    // Same exponential-with-jitter schedule as the client's request retry,
+    let budget = if provider_error.is_throttle() {
+        MAX_THROTTLE_STREAM_EVENT_RETRIES
+    } else {
+        MAX_STREAM_EVENT_RETRIES
+    };
+    if attempts_used >= budget {
+        return None;
+    }
+    // Same exponential-with-jitter schedule as the client's request retry
+    // (which the throttle budget is deep enough to ride up to its 30s cap),
     // floored by a server-supplied Retry-After when the provider sent one.
     let attempt = attempts_used + 1;
     let delay_ms = backoff_delay_ms(attempt).max(provider_error.retry_after_ms().unwrap_or(0));
-    Some(std::time::Duration::from_millis(delay_ms))
+    Some((std::time::Duration::from_millis(delay_ms), budget))
+}
+
+/// Refresh the liveness clocks: store the in-process activity timestamp and
+/// bridge it to the host's `ActivityTracker` via the (throttled)
+/// `touch_activity` RPC.
+///
+/// Called on every decoded stream event, and — deliberately — before each
+/// mid-stream retry wait. The host-side tracker entry is *upserted* by the
+/// first touch, and its presence doubles as the stall poller's "past the
+/// first LLM call" signal (see `AgentContext::touch_activity`): without a
+/// touch, a session whose FIRST round lands inside an overload burst would
+/// sit under the poller's aggressive first-call stall cap (300s) while
+/// waiting out the multi-minute throttle schedule, and the coordinator would
+/// kill it mid-backoff — a retry budget the watchdog undercuts is worthless.
+/// Each retry iteration waits at most 30s (the `backoff_delay_ms` cap), so
+/// touching once per iteration keeps observed idle within roughly one
+/// [`TOUCH_ACTIVITY_RPC_INTERVAL_SECS`] interval.
+///
+/// Returns the unix timestamp used, so the per-event path can reuse it for
+/// its token-flush throttle.
+///
+/// Deliberately takes the individual fields rather than `&StreamLoopContext`:
+/// a `&StreamLoopContext` held across the `touch_activity_rpc` await would
+/// require the whole struct to be `Sync`, and it is not — it owns the
+/// `Pin<Box<dyn Stream + Send>>` provider stream (`Send` but not `Sync`) —
+/// which would strip `Send` from `consume_provider_stream`'s future and break
+/// `djinn-agent`'s `execute_stage`, whose spawned future must be `Send`.
+/// Callers copy these (`Sync`) references out of the context first.
+async fn touch_stream_activity(
+    slot_ctx: &crate::host::SlotContext,
+    task_id: &str,
+    activity_ts: &AtomicU64,
+    last_rpc_touch: &AtomicU64,
+) -> u64 {
+    let now = slot_ctx
+        .clock
+        .now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    activity_ts.store(now, Ordering::Relaxed);
+    // Bridge to the host's ActivityTracker.
+    let last = last_rpc_touch.load(Ordering::Relaxed);
+    if now.saturating_sub(last) >= TOUCH_ACTIVITY_RPC_INTERVAL_SECS {
+        last_rpc_touch.store(now, Ordering::Relaxed);
+        if let Err(e) = slot_ctx
+            .callbacks
+            .touch_activity_rpc(task_id.to_string())
+            .await
+        {
+            tracing::warn!(
+                task_id = %task_id,
+                error = %e,
+                "reply_loop::streaming: touch_activity RPC failed; \
+                 host stall poller may see stale idle for this turn"
+            );
+        }
+    }
+    now
 }
 
 pub(super) async fn consume_provider_stream(
@@ -335,7 +435,7 @@ pub(super) async fn consume_provider_stream(
                         // restart of the whole round — but only while the round is
                         // still safely restartable. Otherwise fall through to the
                         // unchanged terminal path.
-                        if let Some(delay) = transient_round_restart_delay(
+                        if let Some((delay, max_attempts)) = transient_round_restart_delay(
                             &e,
                             stream_event_retries,
                             &state,
@@ -346,12 +446,23 @@ pub(super) async fn consume_provider_stream(
                                 task_id = %ctx.task_id,
                                 session_id = %ctx.session_id,
                                 attempt = stream_event_retries,
-                                max_attempts = MAX_STREAM_EVENT_RETRIES,
+                                max_attempts,
                                 delay_ms = delay.as_millis() as u64,
                                 error = %e,
                                 "provider stream event failed with a retryable error before any \
                                  output was emitted; retrying"
                             );
+                            // A deliberate backoff is activity, not idleness:
+                            // refresh the liveness clocks so the coordinator's
+                            // stall poller keeps counting this session as live
+                            // across a multi-minute throttle wait.
+                            touch_stream_activity(
+                                ctx.ctx,
+                                ctx.task_id,
+                                ctx.activity_ts,
+                                ctx.last_rpc_touch,
+                            )
+                            .await;
                             tokio::select! {
                                 biased;
                                 _ = ctx.cancel.cancelled() => {
@@ -403,24 +514,13 @@ pub(super) async fn consume_provider_stream(
                     }
                 };
                 state.saw_round_event = true;
-                let now = ctx.ctx.clock.now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0);
-                ctx.activity_ts.store(now, Ordering::Relaxed);
-                // Bridge to the host's ActivityTracker.
-                let last = ctx.last_rpc_touch.load(Ordering::Relaxed);
-                if now.saturating_sub(last) >= TOUCH_ACTIVITY_RPC_INTERVAL_SECS {
-                    ctx.last_rpc_touch.store(now, Ordering::Relaxed);
-                    if let Err(e) = ctx.ctx.callbacks.touch_activity_rpc(ctx.task_id.to_string()).await {
-                        tracing::warn!(
-                            task_id = %ctx.task_id,
-                            error = %e,
-                            "reply_loop::streaming: touch_activity RPC failed; \
-                             host stall poller may see stale idle for this turn"
-                        );
-                    }
-                }
+                let now = touch_stream_activity(
+                    ctx.ctx,
+                    ctx.task_id,
+                    ctx.activity_ts,
+                    ctx.last_rpc_touch,
+                )
+                .await;
                 match evt {
                     StreamEvent::Delta(ContentBlock::Text { text }) => {
                         ctx.ctx.event_bus.send(DjinnEventEnvelope::session_message(
