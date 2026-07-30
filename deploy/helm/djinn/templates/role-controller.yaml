@@ -11,6 +11,11 @@ rules:
   - apiGroups: ["batch"]
     resources: ["jobs"]
     verbs: ["create", "get", "list", "watch", "patch", "delete"]
+  # The inert Kueue prerequisite only needs controller observation of the
+  # namespaced Workloads it will own after the later cutover.
+  - apiGroups: ["kueue.x-k8s.io"]
+    resources: ["workloads"]
+    verbs: ["get", "list", "watch"]
   # Task-run / warm / verification Pod lifecycle (the Pods themselves are
   # created by the Job controller; djinn only watches + cleans them up).
   # Backing services run as native sidecars inside these Pods, so there are no

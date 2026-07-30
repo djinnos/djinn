@@ -38,6 +38,14 @@
         "maxBuildTaskRuns": { "type": "integer", "minimum": 1, "maximum": 64 }
       }
     },
+    "kueue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["buildPods"],
+      "properties": {
+        "buildPods": { "type": "integer", "minimum": 1 }
+      }
+    },
     "logCollector": {
       "type": "object",
       "additionalProperties": false,
@@ -118,6 +126,7 @@
       }
     }
   },
+  "required": ["kueue"],
   "allOf": [
     {"if":{"properties":{"monitoring":{"properties":{"enabled":{"const":true}},"required":["enabled"]}}},"then":{"properties":{"monitoring":{"properties":{"alertmanager":{"properties":{"webhookSecret":{"properties":{"name":{"minLength":1}},"required":["name","key"]}},"required":["webhookSecret"]}},"required":["alertmanager"]}}}},
     {
