@@ -23,6 +23,7 @@ expression: names
   "write",
   "edit",
   "apply_patch",
+  "set_file_mode",
   "memory_build_context",
   "memory_write",
   "memory_edit",

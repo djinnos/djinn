@@ -172,6 +172,43 @@ pub fn tool_edit() -> RmcpTool {
     )
 }
 
+/// Flip a worktree file's executable bit.
+///
+/// The description leads with the failure it resolves because that is how an
+/// agent finds this tool: it reaches for `chmod` in the shell, gets `EPERM`, and
+/// needs to learn from the error's neighbourhood that a working route exists.
+/// Files written via `write`/`edit` are owned by the worker process (uid 1000);
+/// the shell runs as the launcher-spawned child (uid 1001), and `chmod` is
+/// governed by ownership alone.
+///
+/// Takes `executable: bool`, never a numeric mode — setuid/setgid/sticky are
+/// unrepresentable rather than merely rejected.
+pub fn tool_set_file_mode() -> RmcpTool {
+    RmcpTool::new(
+        "set_file_mode".to_string(),
+        concat!(
+            "Set or clear the executable bit on a file in the task worktree. ",
+            "Use this instead of `chmod` in the shell: shell commands run as a ",
+            "different uid than the process that wrote the file, so `chmod` there ",
+            "fails with \"Operation not permitted\". ",
+            "Applies to regular files only. Refuses files carrying ",
+            "setuid/setgid/sticky bits. ",
+            "After committing, verify with `git ls-tree HEAD -- <path>` (expect ",
+            "100755 or 100644) — not `git ls-files -s`, which shows the index and ",
+            "can report a mode that the commit path has not recorded.",
+        )
+        .to_string(),
+        object!({
+            "type": "object",
+            "required": ["path", "executable"],
+            "properties": {
+                "path": {"type": "string", "description": "Absolute or worktree-relative file path"},
+                "executable": {"type": "boolean", "description": "true to make the file executable (git 100755), false to clear the executable bit (git 100644)"}
+            }
+        }),
+    )
+}
+
 pub fn tool_task_delete_branch() -> RmcpTool {
     RmcpTool::new(
         "task_delete_branch".to_string(),
@@ -451,6 +488,11 @@ pub fn tool_schemas_worker() -> Vec<serde_json::Value> {
     tool_values.push(serialize_tool(tool_write(), destructive()));
     tool_values.push(serialize_tool(tool_edit(), destructive()));
     tool_values.push(serialize_tool(tool_apply_patch(), destructive()));
+    // Worker-only: the roles that merely read or plan never need an executable
+    // bit, and the restricted evidence-spike profile has no file mutation at all.
+    // Idempotent rather than destructive — it changes no bytes, and re-running it
+    // with the same argument is a no-op.
+    tool_values.push(serialize_tool(tool_set_file_mode(), idempotent_mutation()));
     tool_values.push(serialize_tool(
         shared_schemas::tool_memory_build_context(),
         read_only(),

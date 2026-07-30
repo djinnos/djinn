@@ -91,6 +91,9 @@ fn expected_safety_tuple(name: &str) -> Option<(bool, bool, bool, bool)> {
         | "epic_update"
         | "epic_close"
         | "proposal_ac_set"
+        // Changes no bytes, and re-running it with the same `executable`
+        // argument is a no-op — idempotent, not destructive.
+        | "set_file_mode"
         | "proposal_debate_resolve" => Some(idempotent_mutation),
         "task_create"
         | "epic_create"

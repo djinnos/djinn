@@ -47,6 +47,7 @@ pub(crate) mod ci;
 pub(crate) mod ci_artifact;
 mod code_intel;
 mod evidence_exec;
+mod file_mode;
 pub(crate) mod gate_guard;
 mod jit_pitfalls;
 // Retained for test coverage; production dispatch goes through djinn-mcp-extension.
@@ -74,6 +75,7 @@ pub(crate) use ci_artifact::call_ci_artifact;
 pub(crate) use code_intel::{call_code_graph, call_github_fetch_file, call_github_search};
 #[cfg(test)]
 pub(super) use code_intel::{call_code_graph_inner, call_lsp, should_pre_resolve_chat_key};
+pub(crate) use file_mode::call_set_file_mode;
 pub(crate) use task_admin::call_task_kill_session;
 pub(crate) use workspace::{
     call_apply_patch, call_code_search, call_edit, call_read, call_shell, call_write,
@@ -271,6 +273,10 @@ pub(super) async fn dispatch_tool_call(
             )
             .await
         }
+        // Runs in the worker process on purpose: it owns the files `write` /
+        // `edit` created, and `chmod` is an owner-only operation the agent's
+        // uid-1001 shell can never perform on them.
+        "set_file_mode" => call_set_file_mode(&call.arguments, worktree_path).await,
 
         // ── Code graph (agent-local bridge) ─────────────────────────────
         // djinn-mcp-extension returns Unhandled for code_graph because it
