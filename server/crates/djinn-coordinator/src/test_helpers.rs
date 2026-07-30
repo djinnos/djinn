@@ -238,6 +238,7 @@ pub async fn create_test_project(db: &Database) -> djinn_core::models::Project {
                 .as_deref()
                 .unwrap_or("test-registry/djinn-test:testhash"),
             Some("sha256:testhash"),
+            None,
         )
         .await;
     let _ = image_repo

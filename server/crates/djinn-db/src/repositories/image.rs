@@ -11,6 +11,7 @@
 //! committed `.sqlx` offline cache on every migration. If the tables stabilise,
 //! converting to `query!` would add compile-time SQL validation.
 
+use djinn_launcher_protocol::{LauncherAuthorityProtocol, ParseLauncherAuthorityProtocolError};
 use sqlx::Row;
 
 use crate::Result;
@@ -40,6 +41,45 @@ pub struct Image {
     pub registry_digest: Option<String>,
     pub status: String,
     pub last_error: Option<String>,
+    /// Wire form of the launcher authority protocol this artifact declared in
+    /// its build metadata (migration 165), or `None` for a build made before
+    /// the declaration existed. Read it through
+    /// [`Image::declared_launcher_protocol`] rather than matching the string.
+    pub launcher_authority_protocol: Option<String>,
+}
+
+impl Image {
+    /// The launcher authority protocol this artifact **declared** at creation
+    /// time, as captured from build metadata by the image-build watcher.
+    ///
+    /// `Ok(None)` is a legacy image built before the declaration existed — not
+    /// an unknown protocol. `Err` is unreachable through this repository
+    /// (migration 165 constrains the column to the two wire forms) but is
+    /// surfaced rather than defaulted: silently reading an unrecognised value
+    /// as `leaf-v1` is precisely what
+    /// [`LauncherAuthorityProtocol::from_str`](std::str::FromStr::from_str)
+    /// refuses to do.
+    pub fn declared_launcher_protocol(
+        &self,
+    ) -> std::result::Result<Option<LauncherAuthorityProtocol>, ParseLauncherAuthorityProtocolError>
+    {
+        match self.launcher_authority_protocol.as_deref() {
+            None => Ok(None),
+            Some(wire) => wire.parse().map(Some),
+        }
+    }
+
+    /// The protocol a dispatch of this image actually runs under: the
+    /// declaration when the artifact made one, else `leaf-v1`.
+    ///
+    /// `leaf-v1` is the behavior that predates the declaration, so it is the
+    /// only correct reading of an undeclared row — every already-built image on
+    /// a live deployment is one of those and must keep dispatching.
+    pub fn effective_launcher_protocol(
+        &self,
+    ) -> std::result::Result<LauncherAuthorityProtocol, ParseLauncherAuthorityProtocolError> {
+        Ok(self.declared_launcher_protocol()?.unwrap_or_default())
+    }
 }
 
 /// A catalog image currently selected by at least one project, with the
@@ -80,11 +120,13 @@ fn map_image(r: &sqlx::postgres::PgRow) -> Image {
         registry_digest: r.get("registry_digest"),
         status: r.get("status"),
         last_error: r.get("last_error"),
+        launcher_authority_protocol: r.get("launcher_authority_protocol"),
     }
 }
 
 const SELECT_COLS: &str = r#"id, name, description,
-    config::text AS config, config_hash, tag, registry_digest, status, last_error"#;
+    config::text AS config, config_hash, tag, registry_digest, status, last_error,
+    launcher_authority_protocol"#;
 
 pub struct ImageRepository {
     db: Database,
@@ -138,8 +180,12 @@ impl ImageRepository {
     }
 
     /// Update an image's name/description/config. Changing the config resets the
-    /// build state (status → none, hash/tag/digest cleared) so the controller
-    /// rebuilds it on the next tick.
+    /// build state (status → none, hash/tag/digest/protocol cleared) so the
+    /// controller rebuilds it on the next tick.
+    ///
+    /// The protocol declaration is cleared alongside the digest: it describes
+    /// an artifact that no longer exists, and migration 165 forbids a declaring
+    /// row from outliving its digest.
     pub async fn update(
         &self,
         id: &str,
@@ -154,7 +200,8 @@ impl ImageRepository {
             r#"UPDATE images
                   SET name = $2, description = $3, config = $4::jsonb,
                       status = 'none', config_hash = NULL, tag = NULL,
-                      registry_digest = NULL, last_error = NULL,
+                      registry_digest = NULL, launcher_authority_protocol = NULL,
+                      last_error = NULL,
                       updated_at = to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
                 WHERE id = $1"#,
         )
@@ -191,21 +238,57 @@ impl ImageRepository {
         Ok(())
     }
 
+    /// Flip an image to `ready`.
+    ///
+    /// `launcher_protocol` is the declaration the finished build artifact
+    /// carried in its build metadata, or `None` for a build that declared
+    /// nothing (a legacy builder, or a reconcile that could not read the
+    /// build's metadata).
+    ///
+    /// **A declaring image must carry the immutable manifest digest.**
+    /// Migration 164's `build_pod_permits_resize_identity_check` requires
+    /// `image_digest IS NOT NULL` whenever resize identity is present, so an
+    /// image that announces a launcher authority protocol but has no digest
+    /// produces a build Pod that can never capture that identity — bootstrap
+    /// fails closed and every task run on that image stops dispatching, with
+    /// no signal until it does. This refuses the write instead, leaving the
+    /// row out of `ready` so the caller can record a diagnostic and rebuild.
+    /// Migration 165 carries the same predicate as a CHECK, so the guarantee
+    /// survives a caller that bypasses this method.
+    ///
+    /// The requirement is scoped to declaring images on purpose: an undeclared
+    /// (`None`) build may still go `ready` without a digest, because that is
+    /// the shape every image already built on a live deployment has.
     pub async fn mark_ready(
         &self,
         id: &str,
         tag: &str,
         registry_digest: Option<&str>,
+        launcher_protocol: Option<LauncherAuthorityProtocol>,
     ) -> Result<()> {
+        let digest = registry_digest.map(str::trim).filter(|d| !d.is_empty());
+        if let Some(protocol) = launcher_protocol
+            && digest.is_none()
+        {
+            return Err(crate::Error::InvalidData(format!(
+                "image {id} declares launcher authority protocol {} but captured no immutable \
+                 registry digest; a protocol-declaring image without a digest can never capture \
+                 build-pod resize identity (migration 164) and would silently wedge dispatch, so \
+                 it is refused rather than marked ready",
+                protocol.as_wire()
+            )));
+        }
         self.db.ensure_initialized().await?;
         sqlx::query(
-            r#"UPDATE images SET status = 'ready', tag = $2, registry_digest = $3, last_error = NULL,
+            r#"UPDATE images SET status = 'ready', tag = $2, registry_digest = $3,
+                      launcher_authority_protocol = $4, last_error = NULL,
                       updated_at = to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
                WHERE id = $1"#,
         )
         .bind(id)
         .bind(tag)
-        .bind(registry_digest)
+        .bind(digest)
+        .bind(launcher_protocol.map(LauncherAuthorityProtocol::as_wire))
         .execute(self.db.pool())
         .await?;
         Ok(())
@@ -384,7 +467,7 @@ mod tests {
         let img = repo.get("i1").await.unwrap().expect("row");
         assert_eq!(img.name, "Go");
         assert_eq!(img.status, ImageStatus::NONE);
-        repo.mark_ready("i1", "ghcr/x:abc", Some("sha256:deadbeef"))
+        repo.mark_ready("i1", "ghcr/x:abc", Some("sha256:deadbeef"), None)
             .await
             .unwrap();
         assert_eq!(repo.get("i1").await.unwrap().unwrap().status, "ready");
@@ -463,7 +546,7 @@ mod tests {
 
         // Mark the catalog image ready with a digest → digest-pinned pull ref.
         images
-            .mark_ready("i1", "reg/djinn-image-i1:hash", Some("sha256:abc"))
+            .mark_ready("i1", "reg/djinn-image-i1:hash", Some("sha256:abc"), None)
             .await
             .unwrap();
         let d = projects
@@ -676,7 +759,7 @@ mod tests {
         let repo = ImageRepository::new(db.clone());
         repo.create("i1", "Go", None, "{}").await.unwrap();
         repo.set_project_image("p1", Some("i1")).await.unwrap();
-        repo.mark_ready("i1", "reg/djinn-image-i1:hash", Some("sha256:abc"))
+        repo.mark_ready("i1", "reg/djinn-image-i1:hash", Some("sha256:abc"), None)
             .await
             .unwrap();
 
@@ -694,7 +777,7 @@ mod tests {
         let repo = ImageRepository::new(db.clone());
         repo.create("i1", "Node", None, "{}").await.unwrap();
         repo.set_project_image("p1", Some("i1")).await.unwrap();
-        repo.mark_ready("i1", "reg/djinn-image-i1:hash", None)
+        repo.mark_ready("i1", "reg/djinn-image-i1:hash", None, None)
             .await
             .unwrap();
 
@@ -755,5 +838,195 @@ mod tests {
         // Ordered by image id.
         assert_eq!(rows[0].image_id, "img-a");
         assert_eq!(rows[1].image_id, "img-b");
+    }
+
+    // ── launcher authority protocol (migration 165) ───────────────────────
+
+    /// **The anti-wedge guard.** A live deployment already holds `images` rows
+    /// that are `status = 'ready'` with `registry_digest IS NULL`, built long
+    /// before any protocol declaration existed. They declare nothing, so the
+    /// new digest requirement does not apply to them, and they must keep
+    /// dispatching under `leaf-v1` exactly as they do today.
+    ///
+    /// Making the digest check unconditional — in [`ImageRepository::mark_ready`]
+    /// or by dropping the `launcher_authority_protocol IS NULL OR` arm from
+    /// migration 165's `images_declared_protocol_requires_digest_check` — bricks
+    /// every one of those images on the next deploy. Either mutation fails this
+    /// test at the `mark_ready` call below.
+    #[tokio::test]
+    async fn a_preexisting_ready_row_with_no_digest_still_dispatches_under_leaf_v1() {
+        let db = Database::open_in_memory().unwrap();
+        seed_project(&db, "p1").await;
+        let images = ImageRepository::new(db.clone());
+        let projects = ProjectRepository::new(db.clone(), EventBus::noop());
+        images.create("legacy", "Legacy", None, "{}").await.unwrap();
+        images
+            .set_project_image("p1", Some("legacy"))
+            .await
+            .unwrap();
+
+        // Exactly the shape a live deployment already holds: ready, no digest,
+        // no declaration.
+        images
+            .mark_ready("legacy", "reg/djinn-image-legacy:hash", None, None)
+            .await
+            .expect(
+                "an undeclared legacy build must still be markable ready without a digest — \
+                 an unconditional digest check strands every already-built image",
+            );
+
+        let img = images.get("legacy").await.unwrap().expect("row");
+        assert_eq!(img.status, ImageStatus::READY);
+        assert!(img.registry_digest.is_none());
+        assert_eq!(
+            img.declared_launcher_protocol().unwrap(),
+            None,
+            "a legacy row declares nothing; NULL is not an unknown protocol"
+        );
+        assert_eq!(
+            img.effective_launcher_protocol().unwrap(),
+            LauncherAuthorityProtocol::LeafV1,
+            "an undeclared image runs under the behavior that predates the declaration"
+        );
+
+        let dispatch = projects
+            .resolve_dispatch_image("p1")
+            .await
+            .unwrap()
+            .expect("project resolves");
+        assert_eq!(
+            dispatch.pull_ref().as_deref(),
+            Some("reg/djinn-image-legacy:hash"),
+            "the legacy digestless image must remain dispatchable on its content-addressed tag"
+        );
+    }
+
+    /// The fail-closed door: a build that announces a protocol but captured no
+    /// digest is refused, and nothing is written.
+    #[tokio::test]
+    async fn mark_ready_refuses_a_protocol_declaring_image_with_no_digest() {
+        let db = Database::open_in_memory().unwrap();
+        db.ensure_initialized().await.unwrap();
+        let repo = ImageRepository::new(db.clone());
+        repo.create("i1", "Rust", None, "{}").await.unwrap();
+
+        for absent in [None, Some(""), Some("   ")] {
+            let err = repo
+                .mark_ready(
+                    "i1",
+                    "reg/djinn-image-i1:hash",
+                    absent,
+                    Some(LauncherAuthorityProtocol::ResizeV2),
+                )
+                .await
+                .expect_err("a declaring image with no digest must be refused");
+            let rendered = err.to_string();
+            assert!(
+                rendered.contains("registry digest") && rendered.contains("resize-v2"),
+                "the refusal must name the missing digest and the declared protocol, got: {rendered}"
+            );
+        }
+
+        let img = repo.get("i1").await.unwrap().expect("row");
+        assert_eq!(
+            img.status,
+            ImageStatus::NONE,
+            "a refused mark_ready must not have written the row"
+        );
+        assert!(img.launcher_authority_protocol.is_none());
+    }
+
+    /// A declaring build that DID capture a digest goes ready and round-trips
+    /// its declaration through the column.
+    #[tokio::test]
+    async fn mark_ready_persists_the_declared_protocol_alongside_the_digest() {
+        let db = Database::open_in_memory().unwrap();
+        db.ensure_initialized().await.unwrap();
+        let repo = ImageRepository::new(db.clone());
+
+        for protocol in LauncherAuthorityProtocol::ALL {
+            let id = format!("img-{}", protocol.as_wire());
+            repo.create(&id, &format!("Image {protocol}"), None, "{}")
+                .await
+                .unwrap();
+            repo.mark_ready(
+                &id,
+                "reg/djinn-image-x:hash",
+                Some("sha256:abc"),
+                Some(protocol),
+            )
+            .await
+            .unwrap();
+            let img = repo.get(&id).await.unwrap().expect("row");
+            assert_eq!(img.declared_launcher_protocol().unwrap(), Some(protocol));
+            assert_eq!(img.effective_launcher_protocol().unwrap(), protocol);
+
+            // Editing the config resets the build state; the declaration must
+            // go with the digest, or migration 165's CHECK would reject the row.
+            repo.update(
+                &id,
+                &format!("Image {protocol}"),
+                None,
+                r#"{"schema_version":1}"#,
+            )
+            .await
+            .unwrap();
+            let after = repo.get(&id).await.unwrap().expect("row");
+            assert!(after.registry_digest.is_none());
+            assert_eq!(after.declared_launcher_protocol().unwrap(), None);
+        }
+    }
+
+    /// The Rust guard is not the only door. Migration 165 must carry the same
+    /// two predicates, so a caller that writes the row directly cannot create
+    /// the wedge either.
+    #[tokio::test]
+    async fn migration_165_constrains_the_column_to_the_wire_set_and_demands_a_digest() {
+        let db = Database::open_in_memory().unwrap();
+        db.ensure_initialized().await.unwrap();
+        let repo = ImageRepository::new(db.clone());
+        repo.create("i1", "Rust", None, "{}").await.unwrap();
+
+        // Every wire form the type knows is accepted — with a digest.
+        for protocol in LauncherAuthorityProtocol::ALL {
+            sqlx::query(
+                "UPDATE images SET status = 'ready', registry_digest = 'sha256:abc', \
+                 launcher_authority_protocol = $2 WHERE id = $1",
+            )
+            .bind("i1")
+            .bind(protocol.as_wire())
+            .execute(db.pool())
+            .await
+            .unwrap_or_else(|e| panic!("the database must accept {}: {e}", protocol.as_wire()));
+        }
+
+        // A declaration the type cannot parse is rejected by the database too.
+        for rejected in ["leaf-v2", "LEAF-V1", "resize-v2 ", "", "unknown"] {
+            assert!(
+                sqlx::query(
+                    "UPDATE images SET registry_digest = 'sha256:abc', \
+                     launcher_authority_protocol = $2 WHERE id = $1",
+                )
+                .bind("i1")
+                .bind(rejected)
+                .execute(db.pool())
+                .await
+                .is_err(),
+                "{rejected:?} must not be storable as a launcher authority protocol"
+            );
+        }
+
+        // A declaration without a digest is rejected even via raw SQL.
+        assert!(
+            sqlx::query(
+                "UPDATE images SET registry_digest = NULL, \
+                 launcher_authority_protocol = 'resize-v2' WHERE id = $1",
+            )
+            .bind("i1")
+            .execute(db.pool())
+            .await
+            .is_err(),
+            "migration 165 must refuse a protocol-declaring row with no digest"
+        );
     }
 }

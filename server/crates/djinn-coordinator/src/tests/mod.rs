@@ -243,7 +243,7 @@ async fn make_epic(
     // real Postgres schema, whose image identity fields are length-bound.
     let image_tag = test_image_tag(&image_id);
     image_repo
-        .mark_ready(&image_id, &image_tag, Some("sha256:testhash"))
+        .mark_ready(&image_id, &image_tag, Some("sha256:testhash"), None)
         .await
         .unwrap();
     image_repo

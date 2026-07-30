@@ -172,6 +172,7 @@ async fn seed_project_with_ready_image(db: &Database, name: &str) -> String {
             &image_id,
             &format!("reg.example:5000/djinn-project-{}:abc123", project.id),
             None,
+            None,
         )
         .await
         .unwrap();
