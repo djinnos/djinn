@@ -1,4 +1,4 @@
-//! Migration 162 — durable build-pod permit schema contract.
+//! Migrations 162/163 — durable build-pod permit and resize identity contracts.
 //!
 //! Exercises the exact PostgreSQL schema introduced for build-pod permits with
 //! the repository's isolated-database migration harness. In particular, a Job
@@ -21,21 +21,47 @@ fn base_database_url() -> String {
 }
 
 #[tokio::test]
-async fn migration_163_upgrades_released_162_permits_without_job_uids() {
+async fn migration_163_upgrades_every_valid_162_permit_shape() {
     with_temp_database("upgrade_resize_identity", |db_url| async move {
         let mut conn = PgConnection::connect(&db_url).await.unwrap();
         apply_prior_migrations(&mut conn).await;
         apply_permit_migration(&mut conn).await;
         let pool = PgPoolOptions::new().max_connections(1).connect(&db_url).await.unwrap();
-        seed_task_runs(&pool, MIGRATION_OPERATOR_ID, &["released"]).await;
+        seed_task_runs(
+            &pool,
+            MIGRATION_OPERATOR_ID,
+            &["released", "acquired", "job-created"],
+        )
+        .await;
         sqlx::query("INSERT INTO build_pod_permits (task_run_id, fencing_token, state, released_at, released_fencing_token, release_reason) VALUES ('released', 9001, 'released', now(), 9001, 'before_job')")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO build_pod_permits (task_run_id, fencing_token, state) VALUES ('acquired', 9002, 'acquired')")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO build_pod_permits (task_run_id, fencing_token, state, job_uid) VALUES ('job-created', 9003, 'job_created', 'preexisting-job')")
             .execute(&pool).await.unwrap();
         pool.close().await;
         apply_resize_migration(&mut conn).await;
         let pool = PgPoolOptions::new().max_connections(1).connect(&db_url).await.unwrap();
-        let row: (Option<String>, String) = sqlx::query_as("SELECT job_uid, state FROM build_pod_permits WHERE task_run_id = 'released'")
-            .fetch_one(&pool).await.unwrap();
-        assert_eq!(row, (None, "released".into()));
+        let rows: Vec<(String, Option<String>, String, Option<String>)> = sqlx::query_as(
+            "SELECT task_run_id, job_uid, state, pod_uid FROM build_pod_permits ORDER BY task_run_id",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                ("acquired".into(), None, "acquired".into(), None),
+                (
+                    "job-created".into(),
+                    Some("preexisting-job".into()),
+                    "job_created".into(),
+                    None,
+                ),
+                ("released".into(), None, "released".into(), None),
+            ],
+            "migration 163 must preserve every migration-162 permit shape without inventing resize identity"
+        );
         pool.close().await;
     }).await;
 }
@@ -304,7 +330,7 @@ async fn existing_build_lease_and_admission_snapshot(pool: &sqlx::PgPool) -> Vec
 }
 
 #[tokio::test]
-async fn migration_162_embedded_fresh_database_enforces_build_pod_permit_contract() {
+async fn migration_163_embedded_fresh_database_enforces_resize_identity_contract() {
     with_temp_database("build_pod_permits", |db_url| async move {
         let creator_id =
             djinn_db::test_support::apply_all_migrations_to_fresh_database(&db_url).await;
@@ -319,6 +345,13 @@ async fn migration_162_embedded_fresh_database_enforces_build_pod_permit_contrac
             "permit-run-released",
             "permit-run-invalid",
             "permit-run-distinct",
+            "permit-run-resize-valid",
+            "permit-run-resize-partial",
+            "permit-run-resize-observed",
+            "permit-run-resize-effective",
+            "permit-run-resize-zero",
+            "permit-run-resize-negative",
+            "permit-run-resize-illegal",
         ];
         seed_task_runs(&pool, &creator_id, &run_ids).await;
 
@@ -425,9 +458,56 @@ async fn migration_162_embedded_fresh_database_enforces_build_pod_permit_contrac
             );
         }
 
+        // Migration 163 makes resize identity an all-or-nothing, protocol- and
+        // ceiling-validated shape. Each rejected insert otherwise supplies a
+        // valid migration-162 permit, so the asserted failure is resize-specific.
+        for sql in [
+            "INSERT INTO build_pod_permits (task_run_id, fencing_token, state, job_uid, pod_namespace) \
+             VALUES ('permit-run-resize-partial', 1201, 'job_created', 'job-partial', 'ns')",
+            "INSERT INTO build_pod_permits (task_run_id, fencing_token, state, job_uid, pod_namespace, pod_name, pod_uid, launcher_container_name, launcher_container_id, image_digest, observed_launcher_protocol, effective_launcher_protocol, admitted_cpu_millicores) \
+             VALUES ('permit-run-resize-observed', 1202, 'job_created', 'job-observed', 'ns', 'pod', 'uid-observed', 'launcher', 'containerd://launcher', 'sha256:observed', 'unknown-v3', 'resize-v2', 1000)",
+            "INSERT INTO build_pod_permits (task_run_id, fencing_token, state, job_uid, pod_namespace, pod_name, pod_uid, launcher_container_name, launcher_container_id, image_digest, observed_launcher_protocol, effective_launcher_protocol, admitted_cpu_millicores) \
+             VALUES ('permit-run-resize-effective', 1203, 'job_created', 'job-effective', 'ns', 'pod', 'uid-effective', 'launcher', 'containerd://launcher', 'sha256:effective', 'resize-v2', 'unknown-v3', 1000)",
+            "INSERT INTO build_pod_permits (task_run_id, fencing_token, state, job_uid, pod_namespace, pod_name, pod_uid, launcher_container_name, launcher_container_id, image_digest, observed_launcher_protocol, effective_launcher_protocol, admitted_cpu_millicores) \
+             VALUES ('permit-run-resize-zero', 1204, 'job_created', 'job-zero', 'ns', 'pod', 'uid-zero', 'launcher', 'containerd://launcher', 'sha256:zero', 'resize-v2', 'resize-v2', 0)",
+            "INSERT INTO build_pod_permits (task_run_id, fencing_token, state, job_uid, pod_namespace, pod_name, pod_uid, launcher_container_name, launcher_container_id, image_digest, observed_launcher_protocol, effective_launcher_protocol, admitted_cpu_millicores) \
+             VALUES ('permit-run-resize-negative', 1205, 'job_created', 'job-negative', 'ns', 'pod', 'uid-negative', 'launcher', 'containerd://launcher', 'sha256:negative', 'resize-v2', 'resize-v2', -1)",
+            "INSERT INTO build_pod_permits (task_run_id, fencing_token, state, job_uid, pod_namespace, pod_name, pod_uid, launcher_container_name, launcher_container_id, image_digest, observed_launcher_protocol, effective_launcher_protocol, admitted_cpu_millicores) \
+             VALUES ('permit-run-resize-illegal', 1206, 'not-a-lifecycle-state', 'job-illegal', 'ns', 'pod', 'uid-illegal', 'launcher', 'containerd://launcher', 'sha256:illegal', 'resize-v2', 'resize-v2', 1000)",
+        ] {
+            assert!(
+                sqlx::query(sql).execute(&pool).await.is_err(),
+                "resize identity schema should reject invalid contract SQL: {sql}"
+            );
+        }
+
+        sqlx::query(
+            "INSERT INTO build_pod_permits \
+             (task_run_id, fencing_token, state, job_uid, pod_namespace, pod_name, pod_uid, \
+              launcher_container_name, launcher_container_id, image_digest, \
+              observed_launcher_protocol, effective_launcher_protocol, admitted_cpu_millicores) \
+             VALUES ('permit-run-resize-valid', 1207, 'birth_confirmed', 'job-valid', 'ns', \
+                     'pod', 'uid-valid', 'launcher', 'containerd://launcher', 'sha256:valid', \
+                     'resize-v2', 'resize-v2', 1000)",
+        )
+        .execute(&pool)
+        .await
+        .expect("insert complete resize identity");
+        for sql in [
+            "UPDATE build_pod_permits SET state = 'lifted' \
+             WHERE task_run_id = 'permit-run-resize-valid'",
+            "UPDATE build_pod_permits SET image_digest = 'sha256:replacement' \
+             WHERE task_run_id = 'permit-run-resize-valid'",
+        ] {
+            assert!(
+                sqlx::query(sql).execute(&pool).await.is_err(),
+                "resize identity schema should reject illegal transition or immutable mutation: {sql}"
+            );
+        }
+
         // The downstream active-count query is authoritative: all and only
         // non-released rows count. The terminal-but-present Job is active here.
-        assert_eq!(active_permit_count(&pool).await, 3);
+        assert_eq!(active_permit_count(&pool).await, 4);
         sqlx::query(
             "UPDATE build_pod_permits \
              SET state = 'released', released_at = now(), \
@@ -437,7 +517,7 @@ async fn migration_162_embedded_fresh_database_enforces_build_pod_permit_contrac
         .execute(&pool)
         .await
         .expect("explicitly release terminal-but-present Job permit");
-        assert_eq!(active_permit_count(&pool).await, 2);
+        assert_eq!(active_permit_count(&pool).await, 3);
 
         pool.close().await;
     })
