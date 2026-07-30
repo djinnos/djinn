@@ -1,4 +1,4 @@
-//! Migrations 162/163 — durable build-pod permit and resize identity contracts.
+//! Durable build-pod permit and Pod resize identity schema contracts.
 //!
 //! Exercises the exact PostgreSQL schema introduced for build-pod permits with
 //! the repository's isolated-database migration harness. In particular, a Job
@@ -12,7 +12,11 @@ use sqlx::{Connection, Executor};
 
 const MIGRATION_VERSION: u64 = 162;
 const MIGRATION_FILE: &str = "162_build_pod_permits.sql";
-const RESIZE_MIGRATION_FILE: &str = "163_build_pod_resize_identity.sql";
+/// The resize migration is identified by its *description*, not its number.
+/// Migration numbers are assigned at merge time and get renumbered whenever
+/// another migration lands first, so pinning the numeric prefix here makes this
+/// test fail for a reason that has nothing to do with the schema it guards.
+const RESIZE_MIGRATION_SUFFIX: &str = "_build_pod_resize_identity.sql";
 const MIGRATION_OPERATOR_ID: &str = "00000000-0000-7000-8000-000000000162";
 const CREATOR_CONTRACT_VERSION: u64 = 142;
 
@@ -21,7 +25,7 @@ fn base_database_url() -> String {
 }
 
 #[tokio::test]
-async fn migration_163_upgrades_every_valid_162_permit_shape() {
+async fn resize_migration_upgrades_every_valid_permit_shape() {
     with_temp_database("upgrade_resize_identity", |db_url| async move {
         let mut conn = PgConnection::connect(&db_url).await.unwrap();
         apply_prior_migrations(&mut conn).await;
@@ -60,18 +64,40 @@ async fn migration_163_upgrades_every_valid_162_permit_shape() {
                 ),
                 ("released".into(), None, "released".into(), None),
             ],
-            "migration 163 must preserve every migration-162 permit shape without inventing resize identity"
+            "the resize migration must preserve every prior permit shape without inventing resize identity"
         );
         pool.close().await;
     }).await;
 }
 
+/// Resolve the resize migration by description so a renumber cannot break this
+/// test, and fail loudly if it is missing or ambiguous rather than silently
+/// applying nothing.
+fn resize_migration_path() -> PathBuf {
+    let mut matches: Vec<PathBuf> = std::fs::read_dir(migrations_dir())
+        .expect("read migrations dir")
+        .filter_map(|entry| {
+            let path = entry.expect("read migration dir entry").path();
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.ends_with(RESIZE_MIGRATION_SUFFIX))
+                .then_some(path)
+        })
+        .collect();
+    matches.sort();
+    assert_eq!(
+        matches.len(),
+        1,
+        "expected exactly one `*{RESIZE_MIGRATION_SUFFIX}` migration, found {matches:?}"
+    );
+    matches.remove(0)
+}
+
 async fn apply_resize_migration(conn: &mut PgConnection) {
-    let sql = std::fs::read_to_string(migrations_dir().join(RESIZE_MIGRATION_FILE))
-        .expect("read resize migration sql");
+    let sql = std::fs::read_to_string(resize_migration_path()).expect("read resize migration sql");
     conn.execute(sql.as_str())
         .await
-        .expect("apply resize migration after migration 162");
+        .expect("apply resize migration after the build-pod permit migration");
 }
 
 fn migrations_dir() -> PathBuf {
@@ -330,7 +356,7 @@ async fn existing_build_lease_and_admission_snapshot(pool: &sqlx::PgPool) -> Vec
 }
 
 #[tokio::test]
-async fn migration_163_embedded_fresh_database_enforces_resize_identity_contract() {
+async fn embedded_fresh_database_enforces_build_pod_permit_and_resize_contract() {
     with_temp_database("build_pod_permits", |db_url| async move {
         let creator_id =
             djinn_db::test_support::apply_all_migrations_to_fresh_database(&db_url).await;
@@ -352,6 +378,7 @@ async fn migration_163_embedded_fresh_database_enforces_resize_identity_contract
             "permit-run-resize-zero",
             "permit-run-resize-negative",
             "permit-run-resize-illegal",
+            "permit-run-resize-duplicate",
         ];
         seed_task_runs(&pool, &creator_id, &run_ids).await;
 
@@ -458,7 +485,7 @@ async fn migration_163_embedded_fresh_database_enforces_resize_identity_contract
             );
         }
 
-        // Migration 163 makes resize identity an all-or-nothing, protocol- and
+        // The resize migration makes identity an all-or-nothing, protocol- and
         // ceiling-validated shape. Each rejected insert otherwise supplies a
         // valid migration-162 permit, so the asserted failure is resize-specific.
         for sql in [
@@ -504,6 +531,25 @@ async fn migration_163_embedded_fresh_database_enforces_resize_identity_contract
                 "resize identity schema should reject illegal transition or immutable mutation: {sql}"
             );
         }
+
+        // A Pod UID is owned by exactly one permit. A second task run claiming
+        // the same Pod with its own ceiling would otherwise hold a competing
+        // "write-once" authority over the same container.
+        assert!(
+            sqlx::query(
+                "INSERT INTO build_pod_permits \
+                 (task_run_id, fencing_token, state, job_uid, pod_namespace, pod_name, pod_uid, \
+                  launcher_container_name, launcher_container_id, image_digest, \
+                  observed_launcher_protocol, effective_launcher_protocol, admitted_cpu_millicores) \
+                 VALUES ('permit-run-resize-duplicate', 1208, 'birth_confirmed', 'job-duplicate', \
+                         'ns', 'pod-two', 'uid-valid', 'launcher', 'containerd://launcher', \
+                         'sha256:valid', 'resize-v2', 'resize-v2', 2000)",
+            )
+            .execute(&pool)
+            .await
+            .is_err(),
+            "a Pod UID already captured by another permit must be rejected"
+        );
 
         // The downstream active-count query is authoritative: all and only
         // non-released rows count. The terminal-but-present Job is active here.

@@ -42,6 +42,13 @@ ALTER TABLE build_pod_permits
         OR pod_uid IS NOT NULL
     );
 
+-- A Pod belongs to exactly one permit. The per-row write-once predicate alone
+-- only stops the *same* permit being recaptured; without this index two task
+-- runs could each capture the same Pod UID with different admitted ceilings and
+-- both believe they hold write-once authority over that Pod.
+CREATE UNIQUE INDEX build_pod_permits_pod_uid_key ON build_pod_permits (pod_uid)
+    WHERE pod_uid IS NOT NULL;
+
 CREATE INDEX build_pod_permits_resize_nonterminal_idx ON build_pod_permits (acquired_at, task_run_id)
     WHERE state IN ('birth_confirmed', 'lift_applying', 'lifted', 'drop_required', 'drop_applying', 'quarantined');
 

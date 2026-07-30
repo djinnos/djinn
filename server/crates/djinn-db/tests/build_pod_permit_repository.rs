@@ -52,7 +52,7 @@ async fn seed_runs(db: &Database, ids: &[&str]) {
 #[tokio::test]
 async fn resize_identity_is_write_once_and_lifecycle_is_uid_fenced() {
     let db = Database::ephemeral().await.unwrap();
-    seed_runs(&db, &["resize"]).await;
+    seed_runs(&db, &["resize", "resize-malformed"]).await;
     let repo = BuildPodPermitRepository::new(db.clone());
     let permit = match repo.acquire("resize", 1).await {
         AcquireBuildPodPermitResult::Acquired { row, .. } => row,
@@ -87,19 +87,157 @@ async fn resize_identity_is_write_once_and_lifecycle_is_uid_fenced() {
             .unwrap(),
         CaptureBuildPodResizeIdentityResult::AlreadyCaptured(_)
     ));
-    let mut conflicting = identity.clone();
-    conflicting.pod_uid = "other-pod".into();
+    // Write-once is per field, not merely per Pod UID: every component of the
+    // captured identity must reject a conflicting second capture, and none of
+    // them may mutate the durable row on the way to being rejected.
+    let conflicting_identities = [
+        ("pod uid", {
+            let mut it = identity.clone();
+            it.pod_uid = "other-pod".into();
+            it
+        }),
+        ("pod coordinates", {
+            let mut it = identity.clone();
+            it.pod_namespace = "other-ns".into();
+            it.pod_name = "other-pod-name".into();
+            it
+        }),
+        ("launcher container identity", {
+            let mut it = identity.clone();
+            it.launcher_container_id = "containerd://other".into();
+            it
+        }),
+        ("image digest", {
+            let mut it = identity.clone();
+            it.image_digest = "sha256:replacement".into();
+            it
+        }),
+        ("effective protocol", {
+            let mut it = identity.clone();
+            it.effective_launcher_protocol = "leaf-v1".into();
+            it
+        }),
+        ("admitted ceiling", {
+            let mut it = identity.clone();
+            it.admitted_cpu_millicores = 2000;
+            it
+        }),
+    ];
+    for (label, conflicting) in &conflicting_identities {
+        assert!(
+            matches!(
+                repo.capture_resize_identity(
+                    "resize",
+                    &permit.permit_id,
+                    permit.fencing_token,
+                    conflicting
+                )
+                .await
+                .unwrap(),
+                CaptureBuildPodResizeIdentityResult::Rejected
+            ),
+            "a conflicting {label} must fail closed"
+        );
+        assert_eq!(
+            repo.active("resize")
+                .await
+                .unwrap()
+                .unwrap()
+                .resize_identity,
+            Some(identity.clone()),
+            "a rejected {label} capture must leave the first writer's row intact"
+        );
+    }
+    // A replay of the *correct* identity under a stale permit or fence is still
+    // not an owner, so it cannot be reported as an idempotent replay.
     assert!(matches!(
         repo.capture_resize_identity(
             "resize",
             &permit.permit_id,
-            permit.fencing_token,
-            &conflicting
+            permit.fencing_token + 1,
+            &identity
         )
         .await
         .unwrap(),
         CaptureBuildPodResizeIdentityResult::Rejected
     ));
+    assert!(matches!(
+        repo.capture_resize_identity(
+            "resize",
+            "00000000-0000-4000-8000-000000000000",
+            permit.fencing_token,
+            &identity
+        )
+        .await
+        .unwrap(),
+        CaptureBuildPodResizeIdentityResult::Rejected
+    ));
+    assert_eq!(
+        repo.active("resize")
+            .await
+            .unwrap()
+            .unwrap()
+            .resize_identity,
+        Some(identity.clone()),
+        "stale-permit and stale-fence captures must not mutate the row"
+    );
+
+    // A never-captured permit proves the malformed-identity guard actually
+    // rejects rather than the row simply being locked by an earlier capture.
+    let fresh = match repo.acquire("resize-malformed", 2).await {
+        AcquireBuildPodPermitResult::Acquired { row, .. } => row,
+        outcome => panic!("unexpected outcome: {outcome:?}"),
+    };
+    assert!(matches!(
+        repo.bind_or_refresh_job_uid(
+            "resize-malformed",
+            &fresh.permit_id,
+            fresh.fencing_token,
+            "job-malformed"
+        )
+        .await
+        .unwrap(),
+        BindBuildPodPermitResult::Bound(_)
+    ));
+    for (label, malformed) in [
+        ("blank pod uid", {
+            let mut it = identity.clone();
+            it.pod_uid = "   ".into();
+            it
+        }),
+        ("unknown protocol", {
+            let mut it = identity.clone();
+            it.observed_launcher_protocol = "unknown-v3".into();
+            it
+        }),
+        ("nonpositive ceiling", {
+            let mut it = identity.clone();
+            it.admitted_cpu_millicores = 0;
+            it
+        }),
+    ] {
+        assert!(
+            matches!(
+                repo.capture_resize_identity(
+                    "resize-malformed",
+                    &fresh.permit_id,
+                    fresh.fencing_token,
+                    &malformed
+                )
+                .await
+                .unwrap(),
+                CaptureBuildPodResizeIdentityResult::Rejected
+            ),
+            "a malformed identity ({label}) must fail closed"
+        );
+    }
+    let untouched = repo.active("resize-malformed").await.unwrap().unwrap();
+    assert_eq!(untouched.state, BuildPodPermitState::JobCreated);
+    assert_eq!(
+        untouched.resize_identity, None,
+        "a rejected malformed capture must not enter the resize lifecycle"
+    );
+
     for (from, to) in [
         (
             BuildPodPermitState::BirthConfirmed,
@@ -126,19 +264,29 @@ async fn resize_identity_is_write_once_and_lifecycle_is_uid_fenced() {
             BuildPodPermitState::Quarantined,
         ),
     ] {
-        assert!(matches!(
-            repo.transition_resize_lifecycle(
+        let outcome = repo
+            .transition_resize_lifecycle(
                 "resize",
                 &permit.permit_id,
                 permit.fencing_token,
                 "pod-uid",
                 from,
-                to
+                to,
             )
             .await
-            .unwrap(),
-            TransitionBuildPodResizeLifecycleResult::Transitioned(_)
-        ));
+            .unwrap();
+        let TransitionBuildPodResizeLifecycleResult::Transitioned(row) = outcome else {
+            panic!("{from:?} -> {to:?} must be a legal transition, got {outcome:?}");
+        };
+        // The returned row, not just the variant, has to carry the new state,
+        // and the identity must survive the transition untouched.
+        assert_eq!(row.state, to);
+        assert_eq!(row.resize_identity, Some(identity.clone()));
+        assert_eq!(
+            repo.active("resize").await.unwrap().unwrap().state,
+            to,
+            "the durable row must agree with the returned row"
+        );
     }
     // A matching UID/fence is not sufficient: stale observers must also echo
     // the actual durable lifecycle state.
@@ -186,14 +334,24 @@ async fn resize_identity_is_write_once_and_lifecycle_is_uid_fenced() {
         .unwrap(),
         TransitionBuildPodResizeLifecycleResult::Rejected
     ));
+    // A freshly constructed repository — the restart case — must recover the
+    // nonterminal row from the database alone. The still-`job_created`
+    // `resize-malformed` permit is the negative control: it is active for
+    // capacity but owes no resize work, so it must not appear here.
+    let recovered = BuildPodPermitRepository::new(db)
+        .list_nonterminal_resize()
+        .await
+        .unwrap();
     assert_eq!(
-        BuildPodPermitRepository::new(db)
-            .list_nonterminal_resize()
-            .await
-            .unwrap()
-            .len(),
-        1
+        recovered
+            .iter()
+            .map(|row| row.task_run_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["resize"],
+        "only nonterminal resize rows are recoverable after a restart"
     );
+    assert_eq!(recovered[0].state, BuildPodPermitState::Quarantined);
+    assert_eq!(recovered[0].resize_identity, Some(identity));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
