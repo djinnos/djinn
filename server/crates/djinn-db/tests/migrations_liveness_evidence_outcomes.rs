@@ -306,7 +306,8 @@ async fn assert_liveness_schema(pool: &sqlx::PgPool) {
 
     for (column, data_type, nullable) in [
         ("id", "character varying", "NO"),
-        ("session_id", "character varying", "NO"),
+        // Migration 163 permits task-scoped evidence without a scalar session.
+        ("session_id", "character varying", "YES"),
         ("task_id", "character varying", "YES"),
         ("task_run_id", "character varying", "YES"),
         ("verdict", "character varying", "NO"),
@@ -366,6 +367,7 @@ async fn assert_liveness_schema(pool: &sqlx::PgPool) {
         "liveness_evidence_verdict_check",
         "liveness_evidence_outcome_kind_check",
         "liveness_evidence_outcome_reason_check",
+        "liveness_evidence_owner_check",
     ] {
         assert!(
             liveness_constraints.iter().any(|c| c == expected),
