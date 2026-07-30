@@ -410,10 +410,21 @@ impl<F: CgroupFs, S: SpawnIntoCgroup> Launcher<F, S> {
         let child = match self.syscall.spawn_into_cgroup(fd, &invocation, &command) {
             Ok(child) => child,
             Err(error) => {
-                // The spawn seam stands the child down before `execve` on every
-                // failure path, so this direct child is necessarily empty. Do
-                // not leak a delegated cgroup on refusal.
-                let _ = self.fs.remove_leaf(fd, name);
+                // A failed spawn may have reached cgroup placement before its
+                // exec handshake reports the error. Treat it as every other
+                // terminal path: kill the whole leaf, observe emptiness, then
+                // remove it. This intentionally performs no quota mutation.
+                let mut failed_leaf = Leaf {
+                    name: name.to_owned(),
+                    fd,
+                    invocation,
+                    authority,
+                    protocol: self.config.authority_protocol,
+                    lifted: false,
+                    terminal: false,
+                };
+                self.kill(&mut failed_leaf)?;
+                self.remove(&failed_leaf)?;
                 return Err(error);
             }
         };
@@ -909,6 +920,15 @@ mod tests {
                 ..Self::default()
             }
         }
+
+        fn ready_with_empty_next_leaf() -> Self {
+            let mut fs = Self::ready();
+            fs.files.insert(
+                (fs.next + 1, "cgroup.events".into()),
+                "populated 0\n".into(),
+            );
+            fs
+        }
     }
     impl CgroupFs for FakeFs {
         fn readiness(&self) -> Result<Readiness, Error> {
@@ -1244,10 +1264,11 @@ mod tests {
     }
 
     #[test]
-    fn resize_v2_spawn_failure_removes_the_empty_leaf_without_a_quota_write() {
+    fn resize_v2_spawn_failure_kills_waits_and_removes_without_a_quota_write() {
         let config = config().with_authority_protocol(LauncherAuthorityProtocol::ResizeV2);
+        let fs = FakeFs::ready_with_empty_next_leaf();
         let mut launcher = Launcher::new(
-            FakeFs::ready(),
+            fs,
             FakeSpawn {
                 deny: true,
                 ..FakeSpawn::default()
@@ -1261,7 +1282,24 @@ mod tests {
         ));
         assert_eq!(launcher.fs.created, vec!["refused"]);
         assert_eq!(launcher.fs.removed, vec!["refused"]);
-        assert!(launcher.fs.writes.is_empty(), "setup failure cannot restore cpu.max");
+        assert!(
+            launcher
+                .fs
+                .writes
+                .iter()
+                .all(|(file, _)| file != "cpu.max"),
+            "setup failure cannot restore cpu.max"
+        );
+        assert_eq!(
+            launcher.fs.writes,
+            vec![("cgroup.kill".into(), "1".into())],
+            "spawn failure remains a cgroup-wide kill"
+        );
+        assert_eq!(
+            launcher.fs.reads,
+            vec!["cgroup.events"],
+            "spawn failure waits for cgroup.events to report emptiness before removal"
+        );
     }
 
     #[test]
@@ -1393,8 +1431,9 @@ mod tests {
 
     #[test]
     fn denied_spawn_never_executes_a_child() {
+        let fs = FakeFs::ready_with_empty_next_leaf();
         let mut l = Launcher::new(
-            FakeFs::ready(),
+            fs,
             FakeSpawn {
                 deny: true,
                 ..FakeSpawn::default()
