@@ -52,6 +52,12 @@ env:
   # what a healthy hosted runner has free after the reclaim set below, so a
   # healthy runner never trips it — a preflight that false-fails is worse than
   # no preflight.
+  # Number of rows in `server-test`'s static matrix. Asserted against the plan
+  # inside every shard, so a plan wider than the matrix fails loudly instead of
+  # silently dropping the tail shards' tests. Must equal the row count of that
+  # matrix AND be >= the planner's widest shard count; `ci-nextest-plan.test.mjs`
+  # enforces both.
+  CI_SERVER_TEST_MATRIX_WIDTH: "8"
   CI_RUNNER_DISK_MIN_GB: "14"
   # Warn band. Free space between MIN and WARN still completes the build but is
   # already abnormal for a hosted runner, so annotate it: the run summary is
@@ -1362,6 +1368,25 @@ jobs:
     timeout-minutes: 40
     strategy:
       fail-fast: false
+      # WIDTH INVARIANT: this list must have at least as many rows as the
+      # WIDEST plan the planner can emit, i.e. max(PR_MAX_SHARDS,
+      # WIDE_DEFAULT_SHARDS, COLD_START_SHARDS) in scripts/ci-nextest-plan.mjs.
+      # `CI_SERVER_TEST_MATRIX_WIDTH` at the top of this file must equal this
+      # row count, and `ci-nextest-plan.test.mjs` fails if either side drifts.
+      #
+      # Why it is load-bearing: because the surplus direction is SAFE and the
+      # deficit direction is SILENT. A plan narrower than the matrix no-ops its
+      # extra indices. A plan WIDER than the matrix has no job for the tail
+      # indices, so those tests simply never run — and nothing notices. The
+      # exact-once proof is a property of the PLAN's partition, not of what
+      # executed, so it still passes; the surviving shards all succeed; and the
+      # gate goes green.
+      #
+      # This happened. #2799 raised PR_MAX_SHARDS 4 -> 8 against this list
+      # while it still had four rows, and once #2803 made the planner reach
+      # PR_MAX_SHARDS at all, run 30544309199 planned eight shards of ~1458
+      # tests and ran four of them: 5834 of 11666 tests (50%) were assigned to
+      # shardIndex 4-7, which had no jobs. The run was green.
       matrix:
         include:
           - shard: shard-1
@@ -1372,6 +1397,14 @@ jobs:
             shardIndex: 2
           - shard: shard-4
             shardIndex: 3
+          - shard: shard-5
+            shardIndex: 4
+          - shard: shard-6
+            shardIndex: 5
+          - shard: shard-7
+            shardIndex: 6
+          - shard: shard-8
+            shardIndex: 7
     defaults:
       run:
         working-directory: server
@@ -1598,6 +1631,16 @@ jobs:
           set -euo pipefail
           matched=$(jq -r --argjson idx "$SHARD_INDEX" '[.shards[] | select(.shardIndex == $idx)] | length' nextest-plan/matrix.json)
           shard_count=$(jq -r '.shardCount' nextest-plan/matrix.json)
+          # WIDTH GUARD — fail closed when the plan is WIDER than the static
+          # matrix. Every running shard trips this, because no job can detect
+          # its own absence: the shards that would cover indices >= the matrix
+          # width are precisely the ones that were never created. Without this,
+          # a plan of 8 against a matrix of 4 runs half the suite and reports
+          # success (run 30544309199: 5834 of 11666 tests never executed).
+          if [ "$shard_count" -gt "$CI_SERVER_TEST_MATRIX_WIDTH" ]; then
+            echo "::error title=Shard matrix too narrow::Plan selected $shard_count shard(s) but server-test's static matrix provisions only $CI_SERVER_TEST_MATRIX_WIDTH. Tests on shardIndex $CI_SERVER_TEST_MATRIX_WIDTH..$((shard_count - 1)) would NEVER RUN and the gate would still pass. Add matrix rows (and raise CI_SERVER_TEST_MATRIX_WIDTH) or lower the planner's shard count."
+            exit 1
+          fi
           if [ "$matched" -eq 0 ]; then
             if [ "$SHARD_INDEX" -ge "$shard_count" ]; then
               # The matrix provisions the planner's maximum width; this plan
