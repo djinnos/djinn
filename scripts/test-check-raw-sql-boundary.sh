@@ -311,6 +311,119 @@ assert_output_contains "T9 reports query! macro violation" \
     "::error::Raw sqlx query usage detected outside djinn-db: $QUERY_MACRO_PATH" \
     "$LOG_DIR/t9_query_macro.log.out"
 
+# ── T20: .inc files are compiled source and MUST be inspected ─────────
+#
+# Regression test for the hole this suite did not have: `.inc` files are
+# include!()d into a .rs module and compiled verbatim, but the guard's
+# candidate filter only accepted `*.rs`, so a real violation in
+# graph_tools/tests_coverage.inc sat in the tree with a green gate.
+FIXTURE_INC="$REPO_ROOT/$FIXTURE_BASE/src/tests_seed.inc"
+cat > "$FIXTURE_INC" <<'FIXTURE'
+    async fn seed(db: &Database) {
+        sqlx::query("INSERT INTO projects (id, name) VALUES ($1,$2)")
+            .bind("p1")
+            .bind("p1")
+            .execute(db.pool())
+            .await
+            .expect("seed project");
+    }
+FIXTURE
+
+INC_PATH="$FIXTURE_BASE/src/tests_seed.inc"
+set +e
+run_guard t20_inc_violation "$INC_PATH"
+t20_actual=$?
+set -e
+assert_exit "T20 sqlx::query in a .inc file exits non-zero" 1 "$t20_actual" "$LOG_DIR/t20_inc_violation.log.out"
+assert_output_contains "T20 reports the violating .inc file" \
+    "::error::Raw sqlx query usage detected outside djinn-db: $INC_PATH" \
+    "$LOG_DIR/t20_inc_violation.log.out"
+assert_output_lacks "T20 does not warn about .inc as unrecognised" \
+    "unrecognised extension" "$LOG_DIR/t20_inc_violation.log.out"
+
+# ── T21: a clean .inc file passes and is counted as checked ───────────
+FIXTURE_INC_CLEAN="$REPO_ROOT/$FIXTURE_BASE/src/tests_clean.inc"
+cat > "$FIXTURE_INC_CLEAN" <<'FIXTURE'
+    async fn seed(db: &Database) {
+        ProjectRepository::new(db.clone(), EventBus::noop())
+            .create_with_id("p1", "p1", "test", "p1")
+            .await
+            .expect("seed project");
+    }
+FIXTURE
+
+INC_CLEAN_PATH="$FIXTURE_BASE/src/tests_clean.inc"
+set +e
+run_guard t21_inc_clean "$INC_CLEAN_PATH"
+t21_actual=$?
+set -e
+assert_exit "T21 clean .inc file exits 0" 0 "$t21_actual" "$LOG_DIR/t21_inc_clean.log.out"
+assert_output_contains "T21 counts the .inc file as checked" \
+    "checked 1 Rust source file(s)" "$LOG_DIR/t21_inc_clean.log.out"
+
+# ── T22: an unrecognised extension is LOUD, not silently skipped ──────
+#
+# The defect was never `.inc` specifically — it was that a file the guard
+# declines to classify vanishes without a trace. An unknown extension under
+# the server source tree must be announced AND inspected, so a novel
+# compiled extension can never pass quietly.
+FIXTURE_UNKNOWN="$REPO_ROOT/$FIXTURE_BASE/src/generated_queries.rs2"
+cat > "$FIXTURE_UNKNOWN" <<'FIXTURE'
+pub async fn fetch(pool: &sqlx::PgPool) {
+    sqlx::query("SELECT 1").execute(pool).await.unwrap();
+}
+FIXTURE
+
+UNKNOWN_PATH="$FIXTURE_BASE/src/generated_queries.rs2"
+set +e
+run_guard t22_unknown_ext "$UNKNOWN_PATH"
+t22_actual=$?
+set -e
+assert_exit "T22 unrecognised extension with a violation exits non-zero" 1 "$t22_actual" "$LOG_DIR/t22_unknown_ext.log.out"
+assert_output_contains "T22 warns about the unrecognised extension" \
+    "::warning::check-raw-sql-boundary: unrecognised extension under the server source tree; inspecting it as if it were compiled Rust: $UNKNOWN_PATH" \
+    "$LOG_DIR/t22_unknown_ext.log.out"
+assert_output_contains "T22 still reports the violation" \
+    "::error::Raw sqlx query usage detected outside djinn-db: $UNKNOWN_PATH" \
+    "$LOG_DIR/t22_unknown_ext.log.out"
+
+# ── T23: a clean unrecognised extension warns but does not fail ───────
+FIXTURE_UNKNOWN_CLEAN="$REPO_ROOT/$FIXTURE_BASE/src/notes.rs2"
+cat > "$FIXTURE_UNKNOWN_CLEAN" <<'FIXTURE'
+pub const GREETING: &str = "hello";
+FIXTURE
+
+UNKNOWN_CLEAN_PATH="$FIXTURE_BASE/src/notes.rs2"
+set +e
+run_guard t23_unknown_clean "$UNKNOWN_CLEAN_PATH"
+t23_actual=$?
+set -e
+assert_exit "T23 clean unrecognised extension exits 0" 0 "$t23_actual" "$LOG_DIR/t23_unknown_clean.log.out"
+assert_output_contains "T23 still warns about the unrecognised extension" \
+    "unrecognised extension" "$LOG_DIR/t23_unknown_clean.log.out"
+assert_output_contains "T23 summary names the unclassified count" \
+    "1 with an unrecognised extension, inspected anyway" \
+    "$LOG_DIR/t23_unknown_clean.log.out"
+
+# ── T24: inert data files under server/ are skipped silently ──────────
+#
+# The loud-unclassified rule must not turn every fixture into noise. A .sql
+# fixture living under server/crates is data, not compiled source.
+FIXTURE_SQL="$REPO_ROOT/$FIXTURE_BASE/fixtures/seed.sql"
+mkdir -p -- "$(dirname -- "$FIXTURE_SQL")"
+cat > "$FIXTURE_SQL" <<'FIXTURE'
+INSERT INTO projects (id, name) VALUES ('p1', 'p1');
+FIXTURE
+
+SQL_FIXTURE_PATH="$FIXTURE_BASE/fixtures/seed.sql"
+set +e
+run_guard t24_inert "$SQL_FIXTURE_PATH"
+t24_actual=$?
+set -e
+assert_exit "T24 inert .sql fixture exits 0" 0 "$t24_actual" "$LOG_DIR/t24_inert.log.out"
+assert_output_lacks "T24 does not warn about inert data files" \
+    "unrecognised extension" "$LOG_DIR/t24_inert.log.out"
+
 # ── T10: mixed files — violation + clean + djinn-db ───────────────────
 set +e
 run_guard t10_mixed "$VIOLATION_PATH" "$CLEAN_PATH" "$DJINNDB_PATH"
