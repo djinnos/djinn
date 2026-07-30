@@ -300,11 +300,11 @@ impl DirectServices {
                 Arc::new(BuildLeaseRepository::new(agent_context.db.clone())),
                 0,
             )
-            // Recovery reads the durable admission epoch (and its reference cap)
-            // before the lease service opens.
-            .with_handoff_epoch(Arc::new(djinn_db::AdmissionHandoffRepository::new(
-                agent_context.db.clone(),
-            ))),
+            // Recovery reads the durable invocation-lease authority (and its
+            // reference cap) before the lease service opens.
+            .with_invocation_lease_authority(Arc::new(
+                djinn_db::InvocationLeaseAuthorityRepository::new(agent_context.db.clone()),
+            )),
         );
         Self::with_provider_override_and_build_lease(
             agent_context,
@@ -1094,22 +1094,12 @@ impl SupervisorServices for DirectServices {
     // injected where the runner is built, so an unimplemented authority is a
     // compile error rather than a silent `Unleased`.
 
-    /// Record this live generation's acknowledgement of the current admission
-    /// epoch (host in-process path). Idempotent + stale-fenced in the database.
-    /// A missing epoch row or a read/write failure is non-fatal: the durable
-    /// invocation-primary edge stays blocked (fail closed) until the ack lands.
-    async fn record_generation_ack(&self, generation_key: String) -> Result<(), String> {
-        let repo =
-            djinn_db::AdmissionHandoffRepository::new(self.callbacks.agent_context.db.clone());
-        let epoch = match repo.read().await {
-            Ok(Some(row)) => row.epoch,
-            Ok(None) => return Ok(()),
-            Err(error) => return Err(error.to_string()),
-        };
-        repo.record_generation_ack(epoch, &generation_key)
-            .await
-            .map_err(|error| error.to_string())
-    }
+    // `record_generation_ack` is deliberately gone from this impl too. It wrote
+    // `admission_handoff_generation_ack` rows for the v0→v1 invocation-primary
+    // handoff edge, which the Kueue cutover deleted along with the v0 authority.
+    // The trait method was REMOVED rather than stubbed: its old default was
+    // `Ok(())`, so a stub here would have compiled, written nothing, and left
+    // the two real writers looking healthy.
 
     async fn load_task(&self, task_id: String) -> Result<Task, String> {
         crate::actors::slot::helpers::load_task(&task_id, &self.callbacks.agent_context)

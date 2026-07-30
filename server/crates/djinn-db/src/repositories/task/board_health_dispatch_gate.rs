@@ -36,7 +36,7 @@
 //! # The lease authority, and what it can prove
 //!
 //! The **lease authority** (`build_leases` + `build_lease_caps`, armed by
-//! `admission_handoff.v1_mode`) is the weighted FIFO, and the only durable
+//! the invocation-lease authority) is the weighted FIFO, and the only durable
 //! surface that ever measures pool occupancy. It is read here, and every key
 //! in the emitted `build_capacity` block names it explicitly.
 //!
@@ -149,9 +149,11 @@ pub(super) struct DispatchLeaseRow {
 pub(super) struct LeaseCapacity {
     pub occupancy: i64,
     pub cap: i64,
-    /// True only when the durable admission epoch has armed the v1 authority
-    /// (`admission_handoff.v1_mode = 'enforce'`). While it is `off`/`shadow`
-    /// the lease FIFO writes no dispatch rows and cannot be denying anything.
+    /// True only when the durable invocation-lease authority is armed to
+    /// [`crate::InvocationLeaseMode::Enforce`]. While it is `off`/`shadow` — or
+    /// the authority row is absent entirely — the lease FIFO writes no dispatch
+    /// rows and cannot be denying anything. A missing or unparseable mode is a
+    /// real `false`, not an unobservable capacity read.
     pub enforcing: bool,
 }
 
@@ -277,14 +279,18 @@ pub(super) async fn load_lease_ledger(pool: &sqlx::PgPool) -> LeaseLedger {
 
     // Occupancy is the weighted SUM over the occupying states across EVERY
     // consumer kind — warm and invocation leases contend with dispatch for the
-    // same cap. `admission_handoff.v1_mode` says whether that cap is armed.
+    // same cap. The invocation-lease authority says whether that cap is armed.
+    //
+    // The mode is selected as the durable string and parsed through
+    // `InvocationLeaseMode`, not compared to a literal here: a value nobody can
+    // name must not read as "armed" or as "disarmed" by accident, and there is
+    // exactly one place that decides what "enforcing" means.
     let capacity_sql = r#"SELECT
              COALESCE((SELECT SUM(weight) FROM build_leases
                         WHERE state IN ('granted','launching','bound','active','suspect')),
                       0)::BIGINT AS occupancy,
              COALESCE((SELECT cap FROM build_lease_caps WHERE singleton), 0)::BIGINT AS cap,
-             COALESCE((SELECT v1_mode FROM admission_handoff WHERE name = 'build'),
-                      'off') AS v1_mode"#;
+             (SELECT v1_mode FROM admission_handoff WHERE name = 'build') AS mode"#;
 
     let Ok(capacity_row) = sqlx::query(capacity_sql).fetch_one(pool).await else {
         return LeaseLedger::Unobservable {
@@ -292,13 +298,17 @@ pub(super) async fn load_lease_ledger(pool: &sqlx::PgPool) -> LeaseLedger {
         };
     };
 
+    // An absent authority row is a real, reportable verdict — a deployment that
+    // has never armed the authority is disarmed — not an unobservable one.
+    let mode = capacity_row
+        .try_get::<Option<String>, _>("mode")
+        .ok()
+        .flatten()
+        .and_then(|mode| crate::InvocationLeaseMode::parse(&mode).ok());
     let capacity = LeaseCapacity {
         occupancy: capacity_row.try_get("occupancy").unwrap_or(0),
         cap: capacity_row.try_get("cap").unwrap_or(0),
-        enforcing: capacity_row
-            .try_get::<String, _>("v1_mode")
-            .map(|mode| mode == "enforce")
-            .unwrap_or(false),
+        enforcing: mode.is_some_and(crate::InvocationLeaseMode::is_enforcing),
     };
 
     let by_task = rows
@@ -490,8 +500,8 @@ pub(super) fn lease_gate(ledger: &LeaseLedger, task_id: &str) -> LeaseGateOutcom
         "cap":       capacity.cap,
         "lease_authority_enforcing": capacity.enforcing,
         "at_capacity": at_capacity,
-        "note": "LEASE authority only (`build_leases` / `build_lease_caps`, armed by \
-                 `admission_handoff.v1_mode`). `lease_authority_enforcing` says whether \
+        "note": "LEASE authority only (`build_leases` / `build_lease_caps`, armed by the \
+                 durable invocation-lease authority). `lease_authority_enforcing` says whether \
                  THIS authority is armed and says NOTHING about the build-admission \
                  controller, whose mode is process configuration. These numbers are \
                  only reached AFTER the controller agrees to admit at all, so \

@@ -22,9 +22,10 @@
 //! `admission_journal` is deliberately NOT in [`LEDGER_RELATIONS`]. The relation
 //! is being dropped with the authority that owned it; counting it would make
 //! these tests fail to compile against the migrated schema for a reason that has
-//! nothing to do with dispatch. `build_leases` (the v1 lease, retained) and
-//! `admission_handoff` (the epoch handoff, retained) are what is left, and both
-//! are still reachable from these paths.
+//! nothing to do with dispatch. `build_leases` (the build-slot lease, retained)
+//! and `admission_handoff` (the physical row the invocation-lease authority
+//! lives in, retained) are what is left, and both are still reachable from these
+//! paths.
 
 use std::sync::Arc as StdArc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -255,7 +256,7 @@ async fn disarmed_warm_job_still_dispatches_through_the_retained_lease() {
     assert_eq!(
         census_of(&after, "admission_handoff"),
         census_of(&before, "admission_handoff"),
-        "a warm dispatch writes no epoch handoff row"
+        "a warm dispatch never mutates the invocation-lease authority row"
     );
 }
 

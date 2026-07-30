@@ -72,10 +72,6 @@ pub use repositories::tool_call_metrics::{
     retry_after_edit_failure, wilson_difference_interval, wilson_interval,
 };
 pub use repositories::{
-    admission_handoff::{
-        AdmissionHandoffAuthority, AdmissionHandoffPhase, AdmissionHandoffRepository,
-        AdmissionHandoffRow, V0Mode, V1Mode,
-    },
     agent::{
         AgentCreateInput, AgentListQuery, AgentListResult, AgentMetrics, AgentRepository,
         AgentUpdateInput, VALID_BASE_ROLES,
@@ -134,6 +130,9 @@ pub use repositories::{
     extension_load_diagnostic::{ExtensionLoadDiagnosticRepository, InsertExtensionLoadDiagnostic},
     git_settings::GitSettingsRepository,
     image::{Image, ImageRepository, ImageStatus, SelectedCatalogImage},
+    invocation_lease_authority::{
+        InvocationLeaseAuthorityRepository, InvocationLeaseAuthorityRow, InvocationLeaseMode,
+    },
     legacy_settings_import::{
         LegacySettingsImport, LegacySettingsImportError, LegacySettingsImportResult,
     },

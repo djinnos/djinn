@@ -619,7 +619,7 @@ impl LeaseInvocationRunner {
         // leaf is born at. `Unleased` was then implemented as `{}` — and because
         // the leaf had already been pinned to the 250m unleased quota, that
         // "no-op" clamped every command for its whole life. Production ran with
-        // the `admission_handoff` row ABSENT, so `Unleased` was the decision for
+        // the invocation-lease authority row ABSENT, so `Unleased` was the decision for
         // EVERY invocation: a measured leaf reached 21.1 CPU-seconds (84x the
         // 0.25 CPU-s escalation threshold) while `cpu.max` never left
         // `25000 100000`. Reading it here, and deriving the birth authority from
