@@ -9,7 +9,8 @@ Kueue admission for build Jobs.
 
 ### Repository contract execution (no cluster)
 
-Run the deterministic fake-`kubectl` contract from a repository checkout:
+Run the deterministic stubbed-`kubectl`/`helm` contract from a repository
+checkout:
 
 ```sh
 deploy/kueue/tests/zero-capture-gate.sh
