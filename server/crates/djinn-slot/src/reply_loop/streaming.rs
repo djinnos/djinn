@@ -344,27 +344,38 @@ fn transient_round_restart_delay(
 ///
 /// Returns the unix timestamp used, so the per-event path can reuse it for
 /// its token-flush throttle.
-async fn touch_stream_activity(ctx: &StreamLoopContext<'_>) -> u64 {
-    let now = ctx
-        .ctx
+///
+/// Deliberately takes the individual fields rather than `&StreamLoopContext`:
+/// a `&StreamLoopContext` held across the `touch_activity_rpc` await would
+/// require the whole struct to be `Sync`, and it is not — it owns the
+/// `Pin<Box<dyn Stream + Send>>` provider stream (`Send` but not `Sync`) —
+/// which would strip `Send` from `consume_provider_stream`'s future and break
+/// `djinn-agent`'s `execute_stage`, whose spawned future must be `Send`.
+/// Callers copy these (`Sync`) references out of the context first.
+async fn touch_stream_activity(
+    slot_ctx: &crate::host::SlotContext,
+    task_id: &str,
+    activity_ts: &AtomicU64,
+    last_rpc_touch: &AtomicU64,
+) -> u64 {
+    let now = slot_ctx
         .clock
         .now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    ctx.activity_ts.store(now, Ordering::Relaxed);
+    activity_ts.store(now, Ordering::Relaxed);
     // Bridge to the host's ActivityTracker.
-    let last = ctx.last_rpc_touch.load(Ordering::Relaxed);
+    let last = last_rpc_touch.load(Ordering::Relaxed);
     if now.saturating_sub(last) >= TOUCH_ACTIVITY_RPC_INTERVAL_SECS {
-        ctx.last_rpc_touch.store(now, Ordering::Relaxed);
-        if let Err(e) = ctx
-            .ctx
+        last_rpc_touch.store(now, Ordering::Relaxed);
+        if let Err(e) = slot_ctx
             .callbacks
-            .touch_activity_rpc(ctx.task_id.to_string())
+            .touch_activity_rpc(task_id.to_string())
             .await
         {
             tracing::warn!(
-                task_id = %ctx.task_id,
+                task_id = %task_id,
                 error = %e,
                 "reply_loop::streaming: touch_activity RPC failed; \
                  host stall poller may see stale idle for this turn"
@@ -445,7 +456,13 @@ pub(super) async fn consume_provider_stream(
                             // refresh the liveness clocks so the coordinator's
                             // stall poller keeps counting this session as live
                             // across a multi-minute throttle wait.
-                            touch_stream_activity(&ctx).await;
+                            touch_stream_activity(
+                                ctx.ctx,
+                                ctx.task_id,
+                                ctx.activity_ts,
+                                ctx.last_rpc_touch,
+                            )
+                            .await;
                             tokio::select! {
                                 biased;
                                 _ = ctx.cancel.cancelled() => {
@@ -497,7 +514,13 @@ pub(super) async fn consume_provider_stream(
                     }
                 };
                 state.saw_round_event = true;
-                let now = touch_stream_activity(&ctx).await;
+                let now = touch_stream_activity(
+                    ctx.ctx,
+                    ctx.task_id,
+                    ctx.activity_ts,
+                    ctx.last_rpc_touch,
+                )
+                .await;
                 match evt {
                     StreamEvent::Delta(ContentBlock::Text { text }) => {
                         ctx.ctx.event_bus.send(DjinnEventEnvelope::session_message(
