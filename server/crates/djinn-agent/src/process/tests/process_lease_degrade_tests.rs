@@ -436,38 +436,21 @@ fn clock_pinned_at(now_ms: i64) -> Arc<TestClock> {
     ))
 }
 
-/// Drive the durable admission epoch to a committed forward overlap with v1
-/// enforcing — the only state in which a bound invocation may lift `cpu.max`.
-/// Every write goes through the real repository, so the arming sequence is the
-/// operator sequence.
+/// Arm the durable invocation-lease authority to `enforce` — the only state in
+/// which a bound invocation may lift `cpu.max`. Every write goes through the
+/// real repository, so the arming sequence is the operator sequence.
 pub(super) async fn arm_invocation_lift(db: &djinn_db::Database) {
-    use djinn_db::{AdmissionHandoffAuthority, AdmissionHandoffPhase, V0Mode, V1Mode};
+    use djinn_db::InvocationLeaseMode;
 
-    let handoff = djinn_db::AdmissionHandoffRepository::new(db.clone());
-    let row = handoff
+    let authority = djinn_db::InvocationLeaseAuthorityRepository::new(db.clone());
+    let row = authority
         .seed_baseline()
         .await
-        .expect("seed the baseline epoch");
-    let row = handoff
-        .set_modes_and_cap(row.epoch, V0Mode::Enforce, V1Mode::Enforce, None)
+        .expect("seed the disarmed baseline");
+    authority
+        .set_mode_and_cap(row.epoch, InvocationLeaseMode::Enforce, None)
         .await
-        .expect("arm v1 enforcement");
-    handoff
-        .acknowledge(AdmissionHandoffAuthority::Emergency, row.epoch)
-        .await
-        .expect("emergency acknowledges the armed epoch");
-    let row = handoff
-        .advance(row.epoch, AdmissionHandoffPhase::ForwardOverlap, &[])
-        .await
-        .expect("enter the forward overlap");
-    handoff
-        .acknowledge(AdmissionHandoffAuthority::Emergency, row.epoch)
-        .await
-        .expect("emergency acknowledges the overlap");
-    handoff
-        .acknowledge(AdmissionHandoffAuthority::Invocation, row.epoch)
-        .await
-        .expect("invocation acknowledges the overlap");
+        .expect("arm the invocation lease authority");
 }
 
 /// Compose the production lease authority over a fresh database with an armed
@@ -488,9 +471,9 @@ async fn real_lease_services(
             Arc::new(djinn_coordinator::build_lease::NoopLeaseTransactionPause),
             Arc::new(djinn_coordinator::build_lease::MetricsLeaseTelemetry),
         )
-        .with_handoff_epoch(Arc::new(djinn_db::AdmissionHandoffRepository::new(
-            db.clone(),
-        ))),
+        .with_invocation_lease_authority(Arc::new(
+            djinn_db::InvocationLeaseAuthorityRepository::new(db.clone()),
+        )),
     );
     Arc::new(crate::direct_services::DirectServices::with_build_lease(
         crate::test_helpers::agent_context_from_db(db.clone(), CancellationToken::new()),

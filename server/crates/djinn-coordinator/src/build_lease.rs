@@ -11,8 +11,8 @@ use std::sync::{
 
 use async_trait::async_trait;
 use djinn_db::{
-    AdmissionHandoffRepository, BuildLeaseConsumerKind, BuildLeaseKey, BuildLeaseRepository,
-    BuildLeaseRow, BuildLeaseState, BuildLeaseTerminalReason, GrantNextBuildLeaseResult,
+    BuildLeaseConsumerKind, BuildLeaseKey, BuildLeaseRepository, BuildLeaseRow, BuildLeaseState,
+    BuildLeaseTerminalReason, GrantNextBuildLeaseResult, InvocationLeaseAuthorityRepository,
     QueueBuildLeaseInput, QueueBuildLeaseResult,
 };
 use djinn_runtime::BuildSlotWeight;
@@ -264,28 +264,28 @@ pub struct BuildLeaseService {
     /// `0` is read as "never armed" and resolves to this configured value.
     /// Draining is expressed by `is_ready()`, not by a zero cap, and the only
     /// production writer of a durable cap (`admin epoch set-cap`) is guarded by
-    /// `admission_handoff_cap_positive_check` and cannot store `0`.
+    /// the authority row's positive-cap CHECK constraint and cannot store `0`.
     configured_cap: i64,
     /// Rendered CPU facts the per-row weight is derived from. See
     /// [`BuildSlotWeights`]; the default matches the default manifest render.
     weights: BuildSlotWeights,
     recovered: AtomicBool,
-    /// Durable admission-handoff epoch reader. When present, [`Self::recover`]
-    /// and [`Self::recovery_snapshot`] read the epoch (and its reference cap)
+    /// Durable invocation-lease authority reader. When present, [`Self::recover`]
+    /// and [`Self::recovery_snapshot`] read the authority (and its reference cap)
     /// before the service opens, so a restart never admits or spawns without
-    /// having observed the current epoch. `None` in the many tests that exercise
+    /// having observed the armed cap. `None` in the many tests that exercise
     /// the lease state machine in isolation (behaviour then unchanged).
-    handoff: Option<Arc<AdmissionHandoffRepository>>,
-    /// The admission epoch observed by the most recent successful recovery, or
+    authority: Option<Arc<InvocationLeaseAuthorityRepository>>,
+    /// The authority epoch observed by the most recent successful read, or
     /// `-1` when none has been observed (unknown/unreadable ⇒ fail closed).
     observed_epoch: AtomicI64,
-    /// Whether the durable epoch puts the v1 authority in `Enforce`.
+    /// Whether the durable authority is armed to `Enforce`.
     ///
     /// This is the arming switch for layer-1 dispatch admission. Until the
-    /// operator flips the epoch to invocation-primary, dispatch runs in shadow:
-    /// it probes occupancy and records what enforcement WOULD have done, but
-    /// acquires nothing and denies nothing. Defaults to `false` so a process
-    /// that has not read the epoch cannot start enforcing a cap nobody armed.
+    /// operator arms the authority, dispatch runs in shadow: it probes occupancy
+    /// and records what enforcement WOULD have done, but acquires nothing and
+    /// denies nothing. Defaults to `false` so a process that has not read the
+    /// authority cannot start enforcing a cap nobody armed.
     dispatch_enforcing: AtomicBool,
     /// Keeps queue+local-drain atomic in this process. Database advisory locks
     /// serialize the same decisions across replacement coordinators.
@@ -321,7 +321,7 @@ impl BuildLeaseService {
             configured_cap: cap.max(0),
             weights: BuildSlotWeights::default(),
             recovered: AtomicBool::new(false),
-            handoff: None,
+            authority: None,
             observed_epoch: AtomicI64::new(-1),
             dispatch_enforcing: AtomicBool::new(false),
             operation: Mutex::new(()),
@@ -367,11 +367,14 @@ impl BuildLeaseService {
         Ok(weight.slots())
     }
 
-    /// Install the durable admission-handoff epoch reader so recovery reads the
-    /// epoch (and its reference cap) before opening.
+    /// Install the durable invocation-lease authority reader so recovery adopts
+    /// its reference cap before opening.
     #[must_use]
-    pub fn with_handoff_epoch(mut self, handoff: Arc<AdmissionHandoffRepository>) -> Self {
-        self.handoff = Some(handoff);
+    pub fn with_invocation_lease_authority(
+        mut self,
+        authority: Arc<InvocationLeaseAuthorityRepository>,
+    ) -> Self {
+        self.authority = Some(authority);
         self
     }
 
@@ -380,7 +383,7 @@ impl BuildLeaseService {
         self.recovered.load(Ordering::Acquire)
     }
 
-    /// The admission epoch observed by the most recent successful recovery, or
+    /// The authority epoch observed by the most recent successful read, or
     /// `None` when none has been observed (unknown/unreadable ⇒ fail closed).
     #[must_use]
     pub fn observed_epoch(&self) -> Option<i64> {
@@ -388,7 +391,7 @@ impl BuildLeaseService {
         (epoch >= 0).then_some(epoch)
     }
 
-    /// Whether the durable epoch arms layer-1 dispatch admission for
+    /// Whether the durable authority arms layer-1 dispatch admission for
     /// enforcement. False means shadow: observe and report, never deny.
     #[must_use]
     pub fn dispatch_enforcing(&self) -> bool {
@@ -396,7 +399,7 @@ impl BuildLeaseService {
     }
 
     /// Force the dispatch-enforcement arming state. Tests only: production
-    /// arms exclusively through the durable admission epoch.
+    /// arms exclusively through the durable invocation-lease authority.
     #[doc(hidden)]
     pub fn set_dispatch_enforcing_for_test(&self, enforcing: bool) {
         self.dispatch_enforcing.store(enforcing, Ordering::Release);
@@ -410,11 +413,11 @@ impl BuildLeaseService {
         self.pause.before_transaction(LeaseOperation::Recover).await;
         match self.repository.snapshot().await {
             Ok(snapshot) => {
-                // Read the durable admission epoch (and its reference cap)
-                // BEFORE the service opens, so a restart never admits or spawns
-                // without having observed the current epoch. The handoff
+                // Read the durable invocation-lease authority (and its reference
+                // cap) BEFORE the service opens, so a restart never admits or
+                // spawns without having observed the armed cap. The authority's
                 // reference cap is authoritative when set.
-                let cap = self.read_handoff_epoch(snapshot.cap).await;
+                let cap = self.adopt_authority_cap(snapshot.cap).await;
                 if cap == 0 {
                     // Not a warning about capacity pressure: with a cap of zero
                     // `grant_next` short-circuits on `occupied >= cap` before it
@@ -439,15 +442,15 @@ impl BuildLeaseService {
 
     /// Return the durable non-terminal recovery view without mutating it.
     ///
-    /// The admission epoch (and its reference cap) is read alongside the lease
-    /// snapshot so the recovery view reflects the epoch's authoritative cap
+    /// The invocation-lease authority (and its reference cap) is read alongside
+    /// the lease snapshot so the recovery view reflects the authority's cap
     /// before any spawn decision is made.
     pub async fn recovery_snapshot(&self) -> Result<djinn_db::BuildLeaseSnapshot, ()> {
         if !self.is_ready() {
             return Err(());
         }
         let mut snapshot = self.repository.snapshot().await.map_err(|_| ())?;
-        snapshot.cap = self.read_handoff_epoch(snapshot.cap).await;
+        snapshot.cap = self.adopt_authority_cap(snapshot.cap).await;
         Ok(snapshot)
     }
 

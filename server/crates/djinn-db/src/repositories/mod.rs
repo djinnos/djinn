@@ -1,4 +1,3 @@
-pub mod admission_handoff;
 pub mod agent;
 pub mod audit_sampler;
 pub mod build_admission_denial;
@@ -20,6 +19,7 @@ pub mod extension_load_diagnostic_tests;
 pub mod git_settings;
 pub mod image;
 pub mod init;
+pub mod invocation_lease_authority;
 pub mod legacy_settings_import;
 pub mod liveness;
 pub mod llm_call_attempt;

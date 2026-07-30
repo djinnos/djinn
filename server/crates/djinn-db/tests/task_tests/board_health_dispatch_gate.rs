@@ -231,6 +231,70 @@ async fn an_unarmed_authority_is_not_blamed_for_a_full_pool() {
     );
 }
 
+/// **`lease_authority_enforcing` tracks the invocation-lease authority in BOTH
+/// directions, and never degrades to "unobservable".**
+///
+/// The Kueue cutover retired the v0↔v1 handoff that this field used to read.
+/// The failure mode being guarded is not "it stopped compiling" — it is a field
+/// that quietly latches to one value, or reports nothing at all, while the
+/// public MCP `board_health` payload keeps claiming to describe build capacity.
+///
+/// So the state is flipped through the REAL repository (the same path
+/// `djinn-server epoch` writes) and read back through the real gate, in every
+/// direction: disarmed → armed → shadow → armed → absent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lease_authority_enforcing_follows_the_authority_in_both_directions() {
+    use djinn_db::{InvocationLeaseAuthorityRepository, InvocationLeaseMode};
+
+    let db = create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let repo = TaskRepository::new(db.clone(), event_bus_for(&tx));
+    let task = stranded_task(&db, &repo, "Authority-flip task").await;
+    let authority = InvocationLeaseAuthorityRepository::new(db.clone());
+
+    let enforcing = async |repo: &TaskRepository, id: &str| {
+        gate_for(repo, id).await["build_capacity"]["lease_authority_enforcing"].clone()
+    };
+
+    // Seeded baseline: disarmed.
+    let row = authority.read().await.unwrap().unwrap();
+    assert_eq!(row.mode, InvocationLeaseMode::Off);
+    assert_eq!(enforcing(&repo, &task.id).await, serde_json::json!(false));
+
+    // Armed.
+    let row = authority
+        .set_mode_and_cap(row.epoch, InvocationLeaseMode::Enforce, Some(3))
+        .await
+        .unwrap();
+    assert_eq!(enforcing(&repo, &task.id).await, serde_json::json!(true));
+
+    // Shadow observes but does not enforce — the field must FALL again.
+    let row = authority
+        .set_mode_and_cap(row.epoch, InvocationLeaseMode::Shadow, Some(3))
+        .await
+        .unwrap();
+    assert_eq!(enforcing(&repo, &task.id).await, serde_json::json!(false));
+
+    // And RISE again, so this is not a one-way latch.
+    let row = authority
+        .set_mode_and_cap(row.epoch, InvocationLeaseMode::Enforce, Some(3))
+        .await
+        .unwrap();
+    assert_eq!(enforcing(&repo, &task.id).await, serde_json::json!(true));
+
+    // An absent authority row is a real `false`, not an unobservable read: the
+    // whole payload must keep reporting capacity for a deployment that has
+    // never armed the authority.
+    authority.delete_for_test().await.unwrap();
+    let gate = gate_for(&repo, &task.id).await;
+    assert_eq!(gate["build_capacity"]["lease_authority_enforcing"], false);
+    assert_eq!(
+        gate["build_capacity"]["authority"], "build_leases",
+        "an absent authority row must not make the capacity block unobservable"
+    );
+    let _ = row;
+}
+
 /// **The #2661 follow-up, end to end.** The dispatcher records why it refused;
 /// `board_health` reads it back.
 ///

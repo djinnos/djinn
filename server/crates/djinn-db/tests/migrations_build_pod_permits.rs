@@ -302,18 +302,24 @@ async fn seed_preexisting_build_lease_and_admission_data(pool: &sqlx::PgPool) {
     // The `admission_journal` seed that used to live here was removed with the
     // pods-quota reservation authority itself (o53p). The point of this helper
     // is unchanged: prove migrations 162/164 do not rewrite pre-existing ledger
-    // rows. The `build_leases`, `build_lease_caps` and `admission_handoff`
-    // assertions below still carry that proof, and every build_pod_permits /
-    // 162 / 164 assertion in this file is byte-identical to before.
+    // rows. The `build_leases`, `build_lease_caps` and invocation-lease
+    // authority assertions below still carry that proof, and every
+    // build_pod_permits / 162 / 164 assertion in this file is byte-identical to
+    // before.
+    //
+    // The retired v0↔v1 handoff columns (`phase`, `v0_mode`, the two ack
+    // columns) are no longer written or asserted: they are `flc5`'s to drop, and
+    // a test that pinned them would turn that DROP into a failure here rather
+    // than in the code that actually depends on them. What is seeded and
+    // asserted is exactly what the invocation-lease authority owns.
     sqlx::query(
         "UPDATE admission_handoff \
-         SET phase = 'invocation_primary', epoch = 7, v0_mode = 'disabled', \
-             v1_mode = 'enforce', cap = 7, updated_at = '2025-01-02T03:04:07Z' \
+         SET epoch = 7, v1_mode = 'enforce', cap = 7, updated_at = '2025-01-02T03:04:07Z' \
          WHERE name = 'build'",
     )
     .execute(pool)
     .await
-    .expect("seed pre-existing admission handoff");
+    .expect("seed pre-existing invocation lease authority");
 }
 
 async fn existing_build_lease_and_admission_snapshot(pool: &sqlx::PgPool) -> Vec<String> {
@@ -331,14 +337,14 @@ async fn existing_build_lease_and_admission_snapshot(pool: &sqlx::PgPool) -> Vec
     .fetch_one(pool)
     .await
     .expect("read pre-existing build lease cap");
-    let handoff: String = sqlx::query_scalar(
-        "SELECT concat_ws('|', name, phase, epoch, v0_mode, v1_mode, cap, updated_at::text) \
+    let authority: String = sqlx::query_scalar(
+        "SELECT concat_ws('|', name, epoch, v1_mode, cap, updated_at::text) \
          FROM admission_handoff WHERE name = 'build'",
     )
     .fetch_one(pool)
     .await
-    .expect("read pre-existing admission handoff");
-    vec![lease, lease_cap, handoff]
+    .expect("read pre-existing invocation lease authority");
+    vec![lease, lease_cap, authority]
 }
 
 #[tokio::test]

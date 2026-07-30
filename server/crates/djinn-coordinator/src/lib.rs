@@ -48,11 +48,7 @@ use types::*;
 
 pub mod audit_sampler;
 pub mod build_admission;
-/// Operator-driven safe-ordering executor for the durable admission epoch.
-/// Retained by o53p: it drives `admission_handoff`, not the deleted pods-quota
-/// reservation, and is the engine behind the `djinn-server epoch` CLI.
-pub mod build_admission_transition;
-/// Durable v1 lease service; v0 admission remains rollout authority.
+/// Durable build-slot lease service.
 pub mod build_lease;
 /// Retirement of occupying build leases whose Kubernetes object is provably gone.
 pub mod build_lease_reclaim;
@@ -67,8 +63,12 @@ pub mod environment;
 pub mod events;
 pub mod file_time;
 pub mod github_error_render;
-/// Adapter that gives graph warming the same v1 FIFO service as task consumers.
+/// Adapter that gives graph warming the same FIFO service as task consumers.
 pub mod graph_warm_lease;
+/// Operator control surface for the durable invocation-lease authority — the
+/// arming switch and reference cap for the per-invocation cgroup CPU lease, and
+/// the engine behind the `djinn-server epoch` CLI.
+pub mod invocation_lease_control;
 pub mod output_stash;
 
 /// Terminalize the worker's in-flight attempt (and record a durable `reopened`

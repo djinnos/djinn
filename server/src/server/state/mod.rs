@@ -25,9 +25,9 @@ use djinn_coordinator::run_dir_observe::{RunDirObserveSeams, arm_disk_observatio
 use djinn_core::clock::{Clock, SystemClock as SystemClockTrait};
 use djinn_core::models::KnowledgeInjectionConfig;
 use djinn_db::{
-    AdmissionHandoffAuthority, AdmissionHandoffRepository, Database, NoopNoteVectorStore,
-    NoteVectorStore, ProjectRepository, QdrantCodeChunkConfig, QdrantCodeChunkVectorStore,
-    QdrantConfig, QdrantNoteVectorStore, SettingsRepository,
+    Database, InvocationLeaseAuthorityRepository, NoopNoteVectorStore, NoteVectorStore,
+    ProjectRepository, QdrantCodeChunkConfig, QdrantCodeChunkVectorStore, QdrantConfig,
+    QdrantNoteVectorStore, SettingsRepository,
 };
 use djinn_git::{GitActorHandle, GitError};
 use djinn_image_controller::{
@@ -57,17 +57,17 @@ const EVENT_CHANNEL_CAPACITY: usize = 1024;
 const SETTINGS_RAW_KEY: &str = "settings.raw";
 const MODEL_HEALTH_STATE_KEY: &str = "model_health.state";
 
-/// How often every pod re-reads the durable admission epoch to acknowledge the
-/// (now permanently absent) emergency authority and adopt an operator cap.
+/// How often every pod re-reads the durable invocation-lease authority to adopt
+/// an operator cap change without a restart.
 const BUILD_EPOCH_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
-/// Pre-recovery fallback for the v1 build-slot FIFO's reference cap.
+/// Pre-recovery fallback for the build-slot FIFO's reference cap.
 ///
-/// It is only a fallback. `BuildLeaseService::with_handoff_epoch` reads the
-/// durable `admission_handoff.cap` on recovery and an armed epoch's cap always
-/// wins, which is what makes `djinn-server epoch set-cap` a live control. This
-/// number is what the process uses in the window before that read completes,
-/// and on a deployment that has never seeded the epoch.
+/// It is only a fallback. `BuildLeaseService::with_invocation_lease_authority`
+/// reads the durable authority's cap on recovery and an armed cap always wins,
+/// which is what makes `djinn-server epoch set-cap` a live control. This number
+/// is what the process uses in the window before that read completes, and on a
+/// deployment that has never seeded the authority.
 ///
 /// It used to come from `DJINN_MAX_BUILD_TASKRUNS` via `BuildAdmissionConfig`.
 /// That variable configured the DELETED pre-create reservation authority, is no
@@ -250,7 +250,7 @@ struct Inner {
     pub provider_catalog_refresh_interval: std::time::Duration,
     /// Ensures repeated startup hooks cannot create concurrent refresh loops.
     pub provider_catalog_refresh_started: AtomicBool,
-    /// Ensures startup creates at most one persistent handoff-warning loop.
+    /// Ensures startup creates at most one persistent authority-refresh loop.
     pub build_epoch_loop_started: AtomicBool,
     /// Whether THIS process won the coordinator advisory lock and confirmed the
     /// single-active build-admission topology.
@@ -466,11 +466,13 @@ impl AppState {
                 DEFAULT_BUILD_SLOT_CAP,
             )
             .with_slot_weights(warm_weights)
-            // The v1 lease service reads the durable admission epoch (and its
-            // reference cap) on recovery, so a restart observes the current
-            // epoch before admitting or spawning. An armed epoch cap still
-            // wins over the configured value above.
-            .with_handoff_epoch(Arc::new(AdmissionHandoffRepository::new(db.clone()))),
+            // The lease service reads the durable invocation-lease authority
+            // (and its reference cap) on recovery, so a restart observes the
+            // armed cap before admitting or spawning. An armed cap still wins
+            // over the configured value above.
+            .with_invocation_lease_authority(Arc::new(
+                InvocationLeaseAuthorityRepository::new(db.clone()),
+            )),
         );
         Self {
             inner: Arc::new(Inner {
@@ -726,117 +728,45 @@ impl AppState {
             .await;
     }
 
-    /// Run one durable admission-epoch pass, then start the loop that repeats it.
+    /// Run one durable invocation-lease authority pass, then start the loop that
+    /// repeats it.
     ///
-    /// Runs on EVERY pod, leader or standby, and carries the two things the
-    /// retained per-invocation cgroup CPU lease depends on: the emergency
-    /// acknowledgement and the operator-settable reference cap.
+    /// Runs on EVERY pod, leader or standby, and carries the one runtime thing
+    /// the retained per-invocation cgroup CPU lease depends on: the
+    /// operator-settable reference cap.
     ///
     /// The first pass is AWAITED here rather than left to the loop's first
     /// tick. `tokio::time::interval` fires immediately and the loop consumes
-    /// that tick to establish its cadence, so a loop-only bridge would leave a
-    /// restarted pod up to [`BUILD_EPOCH_INTERVAL`] behind. That window is not
-    /// theoretical: an operator who advances the epoch and rolls the deployment
-    /// would have every invocation running `Unleased` — uncontained — for five
-    /// minutes, which is exactly the silent-disarm shape this bridge exists to
-    /// close. The old `initialize_build_admission_handoff` applied the durable
-    /// row synchronously at startup for the same reason.
+    /// that tick to establish its cadence, so a loop-only pass would leave a
+    /// restarted pod up to [`BUILD_EPOCH_INTERVAL`] behind — enforcing a cap an
+    /// operator has already changed, for five minutes, on a pod that just came
+    /// up during an incident.
+    ///
+    /// # What this pass no longer has to do
+    ///
+    /// S3a added an emergency-acknowledgement bridge here, because the retired
+    /// v0↔v1 handoff refused to arm the lease unless the deleted v0 authority's
+    /// acknowledgement was at the current epoch — so an `epoch advance` would
+    /// have silently dropped every invocation to `Unleased`. That bridge is gone
+    /// with the acknowledgement it wrote: the arming decision now reads the
+    /// authority's mode alone, so no periodic writer is required to keep the
+    /// lease armed and no missed tick can disarm it. The pass is now purely the
+    /// cap adoption it always also was.
     async fn initialize_build_epoch_bridge(&self) {
         self.run_build_epoch_pass().await;
         self.start_build_epoch_loop();
     }
 
-    /// Acknowledge the durable epoch on behalf of the emergency (v0) authority,
-    /// which no longer exists.
+    /// The durable invocation-lease authority maintenance loop.
     ///
-    /// # Why this exists: without it, `epoch advance` silently disarms the lease
+    /// One load-bearing half: `refresh_epoch_cap()`, which adopts an operator
+    /// `epoch set-cap` without a restart. On 2026-07-25 production reported
+    /// `set-cap --cap 12` applied and `epoch show` confirmed `cap 12`, while
+    /// every denial that followed still said `cap=3` until the pods were
+    /// restarted. A stored cap that is never adopted is not a control.
     ///
-    /// `admission_handoff` is not a build-capacity relation. It is the arming
-    /// authority for the per-invocation cgroup CPU lease, which the Kueue
-    /// cutover explicitly RETAINS. Production runs `phase ForwardOverlap`, and
-    /// [`evaluate_invocation_lift`] requires BOTH acknowledgements to be at the
-    /// current epoch in that phase before it will return
-    /// [`InvocationLiftDecision::Lift`].
-    ///
-    /// The sole writer of `emergency_ack_epoch` used to be
-    /// `finalize_build_admission_handoff`, whose `ack_allowed` was gated on the
-    /// v0 `BuildAdmissionController` being a healthy `Enforce`. o53p deletes
-    /// that controller. Deleting it WITHOUT this bridge would not fail to
-    /// compile and would not fail a test: the epoch's existing acks stay valid,
-    /// so nothing changes at deploy. It breaks at the first `epoch advance` an
-    /// operator runs, which clears both acks — after which nothing on earth
-    /// writes the emergency one, `complete` is false forever, and every
-    /// invocation silently drops to `Unleased` (no quota of its own, no
-    /// containment). That is the inert-mechanism signature this repository has
-    /// paid for repeatedly.
-    ///
-    /// # Why acknowledging unconditionally is CORRECT, not a rubber stamp
-    ///
-    /// The old gate asked "is the v0 emergency authority healthy enough to hand
-    /// over?". With v0 deleted, the emergency authority is permanently ABSENT,
-    /// and an absent authority has nothing left to hand over — it is
-    /// permanently, trivially ready. There is no state in which it could
-    /// legitimately withhold, because there is no v0 to withhold on behalf of.
-    /// So this preserves production's `Lift` exactly rather than widening it.
-    ///
-    /// This is deliberately a BRIDGE, not the destination. Sibling task `ubne`
-    /// (S3b) removes the emergency half of the phase projection entirely by
-    /// collapsing `complete` to `invocation_ack_epoch == epoch`, at which point
-    /// this function and the relation it writes both go away.
-    async fn acknowledge_absent_emergency_authority(&self) {
-        let handoff = AdmissionHandoffRepository::new(self.db().clone());
-        let row = match handoff.read().await {
-            Ok(Some(row)) => row,
-            // No epoch is armed. Nothing to acknowledge, and `Unleased` is the
-            // documented, correct state of a deployment that never seeded one.
-            Ok(None) => return,
-            Err(error) => {
-                tracing::error!(
-                    %error,
-                    "build admission: could not read the durable handoff row; the emergency \
-                     acknowledgement could not be written. If an epoch advance has happened, \
-                     every invocation is running Unleased until this read succeeds."
-                );
-                return;
-            }
-        };
-        if row.emergency_ack_epoch == Some(row.epoch) {
-            return;
-        }
-        match handoff
-            .acknowledge(AdmissionHandoffAuthority::Emergency, row.epoch)
-            .await
-        {
-            Ok(_) => tracing::info!(
-                epoch = row.epoch,
-                phase = ?row.phase,
-                "build admission: acknowledged epoch on behalf of the absent emergency authority"
-            ),
-            Err(error) => tracing::error!(
-                %error,
-                epoch = row.epoch,
-                "build admission: emergency acknowledgement FAILED; the per-invocation cpu \
-                 lease stays Unleased until it succeeds"
-            ),
-        }
-    }
-
-    /// The durable admission-epoch maintenance loop.
-    ///
-    /// Two halves, both load-bearing, neither of which may be deleted without
-    /// the other being re-homed first:
-    ///
-    /// 1. [`Self::acknowledge_absent_emergency_authority`] — see its docs. This
-    ///    is what keeps the retained invocation lease armed across an operator
-    ///    `epoch advance`.
-    /// 2. `refresh_epoch_cap()` — adopts an operator `epoch set-cap` without a
-    ///    restart. On 2026-07-25 production reported `set-cap --cap 12`
-    ///    applied and `epoch show` confirmed `cap 12`, while every denial that
-    ///    followed still said `cap=3` until the pods were restarted. A stored
-    ///    cap that is never adopted is not a control.
-    ///
-    /// Both are reads-then-idempotent-writes of a durable row, so running on
-    /// every pod including standbys is safe.
+    /// It is a read-then-idempotent-write of a durable row, so running on every
+    /// pod including standbys is safe.
     fn start_build_epoch_loop(&self) {
         if self
             .inner
@@ -861,13 +791,12 @@ impl AppState {
 
     /// One tick of [`Self::start_build_epoch_loop`].
     ///
-    /// Extracted so both halves are drivable by a test without waiting out a
+    /// Extracted so the pass is drivable by a test without waiting out a
     /// five-minute `tokio::time::interval`. The loop above must contain nothing
-    /// but a call to this — `the_build_epoch_loop_runs_the_whole_pass`
-    /// fails if a half is ever added directly to the loop body, where no test
-    /// could reach it.
+    /// but a call to this — `the_build_epoch_loop_runs_the_whole_pass` fails if
+    /// work is ever added directly to the loop body, where no test could reach
+    /// it.
     pub(crate) async fn run_build_epoch_pass(&self) {
-        self.acknowledge_absent_emergency_authority().await;
         self.inner.build_lease.refresh_epoch_cap().await;
     }
 
@@ -1009,7 +938,7 @@ impl AppState {
                             tick.tick().await;
                             // Adopt an operator `epoch set-cap` on the build
                             // lease's own maintenance cadence rather than
-                            // waiting out the five-minute handoff tick: a cap
+                            // waiting out the five-minute authority tick: a cap
                             // change is an incident control, and the whole
                             // point of it is that the board unwedges now.
                             cap_refresh_lease.refresh_epoch_cap().await;
@@ -1990,12 +1919,10 @@ impl AppState {
         // image controller) now start in `become_leader()` so only the
         // single lock-holding pod runs them. See `crate::leadership`.
 
-        // Durable admission-epoch maintenance. Runs on EVERY pod (leader and
-        // standby) because both halves are reads-then-idempotent-writes: the
-        // emergency acknowledgement that keeps the retained per-invocation cpu
-        // lease armed across an `epoch advance`, and the reference-cap refresh
-        // that makes `epoch set-cap` a live control. See
-        // `acknowledge_absent_emergency_authority`.
+        // Durable invocation-lease authority maintenance. Runs on EVERY pod
+        // (leader and standby) because it is a read-then-idempotent-write: the
+        // reference-cap refresh that makes `epoch set-cap` a live control rather
+        // than a restart-gated value.
         self.initialize_build_epoch_bridge().await;
 
         // Kueue arming preflight. MUST precede `initialize_graph_warmer`: that
@@ -3604,7 +3531,7 @@ mod retention_preflight_tests {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod build_epoch_bridge_tests {
     use super::*;
-    use djinn_db::{AdmissionHandoffPhase, V0Mode, V1Mode};
+    use djinn_db::{InvocationLeaseAuthorityRepository, InvocationLeaseMode};
     use djinn_supervisor::services::{InvocationLiftDecision, evaluate_invocation_lift};
 
     pub(super) fn state_with_db(db: Database) -> AppState {
@@ -3625,57 +3552,11 @@ mod build_epoch_bridge_tests {
         state_with_db(Database::open_in_memory().expect("test database"))
     }
 
-    fn handoff_repository(state: &AppState) -> AdmissionHandoffRepository {
-        AdmissionHandoffRepository::new(state.db().clone())
+    fn authority(state: &AppState) -> InvocationLeaseAuthorityRepository {
+        InvocationLeaseAuthorityRepository::new(state.db().clone())
     }
 
-    /// Production's ACTUAL durable row, verbatim from
-    /// `kubectl -n djinn exec deploy/djinn-server -- djinn-server epoch show`
-    /// on 2026-07-30: `phase ForwardOverlap, epoch 14, v0_mode Enforce,
-    /// v1_mode Enforce, cap 3, emergency_ack_epoch 14, invocation_ack_epoch 14`.
-    ///
-    /// The epoch number is reached by walking the real repository transitions
-    /// rather than by writing a synthetic row, so the fixture cannot drift away
-    /// from a state the repository would actually permit.
-    async fn seed_production_row(repository: &AdmissionHandoffRepository) -> i64 {
-        let row = repository.seed_baseline().await.expect("seed the baseline");
-        let mut row = repository
-            .set_modes_and_cap(row.epoch, V0Mode::Enforce, V1Mode::Enforce, Some(3))
-            .await
-            .expect("arm both authorities at cap 3");
-        // Walk to the production epoch number through legal transitions.
-        while row.epoch < 13 {
-            repository
-                .acknowledge(AdmissionHandoffAuthority::Emergency, row.epoch)
-                .await
-                .expect("emergency ack");
-            row = repository
-                .set_modes_and_cap(row.epoch, V0Mode::Enforce, V1Mode::Enforce, Some(3))
-                .await
-                .expect("bump the epoch");
-        }
-        repository
-            .acknowledge(AdmissionHandoffAuthority::Emergency, row.epoch)
-            .await
-            .expect("emergency acknowledges the baseline");
-        let row = repository
-            .advance(row.epoch, AdmissionHandoffPhase::ForwardOverlap, &[])
-            .await
-            .expect("enter the forward overlap");
-        assert_eq!(row.epoch, 14, "the fixture is production's epoch");
-        assert_eq!(row.phase, AdmissionHandoffPhase::ForwardOverlap);
-        repository
-            .acknowledge(AdmissionHandoffAuthority::Emergency, row.epoch)
-            .await
-            .expect("emergency acknowledges the overlap");
-        repository
-            .acknowledge(AdmissionHandoffAuthority::Invocation, row.epoch)
-            .await
-            .expect("invocation acknowledges the overlap");
-        row.epoch
-    }
-
-    /// Project the durable row through the RETAINED launcher-side authority.
+    /// Project the durable row through the launcher-side authority.
     ///
     /// A read failure is a panic rather than an `Err(())` on purpose: this
     /// helper exists to distinguish `Lift` from `Unleased`, and
@@ -3683,52 +3564,48 @@ mod build_epoch_bridge_tests {
     /// row — so a broken test database would look exactly like the disarm these
     /// tests are written to catch.
     async fn lift_decision(state: &AppState) -> InvocationLiftDecision {
-        let row = handoff_repository(state)
+        let row = authority(state)
             .read()
             .await
             .unwrap_or_else(|error| panic!("read the durable row: {error}"));
         evaluate_invocation_lift(Ok(row))
     }
 
-    /// The invocation acknowledgement written by the RETAINED
-    /// `SupervisorServices::record_generation_ack` path (sibling task `ubne`
-    /// owns it). Nothing in this slice touches it; it is here so the test
-    /// drives BOTH halves of `complete` and cannot pass by accident.
-    async fn invocation_acknowledges(repository: &AdmissionHandoffRepository, epoch: i64) {
-        repository
-            .acknowledge(AdmissionHandoffAuthority::Invocation, epoch)
-            .await
-            .expect("invocation ack");
-    }
+    // ── AC2: the invocation lease is never silently disarmed ────────────────
 
-    // ── AC2: the emergency-ack bridge ───────────────────────────────────────
-
-    /// **THE INVOCATION LEASE STILL LIFTS ACROSS AN EPOCH ADVANCE.**
+    /// **THE INVOCATION LEASE STILL LIFTS ACROSS AN EPOCH BUMP.**
     ///
-    /// This is the criterion the whole S3a/S3b split exists to protect, and it
-    /// is written to fail loudly if the bridge is removed.
+    /// This is the criterion the whole S3a/S3b split exists to protect.
     ///
-    /// `admission_handoff` is NOT a build-capacity relation. It is the arming
-    /// authority for the per-invocation cgroup CPU lease, which the Kueue
-    /// cutover explicitly retains. In `ForwardOverlap` — production's actual
-    /// phase — [`evaluate_invocation_lift`] requires BOTH acknowledgements at
-    /// the current epoch. Deleting the v0 `BuildAdmissionController` deletes the
-    /// only writer `emergency_ack_epoch` ever had, and that deletion produces NO
-    /// compile error and NO failing test, because the existing acks stay valid
-    /// until the next epoch bump. The lease would silently go `Unleased` — no
-    /// quota of its own, no containment — the first time an operator moved the
-    /// epoch, and nothing would say so.
+    /// The durable authority is NOT a build-capacity relation. It is the arming
+    /// authority for the per-invocation cgroup CPU lease, which the Kueue cutover
+    /// explicitly retains. Under the retired v0↔v1 handoff, an epoch bump cleared
+    /// the per-authority acknowledgements and the lease went `Unleased` — no
+    /// quota of its own, no containment — until some writer re-acknowledged. S3a
+    /// deleted the only writer the emergency acknowledgement ever had, and had to
+    /// bridge it. S3b removes the acknowledgement instead, so there is nothing
+    /// left to go stale.
     ///
-    /// Step 3 below is the non-vacuity guard: it asserts that the epoch bump
-    /// really does disarm the lease before the bridge runs. Without it, a test
-    /// that never disarmed anything would pass whether or not the bridge exists.
+    /// The fixture is the VERBATIM live production row, retired handoff columns
+    /// and all, so this also proves the deployed binary still arms against the
+    /// row that is durably in production today.
+    ///
+    /// Non-vacuity: the last step disarms through the operator control and
+    /// asserts `Unleased`. A hard-coded `Lift` — which would remove the operator
+    /// kill switch — fails there, and mutating the arming read to its default
+    /// (`InvocationLiftDecision::Unleased`) fails everywhere above it.
     #[tokio::test]
-    async fn the_invocation_lease_still_lifts_across_an_epoch_advance() {
+    async fn the_invocation_lease_still_lifts_across_an_epoch_bump() {
         let state = state();
-        let repository = handoff_repository(&state);
+        let authority = authority(&state);
 
-        // 1. Production's row shape.
-        let epoch = seed_production_row(&repository).await;
+        // 1. Production's actual durable row.
+        let row = authority
+            .seed_live_production_row_for_test()
+            .await
+            .expect("write the live production row");
+        assert_eq!(row.epoch, 14);
+        assert_eq!(row.cap, Some(3));
 
         // 2. It lifts. This is the behaviour that must be preserved exactly.
         assert_eq!(
@@ -3737,62 +3614,44 @@ mod build_epoch_bridge_tests {
             "precondition: production's row lifts the per-invocation cpu quota"
         );
 
-        // 3. An operator advances the epoch. Both acks go stale, and the lease
-        //    IS disarmed at this instant — this is the state the bridge exists
-        //    to repair, and asserting it is what makes step 5 mean something.
-        let advanced = repository
-            .set_modes_and_cap(epoch, V0Mode::Enforce, V1Mode::Enforce, Some(3))
+        // 3. An operator changes the cap, which bumps the epoch. This is the
+        //    exact mutation that used to clear both acknowledgements and disarm
+        //    the lease with no compile error and no failing test.
+        let bumped = authority
+            .set_mode_and_cap(row.epoch, InvocationLeaseMode::Enforce, Some(4))
             .await
-            .expect("operator advances the epoch");
-        assert_eq!(advanced.epoch, epoch + 1);
-        assert_eq!(
-            lift_decision(&state).await,
-            InvocationLiftDecision::Unleased,
-            "a bumped epoch invalidates both acks: the lease is disarmed until \
-             both authorities re-acknowledge"
-        );
+            .expect("operator raises the cap");
+        assert_eq!(bumped.epoch, row.epoch + 1, "the epoch really did move");
 
-        // 4. The retained invocation authority re-acknowledges. On its own this
-        //    is NOT enough in ForwardOverlap, which is precisely the trap.
-        invocation_acknowledges(&repository, advanced.epoch).await;
-        assert_eq!(
-            lift_decision(&state).await,
-            InvocationLiftDecision::Unleased,
-            "the invocation ack alone does not complete a ForwardOverlap epoch"
-        );
-
-        // 5. The bridge — one tick of the production loop, nothing else.
-        state.run_build_epoch_pass().await;
-
-        // 6. And the lease is armed again, exactly as production had it.
+        // 4. The lease is STILL armed, with no bridge, no periodic writer, and
+        //    no acknowledgement to keep current.
         assert_eq!(
             lift_decision(&state).await,
             InvocationLiftDecision::Lift,
-            "REMOVING acknowledge_absent_emergency_authority MUST make this fail. \
-             If it does not, S3a has shipped the silent disarm the split exists \
-             to prevent."
+            "an epoch bump must not disarm the per-invocation cgroup CPU lease"
         );
+
+        // 5. And the kill switch still works, so step 4 is not a constant.
+        djinn_coordinator::invocation_lease_control::InvocationLeaseControl::new(Arc::new(
+            InvocationLeaseAuthorityRepository::new(state.db().clone()),
+        ))
+        .kill_switch(bumped.epoch)
+        .await
+        .expect("operator kill switch");
         assert_eq!(
-            repository
-                .read()
-                .await
-                .expect("read")
-                .expect("row")
-                .emergency_ack_epoch,
-            Some(advanced.epoch),
-            "the bridge acknowledges the CURRENT epoch on behalf of the absent \
-             emergency authority"
+            lift_decision(&state).await,
+            InvocationLiftDecision::Unleased,
+            "the operator kill switch must still disarm the lease"
         );
     }
 
-    /// The bridge is idempotent and never fabricates an epoch: with no durable
-    /// row it writes nothing, and re-running it against an already-acknowledged
-    /// row is a no-op rather than a churning write.
+    /// A deployment that has never seeded the authority is disarmed, and the
+    /// periodic pass never fabricates one for it.
     #[tokio::test]
-    async fn the_bridge_writes_nothing_when_there_is_no_epoch_to_acknowledge() {
+    async fn the_pass_never_seeds_an_authority_for_an_unarmed_deployment() {
         let state = state();
-        let repository = handoff_repository(&state);
-        repository
+        let authority = authority(&state);
+        authority
             .delete_for_test()
             .await
             .expect("delete the singleton");
@@ -3800,8 +3659,8 @@ mod build_epoch_bridge_tests {
         state.run_build_epoch_pass().await;
 
         assert!(
-            repository.read().await.expect("read").is_none(),
-            "an unarmed deployment stays unarmed; the bridge never seeds an epoch"
+            authority.read().await.expect("read").is_none(),
+            "an unarmed deployment stays unarmed; the pass never seeds an authority"
         );
         assert_eq!(
             lift_decision(&state).await,
@@ -3810,24 +3669,7 @@ mod build_epoch_bridge_tests {
         );
     }
 
-    #[tokio::test]
-    async fn the_bridge_is_idempotent_across_repeated_passes() {
-        let state = state();
-        let repository = handoff_repository(&state);
-        let epoch = seed_production_row(&repository).await;
-        let before = repository.read().await.expect("read").expect("row");
-
-        state.run_build_epoch_pass().await;
-        state.run_build_epoch_pass().await;
-
-        let after = repository.read().await.expect("read").expect("row");
-        assert_eq!(after.epoch, epoch);
-        assert_eq!(after.emergency_ack_epoch, before.emergency_ack_epoch);
-        assert_eq!(after.invocation_ack_epoch, before.invocation_ack_epoch);
-        assert_eq!(lift_decision(&state).await, InvocationLiftDecision::Lift);
-    }
-
-    // ── AC7: refresh_epoch_cap survives and stays a LIVE control ────────────
+    // ── AC3: the reference cap stays a LIVE operator control ────────────────
 
     /// The 2026-07-25 incident, as a test: `epoch set-cap --cap 12` was applied,
     /// `epoch show` confirmed `cap 12`, and every denial that followed still
@@ -3835,14 +3677,16 @@ mod build_epoch_bridge_tests {
     /// adopted is not a control.
     ///
     /// So this asserts the value the lease ACTUALLY enforces — `build_lease.cap()`
-    /// — changes without a restart, not that a row reads back. The half of the
-    /// loop that does that (`refresh_epoch_cap`) is explicitly out of S3a's
-    /// scope and must not be deleted along with the loop's v0 half.
+    /// — changes without a restart, driven through the same operator control the
+    /// `djinn-server epoch set-cap` CLI drives, against the live production row.
     #[tokio::test]
     async fn the_reference_cap_remains_operator_settable_without_a_restart() {
         let state = state();
-        let repository = handoff_repository(&state);
-        seed_production_row(&repository).await;
+        let repository = Arc::new(InvocationLeaseAuthorityRepository::new(state.db().clone()));
+        let row = repository
+            .seed_live_production_row_for_test()
+            .await
+            .expect("write the live production row");
 
         let _ = state.inner.build_lease.recover().await;
         assert_eq!(
@@ -3851,12 +3695,13 @@ mod build_epoch_bridge_tests {
             "precondition: the live lease enforces production's cap of 3"
         );
 
-        // The operator control, through the retained durable path.
-        let row = repository.read().await.expect("read").expect("row");
-        repository
-            .set_modes_and_cap(row.epoch, V0Mode::Enforce, V1Mode::Enforce, Some(12))
-            .await
-            .expect("epoch set-cap --cap 12");
+        // The operator control, through the same path `epoch set-cap` drives.
+        djinn_coordinator::invocation_lease_control::InvocationLeaseControl::new(Arc::clone(
+            &repository,
+        ))
+        .set_cap(row.epoch, 12)
+        .await
+        .expect("epoch set-cap --cap 12");
         assert_eq!(
             state.inner.build_lease.cap(),
             3,
@@ -3864,7 +3709,7 @@ mod build_epoch_bridge_tests {
              exactly what the incident was"
         );
 
-        // One tick of the SAME loop that carries the emergency ack.
+        // One tick of the production loop's pass. No restart.
         state.run_build_epoch_pass().await;
 
         assert_eq!(
@@ -3873,12 +3718,18 @@ mod build_epoch_bridge_tests {
             "REMOVING refresh_epoch_cap() from the pass MUST make this fail: the \
              cap the lease enforces has to move without a process restart"
         );
+        // And the cap change did not disarm the lease on its way through.
+        assert_eq!(
+            lift_decision(&state).await,
+            InvocationLiftDecision::Lift,
+            "a cap change must never disarm the per-invocation cpu lease"
+        );
     }
 
-    /// Both halves of the pass are reachable from a test, and the loop body
-    /// contains nothing else.
+    /// The pass is reachable from a test, and the loop body contains nothing
+    /// else.
     ///
-    /// A half added directly to the `tokio::select!` arm would run in production
+    /// Work added directly to the `tokio::select!` arm would run in production
     /// and be untestable — which is how an inert half survives review. The pass
     /// is the only place work may live.
     #[test]
@@ -3887,7 +3738,6 @@ mod build_epoch_bridge_tests {
         // Assembled at runtime so these assertions do not match their own
         // literals inside the file they read.
         let pass = format!("run_build_epoch_{}", "pass");
-        let bridge = format!("acknowledge_absent_emergency_{}", "authority");
         let cap = format!("refresh_epoch_{}", "cap");
 
         let body_start = source
@@ -3902,9 +3752,9 @@ mod build_epoch_bridge_tests {
             "the loop must drive the extracted pass"
         );
         assert!(
-            !loop_body.contains(&bridge) && !loop_body.contains(&cap),
-            "no work may live directly in the loop body: a half added there \
-             cannot be reached by any test"
+            !loop_body.contains(&cap),
+            "no work may live directly in the loop body: work added there cannot \
+             be reached by any test"
         );
 
         let pass_body = &source[body_end..];
@@ -3914,21 +3764,16 @@ mod build_epoch_bridge_tests {
                 .expect("the pass has a closing brace");
         let pass_body = &source[body_end..pass_end];
         assert!(
-            pass_body.contains(&bridge),
-            "the pass must acknowledge the absent emergency authority, or the \
-             retained invocation lease disarms at the next epoch advance"
-        );
-        assert!(
             pass_body.contains(&cap),
-            "the pass must refresh the epoch cap, or `epoch set-cap` stops being \
-             a live control"
+            "the pass must refresh the reference cap, or `epoch set-cap` stops \
+             being a live control"
         );
     }
 
     /// The pass runs on EVERY pod, from `initialize()`, not only on the leader.
     ///
-    /// Both halves are reads-then-idempotent-writes of one durable row, and a
-    /// standby that never acknowledged would leave the epoch incomplete for the
+    /// It is a read-then-idempotent-write of one durable row, and a standby that
+    /// never adopted an operator cap change would enforce a stale ceiling for the
     /// whole window between a leader dying and a successor winning the lock.
     #[test]
     fn the_build_epoch_bridge_is_started_on_every_pod() {
@@ -3948,7 +3793,7 @@ mod build_epoch_bridge_tests {
         let site = source.find(call.as_str()).expect("call site exists");
         assert!(
             site > initialize && site < leader,
-            "the bridge must start in the every-pod initialize path, not in \
+            "the pass must start in the every-pod initialize path, not in \
              become_leader"
         );
     }
@@ -3960,7 +3805,8 @@ mod build_epoch_bridge_tests {
     /// warming can run at all.
     ///
     /// Against a fresh database this reproduces production exactly — migration
-    /// 139 seeds `build_lease_caps.cap = 0` and `admission_handoff` is empty —
+    /// 139 seeds `build_lease_caps.cap = 0` and the invocation-lease authority is
+    /// unarmed —
     /// and drives the real adapter over the real repository. Composing with a
     /// zero cap left `grant_next` short-circuiting on `occupied >= cap` before
     /// it read the queue, denying every warm Job while occupancy read 0.

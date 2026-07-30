@@ -2876,12 +2876,12 @@ async fn run_task_run(args: WorkerDefaultArgs) -> Result<()> {
     //
     // This is deliberately the FIRST thing after the RPC handshake, ahead of the
     // launcher handshake below, because the broker-backed shell authority the
-    // launcher path composes needs it: the durable `admission_handoff` epoch that
+    // launcher path composes needs it: the durable invocation-lease authority that
     // governs build-lease escalation lives in this database, and the launcher's
     // per-invocation lift decision is read from it. `bootstrap_warm_database`
     // resolves `DJINN_DATABASE_URL` and hard-errors when it is absent, so this
     // handle is never the project's `DATABASE_URL` catalog-service sidecar (which
-    // has no `admission_handoff` table). It is reused by the pre-task activity
+    // has no such row). It is reused by the pre-task activity
     // sink and by `WorkerSupervisorServices` (via `AgentContext`) below — one
     // connection, one database, for every in-pod platform read and write.
     let in_pod_db = bootstrap_warm_database()

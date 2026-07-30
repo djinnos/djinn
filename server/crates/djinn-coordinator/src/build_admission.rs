@@ -11,7 +11,6 @@
 //! belongs to, and which task-run roles are build-capable at all. The classes
 //! that weigh zero still weigh zero — they simply never reach a queue.
 
-use djinn_db::{V0Mode, V1Mode};
 use djinn_runtime::RoleResourceClass;
 
 /// Smallest legal reference cap. A cap of zero would deny all admission.
@@ -21,32 +20,27 @@ pub const MIN_ADMISSION_CAP: i64 = 1;
 /// mistyped configuration up front rather than letting it reach the durable row.
 pub const MAX_ADMISSION_CAP: i64 = 4096;
 
-/// Validate an admission-epoch configuration before it is written durably.
+/// Validate a reference cap before it is written durably.
 ///
-/// Two rules are enforced up front so a bad configuration never reaches the
-/// durable handoff row:
+/// The durable row's CHECK constraint already refuses a non-positive cap; this
+/// exists so an operator typo is rejected at the CLI with a range in the message
+/// rather than as a constraint violation, and so an absurd upper value never
+/// reaches the row at all.
 ///
-/// - The illegal mode combination in which neither authority enforces
-///   (`v0 ∈ {observe, disabled} ∧ v1 ∈ {off, shadow}`) is rejected. Note the
-///   meaning of `V0Mode::Enforce` changed when capacity accounting was unified
-///   onto the v1 lease: v0 has no cap of its own. Only `V1Mode::Enforce` arms
-///   the actual build-slot cap, and only `V1Mode::Enforce` lifts the
-///   per-invocation cgroup quota.
-/// - The reference cap must be within `[MIN_ADMISSION_CAP, MAX_ADMISSION_CAP]`.
+/// This used to also reject the "neither authority enforces" mode combination.
+/// That rule belonged to the two-authority handoff: it existed so a rollout step
+/// could never commit a state in which both v0 and v1 were released at once.
+/// With one authority left, "not enforcing" is not an illegal combination — it
+/// is the kill switch, and refusing to express it would remove the operator's
+/// only way to disarm.
 ///
-/// Retained by o53p alongside [`crate::build_admission_transition`], which is
-/// its only caller: both belong to the `admission_handoff` epoch, not to the
+/// Retained by o53p alongside [`crate::invocation_lease_control`], which is its
+/// only caller: both belong to the invocation-lease authority, not to the
 /// deleted pods-quota reservation.
-pub fn validate_admission_config(v0: V0Mode, v1: V1Mode, cap: i64) -> Result<(), String> {
-    if !v0.is_enforcing() && !v1.is_enforcing() {
-        return Err(format!(
-            "illegal admission mode combination: neither authority enforces \
-             (v0={v0:?}, v1={v1:?}); at least one of v0 or v1 must enforce the cap"
-        ));
-    }
+pub fn validate_reference_cap(cap: i64) -> Result<(), String> {
     if !(MIN_ADMISSION_CAP..=MAX_ADMISSION_CAP).contains(&cap) {
         return Err(format!(
-            "admission cap {cap} is out of range [{MIN_ADMISSION_CAP}, {MAX_ADMISSION_CAP}]"
+            "reference cap {cap} is out of range [{MIN_ADMISSION_CAP}, {MAX_ADMISSION_CAP}]"
         ));
     }
     Ok(())
@@ -166,28 +160,14 @@ impl TaskRunRole {
     }
 }
 
-/// The canonical durable key for one task-run admission generation.
-///
-/// # This is a retained STUB of a deleted producer, and S3b owns removing it
-///
-/// The Kueue cutover (o53p) deleted `admission_journal` and with it
-/// `admission_generation_key`, which formatted this string from a real journal
-/// key. The one surviving consumer is `SupervisorServices::record_generation_ack`
-/// (`djinn-agent`'s `supervisor_impl/stage.rs`), which writes the durable
-/// `admission_handoff_generation_ack` rows the invocation-primary edge reads.
-/// That relation and that trait method are BOTH in sibling task `ubne` (S3b),
-/// which removes the method rather than stubbing it — so this function must
-/// keep producing byte-identical keys until S3b lands, and disappears with it.
-///
-/// The byte form is deliberately unchanged: `TaskObservation:{task_id}:{generation}`,
-/// exactly what `format!("{:?}:{}:{}", AdmissionDomain::TaskObservation, ..)`
-/// produced. Existing `admission_handoff_generation_ack` rows in production were
-/// written with that spelling, and an ack that no longer byte-matches its
-/// required-generation set is an ack that silently never counts.
-#[must_use]
-pub fn task_run_generation_key(task_id: &str, generation: i64) -> String {
-    format!("TaskObservation:{task_id}:{generation}")
-}
+// `task_run_generation_key` lived here until S3b and is now gone.
+//
+// It formatted the key for an `admission_handoff_generation_ack` row, whose only
+// purpose was to hold the v0→v1 invocation-primary handoff edge closed until
+// every live task-run generation had confirmed the new authority. That edge, the
+// phase ring it belonged to, and the required-generation set the keys were
+// matched against were all retired with the v0 authority. Nothing reads those
+// rows, so nothing needs to be able to spell their keys.
 
 #[cfg(test)]
 mod tests {
@@ -232,18 +212,15 @@ mod tests {
         }
     }
 
-    /// The generation key is a DURABLE byte format, not an internal detail:
-    /// `admission_handoff_generation_ack` rows written before the Kueue cutover
-    /// carry exactly this spelling, and the invocation-primary edge matches its
-    /// required-generation set against them byte-for-byte. Changing the format
-    /// silently stops every existing ack from counting. Lock it.
+    /// The cap range is the operator-facing guard, and "disarmed" must stay
+    /// expressible: rejecting it here would remove the kill switch.
     #[test]
-    fn task_run_generation_key_keeps_its_durable_byte_format() {
-        assert_eq!(
-            task_run_generation_key("019fb35b-105f-7a93-aa52-af9758de06d5", 3),
-            "TaskObservation:019fb35b-105f-7a93-aa52-af9758de06d5:3"
-        );
-        assert_eq!(task_run_generation_key("t", 0), "TaskObservation:t:0");
+    fn the_reference_cap_range_is_enforced_at_both_ends() {
+        assert!(validate_reference_cap(MIN_ADMISSION_CAP).is_ok());
+        assert!(validate_reference_cap(MAX_ADMISSION_CAP).is_ok());
+        assert!(validate_reference_cap(0).is_err());
+        assert!(validate_reference_cap(-1).is_err());
+        assert!(validate_reference_cap(MAX_ADMISSION_CAP + 1).is_err());
     }
 
     /// The build-capable set is the whole reason this module still exists: it

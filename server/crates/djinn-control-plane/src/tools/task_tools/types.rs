@@ -1069,9 +1069,11 @@ pub struct BoardHealthBuildCapacity {
     pub occupancy: i64,
     /// `build_lease_caps.cap`.
     pub cap: i64,
-    /// True only when `admission_handoff.v1_mode = 'enforce'`. While the v1
-    /// authority is off or shadowing it writes no dispatch rows and cannot be
-    /// denying anything, so a full pool is not attributed to it.
+    /// True only when the durable invocation-lease authority is armed to
+    /// `enforce`. While it is off, shadowing, or absent entirely, the lease
+    /// authority writes no dispatch rows and cannot be denying anything, so a
+    /// full pool is not attributed to it. An absent authority row reports a real
+    /// `false` here rather than making the whole capacity block unobservable.
     ///
     /// **Renamed from `enforcing`.** The bare name read as "build admission is
     /// enforcing", which used to be a different authority entirely. On
