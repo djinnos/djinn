@@ -1,7 +1,7 @@
-import { useCallback, useState } from 'react';
-import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { useNavigate } from 'react-router-dom';
-import { HugeiconsIcon } from '@hugeicons/react';
+import { useCallback, useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useNavigate } from "react-router-dom";
+import { HugeiconsIcon } from "@hugeicons/react";
 import {
   Delete02Icon,
   Folder02Icon,
@@ -10,16 +10,16 @@ import {
   Loading02Icon,
   PlusSignIcon,
   Settings01Icon,
-} from '@hugeicons/core-free-icons';
+} from "@hugeicons/core-free-icons";
 
-import { Button } from '@/components/ui/button';
+import { Button } from "@/components/ui/button";
 import {
   Select,
   SelectContent,
   SelectItem,
   SelectTrigger,
   SelectValue,
-} from '@/components/ui/select';
+} from "@/components/ui/select";
 import {
   AlertDialog,
   AlertDialogCancel,
@@ -29,26 +29,26 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
   AlertDialogTrigger,
-} from '@/components/ui/alert-dialog';
-import { AddProjectFromGithubDialog } from '@/components/AddProjectFromGithubDialog';
-import { ImageStatusBadge } from '@/components/ImageStatusBadge';
-import { ProjectImagePicker } from '@/components/images/ProjectImagePicker';
-import { RepositoriesSectionTabs } from '@/components/RepositoriesSectionTabs';
-import { EmptyState } from '@/components/EmptyState';
-import { useAuthUser } from '@/components/AuthGate';
-import { useProjects, useSelectedProjectId } from '@/stores/useProjectStore';
-import { projectStore } from '@/stores/projectStore';
-import { useProjectRoute } from '@/hooks/useProjectRoute';
-import { useProjectEnvironmentConfig } from '@/hooks/useProjectEnvironmentConfig';
+} from "@/components/ui/alert-dialog";
+import { AddProjectFromGithubDialog } from "@/components/AddProjectFromGithubDialog";
+import { ImageStatusBadge } from "@/components/ImageStatusBadge";
+import { ProjectImagePicker } from "@/components/images/ProjectImagePicker";
+import { RepositoriesSectionTabs } from "@/components/RepositoriesSectionTabs";
+import { EmptyState } from "@/components/EmptyState";
+import { useAuthUser } from "@/components/AuthGate";
+import { useProjects, useSelectedProjectId } from "@/stores/useProjectStore";
+import { projectStore } from "@/stores/projectStore";
+import { useProjectRoute } from "@/hooks/useProjectRoute";
+import { useProjectEnvironmentConfig } from "@/hooks/useProjectEnvironmentConfig";
 import {
   fetchProjectBranches,
   fetchProjects,
   removeProject,
   updateProject,
   type Project,
-} from '@/api/server';
-import { showToast } from '@/lib/toast';
-import { cn } from '@/lib/utils';
+} from "@/api/server";
+import { showToast } from "@/lib/toast";
+import { cn } from "@/lib/utils";
 
 function RemoveButton({
   project,
@@ -68,8 +68,9 @@ function RemoveButton({
       await onRemoved();
       setOpen(false);
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Failed to remove repository';
-      showToast.error('Could not remove repository', { description: message });
+      const message =
+        err instanceof Error ? err.message : "Failed to remove repository";
+      showToast.error("Could not remove repository", { description: message });
     } finally {
       setRemoving(false);
     }
@@ -93,7 +94,11 @@ function RemoveButton({
         }
       >
         {removing ? (
-          <HugeiconsIcon icon={Loading02Icon} size={14} className="animate-spin" />
+          <HugeiconsIcon
+            icon={Loading02Icon}
+            size={14}
+            className="animate-spin"
+          />
         ) : (
           <HugeiconsIcon icon={Delete02Icon} size={14} />
         )}
@@ -102,20 +107,29 @@ function RemoveButton({
         <AlertDialogHeader>
           <AlertDialogTitle>Remove {project.name}?</AlertDialogTitle>
           <AlertDialogDescription>
-            This unregisters the repository from Djinn and removes its tasks, epics, and history.
-            The clone on disk and the GitHub repository are not affected.
+            This unregisters the repository from Djinn and removes its tasks,
+            epics, and history. The clone on disk and the GitHub repository are
+            not affected.
           </AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>
           <AlertDialogCancel disabled={removing}>Cancel</AlertDialogCancel>
-          <Button variant="destructive" disabled={removing} onClick={() => void handleConfirm()}>
+          <Button
+            variant="destructive"
+            disabled={removing}
+            onClick={() => void handleConfirm()}
+          >
             {removing ? (
               <>
-                <HugeiconsIcon icon={Loading02Icon} size={16} className="animate-spin" />
+                <HugeiconsIcon
+                  icon={Loading02Icon}
+                  size={16}
+                  className="animate-spin"
+                />
                 Removing...
               </>
             ) : (
-              'Remove'
+              "Remove"
             )}
           </Button>
         </AlertDialogFooter>
@@ -124,13 +138,19 @@ function RemoveButton({
   );
 }
 
-function BranchPicker({ project, readOnly = false }: { project: Project; readOnly?: boolean }) {
+function BranchPicker({
+  project,
+  readOnly = false,
+}: {
+  project: Project;
+  readOnly?: boolean;
+}) {
   const queryClient = useQueryClient();
-  const current = project.branch ?? 'main';
+  const current = project.branch ?? "main";
   const [saving, setSaving] = useState(false);
 
   const branchesQuery = useQuery({
-    queryKey: ['project', project.id, 'branches'],
+    queryKey: ["project", project.id, "branches"],
     queryFn: () => fetchProjectBranches(project.id),
     staleTime: 30_000,
     // Target branch is an org-blast-radius setting; non-admins only view it, so
@@ -151,10 +171,13 @@ function BranchPicker({ project, readOnly = false }: { project: Project; readOnl
       const refreshed = await fetchProjects();
       projectStore.getState().setProjects(refreshed);
       showToast.success(`Working branch set to ${next}`);
-      void queryClient.invalidateQueries({ queryKey: ['project', project.id, 'branches'] });
+      void queryClient.invalidateQueries({
+        queryKey: ["project", project.id, "branches"],
+      });
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Failed to update branch';
-      showToast.error('Could not change branch', { description: message });
+      const message =
+        err instanceof Error ? err.message : "Failed to update branch";
+      showToast.error("Could not change branch", { description: message });
     } finally {
       setSaving(false);
     }
@@ -168,7 +191,7 @@ function BranchPicker({ project, readOnly = false }: { project: Project; readOnl
     <Select
       value={current}
       onValueChange={(v) => {
-        if (typeof v === 'string') void handleChange(v);
+        if (typeof v === "string") void handleChange(v);
       }}
       disabled={saving}
     >
@@ -179,7 +202,11 @@ function BranchPicker({ project, readOnly = false }: { project: Project; readOnl
       >
         {saving ? (
           <span className="flex items-center gap-2 text-muted-foreground">
-            <HugeiconsIcon icon={Loading02Icon} size={12} className="animate-spin" />
+            <HugeiconsIcon
+              icon={Loading02Icon}
+              size={12}
+              className="animate-spin"
+            />
             Updating...
           </span>
         ) : (
@@ -225,15 +252,20 @@ function RepositoryRow({
     <tr
       onClick={onSelect}
       className={cn(
-        'cursor-pointer border-b border-border/50 transition-colors hover:bg-white/[0.03]',
-        isSelected && 'bg-white/[0.04]',
+        "cursor-pointer border-b border-border/50 transition-colors hover:bg-white/[0.03]",
+        isSelected && "bg-white/[0.04]",
       )}
     >
       <td className="px-4 py-3">
         <div className="flex items-center gap-3">
-          <HugeiconsIcon icon={Folder02Icon} className="h-4 w-4 shrink-0 text-muted-foreground" />
+          <HugeiconsIcon
+            icon={Folder02Icon}
+            className="h-4 w-4 shrink-0 text-muted-foreground"
+          />
           <div className="min-w-0">
-            <div className="truncate text-sm font-medium text-foreground">{project.name}</div>
+            <div className="truncate text-sm font-medium text-foreground">
+              {project.name}
+            </div>
             {project.github_owner && project.github_repo && (
               <div className="truncate text-xs text-muted-foreground">
                 {project.github_owner}/{project.github_repo}
@@ -255,16 +287,22 @@ function RepositoryRow({
         />
       </td>
       <td className="px-4 py-3">
-        <ImageStatusBadge
-          projectId={project.id}
-          projectName={project.name}
-        />
+        <ImageStatusBadge projectId={project.id} projectName={project.name} />
       </td>
       <td className="px-4 py-3">
         <div
           className="flex items-center justify-end gap-1.5"
           onClick={(e) => e.stopPropagation()}
         >
+          <button
+            type="button"
+            aria-label={`View readiness for ${project.name}`}
+            onClick={() => navigate(`/projects/${project.id}/readiness`)}
+            className="h-7 rounded-md border bg-transparent px-2 text-xs text-muted-foreground transition-colors hover:bg-white/5 hover:text-foreground"
+            title="View project readiness"
+          >
+            Readiness
+          </button>
           <button
             type="button"
             onClick={() => navigate(`/projects/${project.id}/environment`)}
@@ -307,8 +345,9 @@ export function RepositoriesPage() {
       const refreshed = await fetchProjects();
       projectStore.getState().setProjects(refreshed);
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Failed to refresh projects';
-      showToast.error('Project list refresh failed', { description: message });
+      const message =
+        err instanceof Error ? err.message : "Failed to refresh projects";
+      showToast.error("Project list refresh failed", { description: message });
     } finally {
       setRefreshing(false);
     }
@@ -325,7 +364,10 @@ export function RepositoriesPage() {
         </div>
         <Button onClick={() => setDialogOpen(true)} disabled={refreshing}>
           {refreshing ? (
-            <HugeiconsIcon icon={Loading02Icon} className="h-4 w-4 animate-spin" />
+            <HugeiconsIcon
+              icon={Loading02Icon}
+              className="h-4 w-4 animate-spin"
+            />
           ) : (
             <HugeiconsIcon icon={PlusSignIcon} className="h-4 w-4" />
           )}
@@ -345,7 +387,9 @@ export function RepositoriesPage() {
               message="Add a repository from GitHub to start managing it with Djinn."
               actionLabel="Add repository"
               onAction={() => setDialogOpen(true)}
-              illustration={<HugeiconsIcon icon={GithubIcon} className="h-10 w-10" />}
+              illustration={
+                <HugeiconsIcon icon={GithubIcon} className="h-10 w-10" />
+              }
             />
           ) : (
             <>
@@ -357,7 +401,9 @@ export function RepositoriesPage() {
                       <th className="px-4 py-2.5 font-medium">Target branch</th>
                       <th className="px-4 py-2.5 font-medium">Image</th>
                       <th className="px-4 py-2.5 font-medium">Status</th>
-                      <th className="px-4 py-2.5 text-right font-medium">Actions</th>
+                      <th className="px-4 py-2.5 text-right font-medium">
+                        Actions
+                      </th>
                     </tr>
                   </thead>
                   <tbody>

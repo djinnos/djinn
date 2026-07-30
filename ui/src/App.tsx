@@ -17,6 +17,7 @@ import { RepositoriesPage } from "@/pages/RepositoriesPage";
 import { ImagesPage } from "@/pages/ImagesPage";
 import { ImageEditorPage } from "@/pages/ImageEditorPage";
 import { ProjectEnvironmentPage } from "@/pages/ProjectEnvironmentPage";
+import { ProjectReadinessPage } from "@/pages/ProjectReadinessPage";
 import { UsersPage } from "@/pages/UsersPage";
 import { UsageDashboardPage } from "@/pages/UsageDashboardPage";
 import { ConnectionBanner } from "@/components/ConnectionBanner";
@@ -73,10 +74,16 @@ export function MainLayout() {
             <Route path="/agents" element={<AgentsPage />} />
             <Route path="/memory" element={<MemoryPage />} />
             <Route path="/code-graph" element={<CodeGraphPage />} />
-            <Route path="/pulse" element={<Navigate to="/code-graph" replace />} />
+            <Route
+              path="/pulse"
+              element={<Navigate to="/code-graph" replace />}
+            />
             <Route path="/proposals" element={<ProposalsPage />} />
             <Route path="/proposals/:id" element={<ProposalsPage />} />
-            <Route path="/metrics" element={<Navigate to="/agents" replace />} />
+            <Route
+              path="/metrics"
+              element={<Navigate to="/agents" replace />}
+            />
 
             {/* Task session (global) */}
             <Route path="/task/:taskId" element={<TaskSessionPage />} />
@@ -90,18 +97,33 @@ export function MainLayout() {
             <Route path="/images/:id/edit" element={<ImageEditorPage />} />
 
             {/* Per-project pages */}
-            <Route path="/projects/:id/environment" element={<ProjectEnvironmentPage />} />
+            <Route
+              path="/projects/:id/environment"
+              element={<ProjectEnvironmentPage />}
+            />
+            <Route
+              path="/projects/:id/readiness"
+              element={<ProjectReadinessPage />}
+            />
 
             {/* Users — admin-only roster; non-admins are bounced to the board */}
             <Route
               path="/users"
-              element={isAdmin ? <UsersPage /> : <Navigate to="/tasks" replace />}
+              element={
+                isAdmin ? <UsersPage /> : <Navigate to="/tasks" replace />
+              }
             />
 
             {/* Usage & Analytics — admin-only dashboard */}
             <Route
               path="/admin/usage"
-              element={isAdmin ? <UsageDashboardPage /> : <Navigate to="/tasks" replace />}
+              element={
+                isAdmin ? (
+                  <UsageDashboardPage />
+                ) : (
+                  <Navigate to="/tasks" replace />
+                )
+              }
             />
 
             {/* Settings */}
@@ -134,7 +156,7 @@ function AuthenticatedApp() {
   useEventSource();
 
   useEffect(() => {
-    if (status === 'connected') {
+    if (status === "connected") {
       void refreshGate();
       void refreshModelGate();
       void refreshProjectGate();
@@ -144,14 +166,14 @@ function AuthenticatedApp() {
   // Latch "the server was reachable at least once" during render (React's
   // sanctioned adjust-state-while-rendering pattern) so it can be read below
   // without a render-phase ref access.
-  if (status === 'connected' && !hasConnectedOnce) {
+  if (status === "connected" && !hasConnectedOnce) {
     setHasConnectedOnce(true);
   }
 
   // If the server has been reached once and then drops, keep rendering the
   // shell so the ConnectionBanner can surface the outage without forcing the
   // user back to a blocking overlay.
-  if (status !== 'connected' && hasConnectedOnce) {
+  if (status !== "connected" && hasConnectedOnce) {
     return <MainLayout />;
   }
 
