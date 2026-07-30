@@ -167,6 +167,26 @@ async fn readiness_detail_route_serializes_the_authenticated_two_area_owner_run(
     let response = detail(&app, &project_id, &run_id, Some(&owner)).await;
     assert_eq!(response.status(), StatusCode::OK);
     let json = response_json(response).await;
+    // The routed browser regression imports this fixture directly. Compare its
+    // stable DTO fields with the actual authenticated route response so the UI
+    // cannot silently drift onto a separately invented wire shape.
+    let browser_fixture: Value = serde_json::from_str(include_str!(
+        "../../../../ui/src/pages/fixtures/readiness_terminal_detail.json"
+    ))
+    .expect("valid shared browser detail fixture");
+    assert_eq!(browser_fixture["run"]["status"], json["run"]["status"]);
+    assert_eq!(
+        browser_fixture["run"]["repository_snapshot"],
+        json["run"]["repository_snapshot"]
+    );
+    assert_eq!(
+        browser_fixture["run"]["skill_name"],
+        json["run"]["skill_name"]
+    );
+    assert_eq!(
+        browser_fixture["run"]["skill_version"],
+        json["run"]["skill_version"]
+    );
     assert_eq!(json["run"]["id"], run_id);
     assert_eq!(json["areas"].as_array().unwrap().len(), 2);
     let frontend_json = json["areas"]
@@ -196,7 +216,12 @@ async fn readiness_detail_route_serializes_the_authenticated_two_area_owner_run(
         serde_json::json!({"path":"web/auth.ts","line":12})
     );
     assert_eq!(
-        backend_json["accepted_findings"][0]["evidence"][0],
+        backend_json["accepted_findings"]
+            .as_array()
+            .expect("backend findings serialize as an array")
+            .iter()
+            .find(|finding| finding["guardrail_key"] == "backend-auth")
+            .expect("backend auth finding")["evidence"][0],
         serde_json::json!({"path":"server/src/auth.rs","line":48})
     );
     assert!(
