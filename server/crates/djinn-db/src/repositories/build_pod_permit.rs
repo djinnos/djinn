@@ -14,7 +14,7 @@ const POOL_KEY: &str = "global";
 const ROW_COLUMNS: &str = "task_run_id, permit_id::text AS permit_id, fencing_token, state, job_uid, \
     to_char(acquired_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS acquired_at, \
     to_char(released_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS released_at, \
-    released_fencing_token, release_reason";
+    released_fencing_token, release_reason, pod_namespace, pod_name, pod_uid, launcher_container_name, launcher_container_id, image_digest, observed_launcher_protocol, effective_launcher_protocol, admitted_cpu_millicores";
 
 /// Durable lifecycle states defined by migration 162.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -22,7 +22,72 @@ const ROW_COLUMNS: &str = "task_run_id, permit_id::text AS permit_id, fencing_to
 pub enum BuildPodPermitState {
     Acquired,
     JobCreated,
+    BirthConfirmed,
+    LiftApplying,
+    Lifted,
+    DropRequired,
+    DropApplying,
+    Quarantined,
     Released,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CaptureBuildPodResizeIdentityResult {
+    Captured(BuildPodPermitRow),
+    AlreadyCaptured(BuildPodPermitRow),
+    Rejected,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TransitionBuildPodResizeLifecycleResult {
+    Transitioned(BuildPodPermitRow),
+    Rejected,
+}
+
+impl BuildPodPermitState {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Acquired => "acquired",
+            Self::JobCreated => "job_created",
+            Self::BirthConfirmed => "birth_confirmed",
+            Self::LiftApplying => "lift_applying",
+            Self::Lifted => "lifted",
+            Self::DropRequired => "drop_required",
+            Self::DropApplying => "drop_applying",
+            Self::Quarantined => "quarantined",
+            Self::Released => "released",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BuildPodResizeIdentity {
+    pub pod_namespace: String,
+    pub pod_name: String,
+    pub pod_uid: String,
+    pub launcher_container_name: String,
+    pub launcher_container_id: String,
+    pub image_digest: String,
+    pub observed_launcher_protocol: String,
+    pub effective_launcher_protocol: String,
+    pub admitted_cpu_millicores: i64,
+}
+impl BuildPodResizeIdentity {
+    fn valid(&self) -> bool {
+        !self.pod_namespace.trim().is_empty()
+            && !self.pod_name.trim().is_empty()
+            && !self.pod_uid.trim().is_empty()
+            && !self.launcher_container_name.trim().is_empty()
+            && !self.launcher_container_id.trim().is_empty()
+            && !self.image_digest.trim().is_empty()
+            && matches!(
+                self.observed_launcher_protocol.as_str(),
+                "leaf-v1" | "resize-v2"
+            )
+            && matches!(
+                self.effective_launcher_protocol.as_str(),
+                "leaf-v1" | "resize-v2"
+            )
+            && self.admitted_cpu_millicores > 0
+    }
 }
 
 impl BuildPodPermitState {
@@ -30,6 +95,12 @@ impl BuildPodPermitState {
         match value {
             "acquired" => Ok(Self::Acquired),
             "job_created" => Ok(Self::JobCreated),
+            "birth_confirmed" => Ok(Self::BirthConfirmed),
+            "lift_applying" => Ok(Self::LiftApplying),
+            "lifted" => Ok(Self::Lifted),
+            "drop_required" => Ok(Self::DropRequired),
+            "drop_applying" => Ok(Self::DropApplying),
+            "quarantined" => Ok(Self::Quarantined),
             "released" => Ok(Self::Released),
             _ => Err(DbError::InvalidData(format!(
                 "invalid build pod permit state `{value}`"
@@ -55,6 +126,7 @@ pub struct BuildPodPermitRow {
     pub released_at: Option<String>,
     pub released_fencing_token: Option<i64>,
     pub release_reason: Option<String>,
+    pub resize_identity: Option<BuildPodResizeIdentity>,
 }
 
 /// The admission result deliberately has no successful fallback for unavailable
@@ -253,6 +325,66 @@ impl BuildPodPermitRepository {
         .await?)
     }
 
+    pub async fn capture_resize_identity(
+        &self,
+        task_run_id: &str,
+        permit_id: &str,
+        fencing_token: i64,
+        identity: &BuildPodResizeIdentity,
+    ) -> DbResult<CaptureBuildPodResizeIdentityResult> {
+        if !identity.valid() {
+            return Ok(CaptureBuildPodResizeIdentityResult::Rejected);
+        }
+        self.db.ensure_initialized().await?;
+        let mut tx = self.db.pool().begin().await?;
+        let updated = sqlx::query_as::<_, DbRow>(&format!("UPDATE build_pod_permits SET state='birth_confirmed', pod_namespace=$1, pod_name=$2, pod_uid=$3, launcher_container_name=$4, launcher_container_id=$5, image_digest=$6, observed_launcher_protocol=$7, effective_launcher_protocol=$8, admitted_cpu_millicores=$9 WHERE task_run_id=$10 AND permit_id=$11::uuid AND fencing_token=$12 AND state='job_created' AND pod_uid IS NULL RETURNING {ROW_COLUMNS}"))
+            .bind(&identity.pod_namespace).bind(&identity.pod_name).bind(&identity.pod_uid).bind(&identity.launcher_container_name).bind(&identity.launcher_container_id).bind(&identity.image_digest).bind(&identity.observed_launcher_protocol).bind(&identity.effective_launcher_protocol).bind(identity.admitted_cpu_millicores).bind(task_run_id).bind(permit_id).bind(fencing_token).fetch_optional(&mut *tx).await?;
+        if let Some(row) = updated {
+            tx.commit().await?;
+            return Ok(CaptureBuildPodResizeIdentityResult::Captured(
+                row.try_into()?,
+            ));
+        }
+        let existing = fetch_tx(&mut tx, task_run_id).await?;
+        tx.commit().await?;
+        Ok(match existing {
+            Some(row)
+                if row.permit_id == permit_id
+                    && row.fencing_token == fencing_token
+                    && row.resize_identity.as_ref() == Some(identity) =>
+            {
+                CaptureBuildPodResizeIdentityResult::AlreadyCaptured(row)
+            }
+            _ => CaptureBuildPodResizeIdentityResult::Rejected,
+        })
+    }
+
+    pub async fn transition_resize_lifecycle(
+        &self,
+        task_run_id: &str,
+        permit_id: &str,
+        fencing_token: i64,
+        pod_uid: &str,
+        expected: BuildPodPermitState,
+        next: BuildPodPermitState,
+    ) -> DbResult<TransitionBuildPodResizeLifecycleResult> {
+        if pod_uid.trim().is_empty() {
+            return Ok(TransitionBuildPodResizeLifecycleResult::Rejected);
+        }
+        self.db.ensure_initialized().await?;
+        let row = sqlx::query_as::<_, DbRow>(&format!("UPDATE build_pod_permits SET state=$1 WHERE task_run_id=$2 AND permit_id=$3::uuid AND fencing_token=$4 AND pod_uid=$5 AND state=$6 RETURNING {ROW_COLUMNS}"))
+            .bind(next.as_str()).bind(task_run_id).bind(permit_id).bind(fencing_token).bind(pod_uid).bind(expected.as_str()).fetch_optional(self.db.pool()).await?;
+        Ok(match row {
+            Some(row) => TransitionBuildPodResizeLifecycleResult::Transitioned(row.try_into()?),
+            None => TransitionBuildPodResizeLifecycleResult::Rejected,
+        })
+    }
+
+    pub async fn list_nonterminal_resize(&self) -> DbResult<Vec<BuildPodPermitRow>> {
+        self.db.ensure_initialized().await?;
+        sqlx::query_as::<_, DbRow>(&format!("SELECT {ROW_COLUMNS} FROM build_pod_permits WHERE state IN ('birth_confirmed','lift_applying','lifted','drop_required','drop_applying','quarantined') ORDER BY acquired_at, task_run_id")).fetch_all(self.db.pool()).await?.into_iter().map(TryInto::try_into).collect()
+    }
+
     /// Bind an observed Kubernetes Job UID, or refresh the matching observation.
     /// The conditional predicate fences task run, permit identity, token, and
     /// current state in the same update.
@@ -316,7 +448,7 @@ impl BuildPodPermitRepository {
             "UPDATE build_pod_permits SET state = 'released', released_at = now(), \
              released_fencing_token = fencing_token, release_reason = $1 \
              WHERE task_run_id = $2 AND permit_id = $3::uuid AND fencing_token = $4 \
-               AND state IN ('acquired', 'job_created') RETURNING {ROW_COLUMNS}"
+               AND state <> 'released' RETURNING {ROW_COLUMNS}"
         ))
         .bind(reason)
         .bind(task_run_id)
@@ -354,6 +486,15 @@ struct DbRow {
     released_at: Option<String>,
     released_fencing_token: Option<i64>,
     release_reason: Option<String>,
+    pod_namespace: Option<String>,
+    pod_name: Option<String>,
+    pod_uid: Option<String>,
+    launcher_container_name: Option<String>,
+    launcher_container_id: Option<String>,
+    image_digest: Option<String>,
+    observed_launcher_protocol: Option<String>,
+    effective_launcher_protocol: Option<String>,
+    admitted_cpu_millicores: Option<i64>,
 }
 
 impl TryFrom<DbRow> for BuildPodPermitRow {
@@ -370,6 +511,45 @@ impl TryFrom<DbRow> for BuildPodPermitRow {
             released_at: row.released_at,
             released_fencing_token: row.released_fencing_token,
             release_reason: row.release_reason,
+            resize_identity: match (
+                row.pod_namespace,
+                row.pod_name,
+                row.pod_uid,
+                row.launcher_container_name,
+                row.launcher_container_id,
+                row.image_digest,
+                row.observed_launcher_protocol,
+                row.effective_launcher_protocol,
+                row.admitted_cpu_millicores,
+            ) {
+                (
+                    Some(pod_namespace),
+                    Some(pod_name),
+                    Some(pod_uid),
+                    Some(launcher_container_name),
+                    Some(launcher_container_id),
+                    Some(image_digest),
+                    Some(observed_launcher_protocol),
+                    Some(effective_launcher_protocol),
+                    Some(admitted_cpu_millicores),
+                ) => Some(BuildPodResizeIdentity {
+                    pod_namespace,
+                    pod_name,
+                    pod_uid,
+                    launcher_container_name,
+                    launcher_container_id,
+                    image_digest,
+                    observed_launcher_protocol,
+                    effective_launcher_protocol,
+                    admitted_cpu_millicores,
+                }),
+                (None, None, None, None, None, None, None, None, None) => None,
+                _ => {
+                    return Err(DbError::InvalidData(
+                        "partial build pod resize identity".into(),
+                    ));
+                }
+            },
         })
     }
 }

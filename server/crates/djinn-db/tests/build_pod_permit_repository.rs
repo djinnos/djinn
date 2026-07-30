@@ -2,7 +2,8 @@ use std::sync::Arc;
 
 use djinn_db::{
     AcquireBuildPodPermitResult, BindBuildPodPermitResult, BuildPodPermitRepository,
-    BuildPodPermitState, Database, ReleaseBuildPodPermitResult,
+    BuildPodPermitState, BuildPodResizeIdentity, CaptureBuildPodResizeIdentityResult, Database,
+    ReleaseBuildPodPermitResult, TransitionBuildPodResizeLifecycleResult,
 };
 use tokio::sync::Barrier;
 
@@ -46,6 +47,133 @@ async fn seed_runs(db: &Database, ids: &[&str]) {
         .await
         .unwrap();
     }
+}
+
+#[tokio::test]
+async fn resize_identity_is_write_once_and_lifecycle_is_uid_fenced() {
+    let db = Database::ephemeral().await.unwrap();
+    seed_runs(&db, &["resize"]).await;
+    let repo = BuildPodPermitRepository::new(db.clone());
+    let permit = match repo.acquire("resize", 1).await {
+        AcquireBuildPodPermitResult::Acquired { row, .. } => row,
+        outcome => panic!("unexpected outcome: {outcome:?}"),
+    };
+    assert!(matches!(
+        repo.bind_or_refresh_job_uid("resize", &permit.permit_id, permit.fencing_token, "job")
+            .await
+            .unwrap(),
+        BindBuildPodPermitResult::Bound(_)
+    ));
+    let identity = BuildPodResizeIdentity {
+        pod_namespace: "ns".into(),
+        pod_name: "pod".into(),
+        pod_uid: "pod-uid".into(),
+        launcher_container_name: "launcher".into(),
+        launcher_container_id: "containerd://launcher".into(),
+        image_digest: "sha256:abc".into(),
+        observed_launcher_protocol: "resize-v2".into(),
+        effective_launcher_protocol: "resize-v2".into(),
+        admitted_cpu_millicores: 1000,
+    };
+    assert!(matches!(
+        repo.capture_resize_identity("resize", &permit.permit_id, permit.fencing_token, &identity)
+            .await
+            .unwrap(),
+        CaptureBuildPodResizeIdentityResult::Captured(_)
+    ));
+    assert!(matches!(
+        repo.capture_resize_identity("resize", &permit.permit_id, permit.fencing_token, &identity)
+            .await
+            .unwrap(),
+        CaptureBuildPodResizeIdentityResult::AlreadyCaptured(_)
+    ));
+    let mut conflicting = identity.clone();
+    conflicting.pod_uid = "other-pod".into();
+    assert!(matches!(
+        repo.capture_resize_identity(
+            "resize",
+            &permit.permit_id,
+            permit.fencing_token,
+            &conflicting
+        )
+        .await
+        .unwrap(),
+        CaptureBuildPodResizeIdentityResult::Rejected
+    ));
+    for (from, to) in [
+        (
+            BuildPodPermitState::BirthConfirmed,
+            BuildPodPermitState::LiftApplying,
+        ),
+        (
+            BuildPodPermitState::LiftApplying,
+            BuildPodPermitState::Lifted,
+        ),
+        (
+            BuildPodPermitState::Lifted,
+            BuildPodPermitState::DropRequired,
+        ),
+        (
+            BuildPodPermitState::DropRequired,
+            BuildPodPermitState::DropApplying,
+        ),
+        (
+            BuildPodPermitState::DropApplying,
+            BuildPodPermitState::BirthConfirmed,
+        ),
+        (
+            BuildPodPermitState::BirthConfirmed,
+            BuildPodPermitState::Quarantined,
+        ),
+    ] {
+        assert!(matches!(
+            repo.transition_resize_lifecycle(
+                "resize",
+                &permit.permit_id,
+                permit.fencing_token,
+                "pod-uid",
+                from,
+                to
+            )
+            .await
+            .unwrap(),
+            TransitionBuildPodResizeLifecycleResult::Transitioned(_)
+        ));
+    }
+    assert!(matches!(
+        repo.transition_resize_lifecycle(
+            "resize",
+            &permit.permit_id,
+            permit.fencing_token + 1,
+            "pod-uid",
+            BuildPodPermitState::Quarantined,
+            BuildPodPermitState::DropRequired
+        )
+        .await
+        .unwrap(),
+        TransitionBuildPodResizeLifecycleResult::Rejected
+    ));
+    assert!(matches!(
+        repo.transition_resize_lifecycle(
+            "resize",
+            &permit.permit_id,
+            permit.fencing_token,
+            "stale-uid",
+            BuildPodPermitState::Quarantined,
+            BuildPodPermitState::DropRequired
+        )
+        .await
+        .unwrap(),
+        TransitionBuildPodResizeLifecycleResult::Rejected
+    ));
+    assert_eq!(
+        BuildPodPermitRepository::new(db)
+            .list_nonterminal_resize()
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
