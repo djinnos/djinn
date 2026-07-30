@@ -52,3 +52,19 @@ then enumerates every `MutatingWebhookConfiguration` and
 their subresources, or a wildcard. It requires both positive `matchLabels`
 selectors on the owning webhook. The test passes the vendored manifest and
 proves both negative fixture copies are rejected.
+
+## Zero-capture prerequisite gate
+
+The structural contract above proves the selectors are *shaped* correctly. It
+does not prove that installing this asset alongside the inert chart captures
+nothing. `zero-capture-gate.sh` is the operator-facing harness that proves that
+on a real disposable cluster, and
+`deploy/runbooks/kueue-inert-release-zero-capture.md` makes a passing
+invocation a mandatory prerequisite for the Kueue cutover epic **4c9q**.
+
+Its hermetic fake-`kubectl` contract needs no cluster credentials and runs in
+the same globbed roster as the selector test:
+
+```sh
+deploy/kueue/tests/zero-capture-gate.sh
+```
