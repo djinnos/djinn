@@ -90,7 +90,8 @@
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use djinn_core::clock::{Clock, SystemClock};
@@ -236,12 +237,30 @@ impl ChatShellSandbox {
 /// It has a typed request without stdin and fails closed without namespaces.
 pub struct EvidenceSandbox {
     clone_root: PathBuf,
+    process_observer: Option<EvidenceProcessObserver>,
 }
 
 impl EvidenceSandbox {
     pub fn new(clone_root: PathBuf) -> Self {
         let _ = probe_namespaces();
-        Self { clone_root }
+        Self {
+            clone_root,
+            process_observer: None,
+        }
+    }
+
+    /// Build an evidence sandbox whose process-start boundary is observable.
+    /// This is deliberately a counter, not a command hook: policy validation
+    /// stays before the boundary and rejected argv never reaches child launch.
+    pub fn with_process_observer(
+        clone_root: PathBuf,
+        process_observer: EvidenceProcessObserver,
+    ) -> Self {
+        let _ = probe_namespaces();
+        Self {
+            clone_root,
+            process_observer: Some(process_observer),
+        }
     }
 
     pub async fn run(&self, req: EvidenceRequest) -> Result<ChatShellResult, EvidenceError> {
@@ -254,6 +273,9 @@ impl EvidenceSandbox {
             return Err(EvidenceError::OutputLimitOutOfBounds);
         }
         require_evidence_namespaces(probe_namespaces())?;
+        if let Some(observer) = &self.process_observer {
+            observer.record_start_attempt();
+        }
         run_isolated(
             executable,
             &req.argv[1..],
@@ -265,6 +287,30 @@ impl EvidenceSandbox {
         )
         .await
         .map_err(EvidenceError::Core)
+    }
+}
+
+/// Narrow instrumentation at the evidence sandbox's child-launch boundary.
+/// The closed policy does not permit any utility with a transitive spawn mode,
+/// so a rejected request must leave this counter unchanged.
+#[derive(Clone, Debug, Default)]
+pub struct EvidenceProcessObserver {
+    start_attempts: Arc<AtomicUsize>,
+}
+
+impl EvidenceProcessObserver {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Number of requests that passed all validation and attempted a direct
+    /// isolated child launch.
+    pub fn start_attempts(&self) -> usize {
+        self.start_attempts.load(Ordering::SeqCst)
+    }
+
+    fn record_start_attempt(&self) {
+        self.start_attempts.fetch_add(1, Ordering::SeqCst);
     }
 }
 
@@ -1248,9 +1294,7 @@ mod tests {
     #[tokio::test]
     async fn evidence_request_enforces_cwd_and_caller_bounds_before_spawn() {
         let (_dir, chat) = tempclone();
-        let sandbox = EvidenceSandbox {
-            clone_root: chat.clone_root,
-        };
+        let sandbox = EvidenceSandbox::new(chat.clone_root);
         let request = |cwd, timeout, output_limit| EvidenceRequest {
             argv: vec!["ls".into()],
             cwd,
