@@ -133,6 +133,9 @@ pub use repositories::{
     invocation_lease_authority::{
         InvocationLeaseAuthorityRepository, InvocationLeaseAuthorityRow, InvocationLeaseMode,
     },
+    kueue_workload_admission::{
+        AdmissionApplied, KueueWorkloadAdmissionRecord, KueueWorkloadAdmissionRepository,
+    },
     legacy_settings_import::{
         LegacySettingsImport, LegacySettingsImportError, LegacySettingsImportResult,
     },

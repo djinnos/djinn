@@ -2028,10 +2028,11 @@ impl AppState {
         );
         crate::mirror_fetcher::spawn(self.clone());
 
-        // NOTE: `build_admission_reconcile::spawn` deliberately no longer lives
-        // here. It is now the first statement after the topology gate opens, so
-        // no awaited initializer between the two can leave a fully-admitting
-        // leader with no reconciler. See the comment at that call site.
+        // Kueue Workload reconciliation (slice S5), at the seam vacated by the
+        // deleted `build_admission_reconcile::spawn`. Leader-only: it writes the
+        // durable admission projection and terminalises evicted task-runs.
+        // Inert until `kueue.armed` — see the module docs.
+        crate::kueue_workload_reconcile::spawn(self.clone());
 
         // Standalone SCIP-index driver (leader-only, same reasoning as
         // mirror_fetcher: it creates cluster objects). The real scheduler is
