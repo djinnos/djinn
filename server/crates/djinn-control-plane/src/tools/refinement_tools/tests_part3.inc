@@ -17,33 +17,30 @@
     async fn every_admission_source_leaves_the_run_durably_attributed() {
         let (server, db) = test_server().await;
         let repo = ProposalRepository::new(db.clone(), EventBus::noop());
-        let proposal = repo
-            .create(ProposalCreateInput {
-                title: "Attribution on demand",
-                body: "body",
-                acceptance_criteria: Some("[]"),
-                status: None,
-                body_format: None,
+        // `refinement_owner_user_id` is FK-constrained to `users`, so the
+        // author fallback can only be observed against a real row.
+        // `ProposalRepository::create` stamps `author_user_id` from the ambient
+        // auth context, which is the only way the column is ever written.
+        let author_user_id = create_test_user(&db, "attribution-author-019f").await;
+        let proposal = djinn_core::auth_context::SESSION_USER_ID
+            .scope(Some(author_user_id.clone()), async {
+                repo.create(ProposalCreateInput {
+                    title: "Attribution on demand",
+                    body: "body",
+                    acceptance_criteria: Some("[]"),
+                    status: None,
+                    body_format: None,
+                })
+                .await
             })
             .await
             .unwrap();
+        assert_eq!(
+            proposal.author_user_id.as_deref(),
+            Some(author_user_id.as_str()),
+            "the attribution fallback under test reads the proposal author"
+        );
         link_proposal_to_project(&db, &repo, &proposal.id).await;
-
-        // `refinement_owner_user_id` is FK-constrained to `users`, so the
-        // author fallback can only be observed against a real row.
-        sqlx::query("INSERT INTO users (id, github_id, github_login) VALUES ($1, $2, $3)")
-            .bind("attribution-author-019f")
-            .bind(919_067_201i64)
-            .bind("attribution-author-019f")
-            .execute(db.pool())
-            .await
-            .unwrap();
-        sqlx::query("UPDATE proposals SET author_user_id = $2 WHERE id = $1")
-            .bind(&proposal.id)
-            .bind("attribution-author-019f")
-            .execute(db.pool())
-            .await
-            .unwrap();
 
         // A demanded round carries no explicit owner. It must still attribute
         // the run from the proposal author.
@@ -66,7 +63,7 @@
                 .unwrap()
                 .refinement_owner_user_id
                 .as_deref(),
-            Some("attribution-author-019f"),
+            Some(author_user_id.as_str()),
             "a demanded round must attribute the run it admits"
         );
 
@@ -93,7 +90,7 @@
                 .unwrap()
                 .refinement_owner_user_id
                 .as_deref(),
-            Some("attribution-author-019f"),
+            Some(author_user_id.as_str()),
             "an implicit start must never clear a run's durable owner"
         );
     }

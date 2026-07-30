@@ -93,8 +93,8 @@
             .unwrap();
 
         let proj = insert_project(&db, "svc-legacy-new").await;
-        let epic = insert_epic(&db, &proj, "lg02").await;
-        let spike_id = insert_task(&db, &proj, &epic, "spike-lg2").await;
+        let epic = insert_epic(&db, &proj).await;
+        let spike_id = insert_task(&db, &proj, &epic).await;
 
         repo.set_needs_evidence_spike(&p.id, &spike_id, "X is load-bearing")
             .await

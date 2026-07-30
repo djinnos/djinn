@@ -131,12 +131,9 @@
         let (server, db, p, user_id, _judge_task_id) =
             setup_demand_test().await;
 
-        // Count tasks before via direct SQL.
-        let before_count: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM tasks")
-                .fetch_one(db.pool())
-                .await
-                .unwrap();
+        // Count every task row, not just this project's: a spike created and
+        // then stranded outside the fixture project must still be visible.
+        let before_count = djinn_db::test_support::task_row_count_for_test(&db).await;
 
         // Use a stale round to force rejection.
         let mut params = valid_demand_params(&p.id);
@@ -154,11 +151,7 @@
         assert!(!resp.get("accepted").and_then(|v| v.as_bool()).unwrap_or(true));
 
         // Count tasks after.
-        let after_count: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM tasks")
-                .fetch_one(db.pool())
-                .await
-                .unwrap();
+        let after_count = djinn_db::test_support::task_row_count_for_test(&db).await;
 
         assert_eq!(
             before_count, after_count,

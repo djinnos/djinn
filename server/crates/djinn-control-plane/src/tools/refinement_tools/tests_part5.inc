@@ -43,17 +43,17 @@
         proposal_id: &str,
     ) -> String {
         let project_id = uuid::Uuid::now_v7().to_string();
-        sqlx::query(
-            "INSERT INTO projects (id, name, github_owner, github_repo) \
-             VALUES ($1, $2, $3, $4)",
-        )
-        .bind(&project_id)
-        .bind(format!("test-project-{project_id}"))
-        .bind("test-owner")
-        .bind(format!("test-repo-{project_id}"))
-        .execute(db.pool())
-        .await
-        .unwrap();
+        // `create_with_id` rather than `create`: the `test-owner/test-repo-<id>`
+        // coordinates are how callers address this project through `board_health`.
+        djinn_db::ProjectRepository::new(db.clone(), EventBus::noop())
+            .create_with_id(
+                &project_id,
+                &format!("test-project-{project_id}"),
+                "test-owner",
+                &format!("test-repo-{project_id}"),
+            )
+            .await
+            .unwrap();
 
         repo.add_target(proposal_id, &project_id, "primary")
             .await
