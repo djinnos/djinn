@@ -8,25 +8,18 @@
 
 use crate::{DEFAULT_PERIOD_US, Error};
 
-/// The component that owns an invocation leaf's CPU quota.
+/// The quota-authority protocol is **not defined here**.
 ///
-/// This is intentionally independent from [`LeaseAuthority`], which remains a
-/// per-invocation leaf-v1 armed/unarmed decision. Keeping the axes separate
-/// prevents a resize-v2 leaf from inheriting a leaf-v1 quota mutation.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum LauncherAuthorityProtocol {
-    /// The launcher owns per-leaf quota birth and fenced lift writes.
-    #[default]
-    LeafV1,
-    /// Pod resize owns quota. The launcher must never write leaf `cpu.max`.
-    ResizeV2,
-}
-
-impl LauncherAuthorityProtocol {
-    pub(crate) fn launcher_owns_leaf_quota(self) -> bool {
-        matches!(self, Self::LeafV1)
-    }
-}
+/// It is the one contract `djinn-cgroup-launcher`, `djinn-db` (migration 164's
+/// `CHECK ... IN ('leaf-v1', 'resize-v2')`) and the admission plane must all
+/// agree on, so it lives in the zero-`djinn` leaf crate
+/// [`djinn_launcher_protocol`] and is re-exported here. This crate keeps the
+/// re-export — not a copy — because a second definition is exactly how #2800
+/// shipped a wire form nothing could compare against.
+///
+/// The launcher stays a static sidecar: the protocol crate depends on `serde`
+/// (without `derive`) and on nothing else.
+pub use djinn_launcher_protocol::LauncherAuthorityProtocol;
 
 /// `cpu.max` line for a leaf with NO quota of its own.
 ///

@@ -1,0 +1,23 @@
+[package]
+publish = false
+name = "djinn-launcher-protocol"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+doctest = false
+
+# Deliberately a leaf: the launcher is a tiny static sidecar binary that must
+# never gain a `djinn-db` dependency, and `djinn-db` must never gain a
+# `djinn-cgroup-launcher` one. `serde` is here WITHOUT the `derive` feature —
+# the impls are hand-written so they delegate to `as_wire`/`FromStr` and cannot
+# drift from them.
+[dependencies]
+serde = "1"
+workspace-hack.workspace = true
+
+[dev-dependencies]
+serde_json = "1"
+
+[lints]
+workspace = true

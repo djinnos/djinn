@@ -16,6 +16,10 @@ name = "djinn-cgroup-launcher"
 path = "src/main.rs"
 
 [dependencies]
+# The canonical quota-authority protocol. A leaf crate on purpose: this binary
+# ships into every per-project image and must never reach a database client to
+# learn the two strings it shares with migration 164.
+djinn-launcher-protocol = { path = "../djinn-launcher-protocol" }
 libc = "0.2"
 thiserror = "2"
 workspace-hack.workspace = true
