@@ -98,7 +98,9 @@ pub use repositories::{
     },
     build_pod_permit::{
         AcquireBuildPodPermitResult, BindBuildPodPermitResult, BuildPodPermitRepository,
-        BuildPodPermitRow, BuildPodPermitState, ReleaseBuildPodPermitResult,
+        BuildPodPermitRow, BuildPodPermitState, BuildPodResizeIdentity,
+        CaptureBuildPodResizeIdentityResult, ReleaseBuildPodPermitResult,
+        TransitionBuildPodResizeLifecycleResult,
     },
     chat_interruption_notice::{
         ChatInterruptionNotice, ChatInterruptionNoticeRepository, CreateChatInterruptionNotice,
