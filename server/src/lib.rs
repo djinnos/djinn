@@ -8,6 +8,7 @@ pub mod error;
 pub mod events;
 pub mod git_maintenance;
 pub mod graph_retention;
+pub mod kueue_workload_reconcile;
 pub mod leadership;
 pub mod logging;
 mod mcp_bridge;
