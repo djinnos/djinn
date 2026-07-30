@@ -223,6 +223,69 @@ pub(crate) async fn call_shell(
     }))
 }
 
+/// Headroom reserved inside [`crate::output_stash::MAX_TOOL_RESULT_CHARS`] for
+/// everything in a read result that is *not* the numbered listing: the JSON
+/// envelope's keys, the path value, and the trailing truncation notes appended
+/// to `content` after the budgeted listing has been built.
+const READ_RESULT_RESERVE_CHARS: usize = 1_024;
+
+/// Number of characters needed to encode `s` as the body of a JSON string.
+///
+/// A read result is handed to the model only after
+/// `output_stash::render_tool_result` serializes it as JSON, so the budget that
+/// actually matters is the *escaped* size — a numbered listing spends two
+/// characters on every `\n` and `\t` it contains.
+fn json_escaped_len(s: &str) -> usize {
+    s.chars()
+        .map(|c| match c {
+            '"' | '\\' | '\n' | '\r' | '\t' | '\u{08}' | '\u{0c}' => 2,
+            c if (c as u32) < 0x20 => 6,
+            c => c.len_utf8(),
+        })
+        .sum()
+}
+
+/// Escaped-character budget available to a read result's `content` field before
+/// the downstream tool-result clamp would fire.
+///
+/// Derived from the single shared clamp constant so the two can never drift.
+/// This does **not** widen the clamp: it makes the read handler stop at a line
+/// boundary the clamp will accept, so the window the model receives is the
+/// window the handler recorded coverage for.
+fn read_content_budget() -> usize {
+    crate::output_stash::MAX_TOOL_RESULT_CHARS.saturating_sub(READ_RESULT_RESERVE_CHARS)
+}
+
+/// Render `lines` as a numbered listing beginning at absolute index `start`,
+/// stopping early once the listing would no longer survive the tool-result
+/// clamp. Returns the listing and the number of lines actually emitted.
+///
+/// At least one line is always emitted so a single over-long line still yields
+/// a usable (if over-budget) result rather than an empty window.
+fn numbered_lines_within_budget<'a, I>(lines: I, start: usize, budget: usize) -> (String, usize)
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    let mut numbered = String::new();
+    let mut spent = 0usize;
+    let mut emitted = 0usize;
+    for (i, line) in lines.into_iter().enumerate() {
+        let mut l = line.to_string();
+        if l.chars().count() > 2000 {
+            l = l.chars().take(2000).collect();
+        }
+        let rendered = format!("{:>6}\t{}\n", start + i + 1, l);
+        let cost = json_escaped_len(&rendered);
+        if emitted > 0 && spent + cost > budget {
+            break;
+        }
+        spent += cost;
+        numbered.push_str(&rendered);
+        emitted += 1;
+    }
+    (numbered, emitted)
+}
+
 /// Format an in-memory file body as a numbered, paginated window matching the
 /// shape `call_read` returns from the worktree path. Used for mirror-backed
 /// cross-repo reads (the whole blob is already in memory from `git show`).
@@ -231,21 +294,18 @@ fn numbered_window(content: &str, offset: usize, limit: usize, path: &str) -> se
     let total = lines.len();
     let start = offset.min(total);
     let end = start.saturating_add(limit).min(total);
-    let mut numbered = String::new();
-    for (i, line) in lines[start..end].iter().enumerate() {
-        let line_no = start + i + 1;
-        let mut l = (*line).to_string();
-        if l.chars().count() > 2000 {
-            l = l.chars().take(2000).collect();
-        }
-        numbered.push_str(&format!("{:>6}\t{}\n", line_no, l));
-    }
+    let (numbered, emitted) = numbered_lines_within_budget(
+        lines[start..end].iter().copied(),
+        start,
+        read_content_budget(),
+    );
+    let emitted_end = start + emitted;
     serde_json::json!({
         "path": path,
         "offset": start,
         "limit": limit,
         "total_lines": total,
-        "has_more": end < total,
+        "has_more": emitted_end < total,
         "content": numbered,
     })
 }
@@ -401,38 +461,53 @@ pub(crate) async fn call_read(
     let start = offset.min(total_scanned);
     let end = start.saturating_add(limit).min(total_scanned);
 
-    let mut numbered = String::new();
-    for (i, (line, _byte_end)) in all_lines[start..end].iter().enumerate() {
-        let line_no = start + i + 1;
-        numbered.push_str(&format!("{:>6}\t{}\n", line_no, line));
-    }
+    // Emit only as much of the window as will survive the downstream
+    // tool-result clamp (`output_stash::MAX_TOOL_RESULT_CHARS`). Anything past
+    // that point never reaches the model, so it must not be counted as read.
+    let (mut numbered, emitted) = numbered_lines_within_budget(
+        all_lines[start..end].iter().map(|(line, _)| line.as_str()),
+        start,
+        read_content_budget(),
+    );
+    let emitted_end = start + emitted;
+    let clamped_by_result_budget = emitted_end < end;
+
     if truncated_by_budget {
         numbered.push_str(&format!(
             "\n[file too large: truncated at {} MiB; remaining content not shown]\n",
             MAX_READ_BYTES / (1024 * 1024)
         ));
     }
+    if clamped_by_result_budget {
+        numbered.push_str(&format!(
+            "\n[tool-result budget reached after line {emitted_end}; the rest of this window was \
+             NOT shown. Continue with read(file_path, offset={emitted_end}, limit={limit}).]\n"
+        ));
+    }
 
-    // `has_more` is true if there's content past the scanned window, or if the
-    // requested window didn't reach the end of what we scanned.
-    let has_more = has_more_beyond_window || end < total_scanned;
+    // `has_more` is true if there's content past the scanned window, if the
+    // requested window didn't reach the end of what we scanned, or if the
+    // tool-result budget cut the window short.
+    let has_more = has_more_beyond_window || emitted_end < total_scanned;
 
-    // Compute read coverage metadata from the actual arguments and result.
+    // Compute read coverage metadata from what the model actually receives.
     // A read is full-file coverage only when the worker received all content
     // from the start (offset 0), there are no remaining pages, and no
-    // byte-budget truncation occurred.
+    // byte-budget truncation occurred. `has_more` now accounts for the
+    // tool-result clamp as well, so a listing the clamp would gut can never be
+    // recorded as `Full`.
     let coverage = if offset == 0 && !has_more && !truncated_by_budget {
         crate::file_time::ReadCoverage::Full
     } else {
         // Record the byte range of the window actually returned.
-        let cov_start = if start < end {
+        let cov_start = if start < emitted_end {
             line_byte_offsets[start]
         } else {
             // Empty window: point at EOF offset.
             scanned_bytes as u64
         };
-        let cov_end = if start < end {
-            Some(all_lines[end - 1].1)
+        let cov_end = if start < emitted_end {
+            Some(all_lines[emitted_end - 1].1)
         } else {
             None
         };
