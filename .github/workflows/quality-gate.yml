@@ -1135,14 +1135,51 @@ jobs:
               rm -f "$page_response" "$page_candidates"
               break
             fi
-            jq -r '.artifacts[] | select(.workflow_run.conclusion == "success") | .id' "$page_response" > "$page_candidates"
+            # Emit `<artifact-id> <run-id>` pairs. The producing run's
+            # conclusion is resolved per candidate below and NOT filtered here:
+            # the artifacts endpoint's `workflow_run` object carries only
+            # {id, repository_id, head_repository_id, head_branch, head_sha} —
+            # there is no `conclusion` field on it. Selecting candidates by that
+            # missing field — which this loop did until 2026-07-30 — therefore
+            # matched NOTHING on every run: the candidate list came out empty,
+            # the bounded search ran to exhaustion, and the planner cold-started
+            # every single time. (ci-nextest-plan.test.mjs now fails if the
+            # filter comes back; that is why the expression is described here
+            # rather than quoted.) Verified 2026-07-30 on
+            # runs 30493437428, 30497097480, 30498632438 and 30499367637 — all
+            # four logged "No compatible prior timing artifact found".
+            #
+            # That silently made COLD_START_SHARDS the only shard count the PR
+            # lane ever used, so PR_DEFAULT_SHARDS, PR_MAX_SHARDS and both
+            # PR_WIDEN_* thresholds were dead code, and shard balancing was
+            # always equal-test-count rather than equal-duration.
+            #
+            # `expired` artifacts are dropped here because their download
+            # returns 410 and would burn a candidate slot.
+            jq -r '.artifacts[] | select(.expired != true) | "\(.id) \(.workflow_run.id)"' "$page_response" > "$page_candidates"
             artifact_count="$(jq '.artifacts | length' "$page_response")"
             rm -f "$page_response"
             if [ "$artifact_count" -eq 0 ]; then
               rm -f "$page_candidates"
               break
             fi
-            while IFS= read -r artifact_id && [ -n "$artifact_id" ]; do
+            while IFS=' ' read -r artifact_id run_id && [ -n "$artifact_id" ]; do
+              # Resolve the producing run's conclusion on the runs endpoint,
+              # which does expose it. Bounded: the loop breaks on the first
+              # compatible artifact, so this is normally one extra call. A
+              # non-success run's timings would still be SAFE to use (the
+              # planner's contract lets timing influence balancing only, never
+              # selection) but they are skewed — tests after an early failure
+              # never ran — so prefer a successful run and fall through to an
+              # older one.
+              set +e
+              run_conclusion="$(gh api "repos/${{ github.repository }}/actions/runs/$run_id" \
+                --jq '.conclusion' 2>> nextest-timing/restore.log)"
+              set -e
+              if [ "$run_conclusion" != success ]; then
+                echo "::notice::Timing artifact $artifact_id came from run $run_id (conclusion=${run_conclusion:-unknown}); trying next older candidate."
+                continue
+              fi
               rm -f nextest-timing/timing.zip nextest-timing/timing.json
               set +e
               gh api "repos/${{ github.repository }}/actions/artifacts/$artifact_id/zip" > nextest-timing/timing.zip 2>> nextest-timing/restore.log
@@ -1161,11 +1198,30 @@ jobs:
                 continue
               fi
               # Apply the planner's seven-day freshness policy before acceptance.
+              #
+              # The fractional-second strip is load-bearing, not defensive.
+              # `fromdateiso8601` is strptime("%Y-%m-%dT%H:%M:%SZ") and does NOT
+              # accept a fractional part, but this artifact's `generated_at` is
+              # written by `new Date().toISOString()` (see the timing publish
+              # step below), which always emits milliseconds:
+              #
+              #   date "2026-07-30T11:45:20.077Z" does not match format ...
+              #
+              # jq then EXITS NON-ZERO, `2>&1` swallowed the message, and the
+              # candidate was rejected as "malformed or incompatible" — so this
+              # gate rejected 100% of artifacts, including ones it had just
+              # confirmed were the right version and shape. Stacked with the
+              # artifacts-endpoint filter bug above, the restore had two
+              # independent reasons never to succeed.
+              #
+              # Fixed at the READER on purpose. Emitting second precision from
+              # the writer instead would leave every artifact already inside the
+              # seven-day window unreadable, i.e. a week with no balancing.
               if ! jq -e '
                 .version == "ci-nextest-timing/v1" and
                 (.tests | type) == "object" and
                 (.generated_at | type) == "string" and
-                ((.generated_at | fromdateiso8601) as $generated |
+                ((.generated_at | sub("\\.[0-9]+(?=Z$)"; "") | fromdateiso8601) as $generated |
                   $generated <= now and (now - $generated) <= (7 * 24 * 60 * 60))
               ' nextest-timing/timing.json > /dev/null 2>&1; then
                 echo "::notice::Timing artifact $artifact_id is malformed or incompatible; trying next older candidate."

@@ -861,5 +861,42 @@ describe('workflow static checks', () => {
     // Also reject any --filter-expr line that uses command substitution to read a file.
     assert.ok(!/--filter-expr\s+["']?\$\(cat\s/.test(source), 'workflow must not use command substitution to feed --filter-expr');
   });
+
+  // Regression guard for a silent, total loss of timing-fed balancing.
+  //
+  // The timing-restore loop used to select candidates with
+  // `select(.workflow_run.conclusion == "success")` against
+  // /actions/artifacts. That endpoint's `workflow_run` object has no
+  // `conclusion` field, so the filter matched nothing on every run: the planner
+  // cold-started always, COLD_START_SHARDS became the only shard count the PR
+  // lane could reach, and PR_DEFAULT_SHARDS / PR_MAX_SHARDS / both PR_WIDEN_*
+  // thresholds were unreachable. Nothing failed — the cold-start fallback is
+  // deliberately safe — so the only visible symptom was a shard count that
+  // happened to equal COLD_START_SHARDS.
+  //
+  // These assertions are about the SIDE EFFECT (which endpoint supplies the
+  // conclusion), not about the notice text, because the notices printed
+  // correctly the whole time it was broken.
+  it('resolves the timing artifact run conclusion on an endpoint that returns it', () => {
+    const source = readFileSync(WORKFLOW, 'utf8');
+    const artifactQuery = /actions\/artifacts\?name=nextest-timing[^\n]*/.exec(source);
+    assert.ok(artifactQuery, 'workflow must query the nextest-timing artifact list');
+
+    assert.ok(
+      !/select\(\s*\.workflow_run\.conclusion/.test(source),
+      'the /actions/artifacts response has no workflow_run.conclusion field; '
+      + 'filtering on it selects nothing and silently forces cold-start balancing',
+    );
+    assert.match(
+      source,
+      /actions\/runs\/\$run_id"?\s*\\?\s*\n?\s*--jq '\.conclusion'/,
+      'the producing run conclusion must come from /actions/runs/<id>, which does return it',
+    );
+    assert.match(
+      source,
+      /if \[ "\$run_conclusion" != success \]; then/,
+      'a candidate from a non-successful run must be skipped in favour of an older one',
+    );
+  });
 });
 
