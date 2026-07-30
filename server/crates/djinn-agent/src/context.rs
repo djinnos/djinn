@@ -86,17 +86,16 @@ impl ShellLaunchContext {
     /// # `admission_db` is the PLATFORM database, and it is not optional
     ///
     /// The build-lease escalation this context arms is governed by the durable
-    /// durable invocation-lease authority, which lives in the platform database. This
+    /// invocation-lease authority, which lives in the platform database. This
     /// constructor therefore takes the handle and builds the authority itself,
     /// rather than accepting a pre-made authority or reading an environment
     /// variable: goxi launcher blocker 13 was a composition defect, where the
     /// runner was handed a `SupervisorServices` (`RpcServices`) whose defaulted
     /// `invocation_lift_decision` returned `Unleased` for every invocation while
-    /// the authority was fully armed. Nothing here can now opt out of the read, and
+    /// the authority was armed. Nothing here can now opt out of the read, and
     /// the only `Database` a task-run Pod has is the one
     /// `bootstrap_warm_database()` opens from `DJINN_DATABASE_URL` — never the
-    /// project's `DATABASE_URL` catalog-service sidecar, which has no
-    /// invocation-lease authority row at all.
+    /// project's `DATABASE_URL` catalog sidecar, which has no authority row.
     pub async fn broker_backed(
         task_id: String,
         task_run_id: String,
