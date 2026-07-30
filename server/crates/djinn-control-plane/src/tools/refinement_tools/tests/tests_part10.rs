@@ -1,3 +1,4 @@
+use super::*;
 // Human-readable admission rejections.
 //
 // `RefinementAdmissionError::AlreadyActive` used to be rendered as the literal
@@ -35,7 +36,10 @@ fn assert_is_human_readable(rejection: &AdmissionRejection) {
         );
     }
     assert!(
-        rejection.code.chars().all(|c| c.is_ascii_lowercase() || c == '_'),
+        rejection
+            .code
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c == '_'),
         "code must be a stable snake_case token, got {:?}",
         rejection.code
     );
@@ -96,8 +100,9 @@ fn proposal_not_found_names_the_proposal() {
 
 #[test]
 fn invalid_request_carries_the_underlying_detail() {
-    let rejection =
-        admission_rejection(&RefinementAdmissionError::InvalidRequest("no targets".into()));
+    let rejection = admission_rejection(&RefinementAdmissionError::InvalidRequest(
+        "no targets".into(),
+    ));
     assert_eq!(rejection.code, "invalid_request");
     assert!(
         rejection.message.contains("no targets"),

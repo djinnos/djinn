@@ -1261,7 +1261,3 @@ What happens if D fails?
         );
     }
 }
-
-// P4 tribunal regression tests — extracted to `tribunal_tests.rs`
-// to meet the 1500-line file-size guard.
-include!("tribunal_tests.rs");
