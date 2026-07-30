@@ -27,9 +27,16 @@ require_tool python3
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 
+# Rendered at BOTH arming states. Control-plane workloads must stay out of Kueue
+# build-object admission forever, including after the cutover arms build Jobs —
+# a shared label helper that leaked into the server Deployment would be caught
+# only by the armed render.
 helm template kueue-build-object-test "$CHART_DIR" --is-upgrade >"$WORK/rendered.yaml"
+helm template kueue-build-object-test "$CHART_DIR" --is-upgrade \
+    --set kueue.enabled=true --set kueue.armed=true >"$WORK/rendered-armed.yaml"
 
-python3 - "$WORK/rendered.yaml" <<'PY'
+for manifest in "$WORK/rendered.yaml" "$WORK/rendered-armed.yaml"; do
+python3 - "$manifest" <<'PY'
 import sys
 import yaml
 
@@ -79,5 +86,6 @@ assert labelled_pod_templates([negative_fixture]) == ["negative-labelled-fixture
     "scanner must reject the explicit reserved-label fixture"
 )
 PY
+done
 
 echo "=== Kueue build-object label render contract passed ==="

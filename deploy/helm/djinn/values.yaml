@@ -102,9 +102,37 @@ kueue:
   # value on a Kueue-less cluster fails the install loudly instead.
   #
   # Enabling it does NOT arm anything: no Job carries a queue name and no
-  # namespace is Kueue-managed. Arming belongs to cutover epic 4c9q.
+  # namespace is Kueue-managed. Arming is the separate `armed` flag below.
   enabled: false
   buildPods: 3
+
+  # Arm Kueue admission for build Jobs (cutover epic 4c9q, slice S1).
+  #
+  # This single value drives BOTH halves of the capture contract, and they can
+  # never be split onto separate flags:
+  #   1. the `djinn.io/kueue-managed` label on the Namespace
+  #      (templates/namespace.yaml) — Kueue captures Jobs ONLY in a namespace
+  #      carrying it;
+  #   2. `DJINN_KUEUE_ARMED` on djinn-server, which makes the task-run, warm and
+  #      standalone-SCIP renderers create their Jobs `suspend: true` with a
+  #      `kueue.x-k8s.io/queue-name` label.
+  #
+  # `suspend: true` is NOT inert. A suspended Job in an UNLABELLED namespace is
+  # never captured, so nothing ever unsuspends it and every build Job hangs
+  # forever. That is why both halves hang off this one value.
+  #
+  # INVARIANT: armed implies enabled. `armed: true` with `enabled: false` fails
+  # the render — arming with no ClusterQueue to admit into is the same hang.
+  #
+  # Related prerequisite that the chart cannot check for you: if you manage the
+  # namespace externally (`namespace.create: false`), the chart renders no
+  # Namespace object and therefore cannot apply the label. Label it yourself
+  # BEFORE arming, or every build Job hangs.
+  #
+  # Image builds stay deliberately unarmed at every value of this flag: an image
+  # build is an upstream dependency of a task-run, so sharing one ClusterQueue
+  # creates a priority-inversion deadlock.
+  armed: false
 
 # -----------------------------------------------------------------------------
 # Per-invocation CPU lease (cgroup launcher)

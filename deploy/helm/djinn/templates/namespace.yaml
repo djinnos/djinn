@@ -5,4 +5,12 @@ metadata:
   name: {{ include "djinn.namespace" . }}
   labels:
     {{- include "djinn.labels" . | nindent 4 }}
+    {{- if .Values.kueue.armed }}
+    # Kueue captures Jobs ONLY in a namespace carrying this label. It is driven
+    # by the same value (`kueue.armed`) that makes the renderers create Jobs
+    # `suspend: true`, and it must stay that way: a suspended Job in an
+    # unlabelled namespace is never captured, so nothing ever unsuspends it and
+    # every build Job hangs forever. Never split these onto two flags.
+    djinn.io/kueue-managed: "true"
+    {{- end }}
 {{- end -}}

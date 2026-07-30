@@ -323,6 +323,122 @@ pub struct KubernetesConfig {
     /// Activates the kubelet-delegated cgroup RuntimeClass for new task-run Pods.
     #[serde(default)]
     pub task_run_cgroup_writable_enabled: bool,
+    /// Opts task-run, warm and standalone-SCIP Jobs into Kueue admission.
+    ///
+    /// When true the renderers stamp `suspend: true`, the
+    /// `kueue.x-k8s.io/queue-name` LocalQueue selector and the
+    /// `djinn.io/kueue-build-object` marker onto BOTH the Job metadata and the
+    /// Pod template, so Kueue's Job webhook and Pod webhook both see them.
+    ///
+    /// DANGER: `suspend: true` is not inert. Kueue only captures Jobs in a
+    /// namespace labelled `djinn.io/kueue-managed`, so a suspended Job in an
+    /// unlabelled namespace is never admitted and hangs forever. The Helm chart
+    /// drives this field and that namespace label from the SAME value
+    /// (`kueue.armed`) for exactly that reason — never plumb them apart.
+    ///
+    /// Overridable via `DJINN_KUEUE_ARMED`; defaults to false.
+    #[serde(default)]
+    pub kueue_armed: bool,
+    /// Name prefix of the per-kind LocalQueues rendered by
+    /// `deploy/helm/djinn/templates/kueue-topology.yaml`.
+    ///
+    /// The chart names them `<djinn.fullname>-task-run` / `-warm` / `-scip`, and
+    /// `djinn.fullname` depends on the Helm release name — so the value cannot be
+    /// hard-coded here without risking a `queue-name` that resolves to no
+    /// LocalQueue, which (once armed) means the Job is never admitted.
+    ///
+    /// Overridable via `DJINN_KUEUE_LOCAL_QUEUE_PREFIX`. Only read when
+    /// [`Self::kueue_armed`] is true.
+    #[serde(default = "default_kueue_local_queue_prefix")]
+    pub kueue_local_queue_prefix: String,
+}
+
+fn default_kueue_local_queue_prefix() -> String {
+    "djinn".into()
+}
+
+/// Kueue's LocalQueue selector. Kueue's Job webhook reads it from the Job, and
+/// its Pod webhook reads it from the Pod — hence both label locations.
+pub const LABEL_KUEUE_QUEUE_NAME: &str = "kueue.x-k8s.io/queue-name";
+
+/// Djinn's own marker for "this object is admitted through Kueue". Used by the
+/// chart contracts and by `tests/kueue_build_object_labels.rs` to tell an armed
+/// build object apart from a control-plane workload.
+pub const LABEL_KUEUE_BUILD_OBJECT: &str = "djinn.io/kueue-build-object";
+
+/// The Job kinds that participate in Kueue admission.
+///
+/// There is deliberately NO image-build variant. An image build is an upstream
+/// dependency of a task-run, so sharing one ClusterQueue would let a task-run
+/// hold slots while waiting for the image build queued behind it — a
+/// priority inversion the current ledger cannot produce. Keeping the variant
+/// absent makes that mistake a compile error rather than a review catch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KueueQueueKind {
+    /// Per-task-run worker Job.
+    TaskRun,
+    /// Graph-warm Job.
+    Warm,
+    /// Standalone SCIP index Job.
+    Scip,
+}
+
+impl KueueQueueKind {
+    /// Suffix of the LocalQueue this kind is admitted through. Must match the
+    /// LocalQueue names in `deploy/helm/djinn/templates/kueue-topology.yaml`.
+    #[must_use]
+    pub const fn local_queue_suffix(self) -> &'static str {
+        match self {
+            Self::TaskRun => "task-run",
+            Self::Warm => "warm",
+            Self::Scip => "scip",
+        }
+    }
+}
+
+impl KubernetesConfig {
+    /// Name of the LocalQueue `kind` is admitted through.
+    #[must_use]
+    pub fn kueue_local_queue_name(&self, kind: KueueQueueKind) -> String {
+        format!(
+            "{}-{}",
+            self.kueue_local_queue_prefix,
+            kind.local_queue_suffix()
+        )
+    }
+
+    /// `JobSpec::suspend` for a build Job of `kind`.
+    ///
+    /// `None` when disarmed so the rendered Job is byte-identical to the
+    /// pre-cutover shape — an explicit `Some(false)` would serialize a
+    /// `suspend: false` key that was never there before.
+    #[must_use]
+    pub fn kueue_job_suspend(&self) -> Option<bool> {
+        self.kueue_armed.then_some(true)
+    }
+
+    /// Stamp the Kueue admission labels for `kind` into `labels` when armed, and
+    /// do nothing at all when disarmed.
+    ///
+    /// Call this from each renderer's `job_labels()` — the single map that is
+    /// cloned into BOTH `Job.metadata.labels` and
+    /// `Job.spec.template.metadata.labels`. Stamping after the fact (the
+    /// `stamp_admission_identity` pattern in `graph_warmer_identity.rs`) reaches
+    /// only the Job metadata and silently misses Kueue's Pod webhook.
+    pub fn apply_kueue_build_object_labels(
+        &self,
+        kind: KueueQueueKind,
+        labels: &mut BTreeMap<String, String>,
+    ) {
+        if !self.kueue_armed {
+            return;
+        }
+        labels.insert(LABEL_KUEUE_BUILD_OBJECT.to_string(), "true".to_string());
+        labels.insert(
+            LABEL_KUEUE_QUEUE_NAME.to_string(),
+            self.kueue_local_queue_name(kind),
+        );
+    }
 }
 
 impl KubernetesConfig {
@@ -398,6 +514,11 @@ impl KubernetesConfig {
             // Production task-runs require the launcher and use fresh invocation leaves.
             cgroup_launcher_mode: CgroupLauncherMode::Required,
             task_run_cgroup_writable_enabled: true,
+            // Kueue arming is OFF until the cutover epic 4c9q flips it. See the
+            // field doc: arming without the `djinn.io/kueue-managed` namespace
+            // label hangs every build Job.
+            kueue_armed: false,
+            kueue_local_queue_prefix: default_kueue_local_queue_prefix(),
             // Unbounded by default: per-project build_resources overrides are
             // gated only by request <= limit until an operator configures the
             // per-kind DJINN_K8S_{TASK,WARM}_{CPU,MEMORY}_{MIN,MAX} envs.
@@ -452,6 +573,8 @@ impl KubernetesConfig {
     /// | `DJINN_K8S_CGROUP_DELEGATION_PROFILE` | `cgroup_delegation_profile` | `cgroup-v2-cpu-only` |
     /// | `DJINN_K8S_VOLUME_OWNERSHIP_MODE` | `volume_ownership_mode` | `fsgroup-on-root-mismatch` |
     /// | `DJINN_K8S_CGROUP_LAUNCHER_MODE` | `cgroup_launcher_mode` | `required` |
+    /// | `DJINN_KUEUE_ARMED` | `kueue_armed` | `false` — the Kueue arming switch |
+    /// | `DJINN_KUEUE_LOCAL_QUEUE_PREFIX` | `kueue_local_queue_prefix` | `djinn` |
     ///
     /// `DJINN_DATABASE_URL` is read from djinn-server's own environment (the
     /// Helm chart projects it via `envFrom: configMap djinn-config`) and
@@ -673,6 +796,22 @@ impl KubernetesConfig {
                     tracing::warn!(value = %v, %error, "DJINN_K8S_TASK_RUN_CGROUP_WRITABLE_ENABLED is not a boolean — keeping disabled")
                 }
             }
+        }
+        // Kueue arming. Deliberately NOT `DJINN_K8S_*`-prefixed: it is one half
+        // of a chart-level contract with the `djinn.io/kueue-managed` namespace
+        // label, both driven by `kueue.armed` in values.yaml.
+        if let Ok(v) = std::env::var("DJINN_KUEUE_ARMED") {
+            match v.parse::<bool>() {
+                Ok(armed) => cfg.kueue_armed = armed,
+                Err(error) => {
+                    tracing::warn!(value = %v, %error, "DJINN_KUEUE_ARMED is not a boolean — keeping Kueue disarmed")
+                }
+            }
+        }
+        if let Ok(v) = std::env::var("DJINN_KUEUE_LOCAL_QUEUE_PREFIX")
+            && !v.is_empty()
+        {
+            cfg.kueue_local_queue_prefix = v;
         }
         // Per-project build_resources hard bounds (per Pod kind, per resource).
         // Unset leaves the axis unbounded. Empty strings are ignored so an
