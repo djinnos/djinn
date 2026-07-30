@@ -258,6 +258,7 @@ pub async fn create_test_project(db: &Database) -> Project {
                 .as_deref()
                 .unwrap_or("test-registry/djinn-test:testhash"),
             Some("sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"),
+            None,
         )
         .await;
     let _ = image_repo

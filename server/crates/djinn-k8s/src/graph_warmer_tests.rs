@@ -215,7 +215,7 @@ pub(super) async fn seed_project_with_ready_image(db: &Database, name: &str) -> 
         .expect("create catalog image");
     let tag = format!("reg.example:5000/djinn-project-{}:abc123def456", project.id);
     images
-        .mark_ready(&image_id, &tag, None)
+        .mark_ready(&image_id, &tag, None, None)
         .await
         .expect("mark image ready");
     images

@@ -1455,6 +1455,7 @@ dependencies = [
 name = "djinn-image-builder"
 version = "0.1.0"
 dependencies = [
+ "djinn-launcher-protocol",
  "djinn-stack",
  "pretty_assertions",
  "serde",
@@ -1474,6 +1475,7 @@ dependencies = [
  "djinn-db",
  "djinn-image-builder",
  "djinn-k8s",
+ "djinn-launcher-protocol",
  "djinn-provider",
  "djinn-runtime",
  "djinn-stack",

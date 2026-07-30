@@ -15,6 +15,8 @@ ENV PIP_CACHE_DIR=/cache/pip UV_CACHE_DIR=/cache/uv
 COPY --from=djinn/agent-worker:sha256-golden /usr/local/bin/djinn-agent-worker /opt/djinn/bin/djinn-agent-worker
 COPY --from=djinn/agent-worker:sha256-golden /usr/local/bin/djinn-cgroup-launcher /opt/djinn/bin/djinn-cgroup-launcher
 RUN /tmp/djinn-scripts/install-agent-worker.sh
+LABEL djinn.app/launcher-authority-protocol="leaf-v1"
+ENV DJINN_LAUNCHER_AUTHORITY_PROTOCOL=leaf-v1
 RUN TOOLCHAINS="1.84.0" DEFAULT_TOOLCHAIN="1.84.0" COMPONENTS="rust-analyzer clippy rustfmt" /tmp/djinn-scripts/install-rust.sh
 RUN rm -rf /tmp/djinn-scripts
 RUN [ -d /usr/local/rustup ] && chmod -R a+rwX /usr/local/rustup || true; [ -d /usr/local/cargo ] && chmod -R a+rwX /usr/local/cargo || true

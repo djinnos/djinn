@@ -139,6 +139,15 @@ pub fn build_context_config_map_name(project_id: &str, hash_prefix: &str) -> Str
     build_context_config_map_name_for(&BuildSubject::project(project_id), hash_prefix)
 }
 
+/// Name of the build Job for `(subject, hash_prefix)`.
+///
+/// Single source of the formula: the controller has to name the *same* Job
+/// [`build_image_build_job`] created in order to read its build metadata back
+/// out of the Pod logs when the Job finished before the watcher saw it.
+pub fn build_job_name_for(subject: &BuildSubject, hash_prefix: &str) -> String {
+    format!("djinn-build-{}-{}", subject.resource_segment(), hash_prefix)
+}
+
 /// Build the ConfigMap carrying the generated Dockerfile + install
 /// scripts. The Job owns it via an OwnerReference, so the CM is GC'd
 /// when the Job's TTL expires.
@@ -235,7 +244,7 @@ pub fn build_image_build_job(
 ) -> Job {
     let labels = job_labels(subject, hash_prefix);
     let subject_segment = subject.resource_segment();
-    let job_name = format!("djinn-build-{}-{}", subject_segment, hash_prefix);
+    let job_name = build_job_name_for(subject, hash_prefix);
     let cm_name = build_context_config_map_name_for(subject, hash_prefix);
 
     // buildctl talks to the shared in-cluster buildkitd over gRPC. The
@@ -293,6 +302,14 @@ buildctl \
 # from the Pod logs (--metadata-file writes the containerimage.digest field).
 DIGEST=$(grep -o '"containerimage.digest"[^,}}]*' /tmp/buildmeta.json | grep -o 'sha256:[a-f0-9]\+' || true)
 echo "DJINN_IMAGE_DIGEST=${{DIGEST}}"
+
+# Report the launcher authority protocol this artifact declares. The value is
+# whatever the BuildContext put in the Dockerfile's
+# `djinn.app/launcher-authority-protocol` LABEL — it arrives as an env var on
+# this container and is echoed verbatim. It is deliberately NOT derived from
+# "$IMAGE_TAG": a tag is mutable naming and can be made to claim anything,
+# while the protocol decides whether the launcher or Pod resize owns CPU quota.
+echo "DJINN_LAUNCHER_PROTOCOL=${{LAUNCHER_AUTHORITY_PROTOCOL}}"
 "#,
         auth_dir = REGISTRY_AUTH_MOUNT_DIR,
         docker_config = DOCKER_CONFIG_MOUNT_DIR,
@@ -309,6 +326,13 @@ echo "DJINN_IMAGE_DIGEST=${{DIGEST}}"
             env_var("REGISTRY_HOST", &config.registry_host),
             env_var("SUBJECT_ID", subject.id()),
             env_var("IMAGE_TAG", image_tag),
+            // Straight off the BuildContext that rendered the Dockerfile, so
+            // the sentinel and the artifact's LABEL are the same string by
+            // construction.
+            env_var(
+                "LAUNCHER_AUTHORITY_PROTOCOL",
+                build_context.launcher_protocol.as_wire(),
+            ),
         ]),
         volume_mounts: Some(vec![
             VolumeMount {
@@ -753,5 +777,74 @@ mod tests {
         assert!(script.contains("DJINN_IMAGE_DIGEST="), "script:\n{script}");
         // Cache is keyed by the (bare) subject id.
         assert!(script.contains("/cache/img-1"), "script:\n{script}");
+    }
+
+    /// The protocol sentinel is fed by an env var carrying the *BuildContext's*
+    /// declaration — the same value the Dockerfile's LABEL got. The script must
+    /// never read it out of `$IMAGE_TAG`.
+    #[test]
+    fn catalog_build_script_declares_the_protocol_from_the_build_context_not_the_tag() {
+        let cfg = test_cfg();
+        let ctx = test_build_context();
+        let job = build_image_build_job(
+            &cfg,
+            &BuildSubject::image("img-1"),
+            "abc123",
+            // A tag that lies about the protocol in every segment.
+            "reg/djinn-image-resize-v2:resize-v2",
+            &ctx,
+        );
+        let container = &job
+            .spec
+            .as_ref()
+            .unwrap()
+            .template
+            .spec
+            .as_ref()
+            .unwrap()
+            .containers[0];
+        let script = &container.command.as_ref().unwrap()[2];
+
+        assert!(
+            script.contains("echo \"DJINN_LAUNCHER_PROTOCOL=${LAUNCHER_AUTHORITY_PROTOCOL}\""),
+            "script:\n{script}"
+        );
+        let declared = container
+            .env
+            .as_ref()
+            .unwrap()
+            .iter()
+            .find(|e| e.name == "LAUNCHER_AUTHORITY_PROTOCOL")
+            .expect("the build container must carry the declaration")
+            .value
+            .clone()
+            .unwrap();
+        assert_eq!(declared, ctx.launcher_protocol.as_wire());
+        assert_eq!(
+            declared,
+            djinn_image_builder::DECLARED_LAUNCHER_PROTOCOL.as_wire()
+        );
+        assert_ne!(
+            declared, "resize-v2",
+            "the misleading tag must not reach the declaration"
+        );
+    }
+
+    #[test]
+    fn build_job_name_matches_the_job_the_builder_renders() {
+        let cfg = test_cfg();
+        let ctx = test_build_context();
+        let subject = BuildSubject::image("img-1");
+        let job = build_image_build_job(
+            &cfg,
+            &subject,
+            "abc123",
+            "reg/djinn-image-img-1:abc123",
+            &ctx,
+        );
+        assert_eq!(
+            job.metadata.name.as_deref(),
+            Some(build_job_name_for(&subject, "abc123").as_str())
+        );
     }
 }

@@ -48,7 +48,8 @@ use tracing::{debug, info, warn};
 
 use crate::build_job::{
     BuildSubject, LABEL_BUILD, build_context_config_map_name_for,
-    build_image_build_context_config_map, build_image_build_job, build_job_owner_reference,
+    build_image_build_context_config_map, build_image_build_job, build_job_name_for,
+    build_job_owner_reference,
 };
 use crate::config::ImageControllerConfig;
 
@@ -483,10 +484,36 @@ impl ImageController {
 
         match outcome? {
             BuildDispatch::AlreadySucceeded => {
-                // Watcher already fired; reconcile to ready inline. Digest is
-                // captured by the watcher on the live success event — here we
-                // only have the tag, which is content-addressed + immutable.
-                image_repo.mark_ready(&image_id, &image_tag, None).await?;
+                // The Job reached Succeeded before the watcher saw the event,
+                // so read the same build metadata the watcher would have read,
+                // from the same Pod logs. Passing `None` here instead would
+                // record a protocol-declaring artifact as an undeclared one —
+                // a silent downgrade that reintroduces exactly the gap this
+                // path closes.
+                let job_name = build_job_name_for(&subject, hash_prefix);
+                let metadata = crate::watcher::fetch_build_metadata(
+                    &self.client,
+                    &self.config.namespace,
+                    &job_name,
+                )
+                .await;
+                match crate::watcher::classify_ready(&image_id, &job_name, &metadata) {
+                    crate::watcher::ReadyOutcome::Ready { digest, protocol } => {
+                        image_repo
+                            .mark_ready(&image_id, &image_tag, digest.as_deref(), protocol)
+                            .await?;
+                    }
+                    crate::watcher::ReadyOutcome::Refuse(last_error) => {
+                        warn!(
+                            image_id = %image_id,
+                            job = %job_name,
+                            reason = %last_error,
+                            "image_controller: finished catalog build cannot dispatch — \
+                             refused ready, marking failed"
+                        );
+                        image_repo.mark_failed(&image_id, &last_error).await?;
+                    }
+                }
             }
             BuildDispatch::FailedCleared => {}
             BuildDispatch::Building => {
