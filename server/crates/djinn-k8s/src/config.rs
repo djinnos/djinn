@@ -441,9 +441,49 @@ impl KubernetesConfig {
     }
 }
 
+/// Latch set by the startup Kueue preflight when it refuses to arm.
+///
+/// Deliberately process-global. `KubernetesConfig` is rebuilt by
+/// [`KubernetesConfig::from_env`] at each construction site — the graph warmer at
+/// startup, the slot supervisor at every dispatch — and no single instance is
+/// retained for the process, so mutating one struct would leave the others armed.
+/// The latch is the only place a refusal reaches all of them without threading a
+/// new parameter through every renderer.
+///
+/// One-way by construction: it can only ever move `armed` from true to false, so
+/// a stuck latch degrades to the pre-cutover behaviour (unsuspended Jobs, no
+/// Kueue quota) and can never arm anything.
+static KUEUE_DISARMED_BY_PREFLIGHT: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Latch a startup refusal to arm Kueue. Every subsequent
+/// [`KubernetesConfig::from_env`] renders disarmed regardless of
+/// `DJINN_KUEUE_ARMED`.
+///
+/// Call this from the startup preflight only — see [`crate::kueue_preflight`].
+/// It must run before the first renderer builds its config; in djinn-server that
+/// is `AppState::initialize_graph_warmer`.
+pub fn disarm_kueue_globally() {
+    KUEUE_DISARMED_BY_PREFLIGHT.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Whether the startup preflight refused to arm Kueue.
+#[must_use]
+pub fn kueue_disarmed_by_preflight() -> bool {
+    KUEUE_DISARMED_BY_PREFLIGHT.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// Clear the latch. Test-only: the latch is one-way in production.
+#[cfg(test)]
+fn rearm_kueue_latch_for_test() {
+    KUEUE_DISARMED_BY_PREFLIGHT.store(false, std::sync::atomic::Ordering::SeqCst);
+}
+
 impl KubernetesConfig {
     /// Minimal default used by unit tests; production deployments load
-    /// from the djinn-server config file.
+    /// their Kubernetes settings from the `DJINN_*` environment projected by
+    /// `deploy/helm/djinn/templates/deployment-server.yaml` via
+    /// [`KubernetesConfig::from_env`].
     pub fn for_testing() -> Self {
         Self {
             namespace: "djinn".into(),
@@ -808,6 +848,13 @@ impl KubernetesConfig {
                 }
             }
         }
+        // Honor a startup preflight refusal. `KubernetesConfig` is not held on
+        // AppState — every renderer rebuilds it from the environment at dispatch
+        // time — so the latch, not a mutated struct, is what makes the refusal
+        // reach all of them.
+        if cfg.kueue_armed && kueue_disarmed_by_preflight() {
+            cfg.kueue_armed = false;
+        }
         if let Ok(v) = std::env::var("DJINN_KUEUE_LOCAL_QUEUE_PREFIX")
             && !v.is_empty()
         {
@@ -834,6 +881,58 @@ mod tests {
     use super::*;
 
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// The startup preflight's refusal has to reach `from_env()`, because that
+    /// is where every renderer gets its config — including the slot supervisor,
+    /// which rebuilds one per dispatch long after startup.
+    ///
+    /// Mutation check: delete the `kueue_disarmed_by_preflight()` branch in
+    /// `from_env` and this test fails on the first assertion.
+    #[test]
+    fn a_preflight_refusal_disarms_every_later_from_env() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let saved = std::env::var("DJINN_KUEUE_ARMED").ok();
+        // SAFETY: serialized against sibling tests via ENV_LOCK.
+        unsafe {
+            std::env::set_var("DJINN_KUEUE_ARMED", "true");
+        }
+        rearm_kueue_latch_for_test();
+
+        // Precondition: the env alone does arm, so the assertion below is about
+        // the latch and not about a var that was never read.
+        assert!(
+            KubernetesConfig::from_env().kueue_armed,
+            "DJINN_KUEUE_ARMED=true must arm before the preflight refuses"
+        );
+
+        disarm_kueue_globally();
+        let cfg = KubernetesConfig::from_env();
+        assert!(
+            !cfg.kueue_armed,
+            "a preflight refusal must disarm despite DJINN_KUEUE_ARMED=true"
+        );
+        // The refusal has to reach the rendered Job shape, not just the flag.
+        assert_eq!(
+            cfg.kueue_job_suspend(),
+            None,
+            "a disarmed config must not render `suspend: true`"
+        );
+        let mut labels = BTreeMap::new();
+        cfg.apply_kueue_build_object_labels(KueueQueueKind::TaskRun, &mut labels);
+        assert!(
+            labels.is_empty(),
+            "a disarmed config must not stamp a queue-name label: {labels:?}"
+        );
+
+        rearm_kueue_latch_for_test();
+        // SAFETY: serialized against sibling tests via ENV_LOCK.
+        unsafe {
+            match saved {
+                Some(value) => std::env::set_var("DJINN_KUEUE_ARMED", value),
+                None => std::env::remove_var("DJINN_KUEUE_ARMED"),
+            }
+        }
+    }
 
     /// `from_env()` honors the env vars it documents.  This is a sanity
     /// check on the env-var names (regressions would silently fall back to

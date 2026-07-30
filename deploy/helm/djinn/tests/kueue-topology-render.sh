@@ -253,6 +253,35 @@ assert values["DJINN_KUEUE_ARMED"] == "false", (
 PY
 }
 
+# Same assertion for an externally-managed namespace, where there is no
+# Namespace object to check at all.
+assert_disarmed_server_no_namespace() {
+    local manifest=$1 label=$2
+    python3 - "$manifest" "$label" <<'PY'
+import sys
+import yaml
+
+manifest, label = sys.argv[1:]
+docs = [doc for doc in yaml.safe_load_all(open(manifest, encoding="utf-8")) if doc]
+
+assert not [doc for doc in docs if doc.get("kind") == "Namespace"], (
+    f"{label}: namespace.create=false must render no Namespace object"
+)
+server = next(
+    container
+    for doc in docs
+    if doc.get("kind") == "Deployment"
+    and doc.get("metadata", {}).get("name", "").endswith("-server")
+    for container in doc["spec"]["template"]["spec"]["containers"]
+    if container["name"] == "djinn-server"
+)
+values = {entry["name"]: entry.get("value") for entry in server["env"]}
+assert values["DJINN_KUEUE_ARMED"] == "false", (
+    f"{label}: expected a disarmed server, got {values.get('DJINN_KUEUE_ARMED')!r}"
+)
+PY
+}
+
 echo "=== kueue.enabled alone arms nothing, at BOTH of its values ==="
 assert_disarmed_server "$WORK/default.yaml" "kueue.enabled=false"
 assert_disarmed_server "$WORK/valid.yaml" "kueue.enabled=true"
@@ -294,6 +323,141 @@ grep -q 'required cgroup launcher requires runtimeClassName: djinn-cgroup-writab
 # cannot be an unrelated chart error that would reject either way.
 render "$WORK/disarmed-runtimeclass.yaml" "${RUNTIME_CLASS_VALUES[@]}" --set kueue.armed=false
 assert_topology "$WORK/disarmed-runtimeclass.yaml" 3 no
+
+# ---------------------------------------------------------------------------
+# Arming requires a namespace the chart can actually label.
+#
+# `namespace.create: false` renders no Namespace object, so the chart CANNOT
+# apply djinn.io/kueue-managed while still setting DJINN_KUEUE_ARMED. Every
+# build Job would render `suspend: true` into a namespace Kueue does not manage,
+# nothing would capture them, and nothing would ever unsuspend them. That is the
+# exact failure the one-flag design exists to prevent, reachable through a values
+# combination the chart used to accept in silence.
+# ---------------------------------------------------------------------------
+echo "=== armed=true with namespace.create=false is rejected by name ==="
+if render_capture "$WORK/armed-external-ns.out" \
+    --set kueue.enabled=true --set kueue.armed=true --set namespace.create=false; then
+    echo "FAIL: kueue.armed=true with namespace.create=false rendered successfully" >&2
+    exit 1
+fi
+# The hazard must be NAMED, not merely violated by some unrelated render error.
+grep -q 'kueue.armed=true with namespace.create=false cannot label the namespace' \
+    "$WORK/armed-external-ns.out" || {
+    echo "FAIL: the unlabelled-namespace rejection did not name the hazard:" >&2
+    cat "$WORK/armed-external-ns.out" >&2
+    exit 1
+}
+grep -q 'djinn.io/kueue-managed' "$WORK/armed-external-ns.out" || {
+    echo "FAIL: the rejection did not name the label Kueue actually requires:" >&2
+    cat "$WORK/armed-external-ns.out" >&2
+    exit 1
+}
+# The gate lives in templates/namespace.yaml, i.e. in the template that renders
+# NOTHING in this configuration. Prove it still fires when helm is asked for one
+# unrelated template, because `--show-only` filters after rendering.
+if helm template kueue-topology-test "$CHART_DIR" --is-upgrade \
+    --set kueue.enabled=true --set kueue.armed=true --set namespace.create=false \
+    --show-only templates/deployment-server.yaml >"$WORK/armed-external-ns-showonly.out" 2>&1; then
+    echo "FAIL: the unlabelled-namespace gate did not fire under --show-only" >&2
+    exit 1
+fi
+grep -q 'kueue.armed=true with namespace.create=false cannot label the namespace' \
+    "$WORK/armed-external-ns-showonly.out" || {
+    echo "FAIL: --show-only skipped the gate in templates/namespace.yaml:" >&2
+    cat "$WORK/armed-external-ns-showonly.out" >&2
+    exit 1
+}
+
+echo "=== namespace.create=false alone still renders; only ARMING is gated ==="
+# Non-vacuity: an externally-managed namespace is a supported configuration and
+# must keep rendering. Without this the rejection above could be an unrelated
+# namespace.create=false breakage.
+render "$WORK/external-ns-disarmed.yaml" --set kueue.enabled=true --set namespace.create=false
+assert_disarmed_server_no_namespace "$WORK/external-ns-disarmed.yaml" "namespace.create=false, armed=false"
+
+echo "=== the acknowledgement reopens the escape hatch ==="
+# The gate must not be an unconditional fail: an operator who HAS labelled their
+# externally-managed namespace can still arm.
+render "$WORK/external-ns-acked.yaml" \
+    --set kueue.enabled=true --set kueue.armed=true --set namespace.create=false \
+    --set kueue.namespaceLabelledExternally=true
+python3 - "$WORK/external-ns-acked.yaml" <<'PY'
+import sys
+import yaml
+
+docs = [doc for doc in yaml.safe_load_all(open(sys.argv[1], encoding="utf-8")) if doc]
+
+# No Namespace object: that is the whole premise of this configuration.
+assert not [doc for doc in docs if doc.get("kind") == "Namespace"], (
+    "namespace.create=false must still render no Namespace object"
+)
+# The topology must be there for the armed Jobs to be admitted into.
+local_queues = [doc for doc in docs if doc.get("kind") == "LocalQueue"]
+assert len(local_queues) == 3, f"expected three LocalQueues, got {len(local_queues)}"
+
+server = next(
+    container
+    for doc in docs
+    if doc.get("kind") == "Deployment"
+    and doc.get("metadata", {}).get("name", "").endswith("-server")
+    for container in doc["spec"]["template"]["spec"]["containers"]
+    if container["name"] == "djinn-server"
+)
+values = {entry["name"]: entry.get("value") for entry in server["env"]}
+# The escape hatch must produce a genuinely ARMED render — otherwise the
+# acknowledgement would be a no-op that only silenced the gate.
+assert values["DJINN_KUEUE_ARMED"] == "true", (
+    "the acknowledgement must still arm the renderers, got "
+    f"{values.get('DJINN_KUEUE_ARMED')!r}"
+)
+assert values["DJINN_KUEUE_LOCAL_QUEUE_PREFIX"] == "kueue-topology-test-djinn", (
+    f"queue prefix must match the rendered LocalQueues, got {values.get('DJINN_KUEUE_LOCAL_QUEUE_PREFIX')!r}"
+)
+PY
+
+echo "=== the acknowledgement does NOT arm anything on its own ==="
+# It is an acknowledgement, not a second arming switch.
+render "$WORK/ack-without-armed.yaml" \
+    --set kueue.enabled=true --set kueue.namespaceLabelledExternally=true
+assert_topology "$WORK/ack-without-armed.yaml" 3 no
+
+echo "=== the acknowledgement is inert when the chart owns the namespace ==="
+# namespace.create=true is unaffected by the new value in either direction.
+render "$WORK/ack-with-owned-ns.yaml" \
+    --set kueue.enabled=true --set kueue.armed=true --set kueue.namespaceLabelledExternally=true
+assert_topology "$WORK/ack-with-owned-ns.yaml" 3 yes
+
+echo "=== the preflight's namespace RBAC is granted ==="
+# The render-time acknowledgement is an unverified claim; djinn-server re-checks
+# it at startup by GETting its own Namespace. That read needs a namespaced `get`
+# on `namespaces` — without it the preflight can only report "unverifiable" and
+# disarms, silently costing the deployment its Kueue quota.
+python3 - "$WORK/armed.yaml" <<'PY'
+import sys
+import yaml
+
+docs = [doc for doc in yaml.safe_load_all(open(sys.argv[1], encoding="utf-8")) if doc]
+rules = [
+    rule
+    for doc in docs
+    if doc.get("kind") == "Role"
+    for rule in doc.get("rules", [])
+    if rule.get("apiGroups") == [""] and "namespaces" in rule.get("resources", [])
+]
+assert len(rules) == 1, f"expected exactly one namespaces RBAC rule, got {rules}"
+# Read-only, and namespaced: the apiserver scopes `get namespaces` in a Role to
+# the Role's own namespace, so this grants reading THIS namespace and nothing
+# else. Any write verb, or a ClusterRole, would be a real privilege escalation.
+assert rules[0].get("verbs") == ["get"], (
+    f"the preflight's namespace read must stay get-only, got {rules[0].get('verbs')}"
+)
+assert not [
+    doc for doc in docs
+    if doc.get("kind") == "ClusterRole"
+    for rule in doc.get("rules", [])
+    if "namespaces" in rule.get("resources", [])
+], "reading the namespace must NOT require a ClusterRole"
+PY
 
 expect_rejected() {
     local name=$1
@@ -355,6 +519,29 @@ if helm template kueue-topology-test "$WORK/chart-without-armed" --is-upgrade >"
     exit 1
 fi
 
+echo "=== invalid kueue.namespaceLabelledExternally ==="
+if render "$WORK/ack-string.out" --set-string kueue.namespaceLabelledExternally=yes 2>&1; then
+    echo "FAIL: a non-boolean kueue.namespaceLabelledExternally rendered successfully" >&2
+    exit 1
+fi
+
+echo "=== missing kueue.namespaceLabelledExternally ==="
+cp -R "$CHART_DIR" "$WORK/chart-without-ack"
+python3 - "$WORK/chart-without-ack/values.yaml" <<'PY'
+import sys
+import yaml
+
+path = sys.argv[1]
+values = yaml.safe_load(open(path, encoding="utf-8"))
+values["kueue"].pop("namespaceLabelledExternally")
+with open(path, "w", encoding="utf-8") as output:
+    yaml.safe_dump(values, output, sort_keys=False)
+PY
+if helm template kueue-topology-test "$WORK/chart-without-ack" --is-upgrade >"$WORK/missing-ack.out" 2>&1; then
+    echo "FAIL: missing kueue.namespaceLabelledExternally rendered successfully" >&2
+    exit 1
+fi
+
 echo "=== missing kueue.buildPods ==="
 cp -R "$CHART_DIR" "$WORK/chart-without-kueue"
 python3 - "$WORK/chart-without-kueue/values.yaml" <<'PY'
@@ -383,6 +570,12 @@ assert values["kueue"]["armed"] is False, (
 )
 assert values["kueue"]["enabled"] is False, (
     f"kueue.enabled must ship false, got {values['kueue']['enabled']!r}"
+)
+# The escape hatch is opt-in too. Shipping it true would pre-acknowledge a claim
+# no operator ever made, which is exactly the silence this gate replaced.
+assert values["kueue"]["namespaceLabelledExternally"] is False, (
+    "kueue.namespaceLabelledExternally must ship false, got "
+    f"{values['kueue']['namespaceLabelledExternally']!r}"
 )
 PY
 

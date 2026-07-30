@@ -41,11 +41,12 @@
     "kueue": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["enabled", "buildPods", "armed"],
+      "required": ["enabled", "buildPods", "armed", "namespaceLabelledExternally"],
       "properties": {
         "enabled": { "type": "boolean" },
         "buildPods": { "type": "integer", "minimum": 1 },
-        "armed": { "type": "boolean" }
+        "armed": { "type": "boolean" },
+        "namespaceLabelledExternally": { "type": "boolean" }
       }
     },
     "logCollector": {

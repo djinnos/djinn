@@ -124,15 +124,41 @@ kueue:
   # INVARIANT: armed implies enabled. `armed: true` with `enabled: false` fails
   # the render — arming with no ClusterQueue to admit into is the same hang.
   #
-  # Related prerequisite that the chart cannot check for you: if you manage the
-  # namespace externally (`namespace.create: false`), the chart renders no
-  # Namespace object and therefore cannot apply the label. Label it yourself
-  # BEFORE arming, or every build Job hangs.
+  # INVARIANT: armed requires a namespace this chart can label. With
+  # `namespace.create: false` the chart renders no Namespace object and
+  # therefore CANNOT apply `djinn.io/kueue-managed`, so that combination fails
+  # the render unless you acknowledge you have labelled it yourself — see
+  # `namespaceLabelledExternally` below.
   #
   # Image builds stay deliberately unarmed at every value of this flag: an image
   # build is an upstream dependency of a task-run, so sharing one ClusterQueue
   # creates a priority-inversion deadlock.
   armed: false
+
+  # Operator acknowledgement that an EXTERNALLY MANAGED namespace already
+  # carries `djinn.io/kueue-managed=true`.
+  #
+  # Only consulted when `armed: true` AND `namespace.create: false`. In that
+  # combination the chart renders no Namespace object, so it cannot apply the
+  # label Kueue requires in order to capture anything — while still setting
+  # `DJINN_KUEUE_ARMED`, which makes every task-run, warm and standalone-SCIP
+  # Job render `suspend: true`. Nothing captures those Jobs, so nothing
+  # unsuspends them, and every build hangs forever. The chart therefore REFUSES
+  # that combination outright unless you set this true.
+  #
+  # Before setting it:
+  #     kubectl label namespace <ns> djinn.io/kueue-managed=true
+  #
+  # This value is an unverified CLAIM at render time — Helm cannot see cluster
+  # state. The claim is checked for real at djinn-server startup: the server
+  # GETs its own namespace and, when the label is absent, DISARMS itself and
+  # logs the reason rather than rendering Jobs that would hang (see
+  # `server/crates/djinn-k8s/src/kueue_preflight.rs`). This flag buys you an
+  # install; it does not buy you capture.
+  #
+  # Leave false when `namespace.create: true` — the chart applies the label
+  # itself and the acknowledgement is inert.
+  namespaceLabelledExternally: false
 
 # -----------------------------------------------------------------------------
 # Per-invocation CPU lease (cgroup launcher)

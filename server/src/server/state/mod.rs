@@ -1704,6 +1704,53 @@ impl AppState {
     ///   [`djinn_k8s::KubeClient`] can be constructed → [`K8sGraphWarmer`].
     /// * Otherwise (explicit `DJINN_RUNTIME=test`, local dev without a
     ///   cluster) → in-process warmer via [`build_in_process_graph_warmer`].
+    /// Verify, against the live cluster, that this pod's namespace is actually
+    /// Kueue-managed before any renderer is allowed to arm.
+    ///
+    /// `kueue.armed` in the chart drives both the `djinn.io/kueue-managed`
+    /// Namespace label and `DJINN_KUEUE_ARMED` here, so the two normally cannot
+    /// diverge. They can in exactly one configuration: `namespace.create=false`
+    /// renders no Namespace object, so the chart cannot apply the label, and the
+    /// operator asserts it exists via `kueue.namespaceLabelledExternally`. That
+    /// assertion is unverifiable at render time — this is where it is checked.
+    /// An armed Job in an unlabelled namespace is never captured, never
+    /// unsuspended, and hangs forever.
+    ///
+    /// Refusal disarms (via [`djinn_k8s::disarm_kueue_globally`]) rather than
+    /// aborting the boot: unsuspended Jobs with no Kueue quota is the
+    /// pre-cutover status quo, whereas a crash-looping server is a total outage.
+    async fn run_kueue_arming_preflight(&self) {
+        let config = KubernetesConfig::from_env();
+        if !config.kueue_armed {
+            return;
+        }
+        if !matches!(runtime_kind(), RuntimeKind::Kubernetes) {
+            tracing::warn!(
+                "kueue preflight: DJINN_KUEUE_ARMED is set but the runtime is not Kubernetes; \
+                 disarming"
+            );
+            djinn_k8s::disarm_kueue_globally();
+            return;
+        }
+        let client = match djinn_k8s::try_default_client().await {
+            Ok(client) => client,
+            Err(error) => {
+                tracing::error!(
+                    %error,
+                    "kueue preflight: no Kubernetes client, cannot confirm the namespace is \
+                     Kueue-managed; disarming"
+                );
+                djinn_k8s::disarm_kueue_globally();
+                return;
+            }
+        };
+        let outcome =
+            djinn_k8s::run_kueue_preflight(&client, &config.namespace, config.kueue_armed).await;
+        if !outcome.armed() {
+            djinn_k8s::disarm_kueue_globally();
+        }
+    }
+
     async fn initialize_graph_warmer(&self) {
         {
             let existing = self.inner.graph_warmer.read().await;
@@ -2794,6 +2841,11 @@ impl AppState {
         self.initialize_build_pod_permit_prerequisites().await;
         self.initialize_build_admission_recovery().await;
         self.initialize_build_admission_deferred_recovery().await;
+
+        // Kueue arming preflight. MUST precede `initialize_graph_warmer`: that
+        // is the first `KubernetesConfig::from_env()` whose result is retained,
+        // and a refusal only reaches a config built AFTER the latch is set.
+        self.run_kueue_arming_preflight().await;
 
         // Phase 3 PR 8: pick the canonical-graph warmer impl (K8s or
         // in-process) and cache it. This is just a cached handle (the actual
