@@ -61,6 +61,7 @@ mod compatibility_fallback_tests;
 mod edit_dispatch_tests;
 mod edit_dispatch_unicode_tests;
 mod epic_extension_tests;
+mod evidence_exec_contract_tests;
 mod evidence_spike_dispatch_tests;
 mod gate_guard_dispatch_tests;
 mod jit_trace_tests;

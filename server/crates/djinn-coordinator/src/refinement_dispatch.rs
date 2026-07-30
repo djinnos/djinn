@@ -120,6 +120,38 @@ fn refinement_phase_for_intent(
     }
 }
 
+/// Why the administrative / terminal gates forbid **new** durable refinement
+/// dispatch on this tick.
+///
+/// The durable intent ledger is the only dispatch path for a run with a
+/// `run_id`, so it must honour the same operator controls
+/// `dispatch_next_refinement_phase` already honours — otherwise
+/// `dispatch_pause` and `proposal_stop_build --freeze` stop epic work while the
+/// tribunal keeps spawning adversary/advocate/judge sessions. Derivation is
+/// shared with the legacy path (`derive_proposal_evidence_lifecycle`), so this
+/// is gate parity, not a second policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DurableDispatchBlock {
+    /// Administrative dispatch pause (global or project) or
+    /// `proposals.build_frozen`.
+    PausedOrFrozen,
+    /// The proposal reached a terminal status (`TERMINAL_PROPOSAL_STATUSES`).
+    Terminal,
+    /// The proposal row could not be read, so no gate state is known. Fail
+    /// closed, exactly as the legacy path does.
+    ProposalUnreadable,
+}
+
+impl DurableDispatchBlock {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::PausedOrFrozen => "paused_or_frozen",
+            Self::Terminal => "terminal",
+            Self::ProposalUnreadable => "proposal_unreadable",
+        }
+    }
+}
+
 /// Shared readiness/feedback context injected into every tribunal role task.
 pub(super) struct RefinementRoleContext {
     /// Rendered current-head DoR failures and `SpecLintResultV1` summary, plus
@@ -216,6 +248,17 @@ impl CoordinatorActor {
                     continue;
                 }
             };
+            if intents.is_empty() {
+                continue;
+            }
+            // Operator-control parity with the legacy phase dispatcher, read
+            // once per run rather than once per intent. Consulted only at the
+            // points that would create or enqueue role work — never before the
+            // recovery arm below, which merely re-registers an already-running
+            // role so its outcome is still processed while the gate holds.
+            let dispatch_block = self
+                .durable_refinement_dispatch_block(&run.proposal_id)
+                .await;
             for intent in intents {
                 if matches!(
                     intent.state,
@@ -247,6 +290,26 @@ impl CoordinatorActor {
                                     },
                                 )
                                 .await;
+                                continue;
+                            }
+                            // The role never ran, so this arm would push the
+                            // materialized task through the pool again. Gated:
+                            // leave the intent `materialized` with its task
+                            // intact — nothing is consumed, terminalized, or
+                            // abandoned, and a `materialized` intent is durable
+                            // liveness evidence, so the run cannot be reaped
+                            // while it waits. The same retry enqueues it once
+                            // the gate clears.
+                            if let Some(block) = dispatch_block {
+                                tracing::info!(
+                                    run_id = %run.run_id,
+                                    proposal_id = %run.proposal_id,
+                                    intent_id = %intent.intent_id,
+                                    gate = block.as_str(),
+                                    "durable refinement enqueue skipped by an administrative gate; \
+                                     the materialized intent keeps its task and re-enqueues when \
+                                     the gate clears"
+                                );
                                 continue;
                             }
                             let Some(owner) = proposal.refinement_owner_user_id.as_deref() else {
@@ -310,6 +373,31 @@ impl CoordinatorActor {
                     }
                     continue;
                 }
+                // Gated, and this intent is still `pending`: do not even take
+                // the lease. A `pending` intent is permanent durable liveness
+                // evidence (`evaluate_refinement_liveness`), so leaving it
+                // untouched survives any pause length and any coordinator
+                // restart, and the next ungated tick claims it normally.
+                // Claiming it here would instead convert it to `claimed`, whose
+                // only liveness evidence is an unexpired lease — a coordinator
+                // that died mid-pause would then leave the run reapable as
+                // `reaped_phantom`.
+                if let Some(block) = dispatch_block
+                    && matches!(
+                        intent.state,
+                        djinn_core::refinement_liveness::RefinementIntentState::Pending
+                    )
+                {
+                    tracing::info!(
+                        run_id = %run.run_id,
+                        proposal_id = %run.proposal_id,
+                        intent_id = %intent.intent_id,
+                        gate = block.as_str(),
+                        "durable refinement dispatch skipped by an administrative gate; the pending \
+                         intent is left unleased and dispatches when the gate clears"
+                    );
+                    continue;
+                }
                 let owner = format!("coordinator:{}", self.coordinator_incarnation_id);
                 let Some(lease) = (match proposal_repo
                     .claim_refinement_intent(ClaimRefinementIntentRequest {
@@ -333,6 +421,25 @@ impl CoordinatorActor {
                 }) else {
                     continue;
                 };
+
+                // Gated, and this intent was already `claimed` before the gate
+                // engaged. The claim above is a *renewal*, which is the only
+                // thing that keeps a `claimed` intent's liveness evidence fresh
+                // (see `claim_refinement_intent`), so it must keep happening
+                // while the gate holds; only task creation and pool enqueue
+                // stop. Nothing is consumed — the lease is retained and the
+                // next ungated tick materializes this same intent.
+                if let Some(block) = dispatch_block {
+                    tracing::info!(
+                        run_id = %run.run_id,
+                        proposal_id = %run.proposal_id,
+                        intent_id = %lease.intent_id,
+                        gate = block.as_str(),
+                        "durable refinement dispatch skipped by an administrative gate; the claimed \
+                         intent keeps a renewed lease and dispatches when the gate clears"
+                    );
+                    continue;
+                }
 
                 // Resolve owner/model/admission before task creation. A denied
                 // attempt keeps the lease/intention retryable without creating
@@ -464,6 +571,71 @@ impl CoordinatorActor {
                     }
                 }
             }
+        }
+    }
+
+    /// Whether the operator-facing gates permit **new** durable refinement
+    /// dispatch for this proposal on this tick.
+    ///
+    /// Parity with the three gates `dispatch_next_refinement_phase` honours:
+    /// the administrative dispatch pause, `proposals.build_frozen`, and a
+    /// terminal proposal status. All three are read through the same
+    /// [`EvidenceLifecycleState`] derivation the legacy path uses, so there is
+    /// one definition of "paused/frozen/terminal" for both dispatch paths.
+    ///
+    /// Fail-closed on an unreadable proposal, mirroring the legacy path's
+    /// "could not load proposal for evidence lifecycle check (fail-closed)"
+    /// arm: without the proposal row the gate state is unknown, and the durable
+    /// path must not spawn a tribunal role on a proposal it cannot see. (The
+    /// pause-state read *inside* `refinement_dispatch_paused` keeps its own
+    /// legacy fail-open behaviour — this helper deliberately does not change it,
+    /// so both paths agree.)
+    ///
+    /// Returns `None` when dispatch may proceed.
+    async fn durable_refinement_dispatch_block(
+        &self,
+        proposal_id: &str,
+    ) -> Option<DurableDispatchBlock> {
+        let Some(proposal) = self.load_proposal_for_lifecycle(proposal_id).await else {
+            tracing::warn!(
+                proposal_id = %proposal_id,
+                "Durable refinement dispatch skipped: could not load proposal for evidence \
+                 lifecycle check (fail-closed)"
+            );
+            return Some(DurableDispatchBlock::ProposalUnreadable);
+        };
+        match self.derive_proposal_evidence_lifecycle(&proposal).await {
+            EvidenceLifecycleState::PausedOrFrozen => {
+                tracing::info!(
+                    proposal_id = %proposal_id,
+                    lifecycle_state = "paused_or_frozen",
+                    build_frozen = proposal.build_frozen,
+                    "Durable refinement dispatch skipped: proposal is paused or build-frozen \
+                     (persisted state gate)"
+                );
+                Some(DurableDispatchBlock::PausedOrFrozen)
+            }
+            EvidenceLifecycleState::Terminal => {
+                tracing::info!(
+                    proposal_id = %proposal_id,
+                    lifecycle_state = "terminal",
+                    proposal_status = %proposal.status,
+                    "Durable refinement dispatch skipped: proposal in terminal status \
+                     (persisted state gate)"
+                );
+                Some(DurableDispatchBlock::Terminal)
+            }
+            // The evidence-cycle states are deliberately NOT gated here. The
+            // durable ledger parks an evidence demand as a run-level
+            // `RefinementParkKind::AwaitingEvidence` (which removes the run
+            // from `load_active_refinement_runs`), so it owns that pause
+            // already; layering the derived evidence states on top would be a
+            // new policy for durable runs rather than the operator-control
+            // parity this gate is for.
+            EvidenceLifecycleState::Active
+            | EvidenceLifecycleState::EvidenceReady
+            | EvidenceLifecycleState::AwaitingEvidence
+            | EvidenceLifecycleState::EvidenceFailed => None,
         }
     }
 
@@ -1512,3 +1684,7 @@ mod refinement_durable_dispatch_tests;
 #[cfg(test)]
 #[path = "refinement_durable_handoff_tests.rs"]
 mod refinement_durable_handoff_tests;
+
+#[cfg(test)]
+#[path = "refinement_durable_gate_tests.rs"]
+mod refinement_durable_gate_tests;
