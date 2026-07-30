@@ -95,6 +95,39 @@ fn build_job_labels_and_envs_match_plan() {
     );
 }
 
+#[test]
+fn image_build_job_does_not_opt_into_kueue_build_object_admission() {
+    const KUEUE_BUILD_OBJECT_LABEL: &str = "djinn.io/kueue-build-object";
+
+    let config = ImageControllerConfig::for_testing();
+    let context = test_build_context();
+    let job = build_image_build_job(
+        &config,
+        &BuildSubject::project("proj-kueue-contract"),
+        "1a2b3c4d5e6f",
+        "registry.example/djinn-project-proj-kueue-contract:1a2b3c4d5e6f",
+        &context,
+    );
+
+    assert!(
+        !job.metadata
+            .labels
+            .as_ref()
+            .and_then(|labels| labels.get(KUEUE_BUILD_OBJECT_LABEL))
+            .is_some_and(|value| value == "true"),
+        "image-build Job metadata must remain outside Kueue build-object admission",
+    );
+    assert!(
+        !job.spec
+            .as_ref()
+            .and_then(|spec| spec.template.metadata.as_ref())
+            .and_then(|metadata| metadata.labels.as_ref())
+            .and_then(|labels| labels.get(KUEUE_BUILD_OBJECT_LABEL))
+            .is_some_and(|value| value == "true"),
+        "image-build Pod-template metadata must remain outside Kueue build-object admission",
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Phase 3 PR 5.5: image-build Job watcher transition coverage.
 // ---------------------------------------------------------------------------
