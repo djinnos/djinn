@@ -6,7 +6,6 @@ mod common;
 use std::sync::Arc;
 
 use djinn_control_plane::test_support::McpTestHarness;
-use djinn_core::doctor::registry;
 use djinn_db::DoctorFindingRepository;
 use serde_json::json;
 
@@ -106,7 +105,7 @@ async fn closed_parent_open_children_db_dry_run_is_read_only() {
     ));
     source.refresh().await;
     assert_eq!(source.snapshot()["findings"], json!(health_findings));
-    register_closed_parent_open_children_check(registry(), source);
+    register_closed_parent_open_children_check(harness.doctor_registry(), source);
     let response = harness
         .call_tool(
             "doctor_run",
@@ -244,7 +243,7 @@ async fn closed_parent_open_children_db_repair_applies_safe_disposition() {
     source.refresh().await;
 
     register_closed_parent_open_children_check_with_repair(
-        registry(),
+        harness.doctor_registry(),
         source.clone(),
         source.clone(),
     );
@@ -523,7 +522,7 @@ async fn closed_parent_open_children_repair_skips_external_open_dependent() {
     ));
     source.refresh().await;
     register_closed_parent_open_children_check_with_repair(
-        registry(),
+        harness.doctor_registry(),
         source.clone(),
         source.clone(),
     );
@@ -600,7 +599,7 @@ async fn closed_parent_open_children_repair_cascades_internal_blocker() {
     ));
     source.refresh().await;
     register_closed_parent_open_children_check_with_repair(
-        registry(),
+        harness.doctor_registry(),
         source.clone(),
         source.clone(),
     );
@@ -669,7 +668,7 @@ async fn closed_parent_open_children_repair_skips_stale_snapshot() {
     ));
     source.refresh().await;
     register_closed_parent_open_children_check_with_repair(
-        registry(),
+        harness.doctor_registry(),
         source.clone(),
         source.clone(),
     );

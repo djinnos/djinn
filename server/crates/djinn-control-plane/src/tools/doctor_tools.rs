@@ -43,9 +43,7 @@ use rmcp::{
 };
 use serde::{Deserialize, Serialize};
 
-use djinn_core::doctor::{
-    DoctorCheck, DoctorRegistry, Finding, FindingSeverity, ResolverSnapshot, registry,
-};
+use djinn_core::doctor::{DoctorCheck, DoctorRegistry, Finding, FindingSeverity, ResolverSnapshot};
 use djinn_db::{DoctorFindingRepository, ProjectRepository, RecentDoctorFindings};
 
 use crate::server::DjinnMcpServer;
@@ -438,7 +436,7 @@ fn finding_to_entry(row: &djinn_db::DoctorFinding) -> DoctorListFindingEntry {
 impl DjinnMcpServer {
     /// Run doctor health checks.
     ///
-    /// Enumerates the global check registry, optionally runs a named subset,
+    /// Enumerates the state-resolved check registry, optionally runs a named subset,
     /// persists all emitted findings, and returns a structured report with
     /// check metadata and persisted finding ids. This path **never** invokes
     /// `fix` — fixes are opt-in and only reachable through `doctor_fix`.
@@ -461,7 +459,7 @@ impl DjinnMcpServer {
             });
         }
 
-        let reg = registry();
+        let reg = self.state.doctor_registry();
 
         // Snapshot the full directory before resolving the subset so the
         // response always shows what was available, even on error.
@@ -800,7 +798,7 @@ impl DjinnMcpServer {
             });
         }
 
-        let reg = registry();
+        let reg = self.state.doctor_registry();
 
         // Look up the check by name. Unknown check → structured error.
         let Some(check) = reg.get(&check_name) else {
