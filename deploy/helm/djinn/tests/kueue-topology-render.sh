@@ -24,6 +24,15 @@ render() {
     helm template kueue-topology-test "$CHART_DIR" --is-upgrade "$@" >"$output"
 }
 
+# The topology is `kueue.x-k8s.io/v1beta1`, so it only renders when the operator
+# has declared the Kueue prerequisite installed. Everything below that asserts
+# topology shape therefore has to opt in explicitly.
+render_enabled() {
+    local output=$1
+    shift
+    render "$output" --set kueue.enabled=true "$@"
+}
+
 assert_topology() {
     local manifest=$1 expected_pods=$2
     python3 - "$manifest" "$expected_pods" <<'PY'
@@ -100,15 +109,55 @@ assert values["DJINN_MAX_BUILD_TASKRUNS"] == "3", "buildAdmission cap changed"
 PY
 }
 
-echo "=== valid Kueue topology ==="
-render "$WORK/valid.yaml" --set kueue.buildPods=7
+echo "=== valid Kueue topology (kueue.enabled=true) ==="
+render_enabled "$WORK/valid.yaml" --set kueue.buildPods=7
 assert_topology "$WORK/valid.yaml" 7
+
+echo "=== chart default omits the topology entirely ==="
+# Regression guard for the defect this flag fixes: the topology used to render
+# unconditionally, so `helm install djinn` failed on every cluster without the
+# Kueue CRDs (observed on the production VPS). The default must be installable.
+render "$WORK/default.yaml"
+python3 - "$WORK/default.yaml" <<'PY'
+import sys
+import yaml
+
+docs = [doc for doc in yaml.safe_load_all(open(sys.argv[1], encoding="utf-8")) if doc]
+topology = [
+    doc for doc in docs
+    if str(doc.get("apiVersion", "")).startswith("kueue.x-k8s.io/")
+]
+assert not topology, (
+    "chart defaults must render no kueue.x-k8s.io objects, got "
+    f"{[(d['kind'], d['metadata']['name']) for d in topology]}"
+)
+# Non-vacuity: the render must still be a real chart render, not an empty file
+# that trivially satisfies the assertion above.
+assert any(doc.get("kind") == "Deployment" for doc in docs), (
+    "default render produced no Deployment; the assertion above proved nothing"
+)
+# The controller's observation-only Workload RBAC is deliberately NOT gated:
+# it is inert without the CRDs and must not churn with the flag.
+rules = [
+    rule for doc in docs if doc.get("kind") == "Role"
+    for rule in doc.get("rules", [])
+    if rule.get("apiGroups") == ["kueue.x-k8s.io"]
+]
+assert len(rules) == 1, f"expected the Workload RBAC rule to survive, got {rules}"
+PY
+
+echo "=== explicitly disabled omits the topology ==="
+render "$WORK/disabled.yaml" --set kueue.enabled=false --set kueue.buildPods=7
+grep -q 'kueue.x-k8s.io/v1beta1' "$WORK/disabled.yaml" && {
+    echo "FAIL: kueue.enabled=false still rendered the v1beta1 topology" >&2
+    exit 1
+}
 
 expect_rejected() {
     local name=$1
     shift
     echo "=== invalid kueue.buildPods: $name ==="
-    if render "$WORK/$name.out" "$@" 2>&1; then
+    if render_enabled "$WORK/$name.out" "$@" 2>&1; then
         echo "FAIL: invalid Kueue scenario '$name' rendered successfully" >&2
         exit 1
     fi
@@ -117,6 +166,29 @@ expect_rejected() {
 expect_rejected zero --set kueue.buildPods=0
 expect_rejected fractional --set kueue.buildPods=1.5
 expect_rejected string --set-string kueue.buildPods=seven
+
+echo "=== invalid kueue.enabled ==="
+if render "$WORK/enabled-string.out" --set-string kueue.enabled=yes 2>&1; then
+    echo "FAIL: a non-boolean kueue.enabled rendered successfully" >&2
+    exit 1
+fi
+
+echo "=== missing kueue.enabled ==="
+cp -R "$CHART_DIR" "$WORK/chart-without-enabled"
+python3 - "$WORK/chart-without-enabled/values.yaml" <<'PY'
+import sys
+import yaml
+
+path = sys.argv[1]
+values = yaml.safe_load(open(path, encoding="utf-8"))
+values["kueue"].pop("enabled")
+with open(path, "w", encoding="utf-8") as output:
+    yaml.safe_dump(values, output, sort_keys=False)
+PY
+if helm template kueue-topology-test "$WORK/chart-without-enabled" --is-upgrade >"$WORK/missing-enabled.out" 2>&1; then
+    echo "FAIL: missing kueue.enabled rendered successfully" >&2
+    exit 1
+fi
 
 echo "=== missing kueue.buildPods ==="
 cp -R "$CHART_DIR" "$WORK/chart-without-kueue"

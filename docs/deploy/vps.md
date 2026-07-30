@@ -219,6 +219,39 @@ git clone https://github.com/djinnos/djinn
 cd djinn
 ```
 
+### Optional: install the Kueue prerequisite
+
+Same shape as cert-manager above — a cluster-scoped third-party release Djinn
+does not own. Only needed if you want the Kueue queue topology
+(`kueue.enabled: true` in your values below); the chart installs fine without
+it, and the topology is inert either way.
+
+Requires **Kubernetes >= 1.29** — `k3s --version`. The upstream chart declares
+no `kubeVersion`, so Helm will not check this for you.
+
+```bash
+helm install djinn-prereqs deploy/helm/djinn-prereqs \
+  --namespace kueue-system --create-namespace --wait
+```
+
+This pins Kueue `0.19.0` from `oci://registry.k8s.io/kueue/charts/kueue`, with
+Djinn's scoping applied as values: a *positive*
+`managedJobsNamespaceSelector` that only selects namespaces labelled
+`djinn.io/kueue-managed=true`. No namespace carries that label, so nothing is
+captured. Read [deploy/kueue/README.md](../../deploy/kueue/README.md) before
+labelling anything.
+
+> **Do not install stock upstream Kueue on this box instead.** At its defaults
+> the Pod webhook is registered with `failurePolicy: Fail` and a selector that
+> covers the `djinn` namespace, so an unavailable Kueue controller stops Pod
+> creation — `djinn-server`, Postgres, Qdrant and task-runs together. On a
+> single node that is a total outage. `djinn-prereqs` exists to prevent exactly
+> that; `deploy/kueue/tests/webhook-selectors.sh` asserts it on the rendered
+> output.
+
+Keep `--wait`: `ClusterQueue`/`LocalQueue` carry a conversion webhook, so the
+Kueue controller must be Ready before the `djinn` chart applies the topology.
+
 Create `my-values.yaml` (a complete, working single-node profile — see
 [Configuration](configuration.md) for every knob):
 

@@ -85,6 +85,25 @@ buildAdmission:
 # quota for Kueue's inert prerequisite queues; task-run and warm Jobs are not
 # selected for Kueue admission until the later cutover release.
 kueue:
+  # Render the ResourceFlavor / ClusterQueue / LocalQueue topology.
+  #
+  # OFF by default because the topology is `kueue.x-k8s.io/v1beta1`, and a
+  # cluster without Kueue rejects those objects — which used to make this whole
+  # chart un-installable anywhere Kueue was absent. Install the prerequisite
+  # release first (`deploy/helm/djinn-prereqs`, see deploy/kueue/README.md and
+  # docs/deploy/kubernetes.md), then set this true. Note that the Kueue
+  # controller must be READY, not merely installed: ClusterQueue and LocalQueue
+  # carry a conversion webhook, so applying even a v1beta1 object needs the
+  # webhook service serving. Install the prerequisite with `--wait`.
+  #
+  # This is an explicit value rather than a `.Capabilities.APIVersions` probe on
+  # purpose: capability probing is empty under `helm template` (what Tilt uses),
+  # so it would silently omit the topology in local dev. With this flag, a true
+  # value on a Kueue-less cluster fails the install loudly instead.
+  #
+  # Enabling it does NOT arm anything: no Job carries a queue name and no
+  # namespace is Kueue-managed. Arming belongs to cutover epic 4c9q.
+  enabled: false
   buildPods: 3
 
 # -----------------------------------------------------------------------------

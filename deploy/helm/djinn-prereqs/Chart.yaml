@@ -1,0 +1,27 @@
+apiVersion: v2
+name: djinn-prereqs
+description: |
+  Cluster-scoped third-party prerequisites for Djinn.
+
+  Today this is Kueue only, pinned to an upstream OCI chart release rather
+  than a byte-vendored fork of `manifests.yaml`. The wrapper exists so that
+  Djinn's scoping policy (which namespaces Kueue may manage, which frameworks
+  it registers webhooks for) lives in this repository as *values* over an
+  untouched upstream chart, and so a version bump is a one-line pin change
+  plus `helm dependency update` instead of a re-fork.
+
+  Install this as its own release, BEFORE the `djinn` chart, exactly like
+  cert-manager. It is a prerequisite, not a Djinn component: nothing in it is
+  owned by the `djinn` release's lifecycle.
+
+  This release is INERT. It labels no namespace, so Kueue's positive
+  `managedJobsNamespaceSelector` matches nothing and no Workload is ever
+  created. Arming it belongs to the Kueue cutover epic 4c9q.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+dependencies:
+  - name: kueue
+    version: 0.19.0
+    repository: oci://registry.k8s.io/kueue/charts
+    condition: kueue.enabled
