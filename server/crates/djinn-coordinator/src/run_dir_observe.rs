@@ -5,8 +5,13 @@
 //! ([`djinn_db::RunDirRepository`]), the reconciliation planner
 //! ([`crate::run_dir_reconcile`]), and the disk evaluator plus quota probe
 //! ([`crate::disk_admission`]). This module is the executor that composes them
-//! at coordinator startup and installs the capacity adapter on the production
-//! [`BuildAdmissionController`].
+//! at coordinator startup.
+//!
+//! Kueue cutover (o53p): it used to also install the capacity adapter on the
+//! production `BuildAdmissionController`. That pre-create reservation authority
+//! is deleted, so [`CoordinatorDiskCapacitySource::observe`] is now an
+//! unattached seam — see [`arm_disk_observation`]. Proposal nquz owns giving it
+//! a decision to feed.
 //!
 //! # What this module may NOT do
 //!
@@ -15,9 +20,8 @@
 //! - it never creates, renames, deletes, or truncates anything on the volume —
 //!   the only writes it performs at all are `run_dirs` ledger rows;
 //! - it never reserves bytes, assigns a quota, or allocates a temp/final path;
-//! - it never changes a grant. [`DiskCapacitySource::observe`] is consulted by
-//!   `build_admission` only AFTER a permit has been issued, and its return value
-//!   feeds telemetry alone.
+//! - it never changes a grant. [`CoordinatorDiskCapacitySource::observe`] feeds
+//!   telemetry alone and always has.
 //!
 //! Unknown, malformed, symlinked, unreadable, and unresolved entries become
 //! [`RunDirState::QuarantinedUnowned`] and are left untouched on disk. The whole
@@ -30,15 +34,12 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use async_trait::async_trait;
 use djinn_core::clock::Clock;
 use djinn_db::{
     BuildLeaseRepository, BuildLeaseRow, BuildLeaseState, Database, RunDirRepository, RunDirState,
 };
 
-use crate::build_admission::{
-    BuildAdmissionController, BuildWorkloadKind, DiskCapacitySource, TaskRunRole,
-};
+use crate::build_admission::{BuildWorkloadKind, TaskRunRole};
 use crate::cargo_warm_base_gc::{CapacitySnapshot, FilesystemCapacity, StatvfsFilesystemCapacity};
 use crate::disk_admission::{
     CapacitySample, DiskAdmissionConfig, DiskAdmissionRequest, DiskCapacityState, DiskObservation,
@@ -504,8 +505,8 @@ impl ObserveClock for SystemObserveClock {
     }
 }
 
-/// Adapts the coordinator's existing [`FilesystemCapacity`] snapshot to the
-/// observe-only [`DiskCapacitySource`] that `build_admission` consults.
+/// Adapts the coordinator's existing [`FilesystemCapacity`] snapshot to an
+/// observe-only disk sample.
 ///
 /// The adapter is read-only and never denies. A live probe produces a fresh
 /// sample; a failed probe falls back to the last good snapshot with its true
@@ -653,10 +654,8 @@ impl CoordinatorDiskCapacitySource {
 /// Whether a workload actually runs the project's compile/test toolchain.
 ///
 /// Light and explicitly non-build workloads never consult disk admission and
-/// never seed. `build_admission` already routes them through
-/// `permit_without_reservation`, which does not observe; this is the second,
-/// independent guard so a future routing change cannot silently start charging
-/// orchestration-only work against a disk budget.
+/// never seed. This is the guard that keeps a future routing change from
+/// silently starting to charge orchestration-only work against a disk budget.
 #[must_use]
 pub fn workload_consults_disk(kind: BuildWorkloadKind) -> bool {
     match kind {
@@ -675,13 +674,18 @@ pub fn is_light_role(role: TaskRunRole) -> bool {
     role.resource_class() == djinn_runtime::RoleResourceClass::Light
 }
 
-#[async_trait]
-impl DiskCapacitySource for CoordinatorDiskCapacitySource {
-    async fn observe(
-        &self,
-        request: &crate::build_admission::BuildAdmissionRequest,
-    ) -> Option<DiskObservation> {
-        if !workload_consults_disk(request.kind) {
+impl CoordinatorDiskCapacitySource {
+    /// Observe-only disk pricing for one build workload.
+    ///
+    /// Kueue cutover (o53p): this used to implement `build_admission`'s
+    /// `DiskCapacitySource` trait, whose only consumer was the deleted
+    /// pre-create admission controller. Kueue's ClusterQueue quota does not
+    /// model bytes of a shared PVC, so this observation still has to be made by
+    /// hand — proposal nquz owns re-attaching it to a decision. Until then it is
+    /// an inherent method taking the classification directly, so the seam
+    /// survives the ledger's deletion without a trait that nothing implements.
+    pub async fn observe(&self, kind: BuildWorkloadKind) -> Option<DiskObservation> {
+        if !workload_consults_disk(kind) {
             return None;
         }
         let ledger = self.ledger_totals().await?;
@@ -743,17 +747,25 @@ pub struct RunDirObserveReport {
     pub projected_seed_bytes: u64,
 }
 
-/// Run startup reconciliation, probe quotas, publish bounded telemetry, and
-/// install the capacity source on the supplied controller.
+/// Run startup reconciliation, probe quotas and publish bounded telemetry.
 ///
 /// This is the whole observe-mode activation. It performs no filesystem
-/// mutation and cannot change an admission outcome: installing a source only
-/// adds telemetry to the already-granted path.
-pub async fn arm_disk_observation(
-    db: &Database,
-    controller: &BuildAdmissionController,
-    seams: RunDirObserveSeams,
-) -> RunDirObserveReport {
+/// mutation and cannot change an admission outcome.
+///
+/// # Kueue cutover (o53p): this no longer installs a capacity source
+///
+/// It used to end by handing a [`CoordinatorDiskCapacitySource`] to the
+/// pre-create `BuildAdmissionController` via `set_disk_capacity_source`. That
+/// controller was the reservation authority Kueue replaces, and it is deleted,
+/// so there is nothing left to install onto — Kueue's ClusterQueue quota does
+/// not model bytes of a shared PVC.
+///
+/// The reconciliation, quota probe, telemetry and seed projection below are all
+/// still real and still run. What is gone is the (already observe-only) hookup
+/// of a source that could never change an outcome. Proposal **nquz** owns
+/// re-attaching disk observation to an actual decision; the seam it must attach
+/// is [`CoordinatorDiskCapacitySource::observe`], which survives with its tests.
+pub async fn arm_disk_observation(db: &Database, seams: RunDirObserveSeams) -> RunDirObserveReport {
     let reconcile =
         reconcile_run_dirs_at_startup(db, &seams.root, &seams.volume_id, seams.inventory.as_ref())
             .await;
@@ -769,17 +781,6 @@ pub async fn arm_disk_observation(
     // startup. With no authoritative history the projection is zero and the
     // reservation is the growth allowance alone.
     let projected_seed_bytes = largest_authoritative_run_dir_bytes(db, &seams.volume_id).await;
-
-    let source = CoordinatorDiskCapacitySource::new(
-        seams.volume_id.clone(),
-        seams.root.clone(),
-        seams.config,
-        Arc::clone(&seams.capacity),
-        Arc::new(RunDirRepository::new(db.clone())),
-        Arc::clone(&seams.clock),
-        projected_seed_bytes,
-    );
-    controller.set_disk_capacity_source(Arc::new(source));
 
     tracing::info!(
         volume_id = %seams.volume_id,

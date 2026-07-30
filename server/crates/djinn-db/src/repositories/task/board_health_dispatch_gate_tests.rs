@@ -22,25 +22,12 @@ fn lease_row(state: &str) -> DispatchLeaseRow {
 }
 
 fn observed(rows: Vec<(&str, DispatchLeaseRow)>, capacity: LeaseCapacity) -> LeaseLedger {
-    observed_with_journal(
-        rows,
-        capacity,
-        JournalSignal::Observed(AdmissionJournalSignal::default()),
-    )
-}
-
-fn observed_with_journal(
-    rows: Vec<(&str, DispatchLeaseRow)>,
-    capacity: LeaseCapacity,
-    journal: JournalSignal,
-) -> LeaseLedger {
-    observed_full(rows, capacity, journal, Some(HashMap::new()))
+    observed_full(rows, capacity, Some(HashMap::new()))
 }
 
 fn observed_full(
     rows: Vec<(&str, DispatchLeaseRow)>,
     capacity: LeaseCapacity,
-    journal: JournalSignal,
     denials: Option<HashMap<String, DenialRow>>,
 ) -> LeaseLedger {
     LeaseLedger::Observed {
@@ -49,7 +36,6 @@ fn observed_full(
             .map(|(id, row)| (id.to_owned(), row))
             .collect(),
         capacity,
-        journal,
         denials,
     }
 }
@@ -76,15 +62,6 @@ fn denials(entries: Vec<(&str, DenialRow)>) -> Option<HashMap<String, DenialRow>
             .map(|(id, row)| (id.to_owned(), row))
             .collect(),
     )
-}
-
-fn journal(active: i64, settled: i64) -> JournalSignal {
-    JournalSignal::Observed(AdmissionJournalSignal {
-        create_unknown_active: active,
-        create_unknown_settled: settled,
-        distinct_creator_epochs: if active > 0 { 1 } else { 0 },
-        oldest_create_unknown_at: (active > 0).then(|| "2026-07-29T06:22:57.000Z".to_owned()),
-    })
 }
 
 fn gate(ledger: &LeaseLedger, task_id: &str) -> serde_json::Value {
@@ -223,74 +200,6 @@ fn model_reasons_and_lease_reasons_compose() {
     assert_eq!(gate["gate_verdict"], VERDICT_BLOCKED);
 }
 
-// ── Build-admission journal authority ───────────────────────────────────
-
-/// **The 2026-07-29 outage, reproduced.** A settled `create_unknown` row
-/// held `CreateUnknownHealth` and every dispatch was denied with
-/// `controller_not_admitting`, while the lease authority reported
-/// `occupancy: 1, cap: 3, at_capacity: false`. This section reported
-/// `unexplained` with `reasons: []` for five hours.
-///
-/// Before this gate existed the assertions below were unreachable: the
-/// only surface naming the cause was a `readiness=` field in a container
-/// log on the node.
-#[test]
-fn a_settled_create_unknown_row_names_the_outage() {
-    let ledger = observed_with_journal(Vec::new(), capacity(1, 3, true), journal(1, 1));
-    let gate = gate(&ledger, "task-1");
-    assert_eq!(gate["gate_verdict"], VERDICT_BLOCKED);
-    assert!(
-        gate["reasons"]
-            .as_array()
-            .unwrap()
-            .contains(&serde_json::json!("admission_create_unknown_pending")),
-        "reasons must name the journal authority: {:?}",
-        gate["reasons"]
-    );
-    // The lease authority is simultaneously healthy. Both facts are true;
-    // only one of them explains the strand.
-    assert_eq!(gate["build_capacity"]["at_capacity"], false);
-    assert_eq!(gate["build_admission"]["create_unknown_settled"], 1);
-    assert_eq!(gate["build_admission"]["authority"], "admission_journal");
-    assert_eq!(
-        gate["build_admission"]["settle_window_seconds"],
-        RECLAIM_SETTLE_WINDOW_SECONDS
-    );
-}
-
-/// **Neutralisation guard.** Every healthy task-run passes through
-/// `create_unknown` between the pool accepting the create and the
-/// `("session","started")` callback. Firing on the ACTIVE count would emit
-/// a denial reason during ordinary dispatch — the fabricated-reason bug
-/// this module exists to remove. Only the settled count may fire.
-#[test]
-fn an_in_flight_create_unknown_is_not_a_reason() {
-    let ledger = observed_with_journal(Vec::new(), capacity(1, 3, true), journal(3, 0));
-    let gate = gate(&ledger, "task-1");
-    assert_eq!(gate["gate_verdict"], VERDICT_UNEXPLAINED);
-    assert!(gate["reasons"].as_array().unwrap().is_empty());
-    // ...but the population is still REPORTED, so an operator can see it.
-    assert_eq!(gate["build_admission"]["create_unknown_active"], 3);
-    assert_eq!(gate["build_admission"]["create_unknown_settled"], 0);
-}
-
-/// The journal authority denies independently of the lease authority's
-/// arming. A board with `v1_mode` off or in shadow was still wedged on
-/// 2026-07-29, so the reason must survive the not-enforcing early return.
-#[test]
-fn journal_reason_survives_a_non_enforcing_lease_authority() {
-    let ledger = observed_with_journal(Vec::new(), capacity(0, 3, false), journal(1, 1));
-    let gate = gate(&ledger, "task-1");
-    assert_eq!(gate["build_capacity"]["lease_authority_enforcing"], false);
-    assert_eq!(gate["gate_verdict"], VERDICT_BLOCKED);
-    assert!(
-        gate["reasons"]
-            .as_array()
-            .unwrap()
-            .contains(&serde_json::json!("admission_create_unknown_pending"))
-    );
-}
-
 /// **`build_capacity` must name its own authority.**
 ///
 /// The exact payload from 2026-07-29: `{occupancy: 1, cap: 3, enforcing:
@@ -304,7 +213,7 @@ fn journal_reason_survives_a_non_enforcing_lease_authority() {
 /// different authority. It must not come back.
 #[test]
 fn build_capacity_cannot_be_mistaken_for_the_admission_authority() {
-    let ledger = observed_with_journal(Vec::new(), capacity(1, 3, true), journal(1, 1));
+    let ledger = observed(Vec::new(), capacity(1, 3, true));
     let gate = gate(&ledger, "task-1");
     let capacity_block = &gate["build_capacity"];
 
@@ -320,66 +229,9 @@ fn build_capacity_cannot_be_mistaken_for_the_admission_authority() {
         "the payload must state its own bound: {note}"
     );
     assert!(
-        note.contains("build_admission"),
-        "the note must point at the other authority: {note}"
+        note.contains("build_admission_denial"),
+        "the note must point at the dispatcher's own recorded decision: {note}"
     );
-    // The two authorities disagree in exactly the outage's shape, and the
-    // payload now carries both answers side by side.
-    assert_eq!(capacity_block["at_capacity"], false);
-    assert_eq!(gate["build_admission"]["create_unknown_settled"], 1);
-    assert_eq!(gate["gate_verdict"], VERDICT_BLOCKED);
-}
-
-/// An unreadable `admission_journal` must be declared, not silently read
-/// as a clean one — and it must not take the lease gate down with it.
-#[test]
-fn unobservable_journal_is_declared_unevaluated() {
-    let ledger = observed_with_journal(
-        Vec::new(),
-        capacity(0, 3, true),
-        JournalSignal::Unobservable { detail: "boom" },
-    );
-    let gate = gate(&ledger, "task-1");
-    assert!(gate["build_admission"].is_null());
-    let evaluated = gate["coverage"]["evaluated_gates"].as_array().unwrap();
-    assert!(!evaluated.contains(&serde_json::json!("build_admission_create_unknown")));
-    assert!(evaluated.contains(&serde_json::json!("build_lease_admission")));
-    let unevaluated = gate["coverage"]["unevaluated_gates"].as_array().unwrap();
-    assert!(unevaluated.contains(&serde_json::json!("build_admission_create_unknown")));
-    assert_eq!(
-        gate["coverage"]["build_admission_unevaluated_detail"],
-        "boom"
-    );
-}
-
-/// **The coverage hole this change closes.** `UNEVALUATED_GATES` named
-/// twelve dispatcher gates and zero controller-readiness gates, so an
-/// operator reading `unexplained` had no way to learn that an entire
-/// fail-closed ladder existed above them. Every `BuildAdmissionReadiness`
-/// variant must now be accounted for: `create_unknown_health` as an
-/// evaluated gate, the rest as declared-unevaluated ones.
-#[test]
-fn every_readiness_state_is_accounted_for_in_coverage() {
-    let ledger = observed(Vec::new(), capacity(0, 3, true));
-    let gate = gate(&ledger, "task-1");
-    let evaluated = gate["coverage"]["evaluated_gates"].as_array().unwrap();
-    let unevaluated = gate["coverage"]["unevaluated_gates"].as_array().unwrap();
-
-    assert!(evaluated.contains(&serde_json::json!("build_admission_create_unknown")));
-    // `Healthy` is the absence of a gate, so it has no entry.
-    for state in [
-        "build_admission_shutdown_draining",
-        "build_admission_journal_recovery_incomplete",
-        "build_admission_journal_unhealthy",
-        "build_admission_seeded_occupancy_above_cap",
-        "build_admission_inventory_pending",
-        "build_admission_topology_pending",
-    ] {
-        assert!(
-            unevaluated.contains(&serde_json::json!(state)),
-            "readiness state `{state}` is not declared in coverage"
-        );
-    }
 }
 
 // ── Persisted denial cause (#2661) ──────────────────────────────────────
@@ -393,7 +245,6 @@ fn a_recorded_denial_is_the_dispatchers_own_reason() {
     let ledger = observed_full(
         Vec::new(),
         capacity(1, 3, true),
-        JournalSignal::Observed(AdmissionJournalSignal::default()),
         denials(vec![(
             "task-1",
             denial_row(
@@ -444,7 +295,6 @@ fn each_denial_cause_maps_to_a_distinct_reason() {
         let ledger = observed_full(
             Vec::new(),
             capacity(0, 3, true),
-            JournalSignal::Observed(AdmissionJournalSignal::default()),
             denials(vec![("task-1", denial_row(cause, None, 10))]),
         );
         let gate = gate(&ledger, "task-1");
@@ -471,7 +321,6 @@ fn a_stale_denial_record_is_reported_but_never_blamed() {
     let ledger = observed_full(
         Vec::new(),
         capacity(0, 3, true),
-        JournalSignal::Observed(AdmissionJournalSignal::default()),
         denials(vec![(
             "task-1",
             denial_row(
@@ -510,12 +359,7 @@ fn no_recorded_denial_is_an_evaluated_answer_not_a_gap() {
 /// denied".
 #[test]
 fn unobservable_denials_are_declared_unevaluated() {
-    let ledger = observed_full(
-        Vec::new(),
-        capacity(0, 3, true),
-        JournalSignal::Observed(AdmissionJournalSignal::default()),
-        None,
-    );
+    let ledger = observed_full(Vec::new(), capacity(0, 3, true), None);
     let gate = gate(&ledger, "task-1");
     assert!(gate["build_admission_denial"].is_null());
     let evaluated = gate["coverage"]["evaluated_gates"].as_array().unwrap();
@@ -535,7 +379,6 @@ fn a_denial_recorded_for_another_task_is_not_borrowed() {
     let ledger = observed_full(
         Vec::new(),
         capacity(0, 3, true),
-        JournalSignal::Observed(AdmissionJournalSignal::default()),
         denials(vec![("task-2", denial_row("at_capacity", None, 5))]),
     );
     let gate = gate(&ledger, "task-1");

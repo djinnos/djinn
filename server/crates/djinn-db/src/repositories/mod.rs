@@ -1,5 +1,4 @@
 pub mod admission_handoff;
-pub mod admission_journal;
 pub mod agent;
 pub mod audit_sampler;
 pub mod build_admission_denial;

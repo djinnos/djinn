@@ -919,7 +919,7 @@ async fn production_adapter_cancellation_reconciles_uid_before_capacity_release(
 /// observed; a deleted (missing/unreadable) epoch row fails closed to no
 /// observed epoch.
 #[tokio::test]
-async fn recovery_reads_admission_epoch_and_reference_cap() {
+async fn recovery_reads_the_durable_handoff_epoch_and_reference_cap() {
     use djinn_db::{AdmissionHandoffRepository, V0Mode, V1Mode};
 
     let database = Database::open_in_memory().unwrap();

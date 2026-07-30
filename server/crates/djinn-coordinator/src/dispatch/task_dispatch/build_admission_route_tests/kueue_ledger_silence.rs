@@ -1,48 +1,50 @@
-//! AC4 (task `37yq`): armed, a dispatch writes NOTHING to the build-admission
-//! ledger — and disarmed, it writes exactly what it wrote before.
+//! AC6 (task `o53p`): deleting the pre-create pods-quota reservation ledger did
+//! not delete the pre-Kueue dispatch path along with it.
 //!
-//! # Why these tests count rows instead of inspecting code
+//! With `kueue.armed = false` — the shipped default, and the configuration
+//! every deployment runs today — a task-run, a graph-warm Job and a SCIP-index
+//! Job must each still be dispatched. That is the whole claim: the removal was
+//! a subtraction of an authority, not a subtraction of dispatch.
 //!
-//! "The call site is gone" is not a property you can assert about this system.
-//! The warm path carries TWO stacked capacity authorities — the v1 build lease
-//! (`build_leases`) and the admission journal (`admission_journal`) — and they
-//! are written from different call sites in `graph_warmer.rs`. A grep-shaped or
-//! mock-shaped assertion that one of them is silent passes while the other is
-//! still appending rows, still counting occupancy against a cap nothing
-//! decrements, and still able to refuse a dispatch Kueue has already admitted.
+//! # Why these tests assert a dispatch count and a row census together
 //!
-//! So each test takes a per-relation row census against a real Postgres test
-//! database, runs the production dispatch, and takes it again. Every relation is
-//! counted SEPARATELY: a single summed total would let a write to one relation
-//! hide behind an absent write to another.
+//! "Nothing writes to the ledger any more" is trivially satisfiable by a build
+//! in which nothing dispatches at all, and that failure mode is strictly worse
+//! than the one the deletion set out to fix. So every helper here returns the
+//! dispatch count alongside the census, and every test asserts the count FIRST.
+//! A run that produced no Job never gets as far as the census assertions.
 //!
-//! `admission_handoff` is counted too even though the dispatch path does not
-//! write it today. That is the point — it is the relation an epoch handoff
-//! writes, and a "zero writes" claim that never looked at it is a claim about
-//! two thirds of the ledger.
+//! Conversely a census alone would be blind to the direction of travel, so the
+//! relations are counted SEPARATELY and never summed: a write to one hiding
+//! behind an absent write to another is precisely the shape the old two-stacked-
+//! authorities bug had.
+//!
+//! `admission_journal` is deliberately NOT in [`LEDGER_RELATIONS`]. The relation
+//! is being dropped with the authority that owned it; counting it would make
+//! these tests fail to compile against the migrated schema for a reason that has
+//! nothing to do with dispatch. `build_leases` (the v1 lease, retained) and
+//! `admission_handoff` (the epoch handoff, retained) are what is left, and both
+//! are still reachable from these paths.
 
 use std::sync::Arc as StdArc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
 use djinn_core::events::EventBus;
-use djinn_db::{
-    AdmissionJournalRepository, BuildLeaseRepository, Database, ImageRepository, ProjectRepository,
-};
+use djinn_db::{BuildLeaseRepository, Database, ImageRepository, ProjectRepository};
+use djinn_k8s::scip_schedule::MirrorHead;
 use djinn_k8s::{
-    K8sGraphWarmer, KubernetesConfig, WarmJobDispatcher, WarmJobManifest, WarmJobWatcher,
-    WarmTerminalOutcome,
+    K8sGraphWarmer, KubernetesConfig, ScipIndexScheduler, ScipJobInventory, ScipJobObservation,
+    WarmJobDispatcher, WarmJobManifest, WarmJobWatcher, WarmTerminalOutcome,
 };
 
 use super::*;
-use crate::build_admission::{BuildAdmissionController, BuildAdmissionMode};
 use crate::build_lease::BuildLeaseService;
 use crate::graph_warm_lease::BuildLeaseGraphWarmAdapter;
 use djinn_runtime::GraphWarmerService;
 
-/// The three relations the build-admission capacity authority persists to.
-/// Counted individually, never summed.
-const LEDGER_RELATIONS: [&str; 3] = ["build_leases", "admission_journal", "admission_handoff"];
+/// The ledger relations that survive `o53p`. Counted individually, never summed.
+const LEDGER_RELATIONS: [&str; 2] = ["build_leases", "admission_handoff"];
 
 /// Per-relation row census, in the order of [`LEDGER_RELATIONS`].
 async fn ledger_census(db: &Database) -> Vec<(&'static str, i64)> {
@@ -56,30 +58,34 @@ async fn ledger_census(db: &Database) -> Vec<(&'static str, i64)> {
     census
 }
 
+fn census_of(census: &[(&'static str, i64)], relation: &str) -> i64 {
+    census
+        .iter()
+        .find(|(name, _)| *name == relation)
+        .unwrap_or_else(|| panic!("{relation} counted"))
+        .1
+}
+
 // ---------------------------------------------------------------------------
 // Task-run dispatch
 // ---------------------------------------------------------------------------
 
-/// Run one production `dispatch_ready_tasks` with the ledger fully wired, and
-/// return `(census before, census after, tasks dispatched)`.
-async fn dispatch_one_task_run(
-    kueue_armed: bool,
-) -> (Vec<(&'static str, i64)>, Vec<(&'static str, i64)>, usize) {
+/// Run one production `dispatch_ready_tasks` with `kueue.armed = false` and
+/// return `(census before, census after, tasks dispatched, task the slot pool
+/// actually created)`.
+async fn dispatch_one_task_run() -> (
+    Vec<(&'static str, i64)>,
+    Vec<(&'static str, i64)>,
+    usize,
+    Option<String>,
+) {
     let db = crate::test_helpers::create_test_db();
     let (events_tx, _events_rx) = tokio::sync::broadcast::channel(256);
     let fixture = seed_wnd1_ready_worker_tasks(&db, WND1_READY_TASK_COUNT).await;
     configure_wnd1_user_max_sessions(&db, &fixture.created_by_user_id, &fixture.model_id, 1).await;
 
-    let journal = route_journal(&db);
-    let harness = route_controller(&db, &journal, BuildAdmissionMode::Enforce, 1).await;
-    let controller = StdArc::clone(&harness.controller);
-    let (runtime, mut started_rx, _completed_rx) = AdmissionRouteRuntime::new(journal.clone());
-
+    let (runtime, mut started_rx, _completed_rx) = RouteRuntime::new();
     let mut actor = build_route_actor(&db, &events_tx, &runtime, 1);
-    actor.build_admission = Some(controller.clone());
-    // The ONLY difference between the two runs. Everything above is the
-    // production wiring in both.
-    actor.kueue_armed = kueue_armed;
 
     let task_id = fixture.task_ids[0].clone();
     close_all_except(&db, &fixture, &task_id).await;
@@ -87,72 +93,50 @@ async fn dispatch_one_task_run(
     let before = ledger_census(&db).await;
     actor.dispatch_ready_tasks(Some(&fixture.project_id)).await;
     let dispatched = actor.dispatched;
-    if dispatched > 0 {
-        let observed = started_rx
-            .recv()
-            .await
-            .expect("the pool runner fires for a dispatched task");
-        assert_eq!(observed, task_id);
-    }
+    // The create side effect, not just the coordinator's own counter: `started`
+    // is sent from inside the slot-pool runner.
+    let created = if dispatched > 0 {
+        Some(
+            started_rx
+                .recv()
+                .await
+                .expect("the pool runner fires for a dispatched task"),
+        )
+    } else {
+        None
+    };
     let after = ledger_census(&db).await;
-    if dispatched > 0 {
-        runtime.release(&task_id).await;
+    if let Some(created) = created.as_deref() {
+        runtime.release(created).await;
     }
-    (before, after, dispatched as usize)
+    (before, after, dispatched as usize, created)
 }
 
-/// Armed, a task-run dispatch still dispatches — and writes ZERO rows to all
-/// three ledger relations.
-///
-/// The `dispatched == 1` assertion is load-bearing: a gate that simply refused
-/// to dispatch would also write no rows, and would be a far worse bug than the
-/// one this replaces.
+/// Disarmed, a task-run still dispatches all the way into the slot pool.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn armed_task_run_dispatch_writes_no_ledger_rows() {
-    let (before, after, dispatched) = dispatch_one_task_run(true).await;
+async fn disarmed_task_run_still_dispatches() {
+    let (before, after, dispatched, created) = dispatch_one_task_run().await;
 
     assert_eq!(
         dispatched, 1,
-        "arming Kueue must not stop the dispatch — Kueue admits it, the ledger \
-         simply stops reserving for it"
+        "deleting the reservation ledger must not stop a task-run from being \
+         dispatched on the pre-Kueue path"
+    );
+    assert!(
+        created.is_some(),
+        "the coordinator counted a dispatch the slot pool never created"
     );
     for ((relation, start), (_, end)) in before.iter().zip(after.iter()) {
         assert_eq!(
             start, end,
-            "armed, a task-run dispatch must write no {relation} rows \
-             (before={start}, after={end})"
+            "a disarmed task-run dispatch must not reserve {relation} before the \
+             create (before={start}, after={end})"
         );
     }
 }
 
-/// Disarmed, the SAME dispatch still writes to the journal. Without this the
-/// test above passes for a build where the ledger was never reachable at all —
-/// a broken harness and a working cutover look identical from one side.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn disarmed_task_run_dispatch_still_writes_the_pre_existing_row_set() {
-    let (before, after, dispatched) = dispatch_one_task_run(false).await;
-
-    assert_eq!(dispatched, 1, "the disarmed dispatch must still dispatch");
-    let journal_before = before
-        .iter()
-        .find(|(relation, _)| *relation == "admission_journal")
-        .expect("journal counted")
-        .1;
-    let journal_after = after
-        .iter()
-        .find(|(relation, _)| *relation == "admission_journal")
-        .expect("journal counted")
-        .1;
-    assert!(
-        journal_after > journal_before,
-        "disarmed, the pre-existing write set is unchanged: the dispatch must \
-         still append to admission_journal (before={journal_before}, \
-         after={journal_after})"
-    );
-}
-
 // ---------------------------------------------------------------------------
-// Graph-warm dispatch — the two stacked authorities
+// Graph-warm dispatch
 // ---------------------------------------------------------------------------
 
 struct CountingWarmDispatcher {
@@ -197,22 +181,11 @@ async fn seed_project_with_ready_image(db: &Database, name: &str) -> String {
     project.id
 }
 
-/// Drive one production warm dispatch with BOTH capacity authorities wired —
-/// the v1 build lease and the admission journal — and return
-/// `(census before, census after, POST count)`.
-async fn dispatch_one_warm(
-    kueue_armed: bool,
-) -> (Vec<(&'static str, i64)>, Vec<(&'static str, i64)>, usize) {
+/// Drive one production warm dispatch with the retained v1 build lease wired,
+/// and return `(census before, census after, POST count)`.
+async fn dispatch_one_warm() -> (Vec<(&'static str, i64)>, Vec<(&'static str, i64)>, usize) {
     let db = Database::open_in_memory().expect("test database");
     let project_id = seed_project_with_ready_image(&db, "kueue-warm-ledger").await;
-
-    let journal = StdArc::new(AdmissionJournalRepository::new(db.clone()));
-    let controller = StdArc::new(BuildAdmissionController::new(
-        StdArc::clone(&journal),
-        BuildAdmissionMode::Observe,
-        4,
-        "kueue-ledger-epoch",
-    ));
 
     let lease_service = StdArc::new(BuildLeaseService::new(
         StdArc::new(BuildLeaseRepository::new(db.clone())),
@@ -221,14 +194,13 @@ async fn dispatch_one_warm(
     lease_service.recover().await;
 
     let mut config = KubernetesConfig::for_testing();
-    config.kueue_armed = kueue_armed;
+    config.kueue_armed = false;
     // The LEASED path polls `wait_for_bind_and_open_leased_candidate` for
     // `warm_job_timeout_seconds` awaiting a Kubernetes candidate this harness
-    // deliberately does not provide. The 7200s default would hang the disarmed
-    // run. Every ledger write this test counts happens BEFORE the POST, and so
-    // before that wait is entered — shortening it changes nothing about what is
-    // being proven. (Same reasoning as
-    // `graph_warmer_ledger_tests::a_lease_granted_warm_job_is_still_recorded_in_the_lifecycle_ledger`.)
+    // deliberately does not provide. The 7200s default would hang the run. Every
+    // ledger write this test counts happens BEFORE the POST, and so before that
+    // wait is entered — shortening it changes nothing about what is being
+    // proven.
     config.warm_job_timeout_seconds = 1;
 
     let posts = StdArc::new(AtomicUsize::new(0));
@@ -240,7 +212,6 @@ async fn dispatch_one_warm(
         }),
         StdArc::new(ImmediateSuccessWatcher),
     )
-    .with_warm_admission(controller)
     .with_graph_warm_lease(StdArc::new(BuildLeaseGraphWarmAdapter::new(StdArc::clone(
         &lease_service,
     ))));
@@ -259,56 +230,116 @@ async fn dispatch_one_warm(
     (before, after, posts.load(Ordering::SeqCst))
 }
 
-/// Armed, a warm dispatch creates its Job and writes ZERO rows to all three
-/// relations.
+/// Disarmed, a warm Job is still created — and the authority that admits it is
+/// the retained v1 build lease, which must still be reached.
 ///
-/// The lease AND the journal are both wired here. Silencing only one would fail
-/// this test on the other's relation — which is exactly the failure a
-/// call-site-shaped assertion cannot produce.
+/// The `build_leases` growth assertion is the non-vacuity control: without it
+/// this test would also pass for a build in which the lease seam was never
+/// wired, and then the POST count would be measuring nothing but the fake.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn armed_warm_dispatch_writes_no_ledger_rows_through_either_authority() {
-    let (before, after, posts) = dispatch_one_warm(true).await;
+async fn disarmed_warm_job_still_dispatches_through_the_retained_lease() {
+    let (before, after, posts) = dispatch_one_warm().await;
 
     assert_eq!(
         posts, 1,
-        "arming Kueue must not stop the warm Job from being created"
+        "deleting the reservation ledger must not stop the warm Job from being \
+         created"
+    );
+    assert!(
+        census_of(&after, "build_leases") > census_of(&before, "build_leases"),
+        "the warm dispatch must still pass through the retained v1 build lease \
+         (before={}, after={})",
+        census_of(&before, "build_leases"),
+        census_of(&after, "build_leases")
+    );
+    assert_eq!(
+        census_of(&after, "admission_handoff"),
+        census_of(&before, "admission_handoff"),
+        "a warm dispatch writes no epoch handoff row"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// SCIP-index dispatch
+// ---------------------------------------------------------------------------
+
+/// Cluster inventory holding no SCIP and no warm Job for the project, so
+/// `decide` reaches its dispatch arm.
+struct EmptyScipInventory;
+
+#[async_trait]
+impl ScipJobInventory for EmptyScipInventory {
+    async fn observe(
+        &self,
+        _namespace: &str,
+        _project_id: &str,
+    ) -> Result<ScipJobObservation, String> {
+        Ok(ScipJobObservation::default())
+    }
+}
+
+/// Drive one production SCIP-index dispatch and return
+/// `(census before, census after, POST count)`.
+async fn dispatch_one_scip() -> (Vec<(&'static str, i64)>, Vec<(&'static str, i64)>, usize) {
+    let db = Database::open_in_memory().expect("test database");
+    let project_id = seed_project_with_ready_image(&db, "kueue-scip-ledger").await;
+
+    let mut config = KubernetesConfig::for_testing();
+    config.kueue_armed = false;
+
+    let posts = StdArc::new(AtomicUsize::new(0));
+    let scheduler = ScipIndexScheduler::new(
+        config,
+        StdArc::new(EmptyScipInventory),
+        StdArc::new(CountingWarmDispatcher {
+            posts: StdArc::clone(&posts),
+        }),
+    );
+
+    // A head that has stood still far longer than the quiescence floor, so the
+    // pure `decide` reaches `Dispatch` rather than a skip arm.
+    let head = MirrorHead {
+        revision: "0123456789abcdef0123456789abcdef01234567".to_owned(),
+        age: std::time::Duration::from_secs(24 * 60 * 60),
+    };
+
+    let before = ledger_census(&db).await;
+    let decision = scheduler
+        .tick_project(
+            &project_id,
+            Some(&head),
+            "reg.example:5000/djinn-project-scip:abc123",
+            None,
+        )
+        .await;
+    assert_eq!(
+        decision.dispatch_revision(),
+        Some(head.revision.as_str()),
+        "the SCIP scheduler must reach its dispatch arm, not a skip arm \
+         (reason: {})",
+        decision.reason()
+    );
+    let after = ledger_census(&db).await;
+    (before, after, posts.load(Ordering::SeqCst))
+}
+
+/// Disarmed, a SCIP-index Job is still created — and, as it always was, it is
+/// created leaselessly. Its CPU is folded into protected capacity, so it must
+/// touch neither surviving ledger relation.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn disarmed_scip_job_still_dispatches_without_taking_a_lease() {
+    let (before, after, posts) = dispatch_one_scip().await;
+
+    assert_eq!(
+        posts, 1,
+        "deleting the reservation ledger must not stop the SCIP-index Job from \
+         being created"
     );
     for ((relation, start), (_, end)) in before.iter().zip(after.iter()) {
         assert_eq!(
             start, end,
-            "armed, a warm dispatch must write no {relation} rows \
-             (before={start}, after={end})"
-        );
-    }
-}
-
-/// Disarmed, the same warm dispatch writes to BOTH authorities. This is the
-/// control that makes the test above mean something, and it is also the direct
-/// evidence for "two stacked authorities": one dispatch, two relations growing.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn disarmed_warm_dispatch_writes_through_both_stacked_authorities() {
-    let (before, after, posts) = dispatch_one_warm(false).await;
-
-    assert_eq!(
-        posts, 1,
-        "the disarmed warm dispatch must still POST its Job"
-    );
-    for relation in ["build_leases", "admission_journal"] {
-        let start = before
-            .iter()
-            .find(|(name, _)| *name == relation)
-            .expect("relation counted")
-            .1;
-        let end = after
-            .iter()
-            .find(|(name, _)| *name == relation)
-            .expect("relation counted")
-            .1;
-        assert!(
-            end > start,
-            "disarmed, the warm dispatch must still write {relation} \
-             (before={start}, after={end}) — otherwise the armed test above is \
-             asserting against an authority that was never reachable"
+            "the SCIP Job is leaseless by construction; it must write no \
+             {relation} rows (before={start}, after={end})"
         );
     }
 }

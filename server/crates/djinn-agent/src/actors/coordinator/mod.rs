@@ -10,16 +10,11 @@
 // bridges that gap.
 
 // Re-export everything except the items we shadow.
-pub use djinn_coordinator::build_admission::{
-    AdmissionSeedReport, BuildAdmissionController, BuildAdmissionMode, BuildAdmissionReadiness,
-    allocate_server_epoch,
-};
-pub use djinn_coordinator::build_admission_handoff;
 pub use djinn_coordinator::{
     AutoMergeTracker, BackgroundWorkTracker, BreakerDebugEntry, CoordinatorDebugSnapshot,
-    CoordinatorError, CoordinatorHandle, CoordinatorStatus, DebugBuildAdmission, DebugCooldown,
-    DebugDispatchState, DebugFailureStreak, DebugInflightEntry, DebugSlot, DebugTotals,
-    DispatchPauseView, PR_REVIEW_FEEDBACK_EVENT, PrCleanupConfig, record_supervisor_rework_reopen,
+    CoordinatorError, CoordinatorHandle, CoordinatorStatus, DebugCooldown, DebugDispatchState,
+    DebugFailureStreak, DebugInflightEntry, DebugSlot, DebugTotals, DispatchPauseView,
+    PR_REVIEW_FEEDBACK_EVENT, PrCleanupConfig, record_supervisor_rework_reopen,
 };
 
 // Re-export public submodules.
@@ -78,14 +73,6 @@ impl CoordinatorDeps {
         warmer: std::sync::Arc<dyn djinn_runtime::GraphWarmerService>,
     ) -> Self {
         self.inner = self.inner.with_graph_warmer(warmer);
-        self
-    }
-
-    pub fn with_build_admission(
-        mut self,
-        controller: std::sync::Arc<BuildAdmissionController>,
-    ) -> Self {
-        self.inner = self.inner.with_build_admission(controller);
         self
     }
 

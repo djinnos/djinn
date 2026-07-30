@@ -1,7 +1,6 @@
 //! Operator-driven safe-ordering executor for the durable admission epoch.
 //!
-//! This module sits beside [`crate::build_admission_handoff`] (the emergency-side
-//! policy interpreter) and composes the three durable primitives that
+//! It composes the three durable primitives that
 //! [`AdmissionHandoffRepository`] exposes —
 //! [`AdmissionHandoffRepository::set_modes_and_cap`],
 //! [`AdmissionHandoffRepository::acknowledge`], and
@@ -14,15 +13,25 @@
 //! ## Authority acknowledgements
 //!
 //! Two acknowledgement writers exist. The v0 (emergency) authority ack is
-//! written by the coordinator leader's live handoff loop
-//! (`finalize_build_admission_handoff`) once the emergency controller is a
-//! *healthy* `Enforce` — the executor therefore never fabricates it, it *waits*
-//! for it (returning [`TransitionError::AwaitingEmergencyAck`]). This is the
-//! "controller-replica ack" the reverse ordering confirms before it disables
-//! v1. The v1 (invocation) authority ack has no separate runtime writer — the
-//! agents read the epoch directly through
-//! `evaluate_invocation_lift` — so the executor records it as it drives each
-//! transition, representing the operator arming the invocation authority.
+//! written by the server's admission-epoch loop
+//! (`acknowledge_absent_emergency_authority`) — the executor never fabricates
+//! it, it *waits* for it (returning [`TransitionError::AwaitingEmergencyAck`]).
+//! This is the ack the reverse ordering confirms before it disables v1.
+//!
+//! Kueue cutover (o53p): that writer used to be
+//! `finalize_build_admission_handoff`, gated on the v0 `BuildAdmissionController`
+//! being a *healthy* `Enforce`. The controller is deleted, so the emergency
+//! authority is permanently ABSENT and therefore permanently acknowledged — the
+//! loop now writes the ack unconditionally. The wait below is unchanged and
+//! still correct: it waits for the ack to reach the CURRENT epoch, which after
+//! an `advance` takes one loop tick. Without that writer this executor would
+//! block forever at `enter_forward_overlap`, and — far worse — the retained
+//! per-invocation cgroup lease would silently drop to `Unleased`.
+//!
+//! The v1 (invocation) authority ack has no separate runtime writer — the
+//! agents read the epoch directly through `evaluate_invocation_lift` — so the
+//! executor records it as it drives each transition, representing the operator
+//! arming the invocation authority.
 //!
 //! ## Forward cutover
 //!

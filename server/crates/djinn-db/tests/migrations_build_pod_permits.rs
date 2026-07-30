@@ -299,17 +299,12 @@ async fn seed_preexisting_build_lease_and_admission_data(pool: &sqlx::PgPool) {
     .execute(pool)
     .await
     .expect("seed pre-existing build lease");
-    sqlx::query(
-        "INSERT INTO admission_journal \
-         (domain, work_id, generation, workload_kind, state, creator_server_epoch, \
-          object_name, object_uid, created_at, updated_at) \
-         VALUES ('invocation_build', 'preexisting-work', 3, 'invocation', 'live', \
-                 'preexisting-epoch', 'preexisting-job', 'preexisting-job-uid', \
-                 '2025-01-02T03:04:05Z', '2025-01-02T03:04:06Z')",
-    )
-    .execute(pool)
-    .await
-    .expect("seed pre-existing admission journal row");
+    // The `admission_journal` seed that used to live here was removed with the
+    // pods-quota reservation authority itself (o53p). The point of this helper
+    // is unchanged: prove migrations 162/164 do not rewrite pre-existing ledger
+    // rows. The `build_leases`, `build_lease_caps` and `admission_handoff`
+    // assertions below still carry that proof, and every build_pod_permits /
+    // 162 / 164 assertion in this file is byte-identical to before.
     sqlx::query(
         "UPDATE admission_handoff \
          SET phase = 'invocation_primary', epoch = 7, v0_mode = 'disabled', \
@@ -336,15 +331,6 @@ async fn existing_build_lease_and_admission_snapshot(pool: &sqlx::PgPool) -> Vec
     .fetch_one(pool)
     .await
     .expect("read pre-existing build lease cap");
-    let journal: String = sqlx::query_scalar(
-        "SELECT concat_ws('|', domain, work_id, generation, workload_kind, state, \
-                creator_server_epoch, object_name, object_uid, created_at::text, updated_at::text) \
-         FROM admission_journal \
-         WHERE domain = 'invocation_build' AND work_id = 'preexisting-work' AND generation = 3",
-    )
-    .fetch_one(pool)
-    .await
-    .expect("read pre-existing admission journal row");
     let handoff: String = sqlx::query_scalar(
         "SELECT concat_ws('|', name, phase, epoch, v0_mode, v1_mode, cap, updated_at::text) \
          FROM admission_handoff WHERE name = 'build'",
@@ -352,7 +338,7 @@ async fn existing_build_lease_and_admission_snapshot(pool: &sqlx::PgPool) -> Vec
     .fetch_one(pool)
     .await
     .expect("read pre-existing admission handoff");
-    vec![lease, lease_cap, journal, handoff]
+    vec![lease, lease_cap, handoff]
 }
 
 #[tokio::test]

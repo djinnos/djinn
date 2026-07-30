@@ -1,21 +1,8 @@
 {{- $githubAppConfigAttempted := include "djinn.githubAppConfigAttempted" . -}}
-{{- $buildAdmission := .Values.buildAdmission -}}
 {{- $server := .Values.server -}}
 {{- $migrationOperatorSecret := default "" .Values.migration.designatedOperatorSecret -}}
 {{- if .Release.IsInstall -}}
   {{- $migrationOperatorSecret = required "migration.designatedOperatorSecret is required on fresh installs to bootstrap the caller-owned designated operator" .Values.migration.designatedOperatorSecret -}}
-{{- end -}}
-{{- if eq $buildAdmission.mode "enforce" -}}
-  {{- if ne (int $server.replicas) 1 -}}
-    {{- fail "buildAdmission.mode=enforce requires server.replicas=1" -}}
-  {{- end -}}
-  {{- if eq $server.strategy.type "RollingUpdate" -}}
-    {{- if or (ne (toString $server.strategy.rollingUpdate.maxSurge) "0") (ne (toString $server.strategy.rollingUpdate.maxUnavailable) "1") -}}
-      {{- fail "buildAdmission.mode=enforce requires server.strategy RollingUpdate with maxSurge=0 and maxUnavailable=1" -}}
-    {{- end -}}
-  {{- else if ne $server.strategy.type "Recreate" -}}
-    {{- fail "buildAdmission.mode=enforce requires server.strategy.type=Recreate or non-overlapping RollingUpdate" -}}
-  {{- end -}}
 {{- end -}}
 {{- /*
 Kueue arming invariants. Rendered from this template because it is the one that
@@ -317,13 +304,6 @@ spec:
             # activates the coordinator's selected cleanup mode.
             - name: DJINN_CACHE_CLEANUP_MODE
               value: {{ .Values.cacheCleanup.mode | quote }}
-            # Admission mode and cap are intentionally literal server env
-            # entries, rather than implicit binary defaults. Enforce topology
-            # validation above makes this exact configuration safe to render.
-            - name: DJINN_BUILD_ADMISSION_MODE
-              value: {{ $buildAdmission.mode | quote }}
-            - name: DJINN_MAX_BUILD_TASKRUNS
-              value: {{ $buildAdmission.maxBuildTaskRuns | quote }}
             - name: DJINN_IMAGE_BUILDER_IMAGE
               value: {{ .Values.imagePipeline.builderImage | quote }}
             # Fully-qualified ref used in `COPY --from=<ref>` in each

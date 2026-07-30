@@ -61,36 +61,42 @@
 //!
 //! A dispatch lease cannot be probed the way a warm lease is: its identity is
 //! `dispatch:{task_id}:{generation}`, and the Kubernetes Job it leads to is
-//! named from a `task_run_id` that does not exist yet at acquisition time.
-//! There is no object name to ask about, and guessing one would make the
-//! absence proof vacuous. Its owner is instead a durable fact:
+//! named from a `task_run_id` that did not exist yet at acquisition time. There
+//! is no object name to ask about, and guessing one would make the absence
+//! proof vacuous.
 //!
-//! * a dispatch slot is acquired for exactly one admission generation, and
-//! * `BuildAdmissionController::transition_permit` hands that slot back on the
-//!   same edge that marks the generation terminal.
+//! # Kueue cutover (o53p): the dispatch proof got STRONGER, not weaker
 //!
-//! So a settled dispatch lease whose journal generation is already `terminal`
-//! is holding capacity for a lifecycle that provably ended, and the ways that
-//! generation reaches `terminal` are exactly the ways the slot should already
-//! have been released: the ordinary lifecycle callback, restart recovery
-//! (`recover_all_predecessors`, which retires every predecessor-epoch row and
-//! releases no lease), and the inventory reconciler's own Kubernetes absence
-//! proof. Reclamation therefore INHERITS the journal's evidence instead of
-//! inventing a weaker one of its own.
+//! This population used to be proven ownerless by reading the v0 lifecycle
+//! journal (`admission_journal`): a settled dispatch lease whose admission
+//! generation was already `terminal` was holding capacity for a lifecycle that
+//! provably ended. That journal was the pre-create reservation authority Kueue
+//! replaces, and it is deleted.
 //!
-//! What is deliberately NOT proof: a dispatch lease with no journal row at all.
-//! `BuildAdmissionController::admit` writes no ledger row while v0 is `off`, so
-//! an absent row is genuinely unknown state and stays occupying. The
-//! grant-without-a-row window is closed on the other side instead — `admit`
-//! hands the slot back when the ledger append fails.
+//! What replaces it is not a heuristic, it is a stronger fact. NOTHING acquires
+//! a `task_dispatch` lease any more: `LeaseIdentity::TaskDispatch` has no
+//! constructor anywhere in the workspace, because the pre-create dispatch
+//! reservation it served was stood down by the Kueue cutover. So every
+//! `task_dispatch` row in `build_leases` is a legacy row whose owner cannot
+//! exist, and a settled occupying one is ownerless by construction rather than
+//! by inference from a second ledger.
+//!
+//! That claim is load-bearing, so it is asserted rather than merely stated:
+//! `no_dispatch_lease_can_ever_be_acquired_again` fails if a
+//! `LeaseIdentity::TaskDispatch` constructor is reintroduced. If one ever is,
+//! this proof must be replaced BEFORE that lands, or reclamation would start
+//! retiring live dispatch leases.
+//!
+//! Retiring the legacy rows is the point. Leaving them would strand the
+//! cutover's own leftovers against a production reference cap of 3, which is
+//! the outage shape this module was written to end.
 
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
 use djinn_db::{
-    AdmissionDomain, AdmissionJournalRepository, AdmissionState, BuildLeaseConsumerKind,
-    BuildLeaseRepository, BuildLeaseRow, BuildLeaseState, ReclaimAbsentBuildLeaseInput,
+    BuildLeaseConsumerKind, BuildLeaseRepository, BuildLeaseRow, ReclaimAbsentBuildLeaseInput,
     ReclaimAbsentBuildLeaseOutcome,
 };
 use djinn_k8s::{
@@ -156,10 +162,10 @@ impl BuildLeaseReclaimReport {
 /// absence proof becomes vacuous.
 ///
 /// `task_dispatch` deliberately yields `None`. It is not an oversight and not a
-/// name this function could learn: the slot is acquired BEFORE the task-run
-/// exists, so the Job name it leads to (`taskrun_job_name(task_run_id)`) is not
-/// yet determined. That population is proven ownerless through its admission
-/// generation instead — see [`dispatch_identity`] and the module docs.
+/// name this function could learn: the slot was acquired BEFORE the task-run
+/// existed, so the Job name it leads to (`taskrun_job_name(task_run_id)`) was
+/// never determined. That population is proven ownerless by the absence of any
+/// possible acquirer instead — see the module docs.
 pub fn lease_object_name(row: &BuildLeaseRow) -> Option<String> {
     let mut fields = row.immutable_identity.split(':');
     match (row.key.consumer_kind, fields.next()?) {
@@ -178,37 +184,17 @@ pub fn lease_object_name(row: &BuildLeaseRow) -> Option<String> {
     }
 }
 
-/// The admission generation a `task_dispatch` lease bought capacity for.
-///
-/// Read from the durable `dispatch:{task_id}:{generation}` identity written by
-/// `BuildLeaseService::identity`, never from a process-local counter: the
-/// generation a dispatch attempt reserves is resolved by the journal
-/// (`resolve_dispatch_generation`) before the slot is acquired, so this is the
-/// exact journal key that owns the lease. An identity that does not parse
-/// yields `None` and the lease is left occupying.
-pub fn dispatch_identity(row: &BuildLeaseRow) -> Option<(String, i64)> {
-    if row.key.consumer_kind != BuildLeaseConsumerKind::TaskDispatch {
-        return None;
-    }
-    let rest = row.immutable_identity.strip_prefix("dispatch:")?;
-    let (task_id, generation) = rest.rsplit_once(':')?;
-    let generation: i64 = generation.parse().ok()?;
-    (!task_id.is_empty() && generation >= 0).then(|| (task_id.to_owned(), generation))
-}
-
 /// Why one settled occupying lease may be retired.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum OwnerlessProof {
     /// The authoritative LIST and an independent GET both say the object this
     /// lease committed to does not exist.
     ObjectAbsent,
-    /// The lease is a `task_dispatch` row whose admission generation is
-    /// terminal: the lifecycle it bought capacity for has ended.
-    GenerationTerminal,
-    /// The lease is a `task_dispatch` row the FIFO granted to a requester that
-    /// had already given up: still `granted`, never acknowledged, and no
-    /// admission ever proceeded on it.
-    GrantNeverClaimed,
+    /// The lease is a `task_dispatch` row, and the pre-create dispatch
+    /// reservation that was its only possible acquirer no longer exists (Kueue
+    /// cutover, o53p). No owner can exist, so this is legacy capacity to
+    /// retire.
+    DispatchAuthorityDeleted,
 }
 
 impl OwnerlessProof {
@@ -216,18 +202,13 @@ impl OwnerlessProof {
     /// Kubernetes-shaped reclaimer could see at all before #2608's capacity
     /// cut-over was given a sweep of its own.
     fn is_dispatch(self) -> bool {
-        matches!(self, Self::GenerationTerminal | Self::GrantNeverClaimed)
+        matches!(self, Self::DispatchAuthorityDeleted)
     }
 }
 
 /// Periodic sweep that retires occupying build leases with no owner.
 pub struct BuildLeaseReclaimer {
     repository: Arc<BuildLeaseRepository>,
-    /// The v0 lifecycle ledger. Required, not optional: it is the only thing
-    /// that can answer who owns a `task_dispatch` lease, and an optional
-    /// dependency here would let composition silently reinstate the
-    /// unreclaimable population this module exists to retire.
-    journal: Arc<AdmissionJournalRepository>,
     inventory: Arc<dyn WorkloadInventory>,
     settle_window: Duration,
     serial: Mutex<()>,
@@ -237,15 +218,9 @@ impl BuildLeaseReclaimer {
     #[must_use]
     pub fn new(
         repository: Arc<BuildLeaseRepository>,
-        journal: Arc<AdmissionJournalRepository>,
         inventory: Arc<dyn WorkloadInventory>,
     ) -> Self {
-        Self::with_settle_window(
-            repository,
-            journal,
-            inventory,
-            DEFAULT_LEASE_RECLAIM_SETTLE_WINDOW,
-        )
+        Self::with_settle_window(repository, inventory, DEFAULT_LEASE_RECLAIM_SETTLE_WINDOW)
     }
 
     /// Reclaim with an explicit settle window. Tests use a zero window to
@@ -253,13 +228,11 @@ impl BuildLeaseReclaimer {
     #[must_use]
     pub fn with_settle_window(
         repository: Arc<BuildLeaseRepository>,
-        journal: Arc<AdmissionJournalRepository>,
         inventory: Arc<dyn WorkloadInventory>,
         settle_window: Duration,
     ) -> Self {
         Self {
             repository,
-            journal,
             inventory,
             settle_window,
             serial: Mutex::new(()),
@@ -270,50 +243,21 @@ impl BuildLeaseReclaimer {
     ///
     /// Every branch is a proof, never an age heuristic. `None` means the
     /// question could not be answered — an unrecognised identity, a lease whose
-    /// object is still listed, an `Uncertain` probe against a degraded API
-    /// server, an unreadable journal, or a dispatch generation that is still
-    /// occupying — and an unanswered question always leaves the lease holding
-    /// its slot.
+    /// object is still listed, or an `Uncertain` probe against a degraded API
+    /// server — and an unanswered question always leaves the lease holding its
+    /// slot.
     async fn ownerless_proof(
         &self,
         row: &BuildLeaseRow,
         listed_names: &HashSet<String>,
     ) -> Option<OwnerlessProof> {
-        if let Some((task_id, generation)) = dispatch_identity(row) {
-            return match self
-                .journal
-                .generation_state(AdmissionDomain::TaskObservation, &task_id, generation)
-                .await
-            {
-                Ok(Some(AdmissionState::Terminal)) => Some(OwnerlessProof::GenerationTerminal),
-                // Still occupying the lifecycle ledger: the task-run may be
-                // live, and this lease is its capacity.
-                Ok(Some(_)) => None,
-                // No ledger row at all. That is unknown state, not proof — v0
-                // `off` writes no rows — EXCEPT in the one durable state that
-                // says the grant was never claimed.
-                //
-                // `acquire_dispatch_slot` acknowledges every grant it takes
-                // (`queue` then `grant`), so a lease a live dispatch holds is
-                // always `launching` or later. A settled `granted` row is
-                // therefore always a FIFO grant handed to a requester that had
-                // already walked away on a `Queued` answer — the same trap the
-                // warm path hit — and with no ledger row behind it, no
-                // admission ever proceeded on it either. Three independent
-                // durable facts, none of them "the row looks old".
-                Ok(None) if row.state == BuildLeaseState::Granted => {
-                    Some(OwnerlessProof::GrantNeverClaimed)
-                }
-                Ok(None) => None,
-                Err(error) => {
-                    tracing::warn!(
-                        consumer_id = %row.key.consumer_id,
-                        %error,
-                        "build_lease: admission ledger unreadable; dispatch lease left occupying"
-                    );
-                    None
-                }
-            };
+        if row.key.consumer_kind == BuildLeaseConsumerKind::TaskDispatch {
+            // See the module docs. Nothing constructs `LeaseIdentity::TaskDispatch`
+            // any more, so a settled occupying dispatch lease has no possible
+            // owner. This is a durable fact about the code, not an age heuristic,
+            // and `no_dispatch_lease_can_ever_be_acquired_again` fails if it stops
+            // being true.
+            return Some(OwnerlessProof::DispatchAuthorityDeleted);
         }
         let object_name = lease_object_name(row)?;
         if listed_names.contains(&object_name) {

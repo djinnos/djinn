@@ -48,16 +48,14 @@ use types::*;
 
 pub mod audit_sampler;
 pub mod build_admission;
-pub mod build_admission_handoff;
-pub mod build_admission_inventory;
-/// Operator safe-ordering executor composing the durable epoch primitives into
-/// forward-cutover, kill-switch, and rollback workflows.
+/// Operator-driven safe-ordering executor for the durable admission epoch.
+/// Retained by o53p: it drives `admission_handoff`, not the deleted pods-quota
+/// reservation, and is the engine behind the `djinn-server epoch` CLI.
 pub mod build_admission_transition;
 /// Durable v1 lease service; v0 admission remains rollout authority.
 pub mod build_lease;
 /// Retirement of occupying build leases whose Kubernetes object is provably gone.
 pub mod build_lease_reclaim;
-pub mod build_slot_authority;
 pub mod cargo_warm_base_gc;
 pub(crate) mod ci_preflight_gate;
 pub mod ci_reproduction;
@@ -169,9 +167,9 @@ mod worker_lifecycle;
 pub use handle::CoordinatorHandle;
 pub use types::{
     AutoMergeTracker, BackgroundWorkTracker, BreakerDebugEntry, CoordinatorDebugSnapshot,
-    CoordinatorDeps, CoordinatorError, CoordinatorStatus, DebugBuildAdmission, DebugCooldown,
-    DebugDispatchState, DebugFailureStreak, DebugInflightEntry, DebugSlot, DebugTotals,
-    DispatchPauseView, PrCleanupConfig,
+    CoordinatorDeps, CoordinatorError, CoordinatorStatus, DebugCooldown, DebugDispatchState,
+    DebugFailureStreak, DebugInflightEntry, DebugSlot, DebugTotals, DispatchPauseView,
+    PrCleanupConfig,
 };
 pub use worker_lifecycle::{
     CheckpointLifecycleConfig, CheckpointLifecycleMetadata, CheckpointRequestReason,
@@ -191,33 +189,11 @@ pub use djinn_orchestration_types::coordinator::PR_REVIEW_FEEDBACK_EVENT;
 // ─── Test modules ────────────────────────────────────────────────────────
 
 #[cfg(test)]
-pub(crate) mod build_admission_capacity_support;
-#[cfg(test)]
-mod build_admission_epoch_disruption_tests;
-#[cfg(test)]
-mod build_admission_epoch_matrix_tests;
-#[cfg(test)]
-mod build_admission_epoch_support;
-#[cfg(test)]
-mod build_admission_handoff_matrix_tests;
-#[cfg(test)]
-mod build_admission_integration_tests;
-#[cfg(test)]
-mod build_admission_inventory_tests;
-#[cfg(test)]
-mod build_admission_light_role_tests;
-#[cfg(test)]
-mod build_admission_stale_reclaim_tests;
-#[cfg(test)]
 mod build_lease_cap_arming_tests;
 #[cfg(test)]
 mod build_lease_cap_refresh_tests;
 #[cfg(test)]
 mod build_lease_deadline_echo_tests;
-#[cfg(test)]
-mod build_lease_dispatch_reclaim_tests;
-#[cfg(test)]
-mod build_lease_dispatch_tombstone_tests;
 #[cfg(test)]
 mod build_lease_integration_tests;
 #[cfg(test)]

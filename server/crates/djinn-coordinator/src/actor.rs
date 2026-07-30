@@ -81,13 +81,6 @@ pub(super) struct CoordinatorActor {
     pub(super) boot_at: ::time::OffsetDateTime,
     pub(super) events_tx: broadcast::Sender<DjinnEventEnvelope>,
     pub(super) pool: SlotPoolHandle,
-    /// Durable build admission shared by every task-run dispatch route.
-    pub(super) build_admission: Option<Arc<crate::build_admission::BuildAdmissionController>>,
-    /// Kueue cutover (37yq): armed, the ClusterQueue owns build capacity and
-    /// `admission_controller()` stops handing `build_admission` out to the
-    /// pre-create reservation path. Copied from `CoordinatorDeps`, which reads
-    /// `DJINN_KUEUE_ARMED` once at construction.
-    pub(super) kueue_armed: bool,
     #[cfg_attr(test, allow(dead_code))]
     pub(super) catalog: CatalogService,
     pub(super) health: HealthTracker,
@@ -542,8 +535,6 @@ impl CoordinatorActor {
             cancel,
             db,
             pool,
-            build_admission,
-            kueue_armed,
             catalog,
             health,
             role_registry,
@@ -622,18 +613,6 @@ impl CoordinatorActor {
                 db.clone(),
             )),
         );
-        // Leader-local build-admission health. This constructor runs only on
-        // the pod that won coordinator leadership, so the controller handle
-        // below is the one that actually decides admission — a standby never
-        // registers this check at all, which reads as "not registered" rather
-        // than as a check that silently always passes.
-        crate::doctor::register_build_admission_health_check(
-            djinn_core::doctor::registry(),
-            Arc::new(crate::doctor::ControllerBuildAdmissionHealthSource::new(
-                build_admission.clone(),
-            )),
-        );
-
         Self {
             receiver,
             events,
@@ -644,8 +623,6 @@ impl CoordinatorActor {
             boot_at: ::time::OffsetDateTime::now_utc(),
             events_tx: events_tx.clone(),
             pool,
-            build_admission,
-            kueue_armed,
             catalog,
             health,
             role_registry,
@@ -938,20 +915,6 @@ impl CoordinatorActor {
         }
     }
 
-    pub(super) async fn run_build_admission_release_pass(&mut self) {
-        // Keep the release arm's state small. `dispatch_ready_tasks` is also
-        // reachable through event handling, and embedding another copy of its
-        // large future directly in `run` made the coordinator future overflow
-        // a Tokio worker stack while processing rapid status-change events.
-        // Boxing bounds this arm without changing dispatch or watchdog
-        // semantics.
-        Self::run_pass_with_watchdog(
-            "build-admission-release",
-            Box::pin(self.dispatch_ready_tasks(None)),
-        )
-        .await;
-    }
-
     /// Register this runtime's immutable incarnation lease during startup.
     async fn register_coordinator_incarnation(&self) {
         if let Err(error) = djinn_db::CoordinatorIncarnationRepository::new(self.db.clone())
@@ -1105,17 +1068,6 @@ impl CoordinatorActor {
                 _ = self.cancel.cancelled() => {
                     tracing::info!("CoordinatorActor: cancellation token fired, stopping");
                     break;
-                }
-
-                // A terminal admission transition releases durable capacity.
-                _ = async {
-                    if let Some(controller) = self.build_admission.as_ref() {
-                        controller.release_notifier().notified().await;
-                    } else {
-                        std::future::pending::<()>().await;
-                    }
-                } => {
-                    self.run_build_admission_release_pass().await;
                 }
 
                 // 2. Incoming API messages.
@@ -1769,32 +1721,6 @@ impl CoordinatorActor {
             // exit while the task remains nonterminal is a protocol
             // violation and must count as a failed attempt for retry
             // accounting.
-            // SessionRepository emits `started` both when a runtime session is
-            // created and when it is subsequently observed running. Binding
-            // here makes the UID available to the terminal callback below.
-            ("session", "started") => {
-                let Some(session) = envelope.parse_payload::<djinn_core::models::SessionRecord>()
-                else {
-                    return;
-                };
-                let (Some(task_id), Some(task_run_id)) =
-                    (session.task_id.as_deref(), session.task_run_id.as_deref())
-                else {
-                    return;
-                };
-                let task_repo = TaskRepository::new(
-                    self.db.clone(),
-                    crate::events::event_bus_for(&self.events_tx),
-                );
-                if let Ok(Some(task)) = task_repo.get(task_id).await {
-                    self.live_task_run_build_admission(
-                        task_id,
-                        task.reopen_count.max(0),
-                        task_run_id,
-                    )
-                    .await;
-                }
-            }
             ("session", "completed" | "interrupted" | "failed") => {
                 let Some(session) = envelope.parse_payload::<djinn_core::models::SessionRecord>()
                 else {
@@ -1811,9 +1737,6 @@ impl CoordinatorActor {
                 // the respawn guard does not defer the (task, role) pair
                 // forever on an orphaned pending attempt.
                 if let Some(task_id) = session.task_id.as_deref() {
-                    if let Some(task_run_id) = session.task_run_id.as_deref() {
-                        self.terminal_task_run_build_admission(task_run_id).await;
-                    }
                     let _ = self
                         .classify_session_exit_liveness(
                             &session.id,
@@ -1842,10 +1765,6 @@ impl CoordinatorActor {
                     return;
                 };
                 if task.status == "closed" {
-                    // A cap-denied task has no runtime task-run to emit a terminal callback.
-                    if let Some(admission) = &self.build_admission {
-                        admission.cancel_deferred_task(&task.id).await;
-                    }
                     // Terminalize the live attempt when a task closes via a
                     // force-close path. Best-effort; does not block the event.
                     self.terminalize_force_close_attempt(&task).await;
