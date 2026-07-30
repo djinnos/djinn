@@ -27,11 +27,14 @@ pub mod test_support {
         apply_all_migrations_to_fresh_database, backdate_coordinator_incarnation_lease,
         backdate_task_attempt_created_at, backdate_task_updated_at,
         build_multi_project_housekeeping_fixture, close_task_at,
-        corrupt_credential_encrypted_value, corrupt_refinement_task_role_for_test,
-        delete_proposal_lint_result_for_revision_for_test, delete_proposal_lint_results_for_test,
-        delete_session_row, drop_table_cascade_for_test, drop_table_for_test,
-        elapse_refinement_run_wall_clock_for_test, ensure_doctor_findings_schema, event_bus_for,
-        insert_pending_attempt_with_raw_owner, make_coordinator_incarnation_error_after_first_read,
+        complete_refinement_intent_without_successor_for_test,
+        correlate_task_to_refinement_run_for_test, corrupt_credential_encrypted_value,
+        corrupt_refinement_task_role_for_test, delete_proposal_lint_result_for_revision_for_test,
+        delete_proposal_lint_results_for_test, delete_session_row, drop_table_cascade_for_test,
+        drop_table_for_test, elapse_refinement_run_wall_clock_for_test,
+        ensure_doctor_findings_schema, event_bus_for, force_refinement_run_park_kind_for_test,
+        force_refinement_run_terminal_for_test, insert_pending_attempt_with_raw_owner,
+        make_coordinator_incarnation_error_after_first_read,
         make_coordinator_incarnation_vanish_after_first_read, make_project,
         make_refinement_run_phantom_for_test, nullify_note_confidence_for_test,
         override_debate_trail_body_metadata, proposal_lint_revision_id_for_test,
@@ -42,7 +45,7 @@ pub mod test_support {
         rename_note_confidence_column_for_test, replace_legacy_proposal_head_for_test,
         seed_board_health_mismatch_candidate, seed_chat_session_row, seed_project,
         seed_readiness_detail_projection_for_test, seed_session_row, seed_session_row_with_id,
-        seed_task_row, structured_evidence_handoff_counts_for_test,
+        seed_task_row, structured_evidence_handoff_counts_for_test, task_row_count_for_test,
     };
 }
 

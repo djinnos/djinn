@@ -273,23 +273,17 @@
         link_proposal_to_project(&db, &repo, &proposal.id).await;
         // `proposals.refinement_owner_user_id` is FK-constrained to `users`, so
         // durable owner attribution can only be observed against a real row.
-        sqlx::query("INSERT INTO users (id, github_id, github_login) VALUES ($1, $2, $3)")
-            .bind("durable-owner-019f")
-            .bind(919_019_019i64)
-            .bind("durable-owner-019f")
-            .execute(db.pool())
-            .await
-            .unwrap();
+        let owner_user_id = create_test_user(&db, "durable-owner-019f").await;
         for _ in 0..2 {
             let response = server.dispatch_tool("proposal_refinement_start", serde_json::json!({
-                "proposal_id": proposal.id, "owner_user_id": "durable-owner-019f",
+                "proposal_id": proposal.id, "owner_user_id": owner_user_id,
                 "request_id": "start-request-019f"
             })).await.unwrap();
             assert_eq!(response["error"], "accepted; dispatch pending");
         }
         assert_eq!(
             repo.get(&proposal.id).await.unwrap().unwrap().refinement_owner_user_id.as_deref(),
-            Some("durable-owner-019f")
+            Some(owner_user_id.as_str())
         );
         assert_eq!(repo.load_refinement_run_aggregates(&proposal.id, 60_000).await.unwrap().len(), 1);
         assert_eq!(repo.revisions(&proposal.id).await.unwrap().iter()

@@ -17,8 +17,10 @@
             },
         )
         .await;
-        sqlx::query("UPDATE tasks SET refinement_run_id = $1 WHERE id = $2")
-            .bind(run_id).bind(&task_id).execute(db.pool()).await.unwrap();
+        // Deliberately partial: run id only, no intent identity. That is the
+        // durable shape that makes the task itself the liveness evidence.
+        djinn_db::test_support::correlate_task_to_refinement_run_for_test(db, &task_id, run_id)
+            .await;
         (project_id, task_id)
     }
 
@@ -41,8 +43,10 @@
                 task_id: Some(task_id),
             },
         ).await;
-        sqlx::query("UPDATE sessions SET status = 'running' WHERE id = $1")
-            .bind(&session_id).execute(db.pool()).await.unwrap();
+        djinn_db::SessionRepository::new(db.clone(), EventBus::noop())
+            .set_running(&session_id)
+            .await
+            .unwrap();
         session_id
     }
 
@@ -205,8 +209,11 @@
                 Fixture::Handoff => {}
                 Fixture::Heartbeat => {
                     djinn_db::test_support::make_refinement_run_phantom_for_test(&db, &run_id).await;
-                    sqlx::query("UPDATE refinement_runs SET heartbeat_at = to_char(transaction_timestamp() AT TIME ZONE 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') WHERE id = $1")
-                        .bind(&run_id).execute(db.pool()).await.unwrap();
+                    // The only durable heartbeat writer: it stamps
+                    // `transaction_timestamp()` on the exact generation.
+                    repo.record_refinement_durable_progress(
+                        &run_id, generation, djinn_db::RefinementDurableProgress::DebateAppend,
+                    ).await.unwrap();
                 }
                 Fixture::ExpiredClaim => {
                     assert!(repo.claim_refinement_intent(djinn_db::ClaimRefinementIntentRequest {
@@ -284,14 +291,15 @@
             title: "Exact evidence status", body: "body", acceptance_criteria: Some("[]"),
             status: Some("draft"), body_format: None,
         }).await.unwrap();
-        let run_id = match repo.reap_and_admit(djinn_db::AdmitRefinementRunRequest {
+        let (run_id, intent_id, generation) = match repo.reap_and_admit(djinn_db::AdmitRefinementRunRequest {
             proposal_id: proposal.id.clone(), idempotency_key: "status-evidence".into(),
             source: djinn_db::RefinementAdmissionSource::Demand { demand_id: "status-evidence".into() },
             heartbeat_grace_millis: 60_000,
         }).await.unwrap() {
-            djinn_db::RefinementAdmissionOutcome::Admitted { run_id, .. } => run_id,
+            djinn_db::RefinementAdmissionOutcome::Admitted { run_id, intent_id, generation, .. } => (run_id, intent_id, generation),
             _ => unreachable!(),
         };
+        let owner = "status-evidence-fixture".to_owned();
         let pending = build_refinement_status(&repo, &proposal.id).await.unwrap();
         assert_eq!(pending.run_id.as_deref(), Some(run_id.as_str()));
         assert_eq!(pending.run_state.as_deref(), Some("active"));
@@ -299,24 +307,36 @@
         assert_eq!(pending.liveness_evidence.as_deref(), Some("pending_intent"));
         assert!(pending.active);
 
-        sqlx::query("UPDATE refinement_dispatch_intents SET state = 'claimed', claimed_by = 'test', claimed_at = '2000-01-01T00:00:00.000Z', claim_expires_at = '2999-01-01T00:00:00.000Z' WHERE run_id = $1")
-            .bind(&run_id).execute(db.pool()).await.unwrap();
+        let lease = repo.claim_refinement_intent(djinn_db::ClaimRefinementIntentRequest {
+            run_id: run_id.clone(), intent_id: intent_id.clone(), generation,
+            owner: owner.clone(), lease_millis: 60_000,
+        }).await.unwrap().unwrap();
         let claimed = build_refinement_status(&repo, &proposal.id).await.unwrap();
         assert_eq!(claimed.run_id.as_deref(), Some(run_id.as_str()));
         assert_eq!(claimed.liveness.as_deref(), Some("live"));
         assert_eq!(claimed.liveness_evidence.as_deref(), Some("claimed_intent"));
         assert!(claimed.active);
 
-        sqlx::query("UPDATE refinement_dispatch_intents SET state = 'materialized', claimed_by = NULL, claimed_at = NULL, claim_expires_at = NULL WHERE run_id = $1")
-            .bind(&run_id).execute(db.pool()).await.unwrap();
-        sqlx::query("UPDATE refinement_runs SET heartbeat_at = '2000-01-01T00:00:00.000Z' WHERE id = $1")
-            .bind(&run_id).execute(db.pool()).await.unwrap();
+        // Materialization is only reachable through the repository once the
+        // task already carries the exact correlation, so the task is seeded
+        // and correlated before the acknowledgement rather than after it.
         let (project_id, task_id) = seed_status_task(&db, &run_id, "open").await;
+        djinn_db::TaskRepository::new(db.clone(), EventBus::noop())
+            .set_refinement_correlation(&task_id, Some(&djinn_core::models::TaskRefinementCorrelation::new(
+                run_id.clone(), intent_id.clone(), i64::from(generation), i64::from(lease.round), lease.phase, lease.role,
+            ).unwrap())).await.unwrap();
+        assert!(repo.acknowledge_refinement_task_materialization(djinn_db::AcknowledgeRefinementTaskMaterializationRequest {
+            run_id: run_id.clone(), intent_id: intent_id.clone(), generation,
+            task_id: task_id.clone(), owner: owner.clone(),
+        }).await.unwrap());
+        // Acknowledgement advances the heartbeat once; age it back out of grace
+        // so no fresh-heartbeat fallback can stand in for the intent below.
+        djinn_db::test_support::elapse_refinement_run_wall_clock_for_test(&db, &run_id, 3_600).await;
+        let task_repo = djinn_db::TaskRepository::new(db.clone(), EventBus::noop());
         // A materialized exact-run intent precedes all task, session, and
         // heartbeat fallbacks in the shared evaluator.
         for task_status in ["open", "queued", "in_progress", "pool_paused"] {
-            sqlx::query("UPDATE tasks SET status = $1 WHERE id = $2")
-                .bind(task_status).bind(&task_id).execute(db.pool()).await.unwrap();
+            task_repo.set_status(&task_id, task_status).await.unwrap();
             let status = build_refinement_status(&repo, &proposal.id).await.unwrap();
             assert_eq!(status.run_id.as_deref(), Some(run_id.as_str()));
             assert_eq!(status.liveness.as_deref(), Some("live"));
@@ -324,18 +344,19 @@
             assert!(status.active);
         }
 
-        sqlx::query("UPDATE tasks SET status = 'closed' WHERE id = $1")
-            .bind(&task_id).execute(db.pool()).await.unwrap();
+        task_repo.set_status(&task_id, "closed").await.unwrap();
         let session_id = seed_live_status_session(&db, &project_id, &task_id).await;
         let session = build_refinement_status(&repo, &proposal.id).await.unwrap();
         assert_eq!(session.run_id.as_deref(), Some(run_id.as_str()));
         assert_eq!(session.liveness.as_deref(), Some("live"));
         assert_eq!(session.liveness_evidence.as_deref(), Some("materialized_intent"));
         assert!(session.active);
-        sqlx::query("UPDATE sessions SET status = 'completed' WHERE id = $1")
-            .bind(&session_id).execute(db.pool()).await.unwrap();
-        sqlx::query("UPDATE refinement_runs SET heartbeat_at = to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') WHERE id = $1")
-            .bind(&run_id).execute(db.pool()).await.unwrap();
+        djinn_db::SessionRepository::new(db.clone(), EventBus::noop())
+            .update(&session_id, djinn_core::models::SessionStatus::Completed, 0, 0, 0, 0, None)
+            .await.unwrap();
+        repo.record_refinement_durable_progress(
+            &run_id, generation, djinn_db::RefinementDurableProgress::DebateAppend,
+        ).await.unwrap();
         let heartbeat = build_refinement_status(&repo, &proposal.id).await.unwrap();
         assert_eq!(heartbeat.run_id.as_deref(), Some(run_id.as_str()));
         assert_eq!(heartbeat.liveness.as_deref(), Some("live"));
@@ -379,12 +400,12 @@
             title: "Exact status snapshot", body: "body", acceptance_criteria: Some("[]"),
             status: Some("draft"), body_format: None,
         }).await.unwrap();
-        let run_id = match repo.reap_and_admit(djinn_db::AdmitRefinementRunRequest {
+        let (run_id, intent_id, generation) = match repo.reap_and_admit(djinn_db::AdmitRefinementRunRequest {
             proposal_id: proposal.id.clone(), idempotency_key: "exact-status-fixture".into(),
             source: djinn_db::RefinementAdmissionSource::Demand { demand_id: "exact-status-fixture".into() },
             heartbeat_grace_millis: 60_000,
         }).await.unwrap() {
-            djinn_db::RefinementAdmissionOutcome::Admitted { run_id, .. } => run_id,
+            djinn_db::RefinementAdmissionOutcome::Admitted { run_id, intent_id, generation, .. } => (run_id, intent_id, generation),
             djinn_db::RefinementAdmissionOutcome::Existing { .. } => unreachable!(),
         };
 
@@ -393,11 +414,13 @@
         assert_eq!(live.liveness_evidence.as_deref(), Some("pending_intent"));
 
         // Status must evaluate the durable expired lease rather than treating
-        // every claimed intent as live.
-        sqlx::query("UPDATE refinement_dispatch_intents SET state = 'claimed', claimed_by = 'test', claimed_at = '2000-01-01T00:00:00.000Z', claim_expires_at = '2000-01-01T00:00:01.000Z' WHERE run_id = $1")
-            .bind(&run_id).execute(db.pool()).await.unwrap();
-        sqlx::query("UPDATE refinement_runs SET heartbeat_at = '2000-01-01T00:00:00.000Z' WHERE id = $1")
-            .bind(&run_id).execute(db.pool()).await.unwrap();
+        // every claimed intent as live. Rewinding the run's wall clock expires
+        // the real lease and ages the heartbeat out of grace together.
+        assert!(repo.claim_refinement_intent(djinn_db::ClaimRefinementIntentRequest {
+            run_id: run_id.clone(), intent_id, generation,
+            owner: "exact-status-fixture".into(), lease_millis: 60_000,
+        }).await.unwrap().is_some());
+        djinn_db::test_support::elapse_refinement_run_wall_clock_for_test(&db, &run_id, 3_600).await;
         let expired_claim = build_refinement_status(&repo, &proposal.id).await.unwrap();
         assert_eq!(expired_claim.liveness.as_deref(), Some("stale"));
 
@@ -413,21 +436,38 @@
         );
         assert_eq!(before, after, "status must not mutate a stale phantom");
 
-        sqlx::query("UPDATE refinement_runs SET state = 'parked', park_kind = 'awaiting_review', parked_at = '2026-01-01T00:00:00.000Z' WHERE id = $1")
-            .bind(&run_id).execute(db.pool()).await.unwrap();
+        // The park transition stamps a fresh heartbeat; age it straight back
+        // out of grace so the park itself stays the only live evidence.
+        assert!(repo.park_refinement_run(djinn_db::ParkRefinementRunRequest {
+            run_id: run_id.clone(), generation,
+            kind: djinn_core::refinement_liveness::RefinementParkKind::AwaitingReview,
+        }).await.unwrap());
+        djinn_db::test_support::elapse_refinement_run_wall_clock_for_test(&db, &run_id, 3_600).await;
         let parked = build_refinement_status(&repo, &proposal.id).await.unwrap();
         assert_eq!(parked.run_state.as_deref(), Some("parked"));
         assert_eq!(parked.liveness_evidence.as_deref(), Some("awaiting_review_park"));
         assert!(parked.awaiting_review);
 
-        sqlx::query("UPDATE refinement_runs SET park_kind = 'awaiting_evidence' WHERE id = $1")
-            .bind(&run_id).execute(db.pool()).await.unwrap();
+        // `park_refinement_run` fences on `state = 'running'`, so an already
+        // parked run has no repository path to the other park kind.
+        djinn_db::test_support::force_refinement_run_park_kind_for_test(
+            &db, &run_id, djinn_core::refinement_liveness::RefinementParkKind::AwaitingEvidence,
+        ).await;
         let awaiting_evidence = build_refinement_status(&repo, &proposal.id).await.unwrap();
         assert_eq!(awaiting_evidence.liveness_evidence.as_deref(), Some("awaiting_evidence_park"));
         assert!(!awaiting_evidence.awaiting_review);
 
-        sqlx::query(r#"UPDATE refinement_runs SET state = 'terminal', parked_at = NULL, park_kind = NULL, terminal_at = '2026-01-01T00:00:00.000Z', stop_tag = 'operator_stop', stop_context = '{"actor": "test", "reason": null}'::jsonb WHERE id = $1"#)
-            .bind(&run_id).execute(db.pool()).await.unwrap();
+        // A forced terminal keeps the run row the only evidence: the
+        // repository transition would also append a `refinement_stop`
+        // revision, which `build_refinement_status` reads as a display-only
+        // stop-reason fallback.
+        djinn_db::test_support::force_refinement_run_terminal_for_test(
+            &db, &run_id,
+            &djinn_core::refinement_liveness::RefinementStopReason::OperatorStop {
+                actor: "test".into(), reason: None,
+            },
+            "2026-01-01T00:00:00.000Z",
+        ).await;
         let terminal = build_refinement_status(&repo, &proposal.id).await.unwrap();
         assert_eq!(terminal.run_state.as_deref(), Some("terminal"));
         assert_eq!(terminal.liveness.as_deref(), Some("terminal"));
@@ -453,8 +493,18 @@
         };
         let (project_id, prior_task) = seed_status_task(&db, &first, "closed").await;
         let prior_session = seed_live_status_session(&db, &project_id, &prior_task).await;
-        sqlx::query(r#"UPDATE refinement_runs SET state = 'terminal', terminal_at = '2026-01-01T00:00:00.000Z', stop_tag = 'operator_stop', stop_context = '{"actor": "test", "reason": null}'::jsonb WHERE id = $1"#)
-            .bind(&first).execute(db.pool()).await.unwrap();
+        // Forced, not `terminal_refinement_run`: that transition also appends a
+        // `refinement_stop` revision, and `build_refinement_status` falls back
+        // to the latest such revision for `stop_reason` whenever the current
+        // run has no terminal reason — which is exactly the leak this test
+        // asserts does not happen.
+        djinn_db::test_support::force_refinement_run_terminal_for_test(
+            &db, &first,
+            &djinn_core::refinement_liveness::RefinementStopReason::OperatorStop {
+                actor: "test".into(), reason: None,
+            },
+            "2026-01-01T00:00:00.000Z",
+        ).await;
         let second = match repo.reap_and_admit(admit("current-run")).await.unwrap() {
             djinn_db::RefinementAdmissionOutcome::Admitted { run_id, .. } => run_id,
             _ => unreachable!(),
@@ -464,7 +514,11 @@
         assert_eq!(status.run_id.as_deref(), Some(second.as_str()));
         assert_eq!(status.liveness.as_deref(), Some("stale"));
         assert!(!status.active);
-        assert_eq!(sqlx::query_scalar::<_, String>("SELECT status FROM sessions WHERE id = $1").bind(&prior_session).fetch_one(db.pool()).await.unwrap(), "running");
+        assert_eq!(
+            djinn_db::SessionRepository::new(db.clone(), EventBus::noop())
+                .get(&prior_session).await.unwrap().unwrap().status,
+            "running",
+        );
         assert_ne!(status.stop_reason.as_deref(), Some("operator_stop"));
     }
 
@@ -638,9 +692,12 @@
                     let task_id = djinn_db::test_support::seed_task_row(&db, djinn_db::test_support::UsageTestTaskSeed {
                         project_id: &project_id, status: "closed", close_reason: None, total_reopen_count: 0,
                     }).await;
-                    sqlx::query("UPDATE tasks SET refinement_run_id = $1, refinement_intent_id = $2, refinement_generation = $3, refinement_round = $4, refinement_phase = 'adversary_attack', refinement_role = 'adversary' WHERE id = $5")
-                        .bind(&run_id).bind(&intent_id).bind(generation).bind(lease.round).bind(&task_id)
-                        .execute(db.pool()).await.unwrap();
+                    djinn_db::TaskRepository::new(db.clone(), EventBus::noop())
+                        .set_refinement_correlation(&task_id, Some(&djinn_core::models::TaskRefinementCorrelation::new(
+                            run_id.clone(), intent_id.clone(), i64::from(generation), i64::from(lease.round),
+                            djinn_core::refinement_liveness::RefinementPhase::AdversaryAttack,
+                            djinn_core::refinement_liveness::RefinementRole::Adversary,
+                        ).unwrap())).await.unwrap();
                     assert!(repo.acknowledge_refinement_task_materialization(djinn_db::AcknowledgeRefinementTaskMaterializationRequest {
                         run_id: run_id.clone(), intent_id: intent_id.clone(), generation, task_id: task_id.clone(), owner,
                     }).await.unwrap());
@@ -651,13 +708,16 @@
                     let task_id = djinn_db::test_support::seed_task_row(&db, djinn_db::test_support::UsageTestTaskSeed {
                         project_id: &project_id, status: "queued", close_reason: None, total_reopen_count: 0,
                     }).await;
-                    sqlx::query("UPDATE tasks SET refinement_run_id = $1, refinement_intent_id = $2, refinement_generation = $3, refinement_round = 1, refinement_phase = 'adversary_attack', refinement_role = 'adversary' WHERE id = $4")
-                        .bind(&run_id).bind(&intent_id).bind(generation).bind(&task_id)
-                        .execute(db.pool()).await.unwrap();
+                    djinn_db::TaskRepository::new(db.clone(), EventBus::noop())
+                        .set_refinement_correlation(&task_id, Some(&djinn_core::models::TaskRefinementCorrelation::new(
+                            run_id.clone(), intent_id.clone(), i64::from(generation), 1,
+                            djinn_core::refinement_liveness::RefinementPhase::AdversaryAttack,
+                            djinn_core::refinement_liveness::RefinementRole::Adversary,
+                        ).unwrap())).await.unwrap();
                     // The completed source intent and old heartbeat leave the queued task as the sole evidence.
-                    // Terminal intent rows require their terminal timestamp under the durable schema.
-                    sqlx::query("UPDATE refinement_dispatch_intents SET state = 'completed', terminal_at = to_char(transaction_timestamp() AT TIME ZONE 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'), updated_at = to_char(transaction_timestamp() AT TIME ZONE 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') WHERE id = $1")
-                        .bind(&intent_id).execute(db.pool()).await.unwrap();
+                    // `complete_refinement_intent` would persist a successor in the same transaction, and a
+                    // pending successor intent outranks the queued task in the shared evaluator.
+                    djinn_db::test_support::complete_refinement_intent_without_successor_for_test(&db, &intent_id).await;
                     djinn_db::test_support::elapse_refinement_run_wall_clock_for_test(&db, &run_id, 3_600).await;
                 }
             }
@@ -709,15 +769,25 @@
             };
             let (prior_project, prior_task) = seed_status_task(&db, &prior, "closed").await;
             let _prior_session = seed_live_status_session(&db, &prior_project, &prior_task).await;
+            // Terminalized out of band on purpose: `terminal_refinement_run`
+            // would also append a `refinement_stop` revision, and the assertion
+            // below counts exactly those revisions to prove the tool handler
+            // emitted no spurious stop. A fixture-written audit row would be
+            // indistinguishable from the defect.
+            //
             // `RefinementStopReason` is adjacently tagged (`tag`/`context`), and
             // `OperatorStop` is a struct variant — a row carrying the tag with a
             // null `stop_context` cannot be deserialized and fails every later
-            // snapshot read with `invalid stop reason "operator_stop"`. Write the
-            // context the tag requires.
-            sqlx::query("UPDATE refinement_runs SET state = 'terminal', terminal_at = '2000-01-01T00:00:00.000Z', stop_tag = 'operator_stop', stop_context = $2 WHERE id = $1")
-                .bind(&prior)
-                .bind(serde_json::json!({ "actor": "operator", "reason": "prior run stopped by hand" }))
-                .execute(db.pool()).await.unwrap();
+            // snapshot read with `invalid stop reason "operator_stop"`. The
+            // helper derives the context the tag requires from the reason.
+            djinn_db::test_support::force_refinement_run_terminal_for_test(
+                &db, &prior,
+                &djinn_core::refinement_liveness::RefinementStopReason::OperatorStop {
+                    actor: "operator".into(),
+                    reason: Some("prior run stopped by hand".into()),
+                },
+                "2000-01-01T00:00:00.000Z",
+            ).await;
             let phantom = match repo.reap_and_admit(admission(format!("{name}-phantom"))).await.unwrap() {
                 djinn_db::RefinementAdmissionOutcome::Admitted { run_id, .. } => run_id,
                 _ => unreachable!(),

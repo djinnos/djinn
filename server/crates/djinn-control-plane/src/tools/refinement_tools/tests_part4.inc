@@ -3,53 +3,65 @@
 
     use djinn_core::models::{EvidenceFindings, NeedsEvidenceClaim};
 
-    /// Helper: insert a project row and return its id.
+    /// Helper: create a project row and return its id.
     async fn insert_project(db: &Database, name: &str) -> String {
         let id = uuid::Uuid::now_v7().to_string();
-        sqlx::query(
-            "INSERT INTO projects (id, name, github_owner, github_repo) VALUES ($1, $2, $3, $4)",
-        )
-        .bind(&id)
-        .bind(name)
-        .bind(name)
-        .bind(format!("repo-{}", &id.replace('-', "")[..31]))
-        .execute(db.pool())
-        .await
-        .unwrap();
+        djinn_db::ProjectRepository::new(db.clone(), EventBus::noop())
+            .create_with_id(
+                &id,
+                name,
+                name,
+                &format!("repo-{}", &id.replace('-', "")[..31]),
+            )
+            .await
+            .unwrap();
         id
     }
 
-    /// Helper: insert an epic row and return its id.
-    async fn insert_epic(db: &Database, project_id: &str, short_id: &str) -> String {
-        let id = uuid::Uuid::now_v7().to_string();
-        sqlx::query(
-            "INSERT INTO epics (id, project_id, short_id, title, description, emoji, color, status, owner, memory_refs, auto_breakdown) VALUES ($1, $2, $3, 'T', '', '', '', 'open', '', '[]'::jsonb, true)",
-        )
-        .bind(&id)
-        .bind(project_id)
-        .bind(short_id)
-        .execute(db.pool())
-        .await
-        .unwrap();
-        id
+    /// Helper: create an epic row and return its id. The short id is
+    /// repository-generated; these fixtures only need a valid FK target.
+    async fn insert_epic(db: &Database, project_id: &str) -> String {
+        djinn_db::EpicRepository::new(db.clone(), EventBus::noop())
+            .create_for_project(
+                project_id,
+                djinn_db::EpicCreateInput {
+                    title: "T",
+                    description: "",
+                    emoji: "",
+                    color: "",
+                    owner: "",
+                    memory_refs: None,
+                    status: None,
+                    auto_breakdown: None,
+                    originating_adr_id: None,
+                    blocked_by: None,
+                },
+            )
+            .await
+            .unwrap()
+            .id
     }
 
-    /// Helper: insert a task row and return its id.
-    async fn insert_task(db: &Database, project_id: &str, epic_id: &str, short_id: &str) -> String {
-        let id = uuid::Uuid::now_v7().to_string();
-        let creator_id = create_test_user(db, &format!("spike-creator-{id}")).await;
-        sqlx::query(
-            "INSERT INTO tasks (id, project_id, short_id, epic_id, title, description, design, issue_type, priority, owner, status, continuation_count, labels, acceptance_criteria, memory_refs, created_by_user_id) VALUES ($1, $2, $3, $4, 'T', '', '', 'task', 0, '', 'open', 0, '[]'::jsonb, '[]'::jsonb, '[]'::jsonb, $5)",
-        )
-        .bind(&id)
-        .bind(project_id)
-        .bind(short_id)
-        .bind(epic_id)
-        .bind(creator_id)
-        .execute(db.pool())
-        .await
-        .unwrap();
-        id
+    /// Helper: create a task row and return its id. The short id and the
+    /// creator are repository-generated; these fixtures only need a valid FK
+    /// target for `linked_spike_task_id`.
+    async fn insert_task(db: &Database, project_id: &str, epic_id: &str) -> String {
+        djinn_db::TaskRepository::new(db.clone(), EventBus::noop())
+            .create_fixture_in_project(
+                project_id,
+                Some(epic_id),
+                "T",
+                "",
+                "",
+                "task",
+                0,
+                "",
+                Some("open"),
+                None,
+            )
+            .await
+            .unwrap()
+            .id
     }
 
     /// Helper: create a proposal, start refinement, set a structured
@@ -75,8 +87,8 @@
 
         // Create a real task to satisfy the FK constraint on linked_spike_task_id.
         let proj = insert_project(&db, "svc-test").await;
-        let epic = insert_epic(&db, &proj, "sp01").await;
-        let spike_id = insert_task(&db, &proj, &epic, "spike-01").await;
+        let epic = insert_epic(&db, &proj).await;
+        let spike_id = insert_task(&db, &proj, &epic).await;
 
         let claim = NeedsEvidenceClaim {
             question: "Is module X load-bearing?".to_owned(),
@@ -148,8 +160,8 @@
 
         // Create a real task to satisfy the FK constraint.
         let proj = insert_project(&db, "svc-legacy").await;
-        let epic = insert_epic(&db, &proj, "lg01").await;
-        let spike_id = insert_task(&db, &proj, &epic, "spike-lg").await;
+        let epic = insert_epic(&db, &proj).await;
+        let spike_id = insert_task(&db, &proj, &epic).await;
 
         // Use the legacy plain-string setter.
         repo.set_needs_evidence_spike(&p.id, &spike_id, "X is load-bearing")
