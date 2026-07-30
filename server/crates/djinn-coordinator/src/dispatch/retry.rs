@@ -3357,22 +3357,6 @@ impl CoordinatorActor {
             );
             return;
         };
-        let build_admission = match self
-            .begin_task_run_build_admission(
-                "planner",
-                &review_task.id,
-                review_task.reopen_count.max(0),
-                format!(
-                    "task-run-{}-{}",
-                    review_task.id,
-                    review_task.reopen_count.max(0)
-                ),
-            )
-            .await
-        {
-            Ok(permit) => permit,
-            Err(()) => return,
-        };
         let task_id = review_task.id.clone();
         let project_path_owned = project_path.clone();
         let outcome = self
@@ -3391,12 +3375,6 @@ impl CoordinatorActor {
                 },
             )
             .await;
-        self.finish_task_run_build_admission(
-            build_admission,
-            matches!(outcome, DispatchOutcome::Dispatched),
-        )
-        .await;
-
         match outcome {
             DispatchOutcome::Dispatched => {
                 tracing::info!(outcome = "ok", task_id = %review_task.short_id, role = "planner");

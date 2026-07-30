@@ -2,8 +2,8 @@ use axum::body::Body;
 use axum::http::header::CONTENT_TYPE;
 use axum::http::{Request, StatusCode};
 use djinn_agent::actors::coordinator::{
-    BreakerDebugEntry, CoordinatorDeps, DebugBuildAdmission, DebugDispatchState, DebugSlot,
-    DebugTotals, DispatchPauseView, spawn_coordinator,
+    BreakerDebugEntry, CoordinatorDeps, DebugDispatchState, DebugSlot, DebugTotals,
+    DispatchPauseView, spawn_coordinator,
 };
 use djinn_agent::actors::slot::{SlotPoolConfig, SlotPoolHandle};
 use djinn_db::{CreateUserAuthSession, Database, SessionAuthRepository, UserRepository};
@@ -133,23 +133,24 @@ async fn test_debug_dispatch_state_admin_returns_200() {
     assert!(json.get("snapshot_at").and_then(Value::as_str).is_some());
     assert!(json.get("paused").and_then(Value::as_object).is_some());
     assert!(json.get("totals").and_then(Value::as_object).is_some());
-    // **The 2026-07-29 gap.** The endpoint whose whole purpose is answering
-    // "why is nothing dispatching" omitted build admission entirely, while the
-    // build-admission controller denied every dispatch on the board for five
-    // hours. The key must always be present — `null` when admission is Off is
-    // an answer; a missing key is not.
+    // The pre-create build-admission controller was deleted with the Kueue
+    // cutover (o53p), and with it the `build_admission` block this endpoint
+    // used to carry. Assert its ABSENCE rather than dropping the check: a block
+    // that reappeared would be reporting on an authority that no longer decides
+    // anything, which is worse than no block at all.
     assert!(
-        json.as_object()
+        !json
+            .as_object()
             .expect("the payload is an object")
             .contains_key("build_admission"),
-        "the build-admission block must always be serialized: {json:#}"
+        "the deleted pre-create admission authority must not be reported: {json:#}"
     );
     assert!(
-        json["totals"]
+        !json["totals"]
             .as_object()
             .expect("totals is an object")
             .contains_key("build_admission_denying_all"),
-        "`totals` must carry the one-field board-wedged answer: {json:#}"
+        "`totals` must not carry a verdict about a deleted authority: {json:#}"
     );
 }
 
@@ -203,31 +204,12 @@ fn test_debug_dispatch_state_json_deterministic() {
             projects: vec!["project-a".to_owned()],
             users: vec!["user-1".to_owned()],
         },
-        // The 2026-07-29 shape: enforcing, latched on CreateUnknownHealth,
-        // denying every dispatch on the board while every other field on this
-        // endpoint reads healthy.
-        build_admission: Some(DebugBuildAdmission {
-            readiness: "create_unknown_health".to_owned(),
-            is_ready: false,
-            unsatisfied_gates: vec!["create_unknown_health".to_owned()],
-            mode: "enforce".to_owned(),
-            effective_cap: 3,
-            configured_cap: 3,
-            occupancy: None,
-            create_unknown_pending: 1,
-            blocking_identities: vec!["task_observation:task-9:0@task-run-task-9-0".to_owned()],
-            blocking_identities_elided: 0,
-            seconds_since_last_reconcile: Some(120),
-            server_epoch: "epoch-1".to_owned(),
-            queued: 0,
-        }),
         totals: DebugTotals {
             cooldowns_active: 1,
             inflight_ledger_size: 1,
             free_slots: 1,
             busy_slots: 1,
             open_breakers: 1,
-            build_admission_denying_all: true,
         },
     };
 
@@ -292,32 +274,12 @@ fn test_debug_dispatch_state_json_deterministic() {
       "user-1"
     ]
   },
-  "build_admission": {
-    "readiness": "create_unknown_health",
-    "is_ready": false,
-    "unsatisfied_gates": [
-      "create_unknown_health"
-    ],
-    "mode": "enforce",
-    "effective_cap": 3,
-    "configured_cap": 3,
-    "occupancy": null,
-    "create_unknown_pending": 1,
-    "blocking_identities": [
-      "task_observation:task-9:0@task-run-task-9-0"
-    ],
-    "blocking_identities_elided": 0,
-    "seconds_since_last_reconcile": 120,
-    "server_epoch": "epoch-1",
-    "queued": 0
-  },
   "totals": {
     "cooldowns_active": 1,
     "inflight_ledger_size": 1,
     "free_slots": 1,
     "busy_slots": 1,
-    "open_breakers": 1,
-    "build_admission_denying_all": true
+    "open_breakers": 1
   }
 }
 "###);

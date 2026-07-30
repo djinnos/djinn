@@ -445,8 +445,6 @@ mod tests {
                     role_priorities: std::collections::HashMap::new(),
                 },
             ),
-            build_admission: None,
-            kueue_armed: false,
             catalog: CatalogService::new(),
             health: HealthTracker::new(),
             role_registry: Arc::new(RoleRegistry::new()),

@@ -1055,6 +1055,10 @@ pub struct BoardHealthBuildLease {
 
 /// Pool-wide build capacity as the dispatcher's own authority reads it.
 /// Absent when the lease ledger could not be read.
+///
+/// Since the Kueue cutover deleted the pre-create admission ledger, this is the
+/// only occupancy authority in the payload: there is no second gate that can
+/// deny before capacity is measured.
 #[derive(Serialize, Deserialize, schemars::JsonSchema, Default)]
 pub struct BoardHealthBuildCapacity {
     /// Always `build_leases`, so the payload names its own authority.
@@ -1070,51 +1074,16 @@ pub struct BoardHealthBuildCapacity {
     /// denying anything, so a full pool is not attributed to it.
     ///
     /// **Renamed from `enforcing`.** The bare name read as "build admission is
-    /// enforcing", which is a different authority entirely. On 2026-07-29 this
-    /// block reported `{occupancy: 1, cap: 3, enforcing: true, at_capacity:
-    /// false}` for five hours while the build-admission controller denied every
-    /// single dispatch before capacity was measured. See `build_admission`.
+    /// enforcing", which used to be a different authority entirely. On
+    /// 2026-07-29 this block reported `{occupancy: 1, cap: 3, enforcing: true,
+    /// at_capacity: false}` for five hours while the since-deleted
+    /// build-admission controller denied every single dispatch before capacity
+    /// was measured. The name is kept scoped to the lease FIFO so it can never
+    /// be misread that way again.
     pub lease_authority_enforcing: bool,
-    /// `occupancy >= cap` with a positive cap. Reached only AFTER the
-    /// build-admission controller's readiness gate passes, so `false` here is
-    /// not evidence that a dispatch can proceed.
+    /// `occupancy >= cap` with a positive cap.
     pub at_capacity: bool,
     /// Human-readable restatement of the authority boundary.
-    #[serde(default)]
-    pub note: String,
-}
-
-/// The build-admission JOURNAL authority — the **other** gate, and the one
-/// that wedged the board for five hours on 2026-07-29.
-///
-/// Not the same thing as [`BoardHealthBuildCapacity`]. That one is the lease
-/// FIFO and is the only authority that ever measures occupancy. This one is
-/// `admission_journal`, owned by the `BuildAdmissionController`, and it fails
-/// **closed on a readiness gate before occupancy is measured at all** — so
-/// `build_capacity` can report a completely healthy pool while every single
-/// dispatch is being denied with `cause: "controller_not_admitting"`.
-#[derive(Serialize, Deserialize, schemars::JsonSchema, Default)]
-pub struct BoardHealthBuildAdmission {
-    /// Always `admission_journal`, so the payload names its own authority.
-    #[serde(default)]
-    pub authority: String,
-    /// Rows currently in `create_unknown`, healthy in-flight creates included.
-    pub create_unknown_active: i64,
-    /// Of those, the ones untouched for longer than `settle_window_seconds`.
-    /// This is the population that cannot be explained as a normal
-    /// POST→session window, and the one that arms `CreateUnknownHealth`.
-    pub create_unknown_settled: i64,
-    /// The reclaim settle window in seconds (mirrors
-    /// `DEFAULT_RECLAIM_SETTLE_WINDOW`).
-    pub settle_window_seconds: i64,
-    /// Distinct `creator_server_epoch` values across the active population.
-    /// More than one means at least one row is definitely a predecessor's,
-    /// which is the population that actually arms the gate since #2746.
-    pub distinct_creator_epochs: i64,
-    /// `updated_at` of the oldest active `create_unknown` row.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub oldest_create_unknown_at: Option<String>,
-    /// Human-readable restatement of what these counts do and do not prove.
     #[serde(default)]
     pub note: String,
 }
@@ -1225,17 +1194,11 @@ pub struct BoardHealthDispatchGate {
     /// The task's own `task_dispatch` build-lease row, when it has one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub build_lease: Option<BoardHealthBuildLease>,
-    /// Pool-wide build capacity, when the lease ledger was readable.
-    ///
-    /// **Read this together with `build_admission`.** They are different
-    /// authorities; a healthy `build_capacity` is not evidence that a dispatch
-    /// is possible.
+    /// Pool-wide build capacity, when the lease ledger was readable. This is
+    /// the only occupancy authority; pair it with `build_admission_denial`,
+    /// which is what the dispatcher actually recorded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub build_capacity: Option<BoardHealthBuildCapacity>,
-    /// The build-admission journal authority, when `admission_journal` was
-    /// readable. This is the gate that denies before capacity is measured.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub build_admission: Option<BoardHealthBuildAdmission>,
     /// The dispatcher's own recorded `DenialCause` for this task, when it has
     /// one. Absent means the most recent decision was not a denial: the
     /// permitted path deletes the row.
@@ -1254,8 +1217,7 @@ pub struct BoardHealthDispatchGate {
     pub gate_verdict: Option<String>,
     /// Machine-readable gate reasons (`no_eligible_model`,
     /// `image_not_ready`, `build_lease_queued`, `build_lease_terminal`,
-    /// `build_lease_occupied_without_session`, `build_pool_at_capacity`,
-    /// `admission_create_unknown_pending`).
+    /// `build_lease_occupied_without_session`, `build_pool_at_capacity`).
     /// Always present in the serialized output (may be an empty array) so
     /// clients can rely on the key existing. Read it together with
     /// `coverage`: empty means "no EVALUATED gate fired".

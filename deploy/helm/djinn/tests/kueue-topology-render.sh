@@ -152,8 +152,12 @@ server_deployment = next(
 containers = server_deployment["spec"]["template"]["spec"]["containers"]
 server = next(container for container in containers if container["name"] == "djinn-server")
 values = {entry["name"]: entry.get("value") for entry in server["env"]}
-assert values["DJINN_BUILD_ADMISSION_MODE"] == "observe", "buildAdmission mode changed"
-assert values["DJINN_MAX_BUILD_TASKRUNS"] == "3", "buildAdmission cap changed"
+# Build admission is gone: the pods-quota reservation authority was deleted, so
+# the server must receive neither of its env vars. Kueue's pods quota is the
+# only remaining build-concurrency bound, and it is deliberately independent.
+# See deploy/helm/djinn/tests/build-admission-topology.sh.
+assert "DJINN_BUILD_ADMISSION_MODE" not in values, "removed build-admission env var came back"
+assert "DJINN_MAX_BUILD_TASKRUNS" not in values, "removed build-admission cap env var came back"
 # The renderer half of the arming contract. It must move with the namespace
 # label, never independently: they are two halves of one capture decision.
 expected_armed = "true" if expected_managed == "yes" else "false"

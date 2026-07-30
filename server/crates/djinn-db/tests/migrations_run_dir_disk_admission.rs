@@ -4,7 +4,7 @@
 //! Verifies the migration applies cleanly on a fresh database AND on top of the
 //! prior schema (so additive ordering is correct), installs the documented
 //! columns / CHECK constraints / indexes, and — critically — does NOT modify any
-//! existing `admission_journal` row.
+//! existing `build_leases` admission row.
 //!
 //! Mirrors the harness in `migrations_liveness_evidence_outcomes.rs`.
 
@@ -273,13 +273,20 @@ async fn assert_run_dirs_schema(pool: &sqlx::PgPool) {
     assert_eq!(index_names, expected_indexes);
 }
 
-/// Seed a live admission_journal row through raw SQL so we can prove migration
-/// 151 leaves existing admission rows byte-for-byte unmodified.
+/// Seed a live build-lease row through raw SQL so we can prove migration 151
+/// leaves existing admission rows byte-for-byte unmodified.
+///
+/// This used to seed `admission_journal`. That relation was the pods-quota
+/// reservation authority and was deleted with it (o53p); `build_leases`
+/// (migration 139, so it predates 151) is the retained admission ledger and
+/// carries the same proof. The consumer kind is `graph_warm` because
+/// `task_dispatch` is not a legal kind until migration 153, and this test
+/// replays the schema only as far as 151.
 async fn seed_admission_row(pool: &sqlx::PgPool) {
     sqlx::query(
-        "INSERT INTO admission_journal \
-         (domain, work_id, generation, workload_kind, state, creator_server_epoch, object_name) \
-         VALUES ('task_observation', 'work-preexisting', 0, 'task', 'live', 'epoch-1', 'obj-1')",
+        "INSERT INTO build_leases \
+         (consumer_kind, consumer_id, immutable_identity, fencing_token, state) \
+         VALUES ('graph_warm', 'work-preexisting', 'identity-preexisting', 4242, 'active')",
     )
     .execute(pool)
     .await
@@ -287,17 +294,17 @@ async fn seed_admission_row(pool: &sqlx::PgPool) {
 }
 
 async fn assert_admission_row_unchanged(pool: &sqlx::PgPool) {
-    let (state, epoch): (String, String) = sqlx::query_as(
-        "SELECT state, creator_server_epoch FROM admission_journal WHERE work_id = 'work-preexisting'",
+    let (state, identity): (String, String) = sqlx::query_as(
+        "SELECT state, immutable_identity FROM build_leases WHERE consumer_id = 'work-preexisting'",
     )
     .fetch_one(pool)
     .await
     .expect("load pre-existing admission row");
     assert_eq!(
-        state, "live",
+        state, "active",
         "migration must not modify existing admission rows"
     );
-    assert_eq!(epoch, "epoch-1");
+    assert_eq!(identity, "identity-preexisting");
 }
 
 #[tokio::test]
