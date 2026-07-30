@@ -33,7 +33,7 @@ pub use build_resources::{
     ResolveError, ResourceBounds, apply_resolved_resources, resolve_task_run_resources,
     resolve_warm_resources,
 };
-pub use config::{KubernetesConfig, disarm_kueue_globally, kueue_disarmed_by_preflight};
+pub use config::KubernetesConfig;
 pub use env_config::{
     ENV_CONFIG_KEY, ENV_CONFIG_MOUNT_DIR, ENV_CONFIG_MOUNT_FILE, VOLUME_ENV_CONFIG,
     build_env_config_config_map, env_config_config_map_name, env_config_volume,
@@ -56,6 +56,7 @@ pub use graph_warmer_identity::{LeasedWarmJobIdentity, deterministic_warm_job_na
 pub use kueue_preflight::{
     KueuePreflightOutcome, LABEL_KUEUE_MANAGED, NamespaceKueueStatus,
     classify_labels as classify_kueue_namespace_labels, decide as decide_kueue_preflight,
+    disarm_kueue_globally, kueue_disarmed_by_preflight,
     observe_namespace as observe_kueue_namespace, run as run_kueue_preflight,
 };
 pub use runtime::{KubernetesRuntime, taskrun_job_name};
