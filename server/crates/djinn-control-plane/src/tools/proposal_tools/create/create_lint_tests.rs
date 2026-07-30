@@ -235,7 +235,6 @@ async fn lint_errors_are_structured_and_rollback_every_update_family_write() {
     }
 }
 
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn show_keeps_historical_warning_on_its_exact_revision_after_clean_write() {
     let (server, db) = test_server().await;
@@ -249,7 +248,10 @@ async fn show_keeps_historical_warning_on_its_exact_revision_after_clean_write()
         .unwrap();
     let id = created["id"].as_str().unwrap().to_string();
     let warning_seq = created["latest_revision_seq"].as_i64().unwrap();
-    assert_eq!(created["latest_lint"]["warnings"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        created["latest_lint"]["warnings"].as_array().unwrap().len(),
+        1
+    );
 
     let updated = server
         .dispatch_tool(
@@ -279,7 +281,12 @@ async fn show_keeps_historical_warning_on_its_exact_revision_after_clean_write()
             )
             .await
             .unwrap();
-        assert!(show["latest_lint"]["warnings"].as_array().unwrap().is_empty());
+        assert!(
+            show["latest_lint"]["warnings"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
         assert_eq!(
             show["latest_lint"]["body_sha256"],
             djinn_spec_lint::body_sha256("A clean current body.")
@@ -289,7 +296,13 @@ async fn show_keeps_historical_warning_on_its_exact_revision_after_clean_write()
             .iter()
             .find(|revision| revision["seq"].as_i64() == Some(warning_seq))
             .unwrap();
-        assert_eq!(warning_revision["lint"]["warnings"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            warning_revision["lint"]["warnings"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
         let clean_revision = revisions
             .iter()
             .find(|revision| {
@@ -298,6 +311,11 @@ async fn show_keeps_historical_warning_on_its_exact_revision_after_clean_write()
                         == djinn_spec_lint::body_sha256("A clean current body.")
             })
             .unwrap();
-        assert!(clean_revision["lint"]["warnings"].as_array().unwrap().is_empty());
+        assert!(
+            clean_revision["lint"]["warnings"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
     }
 }

@@ -560,14 +560,23 @@ impl DjinnMcpServer {
     }
 }
 
+// Tests for this concern live in `signoff/`. They are real modules, not
+// textually included fragments: rust-analyzer emits no SCIP document for an
+// included file, so anything defined inside one is unfindable by every agent
+// and by the `*.rs`-filtered CI guards. See scripts/check-include-macro.sh.
 #[cfg(test)]
-mod signoff_tests {
-    include!("signoff_tests.rs");
-}
+mod signoff_tests;
 
-// Tribunal / P4 regression tests — extracted to `tribunal_tests.rs` to meet
-// the 1500-line file-size guard. The debate-trail gate logic lives in this
-// module (see `evaluate_composed_gate`), so tribunal tests are paired with
-// the signoff concern.
+// Tribunal / P4 regression tests — split out to meet the 1500-line file-size
+// guard. The debate-trail gate logic lives in this module (see
+// `evaluate_composed_gate`), so tribunal tests are paired with the signoff
+// concern.
+//
+// This is now the SOLE instantiation. Until this commit `tribunal_tests.rs`
+// was textually included TWICE — here and again from the tail of
+// `signoff_tests.rs` — expanding the same six tests into two modules
+// (`signoff::p4_tribunal_regression_tests` and
+// `signoff::signoff_tests::p4_tribunal_regression_tests`). Both copies ran on
+// every CI run for no added coverage; see the PR that introduced this file.
 #[cfg(test)]
-include!("tribunal_tests.rs");
+mod tribunal_tests;

@@ -1212,7 +1212,15 @@ impl DjinnMcpServer {
     }
 }
 
+// Tests for this concern live in `create/`. They are real modules, not
+// textually included fragments: rust-analyzer emits no SCIP document for an
+// included file, so anything defined inside one is unfindable by every agent
+// and by the `*.rs`-filtered CI guards. See scripts/check-include-macro.sh.
 #[cfg(test)]
-mod create_tests {
-    include!("create_tests.rs");
-}
+mod create_tests;
+
+#[cfg(test)]
+mod create_mdx_tests;
+
+#[cfg(test)]
+mod create_lint_tests;

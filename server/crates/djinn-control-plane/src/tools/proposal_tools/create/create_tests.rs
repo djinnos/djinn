@@ -928,7 +928,10 @@ mod body_excerpt_tests {
         assert_eq!(rev["body_excerpt"].as_str().unwrap().chars().count(), 512);
         assert!(show["latest_lint"].is_object());
         assert!(rev["lint"].is_object());
-        assert_eq!(rev["lint"]["body_sha256"], show["latest_lint"]["body_sha256"]);
+        assert_eq!(
+            rev["lint"]["body_sha256"],
+            show["latest_lint"]["body_sha256"]
+        );
     }
 
     /// `revision_bodies: "full"` restores full revision bodies.
@@ -1443,14 +1446,4 @@ mod schema_lean_tests {
 
         assert_schema_excludes_terms(&json, FORBIDDEN_BLOCK_TERMS, "ProposalUpdateParams");
     }
-}
-
-#[cfg(test)]
-mod mdx_upgrade_and_validation_tests {
-    include!("create_mdx_tests.rs");
-}
-
-#[cfg(test)]
-mod lint_mutation_contract_tests {
-    include!("create_lint_tests.rs");
 }

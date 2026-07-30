@@ -1,3 +1,5 @@
+use super::*;
+
 // glqk: index-coverage contract integration tests.
 //
 // A two-workspace fixture project with one deliberately broken workspace
@@ -254,7 +256,10 @@ async fn impact_check_escalates_to_needs_spike_on_uncovered_scope() {
         "the escalation must name the uncovered workspace"
     );
     assert!(
-        ic.next_step.as_deref().unwrap_or_default().contains("server"),
+        ic.next_step
+            .as_deref()
+            .unwrap_or_default()
+            .contains("server"),
         "next_step names the uncovered workspace"
     );
 }

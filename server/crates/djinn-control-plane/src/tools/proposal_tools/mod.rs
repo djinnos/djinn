@@ -219,9 +219,8 @@ impl DjinnMcpServer {
     }
 }
 
-// End-to-end planner refinement loop tests — extracted to
-// `end_to_end_planner_tests.rs` to meet the 1500-line file-size guard.
-// These are the only remaining cross-cutting regressions in `proposal_tools/`;
-// they span create, update, signoff, and lifecycle tools.
+// End-to-end planner refinement loop tests — split out to meet the 1500-line
+// file-size guard. These are the only remaining cross-cutting regressions in
+// `proposal_tools/`; they span create, update, signoff, and lifecycle tools.
 #[cfg(test)]
-include!("end_to_end_planner_tests.rs");
+mod end_to_end_planner_tests;
