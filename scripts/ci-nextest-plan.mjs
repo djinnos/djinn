@@ -39,8 +39,36 @@ export const PR_DEFAULT_SHARDS = 2;
 // (maximumEntriesToBuild=5, mergingStrategy=HEADGREEN), so the queue's cost
 // function is throughput under contention, not latency of one entry.
 export const PR_MAX_SHARDS = 8;
-export const WIDE_DEFAULT_SHARDS = 4;
-export const COLD_START_SHARDS = 4;
+// Both 4 -> 8, to match the matrix width. NOT a latency change in intent — a
+// COST fix, and it reverses the reasoning recorded above.
+//
+// `server-test`'s matrix is STATIC at `CI_SERVER_TEST_MATRIX_WIDTH` (8) rows,
+// because the shards must start before the planner has decided anything. A
+// plan NARROWER than the matrix does not save those runners: the surplus jobs
+// are still created and still execute steps 1-14, which includes the
+// unconditional ~6m `Build test binaries`. They only discover they are surplus
+// at step 16, after the plan artifact downloads. Measured step order on
+// 2026-07-30 — only `Run planner-selected shard tests` carries the
+// `steps.shard.outputs.active` guard; the build does not, and cannot, because
+// it deliberately runs concurrently with the planner's discovery.
+//
+// So a narrow plan against a wide matrix costs ~7.5m of runner time per
+// surplus shard and buys nothing. At WIDE_DEFAULT_SHARDS=4 against 8 rows that
+// was 4 idle jobs x ~7.5m = ~30 runner-min per merge-queue run, ~46 queue runs
+// a day.
+//
+// This supersedes the "the queue optimizes throughput, not latency, so keep it
+// at 4" note on PR_MAX_SHARDS above. That was true when the matrix was also 4.
+// Once the matrix is 8 the runners are committed either way, so planning 8 is
+// both CHEAPER (no build-then-idle jobs) and faster. If these are ever lowered,
+// lower the matrix and CI_SERVER_TEST_MATRIX_WIDTH in the same commit, or the
+// waste comes straight back.
+//
+// PR_DEFAULT_SHARDS is left at 2 and is unreachable in practice: the widen
+// check is `tests.length >= PR_WIDEN_TEST_THRESHOLD` (200) and the suite is
+// ~11.6k tests, so the PR lane always takes PR_MAX_SHARDS.
+export const WIDE_DEFAULT_SHARDS = 8;
+export const COLD_START_SHARDS = 8;
 export const PR_WIDEN_TEST_THRESHOLD = 200;
 export const PR_WIDEN_DURATION_THRESHOLD_SECONDS = 600;
 export const MAX_ARG_STRLEN = 131072;
