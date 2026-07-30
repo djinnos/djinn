@@ -68,7 +68,7 @@ async fn leader_handoff_tick(state: &AppState) {
 }
 
 /// Drive the ordered startup gates in the exact sequence `AppState::initialize`
-/// runs them (handoff → recovery → deferred recovery → inventory), then the
+/// runs them (handoff → pod permits → recovery → deferred recovery → inventory), then the
 /// topology confirmation that `become_leader` performs on winning the
 /// coordinator advisory lock.
 async fn boot_through_leadership(state: &AppState) {
@@ -80,6 +80,7 @@ async fn boot_through_leadership(state: &AppState) {
 /// i.e. what a standby pod (or a leader that never won the lock) reaches.
 async fn boot_to_topology_gate(state: &AppState) {
     state.initialize_build_admission_handoff().await;
+    state.initialize_build_pod_permit_prerequisites().await;
     state.initialize_build_admission_recovery().await;
     state.initialize_build_admission_deferred_recovery().await;
     *state.inner.graph_warmer.write().await =
@@ -105,6 +106,7 @@ fn observe_config() -> BuildAdmissionConfig {
     BuildAdmissionConfig {
         mode: BuildAdmissionMode::Observe,
         cap: 3,
+        pod_limit: Some(1),
     }
 }
 
