@@ -215,6 +215,44 @@ fn record_confirmed_job_create<T, E>(result: Result<T, E>) -> Result<T, E> {
     result
 }
 
+/// Create the task-run Job, adopting the existing object when the apiserver
+/// says it is already there.
+///
+/// The task-run Job name is deterministic in the task-run id
+/// (`djinn-taskrun-{uuid}`, `job.rs`), so `AlreadyExists` is never a name
+/// collision between two different runs — it is *this* run's object, created by
+/// a POST whose response we lost, by a concurrent dispatcher, or by a retry
+/// after an ambiguous failure. Returning the error instead would leave the
+/// caller to create a second Job that Kubernetes will not let it create, and
+/// under Kueue would strand an admitted Workload nobody is waiting on.
+///
+/// The adopted object is fetched with GET rather than reconstructed locally,
+/// because the winner's `metadata.uid` is what the Secret's OwnerReference must
+/// point at — an ownerRef carrying a UID that never existed is silently dropped
+/// by the apiserver and the Secret outlives its Job.
+///
+/// [`record_confirmed_job_create`] wraps only the create arm: an adopt is a
+/// retry of a Job that was already counted, and counting it again would inflate
+/// `job_started` by exactly the retries this function exists to absorb.
+async fn create_or_adopt_task_run_job(
+    jobs: &Api<Job>,
+    job: &Job,
+    resource_name: &str,
+) -> Result<Job, kube::Error> {
+    match record_confirmed_job_create(jobs.create(&PostParams::default(), job).await) {
+        Ok(created) => Ok(created),
+        Err(error) if crate::graph_warmer::api_error_is_already_exists(&error) => {
+            info!(
+                job = %resource_name,
+                "kubernetes_runtime: task-run Job already exists — adopting it instead of \
+                 creating a second one"
+            );
+            jobs.get(resource_name).await
+        }
+        Err(error) => Err(error),
+    }
+}
+
 fn service_resolution_activity_payload(
     task_run_id: &str,
     project_id: &str,
@@ -589,10 +627,22 @@ impl SessionRuntime for KubernetesRuntime {
 
         let secrets: Api<Secret> = Api::namespaced(self.client.clone(), ns);
         if let Err(e) = secrets.create(&PostParams::default(), &secret).await {
-            self.drop_pending(&task_run_id_str).await;
-            return Err(RuntimeError::Prepare(format!(
-                "create secret {resource_name}: {e}"
-            )));
+            // The Secret name is deterministic in the task-run id, exactly like
+            // the Job's. Treating `AlreadyExists` as fatal here would make the
+            // Job's own create-then-observe adoption unreachable: every retry
+            // of an ambiguous dispatch would die one step earlier, on a Secret
+            // this very task-run wrote, and the Job it must adopt would never
+            // be POSTed at all.
+            if !crate::graph_warmer::api_error_is_already_exists(&e) {
+                self.drop_pending(&task_run_id_str).await;
+                return Err(RuntimeError::Prepare(format!(
+                    "create secret {resource_name}: {e}"
+                )));
+            }
+            info!(
+                secret = %resource_name,
+                "kubernetes_runtime: task-run Secret already exists — adopting it"
+            );
         }
 
         // 1b. Log the `task_run_services_resolved` activity event.
@@ -722,23 +772,22 @@ impl SessionRuntime for KubernetesRuntime {
         );
         crate::build_resources::apply_resolved_resources(&mut job, resolved_task_resources);
         let jobs: Api<Job> = Api::namespaced(self.client.clone(), ns);
-        let created_job =
-            match record_confirmed_job_create(jobs.create(&PostParams::default(), &job).await) {
-                Ok(j) => j,
-                Err(e) => {
-                    // Best-effort cleanup of the orphan Secret — don't shadow the
-                    // original error if cleanup also fails.
-                    let secrets_bg = secrets.clone();
-                    let name = resource_name.clone();
-                    tokio::spawn(async move {
-                        let _ = secrets_bg.delete(&name, &DeleteParams::default()).await;
-                    });
-                    self.drop_pending(&task_run_id_str).await;
-                    return Err(RuntimeError::Prepare(format!(
-                        "create job {resource_name}: {e}"
-                    )));
-                }
-            };
+        let created_job = match create_or_adopt_task_run_job(&jobs, &job, &resource_name).await {
+            Ok(j) => j,
+            Err(e) => {
+                // Best-effort cleanup of the orphan Secret — don't shadow the
+                // original error if cleanup also fails.
+                let secrets_bg = secrets.clone();
+                let name = resource_name.clone();
+                tokio::spawn(async move {
+                    let _ = secrets_bg.delete(&name, &DeleteParams::default()).await;
+                });
+                self.drop_pending(&task_run_id_str).await;
+                return Err(RuntimeError::Prepare(format!(
+                    "create job {resource_name}: {e}"
+                )));
+            }
+        };
 
         // 3. Attach an OwnerReference so the Secret GCs with the Job.
         let job_uid = match created_job.metadata.uid.clone() {
@@ -3602,3 +3651,7 @@ mod tests {
         let _ = tokio::time::timeout(Duration::from_secs(2), server.join).await;
     }
 }
+
+#[cfg(test)]
+#[path = "runtime_kueue_create_tests.rs"]
+mod runtime_kueue_create_tests;

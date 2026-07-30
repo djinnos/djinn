@@ -627,6 +627,24 @@ impl CoordinatorActor {
     // normal task dispatch go through the exact same cap/ledger code path.
 
     fn admission_controller(&self) -> Option<&crate::build_admission::BuildAdmissionController> {
+        // Kueue cutover (37yq). Armed, the ClusterQueue is the capacity
+        // authority and this ledger stops reserving before a create.
+        //
+        // Gated HERE and not at the four call sites because this is the one
+        // choke point all of them share: `begin_`/`finish_` (this file),
+        // `live_`/`terminal_` (this file, driven from `actor.rs`), and the
+        // dispatchers in `refinement_dispatch.rs` and `dispatch/retry.rs` all
+        // resolve the controller through this accessor. A per-call-site gate
+        // would have to be repeated in four files and would silently regrow the
+        // fifth time someone adds a dispatcher — the same "two stacked
+        // authorities, one of them silenced" shape the warm path had.
+        //
+        // Every caller already handles `None`: it is how the coordinator ran
+        // before the ledger existed, so an armed deployment takes the
+        // pre-ledger path rather than a new one.
+        if self.kueue_armed {
+            return None;
+        }
         self.build_admission.as_deref()
     }
 
@@ -4038,6 +4056,7 @@ mod inflight_ledger_tests {
             events_tx: events_tx.clone(),
             pool: controlled_runtime.spawn_pool(db, cancel, max_slots),
             build_admission: None,
+            kueue_armed: false,
             catalog: CatalogService::new(),
             health: djinn_provider::catalog::health::HealthTracker::new(),
             role_registry: std::sync::Arc::new(crate::roles::RoleRegistry::new()),
@@ -5416,6 +5435,7 @@ mod failover_chain_tests {
             events_tx: events_tx.clone(),
             pool: pool.clone(),
             build_admission: None,
+            kueue_armed: false,
             catalog: CatalogService::new(),
             health: djinn_provider::catalog::health::HealthTracker::new(),
             role_registry: std::sync::Arc::new(crate::roles::RoleRegistry::new()),
@@ -7989,6 +8009,7 @@ mod monitored_reopen_no_eligible_model_tests {
             events_tx: events_tx.clone(),
             pool,
             build_admission: None,
+            kueue_armed: false,
             catalog: CatalogService::new(),
             health: djinn_provider::catalog::health::HealthTracker::new(),
             role_registry: std::sync::Arc::new(crate::roles::RoleRegistry::new()),
@@ -8570,6 +8591,7 @@ mod build_admission_route_tests {
             events_tx: events_tx.clone(),
             pool: runtime.spawn_pool(db, cancel, max_slots),
             build_admission: None,
+            kueue_armed: false,
             catalog: CatalogService::new(),
             health: djinn_provider::catalog::health::HealthTracker::new(),
             role_registry: std::sync::Arc::new(crate::roles::RoleRegistry::new()),
@@ -10019,4 +10041,7 @@ mod build_admission_route_tests {
         );
         assert!(controller.accepted_transition_count() >= 8);
     }
+
+    /// AC4 (37yq): the per-relation ledger census, armed and disarmed.
+    mod kueue_ledger_silence;
 }

@@ -45,6 +45,7 @@ pub use graph_warmer::{
     NoopJobWatcher, NoopWarmJobLister, WarmAdmission, WarmAdmissionError, WarmAdmissionPermit,
     WarmAdmissionRequest, WarmAdmissionTransition, WarmCompletionSink, WarmJobDispatcher,
     WarmJobLister, WarmJobManifest, WarmJobWatcher, WarmTerminalOutcome,
+    api_error_is_already_exists,
 };
 pub use graph_warmer_candidates::{
     CleanupObservation, GateObservation, KubeWarmCandidateClient, WarmAnnotationValidation,
@@ -56,7 +57,7 @@ pub use graph_warmer_identity::{LeasedWarmJobIdentity, deterministic_warm_job_na
 pub use kueue_preflight::{
     KueuePreflightOutcome, LABEL_KUEUE_MANAGED, NamespaceKueueStatus,
     classify_labels as classify_kueue_namespace_labels, decide as decide_kueue_preflight,
-    disarm_kueue_globally, kueue_disarmed_by_preflight,
+    disarm_kueue_globally, kueue_armed_from_env, kueue_disarmed_by_preflight,
     observe_namespace as observe_kueue_namespace, run as run_kueue_preflight,
 };
 pub use runtime::{KubernetesRuntime, taskrun_job_name};
@@ -70,7 +71,7 @@ pub use scip_schedule::{
     ScipJobObservation, decide as decide_scip_index, observe_from_jobs,
 };
 pub use token_review::TokenReviewer;
-pub use warm_job::{build_leased_warm_job, build_warm_job};
+pub use warm_job::{build_leased_warm_job, build_warm_job, warm_job_name};
 pub use workload_inventory::{
     KubeWorkloadInventory, LABEL_ADMISSION_DOMAIN, LABEL_ADMISSION_GENERATION,
     LABEL_ADMISSION_WORK_ID, ObjectPresence, UidGetResult, WorkloadInventory, WorkloadObjectKind,

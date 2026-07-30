@@ -262,17 +262,37 @@ impl ImageController {
                 );
                 existing
             }
-            None => {
-                let created = jobs.create(&PostParams::default(), &job).await?;
-                info!(
-                    subject = %subject_id,
-                    hash = %hash_prefix,
-                    job = %created.metadata.name.as_deref().unwrap_or_default(),
-                    namespace = %self.config.namespace,
-                    "image_controller: build Job created"
-                );
-                created
-            }
+            None => match jobs.create(&PostParams::default(), &job).await {
+                Ok(created) => {
+                    info!(
+                        subject = %subject_id,
+                        hash = %hash_prefix,
+                        job = %created.metadata.name.as_deref().unwrap_or_default(),
+                        namespace = %self.config.namespace,
+                        "image_controller: build Job created"
+                    );
+                    created
+                }
+                // The `get_opt` above is a read, and reads race creates. The
+                // build Job name is `djinn-build-{subject}-{hash}` — deterministic
+                // in the content hash — so `AlreadyExists` means another
+                // reconcile (or another replica) POSTed the same build between
+                // our read and our write. Adopt it: creating "a second Job for
+                // this hash" is not a thing Kubernetes will let us do, and
+                // failing the reconcile instead just defers the same adoption to
+                // the next tick while the image sits un-owned.
+                Err(error) if djinn_k8s::api_error_is_already_exists(&error) => {
+                    info!(
+                        subject = %subject_id,
+                        hash = %hash_prefix,
+                        job = %job_name,
+                        namespace = %self.config.namespace,
+                        "image_controller: build Job was created concurrently — adopting it"
+                    );
+                    jobs.get(&job_name).await?
+                }
+                Err(error) => return Err(error.into()),
+            },
         };
 
         // 4. Back-fill OwnerReference on the CM so it GCs with the Job.

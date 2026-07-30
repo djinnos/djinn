@@ -25,7 +25,6 @@ use k8s_openapi::api::core::v1::{
 };
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
-use uuid::Uuid;
 
 use crate::config::KubernetesConfig;
 use crate::graph_warmer_identity::LeasedWarmJobIdentity;
@@ -97,11 +96,38 @@ pub const VOLUME_WORKSPACE: &str = "workspace";
 /// the worker binary.
 pub const WARM_COMMAND_BIN: &str = "/opt/djinn/bin/djinn-agent-worker";
 
+/// Deterministic Job name for one `(project, warm generation)` warm run.
+///
+/// `warm_generation` is the mirror revision the warm targets: a new head is a
+/// new warm generation, and every retry of the *same* generation must land on
+/// the same object so a lost create response cannot produce two warm Jobs for
+/// one revision. That is exactly the property [`crate::scip_job::
+/// scip_index_job_name`] already has, and the property Kueue's create-then-admit
+/// flow depends on — an admitted Workload is keyed by the Job it wraps, so a
+/// retry that invents a fresh name enqueues a *second* Workload against the same
+/// quota instead of adopting the one already queued.
+///
+/// Delegates to [`crate::deterministic_warm_job_name`] so this name is
+/// byte-identical to the one the durable warm identity has always persisted
+/// (`graph_warmer_identity.rs`) — the dispatch path used to build a
+/// `Uuid::now_v7()` name here and then overwrite it with the deterministic one
+/// on the way to the apiserver, which meant the manifest a direct caller got
+/// back was never the manifest Kubernetes saw.
+#[must_use]
+pub fn warm_job_name(project_id: &str, warm_generation: &str) -> String {
+    crate::graph_warmer_identity::deterministic_warm_job_name(
+        project_id,
+        &crate::graph_warmer_identity::warm_work_id(project_id, warm_generation),
+    )
+}
+
 /// Build the Job manifest dispatched for one graph-warm run.
 ///
-/// `project_id` becomes the resource-name suffix + label value. The
-/// Pod's command is a shell wrapper that clones the bare mirror into a
-/// writable emptyDir, then invokes `djinn-server warm-graph <project_id>`.
+/// `project_id` becomes the resource-name suffix + label value, and
+/// `warm_generation` (the mirror revision this warm targets) makes the Job name
+/// deterministic — see [`warm_job_name`]. The Pod's command is a shell wrapper
+/// that clones the bare mirror into a writable emptyDir, then invokes
+/// `djinn-server warm-graph <project_id>`.
 ///
 /// The ServiceAccount (`config.service_account`) is reused from task-run
 /// dispatch — the warm Pod needs the mirror PVC + the DB env, both of
@@ -109,12 +135,12 @@ pub const WARM_COMMAND_BIN: &str = "/opt/djinn/bin/djinn-agent-worker";
 pub fn build_warm_job(
     config: &KubernetesConfig,
     project_id: &str,
+    warm_generation: &str,
     project_image_tag: &str,
     policy: Option<&djinn_stack::environment::CargoCachePolicy>,
 ) -> Job {
-    let suffix = Uuid::now_v7();
     let sanitized_project = sanitize_id(project_id);
-    let job_name = format!("djinn-warm-{}-{}", sanitized_project, short_uuid(&suffix));
+    let job_name = warm_job_name(project_id, warm_generation);
     let labels = job_labels(config, project_id);
 
     let project_root = format!("{WORKSPACE_MOUNT_DIR}/{sanitized_project}");
@@ -425,7 +451,13 @@ pub fn build_leased_warm_job(
     policy: Option<&djinn_stack::environment::CargoCachePolicy>,
     identity: &LeasedWarmJobIdentity,
 ) -> Job {
-    let mut job = build_warm_job(config, project_id, project_image_tag, policy);
+    let mut job = build_warm_job(
+        config,
+        project_id,
+        &identity.graph_revision,
+        project_image_tag,
+        policy,
+    );
     job.metadata.name = Some(identity.object_name.clone());
     let annotations = BTreeMap::from([
         (
@@ -566,13 +598,6 @@ pub(crate) fn sanitize_id(raw: &str) -> String {
         out.truncate(48);
     }
     out
-}
-
-/// Short form of a uuid v7 used as the Job-name disambiguator (full uuid
-/// overruns DNS label budgets when combined with project id + prefix).
-pub(crate) fn short_uuid(id: &Uuid) -> String {
-    let full = id.simple().to_string();
-    full[..12.min(full.len())].to_string()
 }
 
 #[cfg(test)]

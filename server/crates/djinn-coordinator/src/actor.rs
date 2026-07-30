@@ -83,6 +83,11 @@ pub(super) struct CoordinatorActor {
     pub(super) pool: SlotPoolHandle,
     /// Durable build admission shared by every task-run dispatch route.
     pub(super) build_admission: Option<Arc<crate::build_admission::BuildAdmissionController>>,
+    /// Kueue cutover (37yq): armed, the ClusterQueue owns build capacity and
+    /// `admission_controller()` stops handing `build_admission` out to the
+    /// pre-create reservation path. Copied from `CoordinatorDeps`, which reads
+    /// `DJINN_KUEUE_ARMED` once at construction.
+    pub(super) kueue_armed: bool,
     #[cfg_attr(test, allow(dead_code))]
     pub(super) catalog: CatalogService,
     pub(super) health: HealthTracker,
@@ -538,6 +543,7 @@ impl CoordinatorActor {
             db,
             pool,
             build_admission,
+            kueue_armed,
             catalog,
             health,
             role_registry,
@@ -639,6 +645,7 @@ impl CoordinatorActor {
             events_tx: events_tx.clone(),
             pool,
             build_admission,
+            kueue_armed,
             catalog,
             health,
             role_registry,

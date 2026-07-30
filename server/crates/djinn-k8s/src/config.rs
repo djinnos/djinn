@@ -802,21 +802,17 @@ impl KubernetesConfig {
         // Kueue arming. Deliberately NOT `DJINN_K8S_*`-prefixed: it is one half
         // of a chart-level contract with the `djinn.io/kueue-managed` namespace
         // label, both driven by `kueue.armed` in values.yaml.
-        if let Ok(v) = std::env::var("DJINN_KUEUE_ARMED") {
-            match v.parse::<bool>() {
-                Ok(armed) => cfg.kueue_armed = armed,
-                Err(error) => {
-                    tracing::warn!(value = %v, %error, "DJINN_KUEUE_ARMED is not a boolean — keeping Kueue disarmed")
-                }
-            }
-        }
-        // Honor a startup preflight refusal. `KubernetesConfig` is not held on
-        // AppState — every renderer rebuilds it from the environment at dispatch
-        // time — so the latch, not a mutated struct, is what makes the refusal
-        // reach all of them. See `crate::kueue_preflight`.
-        if cfg.kueue_armed && crate::kueue_preflight::kueue_disarmed_by_preflight() {
-            cfg.kueue_armed = false;
-        }
+        //
+        // Env parsing AND the startup preflight latch both live in
+        // `crate::kueue_preflight::kueue_armed_from_env`, because the renderers
+        // are no longer the only consumer: the coordinator's build-admission
+        // gate reads the same state to decide whether the in-process ledger
+        // stands down (37yq). Two readers that each parsed the env for
+        // themselves could disagree, and the disagreement that matters is
+        // exactly the dangerous one — a ledger that stood down while the
+        // preflight had disarmed the renderers, leaving nothing owning
+        // capacity. One function, one answer.
+        cfg.kueue_armed = crate::kueue_preflight::kueue_armed_from_env();
         if let Ok(v) = std::env::var("DJINN_KUEUE_LOCAL_QUEUE_PREFIX")
             && !v.is_empty()
         {

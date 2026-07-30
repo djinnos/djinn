@@ -137,6 +137,22 @@ pub struct CoordinatorDeps {
     pub graph_warmer: Option<Arc<dyn GraphWarmerService>>,
     /// Shared task-run and graph-warm admission boundary. Optional only during rollout.
     pub build_admission: Option<Arc<BuildAdmissionController>>,
+    /// Kueue cutover (37yq): `true` once `kueue.armed` puts the ClusterQueue in
+    /// charge of build capacity, at which point the in-process build-admission
+    /// ledger must stop reserving before a create.
+    ///
+    /// Read through `djinn_k8s::kueue_armed_from_env`, which is the SAME
+    /// function `KubernetesConfig::from_env` uses — so this gate and the
+    /// renderers cannot disagree, and in particular this gate cannot miss the
+    /// startup namespace preflight's disarm latch (`kueue_preflight`, xbrl).
+    /// Missing it would stand the ledger down while the renderers correctly
+    /// emit unsuspended Jobs, leaving NO authority owning build capacity.
+    ///
+    /// Read ONCE, here, rather than per dispatch: a value re-read on every call
+    /// could change under a live task-run — reserving capacity at `begin_` and
+    /// then finding no controller at `finish_`, which leaks the reservation for
+    /// the life of the process.
+    pub kueue_armed: bool,
     pub(super) consolidation_runner: Option<Arc<dyn ConsolidationRunner>>,
     /// Shared bare-mirror manager. Threaded into the synthesized `AgentContext`
     /// built inside `process_approved_tasks` so the direct-push merge fallback
@@ -186,6 +202,7 @@ impl CoordinatorDeps {
             lsp,
             graph_warmer: None,
             build_admission: None,
+            kueue_armed: djinn_k8s::kueue_armed_from_env(),
             consolidation_runner: None,
             mirror: None,
             runtime_ops: None,
@@ -206,6 +223,13 @@ impl CoordinatorDeps {
     /// Inject the controller shared by every build-producing dispatcher.
     pub fn with_build_admission(mut self, controller: Arc<BuildAdmissionController>) -> Self {
         self.build_admission = Some(controller);
+        self
+    }
+
+    /// Override the Kueue arming state (tests; production reads the env var).
+    #[must_use]
+    pub fn with_kueue_armed(mut self, armed: bool) -> Self {
+        self.kueue_armed = armed;
         self
     }
 
