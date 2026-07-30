@@ -15,8 +15,10 @@ const run = {
   created_at: "2026-07-30T12:00:00Z", completed_at: "2026-07-30T12:01:00Z",
 };
 
-// This is deliberately the route's serialized detail shape, not a component
-// model. The page must consume it solely through the browser HTTP client.
+// This is the exact serialized contract materialized by the authenticated
+// two-area Axum route regression in server/src/server/tests/readiness.rs. It
+// deliberately remains an HTTP DTO (rather than a component model) so this
+// routed page consumes only the browser client's server shape.
 const terminalDetail = {
   run,
   areas: [
@@ -24,15 +26,21 @@ const terminalDetail = {
       id: "area-frontend", area_key: "frontend", composition: { languages: ["TypeScript"], roles: ["frontend"] }, path_scopes: ["web/"],
       frozen_at: "2026-07-30T12:00:01Z", status: "succeeded",
       attempts: [{ id: "attempt-frontend", attempt_number: 1, status: "succeeded", payload_digest: "frontend-digest", created_at: "2026-07-30T12:00:02Z", terminal_at: "2026-07-30T12:00:03Z", is_current: true }],
-      accepted_findings: [{ id: "finding-frontend", attempt_id: "attempt-frontend", guardrail_key: "frontend-auth", status: "covered", severity: "high", confidence: 0.95, evidence: [{ path: "web/auth.ts", line: 12 }], created_at: "2026-07-30T12:00:03Z" }],
+      accepted_findings: [
+        { id: "finding-frontend-auth", attempt_id: "attempt-frontend", guardrail_key: "frontend-auth", status: "covered", severity: "high", confidence: 0.95, evidence: [{ path: "web/auth.ts", line: 12 }], created_at: "2026-07-30T12:00:03Z" },
+        { id: "finding-frontend-inputs", attempt_id: "attempt-frontend", guardrail_key: "frontend-inputs", status: "partial", severity: "medium", confidence: 0.8, evidence: [{ path: "web/forms.ts", line: 31 }], created_at: "2026-07-30T12:00:03Z" },
+      ],
       accepted_outputs: [{ attempt_id: "attempt-frontend", result: { unsupported: [{ guardrail_key: "browser-session", reason: "not applicable to this frontend" }], warnings: [{ reason: "legacy form remains outside migration scope" }] }, created_at: "2026-07-30T12:00:03Z" }],
     },
     {
       id: "area-backend", area_key: "backend", composition: { languages: ["Rust"], roles: ["backend"] }, path_scopes: ["server/"],
       frozen_at: "2026-07-30T12:00:01Z", status: "succeeded",
       attempts: [{ id: "attempt-backend", attempt_number: 1, status: "succeeded", payload_digest: "backend-digest", created_at: "2026-07-30T12:00:02Z", terminal_at: "2026-07-30T12:00:03Z", is_current: true }],
-      accepted_findings: [{ id: "finding-backend", attempt_id: "attempt-backend", guardrail_key: "backend-secrets", status: "analysis_error", severity: "low", confidence: 0.85, evidence: [{ path: "server/src/config.rs", line: 9 }], created_at: "2026-07-30T12:00:03Z" }],
-      accepted_outputs: [{ attempt_id: "attempt-backend", result: { errors: [{ reason: "secret rotation is not configured" }] }, created_at: "2026-07-30T12:00:03Z" }],
+      accepted_findings: [
+        { id: "finding-backend-auth", attempt_id: "attempt-backend", guardrail_key: "backend-auth", status: "covered", severity: "high", confidence: 0.9, evidence: [{ path: "server/src/auth.rs", line: 48 }], created_at: "2026-07-30T12:00:03Z" },
+        { id: "finding-backend-secrets", attempt_id: "attempt-backend", guardrail_key: "backend-secrets", status: "analysis_error", severity: "low", confidence: 0.85, evidence: [{ path: "server/src/config.rs", line: 9 }], created_at: "2026-07-30T12:00:03Z" },
+      ],
+      accepted_outputs: [{ attempt_id: "attempt-backend", result: { errors: [{ reason: "secret rotation is not configured" }], warnings: [{ reason: "secret rotation is not configured" }] }, created_at: "2026-07-30T12:00:03Z" }],
     },
   ],
   area_scores: [
@@ -41,10 +49,9 @@ const terminalDetail = {
   ],
   project_score: { score: 7 / 9, band: "ready", created_at: "2026-07-30T12:01:00Z" },
   suggestions: [
-    { id: "suggestion-1", dedupe_key: "shared-auth-remediation", suggestion: { action: "Apply shared authentication remediation", validation_guidance: "Verify web/auth.ts and server/src/auth.rs after the change." }, created_at: "2026-07-30T12:01:00Z" },
-    { id: "suggestion-duplicate", dedupe_key: "shared-auth-remediation", suggestion: { action: "Duplicate must not render" }, created_at: "2026-07-30T12:01:00Z" },
+    { id: "suggestion-1", dedupe_key: "shared-auth-remediation", suggestion: { action: "Apply shared authentication remediation", area_ids: ["area-backend", "area-frontend"], guardrail_ids: ["backend-auth", "frontend-auth"], validation_guidance: "Verify web/auth.ts and server/src/auth.rs after the change." }, created_at: "2026-07-30T12:01:00Z" },
   ],
-  events: [{ id: "event-1", event_kind: "aggregation_completed_with_errors", payload: { warnings: ["one guardrail could not be analyzed"] }, created_at: "2026-07-30T12:01:00Z" }],
+  events: [{ id: "event-1", event_kind: "readiness_aggregated", payload: { status: "completed_with_errors" }, created_at: "2026-07-30T12:01:00Z" }],
 };
 
 function jsonResponse(body: unknown): Response {
@@ -73,22 +80,26 @@ describe("ProjectReadinessPage terminal HTTP detail", () => {
     expect(screen.getByText("agent-readiness-guardrails v1.0.0")).toBeInTheDocument();
     expect(screen.getByText("Score: 0.7777777777777778 — Band: ready")).toBeInTheDocument();
     expect(screen.getAllByRole("article", { name: /Readiness area/ })).toHaveLength(2);
-    expect(screen.getByRole("article", { name: "Readiness area frontend" })).toHaveTextContent('"languages":["TypeScript"]');
+    expect(screen.getByRole("article", { name: "Readiness area frontend" })).toHaveTextContent('"languages":["TypeScript"],"roles":["frontend"]');
     expect(screen.getByRole("article", { name: "Readiness area frontend" })).toHaveTextContent("Persisted area score: 0.8");
-    expect(screen.getByRole("article", { name: "Readiness area backend" })).toHaveTextContent('"languages":["Rust"]');
+    expect(screen.getByRole("article", { name: "Readiness area backend" })).toHaveTextContent('"languages":["Rust"],"roles":["backend"]');
     expect(screen.getByRole("article", { name: "Readiness area backend" })).toHaveTextContent("Persisted area score: 0.75");
     expect(screen.getByTestId("current-attempt-area-frontend")).toHaveTextContent("#1 — succeeded");
     expect(screen.getByTestId("current-attempt-area-backend")).toHaveTextContent("#1 — succeeded");
     expect(screen.getByText("frontend-auth")).toBeInTheDocument();
     expect(screen.getByText("Confidence: 0.95")).toBeInTheDocument();
     expect(screen.getByText('Evidence: [{"path":"web/auth.ts","line":12}]')).toBeInTheDocument();
+    expect(screen.getByText("backend-auth")).toBeInTheDocument();
+    expect(screen.getByText("Confidence: 0.9")).toBeInTheDocument();
+    expect(screen.getByText('Evidence: [{"path":"server/src/auth.rs","line":48}]')).toBeInTheDocument();
     expect(screen.getByText("backend-secrets")).toBeInTheDocument();
     expect(screen.getByText("Confidence: 0.85")).toBeInTheDocument();
     expect(screen.getByText('Evidence: [{"path":"server/src/config.rs","line":9}]')).toBeInTheDocument();
     expect(screen.getByLabelText("frontend Unsupported entries")).toHaveTextContent("browser-session");
     expect(screen.getByLabelText("frontend Warnings")).toHaveTextContent("legacy form remains outside migration scope");
+    expect(screen.getByLabelText("backend Warnings")).toHaveTextContent("secret rotation is not configured");
     expect(screen.getByLabelText("backend Errors")).toHaveTextContent("secret rotation is not configured");
-    expect(screen.getByLabelText("Run diagnostics")).toHaveTextContent("aggregation_completed_with_errors");
+    expect(screen.getByLabelText("Run diagnostics")).toHaveTextContent("readiness_aggregated");
     expect(screen.getByLabelText("Suggested next actions")).toHaveTextContent("Verify web/auth.ts and server/src/auth.rs after the change.");
     expect(screen.getAllByText("shared-auth-remediation")).toHaveLength(1);
 
