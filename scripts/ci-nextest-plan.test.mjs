@@ -861,5 +861,100 @@ describe('workflow static checks', () => {
     // Also reject any --filter-expr line that uses command substitution to read a file.
     assert.ok(!/--filter-expr\s+["']?\$\(cat\s/.test(source), 'workflow must not use command substitution to feed --filter-expr');
   });
+
+  // Regression guard for a silent, total loss of timing-fed balancing.
+  //
+  // The timing-restore loop used to select candidates with
+  // `select(.workflow_run.conclusion == "success")` against
+  // /actions/artifacts. That endpoint's `workflow_run` object has no
+  // `conclusion` field, so the filter matched nothing on every run: the planner
+  // cold-started always, COLD_START_SHARDS became the only shard count the PR
+  // lane could reach, and PR_DEFAULT_SHARDS / PR_MAX_SHARDS / both PR_WIDEN_*
+  // thresholds were unreachable. Nothing failed — the cold-start fallback is
+  // deliberately safe — so the only visible symptom was a shard count that
+  // happened to equal COLD_START_SHARDS.
+  //
+  // These assertions are about the SIDE EFFECT (which endpoint supplies the
+  // conclusion), not about the notice text, because the notices printed
+  // correctly the whole time it was broken.
+  // The invariant whose violation silently halved the test suite.
+  //
+  // `server-test`'s matrix is STATIC (the shards deliberately do not
+  // `needs: nextest-plan`, so they can build concurrently with the planner's
+  // discovery). A plan NARROWER than the matrix is safe — surplus indices
+  // no-op. A plan WIDER than the matrix is silent data loss: the tail indices
+  // have no jobs, so their tests never run, and nothing fails. The exact-once
+  // proof does not catch it because it validates the plan's partition, not what
+  // executed.
+  //
+  // #2799 raised PR_MAX_SHARDS 4 -> 8 while the matrix still had four rows.
+  // Once #2803 let the planner reach PR_MAX_SHARDS, run 30544309199 planned
+  // eight shards of ~1458 tests and ran four: 5834 of 11666 tests (50%) never
+  // executed, and the run was GREEN.
+  it('provisions a server-test matrix at least as wide as the widest possible plan', () => {
+    const source = readFileSync(WORKFLOW, 'utf8');
+
+    const serverTest = /^ {2}server-test:$/m.exec(source);
+    assert.ok(serverTest, 'server-test job must exist');
+    const afterJob = source.slice(serverTest.index);
+    const nextJob = /\n {2}[a-z0-9-]+:\n/.exec(afterJob.slice(1));
+    const jobBlock = nextJob ? afterJob.slice(0, nextJob.index + 1) : afterJob;
+
+    const rows = [...jobBlock.matchAll(/^ {10}- shard: shard-(\d+)$/gm)].map((m) => Number(m[1]));
+    const indices = [...jobBlock.matchAll(/^ {12}shardIndex: (\d+)$/gm)].map((m) => Number(m[1]));
+    assert.ok(rows.length > 0, 'server-test must declare an explicit shard matrix');
+    assert.equal(rows.length, indices.length, 'every matrix row needs a shardIndex');
+    assert.deepEqual(
+      indices,
+      indices.map((_, i) => i),
+      'shardIndex values must be a dense 0-based range, since the planner assigns by index',
+    );
+
+    const widest = Math.max(PR_MAX_SHARDS, WIDE_DEFAULT_SHARDS, COLD_START_SHARDS);
+    assert.ok(
+      indices.length >= widest,
+      `server-test's static matrix has ${indices.length} rows but the planner can emit up to `
+      + `${widest} shards (max of PR_MAX_SHARDS=${PR_MAX_SHARDS}, `
+      + `WIDE_DEFAULT_SHARDS=${WIDE_DEFAULT_SHARDS}, COLD_START_SHARDS=${COLD_START_SHARDS}). `
+      + 'Tests on the unprovisioned tail indices would never run and CI would still pass.',
+    );
+
+    // The runtime guard reads this env var; if it drifts from the real row
+    // count the guard either misfires or stops firing.
+    const declared = /^ {2}CI_SERVER_TEST_MATRIX_WIDTH: "(\d+)"$/m.exec(source);
+    assert.ok(declared, 'CI_SERVER_TEST_MATRIX_WIDTH must be declared at workflow level');
+    assert.equal(
+      Number(declared[1]),
+      indices.length,
+      'CI_SERVER_TEST_MATRIX_WIDTH must equal the number of server-test matrix rows',
+    );
+    assert.match(
+      jobBlock,
+      /if \[ "\$shard_count" -gt "\$CI_SERVER_TEST_MATRIX_WIDTH" \]; then/,
+      'every shard must fail closed when the plan is wider than the provisioned matrix',
+    );
+  });
+
+  it('resolves the timing artifact run conclusion on an endpoint that returns it', () => {
+    const source = readFileSync(WORKFLOW, 'utf8');
+    const artifactQuery = /actions\/artifacts\?name=nextest-timing[^\n]*/.exec(source);
+    assert.ok(artifactQuery, 'workflow must query the nextest-timing artifact list');
+
+    assert.ok(
+      !/select\(\s*\.workflow_run\.conclusion/.test(source),
+      'the /actions/artifacts response has no workflow_run.conclusion field; '
+      + 'filtering on it selects nothing and silently forces cold-start balancing',
+    );
+    assert.match(
+      source,
+      /actions\/runs\/\$run_id"?\s*\\?\s*\n?\s*--jq '\.conclusion'/,
+      'the producing run conclusion must come from /actions/runs/<id>, which does return it',
+    );
+    assert.match(
+      source,
+      /if \[ "\$run_conclusion" != success \]; then/,
+      'a candidate from a non-successful run must be skipped in favour of an older one',
+    );
+  });
 });
 
