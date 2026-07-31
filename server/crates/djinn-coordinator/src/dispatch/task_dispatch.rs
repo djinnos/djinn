@@ -12,14 +12,11 @@ use super::admission::{
     overlay_inflight_ledger,
 };
 use super::post_intervention_lane;
-use crate::build_admission::BuildAdmissionDecision;
 use crate::dispatch_pause::{load_dispatch_pause_state, matching_task_dispatch_pause};
 use crate::roles::DispatchContext;
 use djinn_core::clock::{Clock, SystemClock};
-use djinn_db::AdmissionDomain;
 use djinn_db::repositories::task_arbitration::TaskArbitrationRepository;
 use djinn_db::{DispatchStateRepository, DispatchStateUpsert};
-use djinn_k8s::{WarmAdmission, WarmAdmissionPermit, WarmAdmissionTransition};
 
 /// Consecutive failover-chain exhaustions in which the model-health breaker was
 /// open for EVERY candidate — nothing attempted — after which the coordinator
@@ -207,15 +204,17 @@ impl CoordinatorActor {
                     retain_inflight_reservation(task_id, active_task_ids, Some(&live))
                 });
                 for task_id in stale_inflight_task_ids {
-                    self.persist_durable_dispatch_state_update(
-                        &task_id,
-                        None,
-                        "inflight_ledger_reconcile_clear",
-                        DurableDispatchStateUpdate {
-                            inflight: Some(None),
-                            ..Default::default()
-                        },
-                    )
+                    poll_stack::boxed(|| {
+                        self.persist_durable_dispatch_state_update(
+                            &task_id,
+                            None,
+                            "inflight_ledger_reconcile_clear",
+                            DurableDispatchStateUpdate {
+                                inflight: Some(None),
+                                ..Default::default()
+                            },
+                        )
+                    })
                     .await;
                 }
             }
@@ -235,15 +234,17 @@ impl CoordinatorActor {
                     retain_inflight_reservation(task_id, active_task_ids, None)
                 });
                 for task_id in started_task_ids {
-                    self.persist_durable_dispatch_state_update(
-                        &task_id,
-                        None,
-                        "inflight_ledger_session_started_clear",
-                        DurableDispatchStateUpdate {
-                            inflight: Some(None),
-                            ..Default::default()
-                        },
-                    )
+                    poll_stack::boxed(|| {
+                        self.persist_durable_dispatch_state_update(
+                            &task_id,
+                            None,
+                            "inflight_ledger_session_started_clear",
+                            DurableDispatchStateUpdate {
+                                inflight: Some(None),
+                                ..Default::default()
+                            },
+                        )
+                    })
                     .await;
                 }
             }
@@ -308,8 +309,7 @@ impl CoordinatorActor {
                 HashMap::new()
             }
         };
-        self.reconcile_inflight_dispatch_ledger(&active_task_ids)
-            .await;
+        poll_stack::boxed(|| self.reconcile_inflight_dispatch_ledger(&active_task_ids)).await;
         overlay_inflight_ledger(&mut by_model, &self.inflight_dispatches);
         overlay_inflight_lane_ledger(&mut by_lane, &self.inflight_dispatches);
         self.overlay_provisional_admissions(&mut by_model, &mut by_lane);
@@ -331,7 +331,8 @@ impl CoordinatorActor {
         running_by_user_model: &mut HashMap<(String, String), u32>,
         running_by_user_lane: &mut HashMap<(String, djinn_core::models::ModelLane), u32>,
     ) {
-        let (fresh_by_model, fresh_by_lane) = self.effective_running_counts().await;
+        let (fresh_by_model, fresh_by_lane) =
+            poll_stack::boxed(|| self.effective_running_counts()).await;
         *running_by_user_model = fresh_by_model;
         *running_by_user_lane = fresh_by_lane;
     }
@@ -365,15 +366,17 @@ impl CoordinatorActor {
                 self.dispatch_cooldowns.len(),
                 self.inflight_dispatches.len(),
             );
-            self.persist_durable_dispatch_state_update(
-                task_id,
-                task_short_id,
-                "inflight_ledger_insert",
-                DurableDispatchStateUpdate {
-                    inflight: Some(Some((Some(c.to_string()), model.to_string()))),
-                    ..Default::default()
-                },
-            )
+            poll_stack::boxed(|| {
+                self.persist_durable_dispatch_state_update(
+                    task_id,
+                    task_short_id,
+                    "inflight_ledger_insert",
+                    DurableDispatchStateUpdate {
+                        inflight: Some(Some((Some(c.to_string()), model.to_string()))),
+                        ..Default::default()
+                    },
+                )
+            })
             .await;
         }
     }
@@ -477,8 +480,9 @@ impl CoordinatorActor {
         task: &djinn_core::models::Task,
     ) -> crate::WorkerLifecycleMetadata {
         crate::WorkerLifecycleMetadata {
-            checkpoint: self.checkpoint_lifecycle_from_activity(task).await,
-            model_rotation: self.model_rotation_lifecycle_from_activity(task).await,
+            checkpoint: poll_stack::boxed(|| self.checkpoint_lifecycle_from_activity(task)).await,
+            model_rotation: poll_stack::boxed(|| self.model_rotation_lifecycle_from_activity(task))
+                .await,
             ..Default::default()
         }
     }
@@ -626,282 +630,6 @@ impl CoordinatorActor {
     // dispatch_next_refinement_phase`, so refinement tribunal dispatch and
     // normal task dispatch go through the exact same cap/ledger code path.
 
-    fn admission_controller(&self) -> Option<&crate::build_admission::BuildAdmissionController> {
-        self.build_admission.as_deref()
-    }
-
-    /// The durable consumer kind for a task dispatch denial. Matches
-    /// `build_leases.consumer_kind` so the two ledgers can be read together.
-    const DENIAL_CONSUMER_KIND: &'static str = "task_dispatch";
-
-    /// Write down why this task was denied.
-    ///
-    /// Best-effort by design: a denial is already a "leave the task queued"
-    /// outcome, and failing to record the reason must not change it. A failed
-    /// write is logged at `warn` because the missing row is itself the class of
-    /// blindness this path exists to end.
-    async fn record_task_run_denial(
-        &self,
-        task_id: &str,
-        cause: &crate::build_admission::DenialCause,
-        occupancy: Option<i64>,
-        cap: i64,
-        server_epoch: &str,
-    ) {
-        let record = djinn_db::BuildAdmissionDenialRecord {
-            consumer_kind: Self::DENIAL_CONSUMER_KIND.to_owned(),
-            consumer_id: task_id.to_owned(),
-            cause: cause.name().to_owned(),
-            readiness: cause
-                .readiness()
-                .map(|readiness| readiness.as_str().to_owned()),
-            detail: cause.detail().map(str::to_owned),
-            // Deliberately propagated as-is. `None` means the denial never
-            // measured occupancy, and writing 0 instead would recreate the
-            // exact confusion #2661 removed from the log.
-            occupancy,
-            cap,
-            server_epoch: server_epoch.to_owned(),
-        };
-        if let Err(error) = djinn_db::BuildAdmissionDenialRepository::new(self.db.clone())
-            .record(&record)
-            .await
-        {
-            tracing::warn!(
-                task_id,
-                %error,
-                "failed to persist the build-admission denial cause; board_health will \
-                 report `unexplained` for this task"
-            );
-        }
-    }
-
-    /// Drop this task's denial record now that it has been admitted.
-    ///
-    /// Without this the table becomes the #2661 tombstone in a new location: a
-    /// denial row that outlives its condition, replayed as a live reason
-    /// forever.
-    async fn clear_task_run_denial(&self, task_id: &str) {
-        if let Err(error) = djinn_db::BuildAdmissionDenialRepository::new(self.db.clone())
-            .clear(Self::DENIAL_CONSUMER_KIND, task_id)
-            .await
-        {
-            tracing::warn!(
-                task_id,
-                %error,
-                "failed to clear a stale build-admission denial record after a permit"
-            );
-        }
-    }
-
-    /// Reserve and durably mark a task-run create before the pool side effect.
-    /// A controller denial is deliberately neutral: callers leave the task queued.
-    pub(crate) async fn begin_task_run_build_admission(
-        &self,
-        role: &str,
-        task_id: &str,
-        generation: i64,
-        object_name: String,
-    ) -> Result<Option<WarmAdmissionPermit>, ()> {
-        let Some(controller) = self.admission_controller() else {
-            return Ok(None);
-        };
-        match controller
-            .admit_task_run(
-                Some(role),
-                AdmissionDomain::TaskObservation,
-                task_id.to_owned(),
-                generation,
-                object_name,
-            )
-            .await
-        {
-            Ok(BuildAdmissionDecision::Permitted { permit, idempotent }) => {
-                // A deterministic retry retains the original permit and its
-                // CreateUnknown/Live journal state. Replaying CreateStarted is
-                // only valid while the original create is in flight, so do not
-                // turn an ambiguous accepted create into a false pre-create
-                // failure before the retry reaches the pool.
-                if idempotent {
-                    self.clear_task_run_denial(task_id).await;
-                    return Ok(Some(permit));
-                }
-                if let Err(error) = controller
-                    .transition(&permit, WarmAdmissionTransition::CreateStarted)
-                    .await
-                {
-                    // No pool create was attempted. A reservation that cannot
-                    // enter CreateStarted is definitive pre-create failure, not
-                    // an ambiguous runtime outcome. Best-effort terminalization
-                    // prevents a valid reservation from leaking; persistence
-                    // unavailability deliberately retains capacity.
-                    if let Err(terminal_error) = controller
-                        .transition(
-                            &permit,
-                            WarmAdmissionTransition::DefinitiveFailure {
-                                diagnostic:
-                                    "CreateStarted could not be recorded before pool create"
-                                        .to_owned(),
-                            },
-                        )
-                        .await
-                    {
-                        tracing::warn!(task_id, role, %terminal_error, "failed to terminalize pre-create admission after CreateStarted failure; retaining capacity conservatively");
-                    }
-                    tracing::warn!(task_id, role, %error, "build admission CreateStarted failed; deferring pool create");
-                    return Err(());
-                }
-                self.clear_task_run_denial(task_id).await;
-                Ok(Some(permit))
-            }
-            Ok(BuildAdmissionDecision::Denied {
-                occupancy,
-                cap,
-                cause,
-            }) => {
-                // `occupancy` is what was MEASURED, or "unmeasured" when the
-                // denial never consulted it. This line used to print a
-                // hard-coded 0 for every non-capacity denial, which is how a
-                // permanently tombstoned dispatch lease spent 40 minutes
-                // looking like a full pool at `occupancy=0 cap=3`. The cause
-                // is what tells those two apart.
-                //
-                // `readiness` is now on the SAME line as the cause. During the
-                // 2026-07-29 outage it existed only on an adjacent line that
-                // nobody had reason to correlate, which is what made
-                // `controller_not_admitting` unactionable for five hours.
-                let readiness = cause.readiness().map(|readiness| readiness.as_str());
-                tracing::info!(
-                    task_id,
-                    role,
-                    occupancy = occupancy
-                        .map_or_else(|| "unmeasured".to_owned(), |value| value.to_string()),
-                    cap,
-                    cause = %cause,
-                    readiness = readiness.unwrap_or("n/a"),
-                    "build admission denied; leaving task queued"
-                );
-                // ...and it is written down, because a log line on a node is
-                // not a surface any projection can join against. See
-                // `djinn_db::BuildAdmissionDenialRepository`.
-                self.record_task_run_denial(
-                    task_id,
-                    &cause,
-                    occupancy,
-                    cap,
-                    controller.server_epoch(),
-                )
-                .await;
-                Err(())
-            }
-            Ok(BuildAdmissionDecision::Unclassified) => {
-                tracing::warn!(
-                    task_id,
-                    role,
-                    "unclassified build admission; leaving task queued"
-                );
-                Err(())
-            }
-            Err(error) => {
-                tracing::warn!(task_id, role, %error, "build admission unavailable; deferring pool create");
-                Err(())
-            }
-        }
-    }
-
-    /// Translate the strongest result available from the slot-pool seam. The pool
-    /// does not return a Kubernetes UID, so even an accepted request remains
-    /// CreateUnknown until a UID-bearing runtime callback is wired.
-    pub(crate) async fn finish_task_run_build_admission(
-        &self,
-        permit: Option<WarmAdmissionPermit>,
-        dispatched: bool,
-    ) {
-        let (Some(controller), Some(permit)) = (self.admission_controller(), permit) else {
-            return;
-        };
-        let transition = if dispatched {
-            WarmAdmissionTransition::CreateUnknown {
-                diagnostic: "slot-pool accepted create without object UID".to_owned(),
-            }
-        } else {
-            WarmAdmissionTransition::DefinitiveFailure {
-                diagnostic: "slot-pool rejected before task-run creation".to_owned(),
-            }
-        };
-        if let Err(error) = controller.transition(&permit, transition).await {
-            tracing::warn!(%error, "failed to persist task-run build-admission outcome; retaining capacity conservatively");
-        }
-    }
-
-    /// Mark a runtime task-run live and bind its UID to this exact generation.
-    /// Terminal events must use this UID binding rather than a task-ID lookup.
-    ///
-    /// The permit is resolved from the task's CURRENT admission generation, not
-    /// from a caller-side counter: a second dispatch attempt at the same
-    /// `reopen_count` reserves its own generation, and binding a fresh runtime
-    /// UID onto the retired generation is exactly what made every observation
-    /// transition fail the UID fence. `generation` remains the fallback for a
-    /// permit that predates this process's work-scoped bookkeeping.
-    pub(crate) async fn live_task_run_build_admission(
-        &self,
-        task_id: &str,
-        generation: i64,
-        task_run_id: &str,
-    ) {
-        let Some(controller) = self.admission_controller() else {
-            return;
-        };
-        let permit = match controller.current_task_run_permit(task_id).await {
-            Some(permit) => Some(permit),
-            None => controller.task_run_permit(task_id, generation).await,
-        };
-        let Some(permit) = permit else {
-            return;
-        };
-        if let Err(error) = controller
-            .transition(
-                &permit,
-                WarmAdmissionTransition::Live {
-                    uid: task_run_id.to_owned(),
-                },
-            )
-            .await
-        {
-            tracing::warn!(task_id, task_run_id, generation, %error, "failed to mark task-run admission live; retaining capacity conservatively");
-            return;
-        }
-        controller
-            .bind_task_run(task_run_id.to_owned(), permit)
-            .await;
-    }
-
-    /// Terminal callbacks without a live UID binding are ambiguous and retain
-    /// capacity rather than accidentally releasing a newer task generation.
-    pub(crate) async fn terminal_task_run_build_admission(&self, task_run_id: &str) {
-        let Some(controller) = self.admission_controller() else {
-            return;
-        };
-        let Some(permit) = controller.task_run_permit_for_runtime_id(task_run_id).await else {
-            tracing::debug!(
-                task_run_id,
-                "unbound terminal task-run callback; retaining admission capacity"
-            );
-            return;
-        };
-        if let Err(error) = controller
-            .transition(
-                &permit,
-                WarmAdmissionTransition::Terminal {
-                    uid: task_run_id.to_owned(),
-                },
-            )
-            .await
-        {
-            tracing::warn!(task_run_id, %error, "failed to terminalize task-run admission; retaining capacity conservatively");
-        }
-    }
-
     /// Check whether a single `(user, model, lane)` dispatch is admissible
     /// under both configured concurrency ceilings.
     ///
@@ -924,7 +652,8 @@ impl CoordinatorActor {
         role: &str,
         lane_cap: Option<u32>,
     ) -> bool {
-        let (running_by_model, running_by_lane) = self.effective_running_counts().await;
+        let (running_by_model, running_by_lane) =
+            poll_stack::boxed(|| self.effective_running_counts()).await;
         let lane = djinn_core::models::ModelLane::for_role(role);
         model_under_user_cap(&running_by_model, user, model, model_cap)
             && lane_under_user_cap(&running_by_lane, user, lane, lane_cap)
@@ -948,15 +677,17 @@ impl CoordinatorActor {
                 self.dispatch_cooldowns.len(),
                 self.inflight_dispatches.len(),
             );
-            self.persist_durable_dispatch_state_update(
-                task_id,
-                None,
-                "inflight_ledger_clear",
-                DurableDispatchStateUpdate {
-                    inflight: Some(None),
-                    ..Default::default()
-                },
-            )
+            poll_stack::boxed(|| {
+                self.persist_durable_dispatch_state_update(
+                    task_id,
+                    None,
+                    "inflight_ledger_clear",
+                    DurableDispatchStateUpdate {
+                        inflight: Some(None),
+                        ..Default::default()
+                    },
+                )
+            })
             .await;
         }
     }
@@ -999,8 +730,10 @@ impl CoordinatorActor {
     ) {
         self.provisional_admissions.remove(provisional_key);
         self.inflight_dispatches.remove(provisional_key);
-        self.record_inflight_dispatch(real_task_id, None, Some(creator), model, role)
-            .await;
+        poll_stack::boxed(|| {
+            self.record_inflight_dispatch(real_task_id, None, Some(creator), model, role)
+        })
+        .await;
     }
 
     /// Clear a provisional refinement admission.
@@ -1094,17 +827,19 @@ impl CoordinatorActor {
         task_short_id: Option<&str>,
         reason: &str,
     ) {
-        self.persist_durable_dispatch_state_update(
-            task_id,
-            task_short_id,
-            reason,
-            DurableDispatchStateUpdate {
-                failure_streak: Some(0),
-                cooldown_until: Some(None),
-                last_dispatched: Some(None),
-                inflight: Some(None),
-            },
-        )
+        poll_stack::boxed(|| {
+            self.persist_durable_dispatch_state_update(
+                task_id,
+                task_short_id,
+                reason,
+                DurableDispatchStateUpdate {
+                    failure_streak: Some(0),
+                    cooldown_until: Some(None),
+                    last_dispatched: Some(None),
+                    inflight: Some(None),
+                },
+            )
+        })
         .await;
     }
 
@@ -1165,7 +900,7 @@ impl CoordinatorActor {
         self.dispatch_cooldowns.remove(task_id);
         self.last_dispatched.remove(task_id);
         self.inflight_dispatches.remove(task_id);
-        self.clear_durable_dispatch_backoff_state(task_id, None, reason)
+        poll_stack::boxed(|| self.clear_durable_dispatch_backoff_state(task_id, None, reason))
             .await;
     }
 
@@ -1575,8 +1310,10 @@ impl CoordinatorActor {
         }
 
         if breaker_open_for_all_candidates {
-            self.apply_breaker_open_exhaustion_backoff(task, role, candidate_models)
-                .await;
+            poll_stack::boxed(|| {
+                self.apply_breaker_open_exhaustion_backoff(task, role, candidate_models)
+            })
+            .await;
             return;
         }
 
@@ -1595,22 +1332,26 @@ impl CoordinatorActor {
         };
 
         if streak >= MAX_DISPATCH_FAILURES {
-            self.terminally_fail_task(
-                task,
-                role,
-                "all failover candidates exhausted after multiple attempts. \
+            poll_stack::boxed(|| {
+                self.terminally_fail_task(
+                    task,
+                    role,
+                    "all failover candidates exhausted after multiple attempts. \
                  The task could not be dispatched to any configured model. \
                  Resolve the underlying issue and reopen.",
-            )
+                )
+            })
             .await;
             self.dispatch_failure_streak.remove(&task.id);
             self.dispatch_cooldowns.remove(&task.id);
             self.inflight_dispatches.remove(&task.id);
-            self.clear_durable_dispatch_backoff_state(
-                &task.id,
-                Some(&task.short_id),
-                "chain_exhaustion_terminal_close_clear",
-            )
+            poll_stack::boxed(|| {
+                self.clear_durable_dispatch_backoff_state(
+                    &task.id,
+                    Some(&task.short_id),
+                    "chain_exhaustion_terminal_close_clear",
+                )
+            })
             .await;
         } else {
             let cooldown = escalating_dispatch_cooldown(streak);
@@ -1624,17 +1365,19 @@ impl CoordinatorActor {
             );
             self.dispatch_cooldowns
                 .insert(task.id.clone(), SystemClock::new().now_instant() + cooldown);
-            self.persist_durable_dispatch_state_update(
-                &task.id,
-                Some(&task.short_id),
-                "chain_exhaustion_backoff",
-                DurableDispatchStateUpdate {
-                    failure_streak: Some(streak),
-                    cooldown_until: Some(dispatch_wall_clock_after(cooldown)),
-                    last_dispatched: Some(None),
-                    ..Default::default()
-                },
-            )
+            poll_stack::boxed(|| {
+                self.persist_durable_dispatch_state_update(
+                    &task.id,
+                    Some(&task.short_id),
+                    "chain_exhaustion_backoff",
+                    DurableDispatchStateUpdate {
+                        failure_streak: Some(streak),
+                        cooldown_until: Some(dispatch_wall_clock_after(cooldown)),
+                        last_dispatched: Some(None),
+                        ..Default::default()
+                    },
+                )
+            })
             .await;
 
             // Single-candidate lanes cannot fail *over* to anything: when the
@@ -1647,12 +1390,14 @@ impl CoordinatorActor {
             // the environment heals.
             if candidate_models.len() == 1 && streak == SINGLE_CANDIDATE_EXHAUSTION_SIGNAL_THRESHOLD
             {
-                self.emit_single_candidate_exhaustion_signal(
-                    task,
-                    role,
-                    &candidate_models[0],
-                    streak,
-                )
+                poll_stack::boxed(|| {
+                    self.emit_single_candidate_exhaustion_signal(
+                        task,
+                        role,
+                        &candidate_models[0],
+                        streak,
+                    )
+                })
                 .await;
             }
         }
@@ -1723,21 +1468,25 @@ impl CoordinatorActor {
         // `failure_streak: None` leaves the durable streak untouched — the
         // write-through helper carries the stored value forward. Only the
         // cooldown moves.
-        self.persist_durable_dispatch_state_update(
-            &task.id,
-            Some(&task.short_id),
-            "breaker_open_exhaustion_backoff",
-            DurableDispatchStateUpdate {
-                cooldown_until: Some(dispatch_wall_clock_after(cooldown)),
-                last_dispatched: Some(None),
-                ..Default::default()
-            },
-        )
+        poll_stack::boxed(|| {
+            self.persist_durable_dispatch_state_update(
+                &task.id,
+                Some(&task.short_id),
+                "breaker_open_exhaustion_backoff",
+                DurableDispatchStateUpdate {
+                    cooldown_until: Some(dispatch_wall_clock_after(cooldown)),
+                    last_dispatched: Some(None),
+                    ..Default::default()
+                },
+            )
+        })
         .await;
 
         if streak == BREAKER_OPEN_EXHAUSTION_SIGNAL_THRESHOLD {
-            self.emit_breaker_open_exhaustion_signal(task, role, candidate_models, streak)
-                .await;
+            poll_stack::boxed(|| {
+                self.emit_breaker_open_exhaustion_signal(task, role, candidate_models, streak)
+            })
+            .await;
         }
     }
 
@@ -2021,7 +1770,7 @@ impl CoordinatorActor {
         // PR creation depends on minting installation tokens, which requires
         // GITHUB_APP_ID + private key; without them every dispatch would
         // fail-retry at merge time.
-        if !self.has_github_credentials().await {
+        if !poll_stack::boxed(|| self.has_github_credentials()).await {
             tracing::warn!(
                 "CoordinatorActor: GitHub App not configured (GITHUB_APP_ID unset or \
                  private key missing), skipping dispatch. Configure the App env vars \
@@ -2138,15 +1887,17 @@ impl CoordinatorActor {
             *expiry > prune_now || paused_ready_task_ids.contains(task_id)
         });
         for task_id in expired_cooldown_task_ids {
-            self.persist_durable_dispatch_state_update(
-                &task_id,
-                None,
-                "cooldown_expired_prune",
-                DurableDispatchStateUpdate {
-                    cooldown_until: Some(None),
-                    ..Default::default()
-                },
-            )
+            poll_stack::boxed(|| {
+                self.persist_durable_dispatch_state_update(
+                    &task_id,
+                    None,
+                    "cooldown_expired_prune",
+                    DurableDispatchStateUpdate {
+                        cooldown_until: Some(None),
+                        ..Default::default()
+                    },
+                )
+            })
             .await;
         }
         let expired_last_dispatched_task_ids: Vec<String> = self
@@ -2163,15 +1914,17 @@ impl CoordinatorActor {
                 || paused_ready_task_ids.contains(task_id)
         });
         for task_id in expired_last_dispatched_task_ids {
-            self.persist_durable_dispatch_state_update(
-                &task_id,
-                None,
-                "last_dispatched_expired_prune",
-                DurableDispatchStateUpdate {
-                    last_dispatched: Some(None),
-                    ..Default::default()
-                },
-            )
+            poll_stack::boxed(|| {
+                self.persist_durable_dispatch_state_update(
+                    &task_id,
+                    None,
+                    "last_dispatched_expired_prune",
+                    DurableDispatchStateUpdate {
+                        last_dispatched: Some(None),
+                        ..Default::default()
+                    },
+                )
+            })
             .await;
         }
 
@@ -2244,8 +1997,7 @@ impl CoordinatorActor {
         // between the active-id and count reads is conservatively double-counted
         // for one pass; it is never missed during the handoff. DB rows remain
         // the durable floor across server restarts.
-        self.reconcile_inflight_dispatch_ledger(&active_task_ids)
-            .await;
+        poll_stack::boxed(|| self.reconcile_inflight_dispatch_ledger(&active_task_ids)).await;
         overlay_inflight_ledger(&mut running_by_user_model, &self.inflight_dispatches);
         overlay_inflight_lane_ledger(&mut running_by_user_lane, &self.inflight_dispatches);
         self.overlay_provisional_admissions(&mut running_by_user_model, &mut running_by_user_lane);
@@ -2348,7 +2100,7 @@ impl CoordinatorActor {
             // dispatch a task with no resolved owner. Park it loudly rather than
             // silently consuming org-shared credentials under no identity — this
             // surfaces an ownership regression instead of running ownerless.
-            if self.task_is_ownerless(&task).await {
+            if poll_stack::boxed(|| self.task_is_ownerless(&task)).await {
                 tracing::warn!(
                     task_id = %task.short_id,
                     task_uuid = %task.id,
@@ -2457,7 +2209,7 @@ impl CoordinatorActor {
                      cannot make forward progress by re-running. Escalating for terminal resolution.",
                     task.ci_same_signature_count, head,
                 );
-                self.escalate_to_planner_or_terminally_fail(&task, &reason)
+                poll_stack::boxed(|| self.escalate_to_planner_or_terminally_fail(&task, &reason))
                     .await;
                 continue;
             }
@@ -2553,7 +2305,7 @@ impl CoordinatorActor {
                 pr_rework_signal == Some(super::respawn_guard::PrReworkSignal::MergeConflict);
             if role == "worker"
                 && !is_merge_conflict_rework
-                && self.maybe_intervene_on_stuck_task(&task).await
+                && poll_stack::boxed(|| self.maybe_intervene_on_stuck_task(&task)).await
             {
                 // The planner escalation dispatched a new session (under the
                 // same creator, potentially the same model). Bump the local
@@ -2561,10 +2313,12 @@ impl CoordinatorActor {
                 // reduced capacity — the inflight ledger is already updated
                 // inside dispatch_planner_escalation, but the local
                 // running_by_user_model was seeded before this admission.
-                self.bump_local_cap_for_last_planner_admission(
-                    &mut running_by_user_model,
-                    &mut running_by_user_lane,
-                )
+                poll_stack::boxed(|| {
+                    self.bump_local_cap_for_last_planner_admission(
+                        &mut running_by_user_model,
+                        &mut running_by_user_lane,
+                    )
+                })
                 .await;
                 continue;
             }
@@ -2604,7 +2358,7 @@ impl CoordinatorActor {
                     reappearing,
                     Some(ReappearingDispatch::SameRoleFailure { .. })
                 ) {
-                    self.latest_attempt_strike_decision(&task.id, role).await
+                    poll_stack::boxed(|| self.latest_attempt_strike_decision(&task.id, role)).await
                 } else {
                     None
                 };
@@ -2618,11 +2372,13 @@ impl CoordinatorActor {
                     self.dispatch_failure_streak.remove(&task.id);
                     self.provider_failure_streak.remove(&task.id);
                     self.dispatch_cooldowns.remove(&task.id);
-                    self.clear_durable_dispatch_backoff_state(
-                        &task.id,
-                        Some(&task.short_id),
-                        "environmental_interrupt_no_dispatch_penalty",
-                    )
+                    poll_stack::boxed(|| {
+                        self.clear_durable_dispatch_backoff_state(
+                            &task.id,
+                            Some(&task.short_id),
+                            "environmental_interrupt_no_dispatch_penalty",
+                        )
+                    })
                     .await;
                     tracing::info!(
                         task_id = %task.short_id,
@@ -2686,10 +2442,12 @@ impl CoordinatorActor {
                                 // Bump the local cap to reflect the planner session
                                 // the intervention just dispatched (same as trigger
                                 // B and the stuck-task path).
-                                self.bump_local_cap_for_last_planner_admission(
-                                    &mut running_by_user_model,
-                                    &mut running_by_user_lane,
-                                )
+                                poll_stack::boxed(|| {
+                                    self.bump_local_cap_for_last_planner_admission(
+                                        &mut running_by_user_model,
+                                        &mut running_by_user_lane,
+                                    )
+                                })
                                 .await;
                                 continue;
                             }
@@ -2734,18 +2492,22 @@ impl CoordinatorActor {
                                 self.dispatch_failure_streak.remove(&task.id);
                                 self.provider_failure_streak.remove(&task.id);
                                 self.dispatch_cooldowns.remove(&task.id);
-                                self.clear_durable_dispatch_backoff_state(
-                                    &task.id,
-                                    Some(&task.short_id),
-                                    "cycling_planner_intervention_handoff_clear",
-                                )
+                                poll_stack::boxed(|| {
+                                    self.clear_durable_dispatch_backoff_state(
+                                        &task.id,
+                                        Some(&task.short_id),
+                                        "cycling_planner_intervention_handoff_clear",
+                                    )
+                                })
                                 .await;
                                 // Bump local cap to reflect the planner session the
                                 // intervention just dispatched (same as Trigger A).
-                                self.bump_local_cap_for_last_planner_admission(
-                                    &mut running_by_user_model,
-                                    &mut running_by_user_lane,
-                                )
+                                poll_stack::boxed(|| {
+                                    self.bump_local_cap_for_last_planner_admission(
+                                        &mut running_by_user_model,
+                                        &mut running_by_user_lane,
+                                    )
+                                })
                                 .await;
                                 continue;
                             }
@@ -2757,22 +2519,26 @@ impl CoordinatorActor {
                             // quota window or a provider outage must never terminally
                             // close the task.
                             if !throttle && !transient && next_streak >= MAX_DISPATCH_FAILURES {
-                                self.terminally_fail_task(
+                                poll_stack::boxed(|| {
+                                    self.terminally_fail_task(
                                     &task,
                                     role,
                                     "repeated dispatch failures: the task could not complete after \
                                  multiple attempts. Resolve the underlying issue and reopen.",
                                 )
+                                })
                                 .await;
                                 self.dispatch_failure_streak.remove(&task.id);
                                 self.provider_failure_streak.remove(&task.id);
                                 self.dispatch_cooldowns.remove(&task.id);
                                 self.inflight_dispatches.remove(&task.id);
-                                self.clear_durable_dispatch_backoff_state(
-                                    &task.id,
-                                    Some(&task.short_id),
-                                    "same_role_terminal_close_clear",
-                                )
+                                poll_stack::boxed(|| {
+                                    self.clear_durable_dispatch_backoff_state(
+                                        &task.id,
+                                        Some(&task.short_id),
+                                        "same_role_terminal_close_clear",
+                                    )
+                                })
                                 .await;
                                 continue;
                             }
@@ -2840,19 +2606,21 @@ impl CoordinatorActor {
                                 task.id.clone(),
                                 SystemClock::new().now_instant() + effective_cooldown,
                             );
-                            self.persist_durable_dispatch_state_update(
-                                &task.id,
-                                Some(&task.short_id),
-                                "same_role_failure_backoff",
-                                DurableDispatchStateUpdate {
-                                    failure_streak: Some(stored_streak),
-                                    cooldown_until: Some(dispatch_wall_clock_after(
-                                        effective_cooldown,
-                                    )),
-                                    last_dispatched: Some(None),
-                                    ..Default::default()
-                                },
-                            )
+                            poll_stack::boxed(|| {
+                                self.persist_durable_dispatch_state_update(
+                                    &task.id,
+                                    Some(&task.short_id),
+                                    "same_role_failure_backoff",
+                                    DurableDispatchStateUpdate {
+                                        failure_streak: Some(stored_streak),
+                                        cooldown_until: Some(dispatch_wall_clock_after(
+                                            effective_cooldown,
+                                        )),
+                                        last_dispatched: Some(None),
+                                        ..Default::default()
+                                    },
+                                )
+                            })
                             .await;
                             continue;
                         }
@@ -2860,11 +2628,13 @@ impl CoordinatorActor {
                             self.dispatch_failure_streak.remove(&task.id);
                             self.provider_failure_streak.remove(&task.id);
                             self.dispatch_cooldowns.remove(&task.id);
-                            self.clear_durable_dispatch_backoff_state(
-                                &task.id,
-                                Some(&task.short_id),
-                                "role_transition_dispatch_state_clear",
-                            )
+                            poll_stack::boxed(|| {
+                                self.clear_durable_dispatch_backoff_state(
+                                    &task.id,
+                                    Some(&task.short_id),
+                                    "role_transition_dispatch_state_clear",
+                                )
+                            })
                             .await;
                         }
                     }
@@ -2934,7 +2704,7 @@ impl CoordinatorActor {
             // Degrades to the unfiltered list when exclusion would empty it
             // (only one viable model → plan-lane retry, then park at the bound).
             if role == "worker" && task.intervention_count >= 1 {
-                let history = self.post_intervention_history(&task).await;
+                let history = poll_stack::boxed(|| self.post_intervention_history(&task)).await;
                 let rotation_excluded = history.rotation_excluded_models();
                 if !rotation_excluded.is_empty() {
                     let filtered: Vec<String> = model_ids
@@ -3001,8 +2771,14 @@ impl CoordinatorActor {
             // task. Reorders in place (entries != implementer first, preserving
             // priority); collapses to same-model when nothing else is viable.
             if role == "reviewer" {
-                self.apply_diverse_review_ordering(&task, Some(creator.as_str()), &mut model_ids)
-                    .await;
+                poll_stack::boxed(|| {
+                    self.apply_diverse_review_ordering(
+                        &task,
+                        Some(creator.as_str()),
+                        &mut model_ids,
+                    )
+                })
+                .await;
             }
 
             // Dispatch-time throttle deprioritization: move any model that is
@@ -3083,13 +2859,16 @@ impl CoordinatorActor {
                         .quality_reopen_count(&task.id)
                         .await
                         .unwrap_or(0);
-                    self.park_source_human_review_with_dossier(
-                        &task,
-                        park_reason,
-                        quality_strikes,
-                        Some(dossier),
-                        &serde_json::json!({}),
-                    )
+                    let empty_evidence = serde_json::json!({});
+                    poll_stack::boxed(|| {
+                        self.park_source_human_review_with_dossier(
+                            &task,
+                            park_reason,
+                            quality_strikes,
+                            Some(dossier),
+                            &empty_evidence,
+                        )
+                    })
                     .await;
                     continue;
                 }
@@ -3110,22 +2889,26 @@ impl CoordinatorActor {
                     *s
                 };
                 if streak >= MAX_DISPATCH_FAILURES {
-                    self.terminally_fail_task(
+                    poll_stack::boxed(|| {
+                        self.terminally_fail_task(
                         &task,
                         role,
                         "no model available for this task's owner: none of the role's configured \
                          models have a provider connected for them. Connect a provider/model for \
                          the owner and reopen.",
                     )
+                    })
                     .await;
                     self.dispatch_failure_streak.remove(&task.id);
                     self.dispatch_cooldowns.remove(&task.id);
                     self.inflight_dispatches.remove(&task.id);
-                    self.clear_durable_dispatch_backoff_state(
-                        &task.id,
-                        Some(&task.short_id),
-                        "no_eligible_model_terminal_close_clear",
-                    )
+                    poll_stack::boxed(|| {
+                        self.clear_durable_dispatch_backoff_state(
+                            &task.id,
+                            Some(&task.short_id),
+                            "no_eligible_model_terminal_close_clear",
+                        )
+                    })
                     .await;
                 } else {
                     let cooldown = escalating_dispatch_cooldown(streak);
@@ -3138,17 +2921,19 @@ impl CoordinatorActor {
                     );
                     self.dispatch_cooldowns
                         .insert(task.id.clone(), SystemClock::new().now_instant() + cooldown);
-                    self.persist_durable_dispatch_state_update(
-                        &task.id,
-                        Some(&task.short_id),
-                        "no_eligible_model_backoff",
-                        DurableDispatchStateUpdate {
-                            failure_streak: Some(streak),
-                            cooldown_until: Some(dispatch_wall_clock_after(cooldown)),
-                            last_dispatched: Some(None),
-                            ..Default::default()
-                        },
-                    )
+                    poll_stack::boxed(|| {
+                        self.persist_durable_dispatch_state_update(
+                            &task.id,
+                            Some(&task.short_id),
+                            "no_eligible_model_backoff",
+                            DurableDispatchStateUpdate {
+                                failure_streak: Some(streak),
+                                cooldown_until: Some(dispatch_wall_clock_after(cooldown)),
+                                last_dispatched: Some(None),
+                                ..Default::default()
+                            },
+                        )
+                    })
                     .await;
                 }
                 continue;
@@ -3251,7 +3036,9 @@ impl CoordinatorActor {
                 }
             }
 
-            let Some(project_path) = self.project_path_for_id(&task.project_id).await else {
+            let Some(project_path) =
+                poll_stack::boxed(|| self.project_path_for_id(&task.project_id)).await
+            else {
                 tracing::warn!(task_id = %task.short_id, project_id = %task.project_id, "CoordinatorActor: project path not found, skipping dispatch");
                 continue;
             };
@@ -3300,19 +3087,6 @@ impl CoordinatorActor {
                     "CoordinatorActor: warm build-cache dispatch gate decision"
                 );
             }
-
-            let build_admission = match self
-                .begin_task_run_build_admission(
-                    role,
-                    &task.id,
-                    task.reopen_count.max(0),
-                    format!("task-run-{}-{}", task.id, task.reopen_count.max(0)),
-                )
-                .await
-            {
-                Ok(permit) => permit,
-                Err(()) => continue,
-            };
 
             // Coordinator-side resume-via-git selection: when resume is
             // enabled and the selector produced a metadata struct, serialize
@@ -3379,12 +3153,6 @@ impl CoordinatorActor {
                 )
                 .await;
 
-            self.finish_task_run_build_admission(
-                build_admission,
-                matches!(outcome, DispatchOutcome::Dispatched),
-            )
-            .await;
-
             match outcome {
                 DispatchOutcome::Dispatched => {
                     record_dispatch_outcome(djinn_telemetry::dispatch::OUTCOME_OK);
@@ -3410,18 +3178,20 @@ impl CoordinatorActor {
                     // ladder this task was climbing is over — reset it so a
                     // future, unrelated outage starts back at the first rung.
                     self.breaker_open_backoff_streak.remove(&task.id);
-                    self.persist_durable_dispatch_state_update(
-                        &task.id,
-                        Some(&task.short_id),
-                        "successful_dispatch_marker",
-                        DurableDispatchStateUpdate {
-                            cooldown_until: Some(None),
-                            last_dispatched: Some(
-                                dispatch_wall_clock_now().map(|ts| (ts, role.to_owned())),
-                            ),
-                            ..Default::default()
-                        },
-                    )
+                    poll_stack::boxed(|| {
+                        self.persist_durable_dispatch_state_update(
+                            &task.id,
+                            Some(&task.short_id),
+                            "successful_dispatch_marker",
+                            DurableDispatchStateUpdate {
+                                cooldown_until: Some(None),
+                                last_dispatched: Some(
+                                    dispatch_wall_clock_now().map(|ts| (ts, role.to_owned())),
+                                ),
+                                ..Default::default()
+                            },
+                        )
+                    })
                     .await;
                     self.dispatched += 1;
                     // Attempt lifecycle: record the dispatch-start as a
@@ -3474,13 +3244,15 @@ impl CoordinatorActor {
                             // lands (pod boot lags 20-60s). Reconciled against
                             // the live pool at the top of each pass, so it drops
                             // out the moment the task completes.
-                            self.record_inflight_dispatch(
-                                &task.id,
-                                Some(&task.short_id),
-                                Some(c),
-                                used,
-                                role,
-                            )
+                            poll_stack::boxed(|| {
+                                self.record_inflight_dispatch(
+                                    &task.id,
+                                    Some(&task.short_id),
+                                    Some(c),
+                                    used,
+                                    role,
+                                )
+                            })
                             .await;
                         }
                     }
@@ -3539,13 +3311,15 @@ impl CoordinatorActor {
                     // the exhaustion says nothing about this task and must back
                     // off WITHOUT advancing the streak that force-closes at
                     // MAX_DISPATCH_FAILURES.
-                    self.apply_chain_exhaustion_side_effects(
-                        &task,
-                        role,
-                        model_ids,
-                        &exhausted_observations,
-                        breaker_open_for_all_candidates,
-                    )
+                    poll_stack::boxed(|| {
+                        self.apply_chain_exhaustion_side_effects(
+                            &task,
+                            role,
+                            model_ids,
+                            &exhausted_observations,
+                            breaker_open_for_all_candidates,
+                        )
+                    })
                     .await;
                 }
             }
@@ -4037,7 +3811,6 @@ mod inflight_ledger_tests {
             boot_at: ::time::OffsetDateTime::now_utc(),
             events_tx: events_tx.clone(),
             pool: controlled_runtime.spawn_pool(db, cancel, max_slots),
-            build_admission: None,
             catalog: CatalogService::new(),
             health: djinn_provider::catalog::health::HealthTracker::new(),
             role_registry: std::sync::Arc::new(crate::roles::RoleRegistry::new()),
@@ -4064,6 +3837,7 @@ mod inflight_ledger_tests {
             breaker_open_backoff_streak: HashMap::new(),
             background_work_tracker: BackgroundWorkTracker::default(),
             stranded_ready_source: None,
+            doctor_registry: crate::actor::new_doctor_registry_handle(),
             closed_parent_open_children_source: None,
             auto_merge_tracker: AutoMergeTracker::default(),
             consolidation_runner: std::sync::Arc::new(
@@ -4302,120 +4076,6 @@ mod inflight_ledger_tests {
             effective_after_overlay, persisted_running,
             "cap {cap}: coordinator effective cap accounting drifted from persisted session state after settlement"
         );
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn terminal_session_event_retains_release_wakeup_for_queued_dispatch() {
-        use crate::build_admission::{BuildAdmissionController, BuildAdmissionMode};
-
-        let db = crate::test_helpers::create_test_db();
-        let (events_tx, _events_rx) = tokio::sync::broadcast::channel(256);
-        let fixture = seed_wnd1_ready_worker_tasks(&db, WND1_READY_TASK_COUNT).await;
-        configure_wnd1_user_max_sessions(&db, &fixture.created_by_user_id, &fixture.model_id, 2)
-            .await;
-
-        let (runtime, mut started_rx) = Wnd1ControlledRuntime::new();
-        let mut actor = wnd1_actor_for_tests(&db, &events_tx, &runtime, 2);
-        let h = crate::build_admission_capacity_support::attach_capacity(
-            &db,
-            BuildAdmissionController::new(
-                std::sync::Arc::new(djinn_db::AdmissionJournalRepository::new(db.clone())),
-                BuildAdmissionMode::Enforce,
-                1,
-                "runtime-release-test",
-            ),
-            1,
-        )
-        .await;
-        let controller = std::sync::Arc::clone(&h.controller);
-        actor.build_admission = Some(controller.clone());
-
-        let active_task_id = &fixture.task_ids[0];
-        let queued_task_id = &fixture.task_ids[1];
-        let task_repo =
-            djinn_db::TaskRepository::new(db.clone(), djinn_core::events::EventBus::noop());
-        for task_id in fixture.task_ids.iter().filter(|id| *id != queued_task_id) {
-            task_repo
-                .set_status(task_id, "closed")
-                .await
-                .expect("remove non-queued fixture task from the ready queue");
-        }
-        let permit = actor
-            .begin_task_run_build_admission(
-                "worker",
-                active_task_id,
-                0,
-                format!("task-run-{active_task_id}-0"),
-            )
-            .await
-            .expect("reserve active task admission")
-            .expect("controller returns a permit");
-        let runtime_uid = "runtime-release-test-uid";
-        controller
-            .transition(
-                &permit,
-                WarmAdmissionTransition::Live {
-                    uid: runtime_uid.to_owned(),
-                },
-            )
-            .await
-            .expect("mark active task admission live");
-        controller
-            .bind_task_run(runtime_uid.to_owned(), permit)
-            .await;
-
-        actor.dispatch_ready_tasks(Some(&fixture.project_id)).await;
-        assert_eq!(actor.dispatched, 0, "queued task must be cap-denied");
-
-        let mut session =
-            djinn_db::SessionRepository::new(db.clone(), djinn_core::events::EventBus::noop())
-                .create(djinn_db::CreateSessionParams {
-                    project_id: &fixture.project_id,
-                    task_id: Some(active_task_id),
-                    model: &fixture.model_id,
-                    agent_type: "worker",
-                    metadata_json: None,
-                    task_run_id: None,
-                    pricing: None,
-                    cost_basis: None,
-                })
-                .await
-                .expect("create terminal event session payload");
-        session.task_run_id = Some(runtime_uid.to_owned());
-        session.status = "completed".to_owned();
-
-        // No `notified()` future exists while the actor handles this event. The
-        // release therefore has to survive until the select branch is rebuilt.
-        actor
-            .handle_event(djinn_core::events::DjinnEventEnvelope {
-                entity_type: "session",
-                action: "completed",
-                payload: serde_json::to_value(session).expect("serialize session event"),
-                id: None,
-                project_id: None,
-                from_sync: false,
-            })
-            .await;
-        tokio::time::timeout(
-            Duration::from_millis(100),
-            controller.release_notifier().notified(),
-        )
-        .await
-        .expect("terminal release wakeup must be retained");
-
-        // Invoke the exact pass used by the actor's admission-release select
-        // branch; no periodic tick is advanced in this test.
-        actor.run_build_admission_release_pass().await;
-        assert_eq!(
-            actor.dispatched, 1,
-            "release wakeup must dispatch queued work"
-        );
-        assert_eq!(
-            started_rx.recv().await.as_deref(),
-            Some(queued_task_id.as_str()),
-            "the queued task must be the work invoked by the release pass"
-        );
-        runtime.release(queued_task_id).await;
     }
 
     // Normal Rust/nextest-discoverable test: it uses only TestRuntime/template
@@ -5415,7 +5075,6 @@ mod failover_chain_tests {
             boot_at: ::time::OffsetDateTime::now_utc(),
             events_tx: events_tx.clone(),
             pool: pool.clone(),
-            build_admission: None,
             catalog: CatalogService::new(),
             health: djinn_provider::catalog::health::HealthTracker::new(),
             role_registry: std::sync::Arc::new(crate::roles::RoleRegistry::new()),
@@ -5435,6 +5094,7 @@ mod failover_chain_tests {
             breaker_open_backoff_streak: HashMap::new(),
             background_work_tracker: BackgroundWorkTracker::default(),
             stranded_ready_source: None,
+            doctor_registry: crate::actor::new_doctor_registry_handle(),
             closed_parent_open_children_source: None,
             auto_merge_tracker: AutoMergeTracker::default(),
             consolidation_runner: std::sync::Arc::new(
@@ -7988,7 +7648,6 @@ mod monitored_reopen_no_eligible_model_tests {
             boot_at: ::time::OffsetDateTime::now_utc(),
             events_tx: events_tx.clone(),
             pool,
-            build_admission: None,
             catalog: CatalogService::new(),
             health: djinn_provider::catalog::health::HealthTracker::new(),
             role_registry: std::sync::Arc::new(crate::roles::RoleRegistry::new()),
@@ -8008,6 +7667,7 @@ mod monitored_reopen_no_eligible_model_tests {
             breaker_open_backoff_streak: HashMap::new(),
             background_work_tracker: BackgroundWorkTracker::default(),
             stranded_ready_source: None,
+            doctor_registry: crate::actor::new_doctor_registry_handle(),
             closed_parent_open_children_source: None,
             auto_merge_tracker: AutoMergeTracker::default(),
             consolidation_runner: std::sync::Arc::new(
@@ -8360,58 +8020,46 @@ mod throttle_deprioritization_tests {
     }
 }
 
-/// Deterministic injected-controller route tests for the task-run admission
-/// lifecycle.
+/// Deterministic route tests for the coordinator's real dispatch and
+/// escalation paths against a controlled slot pool.
 ///
-/// These tests exercise the **actual** coordinator dispatch/resume/escalation
-/// routes with an injected [`BuildAdmissionController`] and a controlled slot
-/// pool. They prove that each route durably records reservation/CreateStarted
-/// in the admission journal **before** the slot pool create side effect is
-/// observed, and that the Observe/Off/Enforce controller modes and lifecycle
-/// callbacks behave correctly through the wired route.
+/// Task `o53p` deleted the pre-create pods-quota reservation authority, and with
+/// it every test here whose subject was that authority: the create-time journal
+/// snapshots, the Observe/Off/Enforce mode matrix, the cap-denial and
+/// permit-lifecycle assertions, and the admission-generation bookkeeping. None
+/// of those claims survive the deletion, so none of them were weakened into
+/// something that still passes.
+///
+/// What remains is the half whose subject is retained — that the production
+/// routes still dispatch, and that the identities they persist stay correlated —
+/// plus [`kueue_ledger_silence`], which carries that into the AC6
+/// no-dispatch-regression proof.
 #[cfg(test)]
 mod build_admission_route_tests {
     use super::inflight_ledger_tests::{
         WND1_CONTROLLED_RUNTIME_GUARD, WND1_READY_TASK_COUNT, WND1_STABLE_MODEL_ID,
         Wnd1DispatchFixture, configure_wnd1_user_max_sessions, seed_wnd1_ready_worker_tasks,
-        wait_for_pool_to_forget_task,
     };
     use super::*;
-    use crate::build_admission::{BuildAdmissionController, BuildAdmissionMode};
-    use djinn_db::{AdmissionDomain, AdmissionJournalRepository, AdmissionState, TaskRepository};
-    use futures::FutureExt;
+    use djinn_db::TaskRepository;
     use std::sync::{Arc as StdArc, Mutex as StdMutex};
 
     // ─── Fixtures ─────────────────────────────────────────────────────────
 
-    /// Whether an occupying admission row existed at the moment the controlled
-    /// slot-pool runner callback fired.
+    /// Controlled runtime that reports every task the slot pool really created
+    /// and parks it until the test releases it.
     ///
-    /// The exact state (CreateInFlight vs CreateUnknown) depends on whether
-    /// `finish_task_run_build_admission` raced ahead of the runner's first
-    /// await point, but the existence of ANY occupying row is the invariant:
-    /// it proves the reservation happened before the pool create side effect.
-    #[derive(Clone, Default)]
-    struct CreateTimeSnapshot {
-        row_existed: bool,
-        generation: Option<i64>,
-        history_len: usize,
-        occupancy: i64,
-    }
-
-    /// Controlled runtime that snapshots the admission journal at create time.
-    struct AdmissionRouteRuntime {
+    /// Reporting the create is the whole point: a route test that only inspects
+    /// coordinator state would pass for a build in which the pool was never
+    /// reached at all.
+    struct RouteRuntime {
         started_tx: tokio::sync::mpsc::UnboundedSender<String>,
         completed_tx: tokio::sync::mpsc::UnboundedSender<String>,
         releases: StdArc<StdMutex<HashMap<String, tokio::sync::oneshot::Sender<()>>>>,
-        snapshots: StdArc<StdMutex<HashMap<String, CreateTimeSnapshot>>>,
-        journal: StdArc<AdmissionJournalRepository>,
     }
 
-    impl AdmissionRouteRuntime {
-        fn new(
-            journal: StdArc<AdmissionJournalRepository>,
-        ) -> (
+    impl RouteRuntime {
+        fn new() -> (
             Self,
             tokio::sync::mpsc::UnboundedReceiver<String>,
             tokio::sync::mpsc::UnboundedReceiver<String>,
@@ -8423,8 +8071,6 @@ mod build_admission_route_tests {
                     started_tx,
                     completed_tx,
                     releases: StdArc::new(StdMutex::new(HashMap::new())),
-                    snapshots: StdArc::new(StdMutex::new(HashMap::new())),
-                    journal,
                 },
                 started_rx,
                 completed_rx,
@@ -8440,8 +8086,6 @@ mod build_admission_route_tests {
             let started_tx = self.started_tx.clone();
             let completed_tx = self.completed_tx.clone();
             let releases = self.releases.clone();
-            let snapshots = self.snapshots.clone();
-            let journal = self.journal.clone();
             djinn_slot::SlotPoolHandle::spawn_with_factory(
                 crate::test_helpers::agent_context_from_db(db.clone(), cancel.clone()),
                 cancel,
@@ -8459,8 +8103,6 @@ mod build_admission_route_tests {
                     let started_tx = started_tx.clone();
                     let completed_tx = completed_tx.clone();
                     let releases = releases.clone();
-                    let snapshots = snapshots.clone();
-                    let journal = journal.clone();
                     let runner: djinn_slot::TestLifecycleRunner = StdArc::new(
                         move |task_id,
                               _project_path,
@@ -8472,42 +8114,7 @@ mod build_admission_route_tests {
                             let started_tx = started_tx.clone();
                             let completed_tx = completed_tx.clone();
                             let releases = releases.clone();
-                            let snapshots = snapshots.clone();
-                            let journal = journal.clone();
                             Box::pin(async move {
-                                // ── CREATE-TIME SNAPSHOT ──
-                                // If a journal row exists for this task, the
-                                // reservation/CreateStarted happened before the
-                                // pool runner fired.
-                                let history = journal
-                                    .list_history(AdmissionDomain::TaskObservation, &task_id)
-                                    .await
-                                    .unwrap_or_default();
-                                let row_existed = history.iter().any(|r| {
-                                    matches!(
-                                        r.state,
-                                        AdmissionState::CreateInFlight
-                                            | AdmissionState::CreateUnknown
-                                            | AdmissionState::Live
-                                            | AdmissionState::Reserved
-                                    )
-                                });
-                                let generation = history.first().map(|row| row.key.generation);
-                                let history_len = history.len();
-                                let occupancy = journal
-                                    .count_task_or_warm_occupancy()
-                                    .await
-                                    .unwrap_or_default();
-                                snapshots.lock().expect("snapshot map mutex").insert(
-                                    task_id.clone(),
-                                    CreateTimeSnapshot {
-                                        row_existed,
-                                        generation,
-                                        history_len,
-                                        occupancy,
-                                    },
-                                );
-
                                 let (release_tx, release_rx) = tokio::sync::oneshot::channel();
                                 releases
                                     .lock()
@@ -8541,21 +8148,12 @@ mod build_admission_route_tests {
                 let _ = sender.send(());
             }
         }
-
-        fn snapshot(&self, task_id: &str) -> CreateTimeSnapshot {
-            self.snapshots
-                .lock()
-                .expect("snapshot map mutex")
-                .get(task_id)
-                .cloned()
-                .unwrap_or_default()
-        }
     }
 
     fn build_route_actor(
         db: &djinn_db::Database,
         events_tx: &tokio::sync::broadcast::Sender<DjinnEventEnvelope>,
-        runtime: &AdmissionRouteRuntime,
+        runtime: &RouteRuntime,
         max_slots: u32,
     ) -> CoordinatorActor {
         let cancel = tokio_util::sync::CancellationToken::new();
@@ -8569,7 +8167,6 @@ mod build_admission_route_tests {
             boot_at: ::time::OffsetDateTime::now_utc(),
             events_tx: events_tx.clone(),
             pool: runtime.spawn_pool(db, cancel, max_slots),
-            build_admission: None,
             catalog: CatalogService::new(),
             health: djinn_provider::catalog::health::HealthTracker::new(),
             role_registry: std::sync::Arc::new(crate::roles::RoleRegistry::new()),
@@ -8596,6 +8193,7 @@ mod build_admission_route_tests {
             breaker_open_backoff_streak: HashMap::new(),
             background_work_tracker: BackgroundWorkTracker::default(),
             stranded_ready_source: None,
+            doctor_registry: crate::actor::new_doctor_registry_handle(),
             closed_parent_open_children_source: None,
             auto_merge_tracker: AutoMergeTracker::default(),
             consolidation_runner: std::sync::Arc::new(
@@ -8641,28 +8239,6 @@ mod build_admission_route_tests {
         }
     }
 
-    fn route_journal(db: &djinn_db::Database) -> StdArc<AdmissionJournalRepository> {
-        StdArc::new(AdmissionJournalRepository::new(db.clone()))
-    }
-
-    /// The dispatch route under test is layer-1 build admission, so its
-    /// controller must reach the ONE capacity authority exactly as `AppState`
-    /// wires it. A controller with no authority is not capacity gated at all,
-    /// and every cap assertion below would pass for the wrong reason.
-    async fn route_controller(
-        db: &djinn_db::Database,
-        journal: &StdArc<AdmissionJournalRepository>,
-        mode: BuildAdmissionMode,
-        cap: i64,
-    ) -> crate::build_admission_capacity_support::CapacityHarness {
-        crate::build_admission_capacity_support::attach_capacity(
-            db,
-            BuildAdmissionController::new(journal.clone(), mode, cap, "route-test"),
-            cap,
-        )
-        .await
-    }
-
     /// Close every fixture task except `keep`, so only one task is ready for
     /// dispatch.
     async fn close_all_except(db: &djinn_db::Database, fixture: &Wnd1DispatchFixture, keep: &str) {
@@ -8675,74 +8251,6 @@ mod build_admission_route_tests {
         }
     }
 
-    // ─── AC1: Normal worker dispatch route ────────────────────────────────
-
-    /// Prove the normal worker dispatch route records an admission row BEFORE
-    /// the slot-pool create side effect fires.
-    ///
-    /// This test calls `dispatch_ready_tasks` (the actual production route)
-    /// without manually reserving admission first. The snapshot captured inside
-    /// the pool runner proves the journal already had an occupying admission
-    /// row when the create happened.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn normal_worker_route_reserves_before_pool_create() {
-        let db = crate::test_helpers::create_test_db();
-        let (events_tx, _events_rx) = tokio::sync::broadcast::channel(256);
-        let fixture = seed_wnd1_ready_worker_tasks(&db, WND1_READY_TASK_COUNT).await;
-        configure_wnd1_user_max_sessions(&db, &fixture.created_by_user_id, &fixture.model_id, 1)
-            .await;
-
-        let journal = route_journal(&db);
-        let h = route_controller(&db, &journal, BuildAdmissionMode::Enforce, 1).await;
-        let controller = StdArc::clone(&h.controller);
-        let (runtime, mut started_rx, _completed_rx) = AdmissionRouteRuntime::new(journal.clone());
-
-        let mut actor = build_route_actor(&db, &events_tx, &runtime, 1);
-        actor.build_admission = Some(controller.clone());
-
-        let task_id = fixture.task_ids[0].clone();
-        close_all_except(&db, &fixture, &task_id).await;
-
-        // Dispatch through the actual production route — no manual
-        // begin_task_run_build_admission call.
-        actor.dispatch_ready_tasks(Some(&fixture.project_id)).await;
-        assert_eq!(
-            actor.dispatched, 1,
-            "task must dispatch on the normal route"
-        );
-
-        let dispatched_id = started_rx
-            .recv()
-            .await
-            .expect("pool runner must fire for the dispatched task");
-        assert_eq!(dispatched_id, task_id);
-
-        // ── Proof: an occupying admission row existed in the journal BEFORE
-        // the pool runner fired ──
-        let snapshot = runtime.snapshot(&task_id);
-        assert!(
-            snapshot.row_existed,
-            "admission journal must have an occupying row when the pool runner \
-             fires — proving reservation/CreateStarted precedes the slot-pool \
-             create side effect on the normal worker route"
-        );
-
-        // After the pool accepted, the journal shows CreateUnknown.
-        let history = journal
-            .list_history(AdmissionDomain::TaskObservation, &task_id)
-            .await
-            .expect("read task admission history");
-        assert_eq!(history.len(), 1, "exactly one admission generation");
-        assert_eq!(
-            history[0].state,
-            AdmissionState::CreateUnknown,
-            "accepted pool create transitions to CreateUnknown"
-        );
-
-        runtime.release(&task_id).await;
-    }
-
-    // ─── AC1: Controlled resume route ─────────────────────────────────────
     /// Regression: the coordinator can select `lead` while the production
     /// supervisor persists its first exact attempt as `worker`.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -8913,100 +8421,25 @@ mod build_admission_route_tests {
         );
     }
 
-    /// Prove a controlled-resume dispatch (worker with resume metadata) still
-    /// records an admission row before the pool create.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn controlled_resume_route_reserves_before_pool_create() {
-        let db = crate::test_helpers::create_test_db();
-        let (events_tx, _events_rx) = tokio::sync::broadcast::channel(256);
-        let fixture = seed_wnd1_ready_worker_tasks(&db, WND1_READY_TASK_COUNT).await;
-        configure_wnd1_user_max_sessions(&db, &fixture.created_by_user_id, &fixture.model_id, 1)
-            .await;
-
-        let journal = route_journal(&db);
-        let h = route_controller(&db, &journal, BuildAdmissionMode::Enforce, 1).await;
-        let controller = StdArc::clone(&h.controller);
-        let (runtime, mut started_rx, _completed_rx) = AdmissionRouteRuntime::new(journal.clone());
-
-        let mut actor = build_route_actor(&db, &events_tx, &runtime, 1);
-        actor.build_admission = Some(controller.clone());
-        // Enable resume-via-git so dispatch routes through
-        // dispatch_with_resume_metadata.
-        actor.worker_lifecycle_config.resume.enabled = true;
-
-        let task_id = fixture.task_ids[0].clone();
-        close_all_except(&db, &fixture, &task_id).await;
-
-        // Seed a checkpoint activity row so the resume selector produces
-        // non-None metadata → dispatch uses dispatch_with_resume_metadata.
-        let task_repo = TaskRepository::new(db.clone(), djinn_core::events::EventBus::noop());
-        let checkpoint_payload = serde_json::json!({
-            "event": "preservation_checkpoint_created",
-            "preservation_commit_sha": "abc123",
-            "preservation_ref_name": format!("task/checks/{}", "task"),
-        });
-        task_repo
-            .log_activity(
-                Some(&task_id),
-                "coordinator",
-                "system",
-                "comment",
-                &checkpoint_payload.to_string(),
-            )
-            .await
-            .expect("seed checkpoint activity");
-
-        actor.dispatch_ready_tasks(Some(&fixture.project_id)).await;
-        assert_eq!(
-            actor.dispatched, 1,
-            "task must dispatch on the resume route"
-        );
-
-        let dispatched_id = started_rx
-            .recv()
-            .await
-            .expect("pool runner must fire for the resumed task");
-        assert_eq!(dispatched_id, task_id);
-
-        let snapshot = runtime.snapshot(&task_id);
-        assert!(
-            snapshot.row_existed,
-            "controlled-resume route must have an admission row before the \
-             pool create fires"
-        );
-
-        runtime.release(&task_id).await;
-    }
-
-    // ─── AC1: Retry / planner-escalation route ────────────────────────────
-
-    /// Prove the planner-escalation dispatch route goes through build admission
-    /// and dispatches WITHOUT reserving a build slot.
+    /// The planner-escalation route still dispatches, and dispatches a NEW
+    /// review task rather than re-dispatching its source.
     ///
-    /// This test previously asserted the opposite (an occupying row before the
-    /// pool create). Task `h1yv` inverted it: a Planner is
-    /// [`djinn_runtime::RoleResourceClass::Light`] — unlikely enough to run the
-    /// project's compile/test toolchain that pre-charging it a slot is the wrong
-    /// trade — so it is admitted with a zero-slot permit and leaves no journal
-    /// row. A Planner that does compile is governed by the measured invocation
-    /// lease, not by dispatch admission. The route invariant that
-    /// still matters is that the escalation dispatches at all while a scarce cap
-    /// is in force, and that it adds nothing to durable occupancy.
+    /// This test used to be a build-admission assertion — that a Light planner
+    /// took a zero-slot permit and left no journal row. With the pre-create
+    /// reservation authority deleted there is no permit and no row to assert
+    /// about, but the route claim underneath it is untouched and is exactly the
+    /// thing a deletion could silently break: the escalation reaching the slot
+    /// pool at all.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn planner_escalation_route_dispatches_without_consuming_a_build_slot() {
+    async fn planner_escalation_route_dispatches_a_new_review_task() {
         let db = crate::test_helpers::create_test_db();
         let (events_tx, _events_rx) = tokio::sync::broadcast::channel(256);
         let fixture = seed_wnd1_ready_worker_tasks(&db, WND1_READY_TASK_COUNT).await;
         configure_wnd1_user_max_sessions(&db, &fixture.created_by_user_id, &fixture.model_id, 1)
             .await;
 
-        let journal = route_journal(&db);
-        let h = route_controller(&db, &journal, BuildAdmissionMode::Enforce, 1).await;
-        let controller = StdArc::clone(&h.controller);
-        let (runtime, mut started_rx, _completed_rx) = AdmissionRouteRuntime::new(journal.clone());
-
+        let (runtime, mut started_rx, _completed_rx) = RouteRuntime::new();
         let mut actor = build_route_actor(&db, &events_tx, &runtime, 1);
-        actor.build_admission = Some(controller.clone());
 
         // Close all fixture tasks so the source task doesn't also dispatch.
         let source_task_id = fixture.task_ids[0].clone();
@@ -9041,982 +8474,10 @@ mod build_admission_route_tests {
             "planner escalation creates a new review task"
         );
 
-        let snapshot = runtime.snapshot(&dispatched_id);
-        assert!(
-            !snapshot.row_existed,
-            "a light planner task-run must reserve no admission row"
-        );
-        assert_eq!(
-            snapshot.occupancy, 0,
-            "a light planner task-run must add nothing to build occupancy"
-        );
-
-        // The review task leaves no admission history at all: nothing was
-        // reserved, so there is nothing to release.
-        let history = journal
-            .list_history(AdmissionDomain::TaskObservation, &dispatched_id)
-            .await
-            .expect("read planner admission history");
-        assert!(
-            history.is_empty(),
-            "a light planner task-run writes no journal rows, got {history:?}"
-        );
-        assert_eq!(
-            journal
-                .count_task_or_warm_occupancy()
-                .await
-                .expect("read occupancy"),
-            0
-        );
-
         runtime.release(&dispatched_id).await;
     }
 
-    // ─── AC2: Enforce denial leaves task queued without failure attribution ─
-
-    /// Prove Enforce cap denial performs zero slot-pool creates and leaves the
-    /// task queued/ready with no provider/model failure attribution, dispatch-
-    /// failure streak increment, or cooldown.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn enforce_denial_no_create_no_failure_attribution() {
-        let db = crate::test_helpers::create_test_db();
-        let (events_tx, _events_rx) = tokio::sync::broadcast::channel(256);
-        let fixture = seed_wnd1_ready_worker_tasks(&db, WND1_READY_TASK_COUNT).await;
-        configure_wnd1_user_max_sessions(&db, &fixture.created_by_user_id, &fixture.model_id, 1)
-            .await;
-
-        let journal = route_journal(&db);
-        // cap=0 → first admission is denied.
-        let h = route_controller(&db, &journal, BuildAdmissionMode::Enforce, 0).await;
-        let controller = StdArc::clone(&h.controller);
-        let (runtime, _started_rx, _completed_rx) = AdmissionRouteRuntime::new(journal.clone());
-
-        let mut actor = build_route_actor(&db, &events_tx, &runtime, 5);
-        actor.build_admission = Some(controller.clone());
-
-        let task_id = fixture.task_ids[0].clone();
-        close_all_except(&db, &fixture, &task_id).await;
-
-        actor.dispatch_ready_tasks(Some(&fixture.project_id)).await;
-        assert_eq!(
-            actor.dispatched, 0,
-            "Enforce denial must not dispatch the task"
-        );
-
-        // Zero occupancy — no admission row was created.
-        assert_eq!(
-            journal.count_task_or_warm_occupancy().await.expect("count"),
-            0,
-            "Enforce denial must create no admission journal row"
-        );
-
-        // ── No failure attribution ──
-        assert!(
-            !actor.dispatch_failure_streak.contains_key(&task_id),
-            "Enforce denial must not increment the dispatch-failure streak"
-        );
-        assert!(
-            !actor.provider_failure_streak.contains_key(&task_id),
-            "Enforce denial must not increment the provider-failure streak"
-        );
-        assert!(
-            !actor.dispatch_cooldowns.contains_key(&task_id),
-            "Enforce denial must not apply a dispatch cooldown"
-        );
-        assert!(
-            actor
-                .health
-                .is_available(Some(&fixture.created_by_user_id), &fixture.model_id),
-            "Enforce denial must not mark the model unhealthy"
-        );
-
-        // ── Task remains queued/ready ──
-        let task_repo = TaskRepository::new(db.clone(), djinn_core::events::EventBus::noop());
-        let task = task_repo
-            .get(&task_id)
-            .await
-            .expect("fetch denied task")
-            .expect("task exists");
-        assert_eq!(
-            task.status, "open",
-            "Enforce denial must leave the task queued/open"
-        );
-    }
-
-    /// Six ready tasks use the actual dispatcher at cap three. Denied tasks
-    /// must stay queued and neutral rather than receiving a failure/cooldown.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn enforce_cap_three_keeps_three_of_six_ready_tasks_queued_and_neutral() {
-        let db = crate::test_helpers::create_test_db();
-        let (events_tx, _events_rx) = tokio::sync::broadcast::channel(256);
-        let fixture = seed_wnd1_ready_worker_tasks(&db, WND1_READY_TASK_COUNT).await;
-        configure_wnd1_user_max_sessions(&db, &fixture.created_by_user_id, &fixture.model_id, 5)
-            .await;
-
-        let journal = route_journal(&db);
-        let h = route_controller(&db, &journal, BuildAdmissionMode::Enforce, 3).await;
-        let controller = StdArc::clone(&h.controller);
-        let (runtime, mut started_rx, _completed_rx) = AdmissionRouteRuntime::new(journal.clone());
-        let mut actor = build_route_actor(&db, &events_tx, &runtime, 5);
-        actor.build_admission = Some(controller);
-
-        let ready = fixture.task_ids[..6].to_vec();
-        let task_repo = TaskRepository::new(db.clone(), djinn_core::events::EventBus::noop());
-        for id in fixture.task_ids.iter().skip(6) {
-            task_repo
-                .set_status(id, "closed")
-                .await
-                .expect("close non-target task");
-        }
-
-        actor.dispatch_ready_tasks(Some(&fixture.project_id)).await;
-        assert_eq!(
-            actor.dispatched, 3,
-            "cap three permits exactly three pool creates"
-        );
-        assert_eq!(
-            journal.count_task_or_warm_occupancy().await.expect("count"),
-            3,
-            "only the dispatched three retain durable occupancy"
-        );
-
-        let mut dispatched = std::collections::HashSet::new();
-        for _ in 0..3 {
-            dispatched.insert(started_rx.recv().await.expect("admitted pool create"));
-        }
-        for task_id in ready.iter().filter(|id| !dispatched.contains(*id)) {
-            let task = task_repo
-                .get(task_id)
-                .await
-                .expect("fetch denied task")
-                .expect("denied task exists");
-            assert_eq!(task.status, "open", "cap denial leaves task queued");
-            assert!(
-                !actor.dispatch_failure_streak.contains_key(task_id)
-                    && !actor.provider_failure_streak.contains_key(task_id)
-                    && !actor.dispatch_cooldowns.contains_key(task_id),
-                "cap denial for {task_id} must not attribute failure or cooldown"
-            );
-        }
-        assert_eq!(
-            ready.iter().filter(|id| !dispatched.contains(*id)).count(),
-            3,
-            "exactly three ready tasks remain queued"
-        );
-
-        for task_id in dispatched {
-            runtime.release(&task_id).await;
-        }
-    }
-
-    // ─── AC2: Observe mode creates and records would-defer ────────────────
-
-    /// Prove Observe mode never cap-denies: dispatch proceeds at/over cap and
-    /// the would-defer observation is recorded.
-    ///
-    /// The would-defer signal exists only while layer-1 dispatch is in SHADOW —
-    /// it is what the operator reads before arming the epoch. A shadow probe
-    /// deliberately acquires nothing (a shadow reservation would occupy real
-    /// capacity and start denying graph warming), so the occupancy it reports
-    /// against must come from a consumer that genuinely holds a slot. Here that
-    /// is a graph-warm Job, which is exactly the production shape: the pool is
-    /// full, dispatch would have deferred, and Observe dispatches anyway.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn observe_mode_dispatches_and_records_would_defer() {
-        let db = crate::test_helpers::create_test_db();
-        let (events_tx, _events_rx) = tokio::sync::broadcast::channel(256);
-        let fixture = seed_wnd1_ready_worker_tasks(&db, WND1_READY_TASK_COUNT).await;
-        // Per-user cap=2 so two tasks dispatch, the Observe controller cap=1
-        // records would-defer for the second.
-        configure_wnd1_user_max_sessions(&db, &fixture.created_by_user_id, &fixture.model_id, 2)
-            .await;
-
-        let journal = route_journal(&db);
-        let h = route_controller(&db, &journal, BuildAdmissionMode::Observe, 1).await;
-        let controller = StdArc::clone(&h.controller);
-        let _warm_slot = h
-            .hold_warm_lease("observe-route-occupant")
-            .await
-            .expect("the warm Job takes the only slot");
-        h.lease.set_dispatch_enforcing_for_test(false);
-        let (runtime, mut started_rx, _completed_rx) = AdmissionRouteRuntime::new(journal.clone());
-
-        let mut actor = build_route_actor(&db, &events_tx, &runtime, 2);
-        actor.build_admission = Some(controller.clone());
-
-        let first_task = fixture.task_ids[0].clone();
-        let second_task = fixture.task_ids[1].clone();
-        // Close all except first two so only two tasks are ready.
-        let task_repo = TaskRepository::new(db.clone(), djinn_core::events::EventBus::noop());
-        for id in fixture
-            .task_ids
-            .iter()
-            .filter(|id| **id != first_task && **id != second_task)
-        {
-            task_repo
-                .set_status(id, "closed")
-                .await
-                .expect("close non-target fixture task");
-        }
-
-        actor.dispatch_ready_tasks(Some(&fixture.project_id)).await;
-        assert!(
-            actor.dispatched >= 1,
-            "Observe mode must dispatch at least one task"
-        );
-
-        // Consume all started signals.
-        for _ in 0..actor.dispatched {
-            let started = started_rx.recv().await.expect("pool create fires");
-            let snap = runtime.snapshot(&started);
-            assert!(
-                snap.row_existed,
-                "Observe mode must have an admission row before pool create \
-                 for task {started}"
-            );
-        }
-
-        // Observe mode records would-defer when occupancy >= cap (the second
-        // admission sees occupancy 1 >= cap 1).
-        let would_defer = controller.would_defer_observation_count().await;
-        assert!(
-            would_defer >= 1,
-            "Observe mode must record at least one would-defer observation when \
-             occupancy reaches cap"
-        );
-
-        // Observe creates durable rows.
-        let occupancy = journal.count_task_or_warm_occupancy().await.expect("count");
-        assert!(
-            occupancy >= 1,
-            "Observe mode must create durable admission rows for dispatched tasks"
-        );
-
-        // Release all dispatched tasks.
-        for i in 0..actor.dispatched {
-            let id = if i == 0 { &first_task } else { &second_task };
-            runtime.release(id).await;
-        }
-    }
-
-    // ─── AC2: Off mode dispatches and leaves journal unchanged ────────────
-
-    /// Prove Off mode dispatches normally while leaving the admission journal
-    /// empty (no durable rows, no occupancy).
-    ///
-    /// Off is what the v0 JOURNAL does, not what capacity does. The fixture used
-    /// to say "Off ignores the cap" by setting the cap to zero, which
-    /// `validate_admission_config` rejects and production therefore cannot
-    /// produce; under one authority the cap is the v1 lease's and is stood down
-    /// through the durable epoch, never by the v0 mode. The cap here is a real
-    /// one with room for the single ready task, so what the assertions below
-    /// measure is exactly what Off owns: no ledger row, and no interference.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn off_mode_dispatches_and_leaves_journal_empty() {
-        let db = crate::test_helpers::create_test_db();
-        let (events_tx, _events_rx) = tokio::sync::broadcast::channel(256);
-        let fixture = seed_wnd1_ready_worker_tasks(&db, WND1_READY_TASK_COUNT).await;
-        configure_wnd1_user_max_sessions(&db, &fixture.created_by_user_id, &fixture.model_id, 1)
-            .await;
-
-        let journal = route_journal(&db);
-        let h = route_controller(&db, &journal, BuildAdmissionMode::Off, 1).await;
-        let controller = StdArc::clone(&h.controller);
-        let (runtime, mut started_rx, _completed_rx) = AdmissionRouteRuntime::new(journal.clone());
-
-        let mut actor = build_route_actor(&db, &events_tx, &runtime, 1);
-        actor.build_admission = Some(controller.clone());
-
-        let task_id = fixture.task_ids[0].clone();
-        close_all_except(&db, &fixture, &task_id).await;
-
-        actor.dispatch_ready_tasks(Some(&fixture.project_id)).await;
-        assert_eq!(actor.dispatched, 1, "Off mode must not prevent dispatch");
-
-        let dispatched_id = started_rx
-            .recv()
-            .await
-            .expect("pool runner must fire under Off mode");
-        assert_eq!(dispatched_id, task_id);
-
-        // ── The admission journal must be empty ──
-        let snapshot = runtime.snapshot(&task_id);
-        assert!(
-            !snapshot.row_existed,
-            "Off mode must not create a durable admission row at create time"
-        );
-
-        assert_eq!(
-            journal.count_task_or_warm_occupancy().await.expect("count"),
-            0,
-            "Off mode must leave zero admission journal occupancy"
-        );
-
-        let history = journal
-            .list_history(AdmissionDomain::TaskObservation, &task_id)
-            .await
-            .expect("read admission history");
-        assert!(
-            history.is_empty(),
-            "Off mode must not mutate the admission journal"
-        );
-
-        runtime.release(&task_id).await;
-    }
-
-    // ─── AC3: Lifecycle — CreateUnknown retains occupancy ─────────────────
-
-    /// Prove accepted ambiguous results (CreateUnknown) retain one occupancy
-    /// slot and that a deterministic retry is idempotent (exactly one create).
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn create_unknown_retains_occupancy_and_retry_is_idempotent() {
-        let db = crate::test_helpers::create_test_db();
-        let (events_tx, _events_rx) = tokio::sync::broadcast::channel(256);
-        let fixture = seed_wnd1_ready_worker_tasks(&db, WND1_READY_TASK_COUNT).await;
-        configure_wnd1_user_max_sessions(&db, &fixture.created_by_user_id, &fixture.model_id, 1)
-            .await;
-
-        let journal = route_journal(&db);
-        let h = route_controller(&db, &journal, BuildAdmissionMode::Enforce, 2).await;
-        let controller = StdArc::clone(&h.controller);
-        let (runtime, mut started_rx, mut completed_rx) =
-            AdmissionRouteRuntime::new(journal.clone());
-
-        let mut actor = build_route_actor(&db, &events_tx, &runtime, 1);
-        actor.build_admission = Some(controller.clone());
-
-        let task_id = fixture.task_ids[0].clone();
-        close_all_except(&db, &fixture, &task_id).await;
-
-        // First dispatch → CreateUnknown (ambiguous accepted create).
-        actor.dispatch_ready_tasks(Some(&fixture.project_id)).await;
-        assert_eq!(actor.dispatched, 1);
-        let _ = started_rx.recv().await;
-
-        assert_eq!(
-            journal.count_task_or_warm_occupancy().await.expect("count"),
-            1,
-            "accepted ambiguous create must retain one occupancy slot"
-        );
-
-        // Simulate a deterministic retry: kill the session so the pool forgets
-        // the task, then re-dispatch. The controller's idempotent permit means
-        // begin_task_run_build_admission returns the existing permit without
-        // re-reserving.
-        let first_snapshot = runtime.snapshot(&task_id);
-        assert_eq!(first_snapshot.generation, Some(0));
-        assert_eq!(first_snapshot.history_len, 1);
-        assert_eq!(first_snapshot.occupancy, 1);
-
-        runtime.release(&task_id).await;
-        assert_eq!(
-            completed_rx.recv().await.as_deref(),
-            Some(task_id.as_str()),
-            "first controlled create must signal direct completion"
-        );
-        // Serialize with the pool actor after runner completion. The pool may
-        // already have removed the mapping, in which case TaskNotFound is the
-        // expected deterministic outcome.
-        let _ = actor.pool.kill_session(&task_id).await;
-        // Runner completion must remove the first controlled session — but that
-        // removal is event-driven, not synchronous with `kill_session`: the
-        // completed-callback fires before the runner future returns, and the
-        // pool drops `task_to_slot` only once the slot's `Killed`/`Free` event
-        // reaches `handle_event`. Reading the mapping immediately therefore
-        // races the pool actor under load. Wait for the event instead — the
-        // retry below also depends on the mapping being gone, since
-        // `dispatch_ready_tasks` skips any task the pool still holds.
-        wait_for_pool_to_forget_task(&actor.pool, &task_id).await;
-        actor
-            .clear_planned_dispatch_completion(&task_id, "ambiguous retry fixture settlement")
-            .await;
-        let attempt_repo = djinn_db::TaskAttemptRepository::new(db.clone());
-        let first_attempt = attempt_repo
-            .latest_pending_or_submitted(&task_id, Some("worker"))
-            .await
-            .expect("read first controlled attempt")
-            .expect("first controlled attempt exists");
-        attempt_repo
-            .advance_to_terminal(djinn_db::TerminalTaskAttemptParams {
-                id: &first_attempt.id,
-                outcome: djinn_core::models::task_attempt::TaskAttemptOutcome::Crashed,
-                pr_url: None,
-                submit_ref: None,
-                checkpoint_ref: None,
-                mirror_head_sha: None,
-                github_head_sha: None,
-                summary: Some("controlled ambiguous-create retry"),
-                summary_json: None,
-                log_tail: None,
-            })
-            .await
-            .expect("terminalize first controlled attempt before retry");
-
-        actor.dispatch_ready_tasks(Some(&fixture.project_id)).await;
-
-        // The journal must still have exactly one admission generation for this
-        // task — the idempotent retry did not create a second row.
-        let history = journal
-            .list_history(AdmissionDomain::TaskObservation, &task_id)
-            .await
-            .expect("read admission history");
-        assert_eq!(
-            history.len(),
-            1,
-            "deterministic retry must be idempotent — exactly one admission generation"
-        );
-
-        assert_eq!(
-            journal.count_task_or_warm_occupancy().await.expect("count"),
-            1,
-            "idempotent retry must not double-count occupancy"
-        );
-
-        assert_eq!(
-            actor.dispatched, 2,
-            "retry must execute a second pool create"
-        );
-        assert_eq!(
-            started_rx.recv().await.as_deref(),
-            Some(task_id.as_str()),
-            "second controlled create callback must execute"
-        );
-        let second_snapshot = runtime.snapshot(&task_id);
-        assert_eq!(second_snapshot.generation, first_snapshot.generation);
-        assert_eq!(second_snapshot.history_len, 1);
-        assert_eq!(second_snapshot.occupancy, 1);
-        runtime.release(&task_id).await;
-    }
-
-    // ─── AC3: Terminal release via actor route — uid-fenced and idempotent ─
-
-    /// Prove a matching generation/UID terminal callback releases exactly once
-    /// through the actor's `handle_event` route, and that wrong-UID and
-    /// duplicate callbacks cannot release occupancy or produce a second wakeup.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn terminal_release_via_actor_route_is_uid_fenced_and_idempotent() {
-        let db = crate::test_helpers::create_test_db();
-        let (events_tx, _events_rx) = tokio::sync::broadcast::channel(256);
-        let fixture = seed_wnd1_ready_worker_tasks(&db, WND1_READY_TASK_COUNT).await;
-        configure_wnd1_user_max_sessions(&db, &fixture.created_by_user_id, &fixture.model_id, 1)
-            .await;
-
-        let journal = route_journal(&db);
-        let h = route_controller(&db, &journal, BuildAdmissionMode::Enforce, 2).await;
-        let controller = StdArc::clone(&h.controller);
-        let (runtime, mut started_rx, _completed_rx) = AdmissionRouteRuntime::new(journal.clone());
-
-        let mut actor = build_route_actor(&db, &events_tx, &runtime, 1);
-        actor.build_admission = Some(controller.clone());
-
-        let task_id = fixture.task_ids[0].clone();
-        close_all_except(&db, &fixture, &task_id).await;
-
-        // ── Dispatch → CreateUnknown (pool accepted) ──
-        actor.dispatch_ready_tasks(Some(&fixture.project_id)).await;
-        assert_eq!(actor.dispatched, 1);
-        let _ = started_rx.recv().await;
-
-        assert_eq!(
-            journal.count_task_or_warm_occupancy().await.unwrap(),
-            1,
-            "dispatched task occupies one slot"
-        );
-
-        // ── Bind a Live UID via the session.started event route ──
-        let runtime_uid = "route-test-uid-1";
-        let session_repo =
-            djinn_db::SessionRepository::new(db.clone(), djinn_core::events::EventBus::noop());
-        let mut session = session_repo
-            .create(djinn_db::CreateSessionParams {
-                project_id: &fixture.project_id,
-                task_id: Some(&task_id),
-                model: &fixture.model_id,
-                agent_type: "worker",
-                metadata_json: None,
-                task_run_id: None,
-                pricing: None,
-                cost_basis: None,
-            })
-            .await
-            .expect("create session");
-        session.task_run_id = Some(runtime_uid.to_owned());
-        session.status = "running".to_owned();
-
-        actor
-            .handle_event(DjinnEventEnvelope {
-                entity_type: "session",
-                action: "started",
-                payload: serde_json::to_value(&session).expect("serialize session"),
-                id: None,
-                project_id: None,
-                from_sync: false,
-            })
-            .await;
-
-        let history = journal
-            .list_history(AdmissionDomain::TaskObservation, &task_id)
-            .await
-            .unwrap();
-        assert_eq!(
-            history[0].state,
-            AdmissionState::Live,
-            "session.started event must mark admission Live"
-        );
-        assert_eq!(
-            history[0].object_uid.as_deref(),
-            Some(runtime_uid),
-            "Live admission must bind the runtime UID"
-        );
-
-        // ── Wrong-UID terminal callback must NOT release ──
-        let mut stale_session = session.clone();
-        stale_session.task_run_id = Some("wrong-uid-nonexistent".to_owned());
-        stale_session.status = "completed".to_owned();
-        actor
-            .handle_event(DjinnEventEnvelope {
-                entity_type: "session",
-                action: "completed",
-                payload: serde_json::to_value(&stale_session).expect("serialize"),
-                id: None,
-                project_id: None,
-                from_sync: false,
-            })
-            .await;
-
-        assert_eq!(
-            journal.count_task_or_warm_occupancy().await.unwrap(),
-            1,
-            "wrong-UID terminal callback must not release occupancy"
-        );
-
-        // ── Matching UID terminal callback releases exactly once ──
-        session.status = "completed".to_owned();
-        actor
-            .handle_event(DjinnEventEnvelope {
-                entity_type: "session",
-                action: "completed",
-                payload: serde_json::to_value(&session).expect("serialize"),
-                id: None,
-                project_id: None,
-                from_sync: false,
-            })
-            .await;
-
-        tokio::time::timeout(
-            Duration::from_millis(100),
-            controller.release_notifier().notified(),
-        )
-        .await
-        .expect("matching terminal callback must retain a release wakeup");
-
-        assert_eq!(
-            journal.count_task_or_warm_occupancy().await.unwrap(),
-            0,
-            "matching UID terminal callback must release the occupancy slot"
-        );
-
-        // ── Duplicate matching terminal callback is idempotent ──
-        actor
-            .handle_event(DjinnEventEnvelope {
-                entity_type: "session",
-                action: "completed",
-                payload: serde_json::to_value(&session).expect("serialize"),
-                id: None,
-                project_id: None,
-                from_sync: false,
-            })
-            .await;
-
-        assert!(
-            controller
-                .release_notifier()
-                .notified()
-                .now_or_never()
-                .is_none(),
-            "duplicate terminal callback must not produce a second wakeup"
-        );
-
-        assert_eq!(
-            journal.count_task_or_warm_occupancy().await.unwrap(),
-            0,
-            "duplicate terminal must not re-release or re-occupy"
-        );
-
-        runtime.release(&task_id).await;
-    }
-
-    // ─── AC3: UID-less terminal callback does not release ─────────────────
-
-    /// Prove a UID-less terminal callback (session without task_run_id) cannot
-    /// release occupancy through the actor route.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn uid_less_terminal_callback_does_not_release() {
-        let db = crate::test_helpers::create_test_db();
-        let (events_tx, _events_rx) = tokio::sync::broadcast::channel(256);
-        let fixture = seed_wnd1_ready_worker_tasks(&db, WND1_READY_TASK_COUNT).await;
-        configure_wnd1_user_max_sessions(&db, &fixture.created_by_user_id, &fixture.model_id, 1)
-            .await;
-
-        let journal = route_journal(&db);
-        let h = route_controller(&db, &journal, BuildAdmissionMode::Enforce, 2).await;
-        let controller = StdArc::clone(&h.controller);
-        let (runtime, mut started_rx, _completed_rx) = AdmissionRouteRuntime::new(journal.clone());
-
-        let mut actor = build_route_actor(&db, &events_tx, &runtime, 1);
-        actor.build_admission = Some(controller.clone());
-
-        let task_id = fixture.task_ids[0].clone();
-        close_all_except(&db, &fixture, &task_id).await;
-
-        // Dispatch and get to CreateUnknown.
-        actor.dispatch_ready_tasks(Some(&fixture.project_id)).await;
-        assert_eq!(actor.dispatched, 1);
-        let _ = started_rx.recv().await;
-
-        assert_eq!(
-            journal.count_task_or_warm_occupancy().await.unwrap(),
-            1,
-            "dispatched task occupies one slot"
-        );
-
-        // A session.completed event with NO task_run_id (UID-less) must not
-        // release the admission slot.
-        let session_repo =
-            djinn_db::SessionRepository::new(db.clone(), djinn_core::events::EventBus::noop());
-        let mut session = session_repo
-            .create(djinn_db::CreateSessionParams {
-                project_id: &fixture.project_id,
-                task_id: Some(&task_id),
-                model: &fixture.model_id,
-                agent_type: "worker",
-                metadata_json: None,
-                task_run_id: None,
-                pricing: None,
-                cost_basis: None,
-            })
-            .await
-            .expect("create session");
-        session.task_run_id = None; // UID-less
-        session.status = "completed".to_owned();
-
-        actor
-            .handle_event(DjinnEventEnvelope {
-                entity_type: "session",
-                action: "completed",
-                payload: serde_json::to_value(&session).expect("serialize"),
-                id: None,
-                project_id: None,
-                from_sync: false,
-            })
-            .await;
-
-        assert_eq!(
-            journal.count_task_or_warm_occupancy().await.unwrap(),
-            1,
-            "UID-less terminal callback must not release admission occupancy"
-        );
-
-        assert!(
-            controller
-                .release_notifier()
-                .notified()
-                .now_or_never()
-                .is_none(),
-            "UID-less terminal callback must not wake dispatch"
-        );
-
-        runtime.release(&task_id).await;
-    }
-
-    /// A delayed terminal callback for an older admission generation must route
-    /// through the actor without releasing the current generation or notifying
-    /// the dispatcher.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn stale_generation_terminal_via_actor_retains_current_occupancy() {
-        let db = crate::test_helpers::create_test_db();
-        let (events_tx, _events_rx) = tokio::sync::broadcast::channel(256);
-        let fixture = seed_wnd1_ready_worker_tasks(&db, WND1_READY_TASK_COUNT).await;
-        let journal = route_journal(&db);
-        let h = route_controller(&db, &journal, BuildAdmissionMode::Enforce, 2).await;
-        let controller = StdArc::clone(&h.controller);
-        let (runtime, _started_rx, _completed_rx) = AdmissionRouteRuntime::new(journal.clone());
-        let mut actor = build_route_actor(&db, &events_tx, &runtime, 1);
-        actor.build_admission = Some(controller.clone());
-
-        let task_id = fixture.task_ids[0].clone();
-        close_all_except(&db, &fixture, &task_id).await;
-        let session_repo =
-            djinn_db::SessionRepository::new(db.clone(), djinn_core::events::EventBus::noop());
-
-        let first_permit = actor
-            .begin_task_run_build_admission("worker", &task_id, 0, format!("task-run-{task_id}-0"))
-            .await
-            .expect("generation zero admission");
-        actor
-            .finish_task_run_build_admission(first_permit, true)
-            .await;
-        let mut first_session = session_repo
-            .create(djinn_db::CreateSessionParams {
-                project_id: &fixture.project_id,
-                task_id: Some(&task_id),
-                model: &fixture.model_id,
-                agent_type: "worker",
-                metadata_json: None,
-                task_run_id: None,
-                pricing: None,
-                cost_basis: None,
-            })
-            .await
-            .expect("create generation zero session");
-        first_session.task_run_id = Some("stale-generation-uid".to_owned());
-        first_session.status = "running".to_owned();
-        actor
-            .handle_event(DjinnEventEnvelope {
-                entity_type: "session",
-                action: "started",
-                payload: serde_json::to_value(&first_session).expect("serialize first started"),
-                id: None,
-                project_id: None,
-                from_sync: false,
-            })
-            .await;
-        first_session.status = "completed".to_owned();
-        actor
-            .handle_event(DjinnEventEnvelope {
-                entity_type: "session",
-                action: "completed",
-                payload: serde_json::to_value(&first_session).expect("serialize first terminal"),
-                id: None,
-                project_id: None,
-                from_sync: false,
-            })
-            .await;
-        assert!(
-            controller
-                .release_notifier()
-                .notified()
-                .now_or_never()
-                .is_some()
-        );
-
-        let task_repo = TaskRepository::new(db.clone(), djinn_core::events::EventBus::noop());
-        task_repo
-            .set_status(&task_id, "closed")
-            .await
-            .expect("close before reopen");
-        let reopened = task_repo
-            .set_status(&task_id, "open")
-            .await
-            .expect("reopen for next generation");
-        assert_eq!(reopened.reopen_count, 1);
-
-        let second_permit = actor
-            .begin_task_run_build_admission("worker", &task_id, 1, format!("task-run-{task_id}-1"))
-            .await
-            .expect("generation one admission");
-        actor
-            .finish_task_run_build_admission(second_permit, true)
-            .await;
-        let mut second_session = session_repo
-            .create(djinn_db::CreateSessionParams {
-                project_id: &fixture.project_id,
-                task_id: Some(&task_id),
-                model: &fixture.model_id,
-                agent_type: "worker",
-                metadata_json: None,
-                task_run_id: None,
-                pricing: None,
-                cost_basis: None,
-            })
-            .await
-            .expect("create generation one session");
-        second_session.task_run_id = Some("current-generation-uid".to_owned());
-        second_session.status = "running".to_owned();
-        actor
-            .handle_event(DjinnEventEnvelope {
-                entity_type: "session",
-                action: "started",
-                payload: serde_json::to_value(&second_session).expect("serialize second started"),
-                id: None,
-                project_id: None,
-                from_sync: false,
-            })
-            .await;
-
-        // Deliver the old generation's terminal callback again through the actor.
-        actor
-            .handle_event(DjinnEventEnvelope {
-                entity_type: "session",
-                action: "completed",
-                payload: serde_json::to_value(&first_session).expect("serialize stale terminal"),
-                id: None,
-                project_id: None,
-                from_sync: false,
-            })
-            .await;
-
-        let history = journal
-            .list_history(AdmissionDomain::TaskObservation, &task_id)
-            .await
-            .expect("read generation history");
-        assert_eq!(history.len(), 2);
-        assert_eq!(
-            history
-                .iter()
-                .find(|row| row.key.generation == 1)
-                .expect("current generation row")
-                .state,
-            AdmissionState::Live,
-        );
-        assert_eq!(
-            journal
-                .count_task_or_warm_occupancy()
-                .await
-                .expect("count occupancy"),
-            1,
-            "stale actor callback must retain the current generation"
-        );
-        assert!(
-            controller
-                .release_notifier()
-                .notified()
-                .now_or_never()
-                .is_none(),
-            "stale generation callback must not emit a release notification"
-        );
-    }
-
-    /// Drive one full task-run attempt through the production admission route:
-    /// reserve + CreateStarted, the pool-outcome transition, the session-started
-    /// Live observation, and the session-terminal release.
-    async fn drive_task_run_attempt(
-        actor: &mut CoordinatorActor,
-        db: &djinn_db::Database,
-        fixture: &Wnd1DispatchFixture,
-        task_id: &str,
-        reopen_count: i64,
-        task_run_id: &str,
-    ) {
-        let permit = actor
-            .begin_task_run_build_admission(
-                "worker",
-                task_id,
-                reopen_count,
-                format!("task-run-{task_id}-{reopen_count}"),
-            )
-            .await
-            .expect("admission permits the attempt");
-        actor.finish_task_run_build_admission(permit, true).await;
-
-        let session_repo =
-            djinn_db::SessionRepository::new(db.clone(), djinn_core::events::EventBus::noop());
-        let mut session = session_repo
-            .create(djinn_db::CreateSessionParams {
-                project_id: &fixture.project_id,
-                task_id: Some(task_id),
-                model: &fixture.model_id,
-                agent_type: "worker",
-                metadata_json: None,
-                task_run_id: None,
-                pricing: None,
-                cost_basis: None,
-            })
-            .await
-            .expect("create attempt session");
-        session.task_run_id = Some(task_run_id.to_owned());
-        session.status = "running".to_owned();
-        actor
-            .handle_event(DjinnEventEnvelope {
-                entity_type: "session",
-                action: "started",
-                payload: serde_json::to_value(&session).expect("serialize started"),
-                id: None,
-                project_id: None,
-                from_sync: false,
-            })
-            .await;
-        session.status = "completed".to_owned();
-        actor
-            .handle_event(DjinnEventEnvelope {
-                entity_type: "session",
-                action: "completed",
-                payload: serde_json::to_value(&session).expect("serialize terminal"),
-                id: None,
-                project_id: None,
-                from_sync: false,
-            })
-            .await;
-    }
-
-    /// Regression (ymx9): a task retried at the same `reopen_count` is a second
-    /// task-run object with its own runtime UID, and must own its own admission
-    /// generation.
-    ///
-    /// Both attempts run the production admission route end to end — the same
-    /// `begin`/`finish`/session-event path `dispatch_ready_tasks` uses — in the
-    /// mode production runs (`Observe`). Before the fix the second attempt
-    /// inherited the first attempt's retired row, so its create observation was
-    /// rejected with `cannot mark create unknown from Terminal` and both of its
-    /// UID-bearing observations with `Kubernetes UID does not match admission
-    /// row`, leaving the second runtime UID unrecorded.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn retried_attempts_at_one_reopen_count_each_record_their_own_runtime_uid() {
-        let db = crate::test_helpers::create_test_db();
-        let (events_tx, _events_rx) = tokio::sync::broadcast::channel(256);
-        let fixture = seed_wnd1_ready_worker_tasks(&db, WND1_READY_TASK_COUNT).await;
-        let journal = route_journal(&db);
-        let h = route_controller(&db, &journal, BuildAdmissionMode::Observe, 4).await;
-        let controller = StdArc::clone(&h.controller);
-        let (runtime, _started_rx, _completed_rx) = AdmissionRouteRuntime::new(journal.clone());
-        let mut actor = build_route_actor(&db, &events_tx, &runtime, 2);
-        actor.build_admission = Some(controller.clone());
-
-        let task_id = fixture.task_ids[0].clone();
-        close_all_except(&db, &fixture, &task_id).await;
-
-        // Two dispatch attempts of the SAME task at the SAME reopen_count: the
-        // ordinary retry shape after a failed or interrupted first attempt.
-        for task_run_id in ["task-run-uid-first", "task-run-uid-second"] {
-            drive_task_run_attempt(&mut actor, &db, &fixture, &task_id, 0, task_run_id).await;
-        }
-
-        let history = journal
-            .list_history(AdmissionDomain::TaskObservation, &task_id)
-            .await
-            .expect("read generation history");
-        assert_eq!(
-            history.len(),
-            2,
-            "each dispatch attempt is its own object lifecycle and its own generation"
-        );
-        assert_eq!(
-            history
-                .iter()
-                .map(|row| (row.key.generation, row.object_uid.as_deref(), row.state))
-                .collect::<Vec<_>>(),
-            vec![
-                (0, Some("task-run-uid-first"), AdmissionState::Terminal),
-                (1, Some("task-run-uid-second"), AdmissionState::Terminal),
-            ],
-            "the UID persisted at Live is the UID the terminal observation \
-             released, per attempt"
-        );
-        assert_eq!(
-            journal
-                .count_task_or_warm_occupancy()
-                .await
-                .expect("count occupancy"),
-            0,
-            "both attempts released their own occupancy"
-        );
-        assert_eq!(
-            controller.rejected_transition_count(),
-            0,
-            "Observe mode must emit successful journal observations; last \
-             rejection: {:?}",
-            controller.last_transition_rejection().await
-        );
-        assert!(controller.accepted_transition_count() >= 8);
-    }
+    /// AC6 (`o53p`): the pre-Kueue dispatch path was not deleted along with the
+    /// pre-create reservation ledger.
+    mod kueue_ledger_silence;
 }

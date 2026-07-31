@@ -1,18 +1,20 @@
-// The telemetry guard mutex is intentionally held across awaits to serialize tests.
-#![allow(clippy::await_holding_lock)]
 // Turn-inline-budget and `collect_tool_results` coverage split out of
 // `tool_dispatch_tests` to keep each test module under the source-size guard.
 // Shared helpers (`test_tool_schema`, `test_cancel_token`) remain in the sibling
 // `tool_dispatch_tests` module and are imported here.
+//
+// Nothing in this module serializes on a mutex or mutates the process
+// environment. The two process-global resources it used to share with its
+// siblings — the `DJINN_TURN_INLINE_*` variables and the
+// `djinn_reply_loop_inline_char_budget_trips_total` counter — are now injected
+// per test (`ToolDispatchContext::turn_inline_budget`) and captured per test
+// (`djinn_telemetry::IsolatedRecorder`) respectively.
 use super::super::turn_budget::{
     DEFAULT_TURN_INLINE_CHAR_BUDGET, DEFAULT_TURN_INLINE_PREVIEW_FLOOR, TurnInlineBudgetConfig,
     apply_turn_inline_budget_pass_with_config, read_positive_env_usize,
 };
-use super::tool_dispatch_tests::{
-    test_cancel_token, test_tool_schema, turn_budget_telemetry_guard,
-};
+use super::tool_dispatch_tests::{test_cancel_token, test_tool_schema};
 use super::*;
-use djinn_telemetry::render;
 
 fn test_dispatch_context<'a>(
     ctx: &'a SlotContext,
@@ -29,6 +31,29 @@ fn test_dispatch_context<'a>(
         otel_session: None,
         phase_tracker: None,
         cancel: test_cancel_token(),
+        turn_inline_budget: None,
+    }
+}
+
+/// Dispatch context whose turn-budget policy is injected rather than read from
+/// the process environment.
+///
+/// `collect_tool_results` runs the turn-budget pass internally, so a test that
+/// wants a non-default budget for that whole path used to `set_var` the
+/// `DJINN_TURN_INLINE_*` names. The environment is process-global: every
+/// concurrently running test in this binary that reached
+/// `TurnInlineBudgetConfig::from_env` observed the override, tripped the budget,
+/// and moved the shared trip counter. Injecting the config keeps the override
+/// on this context alone.
+fn test_dispatch_context_with_budget<'a>(
+    ctx: &'a SlotContext,
+    tool_metadata: &'a ToolRuntimeMetadataMap,
+    worktree_path: &'a std::path::Path,
+    config: TurnInlineBudgetConfig,
+) -> ToolDispatchContext<'a> {
+    ToolDispatchContext {
+        turn_inline_budget: Some(config),
+        ..test_dispatch_context(ctx, tool_metadata, worktree_path)
     }
 }
 #[tokio::test]
@@ -198,10 +223,10 @@ async fn collect_tool_results_budget_pass_externalizes_largest_serial_parallel_s
     let dispatcher = Arc::new(ConfigurableToolDispatcher::new(Vec::new(), handlers));
     let ctx = agent_context_from_db_with_dispatcher(db, CancellationToken::new(), Some(dispatcher));
     let worktree_path = std::path::Path::new("/tmp");
-    unsafe {
-        std::env::set_var("DJINN_TURN_INLINE_CHAR_BUDGET", "5000");
-        std::env::set_var("DJINN_TURN_INLINE_PREVIEW_FLOOR", "500");
-    }
+    let budget = TurnInlineBudgetConfig {
+        budget: 5_000,
+        preview_floor: 500,
+    };
     let schemas = vec![
         test_tool_schema(
             "shell",
@@ -260,7 +285,8 @@ async fn collect_tool_results_budget_pass_externalizes_largest_serial_parallel_s
         },
     )];
     let streaming_dispatched = HashSet::from([3]);
-    let dispatch_ctx = test_dispatch_context(&ctx, &tool_metadata, worktree_path);
+    let dispatch_ctx =
+        test_dispatch_context_with_budget(&ctx, &tool_metadata, worktree_path, budget);
     let blocks = collect_tool_results(
         &turn_tool_calls,
         streaming_results,
@@ -493,7 +519,7 @@ async fn under_budget_turn_is_unchanged_byte_for_byte() {
         budget: 100_000_000,
         preview_floor: 10_000,
     };
-    apply_turn_inline_budget_pass_with_config(&mut results, &dispatch_ctx, config);
+    apply_turn_inline_budget_pass_with_config(&mut results, &dispatch_ctx, config).await;
     let snapshot_after: Vec<String> = results
         .iter()
         .map(|r| match &r.content[0] {
@@ -522,7 +548,7 @@ async fn largest_first_selection_externalizes_the_biggest_candidate() {
         collected_text(0, "call-big", "shell", &big),
         collected_text(1, "call-small", "read", &small),
     ];
-    apply_turn_inline_budget_pass_with_config(&mut results, &dispatch_ctx, config);
+    apply_turn_inline_budget_pass_with_config(&mut results, &dispatch_ctx, config).await;
     let big_text = match &results[0].content[0] {
         ContentBlock::Text { text } => text.as_str(),
         _ => panic!("expected text"),
@@ -551,7 +577,7 @@ async fn non_shrinking_stub_is_skipped() {
     let body = "x".repeat(41);
     let original = body.clone();
     let mut results = vec![collected_text(0, "call-0", "read", &body)];
-    apply_turn_inline_budget_pass_with_config(&mut results, &dispatch_ctx, config);
+    apply_turn_inline_budget_pass_with_config(&mut results, &dispatch_ctx, config).await;
     let text = match &results[0].content[0] {
         ContentBlock::Text { text } => text.clone(),
         _ => panic!("expected text"),
@@ -579,7 +605,7 @@ async fn preview_floor_prevents_fitting_allows_overflow() {
         collected_text(0, "call-0", "read", &body_a),
         collected_text(1, "call-1", "read", &body_b),
     ];
-    apply_turn_inline_budget_pass_with_config(&mut results, &dispatch_ctx, config);
+    apply_turn_inline_budget_pass_with_config(&mut results, &dispatch_ctx, config).await;
     let text_a = match &results[0].content[0] {
         ContentBlock::Text { text } => text.clone(),
         _ => panic!("expected text"),
@@ -627,11 +653,15 @@ async fn externalization_preserves_extension_mcp_and_native_resource_recovery_me
     let ctx = agent_context_from_db_with_dispatcher(db, CancellationToken::new(), Some(dispatcher));
     let worktree_path = std::path::Path::new("/tmp");
     let tool_metadata = ToolRuntimeMetadataMap::new();
-    let dispatch_ctx = test_dispatch_context(&ctx, &tool_metadata, worktree_path);
-    unsafe {
-        std::env::set_var("DJINN_TURN_INLINE_CHAR_BUDGET", "200");
-        std::env::set_var("DJINN_TURN_INLINE_PREVIEW_FLOOR", "10");
-    }
+    let dispatch_ctx = test_dispatch_context_with_budget(
+        &ctx,
+        &tool_metadata,
+        worktree_path,
+        TurnInlineBudgetConfig {
+            budget: 200,
+            preview_floor: 10,
+        },
+    );
     let turn_tool_calls = vec![
         ContentBlock::ToolUse {
             id: "call-ext".into(),
@@ -657,10 +687,6 @@ async fn externalization_preserves_extension_mcp_and_native_resource_recovery_me
         &dispatch_ctx,
     )
     .await;
-    unsafe {
-        std::env::remove_var("DJINN_TURN_INLINE_CHAR_BUDGET");
-        std::env::remove_var("DJINN_TURN_INLINE_PREVIEW_FLOOR");
-    }
     for (expected_id, expected_name) in [
         ("call-ext", "extension_compute"),
         ("call-mcp", "mcp_fetch"),
@@ -706,7 +732,7 @@ async fn externalization_preserves_tool_use_id_and_name_in_stub() {
     };
     let big = "Z".repeat(5_000);
     let mut results = vec![collected_text(7, "call-preserve-id", "code_search", &big)];
-    apply_turn_inline_budget_pass_with_config(&mut results, &dispatch_ctx, config);
+    apply_turn_inline_budget_pass_with_config(&mut results, &dispatch_ctx, config).await;
     let text = match &results[0].content[0] {
         ContentBlock::Text { text } => text.clone(),
         _ => panic!("expected text"),
@@ -783,7 +809,7 @@ async fn budget_trip_reports_tool_name_missing_for_unselected_nameless_result() 
         .finish();
     let dispatch = tracing::dispatcher::Dispatch::new(subscriber);
     let _guard = tracing::dispatcher::set_default(&dispatch);
-    apply_turn_inline_budget_pass_with_config(&mut results, &dispatch_ctx, config);
+    apply_turn_inline_budget_pass_with_config(&mut results, &dispatch_ctx, config).await;
     let output = logs.output();
     assert!(
         output.contains("tool_name_missing=true"),
@@ -810,26 +836,27 @@ fn budget_trip_counter_value(rendered: &str) -> f64 {
 async fn under_budget_turn_does_not_increment_budget_trip_counter() {
     use crate::test_helpers::{agent_context_from_db, create_test_db};
     use tokio_util::sync::CancellationToken;
-    let _guard = turn_budget_telemetry_guard();
-    djinn_telemetry::init().expect("telemetry init");
     let db = create_test_db();
     let ctx = agent_context_from_db(db, CancellationToken::new());
     let worktree_path = std::path::Path::new("/tmp");
     let tool_metadata = ToolRuntimeMetadataMap::new();
     let dispatch_ctx = test_dispatch_context(&ctx, &tool_metadata, worktree_path);
-    let before = render().expect("render metrics");
-    let before_value = budget_trip_counter_value(&before);
+    let recorder = djinn_telemetry::IsolatedRecorder::new();
+    let _scope = recorder.scope();
+    // Seed the series once so the strict reader below still fails loudly if the
+    // counter is ever renamed: an untouched registry renders no sample at all.
+    djinn_telemetry::reply_loop::increment_inline_char_budget_trip();
     let config = TurnInlineBudgetConfig {
         budget: 100_000_000,
         preview_floor: 10_000,
     };
     let body = "x".repeat(1_000);
     let mut results = vec![collected_text(0, "call-0", "read", &body)];
-    apply_turn_inline_budget_pass_with_config(&mut results, &dispatch_ctx, config);
-    let after = render().expect("render after pass");
-    let after_value = budget_trip_counter_value(&after);
+    apply_turn_inline_budget_pass_with_config(&mut results, &dispatch_ctx, config).await;
+    let after = recorder.render();
     assert_eq!(
-        after_value, before_value,
+        budget_trip_counter_value(&after),
+        1.0,
         "under-budget turn must not increment the budget-trip counter:\n{after}"
     );
 }
@@ -837,15 +864,13 @@ async fn under_budget_turn_does_not_increment_budget_trip_counter() {
 async fn over_budget_turn_increments_budget_trip_counter_by_one_for_multiple_externalizations() {
     use crate::test_helpers::{agent_context_from_db, create_test_db};
     use tokio_util::sync::CancellationToken;
-    let _guard = turn_budget_telemetry_guard();
-    djinn_telemetry::init().expect("telemetry init");
     let db = create_test_db();
     let ctx = agent_context_from_db(db, CancellationToken::new());
     let worktree_path = std::path::Path::new("/tmp");
     let tool_metadata = ToolRuntimeMetadataMap::new();
     let dispatch_ctx = test_dispatch_context(&ctx, &tool_metadata, worktree_path);
-    let before = render().expect("render metrics");
-    let before_value = budget_trip_counter_value(&before);
+    let recorder = djinn_telemetry::IsolatedRecorder::new();
+    let _scope = recorder.scope();
     let config = TurnInlineBudgetConfig {
         budget: 200,
         preview_floor: 10,
@@ -856,7 +881,7 @@ async fn over_budget_turn_increments_budget_trip_counter_by_one_for_multiple_ext
         collected_text(0, "call-a", "shell", &big_a),
         collected_text(1, "call-b", "read", &big_b),
     ];
-    apply_turn_inline_budget_pass_with_config(&mut results, &dispatch_ctx, config);
+    apply_turn_inline_budget_pass_with_config(&mut results, &dispatch_ctx, config).await;
     let externalized = results
         .iter()
         .filter(|r| {
@@ -867,23 +892,24 @@ async fn over_budget_turn_increments_budget_trip_counter_by_one_for_multiple_ext
         })
         .count();
     assert!(externalized >= 2, "missing externalization");
-    let after = render().expect("render after pass");
-    let after_value = budget_trip_counter_value(&after);
-    assert_eq!(after_value, before_value + 1.0, "bad counter increment");
+    let after = recorder.render();
+    assert_eq!(
+        budget_trip_counter_value(&after),
+        1.0,
+        "bad counter increment:\n{after}"
+    );
 }
 #[tokio::test]
 async fn over_budget_turn_increments_budget_trip_counter_by_one_when_residual_overflow_remains() {
     use crate::test_helpers::{agent_context_from_db, create_test_db};
     use tokio_util::sync::CancellationToken;
-    let _guard = turn_budget_telemetry_guard();
-    djinn_telemetry::init().expect("telemetry init");
     let db = create_test_db();
     let ctx = agent_context_from_db(db, CancellationToken::new());
     let worktree_path = std::path::Path::new("/tmp");
     let tool_metadata = ToolRuntimeMetadataMap::new();
     let dispatch_ctx = test_dispatch_context(&ctx, &tool_metadata, worktree_path);
-    let before = render().expect("render metrics");
-    let before_value = budget_trip_counter_value(&before);
+    let recorder = djinn_telemetry::IsolatedRecorder::new();
+    let _scope = recorder.scope();
     let config = TurnInlineBudgetConfig {
         budget: 100,
         preview_floor: 10_000,
@@ -894,7 +920,7 @@ async fn over_budget_turn_increments_budget_trip_counter_by_one_when_residual_ov
         collected_text(0, "call-0", "read", &body_a),
         collected_text(1, "call-1", "read", &body_b),
     ];
-    apply_turn_inline_budget_pass_with_config(&mut results, &dispatch_ctx, config);
+    apply_turn_inline_budget_pass_with_config(&mut results, &dispatch_ctx, config).await;
     for result in &results {
         let text = match result.content.first() {
             Some(ContentBlock::Text { text }) => text.as_str(),
@@ -905,9 +931,12 @@ async fn over_budget_turn_increments_budget_trip_counter_by_one_when_residual_ov
             "floor externalized"
         );
     }
-    let after = render().expect("render after pass with residual overflow");
-    let after_value = budget_trip_counter_value(&after);
-    assert_eq!(after_value, before_value + 1.0, "bad counter increment");
+    let after = recorder.render();
+    assert_eq!(
+        budget_trip_counter_value(&after),
+        1.0,
+        "bad counter increment:\n{after}"
+    );
 }
 #[tokio::test]
 async fn budget_trip_structured_event_retains_required_fields() {
@@ -939,7 +968,7 @@ async fn budget_trip_structured_event_retains_required_fields() {
         .finish();
     let dispatch = tracing::dispatcher::Dispatch::new(subscriber);
     let _guard = tracing::dispatcher::set_default(&dispatch);
-    apply_turn_inline_budget_pass_with_config(&mut results, &dispatch_ctx, config);
+    apply_turn_inline_budget_pass_with_config(&mut results, &dispatch_ctx, config).await;
     let output = logs.output();
     for field in [
         "inline_chars_pre=",
@@ -954,12 +983,206 @@ async fn budget_trip_structured_event_retains_required_fields() {
 }
 #[test]
 fn budget_trip_counter_name_is_coupled_to_telemetry_constant() {
-    let _guard = turn_budget_telemetry_guard();
-    djinn_telemetry::init().expect("telemetry init");
-    let before = render().expect("render metrics");
-    let before_value = budget_trip_counter_value(&before);
-    djinn_telemetry::reply_loop::increment_inline_char_budget_trip();
-    let after = render().expect("render after increment");
-    let after_value = budget_trip_counter_value(&after);
-    assert_eq!(after_value, before_value + 1.0, "bad counter increment");
+    let ((), rendered) = djinn_telemetry::render_isolated(
+        djinn_telemetry::reply_loop::increment_inline_char_budget_trip,
+    );
+    assert_eq!(
+        budget_trip_counter_value(&rendered),
+        1.0,
+        "bad counter increment:\n{rendered}"
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Host notification: every externalized result is reported back
+// ═══════════════════════════════════════════════════════════════════════
+
+/// Wraps the shared mock and records every `note_result_externalized` call.
+///
+/// The host records read coverage while it produces a result; this pass is the
+/// only place a result can shrink afterwards, so the notification is the only
+/// thing standing between an externalized read and an edit gate that still
+/// believes the model saw the file.
+struct NotifyRecordingDispatcher {
+    inner: crate::test_helpers::MockToolDispatcher,
+    notified: std::sync::Mutex<Vec<(String, String)>>,
+}
+
+impl NotifyRecordingDispatcher {
+    fn new() -> Self {
+        Self {
+            inner: crate::test_helpers::MockToolDispatcher,
+            notified: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    fn notified(&self) -> Vec<(String, String)> {
+        self.notified.lock().expect("notified lock").clone()
+    }
+}
+
+impl crate::host::SlotToolDispatcher for NotifyRecordingDispatcher {
+    fn is_stash_tool(&self, tool_name: &str) -> bool {
+        self.inner.is_stash_tool(tool_name)
+    }
+    fn handle_stash_call(
+        &self,
+        tool_name: &str,
+        arguments: Option<&serde_json::Map<String, serde_json::Value>>,
+    ) -> Result<String, String> {
+        self.inner.handle_stash_call(tool_name, arguments)
+    }
+    fn render_result(
+        &self,
+        tool_use_id: &str,
+        tool_name: &str,
+        value: &serde_json::Value,
+    ) -> String {
+        self.inner.render_result(tool_use_id, tool_name, value)
+    }
+    fn externalize_rendered_result(
+        &self,
+        tool_use_id: &str,
+        tool_name: &str,
+        rendered: &str,
+        preview_chars: usize,
+    ) -> String {
+        self.inner
+            .externalize_rendered_result(tool_use_id, tool_name, rendered, preview_chars)
+    }
+    fn note_result_externalized<'a>(
+        &'a self,
+        tool_name: &'a str,
+        rendered: &'a str,
+        _worktree_path: &'a std::path::Path,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+        self.notified
+            .lock()
+            .expect("notified lock")
+            .push((tool_name.to_string(), rendered.to_string()));
+        Box::pin(async {})
+    }
+    fn dispatch_extension_tool<'a>(
+        &'a self,
+        tool_name: &'a str,
+        arguments: Option<serde_json::Map<String, serde_json::Value>>,
+        worktree_path: &'a std::path::Path,
+        task_id: &'a str,
+        role_name: &'a str,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = djinn_core::tool_call::ToolCallOutcome> + Send + 'a>,
+    > {
+        self.inner
+            .dispatch_extension_tool(tool_name, arguments, worktree_path, task_id, role_name)
+    }
+    fn is_mcp_tool(&self, tool_name: &str) -> bool {
+        self.inner.is_mcp_tool(tool_name)
+    }
+    fn dispatch_mcp_tool<'a>(
+        &'a self,
+        tool_name: &'a str,
+        arguments: Option<serde_json::Map<String, serde_json::Value>>,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<serde_json::Value, String>> + Send + 'a>,
+    > {
+        self.inner.dispatch_mcp_tool(tool_name, arguments)
+    }
+    fn mcp_server_for_tool(&self, tool_name: &str) -> Option<String> {
+        self.inner.mcp_server_for_tool(tool_name)
+    }
+    fn is_resource_tool(&self, tool_name: &str) -> bool {
+        self.inner.is_resource_tool(tool_name)
+    }
+    fn dispatch_resource_tool<'a>(
+        &'a self,
+        tool_name: &'a str,
+        arguments: Option<serde_json::Map<String, serde_json::Value>>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send + 'a>>
+    {
+        self.inner.dispatch_resource_tool(tool_name, arguments)
+    }
+    fn clear_stash(&self) {
+        self.inner.clear_stash()
+    }
+}
+
+/// The budget pass must hand the host the payload it discarded, for every
+/// result it externalizes and only those — that payload is how the host
+/// identifies the read-coverage record it has to downgrade.
+#[tokio::test]
+async fn externalized_results_are_reported_to_the_host_with_the_discarded_payload() {
+    use crate::test_helpers::{agent_context_from_db, create_test_db};
+    use tokio_util::sync::CancellationToken;
+    let db = create_test_db();
+    let mut ctx = agent_context_from_db(db, CancellationToken::new());
+    let recorder = std::sync::Arc::new(NotifyRecordingDispatcher::new());
+    ctx.tool_dispatcher = Some(recorder.clone());
+    let worktree_path = std::path::Path::new("/tmp");
+    let tool_metadata = ToolRuntimeMetadataMap::new();
+    let dispatch_ctx = test_dispatch_context(&ctx, &tool_metadata, worktree_path);
+
+    let read_payload = serde_json::json!({
+        "path": "/tmp/big.rs",
+        "content": "L".repeat(20_000),
+    })
+    .to_string();
+    let untouched = "S".repeat(50);
+    let mut results = vec![
+        collected_text(0, "call-read", "read", &read_payload),
+        collected_text(1, "call-small", "shell", &untouched),
+    ];
+    let config = TurnInlineBudgetConfig {
+        budget: 1_000,
+        preview_floor: 100,
+    };
+    apply_turn_inline_budget_pass_with_config(&mut results, &dispatch_ctx, config).await;
+
+    // The read result really was replaced by a stub.
+    let read_text = match &results[0].content[0] {
+        ContentBlock::Text { text } => text.as_str(),
+        _ => panic!("expected text"),
+    };
+    assert!(
+        read_text.starts_with("[djinn-output-stash"),
+        "the read result must have been externalized"
+    );
+
+    let notified = recorder.notified();
+    assert_eq!(
+        notified.len(),
+        1,
+        "exactly the externalized result must be reported, got {notified:?}"
+    );
+    assert_eq!(notified[0].0, "read", "the tool name must be reported");
+    assert_eq!(
+        notified[0].1, read_payload,
+        "the host must receive the payload that was discarded, not the stub"
+    );
+}
+
+/// An under-budget turn externalizes nothing, so it must notify nothing —
+/// otherwise every read in a quiet turn would have its coverage revoked.
+#[tokio::test]
+async fn under_budget_turn_reports_no_externalization() {
+    use crate::test_helpers::{agent_context_from_db, create_test_db};
+    use tokio_util::sync::CancellationToken;
+    let db = create_test_db();
+    let mut ctx = agent_context_from_db(db, CancellationToken::new());
+    let recorder = std::sync::Arc::new(NotifyRecordingDispatcher::new());
+    ctx.tool_dispatcher = Some(recorder.clone());
+    let worktree_path = std::path::Path::new("/tmp");
+    let tool_metadata = ToolRuntimeMetadataMap::new();
+    let dispatch_ctx = test_dispatch_context(&ctx, &tool_metadata, worktree_path);
+
+    let mut results = vec![collected_text(0, "call-read", "read", &"L".repeat(20_000))];
+    let config = TurnInlineBudgetConfig {
+        budget: 100_000,
+        preview_floor: 10_000,
+    };
+    apply_turn_inline_budget_pass_with_config(&mut results, &dispatch_ctx, config).await;
+
+    assert!(
+        recorder.notified().is_empty(),
+        "an under-budget turn must not report any externalization"
+    );
 }

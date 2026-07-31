@@ -100,6 +100,15 @@ impl crate::host::SlotToolDispatcher for PhaseScriptedDispatcher {
     fn externalize_rendered_result(&self, _: &str, _: &str, rendered: &str, _: usize) -> String {
         rendered.to_string()
     }
+    fn note_result_externalized<'a>(
+        &'a self,
+        _: &'a str,
+        _: &'a str,
+        _: &'a std::path::Path,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+        // This dispatcher keeps no per-call bookkeeping to downgrade.
+        Box::pin(async {})
+    }
     fn dispatch_extension_tool<'a>(
         &'a self,
         name: &'a str,
@@ -335,6 +344,7 @@ fn test_tracked_dispatch_context<'a>(
         otel_session: None,
         phase_tracker: Some(phase_tracker),
         cancel: test_cancel_token(),
+        turn_inline_budget: None,
     }
 }
 #[test]

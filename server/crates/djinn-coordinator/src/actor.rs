@@ -12,6 +12,7 @@ use super::health;
 use super::messages::CoordinatorMessage;
 use super::types::*;
 use crate::cargo_warm_base_gc::{WarmJobGuard, WarmJobListerGuard};
+use crate::poll_stack;
 use crate::roles::RoleRegistry;
 use djinn_control_plane::bridge::RuntimeOps;
 use djinn_core::clock::{Clock, SystemClock};
@@ -53,6 +54,68 @@ where
 
 // ─── Actor (≤20 fields — AGENT-11) ───────────────────────────────────────────
 
+/// Where a [`CoordinatorActor`] keeps its doctor checks.
+///
+/// Production is unchanged: the actor registers into, and reads back from, the
+/// process-global [`djinn_core::doctor::registry()`] singleton, which is the
+/// same registry the MCP `doctor_run` / `doctor_fix` surfaces resolve against
+/// (`McpState` defaults to it — PR #2820). One server process runs one
+/// coordinator, so "global" and "this actor's" are the same set of checks.
+///
+/// Under `cfg(test)` they are not the same thing, and that difference was a
+/// flake source. `DoctorRegistry::register` replaces by check *name*, and cargo
+/// runs every test in a binary as a thread of one process, so each of the
+/// ~1980 coordinator lib tests that builds an actor overwrote all seven
+/// coordinator checks with sources bound to *its own* ephemeral Postgres
+/// database (a 4-connection pool). Whichever test registered last served every
+/// concurrent actor's tick: sixteen actors piled onto one foreign pool, and
+/// once that owning test finished and its database was dropped the checks sat
+/// there until the pool acquire timed out. A single observed tick spent
+/// `elapsed_ms=15046` in `run_cheap_subset` on
+/// `pool timed out while waiting for an open connection`. The coordinator is a
+/// single-mailbox actor, so for those fifteen seconds it serviced neither its
+/// mailbox nor the event stream, and whichever sibling test was waiting on a
+/// rule to fire failed its bounded wait — a different one each run.
+///
+/// Giving each actor its own registry in tests makes a check's database the
+/// database of the actor that runs it, which is what the production invariant
+/// already says.
+/// Registering into the global as well under `cfg(test)` is not redundant. It
+/// is what keeps every *other* consequence of this change at zero: a
+/// registration owns an `Arc` of its source, which owns a `Database`, and
+/// `register` replacing by name is what drops the previous actor's sources —
+/// which is what runs `TestDbInit::drop`, i.e. `DROP DATABASE`, on the *next*
+/// actor's construction thread. Take that away and the test databases either
+/// accumulate until Postgres runs out of shared memory (a leaked registry) or
+/// get dropped from a task being torn down inside `Runtime::drop`, where
+/// `TestDbInit`'s blocking `std::thread::spawn(..).join()` wedged the suite
+/// past the 900 s cap. Both were observed. Keeping the global registration
+/// keeps object lifetimes byte-identical to before; only the *read* moves.
+#[cfg(not(test))]
+pub(super) type DoctorRegistryHandle = &'static djinn_core::doctor::DoctorRegistry;
+#[cfg(test)]
+pub(super) type DoctorRegistryHandle = Arc<djinn_core::doctor::DoctorRegistry>;
+
+/// Build the registry a freshly-constructed actor resolves its checks from.
+#[cfg(not(test))]
+pub(super) fn new_doctor_registry_handle() -> DoctorRegistryHandle {
+    djinn_core::doctor::registry()
+}
+
+#[cfg(test)]
+pub(super) fn new_doctor_registry_handle() -> DoctorRegistryHandle {
+    Arc::new(djinn_core::doctor::DoctorRegistry::new())
+}
+
+/// Borrow a handle as a plain registry reference.
+///
+/// The deref coercion that gets there differs per `cfg` — `&&'static T` in
+/// production, `&Arc<T>` under test — so it happens here instead of at every
+/// call site, where the production spelling would be a `needless_borrow`.
+pub(super) fn registry_of(handle: &DoctorRegistryHandle) -> &djinn_core::doctor::DoctorRegistry {
+    handle
+}
+
 /// Coordinator actor state.
 ///
 /// Durability boundary: `last_dispatched`, `inflight_dispatches`,
@@ -81,8 +144,6 @@ pub(super) struct CoordinatorActor {
     pub(super) boot_at: ::time::OffsetDateTime,
     pub(super) events_tx: broadcast::Sender<DjinnEventEnvelope>,
     pub(super) pool: SlotPoolHandle,
-    /// Durable build admission shared by every task-run dispatch route.
-    pub(super) build_admission: Option<Arc<crate::build_admission::BuildAdmissionController>>,
     #[cfg_attr(test, allow(dead_code))]
     pub(super) catalog: CatalogService,
     pub(super) health: HealthTracker,
@@ -183,6 +244,9 @@ pub(super) struct CoordinatorActor {
     #[cfg(not(test))]
     pub(super) retrieval_health_source:
         Option<Arc<crate::doctor::retrieval_health::RetrievalHealthSource>>,
+    /// The doctor registry this actor registers its checks into and resolves
+    /// the cheap subset from. See [`DoctorRegistryHandle`].
+    pub(super) doctor_registry: DoctorRegistryHandle,
     /// Per-task state of the PR poller's offloaded clean-merge fast path. The
     /// heavy mechanical merge (fetch + ephemeral clone + merge + push) runs in a
     /// spawned background task instead of inline on this tick; the poller reads
@@ -537,7 +601,6 @@ impl CoordinatorActor {
             cancel,
             db,
             pool,
-            build_admission,
             catalog,
             health,
             role_registry,
@@ -555,79 +618,78 @@ impl CoordinatorActor {
         let mut tick = time::interval(STUCK_INTERVAL);
         tick.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
 
-        // Wire the coordinator-side doctor checks into the global registry. The
-        // stranded-ready source is cached here and refreshed each tick before the
-        // cheap subset runs; the live-mover source is a no-op until the production
+        // Wire the coordinator-side doctor checks into this actor's registry —
+        // the process-global one in production, a private one under
+        // `cfg(test)`; see [`DoctorRegistryHandle`]. The stranded-ready source
+        // is cached here and refreshed each tick before the cheap subset runs;
+        // the live-mover source is a no-op until the production
         // evidence-collector adapter (T5) is wired.
+        let doctor_registry = new_doctor_registry_handle();
         let stranded_ready_source = Arc::new(
             crate::doctor::stranded_ready::TaskRepositoryStrandedReadySource::new(
                 db.clone(),
                 events_tx.clone(),
             ),
         );
-        crate::doctor::register_doctor_checks(
-            djinn_core::doctor::registry(),
-            Arc::new(crate::doctor::live_mover::NoOpLiveMoverSource),
-            Arc::clone(&stranded_ready_source) as Arc<dyn crate::doctor::StrandedReadySource>,
-        );
         let retrieval_health_source =
             Arc::new(crate::doctor::retrieval_health::RetrievalHealthSource::new(
                 db.clone(),
                 djinn_core::models::KnowledgeInjectionConfig::default(),
             ));
-        crate::doctor::register_retrieval_health_checks(
-            djinn_core::doctor::registry(),
-            Arc::clone(&retrieval_health_source),
-        );
         let closed_parent_open_children_source = Arc::new(
             crate::doctor::TaskRepositoryClosedParentOpenChildrenSource::new(
                 db.clone(),
                 events_tx.clone(),
             ),
         );
-        crate::doctor::register_closed_parent_open_children_check_with_repair(
-            djinn_core::doctor::registry(),
-            Arc::clone(&closed_parent_open_children_source)
-                as Arc<dyn crate::doctor::ClosedParentOpenChildrenSource>,
-            Arc::clone(&closed_parent_open_children_source)
-                as Arc<dyn crate::doctor::ClosedParentOpenChildrenRepairSource>,
-        );
-        // Read-only cache-root manifest detector. On-demand cadence: it stats
-        // the cache PVC and walks candidates, which is too expensive for the
-        // cheap periodic subset. It has no fix path.
-        crate::doctor::register_stale_cache_roots_check(
-            djinn_core::doctor::registry(),
-            Arc::new(crate::doctor::ProjectRepositoryStaleCacheRootsSource::new(
-                db.clone(),
-            )),
-        );
-        crate::doctor::register_refinement_phantom_active_check(
-            djinn_core::doctor::registry(),
-            Arc::new(
-                crate::doctor::ProposalRepositoryRefinementPhantomActiveSource::new(
+        let register_checks_into = |registry: &djinn_core::doctor::DoctorRegistry| {
+            crate::doctor::register_doctor_checks(
+                registry,
+                Arc::new(crate::doctor::live_mover::NoOpLiveMoverSource),
+                Arc::clone(&stranded_ready_source) as Arc<dyn crate::doctor::StrandedReadySource>,
+            );
+            crate::doctor::register_retrieval_health_checks(
+                registry,
+                Arc::clone(&retrieval_health_source),
+            );
+            crate::doctor::register_closed_parent_open_children_check_with_repair(
+                registry,
+                Arc::clone(&closed_parent_open_children_source)
+                    as Arc<dyn crate::doctor::ClosedParentOpenChildrenSource>,
+                Arc::clone(&closed_parent_open_children_source)
+                    as Arc<dyn crate::doctor::ClosedParentOpenChildrenRepairSource>,
+            );
+            // Read-only cache-root manifest detector. On-demand cadence: it
+            // stats the cache PVC and walks candidates, which is too expensive
+            // for the cheap periodic subset. It has no fix path.
+            crate::doctor::register_stale_cache_roots_check(
+                registry,
+                Arc::new(crate::doctor::ProjectRepositoryStaleCacheRootsSource::new(
                     db.clone(),
-                    events_tx.clone(),
+                )),
+            );
+            crate::doctor::register_refinement_phantom_active_check(
+                registry,
+                Arc::new(
+                    crate::doctor::ProposalRepositoryRefinementPhantomActiveSource::new(
+                        db.clone(),
+                        events_tx.clone(),
+                    ),
                 ),
-            ),
-        );
-        crate::doctor::register_stalled_epic_check(
-            djinn_core::doctor::registry(),
-            Arc::new(crate::doctor::TaskRepositoryStalledEpicSource::new(
-                db.clone(),
-            )),
-        );
-        // Leader-local build-admission health. This constructor runs only on
-        // the pod that won coordinator leadership, so the controller handle
-        // below is the one that actually decides admission — a standby never
-        // registers this check at all, which reads as "not registered" rather
-        // than as a check that silently always passes.
-        crate::doctor::register_build_admission_health_check(
-            djinn_core::doctor::registry(),
-            Arc::new(crate::doctor::ControllerBuildAdmissionHealthSource::new(
-                build_admission.clone(),
-            )),
-        );
-
+            );
+            crate::doctor::register_stalled_epic_check(
+                registry,
+                Arc::new(crate::doctor::TaskRepositoryStalledEpicSource::new(
+                    db.clone(),
+                )),
+            );
+        };
+        register_checks_into(registry_of(&doctor_registry));
+        // Under `cfg(test)` the line above filled a registry private to this
+        // actor, so the global still needs its (unread) registration to keep
+        // source lifetimes exactly as they were — see [`DoctorRegistryHandle`].
+        #[cfg(test)]
+        register_checks_into(djinn_core::doctor::registry());
         Self {
             receiver,
             events,
@@ -638,7 +700,6 @@ impl CoordinatorActor {
             boot_at: ::time::OffsetDateTime::now_utc(),
             events_tx: events_tx.clone(),
             pool,
-            build_admission,
             catalog,
             health,
             role_registry,
@@ -663,6 +724,7 @@ impl CoordinatorActor {
             )),
             #[cfg(not(test))]
             retrieval_health_source: Some(retrieval_health_source),
+            doctor_registry,
             auto_merge_tracker: Arc::new(std::sync::Mutex::new(HashMap::new())),
             consolidation_runner: consolidation_runner
                 .unwrap_or_else(|| Arc::new(DbConsolidationRunner::new(db.clone()))),
@@ -823,6 +885,11 @@ impl CoordinatorActor {
         summary
     }
 
+    /// The registry this actor's checks live in. See [`DoctorRegistryHandle`].
+    pub(super) fn doctor_registry(&self) -> &djinn_core::doctor::DoctorRegistry {
+        registry_of(&self.doctor_registry)
+    }
+
     pub fn dispatch_state_snapshot(&self) -> CoordinatorDebugSnapshot {
         let instant_now = SystemClock::new().now_instant();
         let wall_now = ::time::OffsetDateTime::now_utc();
@@ -931,20 +998,6 @@ impl CoordinatorActor {
         }
     }
 
-    pub(super) async fn run_build_admission_release_pass(&mut self) {
-        // Keep the release arm's state small. `dispatch_ready_tasks` is also
-        // reachable through event handling, and embedding another copy of its
-        // large future directly in `run` made the coordinator future overflow
-        // a Tokio worker stack while processing rapid status-change events.
-        // Boxing bounds this arm without changing dispatch or watchdog
-        // semantics.
-        Self::run_pass_with_watchdog(
-            "build-admission-release",
-            Box::pin(self.dispatch_ready_tasks(None)),
-        )
-        .await;
-    }
-
     /// Register this runtime's immutable incarnation lease during startup.
     async fn register_coordinator_incarnation(&self) {
         if let Err(error) = djinn_db::CoordinatorIncarnationRepository::new(self.db.clone())
@@ -999,39 +1052,45 @@ impl CoordinatorActor {
 
     pub(super) async fn run(mut self) {
         tracing::info!("CoordinatorActor started");
-        self.register_coordinator_incarnation().await;
+        // Every sub-pass awaited from here down is entered through
+        // `poll_stack::boxed` — see that module for why the coordinator's poll
+        // chain cannot afford to build its sub-futures in the caller's frame.
+        poll_stack::boxed(|| self.register_coordinator_incarnation()).await;
         // Keep the incarnation lease fresh from a dedicated task so a slow tick
         // never lets the reaper read this live coordinator as expired.
         self.spawn_incarnation_renewal();
 
-        let _startup_imports_complete = match ProjectRepository::new(
+        let startup_project_repo = ProjectRepository::new(
             self.db.clone(),
             crate::events::event_bus_for(&self.events_tx),
-        )
-        .list()
-        .await
+        );
+        let _startup_imports_complete = match poll_stack::boxed(|| startup_project_repo.list())
+            .await
         {
             Ok(projects) => {
                 let db = self.db.clone();
-                complete_legacy_settings_import_phase(projects, move |project| {
-                    let db = db.clone();
-                    async move {
-                        let checkout = djinn_core::paths::project_dir(
-                            &project.github_owner,
-                            &project.github_repo,
-                        );
-                        if let Err(error) = djinn_workspace::import_legacy_settings_file(
-                            db,
-                            &project.id,
-                            &checkout,
-                        )
-                        .await
-                        {
-                            tracing::error!(project_id = %project.id, checkout = %checkout.display(), %error, "legacy settings import failed; retained source for this project");
+                let import_phase = complete_legacy_settings_import_phase(
+                    projects,
+                    move |project| {
+                        let db = db.clone();
+                        async move {
+                            let checkout = djinn_core::paths::project_dir(
+                                &project.github_owner,
+                                &project.github_repo,
+                            );
+                            if let Err(error) = djinn_workspace::import_legacy_settings_file(
+                                db,
+                                &project.id,
+                                &checkout,
+                            )
+                            .await
+                            {
+                                tracing::error!(project_id = %project.id, checkout = %checkout.display(), %error, "legacy settings import failed; retained source for this project");
+                            }
                         }
-                    }
-                })
-                .await
+                    },
+                );
+                poll_stack::boxed(|| import_phase).await
             }
             Err(error) => {
                 tracing::error!(%error, "cannot enumerate projects for legacy settings import");
@@ -1055,25 +1114,30 @@ impl CoordinatorActor {
         // that owned it can no longer flush a terminal RPC to us. Run the
         // same sweep the 15-min tick uses so the dev UI / queries don't show
         // weeks-old stale rows after every restart.
-        health::reap_stale_task_runs_for_startup(&self.db).await;
+        poll_stack::boxed(|| health::reap_stale_task_runs_for_startup(&self.db)).await;
         // Reap pending task_attempts orphaned while this coordinator was down
         // (or wedged from before the reaper existed) so the respawn guard
         // unblocks those (task, role) pairs immediately after a deploy.
-        health::reap_orphaned_pending_attempts_for_startup(
-            &self.db,
-            &self.coordinator_incarnation_id,
-        )
+        poll_stack::boxed(|| {
+            health::reap_orphaned_pending_attempts_for_startup(
+                &self.db,
+                &self.coordinator_incarnation_id,
+            )
+        })
         .await;
         let startup_context = self.maintenance_context();
-        health::reap_orphaned_taskrun_jobs_for_startup(&self.db, &startup_context).await;
-        self.rehydrate_durable_dispatch_state().await;
+        poll_stack::boxed(|| {
+            health::reap_orphaned_taskrun_jobs_for_startup(&self.db, &startup_context)
+        })
+        .await;
+        poll_stack::boxed(|| self.rehydrate_durable_dispatch_state()).await;
 
         // Reconcile refinements whose in-memory loop was lost across this
         // restart: their durable `refinement_start` rows still report `active`
         // but no loop drives them. Stop them cleanly so they don't linger as
         // zombies. Runs before the loop starts, so `active_refinements` is
         // empty and there is no race with a freshly-started refinement.
-        self.recover_interrupted_refinements().await;
+        poll_stack::boxed(|| self.recover_interrupted_refinements()).await;
 
         // Recover any linked evidence spikes that reached a terminal task
         // state while the coordinator was down, so missed closed-task events are
@@ -1081,9 +1145,9 @@ impl CoordinatorActor {
         // repository primitive.  For successful findings the durable evidence
         // link/claim is cleared and the in-memory refinement loop is advanced;
         // for failed spikes the proposal remains blocked.
-        self.recover_terminal_linked_spike_evidence().await;
+        poll_stack::boxed(|| self.recover_terminal_linked_spike_evidence()).await;
 
-        self.run_dispatch_loop(_startup_imports_complete).await;
+        poll_stack::boxed(|| self.run_dispatch_loop(_startup_imports_complete)).await;
         tracing::info!("CoordinatorActor stopped");
     }
 
@@ -1100,36 +1164,25 @@ impl CoordinatorActor {
                     break;
                 }
 
-                // A terminal admission transition releases durable capacity.
-                _ = async {
-                    if let Some(controller) = self.build_admission.as_ref() {
-                        controller.release_notifier().notified().await;
-                    } else {
-                        std::future::pending::<()>().await;
-                    }
-                } => {
-                    self.run_build_admission_release_pass().await;
-                }
-
                 // 2. Incoming API messages.
                 msg = self.receiver.recv() => {
                     let Some(msg) = msg else {
                         tracing::debug!("CoordinatorActor: message channel closed");
                         break;
                     };
-                    Self::run_pass_with_watchdog("message", self.handle_message(msg)).await;
+                    Self::run_pass_with_watchdog("message", poll_stack::boxed(|| self.handle_message(msg))).await;
                 }
 
                 // 3. Domain events from repositories.
                 event = self.events.recv() => {
-                    Self::run_pass_with_watchdog("event", self.handle_event_result(event)).await;
+                    Self::run_pass_with_watchdog("event", poll_stack::boxed(|| self.handle_event_result(event))).await;
                 }
 
                 // 4. 30s safety-net tick — stuck detection + dispatch pass for
                 //    any tasks that missed an event (e.g. needs_lead_intervention
                 //    tasks surviving a server restart).
                 _ = self.tick.tick() => {
-                    Self::run_pass_with_watchdog("tick", self.run_tick()).await;
+                    Self::run_pass_with_watchdog("tick", poll_stack::boxed(|| self.run_tick())).await;
                 }
             }
         }
@@ -1141,14 +1194,16 @@ impl CoordinatorActor {
         fields(cycle_id = self.prune_tick_counter + 1, pass_kind = "tick")
     )]
     async fn run_tick(&mut self) {
-        self.enforce_session_stall_timeout().await;
-        self.reap_zombie_sessions().await;
-        self.reap_idle_chat_sessions().await;
-        self.detect_and_recover_stuck_filtered(None).await;
+        poll_stack::boxed(|| self.enforce_session_stall_timeout()).await;
+        poll_stack::boxed(|| self.reap_zombie_sessions()).await;
+        poll_stack::boxed(|| self.reap_idle_chat_sessions()).await;
+        poll_stack::boxed(|| self.detect_and_recover_stuck_filtered(None)).await;
 
-        self.mismatch_scan
-            .trigger(crate::doctor::mismatch_scan::Trigger::Timer)
-            .await;
+        poll_stack::boxed(|| {
+            self.mismatch_scan
+                .trigger(crate::doctor::mismatch_scan::Trigger::Timer)
+        })
+        .await;
 
         // Doctor framework integration (epic 4q1t, task 1lx0). Run only the
         // cheap subset so cluster-facing on-demand checks (e.g. k8s.pod_leak)
@@ -1158,34 +1213,38 @@ impl CoordinatorActor {
         // The run_id is monotonic per-tick so a future `doctor_list_findings`
         // call can scope its query back to one leader-tick invocation.
         if let Some(source) = self.stranded_ready_source.as_ref() {
-            source.refresh().await;
+            poll_stack::boxed(|| source.refresh()).await;
         }
         if let Some(source) = self.closed_parent_open_children_source.as_ref() {
-            source.refresh().await;
+            poll_stack::boxed(|| source.refresh()).await;
         }
         let doctor_run_id = format!("leader-tick-{}", self.prune_tick_counter.wrapping_add(1));
         #[cfg(not(test))]
         let retrieval_health_source = self.retrieval_health_source.as_ref();
         #[cfg(test)]
         let retrieval_health_source = None;
-        crate::doctor::leader_tick::run_elected_retrieval_refresh_and_cheap_checks(
-            true,
-            retrieval_health_source,
-            djinn_core::doctor::registry(),
-            &self.db,
-            &self.events_tx,
-            Some(&doctor_run_id),
-        )
+        poll_stack::boxed(|| {
+            crate::doctor::leader_tick::run_elected_retrieval_refresh_and_cheap_checks(
+                true,
+                retrieval_health_source,
+                self.doctor_registry(),
+                &self.db,
+                &self.events_tx,
+                Some(&doctor_run_id),
+            )
+        })
         .await;
 
         // Separate async DB sweep; its flag is checked before proposal sources
         // are constructed, avoiding scans and body loads while disabled.
         let proposal_integrity_sweep = crate::context::ProposalSpecIntegritySweepConfig::from_env();
-        crate::doctor::leader_tick::run_proposal_spec_integrity_sweep(
-            proposal_integrity_sweep.enabled,
-            &self.db,
-            Some(&doctor_run_id),
-        )
+        poll_stack::boxed(|| {
+            crate::doctor::leader_tick::run_proposal_spec_integrity_sweep(
+                proposal_integrity_sweep.enabled,
+                &self.db,
+                Some(&doctor_run_id),
+            )
+        })
         .await;
 
         // Audit sampler scheduler (epic ihf1, task 0utu). Materializes
@@ -1199,12 +1258,14 @@ impl CoordinatorActor {
             self.db.clone(),
             crate::events::event_bus_for(&self.events_tx),
         );
-        let audit_result = crate::audit_sampler::scheduler::run_audit_scheduler(
-            &audit_config,
-            &audit_repo,
-            &task_repo,
-            &epic_repo,
-        )
+        let audit_result = poll_stack::boxed(|| {
+            crate::audit_sampler::scheduler::run_audit_scheduler(
+                &audit_config,
+                &audit_repo,
+                &task_repo,
+                &epic_repo,
+            )
+        })
         .await;
         if audit_result.ran && !audit_result.materialized_items.is_empty() {
             tracing::info!(
@@ -1244,45 +1305,50 @@ impl CoordinatorActor {
         };
 
         if !memory_throttled {
-            self.dispatch_ready_tasks(None).await;
-            self.drive_active_refinements().await;
+            poll_stack::boxed(|| self.dispatch_ready_tasks(None)).await;
+            poll_stack::boxed(|| self.drive_active_refinements()).await;
         }
-        self.process_approved_tasks().await;
-        self.poll_pr_statuses().await;
+        poll_stack::boxed(|| self.process_approved_tasks()).await;
+        poll_stack::boxed(|| self.poll_pr_statuses()).await;
         if self.last_stale_sweep.elapsed() >= STALE_SWEEP_INTERVAL {
             let app_state = self.maintenance_context();
             // The incarnation lease is NOT renewed here: it lives on the
             // dedicated `spawn_incarnation_renewal` task so a slow tick or this
             // heavy sweep can never let the reaper (run inside
             // `sweep_stale_resources`) read this live coordinator as expired.
-            health::sweep_stale_resources(&self.db, &app_state).await;
+            poll_stack::boxed(|| health::sweep_stale_resources(&self.db, &app_state)).await;
             // Piggyback on the slow stale-sweep cadence (never per tick): close
             // the PR poller's blind spot by reconciling merged-but-unnoticed PRs
             // for non-terminal tasks that sit outside poller-owned statuses.
-            self.reconcile_blindspot_merged_prs().await;
+            poll_stack::boxed(|| self.reconcile_blindspot_merged_prs()).await;
             self.last_stale_sweep = SystemClock::new().now_instant();
         }
         if self.last_auto_dispatch_sweep.elapsed() >= AUTO_DISPATCH_SWEEP_INTERVAL {
-            self.sweep_stale_auto_dispatches().await;
+            poll_stack::boxed(|| self.sweep_stale_auto_dispatches()).await;
             self.last_auto_dispatch_sweep = SystemClock::new().now_instant();
         }
         if self.last_proposal_review_sweep.elapsed() >= STALE_SWEEP_INTERVAL {
-            self.sweep_proposals_needing_review().await;
-            self.sweep_proposals_needing_reconcile().await;
+            poll_stack::boxed(|| self.sweep_proposals_needing_review()).await;
+            poll_stack::boxed(|| self.sweep_proposals_needing_reconcile()).await;
             self.last_proposal_review_sweep = SystemClock::new().now_instant();
         }
         if self.last_graph_refresh.elapsed() >= GRAPH_REFRESH_INTERVAL {
-            self.refresh_canonical_graphs_if_stale().await;
+            poll_stack::boxed(|| self.refresh_canonical_graphs_if_stale()).await;
             self.last_graph_refresh = SystemClock::new().now_instant();
         }
         // Run association pruning once per ~hour (120 ticks at 30s intervals)
         self.prune_tick_counter += 1;
         if self.prune_tick_counter >= 120 {
             self.prune_tick_counter = 0;
-            self.prune_note_associations().await;
+            poll_stack::boxed(|| self.prune_note_associations()).await;
             if !self.should_skip_background_llm_work("hourly_note_consolidation") {
-                super::consolidation::run_note_consolidation(&self.db, &self.consolidation_runner)
-                    .await;
+                poll_stack::boxed(|| {
+                    super::consolidation::run_note_consolidation(
+                        &self.db,
+                        &self.consolidation_runner,
+                    )
+                })
+                .await;
             }
             self.evict_throughput_events();
         }
@@ -1298,7 +1364,7 @@ impl CoordinatorActor {
         }
         // Only attempt a new sweep when no sweep is already running.
         if self.idle_consolidation_handle.is_none() {
-            self.maybe_start_idle_consolidation().await;
+            poll_stack::boxed(|| self.maybe_start_idle_consolidation()).await;
         }
     }
 
@@ -1412,13 +1478,13 @@ impl CoordinatorActor {
                 // re-dispatched, fails again, frees the slot, triggers
                 // dispatch, etc.  The 30-second tick is sufficient for stuck
                 // recovery.
-                self.dispatch_ready_tasks(None).await;
+                poll_stack::boxed(|| self.dispatch_ready_tasks(None)).await;
             }
             CoordinatorMessage::TriggerProjectDispatch { project_id } => {
-                self.dispatch_ready_tasks(Some(&project_id)).await;
+                poll_stack::boxed(|| self.dispatch_ready_tasks(Some(&project_id))).await;
             }
             CoordinatorMessage::TriggerStuckScan => {
-                self.detect_and_recover_stuck_filtered(None).await;
+                poll_stack::boxed(|| self.detect_and_recover_stuck_filtered(None)).await;
             }
             CoordinatorMessage::TriggerBoardHealthMismatchScan => {
                 self.mismatch_scan
@@ -1445,24 +1511,28 @@ impl CoordinatorActor {
                 reason,
                 project_id,
             } => {
-                self.dispatch_planner_escalation(&source_task_id, &reason, &project_id)
-                    .await;
+                poll_stack::boxed(|| {
+                    self.dispatch_planner_escalation(&source_task_id, &reason, &project_id)
+                })
+                .await;
             }
             CoordinatorMessage::RouteLoopGuardPlannerIntervention {
                 source_task_id,
                 role,
                 reason,
             } => {
-                self.route_loop_guard_planner_intervention(&source_task_id, role, &reason)
-                    .await;
+                poll_stack::boxed(|| {
+                    self.route_loop_guard_planner_intervention(&source_task_id, role, &reason)
+                })
+                .await;
             }
             CoordinatorMessage::ClearPlannedDispatchCompletion { task_id, reason } => {
-                self.clear_planned_dispatch_completion(&task_id, &reason)
+                poll_stack::boxed(|| self.clear_planned_dispatch_completion(&task_id, &reason))
                     .await;
-                self.route_settled_noop_without_live_mover(&task_id).await;
+                poll_stack::boxed(|| self.route_settled_noop_without_live_mover(&task_id)).await;
             }
             CoordinatorMessage::RouteSettledNoopWithoutLiveMover { task_id } => {
-                self.route_settled_noop_without_live_mover(&task_id).await;
+                poll_stack::boxed(|| self.route_settled_noop_without_live_mover(&task_id)).await;
             }
             CoordinatorMessage::RefreshRetrievalHealth {
                 check_names,
@@ -1474,7 +1544,7 @@ impl CoordinatorActor {
                 #[cfg(not(test))]
                 let result = crate::doctor::leader_tick::run_manual_retrieval_refresh_and_checks(
                     self.retrieval_health_source.as_ref(),
-                    djinn_core::doctor::registry(),
+                    self.doctor_registry(),
                     &self.db,
                     &self.events_tx,
                     Some(&run_id),
@@ -1506,7 +1576,7 @@ impl CoordinatorActor {
                 let _ = reply.send(self.dispatch_state_snapshot());
             }
             CoordinatorMessage::WakeRefinementRun { run_id } => {
-                self.hydrate_refinement_wake(&run_id).await;
+                poll_stack::boxed(|| self.hydrate_refinement_wake(&run_id)).await;
             }
             CoordinatorMessage::StartProposalRefinement {
                 proposal_id,
@@ -1702,15 +1772,15 @@ impl CoordinatorActor {
         result: Result<DjinnEventEnvelope, broadcast::error::RecvError>,
     ) {
         match result {
-            Ok(envelope) => self.handle_event(envelope).await,
+            Ok(envelope) => poll_stack::boxed(|| self.handle_event(envelope)).await,
             Err(broadcast::error::RecvError::Lagged(n)) => {
                 tracing::warn!(
                     missed = n,
                     "CoordinatorActor: lagged behind event stream, re-subscribing"
                 );
                 self.events = self.events_tx.subscribe();
-                self.detect_and_recover_stuck_filtered(None).await;
-                self.dispatch_ready_tasks(None).await;
+                poll_stack::boxed(|| self.detect_and_recover_stuck_filtered(None)).await;
+                poll_stack::boxed(|| self.dispatch_ready_tasks(None)).await;
             }
             Err(broadcast::error::RecvError::Closed) => {
                 tracing::warn!("CoordinatorActor: event broadcast channel closed");
@@ -1721,7 +1791,7 @@ impl CoordinatorActor {
     pub(super) async fn handle_event(&mut self, envelope: DjinnEventEnvelope) {
         match (envelope.entity_type, envelope.action) {
             ("activity", "logged") => {
-                self.handle_task_outcome_activity(&envelope).await;
+                poll_stack::boxed(|| self.handle_task_outcome_activity(&envelope)).await;
             }
             // Epic created → create a planning task for the Planner (wave 1),
             // gated to `open` epics with auto_breakdown enabled.
@@ -1729,7 +1799,7 @@ impl CoordinatorActor {
                 let Some(epic) = envelope.parse_payload::<djinn_core::models::Epic>() else {
                     return;
                 };
-                self.maybe_create_planning_task(&epic).await;
+                poll_stack::boxed(|| self.maybe_create_planning_task(&epic)).await;
             }
             // Epic updated → if the epic is now open, create a planning task
             // (e.g. a reopened epic, or a re-emitted epic.updated). If the epic
@@ -1739,9 +1809,9 @@ impl CoordinatorActor {
                 let Some(epic) = envelope.parse_payload::<djinn_core::models::Epic>() else {
                     return;
                 };
-                self.maybe_create_planning_task(&epic).await;
+                poll_stack::boxed(|| self.maybe_create_planning_task(&epic)).await;
                 if epic.status == "closed" {
-                    self.maybe_review_proposal_on_epic_close(&epic).await;
+                    poll_stack::boxed(|| self.maybe_review_proposal_on_epic_close(&epic)).await;
                 }
             }
             // Proposal updated → if a material amend landed while the proposal
@@ -1752,7 +1822,7 @@ impl CoordinatorActor {
                 else {
                     return;
                 };
-                self.maybe_reconcile_proposal_on_update(&proposal).await;
+                poll_stack::boxed(|| self.maybe_reconcile_proposal_on_update(&proposal)).await;
             }
             // ADR-051 §7 — exit recheck.  When a planner session ends, look
             // up the epic its task was attached to and recheck whether an
@@ -1762,32 +1832,6 @@ impl CoordinatorActor {
             // exit while the task remains nonterminal is a protocol
             // violation and must count as a failed attempt for retry
             // accounting.
-            // SessionRepository emits `started` both when a runtime session is
-            // created and when it is subsequently observed running. Binding
-            // here makes the UID available to the terminal callback below.
-            ("session", "started") => {
-                let Some(session) = envelope.parse_payload::<djinn_core::models::SessionRecord>()
-                else {
-                    return;
-                };
-                let (Some(task_id), Some(task_run_id)) =
-                    (session.task_id.as_deref(), session.task_run_id.as_deref())
-                else {
-                    return;
-                };
-                let task_repo = TaskRepository::new(
-                    self.db.clone(),
-                    crate::events::event_bus_for(&self.events_tx),
-                );
-                if let Ok(Some(task)) = task_repo.get(task_id).await {
-                    self.live_task_run_build_admission(
-                        task_id,
-                        task.reopen_count.max(0),
-                        task_run_id,
-                    )
-                    .await;
-                }
-            }
             ("session", "completed" | "interrupted" | "failed") => {
                 let Some(session) = envelope.parse_payload::<djinn_core::models::SessionRecord>()
                 else {
@@ -1804,9 +1848,6 @@ impl CoordinatorActor {
                 // the respawn guard does not defer the (task, role) pair
                 // forever on an orphaned pending attempt.
                 if let Some(task_id) = session.task_id.as_deref() {
-                    if let Some(task_run_id) = session.task_run_id.as_deref() {
-                        self.terminal_task_run_build_admission(task_run_id).await;
-                    }
                     let _ = self
                         .classify_session_exit_liveness(
                             &session.id,
@@ -1818,7 +1859,7 @@ impl CoordinatorActor {
                         .await;
                 }
                 // Existing planner-specific epic recheck.
-                self.handle_planner_session_ended(&session).await;
+                poll_stack::boxed(|| self.handle_planner_session_ended(&session)).await;
             }
             ("task", "created") | ("task", "updated") => {
                 let Some(task_payload) = envelope
@@ -1835,13 +1876,9 @@ impl CoordinatorActor {
                     return;
                 };
                 if task.status == "closed" {
-                    // A cap-denied task has no runtime task-run to emit a terminal callback.
-                    if let Some(admission) = &self.build_admission {
-                        admission.cancel_deferred_task(&task.id).await;
-                    }
                     // Terminalize the live attempt when a task closes via a
                     // force-close path. Best-effort; does not block the event.
-                    self.terminalize_force_close_attempt(&task).await;
+                    poll_stack::boxed(|| self.terminalize_force_close_attempt(&task)).await;
 
                     // Record throughput event when a task with a merge commit closes.
                     if task.merge_commit_sha.is_some()
@@ -1849,16 +1886,18 @@ impl CoordinatorActor {
                     {
                         self.record_merge_event(epic_id);
                     }
-                    self.persist_terminal_linked_spike_evidence_from_closed_task(&task)
-                        .await;
+                    poll_stack::boxed(|| {
+                        self.persist_terminal_linked_spike_evidence_from_closed_task(&task)
+                    })
+                    .await;
                     // Tripwire: a closed `human-review-hold` task means a human
                     // resolved the hold — emit `tripwire.hold.released` on each
                     // held source so the merge-boundary gate can clear for the
                     // current head (no release producer existed before; hold
                     // task `yynd` never cleared its gate on close).
-                    self.emit_tripwire_release_on_hold_close(&task).await;
+                    poll_stack::boxed(|| self.emit_tripwire_release_on_hold_close(&task)).await;
                     // Fire epic completion rules (spike/batch).
-                    self.on_task_closed(&task).await;
+                    poll_stack::boxed(|| self.on_task_closed(&task)).await;
                 }
                 if matches!(
                     task.status.as_str(),
@@ -1869,7 +1908,7 @@ impl CoordinatorActor {
                         status = %task.status,
                         "CoordinatorActor: ready-task event → dispatch pass"
                     );
-                    self.dispatch_ready_tasks(Some(&task.project_id)).await;
+                    poll_stack::boxed(|| self.dispatch_ready_tasks(Some(&task.project_id))).await;
                 }
             }
             // A credential was (re)connected or replaced — typically the owner
@@ -1892,7 +1931,7 @@ impl CoordinatorActor {
                         cleared,
                         "CoordinatorActor: credential (re)connected — cleared breaker buckets, re-dispatching"
                     );
-                    self.dispatch_ready_tasks(None).await;
+                    poll_stack::boxed(|| self.dispatch_ready_tasks(None)).await;
                 }
             }
             _ => {}
@@ -1924,7 +1963,8 @@ impl CoordinatorActor {
             return;
         };
 
-        if let Err(e) = self.maybe_apply_task_outcome_confidence(&task).await {
+        if let Err(e) = poll_stack::boxed(|| self.maybe_apply_task_outcome_confidence(&task)).await
+        {
             tracing::warn!(
                 task_id = %task_id,
                 error = %e,
@@ -1943,9 +1983,8 @@ impl CoordinatorActor {
                 .task_outcome_marker_exists(task, TASK_OUTCOME_FAILED_CLOSE)
                 .await?
         {
-            self.apply_task_outcome_confidence_to_task_refs(task)
-                .await?;
-            self.record_task_outcome_marker(task, TASK_OUTCOME_FAILED_CLOSE)
+            poll_stack::boxed(|| self.apply_task_outcome_confidence_to_task_refs(task)).await?;
+            poll_stack::boxed(|| self.record_task_outcome_marker(task, TASK_OUTCOME_FAILED_CLOSE))
                 .await?;
         }
 
@@ -1955,9 +1994,8 @@ impl CoordinatorActor {
                 .task_outcome_marker_exists(task, TASK_OUTCOME_REOPEN_COUNT)
                 .await?
         {
-            self.apply_task_outcome_confidence_to_task_refs(task)
-                .await?;
-            self.record_task_outcome_marker(task, TASK_OUTCOME_REOPEN_COUNT)
+            poll_stack::boxed(|| self.apply_task_outcome_confidence_to_task_refs(task)).await?;
+            poll_stack::boxed(|| self.record_task_outcome_marker(task, TASK_OUTCOME_REOPEN_COUNT))
                 .await?;
         }
 
@@ -2255,7 +2293,7 @@ impl CoordinatorActor {
         // the same rejected acceptance criterion forever instead of
         // escalating to a Planner that can decompose/rescope/close them.
         if selected.is_empty() {
-            return self.resolve_user_model_priority(user_id, role).await;
+            return poll_stack::boxed(|| self.resolve_user_model_priority(user_id, role)).await;
         }
         selected
     }
@@ -2289,7 +2327,7 @@ impl CoordinatorActor {
         let Some(epic_id) = task.epic_id.as_deref() else {
             return;
         };
-        self.recheck_epic_after_planner_end(epic_id).await;
+        poll_stack::boxed(|| self.recheck_epic_after_planner_end(epic_id)).await;
     }
 
     /// Re-run the eligibility check for an epic that was just touched by
@@ -2326,12 +2364,14 @@ impl CoordinatorActor {
         let Ok(Some(epic)) = epic_repo.get(epic_id).await else {
             return;
         };
-        self.create_planning_task_by_ids(
-            &task_repo,
-            epic_id,
-            &epic.project_id,
-            "post_planner_recheck",
-        )
+        poll_stack::boxed(|| {
+            self.create_planning_task_by_ids(
+                &task_repo,
+                epic_id,
+                &epic.project_id,
+                "post_planner_recheck",
+            )
+        })
         .await;
     }
 
@@ -2368,7 +2408,7 @@ impl CoordinatorActor {
             // exists, if the epic has unresolved epic-blockers, or if a planner
             // is already active on it), so calling it here is an idempotent,
             // loop-safe backstop that self-heals within one sweep interval.
-            self.maybe_create_planning_task(&epic).await;
+            poll_stack::boxed(|| self.maybe_create_planning_task(&epic)).await;
 
             if !self
                 .epic_is_eligible_for_next_wave(&task_repo, &epic.id)
@@ -2387,12 +2427,14 @@ impl CoordinatorActor {
             {
                 continue;
             }
-            self.create_planning_task_by_ids(
-                &task_repo,
-                &epic.id,
-                &epic.project_id,
-                "stale_auto_dispatch_sweep",
-            )
+            poll_stack::boxed(|| {
+                self.create_planning_task_by_ids(
+                    &task_repo,
+                    &epic.id,
+                    &epic.project_id,
+                    "stale_auto_dispatch_sweep",
+                )
+            })
             .await;
         }
     }
@@ -2514,8 +2556,6 @@ mod tests {
 
     #[tokio::test]
     async fn record_live_metrics_publishes_synthetic_cooldown_and_inflight_state() {
-        djinn_telemetry::init().unwrap();
-
         let db = crate::test_helpers::create_test_db();
         let (events_tx, _events_rx) = broadcast::channel(16);
         let cancel = CancellationToken::new();
@@ -2593,9 +2633,14 @@ mod tests {
             tracker.insert("pr-b".to_owned(), AutoMergeFastPathState::Reopen);
         }
 
-        actor.record_live_metrics();
-
-        let rendered = djinn_telemetry::render().unwrap();
+        // `record_live_metrics` is synchronous, so scoping it to a private
+        // recorder captures every emission and nothing else. All three series
+        // below are GAUGES on the process-global registry that
+        // `djinn_telemetry::render()` reads: any sibling test that records a
+        // live tick or a PR-poller decision overwrites them outright, so the
+        // absolute assertions here were assertions about whichever test wrote
+        // last (#2824).
+        let (_, rendered) = djinn_telemetry::render_isolated(|| actor.record_live_metrics());
         assert_eq!(
             rendered_metric_sample(&rendered, "djinn_dispatch_cooldowns_active"),
             "djinn_dispatch_cooldowns_active 2"

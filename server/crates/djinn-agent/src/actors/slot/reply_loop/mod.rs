@@ -245,6 +245,24 @@ impl djinn_slot::host::SlotToolDispatcher for AgentToolDispatcher {
             preview_chars,
         )
     }
+    fn note_result_externalized<'a>(
+        &'a self,
+        tool_name: &'a str,
+        rendered: &'a str,
+        worktree_path: &'a std::path::Path,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+        // The turn budget just discarded a payload this dispatcher produced.
+        // `call_read` recorded read coverage from that payload, and the edit
+        // gate trusts the record, so it has to stop claiming the model saw it.
+        Box::pin(
+            crate::extension::handlers::downgrade_externalized_read_coverage(
+                &self.app_state,
+                tool_name,
+                rendered,
+                worktree_path,
+            ),
+        )
+    }
     fn persist_tool_results_before_compaction(
         &self,
         results: &[djinn_slot::host::PreCompactionToolResult],
@@ -416,6 +434,7 @@ pub(crate) async fn run_reply_loop(
     let (result, output, tokens_in, tokens_out, cache_read, cache_write) =
         djinn_slot::reply_loop::run_reply_loop(
             djinn_slot::reply_loop::ReplyLoopContext {
+                session_budget: None,
                 provider,
                 tools,
                 task_id,

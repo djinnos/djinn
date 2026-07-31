@@ -232,7 +232,11 @@ fn the_brokered_lift_control_moves_cpu_max_from_unleased_to_leased() {
             // The real `prctl` seam, not a double: the broker's readiness gate
             // is satisfied exactly the way the worker satisfies it.
             .ready(
-                prepare_worker_readiness(&mut NativeWorkerDumpability).expect("worker readiness"),
+                prepare_worker_readiness(
+                    &mut NativeWorkerDumpability,
+                    djinn_cgroup_launcher::LauncherAuthorityProtocol::LeafV1,
+                )
+                .expect("worker readiness"),
             )
             .expect("READY");
         client

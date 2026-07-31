@@ -762,6 +762,33 @@ mod tests {
     use crate::fixtures::*;
     use test_helpers::*;
 
+    // ── Committed artifacts satisfy the shipped gate ─────────────────────
+
+    /// The committed fixtures + baseline must pass the very gate the
+    /// `Memory Eval Phase 1` CI lane runs.
+    ///
+    /// This is the inverted form of the old `refresh_baseline_with_committed_
+    /// fixtures` test: instead of *rewriting* `baselines/phase1.json` to
+    /// whatever a test run produced, verify the committed file satisfies every
+    /// invariant `validate-fixtures` enforces — including the
+    /// `over_decay_threshold` age-bucket entry that PR #2805 stripped.
+    ///
+    /// Deliberately NOT a byte-for-byte golden comparison against a fresh run.
+    /// `cmd_run` derives age buckets from `SystemClock::now()`, so the bucket
+    /// *set* migrates as the fixtures age on the calendar (the committed
+    /// baseline was refreshed when several notes were `under7d`; those same
+    /// notes are `days7to30` weeks later). A strict-equality golden would rot
+    /// on a date boundary with nobody touching the code. What
+    /// `validate-fixtures` actually depends on is time-invariant, because
+    /// notes only ever get older and so `over_decay_threshold` only ever
+    /// grows — that is what this asserts.
+    #[test]
+    fn committed_baseline_and_fixtures_pass_the_shipped_gate() {
+        let crate_root = tracked_crate_root();
+        cmd_validate_fixtures(crate_root)
+            .expect("committed fixtures + baseline must pass `validate-fixtures`");
+    }
+
     // ── AC: Low query count ──────────────────────────────────────────────
 
     #[test]

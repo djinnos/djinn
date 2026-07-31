@@ -8,6 +8,19 @@
 
 use crate::{DEFAULT_PERIOD_US, Error};
 
+/// The quota-authority protocol is **not defined here**.
+///
+/// It is the one contract `djinn-cgroup-launcher`, `djinn-db` (migration 164's
+/// `CHECK ... IN ('leaf-v1', 'resize-v2')`) and the admission plane must all
+/// agree on, so it lives in the zero-`djinn` leaf crate
+/// [`djinn_launcher_protocol`] and is re-exported here. This crate keeps the
+/// re-export — not a copy — because a second definition is exactly how #2800
+/// shipped a wire form nothing could compare against.
+///
+/// The launcher stays a static sidecar: the protocol crate depends on `serde`
+/// (without `derive`) and on nothing else.
+pub use djinn_launcher_protocol::LauncherAuthorityProtocol;
+
 /// `cpu.max` line for a leaf with NO quota of its own.
 ///
 /// `max` is cgroup-v2's "no limit at this level"; the enclosing Pod cgroup still

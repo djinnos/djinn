@@ -57,9 +57,16 @@ pub struct ProposalSpecIntegritySweepConfig {
 }
 
 impl ProposalSpecIntegritySweepConfig {
+    /// The only environment read; the decision itself lives in
+    /// [`Self::from_lookup`] so tests never write a process-global.
     pub fn from_env() -> Self {
+        Self::from_lookup(|key| std::env::var(key).ok())
+    }
+
+    /// Resolve the gate from an arbitrary key/value source.
+    fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Self {
         Self {
-            enabled: std::env::var("DJINN_PROPOSAL_SPEC_INTEGRITY_SWEEP_V1")
+            enabled: lookup("DJINN_PROPOSAL_SPEC_INTEGRITY_SWEEP_V1")
                 .map(|value| parse_bool_env(&value))
                 .unwrap_or(false),
         }
@@ -281,76 +288,79 @@ impl Default for CacheCleanupConfig {
 
 impl CacheCleanupConfig {
     /// Build a config from environment variables, falling back to safe defaults.
+    ///
+    /// This is the only environment read; every decision lives in
+    /// [`Self::from_lookup`], which takes the values as a parameter.
     pub fn from_env() -> Self {
-        let mode = std::env::var("DJINN_CACHE_CLEANUP_MODE")
+        Self::from_lookup(|key| std::env::var(key).ok())
+    }
+
+    /// Resolve the config from an arbitrary key/value source.
+    ///
+    /// The parse and clamp rules used to read `std::env` directly, which made
+    /// them untestable without a `set_var`. The environment is process-global
+    /// and `cargo test` runs an entire test binary in one process, so those
+    /// writes were visible to every concurrently-running sibling — the fourth
+    /// instance of the shared-singleton flake shape that #2820/#2824/#2851
+    /// each fixed one instance of. Passing the lookup in removes the shared
+    /// cell from the test path entirely rather than trying to sequence access
+    /// to it.
+    fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Self {
+        let mode = lookup("DJINN_CACHE_CLEANUP_MODE")
             .map(|v| CacheCleanupMode::from_env_value(&v))
             .unwrap_or(CacheCleanupMode::DryRun);
 
-        let sccache_enabled = std::env::var("DJINN_CACHE_CLEANUP_SCCACHE_ENABLED")
+        let sccache_enabled = lookup("DJINN_CACHE_CLEANUP_SCCACHE_ENABLED")
             .map(|v| parse_bool_env(&v))
             .unwrap_or(true);
 
-        let sccache_max_age_hours = std::env::var("DJINN_CACHE_CLEANUP_SCCACHE_MAX_AGE_HOURS")
-            .ok()
+        let sccache_max_age_hours = lookup("DJINN_CACHE_CLEANUP_SCCACHE_MAX_AGE_HOURS")
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(24);
 
-        let sccache_delete_armed = std::env::var("DJINN_CACHE_CLEANUP_SCCACHE_DELETE_ARMED")
+        let sccache_delete_armed = lookup("DJINN_CACHE_CLEANUP_SCCACHE_DELETE_ARMED")
             .map(|v| parse_bool_env(&v))
             .unwrap_or(false);
 
-        let output_stash_delete_armed =
-            std::env::var("DJINN_CACHE_CLEANUP_OUTPUT_STASH_DELETE_ARMED")
-                .map(|v| parse_bool_env(&v))
-                .unwrap_or(false);
+        let output_stash_delete_armed = lookup("DJINN_CACHE_CLEANUP_OUTPUT_STASH_DELETE_ARMED")
+            .map(|v| parse_bool_env(&v))
+            .unwrap_or(false);
 
-        let cargo_debris_enabled = std::env::var("DJINN_CACHE_CLEANUP_CARGO_DEBRIS_ENABLED")
+        let cargo_debris_enabled = lookup("DJINN_CACHE_CLEANUP_CARGO_DEBRIS_ENABLED")
             .map(|v| parse_bool_env(&v))
             .unwrap_or(true);
 
-        let cargo_debris_max_age_days =
-            std::env::var("DJINN_CACHE_CLEANUP_CARGO_DEBRIS_MAX_AGE_DAYS")
-                .ok()
-                .and_then(|v| v.parse::<u64>().ok())
-                .unwrap_or(7);
+        let cargo_debris_max_age_days = lookup("DJINN_CACHE_CLEANUP_CARGO_DEBRIS_MAX_AGE_DAYS")
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(7);
 
         let warm_base_idle_retention_days =
-            std::env::var("DJINN_CACHE_CLEANUP_WARM_BASE_IDLE_RETENTION_DAYS")
-                .ok()
+            lookup("DJINN_CACHE_CLEANUP_WARM_BASE_IDLE_RETENTION_DAYS")
                 .and_then(|v| v.parse::<u64>().ok())
                 .unwrap_or(14);
 
-        let warm_profile_min_idle_hours =
-            std::env::var("DJINN_CACHE_CLEANUP_WARM_PROFILE_MIN_IDLE_HOURS")
-                .ok()
-                .and_then(|value| parse_unsigned_decimal(&value))
-                .unwrap_or(24);
+        let warm_profile_min_idle_hours = lookup("DJINN_CACHE_CLEANUP_WARM_PROFILE_MIN_IDLE_HOURS")
+            .and_then(|value| parse_unsigned_decimal(&value))
+            .unwrap_or(24);
 
-        let warm_base_grace_period_secs =
-            std::env::var("DJINN_CACHE_CLEANUP_WARM_BASE_GRACE_PERIOD_SECS")
-                .ok()
-                .and_then(|v| v.parse::<u64>().ok())
-                .unwrap_or(300);
+        let warm_base_grace_period_secs = lookup("DJINN_CACHE_CLEANUP_WARM_BASE_GRACE_PERIOD_SECS")
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(300);
 
-        let warm_base_low_free_ratio =
-            std::env::var("DJINN_CACHE_CLEANUP_WARM_BASE_LOW_FREE_RATIO")
-                .ok()
-                .and_then(|v| v.parse::<f64>().ok())
-                .filter(|v| (0.0..1.0).contains(v))
-                .unwrap_or(0.15);
+        let warm_base_low_free_ratio = lookup("DJINN_CACHE_CLEANUP_WARM_BASE_LOW_FREE_RATIO")
+            .and_then(|v| v.parse::<f64>().ok())
+            .filter(|v| (0.0..1.0).contains(v))
+            .unwrap_or(0.15);
 
-        let warm_base_high_free_ratio =
-            std::env::var("DJINN_CACHE_CLEANUP_WARM_BASE_HIGH_FREE_RATIO")
-                .ok()
-                .and_then(|v| v.parse::<f64>().ok())
-                .filter(|v| (0.0..1.0).contains(v))
-                .unwrap_or(0.25);
+        let warm_base_high_free_ratio = lookup("DJINN_CACHE_CLEANUP_WARM_BASE_HIGH_FREE_RATIO")
+            .and_then(|v| v.parse::<f64>().ok())
+            .filter(|v| (0.0..1.0).contains(v))
+            .unwrap_or(0.25);
 
         let warm_base_low_free_ratio = warm_base_low_free_ratio.min(warm_base_high_free_ratio);
 
         let warm_unrecognized_min_idle_days =
-            std::env::var("DJINN_CACHE_CLEANUP_WARM_UNRECOGNIZED_MIN_IDLE_DAYS")
-                .ok()
+            lookup("DJINN_CACHE_CLEANUP_WARM_UNRECOGNIZED_MIN_IDLE_DAYS")
                 .and_then(|value| parse_unsigned_decimal(&value))
                 .unwrap_or(7);
 
@@ -539,6 +549,18 @@ fn recover_lock<'a, T>(
 mod tests {
     use super::*;
 
+    /// A fixed key/value table to hand to `from_lookup`.
+    ///
+    /// This is the whole point of the seam: the "environment" a config test
+    /// reasons about is a local value owned by that test, not the one shared
+    /// process-wide with every sibling running on another libtest thread.
+    fn env_fixture(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect()
+    }
+
     #[test]
     fn cache_cleanup_config_default_is_safe() {
         let config = CacheCleanupConfig::default();
@@ -565,69 +587,54 @@ mod tests {
 
     #[test]
     fn cache_cleanup_unrecognized_idle_days_falls_back_to_the_shipped_default() {
-        unsafe {
-            std::env::set_var(
-                "DJINN_CACHE_CLEANUP_WARM_UNRECOGNIZED_MIN_IDLE_DAYS",
-                "not-a-number",
-            );
-        }
+        let invalid = env_fixture(&[(
+            "DJINN_CACHE_CLEANUP_WARM_UNRECOGNIZED_MIN_IDLE_DAYS",
+            "not-a-number",
+        )]);
         assert_eq!(
-            CacheCleanupConfig::from_env().warm_unrecognized_min_idle_days,
+            CacheCleanupConfig::from_lookup(|key| invalid.get(key).cloned())
+                .warm_unrecognized_min_idle_days,
             7
         );
-        unsafe {
-            std::env::set_var("DJINN_CACHE_CLEANUP_WARM_UNRECOGNIZED_MIN_IDLE_DAYS", "30");
-        }
+
+        let overridden =
+            env_fixture(&[("DJINN_CACHE_CLEANUP_WARM_UNRECOGNIZED_MIN_IDLE_DAYS", "30")]);
         assert_eq!(
-            CacheCleanupConfig::from_env().warm_unrecognized_min_idle_days,
+            CacheCleanupConfig::from_lookup(|key| overridden.get(key).cloned())
+                .warm_unrecognized_min_idle_days,
             30
         );
-        unsafe {
-            std::env::remove_var("DJINN_CACHE_CLEANUP_WARM_UNRECOGNIZED_MIN_IDLE_DAYS");
-        }
     }
 
     #[test]
     fn cache_cleanup_config_from_env_ignores_invalid_numbers() {
-        // Set invalid values and ensure we fall back to defaults, not crash.
-        unsafe {
-            std::env::set_var("DJINN_CACHE_CLEANUP_WARM_BASE_IDLE_RETENTION_DAYS", "abc");
-            std::env::set_var("DJINN_CACHE_CLEANUP_WARM_BASE_GRACE_PERIOD_SECS", "-1");
-            std::env::set_var("DJINN_CACHE_CLEANUP_WARM_BASE_LOW_FREE_RATIO", "1.5");
-            std::env::set_var("DJINN_CACHE_CLEANUP_WARM_BASE_HIGH_FREE_RATIO", "nope");
-        }
+        // Supply invalid values and ensure we fall back to defaults, not crash.
+        let env = env_fixture(&[
+            ("DJINN_CACHE_CLEANUP_WARM_BASE_IDLE_RETENTION_DAYS", "abc"),
+            ("DJINN_CACHE_CLEANUP_WARM_BASE_GRACE_PERIOD_SECS", "-1"),
+            ("DJINN_CACHE_CLEANUP_WARM_BASE_LOW_FREE_RATIO", "1.5"),
+            ("DJINN_CACHE_CLEANUP_WARM_BASE_HIGH_FREE_RATIO", "nope"),
+        ]);
 
-        let config = CacheCleanupConfig::from_env();
+        let config = CacheCleanupConfig::from_lookup(|key| env.get(key).cloned());
         assert_eq!(config.warm_base_idle_retention_days, 14);
         assert_eq!(config.warm_base_grace_period, Duration::from_secs(300));
         assert!((config.warm_base_low_free_ratio - 0.15).abs() < f64::EPSILON);
         assert!((config.warm_base_high_free_ratio - 0.25).abs() < f64::EPSILON);
-
-        unsafe {
-            std::env::remove_var("DJINN_CACHE_CLEANUP_WARM_BASE_IDLE_RETENTION_DAYS");
-            std::env::remove_var("DJINN_CACHE_CLEANUP_WARM_BASE_GRACE_PERIOD_SECS");
-            std::env::remove_var("DJINN_CACHE_CLEANUP_WARM_BASE_LOW_FREE_RATIO");
-            std::env::remove_var("DJINN_CACHE_CLEANUP_WARM_BASE_HIGH_FREE_RATIO");
-        }
     }
 
     #[test]
     fn cache_cleanup_config_from_env_low_is_capped_to_high() {
-        unsafe {
-            std::env::set_var("DJINN_CACHE_CLEANUP_WARM_BASE_LOW_FREE_RATIO", "0.9");
-            std::env::set_var("DJINN_CACHE_CLEANUP_WARM_BASE_HIGH_FREE_RATIO", "0.2");
-        }
+        let env = env_fixture(&[
+            ("DJINN_CACHE_CLEANUP_WARM_BASE_LOW_FREE_RATIO", "0.9"),
+            ("DJINN_CACHE_CLEANUP_WARM_BASE_HIGH_FREE_RATIO", "0.2"),
+        ]);
 
-        let config = CacheCleanupConfig::from_env();
+        let config = CacheCleanupConfig::from_lookup(|key| env.get(key).cloned());
         // Low should be clamped to high so the stop-at-high-watermark semantics
         // are always defined.
         assert!((config.warm_base_low_free_ratio - 0.2).abs() < f64::EPSILON);
         assert!((config.warm_base_high_free_ratio - 0.2).abs() < f64::EPSILON);
-
-        unsafe {
-            std::env::remove_var("DJINN_CACHE_CLEANUP_WARM_BASE_LOW_FREE_RATIO");
-            std::env::remove_var("DJINN_CACHE_CLEANUP_WARM_BASE_HIGH_FREE_RATIO");
-        }
     }
 
     #[test]
@@ -722,12 +729,46 @@ mod tests {
 
     #[test]
     fn proposal_spec_integrity_sweep_defaults_to_disabled() {
-        unsafe { std::env::remove_var("DJINN_PROPOSAL_SPEC_INTEGRITY_SWEEP_V1") };
+        let unset = env_fixture(&[]);
         assert!(!ProposalSpecIntegritySweepConfig::default().enabled);
-        assert!(!ProposalSpecIntegritySweepConfig::from_env().enabled);
-        unsafe { std::env::set_var("DJINN_PROPOSAL_SPEC_INTEGRITY_SWEEP_V1", "true") };
-        assert!(ProposalSpecIntegritySweepConfig::from_env().enabled);
-        unsafe { std::env::remove_var("DJINN_PROPOSAL_SPEC_INTEGRITY_SWEEP_V1") };
+        assert!(
+            !ProposalSpecIntegritySweepConfig::from_lookup(|key| unset.get(key).cloned()).enabled
+        );
+
+        let armed = env_fixture(&[("DJINN_PROPOSAL_SPEC_INTEGRITY_SWEEP_V1", "true")]);
+        assert!(
+            ProposalSpecIntegritySweepConfig::from_lookup(|key| armed.get(key).cloned()).enabled
+        );
+    }
+
+    /// The `from_lookup` seams are only worth anything if the shipped
+    /// `from_env` constructors still read `std::env`. A behavioural check
+    /// would need a `set_var` — the very thing this module no longer does — so
+    /// assert the wiring textually. Deleting or renaming either `std::env::var`
+    /// call fails this; so does re-inlining the parse rules where the
+    /// `from_lookup` tests above cannot reach them.
+    #[test]
+    fn from_env_constructors_still_read_the_process_environment() {
+        let source = include_str!("context.rs");
+        for constructor in [
+            "impl CacheCleanupConfig {",
+            "impl ProposalSpecIntegritySweepConfig {",
+        ] {
+            let body = source
+                .split_once(constructor)
+                .unwrap_or_else(|| panic!("{constructor} is defined in this file"))
+                .1;
+            let from_env = body
+                .split_once("pub fn from_env() -> Self {")
+                .expect("constructor exposes from_env")
+                .1;
+            let from_env = &from_env[..from_env.find("\n    }").expect("from_env body terminates")];
+            assert!(
+                from_env.contains("Self::from_lookup(|key| std::env::var(key).ok())"),
+                "{constructor} from_env must resolve through std::env into the \
+                 tested from_lookup seam, got:\n{from_env}"
+            );
+        }
     }
 }
 
@@ -747,12 +788,12 @@ mod warm_profile_idle_config_tests {
             ("+24", 24),
             ("18446744073709551616", 24),
         ] {
-            unsafe { std::env::set_var(variable, value) };
+            let env = HashMap::from([(variable.to_owned(), value.to_owned())]);
             assert_eq!(
-                CacheCleanupConfig::from_env().warm_profile_min_idle_hours,
+                CacheCleanupConfig::from_lookup(|key| env.get(key).cloned())
+                    .warm_profile_min_idle_hours,
                 expected
             );
         }
-        unsafe { std::env::remove_var(variable) };
     }
 }

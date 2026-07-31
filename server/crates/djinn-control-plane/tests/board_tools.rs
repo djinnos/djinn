@@ -430,6 +430,33 @@ async fn board_health_mcp_legacy_and_additive_fields_coexist() {
     assert!(gate.get("rate_limited").is_some());
     assert!(gate.get("credential_available").is_some());
     assert!(gate.get("reasons").is_some());
+    // The Kueue admission projection must survive the TYPED round-trip — the
+    // DB builds this JSON, `BoardHealthResponse` parses it, and the tool
+    // re-serializes it. A field the type does not model is dropped here rather
+    // than at some later, quieter moment.
+    let kueue = gate
+        .get("kueue_admission")
+        .expect("kueue_admission must reach the MCP payload");
+    assert_eq!(
+        kueue.get("projection_state").and_then(|v| v.as_str()),
+        Some("no_workloads_observed"),
+        "an unarmed test cluster reports the INERT variant, never a pending queue"
+    );
+    assert_eq!(kueue.get("pending").and_then(|v| v.as_i64()), Some(0));
+    assert!(
+        gate.get("kueue_workload").is_none(),
+        "a task with no Workload carries no per-task Kueue block"
+    );
+    let unevaluated = gate
+        .get("coverage")
+        .and_then(|c| c.get("unevaluated_gates"))
+        .and_then(|v| v.as_array())
+        .expect("coverage.unevaluated_gates must be present");
+    assert!(
+        unevaluated.contains(&json!("kueue_clusterqueue_admission")),
+        "an empty projection cannot distinguish an unarmed cluster from a dead \
+         reflector, so the gate stays unevaluated; got {unevaluated:?}"
+    );
     // Threshold ladder.
     let threshold = stranded_finding
         .get("threshold")

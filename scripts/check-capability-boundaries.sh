@@ -332,20 +332,27 @@ is_in_scope_file() {
     return 0
 }
 
-# is_comment_or_doc returns 0 if the given line is a comment or doc line only.
-is_comment_or_doc() {
-    line=$1
+# Comment handling lives in scripts/lib/rust-source-scan.awk, which strips `//`
+# and `/* */` in a string-literal-aware pass and keeps the code IN FRONT of a
+# trailing comment. The shell predicate this replaced only recognised a comment
+# that STARTED the line, so `let c = Client::new(); // git2::` was reported as a
+# git2 violation — the same prose-trips-a-ban defect that #2871 fixed in
+# `task_run_resize_kind.rs`.
+#
+# `strings=keep` is required here and must not be changed: the matchers for this
+# guard ARE string literals (`Command::new("git")`), so blanking literal bodies
+# would blind it completely.
+SCAN_AWK="$SCRIPT_DIR/lib/rust-source-scan.awk"
+if [ ! -f "$SCAN_AWK" ]; then
+    printf '::error::check-capability-boundaries: missing shared scanner %s\n' "$SCAN_AWK" >&2
+    exit 2
+fi
 
-    # Strip leading whitespace.
-    trimmed=${line#"${line%%[![:space:]]*}"}
-
-    case "$trimmed" in
-        "//"*|"/*"*|"*/"*|"*"*)
-            return 0
-            ;;
-    esac
-
-    return 1
+# Emit `<lineno>:<raw line>` for each match outside comments — the same shape
+# `grep -E -n` produced, so the classification below is unchanged.
+scan_hits() {
+    RS_PATTERN="$PATTERN" awk -f "$SCAN_AWK" -v strings=keep "$1" 2>/dev/null |
+        cut -d: -f2-
 }
 
 # ── Diagnostic helpers ─────────────────────────────────────────────────
@@ -399,9 +406,10 @@ check_files() {
 
         checked=$((checked + 1))
 
-        # Grep the file for capability patterns.  We intentionally do not use
-        # -o so that line numbers remain valid.
-        hits=$(grep -E -n "$PATTERN" "$file" 2>/dev/null || true)
+        # Scan the file for capability patterns, ignoring matches that sit
+        # inside a comment. Output is `<lineno>:<raw line>`, so line numbers
+        # remain valid and the diagnostic shows what the author wrote.
+        hits=$(scan_hits "$file" || true)
         if [ -z "$hits" ]; then
             continue
         fi
@@ -420,10 +428,6 @@ check_files() {
 
             line_no=${hit%%:*}
             line_text=${hit#*:}
-
-            if is_comment_or_doc "$line_text"; then
-                continue
-            fi
 
             # Identify the matcher substring that matched.  We try the obvious
             # literal anchors first; if they fail, fall back to the raw line.

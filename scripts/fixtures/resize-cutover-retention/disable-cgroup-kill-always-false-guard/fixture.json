@@ -1,0 +1,13 @@
+{
+  "asset": "cgroup-kill",
+  "expect": "reject",
+  "why": "AC9, mutation two, second form. The `cgroup.kill` write guarded behind a condition that can never be true. Every symbol is present, the statement is uncommented, and it executes never.",
+  "operations": [
+    {
+      "op": "replace",
+      "path": "server/crates/djinn-cgroup-launcher/src/lib.rs",
+      "find": "        leaf.terminal = true;\n        self.fs.write_leaf(leaf.fd, \"cgroup.kill\", \"1\")\n",
+      "with": "        leaf.terminal = true;\n        if false {\n            self.fs.write_leaf(leaf.fd, \"cgroup.kill\", \"1\")?;\n        }\n        Ok(())\n"
+    }
+  ]
+}

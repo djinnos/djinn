@@ -6,6 +6,7 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { readFile, writeFile, mkdtemp, rm, access } from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
+import { scriptCode } from './lib/source-text.mjs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -790,23 +791,36 @@ describe('nextest.toml compatibility', () => {
 });
 
 describe('consumer boundary: file-backed filter transport', () => {
-  it('produces a matrix row filter larger than the Linux single-argument ceiling', () => {
-    // Synthesize enough tests that the planner emits a filter exceeding
-    // Linux's MAX_ARG_STRLEN. This mirrors the PR #1988 failure mode.
-    const binaryCount = 260;
-    const testsPerBinary = 50;
+  // Synthesize enough tests that the planner emits a per-shard filter
+  // exceeding Linux's MAX_ARG_STRLEN, mirroring the PR #1988 failure mode.
+  //
+  // SIZED PER SHARD, not absolutely. The filter these tests need to overflow is
+  // ONE shard's, so the corpus must grow with the shard count or the boundary
+  // stops being exercised. This was hard-coded at 260 binaries when
+  // PR_MAX_SHARDS was 4; raising it to 8 halved each shard's filter to 70737
+  // bytes and both assertions here failed — the transport bug they guard was
+  // still real, the fixture had just stopped reaching it. 65 binaries per shard
+  // reproduces the original ~3250-tests-per-shard density at any width.
+  const BINARIES_PER_SHARD = 65;
+  const TESTS_PER_BINARY = 50;
+
+  function oversizedFilterPlan() {
     const suites = {};
-    for (let b = 0; b < binaryCount; b += 1) {
+    for (let b = 0; b < BINARIES_PER_SHARD * PR_MAX_SHARDS; b += 1) {
       const binaryId = `pkg${b}::bin`;
       const testCases = {};
-      for (let t = 0; t < testsPerBinary; t += 1) {
+      for (let t = 0; t < TESTS_PER_BINARY; t += 1) {
         testCases[`test_${t}_name_with_some_length`] = testCase();
       }
       suites[binaryId] = suite(`pkg${b}`, 'bin', testCases, { binaryId });
     }
     const summary = makeSummary({ 'rust-suites': suites });
     const tests = parseDiscovery(JSON.stringify(summary));
-    const plan = planTests({ tests, timings: new Map(), profile: 'pull-request' });
+    return planTests({ tests, timings: new Map(), profile: 'pull-request' });
+  }
+
+  it('produces a matrix row filter larger than the Linux single-argument ceiling', () => {
+    const plan = oversizedFilterPlan();
     validateExactOnce(plan);
 
     const largestFilter = plan.matrix
@@ -818,20 +832,7 @@ describe('consumer boundary: file-backed filter transport', () => {
   it('materializes the oversized filter through a generated nextest config', async () => {
     const dir = await makeTempDir();
     try {
-      const binaryCount = 260;
-      const testsPerBinary = 50;
-      const suites = {};
-      for (let b = 0; b < binaryCount; b += 1) {
-        const binaryId = `pkg${b}::bin`;
-        const testCases = {};
-        for (let t = 0; t < testsPerBinary; t += 1) {
-          testCases[`test_${t}_name_with_some_length`] = testCase();
-        }
-        suites[binaryId] = suite(`pkg${b}`, 'bin', testCases, { binaryId });
-      }
-      const summary = makeSummary({ 'rust-suites': suites });
-      const tests = parseDiscovery(JSON.stringify(summary));
-      const plan = planTests({ tests, timings: new Map(), profile: 'pull-request' });
+      const plan = oversizedFilterPlan();
 
       const row = plan.matrix[0];
       assert.ok(Buffer.byteLength(row.filter, 'utf8') > MAX_ARG_STRLEN);
@@ -853,9 +854,30 @@ describe('consumer boundary: file-backed filter transport', () => {
   });
 });
 
+// Every assertion in this block reads the workflow as TEXT, so comments are
+// part of what it matches. `workflowCode()` strips them (see
+// scripts/lib/source-text.mjs), because both directions are live here:
+//
+//   * BAN false-positive: the `select(.workflow_run.conclusion` ban below is
+//     quoted verbatim in this file's own explanatory comment. Documenting the
+//     retired anti-pattern in quality-gate.yml would red the build with no
+//     behavioural change.
+//   * PRESENCE false-negative, and this is the failure this block exists to
+//     prevent recurring: delete the `--jq '.conclusion'` / `run_conclusion`
+//     filter, leave it quoted in a comment, and the planner silently
+//     cold-starts again exactly as it did for the runs described above --
+//     while every assertion here stays green.
+//
+// A trailing comment does not launder the code in front of it, and line
+// numbering is preserved, so the multi-line `\s*\n?\s*` anchors below still
+// resolve.
+function workflowCode() {
+  return scriptCode(readFileSync(WORKFLOW, 'utf8'));
+}
+
 describe('workflow static checks', () => {
   it('rejects expanding a filter file into a single argv string', () => {
-    const source = readFileSync(WORKFLOW, 'utf8');
+    const source = workflowCode();
     assert.ok(!source.includes('--filter-expr "$(cat'), 'workflow must not expand a filter file into one argv argument');
     assert.ok(!source.includes("--filter-expr '$(cat"), 'workflow must not expand a filter file into one argv argument');
     // Also reject any --filter-expr line that uses command substitution to read a file.
@@ -892,7 +914,7 @@ describe('workflow static checks', () => {
   // eight shards of ~1458 tests and ran four: 5834 of 11666 tests (50%) never
   // executed, and the run was GREEN.
   it('provisions a server-test matrix at least as wide as the widest possible plan', () => {
-    const source = readFileSync(WORKFLOW, 'utf8');
+    const source = workflowCode();
 
     const serverTest = /^ {2}server-test:$/m.exec(source);
     assert.ok(serverTest, 'server-test job must exist');
@@ -936,7 +958,7 @@ describe('workflow static checks', () => {
   });
 
   it('resolves the timing artifact run conclusion on an endpoint that returns it', () => {
-    const source = readFileSync(WORKFLOW, 'utf8');
+    const source = workflowCode();
     const artifactQuery = /actions\/artifacts\?name=nextest-timing[^\n]*/.exec(source);
     assert.ok(artifactQuery, 'workflow must query the nextest-timing artifact list');
 

@@ -1,5 +1,6 @@
 ---
 source: crates/djinn-agent/src/prompts/tests.rs
+assertion_line: 509
 expression: section
 ---
 - `task_show(id)`
@@ -22,6 +23,7 @@ expression: section
 - `write(content, path)`
 - `edit(new_text, old_text, path)`
 - `apply_patch(patch)`
+- `set_file_mode(executable, path)`
 - `memory_build_context(edge_kinds?, limit?, min_confidence?, query?, task_id?)`
 - `memory_write(content, reason, title, type, status?, tags?)`
 - `memory_edit(content, identifier, operation, reason, find_text?, section?, type?)`

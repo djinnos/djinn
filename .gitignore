@@ -47,3 +47,10 @@ report.json
 
 # Playwright MCP session artifacts (screenshots/console/page dumps)
 .playwright-mcp/
+
+# Linux core dumps. A tokio worker stack overflow in the djinn-coordinator test
+# suite writes ~15 MB core.<pid> files into the crate directory; on 2026-07-30
+# a 263 MB dump was swept in by `git add -A` twice and caught only at the
+# `git show --stat` check before push.
+core.[0-9]*
+core

@@ -1,0 +1,132 @@
+name: Kueue Cluster Harness
+
+# OPT-IN, NON-REQUIRED lane for the disposable armed-Kueue cluster harness
+# (epic fbiy, task 6knv).
+#
+# DOES THIS RUN ANYWHERE BY DEFAULT? NO — and that is stated here rather than
+# left to be discovered.
+#
+# There is exactly one trigger, `workflow_dispatch`. This lane never runs on a
+# pull request, never runs on a push to main, never runs in the merge queue and
+# is not on any schedule. It is not a required check and cannot block a merge.
+# Nothing in this file runs unless a human presses "Run workflow".
+#
+# That is the same posture as `server/crates/djinn-k8s/tests/kind_smoke.rs`,
+# which is `#[ignore]` + `DJINN_TEST_KIND`-gated with NO lane at all
+# (`grep DJINN_TEST_KIND .github/workflows/` is empty) — and which, measured on
+# 2026-07-30, no longer even executes: it panics on a rustls CryptoProvider
+# ambiguity before its first API call. A gated harness nobody runs decays
+# silently, so the assertions in `kueue_cluster_harness.rs` that MUST NOT
+# regress — the production-safety refusals and the fixture's non-vacuity — are
+# hermetic `guard_*` tests with no `#[ignore]`, and they run on every PR inside
+# the ordinary `djinn-k8s` test lane. What needs this workflow is only the half
+# that genuinely needs an API server.
+#
+# WHY IT IS NOT REQUIRED
+# It creates a kind cluster and installs two Helm charts. That is minutes of
+# runner time and a class of infrastructure flake (image pulls, webhook
+# readiness) that must never be able to wedge the merge queue. `fbiy-B1`, `B2`
+# and `C1` are the tasks that will decide how often this is worth running.
+#
+# IT CANNOT TOUCH PRODUCTION. The runner's kubeconfig contains exactly one
+# context: the kind cluster created by the step below. Every kubectl and helm
+# call in `scripts/kind/setup-kueue-cluster.sh` is `--context`-pinned, and the
+# script refuses any context it did not create.
+
+on:
+  workflow_dispatch:
+    inputs:
+      k8s_version:
+        description: "kind node Kubernetes version (>= 1.30; Kueue 0.19 requires it)"
+        required: false
+        default: "1.31.0"
+      keep_on_failure:
+        description: "If 'true', leave the cluster running on failure for debugging"
+        required: false
+        default: "false"
+
+concurrency:
+  group: kueue-cluster-harness-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  CARGO_BUILD_BUILD_DIR: target
+  RUSTC_WRAPPER: ""
+  RUSTFLAGS: "-D warnings"
+  SQLX_OFFLINE: "true"
+  DJINN_KUEUE_HARNESS_K8S_VERSION: ${{ github.event.inputs.k8s_version || '1.31.0' }}
+
+jobs:
+  kueue-cluster-harness:
+    name: Disposable armed-Kueue cluster
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    # Belt and braces: the only trigger is workflow_dispatch, and this makes a
+    # future edit that adds `pull_request` fail to turn this into a PR check by
+    # accident.
+    if: github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install kind, kubectl and helm
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /usr/local/bin/kind https://kind.sigs.k8s.io/dl/v0.32.0/kind-linux-amd64
+          chmod +x /usr/local/bin/kind
+          curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+          kind version
+          kubectl version --client=true
+          helm version --short
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: server
+          # save-if MUST stay false. rust-cache SAVES by default, and every
+          # cache family in this repository has exactly one writer, declared in
+          # quality-gate.yml (`scripts/ci-cache-policy.test.mjs`). Without this
+          # line an opt-in lane quietly becomes a second writer to a family it
+          # does not own.
+          save-if: false
+          # server-test (codegen), not server-quality (clippy/rmeta only): this
+          # job builds and RUNS the djinn-k8s test binary.
+          shared-key: server-test
+          cache-on-failure: true
+          cache-all-crates: true
+
+      # The hermetic half needs no cluster. Running it first means a broken
+      # production-safety guard fails in seconds instead of after a cluster
+      # bring-up, and it is also what this lane shares with the ordinary PR
+      # lane — if these ever diverge, that is the bug.
+      - name: Hermetic guards (the half that also runs on every PR)
+        working-directory: server
+        run: cargo test -p djinn-k8s --test kueue_cluster_harness
+
+      - name: Create the disposable armed-Kueue cluster
+        run: |
+          scripts/kind/setup-kueue-cluster.sh up \
+            --k8s-version "$DJINN_KUEUE_HARNESS_K8S_VERSION" \
+            ${{ github.event.inputs.keep_on_failure == 'true' && '--keep-on-failure' || '' }}
+
+      - name: Live conformance against the armed cluster
+        working-directory: server
+        env:
+          DJINN_TEST_KUEUE_CLUSTER: "1"
+        # --test-threads=1 because the ClusterQueue's pods nominalQuota is 2:
+        # concurrent tests would contend for the very quota one of them is
+        # measuring.
+        run: cargo test -p djinn-k8s --test kueue_cluster_harness -- --ignored --test-threads=1
+
+      # `if: always()` is the point of this step. The harness deletes its own
+      # cluster when `up` fails, but a failure in the test step above happens
+      # after `up` has already succeeded, and a cancelled run skips everything.
+      # Pass or fail, the cluster AND its registry go.
+      - name: Tear down the cluster and its registry
+        if: always() && github.event.inputs.keep_on_failure != 'true'
+        run: scripts/kind/setup-kueue-cluster.sh down

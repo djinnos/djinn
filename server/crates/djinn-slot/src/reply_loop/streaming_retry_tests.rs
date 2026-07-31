@@ -257,6 +257,7 @@ impl Fixture {
         let worktree_path = std::path::PathBuf::from("/tmp");
         let (result, _output, _in, _out, _cr, _cw) = run_reply_loop(
             ReplyLoopContext {
+                session_budget: None,
                 compaction_cs: &super::CompactionCriticalSection::new(),
                 provider,
                 tools: &[],
@@ -334,6 +335,7 @@ async fn drive_stream_directly(
         otel_session: None,
         phase_tracker: None,
         cancel: &cancel,
+        turn_inline_budget: None,
     };
     let activity_ts = Arc::new(AtomicU64::new(0));
     let last_rpc_touch = Arc::new(AtomicU64::new(0));

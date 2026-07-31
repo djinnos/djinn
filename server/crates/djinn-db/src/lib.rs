@@ -3,6 +3,7 @@ pub mod background;
 pub mod crypto;
 pub mod database;
 pub mod error;
+pub mod launcher_compatibility;
 pub mod migrations;
 pub mod note_hash;
 pub mod repositories;
@@ -27,22 +28,25 @@ pub mod test_support {
         apply_all_migrations_to_fresh_database, backdate_coordinator_incarnation_lease,
         backdate_task_attempt_created_at, backdate_task_updated_at,
         build_multi_project_housekeeping_fixture, close_task_at,
-        corrupt_credential_encrypted_value, corrupt_refinement_task_role_for_test,
+        complete_refinement_intent_without_successor_for_test,
+        correlate_task_to_refinement_run_for_test, corrupt_credential_encrypted_value,
+        corrupt_refinement_task_role_for_test, count_rows_for_test,
         delete_proposal_lint_result_for_revision_for_test, delete_proposal_lint_results_for_test,
         delete_session_row, drop_table_cascade_for_test, drop_table_for_test,
         elapse_refinement_run_wall_clock_for_test, ensure_doctor_findings_schema, event_bus_for,
+        force_refinement_run_park_kind_for_test, force_refinement_run_terminal_for_test,
         insert_pending_attempt_with_raw_owner, make_coordinator_incarnation_error_after_first_read,
         make_coordinator_incarnation_vanish_after_first_read, make_project,
         make_refinement_run_phantom_for_test, nullify_note_confidence_for_test,
         override_debate_trail_body_metadata, proposal_lint_revision_id_for_test,
         refinement_run_audit_for_test, refinement_run_read_only_snapshot_for_test,
-        reject_admission_create_started_for_test, reject_evidence_findings_debates_for_test,
-        reject_evidence_projection_inserts_for_test, reject_new_task_arbitrations_for_test,
-        reject_refinement_successor_for_test, reject_refinement_terminal_audit_for_test,
-        rename_note_confidence_column_for_test, replace_legacy_proposal_head_for_test,
-        seed_board_health_mismatch_candidate, seed_chat_session_row, seed_project,
-        seed_readiness_detail_projection_for_test, seed_session_row, seed_session_row_with_id,
-        seed_task_row, structured_evidence_handoff_counts_for_test,
+        reject_evidence_findings_debates_for_test, reject_evidence_projection_inserts_for_test,
+        reject_new_task_arbitrations_for_test, reject_refinement_successor_for_test,
+        reject_refinement_terminal_audit_for_test, rename_note_confidence_column_for_test,
+        replace_legacy_proposal_head_for_test, seed_board_health_mismatch_candidate,
+        seed_chat_session_row, seed_project, seed_readiness_detail_projection_for_test,
+        seed_session_row, seed_session_row_with_id, seed_task_row,
+        structured_evidence_handoff_counts_for_test, task_row_count_for_test,
     };
 }
 
@@ -52,6 +56,10 @@ pub use database::{
     SqliteVecStatus, default_db_path, test_database_base_url,
 };
 pub use error::{DbError as Error, DbResult as Result, SpecLintRejected, SpecLintViolation};
+pub use launcher_compatibility::{
+    AdmissionDecision, AdmissionRejection, InventoryFault, LegacyDigestInventory,
+    PreProtocolDigest, admit_with_legacy_inventory, decide_admission,
+};
 #[cfg(any(test, feature = "test-support"))]
 pub use repositories::repo_graph_generation::ReservedPublicationFailureStage;
 pub use repositories::tool_call_evaluator::{
@@ -69,16 +77,6 @@ pub use repositories::tool_call_metrics::{
     retry_after_edit_failure, wilson_difference_interval, wilson_interval,
 };
 pub use repositories::{
-    admission_handoff::{
-        AdmissionHandoffAuthority, AdmissionHandoffPhase, AdmissionHandoffRepository,
-        AdmissionHandoffRow, V0Mode, V1Mode,
-    },
-    admission_journal::{
-        AdmissionDomain, AdmissionJournalKey, AdmissionJournalRepository, AdmissionJournalRow,
-        AdmissionRecoveryResult, AdmissionState, AdmissionWorkloadKind, AdoptLiveAdmissionInput,
-        CreateStartedInput, ReclaimAbsentInput, ReclaimAbsentOutcome, ReserveAdmissionInput,
-        ReservedAdmission, TerminalAdmissionInput, UidFencedAdmissionInput,
-    },
     agent::{
         AgentCreateInput, AgentListQuery, AgentListResult, AgentMetrics, AgentRepository,
         AgentUpdateInput, VALID_BASE_ROLES,
@@ -98,7 +96,9 @@ pub use repositories::{
     },
     build_pod_permit::{
         AcquireBuildPodPermitResult, BindBuildPodPermitResult, BuildPodPermitRepository,
-        BuildPodPermitRow, BuildPodPermitState, ReleaseBuildPodPermitResult,
+        BuildPodPermitRow, BuildPodPermitState, BuildPodResizeIdentity,
+        CaptureBuildPodResizeIdentityResult, ReleaseBuildPodPermitResult,
+        TransitionBuildPodResizeLifecycleResult,
     },
     chat_interruption_notice::{
         ChatInterruptionNotice, ChatInterruptionNoticeRepository, CreateChatInterruptionNotice,
@@ -117,6 +117,8 @@ pub use repositories::{
         derive_pair_events, derive_pair_events_into,
     },
     coordinator_incarnation::{CoordinatorIncarnation, CoordinatorIncarnationRepository},
+    credential::CredentialRepository,
+    custom_provider::CustomProviderRepository,
     dispatch_pause::{DispatchPauseMutation, DispatchPauseRepository, DispatchPauseTarget},
     dispatch_state::{DispatchStateRecord, DispatchStateRepository, DispatchStateUpsert},
     doctor_finding::{
@@ -134,7 +136,18 @@ pub use repositories::{
     },
     extension_load_diagnostic::{ExtensionLoadDiagnosticRepository, InsertExtensionLoadDiagnostic},
     git_settings::GitSettingsRepository,
-    image::{Image, ImageRepository, ImageStatus, SelectedCatalogImage},
+    image::{Image, ImageRepository, ImageStatus, PreProtocolImage, SelectedCatalogImage},
+    invocation_lease_authority::{
+        InvocationLeaseAuthorityRepository, InvocationLeaseAuthorityRow, InvocationLeaseMode,
+    },
+    kueue_workload_admission::{
+        AdmissionApplied, KueueWorkloadAdmissionRecord, KueueWorkloadAdmissionRepository,
+    },
+    launcher_authority_mode::{
+        LauncherAuthorityDrainCensus, LauncherAuthorityModeRepository, LauncherAuthorityModeRow,
+        LauncherProtocolAdmission, SetLauncherAuthorityModeResult,
+        decide_launcher_protocol_admission,
+    },
     legacy_settings_import::{
         LegacySettingsImport, LegacySettingsImportError, LegacySettingsImportResult,
     },

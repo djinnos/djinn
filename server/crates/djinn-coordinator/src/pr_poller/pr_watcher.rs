@@ -5,9 +5,9 @@ use djinn_core::models::CiStatus;
 impl CoordinatorActor {
     pub(crate) async fn poll_pr_statuses(&mut self) {
         // Polling has no request token; each task uses its GitHub App installation token.
-        self.poll_pr_draft_tasks().await;
-        self.poll_pr_review_tasks().await;
-        self.poll_pr_review_stuck_tasks().await;
+        poll_stack::boxed(|| self.poll_pr_draft_tasks()).await;
+        poll_stack::boxed(|| self.poll_pr_review_tasks()).await;
+        poll_stack::boxed(|| self.poll_pr_review_stuck_tasks()).await;
     }
 
     // ── pr_draft polling (CI monitoring) ─────────────────────────────────────
@@ -103,8 +103,10 @@ impl CoordinatorActor {
                     // tasks see updated observation timestamps without
                     // escalating to remediation.
                     let pr_number = pull_number as i64;
-                    self.record_ci_snapshot_unavailable(&task.id, &task.short_id, pr_number)
-                        .await;
+                    poll_stack::boxed(|| {
+                        self.record_ci_snapshot_unavailable(&task.id, &task.short_id, pr_number)
+                    })
+                    .await;
                     continue;
                 }
             };
@@ -146,13 +148,15 @@ impl CoordinatorActor {
                     pr = pull_number,
                     "PR poller: PR merged → closing task"
                 );
-                self.apply_pr_merge(
-                    &task.id,
-                    task.pr_url.as_deref().unwrap_or_default(),
-                    pr.merge_commit_sha.as_deref(),
-                    Some("not_applicable"),
-                    "not_applicable",
-                )
+                poll_stack::boxed(|| {
+                    self.apply_pr_merge(
+                        &task.id,
+                        task.pr_url.as_deref().unwrap_or_default(),
+                        pr.merge_commit_sha.as_deref(),
+                        Some("not_applicable"),
+                        "not_applicable",
+                    )
+                })
                 .await;
                 self.pr_status_cache.remove(&task.id);
                 self.pr_draft_first_seen.remove(&task.id);
@@ -167,11 +171,13 @@ impl CoordinatorActor {
                     pr = pull_number,
                     "PR poller: PR closed without merge → force-closing task"
                 );
-                self.apply_pr_transition(
-                    &task.id,
-                    TransitionAction::ForceClose,
-                    Some("PR was closed without merging"),
-                )
+                poll_stack::boxed(|| {
+                    self.apply_pr_transition(
+                        &task.id,
+                        TransitionAction::ForceClose,
+                        Some("PR was closed without merging"),
+                    )
+                })
                 .await;
                 self.pr_status_cache.remove(&task.id);
                 self.pr_draft_first_seen.remove(&task.id);
@@ -190,16 +196,18 @@ impl CoordinatorActor {
                     // remediation attempt here is what burned six sessions on
                     // task `tlu1`: agents were sent to fix code that had never
                     // been shown to be broken.
-                    self.retrigger_inconclusive_run(
-                        gh_client,
-                        &task.id,
-                        &task.short_id,
-                        &pr.head.sha,
-                        &owner,
-                        &repo,
-                        pull_number,
-                        &checks,
-                    )
+                    poll_stack::boxed(|| {
+                        self.retrigger_inconclusive_run(
+                            gh_client,
+                            &task.id,
+                            &task.short_id,
+                            &pr.head.sha,
+                            &owner,
+                            &repo,
+                            pull_number,
+                            &checks,
+                        )
+                    })
                     .await;
                     continue;
                 }
@@ -211,16 +219,18 @@ impl CoordinatorActor {
                             pr = pull_number,
                             "PR poller: no CI check-runs found after min-age guard — treating as passed"
                         );
-                        self.persist_ci_snapshot(
-                            &task.id,
-                            pull_number,
-                            &pr.head.sha,
-                            CiStatus::Passing,
-                            vec![],
-                            None,
-                            0,
-                            None,
-                        )
+                        poll_stack::boxed(|| {
+                            self.persist_ci_snapshot(
+                                &task.id,
+                                pull_number,
+                                &pr.head.sha,
+                                CiStatus::Passing,
+                                vec![],
+                                None,
+                                0,
+                                None,
+                            )
+                        })
                         .await;
                     } else {
                         // CI checks still running or state unknown — hold
@@ -260,16 +270,18 @@ impl CoordinatorActor {
                     }
                     // Advisory-only failures slipped through (required checks
                     // are green).  Overwrite the failing snapshot with passing.
-                    self.persist_ci_snapshot(
-                        &task.id,
-                        pull_number,
-                        &pr.head.sha,
-                        CiStatus::Passing,
-                        vec![],
-                        None,
-                        0,
-                        None,
-                    )
+                    poll_stack::boxed(|| {
+                        self.persist_ci_snapshot(
+                            &task.id,
+                            pull_number,
+                            &pr.head.sha,
+                            CiStatus::Passing,
+                            vec![],
+                            None,
+                            0,
+                            None,
+                        )
+                    })
                     .await;
                 }
                 CiStatus::Passing => {
@@ -303,12 +315,14 @@ impl CoordinatorActor {
                 let reason = self
                     .build_pr_conflict_reason(&task.short_id, &task.project_id)
                     .await;
-                self.apply_pr_transition(&task.id, TransitionAction::PrConflict, Some(&reason))
-                    .await;
+                poll_stack::boxed(|| {
+                    self.apply_pr_transition(&task.id, TransitionAction::PrConflict, Some(&reason))
+                })
+                .await;
                 // Reactive auto-blocker: if exactly one racing same-epic sibling
                 // is landing on main, make this task WAIT for it (beside the
                 // reopen above) instead of looping on the moving main.
-                self.add_conflict_blocker_for_sibling(&task).await;
+                poll_stack::boxed(|| self.add_conflict_blocker_for_sibling(&task)).await;
                 self.pr_status_cache.remove(&task.id);
                 self.pr_draft_first_seen.remove(&task.id);
                 self.review_stuck_sha_first_seen.remove(&task.id);
@@ -430,7 +444,10 @@ impl CoordinatorActor {
                                 )
                                 .await;
                             if !proceed {
-                                self.create_tripwire_hold(&task, result, &pr.head.sha).await;
+                                poll_stack::boxed(|| {
+                                    self.create_tripwire_hold(&task, result, &pr.head.sha)
+                                })
+                                .await;
                                 self.pr_status_cache.remove(&task.id);
                                 self.pr_draft_first_seen.remove(&task.id);
                                 self.review_stuck_sha_first_seen.remove(&task.id);
@@ -499,8 +516,10 @@ impl CoordinatorActor {
                     )
                     .await;
 
-                    self.apply_pr_transition(&task.id, TransitionAction::PrUndraft, None)
-                        .await;
+                    poll_stack::boxed(|| {
+                        self.apply_pr_transition(&task.id, TransitionAction::PrUndraft, None)
+                    })
+                    .await;
                     self.pr_status_cache.remove(&task.id);
                     self.pr_draft_first_seen.remove(&task.id);
                     self.review_stuck_sha_first_seen.remove(&task.id);
@@ -728,26 +747,30 @@ impl CoordinatorActor {
                     );
                     // Record `unknown` for existing snapshot.
                     let pr_number = pull_number as i64;
-                    self.record_ci_snapshot_unavailable(&task.id, &task.short_id, pr_number)
-                        .await;
+                    poll_stack::boxed(|| {
+                        self.record_ci_snapshot_unavailable(&task.id, &task.short_id, pr_number)
+                    })
+                    .await;
                     continue;
                 }
             };
 
             // ── Record CI snapshot (sole writer for GitHub-derived fields) ──
             let pr_number = pull_number as i64;
-            self.record_ci_snapshot(
-                &task.id,
-                &task.short_id,
-                pr_number,
-                &pr.head.sha,
-                &pr.base.ref_name,
-                pull_number,
-                gh_client,
-                &owner,
-                &repo,
-                &checks,
-            )
+            poll_stack::boxed(|| {
+                self.record_ci_snapshot(
+                    &task.id,
+                    &task.short_id,
+                    pr_number,
+                    &pr.head.sha,
+                    &pr.base.ref_name,
+                    pull_number,
+                    gh_client,
+                    &owner,
+                    &repo,
+                    &checks,
+                )
+            })
             .await;
 
             if pr.merged == Some(true) || pr.state == PrState::Closed {
@@ -784,16 +807,18 @@ impl CoordinatorActor {
 
             // Persist the failing CI snapshot for the review-stuck observation.
             let blocking_names: Vec<String> = blocking.iter().map(|cr| cr.name.clone()).collect();
-            self.persist_ci_snapshot(
-                &task.id,
-                pull_number,
-                &current_sha,
-                CiStatus::Failing,
-                blocking_names,
-                None,
-                0,
-                None,
-            )
+            poll_stack::boxed(|| {
+                self.persist_ci_snapshot(
+                    &task.id,
+                    pull_number,
+                    &current_sha,
+                    CiStatus::Failing,
+                    blocking_names,
+                    None,
+                    0,
+                    None,
+                )
+            })
             .await;
 
             let first_seen = match self.review_stuck_sha_first_seen.get(&task.id) {

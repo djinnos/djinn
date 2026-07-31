@@ -23,8 +23,8 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use djinn_cgroup_launcher::{
-    CgroupFs, CgroupMode, ChildProcess, CommandSpec, Error, Invocation, Launcher, LauncherConfig,
-    LeaseAuthority, Readiness, SpawnIntoCgroup,
+    CgroupFs, CgroupMode, ChildProcess, CommandSpec, Error, Invocation, Launcher,
+    LauncherAuthorityProtocol, LauncherConfig, LeaseAuthority, Readiness, SpawnIntoCgroup,
     broker::{
         Broker, BrokerConfig, OsNonceSource, PeerCredentials, UnixPeer, WORKER_GID, WORKER_UID,
     },
@@ -192,8 +192,8 @@ fn command() -> CommandSpec {
     }
 }
 
-fn worker_readiness() -> WorkerReadinessAssertion {
-    prepare_worker_readiness(&mut ReadyDumpability).expect("worker readiness")
+fn worker_readiness(protocol: LauncherAuthorityProtocol) -> WorkerReadinessAssertion {
+    prepare_worker_readiness(&mut ReadyDumpability, protocol).expect("worker readiness")
 }
 
 const POD_CREDENTIAL: &[u8] = b"per-pod-private-credential";
@@ -215,6 +215,7 @@ fn broker() -> Broker<FakeCgroup, FakeClone, OsNonceSource> {
 
 fn authenticated_ready(
     broker: &mut Broker<FakeCgroup, FakeClone, OsNonceSource>,
+    protocol: LauncherAuthorityProtocol,
 ) -> djinn_cgroup_launcher::broker::ConnectionId {
     let peer = FakePeer(UnixPeer {
         pid: 42,
@@ -225,7 +226,7 @@ fn authenticated_ready(
         .authenticate(&peer, POD_CREDENTIAL)
         .expect("authenticate worker");
     broker
-        .accept_worker_readiness(connection, worker_readiness())
+        .accept_worker_readiness(connection, worker_readiness(protocol))
         .expect("accept worker readiness");
     connection
 }
@@ -255,7 +256,7 @@ fn authenticated_broker_gives_each_command_a_fresh_250m_leaf_and_one_explicit_li
         OsNonceSource,
     )
     .expect("broker");
-    let connection = authenticated_ready(&mut broker);
+    let connection = authenticated_ready(&mut broker, LauncherAuthorityProtocol::LeafV1);
 
     let first = Invocation {
         id: "first-command".to_owned(),
@@ -315,6 +316,67 @@ fn authenticated_broker_gives_each_command_a_fresh_250m_leaf_and_one_explicit_li
         ],
         "a matching durable fence is the sole path from the fresh 250m leaf to the explicit pod quota"
     );
+}
+
+/// resize-v2 travels through the authenticated broker just like leaf-v1, but
+/// its leaf never receives a launcher quota mutation, including an accepted lift.
+#[test]
+fn authenticated_resize_v2_broker_lifecycle_is_quota_neutral() {
+    let fs = FakeCgroup::with_owner(7);
+    let clone = FakeClone::allow();
+    let launcher = Launcher::new(
+        fs.clone(),
+        clone.clone(),
+        LauncherConfig::new(None, Some(4_000), 7)
+            .expect("launcher config")
+            .with_authority_protocol(LauncherAuthorityProtocol::ResizeV2),
+    )
+    .expect("ready launcher");
+    let mut broker = Broker::new(
+        launcher,
+        BrokerConfig::worker(42, POD_CREDENTIAL.to_vec()).expect("broker config"),
+        OsNonceSource,
+    )
+    .expect("broker");
+    let connection = authenticated_ready(&mut broker, LauncherAuthorityProtocol::ResizeV2);
+    let nonce = broker
+        .begin_invocation(
+            connection,
+            Invocation {
+                id: "resize-v2".to_owned(),
+                fence: 41,
+            },
+        )
+        .expect("begin invocation");
+    let nonce = broker
+        .create(
+            connection,
+            "resize-v2",
+            nonce,
+            "resize-v2-leaf",
+            LeaseAuthority::Armed,
+            &command(),
+        )
+        .expect("create direct leaf as configured child");
+    let nonce = broker
+        .lift(connection, "resize-v2", nonce, 41)
+        .expect("authenticated resize-v2 lift remains a quota-neutral no-op");
+    let (_sample, nonce) = broker
+        .sample(connection, "resize-v2", nonce)
+        .expect("cpu.stat remains available");
+    let nonce = broker
+        .kill(connection, "resize-v2", nonce)
+        .expect("cgroup-wide terminal kill");
+    fs.set_events("populated 0\n");
+    broker
+        .cleanup(connection, "resize-v2", nonce)
+        .expect("cleanup waits for cgroup.events then removes the leaf");
+
+    assert_eq!(fs.creates(), 1);
+    assert_eq!(clone.0.borrow().attempts, 1);
+    assert!(fs.writes_to("cpu.max").is_empty());
+    assert_eq!(fs.writes_to("cgroup.kill"), vec!["1".to_owned()]);
+    assert_eq!(fs.removes(), 1);
 }
 
 /// A daemon or double-forked grandchild reparents to init and escapes any
@@ -480,7 +542,7 @@ fn ac3_peer_authentication_rejects_wrong_pid_uid_child_and_sibling() {
 #[test]
 fn ac3_forged_own_or_sibling_controls_and_nonce_replay_are_rejected() {
     let mut broker = broker();
-    let connection_a = authenticated_ready(&mut broker);
+    let connection_a = authenticated_ready(&mut broker, LauncherAuthorityProtocol::LeafV1);
     let nonce0 = broker
         .begin_invocation(
             connection_a,
@@ -493,7 +555,7 @@ fn ac3_forged_own_or_sibling_controls_and_nonce_replay_are_rejected() {
 
     // A second authenticated worker connection (a sibling session) may not
     // drive an invocation bound to another connection.
-    let connection_b = authenticated_ready(&mut broker);
+    let connection_b = authenticated_ready(&mut broker, LauncherAuthorityProtocol::LeafV1);
     assert!(matches!(
         broker.create(
             connection_b,

@@ -1,0 +1,215 @@
+# Values for the djinn-prereqs wrapper chart.
+#
+# Everything under `kueue:` is passed to the PINNED upstream subchart
+# (oci://registry.k8s.io/kueue/charts/kueue, version in Chart.yaml/Chart.lock).
+# The subchart itself is untouched — this file is the entire repository-owned
+# scoping policy that used to live as hand-edited webhook entries inside
+# deploy/kueue/vendor/kueue-v0.10.0.yaml.
+#
+# Contract: deploy/kueue/tests/webhook-selectors.sh renders THIS chart and
+# asserts the scoping below actually survives into the admission webhooks.
+
+kueue:
+  # Set false to render djinn-prereqs with the Kueue subchart omitted entirely
+  # (Chart.yaml gates the dependency on this key). Nothing else in this chart
+  # depends on it today; the flag exists so a cluster that already runs a
+  # Kueue it manages elsewhere can still take future prerequisites from here.
+  enabled: true
+
+  # -------------------------------------------------------------------------
+  # Kubernetes floor: Dynamic Resource Allocation must be switched OFF
+  # -------------------------------------------------------------------------
+  # Kueue 0.19.0 ships KueueDRAIntegration ENABLED by default, and the manager
+  # builds a ResourceSlice indexer against `resource.k8s.io/v1` unconditionally
+  # when it is on. That API group is GA only in Kubernetes **1.34**; on anything
+  # older `setupIndexes` fails and the process exits:
+  #
+  #   "msg":"Unable to setup indexes","error":"could not setup ResourceSlice
+  #    indexer: no matches for kind \"ResourceSlice\" in version
+  #    \"resource.k8s.io/v1\""
+  #
+  # That is fatal, not degraded: the Deployment CrashLoopBackOffs, `helm --wait`
+  # never returns, and the release is left with all 11 CRDs Established and both
+  # webhook configurations registered behind a dead controller. Verified on a
+  # disposable kind cluster at 1.31.0 — the pin in scripts/kind/setup-kind.sh,
+  # i.e. the canonical local dev cluster, which could not install this chart at
+  # all until this override existed.
+  #
+  # Djinn does not use dynamic resource allocation: no ResourceClaim, no
+  # DeviceClass, no ResourceSlice, no `resourceClaims` in any PodSpec this
+  # repository renders. Turning the integration off costs nothing and restores
+  # a sub-1.34 floor.
+  #
+  # All THREE gates are required. KueueDRAIntegrationExtendedResource and
+  # KueueDRAIntegrationPartitionableDevices default to enabled and each declares
+  # a hard dependency on the parent; disabling only KueueDRAIntegration makes
+  # the manager reject its own flags at startup:
+  #
+  #   "msg":"conflicting feature gates detected","error":"featureGates: Invalid
+  #    value: \"KueueDRAIntegrationExtendedResource\":
+  #    KueueDRAIntegrationExtendedResource requires KueueDRAIntegration to be
+  #    enabled"
+  #
+  # Contract: deploy/helm/djinn-prereqs/tests/feature-gates.sh renders THIS
+  # chart and fails if any of the three is removed or flipped back on, so an
+  # upstream default cannot silently restore the 1.34 floor on a version bump.
+  controllerManager:
+    featureGates:
+      - name: KueueDRAIntegration
+        enabled: false
+      - name: KueueDRAIntegrationExtendedResource
+        enabled: false
+      - name: KueueDRAIntegrationPartitionableDevices
+        enabled: false
+
+  # -------------------------------------------------------------------------
+  # Djinn scoping policy
+  # -------------------------------------------------------------------------
+  # The upstream chart exposes both knobs only through this one opaque string,
+  # so overriding either means restating the whole default. The body below is
+  # upstream 0.19.0's default `managerConfig.controllerManagerConfigYaml`
+  # VERBATIM, comments included, with exactly two deliberate edits:
+  #
+  #   1. `managedJobsNamespaceSelector` is uncommented and inverted from
+  #      upstream's negative "every namespace except kube-system/kueue-system"
+  #      into a POSITIVE `matchLabels` fence. A namespace must be explicitly
+  #      labelled `djinn.io/kueue-managed: "true"` before ANY Kueue admission
+  #      webhook can select an object in it. No asset in this repository
+  #      applies that label, which is what makes this release inert.
+  #
+  #   2. `integrations.frameworks` drops "pod", "deployment" and "statefulset".
+  #      Those three are the only entries that intercept CREATE on core
+  #      Kubernetes types, and the only ones the upstream chart branches on in
+  #      templates/webhook/manifests.yaml.
+  #
+  #      Read the branch carefully, because it is counter-intuitive and this
+  #      comment used to get it wrong. It is
+  #      `{{- if has "pod" ... }} failurePolicy: Fail {{- else }}
+  #      failurePolicy: Ignore {{- end }}` — a policy switch, NOT a
+  #      registration guard. mpod/vpod, mdeployment/vdeployment and
+  #      mstatefulset/vstatefulset are rendered UNCONDITIONALLY and ARE present
+  #      in the MutatingWebhookConfiguration and ValidatingWebhookConfiguration
+  #      on a live cluster. There is no values hook that removes them. Dropping
+  #      the frameworks flips those six from `failurePolicy: Fail` to
+  #      `failurePolicy: Ignore`, and that is the entire render-visible effect.
+  #
+  #      `Ignore` is what carries the guarantee: the manager does not enable
+  #      the handlers, and an unreachable or handler-less Kueue webhook is
+  #      SKIPPED by the API server instead of blocking CREATE. Combined with
+  #      edit 1's positive namespace fence — which those same webhooks also
+  #      carry — nothing in an unlabelled namespace is intercepted. Do not read
+  #      the shorter framework list as "core Pod CREATE is not intercepted at
+  #      all"; read it as "it is intercepted by a fenced, fail-open webhook".
+  #
+  #      Contract: deploy/helm/djinn-prereqs/tests/feature-gates.sh asserts all
+  #      six webhooks are PRESENT with failurePolicy Ignore, so this text cannot
+  #      drift from the render again. deploy/kueue/tests/check-webhook-selectors.py
+  #      has always described this correctly.
+  #
+  #      Everything else in the list is left EXACTLY as upstream ships it. The
+  #      remaining frameworks are CRD-scoped (ray.io, kubeflow.org, jobset,
+  #      appwrapper, trainer), their webhooks render unconditionally whether or
+  #      not the framework is listed, and dropping a name from the list while
+  #      its webhook still registers would point a live admission webhook at a
+  #      handler the manager did not enable. That is a worse failure than the
+  #      unused entries.
+  #
+  # A drift check (deploy/kueue/tests/check-manager-config-drift.py) parses the
+  # subchart's own default out of charts/kueue-<version>.tgz and fails if this
+  # string differs from it in any way other than those two edits. On a version
+  # bump the check tells you exactly what upstream changed underneath you.
+  managerConfig:
+    controllerManagerConfigYaml: |-
+      apiVersion: config.kueue.x-k8s.io/v1beta2
+      kind: Configuration
+      health:
+        healthProbeBindAddress: :8081
+      metrics:
+        bindAddress: :8443
+      # enableClusterQueueResources: true
+      webhook:
+        port: 9443
+      leaderElection:
+        leaderElect: true
+        resourceName: c1f6bfd2.kueue.x-k8s.io
+      controller:
+        groupKindConcurrency:
+          Job.batch: 5
+          Pod: 5
+          Workload.kueue.x-k8s.io: 10
+          LocalQueue.kueue.x-k8s.io: 5
+          ClusterQueue.kueue.x-k8s.io: 5
+          ResourceFlavor.kueue.x-k8s.io: 1
+      clientConnection:
+        qps: 300
+        burst: 500
+      #pprofBindAddress: :8083
+      #waitForPodsReady:
+      #  timeout: 5m
+      #  recoveryTimeout: 3m
+      #  blockAdmission: false
+      #  requeuingStrategy:
+      #    timestamp: Eviction
+      #    backoffLimitCount: null # null indicates infinite requeuing
+      #    backoffBaseSeconds: 60
+      #    backoffMaxSeconds: 3600
+      #manageJobsWithoutQueueName: true
+      # See "Opt-in Namespace Management" for guidance on namespace management:
+      # https://kueue.sigs.k8s.io/docs/tasks/manage/enforce_job_management/opt_in_namespace_management/
+      # DJINN EDIT 1 of 2: positive namespace fence, replacing upstream's
+      # negative kube-system/kueue-system exclusion. Nothing in this repository
+      # applies djinn.io/kueue-managed, so this selects zero namespaces.
+      managedJobsNamespaceSelector:
+        matchLabels:
+          djinn.io/kueue-managed: "true"
+      #internalCertManagement:
+      #  enable: false
+      #  webhookServiceName: ""
+      #  webhookSecretName: ""
+      integrations:
+        frameworks:
+        - "batch/job"
+        - "kubeflow.org/mpijob"
+        - "ray.io/rayjob"
+        - "ray.io/rayservice"
+        - "ray.io/raycluster"
+        - "jobset.x-k8s.io/jobset"
+        - "trainer.kubeflow.org/trainjob"
+      #  - "kubeflow.org/paddlejob"
+      #  - "kubeflow.org/pytorchjob"
+      #  - "kubeflow.org/tfjob"
+      #  - "kubeflow.org/xgboostjob"
+      #  - "kubeflow.org/jaxjob"
+        - "workload.codeflare.dev/appwrapper"
+      #  - "sparkoperator.k8s.io/sparkapplication"
+      # DJINN EDIT 2 of 2: upstream 0.19.0 ships "pod", "deployment" and
+      # "statefulset" ENABLED here. All three are removed so the manager enables
+      # no handler for core Pod/Deployment/StatefulSet, and the chart renders
+      # mpod/vpod, mdeployment/vdeployment and mstatefulset/vstatefulset with
+      # failurePolicy: Ignore. The webhooks themselves are still registered —
+      # see the note above; there is no values hook that unregisters them.
+        - "leaderworkerset.x-k8s.io/leaderworkerset"
+      #  externalFrameworks:
+      #  - "Foo.v1.example.com"
+      #fairSharing:
+      #  preemptionStrategies: [LessThanOrEqualToFinalShare, LessThanInitialShare]
+      #admissionFairSharing:
+      #  usageHalfLifeTime: "168h" # 7 days
+      #  usageSamplingInterval: "5m"
+      #  resourceWeights: # optional, defaults to 1 for all resources if not specified
+      #    cpu: 0    # if you want to completely ignore cpu usage
+      #    memory: 0 # ignore completely memory usage
+      #    example.com/gpu: 100 # and you care only about GPUs usage
+      #resources:
+      #  excludeResourcePrefixes: []
+      #  quotaCheckStrategy: "BlockUndeclared"
+      # transformations:
+      # - input: nvidia.com/mig-4g.5gb
+      #   strategy: Replace | Retain
+      #   outputs:
+      #     example.com/accelerator-memory: 5Gi
+      #     example.com/accelerator-gpc: 4
+      #objectRetentionPolicies:
+      #  workloads:
+      #    afterFinished: null # null indicates infinite retention, 0s means no retention at all
+      #    afterDeactivatedByKueue: null # null indicates infinite retention, 0s means no retention at all

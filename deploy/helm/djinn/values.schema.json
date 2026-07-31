@@ -29,21 +29,15 @@
         "maxIdleHours": { "type": "integer", "minimum": 0 }
       }
     },
-    "buildAdmission": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["mode", "maxBuildTaskRuns"],
-      "properties": {
-        "mode": { "type": "string", "enum": ["off", "observe", "enforce"] },
-        "maxBuildTaskRuns": { "type": "integer", "minimum": 1, "maximum": 64 }
-      }
-    },
     "kueue": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["buildPods"],
+      "required": ["enabled", "buildPods", "armed", "namespaceLabelledExternally"],
       "properties": {
-        "buildPods": { "type": "integer", "minimum": 1 }
+        "enabled": { "type": "boolean" },
+        "buildPods": { "type": "integer", "minimum": 1 },
+        "armed": { "type": "boolean" },
+        "namespaceLabelledExternally": { "type": "boolean" }
       }
     },
     "logCollector": {
@@ -154,54 +148,6 @@
               }
             },
             "required": ["runtimeClass"]
-          }
-        }
-      }
-    },
-    {
-      "if": {
-        "properties": {
-          "buildAdmission": {
-            "properties": { "mode": { "const": "enforce" } },
-            "required": ["mode"]
-          }
-        }
-      },
-      "then": {
-        "properties": {
-          "server": {
-            "properties": {
-              "replicas": { "const": 1 },
-              "strategy": {
-                "anyOf": [
-                  { "properties": { "type": { "const": "Recreate" } } },
-                  {
-                    "properties": {
-                      "type": { "const": "RollingUpdate" },
-                      "rollingUpdate": {
-                        "properties": {
-                          "maxSurge": {
-                            "anyOf": [
-                              { "type": "integer", "minimum": 0, "maximum": 0 },
-                              { "type": "string", "enum": ["0"] }
-                            ]
-                          },
-                          "maxUnavailable": {
-                            "anyOf": [
-                              { "type": "integer", "minimum": 1, "maximum": 1 },
-                              { "type": "string", "enum": ["1"] }
-                            ]
-                          }
-                        },
-                        "required": ["maxSurge", "maxUnavailable"]
-                      }
-                    },
-                    "required": ["type", "rollingUpdate"]
-                  }
-                ]
-              }
-            },
-            "required": ["replicas", "strategy"]
           }
         }
       }

@@ -7,6 +7,7 @@ use super::error_handling::{
 // keeps the size guard from re-flagging the pre-existing oversize while
 // leaving the new tests in their natural location alongside the related
 // reply-loop coverage.
+use super::budget::SessionBudgetPolicy;
 use super::loop_guard::{LoopGuardError, LoopGuardKind};
 use super::persistence::serialize_llm_input;
 use super::turn::{ReplyLoopContext, WindDownReason, run_reply_loop};
@@ -37,39 +38,6 @@ use std::time::{Duration, Instant, SystemTime};
 use tokio_util::sync::CancellationToken;
 
 mod anthropic_replay;
-
-/// Process-wide mutex that serializes the soft-budget tests' mutations of
-/// `DJINN_SESSION_BUDGET_*` env vars. The reply loop reads its
-/// `SessionBudgetPolicy` via `SessionBudgetPolicy::from_env()` at the start of
-/// `run_reply_loop`, and Rust tests run in parallel by default — so without
-/// serialization a concurrent test could observe our env override (or vice
-/// versa). The lock is held across the `.await` on `run_reply_loop` on
-/// purpose: env mutations are synchronous, the lock is uncontended in spirit
-/// (we don't yield inside the critical section), and the existing
-/// `AUTO_CODE_CONTEXT_ENV_LOCK` pattern in `helpers/tests.rs` follows the
-/// same shape. SAFETY: env mutation always happens with this lock held.
-static SESSION_BUDGET_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-/// Clear every `DJINN_SESSION_BUDGET_*` env var that `SessionBudgetPolicy::from_env`
-/// consults. Called by soft-budget tests (under the env lock) at teardown so
-/// the test doesn't leak a tiny budget into a sibling test that doesn't
-/// expect it.
-fn clear_session_budget_env() {
-    // SAFETY: always called under SESSION_BUDGET_ENV_LOCK.
-    unsafe {
-        for role in ["WORKER", "PLANNER", "ARCHITECT", "OTHER"] {
-            for suffix in [
-                "_MAX_TURNS",
-                "_MAX_CUMULATIVE_TOKENS",
-                "_SOFT_THRESHOLD_RATIO",
-                "_HARD_THRESHOLD_RATIO",
-            ] {
-                let var = format!("DJINN_SESSION_BUDGET_{role}{suffix}");
-                std::env::remove_var(var);
-            }
-        }
-    }
-}
 
 /// Pre-scripted response: text (optional) + tool calls + token counts.
 /// When `_error` is set, `MockProvider::stream()` returns the error immediately
@@ -284,6 +252,11 @@ struct ReplyLoopHarness {
     /// Defaults to the canonical worker path; phase scripts override this to
     /// isolate their process-global collector samples from dispatcher tests.
     role_name: &'static str,
+    /// Per-harness session budget. `None` lets `run_reply_loop` resolve the
+    /// policy from the process env exactly as production does; the budget
+    /// tests set it via [`Self::with_session_budget`] so their tiny caps are
+    /// scoped to their own reply loop instead of the shared process env.
+    session_budget: Option<SessionBudgetPolicy>,
 }
 
 type ReplyLoopResult = (anyhow::Result<()>, ParsedAgentOutput, i64, i64, i64, i64);
@@ -302,6 +275,7 @@ impl ReplyLoopHarness {
             cancel,
             conv,
             role_name: "worker",
+            session_budget: None,
         }
     }
 
@@ -360,7 +334,23 @@ impl ReplyLoopHarness {
             cancel,
             conv,
             role_name: "worker",
+            session_budget: None,
         }
+    }
+
+    /// Scope a `DJINN_SESSION_BUDGET_*` override to this harness's reply loop.
+    ///
+    /// The pairs are parsed by the same `from_env_map` path the production
+    /// `SessionBudgetPolicy::from_env()` uses, so the parsing coverage the old
+    /// `std::env::set_var` version had is preserved — but the override never
+    /// touches the process environment, which every concurrently running test
+    /// shares.
+    fn with_session_budget<const N: usize>(mut self, vars: [(&str, String); N]) -> Self {
+        self.session_budget = Some(
+            SessionBudgetPolicy::from_env_iter(vars.map(|(k, v)| (k.to_string(), v)))
+                .expect("valid session budget override"),
+        );
+        self
     }
 
     /// Run the reply loop with default settings (context_window=10_000,
@@ -418,6 +408,7 @@ impl ReplyLoopHarness {
         let worktree_path = std::path::PathBuf::from("/tmp");
         run_reply_loop(
             ReplyLoopContext {
+                session_budget: self.session_budget.clone(),
                 compaction_cs: &crate::reply_loop::CompactionCriticalSection::new(),
                 provider,
                 tools,
@@ -542,6 +533,7 @@ async fn proactive_compaction_fires_when_current_context_exceeds_threshold() {
     conv.push(Message::user("Do the task."));
     let (result, _output, _tokens_in, _tokens_out, _cr, _cw) = run_reply_loop(
         ReplyLoopContext {
+            session_budget: None,
             compaction_cs: &crate::reply_loop::CompactionCriticalSection::new(),
             provider: &provider,
             tools: &[],
@@ -635,6 +627,7 @@ async fn no_compaction_when_sum_large_but_current_context_small() {
     conv.push(Message::user("Do the task."));
     let (result, _output, _tokens_in, _tokens_out, _cr, _cw) = run_reply_loop(
         ReplyLoopContext {
+            session_budget: None,
             compaction_cs: &crate::reply_loop::CompactionCriticalSection::new(),
             provider: &provider,
             tools: &[],
@@ -762,6 +755,7 @@ async fn reactive_compaction_on_context_length_error() {
     conv.push(Message::user("Do the task."));
     let (result, _output, _tokens_in, _tokens_out, _cr, _cw) = run_reply_loop(
         ReplyLoopContext {
+            session_budget: None,
             compaction_cs: &crate::reply_loop::CompactionCriticalSection::new(),
             provider: &provider,
             tools: &[],
@@ -1101,6 +1095,7 @@ async fn run_scripted_reply_loop_with_dispatcher(
     conv.push(Message::user("Do the task."));
     let (result, output, _tokens_in, _tokens_out, _cr, _cw) = run_reply_loop(
         ReplyLoopContext {
+            session_budget: None,
             compaction_cs: &crate::reply_loop::CompactionCriticalSection::new(),
             provider,
             tools,
@@ -1287,6 +1282,7 @@ async fn tool_choice_required_for_supported_providers() {
     conv.push(Message::user("Do the task."));
     let (result, _output, _, _, _, _) = run_reply_loop(
         ReplyLoopContext {
+            session_budget: None,
             compaction_cs: &crate::reply_loop::CompactionCriticalSection::new(),
             provider: &provider,
             tools: &tools,
@@ -1405,6 +1401,7 @@ async fn max_step_cap_injects_wind_down_and_ends_gracefully() {
     conv.push(Message::user("Do the task."));
     let (result, _output, _tokens_in, _tokens_out, _cr, _cw) = run_reply_loop(
         ReplyLoopContext {
+            session_budget: None,
             compaction_cs: &crate::reply_loop::CompactionCriticalSection::new(),
             provider: &provider,
             tools: &tools,
@@ -1509,6 +1506,7 @@ async fn max_step_wind_down_ignored_falls_back_to_hard_error() {
     conv.push(Message::user("Do the task."));
     let (result, _output, _tokens_in, _tokens_out, _cr, _cw) = run_reply_loop(
         ReplyLoopContext {
+            session_budget: None,
             compaction_cs: &crate::reply_loop::CompactionCriticalSection::new(),
             provider: &provider,
             tools: &tools,
@@ -1562,10 +1560,6 @@ async fn max_step_wind_down_ignored_falls_back_to_hard_error() {
 
 #[tokio::test]
 async fn hard_token_budget_injects_wind_down_and_ends_gracefully() {
-    let _env_guard = SESSION_BUDGET_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner());
-    install_session_budget_env_with_hard(1_000, 0.5, 0.92);
     let tools = vec![dummy_tool_schema("missing_tool")];
     let mut responses = Vec::new();
     for step in 1..=2 {
@@ -1581,10 +1575,10 @@ async fn hard_token_budget_injects_wind_down_and_ends_gracefully() {
         75,
     ));
     let provider = MockProvider::new(responses);
-    let mut h = ReplyLoopHarness::new().await;
+    let mut h = ReplyLoopHarness::new()
+        .await
+        .with_session_budget(session_budget_vars_with_hard(1_000, 0.5, 0.92));
     let (result, _output, _tokens_in, _tokens_out, _cr, _cw) = h.run(&provider, &tools).await;
-    clear_session_budget_env();
-    let _ = &_env_guard;
     assert!(
         result.is_ok(),
         "token budget should wind down gracefully, got: {:?}",
@@ -1610,10 +1604,6 @@ async fn hard_token_budget_injects_wind_down_and_ends_gracefully() {
 
 #[tokio::test]
 async fn hard_token_budget_wind_down_ignored_falls_back_to_hard_error() {
-    let _env_guard = SESSION_BUDGET_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner());
-    install_session_budget_env_with_hard(1_000, 0.5, 0.92);
     let tools = vec![dummy_tool_schema("missing_tool")];
     let mut responses = Vec::new();
     for step in 1..=3 {
@@ -1625,10 +1615,10 @@ async fn hard_token_budget_wind_down_ignored_falls_back_to_hard_error() {
         ));
     }
     let provider = MockProvider::new(responses);
-    let mut h = ReplyLoopHarness::new().await;
+    let mut h = ReplyLoopHarness::new()
+        .await
+        .with_session_budget(session_budget_vars_with_hard(1_000, 0.5, 0.92));
     let (result, _output, _tokens_in, _tokens_out, _cr, _cw) = h.run(&provider, &tools).await;
-    clear_session_budget_env();
-    let _ = &_env_guard;
     assert!(
         result.is_err(),
         "ignoring token-budget wind-down should hard-error"
@@ -1978,38 +1968,41 @@ fn count_system_reminder_messages(conv: &Conversation) -> usize {
         .count()
 }
 
-/// Apply a `SessionBudgetPolicy` override to the env so the next
-/// `SessionBudgetPolicy::from_env()` inside `run_reply_loop` resolves a small
-/// cumulative-token cap with a low soft threshold. Always called under
-/// `SESSION_BUDGET_ENV_LOCK` and followed by `clear_session_budget_env()` at
-/// test teardown.
-fn install_session_budget_env(max_cumulative_tokens: u64, soft_ratio: f64) {
-    // SAFETY: always called under SESSION_BUDGET_ENV_LOCK.
-    unsafe {
-        std::env::set_var(
+/// The `DJINN_SESSION_BUDGET_*` pairs for a small cumulative-token cap with a
+/// low soft threshold, to hand to [`ReplyLoopHarness::with_session_budget`].
+///
+/// `MAX_TURNS` and `HARD_THRESHOLD_RATIO` are deliberately absent so the
+/// resolved policy keeps its defaults for those — the injected policy is built
+/// from these pairs alone, so unlike the previous env-var version there is no
+/// stale override from a sibling test to clear first.
+fn session_budget_vars(max_cumulative_tokens: u64, soft_ratio: f64) -> [(&'static str, String); 2] {
+    [
+        (
             "DJINN_SESSION_BUDGET_WORKER_MAX_CUMULATIVE_TOKENS",
             max_cumulative_tokens.to_string(),
-        );
-        std::env::set_var(
+        ),
+        (
             "DJINN_SESSION_BUDGET_WORKER_SOFT_THRESHOLD_RATIO",
             soft_ratio.to_string(),
-        );
-    }
+        ),
+    ]
 }
 
-fn install_session_budget_env_with_hard(
+/// [`session_budget_vars`] plus an explicit hard-threshold ratio.
+fn session_budget_vars_with_hard(
     max_cumulative_tokens: u64,
     soft_ratio: f64,
     hard_ratio: f64,
-) {
-    install_session_budget_env(max_cumulative_tokens, soft_ratio);
-    // SAFETY: always called under SESSION_BUDGET_ENV_LOCK.
-    unsafe {
-        std::env::set_var(
+) -> [(&'static str, String); 3] {
+    let [max, soft] = session_budget_vars(max_cumulative_tokens, soft_ratio);
+    [
+        max,
+        soft,
+        (
             "DJINN_SESSION_BUDGET_WORKER_HARD_THRESHOLD_RATIO",
             hard_ratio.to_string(),
-        );
-    }
+        ),
+    ]
 }
 
 /// Crossing the soft threshold exactly once — the reply loop persists and
@@ -2036,22 +2029,13 @@ fn install_session_budget_env_with_hard(
 /// stream never produces the reminder (only the reply loop does).
 #[tokio::test]
 async fn soft_budget_threshold_triggers_one_shot_converge_reminder() {
-    // Recover from a poisoned mutex so a prior test that panicked mid-env-mutation
-    // doesn't cascade its failure here. The lock still serializes; we just
-    // ignore the poison marker since the protected state is process env (which
-    // gets reset by the test's own setup/teardown anyway).
-    let _env_guard = SESSION_BUDGET_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner());
     // 200 token cap × 0.25 ratio = 50-token soft cap; the default hard cap
     // (92% = 184 tokens) stays safely above this test's 100-token spend.
-    install_session_budget_env(200, 0.25);
-    // Safety net: ensure no stale overrides from a previous test leak through.
-    // SAFETY: SESSION_BUDGET_ENV_LOCK held.
-    unsafe {
-        std::env::remove_var("DJINN_SESSION_BUDGET_WORKER_MAX_TURNS");
-        std::env::remove_var("DJINN_SESSION_BUDGET_WORKER_HARD_THRESHOLD_RATIO");
-    }
+    // The policy is built from these pairs alone and injected below, so
+    // `MAX_TURNS` and `HARD_THRESHOLD_RATIO` keep their defaults and no
+    // sibling test can observe or perturb this override.
+    let session_budget = SessionBudgetPolicy::from_env_iter(session_budget_vars(200, 0.25))
+        .expect("valid session budget override");
     let tools = vec![
         dummy_tool_schema("submit_work"),
         dummy_tool_schema("worker_tool"),
@@ -2083,6 +2067,7 @@ async fn soft_budget_threshold_triggers_one_shot_converge_reminder() {
     conv.push(Message::user("Do the task."));
     let (result, _output, _tokens_in, _tokens_out, _cr, _cw) = run_reply_loop(
         ReplyLoopContext {
+            session_budget: Some(session_budget),
             compaction_cs: &crate::reply_loop::CompactionCriticalSection::new(),
             provider: &provider,
             tools: &tools,
@@ -2096,9 +2081,9 @@ async fn soft_budget_threshold_triggers_one_shot_converge_reminder() {
             // Large context window so the context-pressure secondary signal
             // (`current_context_tokens / context_window`) never trips on its
             // own — the test exercises the cumulative `input+output` spend
-            // path only. We need `max_cumulative_tokens` (set via env) to be
-            // the dominant signal, and a 10k-token window with <100 tokens of
-            // usage keeps that ratio tiny.
+            // path only. We need `max_cumulative_tokens` (injected above) to
+            // be the dominant signal, and a 10k-token window with <100 tokens
+            // of usage keeps that ratio tiny.
             context_window: 10_000,
             model_id: "test/mock-model",
             cancel: &cancel,
@@ -2114,11 +2099,6 @@ async fn soft_budget_threshold_triggers_one_shot_converge_reminder() {
         false,
     )
     .await;
-    // SAFETY: SESSION_BUDGET_ENV_LOCK held; restore baseline before asserting.
-    clear_session_budget_env();
-    // Avoid the `_env_guard` "field never read" warning while still proving
-    // the guard was held for the duration of `run_reply_loop`.
-    let _ = &_env_guard;
     assert!(
         result.is_ok(),
         "soft-budget reminder should not fail the session; got: {:?}",
@@ -2169,20 +2149,8 @@ async fn soft_budget_threshold_triggers_one_shot_converge_reminder() {
 /// `max_cumulative_tokens * soft_threshold_ratio` no injection happens.
 #[tokio::test]
 async fn soft_budget_below_threshold_no_injection() {
-    // Recover from a poisoned mutex so a prior test that panicked mid-env-mutation
-    // doesn't cascade its failure here. See the matching comment in
-    // `soft_budget_threshold_triggers_one_shot_converge_reminder`.
-    let _env_guard = SESSION_BUDGET_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner());
     // 1000 token cap × 0.75 = 750-token soft cap. We'll spend a fraction of
     // that across many turns and verify no reminder fires.
-    install_session_budget_env(1_000, 0.75);
-    // SAFETY: SESSION_BUDGET_ENV_LOCK held.
-    unsafe {
-        std::env::remove_var("DJINN_SESSION_BUDGET_WORKER_MAX_TURNS");
-        std::env::remove_var("DJINN_SESSION_BUDGET_WORKER_HARD_THRESHOLD_RATIO");
-    }
     let tools = vec![
         dummy_tool_schema("submit_work"),
         dummy_tool_schema("worker_tool"),
@@ -2212,12 +2180,11 @@ async fn soft_budget_below_threshold_no_injection() {
             _error: None,
         },
     ]);
-    let mut h = ReplyLoopHarness::new().await;
+    let mut h = ReplyLoopHarness::new()
+        .await
+        .with_session_budget(session_budget_vars(1_000, 0.75));
     provider.bind_valid_submit_work_fixtures(&h.task_id);
     let (result, _output, _tokens_in, _tokens_out, _cr, _cw) = h.run(&provider, &tools).await;
-    // SAFETY: SESSION_BUDGET_ENV_LOCK held; restore baseline before asserting.
-    clear_session_budget_env();
-    let _ = &_env_guard;
     assert!(
         result.is_ok(),
         "session should complete normally below the soft threshold; got: {:?}",
@@ -2241,15 +2208,6 @@ async fn soft_budget_below_threshold_no_injection() {
 
 #[tokio::test]
 async fn hard_budget_wind_down_captures_budget_summary() {
-    let _env_guard = SESSION_BUDGET_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner());
-    install_session_budget_env(100, 0.5);
-    // SAFETY: SESSION_BUDGET_ENV_LOCK held.
-    unsafe {
-        std::env::remove_var("DJINN_SESSION_BUDGET_WORKER_MAX_TURNS");
-        std::env::set_var("DJINN_SESSION_BUDGET_WORKER_HARD_THRESHOLD_RATIO", "0.8");
-    }
     let tools = vec![
         dummy_tool_schema("submit_work"),
         dummy_tool_schema("worker_tool"),
@@ -2259,10 +2217,10 @@ async fn hard_budget_wind_down_captures_budget_summary() {
         MockResponse::tool_call_with_input("b", "worker_tool", serde_json::json!({"step": 2}), 30), // cumulative 90 → hard wind-down before next turn
         MockResponse::text_only("Budget handoff: implemented A; B remains.", 5),
     ]);
-    let mut h = ReplyLoopHarness::new().await;
+    let mut h = ReplyLoopHarness::new()
+        .await
+        .with_session_budget(session_budget_vars_with_hard(100, 0.5, 0.8));
     let (result, output, tokens_in, tokens_out, _cr, _cw) = h.run(&provider, &tools).await;
-    clear_session_budget_env();
-    let _ = &_env_guard;
     assert!(
         result.is_ok(),
         "hard budget summary should park cleanly: {result:?}"
@@ -2355,15 +2313,6 @@ async fn hard_budget_wind_down_captures_budget_summary() {
 
 #[tokio::test]
 async fn hard_budget_wind_down_ignored_returns_typed_budget_error() {
-    let _env_guard = SESSION_BUDGET_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner());
-    install_session_budget_env(100, 0.5);
-    // SAFETY: SESSION_BUDGET_ENV_LOCK held.
-    unsafe {
-        std::env::remove_var("DJINN_SESSION_BUDGET_WORKER_MAX_TURNS");
-        std::env::set_var("DJINN_SESSION_BUDGET_WORKER_HARD_THRESHOLD_RATIO", "0.8");
-    }
     let tools = vec![
         dummy_tool_schema("submit_work"),
         dummy_tool_schema("worker_tool"),
@@ -2379,10 +2328,10 @@ async fn hard_budget_wind_down_ignored_returns_typed_budget_error() {
         // fallback as a false successful summary.
         MockResponse::text_only("fallback budget handoff that must never be consumed", 5),
     ]);
-    let mut h = ReplyLoopHarness::new().await;
+    let mut h = ReplyLoopHarness::new()
+        .await
+        .with_session_budget(session_budget_vars_with_hard(100, 0.5, 0.8));
     let (result, output, tokens_in, tokens_out, _cr, _cw) = h.run(&provider, &tools).await;
-    clear_session_budget_env();
-    let _ = &_env_guard;
     let err = result.expect_err("ignored hard-budget wind-down should return typed error");
     assert!(
         err.downcast_ref::<BudgetWindDownIgnored>().is_some(),
@@ -2516,6 +2465,7 @@ async fn dangling_tool_call_is_sanitized_before_reaching_provider() {
     });
     let (result, _output, _, _, _, _) = run_reply_loop(
         ReplyLoopContext {
+            session_budget: None,
             compaction_cs: &crate::reply_loop::CompactionCriticalSection::new(),
             provider: &provider,
             tools: &tools,
@@ -2645,6 +2595,7 @@ async fn first_no_progress_submit_intercepted_returns_corrective_and_continues()
     conv.push(Message::user("Do the task."));
     let (result, output, _, _, _, _) = run_reply_loop(
         ReplyLoopContext {
+            session_budget: None,
             compaction_cs: &crate::reply_loop::CompactionCriticalSection::new(),
             provider: &provider,
             tools: &[serde_json::json!({
@@ -2728,6 +2679,7 @@ async fn missing_rejected_fingerprint_skips_comparison_and_allows_finalize() {
     conv.push(Message::user("Do the task."));
     let (result, output, _, _, _, _) = run_reply_loop(
         ReplyLoopContext {
+            session_budget: None,
             compaction_cs: &crate::reply_loop::CompactionCriticalSection::new(),
             provider: &provider,
             tools: &[serde_json::json!({
@@ -2801,6 +2753,7 @@ async fn non_worker_role_bypasses_guard() {
     conv.push(Message::user("Plan the task."));
     let (result, output, _, _, _, _) = run_reply_loop(
         ReplyLoopContext {
+            session_budget: None,
             compaction_cs: &crate::reply_loop::CompactionCriticalSection::new(),
             provider: &provider,
             tools: &[serde_json::json!({
@@ -2869,6 +2822,7 @@ async fn different_fingerprint_allows_finalize() {
     conv.push(Message::user("Do the task."));
     let (result, output, _, _, _, _) = run_reply_loop(
         ReplyLoopContext {
+            session_budget: None,
             compaction_cs: &crate::reply_loop::CompactionCriticalSection::new(),
             provider: &provider,
             tools: &[serde_json::json!({
@@ -2966,6 +2920,7 @@ async fn empty_worktree_skips_guard_and_allows_finalize() {
     conv.push(Message::user("Do the task."));
     let (result, output, _, _, _, _) = run_reply_loop(
         ReplyLoopContext {
+            session_budget: None,
             compaction_cs: &crate::reply_loop::CompactionCriticalSection::new(),
             provider: &provider,
             tools: &[serde_json::json!({
@@ -3063,6 +3018,7 @@ async fn second_strike_no_progress_submission_settles_session() {
     conv.push(Message::user("Do the task."));
     let (result, output, _, _, _, _) = run_reply_loop(
         ReplyLoopContext {
+            session_budget: None,
             compaction_cs: &crate::reply_loop::CompactionCriticalSection::new(),
             provider: &provider,
             tools: &[serde_json::json!({
@@ -3277,6 +3233,7 @@ async fn gs37_no_edit_submit_after_rejection_keeps_one_quality_strike_and_prompt
     conv.push(Message::user("Do the task."));
     let (_result, output, _, _, _, _) = run_reply_loop(
         ReplyLoopContext {
+            session_budget: None,
             compaction_cs: &crate::reply_loop::CompactionCriticalSection::new(),
             provider: &provider,
             tools: &[serde_json::json!({
@@ -3438,6 +3395,7 @@ async fn changed_diff_fingerprint_does_not_trigger_no_progress_submission() {
     conv.push(Message::user("Do the task."));
     let (result, output, _, _, _, _) = run_reply_loop(
         ReplyLoopContext {
+            session_budget: None,
             compaction_cs: &crate::reply_loop::CompactionCriticalSection::new(),
             provider: &provider,
             tools: &[serde_json::json!({
@@ -3718,6 +3676,7 @@ async fn shared_compaction_cs_released_and_transcript_coherent_after_proactive_c
 
     let (result, _, _, _, _, _) = run_reply_loop(
         ReplyLoopContext {
+            session_budget: None,
             compaction_cs: &shared_cs,
             provider: &provider,
             tools: &[],
@@ -3839,6 +3798,7 @@ async fn cancel_during_failed_compaction_releases_guard_no_orphaned_context() {
 
     let (result, _, _, _, _, _) = run_reply_loop(
         ReplyLoopContext {
+            session_budget: None,
             compaction_cs: &shared_cs,
             provider: &provider,
             tools: &[],
@@ -3953,6 +3913,7 @@ async fn successful_compaction_produces_clean_post_rotation_transcript() {
 
     let (result, _, _, _, _, _) = run_reply_loop(
         ReplyLoopContext {
+            session_budget: None,
             compaction_cs: &shared_cs,
             provider: &provider,
             tools: &[],
@@ -4210,6 +4171,7 @@ async fn compaction_cs_released_on_max_turns_exit() {
 
     let (result, _, _, _, _, _) = run_reply_loop(
         ReplyLoopContext {
+            session_budget: None,
             compaction_cs: &shared_cs,
             provider: &provider,
             tools: &[],
@@ -4265,6 +4227,7 @@ async fn compaction_cs_released_on_cancel_exit() {
 
     let (result, _, _, _, _, _) = run_reply_loop(
         ReplyLoopContext {
+            session_budget: None,
             compaction_cs: &shared_cs,
             provider: &provider,
             tools: &[],
@@ -4322,6 +4285,7 @@ async fn load_conversation_projects_compacted_view_while_raw_preserves_history()
 
     let (result, _, _, _, _, _) = run_reply_loop(
         ReplyLoopContext {
+            session_budget: None,
             compaction_cs: &crate::reply_loop::CompactionCriticalSection::new(),
             provider: &provider,
             tools: &[],
@@ -5702,6 +5666,13 @@ async fn provider_phase_scenario_cancellation_and_drop_flush_active_interval_onc
     );
 }
 
+// `PHASE_METRIC_LOCK` is held across the `.await`s below on purpose: the four
+// scenarios each measure an exact before/after delta on the process-global
+// phase-metric collector, so they must not interleave with one another. They
+// already run inside this single test function, and the dedicated
+// `PHASE_METRIC_ROLE` label keeps their samples away from the worker-role
+// dispatcher tests running in parallel, so the lock is uncontended in practice.
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn provider_phase_scripted_reply_loop_scenarios() {
     // Keep every database-backed harness and process-global refinement-role

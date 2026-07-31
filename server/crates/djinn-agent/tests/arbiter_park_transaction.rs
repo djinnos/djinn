@@ -51,6 +51,8 @@ fn test_agent_context(db: Database) -> AgentContext {
         graph_warmer: None,
         repo_graph_ops: None,
         runtime_ops: None,
+        resize_admission: None,
+        resize_drop: None,
         cargo_target_runs_root: {
             let path = std::env::current_dir()
                 .unwrap()

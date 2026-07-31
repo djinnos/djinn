@@ -497,7 +497,7 @@ async fn shell_dispatch_lease_queue_timeout_returns_the_command_result_not_an_er
         // The real durable admission authority over the same real database the
         // lease authority above uses. The composition under test is
         // `call_shell` -> `ShellLaunchContext` -> `LeaseInvocationRunner` ->
-        // durable `admission_handoff` read; nothing here fakes the decision.
+        // durable invocation-lease authority read; nothing here fakes the decision.
         Arc::new(DurableInvocationLiftAuthority::new(
             state.db.clone(),
             "shell-dispatch-test",
@@ -535,7 +535,7 @@ async fn shell_dispatch_lease_queue_timeout_returns_the_command_result_not_an_er
     );
     assert_eq!(broker.lifts, 0, "a degraded command is never lifted");
     // …and because this composition runs against the real durable authority in
-    // the state a normal deployment is actually in — no `admission_handoff` row,
+    // the state a normal deployment is actually in — no authority row,
     // which `evaluate_invocation_lift` maps to `Unleased` — the leaf must have
     // been born WITHOUT a quota of its own.
     //

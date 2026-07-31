@@ -341,17 +341,12 @@ impl SupervisorServices for WorkerSupervisorServices {
     // `DurableInvocationLiftAuthority`, handed the same in-pod platform
     // `Database` this type uses, at the point the runner is constructed.
 
-    async fn record_generation_ack(&self, generation_key: String) -> Result<(), String> {
-        let repo = djinn_db::AdmissionHandoffRepository::new(self.agent_context.db.clone());
-        let epoch = match repo.read().await {
-            Ok(Some(row)) => row.epoch,
-            Ok(None) => return Ok(()),
-            Err(error) => return Err(error.to_string()),
-        };
-        repo.record_generation_ack(epoch, &generation_key)
-            .await
-            .map_err(|error| error.to_string())
-    }
+    // And there is deliberately no `record_generation_ack` here either. It wrote
+    // `admission_handoff_generation_ack` rows for the v0→v1 invocation-primary
+    // handoff edge; the Kueue cutover deleted that authority, that edge, and the
+    // required-generation set the rows were matched against. The trait method
+    // was removed rather than stubbed, so nothing is left writing rows nobody
+    // reads.
 
     async fn report_stage_step(&self, step: &'static str) -> Result<(), String> {
         self.rpc.report_stage_step(step).await

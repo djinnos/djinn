@@ -9,9 +9,11 @@
 //! Ships DARK/OBSERVE (proposal nquz, phase 1): no production caller writes rows
 //! through this ledger yet, and no automated GC path consumes it.
 //!
-//! Serialization mirrors `admission_journal.rs`: every mutating transition takes
-//! a per-volume transaction-scoped advisory lock plus `SELECT ... FOR UPDATE` on
-//! the run-dir row, then applies a compare-and-set on `(state, generation)`.
+//! Serialization: every mutating transition takes a per-volume
+//! transaction-scoped advisory lock plus `SELECT ... FOR UPDATE` on the run-dir
+//! row, then applies a compare-and-set on `(state, generation)`. This pattern
+//! was copied from `admission_journal.rs`, which the Kueue cutover (o53p)
+//! deleted along with the rest of the pods-quota reservation ledger.
 
 use serde::{Deserialize, Serialize};
 use sqlx::{Postgres, Transaction};

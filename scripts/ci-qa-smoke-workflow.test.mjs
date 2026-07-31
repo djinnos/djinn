@@ -3,6 +3,8 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import test from 'node:test';
 
+import { scriptCode } from './lib/source-text.mjs';
+
 const WORKFLOW = resolve('.github/workflows/quality-gate.yml');
 
 // Keep trigger parsing scoped to GitHub event names so later top-level mappings
@@ -126,8 +128,27 @@ function stepName(step) {
   return step.lines[0].text.match(/^ {6}- name:\s*(.+?)\s*$/)?.[1];
 }
 
+// Every source-text assertion in this file goes through `blockCode`, which
+// strips `#` comments (see scripts/lib/source-text.mjs). Two live defects
+// motivated it, one in each direction:
+//
+//   * BAN false-positive: `assertQaJobHasNoLiveDependencies` forbids
+//     /\bkind\b/i, which matches the ordinary English word in a comment
+//     ("this kind of failure"). So does /\bhttps?:\/\//i against any URL in
+//     a comment. Either reds the build with no live dependency added.
+//   * PRESENCE false-negative, the silent one: delete the
+//     `psql … CREATE DATABASE djinn_test_template` step, leave a comment
+//     saying it moved, and this guard stays green while qa-smoke no longer
+//     creates its database.
+//
+// A trailing comment does NOT launder the code in front of it, so
+// `run: make test  # no kubectl needed` is still a `make test` step.
+function blockCode(block) {
+  return scriptCode(block.lines.map(({ text }) => text).join('\n'));
+}
+
 function stepText(step) {
-  return step.lines.map(({ text }) => text).join('\n');
+  return blockCode(step);
 }
 
 function namedStep(job, name) {
@@ -152,7 +173,7 @@ function assertStepOrder(job, names) {
 }
 
 function assertQaJobHasNoLiveDependencies(job) {
-  const source = job.lines.map(({ text }) => text).join('\n');
+  const source = blockCode(job);
   assert.doesNotMatch(source, /\b(?:kubectl|kind|kubernetes|kubeconfig|helm|tilt)\b/i,
     'qa-smoke must not depend on Kubernetes or local-cluster tooling');
   assert.doesNotMatch(source, /\b(?:nightly[-_ ]live|live[-_ ](?:provider|credential|scenario|execution))\b/i,
@@ -208,7 +229,7 @@ test('qa-smoke consumes the routed output and is event-safe', () => {
 test('qa-smoke owns only a restore-only test cache and a disposable database', () => {
   const qa = parseJobs(readFileSync(WORKFLOW, 'utf8')).jobs.get('qa-smoke');
   assert.ok(qa, 'qa-smoke job must exist');
-  const source = qa.lines.map(({ text }) => text).join('\n');
+  const source = blockCode(qa);
 
   assert.match(source, /Swatinem\/rust-cache@v2/, 'qa-smoke must restore Rust build inputs');
   assert.match(source, /^ {10}shared-key:\s*server-test\s*$/m, 'qa-smoke must use the server-test cache family');
@@ -236,7 +257,7 @@ test('qa-smoke owns only a restore-only test cache and a disposable database', (
 test('qa-smoke builds, precompiles, and directly executes in deterministic order', () => {
   const qa = parseJobs(readFileSync(WORKFLOW, 'utf8')).jobs.get('qa-smoke');
   assert.ok(qa, 'qa-smoke job must exist');
-  const source = qa.lines.map(({ text }) => text).join('\n');
+  const source = blockCode(qa);
   assertStepOrder(qa, [
     'Build migrated Postgres template',
     'Build qa runner once',
@@ -292,7 +313,7 @@ test('Quality Gate aggregates qa-smoke results fail-closed', () => {
   assert.ok(gate, 'Quality Gate job must exist');
   assert.ok(jobNeeds(gate).includes('qa-smoke'), 'Quality Gate must depend on qa-smoke');
 
-  const source = gate.lines.map(({ text }) => text).join('\n');
+  const source = blockCode(gate);
   assert.match(source, /^ {10}QA_SMOKE:\s*\$\{\{ needs\.preflight\.outputs\.qaSmoke \}\}:\$\{\{ needs\.qa-smoke\.result \}\}\s*$/m,
     'Quality Gate must pair qa-smoke selection with its result');
   assert.match(source, /if \[ "\$selected" = true \] && \[ "\$result" = success \]; then return; fi/,

@@ -25,7 +25,12 @@ pub(crate) mod lifecycle; // HOST-ONLY: per-stage lifecycle helpers
 mod pool; // HOST-ONLY: slot pool, handle, factory
 pub(crate) mod reply_loop; // THIN SHIM: reply-loop facade adapter
 pub(crate) mod session_extraction; // THIN SHIM: extraction backfill adapter
-mod supervisor_runner; // HOST-ONLY: host-side dispatch logic
+// HOST-ONLY: host-side dispatch logic. `pub` for exactly one reason: the
+// production dispatch seam `execute_runtime_report_phase` has to be enterable
+// from the composition root's own tests, so a reachability claim about it can
+// be proved by driving the function production calls rather than by
+// constructing the types it happens to use.
+pub mod supervisor_runner;
 
 pub use actor::*;
 pub use commands::{SlotCommand, SlotError};

@@ -1,17 +1,25 @@
-//! Cap resolution for the one v1 build-slot FIFO.
+//! Cap resolution for the one build-slot FIFO.
 //!
 //! Split out of `build_lease.rs` for the file-size guard; this is the same
 //! `BuildLeaseService` and the same private state, in a child module.
 //!
 //! Everything here answers one question: what cap is enforced RIGHT NOW. The
-//! answer has a strict precedence — the durable admission-epoch reference cap,
-//! then a positive `build_lease_caps` row, then the process configuration —
-//! and exactly one place that writes the enforced value
-//! ([`BuildLeaseService::read_handoff_epoch`]).
+//! answer has a strict precedence — the durable invocation-lease authority's
+//! reference cap, then a positive `build_lease_caps` row, then the process
+//! configuration — and exactly one place that writes the enforced value
+//! ([`BuildLeaseService::adopt_authority_cap`]).
 //!
 //! That single writer is the fix for a real production defect. `set-cap` used
 //! to be inert against a running process because the resolved cap was only
-//! STORED by `recover()`; see `read_handoff_epoch` for the full account.
+//! STORED by `recover()`; see `adopt_authority_cap` for the full account.
+//!
+//! # This module survives the Kueue cutover deliberately
+//!
+//! 9oga's file map lists it as delete-entirely while listing `build_lease.rs`,
+//! which calls it, as a retain. That is a contradiction in the campaign's own
+//! map, and this is the side of it that is correct: the reference cap is the
+//! invocation lease's, not the deleted pods-quota reservation's, and this is the
+//! only path that adopts it at runtime.
 
 use std::sync::atomic::Ordering;
 
@@ -49,14 +57,14 @@ impl BuildLeaseService {
         self.configured_cap
     }
 
-    /// Read the durable admission-handoff epoch and apply its reference cap.
+    /// Read the durable invocation-lease authority and apply its reference cap.
     ///
     /// Returns the reference cap to enforce, defaulting to `fallback` (the
-    /// lease-table cap) when no handoff reader is installed or the row carries
-    /// no cap. An unreadable epoch clears the observed epoch (fail closed) and
-    /// retains the fallback cap. The handoff reference cap is authoritative for
-    /// the v1 authority when set, so a restart converges on the epoch's cap
-    /// rather than a stale lease-table value.
+    /// lease-table cap) when no authority reader is installed or the row carries
+    /// no cap. An unreadable authority clears the observed epoch (fail closed)
+    /// and retains the fallback cap. The authority's reference cap is
+    /// authoritative when set, so a restart converges on it rather than on a
+    /// stale lease-table value.
     ///
     /// The resolved cap is STORED, not merely returned. It used to be returned
     /// only, and `recover()` was the sole caller that wrote it to `self.cap` —
@@ -67,41 +75,41 @@ impl BuildLeaseService {
     /// atomic that only a restart could refresh. An operator's only cap knob
     /// silently doing nothing during an incident is worse than refusing the
     /// write, so the durable cap is now authoritative at runtime: every read of
-    /// the epoch converges the enforced value, and
-    /// [`Self::refresh_epoch_cap`] performs that read on the coordinator's
-    /// handoff tick.
+    /// the authority converges the enforced value, and
+    /// [`Self::refresh_epoch_cap`] performs that read on the server's periodic
+    /// authority pass.
     ///
     /// Storing here is deliberately the ONLY write path besides `set_cap`, so
     /// there is one rule for what the enforced cap is: whatever the last
-    /// successful epoch read resolved. An unreadable or capless epoch stores
-    /// the fallback rather than widening the cap.
-    pub(super) async fn read_handoff_epoch(&self, fallback: i64) -> i64 {
-        let cap = self.resolve_handoff_epoch(fallback).await;
+    /// successful authority read resolved. An unreadable or capless authority
+    /// stores the fallback rather than widening the cap.
+    pub(super) async fn adopt_authority_cap(&self, fallback: i64) -> i64 {
+        let cap = self.resolve_authority_cap(fallback).await;
         self.cap.store(cap, Ordering::Release);
         cap
     }
 
-    async fn resolve_handoff_epoch(&self, fallback: i64) -> i64 {
+    async fn resolve_authority_cap(&self, fallback: i64) -> i64 {
         let fallback = self.armed_fallback(fallback);
-        let Some(handoff) = self.handoff.as_ref() else {
+        let Some(authority) = self.authority.as_ref() else {
             return fallback;
         };
-        match handoff.read().await {
+        match authority.read().await {
             Ok(Some(row)) => {
                 self.observed_epoch.store(row.epoch, Ordering::Release);
                 self.dispatch_enforcing
-                    .store(row.v1_mode.is_enforcing(), Ordering::Release);
+                    .store(row.mode.is_enforcing(), Ordering::Release);
                 row.cap.unwrap_or(fallback)
             }
             Ok(None) => {
-                // No durable epoch row: nothing to observe, keep the fallback.
+                // No durable authority row: nothing to observe, keep the fallback.
                 self.observed_epoch.store(-1, Ordering::Release);
                 self.dispatch_enforcing.store(false, Ordering::Release);
                 fallback
             }
             Err(_) => {
-                // Unreadable epoch: fail closed on the observed epoch, and do
-                // NOT enforce a cap we could not confirm was armed.
+                // Unreadable authority: fail closed on the observed epoch, and
+                // do NOT enforce a cap we could not confirm was armed.
                 self.observed_epoch.store(-1, Ordering::Release);
                 self.dispatch_enforcing.store(false, Ordering::Release);
                 fallback
@@ -109,14 +117,14 @@ impl BuildLeaseService {
         }
     }
 
-    /// Re-read the durable admission epoch and adopt its reference cap, without
-    /// a restart.
+    /// Re-read the durable invocation-lease authority and adopt its reference
+    /// cap, without a restart.
     ///
     /// This is what makes `djinn-server epoch set-cap` a live control rather
     /// than a value that takes effect at the next rollout. It is called on the
-    /// coordinator's periodic handoff tick — the same tick that already
-    /// re-evaluates the epoch's v0/v1 modes — so the cap and the modes it is
-    /// paired with can never be observed from different epochs for long.
+    /// server's periodic authority pass — the same pass that already
+    /// re-evaluates the arming mode — so the cap and the mode it is paired with
+    /// can never be observed from different epochs for long.
     ///
     /// A RAISED cap must also drain: `grant_next` runs only when someone
     /// queues, so without this an operator who raises the cap to unwedge a
@@ -133,7 +141,7 @@ impl BuildLeaseService {
         let _guard = self.operation.lock().await;
         let previous = self.cap.load(Ordering::Acquire);
         let durable = self.repository.snapshot().await.map(|s| s.cap).ok()?;
-        let cap = self.read_handoff_epoch(durable).await;
+        let cap = self.adopt_authority_cap(durable).await;
         if cap == previous {
             return Some(cap);
         }

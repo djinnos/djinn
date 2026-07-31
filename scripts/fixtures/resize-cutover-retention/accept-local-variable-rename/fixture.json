@@ -1,0 +1,13 @@
+{
+  "asset": null,
+  "expect": "accept",
+  "why": "AC8's REQUIRED-PASSING case. An ordinary refactor: a local variable renamed inside the most heavily protected function in the repository. Nothing was retired, so the gate must stay green. A gate formulated as byte-identity of protected source files turns THIS red, which is why byte-identity is rejected outright — source files in this epic are expected to change; what must not happen is retirement.",
+  "operations": [
+    {
+      "op": "replace",
+      "path": "server/crates/djinn-cgroup-launcher/src/lib.rs",
+      "find": "        let events = self.fs.read_leaf(leaf.fd, \"cgroup.events\")?;\n        if populated_zero(&events)? {\n",
+      "with": "        let drained = self.fs.read_leaf(leaf.fd, \"cgroup.events\")?;\n        if populated_zero(&drained)? {\n"
+    }
+  ]
+}

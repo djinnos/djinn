@@ -313,15 +313,49 @@ impl KubeClientDispatcher {
 impl WarmJobDispatcher for KubeClientDispatcher {
     async fn dispatch(&self, namespace: &str, job: Job) -> Result<String, String> {
         let api: Api<Job> = Api::namespaced(self.client.clone(), namespace);
-        let created = api
-            .create(&PostParams::default(), &job)
-            .await
-            .map_err(|e| e.to_string())?;
-        Ok(created
-            .metadata
-            .name
-            .unwrap_or_else(|| "unnamed-warm-job".to_string()))
+        let requested_name = job.metadata.name.clone();
+        match api.create(&PostParams::default(), &job).await {
+            Ok(created) => Ok(created
+                .metadata
+                .name
+                .unwrap_or_else(|| "unnamed-warm-job".to_string())),
+            // Create-then-observe: both warm and standalone-SCIP Job names are
+            // deterministic in their work identity, so a 409 means *this exact
+            // object* already exists — a lost create response, a concurrent
+            // dispatcher, or a retry after an ambiguous POST. Adopting it is the
+            // only outcome that keeps one work identity mapped to one Kubernetes
+            // object; returning the error instead makes the caller re-dispatch
+            // and, once Kueue is armed, leaves an admitted Workload nobody
+            // observes. GET (not the create response) because the winner's
+            // manifest — including the Workload Kueue derived from it — is the
+            // authority, not ours.
+            Err(error) if api_error_is_already_exists(&error) => {
+                let name = requested_name.ok_or_else(|| {
+                    format!("apiserver reported AlreadyExists for an unnamed Job: {error}")
+                })?;
+                let existing = api.get(&name).await.map_err(|get_error| {
+                    format!("adopt existing Job {name} after AlreadyExists: {get_error}")
+                })?;
+                Ok(existing.metadata.name.unwrap_or(name))
+            }
+            Err(error) => Err(error.to_string()),
+        }
     }
+}
+
+/// `true` when the apiserver rejected a create because the object already
+/// exists (HTTP 409 / `reason: AlreadyExists`).
+///
+/// Matched on the structured `ErrorResponse` rather than on the rendered
+/// message: 409 is also how the apiserver reports an optimistic-concurrency
+/// conflict on *update*, and only `reason` tells the two apart.
+#[must_use]
+pub fn api_error_is_already_exists(error: &kube::Error) -> bool {
+    matches!(
+        error,
+        kube::Error::Api(response)
+            if response.code == 409 && response.reason == "AlreadyExists"
+    )
 }
 
 #[path = "graph_warmer_lifecycle.rs"]
@@ -529,11 +563,13 @@ impl<C: WarmCandidateClient> WarmCandidateReconciler for WarmCandidateControl<C>
 }
 
 impl WarmDispatch {
-    async fn admission_request(&self, project_id: &str) -> WarmAdmissionRequest {
-        let revision = discover_mirror_main_tip(project_id)
-            .await
-            .unwrap_or_else(|| "unknown".to_string());
-        let work_id = warm_work_id(project_id, &revision);
+    /// Build the admission identity for one `(project, warm generation)` pair.
+    ///
+    /// Pure: the caller reads the mirror head once and passes it in, so the
+    /// object name, the ledger work id and the lease's `graph_revision` are
+    /// derived from the same observation.
+    fn admission_request_for(project_id: &str, revision: &str) -> WarmAdmissionRequest {
+        let work_id = warm_work_id(project_id, revision);
         debug_assert!(
             crate::label_value::is_valid_label_value(&work_id),
             "warm work_id must be label-safe: {work_id}"
@@ -779,11 +815,34 @@ impl WarmDispatch {
             }
         };
 
-        let admission_request = self.admission_request(project_id).await;
-        let lease_grant = if let Some(lease) = self.lease.as_ref() {
-            let revision = discover_mirror_main_tip(project_id)
-                .await
-                .unwrap_or_else(|| "unknown".to_string());
+        // The mirror head is the warm generation: it names the object, it keys
+        // the ledger's work id, and it is the lease's `graph_revision`. Read it
+        // ONCE — the lease branch used to re-read it, so a head that advanced
+        // between the two reads gave the lease a different revision than the
+        // one the Job name and journal key were derived from.
+        let warm_generation = discover_mirror_main_tip(project_id)
+            .await
+            .unwrap_or_else(|| "unknown".to_string());
+        let admission_request = Self::admission_request_for(project_id, &warm_generation);
+
+        // === Kueue cutover (37yq) ===
+        //
+        // When armed, Kueue's ClusterQueue is the capacity authority and BOTH
+        // pre-create ledger authorities on this path stand down: the v1 build
+        // lease AND the admission journal. Silencing only one leaves the other
+        // still writing, still counting occupancy against a cap nothing
+        // decrements, and still able to refuse a dispatch Kueue already
+        // admitted — which is why they are gated together here and not at their
+        // individual call sites.
+        //
+        // Disarmed, `ledger_lease` / `ledger_admission` are exactly
+        // `self.lease` / `self.admission`, so the pre-cutover path is unchanged.
+        let disarmed = !self.config.kueue_armed;
+        let ledger_lease = disarmed.then_some(self.lease.as_ref()).flatten();
+        let ledger_admission = disarmed.then_some(self.admission.as_ref()).flatten();
+
+        let lease_grant = if let Some(lease) = ledger_lease {
+            let revision = warm_generation.clone();
             let now_ms =
                 (time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000) as i64;
             let deadline_ms =
@@ -834,6 +893,7 @@ impl WarmDispatch {
             None => build_warm_job(
                 &self.config,
                 project_id,
+                &warm_generation,
                 &image_tag,
                 cargo_cache_policy.as_ref(),
             ),
@@ -857,7 +917,7 @@ impl WarmDispatch {
         // ledger append that cannot deny at a cap (see `CapacitySource`). So it
         // runs on both paths, and the lease grant governs only whether the Job
         // may be created.
-        let permit = match self.admission.as_ref() {
+        let permit = match ledger_admission {
             Some(admission) => match admission.admit(admission_request.clone()).await {
                 Ok(permit) => {
                     if let Err(error) = admission
@@ -889,8 +949,7 @@ impl WarmDispatch {
                     error = %e,
                     "K8sGraphWarmer: Job dispatch failed"
                 );
-                if let (Some(admission), Some(permit)) = (self.admission.as_ref(), permit.as_ref())
-                {
+                if let (Some(admission), Some(permit)) = (ledger_admission, permit.as_ref()) {
                     let transition = if dispatcher_error_is_definitive(&e) {
                         WarmAdmissionTransition::DefinitiveFailure {
                             diagnostic: e.clone(),
@@ -950,7 +1009,7 @@ impl WarmDispatch {
             // is the state reconciliation knows how to resolve in either
             // direction — adoption if the object shows up, retirement once its
             // absence is proven.
-            if let (Some(admission), Some(permit)) = (self.admission.as_ref(), permit.as_ref())
+            if let (Some(admission), Some(permit)) = (ledger_admission, permit.as_ref())
                 && let Err(error) = admission
                     .transition(
                         permit,
@@ -969,7 +1028,7 @@ impl WarmDispatch {
         }
 
         let uid = self.watcher.job_uid(&namespace, &job_name).await;
-        if let (Some(admission), Some(permit)) = (self.admission.as_ref(), permit.as_ref()) {
+        if let (Some(admission), Some(permit)) = (ledger_admission, permit.as_ref()) {
             let transition = match uid.as_ref() {
                 Some(uid) => WarmAdmissionTransition::Live { uid: uid.clone() },
                 None => WarmAdmissionTransition::CreateUnknown {
@@ -993,7 +1052,7 @@ impl WarmDispatch {
         let watcher = self.watcher.clone();
         let in_flight = self.in_flight.clone();
         let completion_sink = self.completion_sink.clone();
-        let admission = self.admission.clone();
+        let admission = ledger_admission.cloned();
         let permit = permit.clone();
         let uid = uid.clone();
         let project_id_owned = project_id.to_string();
@@ -1789,6 +1848,9 @@ impl GraphWarmerService for K8sGraphWarmer {
 #[cfg(test)]
 #[path = "graph_warmer_admission_tests.rs"]
 mod admission_tests;
+#[cfg(test)]
+#[path = "graph_warmer_adopt_tests.rs"]
+mod adopt_tests;
 #[cfg(test)]
 #[path = "graph_warmer_ledger_tests.rs"]
 mod ledger_tests;

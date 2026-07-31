@@ -1,0 +1,8 @@
+{
+  "asset": "cgroup-launcher-crate",
+  "expect": "reject",
+  "why": "Retiring the launcher crate starts with dropping its manifest: without it the crate no longer builds, no longer ships in the release image, and its containment suites stop compiling. The file the gate loses first is the one that names the crate.",
+  "operations": [
+    { "op": "delete", "path": "server/crates/djinn-cgroup-launcher/Cargo.toml" }
+  ]
+}

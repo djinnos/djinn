@@ -21,8 +21,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use djinn_db::{
-    AdmissionJournalRepository, BuildLeaseConsumerKind, BuildLeaseKey, BuildLeaseRepository,
-    BuildLeaseState, Database, ReclaimAbsentBuildLeaseInput, ReclaimAbsentBuildLeaseOutcome,
+    BuildLeaseConsumerKind, BuildLeaseKey, BuildLeaseRepository, BuildLeaseState, Database,
+    ReclaimAbsentBuildLeaseInput, ReclaimAbsentBuildLeaseOutcome,
 };
 use djinn_k8s::{
     LeasedWarmJobIdentity, ObjectPresence, UidGetResult, WorkloadInventory, WorkloadObjectKind,
@@ -231,15 +231,10 @@ fn reclaimer(
     repository: &Arc<BuildLeaseRepository>,
     inventory: NamespaceInventory,
 ) -> BuildLeaseReclaimer {
+    // Warm and invocation reclamation prove absence from Kubernetes and nothing
+    // else: the only authority the reclaimer consults is the namespace.
     BuildLeaseReclaimer::with_settle_window(
         Arc::clone(repository),
-        // Warm and invocation reclamation prove absence from Kubernetes and
-        // ask the admission ledger nothing at all, so an empty ledger is the
-        // honest fixture: if either path ever starts consulting it, these
-        // tests change behaviour rather than passing quietly.
-        Arc::new(AdmissionJournalRepository::new(
-            Database::open_in_memory().unwrap(),
-        )),
         Arc::new(inventory),
         Duration::ZERO,
     )
@@ -444,9 +439,6 @@ async fn an_unusable_listing_blocks_the_pass_and_retires_nothing() {
     wedge(&service).await;
     let report = BuildLeaseReclaimer::with_settle_window(
         Arc::clone(&repository),
-        Arc::new(AdmissionJournalRepository::new(
-            Database::open_in_memory().unwrap(),
-        )),
         Arc::new(Unlistable),
         Duration::ZERO,
     )
@@ -474,9 +466,6 @@ async fn an_unsettled_lease_is_not_judged_by_a_listing_it_could_predate() {
 
     let report = BuildLeaseReclaimer::with_settle_window(
         Arc::clone(&repository),
-        Arc::new(AdmissionJournalRepository::new(
-            Database::open_in_memory().unwrap(),
-        )),
         Arc::new(NamespaceInventory::empty()),
         Duration::from_secs(3600),
     )
@@ -592,5 +581,103 @@ fn lease_object_names_come_from_the_durable_identity_or_nowhere() {
     assert_eq!(
         lease_object_name(&row(BuildLeaseConsumerKind::TaskInvocation, "task:t::inv")),
         None
+    );
+}
+
+/// The load-bearing premise of `OwnerlessProof::DispatchAuthorityDeleted`.
+///
+/// A settled occupying `task_dispatch` lease is retired unconditionally, and
+/// that is only safe because NOTHING can acquire one any more: the pre-create
+/// dispatch reservation was stood down by the Kueue cutover (o53p), and
+/// `LeaseIdentity::TaskDispatch` has no constructor left in the workspace.
+///
+/// If someone reintroduces one, this fails BEFORE the reclaimer starts eating
+/// live dispatch leases. That ordering is the whole point: the failure mode
+/// being guarded is silent — a reclaimed live lease looks exactly like a
+/// reclaimed legacy one until the board stops dispatching.
+///
+/// The scan is over source text rather than types because "no value of this
+/// variant is ever constructed" is not expressible in Rust's type system while
+/// the variant must stay constructible for the durable rows that already exist.
+/// `identity()` in `build_lease.rs` MATCHES on the variant to map a legacy row,
+/// which is a read, not an acquisition — hence the pattern-vs-construction
+/// distinction below.
+#[test]
+fn no_dispatch_lease_can_ever_be_acquired_again() {
+    // Assembled at runtime so this test does not match its own literals.
+    let ctor = format!("LeaseIdentity::TaskDispatch{}", "(");
+    let struct_ctor = format!("TaskDispatchLeaseIdentity {}", "{");
+
+    fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = path.file_name().unwrap_or_default().to_string_lossy();
+            if path.is_dir() {
+                if name == "target" || name == ".git" || name == "node_modules" {
+                    continue;
+                }
+                walk(&path, out);
+            } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+                out.push(path);
+            }
+        }
+    }
+
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("crates dir")
+        .parent()
+        .expect("server dir")
+        .to_path_buf();
+    let mut files = Vec::new();
+    walk(&root, &mut files);
+    assert!(
+        files.len() > 100,
+        "the source scan must actually reach the workspace; found only {} files under {}",
+        files.len(),
+        root.display()
+    );
+
+    let mut offenders: Vec<String> = Vec::new();
+    for path in files {
+        // This test's own source names both constructors in its assertions.
+        if path.ends_with("build_lease_reclaim_tests.rs") {
+            continue;
+        }
+        let Ok(source) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        for line in source.lines() {
+            let trimmed = line.trim_start();
+            // `identity()` and friends PATTERN-MATCH the variant to read a
+            // legacy row. That is not an acquisition.
+            if trimmed.starts_with("//") || trimmed.contains("=>") {
+                continue;
+            }
+            // The type and variant must stay DECLARED — legacy rows still map
+            // through them. Only a construction site is an acquisition.
+            if trimmed.starts_with("pub struct")
+                || trimmed.starts_with("struct")
+                || trimmed.starts_with("pub enum")
+                || trimmed.starts_with("enum")
+            {
+                continue;
+            }
+            if line.contains(&ctor) || line.contains(&struct_ctor) {
+                offenders.push(format!("{}: {}", path.display(), line.trim()));
+            }
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "a `task_dispatch` build lease is being acquired again, but \
+         `BuildLeaseReclaimer` retires every settled occupying one on the \
+         grounds that no acquirer exists. Replace `DispatchAuthorityDeleted` \
+         with a real ownership proof BEFORE landing this:\n{}",
+        offenders.join("\n")
     );
 }

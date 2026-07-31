@@ -349,26 +349,51 @@ fn auto_merge_full_cycle_inflight_then_reopen_then_respawn() {
 
 #[test]
 fn auto_merge_reopen_decision_records_merge_failure_after_lock_release() {
-    djinn_telemetry::init().unwrap();
-    let before = djinn_telemetry::render().unwrap();
-    let merge_failures_before = unlabelled_metric_value(&before, "djinn_merge_failures_total");
+    // Scoped to a recorder no sibling test can reach (#2824). The registry
+    // `djinn_telemetry::render()` reads is process-global and every test in
+    // this binary is a thread of one process, so the previous version asserted
+    // on the whole binary's cumulative state: `djinn_pr_poller_tracked` is a
+    // GAUGE, and any sibling calling `set_tracked` overwrote it outright.
+    // Matching the sibling's value by convention only papered over that — it
+    // left the assertion true for the wrong reason, and one new caller away
+    // from flaking. The before/after delta on the counter had the same hole:
+    // a concurrent `increment_merge_failure` can land between the two renders.
+    let (_, rendered) = djinn_telemetry::render_isolated(|| {
+        record_auto_merge_decision_metrics(
+            &AutoMergeTickDecision::Return(AutoMergeFastPathState::Reopen),
+            2,
+        );
+    });
 
-    // Use the same tracked value as the coordinator live-metrics regression so
-    // the process-global gauge cannot make either test flaky if libtest runs
-    // them concurrently.
-    record_auto_merge_decision_metrics(
-        &AutoMergeTickDecision::Return(AutoMergeFastPathState::Reopen),
-        2,
-    );
-
-    let rendered = djinn_telemetry::render().unwrap();
+    // Absolute, not delta: this recorder starts empty and only this closure
+    // wrote to it.
     assert_eq!(
         unlabelled_metric_value(&rendered, "djinn_pr_poller_tracked"),
         2.0
     );
     assert_eq!(
         unlabelled_metric_value(&rendered, "djinn_merge_failures_total"),
-        merge_failures_before + 1.0
+        1.0
+    );
+}
+
+#[test]
+fn auto_merge_non_reopen_decision_records_no_merge_failure() {
+    // Same isolation, opposite arm: the counter must be absent entirely rather
+    // than merely unchanged. Against the process-global registry this could
+    // not be asserted at all — a sibling's increment would have left the
+    // series present with a nonzero total.
+    let (_, rendered) = djinn_telemetry::render_isolated(|| {
+        record_auto_merge_decision_metrics(&AutoMergeTickDecision::Spawn, 5);
+    });
+
+    assert_eq!(
+        unlabelled_metric_value(&rendered, "djinn_pr_poller_tracked"),
+        5.0
+    );
+    assert!(
+        !rendered.contains("djinn_merge_failures_total"),
+        "a Spawn decision must not touch the merge-failure counter, got:\n{rendered}"
     );
 }
 

@@ -1,4 +1,4 @@
-//! Migration 162 — durable build-pod permit schema contract.
+//! Durable build-pod permit and Pod resize identity schema contracts.
 //!
 //! Exercises the exact PostgreSQL schema introduced for build-pod permits with
 //! the repository's isolated-database migration harness. In particular, a Job
@@ -12,11 +12,92 @@ use sqlx::{Connection, Executor};
 
 const MIGRATION_VERSION: u64 = 162;
 const MIGRATION_FILE: &str = "162_build_pod_permits.sql";
+/// The resize migration is identified by its *description*, not its number.
+/// Migration numbers are assigned at merge time and get renumbered whenever
+/// another migration lands first, so pinning the numeric prefix here makes this
+/// test fail for a reason that has nothing to do with the schema it guards.
+const RESIZE_MIGRATION_SUFFIX: &str = "_build_pod_resize_identity.sql";
 const MIGRATION_OPERATOR_ID: &str = "00000000-0000-7000-8000-000000000162";
 const CREATOR_CONTRACT_VERSION: u64 = 142;
 
 fn base_database_url() -> String {
     djinn_db::test_database_base_url()
+}
+
+#[tokio::test]
+async fn resize_migration_upgrades_every_valid_permit_shape() {
+    with_temp_database("upgrade_resize_identity", |db_url| async move {
+        let mut conn = PgConnection::connect(&db_url).await.unwrap();
+        apply_prior_migrations(&mut conn).await;
+        apply_permit_migration(&mut conn).await;
+        let pool = PgPoolOptions::new().max_connections(1).connect(&db_url).await.unwrap();
+        seed_task_runs(
+            &pool,
+            MIGRATION_OPERATOR_ID,
+            &["released", "acquired", "job-created"],
+        )
+        .await;
+        sqlx::query("INSERT INTO build_pod_permits (task_run_id, fencing_token, state, released_at, released_fencing_token, release_reason) VALUES ('released', 9001, 'released', now(), 9001, 'before_job')")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO build_pod_permits (task_run_id, fencing_token, state) VALUES ('acquired', 9002, 'acquired')")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO build_pod_permits (task_run_id, fencing_token, state, job_uid) VALUES ('job-created', 9003, 'job_created', 'preexisting-job')")
+            .execute(&pool).await.unwrap();
+        pool.close().await;
+        apply_resize_migration(&mut conn).await;
+        let pool = PgPoolOptions::new().max_connections(1).connect(&db_url).await.unwrap();
+        let rows: Vec<(String, Option<String>, String, Option<String>)> = sqlx::query_as(
+            "SELECT task_run_id, job_uid, state, pod_uid FROM build_pod_permits ORDER BY task_run_id",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                ("acquired".into(), None, "acquired".into(), None),
+                (
+                    "job-created".into(),
+                    Some("preexisting-job".into()),
+                    "job_created".into(),
+                    None,
+                ),
+                ("released".into(), None, "released".into(), None),
+            ],
+            "the resize migration must preserve every prior permit shape without inventing resize identity"
+        );
+        pool.close().await;
+    }).await;
+}
+
+/// Resolve the resize migration by description so a renumber cannot break this
+/// test, and fail loudly if it is missing or ambiguous rather than silently
+/// applying nothing.
+fn resize_migration_path() -> PathBuf {
+    let mut matches: Vec<PathBuf> = std::fs::read_dir(migrations_dir())
+        .expect("read migrations dir")
+        .filter_map(|entry| {
+            let path = entry.expect("read migration dir entry").path();
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.ends_with(RESIZE_MIGRATION_SUFFIX))
+                .then_some(path)
+        })
+        .collect();
+    matches.sort();
+    assert_eq!(
+        matches.len(),
+        1,
+        "expected exactly one `*{RESIZE_MIGRATION_SUFFIX}` migration, found {matches:?}"
+    );
+    matches.remove(0)
+}
+
+async fn apply_resize_migration(conn: &mut PgConnection) {
+    let sql = std::fs::read_to_string(resize_migration_path()).expect("read resize migration sql");
+    conn.execute(sql.as_str())
+        .await
+        .expect("apply resize migration after the build-pod permit migration");
 }
 
 fn migrations_dir() -> PathBuf {
@@ -218,26 +299,27 @@ async fn seed_preexisting_build_lease_and_admission_data(pool: &sqlx::PgPool) {
     .execute(pool)
     .await
     .expect("seed pre-existing build lease");
-    sqlx::query(
-        "INSERT INTO admission_journal \
-         (domain, work_id, generation, workload_kind, state, creator_server_epoch, \
-          object_name, object_uid, created_at, updated_at) \
-         VALUES ('invocation_build', 'preexisting-work', 3, 'invocation', 'live', \
-                 'preexisting-epoch', 'preexisting-job', 'preexisting-job-uid', \
-                 '2025-01-02T03:04:05Z', '2025-01-02T03:04:06Z')",
-    )
-    .execute(pool)
-    .await
-    .expect("seed pre-existing admission journal row");
+    // The `admission_journal` seed that used to live here was removed with the
+    // pods-quota reservation authority itself (o53p). The point of this helper
+    // is unchanged: prove migrations 162/164 do not rewrite pre-existing ledger
+    // rows. The `build_leases`, `build_lease_caps` and invocation-lease
+    // authority assertions below still carry that proof, and every
+    // build_pod_permits / 162 / 164 assertion in this file is byte-identical to
+    // before.
+    //
+    // The retired v0↔v1 handoff columns (`phase`, `v0_mode`, the two ack
+    // columns) are no longer written or asserted: they are `flc5`'s to drop, and
+    // a test that pinned them would turn that DROP into a failure here rather
+    // than in the code that actually depends on them. What is seeded and
+    // asserted is exactly what the invocation-lease authority owns.
     sqlx::query(
         "UPDATE admission_handoff \
-         SET phase = 'invocation_primary', epoch = 7, v0_mode = 'disabled', \
-             v1_mode = 'enforce', cap = 7, updated_at = '2025-01-02T03:04:07Z' \
+         SET epoch = 7, v1_mode = 'enforce', cap = 7, updated_at = '2025-01-02T03:04:07Z' \
          WHERE name = 'build'",
     )
     .execute(pool)
     .await
-    .expect("seed pre-existing admission handoff");
+    .expect("seed pre-existing invocation lease authority");
 }
 
 async fn existing_build_lease_and_admission_snapshot(pool: &sqlx::PgPool) -> Vec<String> {
@@ -255,27 +337,18 @@ async fn existing_build_lease_and_admission_snapshot(pool: &sqlx::PgPool) -> Vec
     .fetch_one(pool)
     .await
     .expect("read pre-existing build lease cap");
-    let journal: String = sqlx::query_scalar(
-        "SELECT concat_ws('|', domain, work_id, generation, workload_kind, state, \
-                creator_server_epoch, object_name, object_uid, created_at::text, updated_at::text) \
-         FROM admission_journal \
-         WHERE domain = 'invocation_build' AND work_id = 'preexisting-work' AND generation = 3",
-    )
-    .fetch_one(pool)
-    .await
-    .expect("read pre-existing admission journal row");
-    let handoff: String = sqlx::query_scalar(
-        "SELECT concat_ws('|', name, phase, epoch, v0_mode, v1_mode, cap, updated_at::text) \
+    let authority: String = sqlx::query_scalar(
+        "SELECT concat_ws('|', name, epoch, v1_mode, cap, updated_at::text) \
          FROM admission_handoff WHERE name = 'build'",
     )
     .fetch_one(pool)
     .await
-    .expect("read pre-existing admission handoff");
-    vec![lease, lease_cap, journal, handoff]
+    .expect("read pre-existing invocation lease authority");
+    vec![lease, lease_cap, authority]
 }
 
 #[tokio::test]
-async fn migration_162_embedded_fresh_database_enforces_build_pod_permit_contract() {
+async fn embedded_fresh_database_enforces_build_pod_permit_and_resize_contract() {
     with_temp_database("build_pod_permits", |db_url| async move {
         let creator_id =
             djinn_db::test_support::apply_all_migrations_to_fresh_database(&db_url).await;
@@ -290,6 +363,14 @@ async fn migration_162_embedded_fresh_database_enforces_build_pod_permit_contrac
             "permit-run-released",
             "permit-run-invalid",
             "permit-run-distinct",
+            "permit-run-resize-valid",
+            "permit-run-resize-partial",
+            "permit-run-resize-observed",
+            "permit-run-resize-effective",
+            "permit-run-resize-zero",
+            "permit-run-resize-negative",
+            "permit-run-resize-illegal",
+            "permit-run-resize-duplicate",
         ];
         seed_task_runs(&pool, &creator_id, &run_ids).await;
 
@@ -396,9 +477,75 @@ async fn migration_162_embedded_fresh_database_enforces_build_pod_permit_contrac
             );
         }
 
+        // The resize migration makes identity an all-or-nothing, protocol- and
+        // ceiling-validated shape. Each rejected insert otherwise supplies a
+        // valid migration-162 permit, so the asserted failure is resize-specific.
+        for sql in [
+            "INSERT INTO build_pod_permits (task_run_id, fencing_token, state, job_uid, pod_namespace) \
+             VALUES ('permit-run-resize-partial', 1201, 'job_created', 'job-partial', 'ns')",
+            "INSERT INTO build_pod_permits (task_run_id, fencing_token, state, job_uid, pod_namespace, pod_name, pod_uid, launcher_container_name, launcher_container_id, image_digest, observed_launcher_protocol, effective_launcher_protocol, admitted_cpu_millicores) \
+             VALUES ('permit-run-resize-observed', 1202, 'job_created', 'job-observed', 'ns', 'pod', 'uid-observed', 'launcher', 'containerd://launcher', 'sha256:observed', 'unknown-v3', 'resize-v2', 1000)",
+            "INSERT INTO build_pod_permits (task_run_id, fencing_token, state, job_uid, pod_namespace, pod_name, pod_uid, launcher_container_name, launcher_container_id, image_digest, observed_launcher_protocol, effective_launcher_protocol, admitted_cpu_millicores) \
+             VALUES ('permit-run-resize-effective', 1203, 'job_created', 'job-effective', 'ns', 'pod', 'uid-effective', 'launcher', 'containerd://launcher', 'sha256:effective', 'resize-v2', 'unknown-v3', 1000)",
+            "INSERT INTO build_pod_permits (task_run_id, fencing_token, state, job_uid, pod_namespace, pod_name, pod_uid, launcher_container_name, launcher_container_id, image_digest, observed_launcher_protocol, effective_launcher_protocol, admitted_cpu_millicores) \
+             VALUES ('permit-run-resize-zero', 1204, 'job_created', 'job-zero', 'ns', 'pod', 'uid-zero', 'launcher', 'containerd://launcher', 'sha256:zero', 'resize-v2', 'resize-v2', 0)",
+            "INSERT INTO build_pod_permits (task_run_id, fencing_token, state, job_uid, pod_namespace, pod_name, pod_uid, launcher_container_name, launcher_container_id, image_digest, observed_launcher_protocol, effective_launcher_protocol, admitted_cpu_millicores) \
+             VALUES ('permit-run-resize-negative', 1205, 'job_created', 'job-negative', 'ns', 'pod', 'uid-negative', 'launcher', 'containerd://launcher', 'sha256:negative', 'resize-v2', 'resize-v2', -1)",
+            "INSERT INTO build_pod_permits (task_run_id, fencing_token, state, job_uid, pod_namespace, pod_name, pod_uid, launcher_container_name, launcher_container_id, image_digest, observed_launcher_protocol, effective_launcher_protocol, admitted_cpu_millicores) \
+             VALUES ('permit-run-resize-illegal', 1206, 'not-a-lifecycle-state', 'job-illegal', 'ns', 'pod', 'uid-illegal', 'launcher', 'containerd://launcher', 'sha256:illegal', 'resize-v2', 'resize-v2', 1000)",
+        ] {
+            assert!(
+                sqlx::query(sql).execute(&pool).await.is_err(),
+                "resize identity schema should reject invalid contract SQL: {sql}"
+            );
+        }
+
+        sqlx::query(
+            "INSERT INTO build_pod_permits \
+             (task_run_id, fencing_token, state, job_uid, pod_namespace, pod_name, pod_uid, \
+              launcher_container_name, launcher_container_id, image_digest, \
+              observed_launcher_protocol, effective_launcher_protocol, admitted_cpu_millicores) \
+             VALUES ('permit-run-resize-valid', 1207, 'birth_confirmed', 'job-valid', 'ns', \
+                     'pod', 'uid-valid', 'launcher', 'containerd://launcher', 'sha256:valid', \
+                     'resize-v2', 'resize-v2', 1000)",
+        )
+        .execute(&pool)
+        .await
+        .expect("insert complete resize identity");
+        for sql in [
+            "UPDATE build_pod_permits SET state = 'lifted' \
+             WHERE task_run_id = 'permit-run-resize-valid'",
+            "UPDATE build_pod_permits SET image_digest = 'sha256:replacement' \
+             WHERE task_run_id = 'permit-run-resize-valid'",
+        ] {
+            assert!(
+                sqlx::query(sql).execute(&pool).await.is_err(),
+                "resize identity schema should reject illegal transition or immutable mutation: {sql}"
+            );
+        }
+
+        // A Pod UID is owned by exactly one permit. A second task run claiming
+        // the same Pod with its own ceiling would otherwise hold a competing
+        // "write-once" authority over the same container.
+        assert!(
+            sqlx::query(
+                "INSERT INTO build_pod_permits \
+                 (task_run_id, fencing_token, state, job_uid, pod_namespace, pod_name, pod_uid, \
+                  launcher_container_name, launcher_container_id, image_digest, \
+                  observed_launcher_protocol, effective_launcher_protocol, admitted_cpu_millicores) \
+                 VALUES ('permit-run-resize-duplicate', 1208, 'birth_confirmed', 'job-duplicate', \
+                         'ns', 'pod-two', 'uid-valid', 'launcher', 'containerd://launcher', \
+                         'sha256:valid', 'resize-v2', 'resize-v2', 2000)",
+            )
+            .execute(&pool)
+            .await
+            .is_err(),
+            "a Pod UID already captured by another permit must be rejected"
+        );
+
         // The downstream active-count query is authoritative: all and only
         // non-released rows count. The terminal-but-present Job is active here.
-        assert_eq!(active_permit_count(&pool).await, 3);
+        assert_eq!(active_permit_count(&pool).await, 4);
         sqlx::query(
             "UPDATE build_pod_permits \
              SET state = 'released', released_at = now(), \
@@ -408,7 +555,7 @@ async fn migration_162_embedded_fresh_database_enforces_build_pod_permit_contrac
         .execute(&pool)
         .await
         .expect("explicitly release terminal-but-present Job permit");
-        assert_eq!(active_permit_count(&pool).await, 2);
+        assert_eq!(active_permit_count(&pool).await, 3);
 
         pool.close().await;
     })
