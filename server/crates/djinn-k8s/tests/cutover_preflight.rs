@@ -1175,19 +1175,36 @@ async fn seed_permit_in_state(database: &Database, task_run_id: &str, target: Bu
         BuildPodPermitState::Quarantined => &[BuildPodPermitState::Quarantined],
         other => panic!("{other:?} is not a nonterminal resize state"),
     };
+    // Migration 168: the lifecycle is entered by CLAIMING an invocation, and
+    // every later edge is fenced on the invocation the claim wrote.
+    let invocation = format!("invocation-{task_run_id}");
+    let mut claimed: Option<&str> = None;
     let mut current = BuildPodPermitState::BirthConfirmed;
     for next in walk {
-        let outcome = repo
-            .transition_resize_lifecycle(
+        let outcome = if *next == BuildPodPermitState::LiftApplying {
+            claimed = Some(invocation.as_str());
+            repo.begin_resize_invocation(
                 task_run_id,
                 &row.permit_id,
                 row.fencing_token,
                 &identity.pod_uid,
+                &invocation,
+            )
+            .await
+            .expect("claim invocation")
+        } else {
+            repo.transition_resize_lifecycle(
+                task_run_id,
+                &row.permit_id,
+                row.fencing_token,
+                &identity.pod_uid,
+                claimed,
                 current,
                 *next,
             )
             .await
-            .expect("transition");
+            .expect("transition")
+        };
         let TransitionBuildPodResizeLifecycleResult::Transitioned(_) = outcome else {
             panic!("{current:?} -> {next:?} must be a legal transition, got {outcome:?}");
         };

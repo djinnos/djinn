@@ -400,6 +400,14 @@ struct Inner {
     /// unreachable — `scripts/check-resize-reachability.sh` exists to keep it
     /// that way only over this maintainer's dead build.
     pub resize_admission: Arc<crate::task_run_resize_bootstrap::TaskRunResizeAdmissionBridge>,
+    /// Proposal `3i92`'s fail-safe drop, composed once for the whole process.
+    ///
+    /// The other half of `resize_admission`: that one raises a launcher's
+    /// ceiling for one invocation, this one is the seam every terminal path
+    /// converges on to give the CPU back. Threaded into every
+    /// [`AppState::agent_context`], which is where `DirectServices`'
+    /// `release_lease` handler reads it. **This is the composition site.**
+    pub resize_drop: Arc<crate::task_run_resize_drop::TaskRunResizeDropBridge>,
 }
 
 /// Result of a boot token exchange attempt.
@@ -537,6 +545,8 @@ impl AppState {
         let resize_admission = Arc::new(
             crate::task_run_resize_bootstrap::TaskRunResizeAdmissionBridge::from_env(db.clone()),
         );
+        let resize_drop =
+            Arc::new(crate::task_run_resize_drop::TaskRunResizeDropBridge::from_env(db.clone()));
         Self {
             inner: Arc::new(Inner {
                 db,
@@ -581,6 +591,7 @@ impl AppState {
                 graph_warmer: tokio::sync::RwLock::new(None),
                 build_lease,
                 resize_admission,
+                resize_drop,
             }),
         }
     }
@@ -1719,6 +1730,7 @@ impl AppState {
             ))),
             runtime_ops: Some(Arc::new(self.clone())),
             resize_admission: Some(self.inner.resize_admission.clone()),
+            resize_drop: Some(self.inner.resize_drop.clone()),
             // Host-side runs root for the coordinator sweep + teardown backstop.
             // Resolves to `$DJINN_HOME/cache/cargo-target-runs` (the server pod's
             // mount of the shared cache PVC), not the Job-pod `/cache` path.

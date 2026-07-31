@@ -220,7 +220,42 @@ impl ResizeLift {
         }
     }
 
-    /// Compare-and-swap one lifecycle edge, fenced on all four permit fields.
+    /// Claim the lifecycle for this invocation: `birth_confirmed →
+    /// lift_applying`, writing the invocation fence.
+    ///
+    /// A second, concurrent invocation of the same task run loses here without a
+    /// write and therefore without a PATCH — see
+    /// [`BuildPodPermitRepository::begin_resize_invocation`].
+    async fn begin_invocation(&self, intent: &PodResizeIntent) -> Result<(), ResizeApplyFailure> {
+        match self
+            .permits
+            .begin_resize_invocation(
+                &intent.task_run_id,
+                &intent.permit_id,
+                intent.fencing_token,
+                &intent.pod_uid,
+                &intent.invocation_id,
+            )
+            .await
+        {
+            Ok(TransitionBuildPodResizeLifecycleResult::Transitioned(_)) => Ok(()),
+            Ok(TransitionBuildPodResizeLifecycleResult::Rejected) => Err(ResizeApplyFailure::new(
+                DegradedUnleasedReason::LiftLifecycleUnwritable,
+                format!(
+                    "permit {} refused invocation {}'s lift claim; another invocation \
+                     owns this lifecycle",
+                    intent.permit_id, intent.invocation_id
+                ),
+            )),
+            Err(error) => Err(ResizeApplyFailure::new(
+                DegradedUnleasedReason::LiftLifecycleUnwritable,
+                format!("durable permit lifecycle unwritable: {error}"),
+            )),
+        }
+    }
+
+    /// Compare-and-swap one lifecycle edge, fenced on all four permit fields
+    /// **and** on the owning invocation.
     async fn transition(
         &self,
         intent: &PodResizeIntent,
@@ -234,6 +269,7 @@ impl ResizeLift {
                 &intent.permit_id,
                 intent.fencing_token,
                 &intent.pod_uid,
+                Some(&intent.invocation_id),
                 expected,
                 next,
             )
@@ -425,15 +461,26 @@ impl PodResizeApplier for ResizeLift {
         // lift_applying` edge). Anything else is not a liftable subject.
         let entered = match intent.permit_state {
             BuildPodPermitState::BirthConfirmed => {
-                self.transition(
-                    intent,
-                    BuildPodPermitState::BirthConfirmed,
-                    BuildPodPermitState::LiftApplying,
-                )
-                .await?;
+                self.begin_invocation(intent).await?;
                 BuildPodPermitState::LiftApplying
             }
-            BuildPodPermitState::Lifted => BuildPodPermitState::Lifted,
+            BuildPodPermitState::Lifted => {
+                // A self-transition, purely to run the invocation fence BEFORE
+                // any PATCH. Without it a second invocation that authorized
+                // while the first already held `lifted` would re-confirm a lift
+                // it does not own — and, because the `Lifted` arm skips the
+                // closing transition below, it would never be fenced at all.
+                // The lifecycle is one row per task run and nothing serializes
+                // invocations of one run, so this is a reachable race, not a
+                // hypothetical one.
+                self.transition(
+                    intent,
+                    BuildPodPermitState::Lifted,
+                    BuildPodPermitState::Lifted,
+                )
+                .await?;
+                BuildPodPermitState::Lifted
+            }
             other => {
                 return Err(ResizeApplyFailure::new(
                     DegradedUnleasedReason::PermitNotLiftable,

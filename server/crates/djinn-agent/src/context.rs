@@ -464,6 +464,9 @@ pub struct AgentContext {
     /// context, never a disable switch — see
     /// [`crate::task_run_resize_admission`] for what that distinction costs.
     pub resize_admission: Option<crate::task_run_resize_admission::ResizeAdmissionBridge>,
+    /// Proposal `3i92`'s fail-safe drop, injected at the same boundary. `None`
+    /// marks an off-server context; see [`crate::task_run_resize_drop_gate`].
+    pub resize_drop: Option<crate::task_run_resize_drop_gate::ResizeDropBridge>,
     /// **This process's own view** of the per-task-run Cargo target root.
     ///
     /// Required, deliberately: the shared cache PVC is mounted at *different*

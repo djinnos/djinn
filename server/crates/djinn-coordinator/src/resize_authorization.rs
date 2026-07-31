@@ -94,6 +94,16 @@ pub struct PodResizeIntent {
     /// immutable identity — never the caller's claim. It is the label the
     /// applier's fresh GET is scoped by.
     pub task_run_id: String,
+    /// The **durable owner's** invocation, likewise recovered from the lease
+    /// row's immutable identity.
+    ///
+    /// This is the invocation half of migration 168's
+    /// `(task_run_id, pod_uid, resize_invocation_id)` fence. `build_pod_permits`
+    /// has PRIMARY KEY `task_run_id`, so one row serves every invocation of a
+    /// run — and nothing serializes invocations of one run against each other.
+    /// Without this field the applier could not tell its own lift from a
+    /// concurrent invocation's.
+    pub invocation_id: String,
     /// The permit row's immutable identity, echoed by every durable lifecycle
     /// compare-and-swap the applier makes.
     pub permit_id: String,
@@ -327,7 +337,16 @@ impl ResizeRefusal {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ResizeAuthorizationOutcome {
     /// Server-derived and clamped. The only variant `0ppk-1b` may PATCH.
-    Authorized(PodResizeIntent),
+    ///
+    /// Boxed, and that is not lint appeasement. This outcome is held across an
+    /// `.await` inside `BuildLeaseService::grant`, which is itself held inside
+    /// the dispatch rules engine's future. Inlining a ~224-byte intent there
+    /// grew that future past a tokio worker's 2MiB stack and aborted
+    /// `rules::tests::amend_while_building_dispatches_one_reconcile_task_from_event`
+    /// with a stack overflow — a failure with no textual connection to resize at
+    /// all. One pointer keeps the whole chain bounded no matter how the intent
+    /// grows later.
+    Authorized(Box<PodResizeIntent>),
     /// Refused. Zero intents were recorded.
     Refused(ResizeRefusal),
     /// The durable authority is not armed to enforce, so no invocation is lifted
@@ -500,13 +519,14 @@ impl ResizeAuthority {
 
         match clamp(
             &owner.task_run_id,
+            &owner.invocation_id,
             &permit_id,
             permit_fence,
             permit_state,
             &identity,
             self.configured_leased_millicores,
         ) {
-            Ok(intent) => ResizeAuthorizationOutcome::Authorized(intent),
+            Ok(intent) => ResizeAuthorizationOutcome::Authorized(Box::new(intent)),
             Err(refusal) => Self::refuse(refusal),
         }
     }
@@ -614,6 +634,7 @@ fn durable_owner(row: &BuildLeaseRow) -> Option<TaskInvocationLeaseIdentity> {
 /// one-line edit at a single site rather than something that could be half-done.
 fn clamp(
     task_run_id: &str,
+    invocation_id: &str,
     permit_id: &str,
     fencing_token: i64,
     permit_state: BuildPodPermitState,
@@ -644,6 +665,7 @@ fn clamp(
     let target_millicores = configured_leased_millicores.min(ceiling);
     Ok(PodResizeIntent {
         task_run_id: task_run_id.to_owned(),
+        invocation_id: invocation_id.to_owned(),
         permit_id: permit_id.to_owned(),
         fencing_token,
         permit_state,
