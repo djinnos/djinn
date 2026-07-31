@@ -243,16 +243,18 @@ impl CoordinatorActor {
         // Set last_remediation_base_sha to the current failing head so later
         // submit handling can compare against that baseline.
         let blocking_names: Vec<String> = blocking.iter().map(|cr| cr.name.clone()).collect();
-        self.persist_ci_snapshot(
-            task_id,
-            pull_number,
-            current_sha,
-            CiStatus::Failing,
-            blocking_names,
-            Some(fingerprint.clone()),
-            total_consecutive,
-            Some(current_sha.to_owned()),
-        )
+        poll_stack::boxed(|| {
+            self.persist_ci_snapshot(
+                task_id,
+                pull_number,
+                current_sha,
+                CiStatus::Failing,
+                blocking_names,
+                Some(fingerprint.clone()),
+                total_consecutive,
+                Some(current_sha.to_owned()),
+            )
+        })
         .await;
 
         // ── Emit divergence-aware activity event when strike is suppressed ────
@@ -372,13 +374,15 @@ impl CoordinatorActor {
                          all reproduction-context fetches failed; escalating generically"
                     );
                     let sections_text = ci_failure_sections.join("\n");
-                    self.route_planner_intervention(
-                        task,
-                        "worker",
-                        &reason,
-                        Some(&sections_text),
-                        task.reopen_count,
-                    )
+                    poll_stack::boxed(|| {
+                        self.route_planner_intervention(
+                            task,
+                            "worker",
+                            &reason,
+                            Some(&sections_text),
+                            task.reopen_count,
+                        )
+                    })
                     .await;
                 }
                 SameSignatureEscalationRoute::UnreproducibleIntervention => {
@@ -403,8 +407,15 @@ impl CoordinatorActor {
                     // Create a HumanReview remediation task with the
                     // unreproducible reason.  No Planner dispatch — a human
                     // must resolve it.
-                    self.escalate_ci_failure_and_park(task, pr_url, &reason, &ci_failure_sections)
-                        .await;
+                    poll_stack::boxed(|| {
+                        self.escalate_ci_failure_and_park(
+                            task,
+                            pr_url,
+                            &reason,
+                            &ci_failure_sections,
+                        )
+                    })
+                    .await;
                 }
                 SameSignatureEscalationRoute::ReproductionPlan => {
                     // At least one reproducible bundle: build a focused
@@ -430,8 +441,15 @@ impl CoordinatorActor {
                     // plan as the reason.  This parks the source on the blocker
                     // without dispatching a Planner (no scope reshape for
                     // ordinary reproduced CI loops).
-                    self.escalate_ci_failure_and_park(task, pr_url, &reason, &ci_failure_sections)
-                        .await;
+                    poll_stack::boxed(|| {
+                        self.escalate_ci_failure_and_park(
+                            task,
+                            pr_url,
+                            &reason,
+                            &ci_failure_sections,
+                        )
+                    })
+                    .await;
                 }
             }
             return true;
@@ -493,25 +511,29 @@ impl CoordinatorActor {
                 failing_crates = failing_crates.join(", "),
             );
             let sections_text = ci_failure_sections.join("\n");
-            self.route_planner_intervention(
-                task,
-                "worker",
-                &reason,
-                Some(&sections_text),
-                task.reopen_count,
-            )
+            poll_stack::boxed(|| {
+                self.route_planner_intervention(
+                    task,
+                    "worker",
+                    &reason,
+                    Some(&sections_text),
+                    task.reopen_count,
+                )
+            })
             .await;
-            self.terminalize_for_pr_outcome(
-                task_id,
-                djinn_core::models::task_attempt::TaskAttemptOutcome::Reopened,
-                Some(&TransitionAction::PrCiFailed),
-                Some(&reason),
-            )
+            poll_stack::boxed(|| {
+                self.terminalize_for_pr_outcome(
+                    task_id,
+                    djinn_core::models::task_attempt::TaskAttemptOutcome::Reopened,
+                    Some(&TransitionAction::PrCiFailed),
+                    Some(&reason),
+                )
+            })
             .await;
             // Park the source to `open` so it is held by the blocker the
             // intervention added (not left in pr_draft/pr_review) and revivable
             // when the remediation closes.
-            self.park_source_open(task_id, &reason).await;
+            poll_stack::boxed(|| self.park_source_open(task_id, &reason)).await;
             return true;
         }
         // If Some(false): normal worker bug, fall through to existing retry path.
@@ -541,8 +563,10 @@ impl CoordinatorActor {
                     sha = %current_sha,
                     "PR poller: CI failed but branch is diff-empty vs base — escalating + parking (held on remediation blocker)"
                 );
-                self.escalate_ci_failure_and_park(task, pr_url, &reason, &ci_failure_sections)
-                    .await;
+                poll_stack::boxed(|| {
+                    self.escalate_ci_failure_and_park(task, pr_url, &reason, &ci_failure_sections)
+                })
+                .await;
                 return true;
             }
             Ok(_) => {}
@@ -600,8 +624,10 @@ impl CoordinatorActor {
                 threshold = PR_CI_FAILURE_THRESHOLD,
                 "PR poller: CI-failure rework threshold exceeded — escalating + parking (held on remediation blocker)"
             );
-            self.escalate_ci_failure_and_park(task, pr_url, &reason, &ci_failure_sections)
-                .await;
+            poll_stack::boxed(|| {
+                self.escalate_ci_failure_and_park(task, pr_url, &reason, &ci_failure_sections)
+            })
+            .await;
             return true;
         }
 
@@ -636,11 +662,13 @@ impl CoordinatorActor {
             round,
             PR_CI_FAILURE_THRESHOLD,
         );
-        self.apply_pr_transition(
-            task_id,
-            TransitionAction::PrCiFailed,
-            Some("CI checks failed on PR"),
-        )
+        poll_stack::boxed(|| {
+            self.apply_pr_transition(
+                task_id,
+                TransitionAction::PrCiFailed,
+                Some("CI checks failed on PR"),
+            )
+        })
         .await;
         // Non-required failures ride along as informational context so the
         // rework worker knows about them without treating them as blockers.
@@ -651,16 +679,18 @@ impl CoordinatorActor {
             .filter(|cr| !blocking_names.contains(cr.name.as_str()))
             .copied()
             .collect();
-        self.log_ci_failure_comment(
-            task_id,
-            &blocking,
-            &advisory,
-            pr_url,
-            current_sha,
-            gh_client,
-            owner,
-            repo,
-        )
+        poll_stack::boxed(|| {
+            self.log_ci_failure_comment(
+                task_id,
+                &blocking,
+                &advisory,
+                pr_url,
+                current_sha,
+                gh_client,
+                owner,
+                repo,
+            )
+        })
         .await;
         true
     }
@@ -681,12 +711,14 @@ impl CoordinatorActor {
     ) {
         let task_repo = self.task_repo();
 
-        self.terminalize_for_pr_outcome(
-            &task.id,
-            djinn_core::models::task_attempt::TaskAttemptOutcome::Reopened,
-            Some(&TransitionAction::PrCiFailed),
-            Some(reason),
-        )
+        poll_stack::boxed(|| {
+            self.terminalize_for_pr_outcome(
+                &task.id,
+                djinn_core::models::task_attempt::TaskAttemptOutcome::Reopened,
+                Some(&TransitionAction::PrCiFailed),
+                Some(reason),
+            )
+        })
         .await;
 
         // Fold the merge-queue lane facts (run id, failing checks,
@@ -774,7 +806,7 @@ impl CoordinatorActor {
         // parking the source, so the open task is never dispatchable without its
         // blocker; when the ceiling is reached it ForceCloses the source instead
         // (which releases its blockers) and does NOT park.
-        self.escalate_to_planner_or_terminally_fail(task, &enriched_reason)
+        poll_stack::boxed(|| self.escalate_to_planner_or_terminally_fail(task, &enriched_reason))
             .await;
         self.pr_status_cache.remove(&task.id);
         self.pr_draft_first_seen.remove(&task.id);
@@ -794,8 +826,10 @@ impl CoordinatorActor {
     /// without its blocker. Once parked, `list_ready` filters it out (blocked)
     /// and `emit_unblocked_tasks` revives it when the remediation closes.
     pub(crate) async fn park_source_open(&self, task_id: &str, reason: &str) {
-        self.apply_pr_transition(task_id, TransitionAction::ParkForRemediation, Some(reason))
-            .await;
+        poll_stack::boxed(|| {
+            self.apply_pr_transition(task_id, TransitionAction::ParkForRemediation, Some(reason))
+        })
+        .await;
     }
 
     /// Resolve the merge methods this repository actually permits, in Djinn's

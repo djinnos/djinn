@@ -204,15 +204,17 @@ impl CoordinatorActor {
                     retain_inflight_reservation(task_id, active_task_ids, Some(&live))
                 });
                 for task_id in stale_inflight_task_ids {
-                    self.persist_durable_dispatch_state_update(
-                        &task_id,
-                        None,
-                        "inflight_ledger_reconcile_clear",
-                        DurableDispatchStateUpdate {
-                            inflight: Some(None),
-                            ..Default::default()
-                        },
-                    )
+                    poll_stack::boxed(|| {
+                        self.persist_durable_dispatch_state_update(
+                            &task_id,
+                            None,
+                            "inflight_ledger_reconcile_clear",
+                            DurableDispatchStateUpdate {
+                                inflight: Some(None),
+                                ..Default::default()
+                            },
+                        )
+                    })
                     .await;
                 }
             }
@@ -232,15 +234,17 @@ impl CoordinatorActor {
                     retain_inflight_reservation(task_id, active_task_ids, None)
                 });
                 for task_id in started_task_ids {
-                    self.persist_durable_dispatch_state_update(
-                        &task_id,
-                        None,
-                        "inflight_ledger_session_started_clear",
-                        DurableDispatchStateUpdate {
-                            inflight: Some(None),
-                            ..Default::default()
-                        },
-                    )
+                    poll_stack::boxed(|| {
+                        self.persist_durable_dispatch_state_update(
+                            &task_id,
+                            None,
+                            "inflight_ledger_session_started_clear",
+                            DurableDispatchStateUpdate {
+                                inflight: Some(None),
+                                ..Default::default()
+                            },
+                        )
+                    })
                     .await;
                 }
             }
@@ -305,8 +309,7 @@ impl CoordinatorActor {
                 HashMap::new()
             }
         };
-        self.reconcile_inflight_dispatch_ledger(&active_task_ids)
-            .await;
+        poll_stack::boxed(|| self.reconcile_inflight_dispatch_ledger(&active_task_ids)).await;
         overlay_inflight_ledger(&mut by_model, &self.inflight_dispatches);
         overlay_inflight_lane_ledger(&mut by_lane, &self.inflight_dispatches);
         self.overlay_provisional_admissions(&mut by_model, &mut by_lane);
@@ -328,7 +331,8 @@ impl CoordinatorActor {
         running_by_user_model: &mut HashMap<(String, String), u32>,
         running_by_user_lane: &mut HashMap<(String, djinn_core::models::ModelLane), u32>,
     ) {
-        let (fresh_by_model, fresh_by_lane) = self.effective_running_counts().await;
+        let (fresh_by_model, fresh_by_lane) =
+            poll_stack::boxed(|| self.effective_running_counts()).await;
         *running_by_user_model = fresh_by_model;
         *running_by_user_lane = fresh_by_lane;
     }
@@ -362,15 +366,17 @@ impl CoordinatorActor {
                 self.dispatch_cooldowns.len(),
                 self.inflight_dispatches.len(),
             );
-            self.persist_durable_dispatch_state_update(
-                task_id,
-                task_short_id,
-                "inflight_ledger_insert",
-                DurableDispatchStateUpdate {
-                    inflight: Some(Some((Some(c.to_string()), model.to_string()))),
-                    ..Default::default()
-                },
-            )
+            poll_stack::boxed(|| {
+                self.persist_durable_dispatch_state_update(
+                    task_id,
+                    task_short_id,
+                    "inflight_ledger_insert",
+                    DurableDispatchStateUpdate {
+                        inflight: Some(Some((Some(c.to_string()), model.to_string()))),
+                        ..Default::default()
+                    },
+                )
+            })
             .await;
         }
     }
@@ -474,8 +480,9 @@ impl CoordinatorActor {
         task: &djinn_core::models::Task,
     ) -> crate::WorkerLifecycleMetadata {
         crate::WorkerLifecycleMetadata {
-            checkpoint: self.checkpoint_lifecycle_from_activity(task).await,
-            model_rotation: self.model_rotation_lifecycle_from_activity(task).await,
+            checkpoint: poll_stack::boxed(|| self.checkpoint_lifecycle_from_activity(task)).await,
+            model_rotation: poll_stack::boxed(|| self.model_rotation_lifecycle_from_activity(task))
+                .await,
             ..Default::default()
         }
     }
@@ -645,7 +652,8 @@ impl CoordinatorActor {
         role: &str,
         lane_cap: Option<u32>,
     ) -> bool {
-        let (running_by_model, running_by_lane) = self.effective_running_counts().await;
+        let (running_by_model, running_by_lane) =
+            poll_stack::boxed(|| self.effective_running_counts()).await;
         let lane = djinn_core::models::ModelLane::for_role(role);
         model_under_user_cap(&running_by_model, user, model, model_cap)
             && lane_under_user_cap(&running_by_lane, user, lane, lane_cap)
@@ -669,15 +677,17 @@ impl CoordinatorActor {
                 self.dispatch_cooldowns.len(),
                 self.inflight_dispatches.len(),
             );
-            self.persist_durable_dispatch_state_update(
-                task_id,
-                None,
-                "inflight_ledger_clear",
-                DurableDispatchStateUpdate {
-                    inflight: Some(None),
-                    ..Default::default()
-                },
-            )
+            poll_stack::boxed(|| {
+                self.persist_durable_dispatch_state_update(
+                    task_id,
+                    None,
+                    "inflight_ledger_clear",
+                    DurableDispatchStateUpdate {
+                        inflight: Some(None),
+                        ..Default::default()
+                    },
+                )
+            })
             .await;
         }
     }
@@ -720,8 +730,10 @@ impl CoordinatorActor {
     ) {
         self.provisional_admissions.remove(provisional_key);
         self.inflight_dispatches.remove(provisional_key);
-        self.record_inflight_dispatch(real_task_id, None, Some(creator), model, role)
-            .await;
+        poll_stack::boxed(|| {
+            self.record_inflight_dispatch(real_task_id, None, Some(creator), model, role)
+        })
+        .await;
     }
 
     /// Clear a provisional refinement admission.
@@ -815,17 +827,19 @@ impl CoordinatorActor {
         task_short_id: Option<&str>,
         reason: &str,
     ) {
-        self.persist_durable_dispatch_state_update(
-            task_id,
-            task_short_id,
-            reason,
-            DurableDispatchStateUpdate {
-                failure_streak: Some(0),
-                cooldown_until: Some(None),
-                last_dispatched: Some(None),
-                inflight: Some(None),
-            },
-        )
+        poll_stack::boxed(|| {
+            self.persist_durable_dispatch_state_update(
+                task_id,
+                task_short_id,
+                reason,
+                DurableDispatchStateUpdate {
+                    failure_streak: Some(0),
+                    cooldown_until: Some(None),
+                    last_dispatched: Some(None),
+                    inflight: Some(None),
+                },
+            )
+        })
         .await;
     }
 
@@ -886,7 +900,7 @@ impl CoordinatorActor {
         self.dispatch_cooldowns.remove(task_id);
         self.last_dispatched.remove(task_id);
         self.inflight_dispatches.remove(task_id);
-        self.clear_durable_dispatch_backoff_state(task_id, None, reason)
+        poll_stack::boxed(|| self.clear_durable_dispatch_backoff_state(task_id, None, reason))
             .await;
     }
 
@@ -1296,8 +1310,10 @@ impl CoordinatorActor {
         }
 
         if breaker_open_for_all_candidates {
-            self.apply_breaker_open_exhaustion_backoff(task, role, candidate_models)
-                .await;
+            poll_stack::boxed(|| {
+                self.apply_breaker_open_exhaustion_backoff(task, role, candidate_models)
+            })
+            .await;
             return;
         }
 
@@ -1316,22 +1332,26 @@ impl CoordinatorActor {
         };
 
         if streak >= MAX_DISPATCH_FAILURES {
-            self.terminally_fail_task(
-                task,
-                role,
-                "all failover candidates exhausted after multiple attempts. \
+            poll_stack::boxed(|| {
+                self.terminally_fail_task(
+                    task,
+                    role,
+                    "all failover candidates exhausted after multiple attempts. \
                  The task could not be dispatched to any configured model. \
                  Resolve the underlying issue and reopen.",
-            )
+                )
+            })
             .await;
             self.dispatch_failure_streak.remove(&task.id);
             self.dispatch_cooldowns.remove(&task.id);
             self.inflight_dispatches.remove(&task.id);
-            self.clear_durable_dispatch_backoff_state(
-                &task.id,
-                Some(&task.short_id),
-                "chain_exhaustion_terminal_close_clear",
-            )
+            poll_stack::boxed(|| {
+                self.clear_durable_dispatch_backoff_state(
+                    &task.id,
+                    Some(&task.short_id),
+                    "chain_exhaustion_terminal_close_clear",
+                )
+            })
             .await;
         } else {
             let cooldown = escalating_dispatch_cooldown(streak);
@@ -1345,17 +1365,19 @@ impl CoordinatorActor {
             );
             self.dispatch_cooldowns
                 .insert(task.id.clone(), SystemClock::new().now_instant() + cooldown);
-            self.persist_durable_dispatch_state_update(
-                &task.id,
-                Some(&task.short_id),
-                "chain_exhaustion_backoff",
-                DurableDispatchStateUpdate {
-                    failure_streak: Some(streak),
-                    cooldown_until: Some(dispatch_wall_clock_after(cooldown)),
-                    last_dispatched: Some(None),
-                    ..Default::default()
-                },
-            )
+            poll_stack::boxed(|| {
+                self.persist_durable_dispatch_state_update(
+                    &task.id,
+                    Some(&task.short_id),
+                    "chain_exhaustion_backoff",
+                    DurableDispatchStateUpdate {
+                        failure_streak: Some(streak),
+                        cooldown_until: Some(dispatch_wall_clock_after(cooldown)),
+                        last_dispatched: Some(None),
+                        ..Default::default()
+                    },
+                )
+            })
             .await;
 
             // Single-candidate lanes cannot fail *over* to anything: when the
@@ -1368,12 +1390,14 @@ impl CoordinatorActor {
             // the environment heals.
             if candidate_models.len() == 1 && streak == SINGLE_CANDIDATE_EXHAUSTION_SIGNAL_THRESHOLD
             {
-                self.emit_single_candidate_exhaustion_signal(
-                    task,
-                    role,
-                    &candidate_models[0],
-                    streak,
-                )
+                poll_stack::boxed(|| {
+                    self.emit_single_candidate_exhaustion_signal(
+                        task,
+                        role,
+                        &candidate_models[0],
+                        streak,
+                    )
+                })
                 .await;
             }
         }
@@ -1444,21 +1468,25 @@ impl CoordinatorActor {
         // `failure_streak: None` leaves the durable streak untouched — the
         // write-through helper carries the stored value forward. Only the
         // cooldown moves.
-        self.persist_durable_dispatch_state_update(
-            &task.id,
-            Some(&task.short_id),
-            "breaker_open_exhaustion_backoff",
-            DurableDispatchStateUpdate {
-                cooldown_until: Some(dispatch_wall_clock_after(cooldown)),
-                last_dispatched: Some(None),
-                ..Default::default()
-            },
-        )
+        poll_stack::boxed(|| {
+            self.persist_durable_dispatch_state_update(
+                &task.id,
+                Some(&task.short_id),
+                "breaker_open_exhaustion_backoff",
+                DurableDispatchStateUpdate {
+                    cooldown_until: Some(dispatch_wall_clock_after(cooldown)),
+                    last_dispatched: Some(None),
+                    ..Default::default()
+                },
+            )
+        })
         .await;
 
         if streak == BREAKER_OPEN_EXHAUSTION_SIGNAL_THRESHOLD {
-            self.emit_breaker_open_exhaustion_signal(task, role, candidate_models, streak)
-                .await;
+            poll_stack::boxed(|| {
+                self.emit_breaker_open_exhaustion_signal(task, role, candidate_models, streak)
+            })
+            .await;
         }
     }
 
@@ -1742,7 +1770,7 @@ impl CoordinatorActor {
         // PR creation depends on minting installation tokens, which requires
         // GITHUB_APP_ID + private key; without them every dispatch would
         // fail-retry at merge time.
-        if !self.has_github_credentials().await {
+        if !poll_stack::boxed(|| self.has_github_credentials()).await {
             tracing::warn!(
                 "CoordinatorActor: GitHub App not configured (GITHUB_APP_ID unset or \
                  private key missing), skipping dispatch. Configure the App env vars \
@@ -1859,15 +1887,17 @@ impl CoordinatorActor {
             *expiry > prune_now || paused_ready_task_ids.contains(task_id)
         });
         for task_id in expired_cooldown_task_ids {
-            self.persist_durable_dispatch_state_update(
-                &task_id,
-                None,
-                "cooldown_expired_prune",
-                DurableDispatchStateUpdate {
-                    cooldown_until: Some(None),
-                    ..Default::default()
-                },
-            )
+            poll_stack::boxed(|| {
+                self.persist_durable_dispatch_state_update(
+                    &task_id,
+                    None,
+                    "cooldown_expired_prune",
+                    DurableDispatchStateUpdate {
+                        cooldown_until: Some(None),
+                        ..Default::default()
+                    },
+                )
+            })
             .await;
         }
         let expired_last_dispatched_task_ids: Vec<String> = self
@@ -1884,15 +1914,17 @@ impl CoordinatorActor {
                 || paused_ready_task_ids.contains(task_id)
         });
         for task_id in expired_last_dispatched_task_ids {
-            self.persist_durable_dispatch_state_update(
-                &task_id,
-                None,
-                "last_dispatched_expired_prune",
-                DurableDispatchStateUpdate {
-                    last_dispatched: Some(None),
-                    ..Default::default()
-                },
-            )
+            poll_stack::boxed(|| {
+                self.persist_durable_dispatch_state_update(
+                    &task_id,
+                    None,
+                    "last_dispatched_expired_prune",
+                    DurableDispatchStateUpdate {
+                        last_dispatched: Some(None),
+                        ..Default::default()
+                    },
+                )
+            })
             .await;
         }
 
@@ -1965,8 +1997,7 @@ impl CoordinatorActor {
         // between the active-id and count reads is conservatively double-counted
         // for one pass; it is never missed during the handoff. DB rows remain
         // the durable floor across server restarts.
-        self.reconcile_inflight_dispatch_ledger(&active_task_ids)
-            .await;
+        poll_stack::boxed(|| self.reconcile_inflight_dispatch_ledger(&active_task_ids)).await;
         overlay_inflight_ledger(&mut running_by_user_model, &self.inflight_dispatches);
         overlay_inflight_lane_ledger(&mut running_by_user_lane, &self.inflight_dispatches);
         self.overlay_provisional_admissions(&mut running_by_user_model, &mut running_by_user_lane);
@@ -2069,7 +2100,7 @@ impl CoordinatorActor {
             // dispatch a task with no resolved owner. Park it loudly rather than
             // silently consuming org-shared credentials under no identity — this
             // surfaces an ownership regression instead of running ownerless.
-            if self.task_is_ownerless(&task).await {
+            if poll_stack::boxed(|| self.task_is_ownerless(&task)).await {
                 tracing::warn!(
                     task_id = %task.short_id,
                     task_uuid = %task.id,
@@ -2178,7 +2209,7 @@ impl CoordinatorActor {
                      cannot make forward progress by re-running. Escalating for terminal resolution.",
                     task.ci_same_signature_count, head,
                 );
-                self.escalate_to_planner_or_terminally_fail(&task, &reason)
+                poll_stack::boxed(|| self.escalate_to_planner_or_terminally_fail(&task, &reason))
                     .await;
                 continue;
             }
@@ -2274,7 +2305,7 @@ impl CoordinatorActor {
                 pr_rework_signal == Some(super::respawn_guard::PrReworkSignal::MergeConflict);
             if role == "worker"
                 && !is_merge_conflict_rework
-                && self.maybe_intervene_on_stuck_task(&task).await
+                && poll_stack::boxed(|| self.maybe_intervene_on_stuck_task(&task)).await
             {
                 // The planner escalation dispatched a new session (under the
                 // same creator, potentially the same model). Bump the local
@@ -2282,10 +2313,12 @@ impl CoordinatorActor {
                 // reduced capacity — the inflight ledger is already updated
                 // inside dispatch_planner_escalation, but the local
                 // running_by_user_model was seeded before this admission.
-                self.bump_local_cap_for_last_planner_admission(
-                    &mut running_by_user_model,
-                    &mut running_by_user_lane,
-                )
+                poll_stack::boxed(|| {
+                    self.bump_local_cap_for_last_planner_admission(
+                        &mut running_by_user_model,
+                        &mut running_by_user_lane,
+                    )
+                })
                 .await;
                 continue;
             }
@@ -2325,7 +2358,7 @@ impl CoordinatorActor {
                     reappearing,
                     Some(ReappearingDispatch::SameRoleFailure { .. })
                 ) {
-                    self.latest_attempt_strike_decision(&task.id, role).await
+                    poll_stack::boxed(|| self.latest_attempt_strike_decision(&task.id, role)).await
                 } else {
                     None
                 };
@@ -2339,11 +2372,13 @@ impl CoordinatorActor {
                     self.dispatch_failure_streak.remove(&task.id);
                     self.provider_failure_streak.remove(&task.id);
                     self.dispatch_cooldowns.remove(&task.id);
-                    self.clear_durable_dispatch_backoff_state(
-                        &task.id,
-                        Some(&task.short_id),
-                        "environmental_interrupt_no_dispatch_penalty",
-                    )
+                    poll_stack::boxed(|| {
+                        self.clear_durable_dispatch_backoff_state(
+                            &task.id,
+                            Some(&task.short_id),
+                            "environmental_interrupt_no_dispatch_penalty",
+                        )
+                    })
                     .await;
                     tracing::info!(
                         task_id = %task.short_id,
@@ -2407,10 +2442,12 @@ impl CoordinatorActor {
                                 // Bump the local cap to reflect the planner session
                                 // the intervention just dispatched (same as trigger
                                 // B and the stuck-task path).
-                                self.bump_local_cap_for_last_planner_admission(
-                                    &mut running_by_user_model,
-                                    &mut running_by_user_lane,
-                                )
+                                poll_stack::boxed(|| {
+                                    self.bump_local_cap_for_last_planner_admission(
+                                        &mut running_by_user_model,
+                                        &mut running_by_user_lane,
+                                    )
+                                })
                                 .await;
                                 continue;
                             }
@@ -2455,18 +2492,22 @@ impl CoordinatorActor {
                                 self.dispatch_failure_streak.remove(&task.id);
                                 self.provider_failure_streak.remove(&task.id);
                                 self.dispatch_cooldowns.remove(&task.id);
-                                self.clear_durable_dispatch_backoff_state(
-                                    &task.id,
-                                    Some(&task.short_id),
-                                    "cycling_planner_intervention_handoff_clear",
-                                )
+                                poll_stack::boxed(|| {
+                                    self.clear_durable_dispatch_backoff_state(
+                                        &task.id,
+                                        Some(&task.short_id),
+                                        "cycling_planner_intervention_handoff_clear",
+                                    )
+                                })
                                 .await;
                                 // Bump local cap to reflect the planner session the
                                 // intervention just dispatched (same as Trigger A).
-                                self.bump_local_cap_for_last_planner_admission(
-                                    &mut running_by_user_model,
-                                    &mut running_by_user_lane,
-                                )
+                                poll_stack::boxed(|| {
+                                    self.bump_local_cap_for_last_planner_admission(
+                                        &mut running_by_user_model,
+                                        &mut running_by_user_lane,
+                                    )
+                                })
                                 .await;
                                 continue;
                             }
@@ -2478,22 +2519,26 @@ impl CoordinatorActor {
                             // quota window or a provider outage must never terminally
                             // close the task.
                             if !throttle && !transient && next_streak >= MAX_DISPATCH_FAILURES {
-                                self.terminally_fail_task(
+                                poll_stack::boxed(|| {
+                                    self.terminally_fail_task(
                                     &task,
                                     role,
                                     "repeated dispatch failures: the task could not complete after \
                                  multiple attempts. Resolve the underlying issue and reopen.",
                                 )
+                                })
                                 .await;
                                 self.dispatch_failure_streak.remove(&task.id);
                                 self.provider_failure_streak.remove(&task.id);
                                 self.dispatch_cooldowns.remove(&task.id);
                                 self.inflight_dispatches.remove(&task.id);
-                                self.clear_durable_dispatch_backoff_state(
-                                    &task.id,
-                                    Some(&task.short_id),
-                                    "same_role_terminal_close_clear",
-                                )
+                                poll_stack::boxed(|| {
+                                    self.clear_durable_dispatch_backoff_state(
+                                        &task.id,
+                                        Some(&task.short_id),
+                                        "same_role_terminal_close_clear",
+                                    )
+                                })
                                 .await;
                                 continue;
                             }
@@ -2561,19 +2606,21 @@ impl CoordinatorActor {
                                 task.id.clone(),
                                 SystemClock::new().now_instant() + effective_cooldown,
                             );
-                            self.persist_durable_dispatch_state_update(
-                                &task.id,
-                                Some(&task.short_id),
-                                "same_role_failure_backoff",
-                                DurableDispatchStateUpdate {
-                                    failure_streak: Some(stored_streak),
-                                    cooldown_until: Some(dispatch_wall_clock_after(
-                                        effective_cooldown,
-                                    )),
-                                    last_dispatched: Some(None),
-                                    ..Default::default()
-                                },
-                            )
+                            poll_stack::boxed(|| {
+                                self.persist_durable_dispatch_state_update(
+                                    &task.id,
+                                    Some(&task.short_id),
+                                    "same_role_failure_backoff",
+                                    DurableDispatchStateUpdate {
+                                        failure_streak: Some(stored_streak),
+                                        cooldown_until: Some(dispatch_wall_clock_after(
+                                            effective_cooldown,
+                                        )),
+                                        last_dispatched: Some(None),
+                                        ..Default::default()
+                                    },
+                                )
+                            })
                             .await;
                             continue;
                         }
@@ -2581,11 +2628,13 @@ impl CoordinatorActor {
                             self.dispatch_failure_streak.remove(&task.id);
                             self.provider_failure_streak.remove(&task.id);
                             self.dispatch_cooldowns.remove(&task.id);
-                            self.clear_durable_dispatch_backoff_state(
-                                &task.id,
-                                Some(&task.short_id),
-                                "role_transition_dispatch_state_clear",
-                            )
+                            poll_stack::boxed(|| {
+                                self.clear_durable_dispatch_backoff_state(
+                                    &task.id,
+                                    Some(&task.short_id),
+                                    "role_transition_dispatch_state_clear",
+                                )
+                            })
                             .await;
                         }
                     }
@@ -2655,7 +2704,7 @@ impl CoordinatorActor {
             // Degrades to the unfiltered list when exclusion would empty it
             // (only one viable model → plan-lane retry, then park at the bound).
             if role == "worker" && task.intervention_count >= 1 {
-                let history = self.post_intervention_history(&task).await;
+                let history = poll_stack::boxed(|| self.post_intervention_history(&task)).await;
                 let rotation_excluded = history.rotation_excluded_models();
                 if !rotation_excluded.is_empty() {
                     let filtered: Vec<String> = model_ids
@@ -2722,8 +2771,14 @@ impl CoordinatorActor {
             // task. Reorders in place (entries != implementer first, preserving
             // priority); collapses to same-model when nothing else is viable.
             if role == "reviewer" {
-                self.apply_diverse_review_ordering(&task, Some(creator.as_str()), &mut model_ids)
-                    .await;
+                poll_stack::boxed(|| {
+                    self.apply_diverse_review_ordering(
+                        &task,
+                        Some(creator.as_str()),
+                        &mut model_ids,
+                    )
+                })
+                .await;
             }
 
             // Dispatch-time throttle deprioritization: move any model that is
@@ -2804,13 +2859,16 @@ impl CoordinatorActor {
                         .quality_reopen_count(&task.id)
                         .await
                         .unwrap_or(0);
-                    self.park_source_human_review_with_dossier(
-                        &task,
-                        park_reason,
-                        quality_strikes,
-                        Some(dossier),
-                        &serde_json::json!({}),
-                    )
+                    let empty_evidence = serde_json::json!({});
+                    poll_stack::boxed(|| {
+                        self.park_source_human_review_with_dossier(
+                            &task,
+                            park_reason,
+                            quality_strikes,
+                            Some(dossier),
+                            &empty_evidence,
+                        )
+                    })
                     .await;
                     continue;
                 }
@@ -2831,22 +2889,26 @@ impl CoordinatorActor {
                     *s
                 };
                 if streak >= MAX_DISPATCH_FAILURES {
-                    self.terminally_fail_task(
+                    poll_stack::boxed(|| {
+                        self.terminally_fail_task(
                         &task,
                         role,
                         "no model available for this task's owner: none of the role's configured \
                          models have a provider connected for them. Connect a provider/model for \
                          the owner and reopen.",
                     )
+                    })
                     .await;
                     self.dispatch_failure_streak.remove(&task.id);
                     self.dispatch_cooldowns.remove(&task.id);
                     self.inflight_dispatches.remove(&task.id);
-                    self.clear_durable_dispatch_backoff_state(
-                        &task.id,
-                        Some(&task.short_id),
-                        "no_eligible_model_terminal_close_clear",
-                    )
+                    poll_stack::boxed(|| {
+                        self.clear_durable_dispatch_backoff_state(
+                            &task.id,
+                            Some(&task.short_id),
+                            "no_eligible_model_terminal_close_clear",
+                        )
+                    })
                     .await;
                 } else {
                     let cooldown = escalating_dispatch_cooldown(streak);
@@ -2859,17 +2921,19 @@ impl CoordinatorActor {
                     );
                     self.dispatch_cooldowns
                         .insert(task.id.clone(), SystemClock::new().now_instant() + cooldown);
-                    self.persist_durable_dispatch_state_update(
-                        &task.id,
-                        Some(&task.short_id),
-                        "no_eligible_model_backoff",
-                        DurableDispatchStateUpdate {
-                            failure_streak: Some(streak),
-                            cooldown_until: Some(dispatch_wall_clock_after(cooldown)),
-                            last_dispatched: Some(None),
-                            ..Default::default()
-                        },
-                    )
+                    poll_stack::boxed(|| {
+                        self.persist_durable_dispatch_state_update(
+                            &task.id,
+                            Some(&task.short_id),
+                            "no_eligible_model_backoff",
+                            DurableDispatchStateUpdate {
+                                failure_streak: Some(streak),
+                                cooldown_until: Some(dispatch_wall_clock_after(cooldown)),
+                                last_dispatched: Some(None),
+                                ..Default::default()
+                            },
+                        )
+                    })
                     .await;
                 }
                 continue;
@@ -2972,7 +3036,9 @@ impl CoordinatorActor {
                 }
             }
 
-            let Some(project_path) = self.project_path_for_id(&task.project_id).await else {
+            let Some(project_path) =
+                poll_stack::boxed(|| self.project_path_for_id(&task.project_id)).await
+            else {
                 tracing::warn!(task_id = %task.short_id, project_id = %task.project_id, "CoordinatorActor: project path not found, skipping dispatch");
                 continue;
             };
@@ -3112,18 +3178,20 @@ impl CoordinatorActor {
                     // ladder this task was climbing is over — reset it so a
                     // future, unrelated outage starts back at the first rung.
                     self.breaker_open_backoff_streak.remove(&task.id);
-                    self.persist_durable_dispatch_state_update(
-                        &task.id,
-                        Some(&task.short_id),
-                        "successful_dispatch_marker",
-                        DurableDispatchStateUpdate {
-                            cooldown_until: Some(None),
-                            last_dispatched: Some(
-                                dispatch_wall_clock_now().map(|ts| (ts, role.to_owned())),
-                            ),
-                            ..Default::default()
-                        },
-                    )
+                    poll_stack::boxed(|| {
+                        self.persist_durable_dispatch_state_update(
+                            &task.id,
+                            Some(&task.short_id),
+                            "successful_dispatch_marker",
+                            DurableDispatchStateUpdate {
+                                cooldown_until: Some(None),
+                                last_dispatched: Some(
+                                    dispatch_wall_clock_now().map(|ts| (ts, role.to_owned())),
+                                ),
+                                ..Default::default()
+                            },
+                        )
+                    })
                     .await;
                     self.dispatched += 1;
                     // Attempt lifecycle: record the dispatch-start as a
@@ -3176,13 +3244,15 @@ impl CoordinatorActor {
                             // lands (pod boot lags 20-60s). Reconciled against
                             // the live pool at the top of each pass, so it drops
                             // out the moment the task completes.
-                            self.record_inflight_dispatch(
-                                &task.id,
-                                Some(&task.short_id),
-                                Some(c),
-                                used,
-                                role,
-                            )
+                            poll_stack::boxed(|| {
+                                self.record_inflight_dispatch(
+                                    &task.id,
+                                    Some(&task.short_id),
+                                    Some(c),
+                                    used,
+                                    role,
+                                )
+                            })
                             .await;
                         }
                     }
@@ -3241,13 +3311,15 @@ impl CoordinatorActor {
                     // the exhaustion says nothing about this task and must back
                     // off WITHOUT advancing the streak that force-closes at
                     // MAX_DISPATCH_FAILURES.
-                    self.apply_chain_exhaustion_side_effects(
-                        &task,
-                        role,
-                        model_ids,
-                        &exhausted_observations,
-                        breaker_open_for_all_candidates,
-                    )
+                    poll_stack::boxed(|| {
+                        self.apply_chain_exhaustion_side_effects(
+                            &task,
+                            role,
+                            model_ids,
+                            &exhausted_observations,
+                            breaker_open_for_all_candidates,
+                        )
+                    })
                     .await;
                 }
             }
