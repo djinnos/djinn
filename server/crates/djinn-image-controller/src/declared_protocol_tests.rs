@@ -1,11 +1,21 @@
 //! End-to-end coverage for the **configurable** launcher authority protocol:
-//! from the deployment's environment to the catalog row, through every artifact
-//! the controller actually renders.
+//! from the deployment's environment to the catalog row.
 //!
 //! A sibling file behind the `#[path]` convention `watcher_protocol_tests.rs`
 //! already uses, and a child module of `watcher` so the private sentinel parser
 //! and the `classify_ready` decision are reachable without widening their
 //! visibility for production code.
+//!
+//! **This file names no Kubernetes type.** The `k8s` capability boundary keeps
+//! that vocabulary inside `djinn-k8s`, and the image-controller's exceptions to
+//! it are an inventory being shrunk under `epic/fztz` — not a list to append to
+//! for a new test's convenience. Everything below is provable without a `Job`:
+//! the declaration is decided by `BuildContext::verify_declaration`, the
+//! builder's shell is `render_builder_script`, and the two are bound to one
+//! spelling by `LAUNCHER_PROTOCOL_JOB_ENV` and `PROTOCOL_SENTINEL`. The single
+//! assertion that genuinely needs the rendered Job — that its container env
+//! carries the verified declaration — lives in `build_job.rs`'s own test
+//! module, inside the file the inventory already covers.
 //!
 //! Nothing here asserts on a constant. Each step consumes the output of the
 //! previous one:
@@ -13,11 +23,11 @@
 //! ```text
 //! DJINN_IMAGE_LAUNCHER_AUTHORITY_PROTOCOL=resize-v2
 //!   └─ ImageControllerConfig::from_env
-//!        └─ controller::render_build_context   (the composition site)
-//!             ├─ Dockerfile LABEL / ENV        → the artifact's own metadata
-//!             ├─ BuildContext::environment_hash → the cache key + image tag
-//!             └─ build_image_build_job          → the builder Pod's env
-//!                  └─ the Job's own script, echoed → DJINN_LAUNCHER_PROTOCOL=
+//!        └─ controller::render_build_context      (the composition site)
+//!             ├─ Dockerfile LABEL / ENV           → the artifact's metadata
+//!             ├─ BuildContext::environment_hash   → the cache key + image tag
+//!             └─ BuildContext::verify_declaration → what the build Job reports
+//!                  └─ render_builder_script's own echo, expanded
 //!                       └─ parse_build_metadata → classify_ready
 //!                            └─ ImageRepository::mark_ready → images row
 //! ```
@@ -28,10 +38,11 @@ use djinn_image_builder::{
 };
 use djinn_launcher_protocol::LauncherAuthorityProtocol;
 use djinn_stack::environment::EnvironmentConfig;
-use k8s_openapi::api::batch::v1::Job;
 
 use super::*;
-use crate::build_job::{BuildSubject, build_image_build_job};
+use crate::build_job::{
+    BuildSubject, LAUNCHER_PROTOCOL_JOB_ENV, build_image_build_job, render_builder_script,
+};
 use crate::config::test_env::with_protocol_env;
 use crate::controller::render_build_context;
 
@@ -54,67 +65,35 @@ fn deployment(selection: Option<&str>) -> ImageControllerConfig {
     config
 }
 
-/// The container env the builder Pod runs with.
-fn container_env(job: &Job, key: &str) -> Option<String> {
-    job.spec
-        .as_ref()?
-        .template
-        .spec
-        .as_ref()?
-        .containers
-        .first()?
-        .env
-        .as_ref()?
-        .iter()
-        .find(|env| env.name == key)?
-        .value
-        .clone()
-}
-
-/// The builder Pod's shell script — the one the Job actually runs.
-fn builder_script(job: &Job) -> String {
-    job.spec
-        .as_ref()
-        .unwrap()
-        .template
-        .spec
-        .as_ref()
-        .unwrap()
-        .containers[0]
-        .command
-        .as_ref()
-        .unwrap()[2]
-        .clone()
-}
-
-/// Evaluate the Job's own `echo "DJINN_LAUNCHER_PROTOCOL=..."` line against the
-/// Job's own container env, producing the log line the build Pod would print.
+/// The build Pod's log, produced by evaluating the **builder's own script**
+/// against the value the build Job puts in its environment.
 ///
-/// Deliberately derived from both halves of the real Job rather than
-/// hand-written: if the script stopped expanding the variable the container
-/// sets (a rename on one side only), the substitution below leaves `${...}`
-/// in place, the sentinel fails to parse, and `classify_ready` refuses.
-fn build_log(job: &Job, digest: &str) -> String {
-    let script = builder_script(job);
+/// Both halves are real: the `echo` line comes out of `render_builder_script`,
+/// and `declared` is what `build_image_build_job` calls `verify_declaration`
+/// for. The expansion done here is the one the Pod's shell does. If the script
+/// stopped expanding the variable the Job sets — a rename on one side only —
+/// the substitution would leave `${…}` in place, the sentinel would fail to
+/// parse, and `classify_ready` would refuse.
+fn build_log(
+    config: &ImageControllerConfig,
+    declared: LauncherAuthorityProtocol,
+    digest: &str,
+) -> String {
+    let script = render_builder_script(config, "img-e2e");
     let echo = script
         .lines()
-        .find(|line| line.contains("DJINN_LAUNCHER_PROTOCOL="))
+        .find(|line| line.contains(PROTOCOL_SENTINEL))
         .unwrap_or_else(|| panic!("the build script must report the declaration:\n{script}"))
         .trim()
         .to_string();
-    let mut rendered = echo
-        .trim_start_matches("echo ")
-        .trim_matches('"')
-        .to_string();
-    for key in ["LAUNCHER_AUTHORITY_PROTOCOL", "IMAGE_TAG"] {
-        if let Some(value) = container_env(job, key) {
-            rendered = rendered.replace(&format!("${{{key}}}"), &value);
-        }
-    }
-    format!("#12 exporting to image\nDJINN_IMAGE_DIGEST={digest}\n{rendered}\n")
+    let rendered = echo.trim_start_matches("echo ").trim_matches('"').replace(
+        &format!("${{{LAUNCHER_PROTOCOL_JOB_ENV}}}"),
+        declared.as_wire(),
+    );
+    format!("#12 exporting to image\n{DIGEST_SENTINEL}{digest}\n{rendered}\n")
 }
 
-fn label_value(dockerfile: &str, prefix: &str) -> String {
+fn declaration_in(dockerfile: &str, prefix: &str) -> String {
     dockerfile
         .lines()
         .find_map(|line| line.trim_end().strip_prefix(prefix))
@@ -123,10 +102,10 @@ fn label_value(dockerfile: &str, prefix: &str) -> String {
         .to_string()
 }
 
-/// **AC1 + AC4.** A deployment configures `resize-v2`; the built artifact
-/// declares `resize-v2` in its own OCI metadata, and the catalog row the build
-/// produces records exactly what that artifact declares — read back out of the
-/// Job's own reporting path, not restated.
+/// **AC1 + AC4.** A deployment configures a protocol; the built artifact
+/// declares it in its own OCI metadata, and the catalog row the build produces
+/// records exactly what that artifact declares — carried there by the build
+/// script's own sentinel, not restated by the test.
 ///
 /// MUTATION (AC1): make `render_build_context` pass
 /// `DEFAULT_LAUNCHER_PROTOCOL` instead of `config.declared_launcher_protocol`
@@ -134,10 +113,9 @@ fn label_value(dockerfile: &str, prefix: &str) -> String {
 /// `leaf-v1`, and so does the catalog assertion, because every step downstream
 /// carries what was built.
 ///
-/// MUTATION (AC4): change `build_image_build_job` to render the sentinel env
-/// from something other than the verified declaration (e.g. a literal
-/// `leaf-v1`). The final assertion fails: the row and the artifact's label no
-/// longer agree.
+/// MUTATION (AC4): make `verify_declaration` return `Ok(self.launcher_protocol)`
+/// unconditionally — the reported protocol stops being the one the artifact
+/// carries, and the final assertion (row == the Dockerfile's own LABEL) fails.
 #[tokio::test]
 async fn a_configured_protocol_reaches_the_artifact_and_the_catalog_row() {
     for protocol in LauncherAuthorityProtocol::ALL {
@@ -146,11 +124,11 @@ async fn a_configured_protocol_reaches_the_artifact_and_the_catalog_row() {
 
         // 1. What the artifact itself will carry.
         let context = render_build_context(&config, &image_config()).expect("renders");
-        let label = label_value(
+        let label = declaration_in(
             &context.dockerfile,
             &format!("LABEL {LAUNCHER_PROTOCOL_LABEL}="),
         );
-        let env = label_value(
+        let env = declaration_in(
             &context.dockerfile,
             &format!("ENV {LAUNCHER_PROTOCOL_ENV}="),
         );
@@ -161,20 +139,16 @@ async fn a_configured_protocol_reaches_the_artifact_and_the_catalog_row() {
         );
         assert_eq!(env, label, "the sidecar reads the same declaration");
 
-        // 2. The Job that builds it, and the tag it pushes to.
-        let hash = context.environment_hash(
-            &image_config(),
-            &config.agent_worker_image,
-            &config.build_version,
-        );
-        let subject = BuildSubject::image("img-e2e");
-        let tag = format!("reg.example/djinn-image-img-e2e:{}", &hash[..12]);
-        let job = build_image_build_job(&config, &subject, &hash[..12], &tag, &context)
-            .expect("an agreeing context renders a Job");
+        // 2. What the build Job reports about it — the checked value, which is
+        //    also what its container env carries (asserted against the rendered
+        //    Job in `build_job.rs`'s own test module, inside the k8s boundary).
+        let declared = context
+            .verify_declaration()
+            .expect("a freshly rendered context agrees with itself");
 
-        // 3. What that Job reports back, evaluated from the Job itself.
+        // 3. The build Pod's log, from the builder's own script.
         let digest = format!("sha256:{}", "ab".repeat(32));
-        let metadata = parse_build_metadata(&build_log(&job, &digest));
+        let metadata = parse_build_metadata(&build_log(&config, declared, &digest));
         let ReadyOutcome::Ready {
             digest: seen_digest,
             protocol: reported,
@@ -190,7 +164,12 @@ async fn a_configured_protocol_reaches_the_artifact_and_the_catalog_row() {
         let images = ImageRepository::new(db.clone());
         images.create("img-e2e", "e2e", None, "{}").await.unwrap();
         images
-            .mark_ready("img-e2e", &tag, seen_digest.as_deref(), reported)
+            .mark_ready(
+                "img-e2e",
+                "reg.example/djinn-image-img-e2e:0123456789ab",
+                seen_digest.as_deref(),
+                reported,
+            )
             .await
             .unwrap();
 
@@ -254,15 +233,14 @@ fn flipping_the_deployment_selection_invalidates_the_cached_image() {
 }
 
 /// **AC4, forced.** An artifact whose label and catalog row would disagree
-/// cannot be built: the Job that carries both refuses to render.
+/// cannot be built: the call that renders the build Job refuses.
 ///
 /// This is the failure the whole design exists to make impossible — a
 /// `leaf-v1` image catalogued as `resize-v2` means the launcher writes leaf
 /// `cpu.max` while the plane believes Kubernetes owns quota.
 ///
 /// MUTATION: delete the `verify_declaration()?` call from
-/// `build_image_build_job`. The Job renders, its sentinel says `resize-v2`,
-/// and the assertion that no Job exists fails.
+/// `build_image_build_job`. It returns `Ok` and this test's `expect` panics.
 #[test]
 fn a_build_whose_label_and_catalog_row_would_disagree_is_refused() {
     let config = deployment(None);
@@ -289,5 +267,37 @@ fn a_build_whose_label_and_catalog_row_would_disagree_is_refused() {
             }
         ),
         "unexpected refusal: {error}"
+    );
+}
+
+/// The emitter and the parser of the protocol sentinel share one spelling, and
+/// the script expands exactly the variable the build Job sets.
+///
+/// This is what lets the chain above be proven without a rendered Job: the Job
+/// sets `LAUNCHER_PROTOCOL_JOB_ENV`, the script expands
+/// `LAUNCHER_PROTOCOL_JOB_ENV`, and the watcher parses `PROTOCOL_SENTINEL` —
+/// each spelled once.
+///
+/// MUTATION: give `render_builder_script` its own literal `${PROTOCOL}` instead
+/// of interpolating `LAUNCHER_PROTOCOL_JOB_ENV`. The Pod would print an
+/// unexpanded `${PROTOCOL}` that the watcher refuses; this fails first, naming
+/// the script.
+#[test]
+fn the_script_expands_the_variable_the_build_job_sets() {
+    let script = render_builder_script(&deployment(None), "img-e2e");
+    assert!(
+        script.contains(&format!(
+            "echo \"{PROTOCOL_SENTINEL}${{{LAUNCHER_PROTOCOL_JOB_ENV}}}\""
+        )),
+        "the script must echo the sentinel by expanding the Job's own env var:\n{script}"
+    );
+    // …and nothing derives the declaration from the mutable image name.
+    let protocol_line = script
+        .lines()
+        .find(|line| line.contains(PROTOCOL_SENTINEL))
+        .expect("sentinel line");
+    assert!(
+        !protocol_line.contains("IMAGE_TAG"),
+        "the declaration must never come from the tag: {protocol_line}"
     );
 }
