@@ -64,6 +64,8 @@ use djinn_k8s::pod_resize::{
     CpuLimit, KubePodResizeApi, PodResizeClient, PodResizeError, confirm_launcher_cpu,
     declared_launcher_cpu_limit, locate_launcher_spec, locate_launcher_status,
 };
+use djinn_k8s::runtime::{ObservedLauncherSidecar, TaskRunPodResizeSurface};
+use k8s_openapi::api::batch::v1::Job;
 use k8s_openapi::api::core::v1::Pod;
 use kube::api::{DeleteParams, PostParams};
 use kube::{Api, Client};
@@ -236,8 +238,9 @@ async fn harness_client() -> Client {
     Client::try_from(config).expect("build a kube client for the harness context")
 }
 
-/// The production render, with only its image references made pullable.
-fn rendered_resize_v2_pod(task_run_id: &Uuid) -> Pod {
+/// The production render of a `resize-v2` task-run Job, with only its image
+/// references made pullable.
+fn rendered_resize_v2_job(task_run_id: &Uuid) -> Job {
     let config = KubernetesConfig::from_env();
     let mut job = djinn_k8s::job::build_task_run_job_with_read_sources(
         &config,
@@ -257,6 +260,12 @@ fn rendered_resize_v2_pod(task_run_id: &Uuid) -> Pod {
         LauncherAuthorityProtocol::ResizeV2,
     )
     .expect("the render must produce a launcher sidecar under resize-v2");
+    job
+}
+
+/// The production render, with only its image references made pullable.
+fn rendered_resize_v2_pod(task_run_id: &Uuid) -> Pod {
+    let job = rendered_resize_v2_job(task_run_id);
 
     let template = job
         .spec
@@ -752,4 +761,189 @@ async fn confirm_whole_core(client: &Client, pods: &Api<Pod>, name: &str, target
         tokio::time::sleep(TICK).await;
     }
     panic!("a real kubelet never confirmed {target}; last refusal: {last}");
+}
+
+// ── The production surface, live ──────────────────────────────────────────
+
+/// Namespace for the surface test. Distinct from [`HARNESS_NAMESPACE`] because
+/// both live tests purge every object in the namespace they own and cargo runs
+/// them on separate threads: sharing one namespace would make each test's
+/// cleanup the other's flake.
+const SURFACE_NAMESPACE: &str = "djinn-resize-harness-surface";
+
+/// **The type the server actually holds, against a real apiserver.**
+///
+/// `TaskRunPodResizeSurface` is what `TaskRunResizeAdmissionBridge` resolves and
+/// drives; `server/tests/task_run_resize_dispatch_seam.rs` proves the bridge and
+/// the `DispatchGate` are on the production dispatch path, but it substitutes
+/// this surface for a fixture. So until now none of its three operations had
+/// ever spoken to an apiserver — and the one of them this file DID exercise,
+/// `resize_launcher_cpu`, turned out to be broken at the transport in a way no
+/// hermetic test could see. Its two siblings deserve the same treatment rather
+/// than the benefit of the doubt.
+///
+/// Driven from a real Job, not a hand-built Pod: `observe_launcher` resolves by
+/// the `djinn.app/task-run-id` LABEL and `uid_fenced_delete` reads the Job's own
+/// UID, so a Pod created directly would exercise neither.
+#[tokio::test]
+#[ignore = "requires scripts/kind/setup-resize-cluster.sh up"]
+async fn live_production_resize_surface_observes_and_uid_fences_a_real_job() {
+    if !live_tests_enabled() {
+        return;
+    }
+    let client = harness_client().await;
+    ensure_named_namespace(&client, SURFACE_NAMESPACE).await;
+    let jobs: Api<Job> = Api::namespaced(client.clone(), SURFACE_NAMESPACE);
+    let pods: Api<Pod> = Api::namespaced(client.clone(), SURFACE_NAMESPACE);
+    purge_harness_jobs(&jobs).await;
+    purge_harness_pods(&pods).await;
+
+    let task_run_uuid = Uuid::now_v7();
+    let mut job = rendered_resize_v2_job(&task_run_uuid);
+    job.metadata.namespace = Some(SURFACE_NAMESPACE.to_owned());
+    {
+        let template = job
+            .spec
+            .as_mut()
+            .and_then(|spec| spec.template.spec.as_mut())
+            .expect("pod template spec");
+        // `make_pullable` takes a Pod; wrap the template in one so the Job's
+        // template gets exactly the same treatment the standalone Pod gets.
+        let mut carrier = Pod {
+            spec: Some(template.clone()),
+            ..Default::default()
+        };
+        make_pullable(&mut carrier);
+        *template = carrier.spec.expect("carrier spec");
+    }
+    let created = jobs
+        .create(&PostParams::default(), &job)
+        .await
+        .expect("create the rendered harness job");
+    let job_uid = created.metadata.uid.clone().expect("the Job has a uid");
+
+    let surface =
+        TaskRunPodResizeSurface::new(client.clone(), SURFACE_NAMESPACE, "djinn-resize-harness");
+    let task_run_id = task_run_uuid.to_string();
+
+    // 1. `observe_launcher` — the label lookup, live.
+    let observed = await_observed_launcher(&surface, &task_run_id).await;
+    assert_eq!(
+        observed.launcher_container_name, LAUNCHER_CONTAINER_NAME,
+        "the observed sidecar is the launcher",
+    );
+    assert_eq!(
+        observed.namespace, SURFACE_NAMESPACE,
+        "the surface reports the namespace it is bound to",
+    );
+    assert_eq!(
+        observed.observed_protocol.as_deref(),
+        Some("resize-v2"),
+        "the protocol is read off the STORED spec, which is where a live \
+         mismatch between render and cluster would show",
+    );
+    assert_eq!(
+        observed.admitted_cpu_millicores,
+        Some(4000),
+        "the admitted ceiling is the canonicalised `{RENDERED_CEILING}` parsed to \
+         millicores, not the `4000m` the render emitted",
+    );
+    let pod_uid = observed.pod_uid.clone();
+    assert!(!pod_uid.is_empty(), "the fence needs a real Pod UID");
+    assert_ne!(
+        pod_uid, job_uid,
+        "the fence is the POD's uid, never the Job's — the Job's uid survives a \
+         Pod recreate and would fence nothing",
+    );
+
+    // 2. `resize_launcher_cpu` — the same production call the bridge makes,
+    //    reached through the surface rather than the raw client.
+    let mut cycles = 0;
+    loop {
+        cycles += 1;
+        assert!(cycles <= 120, "the surface never confirmed the birth limit");
+        match surface
+            .resize_launcher_cpu(&observed.pod_name, BIRTH_MILLICORES)
+            .await
+        {
+            Ok(()) => break,
+            Err(PodResizeError::NotConfirmed(_)) => {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+            Err(other) => panic!("the surface's resize failed outright: {other}"),
+        }
+    }
+    let confirmed = pods
+        .get(&observed.pod_name)
+        .await
+        .expect("re-read the resized pod");
+    confirm_launcher_cpu(&confirmed, CpuLimit::from_millis(BIRTH_MILLICORES))
+        .expect("the surface's resize is confirmed from status.initContainerStatuses");
+
+    // 3. `uid_fenced_delete` — refuses a wrong UID, accepts the observed one.
+    let wrong = surface
+        .uid_fenced_delete(&task_run_id, "00000000-0000-0000-0000-000000000000")
+        .await;
+    assert!(
+        wrong.is_err(),
+        "a delete fenced to a UID this task run never had must refuse; accepting \
+         it would mean the fence is decorative and a stale watchdog could destroy \
+         a Pod belonging to a later attempt",
+    );
+    assert!(
+        pods.get_opt(&observed.pod_name)
+            .await
+            .expect("re-read after the refused delete")
+            .is_some(),
+        "the refused delete must not have destroyed anything",
+    );
+    surface
+        .uid_fenced_delete(&task_run_id, &pod_uid)
+        .await
+        .expect("a delete fenced to the OBSERVED uid is accepted");
+
+    purge_harness_jobs(&jobs).await;
+    purge_harness_pods(&pods).await;
+}
+
+async fn ensure_named_namespace(client: &Client, name: &str) {
+    use k8s_openapi::api::core::v1::Namespace;
+    let namespaces: Api<Namespace> = Api::all(client.clone());
+    let namespace = Namespace {
+        metadata: kube::api::ObjectMeta {
+            name: Some(name.to_owned()),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    match namespaces.create(&PostParams::default(), &namespace).await {
+        Ok(_) => {}
+        Err(kube::Error::Api(response)) if response.code == 409 => {}
+        Err(error) => panic!("create harness namespace {name}: {error}"),
+    }
+}
+
+async fn purge_harness_jobs(jobs: &Api<Job>) {
+    jobs.delete_collection(&DeleteParams::background(), &Default::default())
+        .await
+        .expect("purge Jobs left by a previous harness run");
+}
+
+/// Poll until the surface reports a launcher the kubelet has actually started.
+async fn await_observed_launcher(
+    surface: &TaskRunPodResizeSurface,
+    task_run_id: &str,
+) -> ObservedLauncherSidecar {
+    const TICKS: usize = 90;
+    let mut last = String::from("no observation yet");
+    for _ in 0..TICKS {
+        match surface.observe_launcher(task_run_id).await {
+            Ok(Some(observed)) if observed.launcher_container_id.is_some() => return observed,
+            Ok(Some(_)) => last = "observed, but the kubelet has not started it".to_owned(),
+            Ok(None) => last = "no Pod carries this task-run label yet".to_owned(),
+            Err(error) => last = error.to_string(),
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+    panic!("the production surface never observed a started launcher: {last}");
 }
