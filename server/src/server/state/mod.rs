@@ -494,26 +494,28 @@ impl AppState {
         // refuses `leaf-v1` outright. This becomes live the first time an image
         // row carries `resize-v2`.
         let permits = Arc::new(djinn_db::BuildPodPermitRepository::new(db.clone()));
-        let resize_authority = Arc::new(djinn_coordinator::resize_authorization::ResizeAuthority::new(
-            Arc::new(djinn_db::BuildLeaseRepository::new(db.clone())),
-            Arc::clone(&permits),
-            Arc::new(
-                djinn_supervisor::services::DurableInvocationLiftAuthority::new(
-                    db.clone(),
-                    "server AppState",
-                ),
-            ),
-            // The process's own rendered lease, from the SAME `KubernetesConfig`
-            // the manifests are rendered from. The per-Pod ceiling it is clamped
-            // against comes from the write-once permit row, never from here —
-            // see `resize_authorization::clamp`.
-            i64::from(djinn_k8s::launcher::launcher_leased_millicores(
-                &djinn_k8s::KubernetesConfig::from_env(),
-            )),
-            Arc::new(djinn_coordinator::resize_lift::ResizeLift::from_env(
+        let resize_authority = Arc::new(
+            djinn_coordinator::resize_authorization::ResizeAuthority::new(
+                Arc::new(djinn_db::BuildLeaseRepository::new(db.clone())),
                 Arc::clone(&permits),
-            )),
-        ));
+                Arc::new(
+                    djinn_supervisor::services::DurableInvocationLiftAuthority::new(
+                        db.clone(),
+                        "server AppState",
+                    ),
+                ),
+                // The process's own rendered lease, from the SAME `KubernetesConfig`
+                // the manifests are rendered from. The per-Pod ceiling it is clamped
+                // against comes from the write-once permit row, never from here —
+                // see `resize_authorization::clamp`.
+                i64::from(djinn_k8s::launcher::launcher_leased_millicores(
+                    &djinn_k8s::KubernetesConfig::from_env(),
+                )),
+                Arc::new(djinn_coordinator::resize_lift::ResizeLift::from_env(
+                    Arc::clone(&permits),
+                )),
+            ),
+        );
         let build_lease = Arc::new(
             BuildLeaseService::new(
                 Arc::new(djinn_db::BuildLeaseRepository::new(db.clone())),
@@ -524,9 +526,9 @@ impl AppState {
             // (and its reference cap) on recovery, so a restart observes the
             // armed cap before admitting or spawning. An armed cap still wins
             // over the configured value above.
-            .with_invocation_lease_authority(Arc::new(
-                InvocationLeaseAuthorityRepository::new(db.clone()),
-            ))
+            .with_invocation_lease_authority(Arc::new(InvocationLeaseAuthorityRepository::new(
+                db.clone(),
+            )))
             .with_resize_authority(resize_authority),
         );
         // The one place proposal `3i92`'s resize stack becomes reachable. The

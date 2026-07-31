@@ -25,6 +25,23 @@
 #      it is a comment that invites a reader to read it.
 #   3. Each required type is still named by the module. Deleting the predicate
 #      would otherwise satisfy check 2 perfectly.
+#   4. (0ppk-1c) `with_resize_authority` has at least one PRODUCTION caller.
+#
+# WHY CHECK 4
+#
+# `BuildLeaseService` holds its resize authorization as
+# `Option<Arc<ResizeAuthority>>`. For the whole of `0ppk-1a` that `Option` was
+# `None` at every composition and `with_resize_authority` had zero call sites
+# outside tests: the authorization layer, the clamp, and their entire test suite
+# were merged, green, and structurally unable to move a Pod. Nothing about that
+# produces a compile error, and no unit test can catch it — a unit test that
+# installs the authority itself proves only that the setter works.
+#
+# Reachability is a property of the COMPOSITION SITE, so it is checked here, by
+# text, over the production tree. `#[cfg(test)]` blocks, `*_tests.rs` files and
+# `.worktrees/` scratch copies are excluded deliberately: a caller in any of
+# those is exactly the false positive that would let the arming be deleted while
+# CI stayed green.
 #
 # Usage:
 #   ./scripts/check-resize-authorization-boundary.sh
@@ -42,6 +59,8 @@ cd "$ROOT"
 GUARDED_FILES="
 server/crates/djinn-coordinator/src/resize_authorization.rs
 server/crates/djinn-coordinator/src/resize_authorization_tests.rs
+server/crates/djinn-coordinator/src/resize_lift.rs
+server/crates/djinn-coordinator/src/resize_lift_tests.rs
 "
 
 # The retired handoff relation and the protocol columns flc5 drops with it.
@@ -93,8 +112,86 @@ if [ -f "$TYPED_FILE" ]; then
     done
 fi
 
+# ── Check 4: the arming has a production caller ────────────────────────────
+#
+# The symbol is spelled in two halves so this script's own text cannot satisfy
+# the search it performs — a guard that matches itself is a guard that can never
+# fail.
+ARMING_SYMBOL="with_resize""_authority"
+ARMING_ROOT=server/src
+
+# A hit counts only if it precedes the file's first UNINDENTED `#[cfg(test)]`.
+#
+# An unindented `#[cfg(test)]` is a test-MODULE attribute; the indented ones are
+# `#[cfg(test)]` struct fields and statements, which sit in production code and
+# must not truncate the scan. Test modules go at the end of a file in this
+# codebase, so "before the first top-level `#[cfg(test)]`" is exactly "outside
+# every test module" without this script having to parse Rust.
+#
+# The rule is conservative in the safe direction: a caller appearing after one
+# is IGNORED, so the guard can only ever under-count production callers, never
+# over-count them. It can fail spuriously; it cannot pass spuriously.
+arming_callers() {
+    [ -d "$ARMING_ROOT" ] || return 0
+    find "$ARMING_ROOT" -name '*.rs' -type f 2>/dev/null |
+        grep -v -- '_tests\.rs$' |
+        grep -v -- '/\.worktrees/' |
+        while IFS= read -r file; do
+            awk -v sym="$ARMING_SYMBOL" -v path="$file" '
+                /^#\[cfg\(test\)\]/ { exit }
+                # A commented-out call is not a call. Without this, the named
+                # mutation "delete the arming" is satisfied by commenting it out
+                # and the guard passes on a composition that arms nothing --
+                # which is what the first version of this check actually did.
+                {
+                    raw = $0
+                    code = $0
+                    if (in_block) {
+                        if (match(code, /\*\//)) {
+                            code = substr(code, RSTART + RLENGTH)
+                            in_block = 0
+                        } else {
+                            next
+                        }
+                    }
+                    while (match(code, /\/\*/)) {
+                        head = substr(code, 1, RSTART - 1)
+                        rest = substr(code, RSTART + 2)
+                        if (match(rest, /\*\//)) {
+                            code = head substr(rest, RSTART + RLENGTH)
+                        } else {
+                            code = head
+                            in_block = 1
+                            break
+                        }
+                    }
+                    sub(/\/\/.*/, "", code)
+                    if (index(code, "." sym "(")) {
+                        printf "%s:%d:%s\n", path, NR, raw
+                    }
+                }
+            ' "$file"
+        done
+}
+
+if [ ! -d "$ARMING_ROOT" ]; then
+    echo "FAIL: $ARMING_ROOT does not exist; the arming guard has no subject." >&2
+    echo "      If the server composition root moved, update ARMING_ROOT in $0." >&2
+    status=1
+elif [ -z "$(arming_callers)" ]; then
+    echo "FAIL: no production caller of \`$ARMING_SYMBOL\` under $ARMING_ROOT." >&2
+    echo "      \`BuildLeaseService\` holds its resize authorization as an" >&2
+    echo "      Option that defaults to None. With no production caller the" >&2
+    echo "      whole resize stack is merged, green, and structurally unable" >&2
+    echo "      to move a Pod -- which is the exact state 0ppk-1a shipped in" >&2
+    echo "      and 0ppk-1c exists to end. Re-arm it in AppState::new_inner." >&2
+    status=1
+fi
+
 if [ "$status" -eq 0 ]; then
     echo "OK: resize authorization depends on the lift-decision types, not on retired storage."
+    echo "OK: the resize authorization is armed from production code:"
+    arming_callers | sed 's/^/    /'
 fi
 
 exit "$status"

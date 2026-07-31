@@ -38,9 +38,9 @@ use djinn_k8s::pod_resize::PodResizeError;
 use djinn_k8s::pod_resize_fixture::{ApiFault, StoredTaskRunPod};
 use djinn_k8s::runtime::{LauncherObservationError, ObservedLauncherSidecar};
 use djinn_supervisor::services::{
-    DegradedUnleasedReason, DurableInvocationLiftAuthority, InvocationLiftAuthority, LeaseDeadlines,
-    LeaseFencingToken, LeaseGrantRequest, LeaseIdentity, LeaseQueueRequest, LeaseResult,
-    TaskInvocationLeaseIdentity,
+    DegradedUnleasedReason, DurableInvocationLiftAuthority, InvocationLiftAuthority,
+    LeaseDeadlines, LeaseFencingToken, LeaseGrantRequest, LeaseIdentity, LeaseQueueRequest,
+    LeaseResult, TaskInvocationLeaseIdentity,
 };
 
 use crate::build_lease::BuildLeaseService;
@@ -94,7 +94,9 @@ impl LauncherResizeSurface for FixtureSurface {
         pod_name: &str,
         target_millicores: u64,
     ) -> Result<(), PodResizeError> {
-        self.0.resize_launcher_cpu(pod_name, target_millicores).await
+        self.0
+            .resize_launcher_cpu(pod_name, target_millicores)
+            .await
     }
 }
 
@@ -146,7 +148,11 @@ impl Fixture {
         let lease_authority = Arc::new(InvocationLeaseAuthorityRepository::new(db.clone()));
         let seeded = lease_authority.seed_baseline().await.unwrap();
         lease_authority
-            .set_mode_and_cap(seeded.epoch, InvocationLeaseMode::Enforce, Some(CONFIGURED_CAP))
+            .set_mode_and_cap(
+                seeded.epoch,
+                InvocationLeaseMode::Enforce,
+                Some(CONFIGURED_CAP),
+            )
             .await
             .unwrap();
 
@@ -431,7 +437,10 @@ async fn a_matching_regular_container_status_is_never_confirmation() {
         "and the launcher really was still at its birth limit — the degrade is \
          not an artefact of a Pod that had already moved"
     );
-    assert_eq!(fixture.permit_state().await, BuildPodPermitState::DropRequired);
+    assert_eq!(
+        fixture.permit_state().await,
+        BuildPodPermitState::DropRequired
+    );
 }
 
 // ── AC4: every named uncertainty degrades, with drop active ────────────────
@@ -723,7 +732,11 @@ fn the_patch_body_carries_exactly_one_mutable_field() {
         djinn_k8s::pod_resize::CpuLimit::from_millis(ADMITTED_CEILING),
     );
     let spec = body.get("spec").expect("a spec");
-    assert_eq!(spec.as_object().map(serde_json::Map::len), Some(1), "spec has exactly one key");
+    assert_eq!(
+        spec.as_object().map(serde_json::Map::len),
+        Some(1),
+        "spec has exactly one key"
+    );
     assert!(spec.get("containers").is_none(), "never `spec.containers`");
     let containers = spec
         .get("initContainers")
@@ -772,7 +785,10 @@ async fn twenty_lift_cycles_leave_requests_qos_and_the_container_untouched() {
     let container_id = pod.launcher_container_id();
     let restarts = pod.launcher_restart_count();
     let init_containers = pod.init_container_count();
-    assert_eq!(init_containers, 2, "a second init container must stand beside the launcher");
+    assert_eq!(
+        init_containers, 2,
+        "a second init container must stand beside the launcher"
+    );
     assert!(requests.is_some() && qos.is_some() && container_id.is_some());
 
     // The lifecycle only admits one lift per permit, so the cycling is done at
@@ -784,7 +800,11 @@ async fn twenty_lift_cycles_leave_requests_qos_and_the_container_untouched() {
                 .await
                 .unwrap_or_else(|e| panic!("cycle {cycle} target {target}m: {e}"));
         }
-        assert_eq!(pod.launcher_spec_cpu_request(), requests, "cycle {cycle}: requests moved");
+        assert_eq!(
+            pod.launcher_spec_cpu_request(),
+            requests,
+            "cycle {cycle}: requests moved"
+        );
         assert_eq!(pod.qos_class(), qos, "cycle {cycle}: QoS class moved");
         assert_eq!(
             pod.launcher_container_id(),
@@ -803,7 +823,10 @@ async fn twenty_lift_cycles_leave_requests_qos_and_the_container_untouched() {
              patch does to an array with patchMergeKey `name`"
         );
     }
-    assert!(pod.resize_patches() >= 40, "the cycles must actually have patched");
+    assert!(
+        pod.resize_patches() >= 40,
+        "the cycles must actually have patched"
+    );
 }
 
 // ── AC6 / AC7: the clamp is the effective bound, and the CEILING comes from

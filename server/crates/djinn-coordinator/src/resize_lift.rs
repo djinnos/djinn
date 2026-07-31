@@ -240,16 +240,14 @@ impl ResizeLift {
             .await
         {
             Ok(TransitionBuildPodResizeLifecycleResult::Transitioned(_)) => Ok(()),
-            Ok(TransitionBuildPodResizeLifecycleResult::Rejected) => {
-                Err(ResizeApplyFailure::new(
-                    DegradedUnleasedReason::LiftLifecycleUnwritable,
-                    format!(
-                        "permit {} refused the {expected:?} -> {next:?} transition; \
+            Ok(TransitionBuildPodResizeLifecycleResult::Rejected) => Err(ResizeApplyFailure::new(
+                DegradedUnleasedReason::LiftLifecycleUnwritable,
+                format!(
+                    "permit {} refused the {expected:?} -> {next:?} transition; \
                          another actor owns this lifecycle",
-                        intent.permit_id
-                    ),
-                ))
-            }
+                    intent.permit_id
+                ),
+            )),
             Err(error) => Err(ResizeApplyFailure::new(
                 DegradedUnleasedReason::LiftLifecycleUnwritable,
                 format!("durable permit lifecycle unwritable: {error}"),
@@ -292,7 +290,10 @@ impl ResizeLift {
             Ok(None) => {
                 return Err(ResizeApplyFailure::new(
                     DegradedUnleasedReason::LiftPodAbsent,
-                    format!("no Pod carries the label for task run {}", intent.task_run_id),
+                    format!(
+                        "no Pod carries the label for task run {}",
+                        intent.task_run_id
+                    ),
                 ));
             }
             Err(error) => return Err(observation_failure(&error)),
@@ -360,7 +361,10 @@ impl ResizeLift {
         let target = u64::try_from(intent.target_millicores).map_err(|_| {
             ResizeApplyFailure::new(
                 DegradedUnleasedReason::CeilingUnusable,
-                format!("clamped target {}m is not a CPU quantity", intent.target_millicores),
+                format!(
+                    "clamped target {}m is not a CPU quantity",
+                    intent.target_millicores
+                ),
             )
         })?;
 
@@ -373,10 +377,7 @@ impl ResizeLift {
             // PATCH land on a different object.
             self.observe_and_fence(surface, intent).await?;
 
-            match surface
-                .resize_launcher_cpu(&intent.pod_name, target)
-                .await
-            {
+            match surface.resize_launcher_cpu(&intent.pod_name, target).await {
                 Ok(()) => {
                     // The confirming fence. `resize_launcher_cpu`'s own final
                     // GET proves the LIMIT; it does not prove the limit belongs

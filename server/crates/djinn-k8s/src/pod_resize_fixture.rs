@@ -231,16 +231,13 @@ impl StoredTaskRunPod {
     pub fn add_resize_pending(&self) {
         self.mutate(|pod| {
             if let Some(status) = pod.status.as_mut() {
-                status
-                    .conditions
-                    .get_or_insert_with(Default::default)
-                    .push(
-                        serde_json::from_value(json!({
-                            "type": crate::pod_resize::POD_RESIZE_PENDING_CONDITION,
-                            "status": "True",
-                        }))
-                        .expect("condition fixture deserializes"),
-                    );
+                status.conditions.get_or_insert_with(Default::default).push(
+                    serde_json::from_value(json!({
+                        "type": crate::pod_resize::POD_RESIZE_PENDING_CONDITION,
+                        "status": "True",
+                    }))
+                    .expect("condition fixture deserializes"),
+                );
             }
         });
     }
@@ -352,7 +349,11 @@ impl StoredTaskRunPod {
     #[must_use]
     pub fn launcher_restart_count(&self) -> Option<i32> {
         let pod = self.pod()?;
-        Some(crate::pod_resize::locate_launcher_status(&pod).ok()?.restart_count)
+        Some(
+            crate::pod_resize::locate_launcher_status(&pod)
+                .ok()?
+                .restart_count,
+        )
     }
 
     fn mutate(&self, apply: impl FnOnce(&mut Pod)) {
@@ -521,7 +522,9 @@ impl StoredTaskRunPod {
 struct FixtureApi(StoredTaskRunPod);
 
 /// Every launcher entry in `status.initContainerStatuses`, for mutation.
-fn launcher_statuses(pod: &mut Pod) -> impl Iterator<Item = &mut k8s_openapi::api::core::v1::ContainerStatus> {
+fn launcher_statuses(
+    pod: &mut Pod,
+) -> impl Iterator<Item = &mut k8s_openapi::api::core::v1::ContainerStatus> {
     pod.status
         .as_mut()
         .and_then(|status| status.init_container_statuses.as_mut())
