@@ -375,3 +375,132 @@ expect_rejected('added an unrelated ClusterRoleBinding', mutant, job_rs, 'introd
 print('PASS: pods/resize is granted once, namespaced, patch-only, and the '
       'task-run ServiceAccount holds no apiserver credential')
 PY
+
+# ---------------------------------------------------------------------------
+# zpen (proposal 3i92): the couplings the cutover preflight depends on.
+# ---------------------------------------------------------------------------
+# `server/crates/djinn-k8s/src/cutover_preflight.rs` re-asks the questions above
+# at cutover time, against a live render. Two things it relies on live in THIS
+# chart, and if either drifts the preflight does not fail — it passes VACUOUSLY,
+# which is strictly worse than not existing:
+#
+#   1. The triple it matches (`RESIZE_RULE_API_GROUP` / `_RESOURCE` / `_VERB`)
+#      must be the triple this render actually grants. If the chart moved to a
+#      different apiGroup or verb, the preflight would report "no Role grants
+#      pods/resize" on a healthy cluster — or a matching-but-wrong constant
+#      would report a grant that does not exist.
+#   2. The preflight names the task-run ServiceAccount by reading it back off
+#      the render's `app.kubernetes.io/component: taskrun` label, deliberately
+#      rather than hard-coding it, so a renamed account is still checked. If
+#      that label disappeared, the preflight's binding scan would have no
+#      account to compare subjects against and would pass with nothing checked.
+#
+# Asserted here rather than only in the Rust suite because this is a property OF
+# THE CHART, and this file is where a chart edit is reviewed.
+python3 - "$WORK/render.yaml" "$REPO_DIR/server/crates/djinn-k8s/src/cutover_preflight.rs" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+import yaml
+
+render, cutover_rs = (Path(p) for p in sys.argv[1:3])
+docs = [d for d in yaml.safe_load_all(render.read_text(encoding='utf-8')) if isinstance(d, dict)]
+source = cutover_rs.read_text(encoding='utf-8')
+failures = []
+
+
+def constant(name):
+    match = re.search(rf'pub const {name}: &str = "([^"]*)";', source)
+    assert match, f'{name} is not declared in cutover_preflight.rs'
+    return match.group(1)
+
+
+triple = (constant('RESIZE_RULE_API_GROUP'),
+          constant('RESIZE_RULE_RESOURCE'),
+          constant('RESIZE_RULE_VERB'))
+
+
+def rules_matching(documents, want):
+    api_group, resource, verb = want
+    return [
+        (doc, rule)
+        for doc in documents
+        if doc.get('kind') in ('Role', 'ClusterRole')
+        for rule in doc.get('rules') or []
+        if api_group in (rule.get('apiGroups') or [])
+        and resource in (rule.get('resources') or [])
+        and verb in (rule.get('verbs') or [])
+    ]
+
+
+def taskrun_accounts(documents):
+    return [
+        doc['metadata']['name']
+        for doc in documents
+        if doc.get('kind') == 'ServiceAccount'
+        and ((doc.get('metadata') or {}).get('labels') or {})
+        .get('app.kubernetes.io/component') == 'taskrun'
+    ]
+
+
+def check(documents, want):
+    """The two couplings as one verdict, so a mutation can flip it."""
+    problems = []
+    matches = rules_matching(documents, want)
+    if len(matches) != 1:
+        problems.append(
+            f'the cutover preflight matches the triple apiGroups={want[0]!r} '
+            f'resources={want[1]!r} verbs={want[2]!r}, which this render grants '
+            f'{len(matches)} times (expected exactly 1)')
+    elif matches[0][0].get('kind') != 'Role':
+        problems.append('the granting object is not a namespaced Role')
+    accounts = taskrun_accounts(documents)
+    if len(accounts) != 1:
+        problems.append(
+            f'the cutover preflight names the task-run ServiceAccount by its '
+            f'app.kubernetes.io/component=taskrun label; this render carries '
+            f'{len(accounts)} such accounts (expected exactly 1)')
+    return problems
+
+
+failures.extend(check(docs, triple))
+
+# Non-vacuity, coupling 1: a constant that no longer names what the chart grants
+# must be caught here rather than surface as a phantom missing rule at cutover.
+if not check(docs, ('apps', triple[1], triple[2])):
+    failures.append('a drifted apiGroup constant was not detected')
+if not check(docs, (triple[0], triple[1], 'get')):
+    failures.append('a drifted verb constant was not detected')
+# The RESOURCE constant cannot be proved by a render match, and pretending
+# otherwise would be the vacuous assertion this whole file exists to forbid:
+# the chart legitimately grants apiGroups [""] / resources ["pods"] /
+# verbs ["patch"] on the line above the resize rule, so a constant that drifted
+# from `pods/resize` to `pods` would still find exactly one matching Role rule.
+# What IS provable is that the constant names a SUBRESOURCE at all — RBAC does
+# not imply subresources, so `pods` grants nothing on `pods/resize`.
+if not triple[1].startswith('pods/'):
+    failures.append(
+        f'RESIZE_RULE_RESOURCE is {triple[1]!r}, which is not a pods subresource; '
+        f'RBAC on `pods` grants nothing on `pods/resize`')
+
+# Non-vacuity, coupling 2: strip the label the preflight keys on.
+stripped = [
+    {**doc, 'metadata': {**doc['metadata'],
+                         'labels': {k: v
+                                    for k, v in (doc['metadata'].get('labels') or {}).items()
+                                    if k != 'app.kubernetes.io/component'}}}
+    if doc.get('kind') == 'ServiceAccount' else doc
+    for doc in docs
+]
+if not check(stripped, triple):
+    failures.append('removing the component=taskrun label was not detected')
+
+if failures:
+    for failure in failures:
+        print(f'FAIL: {failure}', file=sys.stderr)
+    raise SystemExit(1)
+
+print('PASS: the cutover preflight matches the triple this chart grants, and can '
+      'name the task-run ServiceAccount from the render')
+PY

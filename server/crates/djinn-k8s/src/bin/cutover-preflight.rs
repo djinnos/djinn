@@ -334,16 +334,17 @@ fn drain_fence(live_task_run_pods: Vec<String>) -> DrainFenceObservation {
             return DrainFenceObservation::unobservable(format!("no tokio runtime: {error}"));
         }
     };
-    let database = match Database::open_with_config(DatabaseConnectConfig::Postgres(
-        PostgresDatabaseConfig { url },
-    )) {
-        Ok(database) => database,
-        Err(error) => {
-            return DrainFenceObservation::unobservable(format!(
-                "cannot open DJINN_DATABASE_URL: {error}"
-            ));
-        }
-    };
+    let database =
+        match Database::open_with_config(DatabaseConnectConfig::Postgres(PostgresDatabaseConfig {
+            url,
+        })) {
+            Ok(database) => database,
+            Err(error) => {
+                return DrainFenceObservation::unobservable(format!(
+                    "cannot open DJINN_DATABASE_URL: {error}"
+                ));
+            }
+        };
     let permits = BuildPodPermitRepository::new(database);
     runtime.block_on(observe_drain_fence(&permits, live_task_run_pods))
 }

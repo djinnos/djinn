@@ -33,6 +33,15 @@
 //! `--ignored` invocation or its declared proof count disappears, and the lane
 //! itself fails if fewer than `DJINN_CUTOVER_EXPECTED_PROOFS` proofs execute.
 
+// djinn:allow-oversize
+//
+// Ten acceptance criteria, six independent defect classes, and a negative
+// fixture per mutation each criterion names — plus the source gates and the
+// wiring guard that make the `#[ignore]`d half impossible to skip. Splitting it
+// would put the live-render helper, the fixtures derived from it, and the
+// single-mutation guard that proves those fixtures surgical into three files
+// that only mean anything together.
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::process::Command;
@@ -197,6 +206,10 @@ fn set_ceiling(job: &mut Job, cpu: Option<&str>) {
 /// A clean cutover: the live render, the armed Job for `mode`, an empty
 /// catalog, no live births, and a drained fence.
 struct Fixture {
+    /// Names the case in every assertion this fixture raises. A looped proof
+    /// that fails on iteration four has to say which iteration that was, and
+    /// the workspace lints (correctly) ban print macros for it.
+    label: String,
     manifests: Vec<Value>,
     job: Job,
     mode: LauncherAuthorityProtocol,
@@ -209,6 +222,7 @@ struct Fixture {
 impl Fixture {
     fn clean(mode: LauncherAuthorityProtocol) -> Self {
         Self {
+            label: format!("clean {mode}"),
             manifests: live_render().to_vec(),
             job: task_run_job(mode),
             mode,
@@ -248,15 +262,18 @@ impl Fixture {
             births: &self.births,
             drain: &self.drain,
         };
-        let blocked = run(&input).expect_err("the preflight must refuse this fixture");
+        let label = &self.label;
+        let Err(blocked) = run(&input) else {
+            panic!("{label}: the preflight must refuse this fixture");
+        };
         assert_eq!(
             blocked.classes(),
             BTreeSet::from([class]),
-            "expected exactly the {class} class, got: {blocked}"
+            "{label}: expected exactly the {class} class, got: {blocked}"
         );
         assert!(
             blocked.to_string().contains(needle),
-            "the refusal must name {needle:?}, got: {blocked}"
+            "{label}: the refusal must name {needle:?}, got: {blocked}"
         );
     }
 
@@ -268,7 +285,10 @@ impl Fixture {
                 DefectClass::ALL.to_vec(),
                 "a clean verdict must state that every class was evaluated"
             ),
-            Err(classes) => panic!("expected a clean cutover, blocked on {classes:?}"),
+            Err(classes) => panic!(
+                "{}: expected a clean cutover, blocked on {classes:?}",
+                self.label
+            ),
         }
     }
 }
@@ -292,7 +312,6 @@ enum Intent {
     /// changed or removed anywhere.
     AddedUnder(String),
 }
-
 
 /// Locate the Role rule that carries the `pods/resize` triple.
 fn resize_rule_position(manifests: &[Value]) -> (usize, usize) {
@@ -318,7 +337,7 @@ fn list_contains(rule: &Value, field: &str, wanted: &str) -> bool {
         .is_some_and(|list| list.iter().any(|item| item.as_str() == Some(wanted)))
 }
 
-fn with_resize_rule_deleted(manifests: &mut Vec<Value>) {
+fn with_resize_rule_deleted(manifests: &mut [Value]) {
     let (document, rule) = resize_rule_position(manifests);
     manifests[document]["rules"]
         .as_array_mut()
@@ -436,8 +455,14 @@ fn assert_single_mutation(mutated: &[Value], intent: &Intent) {
         .keys()
         .filter(|key| after.get(*key).is_some_and(|value| value != &base[*key]))
         .collect();
-    let removed: Vec<&String> = base.keys().filter(|key| !after.contains_key(*key)).collect();
-    let added: Vec<&String> = after.keys().filter(|key| !base.contains_key(*key)).collect();
+    let removed: Vec<&String> = base
+        .keys()
+        .filter(|key| !after.contains_key(*key))
+        .collect();
+    let added: Vec<&String> = after
+        .keys()
+        .filter(|key| !base.contains_key(*key))
+        .collect();
 
     match intent {
         Intent::Removed(path) => {
@@ -588,8 +613,8 @@ fn each_pods_resize_rbac_mutation_is_refused_and_names_the_subresource() {
         .filter(|(label, _, _)| *label != "RoleBinding naming the taskrun ServiceAccount")
     {
         let mut fixture = Fixture::clean(LauncherAuthorityProtocol::ResizeV2);
+        fixture.label = format!("rbac mutation: {label}");
         fixture.manifests = manifests;
-        println!("rbac mutation: {label}");
         fixture.expect_blocked(DefectClass::PodsResizeRbac, RESIZE_RULE_RESOURCE);
     }
 }
@@ -830,8 +855,7 @@ fn birth_confirmation_covers_missing_duplicate_stale_and_canonical_forms() {
 /// A digest the inventory vouches for, and one it does not. Both canonical:
 /// `sha256:` plus 64 lowercase hex, which is the only shape
 /// `PreProtocolDigest::parse` accepts.
-const INVENTORIED: &str =
-    "sha256:1111111111111111111111111111111111111111111111111111111111111111";
+const INVENTORIED: &str = "sha256:1111111111111111111111111111111111111111111111111111111111111111";
 const UNINVENTORIED: &str =
     "sha256:2222222222222222222222222222222222222222222222222222222222222222";
 
@@ -1019,11 +1043,7 @@ async fn seed_task_run(database: &Database, task_run_id: &str) {
 /// Walk one permit to `target` through the real lifecycle: acquire, bind a Job
 /// UID, capture the resize identity (which lands on `birth_confirmed`), then
 /// apply the fenced transitions the state machine allows.
-async fn seed_permit_in_state(
-    database: &Database,
-    task_run_id: &str,
-    target: BuildPodPermitState,
-) {
+async fn seed_permit_in_state(database: &Database, task_run_id: &str, target: BuildPodPermitState) {
     seed_task_run(database, task_run_id).await;
     let repo = BuildPodPermitRepository::new(database.clone());
     let AcquireBuildPodPermitResult::Acquired { row, .. } = repo.acquire(task_run_id, 8).await
@@ -1133,8 +1153,8 @@ async fn one_nonterminal_resize_row_in_any_state_blocks_the_cutover() {
         let permits = BuildPodPermitRepository::new(database.clone());
 
         let mut fixture = Fixture::clean(LauncherAuthorityProtocol::ResizeV2);
+        fixture.label = format!("nonterminal state {state:?}");
         fixture.drain = observe_drain_fence(&permits, Vec::new()).await;
-        println!("drain fence state under test: {state:?}");
         fixture.expect_blocked(
             DefectClass::DrainFence,
             "1 nonterminal resize/lease row(s) are still in flight",
@@ -1182,7 +1202,8 @@ fn an_unobservable_drain_fence_is_a_defect() {
     fixture.expect_blocked(DefectClass::DrainFence, "could not be read");
 
     let mut live = Fixture::clean(LauncherAuthorityProtocol::ResizeV2);
-    live.drain = DrainFenceObservation::observed(Vec::new(), vec!["djinn-task-run-abc".to_string()]);
+    live.drain =
+        DrainFenceObservation::observed(Vec::new(), vec!["djinn-task-run-abc".to_string()]);
     live.expect_blocked(DefectClass::DrainFence, "live task-run Pod(s)");
 }
 
@@ -1248,7 +1269,10 @@ fn each_credential_boundary_mutation_is_refused() {
             .and_then(|spec| spec.template.spec.as_mut())
             .expect("pod spec")
             .automount_service_account_token = automount;
-        fixture.expect_blocked(DefectClass::CredentialBoundary, "automountServiceAccountToken");
+        fixture.expect_blocked(
+            DefectClass::CredentialBoundary,
+            "automountServiceAccountToken",
+        );
     }
 
     for audience in [Some("kubernetes.default.svc"), None] {
@@ -1319,14 +1343,16 @@ fn the_stock_task_run_pod_projects_exactly_the_djinn_audience() {
 /// different hat.
 #[test]
 fn the_cutover_preflight_lane_is_wired_and_cannot_silently_skip() {
-    let workflow =
-        std::fs::read_to_string(repo_root().join(".github/workflows/quality-gate.yml"))
-            .expect("quality-gate.yml is readable");
+    let workflow = std::fs::read_to_string(repo_root().join(".github/workflows/quality-gate.yml"))
+        .expect("quality-gate.yml is readable");
     let job = workflow
         .split_once("\n  cutover-preflight:\n")
         .expect("the cutover-preflight job must exist in quality-gate.yml")
         .1;
-    let job = job.split("\n  launcher-kernel-boundary:").next().unwrap_or(job);
+    let job = job
+        .split("\n  launcher-kernel-boundary:")
+        .next()
+        .unwrap_or(job);
 
     for required in [
         "deploy/preflight/tests/cutover-preflight.sh",

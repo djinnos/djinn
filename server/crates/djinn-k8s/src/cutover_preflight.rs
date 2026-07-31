@@ -65,7 +65,9 @@ use std::fmt;
 
 use djinn_cgroup_launcher::LauncherAuthorityProtocol;
 use djinn_db::BuildPodPermitRepository;
-use djinn_db::launcher_compatibility::{AdmissionDecision, LegacyDigestInventory, decide_admission};
+use djinn_db::launcher_compatibility::{
+    AdmissionDecision, LegacyDigestInventory, decide_admission,
+};
 use k8s_openapi::api::batch::v1::Job;
 use k8s_openapi::api::core::v1::{Container, Pod, PodSpec};
 use serde_json::Value;
@@ -440,9 +442,9 @@ pub async fn observe_drain_fence(
                 .collect(),
             live_task_run_pods,
         ),
-        Err(error) => DrainFenceObservation::unobservable(format!(
-            "list_nonterminal_resize failed: {error}"
-        )),
+        Err(error) => {
+            DrainFenceObservation::unobservable(format!("list_nonterminal_resize failed: {error}"))
+        }
     }
 }
 
@@ -499,7 +501,7 @@ pub fn run(input: &CutoverPreflightInput<'_>) -> Result<Report, Blocked> {
     check_drain_fence(input.drain, &mut defects);
     check_credential_boundary(input.manifests, input.task_run_job, &mut defects);
 
-    defects.sort_by(|left, right| left.class.cmp(&right.class));
+    defects.sort_by_key(|defect| defect.class);
     if defects.is_empty() {
         Ok(Report {
             evaluated: DefectClass::ALL.to_vec(),
@@ -611,11 +613,7 @@ fn metadata_name(document: &Value) -> &str {
 /// string comparison: `leaf-v1` is a wire spelling, "the launcher owns the
 /// leaf's quota" is the property that decides whether a container limit is a
 /// ceiling or an ancestor clamp.
-fn check_launcher_ceiling(
-    job: &Job,
-    mode: LauncherAuthorityProtocol,
-    defects: &mut Vec<Defect>,
-) {
+fn check_launcher_ceiling(job: &Job, mode: LauncherAuthorityProtocol, defects: &mut Vec<Defect>) {
     let sidecar = pod_spec(job).and_then(|spec| {
         spec.init_containers
             .as_ref()
@@ -943,7 +941,7 @@ fn check_taskrun_service_account_bindings(manifests: &[Value], defects: &mut Vec
                 .and_then(Value::as_str)
                 == Some(TASKRUN_COMPONENT_VALUE)
         })
-        .map(|doc| metadata_name(doc))
+        .map(metadata_name)
         .collect();
 
     if accounts.is_empty() {
@@ -1026,7 +1024,8 @@ pub fn summarize(input: &CutoverPreflightInput<'_>) -> String {
         input.catalog.len(),
         match input.legacy_digest_inventory {
             LegacyDigestInventory::Unconfigured => "unconfigured".to_string(),
-            LegacyDigestInventory::Verified { digests, .. } => format!("verified:{}", digests.len()),
+            LegacyDigestInventory::Verified { digests, .. } =>
+                format!("verified:{}", digests.len()),
             LegacyDigestInventory::Unusable(fault) => format!("unusable:{fault}"),
         },
         input.births.len(),
