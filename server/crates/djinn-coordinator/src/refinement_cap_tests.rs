@@ -190,6 +190,7 @@ pub(crate) fn build_refinement_actor(
         active_refinements: HashMap::new(),
         refinement_sessions: HashMap::new(),
         stranded_ready_source: None,
+        doctor_registry: crate::actor::new_doctor_registry_handle(),
         closed_parent_open_children_source: None,
         dispatched: 0,
         recovered: 0,
