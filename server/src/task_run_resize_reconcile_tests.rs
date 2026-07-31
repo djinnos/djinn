@@ -31,7 +31,10 @@ fn an_unrecognised_mode_arms_rather_than_disarms() {
         );
     }
     for raw in ["observe", "dry_run", "dry-run"] {
-        assert_eq!(ResizeReconcileMode::parse(raw), ResizeReconcileMode::Observe);
+        assert_eq!(
+            ResizeReconcileMode::parse(raw),
+            ResizeReconcileMode::Observe
+        );
     }
     for raw in ["enforce", "on", "1", "", "yes-please", "enfroce"] {
         assert_eq!(

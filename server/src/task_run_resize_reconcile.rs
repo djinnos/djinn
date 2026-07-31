@@ -85,8 +85,8 @@ use std::time::Duration;
 use djinn_coordinator::build_lease::BuildLeaseService;
 use djinn_db::{
     BuildLeaseConsumerKind, BuildLeaseKey, BuildLeaseRepository, BuildPodPermitRepository,
-    BuildPodPermitRow, BuildPodPermitState, Database, ReleaseBuildPodPermitResult, TaskRunRepository,
-    TransitionBuildPodResizeLifecycleResult,
+    BuildPodPermitRow, BuildPodPermitState, Database, ReleaseBuildPodPermitResult,
+    TaskRunRepository, TransitionBuildPodResizeLifecycleResult,
 };
 use djinn_supervisor::services::{
     LeaseFencingToken, LeaseIdentity, LeaseReleaseRequest, LeaseResult, TaskInvocationLeaseIdentity,
@@ -471,12 +471,7 @@ impl TaskRunResizeReconciler {
         };
         match self
             .permits
-            .release(
-                &row.task_run_id,
-                &row.permit_id,
-                row.fencing_token,
-                reason,
-            )
+            .release(&row.task_run_id, &row.permit_id, row.fencing_token, reason)
             .await
         {
             Ok(ReleaseBuildPodPermitResult::Released(_)) => {
@@ -752,7 +747,9 @@ struct InFlightGuard<'a> {
 
 impl<'a> InFlightGuard<'a> {
     fn claim(set: &'a Mutex<HashSet<String>>, task_run_id: &str) -> Option<Self> {
-        let mut guard = set.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut guard = set
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if !guard.insert(task_run_id.to_owned()) {
             return None;
         }
@@ -855,10 +852,7 @@ where
     loop {
         tokio::select! {
             () = cancel.cancelled() => break,
-            _ = ticker.tick() => {
-                tick().await;
-                break;
-            }
+            _ = ticker.tick() => tick().await,
         }
     }
 }

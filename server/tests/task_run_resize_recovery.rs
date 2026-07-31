@@ -572,12 +572,11 @@ impl Restart {
 
     /// Rebuild everything a restarted process would have to rebuild.
     fn restart(&self, cluster: StoredTaskRunPod, clock: Arc<RecordingClock>) -> Rebuilt {
-        let db = Database::open_with_config(DatabaseConnectConfig::Postgres(
-            PostgresDatabaseConfig {
+        let db =
+            Database::open_with_config(DatabaseConnectConfig::Postgres(PostgresDatabaseConfig {
                 url: self.dsn.clone(),
-            },
-        ))
-        .expect("reopen the same database from its DSN alone");
+            }))
+            .expect("reopen the same database from its DSN alone");
         let surface = Arc::new(CountingSurface::new(cluster));
         let bridge = Arc::new(TaskRunResizeDropBridge::with_surface(
             db.clone(),
@@ -654,15 +653,7 @@ async fn every_nonterminal_state_resumes_after_the_process_that_lifted_it_is_gon
             // dropped before the reconciler exists.
             let permits = BuildPodPermitRepository::new(db.clone());
             let row = captured_permit(&permits, &task_run_id, &pod_uid).await;
-            lift_then_park(
-                &permits,
-                &cluster,
-                &row,
-                &pod_uid,
-                &invocation_id,
-                state,
-            )
-            .await;
+            lift_then_park(&permits, &cluster, &row, &pod_uid, &invocation_id, state).await;
         }
         kill_the_worker(&db, &task_run_id).await;
         assert_eq!(
@@ -858,7 +849,9 @@ async fn a_lifted_row_whose_pod_vanished_is_stranded_even_while_the_run_reads_li
     )
     .await;
     // The node took the Pod with it. The task run still reads `running`.
-    cluster.uid_fenced_delete(&task_run_id, pod_uid).expect("delete");
+    cluster
+        .uid_fenced_delete(&task_run_id, pod_uid)
+        .expect("delete");
     assert!(
         cluster.observe_launcher().expect("observe").is_none(),
         "precondition: the Pod is gone"
@@ -1306,10 +1299,8 @@ async fn two_concurrent_drivers_issue_exactly_one_patch() {
     let left_reconciler = left.reconciler(None, Arc::new(ArmedGate));
     let right_reconciler = right.reconciler(None, Arc::new(ArmedGate));
 
-    let (left_pass, right_pass) = tokio::join!(
-        left_reconciler.run_pass(),
-        right_reconciler.run_pass(),
-    );
+    let (left_pass, right_pass) =
+        tokio::join!(left_reconciler.run_pass(), right_reconciler.run_pass(),);
 
     let resumed = left_pass.resumed + right_pass.resumed;
     assert_eq!(
@@ -1588,7 +1579,10 @@ async fn a_quarantined_pod_is_uid_fence_deleted_and_proven_absent() {
 fn the_reconciler_is_spawned_from_become_leader_and_not_from_initialize() {
     let source = include_str!("../src/server/state/mod.rs");
     // Assembled at runtime so this assertion cannot match its own literal.
-    let call = format!("crate::task_run_resize_{}::spawn(self.clone());", "reconcile");
+    let call = format!(
+        "crate::task_run_resize_{}::spawn(self.clone());",
+        "reconcile"
+    );
     assert_eq!(
         source.matches(call.as_str()).count(),
         1,
@@ -1703,13 +1697,13 @@ where
     F: FnMut() -> Fut,
     Fut: Future<Output = bool>,
 {
-    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         if condition().await {
             return;
         }
         assert!(
-            std::time::Instant::now() < deadline,
+            Instant::now() < deadline,
             "condition never became true within 30s"
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
