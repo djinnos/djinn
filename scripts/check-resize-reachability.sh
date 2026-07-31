@@ -50,11 +50,20 @@ ROOT=${GUARD_ROOT:-$REPO_ROOT}
 cd "$ROOT"
 
 # symbol|extended-regex for a call site|file must also mention this token
+#
+# `0ppk-3` added the last two. Before it, `list_nonterminal_resize` had ZERO
+# callers of ANY kind outside one repository test — the read the whole external
+# reconciler exists to perform, merged and unreachable — and
+# `task_run_resize_reconcile::spawn` is the seam that makes a dead worker's
+# stranded Pod somebody's problem at all. Both are exactly the shape this guard
+# exists to catch.
 GUARDED_SYMBOLS="
 TaskRunResizeBootstrap::bootstrap|\.bootstrap\(|TaskRunResizeBootstrap
 DispatchGate::admit|\.admit\(|DispatchGate
 BuildPodPermitRepository::acquire|\.acquire\(|BuildPodPermitRepository
 BuildPodPermitRepository::capture_resize_identity|\.capture_resize_identity\(|BuildPodPermitRepository
+BuildPodPermitRepository::list_nonterminal_resize|\.list_nonterminal_resize\(|BuildPodPermitRepository
+task_run_resize_reconcile::spawn|task_run_resize_reconcile::spawn\(|become_leader
 "
 
 # file|extended-regex|why this anchor exists
@@ -65,6 +74,7 @@ server/crates/djinn-agent/src/actors/slot/supervisor_runner.rs|acquire_build_pod
 server/crates/djinn-agent/src/actors/slot/supervisor_runner.rs|bind_build_pod_permit_job_uid\(|the dispatch seam must bind the Job UID the runtime just created
 server/crates/djinn-agent/src/actors/slot/supervisor_runner.rs|admit_task_run_dispatch\(|the dispatch seam must gate stdio attach on the birth downsize
 server/crates/djinn-agent/src/actors/slot/supervisor_runner.rs|record_dispatch_started\(|the dispatch site must report itself so the gate's absence is observable
+server/src/server/state/mod.rs|task_run_resize_reconcile::spawn\(self\.clone\(\)\)|the resize reconciler must be armed from become_leader, or a worker death strands its Pod forever
 "
 
 status=0
