@@ -21,10 +21,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use djinn_core::clock::{Clock, SystemClock};
 use djinn_supervisor::services::{
-    InvocationLiftAuthority, InvocationLiftDecision, LeaseAbandonRequest, LeaseBindRequest,
-    LeaseDeadlines, LeaseFencingToken, LeaseGrantRequest, LeaseIdentity, LeaseQueueRequest,
-    LeaseReleaseRequest, LeaseResult, LeaseState, LeaseStatus, LeaseStatusRequest,
-    SupervisorServices, TaskInvocationLeaseIdentity, WatchdogTerminationRequest,
+    DegradedUnleasedReason, InvocationLiftAuthority, InvocationLiftDecision, LeaseAbandonRequest,
+    LeaseBindRequest, LeaseDeadlines, LeaseFencingToken, LeaseGrantRequest, LeaseIdentity,
+    LeaseQueueRequest, LeaseReleaseRequest, LeaseResult, LeaseState, LeaseStatus,
+    LeaseStatusRequest, SupervisorServices, TaskInvocationLeaseIdentity,
+    WatchdogTerminationRequest,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -1447,6 +1448,20 @@ fn degrade_reason(result: &LeaseResult) -> &'static str {
         }) => "released",
         LeaseResult::Abandoned { .. } => "abandoned",
         LeaseResult::LeaseUnavailable => "lease_unavailable",
+        // The lease is live; the server refused to authorize a Pod resize for
+        // it. Bounded because `DegradedUnleasedReason` is a closed enum, and
+        // carried through as a label because "which uncertainty" is the whole
+        // operational value of the degrade — a run of `NotTheInvocationOwner`
+        // is an attack signal, a run of `PermitAbsent` is a wiring bug.
+        LeaseResult::DegradedUnleased { reason } => match reason {
+            DegradedUnleasedReason::NotTheInvocationOwner => "not_the_invocation_owner",
+            DegradedUnleasedReason::FencingTokenMismatch => "fencing_token_mismatch",
+            DegradedUnleasedReason::PermitAbsent => "permit_absent",
+            DegradedUnleasedReason::ResizeIdentityUnknown => "resize_identity_unknown",
+            DegradedUnleasedReason::ProtocolNotResizable => "protocol_not_resizable",
+            DegradedUnleasedReason::CeilingUnusable => "ceiling_unusable",
+            DegradedUnleasedReason::AuthorizationUnreadable => "authorization_unreadable",
+        },
         _ => "unclassified",
     }
 }
@@ -1492,6 +1507,22 @@ fn lease_failure_classify(
             state: LeaseState::Cancelled | LeaseState::Released,
             ..
         }) => *unleased = true,
+        // A refused resize authorization is a SETTLED answer, and this arm is
+        // what makes that true at the only place it is consumed.
+        //
+        // Without it the result falls to `_ => {}`: nothing latches, `fence`
+        // stays `None`, and the next poll reads the still-live lease as
+        // `Status(Launching)` — which re-enters the grant arm above and asks
+        // the same question again, for as long as the child runs. Every input
+        // to the answer is durable (who owns the invocation, which Pod the
+        // permit was captured against, what ceiling was admitted), so the spin
+        // could only ever re-collect the same refusal.
+        //
+        // Latching `unleased` is exactly the documented handling on
+        // [`LeaseResult::DegradedUnleased`]: proceed unleased. It sets no
+        // `output`, so the command is slowed and never failed, and the durable
+        // lease is still reconciled to terminal after the loop.
+        LeaseResult::DegradedUnleased { .. } => *unleased = true,
         _ => {}
     }
 }

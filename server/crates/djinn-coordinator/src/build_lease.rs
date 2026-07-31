@@ -15,7 +15,6 @@ use djinn_db::{
     BuildLeaseTerminalReason, GrantNextBuildLeaseResult, InvocationLeaseAuthorityRepository,
     QueueBuildLeaseInput, QueueBuildLeaseResult,
 };
-use djinn_runtime::BuildSlotWeight;
 use djinn_supervisor::services::{
     LeaseAbandonRequest, LeaseBindRequest, LeaseCancelRequest, LeaseDeadlines, LeaseFencingToken,
     LeaseGrant, LeaseGrantRequest, LeaseIdentity, LeaseQueueRequest, LeaseReleaseRequest,
@@ -23,6 +22,8 @@ use djinn_supervisor::services::{
 };
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use tokio::sync::Mutex;
+
+use crate::resize_authorization::ResizeAuthority;
 
 /// Deterministic deadline clock seam, expressed in contract milliseconds.
 pub trait LeaseClock: Send + Sync {
@@ -184,65 +185,7 @@ impl LeaseTelemetry for MetricsLeaseTelemetry {
     }
 }
 
-/// Rendered CPU facts the weight policy is derived from, in millicores.
-///
-/// Supplied by composition from the SAME `KubernetesConfig` that renders the
-/// manifests, so the weight a workload is charged and the CPU it is actually
-/// given can never drift. Deliberately not read from the environment here: the
-/// grant path must have no opinion about where capacity facts come from, which
-/// is what lets a node-derived cap replace the configured one later without
-/// touching this module.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct BuildSlotWeights {
-    /// One build slot, in millicores: the quota a granted lease actually runs
-    /// under (`launcher_leased_millicores`, the task-run pod's `cpu_limit`).
-    pub slot_millicores: u32,
-    /// The graph-warm Job's rendered CPU request.
-    pub warm_millicores: u32,
-}
-
-impl Default for BuildSlotWeights {
-    /// The default render: a warm Job and a leased task invocation both request
-    /// 4000m, so both weigh exactly one slot. See [`BuildSlotWeight`] for why
-    /// equal weight is the measured answer rather than an approximation.
-    fn default() -> Self {
-        Self {
-            slot_millicores: 4_000,
-            warm_millicores: 4_000,
-        }
-    }
-}
-
-impl BuildSlotWeights {
-    /// Weight of a graph-warm Job.
-    #[must_use]
-    pub fn warm(&self) -> BuildSlotWeight {
-        BuildSlotWeight::for_millicores(self.warm_millicores, self.slot_millicores)
-    }
-
-    /// Weight of a layer-1 dispatch reservation for a build-capable task-run.
-    /// Light task-runs never reach here: dispatch does not acquire for them.
-    #[must_use]
-    pub fn dispatch(&self) -> BuildSlotWeight {
-        BuildSlotWeight::for_millicores(self.slot_millicores, self.slot_millicores)
-    }
-
-    /// Weight of a layer-2 invocation escalation.
-    ///
-    /// `holds_dispatch_slot` is the durable answer from
-    /// [`djinn_db::BuildLeaseRepository::has_occupying_dispatch`], never
-    /// anything the invocation itself asserted. That matters: weight is the
-    /// difference between occupying capacity and not, so a value the sandboxed
-    /// pod could supply would be a way to escape the cap.
-    #[must_use]
-    pub fn invocation(&self, holds_dispatch_slot: bool) -> BuildSlotWeight {
-        if holds_dispatch_slot {
-            BuildSlotWeight::REENTRANT
-        } else {
-            BuildSlotWeight::for_millicores(self.slot_millicores, self.slot_millicores)
-        }
-    }
-}
+pub use crate::build_slot_weights::BuildSlotWeights;
 
 /// Coordinator policy owner over the one repository-global FIFO.
 pub struct BuildLeaseService {
@@ -287,6 +230,11 @@ pub struct BuildLeaseService {
     /// denies nothing. Defaults to `false` so a process that has not read the
     /// authority cannot start enforcing a cap nobody armed.
     dispatch_enforcing: AtomicBool,
+    /// Server-derived Pod-resize authorization for the grant path. `None` in
+    /// every composition on `main` — see [`crate::resize_authorization`] for why
+    /// arming it before `0ppk-1b` creates the permits would degrade every
+    /// production invocation to unleased.
+    resize_authority: Option<Arc<ResizeAuthority>>,
     /// Keeps queue+local-drain atomic in this process. Database advisory locks
     /// serialize the same decisions across replacement coordinators.
     operation: Mutex<()>,
@@ -324,8 +272,16 @@ impl BuildLeaseService {
             authority: None,
             observed_epoch: AtomicI64::new(-1),
             dispatch_enforcing: AtomicBool::new(false),
+            resize_authority: None,
             operation: Mutex::new(()),
         }
+    }
+
+    /// Install the server-derived Pod-resize authorization on the grant path.
+    #[must_use]
+    pub fn with_resize_authority(mut self, authority: Arc<ResizeAuthority>) -> Self {
+        self.resize_authority = Some(authority);
+        self
     }
 
     /// Install the rendered CPU facts that per-row weight is derived from.
@@ -558,13 +514,31 @@ impl BuildLeaseService {
         }
     }
 
-    /// A fenced grant acknowledgement moves the durable row to launching.
+    /// A fenced grant acknowledgement moves the durable row to launching, and is
+    /// the ONE place a Pod resize is authorized.
+    ///
+    /// The destructuring is load-bearing: it is exhaustive, so a coordinate
+    /// field added to [`LeaseGrantRequest`] — a namespace, a Pod name, a
+    /// container index, a CPU target — stops compiling here rather than silently
+    /// becoming something the grant path could honour.
     pub async fn grant(&self, request: LeaseGrantRequest) -> LeaseResult {
-        self.transition(
-            request.identity,
-            request.fencing_token,
-            BuildLeaseState::Launching,
-            LeaseOperation::Grant,
+        let LeaseGrantRequest {
+            identity,
+            fencing_token,
+        } = request;
+        let granted = self
+            .transition(
+                identity.clone(),
+                fencing_token.clone(),
+                BuildLeaseState::Launching,
+                LeaseOperation::Grant,
+            )
+            .await;
+        ResizeAuthority::fold_into_grant(
+            self.resize_authority.as_deref(),
+            &identity,
+            &fencing_token,
+            granted,
         )
         .await
     }

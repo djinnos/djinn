@@ -217,6 +217,39 @@ pub struct LeaseGrant {
     pub fencing_token: LeaseFencingToken,
     pub deadlines: LeaseDeadlines,
 }
+/// Why a lease that is otherwise live may not have its Pod resized, and must
+/// therefore run at the unleased quota.
+///
+/// Every variant is a **settled** answer. None of them is transient, and none of
+/// them becomes true by waiting: the correct response to all of them is to keep
+/// running unleased. They are separated only so the log line and the metric can
+/// tell an authorization DENIAL (`NotTheInvocationOwner`, `FencingTokenMismatch`
+/// — a caller reaching for something that is not its own) apart from an
+/// UNCERTAINTY (everything else — the server could not prove the resize is
+/// allowed), because the first is an attack signal and the second is an
+/// operational one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DegradedUnleasedReason {
+    /// The task run presenting this grant is not the task run the durable lease
+    /// row records as the invocation's owner. An authorization DENIAL.
+    NotTheInvocationOwner,
+    /// The presented fencing token is not the one the durable row was minted
+    /// with. An authorization DENIAL.
+    FencingTokenMismatch,
+    /// No durable build-pod permit is active for the owning task run, so there
+    /// is no server-side relation to derive Pod coordinates from.
+    PermitAbsent,
+    /// The permit exists but carries no write-once Pod resize identity yet.
+    ResizeIdentityUnknown,
+    /// The Pod's effective launcher protocol cannot express a Pod resize.
+    ProtocolNotResizable,
+    /// The stored admitted ceiling is not a usable CPU quantity.
+    CeilingUnusable,
+    /// The durable state needed to decide could not be read at all. A DEFECT —
+    /// reported as a settled degrade because an unreadable authority is not
+    /// permission, and a retry cannot turn it into one.
+    AuthorizationUnreadable,
+}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LeaseResult {
     Queued(LeaseStatus),
@@ -237,6 +270,26 @@ pub enum LeaseResult {
     },
     LeaseWaitTimeout {
         timeout_credit: Option<TimeoutCredit>,
+    },
+    /// The lease itself is live, but the server would not authorize a resize
+    /// for it: this invocation MUST run at the unleased quota.
+    ///
+    /// # Why this is a result and not an `Err`
+    ///
+    /// `LeaseUnavailable` and a transport `Err` both mean *ask again* — the
+    /// invocation runner treats them as retryable and keeps polling. Every
+    /// input to a resize authorization is durable and settled: who owns the
+    /// invocation, which Pod the permit was captured against, what ceiling was
+    /// admitted. None of those change because a caller retried, so surfacing an
+    /// uncertainty as an error would spend the queue deadline re-asking a
+    /// question whose answer is fixed, while the child runs clamped the whole
+    /// time. That is the shape of the 30s-invocation-deadline degrade this lease
+    /// path has already paid for once.
+    ///
+    /// So the answer is stated once, positively, with the reason attached, and
+    /// the caller's only correct handling is to proceed unleased.
+    DegradedUnleased {
+        reason: DegradedUnleasedReason,
     },
     LeaseUnavailable,
 }
