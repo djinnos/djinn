@@ -229,7 +229,7 @@ impl PodResizeError {
 /// than a guessed one.
 fn api_status(error: &kube::Error) -> Option<u16> {
     match error {
-        kube::Error::Api(response) => u16::try_from(response.code).ok(),
+        kube::Error::Api(response) => Some(response.code),
         _ => None,
     }
 }

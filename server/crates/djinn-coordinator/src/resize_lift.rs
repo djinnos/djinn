@@ -452,25 +452,24 @@ impl PodResizeApplier for ResizeLift {
 
         match self.patch_and_confirm(&surface, intent).await {
             Ok(()) => {
-                if entered == BuildPodPermitState::LiftApplying {
-                    if let Err(failure) = self
+                if entered == BuildPodPermitState::LiftApplying
+                    && let Err(failure) = self
                         .transition(
                             intent,
                             BuildPodPermitState::LiftApplying,
                             BuildPodPermitState::Lifted,
                         )
                         .await
-                    {
-                        // The Pod moved but the ledger did not. Refusing the
-                        // grant here is the only answer that keeps the two in
-                        // agreement: a row that does not say `lifted` will be
-                        // dropped back to the birth limit by the reconciler, and
-                        // a lease granted against it would be a lease for CPU
-                        // that is about to be taken away.
-                        self.require_drop(intent, BuildPodPermitState::LiftApplying)
-                            .await;
-                        return Err(failure);
-                    }
+                {
+                    // The Pod moved but the ledger did not. Refusing the
+                    // grant here is the only answer that keeps the two in
+                    // agreement: a row that does not say `lifted` will be
+                    // dropped back to the birth limit by the reconciler, and
+                    // a lease granted against it would be a lease for CPU
+                    // that is about to be taken away.
+                    self.require_drop(intent, BuildPodPermitState::LiftApplying)
+                        .await;
+                    return Err(failure);
                 }
                 Ok(())
             }
