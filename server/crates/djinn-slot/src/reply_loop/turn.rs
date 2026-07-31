@@ -528,6 +528,14 @@ pub struct ReplyLoopContext<'a> {
     /// the same instance to decide whether to defer or demote work that would
     /// otherwise apply to the pre-rotation transcript.
     pub compaction_cs: &'a CompactionCriticalSection,
+    /// Session budget policy for this reply loop.
+    ///
+    /// `None` — every production caller — resolves the policy from the process
+    /// environment via `SessionBudgetPolicy::from_env()`, so the
+    /// `DJINN_SESSION_BUDGET_*` operator contract is unchanged. Tests that need
+    /// a specific budget inject it here instead of mutating the process env,
+    /// which is shared by every concurrently running test.
+    pub session_budget: Option<SessionBudgetPolicy>,
 }
 
 /// A deterministic compaction seam for downstream reply-loop fixtures. The
@@ -636,6 +644,7 @@ pub async fn run_reply_loop(
         active_mcp_server_names,
         max_turns_override,
         compaction_cs,
+        session_budget: session_budget_override,
     } = ctx;
     let tool_dispatcher = match slot_ctx.tool_dispatcher.as_ref() {
         Some(d) => d.as_ref(),
@@ -744,13 +753,15 @@ pub async fn run_reply_loop(
         let mut corrected_tool_failure_signatures: HashSet<ToolCallSignature> = HashSet::new();
         let mut last_assistant_text = String::new();
         let mut turns: u32 = 0;
-        let session_budget = SessionBudgetPolicy::from_env()
-            .unwrap_or_else(|err| {
-                tracing::warn!(
-                    error = %err,
-                    "ReplyLoop: invalid session budget configuration; using defaults"
-                );
-                SessionBudgetPolicy::default()
+        let session_budget = session_budget_override
+            .unwrap_or_else(|| {
+                SessionBudgetPolicy::from_env().unwrap_or_else(|err| {
+                    tracing::warn!(
+                        error = %err,
+                        "ReplyLoop: invalid session budget configuration; using defaults"
+                    );
+                    SessionBudgetPolicy::default()
+                })
             })
             .resolve(role_name, model_id, context_window, max_turns_override);
         let max_turns = session_budget.effective_max_turns;

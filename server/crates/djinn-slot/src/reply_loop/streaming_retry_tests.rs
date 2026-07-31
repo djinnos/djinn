@@ -257,6 +257,7 @@ impl Fixture {
         let worktree_path = std::path::PathBuf::from("/tmp");
         let (result, _output, _in, _out, _cr, _cw) = run_reply_loop(
             ReplyLoopContext {
+                session_budget: None,
                 compaction_cs: &super::CompactionCriticalSection::new(),
                 provider,
                 tools: &[],
