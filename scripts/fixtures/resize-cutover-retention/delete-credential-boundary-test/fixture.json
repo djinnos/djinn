@@ -1,0 +1,8 @@
+{
+  "asset": "credential-boundary-tests",
+  "expect": "reject",
+  "why": "The pods/resize RBAC contract deleted. That test is the only thing asserting which identities may hold the resize verb; the cutover ADDS a caller of that verb, which makes the boundary more load-bearing, not less.",
+  "operations": [
+    { "op": "delete", "path": "deploy/helm/djinn/tests/pods-resize-rbac.sh" }
+  ]
+}

@@ -1,0 +1,6 @@
+{
+  "asset": null,
+  "expect": "accept",
+  "why": "The unmutated materialised root. This is what stops the self-test from passing against a gate that is simply always red, and it proves the materialised root the other fixtures are built on is COMPLETE — a missing input would fail here rather than silently make every reject fixture pass for the wrong reason.",
+  "operations": []
+}
