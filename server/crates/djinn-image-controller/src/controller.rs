@@ -36,9 +36,7 @@ use std::sync::Arc;
 use djinn_db::{
     Database, Image, ImageRepository, ImageStatus, ProjectRepository, ServicePresetRepository,
 };
-use djinn_image_builder::{
-    AgentWorkerImage, BuildContext, compute_environment_hash, generate_dockerfile,
-};
+use djinn_image_builder::{AgentWorkerImage, BuildContext, generate_dockerfile};
 use djinn_stack::environment::EnvironmentConfig;
 use k8s_openapi::api::batch::v1::Job;
 use k8s_openapi::api::core::v1::ConfigMap;
@@ -78,6 +76,17 @@ pub enum ImageControllerError {
         project_id: String,
         #[source]
         source: djinn_image_builder::DockerfileError,
+    },
+    /// The build context reported a launcher authority protocol its own
+    /// Dockerfile does not declare. Never dispatched: the Job env is what the
+    /// catalog records and the Dockerfile is what the artifact carries, so
+    /// building this would produce an image whose label and catalog row
+    /// disagree about who owns CPU quota.
+    #[error("launcher declaration disagreement for {project_id}: {source}")]
+    LauncherDeclaration {
+        project_id: String,
+        #[source]
+        source: djinn_image_builder::DeclarationError,
     },
 }
 
@@ -155,45 +164,42 @@ impl ImageController {
     }
 
     /// Subject-generic k8s build dispatch shared by the per-project and
-    /// catalog-image paths: generate the Dockerfile, upsert the build-context
-    /// ConfigMap, then create (or reconcile) the buildctl Job. Returns what
-    /// the caller should persist — the project/image status write differs by
-    /// subject but the cluster mechanics are identical.
+    /// catalog-image paths: upsert the build-context ConfigMap, then create (or
+    /// reconcile) the buildctl Job. Returns what the caller should persist —
+    /// the project/image status write differs by subject but the cluster
+    /// mechanics are identical.
+    ///
+    /// `build_context` is rendered by the caller, which derives `new_hash` from
+    /// it via [`BuildContext::environment_hash`]. That ordering is deliberate:
+    /// the tag this Job pushes to is a prefix of a hash computed over the
+    /// declaration this very Dockerfile carries, so a `resize-v2` build can
+    /// never land on the tag a `leaf-v1` artifact already occupies.
     async fn dispatch_build_job(
         &self,
         subject: &BuildSubject,
-        cfg: &EnvironmentConfig,
+        build_context: &BuildContext,
         new_hash: &str,
         image_tag: &str,
     ) -> Result<BuildDispatch> {
         let subject_id = subject.id().to_string();
         let hash_prefix = &new_hash[..HASH_TAG_PREFIX_LEN.min(new_hash.len())];
 
-        let (repo_ref, tag_ref) = split_image_ref(&self.config.agent_worker_image);
-        let agent_worker_image = AgentWorkerImage::new(repo_ref, tag_ref);
-
-        // 1. Generate the Dockerfile + script bundle.
-        let build_context = generate_dockerfile(cfg, &agent_worker_image).map_err(|source| {
-            ImageControllerError::Dockerfile {
-                project_id: subject_id.clone(),
-                source,
-            }
-        })?;
-
-        // 2. Create the build-context ConfigMap *before* the Job so the
+        // 1. Create the build-context ConfigMap *before* the Job so the
         // Pod's volume mount is satisfiable at startup. The CM is
         // per-build (per hash) so two different hashes never share content.
-        self.upsert_build_context_cm(subject, hash_prefix, &build_context)
+        self.upsert_build_context_cm(subject, hash_prefix, build_context)
             .await?;
 
-        // 3. Create the Job.
-        let job = build_image_build_job(
-            &self.config,
-            subject,
-            hash_prefix,
-            image_tag,
-            &build_context,
-        );
+        // 2. Create the Job. Fail-closed if the context reports a declaration
+        // its Dockerfile does not carry — the Job env becomes the catalog row
+        // and the Dockerfile becomes the artifact's label, so building one that
+        // disagrees would hand the same Pod's CPU quota to two owners.
+        let job =
+            build_image_build_job(&self.config, subject, hash_prefix, image_tag, build_context)
+                .map_err(|source| ImageControllerError::LauncherDeclaration {
+                    project_id: subject_id.clone(),
+                    source,
+                })?;
         let jobs: Api<Job> = Api::namespaced(self.client.clone(), &self.config.namespace);
         let job_name =
             job.metadata.name.clone().unwrap_or_else(|| {
@@ -419,9 +425,23 @@ impl ImageController {
         self.inject_preset_client_packages(&image_id, image_repo, &mut cfg)
             .await;
 
-        let agent_worker_ref = self.config.agent_worker_image.clone();
-        let new_hash =
-            compute_environment_hash(&cfg, &agent_worker_ref, &self.config.build_version);
+        // Render the Dockerfile *before* hashing, and take the hash from what
+        // was rendered. The declaration this deployment configured is baked
+        // into the artifact and into its cache key by the same value, so the
+        // two cannot drift: there is no second place that restates the
+        // protocol for the hash. Generation is a pure string build, so paying
+        // for it on a tick that turns out to be a no-op costs nothing.
+        let build_context = render_build_context(&self.config, &cfg).map_err(|source| {
+            ImageControllerError::Dockerfile {
+                project_id: image_id.clone(),
+                source,
+            }
+        })?;
+        let new_hash = build_context.environment_hash(
+            &cfg,
+            &self.config.agent_worker_image,
+            &self.config.build_version,
+        );
 
         if image.config_hash.as_deref() == Some(new_hash.as_str())
             && image.status == ImageStatus::READY
@@ -474,7 +494,7 @@ impl ImageController {
             format_catalog_image_tag(&self.config.registry_host, &image_id, hash_prefix);
 
         let outcome = self
-            .dispatch_build_job(&subject, &cfg, &new_hash, &image_tag)
+            .dispatch_build_job(&subject, &build_context, &new_hash, &image_tag)
             .await;
 
         self.in_flight
@@ -627,6 +647,26 @@ enum BuildDispatch {
     AlreadySucceeded,
     /// A terminal Failed Job was deleted — leave state for the next tick.
     FailedCleared,
+}
+
+/// Render the build context for `cfg` under this deployment's configuration.
+///
+/// The one place the deployment's
+/// [`ImageControllerConfig::declared_launcher_protocol`] becomes a build input.
+/// Split out of [`ImageController::enqueue_image`] so the composition itself is
+/// reachable without a cluster: "the configured protocol is the protocol the
+/// generator is called with" is the step a hardcoded declaration would break,
+/// and it is not observable from either side alone.
+pub(crate) fn render_build_context(
+    config: &ImageControllerConfig,
+    cfg: &EnvironmentConfig,
+) -> std::result::Result<BuildContext, djinn_image_builder::DockerfileError> {
+    let (repo_ref, tag_ref) = split_image_ref(&config.agent_worker_image);
+    generate_dockerfile(
+        cfg,
+        &AgentWorkerImage::new(repo_ref, tag_ref),
+        config.declared_launcher_protocol,
+    )
 }
 
 /// Split an image ref of the form `repo:tag` or `repo@sha256:...` into

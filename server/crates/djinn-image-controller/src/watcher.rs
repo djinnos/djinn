@@ -95,7 +95,11 @@ const DIGEST_SENTINEL: &str = "DJINN_IMAGE_DIGEST=";
 /// the artifact declares. The value is echoed from the `BuildContext` that
 /// rendered the Dockerfile, which bakes the identical string into the image's
 /// `djinn.app/launcher-authority-protocol` LABEL.
-const PROTOCOL_SENTINEL: &str = "DJINN_LAUNCHER_PROTOCOL=";
+///
+/// `pub(crate)` because [`crate::build_job::render_builder_script`] prints it
+/// and this parses it: the emitter and the parser of a sentinel must not each
+/// carry their own spelling of it.
+pub(crate) const PROTOCOL_SENTINEL: &str = "DJINN_LAUNCHER_PROTOCOL=";
 
 /// Background task that watches image-build Jobs to completion.
 ///
@@ -1131,3 +1135,7 @@ mod tests {
 #[cfg(test)]
 #[path = "watcher_protocol_tests.rs"]
 mod protocol_tests;
+
+#[cfg(test)]
+#[path = "declared_protocol_tests.rs"]
+mod declared_protocol_tests;

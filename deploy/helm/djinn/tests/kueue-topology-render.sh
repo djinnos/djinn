@@ -76,7 +76,9 @@ render_enabled() {
 # EXTRACTED from the Rust that renders the Jobs:
 #
 #   1. Discover the Job renderers: every non-test `.rs` under $CRATES_ROOT that
-#      defines a `pub fn build_*job*(..) -> Job`. Today that is job.rs
+#      defines a `pub fn build_*job*(..) -> Job` — or `-> Result<Job, E>`, since
+#      a renderer that can REFUSE still emits `suspend: true` and still requests
+#      resources on every path that returns one. Today that is job.rs
 #      (task-run), warm_job.rs, scip_job.rs and the image-controller's
 #      build_job.rs — but the LIST is derived, so a fifth renderer joins it
 #      without an edit here.
@@ -400,9 +402,58 @@ _self_test_strip()
 
 
 # A Job renderer is a function that RETURNS a Job. Nothing here names the four.
+#
+# "Returns a Job" includes returning one FALLIBLY. A renderer that can refuse —
+# `build_image_build_job` refuses to render a Job whose build context reports a
+# launcher authority protocol its own Dockerfile does not declare — still emits
+# `suspend: true` and still requests resources on every path that does return,
+# so it is exactly as much of this guard's business as an infallible one. Before
+# `Result` was allowed here the image-build renderer silently dropped out of the
+# discovered set and the floor below caught it, which is the correct direction
+# to fail; matching both shapes is the fix, and `_self_test_job_builder` keeps
+# the fallible shape from regressing back out of view.
 JOB_BUILDER = re.compile(
-    r"pub\s+fn\s+build_[A-Za-z0-9_]*job[A-Za-z0-9_]*\s*\([^{;]*?\)\s*->\s*Job\s*\{", re.S
+    r"pub\s+fn\s+build_[A-Za-z0-9_]*job[A-Za-z0-9_]*\s*\([^{;]*?\)\s*->\s*"
+    # `Job`, or any `Result<Job, E>` — including a path-qualified alias
+    # (`kube::Result<Job>`) and an error type carrying its own generics
+    # (`Result<Job, Foo<Bar>>`), which the lazy body plus the `\{` anchor
+    # resolves to the LAST `>` before the block.
+    r"(?:Job|(?:[A-Za-z0-9_]+\s*::\s*)*Result\s*<\s*Job\s*(?:,[^{;]*?)?>)"
+    r"\s*\{",
+    re.S,
 )
+
+
+def _self_test_job_builder():
+    """The discovery regex, both directions, every run.
+
+    A discovery that quietly matches fewer renderers makes the coverage
+    assertion cover less while still passing — the same silence this guard
+    exists to end — so it is proven before it is used.
+    """
+    for source in [
+        "pub fn build_task_run_job(spec: &Spec) -> Job {",
+        "pub fn build_image_build_job(c: &C) -> Result<Job, DeclarationError> {",
+        "pub fn build_warm_job(\n    a: A,\n    b: B,\n) -> Result<Job, Error> {",
+        "pub fn build_scip_job(a: A) -> kube::Result<Job> {",
+        "pub fn build_x_job(a: A) -> Result<Job, foo::Bar<Baz>> {",
+        "pub fn build_y_job(a: A) -> Result< Job , E > {",
+    ]:
+        assert JOB_BUILDER.search(source), f"renderer not discovered: {source!r}"
+
+    for source in [
+        # Returns something that merely mentions a Job.
+        "pub fn build_job_name(a: A) -> String {",
+        "pub fn build_job_owner_reference(job: &Job) -> Option<OwnerReference> {",
+        # A Result of something else entirely.
+        "pub fn build_a_job(a: A) -> Result<ConfigMap, E> {",
+        # A declaration, not a definition.
+        "pub fn build_task_run_job(spec: &Spec) -> Job;",
+    ]:
+        assert not JOB_BUILDER.search(source), f"falsely discovered: {source!r}"
+
+
+_self_test_job_builder()
 REQUESTS_BLOCK = re.compile(
     r"requests\s*:\s*Some\(\s*BTreeMap::from\(\s*\[(?P<body>[^\[\]]*)\]\s*\)\s*\)", re.S
 )

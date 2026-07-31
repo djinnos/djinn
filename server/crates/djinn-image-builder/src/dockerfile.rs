@@ -37,19 +37,32 @@ use thiserror::Error;
 
 use crate::scripts::SCRIPTS;
 
-/// The launcher authority protocol every image this generator produces
-/// declares.
+/// The launcher authority protocol an image declares when the deployment
+/// selects nothing.
 ///
-/// This is a property of the **artifact**, not of its name: the
+/// The declaration is a property of the **artifact**, not of its name: the
 /// `djinn-cgroup-launcher` binary [`emit_agent_worker`] copies in writes its
 /// own invocation-leaf `cpu.max`, and that is exactly what
 /// [`LauncherAuthorityProtocol::LeafV1`] means.
 ///
-/// Flipping this constant changes what the shipped binary does, so it must be
-/// accompanied by a [`crate::compute_environment_hash`] salt bump — the hash
-/// does not cover the Dockerfile text, and a cached image would otherwise keep
-/// its old launcher while the catalog claimed the new protocol.
-pub const DECLARED_LAUNCHER_PROTOCOL: LauncherAuthorityProtocol = LauncherAuthorityProtocol::LeafV1;
+/// Which protocol a given build declares is an **input**:
+/// [`generate_dockerfile`] takes it, the deployment supplies it (see
+/// `djinn_image_controller::ImageControllerConfig::declared_launcher_protocol`),
+/// and this constant is only the fallback. That is what makes a resize cutover
+/// reachable at all — a hardcoded declaration cannot be rolled out.
+///
+/// # Why flipping it no longer needs a manual salt bump
+///
+/// The selected protocol is an input to [`crate::compute_environment_hash`], so
+/// a deployment that flips to `resize-v2` necessarily computes a different
+/// environment hash, lands on a different content-addressed tag, and cannot
+/// reuse the cached `leaf-v1` artifact. The historical hazard — "a cached image
+/// keeps its old launcher while the catalog claims the new protocol" — is now
+/// closed by construction instead of by a comment asking for a manual bump.
+/// [`BuildContext::verify_declaration`] closes the other half: the build Job
+/// that reports the declaration to the catalog refuses to render unless the
+/// Dockerfile it is about to build declares the same thing.
+pub const DEFAULT_LAUNCHER_PROTOCOL: LauncherAuthorityProtocol = LauncherAuthorityProtocol::LeafV1;
 
 /// OCI label key carrying the declaration into the built artifact's metadata.
 ///
@@ -106,6 +119,129 @@ pub struct BuildContext {
     pub launcher_protocol: LauncherAuthorityProtocol,
 }
 
+impl BuildContext {
+    /// Check that [`Self::dockerfile`] declares exactly [`Self::launcher_protocol`].
+    ///
+    /// The catalog row is written from the build Job's sentinel, and that
+    /// sentinel is rendered from [`Self::launcher_protocol`] — while the
+    /// artifact's own OCI label comes from the Dockerfile text. If the two ever
+    /// disagreed, the catalog would claim one authority while the shipped
+    /// launcher implemented the other: two owners of the same Pod's CPU quota,
+    /// or none. [`generate_dockerfile`] writes both from the same argument, and
+    /// this is what forbids anything downstream from editing one of them —
+    /// `djinn_image_controller::build_job::build_image_build_job` calls it and
+    /// refuses to render a Job when it fails, so a disagreeing context cannot
+    /// reach a build at all.
+    ///
+    /// Returns the agreed protocol so callers can use the checked value rather
+    /// than re-reading the field they just validated.
+    pub fn verify_declaration(&self) -> Result<LauncherAuthorityProtocol, DeclarationError> {
+        let label = single_directive_value(&self.dockerfile, "LABEL", LAUNCHER_PROTOCOL_LABEL);
+        let env = single_directive_value(&self.dockerfile, "ENV", LAUNCHER_PROTOCOL_ENV);
+
+        let (Some(label), Some(env)) = (label, env) else {
+            return Err(DeclarationError::Undeclared {
+                context_says: self.launcher_protocol,
+            });
+        };
+        if label != env {
+            return Err(DeclarationError::LabelEnvDisagree {
+                label_says: label,
+                env_says: env,
+            });
+        }
+        let declared = label.parse::<LauncherAuthorityProtocol>().map_err(|_| {
+            DeclarationError::Unrecognized {
+                dockerfile_says: label.clone(),
+            }
+        })?;
+        if declared != self.launcher_protocol {
+            return Err(DeclarationError::Disagree {
+                dockerfile_says: declared,
+                context_says: self.launcher_protocol,
+            });
+        }
+        Ok(declared)
+    }
+
+    /// The environment hash this context must be cached under.
+    ///
+    /// Deliberately a method on the rendered context rather than a free
+    /// function taking a protocol: the hash is then computed from the
+    /// declaration that was *actually emitted*, so a caller cannot hash under
+    /// `leaf-v1` and build an artifact that declares `resize-v2`. The tag is
+    /// derived from this hash, so the two protocols can never share one tag and
+    /// a protocol change can never resolve to a cached image.
+    pub fn environment_hash(
+        &self,
+        config: &EnvironmentConfig,
+        agent_worker_ref: &str,
+        build_version: &str,
+    ) -> String {
+        crate::hash::compute_environment_hash(
+            config,
+            agent_worker_ref,
+            build_version,
+            self.launcher_protocol,
+        )
+    }
+}
+
+/// Read the single value of a `DIRECTIVE key=value` line, or `None` when the
+/// key appears zero or more than one time. "More than once" is a failure, not a
+/// last-one-wins: a second declaration is exactly how an artifact ends up
+/// saying two different things.
+fn single_directive_value(dockerfile: &str, directive: &str, key: &str) -> Option<String> {
+    let prefix = format!("{directive} {key}=");
+    let mut found: Option<String> = None;
+    for line in dockerfile.lines() {
+        let Some(value) = line.trim_end().strip_prefix(prefix.as_str()) else {
+            continue;
+        };
+        if found.is_some() {
+            return None;
+        }
+        found = Some(value.trim_matches('"').to_string());
+    }
+    found
+}
+
+/// The artifact's declaration and the context reporting it to the catalog do
+/// not agree. Always fatal: there is no safe way to guess which of two
+/// authorities owns a Pod's CPU quota.
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum DeclarationError {
+    #[error(
+        "the generated Dockerfile declares no launcher authority protocol, but the build context \
+         reports `{context_says}` — the catalog would record an authority the artifact never claims"
+    )]
+    Undeclared {
+        context_says: LauncherAuthorityProtocol,
+    },
+    #[error(
+        "the artifact's LABEL declares `{label_says}` but its ENV declares `{env_says}` — the \
+         image and the launcher sidecar reading it would disagree at runtime"
+    )]
+    LabelEnvDisagree {
+        label_says: String,
+        env_says: String,
+    },
+    #[error(
+        "the generated Dockerfile declares `{dockerfile_says}`, which is not a launcher \
+             authority protocol this plane knows"
+    )]
+    Unrecognized { dockerfile_says: String },
+    #[error(
+        "the generated Dockerfile declares `{dockerfile_says}` but the build context reports \
+         `{context_says}` to the catalog — refusing to build an artifact whose label and catalog \
+         row disagree about which component owns CPU quota"
+    )]
+    Disagree {
+        dockerfile_says: LauncherAuthorityProtocol,
+        context_says: LauncherAuthorityProtocol,
+    },
+}
+
 #[derive(Debug, Error)]
 pub enum DockerfileError {
     #[error(
@@ -126,9 +262,19 @@ pub enum DockerfileError {
 /// is copied from. The worker reference contributes to
 /// [`crate::compute_environment_hash`], so replacing it (e.g. after a
 /// worker rebuild) invalidates cached images.
+///
+/// `launcher_protocol` is the declaration this artifact will carry — supplied
+/// by the deployment, defaulting to [`DEFAULT_LAUNCHER_PROTOCOL`]. It is a
+/// required argument rather than a defaulted one on purpose: a caller that can
+/// silently omit it is a caller that can silently keep a fleet on `leaf-v1`
+/// after an operator configured the cutover. It is written into the Dockerfile
+/// and reported on [`BuildContext::launcher_protocol`] from this one value, and
+/// [`BuildContext::environment_hash`] hashes the same value, so the
+/// declaration, the artifact, and the cache key cannot come apart.
 pub fn generate_dockerfile(
     config: &EnvironmentConfig,
     agent_worker: &AgentWorkerImage,
+    launcher_protocol: LauncherAuthorityProtocol,
 ) -> Result<BuildContext, DockerfileError> {
     if agent_worker.reference.trim().is_empty() {
         return Err(DockerfileError::MissingAgentWorkerRef);
@@ -146,7 +292,7 @@ pub fn generate_dockerfile(
     emit_path(&mut df);
     emit_system_packages(&mut df, config);
     emit_agent_worker(&mut df, agent_worker);
-    emit_launcher_protocol(&mut df, DECLARED_LAUNCHER_PROTOCOL);
+    emit_launcher_protocol(&mut df, launcher_protocol);
     emit_language_blocks(&mut df, config)?;
     emit_env(&mut df, config);
     emit_post_build_hooks(&mut df, config);
@@ -158,7 +304,7 @@ pub fn generate_dockerfile(
             .iter()
             .map(|s| (format!("scripts/{}", s.name), s.body.to_string()))
             .collect(),
-        launcher_protocol: DECLARED_LAUNCHER_PROTOCOL,
+        launcher_protocol,
     })
 }
 
@@ -731,7 +877,12 @@ mod tests {
 
     #[test]
     fn empty_config_emits_base_and_worker_only() {
-        let df = generate_dockerfile(&minimal_valid_config(), &agent_worker()).unwrap();
+        let df = generate_dockerfile(
+            &minimal_valid_config(),
+            &agent_worker(),
+            DEFAULT_LAUNCHER_PROTOCOL,
+        )
+        .unwrap();
         assert!(df.dockerfile.contains("FROM debian:trixie-slim"));
         assert!(
             df.dockerfile
@@ -755,20 +906,25 @@ mod tests {
     /// the [`BuildContext`] so the build Job never has to guess.
     #[test]
     fn the_artifact_declares_its_launcher_protocol_in_build_metadata() {
-        let df = generate_dockerfile(&minimal_valid_config(), &agent_worker()).unwrap();
+        let df = generate_dockerfile(
+            &minimal_valid_config(),
+            &agent_worker(),
+            DEFAULT_LAUNCHER_PROTOCOL,
+        )
+        .unwrap();
 
-        assert_eq!(df.launcher_protocol, DECLARED_LAUNCHER_PROTOCOL);
+        assert_eq!(df.launcher_protocol, DEFAULT_LAUNCHER_PROTOCOL);
         assert!(
             df.dockerfile.contains(&format!(
                 "LABEL {LAUNCHER_PROTOCOL_LABEL}=\"{}\"",
-                DECLARED_LAUNCHER_PROTOCOL.as_wire()
+                DEFAULT_LAUNCHER_PROTOCOL.as_wire()
             )),
             "the OCI label is the declaration; without it the artifact says nothing:\n{}",
             df.dockerfile
         );
         assert!(df.dockerfile.contains(&format!(
             "ENV {LAUNCHER_PROTOCOL_ENV}={}",
-            DECLARED_LAUNCHER_PROTOCOL.as_wire()
+            DEFAULT_LAUNCHER_PROTOCOL.as_wire()
         )));
 
         // The declaration describes the launcher binary, so it must land after
@@ -781,16 +937,134 @@ mod tests {
         assert!(copy < label);
     }
 
+    /// **The declaration is configurable, and the configured value is what the
+    /// artifact carries.** Every protocol the type admits — not just the
+    /// default — reaches the OCI label, the sidecar env var, and the
+    /// [`BuildContext`] the build Job reports from.
+    ///
+    /// MUTATION: pass `DEFAULT_LAUNCHER_PROTOCOL` to `emit_launcher_protocol`
+    /// instead of the argument (i.e. restore the hardcoded declaration). The
+    /// `resize-v2` iteration fails on the LABEL assertion.
+    #[test]
+    fn the_configured_protocol_is_what_the_artifact_declares() {
+        for protocol in LauncherAuthorityProtocol::ALL {
+            let df = generate_dockerfile(&minimal_valid_config(), &agent_worker(), protocol)
+                .unwrap_or_else(|e| panic!("{protocol} must generate: {e}"));
+            let wire = protocol.as_wire();
+
+            assert_eq!(df.launcher_protocol, protocol);
+            assert!(
+                df.dockerfile
+                    .contains(&format!("LABEL {LAUNCHER_PROTOCOL_LABEL}=\"{wire}\"")),
+                "{protocol}: the built artifact must carry the CONFIGURED declaration:\n{}",
+                df.dockerfile
+            );
+            assert!(
+                df.dockerfile
+                    .contains(&format!("ENV {LAUNCHER_PROTOCOL_ENV}={wire}")),
+                "{protocol}: the sidecar reads its protocol out of the same image:\n{}",
+                df.dockerfile
+            );
+            // Nothing else in the artifact may claim a different protocol.
+            for other in LauncherAuthorityProtocol::ALL {
+                if other != protocol {
+                    assert!(
+                        !df.dockerfile.contains(other.as_wire()),
+                        "{protocol}: the artifact also mentions {other}"
+                    );
+                }
+            }
+            df.verify_declaration().unwrap_or_else(|e| {
+                panic!("{protocol}: a freshly generated context must agree: {e}")
+            });
+        }
+    }
+
+    /// **A declaration the build context does not back cannot reach a build.**
+    /// `verify_declaration` is what `build_image_build_job` calls before it
+    /// renders the sentinel that becomes the catalog row, so a context whose
+    /// reported protocol drifts from the Dockerfile it carries is rejected
+    /// rather than built.
+    ///
+    /// MUTATION: make `verify_declaration` return `Ok(self.launcher_protocol)`
+    /// unconditionally. Every arm below fails.
+    #[test]
+    fn a_context_that_reports_something_other_than_it_built_is_refused() {
+        let good = generate_dockerfile(
+            &minimal_valid_config(),
+            &agent_worker(),
+            LauncherAuthorityProtocol::LeafV1,
+        )
+        .unwrap();
+        assert_eq!(
+            good.verify_declaration().unwrap(),
+            LauncherAuthorityProtocol::LeafV1
+        );
+
+        // The catalog would be told `resize-v2` about a `leaf-v1` artifact.
+        let mut lying = good.clone();
+        lying.launcher_protocol = LauncherAuthorityProtocol::ResizeV2;
+        assert_eq!(
+            lying.verify_declaration(),
+            Err(DeclarationError::Disagree {
+                dockerfile_says: LauncherAuthorityProtocol::LeafV1,
+                context_says: LauncherAuthorityProtocol::ResizeV2,
+            })
+        );
+
+        // A Dockerfile that lost its declaration entirely.
+        let mut stripped = good.clone();
+        stripped.dockerfile = stripped
+            .dockerfile
+            .lines()
+            .filter(|line| !line.contains(LAUNCHER_PROTOCOL_LABEL))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(
+            stripped.verify_declaration(),
+            Err(DeclarationError::Undeclared {
+                context_says: LauncherAuthorityProtocol::LeafV1,
+            })
+        );
+
+        // The label and the env var disagreeing is fatal too: the catalog reads
+        // one, the sidecar reads the other.
+        let mut split = good.clone();
+        split.dockerfile = split.dockerfile.replace(
+            &format!("ENV {LAUNCHER_PROTOCOL_ENV}=leaf-v1"),
+            &format!("ENV {LAUNCHER_PROTOCOL_ENV}=resize-v2"),
+        );
+        assert!(matches!(
+            split.verify_declaration(),
+            Err(DeclarationError::LabelEnvDisagree { .. })
+        ));
+
+        // A second declaration appended later is not "last one wins".
+        let mut doubled = good.clone();
+        doubled
+            .dockerfile
+            .push_str(&format!("LABEL {LAUNCHER_PROTOCOL_LABEL}=\"resize-v2\"\n"));
+        assert!(matches!(
+            doubled.verify_declaration(),
+            Err(DeclarationError::Undeclared { .. })
+        ));
+    }
+
     /// The declaration is not derived from — and cannot be confused with — the
     /// image's name. `generate_dockerfile` is never given a tag, and the wire
     /// string comes from the canonical type rather than a local literal.
     #[test]
     fn the_declaration_is_build_metadata_not_a_name() {
-        let df = generate_dockerfile(&minimal_valid_config(), &agent_worker()).unwrap();
-        assert_eq!(DECLARED_LAUNCHER_PROTOCOL.as_wire(), "leaf-v1");
+        let df = generate_dockerfile(
+            &minimal_valid_config(),
+            &agent_worker(),
+            DEFAULT_LAUNCHER_PROTOCOL,
+        )
+        .unwrap();
+        assert_eq!(DEFAULT_LAUNCHER_PROTOCOL.as_wire(), "leaf-v1");
         assert_eq!(
             df.dockerfile
-                .matches(DECLARED_LAUNCHER_PROTOCOL.as_wire())
+                .matches(DEFAULT_LAUNCHER_PROTOCOL.as_wire())
                 .count(),
             2,
             "the protocol appears exactly twice — the LABEL and the ENV — and nowhere else"
@@ -802,6 +1076,7 @@ mod tests {
         let err = generate_dockerfile(
             &minimal_valid_config(),
             &AgentWorkerImage::new("djinn/agent-worker", ""),
+            DEFAULT_LAUNCHER_PROTOCOL,
         )
         .unwrap_err();
         assert!(matches!(err, DockerfileError::MissingAgentWorkerRef));
@@ -841,7 +1116,7 @@ mod tests {
                 cargo_all_features: false,
             },
         ];
-        let df = generate_dockerfile(&cfg, &agent_worker()).unwrap();
+        let df = generate_dockerfile(&cfg, &agent_worker(), DEFAULT_LAUNCHER_PROTOCOL).unwrap();
         // A single RUN line with both toolchains, default preserved,
         // components carried through.
         assert!(
@@ -875,7 +1150,7 @@ mod tests {
             cargo_features: Vec::new(),
             cargo_all_features: false,
         }];
-        let df = generate_dockerfile(&cfg, &agent_worker()).unwrap();
+        let df = generate_dockerfile(&cfg, &agent_worker(), DEFAULT_LAUNCHER_PROTOCOL).unwrap();
         assert!(df.dockerfile.contains("NODE_VERSIONS=\"22 20\""));
         assert!(df.dockerfile.contains("PACKAGE_MANAGERS=\"pnpm yarn\""));
     }
@@ -889,7 +1164,7 @@ mod tests {
             "jq".into(),
             "build-essential".into(),
         ];
-        let df = generate_dockerfile(&cfg, &agent_worker()).unwrap();
+        let df = generate_dockerfile(&cfg, &agent_worker(), DEFAULT_LAUNCHER_PROTOCOL).unwrap();
         assert!(df.dockerfile.contains(
             "APT_PACKAGES=\"build-essential jq postgresql-client\" /tmp/djinn-scripts/install-system.sh"
         ));
@@ -900,7 +1175,7 @@ mod tests {
         let mut cfg = minimal_valid_config();
         cfg.env.insert("RUST_LOG".into(), "info".into());
         cfg.env.insert("CI".into(), "true".into());
-        let df = generate_dockerfile(&cfg, &agent_worker()).unwrap();
+        let df = generate_dockerfile(&cfg, &agent_worker(), DEFAULT_LAUNCHER_PROTOCOL).unwrap();
         // BTreeMap ordering is alphabetical → CI first, then RUST_LOG.
         let ci_pos = df.dockerfile.find("ENV CI=true").unwrap();
         let rust_pos = df.dockerfile.find("ENV RUST_LOG=info").unwrap();
@@ -914,7 +1189,7 @@ mod tests {
             HookCommand::Shell("echo build".into()),
             HookCommand::Exec(vec!["bash".into(), "-lc".into(), "echo exec".into()]),
         ];
-        let df = generate_dockerfile(&cfg, &agent_worker()).unwrap();
+        let df = generate_dockerfile(&cfg, &agent_worker(), DEFAULT_LAUNCHER_PROTOCOL).unwrap();
         assert!(df.dockerfile.contains("RUN echo build"));
         assert!(
             df.dockerfile
@@ -939,7 +1214,8 @@ mod tests {
             cargo_features: Vec::new(),
             cargo_all_features: false,
         }];
-        let err = generate_dockerfile(&cfg, &agent_worker()).unwrap_err();
+        let err =
+            generate_dockerfile(&cfg, &agent_worker(), DEFAULT_LAUNCHER_PROTOCOL).unwrap_err();
         assert!(matches!(err, DockerfileError::UnknownWorkspaceLanguage(s) if s == "zig"));
     }
 
@@ -948,7 +1224,7 @@ mod tests {
         // Alpine support was dropped in the 2026-04-22 cleanup; the base
         // is now fixed regardless of what the config carried.
         let cfg = minimal_valid_config();
-        let df = generate_dockerfile(&cfg, &agent_worker()).unwrap();
+        let df = generate_dockerfile(&cfg, &agent_worker(), DEFAULT_LAUNCHER_PROTOCOL).unwrap();
         assert!(df.dockerfile.contains("FROM debian:trixie-slim"));
         assert!(df.dockerfile.contains("/tmp/djinn-scripts/base-debian.sh"));
     }

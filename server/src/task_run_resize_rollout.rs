@@ -59,6 +59,22 @@
 //! merely violate a runbook. The journal is the assertion surface: a test reads
 //! the observed sequence, not a checklist.
 //!
+//! # The preflight gates the flip, structurally
+//!
+//! [`RolloutStep::AuthorityModeFlipped`] lists [`RolloutStep::PreflightCleared`]
+//! among its prerequisites, and [`RolloutStep::PreflightCleared`] is journaled
+//! only when the REAL `djinn_k8s::cutover_preflight::run` — over a live
+//! `helm template` render, the production task-run Job render, the
+//! environment-resolved signed inventory and the production
+//! `list_nonterminal_resize` query — comes back clean having actually evaluated
+//! its classes. Deleting the [`ResizeRollout::clear_preflight`] call from
+//! [`ResizeRollout::activate`] does not produce an ungated flip; it produces
+//! [`RolloutBlocked::StepOutOfOrder`].
+//!
+//! It sits after the drain proof rather than at the front because the preflight
+//! judges the drain fence too, and at the front of a live deployment that fence
+//! is never empty.
+//!
 //! # There is no state with two quota authorities, or none
 //!
 //! [`ResizeRollout::attempt_dispatch`] is the single admission path this module
@@ -132,6 +148,9 @@ pub enum RolloutStep {
     AdmissionPaused,
     /// Zero live task-run Pods and zero nonterminal resize/lease rows.
     DrainProven,
+    /// The deploy-time preflight returned a clean verdict for the target mode,
+    /// having actually evaluated its classes.
+    PreflightCleared,
     /// The authority mode compare-and-swap committed behind its own fence.
     AuthorityModeFlipped,
     /// Admission is resumed. Only reachable after a confirmed flip.
@@ -142,8 +161,14 @@ impl RolloutStep {
     /// The steps that must already have run before this one may.
     ///
     /// This is the ordering itself, in one place. `AdmissionResumed` requires
-    /// `AuthorityModeFlipped` and `AuthorityModeFlipped` requires `DrainProven`
-    /// — the two reorderings the cutover has to make impossible.
+    /// `AuthorityModeFlipped`, and `AuthorityModeFlipped` requires
+    /// `DrainProven` **and** `PreflightCleared` — the three reorderings the
+    /// cutover has to make impossible.
+    ///
+    /// `PreflightCleared` sits *after* `DrainProven` rather than at the front
+    /// because the preflight judges the drain fence too, and at the front of a
+    /// live deployment that fence is never empty. Placing it here is what makes
+    /// it a gate on the flip rather than a gate on the operator's day.
     const fn prerequisites(self) -> &'static [Self] {
         match self {
             Self::CatalogMutationFrozen => &[],
@@ -155,7 +180,12 @@ impl RolloutStep {
             Self::RetentionVerified => &[],
             Self::AdmissionPaused => &[Self::RetentionVerified],
             Self::DrainProven => &[Self::AdmissionPaused],
-            Self::AuthorityModeFlipped => &[Self::AdmissionPaused, Self::DrainProven],
+            Self::PreflightCleared => &[Self::AdmissionPaused, Self::DrainProven],
+            Self::AuthorityModeFlipped => &[
+                Self::AdmissionPaused,
+                Self::DrainProven,
+                Self::PreflightCleared,
+            ],
             Self::AdmissionResumed => &[Self::AuthorityModeFlipped],
         }
     }
@@ -235,10 +265,26 @@ pub enum RolloutBlocked {
     #[error("{} dispatch-eligible catalog image(s) are incompatible with the authority mode", .0.len())]
     CatalogIncompatible(Vec<CatalogDefect>),
     /// Task-run Pods are still live. PostgreSQL cannot see these.
-    #[error("{} task-run Pod(s) are still live", .0.len())]
+    ///
+    /// Rendered by identity — Pod name, Pod UID, task run — because the next
+    /// thing an operator does with this is a UID-fenced delete, and a count
+    /// tells them nothing to fence against.
+    #[error("{} task-run Pod(s) are still live: {}", .0.len(), render_live_pods(.0))]
     LiveTaskRunPods(Vec<LiveTaskRunPod>),
     /// Permits still owe a resize/lease decision, named individually.
-    #[error("{} permit(s) are in a nonterminal resize state", .0.len())]
+    ///
+    /// **Rendered by identity, not as a census.** This is the whole reason the
+    /// cutover reads `list_nonterminal_resize` instead of leaning on
+    /// [`LauncherAuthorityModeRepository::set_mode`]'s own fence: `set_mode`
+    /// refuses with per-dimension COUNTS, and a `Display` that printed
+    /// `.0.len()` here would throw away the difference at exactly the moment an
+    /// operator reads it. Carrying the rows in the struct and hiding them in the
+    /// message is the same failure as not carrying them.
+    #[error(
+        "{} permit(s) are in a nonterminal resize state: {}",
+        .0.len(),
+        render_nonterminal_rows(.0)
+    )]
     NonterminalResizeRows(Vec<NonterminalResizeRow>),
     /// The apiserver could not be enumerated. Never read as zero Pods.
     #[error("the task-run Pod census is unavailable: {0}")]
@@ -290,6 +336,63 @@ pub enum RolloutBlocked {
     /// back the row it wrote, it dispatches and requires a refusal.
     #[error("admission was paused but a dispatch attempt was still admitted")]
     AdmissionPauseIneffective,
+    /// The deploy-time preflight refused the target mode.
+    ///
+    /// Carries every defect, not just the first: an operator fixing one at a
+    /// time across six deploy windows is how a cutover window is lost.
+    #[error("the cutover preflight refused {}: {}", .classes.join(","), .defects.join("; "))]
+    PreflightRefused {
+        /// The blocking defect classes, sorted and deduplicated.
+        classes: Vec<String>,
+        /// Every blocking reason, as `class detail`.
+        defects: Vec<String>,
+    },
+    /// The preflight could not be evaluated at all — an unreadable render, a
+    /// config `render-gate` already refuses. Never read as a clean verdict.
+    #[error("the cutover preflight could not be evaluated: {0}")]
+    PreflightUnevaluable(String),
+    /// The preflight returned no defects **and** evaluated no classes.
+    ///
+    /// "No defects" and "no checks ran" are the two answers a gate must never
+    /// confuse, and this is the arm that keeps them apart: a preflight that
+    /// silently stopped evaluating would otherwise report the cleanest verdict
+    /// in the system.
+    #[error(
+        "the cutover preflight evaluated zero classes; a clean verdict from no checks is not a clean verdict"
+    )]
+    PreflightVacuous,
+}
+
+/// `task_run_id=state pod_uid=…` for every blocking permit.
+///
+/// The three fields an operator needs at 03:00: which run, what it still owes,
+/// and which Pod identity the drop would be fenced against.
+fn render_nonterminal_rows(rows: &[NonterminalResizeRow]) -> String {
+    rows.iter()
+        .map(|row| {
+            format!(
+                "task_run_id={} state={} pod_uid={}",
+                row.task_run_id,
+                row.state,
+                row.pod_uid.as_deref().unwrap_or("<none>")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+/// `pod=… uid=… task_run_id=…` for every live Pod, so the UID-fenced delete an
+/// operator is about to issue has something to fence against.
+fn render_live_pods(pods: &[LiveTaskRunPod]) -> String {
+    pods.iter()
+        .map(|pod| {
+            format!(
+                "pod={} pod_uid={} task_run_id={}",
+                pod.pod_name, pod.pod_uid, pod.task_run_id
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 /// One dispatch-eligible catalog row that may not run under the mode.
@@ -461,6 +564,49 @@ pub trait TaskRunPodPlane: Send + Sync {
     async fn live_task_run_pods(&self) -> Result<Vec<LiveTaskRunPod>, String>;
 }
 
+/// What the deploy-time preflight decided.
+///
+/// Three variants, not two. A preflight that could not run is not a preflight
+/// that passed, and a preflight that ran no checks is not a preflight that
+/// found nothing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PreflightVerdict {
+    /// Clean, having evaluated the named classes.
+    Clear {
+        /// The defect classes actually evaluated, as stable labels.
+        evaluated: Vec<String>,
+    },
+    /// Blocked, naming every defect.
+    Blocked {
+        /// The blocking classes, sorted and deduplicated.
+        classes: Vec<String>,
+        /// Every blocking reason, as `class detail`.
+        defects: Vec<String>,
+    },
+    /// The preflight could not be evaluated at all.
+    Unevaluable(String),
+}
+
+/// The deploy-time cutover preflight, as the flip consults it.
+///
+/// The production implementation is [`DeployRenderPreflight`], which runs
+/// `djinn_k8s::cutover_preflight::run` over a live `helm template` render — the
+/// same validator `deploy/preflight/cutover-preflight.sh` runs, assembled by the
+/// same code. There is no second copy of any rule, and no arm in which this
+/// module decides a class for itself.
+#[async_trait]
+pub trait CutoverPreflight: Send + Sync {
+    /// Judge the deployment against the mode it is being flipped to.
+    ///
+    /// `live_task_run_pods` is the apiserver half of the drain fence, supplied
+    /// by the caller because the preflight does not talk to a cluster.
+    async fn evaluate(
+        &self,
+        mode: LauncherAuthorityProtocol,
+        live_task_run_pods: &[String],
+    ) -> PreflightVerdict;
+}
+
 /// A read of an OCI registry manifest.
 ///
 /// The check built on this compares the SHA-256 of the **returned bytes**
@@ -554,6 +700,7 @@ pub struct ResizeRollout {
     admission: std::sync::Arc<dyn AdmissionControl>,
     pods: std::sync::Arc<dyn TaskRunPodPlane>,
     registry: std::sync::Arc<dyn RegistryProbe>,
+    preflight: std::sync::Arc<dyn CutoverPreflight>,
     journal: Mutex<Vec<RolloutStep>>,
     dispatches_admitted_while_paused: AtomicU64,
 }
@@ -569,6 +716,7 @@ impl ResizeRollout {
         admission: std::sync::Arc<dyn AdmissionControl>,
         pods: std::sync::Arc<dyn TaskRunPodPlane>,
         registry: std::sync::Arc<dyn RegistryProbe>,
+        preflight: std::sync::Arc<dyn CutoverPreflight>,
     ) -> Self {
         Self {
             permits: BuildPodPermitRepository::new(db.clone()),
@@ -578,6 +726,7 @@ impl ResizeRollout {
             admission,
             pods,
             registry,
+            preflight,
             journal: Mutex::new(Vec::new()),
             dispatches_admitted_while_paused: AtomicU64::new(0),
         }
@@ -951,6 +1100,70 @@ impl ResizeRollout {
         Ok(())
     }
 
+    /// **Step 6b.** Run the deploy-time preflight against the mode being
+    /// flipped to, and refuse the cutover unless it comes back clean.
+    ///
+    /// # Why this is a step and not a call inside the flip
+    ///
+    /// Because the ordering is the enforcement. [`RolloutStep::AuthorityModeFlipped`]
+    /// lists [`RolloutStep::PreflightCleared`] among its prerequisites, and
+    /// [`Self::guard`] refuses a step whose prerequisites are not in the
+    /// journal — so a flip that never ran the preflight is
+    /// [`RolloutBlocked::StepOutOfOrder`] rather than a flip that happened to
+    /// skip a check. Deleting the call below does not make the flip permissive;
+    /// it makes the flip impossible.
+    ///
+    /// The live-Pod census is re-read here and handed to the preflight, so the
+    /// preflight's own drain-fence class is judged against the apiserver rather
+    /// than against whatever the observation bundle claimed.
+    ///
+    /// # Errors
+    ///
+    /// [`RolloutBlocked::PreflightRefused`] naming every defect,
+    /// [`RolloutBlocked::PreflightUnevaluable`], [`RolloutBlocked::PreflightVacuous`],
+    /// or [`RolloutBlocked::PodCensusUnavailable`] when the apiserver half
+    /// cannot be read. None of them is ever "clean".
+    pub async fn clear_preflight(
+        &self,
+        mode: LauncherAuthorityProtocol,
+    ) -> Result<Vec<String>, RolloutBlocked> {
+        self.guard(RolloutStep::PreflightCleared)?;
+        let live: Vec<String> = self
+            .pods
+            .live_task_run_pods()
+            .await
+            .map_err(RolloutBlocked::PodCensusUnavailable)?
+            .into_iter()
+            .map(|pod| pod.task_run_id)
+            .collect();
+        match self.preflight.evaluate(mode, &live).await {
+            PreflightVerdict::Clear { evaluated } if evaluated.is_empty() => {
+                warn!("task_run_resize_rollout: the preflight returned clean with zero classes");
+                Err(RolloutBlocked::PreflightVacuous)
+            }
+            PreflightVerdict::Clear { evaluated } => {
+                self.record(RolloutStep::PreflightCleared);
+                info!(
+                    mode = mode.as_wire(),
+                    evaluated = evaluated.join(","),
+                    "task_run_resize_rollout: cutover preflight clear"
+                );
+                Ok(evaluated)
+            }
+            PreflightVerdict::Blocked { classes, defects } => {
+                warn!(
+                    mode = mode.as_wire(),
+                    classes = classes.join(","),
+                    "task_run_resize_rollout: cutover preflight refused the flip"
+                );
+                Err(RolloutBlocked::PreflightRefused { classes, defects })
+            }
+            PreflightVerdict::Unevaluable(reason) => {
+                Err(RolloutBlocked::PreflightUnevaluable(reason))
+            }
+        }
+    }
+
     /// **Step 7.** Flip the authority mode, behind the drain proof and behind
     /// `set_mode`'s own transactional fence.
     ///
@@ -1040,6 +1253,8 @@ impl ResizeRollout {
         self.verify_retention(plan.retained).await?;
         self.pause_admission(plan.reason, &plan.probe).await?;
         self.prove_drained().await?;
+        self.clear_preflight(LauncherAuthorityProtocol::ResizeV2)
+            .await?;
         let epoch = self
             .flip_authority_mode(plan.expected_epoch, LauncherAuthorityProtocol::ResizeV2)
             .await?;
@@ -1073,6 +1288,8 @@ impl ResizeRollout {
             .await?;
         self.pause_admission(plan.reason, &plan.probe).await?;
         self.prove_drained().await?;
+        self.clear_preflight(LauncherAuthorityProtocol::LeafV1)
+            .await?;
         let epoch = self
             .flip_authority_mode(plan.expected_epoch, LauncherAuthorityProtocol::LeafV1)
             .await?;
@@ -1356,37 +1573,102 @@ impl TaskRunPodPlane for KubernetesTaskRunPodPlane {
     }
 }
 
+/// The deploy-time preflight, bound to a live `helm template` render.
+///
+/// # Why it delegates rather than re-implements
+///
+/// The whole rule lives in `djinn_k8s::cutover_preflight::run`, and the
+/// assembly of its input lives in `djinn_k8s::cutover_preflight_driver` — the
+/// same module `bin/cutover-preflight.rs` uses. This type adds no check, reads
+/// no manifest field of its own and names no Kubernetes type. If it did, the
+/// gate the deploy step runs and the gate the flip runs could disagree, and the
+/// one that disagreed would be the one nobody was watching.
+pub struct DeployRenderPreflight {
+    inner: djinn_k8s::cutover_preflight_driver::RenderedCutoverPreflight,
+}
+
+impl DeployRenderPreflight {
+    /// Read the render and the observation bundle, and bind the durable half of
+    /// the drain fence to `db`.
+    ///
+    /// # Errors
+    ///
+    /// The render is missing, unparseable or empty, or the observation bundle
+    /// is invalid. Every one of these refuses the cutover before it has paused
+    /// admission or moved anything.
+    pub fn load(
+        sources: &djinn_k8s::cutover_preflight_driver::PreflightSources,
+        db: Database,
+    ) -> Result<Self, String> {
+        Ok(Self {
+            inner: djinn_k8s::cutover_preflight_driver::RenderedCutoverPreflight::load(
+                sources,
+                djinn_k8s::cutover_preflight_driver::DrainFenceSource::Repository(
+                    BuildPodPermitRepository::new(db),
+                ),
+            )?,
+        })
+    }
+}
+
+#[async_trait]
+impl CutoverPreflight for DeployRenderPreflight {
+    async fn evaluate(
+        &self,
+        mode: LauncherAuthorityProtocol,
+        live_task_run_pods: &[String],
+    ) -> PreflightVerdict {
+        match self.inner.judge(mode, live_task_run_pods).await {
+            Err(reason) => PreflightVerdict::Unevaluable(reason),
+            Ok(judgement) if judgement.is_clear() => PreflightVerdict::Clear {
+                evaluated: judgement.evaluated_classes(),
+            },
+            Ok(judgement) => PreflightVerdict::Blocked {
+                classes: judgement.blocking_classes(),
+                defects: judgement.blocking_defects(),
+            },
+        }
+    }
+}
+
 impl ResizeRollout {
     /// **The production composition site.**
     ///
     /// Every seam gets its real implementation: the durable dispatch-pause
     /// state and the coordinator's own refusal predicate, the live apiserver,
-    /// and an HTTP registry. The three repositories are built from `db` inside
-    /// [`Self::new`] and cannot be passed in.
+    /// an HTTP registry, and the deploy-time preflight over a live render. The
+    /// three repositories are built from `db` inside [`Self::new`] and cannot be
+    /// passed in.
     ///
     /// Nothing here is conditional, feature-gated or test-only. A cutover
     /// driven through this constructor is the same code path the tests drive,
-    /// with the two seams that need a cluster and a registry pointed at a real
+    /// with the seams that need a cluster and a registry pointed at a real
     /// cluster and a real registry.
-    #[must_use]
+    ///
+    /// # Errors
+    ///
+    /// The rendered manifests or the observation bundle could not be read. A
+    /// cutover whose preflight cannot even be assembled must not start.
     pub fn production(
         db: Database,
         events: djinn_core::events::EventBus,
         runtime: std::sync::Arc<djinn_k8s::runtime::KubernetesRuntime>,
         registry_base_url: &str,
         paused_by: &str,
-    ) -> Self {
-        Self::new(
+        preflight_sources: &djinn_k8s::cutover_preflight_driver::PreflightSources,
+    ) -> Result<Self, String> {
+        Ok(Self::new(
             db.clone(),
             // Read from the deployment's environment at process start. A
             // restart re-reads the document; nothing re-reads it in-process,
             // because an allowlist that can change under a running cutover is
             // not an allowlist.
             LegacyDigestInventory::process().clone(),
-            std::sync::Arc::new(DurableAdmissionControl::new(db, events, paused_by)),
+            std::sync::Arc::new(DurableAdmissionControl::new(db.clone(), events, paused_by)),
             std::sync::Arc::new(KubernetesTaskRunPodPlane::new(runtime)),
             std::sync::Arc::new(HttpRegistryProbe::new(registry_base_url)),
-        )
+            std::sync::Arc::new(DeployRenderPreflight::load(preflight_sources, db)?),
+        ))
     }
 }
 

@@ -23,11 +23,12 @@
 //!     └─> ImageController::enqueue(project_id)
 //!           ├─ read projects.environment_config
 //!           ├─ skip if '{}' (un-seeded — boot reseed hook handles)
-//!           ├─ compute_environment_hash(cfg, agent_worker_ref)
+//!           ├─ render_build_context(controller config, cfg)
+//!           │    └─ generate_dockerfile(cfg, agent_worker, declared protocol)
+//!           ├─ BuildContext::environment_hash(...)   ← hashes what was rendered
 //!           ├─ compare to projects.image_hash
 //!           ├─ if changed: take in-flight guard + check the cluster-wide
 //!           │    concurrency cap (count live build Jobs; defer if at cap)
-//!           │    ├─ generate_dockerfile(cfg, agent_worker)
 //!           │    ├─ upsert per-build ConfigMap (Dockerfile + scripts)
 //!           │    └─ create build Job (buildctl)
 //!           └─ flip projects.image_status to "building"

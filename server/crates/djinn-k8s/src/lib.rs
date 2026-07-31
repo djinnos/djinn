@@ -8,6 +8,7 @@
 pub mod build_resources;
 pub mod config;
 pub mod cutover_preflight;
+pub mod cutover_preflight_driver;
 pub mod env_config;
 pub mod graph_warmer;
 pub mod graph_warmer_candidates;
@@ -31,6 +32,14 @@ pub mod pod_resize_fixture;
 pub mod private_dep_config;
 pub mod runtime;
 mod runtime_eviction;
+/// A `KubernetesRuntime` over an in-process apiserver that records every
+/// request.
+///
+/// Gated exactly like [`pod_resize_fixture`], and for the same reason: a
+/// `djinn-server` test that must prove "zero Pod creations" has to observe the
+/// WIRE, and `deny.toml` bans a direct `kube` dependency outside this crate.
+#[cfg(any(test, feature = "test-support"))]
+pub mod runtime_fixture;
 pub mod scip_job;
 pub mod scip_schedule;
 pub mod secret;
