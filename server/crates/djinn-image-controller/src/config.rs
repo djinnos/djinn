@@ -2,6 +2,9 @@
 
 use std::num::ParseIntError;
 
+use djinn_image_builder::DEFAULT_LAUNCHER_PROTOCOL;
+use djinn_launcher_protocol::LauncherAuthorityProtocol;
+
 /// Default buildkitd DNS (matches `buildkitd-service.yaml` shipped in PR 4).
 const DEFAULT_BUILDKITD_HOST: &str = "tcp://djinn-buildkitd.djinn.svc.cluster.local:1234";
 /// Default Zot registry DNS (matches `zot-service.yaml` shipped in PR 4).
@@ -48,6 +51,18 @@ pub mod env {
     /// guaranteeing new agent prompts/tools propagate even if
     /// `DJINN_IMAGE_AGENT_WORKER_IMAGE` is an unversioned tag (`:latest`).
     pub const DJINN_VERSION: &str = "DJINN_VERSION";
+    /// The launcher authority protocol every image this deployment builds
+    /// declares in its own build metadata — `leaf-v1` (the launcher owns each
+    /// invocation leaf's `cpu.max`) or `resize-v2` (Pod resize owns quota and
+    /// the launcher must never write it).
+    ///
+    /// Unset means [`djinn_image_builder::DEFAULT_LAUNCHER_PROTOCOL`], which is
+    /// what every deployment built before this knob existed, so leaving it
+    /// alone rebuilds nothing. Setting it is the entry point of the resize
+    /// cutover: the declaration is mixed into the environment hash, so the
+    /// flip re-tags and rebuilds every catalog image instead of relabelling
+    /// artifacts whose launcher still writes leaf quota.
+    pub const LAUNCHER_AUTHORITY_PROTOCOL: &str = "DJINN_IMAGE_LAUNCHER_AUTHORITY_PROTOCOL";
     pub const MAX_CONCURRENT: &str = "DJINN_IMAGE_MAX_CONCURRENT";
     pub const NAMESPACE: &str = "DJINN_IMAGE_NAMESPACE";
     pub const REGISTRY_AUTH_SECRET: &str = "DJINN_IMAGE_REGISTRY_AUTH_SECRET";
@@ -96,6 +111,18 @@ pub struct ImageControllerConfig {
     /// version bump always forces a rebuild with the current agent worker
     /// (prompts + tool schemas). Empty/`dev` outside a tagged release.
     pub build_version: String,
+    /// The launcher authority protocol images built by this deployment
+    /// declare. Fleet-wide rather than per project: the declaration describes
+    /// the `djinn-cgroup-launcher` binary copied out of the single
+    /// [`Self::agent_worker_image`] every catalog image shares, and admission
+    /// compares it against the cluster-wide authority-mode singleton
+    /// (`launcher_authority_mode`). A per-project protocol would mean two
+    /// projects on one cluster disagreeing about who owns a node's CPU quota,
+    /// which is not a thing the mode row can express.
+    ///
+    /// Defaults to [`djinn_image_builder::DEFAULT_LAUNCHER_PROTOCOL`]; set via
+    /// [`env::LAUNCHER_AUTHORITY_PROTOCOL`].
+    pub declared_launcher_protocol: LauncherAuthorityProtocol,
     /// Namespace where build Jobs are created and the registry-auth Secret
     /// is mounted from.
     pub namespace: String,
@@ -140,6 +167,7 @@ impl ImageControllerConfig {
             builder_image: DEFAULT_BUILDER_IMAGE.into(),
             agent_worker_image: DEFAULT_AGENT_WORKER_IMAGE.into(),
             build_version: "dev".into(),
+            declared_launcher_protocol: DEFAULT_LAUNCHER_PROTOCOL,
             namespace: DEFAULT_NAMESPACE.into(),
             registry_auth_secret: DEFAULT_REGISTRY_AUTH_SECRET.into(),
             mirror_pvc: DEFAULT_MIRROR_PVC.into(),
@@ -179,6 +207,26 @@ impl ImageControllerConfig {
             && !v.trim().is_empty()
         {
             cfg.build_version = v;
+        }
+        if let Ok(v) = std::env::var(env::LAUNCHER_AUTHORITY_PROTOCOL)
+            && !v.trim().is_empty()
+        {
+            match v.trim().parse::<LauncherAuthorityProtocol>() {
+                Ok(protocol) => cfg.declared_launcher_protocol = protocol,
+                // Keep the default rather than guessing. `leaf-v1` is the
+                // conservative arm: an image that declares less authority than
+                // the cluster expects is refused at admission, whereas guessing
+                // `resize-v2` would ship an artifact claiming Kubernetes owns
+                // quota that the launcher still writes itself.
+                Err(error) => tracing::error!(
+                    value = %v,
+                    %error,
+                    default = %DEFAULT_LAUNCHER_PROTOCOL,
+                    "{} is not a launcher authority protocol; keeping the default — \
+                     the configured cutover is NOT in effect",
+                    env::LAUNCHER_AUTHORITY_PROTOCOL
+                ),
+            }
         }
         if let Ok(v) = std::env::var(env::NAMESPACE) {
             cfg.namespace = v;
@@ -244,8 +292,53 @@ fn validate_positive(n: usize) -> Result<usize, ParseIntError> {
     }
 }
 
+/// Serialized access to the process environment `from_env` reads.
+///
+/// The harness runs this crate's unit tests on many threads in one process, so
+/// two cases setting the same variable interleave and read each other's value —
+/// `from_env_honors_zot_retention_vars` and
+/// `from_env_invalid_zot_retention_bools_fall_back` both write
+/// `DJINN_ZOT_RETENTION_ENABLED`, and either can observe the other's. Every
+/// test that reads or writes this environment takes [`guard`] first, so the
+/// save/restore each one already does is actually sound.
+#[cfg(test)]
+pub(crate) mod test_env {
+    use super::env;
+
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Hold for the duration of any test that mutates or reads the controller's
+    /// environment. NOT reentrant: never call [`with_protocol_env`] while
+    /// holding it.
+    pub(crate) fn guard() -> std::sync::MutexGuard<'static, ()> {
+        LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    pub(crate) fn with_protocol_env<T>(value: Option<&str>, body: impl FnOnce() -> T) -> T {
+        let _guard = guard();
+        let saved = std::env::var(env::LAUNCHER_AUTHORITY_PROTOCOL).ok();
+        // SAFETY: the lock above makes this the only thread mutating this
+        // variable, and nothing else in the test binary reads it concurrently.
+        unsafe {
+            match value {
+                Some(v) => std::env::set_var(env::LAUNCHER_AUTHORITY_PROTOCOL, v),
+                None => std::env::remove_var(env::LAUNCHER_AUTHORITY_PROTOCOL),
+            }
+        }
+        let out = body();
+        unsafe {
+            match saved {
+                Some(prev) => std::env::set_var(env::LAUNCHER_AUTHORITY_PROTOCOL, prev),
+                None => std::env::remove_var(env::LAUNCHER_AUTHORITY_PROTOCOL),
+            }
+        }
+        out
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::test_env::with_protocol_env;
     use super::*;
 
     #[test]
@@ -256,8 +349,46 @@ mod tests {
         assert_eq!(cfg.max_concurrent, DEFAULT_MAX_CONCURRENT);
     }
 
+    /// **A deployment can select the protocol, and selects nothing by default.**
+    ///
+    /// MUTATION: delete the `LAUNCHER_AUTHORITY_PROTOCOL` arm from `from_env`.
+    /// The `resize-v2` case fails, reporting `leaf-v1` — the exact shape of the
+    /// bug this knob exists to fix (a declaration no deployment can reach).
+    #[test]
+    fn from_env_selects_the_declared_launcher_protocol() {
+        for protocol in LauncherAuthorityProtocol::ALL {
+            let cfg = with_protocol_env(Some(protocol.as_wire()), ImageControllerConfig::from_env);
+            assert_eq!(
+                cfg.declared_launcher_protocol, protocol,
+                "{protocol} must be selectable by a deployment"
+            );
+        }
+
+        let unset = with_protocol_env(None, ImageControllerConfig::from_env);
+        assert_eq!(
+            unset.declared_launcher_protocol, DEFAULT_LAUNCHER_PROTOCOL,
+            "an unconfigured deployment must keep declaring what it declared before"
+        );
+        assert_eq!(DEFAULT_LAUNCHER_PROTOCOL, LauncherAuthorityProtocol::LeafV1);
+    }
+
+    /// A value that is not exactly one of the two wire forms never becomes a
+    /// declaration. Nothing here may fall through to `resize-v2`: the
+    /// conservative arm is the one the launcher already implements.
+    #[test]
+    fn a_malformed_protocol_selection_keeps_the_default() {
+        for bogus in ["resize-v3", "RESIZE-V2", "resize_v2", "true", "   "] {
+            let cfg = with_protocol_env(Some(bogus), ImageControllerConfig::from_env);
+            assert_eq!(
+                cfg.declared_launcher_protocol, DEFAULT_LAUNCHER_PROTOCOL,
+                "{bogus:?} must not be honoured as a protocol selection"
+            );
+        }
+    }
+
     #[test]
     fn from_env_honors_documented_vars() {
+        let _env = test_env::guard();
         // SAFETY: single-threaded unit test.
         unsafe {
             std::env::set_var(env::BUILDKITD_HOST, "tcp://bk.example:1234");
@@ -277,6 +408,7 @@ mod tests {
 
     #[test]
     fn from_env_invalid_max_concurrent_falls_back() {
+        let _env = test_env::guard();
         let saved = std::env::var(env::MAX_CONCURRENT).ok();
         unsafe {
             std::env::set_var(env::MAX_CONCURRENT, "not-a-number");
@@ -304,6 +436,7 @@ mod tests {
 
     #[test]
     fn from_env_honors_zot_retention_vars() {
+        let _env = test_env::guard();
         // SAFETY: single-threaded unit test.
         unsafe {
             std::env::set_var(env::ZOT_RETENTION_ENABLED, "true");
@@ -332,6 +465,7 @@ mod tests {
 
     #[test]
     fn from_env_invalid_zot_retention_bools_fall_back() {
+        let _env = test_env::guard();
         // SAFETY: single-threaded unit test.
         unsafe {
             std::env::set_var(env::ZOT_RETENTION_ENABLED, "maybe");

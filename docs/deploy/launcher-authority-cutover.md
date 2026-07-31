@@ -173,6 +173,43 @@ Run in this order. The driver refuses any other.
 | 9 | **Flip the mode** | Compare-and-swap at the expected epoch, behind `set_mode`'s own transactional fence, which holds the `build_pod_permit_pools` row lock admission takes before it inserts. Requires steps 6, 7 **and** 8 in the journal; reaching it without any of them is `StepOutOfOrder`. |
 | 10 | **Resume admission** | Only after a confirmed flip. Resuming earlier is `StepOutOfOrder`. |
 
+### How step 4 is actually performed
+
+The declaration an image carries is a **build input**, set on the deployment
+that builds it:
+
+```yaml
+imagePipeline:
+  controller:
+    launcherAuthorityProtocol: "resize-v2"   # default "" → leaf-v1
+```
+
+rendered as `DJINN_IMAGE_LAUNCHER_AUTHORITY_PROTOCOL` on the server Pod and read
+by `ImageControllerConfig::from_env`. Everything downstream follows from it: the
+generated Dockerfile's `djinn.app/launcher-authority-protocol` LABEL, the env
+the launcher sidecar reads out of the same image, and the sentinel the build Job
+echoes into `images.launcher_authority_protocol`.
+
+Two properties this step depends on, both enforced in code rather than by
+procedure:
+
+* **A protocol change cannot be served from cache.** The declaration is an input
+  to `compute_environment_hash`, and the image tag is a prefix of that hash. A
+  `leaf-v1` artifact and a `resize-v2` artifact of the same config therefore
+  live at different tags, and flipping the value re-tags and rebuilds every
+  catalog image rather than relabelling one whose launcher still writes leaf
+  `cpu.max`. Budget for a full catalog rebuild here; the `leaf-v1` tags remain
+  in the registry, which is what makes step 5's retention check — and rollback —
+  possible.
+* **The label and the catalog row cannot disagree.** `build_image_build_job`
+  refuses to render a Job whose build context reports a protocol its own
+  Dockerfile does not declare (`BuildContext::verify_declaration`), so a
+  `leaf-v1` artifact catalogued as `resize-v2` is not a state the pipeline can
+  reach.
+
+Leaving the value unset keeps the built-in default (`leaf-v1`) and changes no
+image hash, so a deployment that is not doing a cutover rebuilds nothing.
+
 ## Rollback
 
 Same shape from step 5 onward, targeting `leaf-v1`, with the allowlist check
