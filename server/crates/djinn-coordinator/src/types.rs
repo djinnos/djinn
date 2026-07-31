@@ -3,7 +3,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant as StdInstant};
 
 use super::consolidation::ConsolidationRunner;
-use crate::build_admission::BuildAdmissionController;
 use crate::roles::RoleRegistry;
 use djinn_control_plane::bridge::RuntimeOps;
 use djinn_core::events::DjinnEventEnvelope;
@@ -35,9 +34,9 @@ pub(super) struct InflightDispatch {
 // Types that are pure DTOs and shared between slot and coordinator sides.
 
 pub use djinn_orchestration_types::coordinator::{
-    BackgroundWorkTracker, BreakerDebugEntry, CoordinatorDebugSnapshot, DebugBuildAdmission,
-    DebugCooldown, DebugDispatchState, DebugFailureStreak, DebugInflightEntry, DebugSlot,
-    DebugTotals, DispatchPauseView,
+    BackgroundWorkTracker, BreakerDebugEntry, CoordinatorDebugSnapshot, DebugCooldown,
+    DebugDispatchState, DebugFailureStreak, DebugInflightEntry, DebugSlot, DebugTotals,
+    DispatchPauseView,
 };
 
 /// State of the PR-poller's mechanical clean-merge fast path for one task.
@@ -135,8 +134,6 @@ pub struct CoordinatorDeps {
     /// and off-server contexts leave this `None`, which makes the proactive
     /// refresh tick branch a no-op.
     pub graph_warmer: Option<Arc<dyn GraphWarmerService>>,
-    /// Shared task-run and graph-warm admission boundary. Optional only during rollout.
-    pub build_admission: Option<Arc<BuildAdmissionController>>,
     pub(super) consolidation_runner: Option<Arc<dyn ConsolidationRunner>>,
     /// Shared bare-mirror manager. Threaded into the synthesized `AgentContext`
     /// built inside `process_approved_tasks` so the direct-push merge fallback
@@ -185,7 +182,6 @@ impl CoordinatorDeps {
             background_work_tracker,
             lsp,
             graph_warmer: None,
-            build_admission: None,
             consolidation_runner: None,
             mirror: None,
             runtime_ops: None,
@@ -200,12 +196,6 @@ impl CoordinatorDeps {
     /// off-server contexts that omit this leave the tick as a no-op.
     pub fn with_graph_warmer(mut self, warmer: Arc<dyn GraphWarmerService>) -> Self {
         self.graph_warmer = Some(warmer);
-        self
-    }
-
-    /// Inject the controller shared by every build-producing dispatcher.
-    pub fn with_build_admission(mut self, controller: Arc<BuildAdmissionController>) -> Self {
-        self.build_admission = Some(controller);
         self
     }
 

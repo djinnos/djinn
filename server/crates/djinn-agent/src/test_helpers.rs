@@ -119,6 +119,8 @@ pub fn agent_context_from_db(db: Database, _cancel: CancellationToken) -> AgentC
         graph_warmer: None,
         repo_graph_ops: None,
         runtime_ops: None,
+        resize_admission: None,
+        resize_drop: None,
         cargo_target_runs_root: test_path("cargo-target-runs-"),
         mirror: None,
         rpc_registry: None,
@@ -258,6 +260,7 @@ pub async fn create_test_project(db: &Database) -> Project {
                 .as_deref()
                 .unwrap_or("test-registry/djinn-test:testhash"),
             Some("sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"),
+            None,
         )
         .await;
     let _ = image_repo

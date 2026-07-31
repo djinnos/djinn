@@ -2,13 +2,13 @@
 
 pub mod admin;
 pub mod allocator;
-pub mod build_admission_reconcile;
 pub mod codex_keepalive;
 pub mod db;
 pub mod error;
 pub mod events;
 pub mod git_maintenance;
 pub mod graph_retention;
+pub mod kueue_workload_reconcile;
 pub mod leadership;
 pub mod logging;
 mod mcp_bridge;
@@ -18,6 +18,10 @@ pub mod scip_index_watcher;
 pub mod server;
 pub mod server_memory;
 pub mod sse;
+pub mod task_run_resize_bootstrap;
+pub mod task_run_resize_drop;
+pub mod task_run_resize_reconcile;
+pub mod task_run_resize_rollout;
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_helpers;

@@ -182,3 +182,54 @@ async fn phase_1_default_model_facing_tools_dispatch_through_agent_fallback() {
         .expect("patched file");
     assert!(patched.contains("phase1 patched body"));
 }
+
+/// `set_file_mode` is advertised on the worker surface but implemented only in
+/// the agent-local fallback, so a missing dispatch arm would present the model
+/// with a tool that always answers "unknown djinn frontend tool". The schema
+/// snapshots cannot catch that — they assert the advertisement, not the route.
+#[tokio::test]
+async fn set_file_mode_dispatches_through_the_agent_fallback() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let worktree = test_tempdir("set_file_mode_surface_guard");
+    let script = worktree.path().join("gate.sh");
+    tokio::fs::write(&script, "#!/bin/sh\necho hi\n")
+        .await
+        .expect("seed file");
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o644)).expect("seed mode");
+
+    let db = create_test_db();
+    let state = agent_context_from_db(db, CancellationToken::new());
+    let services = test_services();
+
+    let result = call_tool(
+        &state,
+        &services,
+        "set_file_mode",
+        Some(
+            json!({ "path": "gate.sh", "executable": true })
+                .as_object()
+                .cloned()
+                .unwrap(),
+        ),
+        worktree.path(),
+        None,
+        Some("worker"),
+        None,
+        None,
+        &crate::extension::ToolCancellation::never(),
+    )
+    .await
+    .expect("set_file_mode should be handled by the agent fallback");
+
+    assert_eq!(result["ok"].as_bool(), Some(true));
+    assert_eq!(
+        std::fs::metadata(&script)
+            .expect("stat")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o755,
+        "dispatch must reach the handler that actually chmods the file"
+    );
+}

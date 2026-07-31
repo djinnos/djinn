@@ -284,6 +284,11 @@ impl SessionRuntime for TestRuntime {
             container_id: None,
             pod_ref: None,
             started_at: SystemClockTrait::new().now(),
+            // No Job and no launcher sidecar are rendered in-process, so there
+            // is nothing for the permit relation to fence and no protocol for
+            // the resize bootstrap to agree with.
+            job_uid: None,
+            launcher_authority_protocol: None,
         })
     }
 

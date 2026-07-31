@@ -193,20 +193,22 @@ from Zot's own logs, not from the server preflight.
 
 `tests/zot-cache-retention-render.sh` pins all of this.
 
-## Build admission mode
+## Build admission (removed)
 
-`buildAdmission.mode` selects the literal `DJINN_BUILD_ADMISSION_MODE` emitted
-on `djinn-server`: `off`, `observe` (the default), or `enforce`.
-`buildAdmission.maxBuildTaskRuns` emits the literal
-`DJINN_MAX_BUILD_TASKRUNS` cap and defaults to `3`; the chart accepts only
-integers from `1` through `64`.
+The chart no longer renders `DJINN_BUILD_ADMISSION_MODE` or
+`DJINN_MAX_BUILD_TASKRUNS`, and the `buildAdmission.*` values were deleted. The
+pre-create pods-quota reservation authority those knobs configured is gone from
+the server, so nothing consumes them.
 
-Enforce is a single-active-controller deployment mode. It requires
-`server.replicas: 1` and either `server.strategy.type: Recreate`, or a
-`RollingUpdate` with exactly `maxSurge: 0` and `maxUnavailable: 1`. Helm rejects
-an Enforce release that does not meet this topology. Off and Observe retain the
-configured server replica and rollout settings, so their normal default is the
-availability-first rolling update (`maxSurge: 1`, `maxUnavailable: 0`).
+The single-active-controller topology constraint went with it. `server.replicas`
+and `server.strategy` are now free knobs: no combination is rejected at render
+time, and the default stays the availability-first rolling update (`maxSurge:
+1`, `maxUnavailable: 0`), which is safe because coordinator leadership is gated
+by a Postgres advisory lock rather than by replica count.
+
+`tests/build-admission-topology.sh` pins the absence: it renders with
+`buildAdmission.mode=enforce` and `server.replicas=3` and asserts the render
+succeeds with neither environment variable present.
 
 ## Writable cgroup preparation rollout
 

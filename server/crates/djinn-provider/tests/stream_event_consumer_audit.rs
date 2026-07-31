@@ -681,7 +681,50 @@ fn checked_in_classification_covers_every_production_stream_event_match() {
     assert!(!FIXTURE.contains("direct_services.rs::invoke_llm#1"));
     assert!(!FIXTURE.contains("direct_services.rs::collect_planner_stream#1"));
     assert!(
-        FIXTURE.contains("no behavioral claim")
-            || include_str!("stream_event_consumer_audit.rs").contains("no behavioral claim")
+        fixture_header_disclaims_behavioral_coverage(FIXTURE),
+        "the fixture's header must tell the next reader that these rows are an \
+         inventory, not coverage; the disclaimer belongs in the file a reader opens"
     );
+}
+
+/// The disclaimer the fixture header must carry, in the words it uses today.
+const FIXTURE_DISCLAIMER: &str = "not a behavioral claim";
+
+/// Whether `fixture`'s leading comment block disclaims behavioral coverage.
+///
+/// The predicate this replaced was
+/// `FIXTURE.contains("no behavioral claim") || include_str!(<this file>)
+/// .contains("no behavioral claim")`. The fixture has never contained that
+/// phrase — it says "not a behavioral claim" — so the left arm was always
+/// false, and the right arm read this test file into itself, where the phrase
+/// occurs twice: in the module doc on line 1 and in the assertion's own string
+/// literal. The assertion was therefore unconditionally true and could never
+/// fail for any state of either file.
+///
+/// The self-read is gone rather than made self-proof: the claim is about the
+/// FIXTURE, and only the fixture should be able to satisfy or break it. The
+/// match is restricted to the leading `#` header so a data row's classification
+/// text cannot stand in for the header a reader actually sees.
+fn fixture_header_disclaims_behavioral_coverage(fixture: &str) -> bool {
+    fixture
+        .lines()
+        .take_while(|line| line.starts_with('#'))
+        .any(|line| line.contains(FIXTURE_DISCLAIMER))
+}
+
+#[test]
+fn the_fixture_disclaimer_guard_reads_the_fixture_header_and_nothing_else() {
+    assert!(fixture_header_disclaims_behavioral_coverage(
+        "# rows are static evidence, not a behavioral claim\nsite\tarms\n"
+    ));
+    // Removing the header line must fail the guard.
+    assert!(!fixture_header_disclaims_behavioral_coverage(
+        "# site identifier\tall StreamEvent arms at this site\nsite\tarms\n"
+    ));
+    // A data row cannot stand in for the header.
+    assert!(!fixture_header_disclaims_behavioral_coverage(
+        "# site identifier\tall StreamEvent arms at this site\nsite\tnot a behavioral claim\n"
+    ));
+    // An empty fixture is not a disclaimed one.
+    assert!(!fixture_header_disclaims_behavioral_coverage(""));
 }

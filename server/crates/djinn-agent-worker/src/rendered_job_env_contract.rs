@@ -166,6 +166,7 @@ fn the_warm_pod_argv_parses_with_the_real_parser() {
     let job = build_warm_job(
         &KubernetesConfig::for_testing(),
         "proj-opsu",
+        "deadbeef",
         "registry.example/djinn-project:opsu",
         None,
     );
@@ -384,6 +385,7 @@ fn the_unleased_warm_job_renders_no_build_lease_identity() {
     let job = build_warm_job(
         &KubernetesConfig::for_testing(),
         "proj-unleased",
+        "deadbeef",
         "registry.example/djinn-project:unleased",
         None,
     );

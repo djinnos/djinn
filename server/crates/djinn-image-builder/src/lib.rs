@@ -36,6 +36,9 @@ pub mod dockerfile;
 pub mod hash;
 pub mod scripts;
 
-pub use dockerfile::{AgentWorkerImage, BuildContext, DockerfileError, generate_dockerfile};
+pub use dockerfile::{
+    AgentWorkerImage, BuildContext, DECLARED_LAUNCHER_PROTOCOL, DockerfileError,
+    LAUNCHER_PROTOCOL_ENV, LAUNCHER_PROTOCOL_LABEL, generate_dockerfile,
+};
 pub use hash::{compute_environment_hash, compute_script_bundle_sha};
 pub use scripts::{SCRIPTS, ScriptFile};

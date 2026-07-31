@@ -31,7 +31,7 @@ use std::sync::{Arc, Mutex};
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use djinn_core::doctor::{
-    DoctorCheckRun, INJECTION_STARVATION_NAME, RETRIEVAL_ZERO_RESULT_NAME,
+    DoctorCheckRun, DoctorRegistry, INJECTION_STARVATION_NAME, RETRIEVAL_ZERO_RESULT_NAME,
     checks::retrieval::RetrievalHealthConfig,
 };
 
@@ -696,6 +696,7 @@ pub struct McpTestHarness {
     state: McpState,
     db: Database,
     server: DjinnMcpServer,
+    doctor_registry: Arc<DoctorRegistry>,
 }
 
 impl McpTestHarness {
@@ -732,8 +733,7 @@ impl McpTestHarness {
             Arc::new(StubGit),
             Arc::new(StubRepoGraph),
         );
-        let server = DjinnMcpServer::new(state.clone());
-        Self { state, db, server }
+        Self::from_state(state)
     }
 
     /// Build the normal strict-stub harness with an explicitly injected
@@ -758,22 +758,49 @@ impl McpTestHarness {
             Arc::new(StubRepoGraph),
             None,
         );
-        let server = DjinnMcpServer::new(state.clone());
-        Self { state, db, server }
+        Self::from_state(state)
     }
 
     /// Build a harness from a caller-assembled MCP state.  This is the opt-in
     /// escape hatch for integration tests that keep the normal MCP/tool dispatch
     /// path but swap one strict stub for a real actor-backed bridge (for example
     /// a real `SlotPoolHandle` in execution-control tests).
+    ///
+    /// Every constructor funnels through here, which is where each harness is
+    /// bound to a doctor registry of its own. Without that binding the
+    /// `doctor_run` / `doctor_fix` tools resolve checks from the process-wide
+    /// `djinn_core::doctor::registry()` singleton, which is shared by every
+    /// test running concurrently in the same test binary and is keyed by check
+    /// name — so two tests registering the same check name would each end up
+    /// running whichever source registered last, against the *other* test's
+    /// database. A state that already carries an injected registry keeps it,
+    /// so rebuilding state from `harness.state().clone()` does not orphan
+    /// checks the test already registered.
     pub fn from_state(state: McpState) -> Self {
+        let doctor_registry = state
+            .doctor_registry_override()
+            .unwrap_or_else(|| Arc::new(DoctorRegistry::new()));
+        let state = state.with_doctor_registry(doctor_registry.clone());
         let db = state.db().clone();
         let server = DjinnMcpServer::new(state.clone());
-        Self { state, db, server }
+        Self {
+            state,
+            db,
+            server,
+            doctor_registry,
+        }
     }
 
     pub fn db(&self) -> &Database {
         &self.db
+    }
+
+    /// The doctor check registry this harness's `doctor_run` / `doctor_fix`
+    /// resolve from. Tests must register their checks here rather than in
+    /// `djinn_core::doctor::registry()`; the global singleton is shared by
+    /// every concurrently-running test in the binary.
+    pub fn doctor_registry(&self) -> &Arc<DoctorRegistry> {
+        &self.doctor_registry
     }
 
     pub fn state(&self) -> &McpState {

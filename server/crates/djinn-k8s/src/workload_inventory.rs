@@ -261,6 +261,520 @@ pub fn has_canonical_warm_signature(r: &WorkloadRecord) -> bool {
             .any(|c| c.contains(crate::warm_job::WARM_COMMAND_BIN) && c.contains("warm-graph"))
 }
 
+// =============================================================================
+// Kueue Workload observation (cutover slice S5, task kh7g)
+// =============================================================================
+//
+// Everything above answers "does this object still exist?" by polling. What
+// follows answers a different question — "has Kueue admitted this build, and is
+// it still admitted?" — and answers it by WATCHING, because the two failure
+// modes are not the same shape.
+//
+// A Workload's admission state is edge-triggered and reversible: Kueue admits,
+// then preempts for quota, then re-admits, and every one of those edges matters
+// to the run sitting behind it. A poll on any cadence silently collapses an
+// admit/evict/admit sequence into whatever the last sample happened to see. The
+// watch preserves the edges; the reconciler on the other end is what makes them
+// idempotent.
+//
+// # Why a hand-rolled resource type instead of the Kueue crate
+//
+// Nothing here depends on Kueue's Go types, its CRD schema version beyond the
+// group/version below, or on Kueue being installed at all. The struct models
+// only `metadata` plus the `status.conditions` this repository reads; every
+// other field the API server sends is ignored by serde. That is deliberate:
+// `kueue.armed` defaults false and no namespace carries
+// `djinn.io/kueue-managed`, so the production cluster today has NO Kueue CRDs
+// and NO Workload objects. A type that deserialised the full Kueue schema would
+// have to track their API revisions for a payload this process never reads.
+//
+// # Behaviour on a cluster with no Kueue installed
+//
+// [`KubeWorkloadWatch::run_session`] returns `Err` — the API server answers
+// `404 NotFound` for an unregistered resource — and the caller backs off and
+// retries. It never panics, never blocks another subsystem, and never mutates
+// anything, because no observation is ever produced. That is the CURRENT
+// production shape, which is why the reconciler's spawn site refuses to start
+// this watch at all unless Kueue is armed.
+
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
+/// Re-exported because `djinn-server` reads Workload identity but does not
+/// depend on `k8s-openapi`: the owner link is half of how a Workload is resolved
+/// to a task-run, so a consumer that cannot name this type cannot exercise that
+/// half at all.
+pub use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
+use kube::runtime::watcher;
+use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
+
+/// API group Kueue serves its `Workload` resource under.
+pub const KUEUE_GROUP: &str = "kueue.x-k8s.io";
+/// API version pinned by `deploy/helm/djinn/templates/kueue-topology.yaml`.
+pub const KUEUE_WORKLOAD_VERSION: &str = "v1beta1";
+/// Kueue's per-Job accounting object.
+pub const KUEUE_WORKLOAD_KIND: &str = "Workload";
+/// Plural, as it appears in the resource path.
+pub const KUEUE_WORKLOAD_PLURAL: &str = "workloads";
+
+/// Condition type Kueue sets once a Workload holds admitted quota.
+pub const CONDITION_ADMITTED: &str = "Admitted";
+/// Condition type Kueue sets when it takes admitted quota BACK — preemption,
+/// a stopped ClusterQueue, a failed admission check, deactivation.
+pub const CONDITION_EVICTED: &str = "Evicted";
+/// Condition type Kueue sets when the underlying Job reached a terminal state.
+pub const CONDITION_FINISHED: &str = "Finished";
+
+/// The minimal projection of a Kueue `Workload` this process reads.
+///
+/// Unknown fields (`spec`, `status.admission`, `status.requeueState`, …) are
+/// dropped by serde rather than modelled: see the module section above.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct KueueWorkload {
+    #[serde(default)]
+    pub metadata: ObjectMeta,
+    #[serde(default)]
+    pub status: KueueWorkloadStatus,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct KueueWorkloadStatus {
+    #[serde(default)]
+    pub conditions: Vec<KueueWorkloadCondition>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct KueueWorkloadCondition {
+    #[serde(rename = "type")]
+    pub condition_type: String,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+impl kube::Resource for KueueWorkload {
+    type DynamicType = ();
+    type Scope = kube::core::NamespaceResourceScope;
+
+    fn kind(_: &()) -> Cow<'_, str> {
+        Cow::Borrowed(KUEUE_WORKLOAD_KIND)
+    }
+    fn group(_: &()) -> Cow<'_, str> {
+        Cow::Borrowed(KUEUE_GROUP)
+    }
+    fn version(_: &()) -> Cow<'_, str> {
+        Cow::Borrowed(KUEUE_WORKLOAD_VERSION)
+    }
+    fn plural(_: &()) -> Cow<'_, str> {
+        Cow::Borrowed(KUEUE_WORKLOAD_PLURAL)
+    }
+    fn meta(&self) -> &ObjectMeta {
+        &self.metadata
+    }
+    fn meta_mut(&mut self) -> &mut ObjectMeta {
+        &mut self.metadata
+    }
+}
+
+/// Where one Workload sits in Kueue's admission lifecycle, reduced to the three
+/// answers the coordinator can act on.
+///
+/// `Pending` and `Admitted` are REVERSIBLE and the reconciler must be able to
+/// move between them in both directions: a preemption is a live Workload
+/// returning to the queue, not a terminal event.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WorkloadAdmission {
+    /// Kueue has not (or no longer) granted this Workload quota. `reason`
+    /// carries Kueue's own word for it when there is one — `Preempted`,
+    /// `ClusterQueueStopped`, `Deactivated` — and `None` when the Workload has
+    /// simply not been looked at yet.
+    Pending { reason: Option<String> },
+    /// Kueue admitted the Workload; the Job is unsuspended and its Pod may run.
+    Admitted,
+    /// The Job behind this Workload reached a terminal state. Terminal, and
+    /// deliberately NOT folded into `Pending`: a finished build must never be
+    /// mistaken for one waiting on quota.
+    Finished { reason: Option<String> },
+}
+
+impl WorkloadAdmission {
+    /// Rendered form, used as the durable projection's state column.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Pending { .. } => "pending",
+            Self::Admitted => "admitted",
+            Self::Finished { .. } => "finished",
+        }
+    }
+
+    /// Kueue's own explanation, when it gave one.
+    pub fn reason(&self) -> Option<&str> {
+        match self {
+            Self::Pending { reason } | Self::Finished { reason } => reason.as_deref(),
+            Self::Admitted => None,
+        }
+    }
+
+    /// True while the build behind this Workload is waiting on quota.
+    pub fn is_pending(&self) -> bool {
+        matches!(self, Self::Pending { .. })
+    }
+}
+
+fn condition<'a>(w: &'a KueueWorkload, kind: &str) -> Option<&'a KueueWorkloadCondition> {
+    w.status
+        .conditions
+        .iter()
+        .find(|c| c.condition_type == kind && c.status.eq_ignore_ascii_case("True"))
+}
+
+/// Reduce a Workload's conditions to one admission answer.
+///
+/// # Precedence, and why `Evicted` outranks `Admitted`
+///
+/// Kueue does not clear `Admitted=True` at the instant it evicts: an evicted
+/// Workload is observable carrying BOTH conditions true while the Job is being
+/// re-suspended. Reading `Admitted` first would therefore report a preempted
+/// build as still running, which is precisely the direction that must never be
+/// wrong — an over-reported admission strands a run nothing will ever finish,
+/// while an over-reported pending merely re-observes on the next event.
+pub fn classify_workload_admission(w: &KueueWorkload) -> WorkloadAdmission {
+    if let Some(finished) = condition(w, CONDITION_FINISHED) {
+        return WorkloadAdmission::Finished {
+            reason: finished.reason.clone(),
+        };
+    }
+    if let Some(evicted) = condition(w, CONDITION_EVICTED) {
+        return WorkloadAdmission::Pending {
+            reason: evicted.reason.clone(),
+        };
+    }
+    if condition(w, CONDITION_ADMITTED).is_some() {
+        return WorkloadAdmission::Admitted;
+    }
+    WorkloadAdmission::Pending {
+        reason: w
+            .status
+            .conditions
+            .iter()
+            .find(|c| c.condition_type == CONDITION_ADMITTED)
+            .and_then(|c| c.reason.clone()),
+    }
+}
+
+/// Resolve the task-run this Workload accounts for, or `None` when it accounts
+/// for something else (a warm Job, a SCIP Job, another tenant's workload).
+///
+/// Two sources, in order, because neither alone is sufficient:
+///
+/// 1. `djinn.app/task-run-id` on the Workload itself. Kueue propagates the
+///    parent Job's labels onto the Workload it derives, so this is present for
+///    a task-run Job rendered by `job_labels()`.
+/// 2. the `djinn-taskrun-<uuid>` name of the owning Job. Kueue owner-links every
+///    Workload to the object it accounts for, and that link survives label
+///    propagation changing between Kueue releases.
+///
+/// A Workload that answers neither is NOT ours and the caller must leave every
+/// task-run untouched.
+pub fn workload_task_run_id(w: &KueueWorkload) -> Option<String> {
+    if let Some(raw) = w
+        .metadata
+        .labels
+        .as_ref()
+        .and_then(|l| l.get(crate::job::LABEL_TASK_RUN_ID))
+        && uuid::Uuid::parse_str(raw).is_ok()
+    {
+        return Some(raw.clone());
+    }
+    w.metadata
+        .owner_references
+        .as_ref()?
+        .iter()
+        .filter(|o| o.kind == "Job")
+        .find_map(|o| crate::job::task_run_id_from_job_name(&o.name))
+}
+
+/// One observation handed to the reconciler.
+#[derive(Clone, Debug, PartialEq)]
+pub enum WorkloadObservation {
+    /// A fresh list/watch session has begun; everything that follows until the
+    /// next `SessionRestarted` is a replay of current cluster state.
+    ///
+    /// The reconciler needs this edge to distinguish "Kueue changed something"
+    /// from "we reconnected and are being told the same thing again".
+    SessionRestarted,
+    /// The Workload exists with this state.
+    Applied(KueueWorkload),
+    /// The Workload is gone. Kueue garbage-collects a Workload with its owning
+    /// Job, so this is a lifecycle end, not an eviction.
+    Deleted(KueueWorkload),
+}
+
+/// The watch seam. Production watches a real API server; tests drive a scripted
+/// stream through the same reconciler.
+#[async_trait]
+pub trait WorkloadWatch: Send + Sync + 'static {
+    /// Run ONE watch session, pumping observations into `tx` until the session
+    /// ends.
+    ///
+    /// `Ok(())` means the stream ended cleanly, `Err` that it broke. The caller
+    /// re-opens either way — the distinction exists so a broken session can be
+    /// logged and backed off differently from an orderly close, not so one of
+    /// them can be treated as terminal.
+    async fn run_session(
+        &self,
+        tx: tokio::sync::mpsc::Sender<WorkloadObservation>,
+    ) -> Result<(), String>;
+}
+
+/// The production watch: `kube`'s reflector-grade `watcher` over namespaced
+/// Kueue Workloads, filtered to djinn's own build objects.
+pub struct KubeWorkloadWatch {
+    client: crate::KubeClient,
+    namespace: String,
+}
+
+impl KubeWorkloadWatch {
+    pub fn new(client: crate::KubeClient, namespace: impl Into<String>) -> Self {
+        Self {
+            client,
+            namespace: namespace.into(),
+        }
+    }
+}
+
+#[async_trait]
+impl WorkloadWatch for KubeWorkloadWatch {
+    async fn run_session(
+        &self,
+        tx: tokio::sync::mpsc::Sender<WorkloadObservation>,
+    ) -> Result<(), String> {
+        use futures::StreamExt;
+
+        let api: kube::Api<KueueWorkload> =
+            kube::Api::namespaced(self.client.clone(), &self.namespace);
+        // Kueue derives one Workload per captured Job and copies the Job's
+        // labels onto it, so the same marker that selects djinn's build objects
+        // selects their Workloads. Without it this watch would also stream every
+        // other tenant's Workloads in the namespace.
+        let config = watcher::Config::default()
+            .labels(&format!("{}=true", crate::config::LABEL_KUEUE_BUILD_OBJECT));
+        let mut stream = watcher::watcher(api, config).boxed();
+
+        while let Some(event) = stream.next().await {
+            let observation = match event {
+                Ok(watcher::Event::Init) => WorkloadObservation::SessionRestarted,
+                Ok(watcher::Event::Apply(w) | watcher::Event::InitApply(w)) => {
+                    WorkloadObservation::Applied(w)
+                }
+                Ok(watcher::Event::Delete(w)) => WorkloadObservation::Deleted(w),
+                Ok(watcher::Event::InitDone) => continue,
+                Err(e) => return Err(e.to_string()),
+            };
+            if tx.send(observation).await.is_err() {
+                // The reconciler is gone (leadership released). Ending the
+                // session here is what lets this task be dropped instead of
+                // holding a live watch against the API server forever.
+                return Ok(());
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod kueue_workload_tests {
+    use super::*;
+
+    fn condition(kind: &str, status: &str, reason: Option<&str>) -> KueueWorkloadCondition {
+        KueueWorkloadCondition {
+            condition_type: kind.to_owned(),
+            status: status.to_owned(),
+            reason: reason.map(ToOwned::to_owned),
+            message: None,
+        }
+    }
+
+    fn workload(conditions: Vec<KueueWorkloadCondition>) -> KueueWorkload {
+        KueueWorkload {
+            metadata: ObjectMeta::default(),
+            status: KueueWorkloadStatus { conditions },
+        }
+    }
+
+    #[test]
+    fn a_workload_with_no_conditions_is_pending() {
+        assert_eq!(
+            classify_workload_admission(&workload(vec![])),
+            WorkloadAdmission::Pending { reason: None }
+        );
+    }
+
+    #[test]
+    fn an_admitted_condition_reads_as_admitted() {
+        assert_eq!(
+            classify_workload_admission(&workload(vec![condition(
+                CONDITION_ADMITTED,
+                "True",
+                None
+            )])),
+            WorkloadAdmission::Admitted
+        );
+    }
+
+    /// `Admitted=False` is not admission. A classifier that looked only at the
+    /// condition's PRESENCE would report every queued Workload as admitted.
+    #[test]
+    fn an_admitted_condition_that_is_false_is_still_pending() {
+        assert_eq!(
+            classify_workload_admission(&workload(vec![condition(
+                CONDITION_ADMITTED,
+                "False",
+                Some("NoReservation")
+            )])),
+            WorkloadAdmission::Pending {
+                reason: Some("NoReservation".to_owned())
+            }
+        );
+    }
+
+    /// The precedence that actually matters: Kueue leaves `Admitted=True` in
+    /// place while it evicts, so an evicted Workload is observable carrying
+    /// both. Reading `Admitted` first would report a preempted build as running.
+    #[test]
+    fn eviction_outranks_a_stale_admitted_condition() {
+        assert_eq!(
+            classify_workload_admission(&workload(vec![
+                condition(CONDITION_ADMITTED, "True", None),
+                condition(CONDITION_EVICTED, "True", Some("Preempted")),
+            ])),
+            WorkloadAdmission::Pending {
+                reason: Some("Preempted".to_owned())
+            }
+        );
+    }
+
+    /// A finished build must never be mistaken for one waiting on quota — that
+    /// would leave the projection reporting queue pressure that does not exist.
+    #[test]
+    fn a_finished_workload_is_terminal_not_pending() {
+        let admission = classify_workload_admission(&workload(vec![
+            condition(CONDITION_ADMITTED, "True", None),
+            condition(CONDITION_EVICTED, "True", Some("Preempted")),
+            condition(CONDITION_FINISHED, "True", Some("JobFinished")),
+        ]));
+        assert_eq!(
+            admission,
+            WorkloadAdmission::Finished {
+                reason: Some("JobFinished".to_owned())
+            }
+        );
+        assert!(!admission.is_pending());
+    }
+
+    #[test]
+    fn the_task_run_label_identifies_the_run() {
+        let id = uuid::Uuid::now_v7().to_string();
+        let mut w = workload(vec![]);
+        w.metadata.labels = Some(BTreeMap::from([(
+            crate::job::LABEL_TASK_RUN_ID.to_owned(),
+            id.clone(),
+        )]));
+        assert_eq!(workload_task_run_id(&w), Some(id));
+    }
+
+    #[test]
+    fn the_owning_job_name_identifies_the_run_when_the_label_is_absent() {
+        let id = uuid::Uuid::now_v7().to_string();
+        let mut w = workload(vec![]);
+        w.metadata.owner_references = Some(vec![
+            k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference {
+                kind: "Job".to_owned(),
+                name: format!("djinn-taskrun-{id}"),
+                ..Default::default()
+            },
+        ]);
+        assert_eq!(workload_task_run_id(&w), Some(id));
+    }
+
+    /// A warm Job's Workload carries the same build-object label and reaches
+    /// the same watch. It is not a task-run and must resolve to nothing.
+    #[test]
+    fn a_workload_that_is_not_a_task_run_resolves_to_nothing() {
+        let mut w = workload(vec![]);
+        w.metadata.labels = Some(BTreeMap::from([(
+            crate::config::LABEL_KUEUE_BUILD_OBJECT.to_owned(),
+            "true".to_owned(),
+        )]));
+        w.metadata.owner_references = Some(vec![
+            k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference {
+                kind: "Job".to_owned(),
+                name: "djinn-warm-someproject-7".to_owned(),
+                ..Default::default()
+            },
+        ]);
+        assert_eq!(workload_task_run_id(&w), None);
+    }
+
+    /// A malformed label must not be believed just because it is present: the
+    /// fallback to the owning Job name is what makes the resolution honest.
+    #[test]
+    fn a_malformed_label_falls_through_to_the_owner_reference() {
+        let id = uuid::Uuid::now_v7().to_string();
+        let mut w = workload(vec![]);
+        w.metadata.labels = Some(BTreeMap::from([(
+            crate::job::LABEL_TASK_RUN_ID.to_owned(),
+            "not-a-uuid".to_owned(),
+        )]));
+        w.metadata.owner_references = Some(vec![
+            k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference {
+                kind: "Job".to_owned(),
+                name: format!("djinn-taskrun-{id}"),
+                ..Default::default()
+            },
+        ]);
+        assert_eq!(workload_task_run_id(&w), Some(id));
+    }
+
+    /// The resource coordinates are the whole contract with the API server. A
+    /// typo here is a permanent `404` that reads as "Kueue is not installed".
+    #[test]
+    fn the_resource_coordinates_address_kueue_workloads() {
+        use kube::Resource;
+        assert_eq!(KueueWorkload::group(&()), "kueue.x-k8s.io");
+        assert_eq!(KueueWorkload::version(&()), "v1beta1");
+        assert_eq!(KueueWorkload::kind(&()), "Workload");
+        assert_eq!(KueueWorkload::plural(&()), "workloads");
+        assert_eq!(KueueWorkload::api_version(&()), "kueue.x-k8s.io/v1beta1");
+    }
+
+    /// Kueue sends far more than this type models. Unknown fields must be
+    /// dropped rather than failing the whole watch session.
+    #[test]
+    fn unmodelled_fields_do_not_break_deserialisation() {
+        let raw = serde_json::json!({
+            "apiVersion": "kueue.x-k8s.io/v1beta1",
+            "kind": "Workload",
+            "metadata": {"name": "job-djinn-taskrun-x-abcde", "namespace": "djinn"},
+            "spec": {"queueName": "djinn-task-run", "podSets": [{"count": 1, "name": "main"}]},
+            "status": {
+                "admission": {"clusterQueue": "djinn-build"},
+                "conditions": [
+                    {"type": "Admitted", "status": "True", "reason": "Admitted",
+                     "message": "The workload is admitted", "lastTransitionTime": "2026-07-30T00:00:00Z"}
+                ]
+            }
+        });
+        let parsed: KueueWorkload =
+            serde_json::from_value(raw).expect("must tolerate extra fields");
+        assert_eq!(
+            classify_workload_admission(&parsed),
+            WorkloadAdmission::Admitted
+        );
+    }
+}
+
 #[cfg(test)]
 mod call_timeout_tests {
     use super::*;

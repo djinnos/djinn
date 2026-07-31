@@ -408,6 +408,67 @@ async fn repeated_unavailability_still_fails() {
     assert!(launcher.lifts() == 0);
 }
 
+/// `0ppk-1a` acceptance criterion 4, at the consumer.
+///
+/// The coordinator refusing to authorize a Pod resize returns
+/// [`LeaseResult::DegradedUnleased`] — deliberately a RESULT and not an `Err`,
+/// because every input to that answer is durable and settled. This proves the
+/// runner honours that: it degrades once, keeps the child alive at the unleased
+/// quota, and never asks again.
+///
+/// The lease is scripted to stay LIVE (`Launching`, same fence) on every later
+/// status poll, which is what production would report — the refusal is about
+/// the resize, not about the lease. That is precisely the shape that makes the
+/// re-ask possible, so it is the shape this test pins.
+///
+/// NON-VACUITY (run, do not assume): delete the `DegradedUnleased` arm from
+/// `lease_failure_classify` so the result falls through to `_ => {}`, and
+/// `grant_calls` climbs past 1 — the runner re-enters the grant arm on every
+/// poll and re-collects the same settled refusal for the life of the child.
+#[tokio::test]
+async fn a_refused_resize_authorization_degrades_once_and_never_re_asks() {
+    let services = Arc::new(ScriptedServices::new(
+        vec![granted(1)],
+        vec![LeaseResult::DegradedUnleased {
+            reason: djinn_supervisor::services::DegradedUnleasedReason::NotTheInvocationOwner,
+        }],
+        // The lease itself is untouched by the refusal and stays live.
+        vec![status(LeaseState::Launching, Some(1)); 8],
+    ));
+    let launcher = Arc::new(DegradeLauncher::completing());
+    let runner = LeaseInvocationRunner::new(
+        services.clone(),
+        services.clone(),
+        launcher.clone(),
+        clock(),
+    );
+    let output = runner
+        .output(command(), config(), CancellationToken::new())
+        .await
+        .expect("a refused resize authorization must not fail the command");
+
+    // Slow, not dead, and not lifted.
+    assert_eq!(output.process.termination, ProcessTermination::Exited);
+    assert_eq!(output.process.output.status.code(), Some(0));
+    assert_eq!(
+        launcher.killed_while_running(),
+        0,
+        "a refused resize authorization must never kill a running child"
+    );
+    assert_eq!(
+        launcher.lifts(),
+        0,
+        "the leaf must stay at the broker's unleased quota"
+    );
+    assert_eq!(
+        services.grant_calls.load(Ordering::SeqCst),
+        1,
+        "SETTLED means asked exactly once: a durable refusal cannot become an \
+         authorization by re-asking, and a re-ask loop would spend the whole \
+         invocation re-collecting it"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Production composition seam: the real `DirectServices` lease authority over a
 // real durable repository, driven by the real runner — no hand-built lease
@@ -436,38 +497,21 @@ fn clock_pinned_at(now_ms: i64) -> Arc<TestClock> {
     ))
 }
 
-/// Drive the durable admission epoch to a committed forward overlap with v1
-/// enforcing — the only state in which a bound invocation may lift `cpu.max`.
-/// Every write goes through the real repository, so the arming sequence is the
-/// operator sequence.
+/// Arm the durable invocation-lease authority to `enforce` — the only state in
+/// which a bound invocation may lift `cpu.max`. Every write goes through the
+/// real repository, so the arming sequence is the operator sequence.
 pub(super) async fn arm_invocation_lift(db: &djinn_db::Database) {
-    use djinn_db::{AdmissionHandoffAuthority, AdmissionHandoffPhase, V0Mode, V1Mode};
+    use djinn_db::InvocationLeaseMode;
 
-    let handoff = djinn_db::AdmissionHandoffRepository::new(db.clone());
-    let row = handoff
+    let authority = djinn_db::InvocationLeaseAuthorityRepository::new(db.clone());
+    let row = authority
         .seed_baseline()
         .await
-        .expect("seed the baseline epoch");
-    let row = handoff
-        .set_modes_and_cap(row.epoch, V0Mode::Enforce, V1Mode::Enforce, None)
+        .expect("seed the disarmed baseline");
+    authority
+        .set_mode_and_cap(row.epoch, InvocationLeaseMode::Enforce, None)
         .await
-        .expect("arm v1 enforcement");
-    handoff
-        .acknowledge(AdmissionHandoffAuthority::Emergency, row.epoch)
-        .await
-        .expect("emergency acknowledges the armed epoch");
-    let row = handoff
-        .advance(row.epoch, AdmissionHandoffPhase::ForwardOverlap, &[])
-        .await
-        .expect("enter the forward overlap");
-    handoff
-        .acknowledge(AdmissionHandoffAuthority::Emergency, row.epoch)
-        .await
-        .expect("emergency acknowledges the overlap");
-    handoff
-        .acknowledge(AdmissionHandoffAuthority::Invocation, row.epoch)
-        .await
-        .expect("invocation acknowledges the overlap");
+        .expect("arm the invocation lease authority");
 }
 
 /// Compose the production lease authority over a fresh database with an armed
@@ -488,9 +532,9 @@ async fn real_lease_services(
             Arc::new(djinn_coordinator::build_lease::NoopLeaseTransactionPause),
             Arc::new(djinn_coordinator::build_lease::MetricsLeaseTelemetry),
         )
-        .with_handoff_epoch(Arc::new(djinn_db::AdmissionHandoffRepository::new(
-            db.clone(),
-        ))),
+        .with_invocation_lease_authority(Arc::new(
+            djinn_db::InvocationLeaseAuthorityRepository::new(db.clone()),
+        )),
     );
     Arc::new(crate::direct_services::DirectServices::with_build_lease(
         crate::test_helpers::agent_context_from_db(db.clone(), CancellationToken::new()),

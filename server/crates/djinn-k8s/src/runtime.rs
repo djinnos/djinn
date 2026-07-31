@@ -60,6 +60,7 @@ use uuid::Uuid;
 
 use crate::config::KubernetesConfig;
 use crate::job::{build_task_run_job_with_read_sources, taskrun_job_ref_from_job};
+use crate::runtime_eviction::{PodAbsenceVerdict, classify_absent_pod};
 use crate::secret::{TaskRunSecretBuilder, job_owner_reference, task_run_resource_name};
 use crate::sidecar::ImageServiceResolution;
 
@@ -215,6 +216,44 @@ fn record_confirmed_job_create<T, E>(result: Result<T, E>) -> Result<T, E> {
     result
 }
 
+/// Create the task-run Job, adopting the existing object when the apiserver
+/// says it is already there.
+///
+/// The task-run Job name is deterministic in the task-run id
+/// (`djinn-taskrun-{uuid}`, `job.rs`), so `AlreadyExists` is never a name
+/// collision between two different runs — it is *this* run's object, created by
+/// a POST whose response we lost, by a concurrent dispatcher, or by a retry
+/// after an ambiguous failure. Returning the error instead would leave the
+/// caller to create a second Job that Kubernetes will not let it create, and
+/// under Kueue would strand an admitted Workload nobody is waiting on.
+///
+/// The adopted object is fetched with GET rather than reconstructed locally,
+/// because the winner's `metadata.uid` is what the Secret's OwnerReference must
+/// point at — an ownerRef carrying a UID that never existed is silently dropped
+/// by the apiserver and the Secret outlives its Job.
+///
+/// [`record_confirmed_job_create`] wraps only the create arm: an adopt is a
+/// retry of a Job that was already counted, and counting it again would inflate
+/// `job_started` by exactly the retries this function exists to absorb.
+async fn create_or_adopt_task_run_job(
+    jobs: &Api<Job>,
+    job: &Job,
+    resource_name: &str,
+) -> Result<Job, kube::Error> {
+    match record_confirmed_job_create(jobs.create(&PostParams::default(), job).await) {
+        Ok(created) => Ok(created),
+        Err(error) if crate::graph_warmer::api_error_is_already_exists(&error) => {
+            info!(
+                job = %resource_name,
+                "kubernetes_runtime: task-run Job already exists — adopting it instead of \
+                 creating a second one"
+            );
+            jobs.get(resource_name).await
+        }
+        Err(error) => Err(error),
+    }
+}
+
 fn service_resolution_activity_payload(
     task_run_id: &str,
     project_id: &str,
@@ -239,6 +278,11 @@ fn service_resolution_activity_payload(
 /// idle stall reaper it replaces, and well inside the worker's termination
 /// grace + report-flush window for a clean exit.
 const INFRA_DEATH_POLL_INTERVAL: Duration = Duration::from_secs(15);
+
+/// Termination grace period on the Job reaped by
+/// [`KubernetesRuntime::reap_lost_fenced_pod`]. Matches `cancel` / `teardown`
+/// so every foreground Job delete this runtime issues offers the same window.
+const INFRA_DEATH_REAP_GRACE_SECONDS: u32 = 30;
 
 /// Kubernetes-backed `SessionRuntime`.
 ///
@@ -476,8 +520,18 @@ impl SessionRuntime for KubernetesRuntime {
         let project_image_tag = self.dispatch_image_override.clone();
         #[cfg(not(test))]
         let project_image_tag: Option<String> = None;
-        let project_image_tag = match project_image_tag {
-            Some(tag) => tag,
+        // The launcher authority protocol travels WITH the resolved image: it
+        // is what the artifact declared at build time (migration 166), and the
+        // rendered Job must carry it into the pod or #2823's reachable
+        // `resize-v2` branch has nothing feeding it. Resolved here, applied to
+        // the Job below, BEFORE any Job is created.
+        let (project_image_tag, authority_protocol) = match project_image_tag {
+            // Test-only image override: no catalog row exists, so the render
+            // uses the pre-protocol behavior the override has always implied.
+            Some(tag) => (
+                tag,
+                djinn_cgroup_launcher::LauncherAuthorityProtocol::LeafV1,
+            ),
             None => {
                 let dispatch_image = repo
                     .resolve_dispatch_image(&spec.project_id)
@@ -488,10 +542,23 @@ impl SessionRuntime for KubernetesRuntime {
                             spec.project_id
                         ))
                     })?;
-                match dispatch_image.as_ref().and_then(|d| d.pull_ref()) {
-                    Some(pull_ref) => pull_ref,
-                    None => return Err(RuntimeError::DevcontainerMissing(spec.project_id.clone())),
-                }
+                let Some(dispatch_image) = dispatch_image else {
+                    return Err(RuntimeError::DevcontainerMissing(spec.project_id.clone()));
+                };
+                let Some(pull_ref) = dispatch_image.pull_ref() else {
+                    return Err(RuntimeError::DevcontainerMissing(spec.project_id.clone()));
+                };
+                let protocol = crate::launcher::render_authority_protocol(
+                    dispatch_image.authority_protocol,
+                    dispatch_image.digest.as_deref(),
+                )
+                .map_err(|error| {
+                    RuntimeError::Prepare(format!(
+                        "launcher authority protocol for project {}: {error}",
+                        spec.project_id
+                    ))
+                })?;
+                (pull_ref, protocol)
             }
         };
 
@@ -589,10 +656,22 @@ impl SessionRuntime for KubernetesRuntime {
 
         let secrets: Api<Secret> = Api::namespaced(self.client.clone(), ns);
         if let Err(e) = secrets.create(&PostParams::default(), &secret).await {
-            self.drop_pending(&task_run_id_str).await;
-            return Err(RuntimeError::Prepare(format!(
-                "create secret {resource_name}: {e}"
-            )));
+            // The Secret name is deterministic in the task-run id, exactly like
+            // the Job's. Treating `AlreadyExists` as fatal here would make the
+            // Job's own create-then-observe adoption unreachable: every retry
+            // of an ambiguous dispatch would die one step earlier, on a Secret
+            // this very task-run wrote, and the Job it must adopt would never
+            // be POSTed at all.
+            if !crate::graph_warmer::api_error_is_already_exists(&e) {
+                self.drop_pending(&task_run_id_str).await;
+                return Err(RuntimeError::Prepare(format!(
+                    "create secret {resource_name}: {e}"
+                )));
+            }
+            info!(
+                secret = %resource_name,
+                "kubernetes_runtime: task-run Secret already exists — adopting it"
+            );
         }
 
         // 1b. Log the `task_run_services_resolved` activity event.
@@ -721,24 +800,41 @@ impl SessionRuntime for KubernetesRuntime {
             read_source_cache_sub_path.as_deref(),
         );
         crate::build_resources::apply_resolved_resources(&mut job, resolved_task_resources);
+        // Carry the image's quota authority into the pod. Fails closed before
+        // the Job is POSTed: an armed render with no launcher container would
+        // otherwise start a launcher that silently defaults to leaf-v1.
+        if let Err(error) = crate::launcher::apply_launcher_authority_protocol(
+            &mut job,
+            self.config.cgroup_launcher_mode,
+            authority_protocol,
+        ) {
+            self.drop_pending(&task_run_id_str).await;
+            let secrets_bg = secrets.clone();
+            let name = resource_name.clone();
+            tokio::spawn(async move {
+                let _ = secrets_bg.delete(&name, &DeleteParams::default()).await;
+            });
+            return Err(RuntimeError::Prepare(format!(
+                "launcher authority protocol render: {error}"
+            )));
+        }
         let jobs: Api<Job> = Api::namespaced(self.client.clone(), ns);
-        let created_job =
-            match record_confirmed_job_create(jobs.create(&PostParams::default(), &job).await) {
-                Ok(j) => j,
-                Err(e) => {
-                    // Best-effort cleanup of the orphan Secret — don't shadow the
-                    // original error if cleanup also fails.
-                    let secrets_bg = secrets.clone();
-                    let name = resource_name.clone();
-                    tokio::spawn(async move {
-                        let _ = secrets_bg.delete(&name, &DeleteParams::default()).await;
-                    });
-                    self.drop_pending(&task_run_id_str).await;
-                    return Err(RuntimeError::Prepare(format!(
-                        "create job {resource_name}: {e}"
-                    )));
-                }
-            };
+        let created_job = match create_or_adopt_task_run_job(&jobs, &job, &resource_name).await {
+            Ok(j) => j,
+            Err(e) => {
+                // Best-effort cleanup of the orphan Secret — don't shadow the
+                // original error if cleanup also fails.
+                let secrets_bg = secrets.clone();
+                let name = resource_name.clone();
+                tokio::spawn(async move {
+                    let _ = secrets_bg.delete(&name, &DeleteParams::default()).await;
+                });
+                self.drop_pending(&task_run_id_str).await;
+                return Err(RuntimeError::Prepare(format!(
+                    "create job {resource_name}: {e}"
+                )));
+            }
+        };
 
         // 3. Attach an OwnerReference so the Secret GCs with the Job.
         let job_uid = match created_job.metadata.uid.clone() {
@@ -788,6 +884,22 @@ impl SessionRuntime for KubernetesRuntime {
             container_id: None,
             pod_ref: Some(resource_name),
             started_at: SystemClock::new().now(),
+            // The JOB uid, confirmed by the create above. `prepare` does not
+            // wait for a Pod and therefore has no Pod UID to offer; the resize
+            // bootstrap obtains that separately from a fresh Pod GET.
+            job_uid: Some(job_uid),
+            // The protocol the render actually APPLIED to this Job — not the
+            // one it resolved. Under a launcher mode that renders no sidecar,
+            // `apply_launcher_authority_protocol` above is a documented no-op,
+            // so there is no launcher container to govern and no protocol
+            // handshake to agree with. Reporting the resolved value there would
+            // make the dispatch seam demand a birth confirmation for a Pod that
+            // has no launcher at all, and refuse every such dispatch forever.
+            launcher_authority_protocol: self
+                .config
+                .cgroup_launcher_mode
+                .renders_sidecar()
+                .then_some(authority_protocol),
         })
     }
 
@@ -1061,10 +1173,33 @@ impl SessionRuntime for KubernetesRuntime {
     /// - The Pod was OBSERVED running and is now gone while the Job is also
     ///   gone (TTL-GC'd after finishing) → the run finished out-of-band and we
     ///   never saw a report; treat as a terminal disappearance.
+    /// - The *fenced* Pod — the immutable UID this watch bound on its first
+    ///   observation — is gone while the Job is still NONTERMINAL **and nothing
+    ///   in observable cluster state explains the absence**. That is a
+    ///   force-delete / node loss, and it is the one arm that also has to *act*:
+    ///   see [`Self::reap_lost_fenced_pod`].
     ///
     /// A `Succeeded` Job is NOT treated as death — a clean run delivers its
     /// terminal report over the stream, which the runner prefers; resolving
     /// here on success would race that and risk a spurious "interrupted".
+    ///
+    /// Neither is a Kueue EVICTION, which is bit-for-bit the same observation —
+    /// Kueue re-suspends the Job and its Pod is deleted — and is RECOVERABLE:
+    /// releasing the queue re-admits the Workload and a new Pod runs. Reaping
+    /// there would convert a run that was going to finish into one that never
+    /// can. [`crate::runtime_eviction::classify_absent_pod`] holds the two
+    /// fields that tell the two apart, and why they are those two.
+    ///
+    /// # The Pod fence
+    ///
+    /// Every observation is bound to one immutable `metadata.uid`, captured the
+    /// first time any Pod appears under this run's label selector. The label
+    /// selector alone is not an identity: after a Pod is force-deleted the Job
+    /// controller creates a *replacement* Pod carrying the very same labels, and
+    /// reading `items.first()` would silently re-target the watch at an object
+    /// this run never launched, never handshook with, and holds no lease on. The
+    /// fence is bound once and never re-bound, so a replacement UID is observed
+    /// but never adopted.
     async fn watch_infra_death(&self, handle: &RunHandle) -> String {
         let Some(job_name) = handle.pod_ref.as_deref() else {
             // No Job reference (shouldn't happen on the K8s path) — never
@@ -1081,6 +1216,13 @@ impl SessionRuntime for KubernetesRuntime {
         // counts as a terminal out-of-band death — a pod that simply hasn't
         // been created yet (scheduling lag) must never trip the watch.
         let mut pod_seen = false;
+        // The immutable Pod identity this run is fenced to. Bound once, on the
+        // first observation that carries a UID; never re-bound.
+        let mut bound_pod_uid: Option<String> = None;
+        // Whether the previous poll already reported holding on an explained
+        // Pod absence. Presentation only: a run parked in the queue for an hour
+        // must not write the same INFO line 240 times.
+        let mut held_absence = false;
 
         loop {
             // 1. Richest signal first: the Pod's container terminated state,
@@ -1090,38 +1232,99 @@ impl SessionRuntime for KubernetesRuntime {
                 .await
             {
                 Ok(list) => {
-                    if let Some(pod) = list.items.first() {
-                        pod_seen = true;
-                        if let Some(reason) = pod_container_death_reason(pod) {
-                            debug!(
-                                task_run_id = %handle.task_run_id,
-                                job = %job_name,
-                                %reason,
-                                "kubernetes_runtime: infra-death watch — worker container terminated"
-                            );
-                            return reason;
-                        }
-                    } else if pod_seen {
-                        // The Pod was here and is now gone. If the Job is also
-                        // gone (TTL-GC after finishing), the run ended
-                        // out-of-band without a report — terminal.
-                        match jobs.get_opt(job_name).await {
-                            Ok(None) => {
+                    if bound_pod_uid.is_none()
+                        && let Some(uid) = bind_worker_pod_uid(&list.items)
+                    {
+                        debug!(
+                            task_run_id = %handle.task_run_id,
+                            job = %job_name,
+                            pod_uid = %uid,
+                            "kubernetes_runtime: infra-death watch — bound to worker Pod UID"
+                        );
+                        bound_pod_uid = Some(uid);
+                    }
+
+                    match fenced_worker_pod(&list.items, bound_pod_uid.as_deref()) {
+                        Some(pod) => {
+                            pod_seen = true;
+                            if let Some(reason) = pod_container_death_reason(pod) {
                                 debug!(
                                     task_run_id = %handle.task_run_id,
                                     job = %job_name,
-                                    "kubernetes_runtime: infra-death watch — pod and job both gone"
+                                    %reason,
+                                    "kubernetes_runtime: infra-death watch — worker container terminated"
                                 );
-                                return "worker Pod and Job disappeared (TTL-GC after \
-                                        out-of-band termination)"
-                                    .to_string();
-                            }
-                            Ok(Some(_)) | Err(_) => {
-                                // Job still present (or a transient apiserver
-                                // error) — fall through to the Job-status
-                                // check, which decides terminal-ness.
+                                return reason;
                             }
                         }
+                        // The fenced Pod was here and is now gone. Anything else
+                        // still matching the selector is a replacement the Job
+                        // controller minted, which this watch refuses to adopt.
+                        None if pod_seen => {
+                            match jobs.get_opt(job_name).await {
+                                Ok(None) => {
+                                    debug!(
+                                        task_run_id = %handle.task_run_id,
+                                        job = %job_name,
+                                        "kubernetes_runtime: infra-death watch — pod and job both gone"
+                                    );
+                                    return "worker Pod and Job disappeared (TTL-GC after \
+                                            out-of-band termination)"
+                                        .to_string();
+                                }
+                                Ok(Some(job)) => {
+                                    // A Failed Job is the pre-existing arm and
+                                    // owns its own richer reason.
+                                    if let Some(reason) = job_failed_reason(&job) {
+                                        debug!(
+                                            task_run_id = %handle.task_run_id,
+                                            job = %job_name,
+                                            %reason,
+                                            "kubernetes_runtime: infra-death watch — job failed"
+                                        );
+                                        return reason;
+                                    }
+                                    // A cleanly Complete Job whose Pod was
+                                    // TTL-GC'd is NOT a death: the terminal
+                                    // report rides the stream. Keep watching.
+                                    //
+                                    // Nor is a Kueue EVICTION, which produces
+                                    // this same state and is recoverable — see
+                                    // `crate::runtime_eviction`. Only an
+                                    // unexplained absence is A1's subject.
+                                    if !job_completed_cleanly(&job) {
+                                        match classify_absent_pod(&self.client, ns, &job, job_name)
+                                            .await
+                                        {
+                                            PodAbsenceVerdict::Abandoned => {
+                                                return self
+                                                    .reap_lost_fenced_pod(
+                                                        handle,
+                                                        job_name,
+                                                        bound_pod_uid.as_deref(),
+                                                        &unadopted_pod_uids(
+                                                            &list.items,
+                                                            bound_pod_uid.as_deref(),
+                                                        ),
+                                                    )
+                                                    .await;
+                                            }
+                                            verdict => self.log_held_pod_absence(
+                                                handle,
+                                                job_name,
+                                                &verdict,
+                                                &mut held_absence,
+                                            ),
+                                        }
+                                    }
+                                }
+                                Err(_) => {
+                                    // Transient apiserver error — fall through
+                                    // to the Job-status check below.
+                                }
+                            }
+                        }
+                        None => {}
                     }
                 }
                 Err(e) => {
@@ -1194,6 +1397,114 @@ impl SessionRuntime for KubernetesRuntime {
 }
 
 impl KubernetesRuntime {
+    /// Contain a task-run whose fenced Pod was destroyed out-of-band while its
+    /// Job was still nonterminal, and return the death reason the dispatch
+    /// runner terminalises the run with.
+    ///
+    /// The Job is foreground-deleted here rather than left to `teardown`. Both
+    /// halves matter:
+    ///
+    /// * *Foreground*, so the apiserver blocks the Job's own removal on its
+    ///   Pods being fully cleaned up. A background delete returns immediately
+    ///   and hands the surviving replacement Pod — the one this watch just
+    ///   refused to adopt — to the orphan collector, which is exactly the
+    ///   window where it can outlive the run that paid for it.
+    /// * *Here*, because the Job is what holds quota. A retry always mints a
+    ///   fresh `task_run_id`, so the abandoned Job's deterministic name is never
+    ///   reused and nothing ever adopts it; under Kueue its admitted Workload
+    ///   would sit against the ClusterQueue until a human noticed.
+    ///
+    /// A failed delete does not suppress the reason: the run is dead either
+    /// way, and refusing to resolve would pin the dispatch slot on the very
+    /// stall this watch exists to break. The next reconcile can retry the Job.
+    /// Report a fenced-Pod absence the watch is deliberately NOT acting on.
+    ///
+    /// The first observation is INFO — a run whose Pod vanished and was not
+    /// reaped is exactly the thing an operator wants in the log, once. Every
+    /// later poll is DEBUG, because a Workload can sit in the queue for as long
+    /// as the queue is full and 4 lines a minute of it is not information.
+    fn log_held_pod_absence(
+        &self,
+        handle: &RunHandle,
+        job_name: &str,
+        verdict: &PodAbsenceVerdict,
+        already_reported: &mut bool,
+    ) {
+        let (kind, evidence) = match verdict {
+            PodAbsenceVerdict::Recoverable(evidence) => ("recoverable", evidence.as_str()),
+            PodAbsenceVerdict::Inconclusive(error) => ("inconclusive", error.as_str()),
+            // Never reached: the caller reaps on `Abandoned` instead of holding.
+            PodAbsenceVerdict::Abandoned => ("abandoned", ""),
+        };
+        if std::mem::replace(already_reported, true) {
+            debug!(
+                task_run_id = %handle.task_run_id,
+                job = %job_name,
+                verdict = %kind,
+                %evidence,
+                "kubernetes_runtime: infra-death watch — still holding the fenced Pod's absence"
+            );
+            return;
+        }
+        info!(
+            task_run_id = %handle.task_run_id,
+            job = %job_name,
+            verdict = %kind,
+            %evidence,
+            "kubernetes_runtime: infra-death watch — the fenced worker Pod is gone but its \
+             absence is explained; NOT terminalising and NOT reaping the Job, so the run can \
+             still be re-admitted"
+        );
+    }
+
+    async fn reap_lost_fenced_pod(
+        &self,
+        handle: &RunHandle,
+        job_name: &str,
+        bound_pod_uid: Option<&str>,
+        unadopted_pod_uids: &[String],
+    ) -> String {
+        let ns = &self.config.namespace;
+        let fenced = bound_pod_uid.unwrap_or("<unknown>");
+        match delete_job_foreground(&self.client, ns, job_name, INFRA_DEATH_REAP_GRACE_SECONDS)
+            .await
+        {
+            Ok(()) => {
+                info!(
+                    task_run_id = %handle.task_run_id,
+                    job = %job_name,
+                    namespace = %ns,
+                    pod_uid = %fenced,
+                    unadopted = ?unadopted_pod_uids,
+                    "kubernetes_runtime: infra-death watch — fenced worker Pod vanished under a \
+                     live Job; foreground-deleted the Job so it stops holding quota"
+                );
+            }
+            Err(error) => {
+                warn!(
+                    task_run_id = %handle.task_run_id,
+                    job = %job_name,
+                    namespace = %ns,
+                    pod_uid = %fenced,
+                    %error,
+                    "kubernetes_runtime: infra-death watch — reaping the orphaned task-run Job \
+                     failed; still terminalising the run"
+                );
+            }
+        }
+        let mut reason = format!(
+            "worker Pod {fenced} was deleted while its Job {job_name} was still active \
+             (force delete / node loss); the Job was foreground-deleted"
+        );
+        if !unadopted_pod_uids.is_empty() {
+            reason.push_str(&format!(
+                "; refused to adopt replacement Pod UID(s) {}",
+                unadopted_pod_uids.join(", ")
+            ));
+        }
+        reason
+    }
+
     /// Drop a reserved pending-connection slot — used on `prepare` failure
     /// paths so we don't leak registry entries when Job / Secret creation
     /// errors out after the slot was reserved.  Best-effort; the caller
@@ -1246,6 +1557,74 @@ fn pod_container_death_reason(pod: &Pod) -> Option<String> {
         });
     }
     None
+}
+
+/// The immutable Pod identity a run's infra-death watch fences itself to.
+///
+/// Returns the first non-blank `metadata.uid` in the listed Pods. A Pod without
+/// a UID cannot be fenced on and is skipped rather than treated as the run's
+/// Pod — an unfenced observation is the failure mode this whole module exists to
+/// remove.
+fn bind_worker_pod_uid(pods: &[Pod]) -> Option<String> {
+    pods.iter().find_map(|pod| {
+        pod.metadata
+            .uid
+            .as_deref()
+            .map(str::trim)
+            .filter(|uid| !uid.is_empty())
+            .map(str::to_string)
+    })
+}
+
+/// Select the Pod this run is fenced to, by immutable UID.
+///
+/// THE UID COMPARISON IS THE CONTAINMENT. The label selector matches every Pod
+/// the Job controller ever makes for this run, including the replacement it
+/// mints after the original is force-deleted. Falling back to "the first listed
+/// Pod" would adopt that replacement: the watch would report it healthy, the
+/// run would keep its dispatch slot, and the build lease would still be bound to
+/// a UID that no longer exists anywhere in the cluster.
+///
+/// `bound` is `None` only before any Pod has ever carried a UID, where there is
+/// no fence to enforce yet and positional selection is all that is available.
+fn fenced_worker_pod<'a>(pods: &'a [Pod], bound: Option<&str>) -> Option<&'a Pod> {
+    match bound {
+        Some(uid) => pods
+            .iter()
+            .find(|pod| pod.metadata.uid.as_deref() == Some(uid)),
+        None => pods.first(),
+    }
+}
+
+/// The UIDs of every listed Pod that is NOT the fenced one — the replacements
+/// this watch observed and declined to adopt. Reported in the death reason and
+/// the reap log so a live-cluster investigation can see what was refused.
+fn unadopted_pod_uids(pods: &[Pod], bound: Option<&str>) -> Vec<String> {
+    pods.iter()
+        .filter_map(|pod| pod.metadata.uid.as_deref())
+        .filter(|uid| Some(*uid) != bound)
+        .map(str::to_string)
+        .collect()
+}
+
+/// Whether a `Job` reached its *successful* terminal state.
+///
+/// Distinct from [`job_failed_reason`]: a clean completion is not a death, so a
+/// Pod that disappears under a Complete Job is TTL-GC and must never be reaped
+/// as a containment event. Anything neither complete nor failed is nonterminal —
+/// still holding quota, still owed a Pod.
+fn job_completed_cleanly(job: &Job) -> bool {
+    let Some(status) = job.status.as_ref() else {
+        return false;
+    };
+    if status.succeeded.unwrap_or(0) > 0 {
+        return true;
+    }
+    status.conditions.as_ref().is_some_and(|conditions| {
+        conditions
+            .iter()
+            .any(|condition| condition.type_ == "Complete" && condition.status == "True")
+    })
 }
 
 /// Inspect a `Job` for a terminal `Failed` condition and return its reason.
@@ -1762,6 +2141,272 @@ pub async fn list_taskrun_jobs(
         .collect::<Vec<_>>();
     refs.sort_by(|a, b| a.job_name.cmp(&b.job_name));
     Ok(refs)
+}
+
+// ── Post-admission launcher observation (g8jk-3) ───────────────────────────
+//
+// The resize bootstrap that consumes this lives in
+// `djinn_server::task_run_resize_bootstrap`. The split is deliberate: the
+// mechanics of reading a stored Pod belong to the crate that owns the Kubernetes
+// types, and the policy — what to capture, when to refuse, when to delete —
+// belongs beside the durable permit relation. Nothing below decides anything; it
+// reports what the apiserver has stored.
+
+/// One fresh read of the *stored* launcher sidecar, flattened to plain data.
+///
+/// Every field here comes from the object the apiserver persisted, never from
+/// the render input. That is the whole point of post-admission capture: a
+/// mutating admission webhook may have changed what was rendered, and a value
+/// derived from the render would report the ceiling we asked for rather than the
+/// ceiling the Pod actually has.
+///
+/// Fields that a still-starting Pod legitimately lacks are [`Option`], and the
+/// caller decides whether their absence is "not yet" or "never". This type
+/// deliberately makes no such judgement.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ObservedLauncherSidecar {
+    /// `metadata.namespace` of the stored Pod.
+    pub namespace: String,
+    /// `metadata.name` of the stored Pod.
+    pub pod_name: String,
+    /// `metadata.uid` — the fence every later resize and delete is bound to.
+    pub pod_uid: String,
+    /// The launcher's container name, as it appears in `spec.initContainers`.
+    pub launcher_container_name: String,
+    /// `status.initContainerStatuses[..].containerID`. Absent until the kubelet
+    /// has actually started the sidecar.
+    pub launcher_container_id: Option<String>,
+    /// `status.initContainerStatuses[..].imageID` — the resolved artifact, not
+    /// the possibly-mutable tag in the spec.
+    pub image_digest: Option<String>,
+    /// The launcher's own `DJINN_LAUNCHER_AUTHORITY_PROTOCOL` value, read off
+    /// the stored spec. Absent for images rendered before the protocol existed.
+    pub observed_protocol: Option<String>,
+    /// The persisted `spec.initContainers[cgroup-launcher].resources.limits.cpu`
+    /// in millicores — the admitted ceiling. Absent under `leaf-v1`, which
+    /// renders no launcher CPU limit at all.
+    pub admitted_cpu_millicores: Option<u64>,
+}
+
+/// Why a stored Pod could not be flattened into an [`ObservedLauncherSidecar`].
+///
+/// Both variants are failures, but they are not the same failure: `Incomplete`
+/// describes a Pod that has not finished being admitted and may complete on the
+/// next read, while `Ambiguous` describes a Pod whose launcher cannot be *named*
+/// and never will be by waiting.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum LauncherObservationError {
+    /// A `metadata` field the fence depends on is not populated yet.
+    #[error("stored Pod is missing `metadata.{field}`")]
+    Incomplete {
+        /// The absent metadata field.
+        field: &'static str,
+    },
+    /// The launcher is not uniquely identifiable in the stored Pod.
+    #[error("{0}")]
+    Ambiguous(#[from] crate::pod_resize::PodResizeError),
+    /// The apiserver read itself failed, or resolved to more than one Pod.
+    #[error("{0}")]
+    Api(String),
+}
+
+/// Flatten a stored Pod into the launcher facts the resize bootstrap needs.
+///
+/// The launcher must be uniquely identifiable in **both** `spec.initContainers`
+/// and `status.initContainerStatuses` before any field is read, for the reason
+/// [`crate::pod_resize`] documents at length: the worker container can carry a
+/// coincidentally matching CPU limit, so resolving the launcher by anything less
+/// than a unique name match does not read nothing, it reads the wrong thing.
+///
+/// # Errors
+///
+/// [`LauncherObservationError`] — see its variants.
+pub fn observe_launcher_sidecar(
+    pod: &Pod,
+) -> Result<ObservedLauncherSidecar, LauncherObservationError> {
+    let namespace = non_empty(pod.metadata.namespace.as_deref())
+        .ok_or(LauncherObservationError::Incomplete { field: "namespace" })?;
+    let pod_name = non_empty(pod.metadata.name.as_deref())
+        .ok_or(LauncherObservationError::Incomplete { field: "name" })?;
+    let pod_uid = non_empty(pod.metadata.uid.as_deref())
+        .ok_or(LauncherObservationError::Incomplete { field: "uid" })?;
+
+    let spec = crate::pod_resize::locate_launcher_spec(pod)?;
+    let status = crate::pod_resize::locate_launcher_status(pod)?;
+
+    // The declared limit is read through `declared_launcher_cpu_limit`, which is
+    // documented as a spec read and explicitly NOT confirmation of anything. It
+    // is the right source here precisely because capture is a statement about
+    // what was admitted, not about what the kubelet has actuated.
+    let admitted_cpu_millicores = crate::pod_resize::declared_launcher_cpu_limit(pod)
+        .ok()
+        .map(|limit| limit.millis());
+
+    Ok(ObservedLauncherSidecar {
+        namespace,
+        pod_name,
+        pod_uid,
+        launcher_container_name: spec.name.clone(),
+        launcher_container_id: non_empty(status.container_id.as_deref()),
+        image_digest: non_empty(Some(status.image_id.as_str())),
+        observed_protocol: spec.env.as_ref().and_then(|env| {
+            env.iter()
+                .find(|entry| entry.name == crate::launcher::AUTHORITY_PROTOCOL_ENV)
+                .and_then(|entry| non_empty(entry.value.as_deref()))
+        }),
+        admitted_cpu_millicores,
+    })
+}
+
+fn non_empty(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+/// Fresh, label-scoped read of the single live Pod for `task_run_id`.
+///
+/// Never served from a cache. More than one labelled Pod is an error rather than
+/// a choice: a replacement Pod standing beside the original is exactly the
+/// situation in which picking either one is wrong, and it is the same rule
+/// [`terminate_taskrun_pod_exact`] already applies before it deletes anything.
+///
+/// # Errors
+///
+/// A rendered `kube::Error` on list failure, or an ambiguity message when the
+/// label selector does not resolve to exactly one Pod.
+pub async fn get_taskrun_pod_fresh(
+    client: &kube::Client,
+    namespace: &str,
+    task_run_id: &str,
+) -> Result<Option<Pod>, String> {
+    let pods: Api<Pod> = Api::namespaced(client.clone(), namespace);
+    let selector = format!("{}={task_run_id}", crate::job::LABEL_TASK_RUN_ID);
+    let listed = pods
+        .list(&ListParams::default().labels(&selector))
+        .await
+        .map_err(|e| format!("list task-run Pods: {e}"))?
+        .items;
+    match listed.len() {
+        0 => Ok(None),
+        1 => Ok(listed.into_iter().next()),
+        found => Err(format!(
+            "task-run {task_run_id} resolves to {found} Pods; refusing to pick one"
+        )),
+    }
+}
+
+/// The three apiserver operations the resize bootstrap performs, bound to one
+/// namespace and one field manager.
+///
+/// It exists so `djinn-server` can drive the bootstrap without depending on
+/// `kube` or `k8s-openapi` directly, and so the bootstrap's own tests can
+/// substitute a fake for all three at once.
+pub struct TaskRunPodResizeSurface {
+    client: kube::Client,
+    namespace: String,
+    field_manager: String,
+}
+
+impl TaskRunPodResizeSurface {
+    /// Bind to one namespace.
+    pub fn new(
+        client: kube::Client,
+        namespace: impl Into<String>,
+        field_manager: impl Into<String>,
+    ) -> Self {
+        Self {
+            client,
+            namespace: namespace.into(),
+            field_manager: field_manager.into(),
+        }
+    }
+
+    /// Build from ambient cluster configuration — the in-cluster service
+    /// account, or the caller's kubeconfig — and the environment-configured
+    /// task-run namespace.
+    ///
+    /// This is the composition-root constructor: the server builds its resize
+    /// admission bridge once at boot, long before any particular dispatch has a
+    /// [`KubernetesRuntime`] to borrow a client from. It resolves the client the
+    /// same way [`KubernetesRuntime::new`] does, so the surface and the runtime
+    /// cannot end up pointed at different clusters.
+    ///
+    /// # Errors
+    ///
+    /// The rendered `kube::Error` when no cluster configuration is available.
+    pub async fn from_env() -> Result<Self, String> {
+        let config = KubernetesConfig::from_env();
+        let client = kube::Client::try_default()
+            .await
+            .map_err(|error| format!("task-run resize surface: kube client: {error}"))?;
+        Ok(Self::new(client, config.namespace, "djinn-task-run-resize"))
+    }
+
+    /// Build from a live runtime, reusing its client and configured namespace.
+    #[must_use]
+    pub fn from_runtime(runtime: &KubernetesRuntime) -> Self {
+        Self::new(
+            runtime.client().clone(),
+            runtime.config().namespace.clone(),
+            "djinn-task-run-resize",
+        )
+    }
+
+    /// Fresh GET, then flatten. `Ok(None)` means no Pod exists yet.
+    ///
+    /// # Errors
+    ///
+    /// [`LauncherObservationError`] — the list failed or was ambiguous
+    /// (`Api`), the Pod is not fully admitted (`Incomplete`), or the launcher
+    /// cannot be named (`Ambiguous`).
+    pub async fn observe_launcher(
+        &self,
+        task_run_id: &str,
+    ) -> Result<Option<ObservedLauncherSidecar>, LauncherObservationError> {
+        let Some(pod) = get_taskrun_pod_fresh(&self.client, &self.namespace, task_run_id)
+            .await
+            .map_err(LauncherObservationError::Api)?
+        else {
+            return Ok(None);
+        };
+        observe_launcher_sidecar(&pod).map(Some)
+    }
+
+    /// One limits-only resize of the launcher sidecar, confirmed through
+    /// `status.initContainerStatuses`.
+    ///
+    /// # Errors
+    ///
+    /// [`crate::pod_resize::PodResizeError`]; in particular `NotConfirmed` when
+    /// the PATCH was accepted but the fresh status does not yet agree.
+    pub async fn resize_launcher_cpu(
+        &self,
+        pod_name: &str,
+        target_millicores: u64,
+    ) -> Result<(), crate::pod_resize::PodResizeError> {
+        let api = crate::pod_resize::KubePodResizeApi::new(
+            self.client.clone(),
+            &self.namespace,
+            self.field_manager.clone(),
+        );
+        crate::pod_resize::PodResizeClient::new(api)
+            .resize_launcher_cpu(
+                pod_name,
+                crate::pod_resize::CpuLimit::from_millis(target_millicores),
+            )
+            .await
+    }
+
+    /// UID-fenced destruction of exactly the observed Pod, plus its Job.
+    ///
+    /// # Errors
+    ///
+    /// The rendered failure from [`terminate_taskrun_pod_exact`].
+    pub async fn uid_fenced_delete(&self, task_run_id: &str, pod_uid: &str) -> Result<(), String> {
+        terminate_taskrun_pod_exact(&self.client, &self.namespace, task_run_id, pod_uid).await
+    }
 }
 
 /// Delete a Job with `Foreground` propagation and the given grace period,
@@ -3601,4 +4246,195 @@ mod tests {
         server.cancel();
         let _ = tokio::time::timeout(Duration::from_secs(2), server.join).await;
     }
+
+    // ── observe_launcher_sidecar (g8jk-3) ─────────────────────────────────
+
+    mod launcher_observation {
+        use super::*;
+        use crate::launcher::{AUTHORITY_PROTOCOL_ENV, LAUNCHER_CONTAINER_NAME};
+        use k8s_openapi::api::core::v1::{
+            Container, ContainerStatus, EnvVar, PodSpec, PodStatus, ResourceRequirements,
+        };
+        use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
+        use std::collections::BTreeMap;
+
+        fn cpu_limit(quantity: &str) -> ResourceRequirements {
+            ResourceRequirements {
+                limits: Some(BTreeMap::from([(
+                    "cpu".to_owned(),
+                    Quantity(quantity.to_owned()),
+                )])),
+                ..ResourceRequirements::default()
+            }
+        }
+
+        fn container(name: &str, quantity: Option<&str>, protocol: Option<&str>) -> Container {
+            Container {
+                name: name.to_owned(),
+                resources: quantity.map(cpu_limit),
+                env: protocol.map(|value| {
+                    vec![EnvVar {
+                        name: AUTHORITY_PROTOCOL_ENV.to_owned(),
+                        value: Some(value.to_owned()),
+                        value_from: None,
+                    }]
+                }),
+                ..Container::default()
+            }
+        }
+
+        fn status(
+            name: &str,
+            container_id: Option<&str>,
+            image_id: Option<&str>,
+        ) -> ContainerStatus {
+            ContainerStatus {
+                name: name.to_owned(),
+                container_id: container_id.map(ToOwned::to_owned),
+                image_id: image_id.unwrap_or_default().to_owned(),
+                ..ContainerStatus::default()
+            }
+        }
+
+        fn pod(
+            init: Vec<Container>,
+            regular: Vec<Container>,
+            statuses: Vec<ContainerStatus>,
+        ) -> Pod {
+            Pod {
+                metadata: ObjectMeta {
+                    name: Some("taskrun-pod".to_owned()),
+                    namespace: Some("djinn".to_owned()),
+                    uid: Some("pod-uid-1".to_owned()),
+                    ..ObjectMeta::default()
+                },
+                spec: Some(PodSpec {
+                    init_containers: Some(init),
+                    containers: regular,
+                    ..PodSpec::default()
+                }),
+                status: Some(PodStatus {
+                    init_container_statuses: Some(statuses),
+                    ..PodStatus::default()
+                }),
+            }
+        }
+
+        #[test]
+        fn reads_the_stored_launcher_spec_and_status() {
+            let observed = observe_launcher_sidecar(&pod(
+                vec![container(
+                    LAUNCHER_CONTAINER_NAME,
+                    Some("3800m"),
+                    Some("resize-v2"),
+                )],
+                vec![container("worker", Some("4"), None)],
+                vec![status(
+                    LAUNCHER_CONTAINER_NAME,
+                    Some("containerd://abc"),
+                    Some("registry/img@sha256:feed"),
+                )],
+            ))
+            .expect("observation");
+            assert_eq!(observed.pod_uid, "pod-uid-1");
+            assert_eq!(observed.namespace, "djinn");
+            assert_eq!(observed.pod_name, "taskrun-pod");
+            assert_eq!(observed.launcher_container_name, LAUNCHER_CONTAINER_NAME);
+            assert_eq!(
+                observed.launcher_container_id.as_deref(),
+                Some("containerd://abc")
+            );
+            assert_eq!(
+                observed.image_digest.as_deref(),
+                Some("registry/img@sha256:feed")
+            );
+            assert_eq!(observed.observed_protocol.as_deref(), Some("resize-v2"));
+            // 3800m, NOT the worker's coincidental 4 cores.
+            assert_eq!(observed.admitted_cpu_millicores, Some(3800));
+        }
+
+        #[test]
+        fn a_still_starting_sidecar_reports_absent_fields_rather_than_failing() {
+            let observed = observe_launcher_sidecar(&pod(
+                vec![container(LAUNCHER_CONTAINER_NAME, Some("4000m"), None)],
+                vec![],
+                vec![status(LAUNCHER_CONTAINER_NAME, None, None)],
+            ))
+            .expect("observation");
+            assert_eq!(observed.launcher_container_id, None);
+            assert_eq!(observed.image_digest, None);
+            assert_eq!(observed.observed_protocol, None);
+            assert_eq!(observed.admitted_cpu_millicores, Some(4000));
+        }
+
+        #[test]
+        fn a_leaf_v1_render_carries_no_ceiling_to_observe() {
+            let observed = observe_launcher_sidecar(&pod(
+                vec![container(LAUNCHER_CONTAINER_NAME, None, Some("leaf-v1"))],
+                vec![container("worker", Some("4"), None)],
+                vec![status(
+                    LAUNCHER_CONTAINER_NAME,
+                    Some("containerd://a"),
+                    Some("i"),
+                )],
+            ))
+            .expect("observation");
+            assert_eq!(observed.admitted_cpu_millicores, None);
+            assert_eq!(observed.observed_protocol.as_deref(), Some("leaf-v1"));
+        }
+
+        #[test]
+        fn an_unnameable_launcher_is_rejected_at_both_sites() {
+            // Zero spec entries.
+            let missing = observe_launcher_sidecar(&pod(
+                vec![container("worker", Some("4"), None)],
+                vec![],
+                vec![status(LAUNCHER_CONTAINER_NAME, Some("c"), Some("i"))],
+            ));
+            assert!(matches!(
+                missing,
+                Err(LauncherObservationError::Ambiguous(
+                    crate::pod_resize::PodResizeError::LauncherIdentityAmbiguous { found: 0, .. }
+                ))
+            ));
+
+            // Two status entries.
+            let duplicated = observe_launcher_sidecar(&pod(
+                vec![container(LAUNCHER_CONTAINER_NAME, Some("4000m"), None)],
+                vec![],
+                vec![
+                    status(LAUNCHER_CONTAINER_NAME, Some("c1"), Some("i")),
+                    status(LAUNCHER_CONTAINER_NAME, Some("c2"), Some("i")),
+                ],
+            ));
+            assert!(matches!(
+                duplicated,
+                Err(LauncherObservationError::Ambiguous(
+                    crate::pod_resize::PodResizeError::LauncherIdentityAmbiguous { found: 2, .. }
+                ))
+            ));
+        }
+
+        #[test]
+        fn a_pod_without_a_uid_is_incomplete_not_observable() {
+            let mut without_uid = pod(
+                vec![container(LAUNCHER_CONTAINER_NAME, Some("4000m"), None)],
+                vec![],
+                vec![status(LAUNCHER_CONTAINER_NAME, Some("c"), Some("i"))],
+            );
+            without_uid.metadata.uid = None;
+            assert_eq!(
+                observe_launcher_sidecar(&without_uid),
+                Err(LauncherObservationError::Incomplete { field: "uid" })
+            );
+        }
+    }
 }
+
+#[cfg(test)]
+#[path = "runtime_kueue_create_tests.rs"]
+mod runtime_kueue_create_tests;
+
+#[cfg(test)]
+#[path = "runtime_pod_fence_tests.rs"]
+mod runtime_pod_fence_tests;

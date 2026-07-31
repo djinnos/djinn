@@ -24,11 +24,31 @@ fn mcp_tools_do_not_use_untyped_json_output() {
         for entry in entries {
             let entry = entry.expect("read entry");
             let path = entry.path();
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            // Test modules are out of scope. This guard is about MCP tool
+            // STRUCT fields: a bare `serde_json::Value` there serializes to a
+            // `true` JSON Schema and strict clients reject the whole tool list.
+            // A `Vec<serde_json::Value>` local inside a test — e.g. parsing the
+            // schema snapshot this very guard protects — is not that, and
+            // flagging it would push tests toward contorted types for no gain.
+            //
+            // This exclusion is new because the offending code is new *to this
+            // scan*, not new to the repo: until the include!-to-module
+            // migration these tests lived in `.inc` fragments, and the
+            // `Some("rs")` check below skipped them silently. That made this
+            // the fifth tool blind to those files by the same `*.rs` filter,
+            // after rust-analyzer/SCIP, rustfmt, check-file-size.sh and
+            // check-raw-sql-boundary.sh.
             if path.is_dir() {
-                visit(&path, offenders);
+                if name != "tests" {
+                    visit(&path, offenders);
+                }
                 continue;
             }
             if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            if name == "tests.rs" || name.ends_with("_tests.rs") {
                 continue;
             }
             // Skip the json_object.rs helper (it wraps Value on purpose).

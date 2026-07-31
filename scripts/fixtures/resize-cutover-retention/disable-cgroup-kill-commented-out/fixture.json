@@ -1,0 +1,13 @@
+{
+  "asset": "cgroup-kill",
+  "expect": "reject",
+  "why": "AC9, mutation two, first form. The `cgroup.kill` write commented out. A grep over raw source still finds the string, which is exactly why the gate judges COMMENT-STRIPPED source: a commented statement is a deleted statement that greps green.",
+  "operations": [
+    {
+      "op": "replace",
+      "path": "server/crates/djinn-cgroup-launcher/src/lib.rs",
+      "find": "        self.fs.write_leaf(leaf.fd, \"cgroup.kill\", \"1\")\n",
+      "with": "        // self.fs.write_leaf(leaf.fd, \"cgroup.kill\", \"1\")\n        Ok(())\n"
+    }
+  ]
+}

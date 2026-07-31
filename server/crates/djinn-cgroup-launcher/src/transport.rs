@@ -104,7 +104,20 @@ impl<F: CgroupFs, S: SpawnIntoCgroup, N: NonceSource> UnixBrokerServer<F, S, N> 
                 Err(Error::Io(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(()),
                 Err(e) => return Err(e),
             };
-            reply(&mut s, self.dispatch(c, &r))?
+            let outcome = self.dispatch(c, &r);
+            // A protocol disagreement ends the CONNECTION, not just the frame.
+            // The categorized refusal is still written first — the worker must
+            // be able to log why it was dropped — but the serve loop then
+            // returns, so no BEGIN or CREATE can follow on this socket even if
+            // the peer ignores the refusal and keeps writing frames.
+            let terminal = match &outcome {
+                Err(Error::ProtocolMismatch { launcher, worker }) => Some((*launcher, *worker)),
+                _ => None,
+            };
+            reply(&mut s, outcome)?;
+            if let Some((launcher, worker)) = terminal {
+                return Err(Error::ProtocolMismatch { launcher, worker });
+            }
         }
     }
     fn dispatch(&mut self, c: ConnectionId, r: &[u8]) -> Result<Vec<u8>, Error> {
@@ -776,10 +789,19 @@ mod tests {
         }
     }
     fn broker<S: SpawnIntoCgroup>(counts: Counts, clone: S) -> Broker<FakeFs, S, TestNonces> {
+        broker_running(counts, clone, crate::LauncherAuthorityProtocol::LeafV1)
+    }
+    fn broker_running<S: SpawnIntoCgroup>(
+        counts: Counts,
+        clone: S,
+        protocol: crate::LauncherAuthorityProtocol,
+    ) -> Broker<FakeFs, S, TestNonces> {
         let launcher = Launcher::new(
             FakeFs(counts),
             clone,
-            LauncherConfig::new(None, None, unsafe { libc::geteuid() }).unwrap(),
+            LauncherConfig::new(None, None, unsafe { libc::geteuid() })
+                .unwrap()
+                .with_authority_protocol(protocol),
         )
         .unwrap();
         Broker::new(
@@ -813,7 +835,13 @@ mod tests {
     }
     fn ready(client: &mut UnixBrokerClient) {
         client
-            .ready(crate::child::prepare_worker_readiness(&mut ReadyDumpability).unwrap())
+            .ready(
+                crate::child::prepare_worker_readiness(
+                    &mut ReadyDumpability,
+                    crate::LauncherAuthorityProtocol::LeafV1,
+                )
+                .unwrap(),
+            )
             .unwrap();
     }
 
@@ -917,6 +945,58 @@ mod tests {
             assert_eq!(counts.leaves.load(Ordering::SeqCst), 0, "{name}");
             assert_eq!(counts.clones.load(Ordering::SeqCst), 0, "{name}");
         }
+    }
+
+    /// AC2, over the real socket: a mismatched READY is refused with its own
+    /// category AND the serve loop returns, so the connection is closed before
+    /// a BEGIN or CREATE frame can be dispatched on it. No leaf, no clone.
+    #[test]
+    fn unix_protocol_mismatch_refuses_ready_and_closes_the_connection() {
+        let counts = Counts::new();
+        let (client_stream, server_stream) = UnixStream::pair().unwrap();
+        thread::scope(|scope| {
+            // The launcher runs resize-v2; `ready()` asserts leaf-v1.
+            let mut server = UnixBrokerServer::new(broker_running(
+                counts.clone(),
+                NoClone(counts.clone()),
+                crate::LauncherAuthorityProtocol::ResizeV2,
+            ));
+            let task = scope.spawn(move || server.serve_connection(server_stream));
+            let mut client = UnixBrokerClient::connect(client_stream, b"test-credential").unwrap();
+
+            let refused = client
+                .ready(
+                    crate::child::prepare_worker_readiness(
+                        &mut ReadyDumpability,
+                        crate::LauncherAuthorityProtocol::LeafV1,
+                    )
+                    .unwrap(),
+                )
+                .expect_err("a disagreeing READY must be refused");
+            assert!(
+                matches!(refused, Error::ControlRejected(ControlRejection::Protocol)),
+                "the worker must learn WHY it was dropped, got {refused:?}"
+            );
+
+            // The socket is gone: the next control cannot be served at all.
+            assert!(
+                client
+                    .begin(Invocation {
+                        id: "after-mismatch".into(),
+                        fence: 1,
+                    })
+                    .is_err(),
+                "no BEGIN may be dispatched after a refused READY"
+            );
+            drop(client);
+            let served = task.join().unwrap();
+            assert!(
+                matches!(served, Err(Error::ProtocolMismatch { .. })),
+                "the serve loop must END on a protocol mismatch, got {served:?}"
+            );
+        });
+        assert_eq!(counts.leaves.load(Ordering::SeqCst), 0);
+        assert_eq!(counts.clones.load(Ordering::SeqCst), 0);
     }
 
     #[test]

@@ -1,6 +1,24 @@
 //! Durable build-admission denials (#2661 follow-up).
 //!
-//! # Why this exists
+//! # NO WRITER REMAINS (Kueue cutover, o53p)
+//!
+//! Read this before trusting anything below. The only producer of these rows
+//! was `dispatch/task_dispatch.rs`'s `record_task_run_denial`, which rendered a
+//! `DenialCause` from the pre-create `BuildAdmissionController`. Both are
+//! deleted: Kueue's ClusterQueue decides build capacity now, and a Job it has
+//! not admitted is queued by Kueue rather than denied by this process.
+//!
+//! So the relation, this repository, and the `build_admission_denial` block in
+//! `board_health` are all still wired and still correct — they simply describe a
+//! population that is now empty and can only shrink. That is honest (`null`
+//! means "no recorded denial", which is true) rather than a false healthy
+//! signal, which is why this was retained rather than ripped out mid-cutover.
+//! Retiring it, together with migration 161, belongs to the follow-up slices
+//! (`plcj` / `flc5`). Do NOT add a new writer here: a denial recorded against a
+//! deleted authority would be the replayed-tombstone failure of #2661 in a new
+//! location.
+//!
+//! # Why this existed
 //!
 //! `BuildAdmissionDecision::Denied` has carried a `DenialCause` since #2661.
 //! It was consumed at exactly one site — a `tracing::info!` in
@@ -44,8 +62,9 @@ pub struct BuildAdmissionDenialRecord {
     /// `DenialCause` rendered by its `Display`: `at_capacity`,
     /// `controller_not_admitting` or `authority_unavailable`.
     pub cause: String,
-    /// `BuildAdmissionReadiness::as_str()` when the controller refused. This
-    /// is the field that lived only in container logs during the outage.
+    /// The closed readiness gate, when the deleted pre-create controller
+    /// refused. This is the field that lived only in container logs during the
+    /// 2026-07-29 outage. Nothing writes it any more — see the module docs.
     pub readiness: Option<String>,
     /// The capacity authority's own words, for `authority_unavailable`.
     pub detail: Option<String>,

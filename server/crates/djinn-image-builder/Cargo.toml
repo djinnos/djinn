@@ -8,6 +8,10 @@ edition = "2024"
 doctest = false
 
 [dependencies]
+# The canonical `LauncherAuthorityProtocol`. The generated Dockerfile declares
+# which protocol the artifact speaks, so the wire form has to come from the one
+# definition the launcher and `djinn-db` also use — never a local copy.
+djinn-launcher-protocol = { path = "../djinn-launcher-protocol" }
 djinn-stack = { path = "../djinn-stack" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

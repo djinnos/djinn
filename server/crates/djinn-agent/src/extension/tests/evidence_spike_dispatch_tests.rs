@@ -105,6 +105,66 @@ async fn evidence_spike_blocks_write_in_local_fallback() {
     );
 }
 
+/// A mutation tool that lands in the agent-local fallback must be rejected by
+/// the allowlist gate, not by absence of a dispatch arm. `set_file_mode` changes
+/// no bytes but it does change a file, so the read-only evidence-spike profile
+/// must refuse it — and refuse it BEFORE the handler runs, since the handler
+/// itself has no notion of the active profile.
+#[tokio::test]
+async fn evidence_spike_blocks_set_file_mode_in_local_fallback() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let db = create_test_db();
+    let state = agent_context_from_db(db, CancellationToken::new());
+    let services = crate::test_helpers::test_services();
+    let tmp = crate::test_helpers::test_tempdir("djinn-ev-fallback-setmode-");
+    let schemas = evidence_spike_schemas();
+
+    let victim = tmp.path().join("gate.sh");
+    std::fs::write(&victim, "#!/bin/sh\n").expect("seed");
+    std::fs::set_permissions(&victim, std::fs::Permissions::from_mode(0o644)).expect("seed mode");
+
+    let result = dispatch_tool_call(
+        &state,
+        &services,
+        &make_tool_call(
+            "set_file_mode",
+            Some(
+                serde_json::json!({"path": "gate.sh", "executable": true})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        ),
+        tmp.path(),
+        Some(&schemas),
+        None,
+        None,
+        None,
+        &crate::extension::ToolCancellation::never(),
+    )
+    .await;
+
+    let err =
+        result.expect_err("set_file_mode must be rejected under the evidence-spike allowlist");
+    assert!(
+        err.contains("not in the allowed schema list"),
+        "error should mention the allowed schema list, got: {err}"
+    );
+
+    // The gate must fire before the handler: assert the side effect did NOT
+    // happen, not merely that an error came back.
+    assert_eq!(
+        std::fs::metadata(&victim)
+            .expect("stat")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o644,
+        "a rejected call must not have chmodded the file"
+    );
+}
+
 #[tokio::test]
 async fn evidence_spike_blocks_edit_in_local_fallback() {
     let db = create_test_db();

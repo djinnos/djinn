@@ -14,6 +14,7 @@ fn builds_warm_job_manifest_with_expected_shape() {
     let job = build_warm_job(
         &cfg,
         "proj-xyz",
+        "deadbeef",
         "reg.example:5000/djinn-project-p:abc123",
         None,
     );
@@ -373,7 +374,7 @@ fn builds_warm_job_manifest_with_expected_shape() {
 #[test]
 fn warm_pod_never_renders_a_launcher_sidecar() {
     let cfg = KubernetesConfig::for_testing();
-    let plain = build_warm_job(&cfg, "proj-xyz", "example/warm:latest", None);
+    let plain = build_warm_job(&cfg, "proj-xyz", "deadbeef", "example/warm:latest", None);
     let leased = build_leased_warm_job(
         &cfg,
         "proj-xyz",
@@ -424,7 +425,13 @@ fn warm_manifest_preserves_shared_cache_lock_prerequisites() {
     cfg.cache_pvc = "warm-cache-pvc".into();
     cfg.warm_job_timeout_seconds = 1_237;
     cfg.warm_cpu_limit = "7".into();
-    let job = build_warm_job(&cfg, "lock-project", "example/warm:latest", None);
+    let job = build_warm_job(
+        &cfg,
+        "lock-project",
+        "deadbeef",
+        "example/warm:latest",
+        None,
+    );
 
     let spec = job.spec.as_ref().expect("job spec");
     // A non-default fixture proves this is configuration wiring rather
@@ -534,7 +541,7 @@ fn warm_manifest_preserves_shared_cache_lock_prerequisites() {
 fn warm_manifest_keys_subcore_limit_as_mold_jobs_one() {
     let mut cfg = KubernetesConfig::for_testing();
     cfg.warm_cpu_limit = "500m".into();
-    let job = build_warm_job(&cfg, "mold-one", "example/warm:latest", None);
+    let job = build_warm_job(&cfg, "mold-one", "deadbeef", "example/warm:latest", None);
     let container = &job
         .spec
         .as_ref()
@@ -593,6 +600,7 @@ fn warm_pod_scheduling_propagates_from_config() {
     let job = build_warm_job(
         &cfg,
         "proj-xyz",
+        "deadbeef",
         "reg.example:5000/djinn-project-p:abc123",
         None,
     );
@@ -609,4 +617,88 @@ fn warm_pod_scheduling_propagates_from_config() {
     assert_eq!(tols.len(), 1);
     assert_eq!(tols[0].key.as_deref(), Some("workload-type"));
     assert_eq!(tols[0].effect.as_deref(), Some("NoSchedule"));
+}
+
+// ---------------------------------------------------------------------------
+// AC3 (37yq): the warm Job name is deterministic in (project, warm generation)
+// ---------------------------------------------------------------------------
+
+/// Mirrors `scip_job::tests::job_name_is_deterministic_and_label_safe`
+/// (`scip_job.rs`) — BOTH halves. Equality alone is satisfied by a constant, and
+/// a constant name is worse than the `Uuid::now_v7()` it replaced: every warm
+/// generation would collide with the previous one's object and the create-then-
+/// observe adopt path would hand back a Job indexing the wrong revision.
+#[test]
+fn warm_job_name_is_deterministic_per_generation_and_label_safe() {
+    let name = warm_job_name("Proj_ABC/xyz", "abc123def4567890");
+
+    assert_eq!(
+        name,
+        warm_job_name("Proj_ABC/xyz", "abc123def4567890"),
+        "same project + same warm generation must name the same object"
+    );
+    assert_ne!(
+        name,
+        warm_job_name("Proj_ABC/xyz", "ffffffffffffffffffff"),
+        "a new warm generation must name a NEW object, or the adopt path \
+         resurrects the previous revision's Job"
+    );
+    assert_ne!(
+        name,
+        warm_job_name("other-project", "abc123def4567890"),
+        "two projects at the same revision must not share one Job"
+    );
+    assert!(
+        crate::label_value::is_valid_label_value(&name),
+        "the Job name is projected into the `job-name` label: {name}"
+    );
+}
+
+/// The same property asserted on the manifest the dispatcher actually POSTs,
+/// not just on the naming helper — the helper being deterministic proves
+/// nothing if `build_warm_job` ignores it.
+#[test]
+fn build_warm_job_is_deterministic_in_project_and_generation() {
+    let cfg = KubernetesConfig::for_testing();
+    let name_of = |project: &str, generation: &str| {
+        build_warm_job(&cfg, project, generation, "example/warm:latest", None)
+            .metadata
+            .name
+            .expect("warm Job is built with a name")
+    };
+
+    assert_eq!(
+        name_of("proj-xyz", "abc123"),
+        name_of("proj-xyz", "abc123"),
+        "two builds of one warm generation must produce one Job name"
+    );
+    assert_ne!(
+        name_of("proj-xyz", "abc123"),
+        name_of("proj-xyz", "def456"),
+        "different warm generations must produce different Job names"
+    );
+}
+
+/// The name `build_warm_job` renders is the name the durable warm identity has
+/// always persisted. Before this slice they diverged: the builder produced a
+/// `Uuid::now_v7()` name and the dispatch path silently overwrote it, so the
+/// manifest a caller held was never the manifest Kubernetes saw.
+#[test]
+fn build_warm_job_agrees_with_the_durable_warm_identity_name() {
+    let cfg = KubernetesConfig::for_testing();
+    let revision = "9f1c2d3e4b5a60718293";
+    let identity = LeasedWarmJobIdentity::new(
+        "proj-xyz",
+        crate::graph_warmer_identity::warm_work_id("proj-xyz", revision),
+        revision,
+        7,
+    );
+
+    assert_eq!(
+        build_warm_job(&cfg, "proj-xyz", revision, "example/warm:latest", None)
+            .metadata
+            .name
+            .as_deref(),
+        Some(identity.object_name.as_str())
+    );
 }

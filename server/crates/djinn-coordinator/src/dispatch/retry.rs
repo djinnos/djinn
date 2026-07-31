@@ -394,8 +394,10 @@ impl CoordinatorActor {
         created_by_user_id: Option<&str>,
         base_role: &str,
     ) -> Vec<String> {
-        self.resolve_user_model_priority_with_lane(created_by_user_id, base_role, None)
-            .await
+        poll_stack::boxed(|| {
+            self.resolve_user_model_priority_with_lane(created_by_user_id, base_role, None)
+        })
+        .await
     }
 
     /// Resolve a `provider/model` list for a DB role's `model_preference`.
@@ -548,8 +550,10 @@ impl CoordinatorActor {
             task.reopen_count
         );
         tracing::Span::current().record("attempt", quality_strikes);
-        self.route_planner_intervention(task, "worker", &reason, None, quality_strikes)
-            .await
+        poll_stack::boxed(|| {
+            self.route_planner_intervention(task, "worker", &reason, None, quality_strikes)
+        })
+        .await
     }
 
     /// Trigger B: route a task cycling on same-role redispatches to a Planner
@@ -615,8 +619,10 @@ impl CoordinatorActor {
              work on the task branch is already sufficient or the task is moot/duplicate.",
             task.status, task.reopen_count
         );
-        self.route_planner_intervention(task, role, &reason, None, task.reopen_count)
-            .await
+        poll_stack::boxed(|| {
+            self.route_planner_intervention(task, role, &reason, None, task.reopen_count)
+        })
+        .await
     }
 
     /// Is the model this task last ran on currently auto-disabled by its own
@@ -723,7 +729,7 @@ impl CoordinatorActor {
         task: &djinn_core::models::Task,
         role: &'static str,
     ) -> bool {
-        if self.provider_breaker_blames_model(task, role).await {
+        if poll_stack::boxed(|| self.provider_breaker_blames_model(task, role)).await {
             return false;
         }
         let strike_count = {
@@ -776,15 +782,19 @@ impl CoordinatorActor {
         self.provider_failure_streak.remove(&task.id);
         self.dispatch_failure_streak.remove(&task.id);
         self.dispatch_cooldowns.remove(&task.id);
-        self.clear_durable_dispatch_backoff_state(
-            &task.id,
-            Some(&task.short_id),
-            "failure_streak_planner_intervention_handoff_clear",
-        )
+        poll_stack::boxed(|| {
+            self.clear_durable_dispatch_backoff_state(
+                &task.id,
+                Some(&task.short_id),
+                "failure_streak_planner_intervention_handoff_clear",
+            )
+        })
         .await;
 
-        self.route_loop_guard_planner_intervention(&task.id, role, &intervention_reason)
-            .await
+        poll_stack::boxed(|| {
+            self.route_loop_guard_planner_intervention(&task.id, role, &intervention_reason)
+        })
+        .await
     }
 
     /// Trigger C: a worker/reviewer run completed degenerate because the
@@ -821,8 +831,10 @@ impl CoordinatorActor {
             }
         };
 
-        self.route_planner_intervention(&task, role, reason, None, task.reopen_count)
-            .await
+        poll_stack::boxed(|| {
+            self.route_planner_intervention(&task, role, reason, None, task.reopen_count)
+        })
+        .await
     }
 
     /// uv3p Part B: what the fleet actually did since the current intervention
@@ -1379,13 +1391,16 @@ impl CoordinatorActor {
             .quality_reopen_count(&task.id)
             .await
             .unwrap_or(task.intervention_count);
-        self.park_source_human_review_with_dossier(
-            task,
-            &format!("Arbitration deadline expired for hold cycle {hold_cycle}"),
-            quality_strikes,
-            Some(dossier.clone()),
-            &dossier,
-        )
+        let park_reason = format!("Arbitration deadline expired for hold cycle {hold_cycle}");
+        poll_stack::boxed(|| {
+            self.park_source_human_review_with_dossier(
+                task,
+                &park_reason,
+                quality_strikes,
+                Some(dossier.clone()),
+                &dossier,
+            )
+        })
         .await
     }
     /// Shared intervention router behind triggers A and B: second-strike
@@ -1427,8 +1442,11 @@ impl CoordinatorActor {
             // unconsumed row). A genuinely in-flight arbiter is left to finish
             // — it may still approve or supersede — and is separately bounded
             // by the 24h arbitration deadline and the decision-failure cap.
-            let final_disposition = self.arbiter_hold_cycle_ceiling_reached(task).await;
-            if final_disposition && self.hold_cycle_ceiling_already_recorded(&task.id).await {
+            let final_disposition =
+                poll_stack::boxed(|| self.arbiter_hold_cycle_ceiling_reached(task)).await;
+            if final_disposition
+                && poll_stack::boxed(|| self.hold_cycle_ceiling_already_recorded(&task.id)).await
+            {
                 let dossier = serde_json::json!({
                     "kind": "final_arbiter_reentry",
                     "hold_description": "The one-shot final arbiter disposition already ran",
@@ -1454,13 +1472,13 @@ impl CoordinatorActor {
             // a rescope, before ANY post-intervention session was ever dispatched.
             // Compute what actually happened since the intervention/hold release
             // and refuse to park on evidence the fleet never tried.
-            let history = self.post_intervention_history(task).await;
+            let history = poll_stack::boxed(|| self.post_intervention_history(task)).await;
 
             // Build the attempt ledger for inclusion in arbiter dossiers.
             // This captures all post-intervention attempt rows (all roles)
             // so operator-facing arbitration payloads consume the durable
             // attempt rows rather than reassembling bespoke history objects.
-            let attempt_ledger = self.attempt_ledger_for_task(task).await;
+            let attempt_ledger = poll_stack::boxed(|| self.attempt_ledger_for_task(task)).await;
 
             // CI staleness check (2vxr): CI evidence whose head SHA predates
             // the latest submitted work must not serve as the park-triggering
@@ -1487,14 +1505,16 @@ impl CoordinatorActor {
                     .as_deref()
                     .filter(|f| !f.is_empty())
             {
-                match self.park_fingerprint_seen(task, fingerprint).await {
+                match poll_stack::boxed(|| self.park_fingerprint_seen(task, fingerprint)).await {
                     Ok(false) => {
-                        self.record_park_redispatch_marker(
-                            task,
-                            "first_occurrence_fingerprint",
-                            Some(fingerprint),
-                            history.non_attempt_models.len(),
-                        )
+                        poll_stack::boxed(|| {
+                            self.record_park_redispatch_marker(
+                                task,
+                                "first_occurrence_fingerprint",
+                                Some(fingerprint),
+                                history.non_attempt_models.len(),
+                            )
+                        })
                         .await;
                         tracing::warn!(
                             task_id = %task.short_id,
@@ -1544,12 +1564,14 @@ impl CoordinatorActor {
                     prior_declines,
                 )
             {
-                self.record_park_redispatch_marker(
-                    task,
-                    NO_ATTEMPTED_REMEDIATION_KIND,
-                    None,
-                    history.non_attempt_models.len(),
-                )
+                poll_stack::boxed(|| {
+                    self.record_park_redispatch_marker(
+                        task,
+                        NO_ATTEMPTED_REMEDIATION_KIND,
+                        None,
+                        history.non_attempt_models.len(),
+                    )
+                })
                 .await;
                 tracing::warn!(
                     task_id = %task.short_id,
@@ -1569,8 +1591,10 @@ impl CoordinatorActor {
             // strike. If the task is in needs_task_review/in_task_review with no
             // rejection newer than the submission, do not park.
             if !final_disposition && history.any_submitted && history.submission_pending_review {
-                self.record_park_redispatch_marker(task, "submission_pending_review", None, 0)
-                    .await;
+                poll_stack::boxed(|| {
+                    self.record_park_redispatch_marker(task, "submission_pending_review", None, 0)
+                })
+                .await;
                 tracing::warn!(
                     task_id = %task.short_id,
                     task_status = %task.status,
@@ -1973,26 +1997,30 @@ impl CoordinatorActor {
             match create_result {
                 TryCreateResult::Created(_) => {
                     if final_disposition {
-                        self.record_hold_cycle_ceiling_final_dispatch(
-                            task,
-                            role,
-                            quality_strikes,
-                            hold_cycle,
-                        )
+                        poll_stack::boxed(|| {
+                            self.record_hold_cycle_ceiling_final_dispatch(
+                                task,
+                                role,
+                                quality_strikes,
+                                hold_cycle,
+                            )
+                        })
                         .await;
                     }
                     // Arbiter dispatch path — fresh arbitration row created.
-                    self.dispatch_arbiter_second_strike(
-                        task,
-                        hold_cycle,
-                        quality_strikes,
-                        &reason,
-                        role,
-                        &history,
-                        &attempt_ledger,
-                        mirror_head_sha.as_deref(),
-                        &failing_ci_job_ids,
-                    )
+                    poll_stack::boxed(|| {
+                        self.dispatch_arbiter_second_strike(
+                            task,
+                            hold_cycle,
+                            quality_strikes,
+                            &reason,
+                            role,
+                            &history,
+                            &attempt_ledger,
+                            mirror_head_sha.as_deref(),
+                            &failing_ci_job_ids,
+                        )
+                    })
                     .await;
                     // Log the arbiter_dispatched outbox payload — only on
                     // initial creation so outbox replay (AlreadyExistsUnconsumed)
@@ -2161,11 +2189,13 @@ impl CoordinatorActor {
         self.dispatch_cooldowns.remove(&task.id);
         self.last_dispatched.remove(&task.id);
         self.inflight_dispatches.remove(&task.id);
-        self.clear_durable_dispatch_backoff_state(
-            &task.id,
-            Some(&task.short_id),
-            "planner_intervention_handoff_clear",
-        )
+        poll_stack::boxed(|| {
+            self.clear_durable_dispatch_backoff_state(
+                &task.id,
+                Some(&task.short_id),
+                "planner_intervention_handoff_clear",
+            )
+        })
         .await;
 
         // Append the merge-queue lane facts (run id, failing checks,
@@ -2183,8 +2213,10 @@ impl CoordinatorActor {
             Some(sections) => format!("{reason}\n\n**CI Failure Details:**\n{sections}"),
             None => reason.to_string(),
         };
-        self.dispatch_planner_escalation(&task.id, &enriched_reason, &task.project_id)
-            .await;
+        poll_stack::boxed(|| {
+            self.dispatch_planner_escalation(&task.id, &enriched_reason, &task.project_id)
+        })
+        .await;
         true
     }
 
@@ -2386,11 +2418,13 @@ impl CoordinatorActor {
         self.dispatch_cooldowns.remove(&task.id);
         self.last_dispatched.remove(&task.id);
         self.inflight_dispatches.remove(&task.id);
-        self.clear_durable_dispatch_backoff_state(
-            &task.id,
-            Some(&task.short_id),
-            "planner_second_strike_arbiter_dispatch",
-        )
+        poll_stack::boxed(|| {
+            self.clear_durable_dispatch_backoff_state(
+                &task.id,
+                Some(&task.short_id),
+                "planner_second_strike_arbiter_dispatch",
+            )
+        })
         .await;
         // Interrupt any running session for this task so parking it
         // actually frees the dispatch slot.
@@ -2548,7 +2582,7 @@ impl CoordinatorActor {
             enriched_reason.push_str("\n\nArbiter re-entry / failure dossier:\n");
             enriched_reason.push_str(&dossier_text);
         }
-        self.park_source_human_review(task, &enriched_reason, quality_strikes)
+        poll_stack::boxed(|| self.park_source_human_review(task, &enriched_reason, quality_strikes))
             .await
     }
 
@@ -2642,7 +2676,7 @@ impl CoordinatorActor {
         task: &djinn_core::models::Task,
         reason: &str,
     ) -> bool {
-        let prior = self.planner_escalation_count(&task.id).await;
+        let prior = poll_stack::boxed(|| self.planner_escalation_count(&task.id)).await;
         if prior >= MAX_AUTONOMOUS_ESCALATIONS {
             let terminal_reason = format!(
                 "Autonomous remediation ladder exhausted: {prior} planner-park escalations already \
@@ -2656,7 +2690,7 @@ impl CoordinatorActor {
                 ceiling = MAX_AUTONOMOUS_ESCALATIONS,
                 "CoordinatorActor: autonomous-escalation ceiling reached — terminally failing task (no human park)"
             );
-            self.terminally_fail_task(task, "coordinator", &terminal_reason)
+            poll_stack::boxed(|| self.terminally_fail_task(task, "coordinator", &terminal_reason))
                 .await;
             return false;
         }
@@ -2664,14 +2698,16 @@ impl CoordinatorActor {
         // only if it isn't already held), THEN park the source to `open`. The
         // blocker is added before the park, so the open task is never
         // dispatchable without its blocker in place.
-        self.create_remediation_task(
-            &task.id,
-            reason,
-            &task.project_id,
-            RemediationKind::PlannerEscalation,
-        )
+        poll_stack::boxed(|| {
+            self.create_remediation_task(
+                &task.id,
+                reason,
+                &task.project_id,
+                RemediationKind::PlannerEscalation,
+            )
+        })
         .await;
-        self.park_source_open(&task.id, reason).await;
+        poll_stack::boxed(|| self.park_source_open(&task.id, reason)).await;
         true
     }
 
@@ -2815,7 +2851,7 @@ impl CoordinatorActor {
 
         // Durable one-shot marker. Re-entry sees this marker and routes directly
         // to the Planner escalation instead of dispatching another final arbiter.
-        if !self.hold_cycle_ceiling_already_recorded(&task.id).await {
+        if !poll_stack::boxed(|| self.hold_cycle_ceiling_already_recorded(&task.id)).await {
             let payload = serde_json::json!({
                 "event": "arbiter_hold_cycle_ceiling",
                 "task_id": task.short_id,
@@ -2852,7 +2888,7 @@ impl CoordinatorActor {
                 djinn_telemetry::arbiter::PARK_REASON_HOLD_CYCLE_CEILING,
                 djinn_telemetry::arbiter::PARK_OUTCOME_SUCCESS,
             );
-            self.record_task_parked_metric(task, quality_strikes).await;
+            poll_stack::boxed(|| self.record_task_parked_metric(task, quality_strikes)).await;
         }
     }
 
@@ -2930,11 +2966,13 @@ impl CoordinatorActor {
         self.dispatch_cooldowns.remove(&task.id);
         self.last_dispatched.remove(&task.id);
         self.inflight_dispatches.remove(&task.id);
-        self.clear_durable_dispatch_backoff_state(
-            &task.id,
-            Some(&task.short_id),
-            "planner_second_strike_hold_clear",
-        )
+        poll_stack::boxed(|| {
+            self.clear_durable_dispatch_backoff_state(
+                &task.id,
+                Some(&task.short_id),
+                "planner_second_strike_hold_clear",
+            )
+        })
         .await;
         // Interrupt any running session for this task so parking it actually
         // frees the dispatch slot (a parked task must not keep burning one).
@@ -2949,9 +2987,8 @@ impl CoordinatorActor {
                 "CoordinatorActor: failed to interrupt running sessions while parking second-strike task"
             );
         }
-        self.escalate_to_planner_or_terminally_fail(task, reason)
-            .await;
-        self.record_task_parked_metric(task, quality_strikes).await;
+        poll_stack::boxed(|| self.escalate_to_planner_or_terminally_fail(task, reason)).await;
+        poll_stack::boxed(|| self.record_task_parked_metric(task, quality_strikes)).await;
         true
     }
 
@@ -2985,8 +3022,15 @@ impl CoordinatorActor {
         reason: &str,
         project_id: &str,
     ) {
-        self.create_remediation_task(source_task_id, reason, project_id, RemediationKind::Planner)
-            .await;
+        poll_stack::boxed(|| {
+            self.create_remediation_task(
+                source_task_id,
+                reason,
+                project_id,
+                RemediationKind::Planner,
+            )
+        })
+        .await;
     }
 
     /// Create a remediation review task that blocks the stuck `source_task_id`,
@@ -3075,7 +3119,8 @@ impl CoordinatorActor {
                 // fresh DB + inflight-ledger snapshot so a just-recorded admission in
                 // this same tick is visible.
                 let model_ids: Vec<String> = if let Some(creator) = source_creator.as_deref() {
-                    let (running_by_model, running_by_lane) = self.effective_running_counts().await;
+                    let (running_by_model, running_by_lane) =
+                        poll_stack::boxed(|| self.effective_running_counts()).await;
                     let settings = djinn_db::UserSettingsRepository::new(self.db.clone())
                         .get(creator)
                         .await
@@ -3118,7 +3163,9 @@ impl CoordinatorActor {
                     model_ids
                 };
 
-                let Some(project_path) = self.project_path_for_id(project_id).await else {
+                let Some(project_path) =
+                    poll_stack::boxed(|| self.project_path_for_id(project_id)).await
+                else {
                     tracing::warn!(
                         project_id = %project_id,
                         source_task_id = %source_task_id,
@@ -3357,22 +3404,6 @@ impl CoordinatorActor {
             );
             return;
         };
-        let build_admission = match self
-            .begin_task_run_build_admission(
-                "planner",
-                &review_task.id,
-                review_task.reopen_count.max(0),
-                format!(
-                    "task-run-{}-{}",
-                    review_task.id,
-                    review_task.reopen_count.max(0)
-                ),
-            )
-            .await
-        {
-            Ok(permit) => permit,
-            Err(()) => return,
-        };
         let task_id = review_task.id.clone();
         let project_path_owned = project_path.clone();
         let outcome = self
@@ -3391,12 +3422,6 @@ impl CoordinatorActor {
                 },
             )
             .await;
-        self.finish_task_run_build_admission(
-            build_admission,
-            matches!(outcome, DispatchOutcome::Dispatched),
-        )
-        .await;
-
         match outcome {
             DispatchOutcome::Dispatched => {
                 tracing::info!(outcome = "ok", task_id = %review_task.short_id, role = "planner");
@@ -3427,13 +3452,15 @@ impl CoordinatorActor {
                     })
                     .cloned();
                 if let Some(model) = dispatched_model {
-                    self.record_inflight_dispatch(
-                        &review_task.id,
-                        Some(&review_task.short_id),
-                        Some(review_task.created_by_user_id.as_str()),
-                        &model,
-                        "planner",
-                    )
+                    poll_stack::boxed(|| {
+                        self.record_inflight_dispatch(
+                            &review_task.id,
+                            Some(&review_task.short_id),
+                            Some(review_task.created_by_user_id.as_str()),
+                            &model,
+                            "planner",
+                        )
+                    })
                     .await;
                 }
                 self.publish_status();

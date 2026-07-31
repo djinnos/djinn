@@ -1132,6 +1132,7 @@ dependencies = [
  "djinn-db",
  "djinn-git",
  "djinn-k8s",
+ "djinn-launcher-protocol",
  "djinn-lsp",
  "djinn-mcp-extension",
  "djinn-memory",
@@ -1159,7 +1160,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
- "sqlx",
  "tempfile",
  "thiserror 2.0.18",
  "time",
@@ -1220,6 +1220,7 @@ dependencies = [
 name = "djinn-cgroup-launcher"
 version = "0.1.0"
 dependencies = [
+ "djinn-launcher-protocol",
  "libc",
  "thiserror 2.0.18",
  "workspace-hack",
@@ -1295,6 +1296,7 @@ dependencies = [
  "djinn-db",
  "djinn-git",
  "djinn-k8s",
+ "djinn-launcher-protocol",
  "djinn-lsp",
  "djinn-memory",
  "djinn-orchestration-types",
@@ -1363,6 +1365,7 @@ dependencies = [
  "dirs 6.0.0",
  "djinn-core",
  "djinn-db",
+ "djinn-launcher-protocol",
  "djinn-memory",
  "djinn-spec-lint",
  "djinn-stack",
@@ -1453,6 +1456,7 @@ dependencies = [
 name = "djinn-image-builder"
 version = "0.1.0"
 dependencies = [
+ "djinn-launcher-protocol",
  "djinn-stack",
  "pretty_assertions",
  "serde",
@@ -1472,6 +1476,7 @@ dependencies = [
  "djinn-db",
  "djinn-image-builder",
  "djinn-k8s",
+ "djinn-launcher-protocol",
  "djinn-provider",
  "djinn-runtime",
  "djinn-stack",
@@ -1511,10 +1516,12 @@ dependencies = [
  "djinn-supervisor",
  "djinn-telemetry",
  "djinn-workspace",
+ "futures",
  "http",
  "http-body-util",
  "k8s-openapi",
  "kube",
+ "rustls",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -1527,6 +1534,15 @@ dependencies = [
  "tower-test",
  "tracing",
  "uuid",
+ "workspace-hack",
+]
+
+[[package]]
+name = "djinn-launcher-protocol"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
  "workspace-hack",
 ]
 
@@ -1667,7 +1683,6 @@ dependencies = [
  "serde_urlencoded",
  "serde_yaml",
  "sha2 0.10.9",
- "sqlx",
  "thiserror 2.0.18",
  "time",
  "tokenizers",
@@ -1722,6 +1737,7 @@ dependencies = [
  "bincode",
  "bytes",
  "djinn-core",
+ "djinn-launcher-protocol",
  "futures",
  "serde",
  "serde_json",
@@ -1775,6 +1791,7 @@ dependencies = [
  "djinn-graph",
  "djinn-image-controller",
  "djinn-k8s",
+ "djinn-launcher-protocol",
  "djinn-memory",
  "djinn-provider",
  "djinn-runtime",
@@ -7381,7 +7398,6 @@ dependencies = [
  "getrandom 0.4.3",
  "git2",
  "hashbrown 0.16.1",
- "hmac",
  "hyper",
  "hyper-rustls",
  "hyper-util",
@@ -7397,7 +7413,6 @@ dependencies = [
  "proc-macro2",
  "rand 0.8.7",
  "rand 0.9.5",
- "rand_chacha 0.9.0",
  "regex-automata",
  "regex-syntax",
  "reqwest 0.12.28",
@@ -7416,10 +7431,7 @@ dependencies = [
  "simd-adler32",
  "slab",
  "smallvec",
- "sqlx",
- "sqlx-macros",
- "sqlx-macros-core",
- "sqlx-mysql",
+ "sqlx-core",
  "sqlx-postgres",
  "stable_deref_trait",
  "syn 2.0.119",

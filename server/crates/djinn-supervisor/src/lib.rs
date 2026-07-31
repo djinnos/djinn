@@ -535,6 +535,169 @@ where
     }
 }
 
+/// Routing decision for [`apply_planner_failed_close`] — the
+/// `StageOutcome::Failed` arm's planner-review close backstop.
+///
+/// Pure helper (no I/O, no async) mirroring [`PlannerEscalateRoute`] so unit
+/// tests can branch on the rule without driving the transition closure.
+#[derive(Debug, PartialEq, Eq)]
+enum PlannerFailedRoute {
+    /// Not the Planner + `issue_type == "review"` leg — the Failed arm's
+    /// close backstop does not apply; no transition is fired here.
+    NotApplicable,
+    /// The run was cancelled (stall-kill / preempt) — fire NO transition so
+    /// the task stays in its current state for redispatch. Mirrors the
+    /// Escalate arm's cancel gate ([`PlannerEscalateRoute::Cancelled`]).
+    Cancelled,
+    /// The stage died on a transient provider-side fault (5xx overload /
+    /// transport death) or a throttle. The provider failed, the planner never
+    /// adjudicated anything — closing here would book a false "completed"
+    /// close. Fire NO transition: the coordinator's execution-state orphan
+    /// reconciler releases the task back to `open`, and the same-role
+    /// reappearance machinery applies the escalating provider-protection
+    /// cooldown ladder (see `dispatch_cooldown_for_failure`), so leaving it
+    /// open does NOT reintroduce the ~30s tight re-dispatch loop this arm
+    /// was added to prevent.
+    LeaveOpenTransient,
+    /// The task carries the `human-review-hold` label — a human-only
+    /// terminal hold that must NEVER be auto-closed by an agent decision
+    /// (`planner_terminal_close_action` returned `None`). No transition.
+    HoldNoClose,
+    /// Genuinely-terminal planner failure (no provider fault, or a
+    /// deterministic one): close the review task so the coordinator's
+    /// ready-task sweep stops re-dispatching it, with a
+    /// `"planner session failed:"`-prefixed reason so the persisted record
+    /// is distinguishable from a planner-adjudicated completion.
+    CloseWithFailureReason,
+}
+
+/// Compute the routing branch for the planner-review close backstop in the
+/// `StageOutcome::Failed` arm of the supervisor loop.
+///
+/// Incident (2026-07-30): four "Planner remediation" review tasks whose
+/// planner sessions died ~11s in on a transient OpenAI `server_is_overloaded`
+/// error were each closed with `close_reason="completed"` despite the planner
+/// having produced nothing — the old arm closed unconditionally, ignoring
+/// `provider_failure`, the cancel token, and the `human-review-hold` guard.
+fn route_planner_failed(
+    role_kind: RoleKind,
+    task: &Task,
+    provider_failure: Option<djinn_runtime::ProviderFailureClass>,
+    cancel_is_cancelled: bool,
+) -> PlannerFailedRoute {
+    if role_kind != RoleKind::Planner || task.issue_type != "review" {
+        return PlannerFailedRoute::NotApplicable;
+    }
+    if cancel_is_cancelled {
+        return PlannerFailedRoute::Cancelled;
+    }
+    if matches!(
+        provider_failure,
+        Some(
+            djinn_runtime::ProviderFailureClass::Transient { .. }
+                | djinn_runtime::ProviderFailureClass::Throttle { .. }
+        )
+    ) {
+        return PlannerFailedRoute::LeaveOpenTransient;
+    }
+    // Defense in depth: the same guard the PlannerExecute / PlannerClose
+    // terminal paths use — a `human-review-hold` task is never auto-closed.
+    match planner_terminal_close_action(task) {
+        Some(_) => PlannerFailedRoute::CloseWithFailureReason,
+        None => PlannerFailedRoute::HoldNoClose,
+    }
+}
+
+/// Apply the planner-review close backstop for a `StageOutcome::Failed`
+/// stage. Encapsulates the routing decision AND the `transition_task` call
+/// (like [`apply_planner_escalate_route`]) so unit tests can assert both the
+/// chosen route and the exact set of transition invocations with a recording
+/// closure. Returns the route taken; the caller's run outcome is unchanged
+/// (the arm still surfaces `TaskRunOutcome::Failed` so the host breaker sees
+/// the provider-failure class).
+#[allow(clippy::too_many_arguments)]
+async fn apply_planner_failed_close<F, Fut>(
+    role_kind: RoleKind,
+    task: &Task,
+    task_id: &str,
+    task_run_id: &str,
+    reason: &str,
+    provider_failure: Option<djinn_runtime::ProviderFailureClass>,
+    cancel_is_cancelled: bool,
+    transition: F,
+) -> PlannerFailedRoute
+where
+    F: FnOnce(String, String, Option<String>) -> Fut,
+    Fut: std::future::Future<Output = Result<(), String>>,
+{
+    let route = route_planner_failed(role_kind, task, provider_failure, cancel_is_cancelled);
+    match route {
+        PlannerFailedRoute::NotApplicable => {}
+        PlannerFailedRoute::Cancelled => {
+            tracing::debug!(
+                task_run_id = %task_run_id,
+                task_id = %task_id,
+                issue_type = %task.issue_type,
+                "supervisor: run cancelled — skipping planner-Failed close transition",
+            );
+        }
+        PlannerFailedRoute::LeaveOpenTransient => {
+            tracing::warn!(
+                task_run_id = %task_run_id,
+                task_id = %task_id,
+                issue_type = %task.issue_type,
+                provider_failure = ?provider_failure,
+                reason = %reason,
+                "supervisor: planner review stage died on a transient provider fault — \
+                 NOT closing the task (a close here would book a false \"completed\"); \
+                 leaving it for redispatch under the coordinator's provider cooldown ladder",
+            );
+        }
+        PlannerFailedRoute::HoldNoClose => {
+            tracing::warn!(
+                task_run_id = %task_run_id,
+                task_id = %task_id,
+                issue_type = %task.issue_type,
+                "supervisor: planner stage failed on a human-review-hold task — \
+                 NOT auto-closing; the hold is human-only",
+            );
+        }
+        PlannerFailedRoute::CloseWithFailureReason => {
+            // Prefix the durable reason (activity log + run outcome surface)
+            // so the closed row is grep-ably distinct from a genuine
+            // planner-adjudicated completion — mirrors the
+            // "planner escalated:" convention of the Escalate arm. The
+            // `close` transition still writes `close_reason="completed"`
+            // (that value is hardcoded in `TransitionAction::Close`); the
+            // reason marker is the honest-labeling surface for this PR.
+            let surfaced_reason = format!("planner session failed: {reason}");
+            info!(
+                task_run_id = %task_run_id,
+                task_id = %task_id,
+                issue_type = %task.issue_type,
+                surfaced_reason = %surfaced_reason,
+                "supervisor: planner review stage failed terminally — closing the \
+                 task so the ready sweep stops re-dispatching it",
+            );
+            if let Err(e) = transition(
+                task_id.to_string(),
+                "close".to_string(),
+                Some(surfaced_reason),
+            )
+            .await
+            {
+                tracing::warn!(
+                    task_run_id = %task_run_id,
+                    task_id = %task_id,
+                    error = %e,
+                    "supervisor: planner-Failed close transition skipped"
+                );
+            }
+        }
+    }
+    route
+}
+
 // ── TaskRunSupervisor ────────────────────────────────────────────────────────
 
 /// Outcome of [`prepare_resume_workspace`] — what the supervisor's
@@ -2619,32 +2782,45 @@ impl TaskRunSupervisor {
                         reason,
                         provider_failure,
                     } => {
-                        // Planner review tasks (issue_type=review) must close
-                        // even on Failed — the LLM sometimes finishes without
-                        // calling submit_grooming (StageOutcome::Failed via
-                        // "finalized via unexpected tool", or no finalize at
-                        // all), and the task otherwise stays `open` and the
-                        // coordinator re-dispatches it every ~30s in a tight
-                        // loop. Observed on n6k8 "Planner board
-                        // health review" after k4my had the same pattern.
-                        if role_kind == RoleKind::Planner
-                            && task.issue_type == "review"
-                            && let Err(e) = self
-                                .services
-                                .transition_task(
-                                    spec.task_id.clone(),
-                                    "close".into(),
-                                    Some(reason.clone()),
-                                )
-                                .await
-                        {
-                            tracing::warn!(
-                                task_run_id = %run_id,
-                                task_id = %spec.task_id,
-                                error = %e,
-                                "supervisor: planner-Failed close transition skipped"
-                            );
-                        }
+                        // Planner review tasks (issue_type=review) that fail
+                        // TERMINALLY must still close — the LLM sometimes
+                        // finishes without calling submit_grooming
+                        // (StageOutcome::Failed via "finalized via unexpected
+                        // tool", or no finalize at all), and the task
+                        // otherwise stays `open` and the coordinator
+                        // re-dispatches it every ~30s in a tight loop.
+                        // Observed on n6k8 "Planner board health review" after
+                        // k4my had the same pattern.
+                        //
+                        // But NOT unconditionally (incident 2026-07-30: four
+                        // planner-remediation reviews whose sessions died ~11s
+                        // in on a transient OpenAI `server_is_overloaded`
+                        // were closed as "completed" with zero planner
+                        // output). `apply_planner_failed_close` gates the
+                        // close on: not cancelled, not a transient/throttle
+                        // provider fault (those are left open for redispatch
+                        // under the coordinator's provider cooldown ladder —
+                        // no tight loop), and not a `human-review-hold` task
+                        // (`planner_terminal_close_action`, the same guard the
+                        // PlannerExecute / PlannerClose paths use). A close
+                        // that does happen carries a "planner session failed:"
+                        // reason marker so it is distinguishable from a
+                        // planner-adjudicated completion.
+                        apply_planner_failed_close(
+                            role_kind,
+                            &task,
+                            &spec.task_id,
+                            &run_id,
+                            &reason,
+                            provider_failure,
+                            self.services.cancel().is_cancelled(),
+                            |task_id, action, close_reason| async move {
+                                self.services
+                                    .transition_task(task_id, action, close_reason)
+                                    .await
+                            },
+                        )
+                        .await;
                         // Arbiter session termination accounting: distinguish
                         // provider/infra failures from sessions that ran and
                         // ended without a valid decision.  Infra failures
@@ -3236,6 +3412,12 @@ mod tests {
         /// Counts `execute_stage` invocations so a test can assert the stage was
         /// (or was not) run.
         execute_stage_calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        /// Role the scripted stage expects to be driven with (Worker for the
+        /// worker-flow tests, Planner for the Planning-flow tests).
+        expected_role: RoleKind,
+        /// Records every `transition_task` call so tests can assert exactly
+        /// which board transitions a run requested (and which it must NOT).
+        transitions: std::sync::Arc<std::sync::Mutex<Vec<TransitionCall>>>,
     }
 
     #[async_trait]
@@ -3259,7 +3441,7 @@ mod tests {
         ) -> Result<StageOutcome, StageError> {
             self.execute_stage_calls
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            assert_eq!(role_kind, RoleKind::Worker);
+            assert_eq!(role_kind, self.expected_role);
             Ok(self.outcome.clone())
         }
 
@@ -3386,10 +3568,18 @@ mod tests {
 
         async fn transition_task(
             &self,
-            _task_id: String,
+            task_id: String,
             action: String,
-            _reason: Option<String>,
+            reason: Option<String>,
         ) -> Result<(), String> {
+            self.transitions
+                .lock()
+                .expect("transitions mutex poisoned")
+                .push(TransitionCall {
+                    task_id,
+                    action: action.clone(),
+                    reason,
+                });
             if self.fail_start_transition && action == "start" {
                 return Err("task has unresolved blockers".into());
             }
@@ -3466,6 +3656,8 @@ mod tests {
             updated_statuses: updated_statuses.clone(),
             fail_start_transition: true,
             execute_stage_calls: execute_stage_calls.clone(),
+            expected_role: RoleKind::Worker,
+            transitions: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         });
         let supervisor = TaskRunSupervisor::new(Arc::clone(&mirror), services);
         let spec = TaskRunSpec {
@@ -3538,6 +3730,8 @@ mod tests {
             updated_statuses: updated_statuses.clone(),
             fail_start_transition: true,
             execute_stage_calls: execute_stage_calls.clone(),
+            expected_role: RoleKind::Worker,
+            transitions: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         });
         let supervisor = TaskRunSupervisor::new(Arc::clone(&mirror), services);
         let spec = TaskRunSpec {
@@ -3700,6 +3894,8 @@ mod tests {
             updated_statuses: std::sync::Arc::clone(&updated_statuses),
             fail_start_transition: false,
             execute_stage_calls: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            expected_role: RoleKind::Worker,
+            transitions: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         });
         let supervisor = TaskRunSupervisor::new(Arc::clone(&mirror), services);
         let spec = TaskRunSpec {
@@ -3777,6 +3973,8 @@ mod tests {
             updated_statuses: std::sync::Arc::clone(&updated_statuses),
             fail_start_transition: false,
             execute_stage_calls: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            expected_role: RoleKind::Worker,
+            transitions: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         });
         let provider_supervisor = TaskRunSupervisor::new(Arc::clone(&mirror), provider_services);
         let provider_spec = TaskRunSpec {
@@ -3880,6 +4078,8 @@ mod tests {
             updated_statuses: std::sync::Arc::clone(&updated_statuses),
             fail_start_transition: false,
             execute_stage_calls: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            expected_role: RoleKind::Worker,
+            transitions: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         });
         let supervisor = TaskRunSupervisor::new(Arc::clone(&mirror), services);
         let spec = TaskRunSpec {
@@ -3948,6 +4148,8 @@ mod tests {
             updated_statuses: std::sync::Arc::clone(&updated_statuses),
             fail_start_transition: false,
             execute_stage_calls: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            expected_role: RoleKind::Worker,
+            transitions: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         });
         let summary_supervisor = TaskRunSupervisor::new(Arc::clone(&mirror), summary_services);
         let summary_spec = TaskRunSpec {
@@ -4141,6 +4343,480 @@ mod tests {
         task.issue_type = "task".into();
         task.labels = "[]".into();
         assert_eq!(planner_terminal_close_action(&task), None);
+    }
+
+    // ── StageOutcome::Failed planner-review close backstop ───────────────
+    //
+    // Incident regression (2026-07-30): four "Planner remediation" review
+    // tasks whose planner sessions died ~11s in on a transient OpenAI
+    // `server_is_overloaded` provider error were each closed with
+    // `close_reason="completed"` — the Failed arm closed unconditionally,
+    // ignoring `provider_failure`, the cancel token, and the
+    // `human-review-hold` guard. These tests pin the gated behavior.
+
+    fn planner_remediation_review_task(task_id: &str) -> Task {
+        let mut task = fixture_task(task_id, "p1");
+        task.issue_type = "review".into();
+        task.labels = r#"["planner-remediation"]"#.into();
+        task
+    }
+
+    /// Pure routing: a transient provider fault (and a throttle) must NOT
+    /// close the review task — the provider failed, not the planner.
+    #[test]
+    fn route_planner_failed_transient_leaves_task_open() {
+        let task = planner_remediation_review_task("t-transient");
+        for pf in [
+            djinn_runtime::ProviderFailureClass::Transient {
+                retry_after_ms: None,
+            },
+            djinn_runtime::ProviderFailureClass::Transient {
+                retry_after_ms: Some(30_000),
+            },
+            djinn_runtime::ProviderFailureClass::Throttle {
+                retry_after_ms: None,
+            },
+        ] {
+            assert_eq!(
+                route_planner_failed(RoleKind::Planner, &task, Some(pf), false),
+                PlannerFailedRoute::LeaveOpenTransient,
+                "a {pf:?} planner-review failure must leave the task open, not close it"
+            );
+        }
+    }
+
+    /// Pure routing: non-transient failures (untyped, task-attributable
+    /// `Failure`, deterministic `AuthInvalid`) still terminalize via close —
+    /// the tight-loop backstop is preserved — but through the marked-reason
+    /// close path.
+    #[test]
+    fn route_planner_failed_non_transient_closes_with_marked_reason() {
+        let task = planner_remediation_review_task("t-terminal");
+        for pf in [
+            None,
+            Some(djinn_runtime::ProviderFailureClass::Failure),
+            Some(djinn_runtime::ProviderFailureClass::AuthInvalid),
+        ] {
+            assert_eq!(
+                route_planner_failed(RoleKind::Planner, &task, pf, false),
+                PlannerFailedRoute::CloseWithFailureReason,
+                "a non-transient ({pf:?}) planner-review failure must still close the task"
+            );
+        }
+    }
+
+    /// Pure routing: the cancel gate fires before any close decision
+    /// (mirrors the Escalate arm) — a stall-kill / preempt must not park
+    /// the task.
+    #[test]
+    fn route_planner_failed_cancelled_fires_no_transition() {
+        let task = planner_remediation_review_task("t-cancel");
+        assert_eq!(
+            route_planner_failed(RoleKind::Planner, &task, None, true),
+            PlannerFailedRoute::Cancelled,
+        );
+        // Cancel wins even over a transient fault (both are no-transition).
+        assert_eq!(
+            route_planner_failed(
+                RoleKind::Planner,
+                &task,
+                Some(djinn_runtime::ProviderFailureClass::Transient {
+                    retry_after_ms: None
+                }),
+                true
+            ),
+            PlannerFailedRoute::Cancelled,
+        );
+    }
+
+    /// Pure routing: a `human-review-hold` review task is never auto-closed
+    /// by the Failed arm — the same `planner_terminal_close_action` guard
+    /// the PlannerExecute / PlannerClose paths use.
+    #[test]
+    fn route_planner_failed_human_review_hold_is_never_closed() {
+        let mut task = planner_remediation_review_task("t-hold");
+        task.labels = r#"["planner-remediation","human-review-hold"]"#.into();
+        assert_eq!(
+            route_planner_failed(RoleKind::Planner, &task, None, false),
+            PlannerFailedRoute::HoldNoClose,
+            "a human-review-hold review task must never be auto-closed by the Failed arm"
+        );
+    }
+
+    /// Pure routing: the backstop stays narrow — non-planner roles and
+    /// non-review issue types are untouched by the Failed arm.
+    #[test]
+    fn route_planner_failed_scope_stays_narrow() {
+        let mut task = planner_remediation_review_task("t-scope");
+        assert_eq!(
+            route_planner_failed(RoleKind::Worker, &task, None, false),
+            PlannerFailedRoute::NotApplicable,
+        );
+        task.issue_type = "task".into();
+        assert_eq!(
+            route_planner_failed(RoleKind::Planner, &task, None, false),
+            PlannerFailedRoute::NotApplicable,
+        );
+    }
+
+    /// Headline incident regression: the exact 2026-07-30 shape — planner +
+    /// review + `server_is_overloaded` transient — must fire NO transition
+    /// at all (previously it fired a plain `close` that booked
+    /// `close_reason="completed"`).
+    #[tokio::test]
+    async fn planner_failed_transient_provider_fault_does_not_close_task() {
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::<TransitionCall>::new()));
+        let calls_for_closure = std::sync::Arc::clone(&calls);
+        let task = planner_remediation_review_task("remediation-1");
+
+        let route = apply_planner_failed_close(
+            RoleKind::Planner,
+            &task,
+            "remediation-1",
+            "run-1",
+            "reply loop error: provider stream event failed: display=server_is_overloaded",
+            Some(djinn_runtime::ProviderFailureClass::Transient {
+                retry_after_ms: None,
+            }),
+            false,
+            move |task_id, action, reason| {
+                let calls = std::sync::Arc::clone(&calls_for_closure);
+                async move {
+                    calls
+                        .lock()
+                        .expect("calls mutex poisoned")
+                        .push(TransitionCall {
+                            task_id,
+                            action,
+                            reason,
+                        });
+                    Ok(())
+                }
+            },
+        )
+        .await;
+
+        assert_eq!(route, PlannerFailedRoute::LeaveOpenTransient);
+        let calls = calls.lock().expect("calls mutex poisoned");
+        assert!(
+            calls.is_empty(),
+            "a transient provider fault must not fire ANY transition (was: plain close \
+             booking close_reason=completed), got {calls:?}"
+        );
+    }
+
+    /// Non-transient failures still close, but the durable reason must be
+    /// marked as a planner session failure — distinguishable from a genuine
+    /// planner-adjudicated completion.
+    #[tokio::test]
+    async fn planner_failed_non_transient_closes_with_marked_reason() {
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::<TransitionCall>::new()));
+        let calls_for_closure = std::sync::Arc::clone(&calls);
+        let task = planner_remediation_review_task("remediation-2");
+
+        let route = apply_planner_failed_close(
+            RoleKind::Planner,
+            &task,
+            "remediation-2",
+            "run-2",
+            "finalized via unexpected tool",
+            None,
+            false,
+            move |task_id, action, reason| {
+                let calls = std::sync::Arc::clone(&calls_for_closure);
+                async move {
+                    calls
+                        .lock()
+                        .expect("calls mutex poisoned")
+                        .push(TransitionCall {
+                            task_id,
+                            action,
+                            reason,
+                        });
+                    Ok(())
+                }
+            },
+        )
+        .await;
+
+        assert_eq!(route, PlannerFailedRoute::CloseWithFailureReason);
+        let calls = calls.lock().expect("calls mutex poisoned");
+        assert_eq!(
+            calls.len(),
+            1,
+            "a terminal planner-review failure must fire exactly one close, got {calls:?}"
+        );
+        assert_eq!(calls[0].action, "close");
+        assert_eq!(calls[0].task_id, "remediation-2");
+        let reason = calls[0]
+            .reason
+            .as_ref()
+            .expect("planner-Failed close must carry a durable reason");
+        assert!(
+            reason.starts_with("planner session failed: "),
+            "close reason must carry the failure marker prefix, got {reason:?}"
+        );
+        assert!(
+            reason.contains("finalized via unexpected tool"),
+            "close reason must preserve the original failure reason, got {reason:?}"
+        );
+    }
+
+    /// A `human-review-hold` review task must not be auto-closed by the
+    /// Failed arm even on a genuinely-terminal failure.
+    #[tokio::test]
+    async fn planner_failed_human_review_hold_fires_no_transition() {
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::<TransitionCall>::new()));
+        let calls_for_closure = std::sync::Arc::clone(&calls);
+        let mut task = planner_remediation_review_task("remediation-3");
+        task.labels = r#"["planner-remediation","human-review-hold"]"#.into();
+
+        let route = apply_planner_failed_close(
+            RoleKind::Planner,
+            &task,
+            "remediation-3",
+            "run-3",
+            "planner produced no grooming decision",
+            None,
+            false,
+            move |task_id, action, reason| {
+                let calls = std::sync::Arc::clone(&calls_for_closure);
+                async move {
+                    calls
+                        .lock()
+                        .expect("calls mutex poisoned")
+                        .push(TransitionCall {
+                            task_id,
+                            action,
+                            reason,
+                        });
+                    Ok(())
+                }
+            },
+        )
+        .await;
+
+        assert_eq!(route, PlannerFailedRoute::HoldNoClose);
+        assert!(
+            calls.lock().expect("calls mutex poisoned").is_empty(),
+            "a human-review-hold task must never be auto-closed by the Failed arm"
+        );
+    }
+
+    /// A cancelled run fires no transition (consistent with the Escalate
+    /// arm's cancel gate) — the task stays in its current state for a clean
+    /// redispatch.
+    #[tokio::test]
+    async fn planner_failed_cancelled_run_fires_no_transition() {
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::<TransitionCall>::new()));
+        let calls_for_closure = std::sync::Arc::clone(&calls);
+        let task = planner_remediation_review_task("remediation-4");
+
+        let route = apply_planner_failed_close(
+            RoleKind::Planner,
+            &task,
+            "remediation-4",
+            "run-4",
+            "planner produced no grooming decision",
+            None,
+            true,
+            move |task_id, action, reason| {
+                let calls = std::sync::Arc::clone(&calls_for_closure);
+                async move {
+                    calls
+                        .lock()
+                        .expect("calls mutex poisoned")
+                        .push(TransitionCall {
+                            task_id,
+                            action,
+                            reason,
+                        });
+                    Ok(())
+                }
+            },
+        )
+        .await;
+
+        assert_eq!(route, PlannerFailedRoute::Cancelled);
+        assert!(
+            calls.lock().expect("calls mutex poisoned").is_empty(),
+            "a cancelled planner-review run must not fire the close transition"
+        );
+    }
+
+    /// Full-run integration regression: drive a `Planning` flow over a
+    /// planner-remediation review task whose stage dies exactly like the
+    /// 2026-07-30 incident (transient `server_is_overloaded`), and assert
+    /// the supervisor requests NO `close` transition while still surfacing
+    /// `TaskRunOutcome::Failed` with the provider class for the host
+    /// breaker.
+    #[tokio::test]
+    async fn planning_run_transient_provider_failure_leaves_review_task_open() {
+        let root = tempfile::tempdir_in(std::env::current_dir().expect("current dir"))
+            .expect("temp test root");
+        let source_dir = root.path().join("source");
+        make_source_repo(&source_dir);
+
+        let project_id = "project-planner-transient";
+        let task_id = "task-planner-transient";
+        let mirror = Arc::new(MirrorManager::new(root.path().join("mirrors")));
+        mirror
+            .ensure_mirror(project_id, &format!("file://{}", source_dir.display()))
+            .await
+            .expect("install fixture mirror");
+
+        let mut task = planner_remediation_review_task(task_id);
+        task.project_id = project_id.into();
+        let transitions = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let services: Arc<dyn SupervisorServices> = Arc::new(ScriptedLoopGuardServices {
+            cancel: CancellationToken::new(),
+            task,
+            outcome: StageOutcome::Failed {
+                reason: "reply loop error: provider stream event failed: \
+                         display=server_is_overloaded"
+                    .into(),
+                provider_failure: Some(djinn_runtime::ProviderFailureClass::Transient {
+                    retry_after_ms: None,
+                }),
+            },
+            updated_statuses: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            fail_start_transition: false,
+            execute_stage_calls: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            expected_role: RoleKind::Planner,
+            transitions: transitions.clone(),
+        });
+        let supervisor = TaskRunSupervisor::new(Arc::clone(&mirror), services);
+        let spec = TaskRunSpec {
+            task_run_id: "run-planner-transient".into(),
+            task_attempt_id: None,
+            task_id: task_id.into(),
+            project_id: project_id.into(),
+            trigger: TaskRunTrigger::NewTask,
+            base_branch: "main".into(),
+            task_branch: "djinn/planner-transient".into(),
+            flow: SupervisorFlow::Planning,
+            model_id_per_role: Default::default(),
+            read_source_project_ids: Vec::new(),
+            knowledge_injection: djinn_core::models::KnowledgeInjectionConfig::default(),
+            github_owner: None,
+            github_install_token: None,
+            commit_author_name: None,
+            commit_author_email: None,
+            resume_lifecycle_metadata: None,
+            is_evidence_spike: false,
+        };
+
+        let report = supervisor.run(spec).await.expect("supervisor run");
+
+        // The run outcome must stay `Failed` and carry the provider class so
+        // the host breaker sees the transient fault.
+        match &report.outcome {
+            TaskRunOutcome::Failed {
+                provider_failure, ..
+            } => {
+                assert!(
+                    matches!(
+                        provider_failure,
+                        Some(djinn_runtime::ProviderFailureClass::Transient { .. })
+                    ),
+                    "run outcome must carry the transient provider class, got {provider_failure:?}"
+                );
+            }
+            other => panic!("expected TaskRunOutcome::Failed, got {other:?}"),
+        }
+
+        let transitions = transitions.lock().expect("transitions mutex poisoned");
+        assert!(
+            !transitions.iter().any(|t| t.action == "close"),
+            "a transient provider failure must NOT close the review task (it would book \
+             close_reason=completed with zero planner output), got {transitions:?}"
+        );
+        // The pre-stage claim is the only transition a transient-failed
+        // planning run should request.
+        assert_eq!(
+            transitions
+                .iter()
+                .map(|t| t.action.as_str())
+                .collect::<Vec<_>>(),
+            vec!["start"],
+            "only the pre-stage start claim should fire"
+        );
+    }
+
+    /// Full-run integration: a NON-transient planner failure on a review
+    /// task still terminalizes it (the n6k8/k4my tight-loop backstop), with
+    /// the marked reason.
+    #[tokio::test]
+    async fn planning_run_terminal_failure_still_closes_review_task_with_marker() {
+        let root = tempfile::tempdir_in(std::env::current_dir().expect("current dir"))
+            .expect("temp test root");
+        let source_dir = root.path().join("source");
+        make_source_repo(&source_dir);
+
+        let project_id = "project-planner-terminal";
+        let task_id = "task-planner-terminal";
+        let mirror = Arc::new(MirrorManager::new(root.path().join("mirrors")));
+        mirror
+            .ensure_mirror(project_id, &format!("file://{}", source_dir.display()))
+            .await
+            .expect("install fixture mirror");
+
+        let mut task = planner_remediation_review_task(task_id);
+        task.project_id = project_id.into();
+        let transitions = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let services: Arc<dyn SupervisorServices> = Arc::new(ScriptedLoopGuardServices {
+            cancel: CancellationToken::new(),
+            task,
+            outcome: StageOutcome::Failed {
+                reason: "finalized via unexpected tool".into(),
+                provider_failure: None,
+            },
+            updated_statuses: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            fail_start_transition: false,
+            execute_stage_calls: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            expected_role: RoleKind::Planner,
+            transitions: transitions.clone(),
+        });
+        let supervisor = TaskRunSupervisor::new(Arc::clone(&mirror), services);
+        let spec = TaskRunSpec {
+            task_run_id: "run-planner-terminal".into(),
+            task_attempt_id: None,
+            task_id: task_id.into(),
+            project_id: project_id.into(),
+            trigger: TaskRunTrigger::NewTask,
+            base_branch: "main".into(),
+            task_branch: "djinn/planner-terminal".into(),
+            flow: SupervisorFlow::Planning,
+            model_id_per_role: Default::default(),
+            read_source_project_ids: Vec::new(),
+            knowledge_injection: djinn_core::models::KnowledgeInjectionConfig::default(),
+            github_owner: None,
+            github_install_token: None,
+            commit_author_name: None,
+            commit_author_email: None,
+            resume_lifecycle_metadata: None,
+            is_evidence_spike: false,
+        };
+
+        let _report = supervisor.run(spec).await.expect("supervisor run");
+
+        let transitions = transitions.lock().expect("transitions mutex poisoned");
+        let closes: Vec<_> = transitions.iter().filter(|t| t.action == "close").collect();
+        assert_eq!(
+            closes.len(),
+            1,
+            "a terminal planner failure must still close the review task exactly once, \
+             got {transitions:?}"
+        );
+        let reason = closes[0]
+            .reason
+            .as_ref()
+            .expect("terminal close must carry a reason");
+        assert!(
+            reason.starts_with("planner session failed: ")
+                && reason.contains("finalized via unexpected tool"),
+            "close reason must be marked as a planner session failure, got {reason:?}"
+        );
     }
 
     /// The headline regression test for `ep1i`: planner + `planning`
@@ -5183,10 +5859,6 @@ mod tests {
     /// clone on base_branch.
     #[tokio::test]
     async fn clone_fallback_uses_base_branch_when_task_branch_verified_absent() {
-        // `timed_clone_attempt` records into the process-global Prometheus
-        // recorder; serialize with the telemetry-scrape tests so their
-        // delta assertions are not polluted by this test's samples.
-        let _guard = clone_telemetry_guard().await;
         let tmp = tempfile::tempdir().expect("mirrors tempdir");
         let (mgr, _tip) = build_resume_test_mirror(tmp.path(), false).await;
         let (clock, cancel) = resume_test_clock_and_cancel();
@@ -5212,10 +5884,6 @@ mod tests {
     /// prior cycle's commits stay reachable from the local ref.
     #[tokio::test]
     async fn clone_uses_task_branch_when_present() {
-        // `timed_clone_attempt` records into the process-global Prometheus
-        // recorder; serialize with the telemetry-scrape tests so their
-        // delta assertions are not polluted by this test's samples.
-        let _guard = clone_telemetry_guard().await;
         let tmp = tempfile::tempdir().expect("mirrors tempdir");
         let (mgr, _tip) = build_resume_test_mirror(tmp.path(), false).await;
         let mirror_path = mgr.mirror_path(RESUME_TEST_PROJECT_ID);
@@ -5250,10 +5918,6 @@ mod tests {
     /// probe cannot prove the branch is missing.
     #[tokio::test]
     async fn transient_clone_failure_does_not_fall_back_to_base_branch() {
-        // `timed_clone_attempt` records into the process-global Prometheus
-        // recorder; serialize with the telemetry-scrape tests so their
-        // delta assertions are not polluted by this test's samples.
-        let _guard = clone_telemetry_guard().await;
         let tmp = tempfile::tempdir().expect("mirrors tempdir");
         let (mgr, _tip) = build_resume_test_mirror(tmp.path(), false).await;
 
@@ -5624,20 +6288,20 @@ mod tests {
 
     use djinn_core::clock::TestClock;
 
-    /// The Prometheus recorder is process-global; serialize telemetry-scrape
-    /// tests behind a mutex so each assertion can use a precise delta.
-    ///
-    /// `tokio::sync::Mutex` rather than `std`: every holder is an `async` test
-    /// that awaits while holding the guard for its whole body, and a `std`
-    /// guard held across an await point blocks the executor thread instead of
-    /// the task (clippy::await_holding_lock). The `.expect("poisoned")` goes
-    /// away with it — tokio's mutex has no poisoning, so one panicking test no
-    /// longer fails every sibling that shares the lock.
-    static CLONE_TELEMETRY_MUTEX: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
-    async fn clone_telemetry_guard() -> tokio::sync::MutexGuard<'static, ()> {
-        CLONE_TELEMETRY_MUTEX.lock().await
-    }
+    // The Prometheus recorder installed by `djinn_telemetry::init()` is
+    // process-global, so a before/after delta taken around the operation under
+    // test measures whatever the *whole binary* emitted in that window, not
+    // what the operation emitted. These tests used to serialize behind a
+    // `CLONE_TELEMETRY_MUTEX` / `CLEANUP_TELEMETRY_MUTEX` for that reason, but
+    // a mutex only excludes the tests that hold it: every other test in the
+    // binary that clones or tears down a workspace kept landing samples inside
+    // the delta window (observed as `7.0 vs 4.0`, `17.0 vs 14.0`, `18.0 vs
+    // 15.0` — over by exactly the number of concurrent siblings).
+    //
+    // Each telemetry test now scopes a `djinn_telemetry::IsolatedRecorder` to
+    // its own thread instead. The rendered registry then contains only what
+    // that test emitted, so the assertions are absolute rather than deltas,
+    // no test excludes any other, and the whole group runs in parallel.
 
     /// Count `workspace_clone_seconds_count` samples for a given outcome.
     fn clone_count(rendered: &str, outcome: &str) -> f64 {
@@ -5692,9 +6356,6 @@ mod tests {
     /// injected monotonic clock.
     #[tokio::test]
     async fn timed_clone_attempt_records_one_ok_sample() {
-        let _guard = clone_telemetry_guard().await;
-        djinn_telemetry::init().expect("telemetry init");
-
         let tmp = tempfile::tempdir().expect("mirrors tempdir");
         let (mgr, _tip) = build_resume_test_mirror(tmp.path(), false).await;
         let clock = Arc::new(TestClock::new(
@@ -5702,55 +6363,52 @@ mod tests {
             std::time::Instant::now(),
         ));
         let cancel = CancellationToken::new();
-
-        let before = djinn_telemetry::render().expect("render before");
-        let ok_before = clone_count(&before, "ok");
-        let ok_sum_before = clone_sum(&before, "ok");
         let elapsed = Duration::from_millis(200);
 
-        let clock_clone = clock.clone();
-        timed_clone_attempt(&*clock, &cancel, async move {
-            let result = mgr
-                .clone_ephemeral(RESUME_TEST_PROJECT_ID, RESUME_TEST_BASE)
-                .await;
-            // Advance the TestClock mono time so elapsed is deterministic.
-            clock_clone.advance_mono(elapsed);
-            result
-        })
-        .await
-        .expect("clone must succeed");
+        let recorder = djinn_telemetry::IsolatedRecorder::new();
+        let rendered = {
+            let _metrics = recorder.scope();
+            let clock_clone = clock.clone();
+            timed_clone_attempt(&*clock, &cancel, async move {
+                let result = mgr
+                    .clone_ephemeral(RESUME_TEST_PROJECT_ID, RESUME_TEST_BASE)
+                    .await;
+                // Advance the TestClock mono time so elapsed is deterministic.
+                clock_clone.advance_mono(elapsed);
+                result
+            })
+            .await
+            .expect("clone must succeed");
+            recorder.render()
+        };
 
-        let after = djinn_telemetry::render().expect("render after");
         assert_eq!(
-            clone_count(&after, "ok"),
-            ok_before + 1.0,
+            clone_count(&rendered, "ok"),
+            1.0,
             "one ok clone sample expected"
         );
         assert!(
-            (clone_sum(&after, "ok") - ok_sum_before - elapsed.as_secs_f64()).abs() < 0.001,
-            "ok clone sum delta must equal elapsed"
+            (clone_sum(&rendered, "ok") - elapsed.as_secs_f64()).abs() < 0.001,
+            "ok clone sum must equal elapsed"
         );
-        // Error/cancelled must not increase.
+        // Error/cancelled must not be recorded at all.
         assert_eq!(
-            clone_count(&after, "error"),
-            clone_count(&before, "error"),
-            "error count must not change for a successful clone"
+            clone_count(&rendered, "error"),
+            0.0,
+            "no error sample for a successful clone"
         );
         assert_eq!(
-            clone_count(&after, "cancelled"),
-            clone_count(&before, "cancelled"),
-            "cancelled count must not change for a successful clone"
+            clone_count(&rendered, "cancelled"),
+            0.0,
+            "no cancelled sample for a successful clone"
         );
-        assert_no_identity_labels(&after, "djinn_workspace_clone_seconds");
+        assert_no_identity_labels(&rendered, "djinn_workspace_clone_seconds");
     }
 
     /// A failed clone (missing mirror project) records exactly one `error`
     /// sample when the cancel token is NOT set.
     #[tokio::test]
     async fn timed_clone_attempt_records_one_error_sample() {
-        let _guard = clone_telemetry_guard().await;
-        djinn_telemetry::init().expect("telemetry init");
-
         let tmp = tempfile::tempdir().expect("mirrors tempdir");
         let mgr = MirrorManager::new(tmp.path().to_path_buf());
         let clock = Arc::new(TestClock::new(
@@ -5758,48 +6416,45 @@ mod tests {
             std::time::Instant::now(),
         ));
         let cancel = CancellationToken::new();
-
-        let before = djinn_telemetry::render().expect("render before");
-        let err_before = clone_count(&before, "error");
-        let err_sum_before = clone_sum(&before, "error");
         let elapsed = Duration::from_millis(150);
 
-        let clock_clone = clock.clone();
-        let result = timed_clone_attempt(&*clock, &cancel, async move {
-            let result = mgr
-                .clone_ephemeral("nonexistent-project", RESUME_TEST_BASE)
-                .await;
-            clock_clone.advance_mono(elapsed);
-            result
-        })
-        .await;
-        assert!(result.is_err(), "clone of missing project must fail");
+        let recorder = djinn_telemetry::IsolatedRecorder::new();
+        let rendered = {
+            let _metrics = recorder.scope();
+            let clock_clone = clock.clone();
+            let result = timed_clone_attempt(&*clock, &cancel, async move {
+                let result = mgr
+                    .clone_ephemeral("nonexistent-project", RESUME_TEST_BASE)
+                    .await;
+                clock_clone.advance_mono(elapsed);
+                result
+            })
+            .await;
+            assert!(result.is_err(), "clone of missing project must fail");
+            recorder.render()
+        };
 
-        let after = djinn_telemetry::render().expect("render after");
         assert_eq!(
-            clone_count(&after, "error"),
-            err_before + 1.0,
+            clone_count(&rendered, "error"),
+            1.0,
             "one error clone sample expected"
         );
         assert!(
-            (clone_sum(&after, "error") - err_sum_before - elapsed.as_secs_f64()).abs() < 0.001,
-            "error clone sum delta must equal elapsed"
+            (clone_sum(&rendered, "error") - elapsed.as_secs_f64()).abs() < 0.001,
+            "error clone sum must equal elapsed"
         );
         assert_eq!(
-            clone_count(&after, "ok"),
-            clone_count(&before, "ok"),
-            "ok count must not change for a failed clone"
+            clone_count(&rendered, "ok"),
+            0.0,
+            "no ok sample for a failed clone"
         );
-        assert_no_identity_labels(&after, "djinn_workspace_clone_seconds");
+        assert_no_identity_labels(&rendered, "djinn_workspace_clone_seconds");
     }
 
     /// A clone that resolves (Ok or Err) while the cancel token IS set
     /// records exactly one `cancelled` sample.
     #[tokio::test]
     async fn timed_clone_attempt_records_cancelled_when_token_set() {
-        let _guard = clone_telemetry_guard().await;
-        djinn_telemetry::init().expect("telemetry init");
-
         let tmp = tempfile::tempdir().expect("mirrors tempdir");
         let (mgr, _tip) = build_resume_test_mirror(tmp.path(), false).await;
         let clock = Arc::new(TestClock::new(
@@ -5808,42 +6463,41 @@ mod tests {
         ));
         let cancel = CancellationToken::new();
         cancel.cancel();
-
-        let before = djinn_telemetry::render().expect("render before");
-        let cancel_before = clone_count(&before, "cancelled");
-        let cancel_sum_before = clone_sum(&before, "cancelled");
         let elapsed = Duration::from_millis(100);
 
-        // Even though the clone succeeds, the cancel token is set so the
-        // outcome is `cancelled`.
-        let clock_clone = clock.clone();
-        timed_clone_attempt(&*clock, &cancel, async move {
-            let result = mgr
-                .clone_ephemeral(RESUME_TEST_PROJECT_ID, RESUME_TEST_BASE)
-                .await;
-            clock_clone.advance_mono(elapsed);
-            result
-        })
-        .await
-        .expect("clone itself succeeds");
+        let recorder = djinn_telemetry::IsolatedRecorder::new();
+        let rendered = {
+            let _metrics = recorder.scope();
+            // Even though the clone succeeds, the cancel token is set so the
+            // outcome is `cancelled`.
+            let clock_clone = clock.clone();
+            timed_clone_attempt(&*clock, &cancel, async move {
+                let result = mgr
+                    .clone_ephemeral(RESUME_TEST_PROJECT_ID, RESUME_TEST_BASE)
+                    .await;
+                clock_clone.advance_mono(elapsed);
+                result
+            })
+            .await
+            .expect("clone itself succeeds");
+            recorder.render()
+        };
 
-        let after = djinn_telemetry::render().expect("render after");
         assert_eq!(
-            clone_count(&after, "cancelled"),
-            cancel_before + 1.0,
+            clone_count(&rendered, "cancelled"),
+            1.0,
             "one cancelled clone sample expected when token is set"
         );
         assert!(
-            (clone_sum(&after, "cancelled") - cancel_sum_before - elapsed.as_secs_f64()).abs()
-                < 0.001,
-            "cancelled clone sum delta must equal elapsed"
+            (clone_sum(&rendered, "cancelled") - elapsed.as_secs_f64()).abs() < 0.001,
+            "cancelled clone sum must equal elapsed"
         );
         assert_eq!(
-            clone_count(&after, "ok"),
-            clone_count(&before, "ok"),
-            "ok count must not change when cancel token is set"
+            clone_count(&rendered, "ok"),
+            0.0,
+            "no ok sample when the cancel token is set"
         );
-        assert_no_identity_labels(&after, "djinn_workspace_clone_seconds");
+        assert_no_identity_labels(&rendered, "djinn_workspace_clone_seconds");
     }
 
     /// Multi-attempt fallback: when task_branch clone fails and base_branch
@@ -5852,9 +6506,6 @@ mod tests {
     /// operation actually begins.
     #[tokio::test]
     async fn timed_clone_attempt_multi_attempt_fallback_records_two_samples() {
-        let _guard = clone_telemetry_guard().await;
-        djinn_telemetry::init().expect("telemetry init");
-
         let tmp = tempfile::tempdir().expect("mirrors tempdir");
         let (mgr, _tip) = build_resume_test_mirror(tmp.path(), false).await;
         let clock = Arc::new(TestClock::new(
@@ -5862,60 +6513,59 @@ mod tests {
             std::time::Instant::now(),
         ));
         let cancel = CancellationToken::new();
-
-        let before = djinn_telemetry::render().expect("render before");
-        let ok_before = clone_count(&before, "ok");
-        let err_before = clone_count(&before, "error");
-        let ok_sum_before = clone_sum(&before, "ok");
-        let err_sum_before = clone_sum(&before, "error");
         let err_elapsed = Duration::from_millis(120);
         let ok_elapsed = Duration::from_millis(250);
 
-        // First attempt: task_branch doesn't exist → error.
-        let clock_clone = clock.clone();
-        let first = timed_clone_attempt(&*clock, &cancel, async move {
-            let result = mgr
-                .clone_ephemeral(RESUME_TEST_PROJECT_ID, RESUME_TEST_TASK)
-                .await;
-            clock_clone.advance_mono(err_elapsed);
-            result
-        })
-        .await;
-        assert!(first.is_err(), "task_branch clone must fail (first cycle)");
+        let recorder = djinn_telemetry::IsolatedRecorder::new();
+        let rendered = {
+            let _metrics = recorder.scope();
 
-        // Second attempt (fallback): base_branch exists → ok.
-        let clock_clone2 = clock.clone();
-        timed_clone_attempt(&*clock, &cancel, async move {
-            let (mgr2, _tip2) = build_resume_test_mirror(tmp.path(), false).await;
-            let result = mgr2
-                .clone_ephemeral(RESUME_TEST_PROJECT_ID, RESUME_TEST_BASE)
-                .await;
-            clock_clone2.advance_mono(ok_elapsed);
-            result
-        })
-        .await
-        .expect("base_branch clone must succeed");
+            // First attempt: task_branch doesn't exist → error.
+            let clock_clone = clock.clone();
+            let first = timed_clone_attempt(&*clock, &cancel, async move {
+                let result = mgr
+                    .clone_ephemeral(RESUME_TEST_PROJECT_ID, RESUME_TEST_TASK)
+                    .await;
+                clock_clone.advance_mono(err_elapsed);
+                result
+            })
+            .await;
+            assert!(first.is_err(), "task_branch clone must fail (first cycle)");
 
-        let after = djinn_telemetry::render().expect("render after");
+            // Second attempt (fallback): base_branch exists → ok.
+            let clock_clone2 = clock.clone();
+            timed_clone_attempt(&*clock, &cancel, async move {
+                let (mgr2, _tip2) = build_resume_test_mirror(tmp.path(), false).await;
+                let result = mgr2
+                    .clone_ephemeral(RESUME_TEST_PROJECT_ID, RESUME_TEST_BASE)
+                    .await;
+                clock_clone2.advance_mono(ok_elapsed);
+                result
+            })
+            .await
+            .expect("base_branch clone must succeed");
+            recorder.render()
+        };
+
         assert_eq!(
-            clone_count(&after, "error"),
-            err_before + 1.0,
+            clone_count(&rendered, "error"),
+            1.0,
             "one error sample for the failed task_branch attempt"
         );
         assert_eq!(
-            clone_count(&after, "ok"),
-            ok_before + 1.0,
+            clone_count(&rendered, "ok"),
+            1.0,
             "one ok sample for the successful base_branch fallback attempt"
         );
         assert!(
-            (clone_sum(&after, "error") - err_sum_before - err_elapsed.as_secs_f64()).abs() < 0.001,
-            "error clone sum delta must equal first attempt elapsed"
+            (clone_sum(&rendered, "error") - err_elapsed.as_secs_f64()).abs() < 0.001,
+            "error clone sum must equal first attempt elapsed"
         );
         assert!(
-            (clone_sum(&after, "ok") - ok_sum_before - ok_elapsed.as_secs_f64()).abs() < 0.001,
-            "ok clone sum delta must equal fallback attempt elapsed"
+            (clone_sum(&rendered, "ok") - ok_elapsed.as_secs_f64()).abs() < 0.001,
+            "ok clone sum must equal fallback attempt elapsed"
         );
-        assert_no_identity_labels(&after, "djinn_workspace_clone_seconds");
+        assert_no_identity_labels(&rendered, "djinn_workspace_clone_seconds");
     }
 
     /// `classify_clone_outcome`: Err + not-cancelled → error. This pure
@@ -5944,24 +6594,6 @@ mod tests {
     }
 
     // ── Workspace cleanup telemetry tests (proposal zp5t) ─────────────────
-
-    /// The Prometheus recorder is process-global; serialize telemetry-scrape
-    /// tests behind a mutex so each assertion can use a precise delta.
-    ///
-    /// `tokio::sync::Mutex` for the same reason as [`CLONE_TELEMETRY_MUTEX`]:
-    /// the async holders await while holding it. This one has synchronous
-    /// `#[test]` holders too, hence the two accessors below.
-    static CLEANUP_TELEMETRY_MUTEX: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
-    async fn cleanup_telemetry_guard() -> tokio::sync::MutexGuard<'static, ()> {
-        CLEANUP_TELEMETRY_MUTEX.lock().await
-    }
-
-    /// Synchronous `#[test]` counterpart. Panics if called from inside a
-    /// runtime — async callers must use [`cleanup_telemetry_guard`].
-    fn cleanup_telemetry_guard_blocking() -> tokio::sync::MutexGuard<'static, ()> {
-        CLEANUP_TELEMETRY_MUTEX.blocking_lock()
-    }
 
     /// Count `workspace_cleanup_seconds_count` samples for a given
     /// trigger/outcome pair.
@@ -6076,9 +6708,6 @@ mod tests {
     /// with the classified trigger.
     #[tokio::test]
     async fn timed_teardown_records_one_complete_ok_sample() {
-        let _guard = cleanup_telemetry_guard().await;
-        djinn_telemetry::init().expect("telemetry init");
-
         let tmp = tempfile::tempdir().expect("mirrors tempdir");
         let (mgr, _tip) = build_resume_test_mirror(tmp.path(), false).await;
         let ws = mgr
@@ -6087,59 +6716,54 @@ mod tests {
             .expect("clone");
         let clock = TestClock::new(std::time::SystemTime::UNIX_EPOCH, std::time::Instant::now());
 
-        let before = djinn_telemetry::render().expect("render before");
-        let count_before = cleanup_count(&before, "complete", "ok");
-        let sum_before = cleanup_sum(&before, "complete", "ok");
+        let recorder = djinn_telemetry::IsolatedRecorder::new();
+        let rendered = {
+            let _metrics = recorder.scope();
+            let result = timed_workspace_teardown(&clock, ws, CleanupTrigger::Complete);
+            assert!(result.is_ok(), "teardown must succeed");
+            recorder.render()
+        };
 
-        let result = timed_workspace_teardown(&clock, ws, CleanupTrigger::Complete);
-        assert!(result.is_ok(), "teardown must succeed");
-
-        let after = djinn_telemetry::render().expect("render after");
         assert_eq!(
-            cleanup_count(&after, "complete", "ok"),
-            count_before + 1.0,
+            cleanup_count(&rendered, "complete", "ok"),
+            1.0,
             "one complete/ok cleanup sample expected"
         );
         // The TestClock does not advance during the synchronous teardown, so
         // the recorded duration is ~0. Assert the sum is non-negative (the
         // teardown completed and recorded a valid sample).
-        let sum_delta = cleanup_sum(&after, "complete", "ok") - sum_before;
+        let sum = cleanup_sum(&rendered, "complete", "ok");
         assert!(
-            sum_delta >= 0.0,
-            "complete/ok sum delta must be non-negative, got {sum_delta}"
+            sum >= 0.0,
+            "complete/ok sum must be non-negative, got {sum}"
         );
-        assert_no_cleanup_identity_labels(&after);
+        assert_no_cleanup_identity_labels(&rendered);
     }
 
     /// An attached workspace teardown is a no-op and does NOT emit a sample —
     /// attached directories are never deleted or observed.
     #[test]
     fn timed_teardown_on_attached_emits_nothing() {
-        let _guard = cleanup_telemetry_guard_blocking();
-        djinn_telemetry::init().expect("telemetry init");
-
         let tmp = tempfile::tempdir().expect("tempdir");
         let ws = Workspace::attach_existing(tmp.path(), "main").expect("attach");
         assert!(!ws.is_owned(), "attached workspace must not be owned");
 
         let clock = TestClock::new(std::time::SystemTime::UNIX_EPOCH, std::time::Instant::now());
 
-        let before = djinn_telemetry::render().expect("render before");
-        let complete_ok_before = cleanup_count(&before, "complete", "ok");
-
-        // teardown_owned on Attached returns Ok and does NOT delete.
-        let result = timed_workspace_teardown(&clock, ws, CleanupTrigger::Complete);
+        let (result, rendered) = djinn_telemetry::render_isolated(|| {
+            // teardown_owned on Attached returns Ok and does NOT delete.
+            timed_workspace_teardown(&clock, ws, CleanupTrigger::Complete)
+        });
         assert!(result.is_ok(), "attached teardown must be Ok");
 
-        let after = djinn_telemetry::render().expect("render after");
         // Attached workspaces are never observed: no telemetry sample emitted.
         assert!(
             tmp.path().exists(),
             "attached directory must NOT be deleted"
         );
         assert_eq!(
-            cleanup_count(&after, "complete", "ok"),
-            complete_ok_before,
+            cleanup_count(&rendered, "complete", "ok"),
+            0.0,
             "attached teardown must NOT emit any sample"
         );
     }
@@ -6149,10 +6773,10 @@ mod tests {
     /// it returns, without relying on slow filesystem failures.
     #[test]
     fn cleanup_records_all_eight_returned_operation_outcomes() {
-        let _guard = cleanup_telemetry_guard_blocking();
-        djinn_telemetry::init().expect("telemetry init");
         let clock = TestClock::new(std::time::SystemTime::UNIX_EPOCH, std::time::Instant::now());
         let elapsed = Duration::from_millis(42);
+        let recorder = djinn_telemetry::IsolatedRecorder::new();
+        let _metrics = recorder.scope();
         for (trigger_str, trigger) in [
             ("complete", CleanupTrigger::Complete),
             ("error", CleanupTrigger::Error),
@@ -6160,14 +6784,11 @@ mod tests {
             ("shutdown", CleanupTrigger::Shutdown),
         ] {
             for (outcome_str, succeeds) in [("ok", true), ("error", false)] {
-                let before = djinn_telemetry::render().expect("render before");
-                let count_before = cleanup_count(&before, trigger_str, outcome_str);
-                let sum_before = cleanup_sum(&before, trigger_str, outcome_str);
                 let result = timed_cleanup_operation(&clock, trigger, || {
-                    let during = djinn_telemetry::render().expect("render during teardown");
+                    let during = recorder.render();
                     assert_eq!(
                         cleanup_count(&during, trigger_str, outcome_str),
-                        count_before,
+                        0.0,
                         "sample must wait for returned teardown"
                     );
                     clock.advance_mono(elapsed);
@@ -6182,30 +6803,25 @@ mod tests {
                     succeeds,
                     "injected {trigger_str}/{outcome_str} result must propagate"
                 );
-                let after = djinn_telemetry::render().expect("render after");
-                assert_eq!(
-                    cleanup_count(&after, trigger_str, outcome_str),
-                    count_before + 1.0
-                );
+                let after = recorder.render();
+                assert_eq!(cleanup_count(&after, trigger_str, outcome_str), 1.0);
                 assert!(
-                    (cleanup_sum(&after, trigger_str, outcome_str)
-                        - sum_before
-                        - elapsed.as_secs_f64())
-                    .abs()
+                    (cleanup_sum(&after, trigger_str, outcome_str) - elapsed.as_secs_f64()).abs()
                         < 0.001
                 );
             }
         }
-        assert_no_cleanup_identity_labels(&djinn_telemetry::render().expect("render labels"));
+        assert_no_cleanup_identity_labels(&recorder.render());
     }
 
     #[test]
     fn cleanup_panic_emits_nothing_until_a_later_returned_teardown() {
-        let _guard = cleanup_telemetry_guard_blocking();
-        djinn_telemetry::init().expect("telemetry init");
         let clock = TestClock::new(std::time::SystemTime::UNIX_EPOCH, std::time::Instant::now());
-        let before = djinn_telemetry::render().expect("render before");
-        let count_before = cleanup_count(&before, "complete", "ok");
+        let recorder = djinn_telemetry::IsolatedRecorder::new();
+        // The guard is held across `catch_unwind` deliberately: it drops only
+        // at the end of the test, so the recovered-from panic cannot silently
+        // put the second teardown's sample on the global recorder.
+        let _metrics = recorder.scope();
         let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             timed_cleanup_operation(
                 &clock,
@@ -6215,22 +6831,16 @@ mod tests {
         }));
         assert!(panic.is_err());
         assert_eq!(
-            cleanup_count(
-                &djinn_telemetry::render().expect("render after panic"),
-                "complete",
-                "ok"
-            ),
-            count_before
+            cleanup_count(&recorder.render(), "complete", "ok"),
+            0.0,
+            "a teardown that panicked must emit nothing"
         );
         timed_cleanup_operation(&clock, CleanupTrigger::Complete, || Ok(()))
             .expect("returned teardown");
         assert_eq!(
-            cleanup_count(
-                &djinn_telemetry::render().expect("render after returned teardown"),
-                "complete",
-                "ok"
-            ),
-            count_before + 1.0
+            cleanup_count(&recorder.render(), "complete", "ok"),
+            1.0,
+            "the later returned teardown emits exactly one sample"
         );
     }
 
@@ -6240,9 +6850,6 @@ mod tests {
     /// no-op.
     #[tokio::test]
     async fn teardown_owned_prevents_double_drop() {
-        let _guard = cleanup_telemetry_guard().await;
-        djinn_telemetry::init().expect("telemetry init");
-
         let tmp = tempfile::tempdir().expect("mirrors tempdir");
         let (mgr, _tip) = build_resume_test_mirror(tmp.path(), false).await;
         let ws = mgr
@@ -6253,18 +6860,16 @@ mod tests {
 
         let clock = TestClock::new(std::time::SystemTime::UNIX_EPOCH, std::time::Instant::now());
 
-        let before = djinn_telemetry::render().expect("render before");
-        let count_before = cleanup_count(&before, "complete", "ok");
-
-        // First teardown: records exactly one sample and removes the dir.
-        timed_workspace_teardown(&clock, ws, CleanupTrigger::Complete)
-            .expect("first teardown must succeed");
+        let (_, rendered) = djinn_telemetry::render_isolated(|| {
+            // First teardown: records exactly one sample and removes the dir.
+            timed_workspace_teardown(&clock, ws, CleanupTrigger::Complete)
+                .expect("first teardown must succeed");
+        });
         assert!(!path.exists(), "directory must be removed after teardown");
 
-        let after = djinn_telemetry::render().expect("render after");
         assert_eq!(
-            cleanup_count(&after, "complete", "ok"),
-            count_before + 1.0,
+            cleanup_count(&rendered, "complete", "ok"),
+            1.0,
             "exactly one cleanup sample (no duplicate from Drop)"
         );
     }
@@ -6296,9 +6901,6 @@ mod tests {
     /// emitted if teardown never returns (panic/SIGKILL are out of scope).
     #[tokio::test]
     async fn timed_teardown_records_error_on_failure() {
-        let _guard = cleanup_telemetry_guard().await;
-        djinn_telemetry::init().expect("telemetry init");
-
         let tmp = tempfile::tempdir().expect("mirrors tempdir");
         let (mgr, _tip) = build_resume_test_mirror(tmp.path(), false).await;
         let ws = mgr
@@ -6309,31 +6911,28 @@ mod tests {
 
         let clock = TestClock::new(std::time::SystemTime::UNIX_EPOCH, std::time::Instant::now());
 
-        let before = djinn_telemetry::render().expect("render before");
-        let count_before = cleanup_count(&before, "error", "error");
-        let sum_before = cleanup_sum(&before, "error", "error");
-
         // Externally delete the directory so TempDir::close() returns Err.
         std::fs::remove_dir_all(&ws_path).expect("externally delete dir");
 
-        let result = timed_workspace_teardown(&clock, ws, CleanupTrigger::Error);
+        let (result, rendered) = djinn_telemetry::render_isolated(|| {
+            timed_workspace_teardown(&clock, ws, CleanupTrigger::Error)
+        });
         assert!(
             result.is_err(),
             "teardown must fail on externally deleted dir"
         );
 
-        let after = djinn_telemetry::render().expect("render after");
         assert_eq!(
-            cleanup_count(&after, "error", "error"),
-            count_before + 1.0,
+            cleanup_count(&rendered, "error", "error"),
+            1.0,
             "one error/error cleanup sample expected"
         );
-        let sum_delta = cleanup_sum(&after, "error", "error") - sum_before;
+        let sum = cleanup_sum(&rendered, "error", "error");
         assert!(
-            sum_delta >= 0.0,
-            "error/error sum delta must be non-negative, got {sum_delta}"
+            sum >= 0.0,
+            "error/error sum must be non-negative, got {sum}"
         );
-        assert_no_cleanup_identity_labels(&after);
+        assert_no_cleanup_identity_labels(&rendered);
     }
 
     /// Regression: a persistent push_to_origin failure after WorkerDone must

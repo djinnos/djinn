@@ -105,16 +105,7 @@ impl SessionMessageRepository {
     /// This is the pre-compaction fallback path and is also used to validate the
     /// retained tail before applying a projected boundary.
     async fn load_raw_conversation_internal(&self, session_id: &str) -> Result<Conversation> {
-        let rows = sqlx::query_as!(
-            SessionMessage,
-            r#"SELECT id, session_id, role, content_json::text AS "content_json!", token_count, created_at
-             FROM session_messages
-             WHERE session_id = $1
-             ORDER BY created_at ASC, id ASC"#,
-            session_id,
-        )
-        .fetch_all(self.db.pool())
-        .await?;
+        let rows = self.list_for_session(session_id).await?;
 
         let mut conv = Conversation::default();
         for row in rows {
@@ -180,16 +171,7 @@ impl SessionMessageRepository {
             return Ok(raw);
         };
 
-        let rows = sqlx::query_as!(
-            SessionMessage,
-            r#"SELECT id, session_id, role, content_json::text AS "content_json!", token_count, created_at
-             FROM session_messages
-             WHERE session_id = $1
-             ORDER BY created_at ASC, id ASC"#,
-            session_id,
-        )
-        .fetch_all(self.db.pool())
-        .await?;
+        let rows = self.list_for_session(session_id).await?;
 
         let start_idx = rows.iter().position(|r| r.id == start_id);
         let Some(start_idx) = start_idx else {
@@ -364,6 +346,33 @@ impl SessionMessageRepository {
         }
 
         Ok(conv)
+    }
+
+    /// List the raw `session_messages` rows for a session in conversation
+    /// order (`created_at ASC, id ASC`).
+    ///
+    /// [`Self::load_raw_conversation`] reads the same rows but projects them
+    /// down to a [`Conversation`], which keeps only role and content. Callers
+    /// that render a message list need the per-row identity the projection
+    /// discards — `id`, `token_count`, and `created_at` — so they get the rows
+    /// themselves. This is the single definition of the "raw history for one
+    /// session" read; both compaction paths above are built on it.
+    ///
+    /// Like every other read on this repository, this does NOT call
+    /// `ensure_initialized`: initialization is the caller's concern on read
+    /// paths, and adding it here would give the three existing callers a
+    /// migration side effect they never had.
+    pub async fn list_for_session(&self, session_id: &str) -> Result<Vec<SessionMessage>> {
+        Ok(sqlx::query_as!(
+            SessionMessage,
+            r#"SELECT id, session_id, role, content_json::text AS "content_json!", token_count, created_at
+             FROM session_messages
+             WHERE session_id = $1
+             ORDER BY created_at ASC, id ASC"#,
+            session_id,
+        )
+        .fetch_all(self.db.pool())
+        .await?)
     }
 
     /// Load the raw conversation without applying any compaction projection.

@@ -919,23 +919,24 @@ async fn production_adapter_cancellation_reconciles_uid_before_capacity_release(
 /// observed; a deleted (missing/unreadable) epoch row fails closed to no
 /// observed epoch.
 #[tokio::test]
-async fn recovery_reads_admission_epoch_and_reference_cap() {
-    use djinn_db::{AdmissionHandoffRepository, V0Mode, V1Mode};
+async fn recovery_reads_the_durable_authority_and_reference_cap() {
+    use djinn_db::{InvocationLeaseAuthorityRepository, InvocationLeaseMode};
 
     let database = Database::open_in_memory().unwrap();
-    let handoff = Arc::new(AdmissionHandoffRepository::new(database.clone()));
+    let authority = Arc::new(InvocationLeaseAuthorityRepository::new(database.clone()));
     // Advance the durable epoch and set a reference cap of 7.
-    handoff
-        .set_modes_and_cap(0, V0Mode::Enforce, V1Mode::Shadow, Some(7))
+    authority
+        .set_mode_and_cap(0, InvocationLeaseMode::Shadow, Some(7))
         .await
         .unwrap();
-    let current = handoff.read().await.unwrap().unwrap();
+    let current = authority.read().await.unwrap().unwrap();
     assert_eq!(current.epoch, 1);
     assert_eq!(current.cap, Some(7));
 
     let repository = Arc::new(BuildLeaseRepository::new(database.clone()));
     let service = Arc::new(
-        BuildLeaseService::new(Arc::clone(&repository), 1).with_handoff_epoch(Arc::clone(&handoff)),
+        BuildLeaseService::new(Arc::clone(&repository), 1)
+            .with_invocation_lease_authority(Arc::clone(&authority)),
     );
     // Before recovery the epoch has not been observed.
     assert_eq!(service.observed_epoch(), None);
@@ -944,10 +945,10 @@ async fn recovery_reads_admission_epoch_and_reference_cap() {
     assert_eq!(service.observed_epoch(), Some(1));
 
     // A missing epoch row fails closed: the observed epoch is cleared.
-    handoff.delete_for_test().await.unwrap();
+    authority.delete_for_test().await.unwrap();
     let restarted = Arc::new(
         BuildLeaseService::new(Arc::new(BuildLeaseRepository::new(database.clone())), 1)
-            .with_handoff_epoch(Arc::clone(&handoff)),
+            .with_invocation_lease_authority(Arc::clone(&authority)),
     );
     assert!(matches!(restarted.recover().await, LeaseResult::Status(_)));
     assert_eq!(
@@ -1179,21 +1180,21 @@ async fn cap_three_mixed_consumers_hold_invariant_and_release_promotes_fifo() {
 /// to admit beyond the reloaded occupancy.
 #[tokio::test]
 async fn cap_three_restart_reloads_occupied_queued_and_epoch_before_admission() {
-    use djinn_db::{AdmissionHandoffRepository, V0Mode, V1Mode};
+    use djinn_db::{InvocationLeaseAuthorityRepository, InvocationLeaseMode};
 
     let database = Database::open_in_memory().unwrap();
     database.ensure_initialized().await.unwrap();
-    let handoff = Arc::new(AdmissionHandoffRepository::new(database.clone()));
+    let authority = Arc::new(InvocationLeaseAuthorityRepository::new(database.clone()));
     // Commit an epoch carrying the authoritative reference cap of 3.
-    handoff
-        .set_modes_and_cap(0, V0Mode::Enforce, V1Mode::Shadow, Some(3))
+    authority
+        .set_mode_and_cap(0, InvocationLeaseMode::Shadow, Some(3))
         .await
         .unwrap();
-    let epoch = handoff.read().await.unwrap().unwrap().epoch;
+    let epoch = authority.read().await.unwrap().unwrap().epoch;
 
     let repository = Arc::new(BuildLeaseRepository::new(database.clone()));
-    let first =
-        BuildLeaseService::new(Arc::clone(&repository), 3).with_handoff_epoch(Arc::clone(&handoff));
+    let first = BuildLeaseService::new(Arc::clone(&repository), 3)
+        .with_invocation_lease_authority(Arc::clone(&authority));
     assert!(matches!(first.recover().await, LeaseResult::Status(_)));
 
     // Occupy three units (warm / warm / task) and queue two more.
@@ -1237,8 +1238,8 @@ async fn cap_three_restart_reloads_occupied_queued_and_epoch_before_admission() 
 
     // Restart: a brand-new generation over the same durable rows + epoch, handed
     // the wrong local cap of 0.
-    let restarted =
-        BuildLeaseService::new(Arc::clone(&repository), 0).with_handoff_epoch(Arc::clone(&handoff));
+    let restarted = BuildLeaseService::new(Arc::clone(&repository), 0)
+        .with_invocation_lease_authority(Arc::clone(&authority));
     assert_eq!(
         restarted.observed_epoch(),
         None,

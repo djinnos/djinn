@@ -14,11 +14,15 @@ fn rendered_counter_value(metric: &str, kind: &str) -> f64 {
         .unwrap_or(0.0)
 }
 
-/// Read one bounded strike-decision series from the process recorder. The
-/// cross-path tests take a render delta around the live coordinator call, not
-/// around the retry classifier, because the coordinator owns metric emission.
-fn rendered_strike_decision_value(decision: &str, source: &str) -> f64 {
-    let rendered = djinn_telemetry::render().unwrap();
+/// Read one bounded strike-decision series out of an already-rendered registry.
+///
+/// The cross-path tests render an [`djinn_telemetry::IsolatedRecorder`] scoped
+/// to the calling thread rather than the process recorder, so the value is
+/// exactly what the live coordinator call under test emitted — no delta, and
+/// nothing a concurrently running sibling test emitted. A series that is
+/// absent means the emission did not happen on this thread, which is a real
+/// failure rather than a zero.
+fn strike_decision_value(rendered: &str, decision: &str, source: &str) -> f64 {
     let prefix = format!(
         "djinn_dispatch_strike_decisions_total{{decision=\"{decision}\",source=\"{source}\"}} "
     );
@@ -33,8 +37,13 @@ fn rendered_strike_decision_value(decision: &str, source: &str) -> f64 {
 /// Guard the cardinality contract at the rendered recorder boundary. Dispatch
 /// identity is durable evidence and structured logging context, never a metric
 /// label: this counter may have exactly its bounded decision/source pair.
-fn assert_strike_decision_labels_are_bounded() {
-    let rendered = djinn_telemetry::render().unwrap();
+///
+/// `rendered` must come from the test's own [`djinn_telemetry::IsolatedRecorder`].
+/// Reading the process-global registry here made the guard assert on every
+/// series the *whole binary* had ever emitted, so a sibling test exercising a
+/// different — but equally bounded — source (`environmental_restart_orphan`,
+/// which this call path never emits) failed this test instead of its own.
+fn assert_strike_decision_labels_are_bounded(rendered: &str) {
     let allowed_decisions = ["counted", "exempted"];
     let allowed_sources = [
         "environmental_owner_expired",
@@ -8115,9 +8124,11 @@ async fn spawn_failed_dispatch_orphan_reaches_no_pr_terminal_cap_live() {
         .unwrap();
     let attempts = TaskAttemptRepository::new(db.clone());
     let mut actor = coordinator_actor_for_tests(&db, &tx);
-    // Capture the first persisted spawn-failure evaluation. Later loop rounds
-    // prove the cap; this delta proves the live coordinator emits exactly once.
-    let counted_before = rendered_strike_decision_value("counted", "spawn_failed");
+    // Scope a private recorder to this test's thread. Later loop rounds prove
+    // the cap; the absolute count in this registry proves the live coordinator
+    // emits exactly once, without a delta a concurrent sibling can land inside.
+    let recorder = djinn_telemetry::IsolatedRecorder::new();
+    let _metrics = recorder.scope();
 
     for strike in 1..=MAX_DISPATCH_FAILURES {
         let attempt_id = seed_pending_attempt(&db, &task.id, "lead").await;
@@ -8146,12 +8157,13 @@ async fn spawn_failed_dispatch_orphan_reaches_no_pr_terminal_cap_live() {
 
         actor.dispatch_ready_tasks(Some(&task.project_id)).await;
         if strike == 1 {
+            let rendered = recorder.render();
             assert_eq!(
-                rendered_strike_decision_value("counted", "spawn_failed") - counted_before,
+                strike_decision_value(&rendered, "counted", "spawn_failed"),
                 1.0,
                 "one live spawn_failed reappearance must emit one counted decision"
             );
-            assert_strike_decision_labels_are_bounded();
+            assert_strike_decision_labels_are_bounded(&rendered);
         }
         if strike < MAX_DISPATCH_FAILURES {
             assert_eq!(actor.dispatch_failure_streak.get(&task.id), Some(&strike));
@@ -8277,16 +8289,21 @@ async fn expired_owner_group_reap_redispatches_after_reaping_each_eligible_group
         },
     );
     // The decision is emitted by dispatch_ready_tasks, after it reads the
-    // reaper's durable evidence; rendering around this call keeps the test on
-    // the real persisted owner-expiry path.
-    let exempted_before = rendered_strike_decision_value("exempted", "environmental_owner_expired");
-    actor.dispatch_ready_tasks(Some(&task.project_id)).await;
+    // reaper's durable evidence; scoping a private recorder around this call
+    // keeps the test on the real persisted owner-expiry path while making the
+    // rendered registry contain only what this call emitted.
+    let recorder = djinn_telemetry::IsolatedRecorder::new();
+    let rendered = {
+        let _metrics = recorder.scope();
+        actor.dispatch_ready_tasks(Some(&task.project_id)).await;
+        recorder.render()
+    };
     assert_eq!(
-        rendered_strike_decision_value("exempted", "environmental_owner_expired") - exempted_before,
+        strike_decision_value(&rendered, "exempted", "environmental_owner_expired"),
         1.0,
         "one live reaped environmental interruption must emit one exempted decision"
     );
-    assert_strike_decision_labels_are_bounded();
+    assert_strike_decision_labels_are_bounded(&rendered);
     assert_eq!(
         actor.dispatched, 1,
         "evidenced interruption must redispatch"

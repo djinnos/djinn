@@ -1,0 +1,8 @@
+{
+  "asset": "runtimeclass-and-node-assets",
+  "expect": "reject",
+  "why": "The RuntimeClass template deleted. Without it there is no containerd handler granting a writable /sys/fs/cgroup and no nodeSelector keeping task-run Pods off unconformed nodes.",
+  "operations": [
+    { "op": "delete", "path": "deploy/helm/djinn/templates/runtimeclass-cgroup-writable.yaml" }
+  ]
+}

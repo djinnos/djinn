@@ -1,0 +1,25 @@
+# The EXPLICIT `resize-v2` image class of the mixed-version matrix.
+#
+# See Dockerfile.leaf-v1 for why the declaration is baked rather than passed at
+# run time. The two files are deliberately near-identical: the ONLY difference
+# between the two declaring classes is the declaration itself, so any behavioural
+# difference the matrix observes between them is attributable to the protocol and
+# to nothing else.
+ARG DJINN_RESIZE_MATRIX_BASE_REPOSITORY=debian
+ARG DJINN_RESIZE_MATRIX_BASE_DIGEST
+FROM ${DJINN_RESIZE_MATRIX_BASE_REPOSITORY}@${DJINN_RESIZE_MATRIX_BASE_DIGEST}
+
+COPY djinn-cgroup-launcher /opt/djinn/bin/djinn-cgroup-launcher
+COPY governor_probe /opt/djinn/bin/djinn-governor-probe
+
+RUN set -eu; \
+    mkdir -p /opt/djinn; \
+    printf 'resize-v2' > /opt/djinn/authority; \
+    chmod 0644 /opt/djinn/authority; \
+    chmod 0755 /opt/djinn/bin/djinn-cgroup-launcher /opt/djinn/bin/djinn-governor-probe; \
+    head -c 33554432 /dev/urandom > /opt/djinn/workload.bin; \
+    chmod 0644 /opt/djinn/workload.bin; \
+    test -x /usr/bin/sha256sum; \
+    test -x /bin/sh
+
+# No ENTRYPOINT and no CMD: see Dockerfile.legacy.

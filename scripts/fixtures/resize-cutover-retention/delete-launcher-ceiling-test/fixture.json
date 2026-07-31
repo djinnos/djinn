@@ -1,0 +1,8 @@
+{
+  "asset": "launcher-cpu-ceiling-stays-conditional",
+  "expect": "reject",
+  "why": "The test that pins the launcher CPU ceiling to resize-v2 ONLY, deleted. launcher.rs's own comment points at this test by name; losing it is how a blanket clamp gets back in without anyone noticing.",
+  "operations": [
+    { "op": "delete", "path": "server/crates/djinn-k8s/src/launcher_tests.rs" }
+  ]
+}

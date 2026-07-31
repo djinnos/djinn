@@ -26,6 +26,27 @@ rules:
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["get", "list", "watch", "patch", "delete"]
+  # In-place Pod vertical scaling (`PATCH pods/resize`, k8s >= 1.33) for the CPU
+  # quota cutover. djinn-server, holding the controller ServiceAccount, is the
+  # ONLY resize actor: the task-run ServiceAccount has no RBAC at all, task-run
+  # Pods set `automountServiceAccountToken: false`, and their single projected
+  # token carries audience `djinn` rather than the apiserver's — so
+  # repository-controlled child code cannot reach this subresource.
+  #
+  # `patch` alone. The resize subresource accepts PATCH only, so `update` would
+  # be dead breadth, and no other verb is meaningful on a subresource that
+  # exists solely to mutate a running Pod's resources.
+  #
+  # Deliberately NAMESPACED, and deliberately without `resourceNames`. RBAC
+  # cannot express a set of Pod names that only exists at run time (one per
+  # task-run), so exact-Pod authorization is an APPLICATION invariant — the
+  # durable permit relation plus a Pod UID fence — not an RBAC one. Task Pods
+  # simply hold no resize credential to bypass that with. Do not widen this
+  # Role, or promote it cluster-wide, to compensate; tests/pods-resize-rbac.sh
+  # fails on either.
+  - apiGroups: [""]
+    resources: ["pods/resize"]
+    verbs: ["patch"]
   - apiGroups: [""]
     resources: ["pods/log"]
     verbs: ["get", "list"]
@@ -41,3 +62,19 @@ rules:
   - apiGroups: [""]
     resources: ["events"]
     verbs: ["get", "list", "watch"]
+  # The Kueue arming preflight reads THIS namespace back at startup to confirm
+  # it really carries `djinn.io/kueue-managed` before any renderer stamps
+  # `suspend: true` onto a build Job
+  # (server/crates/djinn-k8s/src/kueue_preflight.rs).
+  #
+  # Namespaces are cluster-scoped, but the apiserver derives the request's
+  # namespace attribute from the object name for `GET /api/v1/namespaces/<name>`,
+  # so this NAMESPACED rule authorizes reading this namespace and nothing else.
+  # Verified against a real apiserver (kind, k8s v1.34): with only this rule, GET
+  # of the own namespace returns 200 while GET of another namespace and LIST
+  # namespaces both return 403. That is why the preflight needs no ClusterRole,
+  # and TokenReview (role-tokenreview.yaml) remains the server's only
+  # cluster-wide permission.
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get"]

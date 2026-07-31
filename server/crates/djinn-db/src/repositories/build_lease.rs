@@ -20,12 +20,20 @@ pub enum BuildLeaseConsumerKind {
     /// A full workspace compile dispatched as a Kubernetes Job.
     GraphWarm,
     /// Layer 1: the coarse, role-DERIVED dispatch admission unit, reserved
-    /// before a task-run pod is created for work certain to compile.
+    /// before a task-run pod was created for work certain to compile.
     ///
-    /// This exists so both layers draw from one pool. Before it, dispatch
-    /// admission was accounted in a second table (`admission_journal`) against
-    /// the same configured cap, so the two authorities together admitted twice
-    /// the operator's intent.
+    /// # LEGACY ROWS ONLY (Kueue cutover, o53p)
+    ///
+    /// Nothing acquires one of these any more. The pre-create dispatch
+    /// reservation this served was stood down by the Kueue cutover, and
+    /// `LeaseIdentity::TaskDispatch` has no constructor left anywhere in the
+    /// workspace — Kueue's ClusterQueue admits a suspended Job against a quota
+    /// instead, so no capacity is reserved before the object exists.
+    ///
+    /// The variant is retained because rows written before the cutover are
+    /// still in `build_leases` and must still be readable and reclaimable.
+    /// `djinn_coordinator::build_lease_reclaim` retires them on exactly that
+    /// basis; see its module docs before reintroducing an acquirer.
     TaskDispatch,
 }
 impl BuildLeaseConsumerKind {
@@ -274,10 +282,12 @@ impl BuildLeaseRepository {
     ///
     /// No capacity can be double-granted by this: terminal rows are excluded
     /// from [`OCCUPYING`], so the retired row was buying nothing that the fresh
-    /// attempt could buy twice. The dispatch lifecycle/audit trail lives in
-    /// `admission_journal`, which migration 153 retains for exactly that
-    /// purpose; `build_leases` holds dispatch capacity, and spent capacity is
-    /// not evidence.
+    /// attempt could buy twice. `build_leases` holds dispatch capacity, and
+    /// spent capacity is not evidence.
+    ///
+    /// The separate dispatch lifecycle/audit trail this used to point at
+    /// (`admission_journal`) was the pods-quota reservation ledger and was
+    /// deleted by the Kueue cutover (o53p).
     pub async fn queue(&self, input: &QueueBuildLeaseInput) -> DbResult<QueueBuildLeaseResult> {
         if input.key.consumer_id.trim().is_empty() || input.immutable_identity.trim().is_empty() {
             return Err(DbError::InvalidData(

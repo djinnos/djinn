@@ -1,3 +1,22 @@
+{{- /*
+Arming requires a namespace this chart can actually label.
+
+This gate lives OUTSIDE the `namespace.create` conditional on purpose: it has to
+fire in exactly the case where this template renders nothing at all. Helm
+executes every template regardless of whether it produces output, so a `fail`
+here still aborts the render (and still fires under `--show-only`, which filters
+AFTER rendering).
+
+The sibling arming invariants — armed implies enabled, and the RuntimeClass
+stacking check — live in templates/deployment-server.yaml. This one lives here
+because it is a fact about the Namespace object this template does or does not
+render.
+*/ -}}
+{{- if and .Values.kueue.armed (not .Values.namespace.create) -}}
+  {{- if not .Values.kueue.namespaceLabelledExternally -}}
+    {{- fail "kueue.armed=true with namespace.create=false cannot label the namespace: the chart renders no Namespace object, so it cannot apply djinn.io/kueue-managed, and Kueue captures Jobs ONLY in a namespace carrying that label. Arming anyway stamps `suspend: true` onto every task-run, warm and standalone-SCIP Job in a namespace nothing is watching, so nothing ever unsuspends them and every build Job hangs forever. Either set namespace.create=true, or label the namespace yourself (`kubectl label namespace <ns> djinn.io/kueue-managed=true`) and set kueue.namespaceLabelledExternally=true to acknowledge it. That acknowledgement is an unverified claim at render time; djinn-server re-checks it against the live namespace at startup and disarms itself if the label is missing." -}}
+  {{- end -}}
+{{- end -}}
 {{- if .Values.namespace.create -}}
 apiVersion: v1
 kind: Namespace
@@ -5,4 +24,12 @@ metadata:
   name: {{ include "djinn.namespace" . }}
   labels:
     {{- include "djinn.labels" . | nindent 4 }}
+    {{- if .Values.kueue.armed }}
+    # Kueue captures Jobs ONLY in a namespace carrying this label. It is driven
+    # by the same value (`kueue.armed`) that makes the renderers create Jobs
+    # `suspend: true`, and it must stay that way: a suspended Job in an
+    # unlabelled namespace is never captured, so nothing ever unsuspends it and
+    # every build Job hangs forever. Never split these onto two flags.
+    djinn.io/kueue-managed: "true"
+    {{- end }}
 {{- end -}}

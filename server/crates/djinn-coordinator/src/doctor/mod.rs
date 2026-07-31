@@ -15,7 +15,6 @@
 
 #![allow(dead_code)]
 
-pub mod build_admission_health;
 pub mod closed_parent_open_children;
 pub mod leader_tick;
 pub mod live_mover;
@@ -30,11 +29,6 @@ use std::sync::Arc;
 
 use djinn_core::doctor::{DoctorCheck, DoctorRegistry};
 
-pub use build_admission_health::{
-    BUILD_ADMISSION_HEALTH_CHECK_NAME, BuildAdmissionHealthCheck, BuildAdmissionHealthObservation,
-    BuildAdmissionHealthSource, ControllerBuildAdmissionHealthSource,
-    MemoryBuildAdmissionHealthSource,
-};
 pub use closed_parent_open_children::{
     CLOSED_PARENT_OPEN_CHILDREN_CHECK_NAME, ClosedParentOpenChildrenCheck,
     ClosedParentOpenChildrenRepairSource, ClosedParentOpenChildrenSource,
@@ -88,21 +82,6 @@ pub fn register_doctor_checks(
         registered.push(previous);
     }
     registered
-}
-
-/// Register the leader-local build-admission health check.
-///
-/// Registered from the same place as [`register_doctor_checks`] — the
-/// coordinator actor's constructor — because that constructor runs only on the
-/// pod that won coordinator leadership, which is the pod whose in-memory
-/// readiness actually decides admission. See the module docs on
-/// [`build_admission_health`] for why that makes the process-local readiness
-/// genuinely observable rather than silently unobservable.
-pub fn register_build_admission_health_check(
-    registry: &DoctorRegistry,
-    source: Arc<dyn BuildAdmissionHealthSource>,
-) -> Option<String> {
-    registry.register(Arc::new(BuildAdmissionHealthCheck::new(source)))
 }
 
 /// Register the shared retrieval source checks independently of refresh success.

@@ -1,5 +1,14 @@
+// djinn:allow-oversize
+//
+// The worktree tool handlers: `read`, `write`, `edit`, `apply_patch`,
+// `code_search`, `shell`. They share the FileTime read-coverage bookkeeping and
+// the GateGuard edit checks, so they are kept together deliberately. Splitting
+// them is a behaviour-bearing refactor of production dispatch and is out of
+// scope for the read-coverage fix that pushed this file over MAX_BYTES.
+
 use super::gate_guard::{gate_guard_edit_check, gate_guard_shell_check};
 use super::shell_exec::{effective_shell_timeout_ms, finish_shell};
+use super::size_nudge::maybe_append_size_nudge;
 use super::workspace_helpers::{
     cargo_check_denied, classify_cargo_command, emit_edit_match_telemetry,
 };
@@ -223,6 +232,144 @@ pub(crate) async fn call_shell(
     }))
 }
 
+/// Headroom reserved inside [`crate::output_stash::MAX_TOOL_RESULT_CHARS`] for
+/// everything in a read result that is *not* the numbered listing: the JSON
+/// envelope's keys, the path value, and the trailing truncation notes appended
+/// to `content` after the budgeted listing has been built.
+const READ_RESULT_RESERVE_CHARS: usize = 1_024;
+
+/// Number of characters needed to encode `s` as the body of a JSON string.
+///
+/// A read result is handed to the model only after
+/// `output_stash::render_tool_result` serializes it as JSON, so the budget that
+/// actually matters is the *escaped* size — a numbered listing spends two
+/// characters on every `\n` and `\t` it contains.
+fn json_escaped_len(s: &str) -> usize {
+    s.chars()
+        .map(|c| match c {
+            '"' | '\\' | '\n' | '\r' | '\t' | '\u{08}' | '\u{0c}' => 2,
+            c if (c as u32) < 0x20 => 6,
+            c => c.len_utf8(),
+        })
+        .sum()
+}
+
+/// Escaped-character budget available to a read result's `content` field before
+/// the downstream tool-result clamp would fire.
+///
+/// Derived from the single shared clamp constant so the two can never drift.
+/// This does **not** widen the clamp: it makes the read handler stop at a line
+/// boundary the clamp will accept, so the window the model receives is the
+/// window the handler recorded coverage for.
+pub(crate) fn read_content_budget() -> usize {
+    crate::output_stash::MAX_TOOL_RESULT_CHARS.saturating_sub(READ_RESULT_RESERVE_CHARS)
+}
+
+/// Hard ceiling on the number of lines one `read` will return, and the default
+/// when the caller does not ask for a window.
+///
+/// Named because it is a contract, not an implementation detail: `size_nudge`
+/// derives "how many reads does this file cost?" from this exact value, so a
+/// literal here and a literal there would be a drift bug waiting to happen.
+pub(crate) const READ_MAX_LINES: usize = 2000;
+
+/// The extension tool name whose results record read coverage.
+const READ_TOOL_NAME: &str = "read";
+
+/// Recover the resolved file path from an already-rendered `read` result.
+///
+/// `call_read` returns a JSON object whose `path` is
+/// `resolved_path.display().to_string()` — the exact key `FileTime` records
+/// under — and `render_tool_result` hands that object to the model as pretty
+/// JSON. Parsing it back is therefore an identity lookup on the payload the
+/// model was going to receive, not a heuristic on prose.
+///
+/// Returns `None` when the text is not the read handler's own envelope (e.g. a
+/// result some other layer already replaced), in which case there is nothing to
+/// downgrade.
+fn externalized_read_path(rendered: &str) -> Option<std::path::PathBuf> {
+    serde_json::from_str::<serde_json::Value>(rendered)
+        .ok()?
+        .get("path")?
+        .as_str()
+        .map(std::path::PathBuf::from)
+}
+
+/// Downgrade the read-coverage record behind a tool result that the per-turn
+/// inline-character budget re-externalized after the handler recorded it.
+///
+/// `call_read` records coverage for the window it emits, sized against
+/// `output_stash::MAX_TOOL_RESULT_CHARS`. That is the last clamp *inside* the
+/// handler, but not the last clamp overall: `djinn-slot`'s turn budget runs
+/// after every tool in the turn has been dispatched and can replace a rendered
+/// result with a stash stub. Nothing of a numbered listing survives that stub
+/// (its preview is a line-aware head/tail split and the listing is one giant
+/// JSON line), so the record must stop claiming coverage the model never got.
+///
+/// Anything that is not a `read` result carries no coverage and is ignored.
+pub(crate) async fn downgrade_externalized_read_coverage(
+    state: &AgentContext,
+    tool_name: &str,
+    rendered: &str,
+    worktree_path: &Path,
+) {
+    if tool_name != READ_TOOL_NAME {
+        return;
+    }
+    let Some(path) = externalized_read_path(rendered) else {
+        tracing::warn!(
+            worktree = %worktree_path.display(),
+            "read result externalized by the turn budget carried no resolvable path; \
+             read coverage could not be downgraded"
+        );
+        return;
+    };
+    // Cross-repo (mirror-backed) reads never record coverage, and a file read
+    // twice in one turn keeps only the later record; both land here as a
+    // no-op or as a conservative downgrade of the surviving record.
+    let downgraded = state
+        .file_time
+        .mark_read_unobserved(&worktree_path.display().to_string(), &path)
+        .await;
+    if downgraded {
+        tracing::info!(
+            path = %path.display(),
+            "read coverage downgraded: the turn budget externalized this result \
+             after the read handler recorded it"
+        );
+    }
+}
+
+/// Render `lines` as a numbered listing beginning at absolute index `start`,
+/// stopping early once the listing would no longer survive the tool-result
+/// clamp. Returns the listing and the number of lines actually emitted.
+///
+/// At least one line is always emitted so a single over-long line still yields
+/// a usable (if over-budget) result rather than an empty window.
+fn numbered_lines_within_budget<'a, I>(lines: I, start: usize, budget: usize) -> (String, usize)
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    let mut numbered = String::new();
+    let mut spent = 0usize;
+    let mut emitted = 0usize;
+    for (i, line) in lines.into_iter().enumerate() {
+        let mut l = line.to_string();
+        if l.chars().count() > 2000 {
+            l = l.chars().take(2000).collect();
+        }
+        let rendered = format!("{:>6}\t{}\n", start + i + 1, l);
+        let cost = json_escaped_len(&rendered);
+        if emitted > 0 && spent + cost > budget {
+            break;
+        }
+        spent += cost;
+        numbered.push_str(&rendered);
+        emitted += 1;
+    }
+    (numbered, emitted)
+}
+
 /// Format an in-memory file body as a numbered, paginated window matching the
 /// shape `call_read` returns from the worktree path. Used for mirror-backed
 /// cross-repo reads (the whole blob is already in memory from `git show`).
@@ -231,21 +378,18 @@ fn numbered_window(content: &str, offset: usize, limit: usize, path: &str) -> se
     let total = lines.len();
     let start = offset.min(total);
     let end = start.saturating_add(limit).min(total);
-    let mut numbered = String::new();
-    for (i, line) in lines[start..end].iter().enumerate() {
-        let line_no = start + i + 1;
-        let mut l = (*line).to_string();
-        if l.chars().count() > 2000 {
-            l = l.chars().take(2000).collect();
-        }
-        numbered.push_str(&format!("{:>6}\t{}\n", line_no, l));
-    }
+    let (numbered, emitted) = numbered_lines_within_budget(
+        lines[start..end].iter().copied(),
+        start,
+        read_content_budget(),
+    );
+    let emitted_end = start + emitted;
     serde_json::json!({
         "path": path,
         "offset": start,
         "limit": limit,
         "total_lines": total,
-        "has_more": end < total,
+        "has_more": emitted_end < total,
         "content": numbered,
     })
 }
@@ -282,7 +426,7 @@ pub(crate) async fn call_read(
                     .unwrap_or_else(|| "HEAD".to_string());
                 let content = crate::repo_access::read_file(&pid, &git_ref, &p.file_path).await?;
                 let offset = p.offset.unwrap_or(0);
-                let limit = p.limit.unwrap_or(2000).min(2000);
+                let limit = p.limit.unwrap_or(READ_MAX_LINES).min(READ_MAX_LINES);
                 return Ok(numbered_window(&content, offset, limit, &p.file_path));
             }
             // Same as the task project (or unresolvable → fall through to the
@@ -319,7 +463,7 @@ pub(crate) async fn call_read(
     })?;
 
     let offset = p.offset.unwrap_or(0);
-    let limit = p.limit.unwrap_or(2000).min(2000);
+    let limit = p.limit.unwrap_or(READ_MAX_LINES).min(READ_MAX_LINES);
 
     // We only need the window [offset, offset+limit). Stream line by line and
     // stop once we've collected one line past the window — enough to know
@@ -401,38 +545,53 @@ pub(crate) async fn call_read(
     let start = offset.min(total_scanned);
     let end = start.saturating_add(limit).min(total_scanned);
 
-    let mut numbered = String::new();
-    for (i, (line, _byte_end)) in all_lines[start..end].iter().enumerate() {
-        let line_no = start + i + 1;
-        numbered.push_str(&format!("{:>6}\t{}\n", line_no, line));
-    }
+    // Emit only as much of the window as will survive the downstream
+    // tool-result clamp (`output_stash::MAX_TOOL_RESULT_CHARS`). Anything past
+    // that point never reaches the model, so it must not be counted as read.
+    let (mut numbered, emitted) = numbered_lines_within_budget(
+        all_lines[start..end].iter().map(|(line, _)| line.as_str()),
+        start,
+        read_content_budget(),
+    );
+    let emitted_end = start + emitted;
+    let clamped_by_result_budget = emitted_end < end;
+
     if truncated_by_budget {
         numbered.push_str(&format!(
             "\n[file too large: truncated at {} MiB; remaining content not shown]\n",
             MAX_READ_BYTES / (1024 * 1024)
         ));
     }
+    if clamped_by_result_budget {
+        numbered.push_str(&format!(
+            "\n[tool-result budget reached after line {emitted_end}; the rest of this window was \
+             NOT shown. Continue with read(file_path, offset={emitted_end}, limit={limit}).]\n"
+        ));
+    }
 
-    // `has_more` is true if there's content past the scanned window, or if the
-    // requested window didn't reach the end of what we scanned.
-    let has_more = has_more_beyond_window || end < total_scanned;
+    // `has_more` is true if there's content past the scanned window, if the
+    // requested window didn't reach the end of what we scanned, or if the
+    // tool-result budget cut the window short.
+    let has_more = has_more_beyond_window || emitted_end < total_scanned;
 
-    // Compute read coverage metadata from the actual arguments and result.
+    // Compute read coverage metadata from what the model actually receives.
     // A read is full-file coverage only when the worker received all content
     // from the start (offset 0), there are no remaining pages, and no
-    // byte-budget truncation occurred.
+    // byte-budget truncation occurred. `has_more` now accounts for the
+    // tool-result clamp as well, so a listing the clamp would gut can never be
+    // recorded as `Full`.
     let coverage = if offset == 0 && !has_more && !truncated_by_budget {
         crate::file_time::ReadCoverage::Full
     } else {
         // Record the byte range of the window actually returned.
-        let cov_start = if start < end {
+        let cov_start = if start < emitted_end {
             line_byte_offsets[start]
         } else {
             // Empty window: point at EOF offset.
             scanned_bytes as u64
         };
-        let cov_end = if start < end {
-            Some(all_lines[end - 1].1)
+        let cov_end = if start < emitted_end {
+            Some(all_lines[emitted_end - 1].1)
         } else {
             None
         };
@@ -563,6 +722,15 @@ pub(crate) async fn call_write(
             let response =
                 maybe_append_pitfall_hint(response, state, worktree_path, project_id, &touched)
                     .await;
+            // Authorship-time size advisory. Runs after the bytes are on disk
+            // and cannot affect them; see size_nudge's module docs for why it
+            // is here and not in gate_guard.
+            let response = maybe_append_size_nudge(
+                response,
+                worktree_path,
+                std::slice::from_ref(&path),
+            )
+            .await;
             Ok(response)
         })
         .await
@@ -712,6 +880,10 @@ pub(crate) async fn call_edit(
                         &touched,
                     )
                     .await;
+                    // Authorship-time size advisory; see `call_write`.
+                    let result =
+                        maybe_append_size_nudge(result, worktree_path, std::slice::from_ref(&path))
+                            .await;
                     Ok(result)
                 }
                 MatchOutcome::Ambiguous => {
@@ -850,12 +1022,29 @@ pub(crate) async fn call_apply_patch(
                         }
                     })?;
 
-                // GateGuard: enforce worker read-coverage gate before
-                // mutation. Conservative: require full-file coverage for
-                // update/delete since exact touched spans are not proven
-                // from the patch parser.
-                gate_guard_edit_check(state, session_role, &worktree_key, &resolved, 0..usize::MAX)
-                    .await?;
+                // GateGuard: enforce the worker read-coverage gate before
+                // mutation, against the span the patch actually rewrites.
+                //
+                // A `Delete` destroys the whole file, so whole-file coverage
+                // is the honest requirement there. An `Update` only rewrites
+                // its located chunks; declaring `0..usize::MAX` for those made
+                // the check unsatisfiable for every file too large to read
+                // into a single `ReadCoverage::Full` record, which is the
+                // `apply_patch` deadlock workers were escaping via `shell`
+                // heredocs. Unlocatable chunks fall back to the old
+                // conservative span — `apply_patch` rejects them moments later
+                // for the same reason.
+                let span = match op {
+                    crate::patch::FileOp::Update { chunks, .. } => {
+                        match tokio::fs::read_to_string(&resolved).await {
+                            Ok(content) => crate::patch::update_span(&content, chunks, raw_path)
+                                .unwrap_or(0..usize::MAX),
+                            Err(_) => 0..usize::MAX,
+                        }
+                    }
+                    _ => 0..usize::MAX,
+                };
+                gate_guard_edit_check(state, session_role, &worktree_key, &resolved, span).await?;
             }
             crate::patch::FileOp::Add { .. } => {
                 // New files don't need FileTime assertion
@@ -908,6 +1097,15 @@ pub(crate) async fn call_apply_patch(
     };
     let response =
         maybe_append_pitfall_hint(response, state, worktree_path, project_id, &touched_rel).await;
+    // Authorship-time size advisory; see `call_write`. A patch can touch many
+    // files, so the nudge picks the single worst rather than stacking one
+    // advisory per path. Deletes are excluded — nothing was authored.
+    let touched_abs: Vec<std::path::PathBuf> = results
+        .iter()
+        .filter(|(_, action)| *action != "deleted")
+        .map(|(file_path, _)| file_path.clone())
+        .collect();
+    let response = maybe_append_size_nudge(response, worktree_path, &touched_abs).await;
     Ok(response)
 }
 

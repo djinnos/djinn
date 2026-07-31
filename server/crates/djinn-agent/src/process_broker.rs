@@ -17,8 +17,8 @@ use djinn_supervisor::services::{InvocationLiftDecision, TaskInvocationLeaseIden
 /// The two `Armed` arms are deliberately different intents that share one birth
 /// quota: `Lift` will raise it on a matching fenced grant, and `Shadow` observes
 /// without lifting (documented to clamp on purpose). `Unleased` is the arm that
-/// cost four production rollouts — the durable `admission_handoff` row is
-/// absent/baseline/stale, no grant can ever authorize a lift, and clamping such
+/// cost four production rollouts — the durable invocation-lease authority is
+/// absent or disarmed, no grant can ever authorize a lift, and clamping such
 /// an invocation to 250m is pure loss. It maps to `Unarmed` so the leaf is born
 /// with no quota of its own.
 pub(crate) fn birth_authority(decision: InvocationLiftDecision) -> LeaseAuthority {

@@ -467,7 +467,7 @@ async fn codebase_header_builder_renders_status_hotspots_and_tree() {
         }
     }
 
-    clear_cache_for_tests();
+    clear_cache_for_tests("p-system-prompt");
     let tmp = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(tmp.path().join("src/api")).unwrap();
     std::fs::create_dir_all(tmp.path().join("tests")).unwrap();
