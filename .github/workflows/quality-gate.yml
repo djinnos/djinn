@@ -712,6 +712,15 @@ jobs:
       - name: Check resize-authorization boundary
         if: needs.preflight.outputs.size == 'true'
         run: ./scripts/check-resize-authorization-boundary.sh
+      # 0ppk-1b acceptance criterion 2. Same `size` routing and the same
+      # reasoning: a whole-tree grep with no build, and the failure it catches
+      # (a merged, green, unreachable stack) is invisible to every other gate.
+      - name: Self-test resize reachability guard
+        if: needs.preflight.outputs.size == 'true'
+        run: ./scripts/test-check-resize-reachability.sh
+      - name: Check resize reachability
+        if: needs.preflight.outputs.size == 'true'
+        run: ./scripts/check-resize-reachability.sh
       - name: Self-test capability boundary detectors
         if: needs.preflight.outputs.capability == 'true'
         run: ./scripts/test-capability-boundaries.sh

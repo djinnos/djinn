@@ -93,6 +93,8 @@ fn run_handle(job_name: &str) -> RunHandle {
         container_id: None,
         pod_ref: Some(job_name.to_string()),
         started_at: SystemClock::new().now(),
+        job_uid: None,
+        launcher_authority_protocol: None,
     }
 }
 

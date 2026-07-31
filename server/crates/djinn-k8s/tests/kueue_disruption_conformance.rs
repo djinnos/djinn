@@ -452,6 +452,8 @@ fn live_a_kueue_eviction_and_re_admission_leaves_the_task_run_alive() {
         // `SystemTime::now` is workspace-disallowed (`clippy.toml`); this is the
         // same clock `KubernetesRuntime::prepare` stamps a real handle with.
         started_at: SystemClock::new().now(),
+        job_uid: None,
+        launcher_authority_protocol: None,
     };
 
     let tokio_runtime = tokio::runtime::Builder::new_multi_thread()
@@ -605,6 +607,8 @@ fn live_a_force_deleted_pod_still_terminalises_the_run() {
         container_id: None,
         pod_ref: Some(job_name.clone()),
         started_at: SystemClock::new().now(),
+        job_uid: None,
+        launcher_authority_protocol: None,
     };
     let tokio_runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(4)

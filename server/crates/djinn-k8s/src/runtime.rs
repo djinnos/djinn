@@ -884,6 +884,22 @@ impl SessionRuntime for KubernetesRuntime {
             container_id: None,
             pod_ref: Some(resource_name),
             started_at: SystemClock::new().now(),
+            // The JOB uid, confirmed by the create above. `prepare` does not
+            // wait for a Pod and therefore has no Pod UID to offer; the resize
+            // bootstrap obtains that separately from a fresh Pod GET.
+            job_uid: Some(job_uid),
+            // The protocol the render actually APPLIED to this Job — not the
+            // one it resolved. Under a launcher mode that renders no sidecar,
+            // `apply_launcher_authority_protocol` above is a documented no-op,
+            // so there is no launcher container to govern and no protocol
+            // handshake to agree with. Reporting the resolved value there would
+            // make the dispatch seam demand a birth confirmation for a Pod that
+            // has no launcher at all, and refuse every such dispatch forever.
+            launcher_authority_protocol: self
+                .config
+                .cgroup_launcher_mode
+                .renders_sidecar()
+                .then_some(authority_protocol),
         })
     }
 
@@ -2305,6 +2321,27 @@ impl TaskRunPodResizeSurface {
             namespace: namespace.into(),
             field_manager: field_manager.into(),
         }
+    }
+
+    /// Build from ambient cluster configuration — the in-cluster service
+    /// account, or the caller's kubeconfig — and the environment-configured
+    /// task-run namespace.
+    ///
+    /// This is the composition-root constructor: the server builds its resize
+    /// admission bridge once at boot, long before any particular dispatch has a
+    /// [`KubernetesRuntime`] to borrow a client from. It resolves the client the
+    /// same way [`KubernetesRuntime::new`] does, so the surface and the runtime
+    /// cannot end up pointed at different clusters.
+    ///
+    /// # Errors
+    ///
+    /// The rendered `kube::Error` when no cluster configuration is available.
+    pub async fn from_env() -> Result<Self, String> {
+        let config = KubernetesConfig::from_env();
+        let client = kube::Client::try_default()
+            .await
+            .map_err(|error| format!("task-run resize surface: kube client: {error}"))?;
+        Ok(Self::new(client, config.namespace, "djinn-task-run-resize"))
     }
 
     /// Build from a live runtime, reusing its client and configured namespace.

@@ -115,6 +115,12 @@ tikv-jemalloc-ctl = { version = "0.6", features = ["stats"] }
 
 [dev-dependencies]
 djinn-control-plane = { path = "crates/djinn-control-plane", features = ["test-support"] }
+# The dispatch-seam reachability test drives a real stored `Pod` so the birth
+# downsize runs through the real `PodResizeClient` and the real
+# `confirm_launcher_cpu`, not through a stand-in that always agrees. The fixture
+# lives in djinn-k8s because `deny.toml` bans a direct `k8s-openapi` dependency
+# outside the Kubernetes capability owner — and that ban is right.
+djinn-k8s = { path = "crates/djinn-k8s", features = ["test-support"] }
 djinn-db = { path = "crates/djinn-db", features = ["test-support"] }
 djinn-server = { path = ".", features = ["test-support"] }
 insta = { version = "1", features = ["json", "redactions"] }

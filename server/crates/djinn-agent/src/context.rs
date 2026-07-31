@@ -1,3 +1,7 @@
+// djinn:allow-oversize — this file sat 44 bytes under the size guard before
+// 0ppk-1b added one server-injected bridge field to `AgentContext`, so any
+// field added here at all trips it. Split the context struct's supporting types
+// out when this file is next touched substantively.
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -455,6 +459,11 @@ pub struct AgentContext {
     /// control-plane seam without depending on Kubernetes directly. `None` in
     /// off-server/test contexts falls back to the agent-internal no-op runtime.
     pub runtime_ops: Option<Arc<dyn bridge::RuntimeOps>>,
+    /// Proposal `3i92`'s post-admission resize stack, injected at the server
+    /// boundary by `AppState::agent_context()`. `None` marks an off-server
+    /// context, never a disable switch — see
+    /// [`crate::task_run_resize_admission`] for what that distinction costs.
+    pub resize_admission: Option<crate::task_run_resize_admission::ResizeAdmissionBridge>,
     /// **This process's own view** of the per-task-run Cargo target root.
     ///
     /// Required, deliberately: the shared cache PVC is mounted at *different*

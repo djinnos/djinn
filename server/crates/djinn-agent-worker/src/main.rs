@@ -3687,6 +3687,7 @@ fn build_worker_agent_context(
         graph_warmer: None,
         repo_graph_ops: None,
         runtime_ops: None,
+        resize_admission: None,
         // In-Pod view of the shared cache PVC. The Job pod mounts it at
         // `/cache`, NOT at the server pod's `$DJINN_HOME/cache`, and Job specs
         // never set `DJINN_HOME` — so `djinn_core::paths::cargo_target_runs_root()`

@@ -390,6 +390,16 @@ struct Inner {
     /// The admission controller for this server process when admission is enabled.
     /// Durable v1 authority injected into the production graph warmer.
     pub build_lease: Arc<BuildLeaseService>,
+    /// Proposal `3i92`'s post-admission resize stack: the durable
+    /// `build_pod_permits` relation, the limits-only `pods/resize` client and
+    /// the birth dispatch gate, composed once for the whole process.
+    ///
+    /// Threaded into every [`AppState::agent_context`], which is where the slot
+    /// pool's dispatch seam reads it. **This is the composition site.** Before
+    /// it existed the entire resize stack was merged, tested and structurally
+    /// unreachable — `scripts/check-resize-reachability.sh` exists to keep it
+    /// that way only over this maintainer's dead build.
+    pub resize_admission: Arc<crate::task_run_resize_bootstrap::TaskRunResizeAdmissionBridge>,
 }
 
 /// Result of a boot token exchange attempt.
@@ -474,6 +484,12 @@ impl AppState {
                 InvocationLeaseAuthorityRepository::new(db.clone()),
             )),
         );
+        // The one place proposal `3i92`'s resize stack becomes reachable. The
+        // apiserver surface underneath resolves lazily on first dispatch, so a
+        // server with no cluster configuration still boots.
+        let resize_admission = Arc::new(
+            crate::task_run_resize_bootstrap::TaskRunResizeAdmissionBridge::from_env(db.clone()),
+        );
         Self {
             inner: Arc::new(Inner {
                 db,
@@ -517,6 +533,7 @@ impl AppState {
                 image_build_watcher: tokio::sync::Mutex::new(None),
                 graph_warmer: tokio::sync::RwLock::new(None),
                 build_lease,
+                resize_admission,
             }),
         }
     }
@@ -1654,6 +1671,7 @@ impl AppState {
                 self.clone(),
             ))),
             runtime_ops: Some(Arc::new(self.clone())),
+            resize_admission: Some(self.inner.resize_admission.clone()),
             // Host-side runs root for the coordinator sweep + teardown backstop.
             // Resolves to `$DJINN_HOME/cache/cargo-target-runs` (the server pod's
             // mount of the shared cache PVC), not the Job-pod `/cache` path.
@@ -3880,6 +3898,30 @@ mod build_epoch_bridge_tests {
         );
 
         assert_eq!(state.agent_context().knowledge_injection, resolved);
+    }
+
+    /// The composition site for proposal `3i92`'s resize stack (0ppk-1b).
+    ///
+    /// `AppState::agent_context()` is what the slot pool dispatches through, so
+    /// a bridge this state builds but never threads into an `AgentContext` is a
+    /// bridge nothing can call. That distinction is not academic in this
+    /// neighbourhood: an override that nothing composed, and a projection with
+    /// no reader, both shipped green and inert here within the same week.
+    ///
+    /// What stays green if `new_inner` stops constructing the bridge, or if
+    /// `agent_context` stops threading it? Not this: `resize_admission` goes
+    /// back to `None` and a `resize-v2` dispatch would silently fall through to
+    /// an ungoverned launcher.
+    #[tokio::test]
+    async fn every_agent_context_carries_the_resize_admission_bridge() {
+        let db = Database::open_in_memory().expect("test database");
+        let state = AppState::new(db, CancellationToken::new());
+        assert!(
+            state.agent_context().resize_admission.is_some(),
+            "AppState must thread the resize admission bridge into every \
+             AgentContext; without it the dispatch seam acquires no build-pod \
+             permit and no resize-v2 launcher is ever downsized to its birth limit"
+        );
     }
 
     // ── Observe-only disk dimension (proposal nquz) ─────────────────────────
