@@ -82,8 +82,9 @@ TARGET="$SERVER_DIR/target/release"
 # --- the pre-protocol launcher ----------------------------------------------
 LEGACY_CACHE="$OUT_DIR/legacy/$DJINN_RESIZE_MATRIX_PREPROTOCOL_COMMIT"
 LEGACY_BIN="$LEGACY_CACHE/djinn-cgroup-launcher"
-if [ ! -x "$LEGACY_BIN" ]; then
-    printf '>>> compiling the pre-protocol launcher at %s\n' \
+LEGACY_PROBE="$LEGACY_CACHE/legacy_probe"
+if [ ! -x "$LEGACY_BIN" ] || [ ! -x "$LEGACY_PROBE" ]; then
+    printf '>>> compiling the pre-protocol launcher and worker probe at %s\n' \
         "$DJINN_RESIZE_MATRIX_PREPROTOCOL_COMMIT"
     WORKTREE="$OUT_DIR/preprotocol-worktree"
     rm -rf "$WORKTREE"
@@ -91,16 +92,27 @@ if [ ! -x "$LEGACY_BIN" ]; then
     git -C "$REPO_ROOT" worktree prune
     git -C "$REPO_ROOT" worktree add --detach "$WORKTREE" \
         "$DJINN_RESIZE_MATRIX_PREPROTOCOL_COMMIT" >/dev/null
+    # The worker half must ALSO be pre-protocol. The renderer puts the sidecar
+    # and the worker on one image tag, so a legacy image is a legacy launcher
+    # AND a legacy worker; and the current worker cannot even complete the
+    # handshake against a pre-protocol launcher, because the READY payload grew
+    # a protocol byte. Copied into the THROWAWAY worktree so it links against
+    # the pre-protocol crate; nothing in the repository's own tree is touched.
+    mkdir -p "$WORKTREE/server/crates/djinn-cgroup-launcher/examples"
+    cp "$HERE/legacy_probe.rs" \
+        "$WORKTREE/server/crates/djinn-cgroup-launcher/examples/legacy_probe.rs"
     (
         cd "$WORKTREE/server"
         CARGO_TARGET_DIR="$OUT_DIR/preprotocol-target" \
-            cargo build --release -p djinn-cgroup-launcher --bin djinn-cgroup-launcher
+            cargo build --release -p djinn-cgroup-launcher \
+            --bin djinn-cgroup-launcher --example legacy_probe
     )
     mkdir -p "$LEGACY_CACHE"
     cp "$OUT_DIR/preprotocol-target/release/djinn-cgroup-launcher" "$LEGACY_BIN"
+    cp "$OUT_DIR/preprotocol-target/release/examples/legacy_probe" "$LEGACY_PROBE"
     git -C "$REPO_ROOT" worktree remove --force "$WORKTREE"
 else
-    printf '>>> reusing the cached pre-protocol launcher at %s\n' "$LEGACY_BIN"
+    printf '>>> reusing the cached pre-protocol binaries at %s\n' "$LEGACY_CACHE"
 fi
 
 # A local sanity check, duplicated in Rust. Cheap, and it fails at build time
@@ -117,6 +129,7 @@ trap 'rm -rf "$CONTEXT"' EXIT
 cp "$TARGET/djinn-cgroup-launcher" "$CONTEXT/djinn-cgroup-launcher"
 cp "$TARGET/examples/governor_probe" "$CONTEXT/governor_probe"
 cp "$LEGACY_BIN" "$CONTEXT/djinn-cgroup-launcher-preprotocol"
+cp "$LEGACY_PROBE" "$CONTEXT/legacy_probe"
 
 build_one() {
     local dockerfile=$1 image=$2

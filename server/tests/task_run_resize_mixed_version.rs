@@ -1156,7 +1156,7 @@ fn the_image_pins_are_immutable() {
 const HARNESS_CLUSTER: &str = "djinn-resize-omp4";
 const HARNESS_CONTEXT: &str = "kind-djinn-resize-omp4";
 const HARNESS_REGISTRY: &str = "djinn-resize-omp4-registry";
-const HARNESS_REG_PORT: u16 = 5071;
+const HARNESS_REG_PORT: u16 = 5079;
 const NAMESPACE: &str = "djinn";
 const SENTINEL_DIR: &str = "/var/tmp/djinn-resize-matrix-sentinels";
 const SENTINEL_MOUNT: &str = "/sentinel";
@@ -1176,8 +1176,9 @@ const SIBLING_CLUSTERS: &[&str] = &[
     "djinn-kueue-c1",
     "djinn-resize-harness",
     "djinn-resize-pcod",
+    "djinn-resize-1j64",
 ];
-const SIBLING_REG_PORTS: &[u16] = &[5051, 5052, 5055, 5061, 5067];
+const SIBLING_REG_PORTS: &[u16] = &[5051, 5052, 5055, 5061, 5067, 5071];
 
 const TICK: Duration = Duration::from_millis(500);
 const AWAIT_TICKS: usize = 360;
@@ -1675,6 +1676,27 @@ fn leaf_cpu_max(pod: &str, invocation: &str) -> String {
     String::from_utf8_lossy(&output.stdout).trim().to_owned()
 }
 
+/// The quota half of a cgroup v2 `cpu.max` line, in millicores, or `None` when
+/// the leaf carries no quota at all.
+///
+/// `cpu.max` is `"<quota|max> <period>"` — TWO fields. Comparing the whole line
+/// against `"max"` never matches, and comparing it against `"max 100000"` would
+/// bind this test to the kernel's default period. Only the first field is a
+/// statement about who wrote quota.
+fn leaf_quota_millicores(raw: &str) -> Option<u64> {
+    let mut fields = raw.split_whitespace();
+    let quota = fields.next()?;
+    let period: u64 = fields.next()?.parse().ok()?;
+    if quota == "max" {
+        return None;
+    }
+    let quota: u64 = quota.parse().ok()?;
+    if period == 0 {
+        return None;
+    }
+    Some(quota.saturating_mul(1_000) / period)
+}
+
 /// The launcher's CPU limit as the kubelet has ACTUATED it, from the ONLY
 /// confirmation site: `status.initContainerStatuses[name=cgroup-launcher]`.
 fn actuated_launcher_cpu(pod_json: &Value) -> Option<CpuLimit> {
@@ -1704,8 +1726,14 @@ fn resize_patches_recorded(pod_json: &Value) -> usize {
         .unwrap_or(0)
 }
 
+/// One Pod, WITH its `metadata.managedFields`.
+///
+/// `--show-managed-fields` is not optional decoration. kubectl strips
+/// managedFields from `-o json` by default, and without this flag the whole
+/// block reads `null` — which made "zero resize PATCHes landed" pass for a Pod
+/// that had been resized. Measured on this branch before the flag was added.
 fn pod_json(pod: &str) -> Value {
-    kubectl_json(&["-n", NAMESPACE, "get", "pod", pod])
+    kubectl_json(&["-n", NAMESPACE, "get", "pod", pod, "--show-managed-fields"])
 }
 
 fn sentinel_exists(name: &str) -> bool {
@@ -1751,8 +1779,35 @@ fn dispatch(images: &BuiltImages, cell: Cell) -> LiveCell {
     dispatch_as(images, cell, uuid::Uuid::now_v7().to_string())
 }
 
+/// [`harness_config`] with the ServiceAccount and PVC names the CHART actually
+/// installed on this cluster.
+///
+/// Resolved from the live cluster rather than hard-coded: the chart's release
+/// name prefixes them (`djinn-djinn-taskrun`, not `djinn-taskrun`), and a
+/// hard-coded guess fails as `FailedCreate: error looking up service account`
+/// minutes into a cell, which reads exactly like a scheduling problem.
+fn live_config(image: &str) -> KubernetesConfig {
+    let named = |kind: &str, suffix: &str| -> String {
+        kubectl_json(&["-n", NAMESPACE, "get", kind])["items"]
+            .as_array()
+            .expect("a List has items")
+            .iter()
+            .filter_map(|item| item["metadata"]["name"].as_str())
+            .find(|name| name.ends_with(suffix))
+            .unwrap_or_else(|| panic!("the chart installs a {kind} ending in {suffix}"))
+            .to_owned()
+    };
+    KubernetesConfig {
+        service_account: named("serviceaccounts", "-taskrun"),
+        mirror_pvc: named("persistentvolumeclaims", "-mirrors"),
+        cache_pvc: named("persistentvolumeclaims", "-cache"),
+        projects_pvc: named("persistentvolumeclaims", "-projects"),
+        ..harness_config(image)
+    }
+}
+
 fn dispatch_as(images: &BuiltImages, cell: Cell, task_run_id: String) -> LiveCell {
-    let config = harness_config(&images.tag(cell.image));
+    let config = live_config(&images.tag(cell.image));
     let (mut manifest, task_run_id) = render_cell_job_as(&config, cell, task_run_id);
     let invocation = attach_probe_and_sentinel(&mut manifest, cell, &task_run_id);
     let job_name = manifest["metadata"]["name"]
@@ -1886,9 +1941,8 @@ fn the_live_matrix_has_exactly_one_quota_authority_per_admitted_pod() {
         match cell.expected {
             Outcome::Admitted(Authority::Leaf) => {
                 leaf_cells += 1;
-                assert_ne!(
-                    leaf,
-                    "max",
+                assert!(
+                    leaf_quota_millicores(&leaf).is_some(),
                     "cell {}: LEAF authority means the launcher wrote a numeric quota into the \
                      invocation leaf; cpu.max reads {leaf:?}, so NOBODY wrote one",
                     cell.name(),
@@ -1918,8 +1972,8 @@ fn the_live_matrix_has_exactly_one_quota_authority_per_admitted_pod() {
                     )
                 });
                 assert_eq!(
-                    leaf,
-                    "max",
+                    leaf_quota_millicores(&leaf),
+                    None,
                     "cell {}: RESIZE authority means the launcher wrote NOTHING into the leaf, \
                      not even `max` as a rewrite; cpu.max reads {leaf:?}",
                     cell.name(),
@@ -1947,12 +2001,13 @@ fn the_live_matrix_has_exactly_one_quota_authority_per_admitted_pod() {
                 assert!(
                     resize_patches_recorded(&resized) >= 1,
                     "cell {}: the apiserver recorded no pods/resize PATCH, so the resize \
-                     authority never acted",
+                     authority never acted. managedFields: {}",
                     cell.name(),
+                    resized["metadata"]["managedFields"],
                 );
                 assert_eq!(
-                    leaf_cpu_max(&live.pod, &live.invocation),
-                    "max",
+                    leaf_quota_millicores(&leaf_cpu_max(&live.pod, &live.invocation)),
+                    None,
                     "cell {}: the launcher wrote leaf quota AFTER the resize; that is a second \
                      authority on the same Pod",
                     cell.name(),

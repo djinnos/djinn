@@ -37,7 +37,7 @@
 #   --context NAME         must equal the derived context; any other value is refused
 #   --cluster-name NAME    default djinn-resize-omp4
 #   --registry-name NAME   default djinn-resize-omp4-registry
-#   --registry-port PORT   default 5071
+#   --registry-port PORT   default 5079
 #   --k8s-version VER      default 1.35.0
 #   --min-free-gib N       default 30
 #   --keep-on-failure      skip the failure-path teardown (debugging only)
@@ -61,7 +61,7 @@ DOCKER="${DOCKER:-docker}"
 
 CLUSTER_NAME="${DJINN_RESIZE_MATRIX_CLUSTER:-djinn-resize-omp4}"
 REG_NAME="${DJINN_RESIZE_MATRIX_REGISTRY:-djinn-resize-omp4-registry}"
-REG_PORT="${DJINN_RESIZE_MATRIX_REG_PORT:-5071}"
+REG_PORT="${DJINN_RESIZE_MATRIX_REG_PORT:-5079}"
 KIND_IMAGE_VERSION="${DJINN_RESIZE_MATRIX_K8S_VERSION:-1.35.0}"
 MIN_FREE_GIB="${DJINN_RESIZE_MATRIX_MIN_FREE_GIB:-30}"
 REQUESTED_CONTEXT=""
@@ -87,6 +87,7 @@ RESERVED_CLUSTER_NAMES=(
     djinn-kueue-c1
     djinn-resize-harness
     djinn-resize-pcod
+    djinn-resize-1j64
 )
 RESERVED_REGISTRY_NAMES=(
     kind-registry
@@ -94,8 +95,9 @@ RESERVED_REGISTRY_NAMES=(
     djinn-kueue-c1-registry
     djinn-resize-harness-registry
     djinn-resize-pcod-registry
+    djinn-resize-1j64-registry
 )
-RESERVED_REG_PORTS=(5000 5001 5051 5052 5055 5061 5067)
+RESERVED_REG_PORTS=(5000 5001 5051 5052 5055 5061 5067 5071)
 
 EXIT_USAGE=2
 EXIT_REFUSED_TARGET=3
@@ -360,15 +362,47 @@ cleanup_on_failure() {
 }
 trap cleanup_on_failure EXIT
 
+delegate_up() {
+    "$UPSTREAM_SETUP" up \
+        --cluster-name "$CLUSTER_NAME" \
+        --registry-name "$REG_NAME" \
+        --registry-port "$REG_PORT" \
+        --k8s-version "$KIND_IMAGE_VERSION" \
+        --min-free-gib "$MIN_FREE_GIB" \
+        --context "$CONTEXT" \
+        --cgroup-writable
+}
+
 info "delegating cluster creation to $(basename "$UPSTREAM_SETUP") --cgroup-writable"
-"$UPSTREAM_SETUP" up \
-    --cluster-name "$CLUSTER_NAME" \
-    --registry-name "$REG_NAME" \
-    --registry-port "$REG_PORT" \
-    --k8s-version "$KIND_IMAGE_VERSION" \
-    --min-free-gib "$MIN_FREE_GIB" \
-    --context "$CONTEXT" \
-    --cgroup-writable
+# ONE retry, for one measured race and no other.
+#
+# The delegate installs the pinned Kueue prerequisite with `helm --wait`, which
+# waits for the controller Deployment to become Available — not for its
+# conversion/mutating webhook Service to have endpoints. The djinn chart is
+# applied immediately afterwards and its ClusterQueue goes through that webhook,
+# so a cold node loses the race and the apply fails with `connection refused`
+# against `djinn-prereqs-kueue-webhook-service`. Measured on 2026-07-31: it
+# failed on the first attempt and succeeded on the second, on the same host.
+#
+# The retry tears the half-built cluster down first: the delegate refuses to
+# adopt an existing cluster, and adopting one is exactly the behaviour these
+# harnesses must never learn. If the second attempt fails too, that is a real
+# failure and it propagates.
+if ! delegate_up; then
+    info "delegated bring-up failed; tearing down and retrying once (kueue webhook race)"
+    teardown || true
+    delegate_up
+fi
+
+# The RuntimeClass is chart-gated and the delegate's values file does not enable
+# it. Turned on through the CHART rather than by applying a copy of the object,
+# so the handler name and the scheduling nodeSelector keep coming from the single
+# source of truth in `deploy/helm/djinn/templates/runtimeclass-cgroup-writable.yaml`.
+info "enabling the cgroup-writable RuntimeClass on the djinn release"
+helm --kube-context "$CONTEXT" upgrade djinn "$REPO_ROOT/deploy/helm/djinn" \
+    --namespace "$NAMESPACE" \
+    --reuse-values \
+    --set cgroupWritable.runtimeClass.enabled=true >/dev/null
 
 # Guard 8: re-check the floor against the LIVE API server. A tag can lie; the
 # server cannot.

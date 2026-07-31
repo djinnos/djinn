@@ -25,10 +25,17 @@ FROM ${DJINN_RESIZE_MATRIX_BASE_REPOSITORY}@${DJINN_RESIZE_MATRIX_BASE_DIGEST}
 # sidecar from this exact path, so the rendered command is left untouched.
 COPY djinn-cgroup-launcher-preprotocol /opt/djinn/bin/djinn-cgroup-launcher
 
-# The worker half. Modern on purpose: the image CLASS is a statement about the
-# launcher, and pairing a pre-protocol launcher with the current worker probe is
-# exactly the mixed-version combination the matrix exists to exercise.
-COPY governor_probe /opt/djinn/bin/djinn-governor-probe
+# The worker half, ALSO pre-protocol. The renderer puts the sidecar and the
+# worker container on the SAME image tag, so a legacy image is a legacy launcher
+# and a legacy worker — pairing this launcher with the current probe is not a
+# combination production can produce, and it is one that cannot work: the READY
+# payload grew a protocol byte, and the pre-protocol
+# `WorkerReadinessAssertion::from_wire` refuses anything that is not exactly 16
+# bytes. Measured on this branch as `ControlRejected(Worker)`.
+#
+# It lands at the same path as the declaring classes' probe so the worker
+# command the matrix renders is identical across all three classes.
+COPY legacy_probe /opt/djinn/bin/djinn-governor-probe
 
 # This image makes NO protocol declaration. There is no /opt/djinn/authority
 # file here and no DJINN_LAUNCHER_AUTHORITY_PROTOCOL ENV, because the artifact
