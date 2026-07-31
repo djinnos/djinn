@@ -315,12 +315,18 @@ fi
 
 # Disk. The host ran low on 2026-07-30 and a kind node plus a Kueue install is
 # not a small thing to discover you cannot afford halfway through.
-FREE_GIB=$(df -BG --output=avail / | tail -1 | tr -dc '0-9')
+#
+# An unparseable `df` is a failure, not zero free space and not a skip. Both of
+# the wrong answers are worse than stopping: "0Gi free" sends an operator
+# pruning a disk that is fine, and skipping the check reintroduces the very
+# mid-install disk exhaustion this guard exists for.
+FREE_GIB=$(df -BG --output=avail / 2>/dev/null | tail -1 | tr -dc '0-9')
+[ -n "$FREE_GIB" ] || fail 1 \
+    "could not read free space on / (df -BG --output=avail is GNU coreutils syntax). Fix the check rather than removing it."
 info "free space on /: ${FREE_GIB}Gi (floor ${MIN_FREE_GIB}Gi)"
-[ "${FREE_GIB:-0}" -ge "$MIN_FREE_GIB" ] || fail "$EXIT_LOW_DISK" \
+[ "$FREE_GIB" -ge "$MIN_FREE_GIB" ] || fail "$EXIT_LOW_DISK" \
     "only ${FREE_GIB}Gi free on / but this harness wants ${MIN_FREE_GIB}Gi. Prune before retrying (agent worktree cargo targets and cargo-target-runs are the usual culprits); do not lower the floor to get past this."
 
-CREATED_CLUSTER=false
 on_exit() {
     local status=$?
     [ "$status" -eq 0 ] && return 0
@@ -358,7 +364,6 @@ containerdConfigPatches:
 nodes:
   - role: control-plane
 EOF
-CREATED_CLUSTER=true
 
 # `kind create cluster` switches the current context to the new cluster. Every
 # call below is still pinned; this is only so a caller left on the harness
