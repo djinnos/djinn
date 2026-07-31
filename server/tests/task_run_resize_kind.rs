@@ -301,18 +301,33 @@ fn guard_both_kubernetes_floors_are_enforced() {
 #[test]
 fn guard_the_teardown_trap_precedes_everything_it_must_clean_up() {
     let script = read_repo_file(SETUP_SCRIPT);
+    // The line must be the INSTALLATION, not a comment that mentions it. The
+    // first version of this guard matched the prose in the `selftest` header
+    // and stayed green when the real `trap` line was deleted — which is
+    // precisely the failure it exists to catch, so it is now anchored on a line
+    // whose entire content is the command.
+    let line_number = |needle: &str| -> Option<usize> {
+        script
+            .lines()
+            .position(|line| line.trim() == needle || line.trim_start().starts_with(needle))
+            .filter(|_| {
+                script
+                    .lines()
+                    .any(|line| !line.trim_start().starts_with('#') && line.contains(needle))
+            })
+    };
     let trap = script
-        .find("trap on_exit EXIT")
-        .expect("the harness installs an EXIT trap");
-    let registry = script
-        .find("\"$DOCKER\" run -d --restart=no")
+        .lines()
+        .position(|line| line.trim() == "trap on_exit EXIT")
+        .expect(
+            "the harness must install an EXIT trap on a line of its own; a comment mentioning one is not a trap",
+        );
+    let registry = line_number("\"$DOCKER\" run -d --restart=no")
         .expect("the harness starts a registry container");
-    let cluster = script
-        .find("\"$KIND\" create cluster")
-        .expect("the harness creates a cluster");
+    let cluster = line_number("\"$KIND\" create cluster").expect("the harness creates a cluster");
     assert!(
         trap < registry && trap < cluster,
-        "the EXIT trap is installed at byte {trap}, after the registry ({registry}) or the cluster ({cluster}); everything the harness creates must be created UNDER the trap"
+        "the EXIT trap is installed on line {trap}, after the registry ({registry}) or the cluster ({cluster}); everything the harness creates must be created UNDER the trap"
     );
     assert!(
         script.contains("teardown || true"),
