@@ -1,3 +1,8 @@
+// djinn:allow-oversize — task 1j64's design names `server/tests/task_run_resize_cycles.rs`
+// as the single exclusive path for this proof, so the live helpers cannot move
+// into a `tests/<name>/mod.rs` sibling without leaving that set. The size is
+// deliberate and recorded here rather than left unacknowledged in the report.
+//
 // `kubectl`, `docker` and the setup script all report through stderr, and the
 // skip lines below are the only channel a `--ignored` run has for saying why it
 // did nothing. The workspace denies `print_stderr` for library and server code.
