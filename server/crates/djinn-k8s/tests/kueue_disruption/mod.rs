@@ -141,14 +141,21 @@ pub fn which(bin: &str) -> bool {
 /// construction — for an `http://` URL as readily as an `https://` one, so there
 /// is no TLS-free route around it.
 ///
-/// Re-exported from `tests/support/mod.rs` rather than reimplemented, so that
+/// Delegates to `tests/support/mod.rs` rather than reimplementing, so that
 /// every live-cluster test binary in this crate shares ONE installer. The
 /// previous body here was `let _ = …install_default();`, which discarded the
 /// `Err` arm — and that arm does not mean "already fine", it means some *other*
 /// provider won the install and this process is half-initialised. The shared
 /// helper installs exactly once under a `Once` and panics rather than hiding
 /// that. See task `d2ae`.
-pub use support::install_crypto_provider;
+///
+/// A wrapper and not a `pub use`: this module is private to each test binary,
+/// so a re-export the sibling binary never names would trip `unused_imports`
+/// under the lane's `-D warnings`. `#![allow(dead_code)]` at the top covers a
+/// function; it does not cover an import.
+pub fn install_crypto_provider() {
+    support::install_crypto_provider();
+}
 
 /// The context every live call is pinned to, after TWO independent refusals of
 /// anything else — the same discipline `tests/kueue_cluster_harness.rs` uses.
