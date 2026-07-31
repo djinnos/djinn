@@ -195,10 +195,84 @@ classify_path() {
 #   Also catches `use sqlx::{query, ...}` import lines themselves as an
 #   indicator that the module intends to use raw SQL.
 
-# The grep pattern for fully-qualified sqlx calls and same-module usage.
-# We use egrep (POSIX) with alternation. Word-boundary is approximated by
+# The pattern for fully-qualified sqlx calls and same-module usage.
+# We use POSIX ERE with alternation. Word-boundary is approximated by
 # requiring a non-alphanumeric character before the match start where needed.
 SQL_PATTERN='(sqlx::query[!(]|sqlx::query_as[!(]|sqlx::query_scalar[!(]|(^|[^a-zA-Z_])query[!(]|(^|[^a-zA-Z_])query_as[!(]|(^|[^a-zA-Z_])query_scalar[!(]|use sqlx::.*query)'
+
+# ── String literals are data, not calls ────────────────────────────────
+#
+# `djinn-graph/src/db_access.rs` is a scanner that detects SQL in source
+# text. Its unit tests feed it Rust source AS A STRING:
+#
+#     let hits = scan_sql("sqlx::query!(\"INSERT INTO orders …\", sku);");
+#
+# The guard was matching its own test fixtures. `sqlx::query!(` there is a
+# fixture payload; Rust never compiles the contents of a string literal, so
+# no string literal can contain a call.
+#
+# The rule below is therefore: a match is a violation unless THE MATCHED
+# TOKENS THEMSELVES sit inside a string literal. It excuses nothing about
+# what a literal *contains*, so SQL assembled by concatenation —
+#
+#     sqlx::query(&format!("{SET}owner_user_id = $3"))
+#
+# — still has `sqlx::query(` outside every literal and still fails. A
+# blanket "skip lines containing quotes" would have blinded the guard to
+# exactly that shape, which is live in credential.rs today.
+#
+# Implementation: blank out the BODY of every string literal on the line,
+# keep the delimiters, then apply SQL_PATTERN to the result. Rewriting in
+# place (rather than computing match offsets) keeps the `^` anchors in
+# SQL_PATTERN meaningful, since the line keeps its shape.
+#
+# Two limits, both chosen to over-report rather than under-report — a
+# false positive costs one reviewer a minute, a false negative is the
+# failure this guard exists to prevent:
+#
+#   * Literal state RESETS at every line. A multi-line string whose
+#     continuation lines contain sqlx call syntax is still flagged. Carrying
+#     state across lines would let a single mis-parse silence a whole file.
+#   * Raw strings (r#"…"#) are paired by the same quote scan, which is
+#     correct except when a raw body ends in a backslash.
+SQL_SCAN_PROGRAM='
+function strip_string_literals(s,   out, i, n, c) {
+    out = ""
+    i = 1
+    n = length(s)
+    while (i <= n) {
+        c = substr(s, i, 1)
+
+        # A char literal whose value IS a double quote — \047"\047 or the
+        # escaped form \047\"\047 — must not open a phantom string and hide
+        # a real call later on the line.
+        if (c == "\047") {
+            if (substr(s, i, 3) == "\047\"\047") { out = out "\047\047"; i += 3; continue }
+            if (substr(s, i, 4) == "\047\\\"\047") { out = out "\047\047"; i += 4; continue }
+        }
+
+        if (c != "\"") {
+            out = out c
+            i += 1
+            continue
+        }
+
+        # Opening delimiter: keep it, then swallow the body up to the
+        # matching unescaped quote (or end of line).
+        out = out "\"\""
+        i += 1
+        while (i <= n) {
+            c = substr(s, i, 1)
+            if (c == "\\") { i += 2; continue }
+            if (c == "\"") { i += 1; break }
+            i += 1
+        }
+    }
+    return out
+}
+
+strip_string_literals($0) ~ pattern { printf "%d:%s\n", FNR, $0 }
+'
 
 check_files() {
     violations=0
@@ -232,9 +306,10 @@ check_files() {
 
         checked=$((checked + 1))
 
-        # Grep the file for sqlx query patterns.
-        # -E = extended regex (POSIX), -n = line numbers.
-        hits=$(grep -E -n "$SQL_PATTERN" "$file" 2>/dev/null || true)
+        # Scan the file for sqlx query patterns, ignoring matches whose own
+        # tokens are string-literal data rather than code. Output format is
+        # `<line>:<original line>` — identical to `grep -E -n`.
+        hits=$(awk -v pattern="$SQL_PATTERN" "$SQL_SCAN_PROGRAM" "$file" 2>/dev/null || true)
         if [ -n "$hits" ]; then
             violations=$((violations + 1))
             printf '::error::Raw sqlx query usage detected outside djinn-db: %s\n' "$file" >&2

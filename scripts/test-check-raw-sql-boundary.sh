@@ -424,6 +424,134 @@ assert_exit "T24 inert .sql fixture exits 0" 0 "$t24_actual" "$LOG_DIR/t24_inert
 assert_output_lacks "T24 does not warn about inert data files" \
     "unrecognised extension" "$LOG_DIR/t24_inert.log.out"
 
+# ── T25: sqlx syntax inside a string literal is DATA, not a call ──────
+#
+# djinn-graph/src/db_access.rs is a scanner that detects SQL in source text,
+# and its unit tests feed it Rust source as a string. The guard was matching
+# its own test fixtures. Rust never compiles the contents of a string
+# literal, so a literal cannot contain a call.
+#
+# The fixture below reproduces both real shapes from that file AND, on the
+# lines immediately adjacent, a genuine violation — because the rule that
+# fixes the false positive must not be able to swallow the real thing.
+FIXTURE_SCANNER="$REPO_ROOT/$FIXTURE_BASE/src/scanner_selftest.rs"
+cat > "$FIXTURE_SCANNER" <<'FIXTURE'
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn detects_insert_into() {
+        let hits = scan_sql("sqlx::query!(\"INSERT INTO orders (sku) VALUES (?)\", sku);");
+        assert_eq!(hits.len(), 1);
+    }
+
+    #[test]
+    fn ignores_select_without_from() {
+        let hits = scan_sql("let v = sqlx::query_scalar!(\"SELECT 1\");");
+        assert!(hits.is_empty());
+    }
+}
+FIXTURE
+
+SCANNER_PATH="$FIXTURE_BASE/src/scanner_selftest.rs"
+set +e
+run_guard t25_scanner_literals "$SCANNER_PATH"
+t25_actual=$?
+set -e
+assert_exit "T25 sqlx syntax inside a string literal exits 0" 0 "$t25_actual" "$LOG_DIR/t25_scanner_literals.log.out"
+assert_output_lacks "T25 does not flag the scanner self-test fixtures" \
+    "::error::Raw sqlx query usage detected outside djinn-db: $SCANNER_PATH" \
+    "$LOG_DIR/t25_scanner_literals.log.out"
+
+# ── T26: a real violation ADJACENT to such a literal is still caught ───
+#
+# This is the load-bearing test for T25. If the string-literal rule were
+# implemented as "skip lines that contain quotes" or "skip this file", the
+# real call two lines down would vanish with the fixtures.
+FIXTURE_ADJACENT="$REPO_ROOT/$FIXTURE_BASE/src/scanner_adjacent.rs"
+cat > "$FIXTURE_ADJACENT" <<'FIXTURE'
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn detects_insert_into() {
+        let hits = scan_sql("sqlx::query!(\"INSERT INTO orders (sku) VALUES (?)\", sku);");
+        sqlx::query("DELETE FROM orders").execute(pool).await.unwrap();
+        let more = scan_sql("let v = sqlx::query_scalar!(\"SELECT 1\");");
+        assert_eq!(hits.len(), more.len());
+    }
+}
+FIXTURE
+
+ADJACENT_PATH="$FIXTURE_BASE/src/scanner_adjacent.rs"
+set +e
+run_guard t26_adjacent_violation "$ADJACENT_PATH"
+t26_actual=$?
+set -e
+assert_exit "T26 real violation adjacent to string literals exits non-zero" 1 "$t26_actual" "$LOG_DIR/t26_adjacent_violation.log.out"
+assert_output_contains "T26 reports the adjacent violation" \
+    "::error::Raw sqlx query usage detected outside djinn-db: $ADJACENT_PATH" \
+    "$LOG_DIR/t26_adjacent_violation.log.out"
+assert_output_contains "T26 names the real call's line, not the fixtures'" \
+    "6:        sqlx::query(\"DELETE FROM orders\")" \
+    "$LOG_DIR/t26_adjacent_violation.log.out"
+assert_output_lacks "T26 does not report the line 5 fixture" \
+    "5:        let hits = scan_sql" "$LOG_DIR/t26_adjacent_violation.log.out"
+assert_output_lacks "T26 does not report the line 7 fixture" \
+    "7:        let more = scan_sql" "$LOG_DIR/t26_adjacent_violation.log.out"
+
+# ── T27: SQL built by concatenation is still a violation ───────────────
+#
+# The narrowness requirement: only the matched TOKENS being literal data is
+# excused, never the contents of a literal. `credential.rs` builds SQL with
+# format! on the same line as the call — a "quotes on this line" rule would
+# have blinded the guard to exactly that shape.
+FIXTURE_CONCAT="$REPO_ROOT/$FIXTURE_BASE/src/concat_sql.rs"
+cat > "$FIXTURE_CONCAT" <<'FIXTURE'
+const SET: &str = "UPDATE credentials SET value = $1 WHERE ";
+
+pub async fn upsert(pool: &sqlx::PgPool, id: &str) {
+    sqlx::query(&format!("{SET}owner_user_id = $3"))
+        .bind(id)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+FIXTURE
+
+CONCAT_PATH="$FIXTURE_BASE/src/concat_sql.rs"
+set +e
+run_guard t27_concat "$CONCAT_PATH"
+t27_actual=$?
+set -e
+assert_exit "T27 format!-built SQL still exits non-zero" 1 "$t27_actual" "$LOG_DIR/t27_concat.log.out"
+assert_output_contains "T27 reports the concatenation violation" \
+    "::error::Raw sqlx query usage detected outside djinn-db: $CONCAT_PATH" \
+    "$LOG_DIR/t27_concat.log.out"
+
+# ── T28: a call AFTER a closed literal on the same line still fails ────
+#
+# Escape handling matters: `"a\"b"` is ONE literal. Naive quote counting
+# would close it at the escaped quote, treat the rest of the line as string
+# body, and silently swallow the call that follows.
+FIXTURE_AFTER="$REPO_ROOT/$FIXTURE_BASE/src/after_literal.rs"
+cat > "$FIXTURE_AFTER" <<'FIXTURE'
+pub async fn go(pool: &sqlx::PgPool) {
+    let label = "a\"b"; sqlx::query("SELECT 1").execute(pool).await.unwrap();
+    let ch = '"'; sqlx::query_scalar("SELECT 2").fetch_one(pool).await.unwrap();
+    let _ = (label, ch);
+}
+FIXTURE
+
+AFTER_PATH="$FIXTURE_BASE/src/after_literal.rs"
+set +e
+run_guard t28_after_literal "$AFTER_PATH"
+t28_actual=$?
+set -e
+assert_exit "T28 call after a closed literal exits non-zero" 1 "$t28_actual" "$LOG_DIR/t28_after_literal.log.out"
+assert_output_contains "T28 catches the call after an escaped-quote literal" \
+    "2:    let label = " "$LOG_DIR/t28_after_literal.log.out"
+assert_output_contains "T28 catches the call after a double-quote char literal" \
+    "3:    let ch = " "$LOG_DIR/t28_after_literal.log.out"
+
 # ── T10: mixed files — violation + clean + djinn-db ───────────────────
 set +e
 run_guard t10_mixed "$VIOLATION_PATH" "$CLEAN_PATH" "$DJINNDB_PATH"
