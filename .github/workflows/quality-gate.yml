@@ -205,6 +205,12 @@ jobs:
         run: node --test scripts/ci-mold-trixie-apt-smoke.test.mjs
       - name: Verify routed-scope contract
         run: node --test scripts/ci-changed-scope.test.mjs
+      # scripts/lib/source-text.mjs is the shared comment stripper behind the
+      # workflow-text guards below. A regression in it is silent — a guard
+      # whose stripper returned "" would assert nothing and still exit 0 — so
+      # it is proven before its consumers run.
+      - name: Verify source-text stripper contract
+        run: node --test scripts/ci-source-text.test.mjs
       - name: Verify cache ownership policy
         run: node --test scripts/ci-cache-policy.test.mjs
       - name: Verify qa-smoke workflow contract
