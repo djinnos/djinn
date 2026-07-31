@@ -49,6 +49,19 @@ djinn-image-builder = { path = "../djinn-image-builder" }
 # by the shell sandbox's confidential-path denylist.
 djinn-sandbox = { path = "../djinn-sandbox" }
 serde_yaml = "0.9"
+# fbiy-B2 (tests/kueue_disruption_conformance.rs) ONLY.
+#
+# `workspace-hack` unifies rustls 0.23 with BOTH the `ring` and the `aws-lc-rs`
+# providers, so `CryptoProvider::get_default_or_install_from_crate_features()`
+# cannot pick one and every `kube::Client` in a djinn-k8s test binary panics on
+# construction — measured 2026-07-30, and the reason
+# `tests/kueue_cluster_harness.rs` drives `kubectl` instead. The live disruption
+# proof has to call the REAL `SessionRuntime::watch_infra_death`, which takes a
+# real client, so that binary installs the provider itself before it builds one.
+#
+# Same line `server/Cargo.toml` already carries for `server/src/main.rs`'s
+# identical `install_default()` call: dev-only, ring, no default features.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 http = "1"
 http-body-util = "0.1"
 tokio = { version = "1", features = ["full", "test-util"] }
