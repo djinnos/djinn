@@ -41,7 +41,14 @@ fi
 # an operator can actually run.
 SINGLE_NODE_VALUES="$SCRIPT_DIR/fixtures/single-node-values.yaml"
 [ -f "$SINGLE_NODE_VALUES" ] || fail "single-node values file the runbook cites is missing: $SINGLE_NODE_VALUES"
-grep -Fq 'ReadWriteOnce' "$SINGLE_NODE_VALUES" || fail 'single-node values do not override the chart ReadWriteMany defaults, which no single-node default StorageClass can bind'
+# Anchored on the KEY, not on the bare word. A `grep -Fq 'ReadWriteOnce'`
+# accepts the token in a `#` comment, so deleting every real `accessMode:`
+# override and leaving `# ReadWriteOnce is required on single-node` would keep
+# this green while the values file the runbook cites no longer binds anything.
+# The two checks around this one already exclude `#` in their value class; this
+# one did not.
+grep -Eq '^[[:space:]]*accessMode:[[:space:]]*ReadWriteOnce[[:space:]]*(#.*)?$' "$SINGLE_NODE_VALUES" \
+    || fail 'single-node values do not override the chart ReadWriteMany defaults with an accessMode key, which no single-node default StorageClass can bind'
 if grep -Eq '^[[:space:]]+(server|runtime):[[:space:]]*[^[:space:]#]' "$SINGLE_NODE_VALUES"; then
     fail 'single-node values pin an image tag; the release under test belongs on the command line and in the release record'
 fi
