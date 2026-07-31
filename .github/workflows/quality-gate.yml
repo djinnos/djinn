@@ -1007,24 +1007,23 @@ jobs:
           set -euo pipefail
           # `--run-ignored all` runs the ignored proofs ALONGSIDE the always-on
           # guards, so the wiring guard and the source gates are covered by the
-          # same invocation. The executed count is compared against the
+          # same invocation. The PASS count is then compared against the
           # declaration above: a lane that quietly runs zero proofs must fail
           # rather than look green.
+          #
+          # Counted from nextest's own `PASS` lines rather than
+          # `--message-format libtest-json`, which is gated behind an
+          # experimental flag and whose shape is explicitly unstable. A count
+          # that silently becomes 0 because an output format changed would
+          # defeat the guard it feeds.
           cargo nextest run -p djinn-k8s --test cutover_preflight \
-            --run-ignored all --no-fail-fast --message-format libtest-json \
-            > "$RUNNER_TEMP/cutover.json" 2> "$RUNNER_TEMP/cutover.log" || {
-            cat "$RUNNER_TEMP/cutover.log"
-            exit 1
-          }
-          cat "$RUNNER_TEMP/cutover.log"
-          executed=$(grep -c '"type": *"test", *"event": *"ok"' "$RUNNER_TEMP/cutover.json" || true)
+            --run-ignored all --no-fail-fast 2>&1 | tee "$RUNNER_TEMP/cutover.log"
+          executed=$(grep -cE '^ +PASS \[' "$RUNNER_TEMP/cutover.log" || true)
           echo "::notice::cutover-preflight proofs executed=$executed expected>=$DJINN_CUTOVER_EXPECTED_PROOFS"
           if [ "$executed" -lt "$DJINN_CUTOVER_EXPECTED_PROOFS" ]; then
             echo "::error title=Cutover preflight proofs did not run::executed $executed, expected at least $DJINN_CUTOVER_EXPECTED_PROOFS. An ignored proof nobody runs is the exact defect this lane exists to prevent."
             exit 1
           fi
-        env:
-          NEXTEST_EXPERIMENTAL_LIBTEST_JSON: "1"
       - name: Test the deploy-time cutover preflight driver
         # The exit code of deploy/preflight/cutover-preflight.sh is the whole
         # contract, and this suite is what asserts it. DJINN_DATABASE_URL is
