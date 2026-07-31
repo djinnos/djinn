@@ -334,10 +334,16 @@ fn drain_fence(live_task_run_pods: Vec<String>) -> DrainFenceObservation {
             return DrainFenceObservation::unobservable(format!("no tokio runtime: {error}"));
         }
     };
-    let database =
-        match Database::open_with_config(DatabaseConnectConfig::Postgres(PostgresDatabaseConfig {
-            url,
-        })) {
+    // The pool is built INSIDE `block_on`. `PgPool` spawns its own reaper task
+    // at construction, so `sqlx` panics with "this functionality requires a
+    // Tokio context" if it is created outside a runtime — and a panic in a
+    // deploy gate is an exit 101 that reads as neither a clean nor a blocked
+    // verdict. Caught by `deploy/preflight/tests/cutover-preflight.sh` the
+    // first time the lane ran it with a real `DJINN_DATABASE_URL`.
+    runtime.block_on(async move {
+        let database = match Database::open_with_config(DatabaseConnectConfig::Postgres(
+            PostgresDatabaseConfig { url },
+        )) {
             Ok(database) => database,
             Err(error) => {
                 return DrainFenceObservation::unobservable(format!(
@@ -345,6 +351,7 @@ fn drain_fence(live_task_run_pods: Vec<String>) -> DrainFenceObservation {
                 ));
             }
         };
-    let permits = BuildPodPermitRepository::new(database);
-    runtime.block_on(observe_drain_fence(&permits, live_task_run_pods))
+        let permits = BuildPodPermitRepository::new(database);
+        observe_drain_fence(&permits, live_task_run_pods).await
+    })
 }
