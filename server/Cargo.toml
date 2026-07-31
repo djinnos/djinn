@@ -115,6 +115,10 @@ tikv-jemalloc-ctl = { version = "0.6", features = ["stats"] }
 
 [dev-dependencies]
 djinn-control-plane = { path = "crates/djinn-control-plane", features = ["test-support"] }
+# The dispatch-seam reachability test builds real `Pod` objects so the birth
+# downsize runs through the real `PodResizeClient` and the real
+# `confirm_launcher_cpu`, not through a stand-in that always agrees.
+k8s-openapi = { version = "0.23", features = ["v1_30"] }
 djinn-db = { path = "crates/djinn-db", features = ["test-support"] }
 djinn-server = { path = ".", features = ["test-support"] }
 insta = { version = "1", features = ["json", "redactions"] }
