@@ -84,43 +84,120 @@ fn repo_root() -> PathBuf {
         .expect("repository root")
 }
 
+/// THE rendering primitive. Every document this suite judges comes through
+/// here, so `live_render` and the liveness proof below cannot diverge: a change
+/// that stopped actually invoking helm would have to be made in this one place,
+/// and [`the_render_under_test_is_produced_by_helm_at_test_time`] is red the
+/// moment it is.
+///
+/// `--is-upgrade` matches `deploy/preflight/render-gate.sh`: `.Release.IsInstall`
+/// is the chart's only install-vs-upgrade branch and it gates a bootstrap secret
+/// that has nothing to do with the cutover.
+fn render_chart(chart: &std::path::Path, extra: &[&str]) -> Vec<Value> {
+    let output = Command::new("helm")
+        .arg("template")
+        .arg("djinn-cutover-preflight")
+        .arg(chart)
+        .arg("--is-upgrade")
+        .args(extra)
+        .output()
+        .expect(
+            "`helm` must be on PATH: this suite's whole claim is that its fixtures are a live \
+             render of the shipped chart, so a missing helm is a failure and never a skip",
+        );
+    assert!(
+        output.status.success(),
+        "helm template failed for {}: {}",
+        chart.display(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("helm output is utf-8");
+    let documents: Vec<Value> = serde_yaml::Deserializer::from_str(&stdout)
+        .filter_map(|document| Value::deserialize(document).ok())
+        .filter(|document| document.is_object())
+        .collect();
+    assert!(
+        documents.len() > 5,
+        "rendering {} produced {} documents; that is not the shipped chart",
+        chart.display(),
+        documents.len()
+    );
+    documents
+}
+
+fn shipped_chart() -> PathBuf {
+    repo_root().join("deploy/helm/djinn")
+}
+
 /// The LIVE render of the shipped chart, with the repo's stock `values.yaml`.
 ///
 /// Rendered once per process and cloned per case, so twenty proofs cost one
-/// `helm template`. `--is-upgrade` matches `deploy/preflight/render-gate.sh`:
-/// `.Release.IsInstall` is the chart's only install-vs-upgrade branch and it
-/// gates a bootstrap secret that has nothing to do with the cutover.
+/// `helm template`.
 fn live_render() -> &'static [Value] {
     static RENDER: OnceLock<Vec<Value>> = OnceLock::new();
-    RENDER.get_or_init(|| {
-        let chart = repo_root().join("deploy/helm/djinn");
-        let output = Command::new("helm")
-            .arg("template")
-            .arg("djinn-cutover-preflight")
-            .arg(&chart)
-            .arg("--is-upgrade")
-            .output()
-            .expect(
-                "`helm` must be on PATH: this suite's whole claim is that its fixtures are a live \
-                 render of the shipped chart, so a missing helm is a failure and never a skip",
-            );
-        assert!(
-            output.status.success(),
-            "helm template failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let stdout = String::from_utf8(output.stdout).expect("helm output is utf-8");
-        let documents: Vec<Value> = serde_yaml::Deserializer::from_str(&stdout)
-            .filter_map(|document| Value::deserialize(document).ok())
-            .filter(|document| document.is_object())
-            .collect();
-        assert!(
-            documents.len() > 5,
-            "the live render produced {} documents; that is not the shipped chart",
-            documents.len()
-        );
-        documents
-    })
+    RENDER.get_or_init(|| render_chart(&shipped_chart(), &[]))
+}
+
+/// **AC2, liveness.** The documents under test are produced by running `helm`
+/// against the chart AS IT IS ON DISK RIGHT NOW.
+///
+/// A checked-in known-good render passes every other proof in this file on the
+/// day it is committed and keeps passing forever afterwards — it is the exact
+/// "merged, green, unreachable" shape this task exists to remove, and a
+/// diff-based guard cannot see it, because a stale fixture still diffs cleanly
+/// against itself.
+///
+/// So this proof asks something no stored file can answer. It copies the chart
+/// to a temp directory, writes a nonce that has never existed before into its
+/// `values.yaml`, renders THAT through the same [`render_chart`] primitive
+/// `live_render` uses, and requires the nonce to come back out. A renderer that
+/// reads bytes from anywhere else cannot produce it.
+#[test]
+#[ignore = "needs helm; run by the cutover-preflight quality-gate lane"]
+fn the_render_under_test_is_produced_by_helm_at_test_time() {
+    let nonce = format!("zpen-{}", uuid::Uuid::now_v7().simple());
+    let scratch = std::env::temp_dir().join(&nonce);
+    copy_tree(&shipped_chart(), &scratch);
+
+    let values = scratch.join("values.yaml");
+    let original = std::fs::read_to_string(&values).expect("the chart has a values.yaml");
+    std::fs::write(&values, format!("nameOverride: {nonce}\n{original}")).expect("write values");
+
+    let rendered = render_chart(&scratch, &[]);
+    let names: Vec<&str> = rendered
+        .iter()
+        .filter_map(|doc| doc.pointer("/metadata/name"))
+        .filter_map(Value::as_str)
+        .collect();
+    assert!(
+        names.iter().any(|name| name.contains(&nonce)),
+        "the nonce {nonce:?} did not reach the render, so these documents were not produced by \
+         helm from the chart on disk. Rendered names: {names:?}"
+    );
+    // And the shipped render must NOT carry it, or the assertion above could be
+    // satisfied by something other than this test's own edit.
+    assert!(
+        !live_render()
+            .iter()
+            .filter_map(|doc| doc.pointer("/metadata/name"))
+            .filter_map(Value::as_str)
+            .any(|name| name.contains(&nonce)),
+        "the shipped render already contains a nonce generated in this process"
+    );
+    std::fs::remove_dir_all(&scratch).ok();
+}
+
+fn copy_tree(from: &std::path::Path, to: &std::path::Path) {
+    std::fs::create_dir_all(to).expect("create scratch chart dir");
+    for entry in std::fs::read_dir(from).expect("read chart dir") {
+        let entry = entry.expect("chart dir entry");
+        let target = to.join(entry.file_name());
+        if entry.file_type().expect("file type").is_dir() {
+            copy_tree(&entry.path(), &target);
+        } else {
+            std::fs::copy(entry.path(), &target).expect("copy chart file");
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

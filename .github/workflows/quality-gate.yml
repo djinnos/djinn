@@ -941,7 +941,7 @@ jobs:
       # `the_cutover_preflight_lane_is_wired_and_cannot_silently_skip` reads
       # this file back and fails if this declaration, the job, or the
       # `--run-ignored all` invocation disappears.
-      DJINN_CUTOVER_EXPECTED_PROOFS: "17"
+      DJINN_CUTOVER_EXPECTED_PROOFS: "18"
       # The drain-fence proofs open template-cloned per-test databases here.
       DJINN_TEST_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5433/postgres
     services:
