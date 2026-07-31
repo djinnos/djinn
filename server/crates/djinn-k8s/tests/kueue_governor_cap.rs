@@ -61,7 +61,10 @@ fn live_exactly_k_of_m_contending_invocations_observe_the_lifted_quota() {
 
     // M: launch up to the live `pods` quota, then read back what was ADMITTED.
     let quota = pods_nominal_quota(&context);
-    assert!(quota >= 2, "the live pods quota is {quota}; nothing to contend over");
+    assert!(
+        quota >= 2,
+        "the live pods quota is {quota}; nothing to contend over"
+    );
     let mut probes = Vec::new();
     for index in 0..quota {
         probes.push(launch_probe(
@@ -73,9 +76,7 @@ fn live_exactly_k_of_m_contending_invocations_observe_the_lifted_quota() {
         ));
     }
     let m = admitted_workloads(&context).max(probes.len() as u64);
-    eprintln!(
-        "AC3 M={m} (live ClusterQueue admittedWorkloads, pods nominalQuota {quota})",
-    );
+    eprintln!("AC3 M={m} (live ClusterQueue admittedWorkloads, pods nominalQuota {quota})",);
 
     for probe in &probes {
         await_probe_record(&context, probe, "awaiting_decision");
@@ -101,7 +102,11 @@ fn live_exactly_k_of_m_contending_invocations_observe_the_lifted_quota() {
         let granted = authorized.contains(&probe.pod_uid);
         // The unauthorized present a fence they were never granted, so the
         // refusal is the launcher's and not this test's silence.
-        let presented = if granted { probe.fence } else { probe.fence ^ 1 };
+        let presented = if granted {
+            probe.fence
+        } else {
+            probe.fence ^ 1
+        };
         deliver_decision(&context, probe, Some(presented));
     }
 
@@ -207,7 +212,10 @@ fn live_the_task_run_containers_hold_no_sys_admin_or_sys_resource() {
         for line in raw.lines() {
             let (label, hex) = line.split_once(':').expect("a /proc status line");
             let mask = u64::from_str_radix(hex.trim(), 16).expect("a capability mask is hex");
-            for (name, bit) in [("SYS_ADMIN", SYS_ADMIN_BIT), ("SYS_RESOURCE", SYS_RESOURCE_BIT)] {
+            for (name, bit) in [
+                ("SYS_ADMIN", SYS_ADMIN_BIT),
+                ("SYS_RESOURCE", SYS_RESOURCE_BIT),
+            ] {
                 assert_eq!(
                     mask & (1 << bit),
                     0,
