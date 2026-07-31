@@ -192,7 +192,46 @@ pub enum PodResizeError {
         op: &'static str,
         /// Rendered `kube::Error`.
         message: String,
+        /// The apiserver's HTTP status, when the failure was an apiserver
+        /// *verdict* rather than a transport failure.
+        ///
+        /// Carried as a number rather than left inside `message` because the
+        /// lift state machine has to tell `403 Forbidden` (the controller's
+        /// `pods/resize` RBAC rule is missing — an operator fact) from `422`
+        /// (the apiserver refused this particular resize — a request fact) from
+        /// a timeout (nothing is known at all), and each maps to a different
+        /// settled degrade reason. Recovering that distinction by matching on a
+        /// rendered error string would make the classification depend on
+        /// `kube`'s `Display` impl.
+        ///
+        /// `None` means no HTTP response was received: a transport error, a
+        /// timeout, or a client-side failure.
+        status: Option<u16>,
     },
+}
+
+impl PodResizeError {
+    /// The apiserver HTTP status, when this failure carries one.
+    #[must_use]
+    pub const fn api_status(&self) -> Option<u16> {
+        match self {
+            Self::Api { status, .. } => *status,
+            _ => None,
+        }
+    }
+}
+
+/// Recover the apiserver's HTTP status from a `kube::Error`.
+///
+/// `kube::Error::Api(ErrorResponse)` is the only variant that carries an
+/// apiserver verdict; every other variant is a transport, TLS, auth-plumbing or
+/// serialization failure, for which "no status" is the correct answer rather
+/// than a guessed one.
+fn api_status(error: &kube::Error) -> Option<u16> {
+    match error {
+        kube::Error::Api(response) => u16::try_from(response.code).ok(),
+        _ => None,
+    }
 }
 
 /// A CPU limit, normalised to millicores.
@@ -457,6 +496,7 @@ impl PodResizeApi for KubePodResizeApi {
         self.pods.get(name).await.map_err(|e| PodResizeError::Api {
             op: "get",
             message: e.to_string(),
+            status: api_status(&e),
         })
     }
 
@@ -471,6 +511,7 @@ impl PodResizeApi for KubePodResizeApi {
             .map_err(|e| PodResizeError::Api {
                 op: "patch",
                 message: e.to_string(),
+                status: api_status(&e),
             })
     }
 }

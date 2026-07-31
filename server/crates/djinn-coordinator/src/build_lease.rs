@@ -284,6 +284,17 @@ impl BuildLeaseService {
         self
     }
 
+    /// Whether a Pod-resize authorization is armed on this service's grant path.
+    ///
+    /// Exposed so **reachability** can be asserted at a composition site rather
+    /// than inferred from a unit test that installed the authority itself. The
+    /// difference is the whole point: `Option<Arc<ResizeAuthority>> = None` is
+    /// how this stack spent `0ppk-1a` merged, green and unable to fire.
+    #[must_use]
+    pub const fn resize_authority_armed(&self) -> bool {
+        self.resize_authority.is_some()
+    }
+
     /// Install the rendered CPU facts that per-row weight is derived from.
     ///
     /// Composition passes the same `KubernetesConfig`-derived values used to

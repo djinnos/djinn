@@ -8,7 +8,7 @@
 //! whose `active()` returned a struct literal would agree with all of it and
 //! prove none of it.
 //!
-//! The ONE double is [`CountingPodResizeIntentSink`], and it is deliberately on
+//! The ONE double is [`CountingPodResizeApplier`], and it is deliberately on
 //! the far side of the boundary: it stands in for the Kubernetes `pods/resize`
 //! PATCH that `0ppk-1b` owns. "Zero Kubernetes calls" is only assertable if
 //! something counts calls, and a returned `DegradedUnleased` cannot tell a
@@ -32,7 +32,7 @@ use djinn_supervisor::services::{
 
 use crate::build_lease::BuildLeaseService;
 use crate::resize_authorization::{
-    CountingPodResizeIntentSink, RefusalClass, ResizeAuthority, ResizeAuthorizationOutcome,
+    CountingPodResizeApplier, RefusalClass, ResizeAuthority, ResizeAuthorizationOutcome,
 };
 
 /// `DJINN_MAX_BUILD_TASKRUNS` stand-in — large enough that capacity never
@@ -126,7 +126,7 @@ async fn seed_task_runs(db: &Database, runs: &[&str]) {
 struct Fixture {
     service: Arc<BuildLeaseService>,
     permits: Arc<BuildPodPermitRepository>,
-    sink: Arc<CountingPodResizeIntentSink>,
+    applier: Arc<CountingPodResizeApplier>,
     authority: Arc<ResizeAuthority>,
     _db: Database,
 }
@@ -150,7 +150,7 @@ impl Fixture {
 
         let leases = Arc::new(BuildLeaseRepository::new(db.clone()));
         let permits = Arc::new(BuildPodPermitRepository::new(db.clone()));
-        let sink = Arc::new(CountingPodResizeIntentSink::new());
+        let applier = Arc::new(CountingPodResizeApplier::new());
         let lift: Arc<dyn InvocationLiftAuthority> = Arc::new(DurableInvocationLiftAuthority::new(
             db.clone(),
             "resize-authorization-tests",
@@ -160,7 +160,7 @@ impl Fixture {
             Arc::clone(&permits),
             lift,
             CONFIGURED_LEASED,
-            Arc::clone(&sink) as Arc<dyn crate::resize_authorization::PodResizeIntentSink>,
+            Arc::clone(&applier) as Arc<dyn crate::resize_authorization::PodResizeApplier>,
         ));
 
         let service = Arc::new(
@@ -173,7 +173,7 @@ impl Fixture {
         Self {
             service,
             permits,
-            sink,
+            applier,
             authority,
             _db: db,
         }
@@ -299,7 +299,7 @@ async fn a_task_run_naming_another_invocation_is_denied_with_zero_kubernetes_cal
         .granted(OWNER_TASK, OWNER_RUN, OWNER_INVOCATION)
         .await;
     assert_eq!(
-        fixture.sink.calls(),
+        fixture.applier.calls(),
         0,
         "precondition: queueing must not reach the Kubernetes boundary"
     );
@@ -313,7 +313,7 @@ async fn a_task_run_naming_another_invocation_is_denied_with_zero_kubernetes_cal
         )
         .await;
     assert_eq!(
-        fixture.sink.calls(),
+        fixture.applier.calls(),
         0,
         "ZERO Kubernetes calls: the denial must land before any Pod is named"
     );
@@ -325,7 +325,7 @@ async fn a_task_run_naming_another_invocation_is_denied_with_zero_kubernetes_cal
         "a task run naming another task run's invocation must be denied"
     );
     assert!(
-        fixture.sink.intents().is_empty(),
+        fixture.applier.intents().is_empty(),
         "and no intent may have been derived for the intruder's Pod either"
     );
 }
@@ -362,7 +362,7 @@ async fn the_owner_is_authorized_against_its_own_durable_permit() {
         "an authorized grant returns the lease status unchanged: {granted:?}"
     );
 
-    let intents = fixture.sink.intents();
+    let intents = fixture.applier.intents();
     assert_eq!(intents.len(), 1, "exactly one Kubernetes intent");
     let intent = &intents[0];
     assert_eq!(intent.pod_namespace, format!("ns-{OWNER_RUN}"));
@@ -411,7 +411,7 @@ async fn a_mismatched_fencing_token_is_denied_with_zero_kubernetes_calls() {
         }
         other => panic!("a foreign fencing token must be denied, got {other:?}"),
     }
-    assert_eq!(fixture.sink.calls(), 0, "ZERO Kubernetes calls");
+    assert_eq!(fixture.applier.calls(), 0, "ZERO Kubernetes calls");
 }
 
 // ─── AC2: the ceiling clamp ─────────────────────────────────────────────────
@@ -453,10 +453,10 @@ async fn a_configured_lift_above_the_stored_ceiling_clamps_to_the_ceiling() {
         .grant(identity(OWNER_TASK, OWNER_RUN, OWNER_INVOCATION), &token)
         .await;
 
-    let intents = fixture.sink.intents();
+    let intents = fixture.applier.intents();
     assert_eq!(intents.len(), 1);
     assert_eq!(
-        fixture.sink.intents_above_ceiling(),
+        fixture.applier.intents_above_ceiling(),
         0,
         "ZERO PATCH intents above the stored ceiling"
     );
@@ -482,13 +482,13 @@ async fn a_ceiling_above_the_configured_lift_does_not_raise_the_target() {
         .grant(identity(OWNER_TASK, OWNER_RUN, OWNER_INVOCATION), &token)
         .await;
 
-    let intents = fixture.sink.intents();
+    let intents = fixture.applier.intents();
     assert_eq!(intents.len(), 1);
     assert_eq!(
         intents[0].target_millicores, CONFIGURED_LEASED,
         "a generous ceiling must not lift the process above what it configured"
     );
-    assert_eq!(fixture.sink.intents_above_ceiling(), 0);
+    assert_eq!(fixture.applier.intents_above_ceiling(), 0);
 }
 
 // ─── AC3: the lift predicate is written against the TYPES ───────────────────
@@ -529,7 +529,7 @@ async fn only_an_enforcing_authority_authorizes_a_resize() {
             "{mode:?} is not a degrade: the lease result passes through"
         );
         assert_eq!(
-            fixture.sink.calls(),
+            fixture.applier.calls(),
             0,
             "{mode:?} must reach the Kubernetes boundary ZERO times"
         );
@@ -578,7 +578,7 @@ async fn a_leaf_v1_pod_is_not_resizable_and_costs_zero_kubernetes_calls() {
             reason: DegradedUnleasedReason::ProtocolNotResizable
         }
     );
-    assert_eq!(fixture.sink.calls(), 0, "ZERO Kubernetes calls");
+    assert_eq!(fixture.applier.calls(), 0, "ZERO Kubernetes calls");
     assert_eq!(
         LauncherAuthorityProtocol::from_str("resize-v2").unwrap(),
         LauncherAuthorityProtocol::ResizeV2,
@@ -622,7 +622,7 @@ async fn every_uncertainty_degrades_unleased_rather_than_erroring() {
         LeaseResult::LeaseUnavailable,
         "LeaseUnavailable means ASK AGAIN; this answer cannot change by asking"
     );
-    assert_eq!(fixture.sink.calls(), 0, "ZERO Kubernetes calls");
+    assert_eq!(fixture.applier.calls(), 0, "ZERO Kubernetes calls");
 
     // A permit exists but its write-once resize identity was never captured —
     // the window between `acquire` and `g8jk-3`'s post-admission capture.
@@ -645,7 +645,7 @@ async fn every_uncertainty_degrades_unleased_rather_than_erroring() {
         },
         "an uncaptured Pod identity is a settled degrade"
     );
-    assert_eq!(fixture.sink.calls(), 0, "ZERO Kubernetes calls");
+    assert_eq!(fixture.applier.calls(), 0, "ZERO Kubernetes calls");
 }
 
 /// A refusal must not disturb the durable lease. The invocation still holds its

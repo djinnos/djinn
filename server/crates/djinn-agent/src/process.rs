@@ -1461,6 +1461,27 @@ fn degrade_reason(result: &LeaseResult) -> &'static str {
             DegradedUnleasedReason::ProtocolNotResizable => "protocol_not_resizable",
             DegradedUnleasedReason::CeilingUnusable => "ceiling_unusable",
             DegradedUnleasedReason::AuthorizationUnreadable => "authorization_unreadable",
+            // Apply-time outcomes (0ppk-1c). Each is its own label because each
+            // names a different operator action: `resize_forbidden` is a missing
+            // RBAC rule, `launcher_restarted` is a Pod-level event, and
+            // `lift_status_stale` is a node that accepted a resize and never
+            // actuated it. Folding them together would reproduce exactly the
+            // "3 enum variants carried 4 meanings" failure this label exists to
+            // avoid.
+            DegradedUnleasedReason::PermitNotLiftable => "permit_not_liftable",
+            DegradedUnleasedReason::LiftLifecycleUnwritable => "lift_lifecycle_unwritable",
+            DegradedUnleasedReason::ResizeSurfaceUnavailable => "resize_surface_unavailable",
+            DegradedUnleasedReason::ResizeForbidden => "resize_forbidden",
+            DegradedUnleasedReason::ResizeRejected => "resize_rejected",
+            DegradedUnleasedReason::LiftPodAbsent => "lift_pod_absent",
+            DegradedUnleasedReason::LiftIdentityAmbiguous => "lift_identity_ambiguous",
+            DegradedUnleasedReason::ResizeIdentityChanged => "resize_identity_changed",
+            DegradedUnleasedReason::LauncherRestarted => "launcher_restarted",
+            DegradedUnleasedReason::LauncherProtocolChanged => "launcher_protocol_changed",
+            DegradedUnleasedReason::LiftResizePending => "lift_resize_pending",
+            DegradedUnleasedReason::LiftStatusAbsent => "lift_status_absent",
+            DegradedUnleasedReason::LiftStatusStale => "lift_status_stale",
+            DegradedUnleasedReason::LiftDeadlineExceeded => "lift_deadline_exceeded",
         },
         _ => "unclassified",
     }

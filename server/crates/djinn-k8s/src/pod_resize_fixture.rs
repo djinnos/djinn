@@ -48,11 +48,74 @@ pub enum Actuation {
     NeverActuates,
 }
 
+/// An apiserver verdict (or transport failure) the fixture returns instead of
+/// performing the call.
+///
+/// It exists so `403`, `422` and "no response at all" can be driven as the
+/// distinct things they are. The lift classifies on the numeric status carried
+/// by [`PodResizeError::Api`], so a fault injected here reaches the state
+/// machine through the same field a real `kube::Error::Api` would.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ApiFault {
+    /// The apiserver's HTTP status, or `None` for a transport failure/timeout.
+    pub status: Option<u16>,
+    /// The rendered message.
+    pub message: String,
+}
+
+impl ApiFault {
+    /// `403 Forbidden` — the shape a missing `pods/resize` RBAC rule produces.
+    #[must_use]
+    pub fn forbidden() -> Self {
+        Self {
+            status: Some(403),
+            message: "pods \"taskrun\" is forbidden: User cannot patch resource \
+                      \"pods/resize\" in API group \"\""
+                .to_owned(),
+        }
+    }
+
+    /// `422 Unprocessable Entity` — the apiserver refusing this resize.
+    #[must_use]
+    pub fn unprocessable() -> Self {
+        Self {
+            status: Some(422),
+            message: "Pod \"taskrun\" is invalid: spec.initContainers[0].resources.limits: \
+                      Forbidden: resource limits cannot be removed"
+                .to_owned(),
+        }
+    }
+
+    /// A transport timeout: no HTTP response, so no status.
+    #[must_use]
+    pub fn timeout() -> Self {
+        Self {
+            status: None,
+            message: "error trying to connect: operation timed out".to_owned(),
+        }
+    }
+
+    fn into_error(self, op: &'static str) -> PodResizeError {
+        PodResizeError::Api {
+            op,
+            message: self.message,
+            status: self.status,
+        }
+    }
+}
+
 struct ClusterState {
     pod: Option<Pod>,
     actuation: Actuation,
     resize_patches: usize,
     deletes: Vec<(String, String)>,
+    /// Fault returned by every `get_pod`, when set.
+    get_fault: Option<ApiFault>,
+    /// Fault returned by every `patch_resize`, when set. The patch counter is
+    /// **not** incremented for a faulted call: the fixture models a request the
+    /// apiserver rejected, and counting it as an applied PATCH would make the
+    /// "zero PATCH bodies above the ceiling" counters lie.
+    patch_fault: Option<ApiFault>,
 }
 
 /// One stored task-run Pod, plus a record of everything done to it.
@@ -69,6 +132,8 @@ impl StoredTaskRunPod {
                 actuation: Actuation::Actuates,
                 resize_patches: 0,
                 deletes: Vec::new(),
+                get_fault: None,
+                patch_fault: None,
             })),
         }
     }
@@ -135,6 +200,154 @@ impl StoredTaskRunPod {
         self
     }
 
+    /// Add a `PodResizePending` condition. Its presence alone means no observed
+    /// limit is authoritative — the fixture does not set a `status` field on it,
+    /// because [`crate::pod_resize::has_resize_pending_condition`] deliberately
+    /// does not consult one.
+    #[must_use]
+    pub fn with_resize_pending(self) -> Self {
+        self.mutate(|pod| {
+            if let Some(status) = pod.status.as_mut() {
+                status
+                    .conditions
+                    .get_or_insert_with(Default::default)
+                    .push(
+                        serde_json::from_value(json!({
+                            "type": crate::pod_resize::POD_RESIZE_PENDING_CONDITION,
+                            "status": "True",
+                        }))
+                        .expect("condition fixture deserializes"),
+                    );
+            }
+        });
+        self
+    }
+
+    /// Plant a **regular**-container status named `cgroup-launcher` carrying
+    /// `cpu`.
+    ///
+    /// This is the false-confirmation trap in its sharpest form: the launcher is
+    /// a native sidecar, so `status.containerStatuses` can never legitimately
+    /// hold an entry by that name — but a confirmation that read the wrong array
+    /// would find a *matching* limit there and report success while the
+    /// launcher's own init-container status was still stale.
+    #[must_use]
+    pub fn with_misleading_regular_launcher_status(self, cpu: &str) -> Self {
+        let entry = json!({
+            "name": crate::launcher::LAUNCHER_CONTAINER_NAME,
+            "ready": true,
+            "restartCount": 0,
+            "image": "registry.example/launcher@sha256:feed",
+            "imageID": "registry.example/launcher@sha256:feed",
+            "containerID": "containerd://impostor",
+            "resources": { "limits": { "cpu": cpu } },
+        });
+        self.mutate(|pod| {
+            if let Some(status) = pod.status.as_mut() {
+                status
+                    .container_statuses
+                    .get_or_insert_with(Default::default)
+                    .push(serde_json::from_value(entry.clone()).expect("status fixture"));
+            }
+        });
+        self
+    }
+
+    /// Strip `resources` from the launcher's init-container status, leaving the
+    /// spec untouched: the launcher is nameable in both arrays but reports no
+    /// CPU limit at all.
+    #[must_use]
+    pub fn without_launcher_status_limit(self) -> Self {
+        self.mutate(|pod| {
+            for status in launcher_statuses(pod) {
+                status.resources = None;
+            }
+        });
+        self
+    }
+
+    /// Replace the stored Pod's `metadata.uid`, keeping its NAME.
+    ///
+    /// This is a Pod deleted and recreated under the same name — the exact
+    /// object `PodResizeClient::resize_launcher_cpu`, whose only argument is a
+    /// name, cannot tell apart from the original.
+    pub fn recreate_under_same_name(&self, new_uid: &str) {
+        self.mutate(|pod| pod.metadata.uid = Some(new_uid.to_owned()));
+    }
+
+    /// Restart the launcher sidecar: a new `containerID` and a bumped
+    /// `restartCount`.
+    pub fn restart_launcher(&self, new_container_id: &str) {
+        self.mutate(|pod| {
+            for status in launcher_statuses(pod) {
+                status.container_id = Some(new_container_id.to_owned());
+                status.restart_count += 1;
+            }
+        });
+    }
+
+    /// Rewrite the launcher's declared `DJINN_LAUNCHER_AUTHORITY_PROTOCOL`.
+    pub fn set_observed_protocol(&self, protocol: &str) {
+        self.mutate(|pod| {
+            for container in pod
+                .spec
+                .as_mut()
+                .and_then(|spec| spec.init_containers.as_mut())
+                .into_iter()
+                .flatten()
+                .filter(|c| c.name == crate::launcher::LAUNCHER_CONTAINER_NAME)
+            {
+                for entry in container
+                    .env
+                    .get_or_insert_with(Default::default)
+                    .iter_mut()
+                    .filter(|e| e.name == crate::launcher::AUTHORITY_PROTOCOL_ENV)
+                {
+                    entry.value = Some(protocol.to_owned());
+                }
+            }
+        });
+    }
+
+    /// Every `get_pod` fails with `fault` until cleared.
+    #[must_use]
+    pub fn failing_gets(self, fault: ApiFault) -> Self {
+        self.state.lock().expect("cluster").get_fault = Some(fault);
+        self
+    }
+
+    /// Every `patch_resize` fails with `fault`, without mutating the Pod and
+    /// without incrementing the PATCH counter.
+    #[must_use]
+    pub fn failing_patches(self, fault: ApiFault) -> Self {
+        self.state.lock().expect("cluster").patch_fault = Some(fault);
+        self
+    }
+
+    /// The launcher's live `containerID`, for restart assertions.
+    #[must_use]
+    pub fn launcher_container_id(&self) -> Option<String> {
+        let pod = self.pod()?;
+        crate::pod_resize::locate_launcher_status(&pod)
+            .ok()?
+            .container_id
+            .clone()
+    }
+
+    /// The launcher's `restartCount`. A limits-only resize must never move it.
+    #[must_use]
+    pub fn launcher_restart_count(&self) -> Option<i32> {
+        let pod = self.pod()?;
+        Some(crate::pod_resize::locate_launcher_status(&pod).ok()?.restart_count)
+    }
+
+    fn mutate(&self, apply: impl FnOnce(&mut Pod)) {
+        let mut state = self.state.lock().expect("cluster");
+        if let Some(pod) = state.pod.as_mut() {
+            apply(pod);
+        }
+    }
+
     fn pod(&self) -> Option<Pod> {
         self.state.lock().expect("cluster").pod.clone()
     }
@@ -147,6 +360,13 @@ impl StoredTaskRunPod {
     pub fn observe_launcher(
         &self,
     ) -> Result<Option<ObservedLauncherSidecar>, LauncherObservationError> {
+        // A GET fault applies to the observation too. The whole point of the
+        // fault is that the apiserver did not answer; a fixture that served the
+        // stored Pod anyway would let a caller "observe" a cluster it cannot
+        // reach.
+        if let Some(fault) = self.state.lock().expect("cluster").get_fault.clone() {
+            return Err(LauncherObservationError::Api(fault.message));
+        }
         match self.pod() {
             None => Ok(None),
             Some(pod) => observe_launcher_sidecar(&pod).map(Some),
@@ -263,23 +483,41 @@ impl StoredTaskRunPod {
 
 struct FixtureApi(StoredTaskRunPod);
 
+/// Every launcher entry in `status.initContainerStatuses`, for mutation.
+fn launcher_statuses(pod: &mut Pod) -> impl Iterator<Item = &mut k8s_openapi::api::core::v1::ContainerStatus> {
+    pod.status
+        .as_mut()
+        .and_then(|status| status.init_container_statuses.as_mut())
+        .into_iter()
+        .flatten()
+        .filter(|status| status.name == crate::launcher::LAUNCHER_CONTAINER_NAME)
+}
+
 #[async_trait::async_trait]
 impl PodResizeApi for FixtureApi {
     async fn get_pod(&self, name: &str) -> Result<Pod, PodResizeError> {
+        if let Some(fault) = self.0.state.lock().expect("cluster").get_fault.clone() {
+            return Err(fault.into_error("get"));
+        }
         self.0.pod().ok_or_else(|| PodResizeError::Api {
             op: "get",
             message: format!("pod {name} not found"),
+            status: Some(404),
         })
     }
 
     async fn patch_resize(&self, name: &str, body: &Value) -> Result<Pod, PodResizeError> {
         let mut state = self.0.state.lock().expect("cluster");
+        if let Some(fault) = state.patch_fault.clone() {
+            return Err(fault.into_error("patch"));
+        }
         state.resize_patches += 1;
         let actuation = state.actuation;
         let Some(pod) = state.pod.as_mut() else {
             return Err(PodResizeError::Api {
                 op: "patch",
                 message: format!("pod {name} not found"),
+                status: Some(404),
             });
         };
         let target = body["spec"]["initContainers"][0]["name"]
