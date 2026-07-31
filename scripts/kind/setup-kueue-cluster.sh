@@ -439,6 +439,8 @@ info "live API server is Kubernetes 1.${SERVER_MINOR} (floor 1.${MIN_K8S_MINOR})
 # `cgroupWritable.runtimeClass.enabled` — so `deploy/kueue/preflight.sh --mode
 # cutover` still exits 10 against a values file that leaves the gate off, which
 # is 6knv's AC4.
+[ -r "$CONTAINERD_VERSION_LIB" ] || fail 1 \
+    "the containerd schema detector is missing: $CONTAINERD_VERSION_LIB. It is the single source of truth for which plugin namespace a node's live configuration uses; do not inline a namespace here to get past this."
 # shellcheck source=../../deploy/node/k3s/containerd-config-version.sh
 . "$CONTAINERD_VERSION_LIB"
 
