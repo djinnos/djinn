@@ -88,8 +88,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use async_trait::async_trait;
+use djinn_agent::task_run_resize_admission::{
+    ResizeAdmissionOutcome, ResizeAdmissionRefused, ResizeAdmissionRequest, TaskRunResizeAdmission,
+};
 use djinn_db::{
     BuildPodPermitRepository, BuildPodPermitRow, BuildPodPermitState, BuildPodResizeIdentity,
     CaptureBuildPodResizeIdentityResult, Error as DbError,
@@ -832,6 +836,48 @@ impl TaskRunResizeBootstrap {
         }
     }
 
+    /// Give up on a Pod that never became governable, and destroy it.
+    ///
+    /// The caller reaches this when its wait budget is exhausted — every
+    /// [`NotReady`] variant is retryable, so "still not ready" eventually has to
+    /// become a decision. The decision is the same one
+    /// [`Self::refuse_and_delete`] makes and for the same reason: the bootstrap
+    /// window sits entirely before dispatch, so no repository-controlled command
+    /// has run, and a Pod whose quota authority was never established must not
+    /// be left alive.
+    ///
+    /// Returns [`PodDisposition::Retained`] when there is nothing to fence a
+    /// delete to — no Pod, or a launcher that cannot be uniquely named, in which
+    /// case the observation carries no Pod UID at all. The caller's own Job
+    /// teardown remains the backstop for that case; guessing a UID is not an
+    /// option, because an unfenced delete can destroy a *replacement* Pod that
+    /// some other actor legitimately owns.
+    pub async fn abandon(&self, permit: &PermitBinding, reason: &str) -> PodDisposition {
+        let observed = match self.surface.observe_launcher(&permit.task_run_id).await {
+            Ok(Some(observed)) => observed,
+            Ok(None) | Err(_) => {
+                warn!(
+                    task_run_id = %permit.task_run_id,
+                    reason,
+                    "task_run_resize_bootstrap: abandoning dispatch; no fenceable Pod to delete"
+                );
+                return PodDisposition::Retained;
+            }
+        };
+        let deleted = self
+            .surface
+            .uid_fenced_delete(&permit.task_run_id, &observed.pod_uid)
+            .await;
+        warn!(
+            task_run_id = %permit.task_run_id,
+            pod_uid = %observed.pod_uid,
+            reason,
+            delete_failed = deleted.is_err(),
+            "task_run_resize_bootstrap: abandoning dispatch and UID-fenced deleting the Pod"
+        );
+        PodDisposition::UidFencedDeleted(deleted)
+    }
+
     /// Fail closed: UID-fenced delete exactly the observed Pod, then refuse.
     ///
     /// Deletion is the fail-safe because no repository-controlled command has
@@ -859,6 +905,207 @@ impl TaskRunResizeBootstrap {
             reason,
             disposition: PodDisposition::UidFencedDeleted(deleted),
         }
+    }
+}
+
+// ── The production composition (0ppk-1b) ───────────────────────────────────
+//
+// Everything above this line was reachable only from tests. What follows is the
+// object `AppState` builds at boot and the dispatch seam calls: it turns one
+// bootstrap *pass* into one dispatch *decision* by driving passes until the
+// launcher is confirmed, the bootstrap refuses, or a wait budget runs out.
+
+/// Environment override for the birth-confirmation wait budget, in seconds.
+pub const BIRTH_ADMISSION_BUDGET_ENV: &str = "DJINN_BIRTH_CONFIRMATION_BUDGET_SECS";
+
+/// How long one dispatch waits for its launcher sidecar to be admitted and its
+/// birth downsize confirmed.
+///
+/// Deliberately shorter than the supervisor's 480s pre-session deadline: an
+/// unconfirmable Pod must surface as a dispatch failure that names *why*, not as
+/// a pre-session timeout that names nothing.
+pub const BIRTH_ADMISSION_BUDGET_DEFAULT: Duration = Duration::from_secs(180);
+
+/// Interval between bootstrap passes while the launcher is still starting.
+const BIRTH_ADMISSION_POLL_INTERVAL: Duration = Duration::from_millis(500);
+
+/// Where the bridge gets its apiserver surface.
+enum SurfaceSource {
+    /// Built once, lazily, from ambient cluster configuration. Lazy because the
+    /// composition root is synchronous and building a `kube::Client` is not —
+    /// and because a server that never dispatches a Kubernetes Job should not
+    /// fail to boot for want of a kubeconfig.
+    Ambient(tokio::sync::OnceCell<Arc<dyn TaskRunPodSurface>>),
+    /// Supplied by the caller. Fixtures use this; so would any future caller
+    /// that already holds a live surface.
+    Fixed(Arc<dyn TaskRunPodSurface>),
+}
+
+/// The server's resize stack, as the dispatch seam consumes it.
+///
+/// One gate is shared across every dispatch this bridge serves, deliberately:
+/// the unadmitted-dispatch counter is a process-wide statement about ordering,
+/// and a per-dispatch gate could not make it.
+pub struct TaskRunResizeAdmissionBridge {
+    db: djinn_db::Database,
+    gate: Arc<DispatchGate>,
+    surface: SurfaceSource,
+    budget: Duration,
+    poll_interval: Duration,
+}
+
+impl TaskRunResizeAdmissionBridge {
+    /// The production constructor: durable permits over `db`, and an apiserver
+    /// surface resolved from ambient cluster configuration on first use.
+    #[must_use]
+    pub fn from_env(db: djinn_db::Database) -> Self {
+        Self {
+            db,
+            gate: Arc::new(DispatchGate::new()),
+            surface: SurfaceSource::Ambient(tokio::sync::OnceCell::new()),
+            budget: budget_from_env(),
+            poll_interval: BIRTH_ADMISSION_POLL_INTERVAL,
+        }
+    }
+
+    /// Same composition against a caller-supplied surface.
+    #[must_use]
+    pub fn with_surface(db: djinn_db::Database, surface: Arc<dyn TaskRunPodSurface>) -> Self {
+        Self {
+            db,
+            gate: Arc::new(DispatchGate::new()),
+            surface: SurfaceSource::Fixed(surface),
+            budget: budget_from_env(),
+            poll_interval: BIRTH_ADMISSION_POLL_INTERVAL,
+        }
+    }
+
+    /// Override the wait budget and poll interval.
+    #[must_use]
+    pub const fn with_wait(mut self, budget: Duration, poll_interval: Duration) -> Self {
+        self.budget = budget;
+        self.poll_interval = poll_interval;
+        self
+    }
+
+    /// The shared gate. Exposed so the composition root and its tests can read
+    /// the unadmitted-dispatch counter.
+    #[must_use]
+    pub const fn gate(&self) -> &Arc<DispatchGate> {
+        &self.gate
+    }
+
+    async fn surface(&self) -> Result<Arc<dyn TaskRunPodSurface>, String> {
+        match &self.surface {
+            SurfaceSource::Fixed(surface) => Ok(surface.clone()),
+            SurfaceSource::Ambient(cell) => cell
+                .get_or_try_init(|| async {
+                    djinn_k8s::runtime::TaskRunPodResizeSurface::from_env()
+                        .await
+                        .map(|surface| Arc::new(surface) as Arc<dyn TaskRunPodSurface>)
+                })
+                .await
+                .cloned(),
+        }
+    }
+}
+
+fn budget_from_env() -> Duration {
+    std::env::var(BIRTH_ADMISSION_BUDGET_ENV)
+        .ok()
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .filter(|secs| *secs > 0)
+        .map_or(BIRTH_ADMISSION_BUDGET_DEFAULT, Duration::from_secs)
+}
+
+fn refused(reason: impl Into<String>, disposition: &PodDisposition) -> ResizeAdmissionRefused {
+    ResizeAdmissionRefused {
+        reason: reason.into(),
+        pod_deleted: matches!(disposition, PodDisposition::UidFencedDeleted(Ok(()))),
+    }
+}
+
+#[async_trait]
+impl TaskRunResizeAdmission for TaskRunResizeAdmissionBridge {
+    async fn admit_dispatch(
+        &self,
+        request: &ResizeAdmissionRequest,
+    ) -> Result<ResizeAdmissionOutcome, ResizeAdmissionRefused> {
+        let surface = self.surface().await.map_err(|error| ResizeAdmissionRefused {
+            reason: format!("no apiserver surface for the resize bootstrap: {error}"),
+            pod_deleted: false,
+        })?;
+        let permit = PermitBinding {
+            task_run_id: request.task_run_id.clone(),
+            permit_id: request.permit_id.clone(),
+            fencing_token: request.fencing_token,
+        };
+        let bootstrap = TaskRunResizeBootstrap::new(
+            BuildPodPermitRepository::new(self.db.clone()),
+            surface,
+            self.gate.clone(),
+        );
+
+        let deadline = tokio::time::Instant::now() + self.budget;
+        // Assigned on exactly the path that breaks out of the loop, so the
+        // refusal below always names the condition that was still unmet.
+        let stalled: String;
+        loop {
+            match bootstrap.bootstrap(&permit, request.effective_protocol).await {
+                BootstrapOutcome::BirthConfirmed {
+                    pod_uid,
+                    admitted_cpu_millicores,
+                } => {
+                    // The gate, not the outcome, is what admits. It is keyed on
+                    // the in-process confirmed result of this very bootstrap, so
+                    // a `birth_confirmed` row left behind by a previous process
+                    // cannot admit anything on its own.
+                    self.gate
+                        .admit(&permit.task_run_id)
+                        .map_err(|error| ResizeAdmissionRefused {
+                            reason: error.to_string(),
+                            pod_deleted: false,
+                        })?;
+                    return Ok(ResizeAdmissionOutcome::BirthConfirmed {
+                        pod_uid,
+                        admitted_cpu_millicores,
+                    });
+                }
+                BootstrapOutcome::LeafAuthority => {
+                    self.gate
+                        .admit(&permit.task_run_id)
+                        .map_err(|error| ResizeAdmissionRefused {
+                            reason: error.to_string(),
+                            pod_deleted: false,
+                        })?;
+                    return Ok(ResizeAdmissionOutcome::LeafAuthority);
+                }
+                BootstrapOutcome::NotReady(reason) => {
+                    if tokio::time::Instant::now() >= deadline {
+                        stalled = reason.to_string();
+                        break;
+                    }
+                    tokio::time::sleep(self.poll_interval).await;
+                }
+                BootstrapOutcome::Refused {
+                    reason,
+                    disposition,
+                } => {
+                    return Err(refused(reason.to_string(), &disposition));
+                }
+            }
+        }
+
+        let message = format!(
+            "launcher birth limit was not confirmed within {}s: {stalled}",
+            self.budget.as_secs()
+        );
+        let disposition = bootstrap.abandon(&permit, &message).await;
+        Err(refused(message, &disposition))
+    }
+
+    fn record_dispatch_started(&self, task_run_id: &str) {
+        self.gate.record_dispatch_started(task_run_id);
     }
 }
 

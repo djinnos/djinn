@@ -913,13 +913,231 @@ async fn terminalize_dispatch_group_after_dispatch_failure(
 
 /// Everything `dispatch_task_runtime` needs back from the runtime
 /// execution/report phase to run its persistence and finalization logic.
-struct RuntimeExecutionOutcome {
-    report_result: anyhow::Result<Option<TaskRunReport>>,
-    teardown: Result<TaskRunReport, djinn_runtime::RuntimeError>,
-    handshake_timed_out: bool,
-    infra_death: Option<String>,
-    infra_death_log_tail: Option<InfraDeathLogTailCapture>,
-    presession_timeout: Option<PreSessionTimeout>,
+pub struct RuntimeExecutionOutcome {
+    pub report_result: anyhow::Result<Option<TaskRunReport>>,
+    pub teardown: Result<TaskRunReport, djinn_runtime::RuntimeError>,
+    pub handshake_timed_out: bool,
+    pub infra_death: Option<String>,
+    pub infra_death_log_tail: Option<InfraDeathLogTailCapture>,
+    pub presession_timeout: Option<PreSessionTimeout>,
+}
+
+// ── Build-pod permits and the resize birth gate (3i92 / 0ppk-1b) ───────────
+
+/// Environment override for the durable build-pod permit ceiling.
+const BUILD_POD_PERMIT_LIMIT_ENV: &str = "DJINN_BUILD_POD_PERMIT_LIMIT";
+
+/// Default ceiling on concurrent non-`released` `build_pod_permits` rows.
+///
+/// This number is deliberately far above any reachable dispatch concurrency,
+/// and that is the whole point. **Build-slot capacity is not this ledger's
+/// job.** `BuildLeaseService` owns capacity through `build_leases`; the permit
+/// relation exists here to give each task run a durable, fenced *identity* the
+/// Pod resize lifecycle can be written against.
+///
+/// The last time a permit ceiling was treated as an admission gate
+/// (`DJINN_MAX_BUILD_PODS`, v0.7.28) it was rendered by no chart, defaulted to
+/// fail-closed when absent, and wedged **every** dispatch cluster-wide while
+/// `build_capacity` still reported healthy. A second, unrendered capacity gate
+/// in front of dispatch is a strictly worse version of the one that already
+/// exists, so this one is sized not to bind and a `PoolFull` result is a warning
+/// rather than a refusal for `leaf-v1`.
+const BUILD_POD_PERMIT_LIMIT_DEFAULT: i64 = 4096;
+
+fn build_pod_permit_limit() -> i64 {
+    std::env::var(BUILD_POD_PERMIT_LIMIT_ENV)
+        .ok()
+        .and_then(|raw| raw.parse::<i64>().ok())
+        .filter(|limit| *limit > 0)
+        .unwrap_or(BUILD_POD_PERMIT_LIMIT_DEFAULT)
+}
+
+/// One dispatch's durable permit identity, as the seam holds it between
+/// `acquire` and the birth gate.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AcquiredBuildPodPermit {
+    task_run_id: String,
+    permit_id: String,
+    fencing_token: i64,
+}
+
+/// Acquire the durable `build_pod_permits` row for this dispatch, **before**
+/// the Job that it fences exists.
+///
+/// Ordering is load-bearing: the permit's `fencing_token` is what every later
+/// durable write is checked against, so a row created after the Job could not
+/// fence the window in which the Job already has a Pod.
+///
+/// Returns `None` when this context composes no resize stack at all (an in-pod
+/// worker, a test that dispatches no Job) or when the pool could not answer.
+/// `None` is not an admission decision — see [`admit_task_run_dispatch`], which
+/// is where a `resize-v2` render without a permit fails closed.
+async fn acquire_build_pod_permit(
+    app_state: &AgentContext,
+    spec: &TaskRunSpec,
+) -> Option<AcquiredBuildPodPermit> {
+    if app_state.resize_admission.is_none() {
+        return None;
+    }
+    let permits = djinn_db::BuildPodPermitRepository::new(app_state.db.clone());
+    match permits
+        .acquire(&spec.task_run_id, build_pod_permit_limit())
+        .await
+    {
+        djinn_db::AcquireBuildPodPermitResult::Acquired { row, idempotent } => {
+            tracing::debug!(
+                task_run_id = %spec.task_run_id,
+                permit_id = %row.permit_id,
+                fencing_token = row.fencing_token,
+                idempotent,
+                "supervisor dispatch: build-pod permit acquired"
+            );
+            Some(AcquiredBuildPodPermit {
+                task_run_id: row.task_run_id,
+                permit_id: row.permit_id,
+                fencing_token: row.fencing_token,
+            })
+        }
+        other => {
+            tracing::warn!(
+                task_run_id = %spec.task_run_id,
+                result = ?other,
+                "supervisor dispatch: no build-pod permit for this run; a resize-v2 render \
+                 will refuse dispatch and a leaf-v1 render will proceed ungoverned as before"
+            );
+            None
+        }
+    }
+}
+
+/// Bind the **Job** UID the runtime just created onto the permit row.
+///
+/// `prepare` returns after the Job POST and never sees a Pod, so this is a Job
+/// UID and nothing else. `capture_resize_identity`'s `state = 'job_created'`
+/// predicate cannot hold until this write lands, which is why an unbound permit
+/// is a fail-closed condition for `resize-v2` rather than a retry.
+async fn bind_build_pod_permit_job_uid(
+    app_state: &AgentContext,
+    permit: &AcquiredBuildPodPermit,
+    handle: &djinn_runtime::RunHandle,
+) -> bool {
+    let Some(job_uid) = handle.job_uid.as_deref() else {
+        return false;
+    };
+    let permits = djinn_db::BuildPodPermitRepository::new(app_state.db.clone());
+    match permits
+        .bind_or_refresh_job_uid(
+            &permit.task_run_id,
+            &permit.permit_id,
+            permit.fencing_token,
+            job_uid,
+        )
+        .await
+    {
+        Ok(djinn_db::BindBuildPodPermitResult::Bound(_)) => true,
+        Ok(djinn_db::BindBuildPodPermitResult::AlreadyBound(_)) => true,
+        Ok(djinn_db::BindBuildPodPermitResult::Rejected) => {
+            tracing::warn!(
+                task_run_id = %permit.task_run_id,
+                job_uid,
+                "supervisor dispatch: build-pod permit refused the observed Job UID"
+            );
+            false
+        }
+        Err(error) => {
+            tracing::warn!(
+                task_run_id = %permit.task_run_id,
+                job_uid,
+                error = %error,
+                "supervisor dispatch: could not bind the observed Job UID to the build-pod permit"
+            );
+            false
+        }
+    }
+}
+
+/// The birth gate. Nothing downstream of this may attach stdio for a
+/// `resize-v2` run whose launcher is not confirmed at the birth limit.
+///
+/// `leaf-v1` is deliberately untouched: the launcher owns each invocation
+/// leaf's `cpu.max` under that protocol, there is no launcher CPU ceiling to
+/// capture, and every failure mode below degrades it to exactly the dispatch it
+/// performed before this function existed.
+async fn admit_task_run_dispatch(
+    app_state: &AgentContext,
+    permit: Option<&AcquiredBuildPodPermit>,
+    spec: &TaskRunSpec,
+    handle: &djinn_runtime::RunHandle,
+    job_uid_bound: bool,
+) -> anyhow::Result<()> {
+    // A runtime that rendered no launcher sidecar reports no protocol. There is
+    // no quota authority to establish, so there is nothing to gate.
+    let Some(effective_protocol) = handle.launcher_authority_protocol else {
+        return Ok(());
+    };
+    let leaf = effective_protocol.launcher_owns_leaf_quota();
+
+    let Some(admission) = app_state.resize_admission.as_ref() else {
+        if leaf {
+            return Ok(());
+        }
+        anyhow::bail!(
+            "supervisor dispatch: task-run {} rendered `{}` but this context composes no \
+             resize admission bridge, so its launcher CPU ceiling can never be captured or \
+             governed; refusing to start the worker session",
+            spec.task_run_id,
+            effective_protocol.as_wire()
+        );
+    };
+    let Some(permit) = permit else {
+        if leaf {
+            return Ok(());
+        }
+        anyhow::bail!(
+            "supervisor dispatch: task-run {} rendered `{}` but holds no durable build-pod \
+             permit, so no resize identity can be captured for it; refusing to start the \
+             worker session",
+            spec.task_run_id,
+            effective_protocol.as_wire()
+        );
+    };
+    if !job_uid_bound {
+        if leaf {
+            return Ok(());
+        }
+        anyhow::bail!(
+            "supervisor dispatch: task-run {} rendered `{}` but its build-pod permit carries \
+             no bound Job UID, so the write-once resize identity cannot be captured; \
+             refusing to start the worker session",
+            spec.task_run_id,
+            effective_protocol.as_wire()
+        );
+    }
+
+    let request = crate::task_run_resize_admission::ResizeAdmissionRequest {
+        task_run_id: permit.task_run_id.clone(),
+        permit_id: permit.permit_id.clone(),
+        fencing_token: permit.fencing_token,
+        effective_protocol,
+    };
+    match admission.admit_dispatch(&request).await {
+        Ok(outcome) => {
+            tracing::info!(
+                task_run_id = %spec.task_run_id,
+                protocol = effective_protocol.as_wire(),
+                outcome = ?outcome,
+                "supervisor dispatch: launcher quota authority established; dispatch admitted"
+            );
+            Ok(())
+        }
+        Err(refusal) => Err(anyhow::anyhow!(
+            "supervisor dispatch: task-run {} refused by the resize birth gate \
+             (pod_deleted={}): {}",
+            spec.task_run_id,
+            refusal.pod_deleted,
+            refusal.reason
+        )),
+    }
 }
 
 /// Outcome of attaching stdio and waiting for the worker's terminal report.
@@ -933,7 +1151,7 @@ struct TerminalReportAwaitOutcome {
 /// Drive the provider runtime execution phase: prepare, cancellation watcher,
 /// stdio attach, terminal-report await (with infra-death and pre-session
 /// timeout watching), teardown, orphan reaping, and cargo-target cleanup.
-async fn execute_runtime_report_phase(
+pub async fn execute_runtime_report_phase(
     runtime: Arc<dyn SessionRuntime>,
     spec: &TaskRunSpec,
     credentials: &ResolvedCredentials,
@@ -942,10 +1160,20 @@ async fn execute_runtime_report_phase(
     app_state: &AgentContext,
     kill: &CancellationToken,
 ) -> anyhow::Result<RuntimeExecutionOutcome> {
+    // The durable permit is acquired BEFORE the Job exists: its fencing token is
+    // what every later resize write is checked against, and a row minted after
+    // the Pod could not fence the window it is supposed to own.
+    let permit = acquire_build_pod_permit(app_state, spec).await;
     let handle = runtime
         .prepare(spec, credentials)
         .await
         .map_err(|e| anyhow::anyhow!("runtime.prepare failed: {e}"))?;
+    // The JOB uid the create above confirmed. Not a Pod UID — `prepare` never
+    // waits for a Pod and never sees one.
+    let job_uid_bound = match permit.as_ref() {
+        Some(permit) => bind_build_pod_permit_job_uid(app_state, permit, &handle).await,
+        None => false,
+    };
     let cancel_task = spawn_runtime_cancel_watcher(
         runtime.clone(),
         handle.clone(),
@@ -953,6 +1181,37 @@ async fn execute_runtime_report_phase(
         task.id.clone(),
         model_id.to_string(),
     );
+    // The birth gate. For a `resize-v2` render this waits for the launcher
+    // sidecar to be admitted, captures the ceiling the apiserver actually
+    // stored, downsizes to the birth limit and confirms it from
+    // `status.initContainerStatuses` — all strictly before any stdio attach.
+    let admitted = tokio::select! {
+        biased;
+        () = kill.cancelled() => Err(anyhow::anyhow!(
+            "supervisor dispatch: cancelled before the launcher birth limit was confirmed"
+        )),
+        result = admit_task_run_dispatch(app_state, permit.as_ref(), spec, &handle, job_uid_bound) => result,
+    };
+    if let Err(refusal) = admitted {
+        tracing::warn!(
+            task_id = %task.short_id,
+            task_run_id = %spec.task_run_id,
+            error = %refusal,
+            "supervisor dispatch: refusing to attach stdio; tearing the run down"
+        );
+        abort_runtime_cancel_watcher(cancel_task).await;
+        let teardown = runtime.teardown(handle).await;
+        reap_orphan_task_run(app_state, &spec.task_run_id, TaskRunStatus::Failed).await;
+        teardown_cargo_target_run_dir(app_state, &spec.task_run_id).await;
+        if let Err(error) = &teardown {
+            tracing::warn!(
+                task_id = %task.short_id,
+                error = %error,
+                "supervisor dispatch: teardown after a refused dispatch also failed"
+            );
+        }
+        return Err(refusal);
+    }
     let await_outcome =
         attach_and_await_terminal_report(runtime.clone(), &handle, app_state, spec, task, kill)
             .await;
@@ -1016,6 +1275,16 @@ async fn attach_and_await_terminal_report(
     task: &Task,
     kill: &CancellationToken,
 ) -> TerminalReportAwaitOutcome {
+    // The dispatch site, in the literal sense: the next line is where a worker
+    // session goes live and the first repository-controlled command becomes
+    // possible. Recording it here — unconditionally, before the attach, and
+    // *outside* any branch that checks admission — is what makes the gate's
+    // absence observable. If the birth gate above is ever removed or softened
+    // to log-and-continue, this counter climbs off zero on the first early
+    // dispatch whether or not anyone remembered to assert about ordering.
+    if let Some(admission) = app_state.resize_admission.as_ref() {
+        admission.record_dispatch_started(&spec.task_run_id);
+    }
     let bistream_result = runtime.attach_stdio(handle).await;
     let handshake_timed_out = matches!(
         &bistream_result,

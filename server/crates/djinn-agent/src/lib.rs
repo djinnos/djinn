@@ -48,6 +48,7 @@ pub mod skills;
 pub mod supervisor;
 pub(crate) mod supervisor_impl;
 pub mod task_confidence;
+pub mod task_run_resize_admission;
 pub mod task_merge;
 pub(crate) mod truncate;
 pub mod warmer;

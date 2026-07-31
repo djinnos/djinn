@@ -455,6 +455,25 @@ pub struct AgentContext {
     /// control-plane seam without depending on Kubernetes directly. `None` in
     /// off-server/test contexts falls back to the agent-internal no-op runtime.
     pub runtime_ops: Option<Arc<dyn bridge::RuntimeOps>>,
+    /// Proposal `3i92`'s post-admission resize stack, injected at the server
+    /// boundary by `AppState::agent_context()`.
+    ///
+    /// When `Some`, the dispatch seam acquires a durable `build_pod_permits`
+    /// row before the Job is created, binds the Job UID after it, and — for a
+    /// `resize-v2` render — captures the admitted launcher CPU ceiling and
+    /// confirms the birth downsize before any worker session starts.
+    ///
+    /// `None` is *not* a disable switch. It marks an off-server context (an
+    /// in-pod worker, a test that dispatches no Kubernetes Job) that renders no
+    /// launcher sidecar in the first place. A `resize-v2` dispatch reaching a
+    /// context with no bridge is refused rather than quietly dispatched
+    /// ungoverned; see
+    /// [`crate::actors::slot::supervisor_runner::execute_runtime_report_phase`].
+    ///
+    /// `djinn-agent` cannot depend on the server crate (ADR-047), which is why
+    /// this is a trait object rather than the concrete
+    /// `djinn_server::task_run_resize_bootstrap::TaskRunResizeAdmissionBridge`.
+    pub resize_admission: Option<Arc<dyn crate::task_run_resize_admission::TaskRunResizeAdmission>>,
     /// **This process's own view** of the per-task-run Cargo target root.
     ///
     /// Required, deliberately: the shared cache PVC is mounted at *different*
