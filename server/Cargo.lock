@@ -1807,7 +1807,6 @@ dependencies = [
  "globset",
  "http-body-util",
  "insta",
- "k8s-openapi",
  "landlock",
  "libc",
  "opentelemetry",

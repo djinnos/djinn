@@ -972,6 +972,17 @@ struct AcquiredBuildPodPermit {
 /// worker, a test that dispatches no Job) or when the pool could not answer.
 /// `None` is not an admission decision — see [`admit_task_run_dispatch`], which
 /// is where a `resize-v2` render without a permit fails closed.
+///
+/// # Nothing releases these rows yet, and that is deliberate scope
+///
+/// `BuildPodPermitRepository::release` still has no production caller: the
+/// resize lifecycle that reclaims a permit (lift, drop, quarantine, release)
+/// belongs to `0ppk-3`'s reconciler. Until that lands, rows accumulate in
+/// `job_created` / `birth_confirmed`, which is why
+/// [`BUILD_POD_PERMIT_LIMIT_DEFAULT`] is sized not to bind and why a `PoolFull`
+/// result is a warning rather than a refusal for `leaf-v1` — the arm every Pod
+/// on the current fleet takes. A ceiling that both accumulates and fails closed
+/// is how `DJINN_MAX_BUILD_PODS` wedged the whole cluster.
 async fn acquire_build_pod_permit(
     app_state: &AgentContext,
     spec: &TaskRunSpec,

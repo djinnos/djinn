@@ -7,6 +7,12 @@ edition = "2024"
 [lib]
 doctest = false
 
+[features]
+default = []
+# Exposes cluster-free `Pod` fixtures (`pod_resize_fixture`) to downstream test
+# targets. Kept behind a feature so production binaries never link them.
+test-support = []
+
 [dependencies]
 djinn-cgroup-launcher = { path = "../djinn-cgroup-launcher" }
 djinn-core = { path = "../djinn-core" }

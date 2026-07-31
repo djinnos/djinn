@@ -20,6 +20,13 @@ pub mod launcher;
 pub mod launcher_child_fs;
 mod launcher_cpu;
 pub mod pod_resize;
+/// Cluster-free `Pod` fixtures for the resize stack.
+///
+/// Gated so production binaries never link it, and `pub` under `test-support`
+/// so `djinn-server`'s dispatch-seam tests can drive a stored Pod without a
+/// direct `k8s-openapi` dependency — which `deny.toml` bans outside this crate.
+#[cfg(any(test, feature = "test-support"))]
+pub mod pod_resize_fixture;
 pub mod private_dep_config;
 pub mod runtime;
 mod runtime_eviction;

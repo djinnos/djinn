@@ -26,16 +26,17 @@
 //!   `AppState::agent_context()`, and the admission bridge is the real
 //!   `TaskRunResizeAdmissionBridge` wrapping the real `TaskRunResizeBootstrap`
 //!   and the real `DispatchGate`.
-//! * **The resize client is real.** [`FakeCluster`] stores an actual `Pod` and
-//!   drives `PodResizeClient` — so the birth downsize is confirmed by the real
-//!   `confirm_launcher_cpu`, reading the real `status.initContainerStatuses`,
-//!   comparing millicores through the real `CpuLimit`.
+//! * **The resize client is real.** [`StoredTaskRunPod`] holds an actual `Pod`
+//!   and drives `PodResizeClient` — so the birth downsize is confirmed by the
+//!   real `confirm_launcher_cpu`, reading the real
+//!   `status.initContainerStatuses`, comparing millicores through the real
+//!   `CpuLimit`. The fixture lives in `djinn-k8s` because `deny.toml` bans a
+//!   direct `k8s-openapi` dependency outside the Kubernetes capability owner.
 //! * **Only the apiserver transport is substituted.** There is no fake
 //!   repository anywhere: the thing under test is the permit relation and the
 //!   confirmation rule, and both of those are the genuine article.
 
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
@@ -46,10 +47,9 @@ use djinn_db::{
     EffectiveCreatorProvenance, ProjectRepository, TaskRepository, TaskRunRepository,
     UserRepository,
 };
-use djinn_k8s::pod_resize::{CpuLimit, PodResizeApi, PodResizeClient, PodResizeError};
-use djinn_k8s::runtime::{
-    LauncherObservationError, ObservedLauncherSidecar, observe_launcher_sidecar,
-};
+use djinn_k8s::pod_resize::{CpuLimit, PodResizeError};
+use djinn_k8s::pod_resize_fixture::StoredTaskRunPod;
+use djinn_k8s::runtime::{LauncherObservationError, ObservedLauncherSidecar};
 use djinn_launcher_protocol::LauncherAuthorityProtocol;
 use djinn_runtime::{
     BiStream, ResolvedCredentials, RunHandle, RuntimeError, SessionRuntime, SupervisorFlow,
@@ -58,8 +58,6 @@ use djinn_runtime::{
 use djinn_server::task_run_resize_bootstrap::{
     TaskRunPodSurface, TaskRunResizeAdmissionBridge, TaskRunResizeBootstrap,
 };
-use k8s_openapi::api::core::v1::Pod;
-use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
 /// The launcher CPU limit the Job manifest was rendered with.
@@ -77,160 +75,23 @@ const CONFIRMING_BUDGET: Duration = Duration::from_secs(5);
 /// pass then a deadline is exactly the "never becomes admitted" shape.
 const GIVE_UP_BUDGET: Duration = Duration::from_millis(1);
 
-// ── The fixture apiserver ──────────────────────────────────────────────────
+// ── The apiserver surface ─────────────────────────────────────────────────
 
-/// Whether the fixture kubelet actuates an accepted resize into
-/// `status.initContainerStatuses`.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Actuation {
-    /// The kubelet applies the accepted limit to the init-container status, as
-    /// a healthy node does.
-    Actuates,
-    /// The apiserver accepts the PATCH and the status never moves — the exact
-    /// shape a node under pressure produces, and the one that must never be
-    /// read as confirmation.
-    NeverActuates,
-}
-
-struct ClusterState {
-    pod: Option<Pod>,
-    actuation: Actuation,
-    resize_patches: usize,
-    deletes: Vec<(String, String)>,
-}
-
-/// An in-memory apiserver holding exactly one task-run Pod.
+/// Adapts [`StoredTaskRunPod`] to the bootstrap's own surface trait.
+///
+/// Deliberately thin: every decision it could make is made inside the fixture,
+/// which makes them through the production observation, resize and confirmation
+/// functions. There is nothing here for a bug to hide in.
 #[derive(Clone)]
-struct FakeCluster {
-    state: Arc<Mutex<ClusterState>>,
-}
-
-impl FakeCluster {
-    fn new(pod: Pod, actuation: Actuation) -> Self {
-        Self {
-            state: Arc::new(Mutex::new(ClusterState {
-                pod: Some(pod),
-                actuation,
-                resize_patches: 0,
-                deletes: Vec::new(),
-            })),
-        }
-    }
-
-    fn resize_patches(&self) -> usize {
-        self.state.lock().expect("cluster").resize_patches
-    }
-
-    fn deletes(&self) -> Vec<(String, String)> {
-        self.state.lock().expect("cluster").deletes.clone()
-    }
-
-    fn pod(&self) -> Option<Pod> {
-        self.state.lock().expect("cluster").pod.clone()
-    }
-
-    /// The CPU limit the launcher's **init-container status** currently
-    /// reports. This is the only field that can confirm a resize, so it is the
-    /// only field the birth assertion reads.
-    fn launcher_status_cpu(&self) -> Option<String> {
-        let pod = self.pod()?;
-        let status = djinn_k8s::pod_resize::locate_launcher_status(&pod).ok()?;
-        status
-            .resources
-            .as_ref()?
-            .limits
-            .as_ref()?
-            .get("cpu")
-            .map(|q| q.0.clone())
-    }
-}
-
-/// The `PodResizeApi` half of the fixture, so the real [`PodResizeClient`]
-/// drives the real GET / PATCH / GET confirmation cycle against it.
-struct ClusterApi(FakeCluster);
+struct FixtureSurface(StoredTaskRunPod);
 
 #[async_trait]
-impl PodResizeApi for ClusterApi {
-    async fn get_pod(&self, name: &str) -> Result<Pod, PodResizeError> {
-        self.0.pod().ok_or_else(|| PodResizeError::Api {
-            op: "get",
-            message: format!("pod {name} not found"),
-        })
-    }
-
-    async fn patch_resize(&self, name: &str, body: &Value) -> Result<Pod, PodResizeError> {
-        let mut state = self.0.state.lock().expect("cluster");
-        state.resize_patches += 1;
-        let Some(pod) = state.pod.as_mut() else {
-            return Err(PodResizeError::Api {
-                op: "patch",
-                message: format!("pod {name} not found"),
-            });
-        };
-        // Strategic-merge semantics for `initContainers`, whose `patchMergeKey`
-        // is `name`: merge into the entry with the matching name and leave every
-        // other entry — and every other field of the matched entry — alone. An
-        // RFC 7386 merge would replace the whole array; modelling the strategic
-        // rule here is what makes the "requests and QoS are untouched"
-        // assertions mean anything.
-        let target = body["spec"]["initContainers"][0]["name"]
-            .as_str()
-            .expect("patch names its target")
-            .to_owned();
-        let cpu = body["spec"]["initContainers"][0]["resources"]["limits"]["cpu"]
-            .as_str()
-            .expect("patch carries a cpu limit")
-            .to_owned();
-        let quantity = k8s_openapi::apimachinery::pkg::api::resource::Quantity(cpu);
-        for container in pod
-            .spec
-            .as_mut()
-            .and_then(|spec| spec.init_containers.as_mut())
-            .into_iter()
-            .flatten()
-            .filter(|container| container.name == target)
-        {
-            container
-                .resources
-                .get_or_insert_with(Default::default)
-                .limits
-                .get_or_insert_with(Default::default)
-                .insert("cpu".to_owned(), quantity.clone());
-        }
-        if state.actuation == Actuation::Actuates {
-            let pod = state.pod.as_mut().expect("pod");
-            for status in pod
-                .status
-                .as_mut()
-                .and_then(|status| status.init_container_statuses.as_mut())
-                .into_iter()
-                .flatten()
-                .filter(|status| status.name == target)
-            {
-                status
-                    .resources
-                    .get_or_insert_with(Default::default)
-                    .limits
-                    .get_or_insert_with(Default::default)
-                    .insert("cpu".to_owned(), quantity.clone());
-            }
-        }
-        Ok(state.pod.clone().expect("pod"))
-    }
-}
-
-#[async_trait]
-impl TaskRunPodSurface for FakeCluster {
+impl TaskRunPodSurface for FixtureSurface {
     async fn observe_launcher(
         &self,
         _task_run_id: &str,
     ) -> Result<Option<ObservedLauncherSidecar>, LauncherObservationError> {
-        // The real flattening function, so the "unique in BOTH spec and status"
-        // rule is the one under test rather than one re-implemented here.
-        match self.pod() {
-            None => Ok(None),
-            Some(pod) => observe_launcher_sidecar(&pod).map(Some),
-        }
+        self.0.observe_launcher()
     }
 
     async fn resize_launcher_cpu(
@@ -238,130 +99,14 @@ impl TaskRunPodSurface for FakeCluster {
         pod_name: &str,
         target_millicores: u64,
     ) -> Result<(), PodResizeError> {
-        PodResizeClient::new(ClusterApi(self.clone()))
-            .resize_launcher_cpu(pod_name, CpuLimit::from_millis(target_millicores))
+        self.0
+            .resize_launcher_cpu(pod_name, target_millicores)
             .await
     }
 
     async fn uid_fenced_delete(&self, task_run_id: &str, pod_uid: &str) -> Result<(), String> {
-        let mut state = self.state.lock().expect("cluster");
-        let stored = state
-            .pod
-            .as_ref()
-            .and_then(|pod| pod.metadata.uid.clone())
-            .unwrap_or_default();
-        if stored != pod_uid {
-            return Err(format!(
-                "uid precondition failed: stored `{stored}`, fenced `{pod_uid}`"
-            ));
-        }
-        state
-            .deletes
-            .push((task_run_id.to_owned(), pod_uid.to_owned()));
-        state.pod = None;
-        Ok(())
+        self.0.uid_fenced_delete(task_run_id, pod_uid)
     }
-}
-
-// ── Pod fixtures ───────────────────────────────────────────────────────────
-
-fn init_container(name: &str, cpu_limit: Option<&str>) -> Value {
-    let mut resources = json!({ "requests": { "cpu": "100m", "memory": "128Mi" } });
-    if let Some(cpu) = cpu_limit {
-        resources["limits"] = json!({ "cpu": cpu });
-    }
-    json!({
-        "name": name,
-        "image": "registry.example/launcher@sha256:feed",
-        "restartPolicy": "Always",
-        "env": [{ "name": "DJINN_LAUNCHER_AUTHORITY_PROTOCOL", "value": "resize-v2" }],
-        "resources": resources,
-    })
-}
-
-fn init_status(name: &str, cpu_limit: Option<&str>, container_id: Option<&str>) -> Value {
-    let mut status = json!({
-        "name": name,
-        "ready": true,
-        "restartCount": 0,
-        "image": "registry.example/launcher@sha256:feed",
-        "imageID": "registry.example/launcher@sha256:feed",
-    });
-    if let Some(id) = container_id {
-        status["containerID"] = json!(id);
-    }
-    if let Some(cpu) = cpu_limit {
-        status["resources"] = json!({
-            "requests": { "cpu": "100m", "memory": "128Mi" },
-            "limits": { "cpu": cpu },
-        });
-    }
-    status
-}
-
-/// A healthy admitted `resize-v2` Pod: the launcher is uniquely nameable in
-/// `spec.initContainers` **and** `status.initContainerStatuses`, has started, and
-/// declares the rendered ceiling in both places.
-fn resize_v2_pod(pod_uid: &str) -> Pod {
-    build_pod(
-        pod_uid,
-        json!([
-            init_container("preflight", None),
-            init_container("cgroup-launcher", Some(RENDERED_CEILING)),
-        ]),
-        json!([
-            init_status("preflight", None, Some("containerd://preflight")),
-            init_status(
-                "cgroup-launcher",
-                Some(RENDERED_CEILING),
-                Some("containerd://launcher"),
-            ),
-        ]),
-        json!([]),
-    )
-}
-
-fn build_pod(
-    pod_uid: &str,
-    init_containers: Value,
-    init_container_statuses: Value,
-    conditions: Value,
-) -> Pod {
-    serde_json::from_value(json!({
-        "apiVersion": "v1",
-        "kind": "Pod",
-        "metadata": {
-            "name": "taskrun-fixture",
-            "namespace": "djinn",
-            "uid": pod_uid,
-        },
-        "spec": {
-            "initContainers": init_containers,
-            "containers": [{
-                "name": "worker",
-                "image": "registry.example/worker@sha256:beef",
-                "resources": {
-                    "requests": { "cpu": "1", "memory": "2Gi" },
-                    "limits": { "cpu": "4", "memory": "4Gi" },
-                },
-            }],
-        },
-        "status": {
-            "phase": "Running",
-            "qosClass": "Burstable",
-            "conditions": conditions,
-            "initContainerStatuses": init_container_statuses,
-            "containerStatuses": [{
-                "name": "worker",
-                "ready": true,
-                "restartCount": 0,
-                "image": "registry.example/worker@sha256:beef",
-                "imageID": "registry.example/worker@sha256:beef",
-                "containerID": "containerd://worker",
-            }],
-        },
-    }))
-    .expect("pod fixture deserializes")
 }
 
 // ── The fixture runtime ────────────────────────────────────────────────────
@@ -538,13 +283,13 @@ fn context_with(
 
 fn bridge_for(
     db: &Database,
-    cluster: &FakeCluster,
+    cluster: &StoredTaskRunPod,
     budget: Duration,
 ) -> Arc<TaskRunResizeAdmissionBridge> {
     Arc::new(
         TaskRunResizeAdmissionBridge::with_surface(
             db.clone(),
-            Arc::new(cluster.clone()) as Arc<dyn TaskRunPodSurface>,
+            Arc::new(FixtureSurface(cluster.clone())) as Arc<dyn TaskRunPodSurface>,
         )
         .with_wait(budget, Duration::from_millis(5)),
     )
@@ -587,7 +332,7 @@ async fn the_production_dispatch_seam_writes_a_birth_confirmed_permit_for_the_ob
 
     let db = Database::ephemeral().await.expect("ephemeral db");
     let seeded = seed(&db, "ac1").await;
-    let cluster = FakeCluster::new(resize_v2_pod(POD_UID), Actuation::Actuates);
+    let cluster = StoredTaskRunPod::resize_v2(POD_UID, RENDERED_CEILING);
     let bridge = bridge_for(&db, &cluster, CONFIRMING_BUDGET);
     let context = context_with(&db, &bridge);
     let runtime = RecordingRuntime::new(Some(JOB_UID), Some(LauncherAuthorityProtocol::ResizeV2));
@@ -639,7 +384,7 @@ async fn the_production_dispatch_seam_writes_a_birth_confirmed_permit_for_the_ob
 async fn the_birth_limit_is_read_back_from_the_launcher_init_container_status() {
     let db = Database::ephemeral().await.expect("ephemeral db");
     let seeded = seed(&db, "ac3").await;
-    let cluster = FakeCluster::new(resize_v2_pod("pod-uid-ac3"), Actuation::Actuates);
+    let cluster = StoredTaskRunPod::resize_v2("pod-uid-ac3", RENDERED_CEILING);
     let bridge = bridge_for(&db, &cluster, CONFIRMING_BUDGET);
     let context = context_with(&db, &bridge);
     let runtime = RecordingRuntime::new(
@@ -675,30 +420,18 @@ async fn the_birth_limit_is_read_back_from_the_launcher_init_container_status() 
     // The rest of the Pod is untouched: a limits-only resize must not move
     // requests (that would change scheduling and Kueue accounting) and must not
     // drop the other init container (that would be an RFC 7386 merge).
-    let pod = cluster.pod().expect("pod survives the resize");
-    let spec = pod.spec.as_ref().expect("spec");
-    let init = spec.init_containers.as_ref().expect("init containers");
     assert_eq!(
-        init.len(),
+        cluster.init_container_count(),
         2,
         "a strategic merge keeps every other init container; a merge patch would drop them"
     );
-    let launcher = init
-        .iter()
-        .find(|c| c.name == "cgroup-launcher")
-        .expect("launcher");
     assert_eq!(
-        launcher
-            .resources
-            .as_ref()
-            .and_then(|r| r.requests.as_ref())
-            .and_then(|r| r.get("cpu"))
-            .map(|q| q.0.as_str()),
+        cluster.launcher_spec_cpu_request().as_deref(),
         Some("100m"),
         "requests are byte-identical across the resize"
     );
     assert_eq!(
-        pod.status.as_ref().and_then(|s| s.qos_class.as_deref()),
+        cluster.qos_class().as_deref(),
         Some("Burstable"),
         "the QoS class is byte-identical across the resize"
     );
@@ -714,13 +447,14 @@ async fn the_birth_limit_is_read_back_from_the_launcher_init_container_status() 
 /// accepted but never actuated must not dispatch.
 ///
 /// Point confirmation at `status.containerStatuses` and the misleading worker
-/// entry in [`build_pod`] — `cpu: 4`, never resized — is what it would read.
+/// entry the fixture Pod carries — `cpu: 4`, never resized — is what it would
+/// read.
 #[tokio::test]
 async fn an_accepted_but_unactuated_resize_never_dispatches() {
     let db = Database::ephemeral().await.expect("ephemeral db");
     let seeded = seed(&db, "ac4").await;
     // The apiserver accepts the PATCH; the kubelet never moves the status.
-    let cluster = FakeCluster::new(resize_v2_pod("pod-uid-ac4"), Actuation::NeverActuates);
+    let cluster = StoredTaskRunPod::resize_v2("pod-uid-ac4", RENDERED_CEILING).never_actuating();
     let bridge = bridge_for(&db, &cluster, GIVE_UP_BUDGET);
     let context = context_with(&db, &bridge);
     let runtime = RecordingRuntime::new(
@@ -760,13 +494,7 @@ async fn a_launcher_that_never_starts_fails_closed_and_the_pod_is_uid_fenced_del
     let seeded = seed(&db, "ac5").await;
     // Admitted and nameable in both arrays, but the kubelet has not started it:
     // no containerID, so there is nothing to fence a write-once identity with.
-    let pod = build_pod(
-        POD_UID,
-        json!([init_container("cgroup-launcher", Some(RENDERED_CEILING))]),
-        json!([init_status("cgroup-launcher", Some(RENDERED_CEILING), None)]),
-        json!([]),
-    );
-    let cluster = FakeCluster::new(pod, Actuation::Actuates);
+    let cluster = StoredTaskRunPod::resize_v2_launcher_not_started(POD_UID, RENDERED_CEILING);
     let bridge = bridge_for(&db, &cluster, GIVE_UP_BUDGET);
     let context = context_with(&db, &bridge);
     let runtime = RecordingRuntime::new(
@@ -818,7 +546,7 @@ async fn a_launcher_that_never_starts_fails_closed_and_the_pod_is_uid_fenced_del
 async fn the_unadmitted_dispatch_counter_moves_when_a_dispatch_bypasses_the_gate() {
     let db = Database::ephemeral().await.expect("ephemeral db");
     let seeded = seed(&db, "ac5b").await;
-    let cluster = FakeCluster::new(resize_v2_pod("pod-uid-ac5b"), Actuation::Actuates);
+    let cluster = StoredTaskRunPod::resize_v2("pod-uid-ac5b", RENDERED_CEILING);
     let bridge = bridge_for(&db, &cluster, CONFIRMING_BUDGET);
     let context = context_with(&db, &bridge);
     // No Job, no launcher, no protocol — the shape every non-Kubernetes runtime
@@ -848,24 +576,9 @@ async fn a_leaf_v1_dispatch_issues_no_resize_and_captures_no_identity() {
     let db = Database::ephemeral().await.expect("ephemeral db");
     let seeded = seed(&db, "ac7").await;
     // `resolve_launcher_cpu_ceiling` returns `Ok(None)` for leaf-v1, so a
-    // leaf-v1 Pod carries no launcher CPU limit at all. A limit here would be an
+    // leaf-v1 Pod carries no launcher CPU limit at all. A limit there would be an
     // ancestor clamp over every invocation leaf.
-    let mut launcher = init_container("cgroup-launcher", None);
-    launcher["env"] = json!([{
-        "name": "DJINN_LAUNCHER_AUTHORITY_PROTOCOL",
-        "value": "leaf-v1",
-    }]);
-    let pod = build_pod(
-        "pod-uid-ac7",
-        json!([launcher]),
-        json!([init_status(
-            "cgroup-launcher",
-            None,
-            Some("containerd://launcher")
-        )]),
-        json!([]),
-    );
-    let cluster = FakeCluster::new(pod, Actuation::Actuates);
+    let cluster = StoredTaskRunPod::leaf_v1("pod-uid-ac7");
     let bridge = bridge_for(&db, &cluster, CONFIRMING_BUDGET);
     let context = context_with(&db, &bridge);
     let runtime =
