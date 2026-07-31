@@ -44,7 +44,8 @@ async fn an_unarmed_durable_cap_denies_every_graph_warm_lease_forever() {
     // handed to the lease service, so the resolution chain bottomed out at the
     // unarmed durable 0.
     let service = Arc::new(
-        BuildLeaseService::new(Arc::clone(&repository), 0).with_invocation_lease_authority(authority),
+        BuildLeaseService::new(Arc::clone(&repository), 0)
+            .with_invocation_lease_authority(authority),
     );
     assert!(matches!(service.recover().await, LeaseResult::Status(_)));
     assert_eq!(service.cap(), 0);
@@ -87,7 +88,8 @@ async fn an_unarmed_durable_cap_adopts_the_configured_build_slot_cap() {
     // The fixed composition: the same configured cap the v0 journal controller
     // receives from DJINN_MAX_BUILD_TASKRUNS.
     let service = Arc::new(
-        BuildLeaseService::new(Arc::clone(&repository), 3).with_invocation_lease_authority(authority),
+        BuildLeaseService::new(Arc::clone(&repository), 3)
+            .with_invocation_lease_authority(authority),
     );
     assert!(matches!(service.recover().await, LeaseResult::Status(_)));
     assert_eq!(service.cap(), 3);
@@ -143,7 +145,8 @@ async fn re_seeding_the_authority_row_alone_does_not_arm_the_lease() {
     );
 
     let configured = Arc::new(
-        BuildLeaseService::new(Arc::clone(&repository), 3).with_invocation_lease_authority(authority),
+        BuildLeaseService::new(Arc::clone(&repository), 3)
+            .with_invocation_lease_authority(authority),
     );
     assert!(matches!(configured.recover().await, LeaseResult::Status(_)));
     assert_eq!(
@@ -175,7 +178,8 @@ async fn an_armed_cap_is_never_overridden_by_the_configured_fallback() {
         .await
         .unwrap();
     let epoch_armed = Arc::new(
-        BuildLeaseService::new(Arc::clone(&repository), 9).with_invocation_lease_authority(authority),
+        BuildLeaseService::new(Arc::clone(&repository), 9)
+            .with_invocation_lease_authority(authority),
     );
     assert!(matches!(
         epoch_armed.recover().await,
