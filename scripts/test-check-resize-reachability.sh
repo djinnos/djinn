@@ -38,6 +38,10 @@ STATE=server/src/server/state/mod.rs
 BRIDGE=server/src/task_run_resize_bootstrap.rs
 SEAM=server/crates/djinn-agent/src/actors/slot/supervisor_runner.rs
 RECONCILE=server/src/task_run_resize_reconcile.rs
+CUTOVER=server/src/authority_cutover.rs
+CUTOVER_BIN=server/src/bin/authority_cutover.rs
+ROLLOUT=server/src/task_run_resize_rollout.rs
+MANIFEST=server/Cargo.toml
 
 cleanup() {
     rm -rf -- "$SCRATCH" 2>/dev/null || true
@@ -176,12 +180,65 @@ async fn execute_runtime_report_phase() {
 EOF
 }
 
+write_cutover() {
+    mkdir -p -- "$SCRATCH/$(dirname "$CUTOVER")"
+    cat >"$SCRATCH/$CUTOVER" <<'EOF'
+// Operator cutover driver fixture: the ONLY production caller of
+// ResizeRollout::production, running both sequences through ResizeRollout.
+use crate::task_run_resize_rollout::{ResizeRollout, RolloutPlan};
+
+pub async fn run(db: Database, request: &CutoverRequest) -> Result<(), CutoverFailure> {
+    let rollout = ResizeRollout::production(db, events, runtime, url, paused_by, &sources)?;
+    let outcome = match request.direction {
+        CutoverDirection::Activate => rollout.activate(&plan).await,
+        CutoverDirection::Rollback => rollout.rollback(&plan).await,
+    };
+}
+EOF
+
+    mkdir -p -- "$SCRATCH/$(dirname "$CUTOVER_BIN")"
+    cat >"$SCRATCH/$CUTOVER_BIN" <<'EOF'
+// Operator binary fixture.
+use djinn_server::authority_cutover::{CutoverFailure, CutoverRequest, run};
+
+async fn drive() -> Result<(), CutoverFailure> {
+    let report = run(db, events, runtime, &request).await?;
+    Ok(())
+}
+EOF
+
+    mkdir -p -- "$SCRATCH/$(dirname "$ROLLOUT")"
+    cat >"$SCRATCH/$ROLLOUT" <<'EOF'
+// Rollout fixture: the preflight gates both flips.
+impl ResizeRollout {
+    pub async fn activate(&self, plan: &RolloutPlan<'_>) -> Result<i64, RolloutBlocked> {
+        self.prove_drained().await?;
+        self.clear_preflight(LauncherAuthorityProtocol::ResizeV2).await?;
+        self.flip_authority_mode(plan.expected_epoch, LauncherAuthorityProtocol::ResizeV2).await
+    }
+    pub async fn rollback(&self, plan: &RolloutPlan<'_>) -> Result<i64, RolloutBlocked> {
+        self.prove_drained().await?;
+        self.clear_preflight(LauncherAuthorityProtocol::LeafV1).await?;
+        self.flip_authority_mode(plan.expected_epoch, LauncherAuthorityProtocol::LeafV1).await
+    }
+}
+EOF
+
+    mkdir -p -- "$SCRATCH/$(dirname "$MANIFEST")"
+    cat >"$SCRATCH/$MANIFEST" <<'EOF'
+[[bin]]
+name = "authority-cutover"
+path = "src/bin/authority_cutover.rs"
+EOF
+}
+
 fixture() {
     rm -rf -- "$SCRATCH"
     write_state
     write_bridge
     write_seam
     write_reconcile
+    write_cutover
 }
 
 run_guard() {
@@ -357,6 +414,93 @@ mv "$SCRATCH/.tmp" "$SCRATCH/$STATE"
 expect_fail_naming \
     "a spawn that survives only inside a #[cfg(test)] mod does not count" \
     "task_run_resize_reconcile::spawn has ZERO production callers"
+
+# 15. THE `eeky-2` NAMED MUTATION: delete the ResizeRollout::production call.
+#     This is verbatim the state main was in before the operator entry point
+#     landed — the staged activation composed, tested, and callable by nobody.
+fixture
+grep -v 'ResizeRollout::production(' "$SCRATCH/$CUTOVER" >"$SCRATCH/.tmp"
+mv "$SCRATCH/.tmp" "$SCRATCH/$CUTOVER"
+expect_fail_naming \
+    "deleting the ResizeRollout::production call fails, naming the symbol" \
+    "ResizeRollout::production has ZERO production callers"
+
+# 16. The call survives only inside a `#[cfg(test)]` module — which is where it
+#     effectively lived before, as an assertion that the constructor existed.
+fixture
+cat >"$SCRATCH/$CUTOVER" <<'EOF'
+// Driver fixture with the composition demoted to a test.
+use crate::task_run_resize_rollout::{ResizeRollout, RolloutPlan};
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn the_constructor_exists() {
+        let rollout = ResizeRollout::production(db, events, runtime, url, paused_by, &sources);
+        rollout.activate(&plan);
+        rollout.rollback(&plan);
+    }
+}
+EOF
+expect_fail_naming \
+    "a ResizeRollout::production call that survives only in #[cfg(test)] does not count" \
+    "ResizeRollout::production has ZERO production callers"
+
+# 17. The driver exists and calls `production`, but no binary calls the driver.
+#     Reachable-looking code inside a function no `main` reaches.
+fixture
+grep -v 'let report = run(' "$SCRATCH/$CUTOVER_BIN" >"$SCRATCH/.tmp"
+mv "$SCRATCH/.tmp" "$SCRATCH/$CUTOVER_BIN"
+expect_fail_naming \
+    "a cutover driver no binary calls fails on the composition anchor" \
+    "let report = run"
+
+# 18. The binary source exists but cargo does not build it. A file under
+#     `src/bin/` that is not a declared target ships nothing.
+fixture
+grep -v 'authority-cutover' "$SCRATCH/$MANIFEST" >"$SCRATCH/.tmp"
+mv "$SCRATCH/.tmp" "$SCRATCH/$MANIFEST"
+expect_fail_naming \
+    "an undeclared binary target fails on the manifest anchor" \
+    "authority-cutover"
+
+# 19. The driver runs the sequences through something other than ResizeRollout —
+#     `set_mode` directly, say, which has its own fence but refuses with a bare
+#     census and names no row.
+fixture
+grep -v 'rollout.activate(&plan)' "$SCRATCH/$CUTOVER" >"$SCRATCH/.tmp"
+mv "$SCRATCH/.tmp" "$SCRATCH/$CUTOVER"
+expect_fail_naming \
+    "a driver that does not run activate through ResizeRollout fails the anchor" \
+    "must run the forward sequence through ResizeRollout"
+
+# 19b. …and the reverse, guarded separately: rollback is the path that must never
+#      start an incompatible Pod, and `set_mode` alone refuses with a bare census.
+fixture
+grep -v 'rollout.rollback(&plan)' "$SCRATCH/$CUTOVER" >"$SCRATCH/.tmp"
+mv "$SCRATCH/.tmp" "$SCRATCH/$CUTOVER"
+expect_fail_naming \
+    "a driver that does not run rollback through ResizeRollout fails the anchor" \
+    "must run the reverse sequence through ResizeRollout"
+
+# 20. The forward flip stops running the preflight. The gate would still exist,
+#     still be tested, and gate nothing.
+fixture
+grep -v 'clear_preflight(LauncherAuthorityProtocol::ResizeV2)' "$SCRATCH/$ROLLOUT" >"$SCRATCH/.tmp"
+mv "$SCRATCH/.tmp" "$SCRATCH/$ROLLOUT"
+expect_fail_naming \
+    "dropping the forward preflight call fails the anchor" \
+    "clear_preflight"
+
+# 21. …and the reverse flip likewise. Rollback is the path that must never start
+#     an incompatible Pod, so its gate is guarded separately rather than assumed
+#     to travel with the forward one.
+fixture
+grep -v 'clear_preflight(LauncherAuthorityProtocol::LeafV1)' "$SCRATCH/$ROLLOUT" >"$SCRATCH/.tmp"
+mv "$SCRATCH/.tmp" "$SCRATCH/$ROLLOUT"
+expect_fail_naming \
+    "dropping the reverse preflight call fails the anchor" \
+    "clear_preflight"
 
 printf '\n%s passed, %s failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ] || exit 1

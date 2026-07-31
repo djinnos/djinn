@@ -126,8 +126,9 @@ use djinn_k8s::launcher::{
 use djinn_k8s::pod_resize::{CpuLimit, build_resize_patch};
 use djinn_launcher_protocol::{LEAF_V1_WIRE, LauncherAuthorityProtocol, RESIZE_V2_WIRE};
 use djinn_server::task_run_resize_rollout::{
-    DispatchProbe, DurableAdmissionControl, LiveTaskRunPod, RegistryProbe, ResizeRollout,
-    RolloutBlocked, RolloutStep, TaskRunPodPlane,
+    CutoverPreflight, DispatchProbe, DurableAdmissionControl, LiveTaskRunPod,
+    PreflightVerdict as RolloutPreflightVerdict, RegistryProbe, ResizeRollout, RolloutBlocked,
+    RolloutStep, TaskRunPodPlane,
 };
 use serde_json::{Value, json};
 
@@ -2798,8 +2799,42 @@ fn cutover_rollout(db: &Database, pods: Arc<dyn TaskRunPodPlane>) -> ResizeRollo
         )),
         pods,
         Arc::new(UnreachedRegistry),
+        // The gate this suite drives for real is the SHELL one —
+        // `deploy/preflight/cutover-preflight.sh`, run as a subprocess against a
+        // live helm render, whose verdict `gated_flip` refuses on. What the
+        // rollout's own seam adds here is the ORDERING: `PreflightCleared` is a
+        // prerequisite of `AuthorityModeFlipped`, so a flip that skipped
+        // `clear_preflight` is `StepOutOfOrder` rather than an ungated flip.
+        Arc::new(AlwaysClearPreflight),
     )
 }
+
+/// A preflight seam that clears, so the journal ordering is exercised while the
+/// real verdict comes from the shell gate this suite runs as a subprocess.
+struct AlwaysClearPreflight;
+
+#[async_trait]
+impl CutoverPreflight for AlwaysClearPreflight {
+    async fn evaluate(
+        &self,
+        _mode: LauncherAuthorityProtocol,
+        _live_task_run_pods: &[String],
+    ) -> RolloutPreflightVerdict {
+        RolloutPreflightVerdict::Clear {
+            evaluated: DEPLOY_GATE_CLASSES.iter().map(|c| (*c).to_string()).collect(),
+        }
+    }
+}
+
+/// The six classes `djinn_k8s::cutover_preflight::run` evaluates.
+const DEPLOY_GATE_CLASSES: &[&str] = &[
+    "birth-confirmation",
+    "catalog-protocol",
+    "credential-boundary",
+    "drain-fence",
+    "launcher-cpu-ceiling",
+    "pods-resize-rbac",
+];
 
 /// A catalog row the probe dispatch can name, written by the production
 /// `ImageRepository`.
@@ -3071,6 +3106,10 @@ async fn neither_flip_proceeds_with_a_live_permit_row() {
             .prove_drained()
             .await
             .expect("a drained snapshot must prove");
+        rollout
+            .clear_preflight(target)
+            .await
+            .expect("the preflight gate must clear before the flip is reachable");
         let flipped = rollout
             .flip_authority_mode(epoch, target)
             .await
@@ -3086,6 +3125,7 @@ async fn neither_flip_proceeds_with_a_live_permit_row() {
                 RolloutStep::RetentionVerified,
                 RolloutStep::AdmissionPaused,
                 RolloutStep::DrainProven,
+                RolloutStep::PreflightCleared,
                 RolloutStep::AuthorityModeFlipped,
                 RolloutStep::AdmissionResumed,
             ],
@@ -3564,6 +3604,12 @@ async fn gated_flip(
         .prove_drained()
         .await
         .map_err(|blocked| format!("the drain proof refused: {blocked}"))?;
+    // The rollout's own preflight step, so the flip below is reachable at all:
+    // `AuthorityModeFlipped` lists `PreflightCleared` among its prerequisites.
+    rollout
+        .clear_preflight(target)
+        .await
+        .map_err(|blocked| format!("the rollout preflight gate refused: {blocked}"))?;
     rollout
         .flip_authority_mode(expected_epoch, target)
         .await
