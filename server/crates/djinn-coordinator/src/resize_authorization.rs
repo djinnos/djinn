@@ -335,6 +335,11 @@ impl ResizeRefusal {
 /// why an uncertainty on this path must not be expressible as something a caller
 /// could classify as retryable.
 #[derive(Clone, Debug, PartialEq, Eq)]
+// `Authorized` is the hot path and the only variant anyone reads a field from;
+// boxing it would put an allocation on every successful authorization to save
+// stack on two variants that are 2 bytes each. Same trade `GrantNextBuildLeaseResult`
+// makes in `build_lease.rs`.
+#[allow(clippy::large_enum_variant)]
 pub enum ResizeAuthorizationOutcome {
     /// Server-derived and clamped. The only variant `0ppk-1b` may PATCH.
     Authorized(PodResizeIntent),

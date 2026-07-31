@@ -122,6 +122,10 @@ djinn-control-plane = { path = "crates/djinn-control-plane", features = ["test-s
 # outside the Kubernetes capability owner — and that ban is right.
 djinn-k8s = { path = "crates/djinn-k8s", features = ["test-support"] }
 djinn-db = { path = "crates/djinn-db", features = ["test-support"] }
+# `task_run_resize_faults` builds a real `DirectServices` over a real
+# `BuildLeaseService` so the two-ledger ordering is asserted at the COMPOSITION
+# site — `release_lease` — rather than against the drop mechanism alone.
+djinn-agent = { path = "crates/djinn-agent", features = ["test-support"] }
 djinn-server = { path = ".", features = ["test-support"] }
 insta = { version = "1", features = ["json", "redactions"] }
 proptest = "1"

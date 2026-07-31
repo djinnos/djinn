@@ -709,9 +709,15 @@ async fn the_invocation_id_may_only_change_on_entry_to_lift_applying() {
     seed_runs(&db, &["window-run"]).await;
     let repo = BuildPodPermitRepository::new(db.clone());
     let (permit_id, fence) = birth_confirmed(&db, "window-run", "pod-window").await;
-    repo.begin_resize_invocation("window-run", &permit_id, fence, "pod-window", "invocation-a")
-        .await
-        .unwrap();
+    repo.begin_resize_invocation(
+        "window-run",
+        &permit_id,
+        fence,
+        "pod-window",
+        "invocation-a",
+    )
+    .await
+    .unwrap();
 
     // The trigger, not the repository, is the authority. Reach past the
     // repository's own predicate and try to re-key on a non-lift edge.
@@ -775,7 +781,13 @@ async fn the_invocation_id_may_only_change_on_entry_to_lift_applying() {
         ));
     }
     let second = repo
-        .begin_resize_invocation("window-run", &permit_id, fence, "pod-window", "invocation-b")
+        .begin_resize_invocation(
+            "window-run",
+            &permit_id,
+            fence,
+            "pod-window",
+            "invocation-b",
+        )
         .await
         .unwrap();
     let TransitionBuildPodResizeLifecycleResult::Transitioned(row) = second else {

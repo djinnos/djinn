@@ -522,7 +522,8 @@ impl BuildPodPermitRepository {
                 if row.permit_id == permit_id
                     && row.fencing_token == fencing_token
                     && row.state == BuildPodPermitState::LiftApplying
-                    && row.resize_identity.as_ref().map(|id| id.pod_uid.as_str()) == Some(pod_uid)
+                    && row.resize_identity.as_ref().map(|id| id.pod_uid.as_str())
+                        == Some(pod_uid)
                     && row.resize_invocation_id.as_deref() == Some(invocation_id) =>
             {
                 TransitionBuildPodResizeLifecycleResult::Transitioned(Box::new(row))
@@ -546,6 +547,11 @@ impl BuildPodPermitRepository {
     /// invocation having lifted. It is compared with `IS NOT DISTINCT FROM`, so
     /// `None` means "the row must carry no invocation" rather than "do not
     /// check" — dropping this clause is acceptance criterion 1's named mutation.
+    // Every parameter is one component of a single compare-and-swap predicate.
+    // Bundling them into a struct would let a caller construct a HALF-SPECIFIED
+    // fence and still compile, which is exactly the failure this method exists
+    // to make impossible.
+    #[allow(clippy::too_many_arguments)]
     pub async fn transition_resize_lifecycle(
         &self,
         task_run_id: &str,

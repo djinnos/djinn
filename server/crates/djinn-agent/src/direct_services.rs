@@ -47,8 +47,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::actors::slot::lifecycle::memory_intent_planner::parse_planned_queries;
 use crate::context::AgentContext;
-use crate::task_run_resize_drop_gate::{ResizeDropGateRequest, ResizeDropVerdict};
 use crate::supervisor_impl::{SupervisorCallbackContext, execute_stage, supervisor_pr_open};
+use crate::task_run_resize_drop_gate::{ResizeDropGateRequest, ResizeDropVerdict};
 use djinn_provider::catalog::builtin::classify_provider;
 use djinn_provider::message::{ContentBlock, Conversation};
 use djinn_provider::provider::{LlmProvider, LlmResponse, StreamEvent, TokenUsage, ToolChoice};
