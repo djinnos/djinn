@@ -1789,6 +1789,7 @@ dependencies = [
  "djinn-graph",
  "djinn-image-controller",
  "djinn-k8s",
+ "djinn-launcher-protocol",
  "djinn-memory",
  "djinn-provider",
  "djinn-runtime",

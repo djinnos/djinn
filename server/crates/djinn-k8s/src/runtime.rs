@@ -2057,6 +2057,251 @@ pub async fn list_taskrun_jobs(
     Ok(refs)
 }
 
+// ── Post-admission launcher observation (g8jk-3) ───────────────────────────
+//
+// The resize bootstrap that consumes this lives in
+// `djinn_server::task_run_resize_bootstrap`. The split is deliberate: the
+// mechanics of reading a stored Pod belong to the crate that owns the Kubernetes
+// types, and the policy — what to capture, when to refuse, when to delete —
+// belongs beside the durable permit relation. Nothing below decides anything; it
+// reports what the apiserver has stored.
+
+/// One fresh read of the *stored* launcher sidecar, flattened to plain data.
+///
+/// Every field here comes from the object the apiserver persisted, never from
+/// the render input. That is the whole point of post-admission capture: a
+/// mutating admission webhook may have changed what was rendered, and a value
+/// derived from the render would report the ceiling we asked for rather than the
+/// ceiling the Pod actually has.
+///
+/// Fields that a still-starting Pod legitimately lacks are [`Option`], and the
+/// caller decides whether their absence is "not yet" or "never". This type
+/// deliberately makes no such judgement.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ObservedLauncherSidecar {
+    /// `metadata.namespace` of the stored Pod.
+    pub namespace: String,
+    /// `metadata.name` of the stored Pod.
+    pub pod_name: String,
+    /// `metadata.uid` — the fence every later resize and delete is bound to.
+    pub pod_uid: String,
+    /// The launcher's container name, as it appears in `spec.initContainers`.
+    pub launcher_container_name: String,
+    /// `status.initContainerStatuses[..].containerID`. Absent until the kubelet
+    /// has actually started the sidecar.
+    pub launcher_container_id: Option<String>,
+    /// `status.initContainerStatuses[..].imageID` — the resolved artifact, not
+    /// the possibly-mutable tag in the spec.
+    pub image_digest: Option<String>,
+    /// The launcher's own `DJINN_LAUNCHER_AUTHORITY_PROTOCOL` value, read off
+    /// the stored spec. Absent for images rendered before the protocol existed.
+    pub observed_protocol: Option<String>,
+    /// The persisted `spec.initContainers[cgroup-launcher].resources.limits.cpu`
+    /// in millicores — the admitted ceiling. Absent under `leaf-v1`, which
+    /// renders no launcher CPU limit at all.
+    pub admitted_cpu_millicores: Option<u64>,
+}
+
+/// Why a stored Pod could not be flattened into an [`ObservedLauncherSidecar`].
+///
+/// Both variants are failures, but they are not the same failure: `Incomplete`
+/// describes a Pod that has not finished being admitted and may complete on the
+/// next read, while `Ambiguous` describes a Pod whose launcher cannot be *named*
+/// and never will be by waiting.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum LauncherObservationError {
+    /// A `metadata` field the fence depends on is not populated yet.
+    #[error("stored Pod is missing `metadata.{field}`")]
+    Incomplete {
+        /// The absent metadata field.
+        field: &'static str,
+    },
+    /// The launcher is not uniquely identifiable in the stored Pod.
+    #[error("{0}")]
+    Ambiguous(#[from] crate::pod_resize::PodResizeError),
+    /// The apiserver read itself failed, or resolved to more than one Pod.
+    #[error("{0}")]
+    Api(String),
+}
+
+/// Flatten a stored Pod into the launcher facts the resize bootstrap needs.
+///
+/// The launcher must be uniquely identifiable in **both** `spec.initContainers`
+/// and `status.initContainerStatuses` before any field is read, for the reason
+/// [`crate::pod_resize`] documents at length: the worker container can carry a
+/// coincidentally matching CPU limit, so resolving the launcher by anything less
+/// than a unique name match does not read nothing, it reads the wrong thing.
+///
+/// # Errors
+///
+/// [`LauncherObservationError`] — see its variants.
+pub fn observe_launcher_sidecar(
+    pod: &Pod,
+) -> Result<ObservedLauncherSidecar, LauncherObservationError> {
+    let namespace = non_empty(pod.metadata.namespace.as_deref())
+        .ok_or(LauncherObservationError::Incomplete { field: "namespace" })?;
+    let pod_name = non_empty(pod.metadata.name.as_deref())
+        .ok_or(LauncherObservationError::Incomplete { field: "name" })?;
+    let pod_uid = non_empty(pod.metadata.uid.as_deref())
+        .ok_or(LauncherObservationError::Incomplete { field: "uid" })?;
+
+    let spec = crate::pod_resize::locate_launcher_spec(pod)?;
+    let status = crate::pod_resize::locate_launcher_status(pod)?;
+
+    // The declared limit is read through `declared_launcher_cpu_limit`, which is
+    // documented as a spec read and explicitly NOT confirmation of anything. It
+    // is the right source here precisely because capture is a statement about
+    // what was admitted, not about what the kubelet has actuated.
+    let admitted_cpu_millicores = crate::pod_resize::declared_launcher_cpu_limit(pod)
+        .ok()
+        .map(|limit| limit.millis());
+
+    Ok(ObservedLauncherSidecar {
+        namespace,
+        pod_name,
+        pod_uid,
+        launcher_container_name: spec.name.clone(),
+        launcher_container_id: non_empty(status.container_id.as_deref()),
+        image_digest: non_empty(Some(status.image_id.as_str())),
+        observed_protocol: spec.env.as_ref().and_then(|env| {
+            env.iter()
+                .find(|entry| entry.name == crate::launcher::AUTHORITY_PROTOCOL_ENV)
+                .and_then(|entry| non_empty(entry.value.as_deref()))
+        }),
+        admitted_cpu_millicores,
+    })
+}
+
+fn non_empty(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+/// Fresh, label-scoped read of the single live Pod for `task_run_id`.
+///
+/// Never served from a cache. More than one labelled Pod is an error rather than
+/// a choice: a replacement Pod standing beside the original is exactly the
+/// situation in which picking either one is wrong, and it is the same rule
+/// [`terminate_taskrun_pod_exact`] already applies before it deletes anything.
+///
+/// # Errors
+///
+/// A rendered `kube::Error` on list failure, or an ambiguity message when the
+/// label selector does not resolve to exactly one Pod.
+pub async fn get_taskrun_pod_fresh(
+    client: &kube::Client,
+    namespace: &str,
+    task_run_id: &str,
+) -> Result<Option<Pod>, String> {
+    let pods: Api<Pod> = Api::namespaced(client.clone(), namespace);
+    let selector = format!("{}={task_run_id}", crate::job::LABEL_TASK_RUN_ID);
+    let listed = pods
+        .list(&ListParams::default().labels(&selector))
+        .await
+        .map_err(|e| format!("list task-run Pods: {e}"))?
+        .items;
+    match listed.len() {
+        0 => Ok(None),
+        1 => Ok(listed.into_iter().next()),
+        found => Err(format!(
+            "task-run {task_run_id} resolves to {found} Pods; refusing to pick one"
+        )),
+    }
+}
+
+/// The three apiserver operations the resize bootstrap performs, bound to one
+/// namespace and one field manager.
+///
+/// It exists so `djinn-server` can drive the bootstrap without depending on
+/// `kube` or `k8s-openapi` directly, and so the bootstrap's own tests can
+/// substitute a fake for all three at once.
+pub struct TaskRunPodResizeSurface {
+    client: kube::Client,
+    namespace: String,
+    field_manager: String,
+}
+
+impl TaskRunPodResizeSurface {
+    /// Bind to one namespace.
+    pub fn new(
+        client: kube::Client,
+        namespace: impl Into<String>,
+        field_manager: impl Into<String>,
+    ) -> Self {
+        Self {
+            client,
+            namespace: namespace.into(),
+            field_manager: field_manager.into(),
+        }
+    }
+
+    /// Build from a live runtime, reusing its client and configured namespace.
+    #[must_use]
+    pub fn from_runtime(runtime: &KubernetesRuntime) -> Self {
+        Self::new(
+            runtime.client().clone(),
+            runtime.config().namespace.clone(),
+            "djinn-task-run-resize",
+        )
+    }
+
+    /// Fresh GET, then flatten. `Ok(None)` means no Pod exists yet.
+    ///
+    /// # Errors
+    ///
+    /// [`LauncherObservationError`] — the list failed or was ambiguous
+    /// (`Api`), the Pod is not fully admitted (`Incomplete`), or the launcher
+    /// cannot be named (`Ambiguous`).
+    pub async fn observe_launcher(
+        &self,
+        task_run_id: &str,
+    ) -> Result<Option<ObservedLauncherSidecar>, LauncherObservationError> {
+        let Some(pod) = get_taskrun_pod_fresh(&self.client, &self.namespace, task_run_id)
+            .await
+            .map_err(LauncherObservationError::Api)?
+        else {
+            return Ok(None);
+        };
+        observe_launcher_sidecar(&pod).map(Some)
+    }
+
+    /// One limits-only resize of the launcher sidecar, confirmed through
+    /// `status.initContainerStatuses`.
+    ///
+    /// # Errors
+    ///
+    /// [`crate::pod_resize::PodResizeError`]; in particular `NotConfirmed` when
+    /// the PATCH was accepted but the fresh status does not yet agree.
+    pub async fn resize_launcher_cpu(
+        &self,
+        pod_name: &str,
+        target_millicores: u64,
+    ) -> Result<(), crate::pod_resize::PodResizeError> {
+        let api = crate::pod_resize::KubePodResizeApi::new(
+            self.client.clone(),
+            &self.namespace,
+            self.field_manager.clone(),
+        );
+        crate::pod_resize::PodResizeClient::new(api)
+            .resize_launcher_cpu(
+                pod_name,
+                crate::pod_resize::CpuLimit::from_millis(target_millicores),
+            )
+            .await
+    }
+
+    /// UID-fenced destruction of exactly the observed Pod, plus its Job.
+    ///
+    /// # Errors
+    ///
+    /// The rendered failure from [`terminate_taskrun_pod_exact`].
+    pub async fn uid_fenced_delete(&self, task_run_id: &str, pod_uid: &str) -> Result<(), String> {
+        terminate_taskrun_pod_exact(&self.client, &self.namespace, task_run_id, pod_uid).await
+    }
+}
+
 /// Delete a Job with `Foreground` propagation and the given grace period,
 /// treating 404 as success for idempotency.
 async fn delete_job_foreground(
@@ -3893,6 +4138,189 @@ mod tests {
         drop(stream);
         server.cancel();
         let _ = tokio::time::timeout(Duration::from_secs(2), server.join).await;
+    }
+
+    // ── observe_launcher_sidecar (g8jk-3) ─────────────────────────────────
+
+    mod launcher_observation {
+        use super::*;
+        use crate::launcher::{AUTHORITY_PROTOCOL_ENV, LAUNCHER_CONTAINER_NAME};
+        use k8s_openapi::api::core::v1::{
+            Container, ContainerStatus, EnvVar, PodSpec, PodStatus, ResourceRequirements,
+        };
+        use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
+        use std::collections::BTreeMap;
+
+        fn cpu_limit(quantity: &str) -> ResourceRequirements {
+            ResourceRequirements {
+                limits: Some(BTreeMap::from([(
+                    "cpu".to_owned(),
+                    Quantity(quantity.to_owned()),
+                )])),
+                ..ResourceRequirements::default()
+            }
+        }
+
+        fn container(name: &str, quantity: Option<&str>, protocol: Option<&str>) -> Container {
+            Container {
+                name: name.to_owned(),
+                resources: quantity.map(cpu_limit),
+                env: protocol.map(|value| {
+                    vec![EnvVar {
+                        name: AUTHORITY_PROTOCOL_ENV.to_owned(),
+                        value: Some(value.to_owned()),
+                        value_from: None,
+                    }]
+                }),
+                ..Container::default()
+            }
+        }
+
+        fn status(
+            name: &str,
+            container_id: Option<&str>,
+            image_id: Option<&str>,
+        ) -> ContainerStatus {
+            ContainerStatus {
+                name: name.to_owned(),
+                container_id: container_id.map(ToOwned::to_owned),
+                image_id: image_id.unwrap_or_default().to_owned(),
+                ..ContainerStatus::default()
+            }
+        }
+
+        fn pod(
+            init: Vec<Container>,
+            regular: Vec<Container>,
+            statuses: Vec<ContainerStatus>,
+        ) -> Pod {
+            Pod {
+                metadata: ObjectMeta {
+                    name: Some("taskrun-pod".to_owned()),
+                    namespace: Some("djinn".to_owned()),
+                    uid: Some("pod-uid-1".to_owned()),
+                    ..ObjectMeta::default()
+                },
+                spec: Some(PodSpec {
+                    init_containers: Some(init),
+                    containers: regular,
+                    ..PodSpec::default()
+                }),
+                status: Some(PodStatus {
+                    init_container_statuses: Some(statuses),
+                    ..PodStatus::default()
+                }),
+            }
+        }
+
+        #[test]
+        fn reads_the_stored_launcher_spec_and_status() {
+            let observed = observe_launcher_sidecar(&pod(
+                vec![container(
+                    LAUNCHER_CONTAINER_NAME,
+                    Some("3800m"),
+                    Some("resize-v2"),
+                )],
+                vec![container("worker", Some("4"), None)],
+                vec![status(
+                    LAUNCHER_CONTAINER_NAME,
+                    Some("containerd://abc"),
+                    Some("registry/img@sha256:feed"),
+                )],
+            ))
+            .expect("observation");
+            assert_eq!(observed.pod_uid, "pod-uid-1");
+            assert_eq!(observed.namespace, "djinn");
+            assert_eq!(observed.pod_name, "taskrun-pod");
+            assert_eq!(observed.launcher_container_name, LAUNCHER_CONTAINER_NAME);
+            assert_eq!(
+                observed.launcher_container_id.as_deref(),
+                Some("containerd://abc")
+            );
+            assert_eq!(
+                observed.image_digest.as_deref(),
+                Some("registry/img@sha256:feed")
+            );
+            assert_eq!(observed.observed_protocol.as_deref(), Some("resize-v2"));
+            // 3800m, NOT the worker's coincidental 4 cores.
+            assert_eq!(observed.admitted_cpu_millicores, Some(3800));
+        }
+
+        #[test]
+        fn a_still_starting_sidecar_reports_absent_fields_rather_than_failing() {
+            let observed = observe_launcher_sidecar(&pod(
+                vec![container(LAUNCHER_CONTAINER_NAME, Some("4000m"), None)],
+                vec![],
+                vec![status(LAUNCHER_CONTAINER_NAME, None, None)],
+            ))
+            .expect("observation");
+            assert_eq!(observed.launcher_container_id, None);
+            assert_eq!(observed.image_digest, None);
+            assert_eq!(observed.observed_protocol, None);
+            assert_eq!(observed.admitted_cpu_millicores, Some(4000));
+        }
+
+        #[test]
+        fn a_leaf_v1_render_carries_no_ceiling_to_observe() {
+            let observed = observe_launcher_sidecar(&pod(
+                vec![container(LAUNCHER_CONTAINER_NAME, None, Some("leaf-v1"))],
+                vec![container("worker", Some("4"), None)],
+                vec![status(
+                    LAUNCHER_CONTAINER_NAME,
+                    Some("containerd://a"),
+                    Some("i"),
+                )],
+            ))
+            .expect("observation");
+            assert_eq!(observed.admitted_cpu_millicores, None);
+            assert_eq!(observed.observed_protocol.as_deref(), Some("leaf-v1"));
+        }
+
+        #[test]
+        fn an_unnameable_launcher_is_rejected_at_both_sites() {
+            // Zero spec entries.
+            let missing = observe_launcher_sidecar(&pod(
+                vec![container("worker", Some("4"), None)],
+                vec![],
+                vec![status(LAUNCHER_CONTAINER_NAME, Some("c"), Some("i"))],
+            ));
+            assert!(matches!(
+                missing,
+                Err(LauncherObservationError::Ambiguous(
+                    crate::pod_resize::PodResizeError::LauncherIdentityAmbiguous { found: 0, .. }
+                ))
+            ));
+
+            // Two status entries.
+            let duplicated = observe_launcher_sidecar(&pod(
+                vec![container(LAUNCHER_CONTAINER_NAME, Some("4000m"), None)],
+                vec![],
+                vec![
+                    status(LAUNCHER_CONTAINER_NAME, Some("c1"), Some("i")),
+                    status(LAUNCHER_CONTAINER_NAME, Some("c2"), Some("i")),
+                ],
+            ));
+            assert!(matches!(
+                duplicated,
+                Err(LauncherObservationError::Ambiguous(
+                    crate::pod_resize::PodResizeError::LauncherIdentityAmbiguous { found: 2, .. }
+                ))
+            ));
+        }
+
+        #[test]
+        fn a_pod_without_a_uid_is_incomplete_not_observable() {
+            let mut without_uid = pod(
+                vec![container(LAUNCHER_CONTAINER_NAME, Some("4000m"), None)],
+                vec![],
+                vec![status(LAUNCHER_CONTAINER_NAME, Some("c"), Some("i"))],
+            );
+            without_uid.metadata.uid = None;
+            assert_eq!(
+                observe_launcher_sidecar(&without_uid),
+                Err(LauncherObservationError::Incomplete { field: "uid" })
+            );
+        }
     }
 }
 
