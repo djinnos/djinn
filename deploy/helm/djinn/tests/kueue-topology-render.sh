@@ -30,6 +30,15 @@ require_tool python3
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 
+# The Rust crates that render the build Jobs Kueue captures. The ClusterQueue's
+# coveredResources is DERIVED from these, never declared — see
+# `derive_renderer_request_keys` below.
+CRATES_ROOT="$REPO_ROOT/server/crates"
+[ -d "$CRATES_ROOT" ] || {
+    echo "FAIL: the Job renderers are not where this guard reads them: $CRATES_ROOT" >&2
+    exit 1
+}
+
 render() {
     local output=$1
     shift
@@ -53,16 +62,255 @@ render_enabled() {
     render "$output" --set kueue.enabled=true "$@"
 }
 
+# ---------------------------------------------------------------------------
+# WHAT THE RENDERERS ACTUALLY ASK FOR.
+#
+# Kueue refuses to assign a flavor when ANY resource a PodSet requests falls
+# outside the ClusterQueue's resourceGroups ("resource cpu unavailable in
+# ClusterQueue", measured live on fbiy-B1). The failure is silent and total: an
+# armed install captures every build Job, suspends it, and unsuspends none —
+# `helm template` renders happily, and the zero-capture gate passes precisely
+# because nothing is captured while unarmed.
+#
+# So the coverage set cannot be a literal compared against a literal. It is
+# EXTRACTED from the Rust that renders the Jobs:
+#
+#   1. Discover the Job renderers: every non-test `.rs` under $CRATES_ROOT that
+#      defines a `pub fn build_*job*(..) -> Job`. Today that is job.rs
+#      (task-run), warm_job.rs, scip_job.rs and the image-controller's
+#      build_job.rs — but the LIST is derived, so a fifth renderer joins it
+#      without an edit here.
+#   2. Take the crates those renderers live in, and read EVERY
+#      `requests: Some(BTreeMap::from([..]))` map in them. Kueue sums a PodSet's
+#      request across every container in the Pod, so the launcher sidecar
+#      (launcher.rs), the backing-service sidecars (sidecar.rs) and the
+#      post-render override path (build_resources.rs) count exactly as much as
+#      the renderer entry points do — which is why the unit of extraction is the
+#      crate, not the four files.
+#   3. Fail if any `requests:` site in that scope does NOT match the shape the
+#      extractor parses. A renderer that builds its map some other way must not
+#      be silently invisible; that is the same silence this guard exists to end.
+#
+# Emits JSON: {"keys": {"<resource>": ["<file>:<line>", ..]}, ..}
+#
+# `inject_key` is the non-vacuity handle: it appends one synthetic entry to the
+# first requests map of each renderer file, in memory, so the section at the
+# bottom of this file can prove the guard fails when a renderer drifts.
+derive_renderer_request_keys() {
+    local output=$1 inject_key=${2:-}
+    python3 - "$CRATES_ROOT" "$inject_key" >"$output" <<'PY'
+import json
+import re
+import sys
+from pathlib import Path
+
+crates_root, inject_key = Path(sys.argv[1]), sys.argv[2]
+
+
+def fail(message):
+    raise SystemExit(f"FAIL: renderer request extraction: {message}")
+
+
+def strip_comments(text):
+    """Blank out Rust comments, leaving string literals and line numbers intact.
+
+    Without this a doc comment mentioning `requests:` reads as a request site
+    and the unparsed-shape check below fires on prose.
+    """
+    out, i, n = [], 0, len(text)
+    while i < n:
+        char = text[i]
+        if char == '"':
+            out.append(char)
+            i += 1
+            while i < n:
+                if text[i] == "\\":
+                    out.append(text[i : i + 2])
+                    i += 2
+                    continue
+                out.append(text[i])
+                i += 1
+                if text[i - 1] == '"':
+                    break
+            continue
+        if text.startswith("//", i):
+            while i < n and text[i] != "\n":
+                out.append(" ")
+                i += 1
+            continue
+        if text.startswith("/*", i):
+            depth = 1
+            out.append("  ")
+            i += 2
+            while i < n and depth:
+                if text.startswith("/*", i):
+                    depth, i = depth + 1, i + 2
+                    out.append("  ")
+                elif text.startswith("*/", i):
+                    depth, i = depth - 1, i + 2
+                    out.append("  ")
+                else:
+                    out.append("\n" if text[i] == "\n" else " ")
+                    i += 1
+            continue
+        out.append(char)
+        i += 1
+    return "".join(out)
+
+
+CFG_TEST = re.compile(r"#\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]")
+
+
+def strip_cfg_test(text):
+    """Drop `#[cfg(test)]` items. A fixture's resources are not a renderer's."""
+    while True:
+        marker = CFG_TEST.search(text)
+        if not marker:
+            return text
+        i, n = marker.end(), len(text)
+        while i < n and text[i] not in "{;":
+            i += 1
+        if i >= n:
+            return text[: marker.start()]
+        if text[i] == ";":
+            end = i + 1
+        else:
+            depth = 0
+            while i < n:
+                if text[i] == "{":
+                    depth += 1
+                elif text[i] == "}":
+                    depth -= 1
+                    if depth == 0:
+                        break
+                i += 1
+            end = i + 1
+        removed = text[marker.start() : end]
+        text = text[: marker.start()] + "\n" * removed.count("\n") + text[end:]
+
+
+# A Job renderer is a function that RETURNS a Job. Nothing here names the four.
+JOB_BUILDER = re.compile(
+    r"pub\s+fn\s+build_[A-Za-z0-9_]*job[A-Za-z0-9_]*\s*\([^{;]*?\)\s*->\s*Job\s*\{", re.S
+)
+REQUESTS_BLOCK = re.compile(
+    r"requests\s*:\s*Some\(\s*BTreeMap::from\(\s*\[(?P<body>[^\[\]]*)\]\s*\)\s*\)", re.S
+)
+REQUESTS_TOKEN = re.compile(r"\brequests\s*:")
+KEY = re.compile(r'\(\s*"(?P<key>[^"]+)"\s*\.to_string\(\)\s*,')
+
+
+def crate_of(path):
+    return crates_root / path.relative_to(crates_root).parts[0]
+
+
+def line_of(text, index):
+    return text.count("\n", 0, index) + 1
+
+
+sources = sorted(
+    path for path in crates_root.glob("*/src/**/*.rs") if not path.name.endswith("_tests.rs")
+)
+if not sources:
+    fail(f"no Rust sources under {crates_root}")
+# Comment-stripping the whole workspace costs seconds for nothing: a file that
+# contains neither substring can hold neither a Job renderer nor a requests map,
+# and both patterns below require them literally.
+prepared = {}
+for path in sources:
+    text = path.read_text(encoding="utf-8")
+    if "requests" not in text and "Job" not in text:
+        text = ""
+    else:
+        text = strip_cfg_test(strip_comments(text))
+    prepared[path] = text
+
+renderer_files = [path for path, text in prepared.items() if JOB_BUILDER.search(text)]
+# The task-run, warm, SCIP and image-build renderers. Fewer than four means the
+# discovery regex stopped matching, not that a renderer disappeared — and a
+# discovery that finds nothing would make every assertion below vacuous.
+if len(renderer_files) < 4:
+    fail(
+        "expected at least the four Job renderers (task-run, warm, SCIP, image build), found "
+        f"{[str(p) for p in renderer_files]}"
+    )
+renderer_crates = {crate_of(path) for path in renderer_files}
+
+keys, sites, unparsed, blank = {}, [], [], []
+for path in sources:
+    if crate_of(path) not in renderer_crates:
+        continue
+    text = prepared[path]
+    if inject_key and path in renderer_files:
+        text = REQUESTS_BLOCK.sub(
+            lambda match: match.group(0).replace(
+                match.group("body"),
+                match.group("body")
+                + f'("{inject_key}".to_string(), Quantity("1".to_string())),',
+            ),
+            text,
+            count=1,
+        )
+    blocks = list(REQUESTS_BLOCK.finditer(text))
+    starts = {block.start() for block in blocks}
+    for token in REQUESTS_TOKEN.finditer(text):
+        if token.start() not in starts:
+            unparsed.append(f"{path}:{line_of(text, token.start())}")
+    if not blocks:
+        continue
+    sites.append(str(path))
+    for block in blocks:
+        found = KEY.findall(block.group("body"))
+        if not found:
+            blank.append(f"{path}:{line_of(text, block.start())}")
+        for key in found:
+            keys.setdefault(key, []).append(f"{path.name}:{line_of(text, block.start())}")
+
+if unparsed:
+    fail(
+        "these `requests:` sites do not match the shape this extractor parses, so the resources "
+        f"they ask for cannot be derived and coverage would silently drift: {unparsed}"
+    )
+if blank:
+    fail(f"these requests maps parsed to no resource keys at all: {blank}")
+if not keys:
+    fail(
+        f"no resource requests found in {sorted(str(c) for c in renderer_crates)}; every "
+        "assertion built on this set would be vacuous"
+    )
+
+json.dump(
+    {
+        "renderer_files": sorted(str(path) for path in renderer_files),
+        "request_sites": sorted(sites),
+        "keys": {key: sorted(set(where)) for key, where in sorted(keys.items())},
+    },
+    sys.stdout,
+    indent=2,
+)
+PY
+}
+
+echo "=== deriving the resources the Job renderers request ==="
+RENDERER_KEYS="$WORK/renderer-request-keys.json"
+derive_renderer_request_keys "$RENDERER_KEYS"
+python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print("renderers:", *sorted(d["renderer_files"]), sep="\n  "); print("request sites:", *d["request_sites"], sep="\n  "); print("requested resources:", ", ".join(d["keys"]))' "$RENDERER_KEYS"
+
 # `expected_managed` is yes/no: whether the Namespace must carry
 # djinn.io/kueue-managed=true. It is the arming half of the contract, asserted in
 # BOTH directions so neither branch can rot into a tautology.
+#
+# `keys_json` is the derived renderer request set; it defaults to the real one
+# and is overridden only by the non-vacuity section at the bottom.
 assert_topology() {
-    local manifest=$1 expected_pods=$2 expected_managed=$3
-    python3 - "$manifest" "$expected_pods" "$expected_managed" <<'PY'
+    local manifest=$1 expected_pods=$2 expected_managed=$3 keys_json=${4:-$RENDERER_KEYS}
+    python3 - "$manifest" "$expected_pods" "$expected_managed" "$keys_json" <<'PY'
+import json
 import sys
 import yaml
 
-manifest, expected_pods, expected_managed = sys.argv[1:]
+manifest, expected_pods, expected_managed, keys_json = sys.argv[1:]
+derived = json.load(open(keys_json, encoding="utf-8"))
 docs = [doc for doc in yaml.safe_load_all(open(manifest, encoding="utf-8")) if doc]
 
 def named(kind):
@@ -98,24 +346,38 @@ assert spec.get("namespaceSelector") == {}, (
     f"copy of it here; got {spec.get('namespaceSelector')}"
 )
 
-# THREE COVERED RESOURCES, ONE BOUND.
+# COVERAGE IS A SUPERSET OF WHAT THE RENDERERS REQUEST — DERIVED, NOT DECLARED.
 #
 # `pods` is the only intended bound, but Kueue refuses to assign a flavor when
 # ANY resource a PodSet requests falls outside the ClusterQueue's
 # resourceGroups: "couldn't assign flavors to pod set main: resource cpu
-# unavailable in ClusterQueue" (measured live, fbiy-B1). Every real build Pod
-# requests cpu and memory, so a pods-only ClusterQueue admits nothing. cpu and
-# memory are therefore covered at quotas no cluster can reach, which keeps
-# `pods` the sole binding constraint.
-assert group.get("coveredResources") == ["pods", "cpu", "memory"], (
-    "cpu and memory must be covered — a pods-only ClusterQueue cannot admit any Pod that "
-    f"requests them, which is every build Pod; got {group.get('coveredResources')}"
+# unavailable in ClusterQueue" (measured live, fbiy-B1). A pods-only
+# ClusterQueue therefore admits nothing at all.
+#
+# The set on the right-hand side comes from `derive_renderer_request_keys`,
+# which reads the Job renderers' own `resources.requests` maps. Nothing here
+# names a resource: the day a renderer adds `ephemeral-storage`, this assertion
+# fails naming it instead of an armed install wedging in silence.
+covered = group.get("coveredResources")
+assert isinstance(covered, list), f"coveredResources must be a list, got {covered!r}"
+requested = derived["keys"]
+missing = [key for key in requested if key not in covered]
+assert not missing, (
+    f"the ClusterQueue does not cover {missing}, which the Job renderers request at "
+    f"{ {key: requested[key] for key in missing} }. Kueue cannot assign a flavor to a PodSet "
+    "asking for an uncovered resource, so an armed install would capture every build Job, "
+    f"suspend it and unsuspend none. coveredResources={covered}"
 )
 flavor_quotas = group.get("flavors")
 assert isinstance(flavor_quotas, list) and len(flavor_quotas) == 1, "exactly one flavor quota is required"
 assert flavor_quotas[0].get("name") == flavor["metadata"]["name"], "quota must use the empty flavor"
 resources = {entry["name"]: entry["nominalQuota"] for entry in flavor_quotas[0].get("resources", [])}
-assert set(resources) == {"pods", "cpu", "memory"}, f"unexpected quota set: {sorted(resources)}"
+# A covered resource with no nominalQuota is covered at zero, which is worse
+# than not covering it: Kueue assigns the flavor and then admits nothing.
+assert set(resources) == set(covered), (
+    f"every covered resource needs a quota and vice versa; covered={sorted(covered)} "
+    f"quota={sorted(resources)}"
+)
 assert resources["pods"] == int(expected_pods), "pods quota must render buildPods verbatim"
 # Non-binding by construction: 10k cores and 100Ti are ~1000x any cluster Djinn
 # runs on. If either ever became a real bound, `pods` would stop being the thing
@@ -208,6 +470,68 @@ assert_topology "$WORK/valid.yaml" 7 no
 echo "=== armed state: enabled=true, armed=true ==="
 render_enabled "$WORK/armed.yaml" --set kueue.buildPods=7 --set kueue.armed=true
 assert_topology "$WORK/armed.yaml" 7 yes
+
+# ---------------------------------------------------------------------------
+# THE COVERAGE CHECK MUST FAIL IN BOTH DIRECTIONS, INDEPENDENTLY.
+#
+# A superset assertion between two sets that never move proves nothing. Move
+# each side in turn, against the REAL render and the REAL renderer sources, and
+# require the guard to fail NAMING the resource that drifted.
+# ---------------------------------------------------------------------------
+expect_topology_rejected() {
+    local label=$1 manifest=$2 expected_pods=$3 expected_managed=$4 keys_json=$5 must_name=$6
+    local out="$WORK/nonvacuity-$label.out"
+    set +e
+    assert_topology "$manifest" "$expected_pods" "$expected_managed" "$keys_json" >"$out" 2>&1
+    local status=$?
+    set -e
+    if [ "$status" -eq 0 ]; then
+        echo "FAIL: the coverage guard accepted '$label'; it does not detect drift" >&2
+        exit 1
+    fi
+    grep -q -- "$must_name" "$out" || {
+        echo "FAIL: '$label' failed without naming '$must_name', so the failure is unattributable:" >&2
+        cat "$out" >&2
+        exit 1
+    }
+}
+
+echo "=== a renderer that requests an uncovered resource FAILS the guard ==="
+# `ephemeral-storage` is the realistic instance; the probe below uses a name no
+# chart could ever legitimately cover, so this stays a mutation and never
+# becomes a fact about the chart.
+DRIFT_PROBE="djinn.io/uncovered-drift-probe"
+derive_renderer_request_keys "$WORK/renderer-keys-drifted.json" "$DRIFT_PROBE"
+expect_topology_rejected renderer-drift "$WORK/valid.yaml" 7 no \
+    "$WORK/renderer-keys-drifted.json" "$DRIFT_PROBE"
+
+echo "=== a ClusterQueue that stops covering a requested resource FAILS the guard ==="
+# The other half, moved alone: the renderers are untouched and the chart drops
+# one resource it really does have to cover. Which resource is itself derived —
+# naming one here would put the literal straight back.
+python3 - "$WORK/valid.yaml" "$RENDERER_KEYS" "$WORK/coverage-dropped.yaml" \
+    >"$WORK/dropped-resource.txt" <<'PY'
+import json
+import sys
+import yaml
+
+source, keys_json, destination = sys.argv[1:]
+docs = [doc for doc in yaml.safe_load_all(open(source, encoding="utf-8")) if doc]
+requested = list(json.load(open(keys_json, encoding="utf-8"))["keys"])
+
+queue = next(doc for doc in docs if doc.get("kind") == "ClusterQueue")
+group = queue["spec"]["resourceGroups"][0]
+victim = next(key for key in requested if key in group["coveredResources"])
+group["coveredResources"] = [key for key in group["coveredResources"] if key != victim]
+for flavor in group["flavors"]:
+    flavor["resources"] = [entry for entry in flavor["resources"] if entry["name"] != victim]
+
+with open(destination, "w", encoding="utf-8") as output:
+    yaml.safe_dump_all(docs, output)
+sys.stdout.write(victim)
+PY
+expect_topology_rejected coverage-dropped "$WORK/coverage-dropped.yaml" 7 no \
+    "$RENDERER_KEYS" "$(cat "$WORK/dropped-resource.txt")"
 
 echo "=== chart default omits the topology entirely ==="
 # Regression guard for the defect this flag fixes: the topology used to render
