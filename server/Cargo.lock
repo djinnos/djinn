@@ -1520,6 +1520,7 @@ dependencies = [
  "http-body-util",
  "k8s-openapi",
  "kube",
+ "rustls",
  "serde",
  "serde_json",
  "serde_yaml",
