@@ -385,12 +385,25 @@ fi
 # is gone. It stops before `kind create cluster`, so it costs one 25MB registry
 # image and about two seconds.
 if [ "$ACTION" = selftest ]; then
-    info "selftest: running 'up' with a failure injected after the registry is created"
+    # Its OWN names and its OWN port. The self-test must be runnable while the
+    # real harness cluster is up — which is exactly when someone runs the suite
+    # — and `up` refuses to adopt a pre-existing registry (guard 4), so reusing
+    # the live names would fail before the trap was ever installed and report
+    # "the registry survived" for the wrong reason.
+    SELFTEST_CLUSTER="${CLUSTER_NAME}-selftest"
+    SELFTEST_REGISTRY="${REG_NAME}-selftest"
+    SELFTEST_PORT=$((REG_PORT + 1))
+    info "selftest: running 'up' with a failure injected after the registry is created (${SELFTEST_REGISTRY}:${SELFTEST_PORT})"
+    # Never adopt: if a previous self-test crashed hard, say so rather than
+    # deleting a container this run did not create.
+    if "$DOCKER" inspect "$SELFTEST_REGISTRY" >/dev/null 2>&1; then
+        fail 1 "selftest: ${SELFTEST_REGISTRY} already exists; remove it before re-running"
+    fi
     set +e
     DJINN_RESIZE_HARNESS_FAIL_AFTER=registry "$0" up \
-        --cluster-name "$CLUSTER_NAME" \
-        --registry-name "$REG_NAME" \
-        --registry-port "$REG_PORT" \
+        --cluster-name "$SELFTEST_CLUSTER" \
+        --registry-name "$SELFTEST_REGISTRY" \
+        --registry-port "$SELFTEST_PORT" \
         --k8s-version "$KIND_IMAGE_VERSION" \
         --values "$VALUES_FILE" \
         --min-free-gib "$MIN_FREE_GIB" >/dev/null 2>&1
@@ -398,15 +411,15 @@ if [ "$ACTION" = selftest ]; then
     set -e
     [ "$injected" -ne 0 ] || fail 1 \
         "selftest: the injected failure did not fail the run; DJINN_RESIZE_HARNESS_FAIL_AFTER is no longer wired"
-    if "$DOCKER" inspect "$REG_NAME" >/dev/null 2>&1; then
-        "$DOCKER" rm -f "$REG_NAME" >/dev/null || true
-        fail 1 "selftest: registry container ${REG_NAME} SURVIVED a failed 'up'. The teardown trap is missing, or it is installed after the registry is created."
+    if "$DOCKER" inspect "$SELFTEST_REGISTRY" >/dev/null 2>&1; then
+        "$DOCKER" rm -f "$SELFTEST_REGISTRY" >/dev/null || true
+        fail 1 "selftest: registry container ${SELFTEST_REGISTRY} SURVIVED a failed 'up'. The teardown trap is missing, or it is installed after the registry is created."
     fi
-    if "$KIND" get clusters 2>/dev/null | grep -qx "$CLUSTER_NAME"; then
-        fail 1 "selftest: kind cluster ${CLUSTER_NAME} survived a failed 'up'"
+    if "$KIND" get clusters 2>/dev/null | grep -qx "$SELFTEST_CLUSTER"; then
+        fail 1 "selftest: kind cluster ${SELFTEST_CLUSTER} survived a failed 'up'"
     fi
     printf 'PASS: the teardown trap removed the registry after an injected failure (cluster=%s registry=%s)\n' \
-        "$CLUSTER_NAME" "$REG_NAME"
+        "$SELFTEST_CLUSTER" "$SELFTEST_REGISTRY"
     exit 0
 fi
 

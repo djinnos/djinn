@@ -63,11 +63,13 @@ use std::time::Duration;
 
 use djinn_db::BuildLeaseRepository;
 use djinn_k8s::config::KubernetesConfig;
-use djinn_k8s::job::{COMPONENT_TASK_RUN_WORKER, LABEL_COMPONENT, build_task_run_job};
+use djinn_k8s::job::{
+    COMPONENT_TASK_RUN_WORKER, LABEL_COMPONENT, LABEL_TASK_RUN_ID, build_task_run_job,
+};
 use djinn_k8s::launcher::{
     AUTHORITY_PROTOCOL_ENV, CgroupLauncherMode, LAUNCHER_CONTAINER_NAME, LAUNCHER_CREDENTIAL_PATH,
-    LAUNCHER_SOCKET_PATH, TASK_RUN_CGROUP_RUNTIME_CLASS, apply_launcher_authority_protocol,
-    render_authority_protocol,
+    LAUNCHER_IPC_DIR, LAUNCHER_SOCKET_PATH, TASK_RUN_CGROUP_RUNTIME_CLASS,
+    apply_launcher_authority_protocol, render_authority_protocol,
 };
 use djinn_k8s::pod_resize::{
     CpuLimit, NotConfirmed, PodResizeError, RESIZE_SUBRESOURCE, build_resize_patch,
@@ -118,7 +120,12 @@ const PROBE_BUILD_SCRIPT: &str = "server/crates/djinn-k8s/tests/fixtures/governo
 const PROBE_IMAGE: &str = "djinn-resize-probe:pcod";
 const PROBE_BIN: &str = "/opt/djinn/bin/djinn-governor-probe";
 const PROBE_WORKLOAD: &str = "/opt/djinn/workload.bin";
-const PROBE_DECISION_DIR: &str = "/var/tmp/djinn-probe";
+/// The decision file lives on the launcher IPC volume, which is the ONE
+/// directory the renderer mounts into both the worker and the sidecar. It was
+/// briefly a path under `/var/tmp`, which exists in both containers and is
+/// shared by neither: the harness wrote the decision into the launcher and the
+/// probe waited for it in the worker, forever.
+const PROBE_DECISION_DIR: &str = LAUNCHER_IPC_DIR;
 
 const NAMESPACE: &str = "djinn";
 const WORKER_CONTAINER_NAME: &str = "worker";
@@ -667,6 +674,11 @@ fn guard_the_live_lane_is_wired() {
 
 struct CpuFacts {
     pod_cpu_limit: String,
+    /// Read back OUT of the render rather than passed in: the renderer stamps
+    /// the id it was given onto the label the Pod is later selected by, and a
+    /// second id invented at the call site is how the first live run selected a
+    /// Pod that did not exist.
+    task_run_id: String,
     worker_limit_millis: u64,
     launcher_ceiling_millis: u64,
     pod_slice_at_ceiling_millis: u64,
@@ -684,9 +696,51 @@ struct CpuFacts {
 /// rendered limits back is the only way to be measuring the same number the
 /// cluster will.
 fn rendered_cpu_facts(pod_cpu_limit: &str) -> CpuFacts {
+    rendered_cpu_facts_for(pod_cpu_limit, None)
+}
+
+/// The chart-installed object names a live render must be pointed at. Read from
+/// the cluster by SUFFIX rather than spelled out: the release prefix is the
+/// helm release name, so `djinn-djinn-taskrun` is what a release called `djinn`
+/// installing a chart called `djinn` actually produces, and hardcoding either
+/// spelling breaks the moment the release is renamed.
+struct ChartNames {
+    service_account: String,
+    mirror_pvc: String,
+    projects_pvc: String,
+    cache_pvc: String,
+}
+
+fn chart_names() -> ChartNames {
+    let named = |kind: &str, suffix: &str| -> String {
+        kubectl_json(&["-n", NAMESPACE, "get", kind])["items"]
+            .as_array()
+            .expect("a List has items")
+            .iter()
+            .filter_map(|item| item["metadata"]["name"].as_str())
+            .find(|name| name.ends_with(suffix))
+            .unwrap_or_else(|| panic!("the chart installs a {kind} ending in {suffix}"))
+            .to_owned()
+    };
+    ChartNames {
+        service_account: named("serviceaccounts", "-taskrun"),
+        mirror_pvc: named("persistentvolumeclaims", "-mirrors"),
+        projects_pvc: named("persistentvolumeclaims", "-projects"),
+        cache_pvc: named("persistentvolumeclaims", "-cache"),
+    }
+}
+
+fn rendered_cpu_facts_for(pod_cpu_limit: &str, chart: Option<&ChartNames>) -> CpuFacts {
     let mut config = KubernetesConfig::for_testing();
     config.cgroup_launcher_mode = CgroupLauncherMode::Required;
     config.task_run_cgroup_writable_enabled = true;
+    if let Some(chart) = chart {
+        config.namespace = NAMESPACE.to_owned();
+        config.service_account = chart.service_account.clone();
+        config.mirror_pvc = chart.mirror_pvc.clone();
+        config.projects_pvc = chart.projects_pvc.clone();
+        config.cache_pvc = chart.cache_pvc.clone();
+    }
     // The per-project `build_resources.task.cpu_limit` override lands here in
     // production via `apply_resolved_resources`, which calls
     // `retune_launcher_lease` with exactly this string.
@@ -722,8 +776,14 @@ fn rendered_cpu_facts(pod_cpu_limit: &str) -> CpuFacts {
             .expect("the rendered worker carries a cpu limit"),
     );
 
+    let task_run_id = document["metadata"]["labels"][LABEL_TASK_RUN_ID]
+        .as_str()
+        .expect("the renderer stamps the task-run id onto the Job")
+        .to_owned();
+
     CpuFacts {
         pod_cpu_limit: pod_cpu_limit.to_owned(),
+        task_run_id,
         worker_limit_millis,
         launcher_ceiling_millis,
         // Both endpoints derived: the slice is the SUM of the pod's container
@@ -1020,12 +1080,16 @@ async fn live_a_real_brokered_shell_is_governed_by_the_resized_sidecar() {
         .await
         .expect("the supervisor RPC client connects");
 
+    // Render first: the lease identity must carry the SAME task-run id the
+    // renderer stamped onto the Job, or the lease and the Pod are two unrelated
+    // objects and the selector below finds nothing.
+    let facts = rendered_cpu_facts_for(STOCK_CPU_LIMIT, Some(&chart_names()));
     let task_id = Uuid::now_v7().to_string();
-    let task_run_id = Uuid::now_v7();
+    let task_run_id = facts.task_run_id.clone();
     let invocation_id = Uuid::now_v7().to_string();
     let identity = LeaseIdentity::TaskInvocation(TaskInvocationLeaseIdentity {
         task_id: task_id.clone(),
-        task_run_id: task_run_id.to_string(),
+        task_run_id: task_run_id.clone(),
         invocation_id: invocation_id.clone(),
     });
     let queued = rpc
@@ -1049,11 +1113,10 @@ async fn live_a_real_brokered_shell_is_governed_by_the_resized_sidecar() {
         "a zero fence is what production sent at BEGIN; a lift presenting it is refused"
     );
 
-    // ---- Render the Pod exactly the way production does. ----
-    let facts = rendered_cpu_facts(STOCK_CPU_LIMIT);
+    // ---- Dispatch the Pod the render produced. ----
     let ceiling = facts.launcher_ceiling_millis;
     let mut document = facts.document.clone();
-    prepare_probe_job(&mut document, &task_run_id, &invocation_id, fence_value);
+    prepare_probe_job(&mut document, &invocation_id, fence_value);
     // The birth limit: what `TaskRunResizeBootstrap` downsizes a resize-v2
     // sidecar to before dispatch. Taken from the production constant.
     set_launcher_birth_limit(&mut document);
@@ -1434,7 +1497,7 @@ fn ensure_probe_image() {
 /// the UNMODIFIED shipped launcher binary in the rendered sidecar. Everything
 /// else about the render — the sidecar, the RuntimeClass, the IPC volume, the
 /// resource shape — is left exactly as production produced it.
-fn prepare_probe_job(document: &mut Value, task_run_id: &Uuid, invocation: &str, fence: u64) {
+fn prepare_probe_job(document: &mut Value, invocation: &str, fence: u64) {
     document["spec"]["backoffLimit"] = json!(0);
     document["spec"]["ttlSecondsAfterFinished"] = json!(600);
     let spec = &mut document["spec"]["template"]["spec"];
@@ -1485,7 +1548,6 @@ fn prepare_probe_job(document: &mut Value, task_run_id: &Uuid, invocation: &str,
         environment.push(json!({ "name": name, "value": value }));
     }
     document["metadata"]["labels"][LABEL_COMPONENT] = json!(COMPONENT_TASK_RUN_WORKER);
-    let _ = task_run_id;
 }
 
 fn env_value(container: &Value, name: &str) -> Option<String> {
@@ -1519,8 +1581,8 @@ fn initcontainer_mut(index: usize, list: &mut [Value]) -> &mut Value {
     &mut list[index]
 }
 
-fn await_running_pod(task_run_id: &Uuid) -> String {
-    let selector = format!("djinn.app/task-run-id={task_run_id}");
+fn await_running_pod(task_run_id: &str) -> String {
+    let selector = format!("{LABEL_TASK_RUN_ID}={task_run_id}");
     for _ in 0..READY_TICKS {
         let names = kubectl_ok(&[
             "-n",
@@ -1616,26 +1678,42 @@ fn prove_pid_ancestry(pod: &str, node: &str, invocation: &str, container_id: &st
     );
 
     // Inside the launcher container the cgroup namespace is private, so
-    // `/proc/<pid>/cgroup` is relative to the container's own root. The leaf
-    // name is the invocation id, and the launcher's own cgroup must be its
-    // prefix — that is the ancestry claim, in the namespace that can see it.
-    let pid_cgroup = launcher_read(pod, &format!("/proc/{in_pod_pid}/cgroup"));
-    let own_cgroup = launcher_read(pod, "/proc/self/cgroup");
-    let pid_path = pid_cgroup
-        .rsplit("::")
-        .next()
-        .expect("a cgroup v2 line")
-        .trim()
-        .to_owned();
-    let own_path = own_cgroup
-        .rsplit("::")
-        .next()
-        .expect("a cgroup v2 line")
-        .trim()
-        .to_owned();
-    assert!(
-        pid_path.starts_with(own_path.trim_end_matches('/')) && pid_path.ends_with(invocation),
-        "the measured PID's cgroup `{pid_path}` is not a descendant of the launcher's own `{own_path}` ending in the invocation leaf `{invocation}`. A PID under the WORKER container resolves here and fails."
+    // `/proc/<pid>/cgroup` is relative to the container's DELEGATED ROOT. The
+    // launcher's `Bootstrap` vacates the container's own processes into the
+    // `init` leaf before it creates any invocation leaf, so the measured process
+    // is a SIBLING of the launcher's own leaf under that root, not a descendant
+    // of it — the first version of this assertion said "descendant" and was
+    // wrong. What must hold is that both live under one delegated root, that
+    // the measured process is in the invocation's leaf and not in the
+    // launcher's own, and (below, on the node) that the root is the launcher
+    // container's.
+    let cgroup_path = |raw: &str| -> String {
+        raw.rsplit("::")
+            .next()
+            .expect("a cgroup v2 line")
+            .trim()
+            .to_owned()
+    };
+    let pid_path = cgroup_path(&launcher_read(pod, &format!("/proc/{in_pod_pid}/cgroup")));
+    let own_path = cgroup_path(&launcher_read(pod, "/proc/self/cgroup"));
+    let parent_of = |path: &str| -> String {
+        path.rsplit_once('/')
+            .map(|(head, _)| head.to_owned())
+            .unwrap_or_default()
+    };
+    assert_eq!(
+        pid_path.trim_start_matches('/'),
+        invocation,
+        "the measured PID's cgroup is `{pid_path}`, not the invocation leaf `{invocation}`. A process spawned in the WORKER container is not in this cgroup namespace at all, and one spawned by the launcher outside a leaf resolves to the launcher's own `{own_path}`."
+    );
+    assert_ne!(
+        pid_path, own_path,
+        "the measured process is in the launcher's OWN cgroup rather than in an invocation leaf; the broker never created a leaf for it"
+    );
+    assert_eq!(
+        parent_of(&pid_path),
+        parent_of(&own_path),
+        "the invocation leaf `{pid_path}` and the launcher's own `{own_path}` are not children of one delegated root"
     );
 
     // The container-ID half, which only the node can answer: find the cgroup
