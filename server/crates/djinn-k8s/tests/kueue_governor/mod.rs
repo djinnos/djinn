@@ -61,7 +61,8 @@ pub const WORKER_CONTAINER_NAME: &str = "worker";
 pub const SETUP_SCRIPT: &str = "scripts/kind/setup-kueue-cluster.sh";
 pub const GOVERNOR_VALUES: &str = "deploy/helm/djinn/tests/fixtures/kueue-governor-values.yaml";
 pub const B0_VALUES: &str = "deploy/helm/djinn/tests/fixtures/kueue-cluster-values.yaml";
-pub const PROBE_BUILD_SCRIPT: &str = "server/crates/djinn-k8s/tests/fixtures/governor-probe/build.sh";
+pub const PROBE_BUILD_SCRIPT: &str =
+    "server/crates/djinn-k8s/tests/fixtures/governor-probe/build.sh";
 pub const PROBE_IMAGE: &str = "djinn-governor-probe:fbiy-c1";
 pub const PROBE_BIN: &str = "/opt/djinn/bin/djinn-governor-probe";
 pub const PROBE_WORKLOAD: &str = "/opt/djinn/workload.bin";
@@ -347,14 +348,24 @@ pub struct Probe {
 /// CPU limit. The `command` swap is the same single mutation
 /// `sleep_instead_of_the_worker` makes in the sibling harness, for the same
 /// reason, and the probe env rides alongside it.
-pub fn launch_probe(context: &str, config: &KubernetesConfig, fence: u64, clamp_s: u64, post_s: u64) -> Probe {
+pub fn launch_probe(
+    context: &str,
+    config: &KubernetesConfig,
+    fence: u64,
+    clamp_s: u64,
+    post_s: u64,
+) -> Probe {
     let (job, task_run_id) = render_probe_job(config, "harness-project");
     assert_eq!(
         job.spec.as_ref().and_then(|spec| spec.suspend),
         Some(true),
         "the armed renderer must create the Job suspended so Kueue owns admission",
     );
-    let job_name = job.metadata.name.clone().expect("the renderer names the Job");
+    let job_name = job
+        .metadata
+        .name
+        .clone()
+        .expect("the renderer names the Job");
     // The leaf name IS the invocation id in production (`process_broker`), and
     // `validate_leaf_name` rejects anything that is not a direct child name.
     let invocation = format!("probe-{task_run_id}");
@@ -440,9 +451,18 @@ pub fn pods_of(context: &str, task_run_id: &str) -> Vec<(String, String, String)
         .iter()
         .map(|item| {
             (
-                item["metadata"]["name"].as_str().unwrap_or_default().to_owned(),
-                item["metadata"]["uid"].as_str().unwrap_or_default().to_owned(),
-                item["status"]["phase"].as_str().unwrap_or_default().to_owned(),
+                item["metadata"]["name"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned(),
+                item["metadata"]["uid"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned(),
+                item["status"]["phase"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned(),
             )
         })
         .collect()
@@ -463,7 +483,14 @@ pub fn await_running_pod(context: &str, task_run_id: &str) -> (String, String) {
         pods_of(context, task_run_id),
         kubectl_ok(
             context,
-            &["-n", NAMESPACE, "get", "workloads.kueue.x-k8s.io", "-o", "wide"],
+            &[
+                "-n",
+                NAMESPACE,
+                "get",
+                "workloads.kueue.x-k8s.io",
+                "-o",
+                "wide"
+            ],
         ),
     )
 }
@@ -547,7 +574,6 @@ pub fn probe_record(log: &str, record: &str) -> BTreeMap<String, String> {
         .collect()
 }
 
-
 pub fn phase_record(log: &str, phase: &str) -> BTreeMap<String, String> {
     let line = log
         .lines()
@@ -574,7 +600,9 @@ pub fn deliver_decision(context: &str, probe: &Probe, fence: Option<u64>) {
         Some(value) => format!("lift {value}"),
         None => "skip".to_owned(),
     };
-    let script = format!("mkdir -p $(dirname {PROBE_DECISION_PATH}); printf '%s' '{body}' > {PROBE_DECISION_PATH}");
+    let script = format!(
+        "mkdir -p $(dirname {PROBE_DECISION_PATH}); printf '%s' '{body}' > {PROBE_DECISION_PATH}"
+    );
     let output = kubectl(
         context,
         &[
@@ -623,7 +651,13 @@ pub fn clear_task_run_jobs(context: &str) {
             "delete",
             "jobs",
             "-l",
-            "app.kubernetes.io/component=task-run",
+            // The renderer's own component label (`job.rs::job_labels`). NOT
+            // `app.kubernetes.io/component`: measured 2026-07-31, a selector on
+            // that key matches nothing here, leaves the previous run's Jobs
+            // holding the `pods` quota, and the next run then fails with "no Pod
+            // reached Running" — a `pods`-quota exhaustion wearing the costume
+            // of a scheduling bug.
+            "djinn.app/component=task-run-worker",
             "--cascade=foreground",
             "--wait=true",
             "--timeout=180s",
@@ -632,15 +666,19 @@ pub fn clear_task_run_jobs(context: &str) {
 }
 
 pub fn admitted_workloads(context: &str) -> u64 {
-    kubectl_json(context, &["get", "clusterqueues.kueue.x-k8s.io", CLUSTER_QUEUE])["status"]
-        ["admittedWorkloads"]
+    kubectl_json(
+        context,
+        &["get", "clusterqueues.kueue.x-k8s.io", CLUSTER_QUEUE],
+    )["status"]["admittedWorkloads"]
         .as_u64()
         .unwrap_or(0)
 }
 
 pub fn pods_nominal_quota(context: &str) -> u64 {
-    kubectl_json(context, &["get", "clusterqueues.kueue.x-k8s.io", CLUSTER_QUEUE])["spec"]
-        ["resourceGroups"][0]["flavors"][0]["resources"]
+    kubectl_json(
+        context,
+        &["get", "clusterqueues.kueue.x-k8s.io", CLUSTER_QUEUE],
+    )["spec"]["resourceGroups"][0]["flavors"][0]["resources"]
         .as_array()
         .expect("the ClusterQueue covers resources")
         .iter()
@@ -695,7 +733,9 @@ pub fn authorize(pod_uids: &[String], m: u64) -> (i64, Vec<String>) {
             .await
             .expect("read the durable authority")
             .expect("the authority row exists once seeded");
-        let k = live.cap.expect("an armed authority carries a reference cap");
+        let k = live
+            .cap
+            .expect("an armed authority carries a reference cap");
         assert_eq!(
             evaluate_invocation_lift(Ok(Some(live.clone()))),
             InvocationLiftDecision::Lift,

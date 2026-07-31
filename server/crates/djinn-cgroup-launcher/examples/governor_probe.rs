@@ -133,7 +133,11 @@ fn settings() -> Result<Settings, String> {
         authority: match env_required("DJINN_PROBE_AUTHORITY")?.as_str() {
             "armed" => LeaseAuthority::Armed,
             "unarmed" => LeaseAuthority::Unarmed,
-            other => return Err(format!("DJINN_PROBE_AUTHORITY must be armed|unarmed: {other}")),
+            other => {
+                return Err(format!(
+                    "DJINN_PROBE_AUTHORITY must be armed|unarmed: {other}"
+                ));
+            }
         },
         decision_path: PathBuf::from(env_required("DJINN_PROBE_DECISION_PATH")?),
         clamp: Duration::from_secs(env_number("DJINN_PROBE_CLAMP_SECONDS", 12)?),
@@ -332,7 +336,10 @@ fn run() -> Result<(), String> {
     // The harness reads this line, records `cpu.max` from inside the pod, and
     // only then writes the decision. Everything above happens without the
     // harness having said anything about authorization.
-    println!("probe.awaiting_decision path={}", settings.decision_path.display());
+    println!(
+        "probe.awaiting_decision path={}",
+        settings.decision_path.display()
+    );
     let decision = await_decision(&settings)?;
 
     let lift = match decision {
@@ -343,7 +350,9 @@ fn run() -> Result<(), String> {
         Decision::Lift(fence) => {
             let outcome = client.lift(&settings.invocation, fence);
             match &outcome {
-                Ok(()) => println!("probe.lift_attempt attempted=true fence={fence} result=accepted"),
+                Ok(()) => {
+                    println!("probe.lift_attempt attempted=true fence={fence} result=accepted")
+                }
                 Err(error) => println!(
                     "probe.lift_attempt attempted=true fence={fence} result=refused error={error:?}"
                 ),
@@ -391,6 +400,11 @@ fn run() -> Result<(), String> {
         .parent()
         .unwrap_or_else(|| Path::new("."))
         .join("stop");
+    // The workspace bans `Instant::now` so production code takes an injectable
+    // `Clock`. This binary measures a WALL-CLOCK window inside a container; a
+    // logical clock would report a throughput this process invented. Same
+    // exemption `tests/brokered_lease_lift_boundary.rs::measure` takes.
+    #[allow(clippy::disallowed_methods)]
     let held = Instant::now();
     while held.elapsed() < settings.hold && !stop.exists() {
         std::thread::sleep(POLL);
@@ -412,6 +426,11 @@ enum Decision {
 /// `lift <fence>`. The fence is NOT derived here — deriving it would let the
 /// probe authorize itself.
 fn await_decision(settings: &Settings) -> Result<Decision, String> {
+    // The workspace bans `Instant::now` so production code takes an injectable
+    // `Clock`. This binary measures a WALL-CLOCK window inside a container; a
+    // logical clock would report a throughput this process invented. Same
+    // exemption `tests/brokered_lease_lift_boundary.rs::measure` takes.
+    #[allow(clippy::disallowed_methods)]
     let started = Instant::now();
     while started.elapsed() < Duration::from_secs(600) {
         if let Ok(raw) = fs::read_to_string(&settings.decision_path) {
@@ -443,6 +462,11 @@ fn drain(
     window: Duration,
     label: &str,
 ) -> Result<(), String> {
+    // The workspace bans `Instant::now` so production code takes an injectable
+    // `Clock`. This binary measures a WALL-CLOCK window inside a container; a
+    // logical clock would report a throughput this process invented. Same
+    // exemption `tests/brokered_lease_lift_boundary.rs::measure` takes.
+    #[allow(clippy::disallowed_methods)]
     let started = Instant::now();
     while started.elapsed() < window {
         // Drain until the pipe is empty, so the child never blocks on a full
@@ -455,10 +479,14 @@ fn drain(
                 .stdout(&settings.invocation)
                 .map_err(|error| format!("OUTPUT refused in phase {label}: {error:?}"))?;
             if let ChildStatus::Exited(code) = status {
-                return Err(format!("the workload exited early in phase {label}: {code}"));
+                return Err(format!(
+                    "the workload exited early in phase {label}: {code}"
+                ));
             }
             if let ChildStatus::Signaled(signal) = status {
-                return Err(format!("the workload was killed in phase {label}: {signal}"));
+                return Err(format!(
+                    "the workload was killed in phase {label}: {signal}"
+                ));
             }
             let empty = bytes.is_empty();
             phase.units += bytes.iter().filter(|byte| **byte == b'\n').count() as u64;

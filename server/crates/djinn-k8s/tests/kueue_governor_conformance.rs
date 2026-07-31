@@ -221,8 +221,8 @@ fn guard_the_c1_fixture_declares_a_pods_quota_that_admits_a_strict_cap() {
 /// from a launcher bug at the point it surfaces.
 #[test]
 fn guard_the_setup_script_resolves_the_containerd_schema_from_the_live_node() {
-    let script = std::fs::read_to_string(repo_root().join(SETUP_SCRIPT))
-        .expect("read the setup script");
+    let script =
+        std::fs::read_to_string(repo_root().join(SETUP_SCRIPT)).expect("read the setup script");
     assert!(
         script.contains("containerd-config-version.sh"),
         "the script must source deploy/node/k3s/containerd-config-version.sh rather than \
@@ -239,7 +239,10 @@ fn guard_the_setup_script_resolves_the_containerd_schema_from_the_live_node() {
     );
     // The two namespaces must appear nowhere as literals: both come from the
     // detector, keyed on the version it resolved.
-    for namespace in ["io.containerd.grpc.v1.cri\".containerd.runtimes", "io.containerd.cri.v1.runtime'.containerd.runtimes"] {
+    for namespace in [
+        "io.containerd.grpc.v1.cri\".containerd.runtimes",
+        "io.containerd.cri.v1.runtime'.containerd.runtimes",
+    ] {
         assert!(
             !script.contains(namespace),
             "the script hardcodes the runtime table `{namespace}`; it must be derived from the \
@@ -458,7 +461,9 @@ fn live_an_authorized_invocation_is_clamped_throttled_and_lifted_to_three_times_
     let log = await_probe_record(&context, &probe, "summary");
     let lifted = leaf_cpu_max(&context, &probe);
     assert_eq!(
-        probe_record(&log, "lift_attempt").get("result").map(String::as_str),
+        probe_record(&log, "lift_attempt")
+            .get("result")
+            .map(String::as_str),
         Some("accepted"),
         "the broker refused an authorized lift:\n{log}",
     );
@@ -484,7 +489,6 @@ fn live_an_authorized_invocation_is_clamped_throttled_and_lifted_to_three_times_
 
     delete_job(&context, &probe.job_name);
 }
-
 
 // ===========================================================================
 // AC2 — a wrong fence changes nothing
