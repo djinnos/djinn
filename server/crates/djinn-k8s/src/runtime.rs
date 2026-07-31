@@ -888,9 +888,18 @@ impl SessionRuntime for KubernetesRuntime {
             // wait for a Pod and therefore has no Pod UID to offer; the resize
             // bootstrap obtains that separately from a fresh Pod GET.
             job_uid: Some(job_uid),
-            // The protocol the render actually applied to this Job, resolved
-            // from the dispatch image's migration-166 metadata above.
-            launcher_authority_protocol: Some(authority_protocol),
+            // The protocol the render actually APPLIED to this Job — not the
+            // one it resolved. Under a launcher mode that renders no sidecar,
+            // `apply_launcher_authority_protocol` above is a documented no-op,
+            // so there is no launcher container to govern and no protocol
+            // handshake to agree with. Reporting the resolved value there would
+            // make the dispatch seam demand a birth confirmation for a Pod that
+            // has no launcher at all, and refuse every such dispatch forever.
+            launcher_authority_protocol: self
+                .config
+                .cgroup_launcher_mode
+                .renders_sidecar()
+                .then_some(authority_protocol),
         })
     }
 
