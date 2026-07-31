@@ -85,16 +85,43 @@ assert spec.get("queueingStrategy") == "BestEffortFIFO", (
 groups = spec.get("resourceGroups")
 assert isinstance(groups, list) and len(groups) == 1, "ClusterQueue must have one resource group"
 group = groups[0]
-assert group.get("coveredResources") == ["pods"], "only pods may be covered"
+# WHO MAY SUBMIT. An omitted namespaceSelector is not "unrestricted", it is
+# "nobody": the CRD documents "Defaults to null which is a nothing selector (no
+# namespaces eligible)". MEASURED on a live armed cluster (fbiy-B1) with the
+# field absent, every captured Workload sat Pending with "workload namespace
+# doesn't match ClusterQueue selector" and no armed Job was ever unsuspended.
+assert "namespaceSelector" in spec, (
+    "ClusterQueue must declare a namespaceSelector or Kueue admits nothing at all"
+)
+assert spec.get("namespaceSelector") == {}, (
+    "the admission fence is the namespace label plus the LocalQueue's placement, not a third "
+    f"copy of it here; got {spec.get('namespaceSelector')}"
+)
+
+# THREE COVERED RESOURCES, ONE BOUND.
+#
+# `pods` is the only intended bound, but Kueue refuses to assign a flavor when
+# ANY resource a PodSet requests falls outside the ClusterQueue's
+# resourceGroups: "couldn't assign flavors to pod set main: resource cpu
+# unavailable in ClusterQueue" (measured live, fbiy-B1). Every real build Pod
+# requests cpu and memory, so a pods-only ClusterQueue admits nothing. cpu and
+# memory are therefore covered at quotas no cluster can reach, which keeps
+# `pods` the sole binding constraint.
+assert group.get("coveredResources") == ["pods", "cpu", "memory"], (
+    "cpu and memory must be covered — a pods-only ClusterQueue cannot admit any Pod that "
+    f"requests them, which is every build Pod; got {group.get('coveredResources')}"
+)
 flavor_quotas = group.get("flavors")
 assert isinstance(flavor_quotas, list) and len(flavor_quotas) == 1, "exactly one flavor quota is required"
 assert flavor_quotas[0].get("name") == flavor["metadata"]["name"], "quota must use the empty flavor"
-resources = flavor_quotas[0].get("resources")
-assert isinstance(resources, list) and len(resources) == 1, "exactly one nominal quota is required"
-quota = resources[0]
-assert quota.get("name") == "pods", "sole nominal quota must be pods"
-assert quota.get("nominalQuota") == int(expected_pods), "pods quota must render buildPods verbatim"
-assert "cpu" not in str(spec).lower() and "memory" not in str(spec).lower(), "CPU/memory quota is forbidden"
+resources = {entry["name"]: entry["nominalQuota"] for entry in flavor_quotas[0].get("resources", [])}
+assert set(resources) == {"pods", "cpu", "memory"}, f"unexpected quota set: {sorted(resources)}"
+assert resources["pods"] == int(expected_pods), "pods quota must render buildPods verbatim"
+# Non-binding by construction: 10k cores and 100Ti are ~1000x any cluster Djinn
+# runs on. If either ever became a real bound, `pods` would stop being the thing
+# that limits concurrency and the whole topology would mean something else.
+assert resources["cpu"] == "10k", f"cpu quota must stay non-binding, got {resources['cpu']}"
+assert resources["memory"] == "100Ti", f"memory quota must stay non-binding, got {resources['memory']}"
 
 # Exactly three LocalQueues. SCIP joins Kueue because rust-analyzer indexing is
 # CPU-heavy and excluding it under-counts the load the quota exists to bound.
