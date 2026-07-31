@@ -60,6 +60,7 @@ use uuid::Uuid;
 
 use crate::config::KubernetesConfig;
 use crate::job::{build_task_run_job_with_read_sources, taskrun_job_ref_from_job};
+use crate::runtime_eviction::{PodAbsenceVerdict, classify_absent_pod};
 use crate::secret::{TaskRunSecretBuilder, job_owner_reference, task_run_resource_name};
 use crate::sidecar::ImageServiceResolution;
 
@@ -1157,13 +1158,21 @@ impl SessionRuntime for KubernetesRuntime {
     ///   gone (TTL-GC'd after finishing) → the run finished out-of-band and we
     ///   never saw a report; treat as a terminal disappearance.
     /// - The *fenced* Pod — the immutable UID this watch bound on its first
-    ///   observation — is gone while the Job is still NONTERMINAL. That is a
-    ///   force-delete / node loss / out-of-band eviction, and it is the one arm
-    ///   that also has to *act*: see [`Self::reap_lost_fenced_pod`].
+    ///   observation — is gone while the Job is still NONTERMINAL **and nothing
+    ///   in observable cluster state explains the absence**. That is a
+    ///   force-delete / node loss, and it is the one arm that also has to *act*:
+    ///   see [`Self::reap_lost_fenced_pod`].
     ///
     /// A `Succeeded` Job is NOT treated as death — a clean run delivers its
     /// terminal report over the stream, which the runner prefers; resolving
     /// here on success would race that and risk a spurious "interrupted".
+    ///
+    /// Neither is a Kueue EVICTION, which is bit-for-bit the same observation —
+    /// Kueue re-suspends the Job and its Pod is deleted — and is RECOVERABLE:
+    /// releasing the queue re-admits the Workload and a new Pod runs. Reaping
+    /// there would convert a run that was going to finish into one that never
+    /// can. [`crate::runtime_eviction::classify_absent_pod`] holds the two
+    /// fields that tell the two apart, and why they are those two.
     ///
     /// # The Pod fence
     ///
@@ -1194,6 +1203,10 @@ impl SessionRuntime for KubernetesRuntime {
         // The immutable Pod identity this run is fenced to. Bound once, on the
         // first observation that carries a UID; never re-bound.
         let mut bound_pod_uid: Option<String> = None;
+        // Whether the previous poll already reported holding on an explained
+        // Pod absence. Presentation only: a run parked in the queue for an hour
+        // must not write the same INFO line 240 times.
+        let mut held_absence = false;
 
         loop {
             // 1. Richest signal first: the Pod's container terminated state,
@@ -1258,18 +1271,35 @@ impl SessionRuntime for KubernetesRuntime {
                                     // A cleanly Complete Job whose Pod was
                                     // TTL-GC'd is NOT a death: the terminal
                                     // report rides the stream. Keep watching.
+                                    //
+                                    // Nor is a Kueue EVICTION, which produces
+                                    // this same state and is recoverable — see
+                                    // `crate::runtime_eviction`. Only an
+                                    // unexplained absence is A1's subject.
                                     if !job_completed_cleanly(&job) {
-                                        return self
-                                            .reap_lost_fenced_pod(
+                                        match classify_absent_pod(&self.client, ns, &job, job_name)
+                                            .await
+                                        {
+                                            PodAbsenceVerdict::Abandoned => {
+                                                return self
+                                                    .reap_lost_fenced_pod(
+                                                        handle,
+                                                        job_name,
+                                                        bound_pod_uid.as_deref(),
+                                                        &unadopted_pod_uids(
+                                                            &list.items,
+                                                            bound_pod_uid.as_deref(),
+                                                        ),
+                                                    )
+                                                    .await;
+                                            }
+                                            verdict => self.log_held_pod_absence(
                                                 handle,
                                                 job_name,
-                                                bound_pod_uid.as_deref(),
-                                                &unadopted_pod_uids(
-                                                    &list.items,
-                                                    bound_pod_uid.as_deref(),
-                                                ),
-                                            )
-                                            .await;
+                                                &verdict,
+                                                &mut held_absence,
+                                            ),
+                                        }
                                     }
                                 }
                                 Err(_) => {
@@ -1371,6 +1401,46 @@ impl KubernetesRuntime {
     /// A failed delete does not suppress the reason: the run is dead either
     /// way, and refusing to resolve would pin the dispatch slot on the very
     /// stall this watch exists to break. The next reconcile can retry the Job.
+    /// Report a fenced-Pod absence the watch is deliberately NOT acting on.
+    ///
+    /// The first observation is INFO — a run whose Pod vanished and was not
+    /// reaped is exactly the thing an operator wants in the log, once. Every
+    /// later poll is DEBUG, because a Workload can sit in the queue for as long
+    /// as the queue is full and 4 lines a minute of it is not information.
+    fn log_held_pod_absence(
+        &self,
+        handle: &RunHandle,
+        job_name: &str,
+        verdict: &PodAbsenceVerdict,
+        already_reported: &mut bool,
+    ) {
+        let (kind, evidence) = match verdict {
+            PodAbsenceVerdict::Recoverable(evidence) => ("recoverable", evidence.as_str()),
+            PodAbsenceVerdict::Inconclusive(error) => ("inconclusive", error.as_str()),
+            // Never reached: the caller reaps on `Abandoned` instead of holding.
+            PodAbsenceVerdict::Abandoned => ("abandoned", ""),
+        };
+        if std::mem::replace(already_reported, true) {
+            debug!(
+                task_run_id = %handle.task_run_id,
+                job = %job_name,
+                verdict = %kind,
+                %evidence,
+                "kubernetes_runtime: infra-death watch — still holding the fenced Pod's absence"
+            );
+            return;
+        }
+        info!(
+            task_run_id = %handle.task_run_id,
+            job = %job_name,
+            verdict = %kind,
+            %evidence,
+            "kubernetes_runtime: infra-death watch — the fenced worker Pod is gone but its \
+             absence is explained; NOT terminalising and NOT reaping the Job, so the run can \
+             still be re-admitted"
+        );
+    }
+
     async fn reap_lost_fenced_pod(
         &self,
         handle: &RunHandle,

@@ -878,6 +878,161 @@ pub async fn kube_client(context: &str) -> kube::Client {
     kube::Client::try_from(config).expect("build a kube client for the harness context")
 }
 
+/// What an eviction left observable, sampled WHILE it was happening and again
+/// after the queue was released (`03z3`).
+///
+/// The two halves exist because neither field answers on its own: `suspend` is
+/// the Job-level signal Kueue writes *before* the Pod goes away, and the
+/// Workload's `Evicted` condition is the one that SURVIVES re-admission. A fix
+/// that read only the first would be blind at exactly the sample a 15s poll
+/// takes, and this struct is what proves the second is still there to read.
+#[derive(Debug, Default)]
+pub struct EvictionObservation {
+    /// `job.spec.suspend` at some sample taken between the eviction and the
+    /// Pod's disappearance.
+    pub suspended_during: bool,
+    /// The Workload's `Evicted` condition during the eviction, as
+    /// `(status, reason)`.
+    pub evicted_during: Option<(String, String)>,
+    /// The same condition AFTER the queue was released and the Workload
+    /// re-admitted. Measured 2026-07-31: `("False", "QuotaReserved")`.
+    pub evicted_after_readmission: Option<(String, String)>,
+    /// `job.spec.suspend` after re-admission. Measured: `false`, which is why
+    /// the Job-level signal alone cannot carry this.
+    pub suspended_after_readmission: bool,
+    /// ClusterQueue `pods` usage while the run sat evicted. Measured: 0 — an
+    /// evicted Workload holds no quota, which is why holding the reap off does
+    /// not strand the capacity the reap exists to release.
+    pub pods_usage_during: u64,
+    pub seconds_to_pod_deletion: u64,
+    pub seconds_to_readmission: u64,
+}
+
+/// `job.spec.suspend`, or `None` when the Job is gone.
+pub fn job_suspend(context: &str, job_name: &str) -> Option<bool> {
+    let output = Command::new("kubectl")
+        .args([
+            "--context",
+            context,
+            "-n",
+            NAMESPACE,
+            "get",
+            "job",
+            job_name,
+            "-o",
+            "jsonpath={.spec.suspend}",
+        ])
+        .output()
+        .expect("kubectl is on PATH");
+    if !output.status.success() {
+        return None;
+    }
+    match stdout(&output).trim() {
+        "true" => Some(true),
+        "false" => Some(false),
+        _ => None,
+    }
+}
+
+/// The named condition on this Job's Workload as `(status, reason)`, WHATEVER
+/// its status.
+///
+/// [`workload_condition`] answers "is it true now", which is the right question
+/// for admission and the wrong one for "was this Workload ever evicted": Kueue
+/// keeps the `Evicted` condition after re-admission and flips it to `False`.
+pub fn workload_condition_entry(
+    context: &str,
+    job_name: &str,
+    kind: &str,
+) -> Option<(String, String)> {
+    let list = kubectl_json(
+        context,
+        &["-n", NAMESPACE, "get", "workloads.kueue.x-k8s.io"],
+    );
+    list["items"]
+        .as_array()
+        .expect("a List has items")
+        .iter()
+        .find(|workload| {
+            workload["metadata"]["ownerReferences"]
+                .as_array()
+                .is_some_and(|owners| {
+                    owners
+                        .iter()
+                        .any(|owner| owner["kind"] == "Job" && owner["name"] == job_name)
+                })
+        })
+        .and_then(|workload| workload["status"]["conditions"].as_array())
+        .and_then(|conditions| {
+            conditions
+                .iter()
+                .find(|condition| condition["type"] == kind)
+                .map(|condition| {
+                    (
+                        condition["status"].as_str().unwrap_or("?").to_owned(),
+                        condition["reason"].as_str().unwrap_or("?").to_owned(),
+                    )
+                })
+        })
+}
+
+/// Evict this run, SAMPLE the distinguisher while it is evicted, release the
+/// queue, and sample it again once the Workload is re-admitted.
+///
+/// The release is not on a timer, for the reason [`evict_and_release`] records:
+/// it waits on the fenced Pod's actual disappearance. Everything recorded here
+/// is a field read; nothing infers anything from how long a step took.
+pub fn evict_capturing_the_distinguisher(
+    context: &str,
+    task_run_id: &str,
+    job_name: &str,
+    fenced_uid: &str,
+) -> EvictionObservation {
+    let mut observed = EvictionObservation::default();
+    set_stop_policy(context, "HoldAndDrain");
+    let mut gone = false;
+    for tick in 0..AWAIT_TICKS {
+        // Sampled every tick, because the Job is re-suspended long before the
+        // Pod object goes: taking this only at the end would record a property
+        // of the drain rather than of the eviction.
+        observed.suspended_during |= job_suspend(context, job_name) == Some(true);
+        if observed.evicted_during.is_none() {
+            observed.evicted_during = workload_condition_entry(context, job_name, "Evicted");
+        }
+        observed.pods_usage_during = pods_usage(context);
+        if !pods_of(context, task_run_id)
+            .iter()
+            .any(|(_, uid, _)| uid == fenced_uid)
+        {
+            gone = true;
+            observed.seconds_to_pod_deletion = (tick as u64) * TICK.as_millis() as u64 / 1000;
+            break;
+        }
+        std::thread::sleep(TICK);
+    }
+    assert!(
+        gone,
+        "Kueue never evicted the fenced Pod {fenced_uid}; workloads: {}",
+        workload_summary(context),
+    );
+    observed.pods_usage_during = pods_usage(context);
+
+    set_stop_policy(context, "None");
+    for tick in 0..AWAIT_TICKS {
+        if pods_of(context, task_run_id)
+            .iter()
+            .any(|(_, uid, phase)| uid != fenced_uid && !uid.is_empty() && phase == "Running")
+        {
+            observed.seconds_to_readmission = (tick as u64) * TICK.as_millis() as u64 / 1000;
+            break;
+        }
+        std::thread::sleep(TICK);
+    }
+    observed.evicted_after_readmission = workload_condition_entry(context, job_name, "Evicted");
+    observed.suspended_after_readmission = job_suspend(context, job_name) == Some(true);
+    observed
+}
+
 /// Drive one full Kueue eviction of this run and then release the queue.
 ///
 /// The release is NOT on a timer. Measured 2026-07-30: after `HoldAndDrain` the
