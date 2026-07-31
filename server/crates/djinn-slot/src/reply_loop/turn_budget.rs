@@ -96,17 +96,25 @@ fn apply_externalized_stub(result: &mut CollectedToolResult, stub: String) -> (u
 /// projected total fits the budget or no remaining candidate can shrink below
 /// the preview floor; residual overflow is permitted when the floor prevents
 /// fitting. A budget trip emits distinct char-unit telemetry.
-pub(super) fn apply_turn_inline_budget_pass(
+///
+/// Every result this pass externalizes is reported back to the host through
+/// [`SlotToolDispatcher::note_result_externalized`](crate::host::SlotToolDispatcher::note_result_externalized)
+/// before the pass returns. This is the only place a result can be shrunk after
+/// its originating handler recorded bookkeeping for it, so the notification
+/// lives inline with the replacement rather than being handed to a caller that
+/// could forget to make it.
+pub(super) async fn apply_turn_inline_budget_pass(
     results: &mut [CollectedToolResult],
     ctx: &ToolDispatchContext<'_>,
 ) {
-    apply_turn_inline_budget_pass_with_config(results, ctx, TurnInlineBudgetConfig::from_env());
+    apply_turn_inline_budget_pass_with_config(results, ctx, TurnInlineBudgetConfig::from_env())
+        .await;
 }
 
 /// Config-injectable core of [`apply_turn_inline_budget_pass`] so unit tests can
 /// drive the policy deterministically without touching process-wide environment
 /// variables (which race under parallel test execution).
-pub(super) fn apply_turn_inline_budget_pass_with_config(
+pub(super) async fn apply_turn_inline_budget_pass_with_config(
     results: &mut [CollectedToolResult],
     ctx: &ToolDispatchContext<'_>,
     config: TurnInlineBudgetConfig,
@@ -189,9 +197,19 @@ pub(super) fn apply_turn_inline_budget_pass_with_config(
             externalized[idx] = true;
             continue;
         }
+        // Keep the payload that is about to be discarded: the host needs it to
+        // identify the bookkeeping it recorded when it produced this result.
+        let discarded = rendered.to_string();
+        let tool_name = result.tool_name.clone();
         let (_original, _new) = apply_externalized_stub(result, stub);
         externalized[idx] = true;
         externalized_count += 1;
+        // The model will receive the stub, not `discarded`. Anything the host
+        // recorded from the full payload — read coverage, which the edit gate
+        // trusts — has to be downgraded to match.
+        ctx.tool_dispatcher
+            .note_result_externalized(&tool_name, &discarded, ctx.worktree_path)
+            .await;
     }
 
     let inline_chars_post = total_inline_chars(results);

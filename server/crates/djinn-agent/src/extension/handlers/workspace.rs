@@ -1,3 +1,11 @@
+// djinn:allow-oversize
+//
+// The worktree tool handlers: `read`, `write`, `edit`, `apply_patch`,
+// `code_search`, `shell`. They share the FileTime read-coverage bookkeeping and
+// the GateGuard edit checks, so they are kept together deliberately. Splitting
+// them is a behaviour-bearing refactor of production dispatch and is out of
+// scope for the read-coverage fix that pushed this file over MAX_BYTES.
+
 use super::gate_guard::{gate_guard_edit_check, gate_guard_shell_check};
 use super::shell_exec::{effective_shell_timeout_ms, finish_shell};
 use super::workspace_helpers::{
@@ -254,6 +262,73 @@ fn json_escaped_len(s: &str) -> usize {
 /// window the handler recorded coverage for.
 fn read_content_budget() -> usize {
     crate::output_stash::MAX_TOOL_RESULT_CHARS.saturating_sub(READ_RESULT_RESERVE_CHARS)
+}
+
+/// The extension tool name whose results record read coverage.
+const READ_TOOL_NAME: &str = "read";
+
+/// Recover the resolved file path from an already-rendered `read` result.
+///
+/// `call_read` returns a JSON object whose `path` is
+/// `resolved_path.display().to_string()` — the exact key `FileTime` records
+/// under — and `render_tool_result` hands that object to the model as pretty
+/// JSON. Parsing it back is therefore an identity lookup on the payload the
+/// model was going to receive, not a heuristic on prose.
+///
+/// Returns `None` when the text is not the read handler's own envelope (e.g. a
+/// result some other layer already replaced), in which case there is nothing to
+/// downgrade.
+fn externalized_read_path(rendered: &str) -> Option<std::path::PathBuf> {
+    serde_json::from_str::<serde_json::Value>(rendered)
+        .ok()?
+        .get("path")?
+        .as_str()
+        .map(std::path::PathBuf::from)
+}
+
+/// Downgrade the read-coverage record behind a tool result that the per-turn
+/// inline-character budget re-externalized after the handler recorded it.
+///
+/// `call_read` records coverage for the window it emits, sized against
+/// `output_stash::MAX_TOOL_RESULT_CHARS`. That is the last clamp *inside* the
+/// handler, but not the last clamp overall: `djinn-slot`'s turn budget runs
+/// after every tool in the turn has been dispatched and can replace a rendered
+/// result with a stash stub. Nothing of a numbered listing survives that stub
+/// (its preview is a line-aware head/tail split and the listing is one giant
+/// JSON line), so the record must stop claiming coverage the model never got.
+///
+/// Anything that is not a `read` result carries no coverage and is ignored.
+pub(crate) async fn downgrade_externalized_read_coverage(
+    state: &AgentContext,
+    tool_name: &str,
+    rendered: &str,
+    worktree_path: &Path,
+) {
+    if tool_name != READ_TOOL_NAME {
+        return;
+    }
+    let Some(path) = externalized_read_path(rendered) else {
+        tracing::warn!(
+            worktree = %worktree_path.display(),
+            "read result externalized by the turn budget carried no resolvable path; \
+             read coverage could not be downgraded"
+        );
+        return;
+    };
+    // Cross-repo (mirror-backed) reads never record coverage, and a file read
+    // twice in one turn keeps only the later record; both land here as a
+    // no-op or as a conservative downgrade of the surviving record.
+    let downgraded = state
+        .file_time
+        .mark_read_unobserved(&worktree_path.display().to_string(), &path)
+        .await;
+    if downgraded {
+        tracing::info!(
+            path = %path.display(),
+            "read coverage downgraded: the turn budget externalized this result \
+             after the read handler recorded it"
+        );
+    }
 }
 
 /// Render `lines` as a numbered listing beginning at absolute index `start`,

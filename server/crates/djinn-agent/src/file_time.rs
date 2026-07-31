@@ -225,6 +225,39 @@ impl FileTime {
         Ok(())
     }
 
+    /// Downgrade an existing read record for `path` to "the model observed
+    /// none of it".
+    ///
+    /// The read handler records coverage from the window it emits, but it is
+    /// not the last layer that can shrink a tool result: `djinn-slot`'s
+    /// per-turn inline-character budget can replace an already-rendered result
+    /// with a stash stub *after* the handler recorded coverage for it. The stub
+    /// preview is a line-aware head/tail split of the rendered JSON, and a
+    /// numbered listing is a single enormous JSON line — so none of the file
+    /// survives into the transcript. The honest record for that read is a
+    /// zero-width, truncated one.
+    ///
+    /// Only mutates a record that already exists: it never fabricates one, and
+    /// it leaves `read_at`/`modified_at_when_read` untouched so the
+    /// modified-since-read check is unaffected. Returns `true` when a record
+    /// was downgraded.
+    pub async fn mark_read_unobserved(&self, session_id: &str, path: &Path) -> bool {
+        let normalized = normalize(path);
+        let mut guard = self.inner.write().await;
+        let Some(record) = guard
+            .get_mut(session_id)
+            .and_then(|by_path| by_path.get_mut(&normalized))
+        else {
+            return false;
+        };
+        record.coverage = ReadCoverage::Range {
+            start: 0,
+            end: Some(0),
+        };
+        record.truncated = true;
+        true
+    }
+
     /// Forget any recorded read for `path` in this session, so the next
     /// `assert` falls into the "must be read before modification" path and
     /// forces the model to re-read before editing again.

@@ -56,6 +56,15 @@ impl SlotToolDispatcher for MockToolDispatcher {
     ) -> String {
         mock_externalize_rendered_result(tool_use_id, tool_name, rendered, preview_chars)
     }
+    fn note_result_externalized<'a>(
+        &'a self,
+        _tool_name: &'a str,
+        _rendered: &'a str,
+        _worktree_path: &'a std::path::Path,
+    ) -> Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+        // The mock keeps no per-call bookkeeping to downgrade.
+        Box::pin(async {})
+    }
     fn dispatch_extension_tool<'a>(
         &'a self,
         tool_name: &'a str,
@@ -194,6 +203,16 @@ impl SlotToolDispatcher for ConfigurableToolDispatcher {
         preview_chars: usize,
     ) -> String {
         mock_externalize_rendered_result(tool_use_id, tool_name, rendered, preview_chars)
+    }
+    fn note_result_externalized<'a>(
+        &'a self,
+        _tool_name: &'a str,
+        _rendered: &'a str,
+        _worktree_path: &'a std::path::Path,
+    ) -> Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+        // The configurable dispatcher keeps no per-call bookkeeping to
+        // downgrade.
+        Box::pin(async {})
     }
     fn persist_tool_results_before_compaction(
         &self,
