@@ -65,6 +65,7 @@ use std::fmt;
 
 use djinn_cgroup_launcher::LauncherAuthorityProtocol;
 use djinn_db::BuildPodPermitRepository;
+use djinn_db::launcher_compatibility::{AdmissionDecision, LegacyDigestInventory, decide_admission};
 use k8s_openapi::api::batch::v1::Job;
 use k8s_openapi::api::core::v1::{Container, Pod, PodSpec};
 use serde_json::Value;
@@ -275,6 +276,41 @@ impl fmt::Display for CatalogDeclaration {
     }
 }
 
+impl CatalogDeclaration {
+    /// A representative catalog image for this row of the truth table.
+    ///
+    /// `inventoried` must be a digest the caller's [`LegacyDigestInventory`]
+    /// vouches for and `uninventoried` one it does not. Materialising the rows
+    /// here — rather than in a test — means the matrix a proof iterates is
+    /// built from the same exhaustive match the validator compiles against: a
+    /// fifth variant fails compilation instead of quietly skipping a cell.
+    #[must_use]
+    pub fn sample_image(self, inventoried: &str, uninventoried: &str) -> CatalogImage {
+        match self {
+            Self::NoHandshakeAllowlistedDigest => CatalogImage {
+                pull_ref: format!("registry.example/legacy@{inventoried}"),
+                declared: None,
+                digest: Some(inventoried.to_string()),
+            },
+            Self::NoHandshakeUnknownDigest => CatalogImage {
+                pull_ref: format!("registry.example/legacy@{uninventoried}"),
+                declared: None,
+                digest: Some(uninventoried.to_string()),
+            },
+            Self::DeclaredLeafV1 => CatalogImage {
+                pull_ref: format!("registry.example/declared@{inventoried}"),
+                declared: Some(LauncherAuthorityProtocol::LeafV1),
+                digest: Some(inventoried.to_string()),
+            },
+            Self::DeclaredResizeV2 => CatalogImage {
+                pull_ref: format!("registry.example/declared@{inventoried}"),
+                declared: Some(LauncherAuthorityProtocol::ResizeV2),
+                digest: Some(inventoried.to_string()),
+            },
+        }
+    }
+}
+
 /// A dispatch-eligible catalog image, as the preflight sees it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CatalogImage {
@@ -282,93 +318,53 @@ pub struct CatalogImage {
     pub pull_ref: String,
     /// `launcher_authority_protocol` as recorded by the build (migration 166).
     pub declared: Option<LauncherAuthorityProtocol>,
-    /// The registry digest recorded alongside it, if any.
+    /// `images.registry_digest`.
     pub digest: Option<String>,
 }
 
-/// Prefix that makes a reference name specific bytes rather than a moving
-/// target. A tag is not a digest, however carefully it was inventoried.
-const DIGEST_PREFIX: &str = "sha256:";
-
-/// Classify one catalog image into a [`CatalogDeclaration`].
+/// Whether `image` may dispatch while the server's authority mode is `mode`.
 ///
-/// A declaration wins outright. Without one, the image reaches
-/// [`CatalogDeclaration::NoHandshakeAllowlistedDigest`] only when ALL THREE of
-/// these hold, because each one alone is forgeable by a mutable tag:
+/// **This is not a rule of its own.** It delegates to
+/// [`djinn_db::launcher_compatibility::decide_admission`], the centralized
+/// admission decision that composes task `z3gi`'s declaration verdict with the
+/// signed legacy-digest inventory. A preflight with its own copy would be a
+/// second opinion about which images may run, and the whole point of a cutover
+/// preflight is to answer, in advance, the question dispatch will ask later.
 ///
-/// * the recorded digest starts with `sha256:` — a tag inventoried by mistake
-///   is still a tag, and "the allowlist contains this string" is not evidence
-///   about bytes;
-/// * that exact digest is in the signed pre-cutover inventory;
-/// * the pull reference is itself digest-pinned (`@sha256:`), so the Pod runs
-///   the inventoried bytes rather than whatever the tag resolves to today.
-#[must_use]
-pub fn classify_catalog_image(
-    image: &CatalogImage,
-    allowlist: &BTreeSet<String>,
-) -> CatalogDeclaration {
-    match image.declared {
-        Some(LauncherAuthorityProtocol::LeafV1) => return CatalogDeclaration::DeclaredLeafV1,
-        Some(LauncherAuthorityProtocol::ResizeV2) => return CatalogDeclaration::DeclaredResizeV2,
-        None => {}
-    }
-    let inventoried = image.digest.as_deref().is_some_and(|digest| {
-        digest.starts_with(DIGEST_PREFIX) && allowlist.contains(digest)
-    });
-    let pinned = image
-        .pull_ref
-        .split_once('@')
-        .is_some_and(|(_, digest)| digest.starts_with(DIGEST_PREFIX));
-    if inventoried && pinned {
-        CatalogDeclaration::NoHandshakeAllowlistedDigest
-    } else {
-        CatalogDeclaration::NoHandshakeUnknownDigest
-    }
-}
-
-/// Whether an image with `declaration` may dispatch while the server runs in
-/// `mode`.
+/// Two properties come for free from that delegation and are the reason it is
+/// the right seam:
 ///
-/// The whole truth table, as one exhaustive match over both enums. Both halves
-/// are load-bearing:
+/// * **The authority mode is in the comparison.** A pre-handshake image reaches
+///   leaf authority only under `leaf-v1`; under `resize-v2` it is
+///   `MissingDeclarationUnderMode`. Dropping the mode would let a legacy
+///   artifact — whose launcher writes leaf `cpu.max` — dispatch under a server
+///   that believes pod resize owns quota.
+/// * **Only exact digests are compared.** `PreProtocolDigest::parse` requires
+///   `sha256:` plus 64 lowercase hex, so a mutable tag can never satisfy the
+///   inventory however carefully it was listed.
 ///
-/// * The mode is in the comparison, so an allowlisted legacy digest — which is
-///   fine under `leaf-v1`, because `leaf-v1` is what those images have always
-///   run — is REFUSED under `resize-v2`. A legacy image contains a launcher
-///   that writes leaf `cpu.max`; running it while the server believes pod
-///   resize owns quota gives a leaf pinned at the unleased floor with the pod
-///   limit moving underneath it.
-/// * The match is exhaustive over both types, so adding a protocol variant or a
-///   declaration variant fails compilation here instead of quietly landing in a
-///   `_ =>` arm.
-#[must_use]
+/// The extra check on top is that the ADMITTED authority equals the mode being
+/// flipped to. `decide_admission` can only admit the mode it was handed, so
+/// this is a fail-closed assertion rather than a live branch — and it is what
+/// makes a future third variant land as a defect instead of a silent pass.
 pub fn catalog_verdict(
-    declaration: CatalogDeclaration,
+    image: &CatalogImage,
     mode: LauncherAuthorityProtocol,
-) -> Result<(), &'static str> {
-    use CatalogDeclaration as D;
-    use LauncherAuthorityProtocol as P;
-    match (declaration, mode) {
-        (D::DeclaredLeafV1, P::LeafV1) | (D::DeclaredResizeV2, P::ResizeV2) => Ok(()),
-        (D::DeclaredLeafV1, P::ResizeV2) => Err(
-            "the image declares leaf-v1, so its launcher writes each leaf's cpu.max, but the \
-             server is in resize-v2 and writes none — the leaf would stay at the unleased floor",
+    inventory: &LegacyDigestInventory,
+) -> Result<(), String> {
+    match decide_admission(mode, image.declared, image.digest.as_deref(), inventory) {
+        Ok(AdmissionDecision::Admitted(effective)) if effective == mode => Ok(()),
+        Ok(AdmissionDecision::Admitted(effective)) => Err(format!(
+            "the image would dispatch under {effective} while the server authority mode is \
+             {mode}; two components would believe they own one leaf's cpu.max"
+        )),
+        Ok(AdmissionDecision::Undeclarable) => Err(
+            "the image declares no launcher authority protocol and carries no registry digest, so \
+             nothing identifies which component owns quota in it (the render refuses this shape \
+             too, at djinn_k8s::launcher::render_authority_protocol)"
+                .to_string(),
         ),
-        (D::DeclaredResizeV2, P::LeafV1) => Err(
-            "the image declares resize-v2, so its launcher writes no leaf cpu.max, but the server \
-             is in leaf-v1 and issues no pod resize — the build would be bounded only by the pod",
-        ),
-        (D::NoHandshakeAllowlistedDigest, P::LeafV1) => Ok(()),
-        (D::NoHandshakeAllowlistedDigest, P::ResizeV2) => Err(
-            "the image predates the protocol handshake, so whatever launcher it contains writes \
-             leaf-v1 cpu.max; being on the signed legacy inventory makes it dispatchable under \
-             leaf-v1 and says nothing about resize-v2",
-        ),
-        (D::NoHandshakeUnknownDigest, _) => Err(
-            "the image declares no launcher authority protocol and is not pinned to a signed, \
-             pre-inventoried sha256: digest, so nothing identifies which component owns quota in \
-             it",
-        ),
+        Err(rejection) => Err(rejection.to_string()),
     }
 }
 
@@ -466,8 +462,10 @@ pub struct CutoverPreflightInput<'a> {
     pub authority_mode: LauncherAuthorityProtocol,
     /// Every catalog image that could be dispatched right now.
     pub catalog: &'a [CatalogImage],
-    /// The signed, pre-cutover inventory of legacy `sha256:` digests.
-    pub legacy_digest_allowlist: &'a BTreeSet<String>,
+    /// The deployment's signed pre-protocol digest inventory, as
+    /// `djinn-db` resolves it. `Unconfigured` keeps the pre-existing
+    /// membership rule; `Unusable` vouches for nothing at all.
+    pub legacy_digest_inventory: &'a LegacyDigestInventory,
     /// Live Pods whose birth downsize must already be confirmed.
     pub births: &'a [BirthObservation],
     /// The mode-flip drain fence.
@@ -494,7 +492,7 @@ pub fn run(input: &CutoverPreflightInput<'_>) -> Result<Report, Blocked> {
     check_birth_confirmation(input.births, &mut defects);
     check_catalog_protocol(
         input.catalog,
-        input.legacy_digest_allowlist,
+        input.legacy_digest_inventory,
         input.authority_mode,
         &mut defects,
     );
@@ -786,18 +784,17 @@ fn check_birth_confirmation(births: &[BirthObservation], defects: &mut Vec<Defec
 
 fn check_catalog_protocol(
     catalog: &[CatalogImage],
-    allowlist: &BTreeSet<String>,
+    inventory: &LegacyDigestInventory,
     mode: LauncherAuthorityProtocol,
     defects: &mut Vec<Defect>,
 ) {
     for image in catalog {
-        let declaration = classify_catalog_image(image, allowlist);
-        if let Err(reason) = catalog_verdict(declaration, mode) {
+        if let Err(reason) = catalog_verdict(image, mode, inventory) {
             defects.push(Defect::new(
                 DefectClass::CatalogProtocol,
                 format!(
-                    "dispatch-eligible image {:?} classifies as {declaration} and the server \
-                     authority mode is {mode}: {reason}",
+                    "dispatch-eligible image {:?} may not run under authority mode {mode}: \
+                     {reason}",
                     image.pull_ref
                 ),
             ));
@@ -1023,11 +1020,15 @@ pub fn summarize(input: &CutoverPreflightInput<'_>) -> String {
                 counts
             });
     format!(
-        "authority_mode={} launcher_ceiling={ceiling} catalog_images={} legacy_digests={} \
+        "authority_mode={} launcher_ceiling={ceiling} catalog_images={} legacy_inventory={} \
          births={} manifests={} roles={} bindings={}",
         input.authority_mode,
         input.catalog.len(),
-        input.legacy_digest_allowlist.len(),
+        match input.legacy_digest_inventory {
+            LegacyDigestInventory::Unconfigured => "unconfigured".to_string(),
+            LegacyDigestInventory::Verified { digests, .. } => format!("verified:{}", digests.len()),
+            LegacyDigestInventory::Unusable(fault) => format!("unusable:{fault}"),
+        },
         input.births.len(),
         input.manifests.len(),
         kinds.get("Role").copied().unwrap_or(0),
