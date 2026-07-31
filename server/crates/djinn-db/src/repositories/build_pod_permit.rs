@@ -19,7 +19,7 @@ const POOL_KEY: &str = "global";
 const ROW_COLUMNS: &str = "task_run_id, permit_id::text AS permit_id, fencing_token, state, job_uid, \
     to_char(acquired_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS acquired_at, \
     to_char(released_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS released_at, \
-    released_fencing_token, release_reason, pod_namespace, pod_name, pod_uid, launcher_container_name, launcher_container_id, image_digest, observed_launcher_protocol, effective_launcher_protocol, admitted_cpu_millicores";
+    released_fencing_token, release_reason, pod_namespace, pod_name, pod_uid, launcher_container_name, launcher_container_id, image_digest, observed_launcher_protocol, effective_launcher_protocol, admitted_cpu_millicores, resize_invocation_id";
 
 /// Durable lifecycle states. `acquired`/`job_created`/`released` come from
 /// migration 162; the six nonterminal resize states come from migration 164.
@@ -168,6 +168,13 @@ pub struct BuildPodPermitRow {
     pub released_fencing_token: Option<i64>,
     pub release_reason: Option<String>,
     pub resize_identity: Option<BuildPodResizeIdentity>,
+    /// The invocation that currently owns this row's resize lifecycle.
+    ///
+    /// `None` means no invocation has ever lifted this Pod — the row is at
+    /// `birth_confirmed` after capture, or it was driven straight to
+    /// `drop_required`/`quarantined` by an infrastructure observer that has no
+    /// invocation to name. See migration 168.
+    pub resize_invocation_id: Option<String>,
 }
 
 /// The admission result deliberately has no successful fallback for unavailable
@@ -461,20 +468,91 @@ impl BuildPodPermitRepository {
         })
     }
 
+    /// Claim the resize lifecycle for one invocation: `birth_confirmed →
+    /// lift_applying`, writing `resize_invocation_id`.
+    ///
+    /// This is the ONLY edge on which migration 168's trigger permits
+    /// `resize_invocation_id` to change, so it is the only way an invocation can
+    /// become the row's owner. Two invocations of one task run may be in flight
+    /// simultaneously — nothing in `djinn_agent::process`'s `'invocation: loop`
+    /// serializes them, the runner is `Arc`-shared behind `&self`, and its
+    /// journal keeps a `HashSet` of live invocation ids precisely because more
+    /// than one can be live. The single-row lifecycle cannot represent two
+    /// simultaneous lifts, so the second claimant must lose, and this CAS is
+    /// where it loses: `state = 'birth_confirmed'` holds for exactly one of them.
+    ///
+    /// An exact replay by the invocation that already owns the row is
+    /// idempotent; anything else is `Rejected` **without a write**, which is
+    /// what lets a caller assert a PATCH counter of zero.
+    pub async fn begin_resize_invocation(
+        &self,
+        task_run_id: &str,
+        permit_id: &str,
+        fencing_token: i64,
+        pod_uid: &str,
+        invocation_id: &str,
+    ) -> DbResult<TransitionBuildPodResizeLifecycleResult> {
+        if pod_uid.trim().is_empty() || invocation_id.trim().is_empty() {
+            return Ok(TransitionBuildPodResizeLifecycleResult::Rejected);
+        }
+        self.db.ensure_initialized().await?;
+        let mut tx = self.db.pool().begin().await?;
+        let updated = sqlx::query_as::<_, DbRow>(&format!(
+            "UPDATE build_pod_permits SET state = 'lift_applying', resize_invocation_id = $1 \
+             WHERE task_run_id = $2 AND permit_id = $3::uuid AND fencing_token = $4 \
+               AND pod_uid = $5 AND state = 'birth_confirmed' RETURNING {ROW_COLUMNS}"
+        ))
+        .bind(invocation_id)
+        .bind(task_run_id)
+        .bind(permit_id)
+        .bind(fencing_token)
+        .bind(pod_uid)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if let Some(row) = updated {
+            tx.commit().await?;
+            return Ok(TransitionBuildPodResizeLifecycleResult::Transitioned(
+                Box::new(row.try_into()?),
+            ));
+        }
+        let existing = fetch_tx(&mut tx, task_run_id).await?;
+        tx.commit().await?;
+        Ok(match existing {
+            Some(row)
+                if row.permit_id == permit_id
+                    && row.fencing_token == fencing_token
+                    && row.state == BuildPodPermitState::LiftApplying
+                    && row.resize_identity.as_ref().map(|id| id.pod_uid.as_str()) == Some(pod_uid)
+                    && row.resize_invocation_id.as_deref() == Some(invocation_id) =>
+            {
+                TransitionBuildPodResizeLifecycleResult::Transitioned(Box::new(row))
+            }
+            _ => TransitionBuildPodResizeLifecycleResult::Rejected,
+        })
+    }
+
     /// Compare-and-swap one resize lifecycle transition.
     ///
     /// The predicate fences the task run, permit identity, fencing token, the
-    /// captured Pod UID *and* the expected current state in a single statement,
-    /// so a stale observer cannot advance a lifecycle it no longer owns. The
-    /// migration-164 trigger separately rejects transitions that are not on the
-    /// legal edge list, which keeps the state machine authoritative in the
-    /// database rather than in whichever caller happens to run.
+    /// captured Pod UID, **the owning invocation** and the expected current
+    /// state in a single statement, so a stale observer cannot advance a
+    /// lifecycle it no longer owns. The migration-164 trigger separately rejects
+    /// transitions that are not on the legal edge list, which keeps the state
+    /// machine authoritative in the database rather than in whichever caller
+    /// happens to run.
+    ///
+    /// `invocation` is `None` for the infrastructure-observer paths that reach
+    /// `drop_required`/`quarantined` from `birth_confirmed` without any
+    /// invocation having lifted. It is compared with `IS NOT DISTINCT FROM`, so
+    /// `None` means "the row must carry no invocation" rather than "do not
+    /// check" — dropping this clause is acceptance criterion 1's named mutation.
     pub async fn transition_resize_lifecycle(
         &self,
         task_run_id: &str,
         permit_id: &str,
         fencing_token: i64,
         pod_uid: &str,
+        invocation: Option<&str>,
         expected: BuildPodPermitState,
         next: BuildPodPermitState,
     ) -> DbResult<TransitionBuildPodResizeLifecycleResult> {
@@ -485,13 +563,15 @@ impl BuildPodPermitRepository {
         let row = sqlx::query_as::<_, DbRow>(&format!(
             "UPDATE build_pod_permits SET state = $1 \
              WHERE task_run_id = $2 AND permit_id = $3::uuid AND fencing_token = $4 \
-               AND pod_uid = $5 AND state = $6 RETURNING {ROW_COLUMNS}"
+               AND pod_uid = $5 AND resize_invocation_id IS NOT DISTINCT FROM $6 \
+               AND state = $7 RETURNING {ROW_COLUMNS}"
         ))
         .bind(next.as_str())
         .bind(task_run_id)
         .bind(permit_id)
         .bind(fencing_token)
         .bind(pod_uid)
+        .bind(invocation)
         .bind(expected.as_str())
         .fetch_optional(self.db.pool())
         .await?;
@@ -643,13 +723,16 @@ struct DbRow {
     observed_launcher_protocol: Option<String>,
     effective_launcher_protocol: Option<String>,
     admitted_cpu_millicores: Option<i64>,
+    resize_invocation_id: Option<String>,
 }
 
 impl TryFrom<DbRow> for BuildPodPermitRow {
     type Error = DbError;
 
     fn try_from(row: DbRow) -> DbResult<Self> {
+        let resize_invocation_id = row.resize_invocation_id.clone();
         Ok(Self {
+            resize_invocation_id,
             task_run_id: row.task_run_id,
             permit_id: row.permit_id,
             fencing_token: row.fencing_token,

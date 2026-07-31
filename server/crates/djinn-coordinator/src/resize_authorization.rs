@@ -94,6 +94,16 @@ pub struct PodResizeIntent {
     /// immutable identity — never the caller's claim. It is the label the
     /// applier's fresh GET is scoped by.
     pub task_run_id: String,
+    /// The **durable owner's** invocation, likewise recovered from the lease
+    /// row's immutable identity.
+    ///
+    /// This is the invocation half of migration 168's
+    /// `(task_run_id, pod_uid, resize_invocation_id)` fence. `build_pod_permits`
+    /// has PRIMARY KEY `task_run_id`, so one row serves every invocation of a
+    /// run — and nothing serializes invocations of one run against each other.
+    /// Without this field the applier could not tell its own lift from a
+    /// concurrent invocation's.
+    pub invocation_id: String,
     /// The permit row's immutable identity, echoed by every durable lifecycle
     /// compare-and-swap the applier makes.
     pub permit_id: String,
@@ -500,6 +510,7 @@ impl ResizeAuthority {
 
         match clamp(
             &owner.task_run_id,
+            &owner.invocation_id,
             &permit_id,
             permit_fence,
             permit_state,
@@ -614,6 +625,7 @@ fn durable_owner(row: &BuildLeaseRow) -> Option<TaskInvocationLeaseIdentity> {
 /// one-line edit at a single site rather than something that could be half-done.
 fn clamp(
     task_run_id: &str,
+    invocation_id: &str,
     permit_id: &str,
     fencing_token: i64,
     permit_state: BuildPodPermitState,
@@ -644,6 +656,7 @@ fn clamp(
     let target_millicores = configured_leased_millicores.min(ceiling);
     Ok(PodResizeIntent {
         task_run_id: task_run_id.to_owned(),
+        invocation_id: invocation_id.to_owned(),
         permit_id: permit_id.to_owned(),
         fencing_token,
         permit_state,

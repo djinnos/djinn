@@ -34,7 +34,7 @@ use djinn_stack::environment::EnvironmentConfig;
 use djinn_supervisor::services::wire::{PlannerAttemptResult, PlannerOutcome};
 use djinn_supervisor::services::{
     CostBasisHint, LeaseAbandonRequest, LeaseBindRequest, LeaseCancelRequest, LeaseGrantRequest,
-    LeaseQueueRequest, LeaseReleaseRequest, LeaseResult, LeaseStatusRequest,
+    LeaseIdentity, LeaseQueueRequest, LeaseReleaseRequest, LeaseResult, LeaseStatusRequest,
     SerializableCreateSessionParams, SerializableCreateTaskRunParams, SerializableDjinnEvent,
     WatchdogTerminationRequest,
 };
@@ -47,6 +47,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::actors::slot::lifecycle::memory_intent_planner::parse_planned_queries;
 use crate::context::AgentContext;
+use crate::task_run_resize_drop_gate::{ResizeDropGateRequest, ResizeDropVerdict};
 use crate::supervisor_impl::{SupervisorCallbackContext, execute_stage, supervisor_pr_open};
 use djinn_provider::catalog::builtin::classify_provider;
 use djinn_provider::message::{ContentBlock, Conversation};
@@ -1044,6 +1045,33 @@ impl SupervisorServices for DirectServices {
     async fn release_lease(&self, request: LeaseReleaseRequest) -> LeaseResult {
         if !self.recover_build_lease().await {
             return LeaseResult::LeaseUnavailable;
+        }
+        // THE TWO-LEDGER GATE. `BuildLeaseService::release` writes
+        // `build_leases`; the launcher's lifted ceiling lives in
+        // `build_pod_permits`. Releasing capacity before the launcher is
+        // confirmed back at 250m sells the same CPU twice, so the permit
+        // lifecycle moves FIRST and this handler is where the ordering is
+        // imposed. Making this call unconditional again — as it was before
+        // `0ppk-2` — is acceptance criterion 6's named mutation.
+        if let Some(gate) = self.callbacks.agent_context.resize_drop.as_ref()
+            && let LeaseIdentity::TaskInvocation(claim) = &request.identity
+        {
+            let verdict = gate
+                .confirm_drop(&ResizeDropGateRequest {
+                    task_run_id: claim.task_run_id.clone(),
+                    invocation_id: claim.invocation_id.clone(),
+                })
+                .await;
+            if let ResizeDropVerdict::Held { detail } = verdict {
+                tracing::warn!(
+                    task_run_id = %claim.task_run_id,
+                    invocation_id = %claim.invocation_id,
+                    %detail,
+                    "release_lease: the launcher is not back at its birth limit; \
+                     holding the durable CPU lease"
+                );
+                return LeaseResult::LeaseUnavailable;
+            }
         }
         self.build_lease.release(request).await
     }
