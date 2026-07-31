@@ -781,7 +781,13 @@ jobs:
           ./scripts/check-k8s-boundary.sh
       - name: Check architectural boundaries
         if: needs.preflight.outputs.boundaries == 'true'
-        run: python3 scripts/check_boundaries.py
+        run: |
+          # The self-test exists and was never wired up, so nothing enforced
+          # that a checker edit still caught a violation. Its file-rule cases
+          # are paired in both directions — a scan that matched nothing would
+          # report "no boundary violations" forever.
+          python3 scripts/check_boundaries.py --self-test
+          python3 scripts/check_boundaries.py
   server-clippy:
     name: Server Clippy
     needs: preflight
