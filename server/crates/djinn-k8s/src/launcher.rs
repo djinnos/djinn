@@ -49,7 +49,8 @@ pub use djinn_cgroup_launcher::child::{ARTIFACT_GID, CHILD_UID};
 // capability the runtime discards, nor omit one the runtime needs.
 use djinn_cgroup_launcher::bootstrap::RETAINED_CAPABILITY_NAMES;
 use djinn_cgroup_launcher::{
-    CgroupMode, Error as LauncherError, LeasedQuota, Readiness, UnleasedQuota,
+    CgroupMode, Error as LauncherError, LauncherAuthorityProtocol, LeasedQuota, Readiness,
+    UnleasedQuota,
 };
 pub use djinn_runtime::RoleResourceClass;
 
@@ -139,6 +140,21 @@ pub const LAUNCHER_CREDENTIAL_PATH: &str = "/var/run/djinn/launcher/credential";
 pub const LAUNCHER_CGROUP_ROOT: &str = "/sys/fs/cgroup";
 /// RuntimeClass that delegates the writable cgroup hierarchy to task-run Pods.
 pub const TASK_RUN_CGROUP_RUNTIME_CLASS: &str = "djinn-cgroup-writable";
+
+/// Environment variable carrying the quota-authority protocol into the pod.
+///
+/// Read by the launcher sidecar's `main.rs`
+/// (`djinn-cgroup-launcher::AUTHORITY_PROTOCOL_ENV`) and by the worker's
+/// `launcher_handshake`, which asserts it to the broker at READY. The two
+/// containers run the same image, so setting it on one and not the other is the
+/// one disagreement that can actually occur — which is why
+/// [`apply_launcher_authority_protocol`] writes both, and why the broker refuses
+/// a READY that disagrees.
+///
+/// Before this constant existed, `DJINN_LAUNCHER_AUTHORITY_PROTOCOL` was read by
+/// the shipped binary (#2823) and emitted by **nothing**: every production
+/// launcher fell through to `leaf-v1` no matter what the image declared.
+pub const AUTHORITY_PROTOCOL_ENV: &str = "DJINN_LAUNCHER_AUTHORITY_PROTOCOL";
 
 /// Whether an enforcement task-run Pod renders the cgroup-launcher sidecar.
 ///
@@ -506,6 +522,120 @@ pub enum RenderValidationError {
     UnsupportedLeaseQuota { limit: String, min: u32, max: u32 },
     #[error("cgroup launcher mode is `required`, but task-run RuntimeClass assignment is disabled")]
     MissingDelegatedRuntimeClass,
+    #[error(
+        "the resolved image declares no launcher authority protocol and carries no immutable \
+         registry digest, so the server cannot know which component owns invocation CPU quota in \
+         it. Rebuild the catalog image: builds since the protocol declaration landed record both. \
+         Refused before the Job exists rather than dispatching under a guess."
+    )]
+    UndeclarableAuthorityProtocol,
+    #[error(
+        "cgroup launcher mode is `required`, but the rendered Job has no `{container}` container \
+         to carry {env}. The launcher would start with no protocol selection and silently fall \
+         back to leaf-v1, which is the exact silence this render exists to remove."
+    )]
+    MissingLauncherSidecar {
+        container: &'static str,
+        env: &'static str,
+    },
+}
+
+/// Decide the protocol a Job must render, from what the resolved catalog image
+/// declared and whether it is digest-pinned.
+///
+/// * **Declared** → that protocol. Migration 166 guarantees a declaring image is
+///   also digest-pinned, so the value names a specific artifact.
+/// * **Undeclared but digest-pinned** → [`LauncherAuthorityProtocol::LeafV1`].
+///   These are the images built before the declaration existed. `leaf-v1` is
+///   what they have always run, and the digest is what makes "these bytes"
+///   meaningful — so the render states it explicitly rather than relying on the
+///   launcher's absent-variable default.
+/// * **Neither** → refused. Nothing identifies the artifact and nothing states
+///   its quota authority; the alternative is dispatching on a guess about who
+///   writes `cpu.max`, in a system where guessing wrong is either an unbounded
+///   build or a 16x-throttled one.
+///
+/// A per-deployment allowlist for undeclared, undigested images is task vf7a's
+/// job and deliberately not here: an allowlist that arrives with the fence it is
+/// supposed to open is not a fence.
+pub fn render_authority_protocol(
+    declared: Option<LauncherAuthorityProtocol>,
+    digest: Option<&str>,
+) -> Result<LauncherAuthorityProtocol, RenderValidationError> {
+    if let Some(declared) = declared {
+        return Ok(declared);
+    }
+    match digest.map(str::trim).filter(|digest| !digest.is_empty()) {
+        Some(_) => Ok(LauncherAuthorityProtocol::LeafV1),
+        None => Err(RenderValidationError::UndeclarableAuthorityProtocol),
+    }
+}
+
+/// Write [`AUTHORITY_PROTOCOL_ENV`] onto the rendered Job's launcher sidecar and
+/// worker containers.
+///
+/// This runs after `build_task_run_job` rather than inside it because the
+/// protocol is a property of the resolved *catalog image*, which only the
+/// dispatch path has (`djinn_k8s::runtime`), while the Job builder is a pure
+/// function of the config — the same split `build_resources::apply_resolved_resources`
+/// already uses for per-project resource overrides.
+///
+/// Fail-closed: in `required` mode a Job with no `cgroup-launcher` container is
+/// an error, not a silent skip. Under `disabled` mode there is no sidecar and no
+/// broker, so there is nothing to agree about and this is a no-op.
+pub fn apply_launcher_authority_protocol(
+    job: &mut k8s_openapi::api::batch::v1::Job,
+    mode: CgroupLauncherMode,
+    protocol: LauncherAuthorityProtocol,
+) -> Result<(), RenderValidationError> {
+    if !mode.renders_sidecar() {
+        return Ok(());
+    }
+    let missing = || RenderValidationError::MissingLauncherSidecar {
+        container: LAUNCHER_CONTAINER_NAME,
+        env: AUTHORITY_PROTOCOL_ENV,
+    };
+    let pod = job
+        .spec
+        .as_mut()
+        .and_then(|spec| spec.template.spec.as_mut())
+        .ok_or_else(missing)?;
+
+    let sidecar = pod
+        .init_containers
+        .as_mut()
+        .and_then(|containers| {
+            containers
+                .iter_mut()
+                .find(|container| container.name == LAUNCHER_CONTAINER_NAME)
+        })
+        .ok_or_else(missing)?;
+    set_env(sidecar, AUTHORITY_PROTOCOL_ENV, protocol.as_wire());
+
+    // The worker asserts the SAME value to the broker at READY. Setting it on
+    // the sidecar alone would make every armed pod fail its own handshake as
+    // soon as a resize-v2 image exists.
+    for worker in pod
+        .containers
+        .iter_mut()
+        .filter(|container| container.name == "worker")
+    {
+        set_env(worker, AUTHORITY_PROTOCOL_ENV, protocol.as_wire());
+    }
+    Ok(())
+}
+
+/// Set (or replace) one environment entry on a container, so re-applying is
+/// idempotent rather than appending a second, shadowed definition.
+fn set_env(container: &mut Container, name: &str, value: &str) {
+    let env = container.env.get_or_insert_with(Vec::new);
+    match env.iter_mut().find(|entry| entry.name == name) {
+        Some(existing) => {
+            existing.value = Some(value.to_string());
+            existing.value_from = None;
+        }
+        None => env.push(env_var(name, value)),
+    }
 }
 
 /// Map a supported/unsupported cgroup-delegation profile string onto the

@@ -1,6 +1,7 @@
 // djinn:allow-oversize — legacy module over size-guard threshold; split when touched substantively.
 use djinn_core::events::{DjinnEventEnvelope, EventBus};
 use djinn_core::models::Project;
+use djinn_launcher_protocol::LauncherAuthorityProtocol;
 use sqlx::Row;
 
 use crate::Result;
@@ -905,11 +906,13 @@ impl ProjectRepository {
                 digest: None,
                 from_catalog: None,
                 last_error: None,
+                authority_protocol: None,
             }));
         };
 
         let img = sqlx::query(
-            "SELECT tag, registry_digest, status, last_error FROM images WHERE id = $1",
+            "SELECT tag, registry_digest, status, last_error, launcher_authority_protocol \
+             FROM images WHERE id = $1",
         )
         .bind(&image_id)
         .fetch_optional(self.db.pool())
@@ -921,6 +924,13 @@ impl ProjectRepository {
                 digest: i.get("registry_digest"),
                 from_catalog: Some(image_id),
                 last_error: i.get("last_error"),
+                // Parsed, never passed through as a string: migration 166's
+                // CHECK and this parse are the same closed set, so a row that
+                // somehow holds an unknown value fails the RESOLVE rather than
+                // reaching the render as an unrecognised protocol.
+                authority_protocol: parse_declared_protocol(
+                    i.get::<Option<String>, _>("launcher_authority_protocol"),
+                )?,
             },
             // FK RESTRICT makes a dangling selection impossible in practice;
             // treat it as "not ready" rather than panicking.
@@ -930,6 +940,7 @@ impl ProjectRepository {
                 digest: None,
                 from_catalog: Some(image_id),
                 last_error: None,
+                authority_protocol: None,
             },
         }))
     }
@@ -1006,6 +1017,15 @@ pub struct ProjectImage {
 /// precedence is applied — see [`ProjectRepository::resolve_dispatch_image`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DispatchImage {
+    /// The launcher quota-authority protocol this image DECLARED at build time
+    /// (`images.launcher_authority_protocol`, migration 166), or `None` for an
+    /// image that declared nothing.
+    ///
+    /// `None` is not "leaf-v1": it is "this artifact never said". The render
+    /// decides what an undeclared image may do (see
+    /// `djinn_k8s::launcher::render_authority_protocol`); conflating the two
+    /// here would put the decision in the place least able to fail closed.
+    pub authority_protocol: Option<LauncherAuthorityProtocol>,
     /// The `ready` tag to pull, or `None` when the resolved image isn't
     /// built yet (caller hard-fails task dispatch / skips warming).
     pub tag: Option<String>,
@@ -1035,6 +1055,27 @@ impl DispatchImage {
             Some(digest) => Some(format!("{}@{}", strip_tag_suffix(tag), digest)),
             None => Some(tag.to_string()),
         }
+    }
+}
+
+/// Parse `images.launcher_authority_protocol` for a dispatch resolution.
+///
+/// `NULL` and the empty string are "declared nothing" — the shape every image
+/// built before migration 166 holds. Anything else must be one of the two wire
+/// forms: the column is already constrained by migration 166's `CHECK`, so a
+/// value that fails here means the constraint was bypassed, and resolving it to
+/// a default is precisely how a `resize-v2` image would end up dispatched as
+/// `leaf-v1` (or the reverse) with nothing reporting it.
+fn parse_declared_protocol(raw: Option<String>) -> Result<Option<LauncherAuthorityProtocol>> {
+    match raw.as_deref() {
+        None | Some("") => Ok(None),
+        Some(value) => value.parse().map(Some).map_err(|_| {
+            crate::Error::InvalidData(format!(
+                "images.launcher_authority_protocol = {value:?} is not a launcher authority \
+                 protocol; refusing to resolve a dispatch image whose quota authority cannot \
+                 be named"
+            ))
+        }),
     }
 }
 
@@ -1625,6 +1666,109 @@ mod tests {
             updated.graph_orphan_ignore,
             vec!["crates/test-support/src/db.rs".to_string()]
         );
+    }
+
+    /// AC3. The declared protocol survives the round trip to a **freshly
+    /// constructed** repository — the resolution reads the column, it does not
+    /// echo a value the same process just wrote.
+    ///
+    /// Every read below goes through a `ProjectRepository::new(...)` created
+    /// after the write, over a `Database` handle that is itself re-derived, so
+    /// nothing in-process can be serving the answer from memory. Making
+    /// `resolve_dispatch_image` return `authority_protocol: None`
+    /// unconditionally fails the first assertion.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn declared_authority_protocol_survives_readback_through_a_fresh_repository() {
+        use crate::repositories::image::ImageRepository;
+
+        let db = test_db();
+        db.ensure_initialized().await.unwrap();
+        ProjectRepository::new(db.clone(), EventBus::noop())
+            .create_with_id("proto-p1", "proto", "test", "proto-p1")
+            .await
+            .unwrap();
+
+        for protocol in LauncherAuthorityProtocol::ALL {
+            let image_id = format!("img-{}", protocol.as_wire());
+            let images = ImageRepository::new(db.clone());
+            images
+                .create(&image_id, &format!("Rust {protocol}"), None, "{}")
+                .await
+                .unwrap();
+            // Migration 166 requires a digest alongside a declaration.
+            images
+                .mark_ready(
+                    &image_id,
+                    &format!("reg/djinn-image-{}:hash", protocol.as_wire()),
+                    Some("sha256:abc"),
+                    Some(protocol),
+                )
+                .await
+                .unwrap();
+            images
+                .set_project_image("proto-p1", Some(&image_id))
+                .await
+                .unwrap();
+
+            let resolved = ProjectRepository::new(db.clone(), EventBus::noop())
+                .resolve_dispatch_image("proto-p1")
+                .await
+                .unwrap()
+                .expect("project resolves");
+            assert_eq!(
+                resolved.authority_protocol,
+                Some(protocol),
+                "a {protocol} image must resolve as {protocol}, not as a default"
+            );
+            assert_eq!(resolved.digest.as_deref(), Some("sha256:abc"));
+        }
+
+        // An image that declared nothing resolves to `None` — "never said",
+        // which the render treats differently from either protocol.
+        let images = ImageRepository::new(db.clone());
+        images
+            .create("img-legacy", "Rust legacy", None, "{}")
+            .await
+            .unwrap();
+        images
+            .mark_ready("img-legacy", "reg/djinn-image-legacy:hash", None, None)
+            .await
+            .unwrap();
+        images
+            .set_project_image("proto-p1", Some("img-legacy"))
+            .await
+            .unwrap();
+        let resolved = ProjectRepository::new(db.clone(), EventBus::noop())
+            .resolve_dispatch_image("proto-p1")
+            .await
+            .unwrap()
+            .expect("project resolves");
+        assert_eq!(resolved.authority_protocol, None);
+        assert_eq!(resolved.digest, None);
+    }
+
+    /// A column value outside the closed set fails the resolution instead of
+    /// silently becoming `leaf-v1`. Migration 166's CHECK is the first door;
+    /// this is the second, and it is the one that would catch a constraint
+    /// dropped in a future migration.
+    #[test]
+    fn an_unparseable_declared_protocol_refuses_to_resolve() {
+        assert_eq!(parse_declared_protocol(None).unwrap(), None);
+        assert_eq!(parse_declared_protocol(Some(String::new())).unwrap(), None);
+        for protocol in LauncherAuthorityProtocol::ALL {
+            assert_eq!(
+                parse_declared_protocol(Some(protocol.as_wire().to_owned())).unwrap(),
+                Some(protocol)
+            );
+        }
+        for rejected in ["leaf-v2", "LEAF-V1", "resize-v2 ", "unknown"] {
+            let err = parse_declared_protocol(Some(rejected.to_owned()))
+                .expect_err("{rejected} must not resolve");
+            assert!(
+                err.to_string().contains(rejected),
+                "the refusal must name the offending value, got: {err}"
+            );
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

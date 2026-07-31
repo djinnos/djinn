@@ -48,8 +48,17 @@ use std::path::Path;
 use std::time::Duration;
 
 use djinn_cgroup_launcher::Error as LauncherError;
+use djinn_cgroup_launcher::LauncherAuthorityProtocol;
 use djinn_cgroup_launcher::child::{WorkerDumpability, prepare_worker_readiness};
 use djinn_cgroup_launcher::transport::UnixBrokerClient;
+
+/// The quota-authority protocol variable the render sets on BOTH the worker and
+/// the `cgroup-launcher` sidecar (`djinn_k8s::launcher`). The two containers run
+/// the same image, so the only way they can disagree is a render that set it on
+/// one and not the other — which is exactly what the READY assertion catches.
+///
+/// MUST match `AUTHORITY_PROTOCOL_ENV` in `djinn-cgroup-launcher`'s `main.rs`.
+const AUTHORITY_PROTOCOL_ENV: &str = "DJINN_LAUNCHER_AUTHORITY_PROTOCOL";
 
 /// Worker→launcher PID handshake filename. MUST match `WORKER_PID_FILE` in
 /// `djinn-cgroup-launcher` `src/main.rs`; the launcher joins it onto the
@@ -140,6 +149,30 @@ pub enum HandshakeError {
     Readiness(#[source] LauncherError),
     #[error("submit worker readiness: {0}")]
     Ready(#[source] LauncherError),
+    #[error(
+        "{AUTHORITY_PROTOCOL_ENV}={value:?} is not a launcher authority protocol; the worker \
+         will not guess which component owns invocation CPU quota"
+    )]
+    InvalidProtocol { value: String },
+}
+
+/// The protocol this worker believes the pod runs under.
+///
+/// Absent → [`LauncherAuthorityProtocol::LeafV1`], matching the launcher's own
+/// `authority_protocol_from_environment`: a render that predates the variable
+/// leaves both ends on the behavior that predates the protocol, so they still
+/// agree. A value that is *present but unparseable* is refused, never
+/// defaulted — the same rule `FromStr` enforces, for the same reason.
+fn authority_protocol_from_environment() -> Result<LauncherAuthorityProtocol, HandshakeError> {
+    match std::env::var(AUTHORITY_PROTOCOL_ENV) {
+        Ok(value) => value
+            .parse()
+            .map_err(|_| HandshakeError::InvalidProtocol { value }),
+        Err(std::env::VarError::NotPresent) => Ok(LauncherAuthorityProtocol::LeafV1),
+        Err(std::env::VarError::NotUnicode(value)) => Err(HandshakeError::InvalidProtocol {
+            value: value.to_string_lossy().into_owned(),
+        }),
+    }
 }
 
 /// Establish the required leased broker path.
@@ -154,6 +187,25 @@ pub fn establish<D: WorkerDumpability>(
     credential_path: &Path,
     dumpability: &mut D,
 ) -> LauncherHandshake {
+    match authority_protocol_from_environment() {
+        Ok(protocol) => {
+            establish_with_protocol(socket_path, credential_path, dumpability, protocol)
+        }
+        // A malformed protocol is a fail-closed outcome, not an absent mount:
+        // required mode must refuse to run, and disabled mode never gets here.
+        Err(error) => LauncherHandshake::FailedClosed(error),
+    }
+}
+
+/// [`establish`] with the protocol supplied explicitly rather than read from the
+/// environment. Tests use this so the assertion the broker checks is a value the
+/// test states, not a process-global variable a parallel test could be racing.
+pub fn establish_with_protocol<D: WorkerDumpability>(
+    socket_path: &Path,
+    credential_path: &Path,
+    dumpability: &mut D,
+    protocol: LauncherAuthorityProtocol,
+) -> LauncherHandshake {
     // Detection: the launcher IPC mount is the credential file's parent
     // directory (qut0's Memory emptyDir at LAUNCHER_IPC_DIR). Its absence is a
     // typed outcome; the explicit enforcement mode decides whether startup may
@@ -164,7 +216,13 @@ pub fn establish<D: WorkerDumpability>(
     if !mount_dir.is_dir() {
         return LauncherHandshake::AbsentMount;
     }
-    match connect_leased(socket_path, credential_path, mount_dir, dumpability) {
+    match connect_leased(
+        socket_path,
+        credential_path,
+        mount_dir,
+        dumpability,
+        protocol,
+    ) {
         Ok(client) => LauncherHandshake::Connected(Box::new(client)),
         Err(error) => LauncherHandshake::FailedClosed(error),
     }
@@ -175,6 +233,7 @@ fn connect_leased<D: WorkerDumpability>(
     credential_path: &Path,
     mount_dir: &Path,
     dumpability: &mut D,
+    protocol: LauncherAuthorityProtocol,
 ) -> Result<UnixBrokerClient, HandshakeError> {
     // 1. Publish the worker handshake the launcher's serve loop waits for. The
     //    credential is published BEFORE `worker.pid` so the launcher — which
@@ -190,7 +249,10 @@ fn connect_leased<D: WorkerDumpability>(
     // 3. Prove non-dumpability on the authenticated connection. A failure here
     //    is security-critical, so it fails closed to the in-process path rather
     //    than serving a worker that could be ptraced.
-    let readiness = prepare_worker_readiness(dumpability).map_err(HandshakeError::Readiness)?;
+    // The assertion carries the worker's own protocol: the broker refuses READY
+    // (and drops the connection) if it disagrees with the launcher's.
+    let readiness =
+        prepare_worker_readiness(dumpability, protocol).map_err(HandshakeError::Readiness)?;
     client.ready(readiness).map_err(HandshakeError::Ready)?;
     Ok(client)
 }
