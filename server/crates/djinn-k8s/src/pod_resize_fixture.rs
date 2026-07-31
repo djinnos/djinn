@@ -116,6 +116,8 @@ struct ClusterState {
     /// apiserver rejected, and counting it as an applied PATCH would make the
     /// "zero PATCH bodies above the ceiling" counters lie.
     patch_fault: Option<ApiFault>,
+    /// The raw `cpu` quantity carried by every accepted PATCH body, in order.
+    patched_cpu: Vec<String>,
 }
 
 /// One stored task-run Pod, plus a record of everything done to it.
@@ -134,6 +136,7 @@ impl StoredTaskRunPod {
                 deletes: Vec::new(),
                 get_fault: None,
                 patch_fault: None,
+                patched_cpu: Vec::new(),
             })),
         }
     }
@@ -200,12 +203,32 @@ impl StoredTaskRunPod {
         self
     }
 
+    /// Stop actuating accepted resizes from here on.
+    ///
+    /// The `&self` twin of [`Self::never_actuating`], for the fault-injection
+    /// order the real lifecycle forces: a Pod must be admitted and
+    /// birth-downsized on a *healthy* node before the fault the lift then meets
+    /// can be installed.
+    pub fn stop_actuating(&self) {
+        self.state.lock().expect("cluster").actuation = Actuation::NeverActuates;
+    }
+
+    /// Forget every PATCH counted so far.
+    ///
+    /// Used to separate the birth downsize — which is `0ppk-1b`'s write, not the
+    /// lift's — from the lift's own PATCHes, so a "zero PATCHes" assertion means
+    /// "the lift issued none" rather than "nothing has ever happened".
+    pub fn reset_patch_counter(&self) {
+        let mut state = self.state.lock().expect("cluster");
+        state.resize_patches = 0;
+        state.patched_cpu.clear();
+    }
+
     /// Add a `PodResizePending` condition. Its presence alone means no observed
     /// limit is authoritative — the fixture does not set a `status` field on it,
     /// because [`crate::pod_resize::has_resize_pending_condition`] deliberately
     /// does not consult one.
-    #[must_use]
-    pub fn with_resize_pending(self) -> Self {
+    pub fn add_resize_pending(&self) {
         self.mutate(|pod| {
             if let Some(status) = pod.status.as_mut() {
                 status
@@ -220,7 +243,6 @@ impl StoredTaskRunPod {
                     );
             }
         });
-        self
     }
 
     /// Plant a **regular**-container status named `cgroup-launcher` carrying
@@ -231,8 +253,7 @@ impl StoredTaskRunPod {
     /// hold an entry by that name — but a confirmation that read the wrong array
     /// would find a *matching* limit there and report success while the
     /// launcher's own init-container status was still stale.
-    #[must_use]
-    pub fn with_misleading_regular_launcher_status(self, cpu: &str) -> Self {
+    pub fn add_misleading_regular_launcher_status(&self, cpu: &str) {
         let entry = json!({
             "name": crate::launcher::LAUNCHER_CONTAINER_NAME,
             "ready": true,
@@ -250,20 +271,17 @@ impl StoredTaskRunPod {
                     .push(serde_json::from_value(entry.clone()).expect("status fixture"));
             }
         });
-        self
     }
 
     /// Strip `resources` from the launcher's init-container status, leaving the
     /// spec untouched: the launcher is nameable in both arrays but reports no
     /// CPU limit at all.
-    #[must_use]
-    pub fn without_launcher_status_limit(self) -> Self {
+    pub fn clear_launcher_status_limit(&self) {
         self.mutate(|pod| {
             for status in launcher_statuses(pod) {
                 status.resources = None;
             }
         });
-        self
     }
 
     /// Replace the stored Pod's `metadata.uid`, keeping its NAME.
@@ -310,18 +328,14 @@ impl StoredTaskRunPod {
     }
 
     /// Every `get_pod` fails with `fault` until cleared.
-    #[must_use]
-    pub fn failing_gets(self, fault: ApiFault) -> Self {
+    pub fn fail_gets(&self, fault: ApiFault) {
         self.state.lock().expect("cluster").get_fault = Some(fault);
-        self
     }
 
     /// Every `patch_resize` fails with `fault`, without mutating the Pod and
     /// without incrementing the PATCH counter.
-    #[must_use]
-    pub fn failing_patches(self, fault: ApiFault) -> Self {
+    pub fn fail_patches(&self, fault: ApiFault) {
         self.state.lock().expect("cluster").patch_fault = Some(fault);
-        self
     }
 
     /// The launcher's live `containerID`, for restart assertions.
@@ -422,6 +436,29 @@ impl StoredTaskRunPod {
         self.state.lock().expect("cluster").resize_patches
     }
 
+    /// The CPU value carried by every accepted PATCH **body**, in millicores.
+    ///
+    /// This is what makes "zero PATCH bodies above the ceiling" a measurement of
+    /// what was *sent to the apiserver* rather than of a number the caller
+    /// restated. The values are parsed back through
+    /// [`crate::pod_resize::CpuLimit`], so the canonicalisation the apiserver
+    /// applies (`2000m` → `2`) cannot make an above-ceiling body read as
+    /// below-ceiling.
+    #[must_use]
+    pub fn patched_cpu_millicores(&self) -> Vec<u64> {
+        self.state
+            .lock()
+            .expect("cluster")
+            .patched_cpu
+            .iter()
+            .map(|raw| {
+                CpuLimit::parse(raw)
+                    .expect("every emitted patch body carries a parseable quantity")
+                    .millis()
+            })
+            .collect()
+    }
+
     /// Every UID-fenced delete, as `(task_run_id, pod_uid)`.
     #[must_use]
     pub fn deletes(&self) -> Vec<(String, String)> {
@@ -513,13 +550,6 @@ impl PodResizeApi for FixtureApi {
         }
         state.resize_patches += 1;
         let actuation = state.actuation;
-        let Some(pod) = state.pod.as_mut() else {
-            return Err(PodResizeError::Api {
-                op: "patch",
-                message: format!("pod {name} not found"),
-                status: Some(404),
-            });
-        };
         let target = body["spec"]["initContainers"][0]["name"]
             .as_str()
             .expect("the patch names its target")
@@ -528,6 +558,14 @@ impl PodResizeApi for FixtureApi {
             .as_str()
             .expect("the patch carries a cpu limit")
             .to_owned();
+        state.patched_cpu.push(cpu.clone());
+        let Some(pod) = state.pod.as_mut() else {
+            return Err(PodResizeError::Api {
+                op: "patch",
+                message: format!("pod {name} not found"),
+                status: Some(404),
+            });
+        };
         let quantity = Quantity(cpu);
         for container in pod
             .spec

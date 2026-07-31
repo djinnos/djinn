@@ -53,6 +53,12 @@ const CONFIGURED_LEASED: i64 = 4_000;
 /// What the fixture Pod was admitted with. Deliberately BELOW
 /// [`CONFIGURED_LEASED`] so the clamp has something to bite on.
 const ADMITTED_CEILING: u64 = 2_500;
+/// `djinn_server::task_run_resize_bootstrap::BIRTH_CPU_MILLICORES`. Restated
+/// rather than imported because `djinn-server` depends on this crate, not the
+/// other way round. Nothing here asserts a *policy* about the birth limit — it
+/// is only the "somewhere other than the target" the lift has to move the
+/// launcher away from, and any value below the ceiling would serve.
+const BIRTH_MILLICORES: u64 = 250;
 
 const RUN: &str = "01983f00-0000-7000-8000-00000000d001";
 const TASK: &str = "01983f00-0000-7000-8000-00000000e001";
@@ -94,10 +100,36 @@ impl LauncherResizeSurface for FixtureSurface {
 
 // ── The live composition ───────────────────────────────────────────────────
 
+/// Wraps the REAL [`ResizeLift`] and records the intent it was handed.
+///
+/// It changes nothing about the lift — it delegates — so the recorded intent is
+/// the one production would apply. That matters for the ceiling-provenance
+/// assertion: `admitted_cpu_millicores` is the bound the PATCH was clamped
+/// against, and reading it here reads the value that BOUND the request rather
+/// than a value a test wrote down and read back.
+struct RecordingApplier {
+    inner: ResizeLift,
+    intents: std::sync::Mutex<Vec<crate::resize_authorization::PodResizeIntent>>,
+}
+
+#[async_trait]
+impl PodResizeApplier for RecordingApplier {
+    async fn apply(
+        &self,
+        intent: &crate::resize_authorization::PodResizeIntent,
+    ) -> Result<(), crate::resize_authorization::ResizeApplyFailure> {
+        if let Ok(mut guard) = self.intents.lock() {
+            guard.push(intent.clone());
+        }
+        self.inner.apply(intent).await
+    }
+}
+
 struct Fixture {
     service: Arc<BuildLeaseService>,
     permits: Arc<BuildPodPermitRepository>,
     pod: StoredTaskRunPod,
+    applier: Arc<RecordingApplier>,
     _db: Database,
 }
 
@@ -124,19 +156,20 @@ impl Fixture {
             db.clone(),
             "resize-lift-tests",
         ));
-        let applier: Arc<dyn PodResizeApplier> = Arc::new(
-            ResizeLift::with_surface(
+        let applier = Arc::new(RecordingApplier {
+            inner: ResizeLift::with_surface(
                 Arc::clone(&permits),
                 Arc::new(FixtureSurface(pod.clone())),
             )
             .with_wait(budget, Duration::from_millis(1)),
-        );
+            intents: std::sync::Mutex::new(Vec::new()),
+        });
         let authority = Arc::new(ResizeAuthority::new(
             Arc::clone(&leases),
             Arc::clone(&permits),
             lift,
             CONFIGURED_LEASED,
-            applier,
+            Arc::clone(&applier) as Arc<dyn PodResizeApplier>,
         ));
         let service = Arc::new(
             BuildLeaseService::new(Arc::clone(&leases), CONFIGURED_CAP)
@@ -149,10 +182,38 @@ impl Fixture {
             service,
             permits,
             pod,
+            applier,
             _db: db,
         };
         fixture.seed_permit().await;
+        fixture.birth_downsize().await;
         fixture
+    }
+
+    /// The birth downsize `0ppk-1b` performs before the worker session may
+    /// dispatch: the launcher is moved from its admitted ceiling to
+    /// [`BIRTH_MILLICORES`], and the captured ceiling stays on the durable row.
+    ///
+    /// Without this the fixture Pod would already be holding the lift's target
+    /// and every confirmation would pass trivially — a "never actuates" node
+    /// would still confirm, because there would be nothing to actuate. It is
+    /// exactly the shape of vacuous pass this epic keeps producing, so it is
+    /// asserted rather than assumed: the launcher's INIT status must read 250m
+    /// before any lift runs.
+    async fn birth_downsize(&self) {
+        let pod_name = format!("taskrun-{POD_UID}");
+        self.pod
+            .resize_launcher_cpu(&pod_name, BIRTH_MILLICORES)
+            .await
+            .expect("the birth downsize confirms on a healthy node");
+        assert_eq!(
+            self.pod.launcher_status_cpu().as_deref(),
+            Some(format!("{BIRTH_MILLICORES}m").as_str()),
+            "the launcher must sit at its birth limit before a lift, or the lift              has nothing to move and every confirmation passes vacuously"
+        );
+        // From here on, a PATCH counter reading zero means "the lift issued
+        // none", not "nothing has ever happened".
+        self.pod.reset_patch_counter();
     }
 
     /// The two writes `0ppk-1b` makes on the live dispatch path.
@@ -233,6 +294,15 @@ impl Fixture {
             .await
     }
 
+    /// Every intent that reached the applier, in order.
+    fn intents(&self) -> Vec<crate::resize_authorization::PodResizeIntent> {
+        self.applier
+            .intents
+            .lock()
+            .map(|guard| guard.clone())
+            .unwrap_or_default()
+    }
+
     async fn permit_state(&self) -> BuildPodPermitState {
         self.permits
             .active(RUN)
@@ -272,7 +342,12 @@ async fn seed_task_run(db: &Database, run: &str) {
 }
 
 fn healthy_pod() -> StoredTaskRunPod {
-    StoredTaskRunPod::resize_v2(POD_UID, &format!("{ADMITTED_CEILING}m"))
+    pod_admitted_at(ADMITTED_CEILING)
+}
+
+/// A healthy `resize-v2` Pod whose launcher was admitted with `ceiling`.
+fn pod_admitted_at(ceiling: u64) -> StoredTaskRunPod {
+    StoredTaskRunPod::resize_v2(POD_UID, &format!("{ceiling}m"))
 }
 
 /// No confirmation budget: one observation, no waiting. Used by every case that
@@ -294,8 +369,8 @@ async fn a_status_confirmed_lift_grants_and_records_lifted() {
     let fixture = Fixture::armed(healthy_pod(), NO_WAIT).await;
     assert_eq!(
         fixture.pod.launcher_status_cpu().as_deref(),
-        Some(format!("{ADMITTED_CEILING}m").as_str()),
-        "precondition: the launcher starts at its admitted ceiling"
+        Some(format!("{BIRTH_MILLICORES}m").as_str()),
+        "precondition: the launcher sits at its birth limit, NOT at the target"
     );
 
     let result = fixture.lift().await;
@@ -312,8 +387,8 @@ async fn a_status_confirmed_lift_grants_and_records_lifted() {
     assert_eq!(
         fixture.pod.launcher_status_cpu().as_deref(),
         Some(format!("{ADMITTED_CEILING}m").as_str()),
-        "the launcher's INIT-container status is what confirms, and it must hold \
-         the clamped target"
+        "the launcher's INIT-container status is what confirms, and it must have \
+         MOVED from {BIRTH_MILLICORES}m to the clamped target"
     );
     assert_eq!(
         fixture.permit_state().await,
@@ -335,18 +410,26 @@ async fn a_status_confirmed_lift_grants_and_records_lifted() {
 /// confirmation, and this test grants.
 #[tokio::test]
 async fn a_matching_regular_container_status_is_never_confirmation() {
-    let pod = healthy_pod()
-        .never_actuating()
-        .with_misleading_regular_launcher_status(&format!("{ADMITTED_CEILING}m"));
-    let fixture = Fixture::armed(pod, NO_WAIT).await;
+    let fixture = Fixture::armed(healthy_pod(), NO_WAIT).await;
+    // The trap is armed AFTER the birth downsize, so the launcher's own init
+    // status genuinely reads 250m while the launcher NAME appears in the regular
+    // container statuses carrying exactly the value confirmation is looking for.
+    fixture.pod.stop_actuating();
+    fixture
+        .pod
+        .add_misleading_regular_launcher_status(&format!("{ADMITTED_CEILING}m"));
 
-    // The trap is armed: the launcher name appears in the REGULAR container
-    // statuses carrying exactly the value confirmation is looking for.
     let result = fixture.lift().await;
 
     assert!(
         matches!(result, LeaseResult::DegradedUnleased { .. }),
         "a matching regular-container status must never confirm: {result:?}"
+    );
+    assert_eq!(
+        fixture.pod.launcher_status_cpu().as_deref(),
+        Some(format!("{BIRTH_MILLICORES}m").as_str()),
+        "and the launcher really was still at its birth limit — the degrade is \
+         not an artefact of a Pod that had already moved"
     );
     assert_eq!(fixture.permit_state().await, BuildPodPermitState::DropRequired);
 }
@@ -361,13 +444,11 @@ struct Case {
     /// PATCH, so their cases must show a counter of zero.
     patches_allowed: bool,
     budget: Duration,
-    build: fn() -> StoredTaskRunPod,
-    /// Applied after the permit has captured its identity, so the fence has
-    /// something to disagree with.
+    /// Applied after the permit captured its identity AND after the birth
+    /// downsize — the exact moment a real lift starts from. Injecting a fault
+    /// earlier would break the birth downsize instead of the lift.
     disturb: fn(&StoredTaskRunPod),
 }
-
-fn no_disturbance(_: &StoredTaskRunPod) {}
 
 /// **ACCEPTANCE CRITERION 4.**
 ///
@@ -393,43 +474,40 @@ async fn every_named_uncertainty_degrades_with_drop_required() {
             reason: DegradedUnleasedReason::LiftStatusStale,
             patches_allowed: true,
             budget: NO_WAIT,
-            build: || healthy_pod().never_actuating(),
-            disturb: no_disturbance,
+            disturb: |pod| pod.stop_actuating(),
         },
         Case {
             name: "HTTP 200, init status carries no cpu limit at all",
             reason: DegradedUnleasedReason::LiftStatusAbsent,
             patches_allowed: true,
             budget: NO_WAIT,
-            build: || healthy_pod().never_actuating().without_launcher_status_limit(),
-            disturb: no_disturbance,
+            disturb: |pod| {
+                pod.stop_actuating();
+                pod.clear_launcher_status_limit();
+            },
         },
         Case {
             name: "a matching REGULAR-container status while init is stale",
             reason: DegradedUnleasedReason::LiftStatusStale,
             patches_allowed: true,
             budget: NO_WAIT,
-            build: || {
-                healthy_pod()
-                    .never_actuating()
-                    .with_misleading_regular_launcher_status(&format!("{ADMITTED_CEILING}m"))
+            disturb: |pod| {
+                pod.stop_actuating();
+                pod.add_misleading_regular_launcher_status(&format!("{ADMITTED_CEILING}m"));
             },
-            disturb: no_disturbance,
         },
         Case {
             name: "a PodResizePending condition is present",
             reason: DegradedUnleasedReason::LiftResizePending,
             patches_allowed: true,
             budget: NO_WAIT,
-            build: || healthy_pod().with_resize_pending(),
-            disturb: no_disturbance,
+            disturb: |pod| pod.add_resize_pending(),
         },
         Case {
             name: "the Pod was recreated under the same NAME with a new UID",
             reason: DegradedUnleasedReason::ResizeIdentityChanged,
             patches_allowed: false,
             budget: NO_WAIT,
-            build: healthy_pod,
             disturb: |pod| pod.recreate_under_same_name("pod-uid-replacement"),
         },
         Case {
@@ -437,7 +515,6 @@ async fn every_named_uncertainty_degrades_with_drop_required() {
             reason: DegradedUnleasedReason::LauncherProtocolChanged,
             patches_allowed: false,
             budget: NO_WAIT,
-            build: healthy_pod,
             disturb: |pod| pod.set_observed_protocol("leaf-v1"),
         },
         Case {
@@ -445,7 +522,6 @@ async fn every_named_uncertainty_degrades_with_drop_required() {
             reason: DegradedUnleasedReason::LauncherRestarted,
             patches_allowed: false,
             budget: NO_WAIT,
-            build: healthy_pod,
             disturb: |pod| pod.restart_launcher("containerd://restarted"),
         },
         Case {
@@ -453,39 +529,34 @@ async fn every_named_uncertainty_degrades_with_drop_required() {
             reason: DegradedUnleasedReason::LiftDeadlineExceeded,
             patches_allowed: true,
             budget: Duration::from_millis(8),
-            build: || healthy_pod().never_actuating(),
-            disturb: no_disturbance,
+            disturb: |pod| pod.stop_actuating(),
         },
         Case {
             name: "the PATCH timed out in transport (no HTTP status at all)",
             reason: DegradedUnleasedReason::ResizeSurfaceUnavailable,
             patches_allowed: true,
             budget: NO_WAIT,
-            build: || healthy_pod().failing_patches(ApiFault::timeout()),
-            disturb: no_disturbance,
+            disturb: |pod| pod.fail_patches(ApiFault::timeout()),
         },
         Case {
             name: "the apiserver answered 403 (no pods/resize RBAC rule)",
             reason: DegradedUnleasedReason::ResizeForbidden,
             patches_allowed: true,
             budget: NO_WAIT,
-            build: || healthy_pod().failing_patches(ApiFault::forbidden()),
-            disturb: no_disturbance,
+            disturb: |pod| pod.fail_patches(ApiFault::forbidden()),
         },
         Case {
             name: "the apiserver answered 422 (the resize itself was rejected)",
             reason: DegradedUnleasedReason::ResizeRejected,
             patches_allowed: true,
             budget: NO_WAIT,
-            build: || healthy_pod().failing_patches(ApiFault::unprocessable()),
-            disturb: no_disturbance,
+            disturb: |pod| pod.fail_patches(ApiFault::unprocessable()),
         },
         Case {
             name: "no Pod carries the task run's label any more",
             reason: DegradedUnleasedReason::LiftPodAbsent,
             patches_allowed: false,
             budget: NO_WAIT,
-            build: healthy_pod,
             disturb: |pod| {
                 pod.uid_fenced_delete(RUN, POD_UID)
                     .expect("the fenced delete matches the stored uid");
@@ -494,8 +565,10 @@ async fn every_named_uncertainty_degrades_with_drop_required() {
     ];
 
     for case in cases {
-        let pod = (case.build)();
-        let fixture = Fixture::armed(pod, case.budget).await;
+        let fixture = Fixture::armed(healthy_pod(), case.budget).await;
+        // Every case starts from the SAME healthy, birth-downsized Pod. The
+        // fault is installed here, at the exact moment a real lift begins, so a
+        // case cannot pass by having broken the birth downsize instead.
         (case.disturb)(&fixture.pod);
 
         let result = fixture.lift().await;
@@ -731,4 +804,106 @@ async fn twenty_lift_cycles_leave_requests_qos_and_the_container_untouched() {
         );
     }
     assert!(pod.resize_patches() >= 40, "the cycles must actually have patched");
+}
+
+// ── AC6 / AC7: the clamp is the effective bound, and the CEILING comes from
+//              the write-once row ──────────────────────────────────────────
+
+/// **ACCEPTANCE CRITERION 6, cluster-free half.**
+///
+/// The process is configured to lift to 4000m; the Pod was admitted at 2500m.
+/// The value that ends up in `status.initContainerStatuses` must be the
+/// CEILING, and **zero PATCH bodies** may carry a value above it — measured on
+/// the bodies actually sent, parsed back through `CpuLimit` so the apiserver's
+/// canonicalisation cannot disguise an above-ceiling request.
+///
+/// NAMED FAILING MUTATION: delete the `.min(ceiling)` in
+/// `resize_authorization::clamp` and the above-ceiling body counter becomes 1
+/// (a 4000m body against a 2500m ceiling).
+///
+/// LIVE-CLUSTER GAP, stated rather than papered over: the criterion also asks
+/// for a companion control that issues the same oversubscribed value DIRECTLY
+/// through `pods/resize` against a live apiserver, to prove the apiserver does
+/// not bound this and the server clamp is the only effective bound. That half
+/// needs a kind cluster and is NOT done here.
+#[tokio::test]
+async fn the_clamp_is_the_effective_bound_measured_on_the_patch_bodies() {
+    const {
+        assert!(
+            CONFIGURED_LEASED as u64 > ADMITTED_CEILING,
+            "the configured lift must exceed the admitted ceiling, or this test \
+             cannot distinguish a clamp from a passthrough"
+        );
+    }
+    let fixture = Fixture::armed(healthy_pod(), NO_WAIT).await;
+    let result = fixture.lift().await;
+    assert!(matches!(result, LeaseResult::Status(_)), "{result:?}");
+
+    let bodies = fixture.pod.patched_cpu_millicores();
+    assert!(!bodies.is_empty(), "the lift must actually have patched");
+    assert_eq!(
+        bodies
+            .iter()
+            .filter(|millis| **millis > ADMITTED_CEILING)
+            .count(),
+        0,
+        "ZERO PATCH bodies above the admitted ceiling; observed {bodies:?}"
+    );
+    assert_eq!(
+        fixture.pod.launcher_status_cpu().as_deref(),
+        Some(format!("{ADMITTED_CEILING}m").as_str()),
+        "and the value the launcher ends up holding is the CEILING, not the \
+         configured 4000m"
+    );
+}
+
+/// **ACCEPTANCE CRITERION 7 — the ceiling's PROVENANCE.**
+///
+/// A Pod rendered with a per-project `build_resources.task.cpu_limit` override
+/// is admitted with a launcher ceiling ABOVE the deployment default. The bound
+/// the lift is clamped against must be that Pod's own captured value, not the
+/// process's `launcher_leased_millicores`.
+///
+/// NAMED FAILING MUTATION: recompute the ceiling in `resize_authorization::clamp`
+/// from the process's configured value instead of
+/// `identity.admitted_cpu_millicores`, and `intent.admitted_cpu_millicores` here
+/// reads 4000 instead of 8000 — this fails. (The clamped *target* is 4000 either
+/// way, which is exactly why this assertion is on the carried ceiling: it is the
+/// only place the two implementations differ.)
+///
+/// HONEST LIMIT, and it is a real one: with the shipped
+/// `min(configured, admitted)` clamp, an override Pod admitted at 8000m still
+/// lifts only to the deployment default of 4000m — it does NOT lift to its own
+/// rendered lease. Satisfying that literally requires the target to be
+/// `admitted` rather than `min(configured, admitted)`, which would contradict
+/// criterion 6's premise that a lift can be "configured ABOVE the captured
+/// ceiling". See the PR body; the clamp is left exactly as `0ppk-1a` shipped it
+/// rather than redesigned here.
+#[tokio::test]
+async fn the_ceiling_comes_from_the_write_once_row_not_the_deployment_default() {
+    const OVERRIDE_CEILING: u64 = 8_000;
+    const {
+        assert!(
+            OVERRIDE_CEILING > CONFIGURED_LEASED as u64,
+            "the per-project override must RAISE the Pod's ceiling above the \
+             deployment default, or there is no provenance to distinguish"
+        );
+    }
+    let fixture = Fixture::armed(pod_admitted_at(OVERRIDE_CEILING), NO_WAIT).await;
+    let result = fixture.lift().await;
+    assert!(matches!(result, LeaseResult::Status(_)), "{result:?}");
+
+    let intents = fixture.intents();
+    assert_eq!(intents.len(), 1, "exactly one intent reached the boundary");
+    assert_eq!(
+        intents[0].admitted_cpu_millicores,
+        i64::try_from(OVERRIDE_CEILING).unwrap(),
+        "the bound must be the Pod's OWN captured ceiling. Reading 4000 here \
+         means the ceiling was recomputed from the deployment default, which \
+         clamps every per-project-override Pod below its own rendered lease"
+    );
+    assert!(
+        intents[0].target_millicores <= intents[0].admitted_cpu_millicores,
+        "and the target never exceeds the bound it was clamped against"
+    );
 }
