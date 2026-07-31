@@ -42,10 +42,10 @@ use djinn_db::{
 };
 use djinn_launcher_protocol::LauncherAuthorityProtocol;
 use djinn_server::task_run_resize_rollout::{
-    AdmissionControl, CatalogDefectReason, CatalogVerdict, DispatchOutcome, DispatchProbe,
-    DurableAdmissionControl, HttpRegistryProbe, LiveTaskRunPod, RegistryProbe, ResizeRollout,
-    RetainedArtifact, RetentionRole, RolloutBlocked, RolloutPlan, RolloutStep, TaskRunPodPlane,
-    classify_catalog_image,
+    AdmissionControl, CatalogDefectReason, CatalogVerdict, CutoverPreflight, DispatchOutcome,
+    DispatchProbe, DurableAdmissionControl, HttpRegistryProbe, LiveTaskRunPod, PreflightVerdict,
+    RegistryProbe, ResizeRollout, RetainedArtifact, RetentionRole, RolloutBlocked, RolloutPlan,
+    RolloutStep, TaskRunPodPlane, classify_catalog_image,
 };
 use ring::signature::KeyPair as _;
 
@@ -308,6 +308,60 @@ impl TaskRunPodPlane for RecordingPodPlane {
     }
 }
 
+// ── the preflight seam ──────────────────────────────────────────────────────
+
+/// A preflight whose verdict is chosen by the test, recording every call.
+///
+/// The REAL preflight — `djinn_k8s::cutover_preflight::run` over a live
+/// `helm template` render — is driven end to end through
+/// `ResizeRollout::production` in `tests/authority_cutover.rs`. What this
+/// fixture is for is the *ordering* property: that a blocked preflight leaves
+/// the mode untouched and that the flip is unreachable without it. Both of
+/// those are properties of the journal, not of any rule inside the preflight.
+struct RecordingPreflight {
+    verdict: Mutex<PreflightVerdict>,
+    calls: AtomicU64,
+}
+
+impl RecordingPreflight {
+    /// Clean, with every class evaluated.
+    fn clear() -> Arc<Self> {
+        Arc::new(Self {
+            verdict: Mutex::new(PreflightVerdict::Clear {
+                evaluated: vec![
+                    "birth-confirmation".into(),
+                    "catalog-protocol".into(),
+                    "credential-boundary".into(),
+                    "drain-fence".into(),
+                    "launcher-cpu-ceiling".into(),
+                    "pods-resize-rbac".into(),
+                ],
+            }),
+            calls: AtomicU64::new(0),
+        })
+    }
+
+    fn set(&self, verdict: PreflightVerdict) {
+        *self.verdict.lock().unwrap() = verdict;
+    }
+
+    fn calls(&self) -> u64 {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl CutoverPreflight for RecordingPreflight {
+    async fn evaluate(
+        &self,
+        _mode: LauncherAuthorityProtocol,
+        _live_task_run_pods: &[String],
+    ) -> PreflightVerdict {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.verdict.lock().unwrap().clone()
+    }
+}
+
 // ── the registry ────────────────────────────────────────────────────────────
 
 /// A real OCI-manifest endpoint on a real TCP socket.
@@ -478,6 +532,7 @@ async fn retention_is_proven_by_a_registry_round_trip_not_by_a_stored_column() {
         durable_admission(&db),
         RecordingPodPlane::drained(),
         registry.probe(),
+        RecordingPreflight::clear(),
     );
     let retained = vec![RetainedArtifact {
         image_id: "legacy".into(),
@@ -544,6 +599,7 @@ async fn catalog_metadata_is_validated_against_the_mode_and_not_only_the_declara
         durable_admission(&db),
         RecordingPodPlane::drained(),
         Arc::new(UnusedRegistry),
+        RecordingPreflight::clear(),
     );
 
     // Under `leaf-v1`: an allowlisted no-handshake digest maps to leaf
@@ -593,6 +649,7 @@ async fn a_declaration_is_admitted_only_by_the_mode_that_matches_it() {
         durable_admission(&db),
         RecordingPodPlane::drained(),
         Arc::new(UnusedRegistry),
+        RecordingPreflight::clear(),
     );
 
     assert_eq!(
@@ -688,6 +745,7 @@ async fn the_admission_pause_is_proven_by_a_refused_dispatch() {
         durable_admission(&db),
         Arc::clone(&pods) as Arc<dyn TaskRunPodPlane>,
         Arc::new(UnusedRegistry),
+        RecordingPreflight::clear(),
     );
 
     // Positive control: unpaused, the same dispatch creates a Pod. Without this
@@ -752,6 +810,7 @@ async fn a_pause_row_without_a_wired_refusal_blocks_the_cutover() {
         Arc::clone(&broken) as Arc<dyn AdmissionControl>,
         Arc::clone(&pods) as Arc<dyn TaskRunPodPlane>,
         Arc::new(UnusedRegistry),
+        RecordingPreflight::clear(),
     );
 
     rollout.verify_retention(&[]).await.unwrap();
@@ -800,6 +859,7 @@ async fn armed_at_the_flip(
         durable_admission(db),
         Arc::clone(&pods) as Arc<dyn TaskRunPodPlane>,
         Arc::new(UnusedRegistry),
+        RecordingPreflight::clear(),
     );
     rollout.verify_retention(&[]).await.unwrap();
     rollout
@@ -919,6 +979,7 @@ async fn a_drained_snapshot_flips_forward_and_back() {
     )
     .await;
     forward.prove_drained().await.unwrap();
+    forward.clear_preflight(RESIZE).await.unwrap();
     assert_eq!(forward.flip_authority_mode(0, RESIZE).await, Ok(1));
     forward.resume_admission().await.unwrap();
     assert_eq!(authority(&db).await, (RESIZE, 1));
@@ -931,6 +992,7 @@ async fn a_drained_snapshot_flips_forward_and_back() {
     )
     .await;
     back.prove_drained().await.unwrap();
+    back.clear_preflight(LEAF).await.unwrap();
     assert_eq!(back.flip_authority_mode(1, LEAF).await, Ok(2));
     back.resume_admission().await.unwrap();
     assert_eq!(authority(&db).await, (LEAF, 2));
@@ -999,6 +1061,7 @@ async fn rollback_is_blocked_and_leaves_admission_paused() {
             durable_admission(&db),
             Arc::clone(&pods) as Arc<dyn TaskRunPodPlane>,
             registry.probe(),
+            RecordingPreflight::clear(),
         );
         let plan = RolloutPlan {
             retained: &[RetainedArtifact {
@@ -1087,6 +1150,7 @@ async fn the_forward_cutover_records_the_specced_step_sequence() {
         durable_admission(&db),
         Arc::clone(&pods) as Arc<dyn TaskRunPodPlane>,
         registry.probe(),
+        RecordingPreflight::clear(),
     );
     let plan = RolloutPlan {
         retained: &[RetainedArtifact {
@@ -1111,6 +1175,7 @@ async fn the_forward_cutover_records_the_specced_step_sequence() {
             RolloutStep::RetentionVerified,
             RolloutStep::AdmissionPaused,
             RolloutStep::DrainProven,
+            RolloutStep::PreflightCleared,
             RolloutStep::AuthorityModeFlipped,
             RolloutStep::AdmissionResumed,
         ],
@@ -1173,9 +1238,136 @@ async fn the_flip_cannot_precede_the_drain_and_the_resume_cannot_precede_the_fli
     );
     assert_eq!(rollout.dispatches_admitted_while_paused(), 0);
 
-    // In order, both succeed.
+    // REORDERING 3 — flip with the drain proven but the preflight never run.
+    // The gate is the prerequisite graph, not a call somebody remembered to
+    // make: deleting `clear_preflight` from `activate` does not produce an
+    // ungated flip, it produces this.
+    assert_eq!(
+        rollout.flip_authority_mode(0, RESIZE).await,
+        Err(RolloutBlocked::StepOutOfOrder {
+            step: RolloutStep::AuthorityModeFlipped,
+            missing: RolloutStep::PreflightCleared
+        })
+    );
+    assert_eq!(
+        authority(&db).await,
+        (LEAF, 0),
+        "the mode must not have moved"
+    );
+
+    // In order, all three succeed.
+    rollout.clear_preflight(RESIZE).await.unwrap();
     assert_eq!(rollout.flip_authority_mode(0, RESIZE).await, Ok(1));
     rollout.resume_admission().await.unwrap();
+}
+
+/// **A blocked preflight blocks the FLIP, not just the call.**
+///
+/// The seam here is injected, so what this proves is the *ordering* half: a
+/// refusal leaves the durable mode and the epoch exactly where they were, and
+/// leaves admission paused, because `resume_admission` requires a journaled
+/// flip and the flip requires a journaled preflight. The half this cannot prove
+/// — that the preflight production composes is the real one — is proven in
+/// `tests/authority_cutover.rs`, which drives
+/// `djinn_k8s::cutover_preflight::run` over a live render through
+/// `ResizeRollout::production`.
+#[tokio::test]
+async fn a_blocked_preflight_leaves_the_mode_and_the_epoch_where_they_were() {
+    let db = Database::ephemeral().await.unwrap();
+    assert_real_postgres(&db).await;
+    seed_project_and_run(&db, "019fb854-cccc-7000-8000-000000000001").await;
+    let image = seed_image(&db, "legacy", Some(&digest('a')), None).await;
+
+    let pods = RecordingPodPlane::drained();
+    let preflight = RecordingPreflight::clear();
+    let rollout = ResizeRollout::new(
+        db.clone(),
+        signed_inventory(&[digest('a')]),
+        durable_admission(&db),
+        Arc::clone(&pods) as Arc<dyn TaskRunPodPlane>,
+        Arc::new(UnusedRegistry),
+        Arc::clone(&preflight) as Arc<dyn CutoverPreflight>,
+    );
+    rollout.verify_retention(&[]).await.unwrap();
+    rollout
+        .pause_admission("eeky cutover", &probe_for(&image))
+        .await
+        .unwrap();
+    rollout.prove_drained().await.unwrap();
+
+    for (case, verdict) in [
+        (
+            "blocked",
+            PreflightVerdict::Blocked {
+                classes: vec!["pods-resize-rbac".into()],
+                defects: vec!["pods-resize-rbac no Role grants the exact triple".into()],
+            },
+        ),
+        (
+            "unevaluable",
+            PreflightVerdict::Unevaluable("the render could not be read".into()),
+        ),
+        // "No defects" and "no checks ran" must not be the same verdict. A
+        // preflight that quietly stopped evaluating would otherwise return the
+        // cleanest answer in the system.
+        (
+            "vacuous",
+            PreflightVerdict::Clear {
+                evaluated: Vec::new(),
+            },
+        ),
+    ] {
+        preflight.set(verdict);
+        let calls_before = preflight.calls();
+        let blocked = rollout
+            .clear_preflight(RESIZE)
+            .await
+            .expect_err("a non-clean preflight must block");
+        assert!(
+            matches!(
+                blocked,
+                RolloutBlocked::PreflightRefused { .. }
+                    | RolloutBlocked::PreflightUnevaluable(_)
+                    | RolloutBlocked::PreflightVacuous
+            ),
+            "{case}: {blocked:?}"
+        );
+        assert_eq!(
+            preflight.calls(),
+            calls_before + 1,
+            "{case}: the preflight must actually have been consulted"
+        );
+        assert!(
+            !rollout.journal().contains(&RolloutStep::PreflightCleared),
+            "{case}: a blocked preflight must not journal a cleared step"
+        );
+
+        // THE ASSERTION THAT MATTERS: not that an error came back, but that the
+        // durable authority row is untouched. An error returned *after* a flip
+        // would satisfy the first and fail this.
+        assert_eq!(
+            authority(&db).await,
+            (LEAF, 0),
+            "{case}: the mode and the epoch must not have moved"
+        );
+        assert_eq!(
+            rollout
+                .attempt_dispatch("019fb854-cccc-7000-8000-000000000002", &image)
+                .await,
+            DispatchOutcome::RefusedByAdmissionPause,
+            "{case}: admission must be left paused"
+        );
+        assert_eq!(pods.pod_creations(), 0, "{case}");
+    }
+
+    // And with the flip still unreachable, so is the resume.
+    assert_eq!(
+        rollout.resume_admission().await,
+        Err(RolloutBlocked::StepOutOfOrder {
+            step: RolloutStep::AdmissionResumed,
+            missing: RolloutStep::AuthorityModeFlipped
+        })
+    );
 }
 
 /// A step cannot run twice, so a replayed cutover cannot launder a fence.
@@ -1189,6 +1381,7 @@ async fn no_step_runs_twice() {
         durable_admission(&db),
         RecordingPodPlane::drained(),
         Arc::new(UnusedRegistry),
+        RecordingPreflight::clear(),
     );
     rollout.freeze_catalog_mutation().unwrap();
     assert_eq!(
@@ -1219,6 +1412,7 @@ async fn no_pod_ever_has_two_quota_authorities_or_none() {
         durable_admission(&db),
         Arc::clone(&pods) as Arc<dyn TaskRunPodPlane>,
         Arc::new(UnusedRegistry),
+        RecordingPreflight::clear(),
     );
 
     // ── mode `leaf-v1` ───────────────────────────────────────────────────
@@ -1380,6 +1574,12 @@ fn the_production_composition_site_wires_only_production_implementations() {
         "KubernetesTaskRunPodPlane::new",
         "HttpRegistryProbe::new",
         "LegacyDigestInventory::process()",
+        // The preflight the flip is gated on must be the REAL one, assembled
+        // from a live render by the same module `bin/cutover-preflight.rs`
+        // uses. A production constructor that accepted an
+        // `Arc<dyn CutoverPreflight>` would be a seam through which a fake
+        // verdict could reach the flip.
+        "DeployRenderPreflight::load",
         "Self::new(",
     ] {
         assert!(

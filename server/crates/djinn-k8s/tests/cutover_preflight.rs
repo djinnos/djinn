@@ -1504,22 +1504,69 @@ fn the_cutover_preflight_lane_is_wired_and_cannot_silently_skip() {
     );
 }
 
-/// **AC1.** `run` is the production entry point, and the driver binary calls
-/// exactly it — no second rule to drift from.
+/// Source text with `//`-comments and doc comments removed.
+///
+/// Every assertion below is about what the code DOES, and this file's prose
+/// discusses `run(&input)` and `cutover_preflight_driver` at length. Matching a
+/// comment would let the assembly be deleted while the guard stayed green,
+/// which is the failure mode the whole suite exists to prevent.
+fn rust_code(source: &str) -> String {
+    source
+        .lines()
+        .map(|line| match line.find("//") {
+            Some(index) => &line[..index],
+            None => line,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// **AC1.** `run` is the production entry point, and there is exactly ONE
+/// assembly that feeds it.
+///
+/// The assembly used to live inside `bin/cutover-preflight.rs`. It now lives in
+/// `cutover_preflight_driver`, because `djinn-server`'s authority-cutover driver
+/// runs this same preflight before it flips the authority mode, and a preflight
+/// the flip assembles differently from the one the deploy gate assembles is not
+/// the same preflight. So the guard is in three parts: the module calls `run`,
+/// the binary reaches the module, and neither holds a second copy.
 #[test]
 fn the_deploy_driver_calls_the_production_run() {
-    let driver = std::fs::read_to_string(
-        repo_root().join("server/crates/djinn-k8s/src/bin/cutover-preflight.rs"),
-    )
-    .expect("the driver source is readable");
-    assert!(
-        driver.contains("djinn_k8s::cutover_preflight::"),
-        "the driver must import the production validator"
+    let module = rust_code(
+        &std::fs::read_to_string(
+            repo_root().join("server/crates/djinn-k8s/src/cutover_preflight_driver.rs"),
+        )
+        .expect("the assembly module is readable"),
     );
     assert!(
-        driver.contains("run(&input)"),
-        "the driver must call the production `run`"
+        module.contains("crate::cutover_preflight::"),
+        "the assembly must import the production validator"
     );
+    assert!(
+        module.contains("run(&input)"),
+        "the assembly must call the production `run`"
+    );
+
+    let driver = rust_code(
+        &std::fs::read_to_string(
+            repo_root().join("server/crates/djinn-k8s/src/bin/cutover-preflight.rs"),
+        )
+        .expect("the driver source is readable"),
+    );
+    assert!(
+        driver.contains("djinn_k8s::cutover_preflight_driver::"),
+        "the driver must reach the validator through the shared assembly"
+    );
+    assert!(
+        driver.contains(".judge("),
+        "the driver must actually ask for a verdict"
+    );
+    assert!(
+        !driver.contains("CutoverPreflightInput"),
+        "a second input assembly in the binary is exactly the drift this module was extracted to \
+         prevent"
+    );
+
     assert_eq!(
         DefectClass::ALL.len(),
         6,

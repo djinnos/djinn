@@ -1029,6 +1029,25 @@ imagePipeline:
     # re-evaluated on later reconcile ticks as slots free. Keep this low
     # relative to buildkitd's CPU limit.
     maxConcurrentBuilds: 4
+    # Launcher authority protocol every image this deployment BUILDS declares in
+    # its own OCI metadata (`djinn.app/launcher-authority-protocol`), wired to
+    # the server via DJINN_IMAGE_LAUNCHER_AUTHORITY_PROTOCOL.
+    #
+    #   leaf-v1   (default) the djinn-cgroup-launcher shipped in the image owns
+    #             each invocation leaf's `cpu.max`. What every image built
+    #             before this knob existed declares.
+    #   resize-v2 Kubernetes in-place Pod resize owns CPU quota; the launcher
+    #             must never write leaf `cpu.max`.
+    #
+    # This is the producer half of the resize cutover: it changes what NEW
+    # artifacts claim. Flipping it changes each catalog image's environment
+    # hash, so every image is rebuilt under a new content-addressed tag rather
+    # than being relabelled — a cached leaf-v1 artifact can never be served as
+    # resize-v2. Expect a full rebuild of the catalog after changing it, and
+    # sequence it against the cluster-wide launcher_authority_mode row: images
+    # declaring a protocol the mode does not admit are refused at dispatch.
+    # Leave empty to keep the built-in default (leaf-v1) and rebuild nothing.
+    launcherAuthorityProtocol: ""
     resources:
       requests:
         cpu: "100m"
