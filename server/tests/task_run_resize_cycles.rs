@@ -69,7 +69,7 @@ use djinn_k8s::job::{
     COMPONENT_TASK_RUN_WORKER, LABEL_COMPONENT, LABEL_TASK_RUN_ID, build_task_run_job,
 };
 use djinn_k8s::launcher::{
-    CgroupLauncherMode, LAUNCHER_CONTAINER_NAME, TASK_RUN_CGROUP_RUNTIME_CLASS,
+    CgroupLauncherMode, LAUNCHER_CONTAINER_NAME, LAUNCHER_IPC_DIR, TASK_RUN_CGROUP_RUNTIME_CLASS,
     apply_launcher_authority_protocol, render_authority_protocol,
 };
 use djinn_k8s::pod_resize::{
@@ -119,6 +119,11 @@ const RETENTION_GATE: &str = "scripts/check-resize-cutover-retention.sh";
 const RETENTION_SELFTEST: &str = "scripts/test-resize-cutover-retention.mjs";
 const PROBE_BUILD_SCRIPT: &str = "server/crates/djinn-k8s/tests/fixtures/governor-probe/build.sh";
 const PROBE_IMAGE: &str = "djinn-resize-probe:1j64";
+const PROBE_WORKLOAD: &str = "/opt/djinn/workload.bin";
+/// How long the probe holds its broker connection open. Comfortably longer than
+/// [`CYCLES`] cycles take, and bounded, because a probe that never exits turns a
+/// failed run into a hung one.
+const PROBE_HOLD_SECONDS: &str = "2400";
 
 const NAMESPACE: &str = "djinn";
 const WORKER_CONTAINER_NAME: &str = "worker";
@@ -1001,9 +1006,9 @@ fn render_task_run_job(chart: &ChartNames) -> Rendered {
 }
 
 /// The image the sidecar runs is the SHIPPED launcher binary at the path the
-/// renderer expects; only the worker's entrypoint is replaced, with a hold. This
-/// suite proves resource-accounting invariants, not brokered execution — pcod's
-/// suite proves the latter against the same image.
+/// renderer expects; only the worker's entrypoint is replaced. This suite proves
+/// resource-accounting invariants, not brokered execution — pcod's suite proves
+/// the latter against the same image.
 fn ensure_probe_image() {
     let output = Command::new("bash")
         .arg(repo_root().join(PROBE_BUILD_SCRIPT))
@@ -1018,7 +1023,7 @@ fn ensure_probe_image() {
     );
 }
 
-fn prepare_holding_job(document: &mut Value) {
+fn prepare_holding_job(document: &mut Value, invocation: &str) {
     document["spec"]["backoffLimit"] = json!(0);
     document["spec"]["ttlSecondsAfterFinished"] = json!(600);
     let spec = &mut document["spec"]["template"]["spec"];
@@ -1034,8 +1039,51 @@ fn prepare_holding_job(document: &mut Value) {
         .expect("the render carries a worker container");
     worker["image"] = json!(PROBE_IMAGE);
     worker["imagePullPolicy"] = json!("IfNotPresent");
-    worker["command"] = json!(["/bin/sh", "-c", "sleep 5400"]);
+    // The worker must complete the broker HANDSHAKE, not merely exist. The
+    // launcher's startup readiness contract gives the worker a bounded window to
+    // connect and then exits 1 — measured on the first live run of this suite,
+    // where a `sleep` stand-in produced `worker handshake did not complete in
+    // time` and a launcher restart mid-cycle-16. That restart is real evidence
+    // (the container-id assertion caught it), but it is evidence about the
+    // stand-in, not about resize. So the worker is the SHIPPED probe, speaking
+    // the real protocol to the unmodified launcher binary in the rendered
+    // sidecar.
+    //
+    // `skip` is written before the probe starts: this suite proves
+    // resource-accounting invariants across repeated resizes, so the probe
+    // creates its leaf, runs a short workload, declines the lift and holds the
+    // connection open for the whole cycle run. pcod's suite is where the lift
+    // itself is judged.
+    worker["command"] = json!([
+        "/bin/sh",
+        "-c",
+        format!(
+            "set -eu; mkdir -p {LAUNCHER_IPC_DIR}; printf 'skip' > {LAUNCHER_IPC_DIR}/decision; exec /opt/djinn/bin/djinn-governor-probe"
+        )
+    ]);
     worker["args"] = json!([]);
+
+    let environment = worker["env"].as_array_mut().expect("the worker has env");
+    for (name, value) in [
+        ("DJINN_PROBE_INVOCATION", invocation.to_owned()),
+        // Unused on the `skip` arm, but the probe requires it to be declarable.
+        ("DJINN_PROBE_FENCE", "0".to_owned()),
+        ("DJINN_PROBE_AUTHORITY", "armed".to_owned()),
+        (
+            "DJINN_PROBE_DECISION_PATH",
+            format!("{LAUNCHER_IPC_DIR}/decision"),
+        ),
+        ("DJINN_PROBE_WORKLOAD", PROBE_WORKLOAD.to_owned()),
+        ("DJINN_PROBE_CLAMP_SECONDS", "2".to_owned()),
+        ("DJINN_PROBE_LIFTED_SECONDS", "2".to_owned()),
+        ("DJINN_PROBE_WORKERS", "1".to_owned()),
+        // Longer than 40 cycles can take. The probe's own hold is bounded so a
+        // failed run is a failed run rather than a hung one.
+        ("DJINN_PROBE_HOLD_SECONDS", PROBE_HOLD_SECONDS.to_owned()),
+    ] {
+        environment.retain(|entry| entry["name"] != name);
+        environment.push(json!({ "name": name, "value": value }));
+    }
 
     // The birth downsize `TaskRunResizeBootstrap` performs before dispatch, so
     // cycle 1 lifts from the same place every later cycle does.
@@ -1048,6 +1096,41 @@ fn prepare_holding_job(document: &mut Value) {
     launcher["resources"]["limits"]["cpu"] = json!(format!("{BIRTH_MILLICORES}m"));
 
     document["metadata"]["labels"][LABEL_COMPONENT] = json!(COMPONENT_TASK_RUN_WORKER);
+}
+
+/// Wait for a line on the worker's stdout. `probe.fatal` is a hard stop: a probe
+/// that failed will never print the line being waited for, and a timeout would
+/// report that as "the cluster was slow".
+fn await_probe_line(pod: &str, needle: &str) {
+    for _ in 0..READY_TICKS {
+        let log = stdout_of(&kubectl(&[
+            "-n",
+            NAMESPACE,
+            "logs",
+            pod,
+            "-c",
+            WORKER_CONTAINER_NAME,
+        ]));
+        assert!(
+            !log.contains("probe.fatal"),
+            "the brokered probe failed before reaching `{needle}`:\n{log}"
+        );
+        if log.contains(needle) {
+            return;
+        }
+        std::thread::sleep(TICK);
+    }
+    panic!(
+        "the worker never printed `{needle}`:\n{}",
+        stdout_of(&kubectl(&[
+            "-n",
+            NAMESPACE,
+            "logs",
+            pod,
+            "-c",
+            WORKER_CONTAINER_NAME
+        ]))
+    );
 }
 
 fn await_running_pod(task_run_id: &str) -> String {
@@ -1195,11 +1278,17 @@ fn live_repeated_cycles_move_only_the_launcher_limit() {
         "the rendered ceiling ({ceiling}m) is not above the birth limit ({BIRTH_MILLICORES}m); every cycle would be a no-op and every invariant would hold vacuously"
     );
 
+    let invocation_id = Uuid::now_v7().to_string();
     let mut document = rendered.document.clone();
-    prepare_holding_job(&mut document);
+    prepare_holding_job(&mut document, &invocation_id);
     kubectl_apply(&document);
 
     let pod = await_running_pod(&rendered.task_run_id);
+    // The worker must have completed the broker handshake and created its leaf
+    // before the cycles start. Otherwise the launcher's startup readiness
+    // contract expires mid-run and the sidecar RESTARTS, which the container-id
+    // assertion would report as a failed resize.
+    await_probe_line(&pod, "probe.holding");
     let node_slice = pod_slice_path(&node, &pod);
 
     // ---- The BEFORE snapshot, taken once, before cycle 1. ----
