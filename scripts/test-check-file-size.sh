@@ -1,9 +1,14 @@
 #!/bin/sh
 # Self-test harness for scripts/check-file-size.sh.
 #
-# Exercises the production guard end-to-end against synthetic fixture files
+# Exercises the production reporter end-to-end against synthetic fixture files
 # that this script creates (and tears down) under the repository's
 # server/crates/ tree. Pure POSIX shell; no cargo, no python, no network.
+#
+# The reporter is report-only: the central property asserted here is that an
+# oversized file with NO `djinn:allow-oversize` marker is still *named* in the
+# ranked report and still exits 0. It used to exit 1; see the rationale block
+# at the top of check-file-size.sh for why that stopped.
 #
 # Run from the repository root:
 #
@@ -85,6 +90,7 @@ run_guard() {
         MAX_LINES=2 \
         MAX_BYTES=64 \
         SIZE_GUARD_MODE="$mode" \
+        GITHUB_STEP_SUMMARY="$LOG_DIR/$label.summary.md" \
         sh "$GUARD" --files-from-stdin < "$log" > "$out" 2>&1
     return $?
 }
@@ -185,9 +191,21 @@ set +e
 run_guard t3_oversized files-from-stdin "$OVER_PATH"
 t3_actual=$?
 set -e
-assert_exit "T3 synthetic oversized file exits non-zero" 1 "$t3_actual" "$LOG_DIR/t3_oversized.log.out"
-assert_output_contains "T3 reports the failing fixture" \
-    "FAIL  $OVER_PATH" "$LOG_DIR/t3_oversized.log.out"
+# The retirement contract, stated twice: an oversized file with NO marker must
+# NOT fail (first assertion) and must still be named (second). Either one alone
+# is satisfiable by a broken script — a reporter that prints nothing passes the
+# first, and the pre-retirement gate passed the second.
+assert_exit "T3 unacknowledged oversized file exits 0" 0 "$t3_actual" "$LOG_DIR/t3_oversized.log.out"
+assert_output_contains "T3 ranks the unacknowledged fixture" \
+    "unacknowledged  $OVER_PATH" "$LOG_DIR/t3_oversized.log.out"
+assert_output_contains "T3 summary counts it as unacknowledged" \
+    "1 unacknowledged" "$LOG_DIR/t3_oversized.log.out"
+assert_output_contains "T3 emits a notice annotation, not an error" \
+    "::notice file=$OVER_PATH,line=1" "$LOG_DIR/t3_oversized.log.out"
+assert_output_lacks "T3 emits no error annotation" \
+    "::error" "$LOG_DIR/t3_oversized.log.out"
+assert_output_contains "T3 writes the ranked table to the step summary" \
+    "| \`$OVER_PATH\` |" "$LOG_DIR/t3_oversized.summary.md"
 
 # ── T4: generated paths and .gen.* files are skipped ─────────────────
 # Both **/generated/** directory paths and *.gen.* file suffixes must be
@@ -230,10 +248,11 @@ assert_output_lacks "T4 does not report the generated-dir file" \
 assert_output_lacks "T4 does not report the .gen.rs file" \
     "FAIL  $GEN_FILE_PATH" "$LOG_DIR/t4_generated.log.out"
 
-# ── T5: djinn:allow-oversize marker permits an oversized file ───────
-# The marker is the documented escape hatch: an oversized file that
-# includes the exact token "// djinn:allow-oversize" must be reported
-# as OK and not cause a failure.
+# ── T5: djinn:allow-oversize marker classifies, it no longer permits ──
+# Nothing fails, so the marker grants nothing. It is still parsed because
+# it is the author's on-the-record statement that the size is deliberate,
+# which is the one axis that makes the ranking actionable: it separates
+# `acknowledged` rows from `unacknowledged` ones.
 FIXTURE_ALLOW="$REPO_ROOT/$FIXTURE_BASE/src/allowed.rs"
 {
     printf '// djinn:allow-oversize\n'
@@ -251,35 +270,28 @@ run_guard t5_marker files-from-stdin "$ALLOW_PATH"
 t5_actual=$?
 set -e
 assert_exit "T5 marker file exits 0" 0 "$t5_actual" "$LOG_DIR/t5_marker.log.out"
-assert_output_contains "T5 reports the marker file as allowed" \
-    "OK    $ALLOW_PATH  (allowed: djinn:allow-oversize" \
+# Four leading spaces: the status column is left-padded to 14, so
+# "acknowledged" + 2 pad + 2 separator distinguishes it from the 14-char
+# "unacknowledged" + 2 separator that T3 asserts.
+assert_output_contains "T5 ranks the marker file as acknowledged" \
+    "acknowledged    $ALLOW_PATH" \
     "$LOG_DIR/t5_marker.log.out"
-assert_output_contains "T5 summary mentions 1 allowed file" \
-    "1 oversized file(s) allowed by marker" \
+assert_output_contains "T5 summary counts 1 acknowledged, 0 unacknowledged" \
+    "(0 unacknowledged, 1 acknowledged by djinn:allow-oversize)" \
     "$LOG_DIR/t5_marker.log.out"
 
-# ── T6: full-tree mode can be invoked explicitly ─────────────────────
-# Run --all with a generous threshold so the real tree passes; the
-# important property is that the mode flag is accepted, find walks the
-# server/ roots, and the guard reports a non-zero file count. We don't
-# need to enumerate every file — only assert the mode runs to
-# completion and reports it scanned at least one in-scope Rust file.
+# ── T6: full-tree mode over the REAL tree exits 0 ───────────────────
+# Deliberately run with thresholds low enough that the real repository is
+# saturated with oversized files. Under the pre-retirement gate this exited
+# 1; report-only means it must exit 0 while still naming what it found.
 set +e
 cd "$REPO_ROOT" && env \
-    MAX_LINES=9999999 \
-    MAX_BYTES=999999999 \
+    MAX_LINES=1 \
+    MAX_BYTES=1 \
     sh "$GUARD" --all > "$LOG_DIR/t6_all.log.out" 2>&1
 t6_actual=$?
 set -e
-
-if [ "$t6_actual" -eq 0 ] || [ "$t6_actual" -eq 1 ]; then
-    # exit 0 = no oversized; exit 1 = oversized; both prove --all ran.
-    pass "T6 --all mode runs to completion (exit=$t6_actual)"
-else
-    fail "T6 --all mode" "unexpected exit=$t6_actual
-output:
-$(cat "$LOG_DIR/t6_all.log.out")"
-fi
+assert_exit "T6 --all over a saturated tree exits 0" 0 "$t6_actual" "$LOG_DIR/t6_all.log.out"
 if grep -q "Checked [0-9][0-9]* Rust source file(s)" "$LOG_DIR/t6_all.log.out"; then
     pass "T6 --all mode scanned the server tree"
 else
@@ -287,6 +299,54 @@ else
         "no 'Checked N Rust source file(s)' line in:
 $(cat "$LOG_DIR/t6_all.log.out")"
 fi
+# Annotations are capped so GitHub's 10-per-step render limit does not
+# silently discard the tail of a 100+ row report.
+t6_notices=$(grep -c '^::notice ' "$LOG_DIR/t6_all.log.out" || true)
+if [ "$t6_notices" -le 10 ] && [ "$t6_notices" -gt 0 ]; then
+    pass "T6 --all caps annotations at 10 (emitted $t6_notices)"
+else
+    fail "T6 --all caps annotations at 10" "emitted $t6_notices"
+fi
+
+# ── T7: the report is ranked worst-first by bytes ────────────────────
+# A flat list of 100+ paths is not a report. The ordering is the product:
+# the biggest file must be rank 1 regardless of the input order.
+FIXTURE_BIG="$REPO_ROOT/$FIXTURE_BASE/src/bigger.rs"
+FIXTURE_SMALL="$REPO_ROOT/$FIXTURE_BASE/src/smaller.rs"
+{
+    printf '// synthetic BIG fixture\n'
+    for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+        printf 'fn big_%02d() { /* %s */ }\n' "$i" \
+            "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+    done
+} > "$FIXTURE_BIG"
+{
+    printf '// synthetic SMALL-but-still-oversized fixture\n'
+    for i in 1 2 3; do
+        printf 'fn small_%02d() {}\n' "$i"
+    done
+} > "$FIXTURE_SMALL"
+
+BIG_PATH="$FIXTURE_BASE/src/bigger.rs"
+SMALL_PATH="$FIXTURE_BASE/src/smaller.rs"
+set +e
+# Feed the SMALLER file first: rank must come from measurement, not order.
+run_guard t7_rank files-from-stdin "$SMALL_PATH" "$BIG_PATH"
+t7_actual=$?
+set -e
+assert_exit "T7 ranked report exits 0" 0 "$t7_actual" "$LOG_DIR/t7_rank.log.out"
+t7_first=$(grep -E "^ +[0-9]+ +[0-9]+ +[0-9]+ +unacknowledged" "$LOG_DIR/t7_rank.log.out" \
+    | head -n 1 | awk '{print $NF}')
+if [ "$t7_first" = "$BIG_PATH" ]; then
+    pass "T7 the largest file ranks first despite input order"
+else
+    fail "T7 the largest file ranks first despite input order" \
+        "rank 1 was '$t7_first', expected '$BIG_PATH'
+output:
+$(cat "$LOG_DIR/t7_rank.log.out")"
+fi
+assert_output_contains "T7 still names the smaller offender" \
+    "unacknowledged  $SMALL_PATH" "$LOG_DIR/t7_rank.log.out"
 
 # ── summary ──────────────────────────────────────────────────────────
 printf -- '------------------------------------------\n'

@@ -590,40 +590,71 @@ jobs:
           done
           echo "::error::cargo-deny check failed after 3 attempts"
           exit 1
-      - name: Check changed Rust file sizes
+      # REPORT, NOT A GATE. This step is structurally incapable of failing the
+      # run: every command is `|| true`-guarded and the block ends `exit 0`.
+      #
+      # It gated changed files from 2026-06-11 to 2026-07-30. Over those seven
+      # weeks it produced 108 `djinn:allow-oversize` markers and zero splits,
+      # while the oversized-file count went 22 -> 79 — every file that ever
+      # tripped it was marked, none was restructured. It also blocked two
+      # correctness fixes (#2815, #2839) on ~200 bytes of headroom each. See
+      # the rationale block at the top of scripts/check-file-size.sh.
+      #
+      # Retiring the veto deliberately leaves the measurement in place: the
+      # ranked report goes to the step summary and to `::notice` annotations,
+      # and the authorship-time nudge in djinn-agent carries the pressure that
+      # a merge-time gate could not.
+      #
+      # Note there is no `continue-on-error:` here. That would surface the step
+      # as a failure GitHub then ignores, which reads as "the size gate is
+      # broken" to every human scanning the run. A report that succeeds is not
+      # the same artifact as a failure that is tolerated.
+      - name: Self-test Rust file-size report
+        if: needs.preflight.outputs.size == 'true'
+        run: ./scripts/test-check-file-size.sh
+      - name: Report changed Rust file sizes
         if: needs.preflight.outputs.size == 'true'
         env:
           EVENT_NAME: ${{ github.event_name }}
         run: |
-          set -eu
+          # GitHub's default step shell is `bash -eo pipefail`. Both are turned
+          # off here on purpose: a report must not inherit gating semantics from
+          # its shell. `-u` is kept — an unset variable here is a bug in this
+          # block, not a finding about the tree.
+          set +e +o pipefail
+          set -u
 
           if [ -z "$BASE_SHA" ]; then
             # workflow_dispatch has no PR/merge context; fall back to origin/main
-            # so the guard still runs against changes since the main branch.
+            # so the report still covers changes since the main branch.
             git fetch --no-tags --depth=1 origin main >/dev/null 2>&1 || true
             BASE_SHA="$(git rev-parse --verify origin/main 2>/dev/null || true)"
           fi
 
           if [ -z "$BASE_SHA" ]; then
-            echo "::error::Could not determine a base SHA for changed-file detection (event=$EVENT_NAME)."
-            exit 1
+            echo "::warning::Could not determine a base SHA for changed-file detection (event=$EVENT_NAME); skipping the file-size report."
+            exit 0
           fi
 
           echo "Computing changed-file diff against base $BASE_SHA (event=$EVENT_NAME)..."
           # --diff-filter=AMR = Added, Modified, Renamed. D (Deleted) is
-          # intentionally excluded so deleted files are not re-checked.
+          # intentionally excluded so deleted files are not re-reported.
           # The three-dot form uses the merge base of $BASE_SHA and HEAD,
           # which tolerates a slightly stale PR base SHA after main advances.
           git diff --name-only --diff-filter=AMR "$BASE_SHA...HEAD" \
-            | ./scripts/check-file-size.sh --files-from-stdin
+            | ./scripts/check-file-size.sh --files-from-stdin \
+            || echo "::warning::The file-size report did not run to completion. It is report-only, so this does not block."
+          exit 0
       - name: Check applied migrations are immutable
         if: needs.preflight.outputs.migrations == 'true'
         run: ./scripts/check-migrations-immutable.sh
-      # Routed by the same output as the size guard: both police the shape of
-      # Rust source, and `size` is set for any server change. Unlike the size
-      # guard this one scans the whole tree rather than the diff — it is a
-      # grep over tracked *.rs with no build, and a whole-tree scan cannot be
-      # dodged by a base-SHA trick.
+      # Routed by the same output as the file-size report: both concern the
+      # shape of Rust source, and `size` is set for any server change. This
+      # one is still a GATE, deliberately — unlike a size limit it has no
+      # one-line escape, and the `_partN` fragmentation it forbids is exactly
+      # what the size gate's per-file line limit used to reward. It also scans
+      # the whole tree rather than the diff: a grep over tracked *.rs with no
+      # build, and a whole-tree scan cannot be dodged by a base-SHA trick.
       - name: Self-test include! guard
         if: needs.preflight.outputs.size == 'true'
         run: ./scripts/test-check-include-macro.sh
