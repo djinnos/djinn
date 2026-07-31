@@ -107,8 +107,12 @@ pub(super) async fn apply_turn_inline_budget_pass(
     results: &mut [CollectedToolResult],
     ctx: &ToolDispatchContext<'_>,
 ) {
-    apply_turn_inline_budget_pass_with_config(results, ctx, TurnInlineBudgetConfig::from_env())
-        .await;
+    // An injected config wins; production leaves it unset and reads the
+    // environment, so the deployed behaviour is unchanged.
+    let config = ctx
+        .turn_inline_budget
+        .unwrap_or_else(TurnInlineBudgetConfig::from_env);
+    apply_turn_inline_budget_pass_with_config(results, ctx, config).await;
 }
 
 /// Config-injectable core of [`apply_turn_inline_budget_pass`] so unit tests can
