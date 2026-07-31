@@ -246,6 +246,7 @@ pub(crate) fn render_builder_script(
     config: &ImageControllerConfig,
     subject_segment: &str,
 ) -> String {
+    // buildctl talks to the shared in-cluster buildkitd over gRPC. The
     // `--local` flags point the build context + dockerfile at the
     // ConfigMap mount. `--output type=image,...,push=true` pushes to
     // Zot; `--export-cache` / `--import-cache` hit the same registry's
