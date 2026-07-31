@@ -61,6 +61,11 @@
 
 set -eu
 
+# The shared scanner is resolved from THIS SCRIPT's location, deliberately
+# unlike REPO_ROOT below: the tree being scanned may be a throwaway fixture
+# repo, but the scanner is always the one shipped next to this guard.
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+
 # Resolve the tree to scan from the CALLER's working directory rather than from
 # this script's own location. CI invokes it from the repo root either way, and
 # deriving it this way is what lets the self-test drive the real guard against a
@@ -115,68 +120,32 @@ whole_file_is_test() {
     return 1
 }
 
+# The tracker described above now lives in scripts/lib/rust-source-scan.awk,
+# shared with every other Rust source-text guard and self-tested in both
+# directions by scripts/test-rust-source-scan.sh.
+#
+# It moved because the copy that used to sit here broke this guard's own
+# documented exemption 2 ("Production code ... is exempt"). An armed
+# `#[cfg(test)]` disarmed only on a line ending in `;`, so the attribute on a
+# struct FIELD -- which ends in `,` -- left the tracker armed until the next
+# line that opened a brace, which is normally the next PRODUCTION function.
+# Measured on a fixture of exactly that shape (a `#[cfg(test)]` field followed
+# by a plain `pub fn`), a production `render()` was reported as a test read.
+# `server/src/server/state/mod.rs` carries that shape from line 342 onward.
+#
+# The shared tracker disarms on any `;`- or `,`-terminated item and carries
+# paren depth, so a multi-line `#[test] async fn foo(\n a: A,\n) {` signature
+# still resolves to its block rather than disarming mid-signature.
+SCAN_AWK="$SCRIPT_DIR/lib/rust-source-scan.awk"
+if [ ! -f "$SCAN_AWK" ]; then
+    echo "::error::check-test-global-metrics: missing shared scanner $SCAN_AWK" >&2
+    exit 2
+fi
+
 scan_test_reads() {
-    awk -v whole_file="${2:-0}" '
-        function strip(line,    i, n, c, out, in_str) {
-            n = length(line); i = 1; out = ""; in_str = 0
-            while (i <= n) {
-                c = substr(line, i, 1)
-                if (in_str) {
-                    if (c == "\\") { i += 2; continue }
-                    if (c == "\"") { in_str = 0 }
-                    i++
-                    continue
-                }
-                if (c == "\"") { in_str = 1; i++; continue }
-                if (c == "/" && substr(line, i + 1, 1) == "/") { break }
-                out = out c
-                i++
-            }
-            return out
-        }
-        function braces(s,    i, n, c, d) {
-            n = length(s); d = 0
-            for (i = 1; i <= n; i++) {
-                c = substr(s, i, 1)
-                if (c == "{") d++
-                else if (c == "}") d--
-            }
-            return d
-        }
-        BEGIN { depth = 0; armed = 0 }
-        {
-            s = strip($0)
-
-            if (whole_file == 1) {
-                if (s ~ /djinn_telemetry::render[ \t]*\(/) print FNR
-                next
-            }
-
-            if (depth > 0) {
-                if (s ~ /djinn_telemetry::render[ \t]*\(/) print FNR
-                depth += braces(s)
-                if (depth <= 0) depth = 0
-                next
-            }
-
-            # A test attribute arms the tracker; the block it introduces starts
-            # at the next line that opens a brace.
-            if (s ~ /^[ \t]*#\[(cfg\(test\)|test|tokio::test|rstest)/ ||
-                s ~ /^[ \t]*#\[tokio::test\(/) {
-                armed = 1
-                next
-            }
-
-            if (armed) {
-                d = braces(s)
-                if (d > 0) { depth = d; armed = 0; next }
-                # `#[cfg(test)] mod foo;` and `#[cfg(test)] use ...;` introduce
-                # no block in this file.
-                if (s ~ /;[ \t]*$/) { armed = 0 }
-                next
-            }
-        }
-    ' "$1"
+    RS_PATTERN='djinn_telemetry::render[ \t]*\(' \
+        awk -f "$SCAN_AWK" -v strings=blank -v scope=test -v force_test="${2:-0}" "$1" |
+        cut -d: -f2
 }
 
 is_exempt() {

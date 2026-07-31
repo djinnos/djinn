@@ -228,5 +228,58 @@ fn new_inner() {
 EOF
 expect 0 "an indented #[cfg(test)] field does not hide the production caller"
 
+fixture
+# PRODUCTION CODE AFTER A `#[cfg(test)]` BLOCK IS STILL PRODUCTION CODE.
+#
+# The guard used to stop scanning at the first unindented `#[cfg(test)]`, on
+# the stated convention that test modules live at the end of a file. Nothing
+# enforces that convention. This is the shape that convention forbids and the
+# language permits, and it is the exact blind spot that made
+# check-resize-reachability.sh verify reachability against the first 8% of
+# server/src/server/state/mod.rs.
+cat >"$SCRATCH/$ARMING_FILE" <<EOF
+#[cfg(test)]
+mod early_tests {
+    #[test]
+    fn decoy() {
+        let _ = BuildLeaseService::new(repo, cap);
+    }
+}
+
+fn new_inner() {
+    let _ = BuildLeaseService::new(repo, cap).$ARMING_SYMBOL(authority);
+}
+EOF
+expect 0 "a production caller BELOW a #[cfg(test)] module is still found"
+
+fixture
+# The counterpart, so the case above cannot be satisfied by "see everything".
+# Moving the ONLY caller inside that same block must still fail.
+cat >"$SCRATCH/$ARMING_FILE" <<EOF
+#[cfg(test)]
+mod early_tests {
+    #[test]
+    fn decoy() {
+        let _ = BuildLeaseService::new(repo, cap).$ARMING_SYMBOL(authority);
+    }
+}
+
+fn new_inner() {
+    let _ = BuildLeaseService::new(repo, cap);
+}
+EOF
+expect 1 "a caller inside that same #[cfg(test)] module still does not count"
+
+fixture
+# A trailing comment must not launder the code in front of it. `foo(); // x`
+# is still a call to foo(); a stripper that dropped the whole line would let
+# any real arming be hidden by typing a comment after it.
+cat >"$SCRATCH/$ARMING_FILE" <<EOF
+fn new_inner() {
+    let _ = BuildLeaseService::new(repo, cap).$ARMING_SYMBOL(authority); // TODO: revisit
+}
+EOF
+expect 0 "a trailing comment does not launder the arming call in front of it"
+
 printf '\n%s passed, %s failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

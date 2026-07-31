@@ -99,37 +99,26 @@ fi
 
 # Emit "path:lineno:text" for every offending `include!`.
 #
-# The scanner strips Rust double-quoted string literals (honouring backslash
-# escapes) and `//` line comments before looking for the macro, so neither a
-# mention in a comment nor a `format!("include!(\"{f}\")")` inside a test can
-# trip the guard. The OUT_DIR exemption is evaluated against the ORIGINAL line,
-# because stripping string literals would erase the "OUT_DIR" token it keys on.
+# The scan is delegated to scripts/lib/rust-source-scan.awk, which is shared
+# with every other Rust source-text guard in this directory. It strips Rust
+# double-quoted string literals (honouring backslash escapes), `//` line
+# comments and `/* */` block comments before looking for the macro, so neither
+# a mention in a comment nor a `format!("include!(\"{f}\")")` inside a test can
+# trip the guard — while the code IN FRONT of a trailing comment survives, so
+# `include!("x.rs"); // legacy` is still reported.
+#
+# The OUT_DIR exemption is evaluated against the ORIGINAL line (RS_EXEMPT),
+# because blanking string literals would erase the "OUT_DIR" token it keys on.
+SCAN_AWK="$SCRIPT_DIR/lib/rust-source-scan.awk"
+if [ ! -f "$SCAN_AWK" ]; then
+    echo "::error::check-include-macro: missing shared scanner $SCAN_AWK" >&2
+    exit 2
+fi
+
 scan() {
-    awk '
-        function strip(line,    i, n, c, out, in_str) {
-            n = length(line); i = 1; out = ""; in_str = 0
-            while (i <= n) {
-                c = substr(line, i, 1)
-                if (in_str) {
-                    if (c == "\\") { i += 2; continue }
-                    if (c == "\"") { in_str = 0 }
-                    i++
-                    continue
-                }
-                if (c == "\"") { in_str = 1; i++; continue }
-                if (c == "/" && substr(line, i + 1, 1) == "/") { break }
-                out = out c
-                i++
-            }
-            return out
-        }
-        {
-            # Build-script exemption, checked on the raw line: the path is
-            # computed from OUT_DIR, so no source file exists to be indexed.
-            if ($0 ~ /include![ \t]*\([ \t]*concat!/ && $0 ~ /env![ \t]*\([ \t]*"OUT_DIR"[ \t]*\)/) next
-            if (strip($0) ~ /include![ \t]*\(/) printf "%s:%d:%s\n", FILENAME, FNR, $0
-        }
-    ' "$@"
+    RS_PATTERN='include![ \t]*\(' \
+        RS_EXEMPT='include![ \t]*\([ \t]*concat!.*env![ \t]*\([ \t]*"OUT_DIR"[ \t]*\)' \
+        awk -f "$SCAN_AWK" -v strings=blank "$@"
 }
 
 violations=$(
