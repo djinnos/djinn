@@ -1,9 +1,9 @@
 use uuid::Uuid;
 
+use crate::crypto;
+use crate::{Database, Result, ensure_db};
 use djinn_core::events::{DjinnEventEnvelope, EventBus};
 use djinn_core::models::Credential;
-use djinn_db::crypto;
-use djinn_db::{Database, Result, ensure_db};
 
 #[derive(Clone)]
 pub struct CredentialRepository {
@@ -687,7 +687,7 @@ mod tests {
     /// Seed a real `users` row so the `credentials.owner_user_id` FK holds.
     async fn seed_user(db: &Database, github_id: i64, login: &str) -> String {
         db.ensure_initialized().await.unwrap();
-        djinn_db::UserRepository::new(db.clone())
+        crate::UserRepository::new(db.clone())
             .upsert_from_github(github_id, login, None, None)
             .await
             .unwrap()
@@ -952,63 +952,10 @@ mod tests {
         assert_eq!(none[0].key_name, "OPENAI_API_KEY");
     }
 
-    /// End-to-end replica of the coordinator's `resolve_user_model_priority`
-    /// body (real DB + repos + catalog), reproducing the exact staging setup:
-    /// a user who selected `openai/gpt-5.5` and connected Codex (`chatgpt_codex`
-    /// OAuth, which merges into `openai`) + an org-shared fireworks key. The
-    /// per-method `#[cfg(test)]` stub means the live suite never exercises this,
-    /// so we replicate it inline. The model MUST stay eligible.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn user_model_priority_keeps_openai_via_codex_merge() {
-        use crate::catalog::CatalogService;
-        use djinn_core::models::ModelLanes;
-        use djinn_db::UserSettingsRepository;
-
-        let db = Database::open_in_memory().unwrap();
-        let uid = seed_user(&db, 9001, "fern").await;
-        let repo = CredentialRepository::new(db.clone(), EventBus::noop());
-        repo.set_with_owner("chatgpt_codex", "__OAUTH_CHATGPT_CODEX", "tok", Some(&uid))
-            .await
-            .unwrap();
-        repo.set_with_owner("fireworks-ai", "FIREWORKS_API_KEY", "fk", None)
-            .await
-            .unwrap();
-        UserSettingsRepository::new(db.clone())
-            .upsert_lanes(
-                &uid,
-                &ModelLanes::from_flat(vec!["openai/gpt-5.5".to_string()]),
-            )
-            .await
-            .unwrap();
-
-        // ── replicate resolve_user_model_priority (implement lane = worker) ──
-        let models = UserSettingsRepository::new(db.clone())
-            .get(&uid)
-            .await
-            .unwrap()
-            .unwrap()
-            .lanes
-            .unwrap()
-            .for_role("worker")
-            .to_vec();
-        let creds = repo.list_for_user(Some(&uid)).await.unwrap();
-        let connected = CatalogService::new().connected_provider_ids(&creds);
-        let result: Vec<String> = models
-            .into_iter()
-            .filter(|m| {
-                let p = m.split_once('/').map(|(p, _)| p).unwrap_or(m.as_str());
-                connected.contains(p)
-            })
-            .collect();
-
-        assert!(
-            connected.contains("openai"),
-            "codex merge should connect openai; connected={connected:?}"
-        );
-        assert_eq!(
-            result,
-            vec!["openai/gpt-5.5".to_string()],
-            "openai/gpt-5.5 must remain eligible; connected={connected:?}"
-        );
-    }
+    // NOTE: `user_model_priority_keeps_openai_via_codex_merge` — the end-to-end
+    // replica of the coordinator's `resolve_user_model_priority` — cannot live
+    // here. It needs `djinn_provider::catalog::CatalogService`, and djinn-db
+    // must not depend on djinn-provider. It lives in
+    // `djinn-provider/tests/credential_user_model_priority.rs`, on the far side
+    // of the one dependency edge between the two crates.
 }
