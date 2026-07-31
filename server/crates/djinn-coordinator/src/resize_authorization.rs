@@ -335,14 +335,18 @@ impl ResizeRefusal {
 /// why an uncertainty on this path must not be expressible as something a caller
 /// could classify as retryable.
 #[derive(Clone, Debug, PartialEq, Eq)]
-// `Authorized` is the hot path and the only variant anyone reads a field from;
-// boxing it would put an allocation on every successful authorization to save
-// stack on two variants that are 2 bytes each. Same trade `GrantNextBuildLeaseResult`
-// makes in `build_lease.rs`.
-#[allow(clippy::large_enum_variant)]
 pub enum ResizeAuthorizationOutcome {
     /// Server-derived and clamped. The only variant `0ppk-1b` may PATCH.
-    Authorized(PodResizeIntent),
+    ///
+    /// Boxed, and that is not lint appeasement. This outcome is held across an
+    /// `.await` inside `BuildLeaseService::grant`, which is itself held inside
+    /// the dispatch rules engine's future. Inlining a ~224-byte intent there
+    /// grew that future past a tokio worker's 2MiB stack and aborted
+    /// `rules::tests::amend_while_building_dispatches_one_reconcile_task_from_event`
+    /// with a stack overflow — a failure with no textual connection to resize at
+    /// all. One pointer keeps the whole chain bounded no matter how the intent
+    /// grows later.
+    Authorized(Box<PodResizeIntent>),
     /// Refused. Zero intents were recorded.
     Refused(ResizeRefusal),
     /// The durable authority is not armed to enforce, so no invocation is lifted
@@ -522,7 +526,7 @@ impl ResizeAuthority {
             &identity,
             self.configured_leased_millicores,
         ) {
-            Ok(intent) => ResizeAuthorizationOutcome::Authorized(intent),
+            Ok(intent) => ResizeAuthorizationOutcome::Authorized(Box::new(intent)),
             Err(refusal) => Self::refuse(refusal),
         }
     }
