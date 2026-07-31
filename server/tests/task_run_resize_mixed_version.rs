@@ -2821,7 +2821,10 @@ impl CutoverPreflight for AlwaysClearPreflight {
         _live_task_run_pods: &[String],
     ) -> RolloutPreflightVerdict {
         RolloutPreflightVerdict::Clear {
-            evaluated: DEPLOY_GATE_CLASSES.iter().map(|c| (*c).to_string()).collect(),
+            evaluated: DEPLOY_GATE_CLASSES
+                .iter()
+                .map(|c| (*c).to_string())
+                .collect(),
         }
     }
 }
