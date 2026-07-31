@@ -1013,15 +1013,26 @@ jobs:
           #
           # Counted from nextest's own `PASS` lines rather than
           # `--message-format libtest-json`, which is gated behind an
-          # experimental flag and whose shape is explicitly unstable. A count
-          # that silently becomes 0 because an output format changed would
-          # defeat the guard it feeds.
+          # experimental flag and whose shape is explicitly unstable.
+          #
+          # ANSI is stripped first. This workflow sets `CARGO_TERM_COLOR: always`
+          # (env, line ~25), so nextest colorizes even into a pipe and every
+          # PASS line is `ESC[32;1m        PASS ESC[0m ...`. Matching the raw
+          # text counted 0 while all 25 proofs had just passed — caught here
+          # only because the guard fails CLOSED on a count it cannot read.
           cargo nextest run -p djinn-k8s --test cutover_preflight \
             --run-ignored all --no-fail-fast 2>&1 | tee "$RUNNER_TEMP/cutover.log"
-          executed=$(grep -cE '^ +PASS \[' "$RUNNER_TEMP/cutover.log" || true)
+          plain="$RUNNER_TEMP/cutover-plain.log"
+          sed -E 's/\x1b\[[0-9;]*[A-Za-z]//g' "$RUNNER_TEMP/cutover.log" > "$plain"
+          executed=$(grep -cE '^ +PASS \[' "$plain" || true)
           echo "::notice::cutover-preflight proofs executed=$executed expected>=$DJINN_CUTOVER_EXPECTED_PROOFS"
           if [ "$executed" -lt "$DJINN_CUTOVER_EXPECTED_PROOFS" ]; then
             echo "::error title=Cutover preflight proofs did not run::executed $executed, expected at least $DJINN_CUTOVER_EXPECTED_PROOFS. An ignored proof nobody runs is the exact defect this lane exists to prevent."
+            exit 1
+          fi
+          # A skipped proof is an unrun proof wearing a different hat.
+          if ! grep -qE '0 skipped' "$plain"; then
+            echo "::error title=Cutover preflight proofs were skipped::nextest reported skipped tests; --run-ignored all must execute every proof in this binary."
             exit 1
           fi
       - name: Build the deploy-time cutover preflight driver
