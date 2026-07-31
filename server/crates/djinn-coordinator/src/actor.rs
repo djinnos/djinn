@@ -106,6 +106,15 @@ pub(super) fn new_doctor_registry_handle() -> DoctorRegistryHandle {
     Arc::new(djinn_core::doctor::DoctorRegistry::new())
 }
 
+/// Borrow a handle as a plain registry reference.
+///
+/// The deref coercion that gets there differs per `cfg` — `&&'static T` in
+/// production, `&Arc<T>` under test — so it happens here instead of at every
+/// call site, where the production spelling would be a `needless_borrow`.
+pub(super) fn registry_of(handle: &DoctorRegistryHandle) -> &djinn_core::doctor::DoctorRegistry {
+    handle
+}
+
 /// Coordinator actor state.
 ///
 /// Durability boundary: `last_dispatched`, `inflight_dispatches`,
@@ -674,7 +683,7 @@ impl CoordinatorActor {
                 )),
             );
         };
-        register_checks_into(&doctor_registry);
+        register_checks_into(registry_of(&doctor_registry));
         // Under `cfg(test)` the line above filled a registry private to this
         // actor, so the global still needs its (unread) registration to keep
         // source lifetimes exactly as they were — see [`DoctorRegistryHandle`].
@@ -877,7 +886,7 @@ impl CoordinatorActor {
 
     /// The registry this actor's checks live in. See [`DoctorRegistryHandle`].
     pub(super) fn doctor_registry(&self) -> &djinn_core::doctor::DoctorRegistry {
-        &self.doctor_registry
+        registry_of(&self.doctor_registry)
     }
 
     pub fn dispatch_state_snapshot(&self) -> CoordinatorDebugSnapshot {
