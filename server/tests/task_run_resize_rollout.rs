@@ -206,7 +206,12 @@ async fn seed_nonterminal_resize_row(db: &Database, task_run_id: &str) {
         panic!("the permit pool must admit the fixture run");
     };
     permits
-        .bind_or_refresh_job_uid(task_run_id, &row.permit_id, row.fencing_token, "job-uid-eeky")
+        .bind_or_refresh_job_uid(
+            task_run_id,
+            &row.permit_id,
+            row.fencing_token,
+            "job-uid-eeky",
+        )
         .await
         .map(|_| ())
         .unwrap_or_else(|error| panic!("binding a Job UID must succeed: {error}"));
@@ -319,8 +324,7 @@ struct LocalRegistry {
 
 impl LocalRegistry {
     async fn start() -> Self {
-        let manifests: Arc<Mutex<HashMap<String, Vec<u8>>>> =
-            Arc::new(Mutex::new(HashMap::new()));
+        let manifests: Arc<Mutex<HashMap<String, Vec<u8>>>> = Arc::new(Mutex::new(HashMap::new()));
         let state = Arc::clone(&manifests);
         let app = axum::Router::new().route(
             "/v2/{repository}/manifests/{reference}",
@@ -463,13 +467,14 @@ async fn retention_is_proven_by_a_registry_round_trip_not_by_a_stored_column() {
     assert_real_postgres(&db).await;
     let registry = LocalRegistry::start().await;
 
-    let manifest = br#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json"}"#;
+    let manifest =
+        br#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json"}"#;
     let recorded = registry.push("djinn-image-legacy", manifest);
     seed_image(&db, "legacy", Some(&recorded), None).await;
 
     let rollout = ResizeRollout::new(
         db.clone(),
-        signed_inventory(&[recorded.clone()]),
+        signed_inventory(std::slice::from_ref(&recorded)),
         durable_admission(&db),
         RecordingPodPlane::drained(),
         registry.probe(),
@@ -834,7 +839,10 @@ async fn both_flips_are_gated_on_zero_live_pods_and_zero_nonterminal_rows() {
             assert_eq!(rows.len(), 1);
             assert_eq!(rows[0].task_run_id, run);
             assert_eq!(rows[0].state, "BirthConfirmed");
-            assert_eq!(rows[0].pod_uid.as_deref(), Some(format!("uid-{run}").as_str()));
+            assert_eq!(
+                rows[0].pod_uid.as_deref(),
+                Some(format!("uid-{run}").as_str())
+            );
 
             assert_eq!(
                 rollout.flip_authority_mode(0, target).await,
@@ -844,7 +852,11 @@ async fn both_flips_are_gated_on_zero_live_pods_and_zero_nonterminal_rows() {
                 }),
                 "{label}: an unproven drain must not be flippable"
             );
-            assert_eq!(authority(&db).await, (LEAF, 0), "{label}: mode must not move");
+            assert_eq!(
+                authority(&db).await,
+                (LEAF, 0),
+                "{label}: mode must not move"
+            );
         }
 
         // ── one live task-run Pod blocks this flip ───────────────────────
@@ -876,7 +888,11 @@ async fn both_flips_are_gated_on_zero_live_pods_and_zero_nonterminal_rows() {
             };
             assert_eq!(live.len(), 1);
             assert_eq!(live[0].pod_name, "taskrun-still-running");
-            assert_eq!(authority(&db).await, (LEAF, 0), "{label}: mode must not move");
+            assert_eq!(
+                authority(&db).await,
+                (LEAF, 0),
+                "{label}: mode must not move"
+            );
         }
     }
 }
@@ -957,7 +973,7 @@ async fn rollback_is_blocked_and_leaves_admission_paused() {
         let inventory = match case {
             // The signed allowlist file is absent from the deployment.
             "allowlist absent" => LegacyDigestInventory::Unconfigured,
-            _ => signed_inventory(&[retained_digest.clone()]),
+            _ => signed_inventory(std::slice::from_ref(&retained_digest)),
         };
         if case == "digest not pullable" {
             registry.delete("djinn-image-legacy", &retained_digest);
@@ -1123,7 +1139,11 @@ async fn the_flip_cannot_precede_the_drain_and_the_resume_cannot_precede_the_fli
             missing: RolloutStep::DrainProven
         })
     );
-    assert_eq!(authority(&db).await, (LEAF, 0), "the mode must not have moved");
+    assert_eq!(
+        authority(&db).await,
+        (LEAF, 0),
+        "the mode must not have moved"
+    );
 
     // REORDERING 2 — resume before the flip is confirmed.
     rollout.prove_drained().await.unwrap();
@@ -1342,7 +1362,10 @@ fn the_driver_exposes_no_seam_for_a_fake_repository() {
         concat!("Mock", "Image"),
         concat!("Fake", "Database"),
     ] {
-        assert!(!tests.contains(forbidden), "{forbidden:?} is forbidden here");
+        assert!(
+            !tests.contains(forbidden),
+            "{forbidden:?} is forbidden here"
+        );
     }
 }
 

@@ -78,7 +78,8 @@ async fn load(
     public_key: &str,
     signature: &str,
 ) -> Result<djinn_db::repositories::image::SignedLegacyAllowlist, LegacyAllowlistDefect> {
-    let inventory = LegacyDigestInventory::from_signed_document(doc, Some(public_key), Some(signature));
+    let inventory =
+        LegacyDigestInventory::from_signed_document(doc, Some(public_key), Some(signature));
     repo.signed_legacy_digest_allowlist(&inventory).await
 }
 

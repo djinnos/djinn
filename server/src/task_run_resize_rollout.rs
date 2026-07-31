@@ -377,12 +377,7 @@ pub fn classify_catalog_image(
         }
     })?;
 
-    match decide_admission(
-        mode,
-        declared,
-        image.registry_digest.as_deref(),
-        inventory,
-    ) {
+    match decide_admission(mode, declared, image.registry_digest.as_deref(), inventory) {
         Ok(AdmissionDecision::Admitted(protocol)) => match declared {
             Some(_) => Ok(CatalogVerdict::Declared(protocol)),
             None => {
@@ -392,7 +387,9 @@ pub fn classify_catalog_image(
                 PreProtocolDigest::parse(raw)
                     .map(CatalogVerdict::LegacyLeafAuthority)
                     .map_err(|malformed| {
-                        CatalogDefectReason::Rejected(AdmissionRejection::MalformedDigest(malformed))
+                        CatalogDefectReason::Rejected(AdmissionRejection::MalformedDigest(
+                            malformed,
+                        ))
                     })
             }
         },
@@ -593,7 +590,10 @@ impl ResizeRollout {
     /// [`RolloutBlocked`] never reaches it.
     #[must_use]
     pub fn journal(&self) -> Vec<RolloutStep> {
-        self.journal.lock().expect("rollout journal poisoned").clone()
+        self.journal
+            .lock()
+            .expect("rollout journal poisoned")
+            .clone()
     }
 
     /// How many dispatch attempts were admitted while admission was paused.
@@ -983,7 +983,9 @@ impl ResizeRollout {
             SetLauncherAuthorityModeResult::Uninitialized => {
                 Err(RolloutBlocked::AuthorityUninitialized)
             }
-            SetLauncherAuthorityModeResult::Unavailable => Err(RolloutBlocked::AuthorityUnavailable),
+            SetLauncherAuthorityModeResult::Unavailable => {
+                Err(RolloutBlocked::AuthorityUnavailable)
+            }
         }
     }
 
