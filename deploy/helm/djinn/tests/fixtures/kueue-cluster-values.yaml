@@ -1,0 +1,136 @@
+# Djinn chart values for the DISPOSABLE armed-Kueue cluster harness (fbiy-B0).
+#
+# Consumed by scripts/kind/setup-kueue-cluster.sh and asserted against by
+# server/crates/djinn-k8s/tests/kueue_cluster_harness.rs.
+#
+# THIS FILE ARMS KUEUE. It is safe only because the only cluster it is ever
+# applied to is one `setup-kueue-cluster.sh` created seconds earlier and
+# deletes on the way out. Arming the production VPS is a gated operator act
+# behind `deploy/kueue/preflight.sh --mode cutover` and belongs to epic 4c9q's
+# runbook — not here, and not to fbiy.
+#
+# WHAT THIS INSTALL IS AND IS NOT
+# -------------------------------
+# It is a real `helm upgrade --install` of the real chart, so the chart's own
+# arming invariants (namespace.yaml's labelling gate, deployment-server.yaml's
+# "armed implies enabled" and RuntimeClass-stacking gates) execute for real.
+#
+# It is NOT a running Djinn. The harness proves ADMISSION topology — the
+# namespace label, the ClusterQueue quota, the three LocalQueues, and whether
+# Kueue captures a Job the real renderer produced. None of that needs a live
+# server, database or vector store, so the components that would only pull
+# hundreds of MB of images onto a throwaway node are switched off below and the
+# install is deliberately not `--wait`ed. Expect the djinn-server Deployment to
+# sit in ImagePullBackOff; that is the designed state, not a failure.
+
+namespace:
+  create: true
+  name: djinn
+
+# -----------------------------------------------------------------------------
+# The armed queue topology — the entire point of the harness
+# -----------------------------------------------------------------------------
+kueue:
+  enabled: true
+  # Labels the Namespace `djinn.io/kueue-managed=true` AND sets DJINN_KUEUE_ARMED
+  # on djinn-server. Both halves hang off this one value on purpose; see the
+  # chart's values.yaml.
+  armed: true
+  # DELIBERATELY NOT the chart default of 3.
+  #
+  # The live assertion reads the ClusterQueue's `pods` nominalQuota back off the
+  # API server and compares it against THIS number. If it matched the chart
+  # default, that assertion would pass just as well against an install that
+  # never read this file — the "green against nothing" shape fbiy exists to
+  # refute. 2 is also small enough to be a real bound on a single-node kind
+  # node, which is what fbiy-B1 will need.
+  buildPods: 2
+  # Irrelevant while namespace.create is true (the chart applies the label
+  # itself), stated so nobody reads its absence as an oversight.
+  namespaceLabelledExternally: false
+
+# -----------------------------------------------------------------------------
+# NO RuntimeClass — and that is load-bearing, not an omission
+# -----------------------------------------------------------------------------
+# `deploy/kueue/preflight.sh --mode cutover` must exit 10 against this cluster.
+# Exit 10 is "RuntimeClass djinn-cgroup-writable is absent", the ordering gate
+# that took production down twice. A harness that quietly installed the
+# RuntimeClass would turn AC4 into a check of nothing.
+#
+# These three values are the chart's shipped defaults. They are restated here
+# because the harness DEPENDS on them: if a future chart default flipped
+# `cgroupWritable.runtimeClass.enabled` on, the preflight assertion would go
+# green for the wrong reason without a single line of this file changing.
+#
+# `cgroupLauncher.mode: disabled` is required alongside them. The chart refuses
+# `kueue.armed=true` + `cgroupLauncher.mode=required` + no RuntimeClass outright
+# (templates/deployment-server.yaml), and it is right to: the task-run renderer
+# asserts the RuntimeClass and panics the coordinator otherwise. Proving the
+# RuntimeClass is absent therefore REQUIRES the launcher to be disabled — the
+# two facts are one fact. fbiy-C1, which proves the governor end to end, is the
+# task that flips both together after teaching the kind node the
+# `runc-cgroupwritable` containerd handler.
+cgroupLauncher:
+  mode: disabled
+cgroupWritable:
+  runtimeClass:
+    enabled: false
+  taskRuns:
+    enabled: false
+
+# -----------------------------------------------------------------------------
+# Everything below only exists to make the install land on one throwaway node
+# -----------------------------------------------------------------------------
+# Bundled data plane off: nothing the harness asserts reads it, and each one
+# costs an image pull and a PVC on a node that is deleted minutes later.
+postgres:
+  enabled: false
+qdrant:
+  enabled: false
+imagePipeline:
+  enabled: false
+ingress:
+  enabled: false
+monitoring:
+  enabled: false
+logCollector:
+  enabled: false
+
+# With postgres.enabled=false the chart requires an external URL. This one
+# points at nothing on purpose: no pod in this install is ever expected to
+# reach a database, and a harness that needed real credentials to prove an
+# admission contract would not be disposable.
+database:
+  externalUrl: "postgres://harness:harness@127.0.0.1:5432/djinn-kueue-harness?sslmode=disable"
+
+# The chart REFUSES to render a fresh install without this name
+# (templates/deployment-server.yaml). No Secret of this name is ever created:
+# only the djinn-server bootstrap initContainer resolves it, that container is
+# behind an image tag that does not exist here, and inventing a designated
+# operator identity is exactly the kind of fake input that would make the
+# harness look more real than it is.
+migration:
+  designatedOperatorSecret: djinn-kueue-harness-operator
+
+# kind provisions `standard` (rancher.io/local-path), which is ReadWriteOnce
+# only. The chart's committed defaults are the multi-node ReadWriteMany
+# production shape and would leave every claim unbindable here.
+storage:
+  mirrors:
+    accessMode: ReadWriteOnce
+    size: 1Gi
+  cache:
+    accessMode: ReadWriteOnce
+    size: 1Gi
+  projects:
+    accessMode: ReadWriteOnce
+    size: 1Gi
+
+resources:
+  server:
+    requests:
+      cpu: "50m"
+      memory: "128Mi"
+    limits:
+      cpu: "1"
+      memory: "1Gi"
