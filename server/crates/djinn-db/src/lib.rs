@@ -3,6 +3,7 @@ pub mod background;
 pub mod crypto;
 pub mod database;
 pub mod error;
+pub mod launcher_compatibility;
 pub mod migrations;
 pub mod note_hash;
 pub mod repositories;
@@ -55,6 +56,10 @@ pub use database::{
     SqliteVecStatus, default_db_path, test_database_base_url,
 };
 pub use error::{DbError as Error, DbResult as Result, SpecLintRejected, SpecLintViolation};
+pub use launcher_compatibility::{
+    AdmissionDecision, AdmissionRejection, InventoryFault, LegacyDigestInventory,
+    PreProtocolDigest, admit_with_legacy_inventory, decide_admission,
+};
 #[cfg(any(test, feature = "test-support"))]
 pub use repositories::repo_graph_generation::ReservedPublicationFailureStage;
 pub use repositories::tool_call_evaluator::{
@@ -129,7 +134,7 @@ pub use repositories::{
     },
     extension_load_diagnostic::{ExtensionLoadDiagnosticRepository, InsertExtensionLoadDiagnostic},
     git_settings::GitSettingsRepository,
-    image::{Image, ImageRepository, ImageStatus, SelectedCatalogImage},
+    image::{Image, ImageRepository, ImageStatus, PreProtocolImage, SelectedCatalogImage},
     invocation_lease_authority::{
         InvocationLeaseAuthorityRepository, InvocationLeaseAuthorityRow, InvocationLeaseMode,
     },

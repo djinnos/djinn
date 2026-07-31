@@ -36,6 +36,15 @@ use djinn_runtime::{ResolvedCredentials, SessionRuntime};
 use djinn_supervisor::ConnectionRegistry;
 use k8s_openapi::api::batch::v1::Job;
 
+/// A canonical immutable manifest digest: `sha256:` + 64 lowercase hex.
+///
+/// The dispatch-path fixtures below must use a well-formed digest because
+/// `resolve_dispatch_image` now runs task vf7a's admission compatibility fence,
+/// which compares digests exactly. `render_authority_protocol`'s own unit
+/// assertions are unaffected — it takes the digest as an opaque presence check.
+const CANONICAL_DIGEST: &str =
+    "sha256:7822b7de0000000000000000000000000000000000000000000000000000cafe";
+
 /// Read one container's environment value, if present.
 fn env_of(job: &Job, container: &str, name: &str) -> Option<String> {
     let pod = job.spec.as_ref()?.template.spec.as_ref()?;
@@ -219,7 +228,11 @@ fn a_disabled_launcher_render_is_left_alone() {
 async fn a_protocol_less_undigested_image_creates_zero_kubernetes_objects() {
     // Sanity: the SAME flow with a digest-pinned image reaches the POSTs, so
     // the zero below is caused by the refusal and not by an inert harness.
-    let (created, digest_pinned) = prepare_with_image(Some("sha256:abc"), None).await;
+    //
+    // The digest is canonical (`sha256:` + 64 lowercase hex): task vf7a's
+    // admission compatibility fence compares digests exactly, so a placeholder
+    // like `sha256:abc` is refused as a non-digest before the render is reached.
+    let (created, digest_pinned) = prepare_with_image(Some(CANONICAL_DIGEST), None).await;
     assert!(
         digest_pinned.is_ok(),
         "a digest-pinned image must still dispatch: {digest_pinned:?}"
@@ -245,7 +258,7 @@ async fn a_protocol_less_undigested_image_creates_zero_kubernetes_objects() {
 
     // And a declaring image dispatches, carrying its declaration.
     let (created, declared) = prepare_with_image(
-        Some("sha256:abc"),
+        Some(CANONICAL_DIGEST),
         Some(LauncherAuthorityProtocol::ResizeV2),
     )
     .await;
@@ -307,9 +320,14 @@ async fn prepare_with_image(
 
     let db = Database::open_in_memory().expect("in-memory database");
     db.ensure_initialized().await.expect("migrations");
+    // Bounded to `projects.id`'s varchar(36); the digest is only summarized.
     let project_id = format!(
         "proj-{}-{}",
-        digest.unwrap_or("nodigest"),
+        if digest.is_some() {
+            "digested"
+        } else {
+            "nodigest"
+        },
         protocol.map(|p| p.as_wire()).unwrap_or("undeclared")
     );
     ProjectRepository::new(db.clone(), EventBus::noop())
@@ -335,6 +353,22 @@ async fn prepare_with_image(
         .set_project_image(&project_id, Some(&image_id))
         .await
         .expect("select the catalog image");
+
+    // `resolve_dispatch_image` now admits against the DURABLE authority
+    // singleton (migration 167) before `prepare` renders anything (task vf7a),
+    // so a declaring fixture only dispatches when the server actually runs the
+    // protocol it declares. Align the singleton with the fixture's declaration;
+    // the mismatch case has its own tests in `djinn-db`.
+    if let Some(protocol) = protocol {
+        let modes = djinn_db::LauncherAuthorityModeRepository::new(db.clone());
+        let epoch = modes
+            .read()
+            .await
+            .expect("read the authority singleton")
+            .expect("migration 167 seeds it")
+            .epoch;
+        modes.set_mode(epoch, protocol).await;
+    }
 
     let runtime = KubernetesRuntime::from_client_with_db(
         client,

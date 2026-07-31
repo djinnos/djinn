@@ -75,11 +75,38 @@ impl Image {
     /// `leaf-v1` is the behavior that predates the declaration, so it is the
     /// only correct reading of an undeclared row — every already-built image on
     /// a live deployment is one of those and must keep dispatching.
+    ///
+    /// **This is a description of the artifact, not an admission decision.** It
+    /// answers "what would this run as", and knows nothing about the server's
+    /// authority mode or the pre-protocol digest inventory. The decision that
+    /// governs dispatch is
+    /// [`decide_admission`](crate::launcher_compatibility::decide_admission),
+    /// reached through
+    /// [`resolve_dispatch_image`](crate::repositories::project::ProjectRepository::resolve_dispatch_image).
+    /// Reading this as permission is how an undeclared, uninventoried artifact
+    /// would reach a shell under a guessed authority.
     pub fn effective_launcher_protocol(
         &self,
     ) -> std::result::Result<LauncherAuthorityProtocol, ParseLauncherAuthorityProtocolError> {
         Ok(self.declared_launcher_protocol()?.unwrap_or_default())
     }
+}
+
+/// A `ready` catalog image that declares no launcher authority protocol but IS
+/// pinned to an immutable manifest digest — the exact population the signed
+/// pre-protocol digest inventory exists to vouch for.
+///
+/// Produced by [`ImageRepository::legacy_pre_protocol_digests`] so an operator
+/// builds the inventory document from the catalog itself rather than by hand.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PreProtocolImage {
+    pub image_id: String,
+    pub name: String,
+    pub tag: Option<String>,
+    /// Raw `images.registry_digest`. Not validated here — an entry that is not
+    /// a canonical `sha256:<64 hex>` must be visible to the operator building
+    /// the document, not silently dropped from it.
+    pub registry_digest: String,
 }
 
 /// A catalog image currently selected by at least one project, with the
@@ -294,6 +321,39 @@ impl ImageRepository {
         Ok(())
     }
 
+    /// Enumerate the `ready`, digest-pinned images that declare no launcher
+    /// authority protocol.
+    ///
+    /// This is the candidate set for the signed pre-protocol digest inventory:
+    /// exactly the artifacts that predate migration 166 and can still be named
+    /// exactly. Rows with no digest are *not* returned — there is no immutable
+    /// identity to vouch for, so the inventory cannot admit them and
+    /// `render_authority_protocol` refuses them; the fix for those is a
+    /// rebuild, not an allowlist entry.
+    ///
+    /// Ordered by id so a document generated twice from the same catalog is
+    /// byte-identical, which is what makes its signature reproducible.
+    pub async fn legacy_pre_protocol_digests(&self) -> Result<Vec<PreProtocolImage>> {
+        self.db.ensure_initialized().await?;
+        let rows = sqlx::query(
+            "SELECT id, name, tag, registry_digest FROM images \
+             WHERE status = 'ready' AND launcher_authority_protocol IS NULL \
+               AND registry_digest IS NOT NULL AND registry_digest <> '' \
+             ORDER BY id",
+        )
+        .fetch_all(self.db.pool())
+        .await?;
+        Ok(rows
+            .iter()
+            .map(|r| PreProtocolImage {
+                image_id: r.get("id"),
+                name: r.get("name"),
+                tag: r.get("tag"),
+                registry_digest: r.get("registry_digest"),
+            })
+            .collect())
+    }
+
     pub async fn mark_failed(&self, id: &str, error: &str) -> Result<()> {
         self.db.ensure_initialized().await?;
         sqlx::query("UPDATE images SET status = 'failed', last_error = $2 WHERE id = $1")
@@ -448,6 +508,12 @@ mod tests {
 
     use crate::repositories::project::ProjectRepository;
 
+    /// A canonical immutable manifest digest: `sha256:` + 64 lowercase hex.
+    /// The launcher-authority fence compares digests exactly, so fixtures that
+    /// have to survive dispatch must use a well-formed one.
+    const CANONICAL_DIGEST: &str =
+        "sha256:7822b7de0000000000000000000000000000000000000000000000000000cafe";
+
     async fn seed_project(db: &Database, id: &str) {
         db.ensure_initialized().await.unwrap();
         ProjectRepository::new(db.clone(), EventBus::noop())
@@ -545,8 +611,16 @@ mod tests {
         );
 
         // Mark the catalog image ready with a digest → digest-pinned pull ref.
+        // The digest is canonical (`sha256:` + 64 lowercase hex) because the
+        // launcher-authority fence compares digests exactly; a placeholder like
+        // `sha256:abc` names no artifact and is refused before dispatch.
         images
-            .mark_ready("i1", "reg/djinn-image-i1:hash", Some("sha256:abc"), None)
+            .mark_ready(
+                "i1",
+                "reg/djinn-image-i1:hash",
+                Some(CANONICAL_DIGEST),
+                None,
+            )
             .await
             .unwrap();
         let d = projects
@@ -557,7 +631,7 @@ mod tests {
         assert_eq!(d.from_catalog.as_deref(), Some("i1"));
         assert_eq!(
             d.pull_ref().as_deref(),
-            Some("reg/djinn-image-i1@sha256:abc"),
+            Some(format!("reg/djinn-image-i1@{CANONICAL_DIGEST}").as_str()),
             "ready catalog image with a digest dispatches on the digest-pinned ref"
         );
 
