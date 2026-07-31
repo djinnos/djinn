@@ -416,7 +416,12 @@ fn worker_main(
         unsafe { libc::_exit(11) };
     }
     // A real prctl on a real process: from here the worker is non-dumpable.
-    if prepare_worker_readiness(&mut NativeWorkerDumpability).is_err() {
+    if prepare_worker_readiness(
+        &mut NativeWorkerDumpability,
+        djinn_cgroup_launcher::LauncherAuthorityProtocol::LeafV1,
+    )
+    .is_err()
+    {
         say!("fail:non-dumpable readiness");
         unsafe { libc::_exit(12) };
     }
@@ -430,7 +435,12 @@ fn worker_main(
             unsafe { libc::_exit(14) };
         }
     };
-    match prepare_worker_readiness(&mut NativeWorkerDumpability).map(|r| client.ready(r)) {
+    match prepare_worker_readiness(
+        &mut NativeWorkerDumpability,
+        djinn_cgroup_launcher::LauncherAuthorityProtocol::LeafV1,
+    )
+    .map(|r| client.ready(r))
+    {
         Ok(Ok(())) => {}
         Ok(Err(error)) | Err(error) => {
             say!("fail:worker readiness: {error}");

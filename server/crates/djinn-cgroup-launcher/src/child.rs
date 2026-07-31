@@ -2,27 +2,70 @@
 
 use std::os::fd::RawFd;
 
-use crate::Error;
+use crate::{Error, LauncherAuthorityProtocol};
 
 pub const CHILD_UID: u32 = 1001;
 pub const ARTIFACT_GID: u32 = 1000;
+
+/// Length of the readiness proof itself, before the protocol byte.
+const PROOF_BYTES: usize = 16;
+/// Wire length of a [`WorkerReadinessAssertion`]: the proof plus exactly one
+/// [`LauncherAuthorityProtocol::frame_byte`]. A frame of any other length is
+/// refused rather than zero-extended — see [`WorkerReadinessAssertion::from_wire`].
+const ASSERTION_BYTES: usize = PROOF_BYTES + 1;
+
 /// Assertion emitted by the trusted worker only after it locally disabled and
 /// re-read its own dumpability state. It is accepted only on an already
 /// authenticated worker connection.
+///
+/// It carries the worker's own [`LauncherAuthorityProtocol`] as well as the
+/// proof. The launcher and the worker binary are copied from the *same* image
+/// (`djinn-image-builder`'s `dockerfile.rs`), so the two agree by construction —
+/// the point of putting the protocol on this frame is that a disagreement is
+/// *observable* instead of silent. Before this field existed, a launcher started
+/// with `DJINN_LAUNCHER_AUTHORITY_PROTOCOL=resize-v2` next to a worker that
+/// believed it was on `leaf-v1` produced no error anywhere: the launcher simply
+/// never wrote leaf `cpu.max`, and the build ran at whatever quota the pod
+/// happened to have. The broker now refuses that pairing at READY, before any
+/// invocation exists.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct WorkerReadinessAssertion {
-    proof: [u8; 16],
+    proof: [u8; PROOF_BYTES],
+    protocol: LauncherAuthorityProtocol,
 }
 impl WorkerReadinessAssertion {
-    pub(crate) fn wire_bytes(self) -> [u8; 16] {
-        self.proof
+    /// The quota-authority protocol the WORKER believes this pod runs under.
+    pub fn protocol(self) -> LauncherAuthorityProtocol {
+        self.protocol
     }
+
+    pub(crate) fn wire_bytes(self) -> [u8; ASSERTION_BYTES] {
+        let mut bytes = [0_u8; ASSERTION_BYTES];
+        bytes[..PROOF_BYTES].copy_from_slice(&self.proof);
+        bytes[PROOF_BYTES] = self.protocol.frame_byte();
+        bytes
+    }
+
+    /// Decode a READY payload.
+    ///
+    /// Fail-closed on every axis: a frame that is not exactly
+    /// [`ASSERTION_BYTES`] long is refused (a 16-byte frame from a
+    /// protocol-unaware peer included — the two binaries ride one image, so
+    /// there is no rolling-skew case to accommodate), an all-zero proof is
+    /// refused, and a protocol byte outside
+    /// [`LauncherAuthorityProtocol::from_frame_byte`] is refused rather than
+    /// defaulted. `0` is unassigned precisely so a truncated or zeroed frame
+    /// cannot decode as `leaf-v1`.
     pub(crate) fn from_wire(bytes: &[u8]) -> Result<Self, Error> {
-        let proof: [u8; 16] = bytes.try_into().map_err(|_| Error::InvalidWorker)?;
+        let bytes: [u8; ASSERTION_BYTES] = bytes.try_into().map_err(|_| Error::InvalidWorker)?;
+        let (proof, protocol) = bytes.split_at(PROOF_BYTES);
+        let proof: [u8; PROOF_BYTES] = proof.try_into().map_err(|_| Error::InvalidWorker)?;
         if proof.iter().all(|byte| *byte == 0) {
             return Err(Error::InvalidWorker);
         }
-        Ok(Self { proof })
+        let protocol =
+            LauncherAuthorityProtocol::from_frame_byte(protocol[0]).ok_or(Error::InvalidWorker)?;
+        Ok(Self { proof, protocol })
     }
 }
 
@@ -54,8 +97,15 @@ impl WorkerDumpability for NativeWorkerDumpability {
 }
 
 /// Run this in the worker process before sending readiness to the broker.
+///
+/// `protocol` is the worker's OWN view of the pod's quota authority (from
+/// `DJINN_LAUNCHER_AUTHORITY_PROTOCOL`, the same variable the launcher reads).
+/// It is a required argument rather than a defaulted field so a caller cannot
+/// assert `leaf-v1` by omission — that is the failure mode this whole frame
+/// exists to make impossible.
 pub fn prepare_worker_readiness(
     syscalls: &mut impl WorkerDumpability,
+    protocol: LauncherAuthorityProtocol,
 ) -> Result<WorkerReadinessAssertion, Error> {
     syscalls.set_non_dumpable()?;
     if syscalls.get_dumpable()? != 0 {
@@ -63,11 +113,11 @@ pub fn prepare_worker_readiness(
     }
     // The proof is carried by the authenticated socket; it prevents the
     // privileged server from manufacturing readiness from an empty frame.
-    let mut proof = [0_u8; 16];
+    let mut proof = [0_u8; PROOF_BYTES];
     let mut entropy = std::fs::File::open("/dev/urandom").map_err(Error::Io)?;
     use std::io::Read;
     entropy.read_exact(&mut proof).map_err(Error::Io)?;
-    Ok(WorkerReadinessAssertion { proof })
+    Ok(WorkerReadinessAssertion { proof, protocol })
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -473,7 +523,9 @@ mod tests {
             get_result: Ok(0),
             calls: vec![],
         };
-        assert!(prepare_worker_readiness(&mut dumpability).is_ok());
+        assert!(
+            prepare_worker_readiness(&mut dumpability, LauncherAuthorityProtocol::LeafV1).is_ok()
+        );
         assert_eq!(dumpability.calls, ["set", "get"]);
     }
 
@@ -490,7 +542,10 @@ mod tests {
                 get_result,
                 calls: vec![],
             };
-            assert!(prepare_worker_readiness(&mut dumpability).is_err());
+            assert!(
+                prepare_worker_readiness(&mut dumpability, LauncherAuthorityProtocol::LeafV1)
+                    .is_err()
+            );
             assert_eq!(
                 dumpability.calls,
                 if set_ok {

@@ -176,7 +176,13 @@ fn connected_client(stream: UnixStream) -> UnixBrokerClient {
     let mut client =
         UnixBrokerClient::connect(stream, CREDENTIAL).expect("the broker must authenticate us");
     client
-        .ready(prepare_worker_readiness(&mut TestDumpability).expect("readiness"))
+        .ready(
+            prepare_worker_readiness(
+                &mut TestDumpability,
+                djinn_cgroup_launcher::LauncherAuthorityProtocol::LeafV1,
+            )
+            .expect("readiness"),
+        )
         .expect("READY");
     client
 }

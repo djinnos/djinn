@@ -362,6 +362,13 @@ impl<F: CgroupFs, S: SpawnIntoCgroup> Launcher<F, S> {
         self.config.leased_quota
     }
 
+    /// The quota-authority protocol this launcher was configured with — the
+    /// value every leaf is born under, and the one the broker checks an
+    /// arriving worker's READY assertion against.
+    pub fn authority_protocol(&self) -> LauncherAuthorityProtocol {
+        self.config.authority_protocol()
+    }
+
     /// The `cpu.max` line a leaf is born at under `authority`.
     ///
     /// Exposed so the behavioural proof asserts against the same function the
@@ -619,6 +626,19 @@ pub enum Error {
     InvalidEvents,
     #[error("worker identity or non-dumpability check failed")]
     InvalidWorker,
+    /// The READY assertion named a quota-authority protocol this launcher is
+    /// not running. Refused before any invocation is bound, because the two
+    /// sides disagreeing about who owns `cpu.max` is not a state any build may
+    /// start in: under one reading the launcher writes the leaf quota, under
+    /// the other Pod resize does, and nothing would report the difference.
+    #[error(
+        "worker asserted launcher authority protocol {worker}, but this launcher is running \
+         {launcher}; refusing readiness before any invocation is bound"
+    )]
+    ProtocolMismatch {
+        launcher: LauncherAuthorityProtocol,
+        worker: LauncherAuthorityProtocol,
+    },
     #[error("unix peer did not match the authenticated worker")]
     UnauthenticatedPeer,
     #[error("worker-private launcher credential did not match")]

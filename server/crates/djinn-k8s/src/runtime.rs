@@ -514,8 +514,18 @@ impl SessionRuntime for KubernetesRuntime {
         let project_image_tag = self.dispatch_image_override.clone();
         #[cfg(not(test))]
         let project_image_tag: Option<String> = None;
-        let project_image_tag = match project_image_tag {
-            Some(tag) => tag,
+        // The launcher authority protocol travels WITH the resolved image: it
+        // is what the artifact declared at build time (migration 166), and the
+        // rendered Job must carry it into the pod or #2823's reachable
+        // `resize-v2` branch has nothing feeding it. Resolved here, applied to
+        // the Job below, BEFORE any Job is created.
+        let (project_image_tag, authority_protocol) = match project_image_tag {
+            // Test-only image override: no catalog row exists, so the render
+            // uses the pre-protocol behavior the override has always implied.
+            Some(tag) => (
+                tag,
+                djinn_cgroup_launcher::LauncherAuthorityProtocol::LeafV1,
+            ),
             None => {
                 let dispatch_image = repo
                     .resolve_dispatch_image(&spec.project_id)
@@ -526,10 +536,23 @@ impl SessionRuntime for KubernetesRuntime {
                             spec.project_id
                         ))
                     })?;
-                match dispatch_image.as_ref().and_then(|d| d.pull_ref()) {
-                    Some(pull_ref) => pull_ref,
-                    None => return Err(RuntimeError::DevcontainerMissing(spec.project_id.clone())),
-                }
+                let Some(dispatch_image) = dispatch_image else {
+                    return Err(RuntimeError::DevcontainerMissing(spec.project_id.clone()));
+                };
+                let Some(pull_ref) = dispatch_image.pull_ref() else {
+                    return Err(RuntimeError::DevcontainerMissing(spec.project_id.clone()));
+                };
+                let protocol = crate::launcher::render_authority_protocol(
+                    dispatch_image.authority_protocol,
+                    dispatch_image.digest.as_deref(),
+                )
+                .map_err(|error| {
+                    RuntimeError::Prepare(format!(
+                        "launcher authority protocol for project {}: {error}",
+                        spec.project_id
+                    ))
+                })?;
+                (pull_ref, protocol)
             }
         };
 
@@ -771,6 +794,24 @@ impl SessionRuntime for KubernetesRuntime {
             read_source_cache_sub_path.as_deref(),
         );
         crate::build_resources::apply_resolved_resources(&mut job, resolved_task_resources);
+        // Carry the image's quota authority into the pod. Fails closed before
+        // the Job is POSTed: an armed render with no launcher container would
+        // otherwise start a launcher that silently defaults to leaf-v1.
+        if let Err(error) = crate::launcher::apply_launcher_authority_protocol(
+            &mut job,
+            self.config.cgroup_launcher_mode,
+            authority_protocol,
+        ) {
+            self.drop_pending(&task_run_id_str).await;
+            let secrets_bg = secrets.clone();
+            let name = resource_name.clone();
+            tokio::spawn(async move {
+                let _ = secrets_bg.delete(&name, &DeleteParams::default()).await;
+            });
+            return Err(RuntimeError::Prepare(format!(
+                "launcher authority protocol render: {error}"
+            )));
+        }
         let jobs: Api<Job> = Api::namespaced(self.client.clone(), ns);
         let created_job = match create_or_adopt_task_run_job(&jobs, &job, &resource_name).await {
             Ok(j) => j,
