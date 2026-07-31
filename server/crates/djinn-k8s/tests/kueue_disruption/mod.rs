@@ -443,6 +443,19 @@ pub fn repair_cluster_queue_for_admission(context: &str) -> RepairReport {
     }
 
     let pods_quota = pods_nominal_quota(context);
+    // Reported on EVERY call, in both directions. `01ze`'s AC4 is that this
+    // reads `false` against the fixed chart, and a flag that is only printed
+    // when it is true cannot be told apart from a helper that stopped running:
+    // absence of the finding would be evidence of nothing. Note the first live
+    // test in a run is the one whose value is about the CHART — it repairs the
+    // shared cluster, so every later call in the same run sees its own repair.
+    eprintln!(
+        "CHART REPAIR NEEDED: {} (namespace_selector_was_absent={}, uncovered_resources={:?}) \
+         [01ze AC4: must be false against the fixed chart]",
+        report.needed(),
+        report.namespace_selector_was_absent,
+        report.uncovered_resources,
+    );
     if report.needed() {
         eprintln!(
             "LIVE FINDING (fbiy-B2): the chart's armed ClusterQueue cannot admit a Job its own \
