@@ -282,10 +282,12 @@ fi
 
 # Guard 5b: state the feature gate only where stating it is legal.
 #
-# `InPlacePodVerticalScaling` is beta-on-by-default at 1.33 and GA from
-# 1.$GA_K8S_MINOR. Naming a GA gate is tolerated with a deprecation warning until
-# it is removed, and naming a REMOVED gate is a hard kubelet start failure — so
-# an unconditional `featureGates:` block silently pins this harness to a closing
+# `InPlacePodVerticalScaling` is beta-on-by-default at 1.33 and GA from 1.34
+# (measured 2026-07-31: a 1.35.0 kubelet logs "Setting GA feature gate
+# InPlacePodVerticalScaling=true. It will be removed in a future release").
+# Naming a GA gate is tolerated with a deprecation warning until it is removed,
+# and naming a REMOVED gate is a hard kubelet start failure — so an
+# unconditional `featureGates:` block silently pins this harness to a closing
 # window of node images. Below the GA minor the explicit statement still earns
 # its place: it is the only thing standing between a node image whose beta
 # default flipped and a run that reports "not confirmed" for a reason that has
