@@ -19,6 +19,27 @@
 //! DJINN_TEST_KIND=1 cargo test -p djinn-k8s --test kind_smoke -- --ignored
 //! ```
 //!
+//! Both tests additionally need the isolated test Postgres that
+//! `DJINN_TEST_DATABASE_URL` points at — see [`seeded_db`] for why a cluster
+//! smoke test grew a database dependency.
+//!
+//! TWO THINGS THIS FILE HAS TO DO BEFORE IT MAY BUILD A `kube::Client`
+//!
+//! 1. Install a process-level rustls `CryptoProvider`. Until this was added
+//!    (task `d2ae`) both tests below panicked *before their first API call*
+//!    with "Could not automatically determine the process-level CryptoProvider
+//!    from Rustls crate features" — a `#[ignore]`d, `DJINN_TEST_KIND`-gated
+//!    file that no CI lane runs, so nothing ever noticed. See
+//!    [`support::install_crypto_provider`] for the mechanism and for why the
+//!    server binary is unaffected.
+//! 2. Refuse any API server that is not on loopback. These tests CREATE Jobs
+//!    and Secrets. `kube::Client::try_default()` resolves whatever context
+//!    happens to be current, and every context in a Djinn developer's
+//!    kubeconfig is EKS — so an unguarded `try_default()` plus a stray
+//!    `DJINN_TEST_KIND=1` writes into a managed cluster. kind always serves on
+//!    loopback; no managed control plane does. Same discipline as
+//!    `tests/kueue_cluster_harness.rs` and `tests/kueue_disruption/mod.rs`.
+//!
 //! The tests do NOT attempt to run a full task-run end-to-end — a real task
 //! lifecycle needs the djinn-server TCP listener + mirror volume + GitHub App
 //! token, all out of scope until PR 4 pt2. Here we assert:
@@ -38,7 +59,12 @@ use std::env;
 use std::process::Command;
 use std::time::Duration;
 
+use djinn_cgroup_launcher::LauncherAuthorityProtocol;
+use djinn_core::events::EventBus;
 use djinn_core::models::TaskRunTrigger;
+use djinn_db::Database;
+use djinn_db::repositories::image::ImageRepository;
+use djinn_db::repositories::project::ProjectRepository;
 use djinn_k8s::config::KubernetesConfig;
 use djinn_k8s::runtime::KubernetesRuntime;
 use djinn_runtime::{ResolvedCredentials, SessionRuntime, SupervisorFlow, TaskRunSpec};
@@ -46,9 +72,21 @@ use k8s_openapi::api::batch::v1::Job;
 use k8s_openapi::api::core::v1::Secret;
 use kube::api::{Api, DeleteParams};
 
+mod support;
+
 /// Namespace the smoke tests write into. Assumed to exist — `make kind-up` in
 /// Phase 2 PR 4 creates it; otherwise we `kubectl create ns` it below.
 const TEST_NAMESPACE: &str = "djinn-test";
+
+/// A well-formed immutable manifest digest — `sha256:` + 64 lowercase hex.
+///
+/// Required, not decorative: migration 164 refuses to mark ready any image that
+/// declares a launcher authority protocol without capturing a digest, and
+/// `resolve_dispatch_image`'s vf7a admission fence compares digests exactly.
+/// The same constant, for the same reason, as
+/// `tests/launcher_authority_protocol_render.rs`.
+const CANONICAL_DIGEST: &str =
+    "sha256:7822b7de0000000000000000000000000000000000000000000000000000cafe";
 
 /// Minimal PATH-based which(1). Avoids pulling the `which` crate into this
 /// workspace for a single call site.
@@ -102,6 +140,45 @@ fn kind_test_enabled() -> bool {
     true
 }
 
+/// Build the `kube::Client` these tests talk to.
+///
+/// Two things happen here that `kube::Client::try_default()` does not do.
+///
+/// First, [`support::install_crypto_provider`] runs — without it the very next
+/// line panics on "Could not automatically determine the process-level
+/// CryptoProvider from Rustls crate features", before any request is sent. It
+/// is safe to call once per test: the install itself happens exactly once per
+/// process and is loud if it ever loses a race.
+///
+/// Second, the resolved API-server URL is checked. These tests create real
+/// Jobs and Secrets, and a Djinn developer's kubeconfig contains nothing but
+/// EKS contexts, so "whatever context is current" is not an acceptable target.
+/// kind serves on loopback and no managed control plane does, which makes the
+/// host a sufficient guard. `DJINN_TEST_KIND_CONTEXT` selects a specific
+/// kubeconfig context; without it the current context is used, and still has
+/// to clear the loopback check.
+async fn kind_client() -> kube::Client {
+    support::install_crypto_provider();
+
+    let options = kube::config::KubeConfigOptions {
+        context: env::var("DJINN_TEST_KIND_CONTEXT").ok(),
+        ..Default::default()
+    };
+    let config = kube::Config::from_kubeconfig(&options)
+        .await
+        .expect("kind_smoke: resolve a kubeconfig for the kind cluster");
+
+    let host = config.cluster_url.host().unwrap_or_default().to_owned();
+    assert!(
+        matches!(host.as_str(), "127.0.0.1" | "localhost" | "::1" | "[::1]"),
+        "kind_smoke: refusing to run against non-loopback API server {host:?} — these tests \
+         CREATE Jobs and Secrets, and every context in a Djinn kubeconfig is EKS. Point \
+         KUBECONFIG (or DJINN_TEST_KIND_CONTEXT) at a local kind cluster.",
+    );
+
+    kube::Client::try_from(config).expect("kind_smoke: build a kube client for the kind cluster")
+}
+
 /// Build a `KubernetesConfig` scoped to the kind test namespace.
 ///
 /// `server_addr` is never actually dialed during these tests — the worker Pod
@@ -112,6 +189,82 @@ fn test_config() -> KubernetesConfig {
     cfg.namespace = TEST_NAMESPACE.to_string();
     cfg.server_addr = "djinn.djinn-test.svc.cluster.local:8443".into();
     cfg
+}
+
+/// Bring up an isolated Postgres and seed the one project row `prepare()`
+/// insists on, returning the handle the runtime is built with.
+///
+/// WHY A DATABASE IS IN A CLUSTER SMOKE TEST. `prepare()` has resolved the
+/// per-project devcontainer image out of the database since Phase 3 PR 5, and
+/// it hard-fails rather than falling back to `config.image`. `kind_smoke.rs`
+/// still built its runtime with `KubernetesRuntime::from_client`, which leaves
+/// `db: None` — so even after the rustls provider was installed, both tests
+/// died on
+///
+/// ```text
+/// KubernetesRuntime constructed without a database handle;
+/// `with_db` / `from_client_with_db` is required to dispatch task-run Jobs
+/// ```
+///
+/// a second, independent rot in the same unrun file. Measured 2026-07-31
+/// against a live kind cluster, before this was added.
+///
+/// The fixture is the same one `tests/launcher_authority_protocol_render.rs`
+/// uses — project, catalog image marked ready, project pointed at it, and the
+/// durable launcher-authority singleton aligned with what the image declares,
+/// because migration 167's fence refuses a dispatch whose declaration the
+/// server does not actually run. The digest is well-formed and required:
+/// migration 164 refuses to mark ready any image that declares a protocol
+/// without capturing an immutable one.
+///
+/// The pull ref is deliberately unresolvable: nothing here waits for a Pod, and
+/// both tests delete the Job long before the kubelet gives up pulling.
+async fn seeded_db(project_id: &str) -> Database {
+    let db = Database::open_in_memory().expect(
+        "kind_smoke: open an isolated test database — DJINN_TEST_DATABASE_URL must point at a \
+         Postgres carrying the `djinn_test_template` template database",
+    );
+    db.ensure_initialized()
+        .await
+        .expect("kind_smoke: migrations");
+
+    ProjectRepository::new(db.clone(), EventBus::noop())
+        .create_with_id(project_id, project_id, "test", project_id)
+        .await
+        .expect("kind_smoke: seed project");
+
+    let images = ImageRepository::new(db.clone());
+    let image_id = format!("img-{project_id}");
+    images
+        .create(&image_id, &image_id, None, "{}")
+        .await
+        .expect("kind_smoke: seed catalog image");
+    images
+        .mark_ready(
+            &image_id,
+            "registry.invalid/djinn-kind-smoke:never-pulled",
+            Some(CANONICAL_DIGEST),
+            Some(LauncherAuthorityProtocol::LeafV1),
+        )
+        .await
+        .expect("kind_smoke: mark the seeded image ready");
+    images
+        .set_project_image(project_id, Some(&image_id))
+        .await
+        .expect("kind_smoke: select the catalog image");
+
+    let modes = djinn_db::LauncherAuthorityModeRepository::new(db.clone());
+    let epoch = modes
+        .read()
+        .await
+        .expect("kind_smoke: read the launcher-authority singleton")
+        .expect("kind_smoke: migration 167 seeds the launcher-authority singleton")
+        .epoch;
+    modes
+        .set_mode(epoch, LauncherAuthorityProtocol::LeafV1)
+        .await;
+
+    db
 }
 
 /// A tiny spec suitable for the smoke tests — the `Planning` flow is just the
@@ -150,15 +303,16 @@ async fn kind_smoke_prepare_then_cancel() {
         return;
     }
 
-    let client = kube::Client::try_default()
-        .await
-        .expect("kind_smoke: kube::Client::try_default");
+    let client = kind_client().await;
+
+    let spec = sample_spec("task-kind-smoke-prep");
+    let db = seeded_db(&spec.project_id).await;
 
     let config = test_config();
     let registry = std::sync::Arc::new(djinn_supervisor::ConnectionRegistry::new());
-    let runtime = KubernetesRuntime::from_client(client.clone(), config.clone(), registry);
+    let runtime =
+        KubernetesRuntime::from_client_with_db(client.clone(), config.clone(), registry, db);
 
-    let spec = sample_spec("task-kind-smoke-prep");
     let credentials = ResolvedCredentials::default();
 
     // 1) prepare: handle with a populated pod_ref pointing at the Job.
@@ -232,15 +386,16 @@ async fn kind_smoke_runtime_lifecycle() {
         return;
     }
 
-    let client = kube::Client::try_default()
-        .await
-        .expect("kind_smoke: kube::Client::try_default");
+    let client = kind_client().await;
+
+    let spec = sample_spec("task-kind-smoke-life");
+    let db = seeded_db(&spec.project_id).await;
 
     let config = test_config();
     let registry = std::sync::Arc::new(djinn_supervisor::ConnectionRegistry::new());
-    let runtime = KubernetesRuntime::from_client(client.clone(), config.clone(), registry);
+    let runtime =
+        KubernetesRuntime::from_client_with_db(client.clone(), config.clone(), registry, db);
 
-    let spec = sample_spec("task-kind-smoke-life");
     let credentials = ResolvedCredentials::default();
 
     // 1) prepare.
