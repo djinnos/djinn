@@ -307,14 +307,10 @@ mod tests {
 
         // Wire the proposal to this project via proposal_targets so the
         // title-body match path in build_context can find it.
-        sqlx::query(
-            "INSERT INTO proposal_targets (proposal_id, project_id, role) VALUES ($1, $2, 'primary')",
-        )
-        .bind(&proposal.id)
-        .bind(&project.id)
-        .execute(db.pool())
-        .await
-        .unwrap();
+        proposal_repo
+            .add_target(&proposal.id, &project.id, "primary")
+            .await
+            .unwrap();
 
         let server = DjinnMcpServer::new(test_mcp_state(db, &tx));
         (server, project.slug(), seed.permalink)
@@ -398,14 +394,10 @@ mod tests {
             .await
             .unwrap();
 
-        sqlx::query(
-            "INSERT INTO proposal_targets (proposal_id, project_id, role) VALUES ($1, $2, 'primary')",
-        )
-        .bind(&proposal.id)
-        .bind(&project.id)
-        .execute(db.pool())
-        .await
-        .unwrap();
+        proposal_repo
+            .add_target(&proposal.id, &project.id, "primary")
+            .await
+            .unwrap();
 
         // Count notes before build_context.
         let notes_before = note_repo
