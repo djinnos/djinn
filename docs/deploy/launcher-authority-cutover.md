@@ -10,10 +10,83 @@ reverse has to be able to refuse itself.
 > **This document is not the enforcement.** The ordering below is enforced by
 > `ResizeRollout` in `server/src/task_run_resize_rollout.rs`: every step
 > declares the steps that must already have run, the journal records only steps
-> that actually completed, and calling the flip before the drain proof returns
-> `StepOutOfOrder`. If this file and that module ever disagree, the module is
-> right. What this file adds is the *operator* half — what you run, what you
-> retain, and what to do when it blocks.
+> that actually completed, and calling the flip before the drain proof — or
+> before the preflight — returns `StepOutOfOrder`. If this file and that module
+> ever disagree, the module is right. What this file adds is the *operator*
+> half — what you run, what you retain, and what to do when it blocks.
+
+---
+
+## What you run
+
+```bash
+# forward: leaf-v1 -> resize-v2
+DJINN_CUTOVER_DIRECTION=activate \
+DJINN_CUTOVER_AUTHORITY_MODE=resize-v2 \
+DJINN_CUTOVER_PLAN=/path/to/plan.json \
+DJINN_DATABASE_URL=postgres://... \
+DJINN_LEGACY_LAUNCHER_DIGEST_INVENTORY=/path/to/legacy-digests.json \
+DJINN_LEGACY_LAUNCHER_DIGEST_INVENTORY_PUBLIC_KEY=<base64> \
+DJINN_LEGACY_LAUNCHER_DIGEST_INVENTORY_SIGNATURE=<base64> \
+  deploy/cutover/authority-cutover.sh deploy/helm/djinn --values prod-values.yaml
+
+# reverse: resize-v2 -> leaf-v1
+DJINN_CUTOVER_DIRECTION=rollback \
+DJINN_CUTOVER_AUTHORITY_MODE=leaf-v1 \
+  ... same variables ...
+  deploy/cutover/authority-cutover.sh deploy/helm/djinn --values prod-values.yaml
+```
+
+**Exit status:** `0` the mode flipped and admission resumed; `1` blocked — the
+mode did **not** move, and the driver says whether admission is left paused;
+`2` unevaluable — a missing plan, an unreadable render, a probe image that is
+not in the catalog. Nothing was attempted.
+
+The wrapper delegates to `deploy/preflight/cutover-preflight.sh`, pointing
+`CUTOVER_PREFLIGHT_BIN` at the `authority-cutover` binary. That is not a
+shortcut: it is what makes the flip and the deploy gate render the same chart,
+extract the same `DJINN_K8S_*` out of the same rendered `djinn-server`
+container, and re-exec under the same `env -i`. A preflight verdict produced
+under the operator's shell would not be a verdict about the deployment.
+
+### The plan file
+
+Everything one cutover run needs that a render cannot contain. Unknown keys are
+rejected, an empty `retained` set is rejected (proving the pullability of
+nothing is not evidence), and `role` is parsed, never defaulted.
+
+```json
+{
+  "expected_epoch": 3,
+  "registry_base_url": "https://ghcr.io",
+  "reason": "3i92 launcher authority cutover",
+  "probe_task_run_id": "019fc000-0000-7000-8000-000000000001",
+  "probe_image_id": "i1",
+  "retained": [
+    {
+      "image_id": "i1",
+      "repository": "djinnos/djinn-image-i1",
+      "digest": "sha256:<64 hex>",
+      "role": "resize-v2-current"
+    },
+    {
+      "image_id": "i1",
+      "repository": "djinnos/djinn-image-i1",
+      "digest": "sha256:<64 hex>",
+      "role": "leaf-v1-rollback"
+    }
+  ]
+}
+```
+
+`role` is one of `legacy-no-handshake`, `leaf-v1-rollback`,
+`resize-v2-current`. `probe_image_id` must name a real, `ready`, selected
+catalog row — the pause step proves itself by dispatching it, and a synthesised
+image would prove the pause against a path no task run takes.
+
+`expected_epoch` is read first (see "What you need before you start", item 3):
+every flip is a compare-and-swap against it, so a second operator moving the
+mode under you is a conflict, not a silent overwrite.
 
 ---
 
@@ -96,8 +169,9 @@ Run in this order. The driver refuses any other.
 | 5 | **Verify retention** | Every retained digest is fetched from the registry and its content hashes to the recorded digest. |
 | 6 | **Pause admission** | The pause is written **and then disbelieved**: a probe dispatch is issued through the same path a task run takes and must be refused. A pause row with no wired refusal blocks the cutover here rather than passing it. |
 | 7 | **Prove the drain** | **Zero live task-run Pods** and **zero nonterminal resize/lease rows**. Both. See below. |
-| 8 | **Flip the mode** | Compare-and-swap at the expected epoch, behind `set_mode`'s own transactional fence, which holds the `build_pod_permit_pools` row lock admission takes before it inserts. |
-| 9 | **Resume admission** | Only after a confirmed flip. Resuming earlier is `StepOutOfOrder`. |
+| 8 | **Clear the preflight** | `djinn_k8s::cutover_preflight::run` — the same validator `deploy/preflight/cutover-preflight.sh` runs, over the same render, assembled by the same module — must come back clean **for the mode being flipped to**, having actually evaluated its six classes. A clean verdict from zero evaluated classes blocks here. This step runs *after* the drain proof, not before, because the preflight judges the drain fence too and that fence is never empty on a live deployment. |
+| 9 | **Flip the mode** | Compare-and-swap at the expected epoch, behind `set_mode`'s own transactional fence, which holds the `build_pod_permit_pools` row lock admission takes before it inserts. Requires steps 6, 7 **and** 8 in the journal; reaching it without any of them is `StepOutOfOrder`. |
+| 10 | **Resume admission** | Only after a confirmed flip. Resuming earlier is `StepOutOfOrder`. |
 
 ## Rollback
 
@@ -110,8 +184,9 @@ dispatch, and they dispatch only because the signed inventory vouches for them.
 3. Validate the catalog against `leaf-v1`.
 4. Pause admission (proven by a refused dispatch).
 5. Prove the drain.
-6. Flip to `leaf-v1`.
-7. Resume admission.
+6. Clear the preflight, **against `leaf-v1`**.
+7. Flip to `leaf-v1`.
+8. Resume admission.
 
 **Rollback is blocked, and admission is left paused, when any of the first three
 fail.** Concretely: the signed allowlist file is absent; a retained digest is no
@@ -119,6 +194,13 @@ longer pullable; a catalog row has been repointed to a digest the signed
 document does not vouch for. In each case the mode does not move, admission is
 not resumed, and no Pod is started. Do not "unblock" it by relaxing a check —
 restore the artifact or re-sign the inventory.
+
+"Admission is left paused" is reported from the **production dispatch-pause
+predicate**, not from how far the run got. Steps 1-3 run before the rollback's
+own pause step, so a rollback blocked there has an empty journal — and it will
+still say `admission=PAUSED` if a half-finished forward cutover left a pause
+behind, which is exactly when you need to know. An unreadable pause state is
+reported as paused.
 
 ---
 
@@ -154,6 +236,19 @@ not a substitute for the first: it reports counts, and it is blind to Pods.
 
 ## Preflight
 
+The driver runs `djinn_k8s::cutover_preflight::run` itself, at step 8, and
+refuses to flip when it blocks. Running it standalone first is still worth it:
+it is the same verdict, minutes earlier, without pausing anything.
+
+```bash
+DJINN_CUTOVER_AUTHORITY_MODE=resize-v2 DJINN_DATABASE_URL=postgres://... \
+  deploy/preflight/cutover-preflight.sh deploy/helm/djinn --values prod-values.yaml
+```
+
+Expect `drain-fence` to be the one class that blocks a standalone run against a
+live deployment — the drain is not empty until admission has been paused, which
+is why the flip's own preflight runs *after* the drain proof and not before.
+
 ```bash
 # Retention, against a disposable registry:2 (isolated name and port, deleted
 # on exit pass or fail).
@@ -161,7 +256,12 @@ bash deploy/preflight/tests/task-run-resize-rollout.sh
 
 # The workflow itself, against real PostgreSQL.
 cd server && cargo test -p djinn-server --test task_run_resize_rollout
+# The operator entry point, end to end through ResizeRollout::production.
+cd server && cargo test -p djinn-server --test authority_cutover
 cd server && cargo test -p djinn-db  --test image_legacy_digest_allowlist
+
+# The entry point is still reachable from a binary.
+sh scripts/check-resize-reachability.sh
 ```
 
 ---
