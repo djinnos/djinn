@@ -976,33 +976,113 @@ fn this_file() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/task_run_resize_mixed_version.rs")
 }
 
+/// `text` with whole-line comments removed.
+///
+/// Copied from `server/tests/task_run_resize_kind.rs`, whose doc comment is the
+/// canonical statement of this defect class. These are separate test binaries,
+/// so the helper is duplicated rather than shared. A comment cannot call a
+/// function, set a variable or arm a shell step, so it must neither satisfy a
+/// positive assertion nor trip a negative one. Both directions are live here:
+/// the teardown-trap gate below matched the harness script's PROSE, and the
+/// 1.29 ban below sat next to a header paragraph discussing 1.29.
+///
+/// Only WHOLE-line comments are dropped, deliberately: a trailing comment must
+/// not be able to launder the code in front of it.
+fn code_lines(text: &str, comment_prefix: &str) -> String {
+    text.lines()
+        .filter(|line| !line.trim_start().starts_with(comment_prefix))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// [`code_lines`] for Rust. Covers `//`, `///` and `//!`.
+fn rust_code(source: &str) -> String {
+    code_lines(source, "//")
+}
+
+/// [`code_lines`] for shell and YAML, which share the `#` comment marker.
+fn script_code(text: &str) -> String {
+    code_lines(text, "#")
+}
+
+/// Whether `needle` appears in the harness script's CODE rather than its prose.
+///
+/// Split out from its guard so the guard's logic is testable against synthetic
+/// input: otherwise "ignores comments" and "ignores everything" are
+/// indistinguishable from a green run.
+fn shell_code_contains(script: &str, needle: &str) -> bool {
+    script_code(script).contains(needle)
+}
+
+/// Whether the harness script really ARMS the failure-path teardown.
+///
+/// This is the `1j64` defect verbatim: delete the real `trap` line, leave
+/// `# trap cleanup_on_failure EXIT` behind, and a raw `contains` stays green
+/// while a failed `up` leaves a cluster standing.
+fn arms_the_failure_teardown(script: &str) -> bool {
+    shell_code_contains(script, "trap cleanup_on_failure EXIT")
+}
+
+/// Whether the harness script SETS the measured-false 1.29 floor.
+///
+/// The script's header discusses 1.29 at length — it has to, that is where the
+/// correction is recorded. A ban that fires on the paragraph explaining why the
+/// floor moved is a ban that argues against being told why the code is the way
+/// it is.
+fn restores_the_measured_false_floor(script: &str) -> bool {
+    shell_code_contains(script, "MIN_K8S_MINOR=29")
+}
+
+/// Whether this suite READS the one permitted confirmation site.
+///
+/// The needle is assembled at compile time AND required in indexing position,
+/// because the token is spelled in this gate's own doc comment and in its own
+/// failure message. `body.contains("initContainerStatuses")` was satisfied by
+/// those, so it could never fail.
+fn reads_the_init_container_status_list(source: &str) -> bool {
+    rust_code(source).contains(concat!("[\"initContainer", "Statuses\"]"))
+}
+
+/// The forbidden regular-container-status spelling this suite CONSTRUCTS, if any.
+fn regular_status_list_token_in(source: &str) -> Option<String> {
+    let code = rust_code(source);
+    [
+        format!("{}{}", "container", "Statuses"),
+        format!("{}_{}", "container", "statuses"),
+    ]
+    .into_iter()
+    .find(|token| code.contains(token))
+}
+
 /// **AC7, source gate.** No helper in this suite reads the regular-container
 /// status list.
 ///
-/// The forbidden token is ASSEMBLED at run time rather than written out, so this
-/// gate does not trip on itself. `initContainerStatuses` is not a match: the
+/// The forbidden token is ASSEMBLED at compile time rather than written out, so
+/// this gate does not trip on itself. `initContainerStatuses` is not a match: the
 /// forbidden spelling has a lower-case `c` that `initContainerStatuses` does not
 /// contain at that position.
+///
+/// Both halves run over CODE only. The presence half asserted
+/// `body.contains("initContainerStatuses")` against the raw file, which this
+/// paragraph, the assertion's own line and the failure message below each
+/// satisfied on their own — the gate could not fail, so "or this gate guards
+/// nothing" was exactly what it did.
 #[test]
 fn no_helper_in_this_suite_reads_the_regular_container_status_list() {
-    let forbidden = [
-        format!("{}{}", "container", "Statuses"),
-        format!("{}_{}", "container", "statuses"),
-    ];
     let body = std::fs::read_to_string(this_file()).expect("this test file is readable");
     assert!(
-        body.contains("initContainerStatuses"),
-        "the suite must actually name the ONLY confirmation site, or this gate guards nothing",
+        reads_the_init_container_status_list(&body),
+        "the suite must actually READ the ONLY confirmation site, in an indexing expression and \
+         not merely in prose, or this gate guards nothing",
     );
-    for token in forbidden {
-        assert!(
-            !body.contains(&token),
-            "`{token}` appears in this suite. Confirmation for the native sidecar comes ONLY from \
-             status.initContainerStatuses[name={LAUNCHER_CONTAINER_NAME}]; the regular-container \
-             list can carry a matching, stale or misleading entry and reading it is the defect \
-             this gate exists to prevent",
-        );
-    }
+    assert_eq!(
+        regular_status_list_token_in(&body),
+        None,
+        "the forbidden regular-container-status spelling appears in this suite's CODE. \
+         Confirmation for the native sidecar comes ONLY from the init-container status list at \
+         name={LAUNCHER_CONTAINER_NAME}; the regular-container list can carry a matching, stale or \
+         misleading entry and reading it is the defect this gate exists to prevent",
+    );
 }
 
 /// The body of the first `fn <name>` in this file, up to its closing brace at
@@ -1064,11 +1144,20 @@ fn the_managed_fields_read_is_paired_with_show_managed_fields() {
 /// **AC10, hermetic half.** The harness script exists, is disposable, refuses
 /// every sibling's target, pins its context, and cannot have its floor walked
 /// back to the measured-false 1.29.
+///
+/// Every needle below that names shell CODE is matched against
+/// [`script_code`], never the raw file. That script is heavily commented — its
+/// header explains the 1.29 correction, its usage block lists the default
+/// cluster and registry names — so the raw file satisfied most of these
+/// assertions on prose alone. The teardown trap is the sharp case: delete the
+/// real `trap` line, leave `# trap cleanup_on_failure EXIT` behind, and a raw
+/// `contains` reports an armed teardown that does not exist.
 #[test]
 fn the_kind_harness_is_disposable_and_isolated() {
     let script = repo_root().join("scripts/kind/setup-resize-matrix-cluster.sh");
-    let body = std::fs::read_to_string(&script)
+    let raw = std::fs::read_to_string(&script)
         .unwrap_or_else(|error| panic!("{} must exist: {error}", script.display()));
+    let body = script_code(&raw);
 
     assert!(
         body.contains(HARNESS_CLUSTER) && body.contains(HARNESS_REGISTRY),
@@ -1106,9 +1195,9 @@ fn the_kind_harness_is_disposable_and_isolated() {
 
     // The teardown and its proof.
     assert!(
-        body.contains("trap cleanup_on_failure EXIT"),
-        "the failure path must tear the cluster down; without the trap a failed `up` leaves a \
-         cluster behind and the host fills up",
+        arms_the_failure_teardown(&raw),
+        "the failure path must ARM the teardown trap in code; without the trap a failed `up` \
+         leaves a cluster behind and the host fills up",
     );
     assert!(
         body.contains("survived teardown"),
@@ -1125,12 +1214,137 @@ fn the_kind_harness_is_disposable_and_isolated() {
         "the epic's Kubernetes floor is 1.30",
     );
     assert!(
-        !body.contains("MIN_K8S_MINOR=29"),
+        !restores_the_measured_false_floor(&raw),
         "the 1.29 floor was measured false and corrected in #2818; it must not come back",
     );
+    // The one assertion here that is deliberately about PROSE. "Say out loud" is
+    // satisfied by a comment: the point is that a reader of the script learns why
+    // a non-kind API server is refused, and the header comment is a legitimate
+    // place to say it. Matched against the raw file on purpose.
     assert!(
-        body.contains("eks") || body.contains("EKS"),
+        raw.contains("eks") || raw.contains("EKS"),
         "the script must say out loud why a non-kind server is refused",
+    );
+}
+
+// ═══ the gates' own self-tests ═══════════════════════════════════════════════
+//
+// A source gate that ignores comments and a source gate that ignores everything
+// look identical from a green run, so each predicate above is driven against
+// synthetic input in BOTH directions.
+//
+// Two mutations, not one. A PRESENCE gate is mutated by REMOVING the required
+// call; swapping it for a different valid token reds the presence arm and proves
+// nothing about a ban. A BAN is mutated by ADDING the banned token while LEAVING
+// the required one in place.
+
+#[test]
+fn a_whole_line_comment_is_not_code_but_a_trailing_one_does_not_launder_the_line() {
+    assert_eq!(
+        script_code("set -e\n# note\n  # indented\ntrap x EXIT"),
+        "set -e\ntrap x EXIT"
+    );
+    assert_eq!(rust_code("a\n// b\n  /// c\n//! d\ne"), "a\ne");
+    assert_eq!(
+        script_code("trap cleanup_on_failure EXIT  # armed here"),
+        "trap cleanup_on_failure EXIT  # armed here",
+        "a trailing comment must NOT drop the code in front of it",
+    );
+}
+
+#[test]
+fn the_teardown_trap_gate_reads_the_trap_and_not_the_paragraph_about_it() {
+    let armed = "cleanup_on_failure() { :; }\ntrap cleanup_on_failure EXIT\n";
+    assert!(arms_the_failure_teardown(armed));
+    assert!(
+        !arms_the_failure_teardown("cleanup_on_failure() { :; }\n# trap cleanup_on_failure EXIT\n"),
+        "a commented-out trap arms nothing; this is the 1j64 defect verbatim",
+    );
+    assert!(
+        !arms_the_failure_teardown(
+            "# the failure path runs `trap cleanup_on_failure EXIT` before it creates anything\n"
+        ),
+        "prose describing the trap must not stand in for the trap",
+    );
+    assert!(
+        arms_the_failure_teardown("trap cleanup_on_failure EXIT  # before anything is created\n"),
+        "a trailing comment must not hide the real trap in front of it",
+    );
+}
+
+#[test]
+fn the_measured_false_floor_ban_fires_on_an_assignment_and_not_on_the_correction_note() {
+    // The BAN mutation ADDS the 1.29 assignment and LEAVES the 1.30 epic floor
+    // in place, so the only thing that can go red is the ban.
+    let corrected = "# the \"1.29\" older docs carried was measured false (#2818); never restore\n\
+                     # MIN_K8S_MINOR=29 here or anywhere\nEPIC_MIN_K8S_MINOR=30\nMIN_K8S_MINOR=33\n";
+    assert!(
+        !restores_the_measured_false_floor(corrected),
+        "the paragraph recording the correction must not be punished as the defect it warns about",
+    );
+    assert!(
+        restores_the_measured_false_floor(&format!("{corrected}MIN_K8S_MINOR=29\n")),
+        "a real assignment must red the ban even with the epic floor still present",
+    );
+    assert!(
+        restores_the_measured_false_floor("MIN_K8S_MINOR=29  # restored, wrongly\n"),
+        "a trailing comment must not launder a real assignment",
+    );
+    assert!(
+        shell_code_contains(corrected, "EPIC_MIN_K8S_MINOR=30"),
+        "the epic floor is set in code and must still satisfy its own presence gate",
+    );
+}
+
+#[test]
+fn the_confirmation_site_gate_reads_an_indexing_expression_and_not_prose() {
+    let real = concat!(
+        "let raw = pod_json[\"status\"][\"initContainer",
+        "Statuses\"]\n"
+    );
+    assert!(reads_the_init_container_status_list(real));
+    assert!(
+        !reads_the_init_container_status_list(&format!("    // {real}")),
+        "a commented-out read must not satisfy the gate",
+    );
+    assert!(
+        !reads_the_init_container_status_list(concat!(
+            "//! confirmation comes from status.initContainer",
+            "Statuses[name=cgroup-launcher]\n"
+        )),
+        "prose naming the confirmation site must not stand in for reading it",
+    );
+    assert!(
+        reads_the_init_container_status_list(&format!("{} // AC7", real.trim_end())),
+        "a trailing comment must not hide the real read",
+    );
+}
+
+#[test]
+fn the_regular_status_list_ban_fires_on_code_and_not_on_a_comment() {
+    // ADD the forbidden read; the permitted init-container read stays put.
+    let permitted = concat!(
+        "let raw = pod_json[\"status\"][\"initContainer",
+        "Statuses\"];\n"
+    );
+    let offending = concat!("let s = pod_json[\"status\"][\"container", "Statuses\"];\n");
+    assert_eq!(regular_status_list_token_in(permitted), None);
+    assert!(
+        regular_status_list_token_in(&format!("{permitted}{offending}")).is_some(),
+        "a real read of the regular list must red the ban with the permitted read still present",
+    );
+    assert_eq!(
+        regular_status_list_token_in(&format!("{permitted}// {offending}")),
+        None,
+        "a comment explaining why the regular list is forbidden must not red the ban",
+    );
+    assert!(
+        regular_status_list_token_in(&format!("{} // stale\n", offending.trim_end())).is_some(),
+        "a trailing comment must not launder a real read",
+    );
+    assert!(
+        reads_the_init_container_status_list(&format!("{permitted}{offending}")),
+        "the presence arm must still hold under the ban's mutation, or the two arms are confounded",
     );
 }
 

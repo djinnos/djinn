@@ -187,10 +187,18 @@ validate_exit_codes() {
     'EXIT_LEDGER_UNREADABLE=40'
     'EXIT_API_UNREADABLE=41'
   )
+  # Anchored, and deliberately so: an unanchored `grep -Fq` accepts the
+  # assignment inside a `#` comment. Renumber to
+  # `EXIT_MISSING_RUNTIME_CLASS=11` and leave
+  # `# was EXIT_MISSING_RUNTIME_CLASS=10 before the renumber` and the runbook
+  # now lies to an operator while this contract stays green — the 1j64 shape,
+  # in the silent (presence) direction. This file's own non-vacuity mutant at
+  # `expect_rejected` already uses an anchored `sed`, so it removed the real
+  # line and never exercised the comment case.
   local assignment
   for assignment in "${expected[@]}"; do
-    grep -Fq -- "$assignment" "$script" \
-      || { fail "preflight no longer defines $assignment, but the runbook quotes that code"; return 1; }
+    grep -Eq -- "^[[:space:]]*(readonly[[:space:]]+|declare[[:space:]]+-r[[:space:]]+|export[[:space:]]+)?${assignment}[[:space:]]*(#.*)?$" "$script" \
+      || { fail "preflight no longer defines $assignment as code, but the runbook quotes that code"; return 1; }
   done
 }
 

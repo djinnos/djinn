@@ -80,6 +80,24 @@ LauncherAuthorityProtocol
 # Only the module itself must name the types; the test file is free not to.
 TYPED_FILE=server/crates/djinn-coordinator/src/resize_authorization.rs
 
+SCAN_AWK="$SCRIPT_DIR/lib/rust-source-scan.awk"
+if [ ! -f "$SCAN_AWK" ]; then
+    echo "FAIL: missing shared scanner: $SCAN_AWK" >&2
+    exit 2
+fi
+
+# Every text assertion below that is about CODE goes through the shared
+# scanner in scripts/lib/rust-source-scan.awk, which strips comments in a
+# string-literal-aware pass and tracks `#[cfg(test)]` structurally.
+#
+#   rust_hits <file> <ERE> [scope]   -> `<file>:<line>:<text>` per match
+#
+# `strings=blank` erases literal bodies, so a type or symbol named inside a
+# string cannot satisfy a presence assertion either.
+rust_hits() {
+    RS_PATTERN="$2" awk -f "$SCAN_AWK" -v strings=blank -v scope="${3:-any}" "$1" 2>/dev/null
+}
+
 status=0
 
 for file in $GUARDED_FILES; do
@@ -101,12 +119,21 @@ for file in $GUARDED_FILES; do
     done
 done
 
+# Check 3 asks whether the module still names each required type IN CODE.
+#
+# It used to be a bare `grep`, which is the 1j64 defect: `resize_authorization.rs`
+# names both types in doc comments as well as in code (`/// That predicate is
+# [`InvocationLiftDecision`] …`), so deleting every real use would have left the
+# guard green on the prose that describes the use. A PRESENCE assertion is the
+# silent direction — it does not fail, it just stops meaning anything.
 if [ -f "$TYPED_FILE" ]; then
     for type_name in $REQUIRED_TYPES; do
-        if ! grep -n -- "$type_name" "$TYPED_FILE" >/dev/null 2>&1; then
-            echo "FAIL: $TYPED_FILE no longer names '$type_name'." >&2
+        if [ -z "$(rust_hits "$TYPED_FILE" "$type_name")" ]; then
+            echo "FAIL: $TYPED_FILE no longer names '$type_name' in code." >&2
             echo "      The should-we-lift-at-all predicate must be written against" >&2
-            echo "      that type. Removing it satisfies the ban above vacuously." >&2
+            echo "      that type. Removing it satisfies the ban above vacuously," >&2
+            echo "      and a doc comment that merely mentions the type does not" >&2
+            echo "      count -- that is how a presence guard goes quiet." >&2
             status=1
         fi
     done
@@ -120,57 +147,44 @@ fi
 ARMING_SYMBOL="with_resize""_authority"
 ARMING_ROOT=server/src
 
-# A hit counts only if it precedes the file's first UNINDENTED `#[cfg(test)]`.
+# A hit counts only if it is production code: outside every `#[cfg(test)]`
+# block and outside every `#[test]`-attributed item.
 #
-# An unindented `#[cfg(test)]` is a test-MODULE attribute; the indented ones are
-# `#[cfg(test)]` struct fields and statements, which sit in production code and
-# must not truncate the scan. Test modules go at the end of a file in this
-# codebase, so "before the first top-level `#[cfg(test)]`" is exactly "outside
-# every test module" without this script having to parse Rust.
+# THIS USED TO TRUNCATE AT THE FIRST UNINDENTED `#[cfg(test)]`, and that was
+# wrong for a reason worth recording, because the sibling guard
+# `scripts/check-resize-reachability.sh` was taken down by the same idea in a
+# stronger form the same week. The old rationale here read: "test modules go at
+# the end of a file in this codebase, so 'before the first top-level
+# `#[cfg(test)]`' is exactly 'outside every test module'". That convention is
+# not a rule and nothing enforces it. `server/src/server/state/mod.rs` -- the
+# very file this check exists to read -- is 4147 lines with `#[cfg(test)]`
+# FIELD attributes from line 342 onward; requiring the marker to be unindented
+# is the only reason this check ever saw line 540, where the arming actually
+# lives. One production item moved below a test module and the guard would have
+# stopped seeing the composition site: the single place its own purpose
+# requires it to look.
 #
-# The rule is conservative in the safe direction: a caller appearing after one
-# is IGNORED, so the guard can only ever under-count production callers, never
-# over-count them. It can fail spuriously; it cannot pass spuriously.
+# "Fails closed" was the defence, and it is not good enough. A guard that
+# cannot see its subject is not safe, it is decorative: the reachability guard
+# failed closed too, and the effect was that it verified reachability against
+# the first 8% of a file. So the test-context rule is now STRUCTURAL --
+# brace-matched blocks, `#[cfg(test)]` on a field or a `mod x;` correctly
+# treated as introducing no block at all -- and lives in the shared scanner at
+# scripts/lib/rust-source-scan.awk, which is self-tested in both directions by
+# scripts/test-rust-source-scan.sh.
+#
+# A commented-out call is still not a call: the scanner strips comments before
+# matching, so `// .with_resize_authority(x)` does not count. Without that, the
+# named failing mutation "delete the arming" is satisfied by commenting it out
+# and the guard passes on a composition that arms nothing -- which is what the
+# first version of this check actually did.
 arming_callers() {
     [ -d "$ARMING_ROOT" ] || return 0
     find "$ARMING_ROOT" -name '*.rs' -type f 2>/dev/null |
         grep -v -- '_tests\.rs$' |
         grep -v -- '/\.worktrees/' |
         while IFS= read -r file; do
-            awk -v sym="$ARMING_SYMBOL" -v path="$file" '
-                /^#\[cfg\(test\)\]/ { exit }
-                # A commented-out call is not a call. Without this, the named
-                # mutation "delete the arming" is satisfied by commenting it out
-                # and the guard passes on a composition that arms nothing --
-                # which is what the first version of this check actually did.
-                {
-                    raw = $0
-                    code = $0
-                    if (in_block) {
-                        if (match(code, /\*\//)) {
-                            code = substr(code, RSTART + RLENGTH)
-                            in_block = 0
-                        } else {
-                            next
-                        }
-                    }
-                    while (match(code, /\/\*/)) {
-                        head = substr(code, 1, RSTART - 1)
-                        rest = substr(code, RSTART + 2)
-                        if (match(rest, /\*\//)) {
-                            code = head substr(rest, RSTART + RLENGTH)
-                        } else {
-                            code = head
-                            in_block = 1
-                            break
-                        }
-                    }
-                    sub(/\/\/.*/, "", code)
-                    if (index(code, "." sym "(")) {
-                        printf "%s:%d:%s\n", path, NR, raw
-                    }
-                }
-            ' "$file"
+            rust_hits "$file" "\\.$ARMING_SYMBOL\\(" prod
         done
 }
 

@@ -1,0 +1,18 @@
+{
+  "asset": "wait-empty",
+  "expect": "reject",
+  "why": "Retirement disguised as reachability. The production teardown no longer waits for the drain, but a `#[cfg(test)]` module calls `wait_empty`, so a whole-file text search still finds it. A reachability check claims something in PRODUCTION calls the asset; a call site under `#[cfg(test)]` proves the API still compiles and nothing more. This is the shape that let `check-resize-reachability.sh` verify reachability against the first 8% of a 4147-line file.",
+  "operations": [
+    {
+      "op": "replace",
+      "path": "server/crates/djinn-agent/src/process.rs",
+      "find": "        child.wait_empty().map_err(LeaseInvocationError::Launcher)?;\n",
+      "with": ""
+    },
+    {
+      "op": "append",
+      "path": "server/crates/djinn-agent/src/process.rs",
+      "text": "\n#[cfg(test)]\nmod retention_fixture_tests {\n    #[test]\n    fn the_drain_api_still_exists() {\n        let mut child = fixture_child();\n        child.wait_empty().map_err(LeaseInvocationError::Launcher).unwrap();\n    }\n}\n"
+    }
+  ]
+}

@@ -205,6 +205,12 @@ jobs:
         run: node --test scripts/ci-mold-trixie-apt-smoke.test.mjs
       - name: Verify routed-scope contract
         run: node --test scripts/ci-changed-scope.test.mjs
+      # scripts/lib/source-text.mjs is the shared comment stripper behind the
+      # workflow-text guards below. A regression in it is silent — a guard
+      # whose stripper returned "" would assert nothing and still exit 0 — so
+      # it is proven before its consumers run.
+      - name: Verify source-text stripper contract
+        run: node --test scripts/ci-source-text.test.mjs
       - name: Verify cache ownership policy
         run: node --test scripts/ci-cache-policy.test.mjs
       - name: Verify qa-smoke workflow contract
@@ -655,6 +661,15 @@ jobs:
       # what the size gate's per-file line limit used to reward. It also scans
       # the whole tree rather than the diff: a grep over tracked *.rs with no
       # build, and a whole-tree scan cannot be dodged by a base-SHA trick.
+      # scripts/lib/rust-source-scan.awk is the single comment-stripping and
+      # `#[cfg(test)]`-tracking implementation behind five guards below
+      # (include!, global metrics, raw SQL, capability boundaries, resize
+      # authorization). A regression in it takes all five down at once and does
+      # so SILENTLY — a guard whose scanner matches nothing still exits 0. This
+      # runs before any of them so the shared piece is proven first.
+      - name: Self-test shared Rust source scanner
+        if: needs.preflight.outputs.size == 'true'
+        run: ./scripts/test-rust-source-scan.sh
       - name: Self-test include! guard
         if: needs.preflight.outputs.size == 'true'
         run: ./scripts/test-check-include-macro.sh
@@ -766,7 +781,13 @@ jobs:
           ./scripts/check-k8s-boundary.sh
       - name: Check architectural boundaries
         if: needs.preflight.outputs.boundaries == 'true'
-        run: python3 scripts/check_boundaries.py
+        run: |
+          # The self-test exists and was never wired up, so nothing enforced
+          # that a checker edit still caught a violation. Its file-rule cases
+          # are paired in both directions — a scan that matched nothing would
+          # report "no boundary violations" forever.
+          python3 scripts/check_boundaries.py --self-test
+          python3 scripts/check_boundaries.py
   server-clippy:
     name: Server Clippy
     needs: preflight

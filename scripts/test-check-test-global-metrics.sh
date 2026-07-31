@@ -162,6 +162,56 @@ git commit -qm "add production readers"
 expect "production readers before and after a test mod are exempt" 0 "$BASE"
 git reset -q --hard HEAD~1
 
+# 5b. A `#[cfg(test)]` attribute on a struct FIELD introduces no block, so the
+#     production function after it is production code. The tracker that used to
+#     live in the guard disarmed only on a line ending in `;`; a field ends in
+#     `,`, so it stayed armed until the next line that opened a brace and
+#     reported this `render()` as a test read. `server/src/server/state/mod.rs`
+#     has exactly this shape from line 342 onward.
+mkdir -p server/src/server
+cat >server/src/server/state.rs <<'EOF'
+pub struct AppState {
+    /// Test-only bypass.
+    #[cfg(test)]
+    test_bypass_persist: bool,
+    real_field: u32,
+}
+
+pub fn health_probe() -> String {
+    djinn_telemetry::render().unwrap_or_default()
+}
+EOF
+git add server/src/server/state.rs
+git commit -qm "add cfg(test) field before a production reader"
+expect "a #[cfg(test)] FIELD does not make the next fn test code" 0 "$BASE"
+git reset -q --hard HEAD~1
+
+# 5c. The counterpart, so 5b cannot be satisfied by "classify nothing as test".
+#     The same file with the reader moved inside a real test module must fail.
+mkdir -p server/src/server
+cat >server/src/server/state.rs <<'EOF'
+pub struct AppState {
+    #[cfg(test)]
+    test_bypass_persist: bool,
+    real_field: u32,
+}
+
+#[cfg(test)]
+mod tests {
+    #[tokio::test]
+    async fn reads_the_registry(
+        _fixture: u32,
+    ) {
+        let rendered = djinn_telemetry::render().unwrap();
+        assert!(rendered.is_empty());
+    }
+}
+EOF
+git add server/src/server/state.rs
+git commit -qm "add cfg(test) field before a test-module reader"
+expect "a read in a test mod after a #[cfg(test)] field is still caught" 1 "$BASE"
+git reset -q --hard HEAD~1
+
 # 6. The telemetry crate owns the singleton and must be able to test it.
 mkdir -p server/crates/djinn-telemetry/src
 cat >server/crates/djinn-telemetry/src/lib.rs <<'EOF'

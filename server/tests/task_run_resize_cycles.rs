@@ -187,6 +187,112 @@ fn read_repo_file(relative: &str) -> String {
         .unwrap_or_else(|error| panic!("read {relative}: {error}"))
 }
 
+/// `text` with whole-line comments removed.
+///
+/// Copied from `server/tests/task_run_resize_kind.rs`, whose doc comment is the
+/// canonical statement of this defect class. These are separate test binaries,
+/// so the helper is duplicated rather than shared. The rule: a comment cannot
+/// call a function, set a variable or arm a workflow step, so it must neither
+/// satisfy a positive assertion nor trip a negative one. Both directions have
+/// bitten this campaign — this suite's own teardown-trap guard matched prose in
+/// a header and stayed green when the real `trap` line was deleted.
+///
+/// Only WHOLE-line comments are dropped, deliberately: a trailing comment must
+/// not be able to launder the code in front of it.
+fn code_lines(text: &str, comment_prefix: &str) -> String {
+    text.lines()
+        .filter(|line| !line.trim_start().starts_with(comment_prefix))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// [`code_lines`] for Rust. Covers `//`, `///` and `//!`.
+fn rust_code(source: &str) -> String {
+    code_lines(source, "//")
+}
+
+/// [`code_lines`] for shell and YAML, which share the `#` comment marker.
+fn script_code(text: &str) -> String {
+    code_lines(text, "#")
+}
+
+// ---------------------------------------------------------------------------
+// The predicates the source gates below rest on.
+//
+// Each is split out from its guard so the guard's logic is testable against
+// synthetic input: otherwise "ignores comments" and "ignores everything" are
+// indistinguishable from a green run. Every needle is assembled at compile time
+// because the subject of these gates is THE FILE THEY LIVE IN — a needle spelled
+// literally on its own assertion line is satisfied by that line and can never
+// fail. The `ban` needles here already used this trick; the `presence` ones did
+// not, which is the defect this split repairs.
+// ---------------------------------------------------------------------------
+
+/// The CODE lines of `source` that name the regular container-status list.
+///
+/// `initContainerStatuses` is deliberately not a match: the forbidden spelling
+/// has a lower-case `c` where that token has a capital one.
+fn regular_status_list_code_lines(source: &str) -> Vec<String> {
+    let needle = concat!("container", "Statuses");
+    rust_code(source)
+        .lines()
+        .filter(|line| line.contains(needle))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Whether `source` confirms a limit through the PRODUCTION reader, in code.
+fn calls_the_production_confirmation_reader(source: &str) -> bool {
+    rust_code(source).contains(concat!("confirm_launcher", "_cpu("))
+}
+
+/// Whether `source` reads `cpu.weight` as a PATH under a cgroup directory.
+fn reads_cpu_weight_as_a_cgroup_path(source: &str) -> bool {
+    rust_code(source).contains(concat!("/cpu", ".weight"))
+}
+
+/// The CODE line, if any, that derives `cpu.weight` from a request value.
+fn cpu_weight_derived_from_a_request(source: &str) -> Option<String> {
+    let needle = concat!("cpu", ".weight");
+    rust_code(source)
+        .lines()
+        .find(|line| line.contains(needle) && line.contains("requests"))
+        .map(str::to_owned)
+}
+
+/// Whether `source` reads the weight at BOTH the node and the launcher.
+///
+/// The two helper names must appear on a line that also names the cgroup file,
+/// so the helpers' own definitions do not satisfy this: only a call that reads
+/// `cpu.weight` through them does.
+fn reads_the_weight_at_both_sites(source: &str) -> bool {
+    let weight = concat!("cpu", ".weight");
+    let code = rust_code(source);
+    let reads: Vec<&str> = code.lines().filter(|line| line.contains(weight)).collect();
+    reads
+        .iter()
+        .any(|line| line.contains(concat!("node", "_read(")))
+        && reads
+            .iter()
+            .any(|line| line.contains(concat!("launcher", "_read(")))
+}
+
+/// Whether `source` parses the NODE's own allocation table.
+fn parses_the_node_allocation_table(source: &str) -> bool {
+    let code = rust_code(source);
+    code.contains(concat!("\"describe\", ", "\"node\""))
+        && code.contains(concat!("Allocated ", "resources"))
+}
+
+/// Whether `source` INVOKES the shared setup script rather than merely naming it.
+///
+/// The predecessor of this predicate was `source.contains(SETUP_SCRIPT)`, which
+/// the constant's own declaration satisfies: it could not fail while the file
+/// compiled.
+fn invokes_the_shared_setup_script(source: &str) -> bool {
+    rust_code(source).contains(concat!(".arg(repo_root().join(SETUP", "_SCRIPT))"))
+}
+
 fn run_setup_script(args: &[&str]) -> Output {
     Command::new("bash")
         .arg(repo_root().join(SETUP_SCRIPT))
@@ -272,8 +378,8 @@ fn guard_the_harness_is_disjoint_and_reuses_the_shared_script() {
     );
     let source = read_repo_file(THIS_FILE);
     assert!(
-        source.contains(SETUP_SCRIPT),
-        "this suite must name the shared setup script"
+        invokes_the_shared_setup_script(&source),
+        "this suite must INVOKE the shared setup script, passing it to a `Command`. Merely NAMING it was the previous assertion, and the constant's own declaration satisfied that unconditionally."
     );
     assert!(
         !repo_root()
@@ -392,15 +498,7 @@ fn guard_the_kubernetes_floor_is_enforced() {
 #[test]
 fn guard_confirmation_never_reads_container_statuses() {
     let source = read_repo_file(THIS_FILE);
-    // Built by concatenation so this guard's own text is not a hit.
-    let needle = concat!("container", "Statuses");
-    let hits: Vec<&str> = source
-        .lines()
-        .filter(|line| line.contains(needle))
-        .filter(|line| !line.trim_start().starts_with("//!"))
-        .filter(|line| !line.trim_start().starts_with("///"))
-        .filter(|line| !line.trim_start().starts_with("//"))
-        .collect();
+    let hits = regular_status_list_code_lines(&source);
     assert_eq!(
         hits.len(),
         1,
@@ -412,8 +510,8 @@ fn guard_confirmation_never_reads_container_statuses() {
         hits[0]
     );
     assert!(
-        source.contains("confirm_launcher_cpu("),
-        "confirmation must go through the PRODUCTION reader, which reads status.initContainerStatuses[name=cgroup-launcher] and nothing else"
+        calls_the_production_confirmation_reader(&source),
+        "confirmation must go through the PRODUCTION reader, which reads the init-container status list and nothing else"
     );
 }
 
@@ -427,7 +525,10 @@ fn guard_confirmation_never_reads_container_statuses() {
 /// checks still exists is an assumption. This guard checks.
 #[test]
 fn guard_the_misleading_status_fixture_still_exists_and_is_run() {
-    let sibling = read_repo_file(PCOD_SUITE);
+    // Both proof names are also spelled in that suite's doc comments, so a raw
+    // `contains` stays green after the tests themselves are deleted. Only the
+    // `fn` definitions count.
+    let sibling = rust_code(&read_repo_file(PCOD_SUITE));
     for proof in [
         "the_misleading_container_status_is_not_confirmation",
         "live_the_absent_init_status_is_not_confirmed",
@@ -437,7 +538,9 @@ fn guard_the_misleading_status_fixture_still_exists_and_is_run() {
             "{PCOD_SUITE} no longer carries `{proof}`. This suite's confirmation reads defer to it for the live half of AC6; if it moved, point this guard at its new home rather than deleting the guard."
         );
     }
-    let workflow = read_repo_file(WORKFLOW);
+    // The workflow's own header comment names that suite too; a commented-out
+    // step must not stand in for an armed one.
+    let workflow = script_code(&read_repo_file(WORKFLOW));
     assert!(
         workflow.contains("task_run_resize_kind"),
         "the live misleading-status fixture is no longer invoked by any lane"
@@ -451,24 +554,16 @@ fn guard_the_misleading_status_fixture_still_exists_and_is_run() {
 fn guard_cpu_weight_is_read_from_the_cgroup_file() {
     let source = read_repo_file(THIS_FILE);
     assert!(
-        source.contains("/cpu.weight"),
-        "cpu.weight must be read as a PATH under a cgroup directory"
+        reads_cpu_weight_as_a_cgroup_path(&source),
+        "the weight must be read as a PATH under a cgroup directory"
     );
-    for line in source.lines() {
-        if !line.contains("cpu.weight") {
-            continue;
-        }
-        let trimmed = line.trim_start();
-        if trimmed.starts_with("//") {
-            continue;
-        }
-        assert!(
-            !line.contains("requests"),
-            "cpu.weight must never be derived from a request value: {line}"
-        );
-    }
+    assert_eq!(
+        cpu_weight_derived_from_a_request(&source),
+        None,
+        "the weight must never be derived from a request value"
+    );
     assert!(
-        source.contains("node_read(") && source.contains("launcher_read("),
+        reads_the_weight_at_both_sites(&source),
         "the weight must be read at BOTH the pod slice (on the node) and the launcher container"
     );
 }
@@ -479,12 +574,8 @@ fn guard_cpu_weight_is_read_from_the_cgroup_file() {
 fn guard_node_allocation_is_read_from_the_node() {
     let source = read_repo_file(THIS_FILE);
     assert!(
-        source.contains("\"describe\", \"node\""),
-        "the Node's own allocated-resources view is what must be read; a sum over Pod specs is the INPUT to that accounting, not the accounting"
-    );
-    assert!(
-        source.contains("Allocated resources"),
-        "the parser must be anchored on the Node's Allocated resources section"
+        parses_the_node_allocation_table(&source),
+        "the Node's own allocated-resources view is what must be read, and the parser must be anchored on that section's heading. A sum over Pod specs is the INPUT to that accounting, not the accounting."
     );
 }
 
@@ -523,7 +614,7 @@ fn guard_the_resize_patch_touches_only_the_launcher_cpu_limit() {
 
     // Strategic, not merge: `Patch::Merge` on this shape answers
     // `limits: Forbidden: resource limits cannot be removed`.
-    let source = read_repo_file(THIS_FILE);
+    let source = rust_code(&read_repo_file(THIS_FILE));
     assert!(
         source.contains("\"strategic\""),
         "the PATCH must be strategic; the initContainers array carries patchMergeKey: name and a JSON-merge body would replace the whole array"
@@ -572,7 +663,9 @@ fn the_no_retirement_gate_passes_and_its_self_test_is_green() {
 /// unconditional teardown.
 #[test]
 fn guard_the_live_lane_is_wired() {
-    let workflow = read_repo_file(WORKFLOW);
+    // Comment-stripped: a step that is commented out arms nothing, and this
+    // workflow's prose already names the job, the suite and the cluster.
+    let workflow = script_code(&read_repo_file(WORKFLOW));
     for needle in [
         "resize-cycles",
         HARNESS_CLUSTER,
@@ -599,11 +692,199 @@ fn guard_the_live_lane_is_wired() {
 
     // The suite's own count of live proofs, so deleting one fails the ordinary
     // PR lane rather than silently shrinking the dispatch lane.
-    let source = read_repo_file(THIS_FILE);
+    let source = rust_code(&read_repo_file(THIS_FILE));
     let live_proofs = source.matches("#[ignore = \"live:").count();
     assert_eq!(
         live_proofs, 1,
         "this suite declares {live_proofs} live proofs; the workflow and this guard both expect 1"
+    );
+}
+
+// ===========================================================================
+// The gates' own self-tests.
+//
+// A source gate that ignores comments and a source gate that ignores everything
+// look identical from a green run. Each predicate above is therefore driven
+// against synthetic input here, in BOTH directions.
+//
+// Two mutations, not one. A PRESENCE assertion is mutated by REMOVING the
+// required call — swapping it for a different valid token proves nothing about a
+// ban. A BAN is mutated by ADDING the banned token while LEAVING the required
+// one in place, or it is the presence arm that goes red and the ban is still
+// untested.
+// ===========================================================================
+
+#[test]
+fn a_whole_line_comment_is_not_code_but_a_trailing_one_does_not_launder_the_line() {
+    assert_eq!(rust_code("a\n// b\n  /// c\n//! d\ne"), "a\ne");
+    assert_eq!(
+        rust_code("call(); // and why"),
+        "call(); // and why",
+        "a trailing comment must NOT drop the code in front of it: `foo(); // banned` still calls foo"
+    );
+    assert_eq!(
+        script_code("run: x\n# note\n  # indented\nrun: y"),
+        "run: x\nrun: y"
+    );
+}
+
+#[test]
+fn the_confirmation_reader_gate_reads_calls_and_not_prose() {
+    let call = concat!("confirm_launcher", "_cpu(parsed, target).unwrap();");
+    assert!(
+        calls_the_production_confirmation_reader(&format!("fn f() {{\n    {call}\n}}\n")),
+        "a real call must satisfy the gate"
+    );
+    assert!(
+        !calls_the_production_confirmation_reader(&format!("fn f() {{\n    // {call}\n}}\n")),
+        "a commented-out call must NOT satisfy the gate; that is how a deleted confirmation stays green"
+    );
+    assert!(
+        !calls_the_production_confirmation_reader(&format!(
+            "//! confirmation goes through {call}\nfn f() {{}}\n"
+        )),
+        "a doc comment naming the reader must NOT satisfy the gate"
+    );
+    assert!(
+        calls_the_production_confirmation_reader(&format!("fn f() {{\n    {call} // AC6\n}}\n")),
+        "a trailing comment must not hide the real call in front of it"
+    );
+}
+
+#[test]
+fn the_regular_status_list_gate_fires_on_code_and_not_on_a_comment() {
+    // The BAN mutation ADDS the forbidden read; the permitted STATUS_LISTS
+    // mention stays exactly where it is, so what goes red can only be the ban.
+    let permitted = concat!(
+        "const STATUS_LISTS: [&str; 2] = [\"initContainer",
+        "Statuses\", \"container",
+        "Statuses\"];"
+    );
+    let offending = concat!("    let s = &pod[\"status\"][\"container", "Statuses\"];");
+
+    assert_eq!(
+        regular_status_list_code_lines(permitted).len(),
+        1,
+        "the permitted constant is one hit"
+    );
+    assert_eq!(
+        regular_status_list_code_lines(&format!("{permitted}\n{offending}\n")).len(),
+        2,
+        "a real read of the regular list must be a SECOND hit, which is what reds the gate"
+    );
+    assert_eq!(
+        regular_status_list_code_lines(&format!("{permitted}\n    // {offending}\n")).len(),
+        1,
+        "a comment naming the forbidden list must not red the gate"
+    );
+    assert_eq!(
+        regular_status_list_code_lines(&format!("{permitted}\n{offending} // stale\n")).len(),
+        2,
+        "a trailing comment must not launder a real read"
+    );
+    assert!(
+        regular_status_list_code_lines(concat!(
+            "let s = &pod[\"status\"][\"initContainer",
+            "Statuses\"];"
+        ))
+        .is_empty(),
+        "the init-container list is the PERMITTED confirmation site and must never be a hit"
+    );
+}
+
+#[test]
+fn the_cpu_weight_gates_read_the_cgroup_file_and_ignore_comments() {
+    let real = concat!(
+        "    let w = node",
+        "_read(node, \"/sys/fs/cgroup/cpu",
+        ".weight\");"
+    );
+    let derived = concat!("    let w = spec.resources.requests.cpu", ".weight;");
+
+    assert!(reads_cpu_weight_as_a_cgroup_path(real));
+    assert!(
+        !reads_cpu_weight_as_a_cgroup_path(&format!("// {real}")),
+        "a commented-out read must not satisfy the path requirement"
+    );
+    assert!(
+        reads_cpu_weight_as_a_cgroup_path(&format!("{real} // AC4")),
+        "a trailing comment must not hide the real read"
+    );
+
+    // The BAN mutation ADDS the request-derived line and KEEPS the cgroup read.
+    assert_eq!(cpu_weight_derived_from_a_request(real), None);
+    assert!(
+        cpu_weight_derived_from_a_request(&format!("{real}\n{derived}\n")).is_some(),
+        "deriving the weight from a request value must be caught even when a real cgroup read is also present"
+    );
+    assert_eq!(
+        cpu_weight_derived_from_a_request(&format!("{real}\n// {derived}\n")),
+        None,
+        "a comment explaining why requests are the wrong source must not red the gate"
+    );
+    assert!(
+        cpu_weight_derived_from_a_request(&format!("{derived} // legacy\n")).is_some(),
+        "a trailing comment must not launder a request-derived weight"
+    );
+}
+
+#[test]
+fn the_both_sites_and_node_table_gates_ignore_comments() {
+    let both = concat!(
+        "    a = node",
+        "_read(n, &format!(\"{slice}/cpu",
+        ".weight\"));\n    b = launcher",
+        "_read(pod, \"/sys/fs/cgroup/cpu",
+        ".weight\");"
+    );
+    assert!(reads_the_weight_at_both_sites(both));
+    assert!(
+        !reads_the_weight_at_both_sites(&both.replace("    b = launcher", "    // b = launcher")),
+        "commenting out the launcher-side read must red the gate"
+    );
+    assert!(
+        !reads_the_weight_at_both_sites(concat!(
+            "fn node",
+            "_read(n: &str, p: &str) -> String {}\nfn launcher",
+            "_read(pod: &str, p: &str) -> String {}"
+        )),
+        "the helpers' own DEFINITIONS must not satisfy the gate; only a call that reads the cgroup file does"
+    );
+
+    let table = concat!(
+        "    let d = kubectl_ok(&[\"describe\", ",
+        "\"node\", node]);\n    if line.starts_with(\"Allocated ",
+        "resources\") {}"
+    );
+    assert!(parses_the_node_allocation_table(table));
+    assert!(
+        !parses_the_node_allocation_table(&table.replace("    if line", "    // if line")),
+        "commenting out the section anchor must red the gate"
+    );
+    assert!(
+        !parses_the_node_allocation_table(concat!(
+            "//! the parser is anchored on the node's Allocated ",
+            "resources section, read via \"describe\", ",
+            "\"node\""
+        )),
+        "a doc comment describing the parser must NOT stand in for the parser"
+    );
+}
+
+#[test]
+fn the_setup_script_gate_wants_an_invocation_not_a_mention() {
+    let naming = "const SETUP_SCRIPT: &str = \"scripts/kind/setup-resize-kind-cluster.sh\";";
+    let invoking = concat!("        .arg(repo_root().join(SETUP", "_SCRIPT))");
+    assert!(
+        !invokes_the_shared_setup_script(naming),
+        "declaring the constant is not invoking the script; this is the assertion that could never fail"
+    );
+    assert!(invokes_the_shared_setup_script(&format!(
+        "{naming}\nfn r() {{\n    Command::new(\"bash\")\n{invoking}\n}}\n"
+    )));
+    assert!(
+        !invokes_the_shared_setup_script(&format!("{naming}\n    // {invoking}")),
+        "a commented-out invocation must not satisfy the gate"
     );
 }
 

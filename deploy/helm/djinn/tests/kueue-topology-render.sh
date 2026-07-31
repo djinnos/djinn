@@ -112,81 +112,291 @@ def fail(message):
 
 
 def strip_comments(text):
-    """Blank out Rust comments, leaving string literals and line numbers intact.
+    """Blank out Rust comments, returning TWO length-identical forms of the file.
 
     Without this a doc comment mentioning `requests:` reads as a request site
     and the unparsed-shape check below fires on prose.
+
+    Returns `(keep, blank)`:
+      * `keep`  — string literals verbatim. This is what the extractor scans;
+                  its resource names ARE string literals (`"cpu".to_string()`).
+      * `blank` — string BODIES replaced by spaces, delimiters and newlines kept.
+                  Only `strip_cfg_test` reads this, and only to count braces: a
+                  `println!("{")` inside a test must not be able to unbalance the
+                  brace depth and take production code down with it.
+
+    Both forms are byte-for-byte the same length as the input, so they split into
+    the same lines at the same indices and `line_of` still reports real line
+    numbers.
+
+    A trailing comment never eats the code in front of it: `foo(); // requests:`
+    keeps `foo();`. And a `//` inside a string literal is not a comment, so
+    `"https://x"` does not blank the rest of its line.
     """
-    out, i, n = [], 0, len(text)
+    keep, blank, i, n = [], [], 0, len(text)
     while i < n:
         char = text[i]
+        # A char literal whose value IS a double quote must not open a phantom
+        # string and swallow the rest of the file. Same-length placeholder.
+        if char == "'":
+            for width in (3, 4):
+                if text[i : i + width] in ("'\"'", "'\\\"'"):
+                    placeholder = "'" + "q" * (width - 2) + "'"
+                    keep.append(placeholder)
+                    blank.append(placeholder)
+                    i += width
+                    break
+            else:
+                keep.append(char)
+                blank.append(char)
+                i += 1
+            continue
         if char == '"':
-            out.append(char)
+            keep.append(char)
+            blank.append(char)
             i += 1
             while i < n:
                 if text[i] == "\\":
-                    out.append(text[i : i + 2])
+                    keep.append(text[i : i + 2])
+                    blank.append("  ")
                     i += 2
                     continue
-                out.append(text[i])
+                keep.append(text[i])
+                blank.append(text[i] if text[i] in '"\n' else " ")
                 i += 1
                 if text[i - 1] == '"':
                     break
             continue
         if text.startswith("//", i):
             while i < n and text[i] != "\n":
-                out.append(" ")
+                keep.append(" ")
+                blank.append(" ")
                 i += 1
             continue
         if text.startswith("/*", i):
             depth = 1
-            out.append("  ")
+            keep.append("  ")
+            blank.append("  ")
             i += 2
             while i < n and depth:
                 if text.startswith("/*", i):
                     depth, i = depth + 1, i + 2
-                    out.append("  ")
+                    keep.append("  ")
+                    blank.append("  ")
                 elif text.startswith("*/", i):
                     depth, i = depth - 1, i + 2
-                    out.append("  ")
+                    keep.append("  ")
+                    blank.append("  ")
                 else:
-                    out.append("\n" if text[i] == "\n" else " ")
+                    keep.append("\n" if text[i] == "\n" else " ")
+                    blank.append("\n" if text[i] == "\n" else " ")
                     i += 1
             continue
-        out.append(char)
+        keep.append(char)
+        blank.append(char)
         i += 1
-    return "".join(out)
+    return "".join(keep), "".join(blank)
 
 
-CFG_TEST = re.compile(r"#\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]")
+# A test attribute. `#[cfg(not(test))]` deliberately does not match: it marks the
+# PRODUCTION arm of a cfg split and must survive.
+TEST_ATTR = re.compile(
+    r"^[ \t]*#\[[ \t]*(?:cfg[ \t]*\([ \t]*test[ \t]*\)|test|tokio::test|rstest"
+    r"|async_std::test|proptest)"
+)
+ATTR_OPEN = re.compile(r"^[ \t]*#\[")
 
 
-def strip_cfg_test(text):
-    """Drop `#[cfg(test)]` items. A fixture's resources are not a renderer's."""
+def _after_attributes(line):
+    """Whatever follows the leading `#[..]` attributes on `line`.
+
+    `#[cfg(test)] field: Option<T>,` puts the attribute and the item it decorates
+    on ONE line; without this the item would be looked for on the next line,
+    which is production code.
+    """
+    rest = line
     while True:
-        marker = CFG_TEST.search(text)
-        if not marker:
-            return text
-        i, n = marker.end(), len(text)
-        while i < n and text[i] not in "{;":
+        match = ATTR_OPEN.match(rest)
+        if not match:
+            return rest
+        depth, i = 0, match.end() - 1
+        while i < len(rest):
+            if rest[i] == "[":
+                depth += 1
+            elif rest[i] == "]":
+                depth -= 1
+                if depth == 0:
+                    break
             i += 1
-        if i >= n:
-            return text[: marker.start()]
-        if text[i] == ";":
-            end = i + 1
+        if depth:
+            return ""  # attribute spans lines; the item has not started yet
+        rest = rest[i + 1 :]
+
+
+def strip_cfg_test(keep, blank):
+    """Blank the `#[cfg(test)]` items, and NOTHING else.
+
+    STRUCTURAL, never positional — this is the Python counterpart of
+    `rs_test_context` in `scripts/lib/rust-source-scan.awk`; read that file for
+    the full rationale.
+
+    The previous implementation scanned forward from the attribute to the next
+    `{` or `;` and brace-matched from there. A struct FIELD ends in `,`, so on
+    `#[cfg(test)] dispatch_image_override: Option<String>,` the scan ran past the
+    end of the struct and matched the brace of the NEXT item — deleting the rest
+    of the struct plus an entire production `impl` block. Measured on
+    server/crates/djinn-k8s/src/runtime.rs (which this guard reads: it is the
+    crate that owns job.rs) that ate 91 lines of production code, the whole of
+    `impl KubernetesRuntime`. Nothing in that span happens to declare a
+    `requests:` map TODAY, so the derived coverage set is unchanged — but a Job
+    renderer or a `requests:` map added anywhere in it would have been invisible,
+    and the ClusterQueue coverage guard would have stayed green while an
+    uncovered resource shipped.
+
+    The rule instead: a test attribute ARMS the tracker, and the item it
+    decorates either opens a brace (removed to its matching close) or terminates
+    on its own line (`,` for a field, `;` for a `mod x;`/`use`/`const`/`let`) and
+    only that line goes. Paren depth is carried so a multi-line signature
+    `fn f(\n  a: A,\n) {` still resolves to its block.
+
+    Disarming is EAGER, matching the awk: over-keeping leaves test-only resources
+    in the derived set, which makes the coverage assertion demand MORE coverage
+    and fail loudly. Over-deleting is the silent direction, and it is the one
+    this rewrite closes.
+    """
+    kept = keep.split("\n")
+    code = blank.split("\n")
+    depth, armed, parens = 0, False, 0
+    for index, line in enumerate(code):
+        if depth > 0:
+            kept[index] = ""
+            depth += line.count("{") - line.count("}")
+            if depth < 0:
+                depth = 0
+            continue
+        if TEST_ATTR.search(line):
+            armed, parens = True, 0
+            kept[index] = ""
+            item = _after_attributes(line)
+        elif armed:
+            kept[index] = ""
+            item = _after_attributes(line)
         else:
-            depth = 0
-            while i < n:
-                if text[i] == "{":
-                    depth += 1
-                elif text[i] == "}":
-                    depth -= 1
-                    if depth == 0:
-                        break
-                i += 1
-            end = i + 1
-        removed = text[marker.start() : end]
-        text = text[: marker.start()] + "\n" * removed.count("\n") + text[end:]
+            continue
+        # Stacked attributes, blank lines and (already-blanked) comment lines sit
+        # between the attribute and the item it decorates.
+        if not item.strip():
+            continue
+        parens += item.count("(") - item.count(")")
+        opened = item.count("{") - item.count("}")
+        if opened > 0:
+            depth, armed, parens = opened, False, 0
+            continue
+        if parens > 0:
+            continue  # still inside a multi-line signature
+        armed, parens = False, 0
+    return "\n".join(kept)
+
+
+def _self_test_strip():
+    """Both directions, on fixtures, every run.
+
+    A stripper that silently over-deletes makes every assertion downstream
+    vacuous, and the failure looks exactly like a passing guard. So the guard
+    proves its own stripper before it uses it.
+    """
+
+    def prepared(source):
+        return strip_cfg_test(*strip_comments(source))
+
+    # 1. A test module goes; production AFTER it is still production.
+    out = prepared(
+        "pub fn keep_me() -> Job { todo!() }\n"
+        "#[cfg(test)]\n"
+        "mod tests {\n"
+        "    fn drop_me() { requests: 1 }\n"
+        "}\n"
+        "pub fn after_the_tests() -> Job { todo!() }\n"
+    )
+    assert "keep_me" in out and "after_the_tests" in out, out
+    assert "drop_me" not in out, out
+
+    # 2. THE DEFECT. A `#[cfg(test)]` on a struct FIELD removes the field only —
+    #    not the rest of the struct, and not the impl block behind it.
+    out = prepared(
+        "pub struct Runtime {\n"
+        "    #[cfg(test)]\n"
+        "    dispatch_image_override: Option<String>,\n"
+        "    pending: Arc<Mutex<Pending>>,\n"
+        "}\n"
+        "impl Runtime {\n"
+        '    pub fn requests(&self) -> u32 { requests: 1 }\n'
+        "}\n"
+    )
+    assert "dispatch_image_override" not in out, out
+    assert "pending" in out and "impl Runtime" in out and "pub fn requests" in out, out
+
+    # 2b. Attribute and field on ONE line: the NEXT line is production.
+    out = prepared(
+        "pub struct S {\n"
+        "    #[cfg(test)] override_me: Option<String>,\n"
+        "    keep_this_field: u8,\n"
+        "}\n"
+    )
+    assert "override_me" not in out and "keep_this_field" in out, out
+
+    # 3. A multi-line signature resolves to its block, and code after survives.
+    out = prepared(
+        "#[cfg(test)]\n"
+        "fn fixture(\n"
+        "    a: A,\n"
+        ") {\n"
+        "    let x = 1;\n"
+        "}\n"
+        "pub fn survivor() {}\n"
+    )
+    assert "fixture" not in out and "let x = 1" not in out, out
+    assert "survivor" in out, out
+
+    # 4. `#[cfg(test)] mod x;` takes one line, not a file.
+    out = prepared("#[cfg(test)]\nmod fixtures;\npub fn survivor() {}\n")
+    assert "fixtures" not in out and "survivor" in out, out
+
+    # 5. `#[cfg(not(test))]` is the PRODUCTION arm and must survive intact.
+    out = prepared(
+        "#[cfg(test)]\nlet tag = self.override_tag();\n"
+        "#[cfg(not(test))]\nlet tag: Option<String> = None;\n"
+    )
+    assert "override_tag" not in out, out
+    assert "let tag: Option<String> = None;" in out, out
+
+    # 6. An unbalanced brace inside a STRING inside a test must not extend the
+    #    removal past the test block. This is why the brace count reads the
+    #    string-blanked form.
+    out = prepared(
+        "#[cfg(test)]\n"
+        "mod tests {\n"
+        '    fn f() { println!("{"); }\n'
+        "}\n"
+        "pub fn survivor() -> Job { todo!() }\n"
+    )
+    assert "survivor" in out, out
+
+    # 7. Comment blindness: prose ABOUT `#[cfg(test)]` must not arm the stripper.
+    out = prepared(
+        "// this used to be #[cfg(test)] only\n"
+        "pub fn survivor() -> Job { todo!() }\n"
+    )
+    assert "survivor" in out, out
+
+    # 8. A trailing comment does not launder the code in front of it, and a `//`
+    #    inside a string literal is not a comment.
+    keep, _ = strip_comments('let u = "https://x"; requests: 1; // requests: 2\n')
+    assert 'let u = "https://x"; requests: 1;' in keep, keep
+    assert "requests: 2" not in keep, keep
+
+
+_self_test_strip()
 
 
 # A Job renderer is a function that RETURNS a Job. Nothing here names the four.
@@ -208,6 +418,15 @@ def line_of(text, index):
     return text.count("\n", 0, index) + 1
 
 
+# Two path heuristics, both deliberate, both UNDER-reporting by construction:
+#   * `*/src/**/*.rs` reaches one crate level under $CRATES_ROOT. Every Job
+#     renderer in the workspace lives there today, and a renderer moved outside
+#     it would take `renderer_files` below 4 and fail this extraction loudly
+#     rather than silently shrink the derived set.
+#   * `_tests.rs` files are declared by a parent as `#[cfg(test)] mod x;`, so the
+#     attribute that makes them test code is not IN them and nothing here could
+#     see it (the `force_test=1` case in scripts/lib/rust-source-scan.awk). The
+#     name is the only available signal.
 sources = sorted(
     path for path in crates_root.glob("*/src/**/*.rs") if not path.name.endswith("_tests.rs")
 )
@@ -222,7 +441,7 @@ for path in sources:
     if "requests" not in text and "Job" not in text:
         text = ""
     else:
-        text = strip_cfg_test(strip_comments(text))
+        text = strip_cfg_test(*strip_comments(text))
     prepared[path] = text
 
 renderer_files = [path for path, text in prepared.items() if JOB_BUILDER.search(text)]

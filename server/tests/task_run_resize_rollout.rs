@@ -1301,6 +1301,56 @@ fn read(relative: &str) -> String {
     std::fs::read_to_string(&path).unwrap_or_else(|error| panic!("reading {path:?}: {error}"))
 }
 
+/// `text` with whole-line comments removed.
+///
+/// Copied from `server/tests/task_run_resize_kind.rs`, whose doc comment is the
+/// canonical statement of this defect class. These are separate test binaries,
+/// so the helper is duplicated rather than shared. A comment cannot construct a
+/// value, call a method or gate a module, so it must neither satisfy a positive
+/// assertion nor trip a negative one — and both directions were live in the
+/// gates below:
+///
+/// * **False negative.** `launcher_owns_leaf_quota` is named twice in comments
+///   in `djinn-k8s/src/launcher.rs` and once in code. `cgroup.kill` and
+///   `wait_empty` are named together in one comment in the cgroup launcher.
+///   Deleting the code left every one of those retention gates green.
+/// * **False positive.** `!driver.contains("kube::")` and
+///   `!driver.contains("#[cfg(test)]")` fired on any comment that so much as
+///   mentioned the thing it was there to forbid.
+///
+/// Only WHOLE-line comments are dropped, deliberately: a trailing comment must
+/// not be able to launder the code in front of it.
+fn code_lines(text: &str, comment_prefix: &str) -> String {
+    text.lines()
+        .filter(|line| !line.trim_start().starts_with(comment_prefix))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// [`code_lines`] for Rust. Covers `//`, `///` and `//!`.
+fn rust_code(source: &str) -> String {
+    code_lines(source, "//")
+}
+
+/// Whether `needle` appears in `source`'s Rust CODE.
+///
+/// Split out from its guards so their logic is testable against synthetic
+/// input: otherwise "ignores comments" and "ignores everything" are
+/// indistinguishable from a green run.
+fn code_contains(source: &str, needle: &str) -> bool {
+    rust_code(source).contains(needle)
+}
+
+/// The retention needles of `retained` that `source` no longer carries in CODE.
+fn retention_needles_missing_from<'a>(source: &str, retained: &[&'a str]) -> Vec<&'a str> {
+    let code = rust_code(source);
+    retained
+        .iter()
+        .copied()
+        .filter(|needle| !code.contains(needle))
+        .collect()
+}
+
 /// **The production composition site.**
 ///
 /// The reachability question this repository keeps losing to is not "does the
@@ -1315,7 +1365,9 @@ fn read(relative: &str) -> String {
 /// path *can* be handed a substitute for the drain fence or the catalog.
 #[test]
 fn the_production_composition_site_wires_only_production_implementations() {
-    let driver = read("server/src/task_run_resize_rollout.rs");
+    // Comment-stripped in both directions: a doc comment must neither wire a
+    // production implementation nor make the constructor conditional.
+    let driver = rust_code(&read("server/src/task_run_resize_rollout.rs"));
     let start = driver
         .find("pub fn production(")
         .expect("the module must expose a production composition site");
@@ -1371,18 +1423,21 @@ fn the_production_composition_site_wires_only_production_implementations() {
 /// substitutable seam.
 #[test]
 fn the_drain_proof_calls_list_nonterminal_resize_from_compiled_server_code() {
+    // The driver's own module docs discuss `list_nonterminal_resize` at length,
+    // so only a call in CODE counts — and the `cfg(test)` ban must not fire on a
+    // comment that merely explains why there is no test-only path.
     let driver = read("server/src/task_run_resize_rollout.rs");
     assert!(
-        driver.contains(".list_nonterminal_resize()"),
+        code_contains(&driver, ".list_nonterminal_resize()"),
         "the drain proof must call the production repository method"
     );
     assert!(
-        !driver.contains("#[cfg(test)]"),
+        !code_contains(&driver, "#[cfg(test)]"),
         "the driver must carry no test-only code path; the drain proof one production \
          caller compiles is the same one the tests drive"
     );
 
-    let lib = read("server/src/lib.rs");
+    let lib = rust_code(&read("server/src/lib.rs"));
     assert!(
         lib.contains("pub mod task_run_resize_rollout;"),
         "the module must be declared in the server crate, unconditionally"
@@ -1397,7 +1452,7 @@ fn the_drain_proof_calls_list_nonterminal_resize_from_compiled_server_code() {
 /// can stand in for the drain fence or the catalog check.
 #[test]
 fn the_driver_exposes_no_seam_for_a_fake_repository() {
-    let driver = read("server/src/task_run_resize_rollout.rs");
+    let driver = rust_code(&read("server/src/task_run_resize_rollout.rs"));
     // Needles are assembled at compile time so this file does not match itself.
     for forbidden in [
         concat!("permits: ", "impl"),
@@ -1417,9 +1472,13 @@ fn the_driver_exposes_no_seam_for_a_fake_repository() {
         "the permit repository must be constructed from the Database, not injected"
     );
 
-    let tests = read("server/tests/task_run_resize_rollout.rs");
+    // Assembled at compile time and comment-stripped: this file reads ITSELF, so
+    // a needle spelled on its own assertion line is satisfied by that line and
+    // can never fail — and the module doc at the top of this file names the
+    // constructor too.
+    let tests = rust_code(&read("server/tests/task_run_resize_rollout.rs"));
     assert!(
-        tests.contains("Database::ephemeral()"),
+        tests.contains(concat!("Database::", "ephemeral()")),
         "these tests must construct a real PgPool"
     );
     for forbidden in [
@@ -1448,7 +1507,7 @@ fn no_blanket_launcher_cpu_clamp_is_reintroduced_and_nothing_is_retired() {
     // The driver renders nothing at all: no manifest type, no resource block,
     // no quantity. It cannot produce a container `limits.cpu` because it never
     // constructs a container.
-    let driver = read("server/src/task_run_resize_rollout.rs");
+    let driver = rust_code(&read("server/src/task_run_resize_rollout.rs"));
     for rendering in [
         "ResourceRequirements",
         "k8s_openapi",
@@ -1476,10 +1535,12 @@ fn no_blanket_launcher_cpu_clamp_is_reintroduced_and_nothing_is_retired() {
         "the registry probe must use the capability owner's client"
     );
 
-    // The `resize-v2`-only condition on the ceiling render is intact.
+    // The `resize-v2`-only condition on the ceiling render is intact. Read from
+    // CODE: that file names `launcher_owns_leaf_quota` twice in comments and
+    // once in the `if`, so a raw `contains` survives deleting the condition.
     let launcher = read("server/crates/djinn-k8s/src/launcher.rs");
     assert!(
-        launcher.contains("launcher_owns_leaf_quota"),
+        code_contains(&launcher, "launcher_owns_leaf_quota"),
         "the ceiling render must still be conditioned on the protocol"
     );
 
@@ -1494,11 +1555,113 @@ fn no_blanket_launcher_cpu_clamp_is_reintroduced_and_nothing_is_retired() {
             "{asset} must not be deleted by this task"
         );
     }
+    // Both of these are named together in ONE comment in that file, explaining
+    // that teardown is best-effort because `cgroup.kill` is asynchronous. That
+    // comment alone satisfied a raw `contains` for both needles, so the
+    // containment retention gate survived deleting the containment.
     let launcher_src = read("server/crates/djinn-cgroup-launcher/src/lib.rs");
-    for retained in ["cgroup.kill", "wait_empty"] {
+    let missing = retention_needles_missing_from(&launcher_src, &["cgroup.kill", "wait_empty"]);
+    assert!(
+        missing.is_empty(),
+        "{missing:?} must not be disabled by this task"
+    );
+}
+
+// ═══ the gates' own self-tests ══════════════════════════════════════════════
+//
+// A source gate that ignores comments and a source gate that ignores everything
+// look identical from a green run, so the predicate the gates above rest on is
+// driven against synthetic input here, in BOTH directions.
+//
+// Two mutations, not one. A PRESENCE gate is mutated by REMOVING the required
+// construct; swapping it for a different valid token reds the presence arm and
+// proves nothing about a ban. A BAN is mutated by ADDING the banned token while
+// LEAVING the required one in place.
+
+#[test]
+fn a_whole_line_comment_is_not_code_but_a_trailing_one_does_not_launder_the_line() {
+    assert_eq!(rust_code("a\n// b\n  /// c\n//! d\ne"), "a\ne");
+    assert_eq!(
+        rust_code("    self.kill(); // `cgroup.kill` is asynchronous"),
+        "    self.kill(); // `cgroup.kill` is asynchronous",
+        "a trailing comment must NOT drop the code in front of it"
+    );
+}
+
+#[test]
+fn a_retention_gate_reads_the_code_it_protects_and_not_the_comment_about_it() {
+    // This is the shape measured in `djinn-cgroup-launcher/src/lib.rs`: one
+    // comment names both retained primitives, and the code names them again.
+    let comment_only = "        // Teardown is best-effort ON PURPOSE. `cgroup.kill` is\n\
+                        // asynchronous, so `wait_empty` can still observe a live pid.\n\
+                        fn teardown(&mut self) {}\n";
+    let with_code = "        // Teardown is best-effort ON PURPOSE. `cgroup.kill` is\n\
+                     // asynchronous, so `wait_empty` can still observe a live pid.\n\
+                     self.fs.write_leaf(leaf.fd, \"cgroup.kill\", \"1\")?;\n\
+                     pub fn wait_empty(&mut self, leaf: &Leaf) {}\n";
+
+    assert!(
+        comment_only.contains("cgroup.kill") && comment_only.contains("wait_empty"),
+        "the raw text a `contains` gate reads is satisfied by the comment alone — this is the \
+         false negative the gate had"
+    );
+    assert_eq!(
+        retention_needles_missing_from(comment_only, &["cgroup.kill", "wait_empty"]),
+        vec!["cgroup.kill", "wait_empty"],
+        "with the code deleted, BOTH retention needles must be reported missing"
+    );
+    assert!(
+        retention_needles_missing_from(with_code, &["cgroup.kill", "wait_empty"]).is_empty(),
+        "the shipped shape — comment and code together — must stay green"
+    );
+    assert!(
+        retention_needles_missing_from(
+            "self.kill_leaf(\"cgroup.kill\"); // retained\npub fn wait_empty() {} // retained",
+            &["cgroup.kill", "wait_empty"]
+        )
+        .is_empty(),
+        "a trailing comment must not launder the code in front of it"
+    );
+}
+
+#[test]
+fn a_reachability_gate_ignores_comments_in_both_directions() {
+    let condition =
+        "    if protocol.launcher_owns_leaf_quota() {\n        render_ceiling();\n    }\n";
+    let prose = "/// ([`LauncherAuthorityProtocol::launcher_owns_leaf_quota`]), so a container\n";
+
+    // FALSE NEGATIVE: prose alone must not satisfy the presence gate.
+    assert!(
+        prose.contains("launcher_owns_leaf_quota"),
+        "the raw text matches"
+    );
+    assert!(
+        !code_contains(prose, "launcher_owns_leaf_quota"),
+        "deleting the `if` and keeping the doc comment must red the gate"
+    );
+    assert!(code_contains(
+        &format!("{prose}{condition}"),
+        "launcher_owns_leaf_quota"
+    ));
+
+    // FALSE POSITIVE: a comment naming a banned construct must not fire the ban,
+    // while the real construct still must. The required call stays in place in
+    // both fixtures so it is only ever the ban that moves.
+    let call = "    let rows = repo.list_nonterminal_resize().await?;\n";
+    let excused = "// This module reaches no `kube::` type of its own and carries no\n\
+                   // #[cfg(test)] path.\n";
+    assert!(
+        code_contains(&format!("{call}{excused}"), ".list_nonterminal_resize()"),
+        "the presence arm must hold under the ban's mutation, or the arms are confounded"
+    );
+    for banned in ["kube::", "#[cfg(test)]"] {
         assert!(
-            launcher_src.contains(retained),
-            "{retained} must not be disabled by this task"
+            !code_contains(&format!("{call}{excused}"), banned),
+            "{banned:?} named only in a comment must not fire the ban"
+        );
+        assert!(
+            code_contains(&format!("{call}{excused}    use {banned}Client;\n"), banned),
+            "{banned:?} in real code must still fire the ban"
         );
     }
 }

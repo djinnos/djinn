@@ -235,44 +235,38 @@ SQL_PATTERN='(sqlx::query[!(]|sqlx::query_as[!(]|sqlx::query_scalar[!(]|(^|[^a-z
 #     state across lines would let a single mis-parse silence a whole file.
 #   * Raw strings (r#"…"#) are paired by the same quote scan, which is
 #     correct except when a raw body ends in a backslash.
-SQL_SCAN_PROGRAM='
-function strip_string_literals(s,   out, i, n, c) {
-    out = ""
-    i = 1
-    n = length(s)
-    while (i <= n) {
-        c = substr(s, i, 1)
+# ── Comments are prose, not calls ──────────────────────────────────────
+#
+# This guard used to match string-blanked source directly, with no comment
+# handling at all, so a doc comment saying
+#
+#     /// Raw `sqlx::query!` belongs in djinn-db, never here.
+#
+# in any crate outside djinn-db failed the build. That is the same defect
+# #2871 fixed in `task_run_resize_kind.rs`: prose tripping a ban. Comment
+# stripping is delegated to `scripts/lib/rust-source-scan.awk`, which removes
+# `//` and `/* */` in a string-literal-aware pass and — critically — keeps the
+# code IN FRONT of a trailing comment, so `sqlx::query!(..); // fixme` is still
+# a violation.
+#
+# Both limits above are preserved by that scanner and both still over-report
+# rather than under-report: string state resets at every line, and raw strings
+# are paired by the same quote scan.
+SCAN_AWK="$SCRIPT_DIR/lib/rust-source-scan.awk"
+if [ ! -f "$SCAN_AWK" ]; then
+    printf '::error::check-raw-sql-boundary: missing shared scanner %s\n' "$SCAN_AWK" >&2
+    exit 2
+fi
 
-        # A char literal whose value IS a double quote — \047"\047 or the
-        # escaped form \047\"\047 — must not open a phantom string and hide
-        # a real call later on the line.
-        if (c == "\047") {
-            if (substr(s, i, 3) == "\047\"\047") { out = out "\047\047"; i += 3; continue }
-            if (substr(s, i, 4) == "\047\\\"\047") { out = out "\047\047"; i += 4; continue }
-        }
-
-        if (c != "\"") {
-            out = out c
-            i += 1
-            continue
-        }
-
-        # Opening delimiter: keep it, then swallow the body up to the
-        # matching unescaped quote (or end of line).
-        out = out "\"\""
-        i += 1
-        while (i <= n) {
-            c = substr(s, i, 1)
-            if (c == "\\") { i += 2; continue }
-            if (c == "\"") { i += 1; break }
-            i += 1
-        }
-    }
-    return out
+# Emit `<line>:<original line>` — identical to what `grep -E -n` produced.
+#
+# `strings=blank` is the load-bearing option and must not be changed: it erases
+# literal BODIES while keeping the delimiters, so a fixture payload cannot
+# trigger the guard while `sqlx::query(&format!("…"))` still does.
+scan_sql_hits() {
+    RS_PATTERN="$SQL_PATTERN" awk -f "$SCAN_AWK" -v strings=blank "$1" 2>/dev/null |
+        cut -d: -f2-
 }
-
-strip_string_literals($0) ~ pattern { printf "%d:%s\n", FNR, $0 }
-'
 
 check_files() {
     violations=0
@@ -307,9 +301,8 @@ check_files() {
         checked=$((checked + 1))
 
         # Scan the file for sqlx query patterns, ignoring matches whose own
-        # tokens are string-literal data rather than code. Output format is
-        # `<line>:<original line>` — identical to `grep -E -n`.
-        hits=$(awk -v pattern="$SQL_PATTERN" "$SQL_SCAN_PROGRAM" "$file" 2>/dev/null || true)
+        # tokens are string-literal data or comment prose rather than code.
+        hits=$(scan_sql_hits "$file" || true)
         if [ -n "$hits" ]; then
             violations=$((violations + 1))
             printf '::error::Raw sqlx query usage detected outside djinn-db: %s\n' "$file" >&2

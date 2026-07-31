@@ -36,6 +36,11 @@ run_linked_worktree_diff_guard() {
     LINKED_WORKTREE="$LOG_DIR/linked-worktree"
     git -C "$REPO_ROOT" worktree add --detach "$LINKED_WORKTREE" HEAD > "$LOG_DIR/t14_worktree_setup.log" 2>&1
     cp "$GUARD" "$LINKED_WORKTREE/scripts/check-raw-sql-boundary.sh"
+    # The worktree is checked out at HEAD, so it carries the COMMITTED guard and
+    # its committed dependencies. Copy the working-tree scanner alongside the
+    # working-tree guard: otherwise this case silently tests the old pair.
+    mkdir -p "$LINKED_WORKTREE/scripts/lib"
+    cp "$SCRIPT_DIR/lib/rust-source-scan.awk" "$LINKED_WORKTREE/scripts/lib/rust-source-scan.awk"
 
     ORIGIN_MAIN_BEFORE=$(git -C "$REPO_ROOT" rev-parse --verify origin/main^{commit})
     SHALLOW_BEFORE=$(git -C "$REPO_ROOT" rev-parse --is-shallow-repository)
@@ -551,6 +556,59 @@ assert_output_contains "T28 catches the call after an escaped-quote literal" \
     "2:    let label = " "$LOG_DIR/t28_after_literal.log.out"
 assert_output_contains "T28 catches the call after a double-quote char literal" \
     "3:    let ch = " "$LOG_DIR/t28_after_literal.log.out"
+
+# ── T29: prose naming the banned call is not a call ───────────────────
+#
+# The pcod defect (#2871): a comment written to explain WHY a token is wrong
+# fired the ban that forbids it. A rule outside djinn-db is exactly the kind
+# of thing a doc comment says out loud, so this shape is common, not exotic.
+FIXTURE_PROSE="$REPO_ROOT/$FIXTURE_BASE/src/prose_only.rs"
+cat > "$FIXTURE_PROSE" <<'FIXTURE'
+//! Repository access notes.
+//!
+//! Raw `sqlx::query!` and `sqlx::query_as!` belong in djinn-db, never here.
+
+/// Do not reach for sqlx::query_scalar!( in this module; call the repository.
+/*
+ * A block comment mentioning sqlx::query( is prose too.
+ */
+pub async fn count(repo: &Repo) -> u64 {
+    repo.count().await
+}
+FIXTURE
+
+PROSE_PATH="$FIXTURE_BASE/src/prose_only.rs"
+set +e
+run_guard t29_prose "$PROSE_PATH"
+t29_actual=$?
+set -e
+assert_exit "T29 comments naming sqlx calls exit 0" 0 "$t29_actual" "$LOG_DIR/t29_prose.log.out"
+assert_output_lacks "T29 does not flag the prose file" \
+    "$PROSE_PATH" "$LOG_DIR/t29_prose.log.out"
+
+# ── T30: a trailing comment does not launder the code in front of it ───
+#
+# The load-bearing counterpart to T29. If comment stripping were implemented
+# as "drop any line containing //", every violation could be hidden by typing
+# a comment after it. `foo(); // note` is still a call to foo().
+FIXTURE_TRAILING="$REPO_ROOT/$FIXTURE_BASE/src/trailing_comment.rs"
+cat > "$FIXTURE_TRAILING" <<'FIXTURE'
+pub async fn touch(pool: &PgPool) {
+    // sqlx::query("SELECT 1") — this line is prose and must not be reported.
+    sqlx::query("DELETE FROM orders").execute(pool).await.unwrap(); // TODO: move to djinn-db
+}
+FIXTURE
+
+TRAILING_PATH="$FIXTURE_BASE/src/trailing_comment.rs"
+set +e
+run_guard t30_trailing "$TRAILING_PATH"
+t30_actual=$?
+set -e
+assert_exit "T30 code before a trailing comment still exits non-zero" 1 "$t30_actual" "$LOG_DIR/t30_trailing.log.out"
+assert_output_contains "T30 reports the real call on line 3" \
+    "3:    sqlx::query(\"DELETE FROM orders\")" "$LOG_DIR/t30_trailing.log.out"
+assert_output_lacks "T30 does not report the comment on line 2" \
+    "2:    // sqlx::query" "$LOG_DIR/t30_trailing.log.out"
 
 # ── T10: mixed files — violation + clean + djinn-db ───────────────────
 set +e

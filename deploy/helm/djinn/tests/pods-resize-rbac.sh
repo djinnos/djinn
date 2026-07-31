@@ -59,6 +59,125 @@ require_tool python3
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 
+# ---------------------------------------------------------------------------
+# ONE comment-stripping implementation, shared by BOTH python blocks below.
+#
+# This file used to strip comments for its one BAN and not for any of its
+# PRESENCE assertions, which is the worse half of the pair to skip: a ban that
+# reads a comment merely false-alarms, but a presence assertion that reads a
+# comment goes SILENTLY green after the code it names is deleted. Both blocks
+# now import the same helper so the rule cannot be applied to one assertion and
+# forgotten on the next.
+#
+# It is the Python counterpart of `scripts/lib/rust-source-scan.awk`'s `rs_split`
+# and is kept deliberately small: this file cannot call awk from inside a Python
+# heredoc, and rewriting these guards across languages is a separate job.
+# ---------------------------------------------------------------------------
+cat >"$WORK/rust_source_text.py" <<'PY'
+"""Comment stripping for Rust source-text guards, with its own self-tests."""
+
+
+def strip_rust_comments(text):
+    """Blank out Rust comments, keeping the CODE IN FRONT of a trailing one.
+
+    Byte-for-byte length preserving: comment bodies become spaces (newlines
+    kept), so offsets and line numbers in the result index the original file and
+    a brace scan over the result stays aligned with it.
+
+    Three properties this has to hold, each of which a real guard got wrong:
+
+      * a trailing comment does NOT launder the code before it. `foo(); // ban`
+        is still a call to `foo()`. Dropping the whole line — the cheap fix —
+        would let a banned token be smuggled in behind a `//`.
+      * a `//` INSIDE a string literal is not a comment. Truncating at the `//`
+        of `"https://example"` would blank the rest of a real line of code.
+      * string literals are otherwise kept verbatim, because the tokens these
+        guards match on (`TOKEN_AUDIENCE: &str = "djinn"`) live inside them.
+    """
+    out, i, n = [], 0, len(text)
+    while i < n:
+        char = text[i]
+        # A char literal whose value IS a double quote must not open a phantom
+        # string and swallow the rest of the file. Replaced by a same-length
+        # placeholder so nothing downstream sees the quote.
+        if char == "'":
+            for width in (3, 4):
+                if text[i:i + width] in ("'\"'", "'\\\"'"):
+                    out.append("'" + "q" * (width - 2) + "'")
+                    i += width
+                    break
+            else:
+                out.append(char)
+                i += 1
+            continue
+        if char == '"':
+            out.append(char)
+            i += 1
+            while i < n:
+                if text[i] == "\\":
+                    out.append(text[i:i + 2])
+                    i += 2
+                    continue
+                out.append(text[i])
+                i += 1
+                if text[i - 1] == '"':
+                    break
+            continue
+        if text.startswith("//", i):
+            while i < n and text[i] != "\n":
+                out.append(" ")
+                i += 1
+            continue
+        if text.startswith("/*", i):
+            depth = 1
+            out.append("  ")
+            i += 2
+            while i < n and depth:
+                if text.startswith("/*", i):
+                    depth, i = depth + 1, i + 2
+                    out.append("  ")
+                elif text.startswith("*/", i):
+                    depth, i = depth - 1, i + 2
+                    out.append("  ")
+                else:
+                    out.append("\n" if text[i] == "\n" else " ")
+                    i += 1
+            continue
+        out.append(char)
+        i += 1
+    return "".join(out)
+
+
+def _self_test():
+    """Both directions, on fixtures, every run. A stripper nobody tests is the
+    same silent hazard as a guard nobody mutates."""
+    cases = [
+        # (source, must still contain, must no longer contain)
+        ('let x = 1; // audience: Some(BAD)', 'let x = 1;', 'audience'),
+        ('// audience: Some(BAD)', None, 'audience'),
+        ('    /// audience: Some(BAD)', None, 'audience'),
+        ('/* audience: Some(BAD) */ let y = 2;', 'let y = 2;', 'audience'),
+        ('let u = "https://x/audience"; call();', 'call();', None),
+        ('let q = \'"\'; call();', 'call();', None),
+    ]
+    for source, must_keep, must_drop in cases:
+        result = strip_rust_comments(source)
+        assert len(result) == len(source), (
+            f'strip_rust_comments changed the length of {source!r}: {result!r}')
+        if must_keep is not None:
+            assert must_keep in result, (
+                f'strip_rust_comments ate code: {source!r} -> {result!r}')
+        if must_drop is not None:
+            assert must_drop not in result, (
+                f'strip_rust_comments left a comment behind: {source!r} -> {result!r}')
+    # The string-literal body survives: these guards match tokens inside one.
+    assert '"djinn"' in strip_rust_comments('const A: &str = "djinn"; // note')
+
+
+_self_test()
+PY
+export PYTHONPATH="$WORK${PYTHONPATH:+:$PYTHONPATH}"
+
 helm template pods-resize-rbac "$CHART_DIR" --is-upgrade >"$WORK/render.yaml"
 
 python3 - "$WORK/render.yaml" "$JOB_RS" <<'PY'
@@ -68,6 +187,8 @@ import sys
 from pathlib import Path
 
 import yaml
+
+from rust_source_text import strip_rust_comments
 
 RESIZE = 'pods/resize'
 BINDING_KINDS = ('RoleBinding', 'ClusterRoleBinding')
@@ -104,31 +225,34 @@ def grants_resize(rule):
     return any(resource in (RESIZE, '*', 'pods/*') for resource in resources)
 
 
-def strip_rust_comments(text):
-    return '\n'.join(line for line in text.splitlines() if not line.lstrip().startswith('//'))
-
-
-def pod_spec_block(text):
-    """Return the task-run PodSpec struct literal, comments stripped.
+def pod_spec_block(code):
+    """Return the task-run PodSpec struct literal, out of ALREADY-STRIPPED code.
 
     Scoped by brace matching rather than grepping the whole file so the
     assertion below reads the PodSpec djinn-server actually dispatches, not a
     doc comment, a test fixture, or some other struct that happens to mention
     the field.
+
+    The caller strips comments BEFORE this runs, and that ordering is the point:
+    locating the marker in raw text let a commented-out
+    `// let pod_spec = PodSpec {` earlier in the file capture the whole block
+    scope, and brace-matching over raw text let a `{` inside a doc comment
+    unbalance the count. Either one silently redirects every assertion below to
+    a region of the file that is not the PodSpec.
     """
     marker = 'let pod_spec = PodSpec {'
-    assert marker in text, 'task-run PodSpec literal not found in job.rs'
-    start = text.index(marker)
+    assert marker in code, 'task-run PodSpec literal not found in job.rs'
+    start = code.index(marker)
     cursor = start + len(marker)
     depth = 1
     while depth:
-        assert cursor < len(text), 'unbalanced braces in the task-run PodSpec literal'
-        if text[cursor] == '{':
+        assert cursor < len(code), 'unbalanced braces in the task-run PodSpec literal'
+        if code[cursor] == '{':
             depth += 1
-        elif text[cursor] == '}':
+        elif code[cursor] == '}':
             depth -= 1
         cursor += 1
-    return strip_rust_comments(text[start:cursor])
+    return code[start:cursor]
 
 
 def validate(docs, job_rs):
@@ -201,25 +325,28 @@ def validate(docs, job_rs):
             )
 
     # ---- 3. task-run Pods carry no apiserver credential ----------------------
-    spec = pod_spec_block(job_rs)
+    # EVERY source-text assertion below reads `code`, never `job_rs`. A comment
+    # is prose: it can neither satisfy a presence assertion nor trip a ban.
+    code = strip_rust_comments(job_rs)
+    spec = pod_spec_block(code)
     assert re.search(r'automount_service_account_token:\s*Some\(false\)', spec), (
         'the task-run PodSpec no longer sets automount_service_account_token: Some(false); '
         'the apiserver-capable default ServiceAccount token would be projected into a Pod '
         'running repository-controlled code'
     )
-    stray = re.search(r'automount_service_account_token:\s*(Some\(true\)|None)', strip_rust_comments(job_rs))
+    stray = re.search(r'automount_service_account_token:\s*(Some\(true\)|None)', code)
     assert not stray, (
         f'job.rs sets automount_service_account_token: {stray.group(1)} somewhere; '
         'the task-run Pod must never automount the apiserver token'
     )
-    audience = re.search(r'pub const TOKEN_AUDIENCE: &str = "([^"]*)";', job_rs)
+    audience = re.search(r'pub const TOKEN_AUDIENCE: &str = "([^"]*)";', code)
     assert audience, 'job.rs no longer declares TOKEN_AUDIENCE'
     assert audience.group(1) == EXPECTED_AUDIENCE, (
         f'the task-run projected token audience is {audience.group(1)!r}, expected '
         f'{EXPECTED_AUDIENCE!r}. An apiserver (or empty) audience would make the one token '
         'task-run Pods do hold usable against the apiserver'
     )
-    assert re.search(r'audience:\s*Some\(TOKEN_AUDIENCE\.to_string\(\)\)', job_rs), (
+    assert re.search(r'audience:\s*Some\(TOKEN_AUDIENCE\.to_string\(\)\)', code), (
         'the task-run projected token no longer binds its audience to TOKEN_AUDIENCE'
     )
 
@@ -260,6 +387,21 @@ def expect_rejected(label, mutant_docs, mutant_job, needle):
         print(f'  non-vacuity OK: {label}')
     else:
         raise AssertionError(f'{label}: forbidden configuration was ACCEPTED')
+
+
+def expect_accepted(label, mutant_docs, mutant_job):
+    """The other direction: prose about a token is not the token.
+
+    A guard that only ever proves it REJECTS things drifts into rejecting the
+    comment that explains why the token is wrong. That failure is loud rather
+    than silent, but it is still a guard nobody can edit around, so it gets the
+    same fixture treatment.
+    """
+    try:
+        validate(mutant_docs, mutant_job)
+    except AssertionError as error:
+        raise AssertionError(f'{label}: a COMMENT was read as code: {error}') from None
+    print(f'  comment-blindness OK: {label}')
 
 
 # (a) AC1 — widen the verbs.
@@ -372,6 +514,105 @@ mutant.append({
 })
 expect_rejected('added an unrelated ClusterRoleBinding', mutant, job_rs, 'introduces cluster-scoped RBAC')
 
+# ---------------------------------------------------------------------------
+# (e) COMMENT BLINDNESS, both directions, for every source-text assertion above.
+#
+# A BAN and a PRESENCE assertion need DIFFERENT mutations, and neither proves
+# anything about the other:
+#   * to exercise a PRESENCE arm you REMOVE (or comment out) the required token;
+#   * to exercise a BAN you ADD the banned token while LEAVING the required one
+#     in place — otherwise you are re-testing the presence arm and reporting it
+#     as ban coverage.
+# Both arms appear below for each assertion.
+# ---------------------------------------------------------------------------
+
+# (e1) PRESENCE — the defect this section was written for. Delete the real
+# projected-token binding and leave a doc comment that still mentions it. Read
+# against raw source this stayed GREEN while the invariant was false in
+# production, which is the silent direction.
+expect_rejected(
+    'the audience binding commented out, comment left behind',
+    docs,
+    job_rs.replace('audience: Some(TOKEN_AUDIENCE.to_string()),',
+                   '// audience: Some(TOKEN_AUDIENCE.to_string()),'),
+    'no longer binds its audience to TOKEN_AUDIENCE',
+)
+
+# (e2) PRESENCE — the same for the constant itself.
+expect_rejected(
+    'the TOKEN_AUDIENCE declaration commented out',
+    docs,
+    job_rs.replace('pub const TOKEN_AUDIENCE: &str = "djinn";',
+                   '// pub const TOKEN_AUDIENCE: &str = "djinn";'),
+    'no longer declares TOKEN_AUDIENCE',
+)
+
+# (e3) PRESENCE, false-POSITIVE arm — a commented-out DECOY declaration ahead of
+# the real one must not be the match. Raw-text `re.search` takes the first hit,
+# so this reported an apiserver audience against a healthy file.
+expect_accepted(
+    'a commented-out decoy TOKEN_AUDIENCE ahead of the real one',
+    docs,
+    job_rs.replace('pub const TOKEN_AUDIENCE: &str = "djinn";',
+                   '// pub const TOKEN_AUDIENCE: &str = "kubernetes.default.svc";\n'
+                   'pub const TOKEN_AUDIENCE: &str = "djinn";'),
+)
+
+# (e4) BAN, false-POSITIVE arm — prose explaining why the banned value is wrong
+# must not fire the ban. The required Some(false) is untouched, so this is the
+# ban arm and not the presence arm.
+expect_accepted(
+    'a comment explaining why automount_service_account_token: Some(true) is wrong',
+    docs,
+    job_rs + '\n// never write automount_service_account_token: Some(true) here\n',
+)
+
+# (e5) BAN — a trailing comment must NOT launder the code in front of it.
+# `foo(); // banned` still calls foo(). Dropping the whole line would be the
+# cheap way to strip comments and would smuggle this straight through.
+expect_rejected(
+    'a banned token laundered by a trailing comment',
+    docs,
+    job_rs + '\n    automount_service_account_token: Some(true), // deliberate, honest\n',
+    'somewhere; the task-run Pod must never automount',
+)
+
+# (e6) BAN — a `//` inside a string literal is not a comment. Truncating there
+# would blank the rest of a REAL line of code and hide the token after it.
+expect_rejected(
+    'a banned token after a string literal containing //',
+    docs,
+    job_rs + '\n    let _doc = "https://example.invalid/x"; '
+             'automount_service_account_token: Some(true),\n',
+    'somewhere; the task-run Pod must never automount',
+)
+
+# (e7) SCOPE — `pod_spec_block` located its marker in raw text, so a commented-out
+# `let pod_spec = PodSpec {` earlier in the file captured the block scope and
+# every assertion inside it then read the wrong region.
+DECOY_POD_SPEC = (
+    '    // let pod_spec = PodSpec {\n'
+    '    //     automount_service_account_token: Some(true),\n'
+    '    // };\n'
+)
+expect_accepted(
+    'a commented-out PodSpec literal ahead of the real one',
+    docs,
+    job_rs.replace('    let pod_spec = PodSpec {', DECOY_POD_SPEC + '    let pod_spec = PodSpec {', 1),
+)
+# ...and the same text as CODE is still refused, so (e7) is not just "the guard
+# ignores everything that looks like this".
+expect_rejected(
+    'a second, automounting PodSpec literal ahead of the real one',
+    docs,
+    job_rs.replace('    let pod_spec = PodSpec {',
+                   '    let _decoy = PodSpec {\n'
+                   '        automount_service_account_token: Some(true),\n'
+                   '    };\n'
+                   '    let pod_spec = PodSpec {', 1),
+    'somewhere; the task-run Pod must never automount',
+)
+
 print('PASS: pods/resize is granted once, namespaced, patch-only, and the '
       'task-run ServiceAccount holds no apiserver credential')
 PY
@@ -404,14 +645,21 @@ from pathlib import Path
 
 import yaml
 
+from rust_source_text import strip_rust_comments
+
 render, cutover_rs = (Path(p) for p in sys.argv[1:3])
 docs = [d for d in yaml.safe_load_all(render.read_text(encoding='utf-8')) if isinstance(d, dict)]
-source = cutover_rs.read_text(encoding='utf-8')
+# Same rule as the block above, same helper: a commented-out or decoy constant is
+# prose. Reading the raw file meant a `// pub const RESIZE_RULE_VERB: &str =
+# "get";` above the real declaration decided what this guard compared the render
+# against, and a declaration deleted but left in a comment kept it green.
+raw_source = cutover_rs.read_text(encoding='utf-8')
+source = strip_rust_comments(raw_source)
 failures = []
 
 
-def constant(name):
-    match = re.search(rf'pub const {name}: &str = "([^"]*)";', source)
+def constant(name, text=None):
+    match = re.search(rf'pub const {name}: &str = "([^"]*)";', source if text is None else text)
     assert match, f'{name} is not declared in cutover_preflight.rs'
     return match.group(1)
 
@@ -495,6 +743,33 @@ stripped = [
 ]
 if not check(stripped, triple):
     failures.append('removing the component=taskrun label was not detected')
+
+# Non-vacuity, comment blindness: `constant()` reads a DECLARATION, not prose
+# about one. Both directions, because they fail differently:
+#   * a decoy in a comment ahead of the real declaration must be ignored
+#     (otherwise this guard compares the render against a string nobody ships);
+#   * a declaration that has been deleted and left behind as a comment must NOT
+#     satisfy the lookup (otherwise the guard is green with nothing declared).
+DECOY = ('// pub const RESIZE_RULE_VERB: &str = "get";\n'
+         'pub const RESIZE_RULE_VERB: &str = "patch";')
+decoyed = strip_rust_comments(
+    raw_source.replace('pub const RESIZE_RULE_VERB: &str = "patch";', DECOY, 1))
+if constant('RESIZE_RULE_VERB', decoyed) != triple[2]:
+    failures.append(
+        'a commented-out decoy declaration was read as RESIZE_RULE_VERB; the '
+        'preflight would be compared against a constant the crate does not declare')
+
+commented_out = strip_rust_comments(
+    raw_source.replace('pub const RESIZE_RULE_VERB: &str = "patch";',
+                       '// pub const RESIZE_RULE_VERB: &str = "patch";', 1))
+try:
+    constant('RESIZE_RULE_VERB', commented_out)
+except AssertionError:
+    pass
+else:
+    failures.append(
+        'a commented-out RESIZE_RULE_VERB still satisfied the declaration lookup; '
+        'this check would stay green after the constant was deleted')
 
 if failures:
     for failure in failures:
