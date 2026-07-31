@@ -11,7 +11,7 @@
 
 use std::collections::BTreeMap;
 
-use djinn_image_builder::{BuildContext, ScriptFile};
+use djinn_image_builder::{BuildContext, DeclarationError, ScriptFile};
 use k8s_openapi::api::batch::v1::{Job, JobSpec};
 use k8s_openapi::api::core::v1::{
     ConfigMap, ConfigMapVolumeSource, Container, EnvVar, KeyToPath, PodSpec, PodTemplateSpec,
@@ -235,13 +235,25 @@ fn script_key_for_path(path: &str) -> String {
 /// (`<reg>/djinn-project-<id>:<hash>` or `<reg>/djinn-image-<id>:<hash>`);
 /// the builder writes to that tag and exports cache to
 /// `<reg>/cache/<subject-segment>`.
+///
+/// # Fail-closed on a disagreeing declaration
+///
+/// This Job renders two things that must say the same word: the Dockerfile
+/// (via the ConfigMap) whose `LABEL` becomes the artifact's own metadata, and
+/// the `LAUNCHER_AUTHORITY_PROTOCOL` env the builder echoes as the sentinel the
+/// watcher writes into `images.launcher_authority_protocol`. So this is the
+/// last place both are still in one hand, and it refuses to render a Job whose
+/// [`BuildContext`] reports a protocol its Dockerfile does not declare. An
+/// image whose label and catalog row disagree cannot be built, rather than
+/// being built and then detected.
 pub fn build_image_build_job(
     config: &ImageControllerConfig,
     subject: &BuildSubject,
     hash_prefix: &str,
     image_tag: &str,
     build_context: &BuildContext,
-) -> Job {
+) -> Result<Job, DeclarationError> {
+    let declared = build_context.verify_declaration()?;
     let labels = job_labels(subject, hash_prefix);
     let subject_segment = subject.resource_segment();
     let job_name = build_job_name_for(subject, hash_prefix);
@@ -326,13 +338,11 @@ echo "DJINN_LAUNCHER_PROTOCOL=${{LAUNCHER_AUTHORITY_PROTOCOL}}"
             env_var("REGISTRY_HOST", &config.registry_host),
             env_var("SUBJECT_ID", subject.id()),
             env_var("IMAGE_TAG", image_tag),
-            // Straight off the BuildContext that rendered the Dockerfile, so
-            // the sentinel and the artifact's LABEL are the same string by
-            // construction.
-            env_var(
-                "LAUNCHER_AUTHORITY_PROTOCOL",
-                build_context.launcher_protocol.as_wire(),
-            ),
+            // The value `verify_declaration` just read back out of the
+            // Dockerfile this Job builds — so the sentinel the catalog is
+            // written from and the artifact's own LABEL are the same string,
+            // checked rather than assumed.
+            env_var("LAUNCHER_AUTHORITY_PROTOCOL", declared.as_wire()),
         ]),
         volume_mounts: Some(vec![
             VolumeMount {
@@ -419,11 +429,7 @@ echo "DJINN_LAUNCHER_PROTOCOL=${{LAUNCHER_AUTHORITY_PROTOCOL}}"
         spec: Some(pod_spec),
     };
 
-    // Drop `build_context` reference early; `_` silences the unused-var
-    // hint without having to reorder the function body.
-    let _ = build_context;
-
-    Job {
+    Ok(Job {
         metadata: ObjectMeta {
             name: Some(job_name),
             namespace: Some(config.namespace.clone()),
@@ -438,7 +444,7 @@ echo "DJINN_LAUNCHER_PROTOCOL=${{LAUNCHER_AUTHORITY_PROTOCOL}}"
             ..JobSpec::default()
         }),
         ..Job::default()
-    }
+    })
 }
 
 /// Build an OwnerReference pointing at a created build Job so the
@@ -495,7 +501,7 @@ pub(crate) fn sanitize_id(raw: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use djinn_image_builder::{AgentWorkerImage, generate_dockerfile};
+    use djinn_image_builder::{AgentWorkerImage, DEFAULT_LAUNCHER_PROTOCOL, generate_dockerfile};
     use djinn_stack::environment::EnvironmentConfig;
 
     fn test_cfg() -> ImageControllerConfig {
@@ -505,7 +511,12 @@ mod tests {
     fn test_build_context() -> BuildContext {
         let mut cfg = EnvironmentConfig::empty();
         cfg.schema_version = djinn_stack::environment::SCHEMA_VERSION;
-        generate_dockerfile(&cfg, &AgentWorkerImage::new("djinn/agent-runtime", "dev")).unwrap()
+        generate_dockerfile(
+            &cfg,
+            &AgentWorkerImage::new("djinn/agent-runtime", "dev"),
+            DEFAULT_LAUNCHER_PROTOCOL,
+        )
+        .unwrap()
     }
 
     #[test]
@@ -544,7 +555,8 @@ mod tests {
             "abc123def456",
             "reg/p:abc123",
             &ctx,
-        );
+        )
+        .unwrap();
         let script = &job
             .spec
             .as_ref()
@@ -587,7 +599,8 @@ mod tests {
             "abc123",
             "reg/p:abc123",
             &ctx,
-        );
+        )
+        .unwrap();
         let pod = job.spec.as_ref().unwrap().template.spec.as_ref().unwrap();
         let volumes = pod.volumes.as_ref().unwrap();
         let ctx_vol = volumes
@@ -627,7 +640,8 @@ mod tests {
             "abc123",
             "reg/p:abc123",
             &ctx,
-        );
+        )
+        .unwrap();
         let pod = job.spec.as_ref().unwrap().template.spec.as_ref().unwrap();
         assert_eq!(pod.service_account_name.as_deref(), Some("custom-build-sa"));
     }
@@ -642,7 +656,8 @@ mod tests {
             "abc123",
             "reg/p:abc123",
             &ctx,
-        );
+        )
+        .unwrap();
         let pod = job.spec.as_ref().unwrap().template.spec.as_ref().unwrap();
         let volumes = pod.volumes.as_ref().unwrap();
         assert!(
@@ -661,7 +676,8 @@ mod tests {
             "abc123",
             "reg/p:abc123",
             &ctx,
-        );
+        )
+        .unwrap();
         let spec = job.spec.as_ref().unwrap();
         assert_eq!(spec.backoff_limit, Some(1));
         assert_eq!(
@@ -717,7 +733,8 @@ mod tests {
             "6812838f6587",
             "reg/djinn-image-019e9907-3685-7041-a7b7-246adf24c2d0:6812838f6587",
             &ctx,
-        );
+        )
+        .unwrap();
         let name = job.metadata.name.as_deref().unwrap();
         assert!(
             name.len() <= 63,
@@ -737,7 +754,8 @@ mod tests {
             "abc123",
             "reg/djinn-image-img-1:abc123",
             &ctx,
-        );
+        )
+        .unwrap();
         let labels = job.metadata.labels.as_ref().unwrap();
         assert_eq!(
             labels.get(LABEL_IMAGE_ID).map(String::as_str),
@@ -760,7 +778,8 @@ mod tests {
             "abc123",
             "reg/djinn-image-img-1:abc123",
             &ctx,
-        );
+        )
+        .unwrap();
         let script = &job
             .spec
             .as_ref()
@@ -793,7 +812,8 @@ mod tests {
             // A tag that lies about the protocol in every segment.
             "reg/djinn-image-resize-v2:resize-v2",
             &ctx,
-        );
+        )
+        .unwrap();
         let container = &job
             .spec
             .as_ref()
@@ -822,7 +842,7 @@ mod tests {
         assert_eq!(declared, ctx.launcher_protocol.as_wire());
         assert_eq!(
             declared,
-            djinn_image_builder::DECLARED_LAUNCHER_PROTOCOL.as_wire()
+            djinn_image_builder::DEFAULT_LAUNCHER_PROTOCOL.as_wire()
         );
         assert_ne!(
             declared, "resize-v2",
@@ -841,7 +861,8 @@ mod tests {
             "abc123",
             "reg/djinn-image-img-1:abc123",
             &ctx,
-        );
+        )
+        .unwrap();
         assert_eq!(
             job.metadata.name.as_deref(),
             Some(build_job_name_for(&subject, "abc123").as_str())

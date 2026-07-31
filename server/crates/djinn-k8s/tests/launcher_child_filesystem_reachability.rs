@@ -256,6 +256,7 @@ fn image_time_paths() -> Vec<Required> {
     let context = djinn_image_builder::generate_dockerfile(
         &djinn_stack::environment::EnvironmentConfig::default(),
         &djinn_image_builder::AgentWorkerImage::new("registry.example/djinn-agent-worker", "test"),
+        djinn_image_builder::DEFAULT_LAUNCHER_PROTOCOL,
     )
     .expect("the baseline image config must render a Dockerfile");
     let mut required = Vec::new();

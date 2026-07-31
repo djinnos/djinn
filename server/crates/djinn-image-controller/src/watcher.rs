@@ -1131,3 +1131,7 @@ mod tests {
 #[cfg(test)]
 #[path = "watcher_protocol_tests.rs"]
 mod protocol_tests;
+
+#[cfg(test)]
+#[path = "declared_protocol_tests.rs"]
+mod declared_protocol_tests;

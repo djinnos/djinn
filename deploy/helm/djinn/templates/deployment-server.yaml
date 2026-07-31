@@ -387,6 +387,16 @@ spec:
             # later tick as slots free.
             - name: DJINN_IMAGE_MAX_CONCURRENT
               value: {{ .Values.imagePipeline.controller.maxConcurrentBuilds | quote }}
+            {{- with .Values.imagePipeline.controller.launcherAuthorityProtocol }}
+            # Launcher authority protocol newly built catalog images declare in
+            # their own OCI metadata. Rendered only when the operator sets it,
+            # so an unset value is the binary's default (leaf-v1) and no
+            # existing image's environment hash moves. Setting it re-tags and
+            # rebuilds the catalog — a cached leaf-v1 artifact cannot be served
+            # under a resize-v2 declaration.
+            - name: DJINN_IMAGE_LAUNCHER_AUTHORITY_PROTOCOL
+              value: {{ . | quote }}
+            {{- end }}
             # djinn-k8s runtime (task-run + warm-job dispatcher) — same
             # pattern as the image pipeline above: everything is derived
             # from the release fullname + namespace so no hardcoded

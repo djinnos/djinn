@@ -12,9 +12,11 @@
 //!   Dockerfile string + the script bundle that belongs alongside it in
 //!   the builder Pod's ConfigMap.
 //! * [`compute_environment_hash`] — sha256 over the canonicalised
-//!   config JSON + the script bundle digest + the worker binary digest.
-//!   Any change to any of those nulls the cached image hash and
-//!   re-triggers a build.
+//!   config JSON, the script bundle digest, the worker binary digest,
+//!   and the declared launcher authority protocol. Any change to any of
+//!   those nulls the cached image hash and re-triggers a build. Prefer
+//!   [`BuildContext::environment_hash`], which supplies the declaration
+//!   that was actually emitted rather than one a caller restates.
 //!
 //! ## Multi-toolchain
 //!
@@ -37,7 +39,7 @@ pub mod hash;
 pub mod scripts;
 
 pub use dockerfile::{
-    AgentWorkerImage, BuildContext, DECLARED_LAUNCHER_PROTOCOL, DockerfileError,
+    AgentWorkerImage, BuildContext, DEFAULT_LAUNCHER_PROTOCOL, DeclarationError, DockerfileError,
     LAUNCHER_PROTOCOL_ENV, LAUNCHER_PROTOCOL_LABEL, generate_dockerfile,
 };
 pub use hash::{compute_environment_hash, compute_script_bundle_sha};
