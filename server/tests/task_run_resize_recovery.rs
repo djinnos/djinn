@@ -89,9 +89,8 @@ use djinn_db::{
     AcquireBuildPodPermitResult, BindBuildPodPermitResult, BuildLeaseConsumerKind, BuildLeaseKey,
     BuildLeaseRepository, BuildLeaseState, BuildPodPermitRepository, BuildPodPermitRow,
     BuildPodPermitState, BuildPodResizeIdentity, CaptureBuildPodResizeIdentityResult,
-    CreateTaskRunParams, Database, DatabaseConnectConfig, EffectiveCreatorProvenance,
-    PostgresDatabaseConfig, ProjectRepository, TaskRepository, TaskRunRepository,
-    TransitionBuildPodResizeLifecycleResult,
+    CreateTaskRunParams, Database, EffectiveCreatorProvenance, ProjectRepository, TaskRepository,
+    TaskRunRepository, TransitionBuildPodResizeLifecycleResult,
 };
 use djinn_k8s::pod_resize_fixture::{ApiFault, StoredTaskRunPod};
 use djinn_k8s::runtime::{LauncherObservationError, ObservedLauncherSidecar};
@@ -573,21 +572,102 @@ impl Restart {
     /// Rebuild everything a restarted process would have to rebuild.
     fn restart(&self, cluster: StoredTaskRunPod, clock: Arc<RecordingClock>) -> Rebuilt {
         let db =
-            Database::open_with_config(DatabaseConnectConfig::Postgres(PostgresDatabaseConfig {
-                url: self.dsn.clone(),
-            }))
-            .expect("reopen the same database from its DSN alone");
+            Database::reopen_test(&self.dsn).expect("reopen the same database from its DSN alone");
         let surface = Arc::new(CountingSurface::new(cluster));
-        let bridge = Arc::new(TaskRunResizeDropBridge::with_surface(
-            db.clone(),
-            Arc::clone(&surface) as Arc<dyn TaskRunPodSurface>,
-            Arc::clone(&clock) as Arc<dyn ResizeDropClock>,
-        ));
         Rebuilt {
+            bridge: Arc::new(TaskRunResizeDropBridge::with_surface(
+                db.clone(),
+                Arc::clone(&surface) as Arc<dyn TaskRunPodSurface>,
+                Arc::clone(&clock) as Arc<dyn ResizeDropClock>,
+            )),
             db,
             surface,
-            bridge,
         }
+    }
+
+    /// Restart onto a surface that races the ledger. See
+    /// [`LedgerRacingSurface`].
+    fn restart_racing_the_ledger(
+        &self,
+        cluster: StoredTaskRunPod,
+        permit: &BuildPodPermitRow,
+    ) -> Arc<TaskRunResizeDropBridge> {
+        let db = Database::reopen_test(&self.dsn).expect("reopen from the DSN");
+        let surface = Arc::new(LedgerRacingSurface {
+            cluster,
+            permits: BuildPodPermitRepository::new(db.clone()),
+            task_run_id: permit.task_run_id.clone(),
+            permit_id: permit.permit_id.clone(),
+            fencing_token: permit.fencing_token,
+            observations: AtomicU64::new(0),
+        });
+        Arc::new(TaskRunResizeDropBridge::with_surface(
+            db,
+            surface as Arc<dyn TaskRunPodSurface>,
+            Arc::new(RecordingClock::new()) as Arc<dyn ResizeDropClock>,
+        ))
+    }
+}
+
+/// A surface that moves the durable ledger out from under a drop, between its
+/// PATCH and its settle.
+///
+/// The launcher REALLY comes back to 250m and the cluster REALLY reports it.
+/// But the permit row is retired by somebody else in the same instant, so
+/// `settle_confirmed`'s compare-and-swap is rejected and the drop settles as
+/// [`ResizeDropOutcome::Unavailable`] — "the Pod came back down but the ledger
+/// did not move".
+///
+/// This is the ONLY shape that reaches the reconciler's `releases_lease()`
+/// guard at all: a resumption that runs out of its row budget returns `None` and
+/// takes the `unsettled` arm long before it. An earlier version of this file
+/// claimed the apiserver-unavailability test covered that guard; it did not, and
+/// deleting the guard left the whole suite green.
+struct LedgerRacingSurface {
+    cluster: StoredTaskRunPod,
+    permits: BuildPodPermitRepository,
+    task_run_id: String,
+    permit_id: String,
+    fencing_token: i64,
+    observations: AtomicU64,
+}
+
+#[async_trait]
+impl TaskRunPodSurface for LedgerRacingSurface {
+    async fn observe_launcher(
+        &self,
+        _task_run_id: &str,
+    ) -> Result<Option<ObservedLauncherSidecar>, LauncherObservationError> {
+        // Observation 1 is the fencing read before the PATCH; observation 2 is
+        // the CONFIRMING read the settle immediately follows. Racing the ledger
+        // at 2 is what lands the rejection on the settle rather than on the
+        // entry transition.
+        if self.observations.fetch_add(1, Ordering::SeqCst) == 1 {
+            self.permits
+                .release(
+                    &self.task_run_id,
+                    &self.permit_id,
+                    self.fencing_token,
+                    "test_ledger_race",
+                )
+                .await
+                .expect("retire the permit under the drop");
+        }
+        self.cluster.observe_launcher()
+    }
+
+    async fn resize_launcher_cpu(
+        &self,
+        pod_name: &str,
+        target_millicores: u64,
+    ) -> Result<(), djinn_k8s::pod_resize::PodResizeError> {
+        self.cluster
+            .resize_launcher_cpu(pod_name, target_millicores)
+            .await
+    }
+
+    async fn uid_fenced_delete(&self, task_run_id: &str, pod_uid: &str) -> Result<(), String> {
+        self.cluster.uid_fenced_delete(task_run_id, pod_uid)
     }
 }
 
@@ -1258,6 +1338,81 @@ async fn an_unreachable_apiserver_holds_the_lease_and_keeps_retrying() {
     );
 }
 
+/// A SETTLED outcome that is not releasable still holds the lease.
+///
+/// The launcher is confirmed back at 250m — the cluster said so, through
+/// `status.initContainerStatuses` — and the lease is STILL not released,
+/// because the durable lifecycle did not move with it. Holding is the only
+/// answer that keeps the two ledgers in agreement.
+///
+/// This is the test that guards `outcome.releases_lease() &&` in `run_pass`.
+/// It exists because the apiserver-unavailability test above does NOT: an
+/// unsettled resumption returns `None` and takes the `unsettled` arm before the
+/// release site is ever evaluated, so deleting that condition left the entire
+/// suite green. The named mutation was verified against a real deletion.
+///
+/// NAMED FAILING MUTATION: drop `outcome.releases_lease() &&` from the release
+/// condition in `run_pass` and this fails with `build_leases` terminal.
+#[tokio::test]
+async fn a_settled_but_unreleasable_outcome_still_holds_the_lease() {
+    let restart = Restart::new().await;
+    let db = restart.db().clone();
+    let (task_id, task_run_id) = seed_task_run(&db, "unreleasable").await;
+    let pod_uid = "pod-uid-unreleasable";
+    let invocation_id = "invocation-unreleasable";
+    let cluster = StoredTaskRunPod::resize_v2(pod_uid, CEILING);
+    let permits = BuildPodPermitRepository::new(db.clone());
+    let row = captured_permit(&permits, &task_run_id, pod_uid).await;
+    lift_then_park(
+        &permits,
+        &cluster,
+        &row,
+        pod_uid,
+        invocation_id,
+        BuildPodPermitState::DropApplying,
+    )
+    .await;
+    let leases = armed_lease_service(&db).await;
+    hold_build_lease(&leases, &task_id, &task_run_id, invocation_id).await;
+    kill_the_worker(&db, &task_run_id).await;
+    cluster.reset_patch_counter();
+
+    let bridge = restart.restart_racing_the_ledger(cluster.clone(), &row);
+    let reconciler = Arc::new(
+        TaskRunResizeReconciler::new(
+            Database::reopen_test(&restart.dsn).expect("reopen"),
+            bridge,
+            Some(Arc::clone(&leases)),
+            Arc::new(ArmedGate),
+        )
+        .with_row_budget(Duration::from_secs(5)),
+    );
+    let pass = reconciler.run_pass().await;
+
+    assert_eq!(pass.resumed, 1, "pass was {pass:?}");
+    assert_eq!(
+        pass.unsettled, 0,
+        "NON-VACUITY: this must be a SETTLED outcome, not one that ran out of \
+         budget — the budget path returns before the release site; pass was {pass:?}"
+    );
+    assert_eq!(
+        status_millicores(&cluster),
+        Some(BIRTH_MILLICORES),
+        "NON-VACUITY: the cluster really did bring the launcher back down, so \
+         'the lease is held' is not held because nothing happened"
+    );
+    assert_eq!(
+        pass.leases_released, 0,
+        "an outcome the drop refused to call releasable must not release the \
+         durable lease; pass was {pass:?}"
+    );
+    assert_eq!(
+        build_lease_state(&db, invocation_id).await,
+        Some(BuildLeaseState::Launching),
+        "THE OTHER LEDGER: `build_leases` must still be HELD"
+    );
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // AC7 — concurrent ownership is fenced
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1617,7 +1772,12 @@ fn the_reconciler_is_spawned_from_become_leader_and_not_from_initialize() {
 /// stops being true of production, though this test would keep passing;
 /// `the_reconciler_is_spawned_from_become_leader_and_not_from_initialize` above
 /// is the assertion that catches that move, and the two are deliberately paired.
-#[tokio::test]
+/// Multi-threaded on purpose: this is the only test here that runs two
+/// long-lived background processes AND a polling loop at the same time, and on
+/// the default current-thread runtime they all contend for one thread. Under
+/// `--test-threads 4` that showed up as a 30-second timeout on a test that takes
+/// three seconds alone, which is a flake, not a finding.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
 async fn only_the_leader_reconciles_across_a_real_advisory_lock_race() {
     let restart = Restart::new().await;
     let db = restart.db().clone();
@@ -1652,18 +1812,33 @@ async fn only_the_leader_reconciles_across_a_real_advisory_lock_race() {
         let cancel = cancel.clone();
         pods.push(tokio::spawn(async move {
             let _rebuilt = rebuilt;
+            let loop_cancel = cancel.clone();
             djinn_server::leadership::run_with_leadership(Some(dsn), cancel, || async move {
                 acquired.fetch_add(1, Ordering::SeqCst);
-                reconciler.run_pass().await;
+                // The PRODUCTION shape: a loop, not a single pass. A one-shot
+                // here would make the test hostage to any transient database
+                // hiccup — one failed scan and the row is stranded for the rest
+                // of the test — which is exactly the startup-only failure mode
+                // this whole slice exists to avoid.
+                run_loop(Duration::from_millis(50), loop_cancel, move || {
+                    let reconciler = Arc::clone(&reconciler);
+                    async move {
+                        reconciler.run_pass().await;
+                    }
+                })
+                .await;
             })
             .await;
         }));
     }
 
+    // `Released`, not `BirthConfirmed`: the pass drives the row all the way
+    // through the birth limit to permit retirement, so polling for the
+    // intermediate state is a race the poller usually loses.
     wait_until(|| {
         let db = db.clone();
         let task_run_id = task_run_id.clone();
-        async move { permit_state(&db, &task_run_id).await == BuildPodPermitState::BirthConfirmed }
+        async move { permit_state(&db, &task_run_id).await == BuildPodPermitState::Released }
     })
     .await;
     // Give the standby ample opportunity to promote itself if it were going to.
@@ -1697,14 +1872,14 @@ where
     F: FnMut() -> Fut,
     Fut: Future<Output = bool>,
 {
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + Duration::from_secs(60);
     loop {
         if condition().await {
             return;
         }
         assert!(
             Instant::now() < deadline,
-            "condition never became true within 30s"
+            "condition never became true within 60s"
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
