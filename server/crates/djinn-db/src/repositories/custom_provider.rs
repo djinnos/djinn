@@ -1,6 +1,6 @@
+use crate::{Database, Result, ensure_db};
 use djinn_core::events::{DjinnEventEnvelope, EventBus};
 use djinn_core::models::{CustomProvider, SeedModel};
-use djinn_db::{Database, Result, ensure_db};
 
 pub struct CustomProviderRepository {
     db: Database,

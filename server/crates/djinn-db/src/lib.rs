@@ -117,6 +117,8 @@ pub use repositories::{
         derive_pair_events, derive_pair_events_into,
     },
     coordinator_incarnation::{CoordinatorIncarnation, CoordinatorIncarnationRepository},
+    credential::CredentialRepository,
+    custom_provider::CustomProviderRepository,
     dispatch_pause::{DispatchPauseMutation, DispatchPauseRepository, DispatchPauseTarget},
     dispatch_state::{DispatchStateRecord, DispatchStateRepository, DispatchStateUpsert},
     doctor_finding::{
