@@ -32,14 +32,15 @@ kueue:
   armed: true
   # M. Read back off the live ClusterQueue by the test — never compared against
   # this literal — and deliberately NOT the chart default of 3, for the same
-  # reason the B0 fixture is not: a number equal to the default would pass
-  # against an install that never read this file.
+  # reason the B0 fixture is not the default: a number equal to it would let the
+  # live assertion pass against an install that never read this file.
   #
-  # Three is the smallest M that admits a cap K strictly between "authorizes
-  # nothing" (K = 0) and "bounds nothing" (K >= M). At K = 2 the live cluster
-  # holds two lifted invocations and one refused one simultaneously, which is
-  # the population AC3 measures.
-  buildPods: 3
+  # It also has to be at least 3 for the population to be interesting. At M = 4
+  # the durable cap lands at K = 3, so the live cluster holds three lifted
+  # invocations and one refused one simultaneously — a bound that is reached as
+  # well as respected, which is what makes "exactly K" different from "at most
+  # K".
+  buildPods: 4
   namespaceLabelledExternally: false
 
 # -----------------------------------------------------------------------------

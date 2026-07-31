@@ -163,7 +163,11 @@ fn workload_command(settings: &Settings) -> CommandSpec {
     CommandSpec {
         program: "/bin/sh".to_owned(),
         argv: vec!["-c".to_owned(), script],
-        cwd: "/".to_owned(),
+        // `safe_command_path(cwd, true)` accepts the task workspace and nothing
+        // else, and `spawn.rs` `chdir`s there before `execve`. The renderer
+        // mounts the workspace emptyDir into the launcher container too, so this
+        // is the same directory a brokered build would run in.
+        cwd: "/workspace".to_owned(),
         // Empty on purpose. The launcher derives and OVERRIDES the child's
         // parallelism pins and git trust anchor itself (`crate::env`), and every
         // path this command names is absolute, so nothing has to be forwarded.
@@ -243,6 +247,10 @@ fn run() -> Result<(), String> {
         settings.invocation, settings.fence, settings.authority, settings.socket, settings.workers,
     );
 
+    if let Some(directory) = settings.decision_path.parent() {
+        fs::create_dir_all(directory)
+            .map_err(|error| format!("create {}: {error}", directory.display()))?;
+    }
     let credential = write_worker_handshake(&settings.credential_path)?;
     println!(
         "probe.handshake pid={} credential_path={}",
