@@ -105,8 +105,12 @@ if [ -z "$BIN" ]; then
   if [ ! -x "$BIN" ]; then
     command -v cargo >/dev/null 2>&1 ||
       die "cutover-preflight binary missing ($BIN) and cargo is unavailable to build it"
-    cargo build --manifest-path "$REPO_DIR/server/Cargo.toml" \
-      -p djinn-k8s --bin cutover-preflight >&2
+    # Built from `server/`, not via `--manifest-path` from wherever the caller
+    # happens to stand: CI sets a RELATIVE `CARGO_BUILD_BUILD_DIR=target`, and
+    # cargo resolves that against the PROCESS CWD — so building from the repo
+    # root sends every intermediate to `<repo>/target` and rebuilds the whole
+    # djinn-k8s chain off an otherwise-warm `server/target` cache.
+    (cd "$REPO_DIR/server" && cargo build -p djinn-k8s --bin cutover-preflight) >&2
   fi
 fi
 [ -x "$BIN" ] || die "cutover-preflight binary is not executable: $BIN"

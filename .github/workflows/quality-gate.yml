@@ -1024,6 +1024,16 @@ jobs:
             echo "::error title=Cutover preflight proofs did not run::executed $executed, expected at least $DJINN_CUTOVER_EXPECTED_PROOFS. An ignored proof nobody runs is the exact defect this lane exists to prevent."
             exit 1
           fi
+      - name: Build the deploy-time cutover preflight driver
+        # Built HERE, from `server/`, and handed to the contract suite by path.
+        #
+        # This workflow sets `CARGO_BUILD_BUILD_DIR: target` (env, line ~26) and
+        # cargo resolves a RELATIVE build-dir against the process CWD. The
+        # contract suite runs from the repository root, so letting it build the
+        # binary itself would send every intermediate to `<repo>/target` and
+        # rebuild the whole djinn-k8s chain from proc-macro2 off a warm cache —
+        # the same trap `server-sqlx-freshness` documents at line ~1671.
+        run: cargo build -p djinn-k8s --bin cutover-preflight
       - name: Test the deploy-time cutover preflight driver
         # The exit code of deploy/preflight/cutover-preflight.sh is the whole
         # contract, and this suite is what asserts it. DJINN_DATABASE_URL is
@@ -1033,6 +1043,7 @@ jobs:
         working-directory: ${{ github.workspace }}
         env:
           DJINN_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5433/djinn
+          CUTOVER_PREFLIGHT_BIN: ${{ github.workspace }}/server/target/debug/cutover-preflight
         run: bash deploy/preflight/tests/cutover-preflight.sh
   launcher-kernel-boundary:
     name: Launcher Kernel Boundary

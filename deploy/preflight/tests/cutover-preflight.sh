@@ -58,7 +58,10 @@ require_tool cargo
 }
 
 if [ -z "${CUTOVER_PREFLIGHT_BIN:-}" ]; then
-  cargo build --manifest-path "$REPO_DIR/server/Cargo.toml" -p djinn-k8s --bin cutover-preflight
+  # From `server/` — see the note in deploy/preflight/cutover-preflight.sh: a
+  # relative CARGO_BUILD_BUILD_DIR resolves against the process CWD, and this
+  # suite runs from the repository root.
+  (cd "$REPO_DIR/server" && cargo build -p djinn-k8s --bin cutover-preflight)
   CUTOVER_PREFLIGHT_BIN="${CARGO_TARGET_DIR:-$REPO_DIR/server/target}/debug/cutover-preflight"
 fi
 export CUTOVER_PREFLIGHT_BIN
