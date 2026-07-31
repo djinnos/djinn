@@ -79,20 +79,30 @@ where
 /// Giving each actor its own registry in tests makes a check's database the
 /// database of the actor that runs it, which is what the production invariant
 /// already says.
-#[cfg(not(test))]
 pub(super) type DoctorRegistryHandle = &'static djinn_core::doctor::DoctorRegistry;
-#[cfg(test)]
-pub(super) type DoctorRegistryHandle = Arc<djinn_core::doctor::DoctorRegistry>;
 
-/// Build the registry a freshly-constructed actor will own.
+/// Build the registry a freshly-constructed actor resolves its checks from.
 #[cfg(not(test))]
 pub(super) fn new_doctor_registry_handle() -> DoctorRegistryHandle {
     djinn_core::doctor::registry()
 }
 
+/// A fresh per-actor registry, leaked so it is `&'static` like the production
+/// singleton.
+///
+/// The leak is deliberate and it is what the singleton already did: a check
+/// registered into the global registry holds an `Arc` of its source, which
+/// holds a `Database`, and nothing ever unregisters — so every test database
+/// in the binary was already kept alive for the whole process. An owned
+/// `Arc<DoctorRegistry>` would instead have dropped with its actor, and that
+/// changed something unrelated to check isolation: `TestDbInit::drop` issues
+/// `DROP DATABASE` from a `std::thread::spawn(..).join()`, and running that
+/// from a task being dropped during `Runtime::drop` wedged the suite (one
+/// observed run sat on a single wave test past the 900 s cap). Matching the
+/// production lifetime keeps this change to the one thing it is about.
 #[cfg(test)]
 pub(super) fn new_doctor_registry_handle() -> DoctorRegistryHandle {
-    Arc::new(djinn_core::doctor::DoctorRegistry::new())
+    Box::leak(Box::new(djinn_core::doctor::DoctorRegistry::new()))
 }
 
 /// Coordinator actor state.
