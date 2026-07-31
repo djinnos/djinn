@@ -1266,6 +1266,131 @@ impl AdmissionControl for DurableAdmissionControl {
     }
 }
 
+/// The task-run Pod plane, bound to a live apiserver.
+///
+/// Composed entirely from production `djinn-k8s` entry points — the same Job
+/// lister the reapers use and the same [`TaskRunPodResizeSurface`] the resize
+/// bootstrap drives. It introduces no Kubernetes primitive of its own and does
+/// not name a `kube` type, so the cutover cannot drift from what dispatch and
+/// bootstrap already observe.
+///
+/// # Why it cannot create a Pod
+///
+/// [`Self::create_task_run_pod`] refuses, always. The cutover's only dispatch
+/// is the probe [`ResizeRollout::pause_admission`] issues to disbelieve its own
+/// pause, and a probe that materialised a real task-run Pod would be a worse
+/// bug than the one it is checking for. The refusal is also a second fence: if
+/// the pause predicate were ever broken open, the probe would still create
+/// nothing, and `pause_admission` would still block the cutover — with
+/// [`RolloutBlocked::AdmissionPauseIneffective`], because a probe that was not
+/// refused *by the pause* is a probe the pause did not stop.
+///
+/// Real task-run Pod creation belongs to the coordinator's `SessionRuntime`
+/// path and is deliberately not reachable from here.
+pub struct KubernetesTaskRunPodPlane {
+    runtime: std::sync::Arc<djinn_k8s::runtime::KubernetesRuntime>,
+    surface: djinn_k8s::runtime::TaskRunPodResizeSurface,
+}
+
+impl KubernetesTaskRunPodPlane {
+    /// Bind to a live runtime, reusing its client and configured namespace.
+    #[must_use]
+    pub fn new(runtime: std::sync::Arc<djinn_k8s::runtime::KubernetesRuntime>) -> Self {
+        let surface = djinn_k8s::runtime::TaskRunPodResizeSurface::from_runtime(&runtime);
+        Self { runtime, surface }
+    }
+}
+
+#[async_trait]
+impl TaskRunPodPlane for KubernetesTaskRunPodPlane {
+    async fn create_task_run_pod(&self, task_run_id: &str, _image_id: &str) -> Result<(), String> {
+        Err(format!(
+            "the authority cutover never creates task-run Pods; refusing to materialise one for \
+             {task_run_id}"
+        ))
+    }
+
+    async fn resize_launcher_cpu(&self, task_run_id: &str, millicores: u64) -> Result<(), String> {
+        let observed = self
+            .surface
+            .observe_launcher(task_run_id)
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| format!("no Pod exists for task run {task_run_id}"))?;
+        self.surface
+            .resize_launcher_cpu(&observed.pod_name, millicores)
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    /// Every task-run Job in the namespace, resolved to the Pod it currently
+    /// has.
+    ///
+    /// A Job with no Pod contributes nothing; a Job whose Pod read *fails*
+    /// aborts the whole census. That asymmetry is deliberate: "this Job has no
+    /// Pod right now" is an observation, and "the apiserver did not answer" is
+    /// not an observation of zero Pods.
+    async fn live_task_run_pods(&self) -> Result<Vec<LiveTaskRunPod>, String> {
+        let jobs = self
+            .runtime
+            .list_taskrun_jobs()
+            .await
+            .map_err(|error| format!("listing task-run Jobs: {error}"))?;
+        let mut live = Vec::new();
+        for job in jobs {
+            match self.surface.observe_launcher(&job.task_run_id).await {
+                Ok(Some(observed)) => live.push(LiveTaskRunPod {
+                    pod_name: observed.pod_name,
+                    pod_uid: observed.pod_uid,
+                    task_run_id: job.task_run_id,
+                }),
+                Ok(None) => {}
+                Err(error) => {
+                    return Err(format!(
+                        "reading the Pod for task run {}: {error}",
+                        job.task_run_id
+                    ));
+                }
+            }
+        }
+        Ok(live)
+    }
+}
+
+impl ResizeRollout {
+    /// **The production composition site.**
+    ///
+    /// Every seam gets its real implementation: the durable dispatch-pause
+    /// state and the coordinator's own refusal predicate, the live apiserver,
+    /// and an HTTP registry. The three repositories are built from `db` inside
+    /// [`Self::new`] and cannot be passed in.
+    ///
+    /// Nothing here is conditional, feature-gated or test-only. A cutover
+    /// driven through this constructor is the same code path the tests drive,
+    /// with the two seams that need a cluster and a registry pointed at a real
+    /// cluster and a real registry.
+    #[must_use]
+    pub fn production(
+        db: Database,
+        events: djinn_core::events::EventBus,
+        runtime: std::sync::Arc<djinn_k8s::runtime::KubernetesRuntime>,
+        registry_base_url: &str,
+        paused_by: &str,
+    ) -> Self {
+        Self::new(
+            db.clone(),
+            // Read from the deployment's environment at process start. A
+            // restart re-reads the document; nothing re-reads it in-process,
+            // because an allowlist that can change under a running cutover is
+            // not an allowlist.
+            LegacyDigestInventory::process().clone(),
+            std::sync::Arc::new(DurableAdmissionControl::new(db, events, paused_by)),
+            std::sync::Arc::new(KubernetesTaskRunPodPlane::new(runtime)),
+            std::sync::Arc::new(HttpRegistryProbe::new(registry_base_url)),
+        )
+    }
+}
+
 /// A registry probe over plain HTTP(S), speaking the OCI distribution manifest
 /// API.
 ///

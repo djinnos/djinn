@@ -1295,6 +1295,67 @@ fn read(relative: &str) -> String {
     std::fs::read_to_string(&path).unwrap_or_else(|error| panic!("reading {path:?}: {error}"))
 }
 
+/// **The production composition site.**
+///
+/// The reachability question this repository keeps losing to is not "does the
+/// code exist" but "is the thing production composes the thing the tests
+/// drove". `ResizeRollout::production` is that site, and it is asserted here to
+/// wire only production implementations — the durable dispatch-pause state, the
+/// live apiserver, an HTTP registry — through the same `Self::new` the tests
+/// call. It is unconditional: no feature gate, no `cfg`, no fallback branch.
+///
+/// The type-level half of this is stronger than the textual half and is not
+/// restated here: `ResizeRollout::new` takes a `Database`, so no production
+/// path *can* be handed a substitute for the drain fence or the catalog.
+#[test]
+fn the_production_composition_site_wires_only_production_implementations() {
+    let driver = read("server/src/task_run_resize_rollout.rs");
+    let start = driver
+        .find("pub fn production(")
+        .expect("the module must expose a production composition site");
+    let body = &driver[start..];
+    let end = body.find("\n}\n").expect("the constructor must terminate");
+    let body = &body[..end];
+
+    for required in [
+        "DurableAdmissionControl::new",
+        "KubernetesTaskRunPodPlane::new",
+        "HttpRegistryProbe::new",
+        "LegacyDigestInventory::process()",
+        "Self::new(",
+    ] {
+        assert!(
+            body.contains(required),
+            "the production constructor must wire {required}, got:\n{body}"
+        );
+    }
+    for forbidden in ["cfg(", "feature =", "unimplemented", "todo!"] {
+        assert!(
+            !body.contains(forbidden),
+            "{forbidden:?} in the production constructor would make it conditional"
+        );
+    }
+
+    // The Kubernetes Pod plane composes production `djinn-k8s` entry points and
+    // introduces no primitive of its own.
+    for required in [
+        ".list_taskrun_jobs()",
+        "TaskRunPodResizeSurface::from_runtime",
+        ".observe_launcher(",
+    ] {
+        assert!(
+            driver.contains(required),
+            "the live-Pod census must go through the production entry point {required}"
+        );
+    }
+    // …and names no `kube` type of its own, so it cannot diverge from what
+    // dispatch and bootstrap already observe.
+    assert!(
+        !driver.contains("kube::"),
+        "the Pod plane must compose djinn-k8s, not reach past it"
+    );
+}
+
 /// **The reachability gate.**
 ///
 /// `list_nonterminal_resize` had no production caller before this module. The
