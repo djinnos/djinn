@@ -334,6 +334,7 @@ async fn drive_stream_directly(
         otel_session: None,
         phase_tracker: None,
         cancel: &cancel,
+        turn_inline_budget: None,
     };
     let activity_ts = Arc::new(AtomicU64::new(0));
     let last_rpc_touch = Arc::new(AtomicU64::new(0));

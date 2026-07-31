@@ -170,6 +170,14 @@ pub(super) struct ToolDispatchContext<'a> {
     pub otel_session: Option<&'a telemetry::SessionSpan>,
     pub phase_tracker: Option<&'a Arc<Mutex<SessionPhaseTracker>>>,
     pub cancel: &'a tokio_util::sync::CancellationToken,
+    /// Override for the per-turn inline-character budget policy.
+    ///
+    /// Production wiring leaves this `None`, which makes the turn-budget pass
+    /// read [`TurnInlineBudgetConfig::from_env`] exactly as before. Tests set it
+    /// so they can drive the policy deterministically instead of mutating the
+    /// `DJINN_TURN_INLINE_*` process environment, which is shared by every test
+    /// in the binary and races under parallel execution.
+    pub turn_inline_budget: Option<super::turn_budget::TurnInlineBudgetConfig>,
 }
 
 /// Per-call fields passed into [`dispatch_single_tool`].

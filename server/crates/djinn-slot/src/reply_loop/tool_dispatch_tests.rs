@@ -344,6 +344,7 @@ fn test_tracked_dispatch_context<'a>(
         otel_session: None,
         phase_tracker: Some(phase_tracker),
         cancel: test_cancel_token(),
+        turn_inline_budget: None,
     }
 }
 #[test]
