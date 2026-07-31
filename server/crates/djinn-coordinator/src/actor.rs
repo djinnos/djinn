@@ -53,6 +53,48 @@ where
 
 // ─── Actor (≤20 fields — AGENT-11) ───────────────────────────────────────────
 
+/// Where a [`CoordinatorActor`] keeps its doctor checks.
+///
+/// Production is unchanged: the actor registers into, and reads back from, the
+/// process-global [`djinn_core::doctor::registry()`] singleton, which is the
+/// same registry the MCP `doctor_run` / `doctor_fix` surfaces resolve against
+/// (`McpState` defaults to it — PR #2820). One server process runs one
+/// coordinator, so "global" and "this actor's" are the same set of checks.
+///
+/// Under `cfg(test)` they are not the same thing, and that difference was a
+/// flake source. `DoctorRegistry::register` replaces by check *name*, and cargo
+/// runs every test in a binary as a thread of one process, so each of the
+/// ~1980 coordinator lib tests that builds an actor overwrote all seven
+/// coordinator checks with sources bound to *its own* ephemeral Postgres
+/// database (a 4-connection pool). Whichever test registered last served every
+/// concurrent actor's tick: sixteen actors piled onto one foreign pool, and
+/// once that owning test finished and its database was dropped the checks sat
+/// there until the pool acquire timed out. A single observed tick spent
+/// `elapsed_ms=15046` in `run_cheap_subset` on
+/// `pool timed out while waiting for an open connection`. The coordinator is a
+/// single-mailbox actor, so for those fifteen seconds it serviced neither its
+/// mailbox nor the event stream, and whichever sibling test was waiting on a
+/// rule to fire failed its bounded wait — a different one each run.
+///
+/// Giving each actor its own registry in tests makes a check's database the
+/// database of the actor that runs it, which is what the production invariant
+/// already says.
+#[cfg(not(test))]
+pub(super) type DoctorRegistryHandle = &'static djinn_core::doctor::DoctorRegistry;
+#[cfg(test)]
+pub(super) type DoctorRegistryHandle = Arc<djinn_core::doctor::DoctorRegistry>;
+
+/// Build the registry a freshly-constructed actor will own.
+#[cfg(not(test))]
+pub(super) fn new_doctor_registry_handle() -> DoctorRegistryHandle {
+    djinn_core::doctor::registry()
+}
+
+#[cfg(test)]
+pub(super) fn new_doctor_registry_handle() -> DoctorRegistryHandle {
+    Arc::new(djinn_core::doctor::DoctorRegistry::new())
+}
+
 /// Coordinator actor state.
 ///
 /// Durability boundary: `last_dispatched`, `inflight_dispatches`,
@@ -181,6 +223,9 @@ pub(super) struct CoordinatorActor {
     #[cfg(not(test))]
     pub(super) retrieval_health_source:
         Option<Arc<crate::doctor::retrieval_health::RetrievalHealthSource>>,
+    /// The doctor registry this actor registers its checks into and resolves
+    /// the cheap subset from. See [`DoctorRegistryHandle`].
+    pub(super) doctor_registry: DoctorRegistryHandle,
     /// Per-task state of the PR poller's offloaded clean-merge fast path. The
     /// heavy mechanical merge (fetch + ephemeral clone + merge + push) runs in a
     /// spawned background task instead of inline on this tick; the poller reads
@@ -552,10 +597,13 @@ impl CoordinatorActor {
         let mut tick = time::interval(STUCK_INTERVAL);
         tick.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
 
-        // Wire the coordinator-side doctor checks into the global registry. The
-        // stranded-ready source is cached here and refreshed each tick before the
-        // cheap subset runs; the live-mover source is a no-op until the production
+        // Wire the coordinator-side doctor checks into this actor's registry —
+        // the process-global one in production, a private one under
+        // `cfg(test)`; see [`DoctorRegistryHandle`]. The stranded-ready source
+        // is cached here and refreshed each tick before the cheap subset runs;
+        // the live-mover source is a no-op until the production
         // evidence-collector adapter (T5) is wired.
+        let doctor_registry = new_doctor_registry_handle();
         let stranded_ready_source = Arc::new(
             crate::doctor::stranded_ready::TaskRepositoryStrandedReadySource::new(
                 db.clone(),
@@ -563,7 +611,7 @@ impl CoordinatorActor {
             ),
         );
         crate::doctor::register_doctor_checks(
-            djinn_core::doctor::registry(),
+            &doctor_registry,
             Arc::new(crate::doctor::live_mover::NoOpLiveMoverSource),
             Arc::clone(&stranded_ready_source) as Arc<dyn crate::doctor::StrandedReadySource>,
         );
@@ -573,7 +621,7 @@ impl CoordinatorActor {
                 djinn_core::models::KnowledgeInjectionConfig::default(),
             ));
         crate::doctor::register_retrieval_health_checks(
-            djinn_core::doctor::registry(),
+            &doctor_registry,
             Arc::clone(&retrieval_health_source),
         );
         let closed_parent_open_children_source = Arc::new(
@@ -583,7 +631,7 @@ impl CoordinatorActor {
             ),
         );
         crate::doctor::register_closed_parent_open_children_check_with_repair(
-            djinn_core::doctor::registry(),
+            &doctor_registry,
             Arc::clone(&closed_parent_open_children_source)
                 as Arc<dyn crate::doctor::ClosedParentOpenChildrenSource>,
             Arc::clone(&closed_parent_open_children_source)
@@ -593,13 +641,13 @@ impl CoordinatorActor {
         // the cache PVC and walks candidates, which is too expensive for the
         // cheap periodic subset. It has no fix path.
         crate::doctor::register_stale_cache_roots_check(
-            djinn_core::doctor::registry(),
+            &doctor_registry,
             Arc::new(crate::doctor::ProjectRepositoryStaleCacheRootsSource::new(
                 db.clone(),
             )),
         );
         crate::doctor::register_refinement_phantom_active_check(
-            djinn_core::doctor::registry(),
+            &doctor_registry,
             Arc::new(
                 crate::doctor::ProposalRepositoryRefinementPhantomActiveSource::new(
                     db.clone(),
@@ -608,7 +656,7 @@ impl CoordinatorActor {
             ),
         );
         crate::doctor::register_stalled_epic_check(
-            djinn_core::doctor::registry(),
+            &doctor_registry,
             Arc::new(crate::doctor::TaskRepositoryStalledEpicSource::new(
                 db.clone(),
             )),
@@ -647,6 +695,7 @@ impl CoordinatorActor {
             )),
             #[cfg(not(test))]
             retrieval_health_source: Some(retrieval_health_source),
+            doctor_registry,
             auto_merge_tracker: Arc::new(std::sync::Mutex::new(HashMap::new())),
             consolidation_runner: consolidation_runner
                 .unwrap_or_else(|| Arc::new(DbConsolidationRunner::new(db.clone()))),
@@ -805,6 +854,11 @@ impl CoordinatorActor {
         }
 
         summary
+    }
+
+    /// The registry this actor's checks live in. See [`DoctorRegistryHandle`].
+    pub(super) fn doctor_registry(&self) -> &djinn_core::doctor::DoctorRegistry {
+        &self.doctor_registry
     }
 
     pub fn dispatch_state_snapshot(&self) -> CoordinatorDebugSnapshot {
@@ -1130,7 +1184,7 @@ impl CoordinatorActor {
         crate::doctor::leader_tick::run_elected_retrieval_refresh_and_cheap_checks(
             true,
             retrieval_health_source,
-            djinn_core::doctor::registry(),
+            self.doctor_registry(),
             &self.db,
             &self.events_tx,
             Some(&doctor_run_id),
@@ -1433,7 +1487,7 @@ impl CoordinatorActor {
                 #[cfg(not(test))]
                 let result = crate::doctor::leader_tick::run_manual_retrieval_refresh_and_checks(
                     self.retrieval_health_source.as_ref(),
-                    djinn_core::doctor::registry(),
+                    self.doctor_registry(),
                     &self.db,
                     &self.events_tx,
                     Some(&run_id),

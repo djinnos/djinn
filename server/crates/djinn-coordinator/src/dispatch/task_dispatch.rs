@@ -3765,6 +3765,7 @@ mod inflight_ledger_tests {
             breaker_open_backoff_streak: HashMap::new(),
             background_work_tracker: BackgroundWorkTracker::default(),
             stranded_ready_source: None,
+            doctor_registry: crate::actor::new_doctor_registry_handle(),
             closed_parent_open_children_source: None,
             auto_merge_tracker: AutoMergeTracker::default(),
             consolidation_runner: std::sync::Arc::new(
@@ -5021,6 +5022,7 @@ mod failover_chain_tests {
             breaker_open_backoff_streak: HashMap::new(),
             background_work_tracker: BackgroundWorkTracker::default(),
             stranded_ready_source: None,
+            doctor_registry: crate::actor::new_doctor_registry_handle(),
             closed_parent_open_children_source: None,
             auto_merge_tracker: AutoMergeTracker::default(),
             consolidation_runner: std::sync::Arc::new(
@@ -7593,6 +7595,7 @@ mod monitored_reopen_no_eligible_model_tests {
             breaker_open_backoff_streak: HashMap::new(),
             background_work_tracker: BackgroundWorkTracker::default(),
             stranded_ready_source: None,
+            doctor_registry: crate::actor::new_doctor_registry_handle(),
             closed_parent_open_children_source: None,
             auto_merge_tracker: AutoMergeTracker::default(),
             consolidation_runner: std::sync::Arc::new(
@@ -8118,6 +8121,7 @@ mod build_admission_route_tests {
             breaker_open_backoff_streak: HashMap::new(),
             background_work_tracker: BackgroundWorkTracker::default(),
             stranded_ready_source: None,
+            doctor_registry: crate::actor::new_doctor_registry_handle(),
             closed_parent_open_children_source: None,
             auto_merge_tracker: AutoMergeTracker::default(),
             consolidation_runner: std::sync::Arc::new(
