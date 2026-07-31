@@ -8,6 +8,7 @@
 
 use super::gate_guard::{gate_guard_edit_check, gate_guard_shell_check};
 use super::shell_exec::{effective_shell_timeout_ms, finish_shell};
+use super::size_nudge::maybe_append_size_nudge;
 use super::workspace_helpers::{
     cargo_check_denied, classify_cargo_command, emit_edit_match_telemetry,
 };
@@ -260,9 +261,17 @@ fn json_escaped_len(s: &str) -> usize {
 /// This does **not** widen the clamp: it makes the read handler stop at a line
 /// boundary the clamp will accept, so the window the model receives is the
 /// window the handler recorded coverage for.
-fn read_content_budget() -> usize {
+pub(crate) fn read_content_budget() -> usize {
     crate::output_stash::MAX_TOOL_RESULT_CHARS.saturating_sub(READ_RESULT_RESERVE_CHARS)
 }
+
+/// Hard ceiling on the number of lines one `read` will return, and the default
+/// when the caller does not ask for a window.
+///
+/// Named because it is a contract, not an implementation detail: `size_nudge`
+/// derives "how many reads does this file cost?" from this exact value, so a
+/// literal here and a literal there would be a drift bug waiting to happen.
+pub(crate) const READ_MAX_LINES: usize = 2000;
 
 /// The extension tool name whose results record read coverage.
 const READ_TOOL_NAME: &str = "read";
@@ -417,7 +426,7 @@ pub(crate) async fn call_read(
                     .unwrap_or_else(|| "HEAD".to_string());
                 let content = crate::repo_access::read_file(&pid, &git_ref, &p.file_path).await?;
                 let offset = p.offset.unwrap_or(0);
-                let limit = p.limit.unwrap_or(2000).min(2000);
+                let limit = p.limit.unwrap_or(READ_MAX_LINES).min(READ_MAX_LINES);
                 return Ok(numbered_window(&content, offset, limit, &p.file_path));
             }
             // Same as the task project (or unresolvable → fall through to the
@@ -454,7 +463,7 @@ pub(crate) async fn call_read(
     })?;
 
     let offset = p.offset.unwrap_or(0);
-    let limit = p.limit.unwrap_or(2000).min(2000);
+    let limit = p.limit.unwrap_or(READ_MAX_LINES).min(READ_MAX_LINES);
 
     // We only need the window [offset, offset+limit). Stream line by line and
     // stop once we've collected one line past the window — enough to know
@@ -713,6 +722,15 @@ pub(crate) async fn call_write(
             let response =
                 maybe_append_pitfall_hint(response, state, worktree_path, project_id, &touched)
                     .await;
+            // Authorship-time size advisory. Runs after the bytes are on disk
+            // and cannot affect them; see size_nudge's module docs for why it
+            // is here and not in gate_guard.
+            let response = maybe_append_size_nudge(
+                response,
+                worktree_path,
+                std::slice::from_ref(&path),
+            )
+            .await;
             Ok(response)
         })
         .await
@@ -862,6 +880,10 @@ pub(crate) async fn call_edit(
                         &touched,
                     )
                     .await;
+                    // Authorship-time size advisory; see `call_write`.
+                    let result =
+                        maybe_append_size_nudge(result, worktree_path, std::slice::from_ref(&path))
+                            .await;
                     Ok(result)
                 }
                 MatchOutcome::Ambiguous => {
@@ -1075,6 +1097,15 @@ pub(crate) async fn call_apply_patch(
     };
     let response =
         maybe_append_pitfall_hint(response, state, worktree_path, project_id, &touched_rel).await;
+    // Authorship-time size advisory; see `call_write`. A patch can touch many
+    // files, so the nudge picks the single worst rather than stacking one
+    // advisory per path. Deletes are excluded — nothing was authored.
+    let touched_abs: Vec<std::path::PathBuf> = results
+        .iter()
+        .filter(|(_, action)| *action != "deleted")
+        .map(|(file_path, _)| file_path.clone())
+        .collect();
+    let response = maybe_append_size_nudge(response, worktree_path, &touched_abs).await;
     Ok(response)
 }
 
