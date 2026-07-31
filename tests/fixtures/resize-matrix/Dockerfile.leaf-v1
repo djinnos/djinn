@@ -1,0 +1,36 @@
+# The EXPLICIT `leaf-v1` image class of the mixed-version matrix.
+#
+# Independently built, not a run-time config variant of the resize-v2 image: the
+# declaration is BAKED, so the two classes are different artifacts with
+# different digests. That matters because the catalog's declaration
+# (`images.launcher_authority_protocol`) and the artifact's own claim are two
+# separate facts, and a matrix that could only ever see the catalog's copy of
+# them could not detect a catalog that lied about an artifact.
+# `server/tests/task_run_resize_mixed_version.rs` reads /opt/djinn/authority out
+# of the built image and requires it to agree with the row it dispatches.
+ARG DJINN_RESIZE_MATRIX_BASE_REPOSITORY=debian
+ARG DJINN_RESIZE_MATRIX_BASE_DIGEST
+FROM ${DJINN_RESIZE_MATRIX_BASE_REPOSITORY}@${DJINN_RESIZE_MATRIX_BASE_DIGEST}
+
+# The CURRENT launcher, from the working tree. It carries both wire strings —
+# which is precisely what makes the legacy class's provenance scan a real test
+# and not a tautology.
+COPY djinn-cgroup-launcher /opt/djinn/bin/djinn-cgroup-launcher
+COPY governor_probe /opt/djinn/bin/djinn-governor-probe
+
+# The artifact's own declaration. Note this is NOT the mechanism the renderer
+# uses — `apply_launcher_authority_protocol` sets
+# DJINN_LAUNCHER_AUTHORITY_PROTOCOL on the sidecar from the SERVER's admitted
+# decision, and that is the only thing the launcher reads. This file exists so
+# the matrix can cross-check the catalog against the artifact.
+RUN set -eu; \
+    mkdir -p /opt/djinn; \
+    printf 'leaf-v1' > /opt/djinn/authority; \
+    chmod 0644 /opt/djinn/authority; \
+    chmod 0755 /opt/djinn/bin/djinn-cgroup-launcher /opt/djinn/bin/djinn-governor-probe; \
+    head -c 33554432 /dev/urandom > /opt/djinn/workload.bin; \
+    chmod 0644 /opt/djinn/workload.bin; \
+    test -x /usr/bin/sha256sum; \
+    test -x /bin/sh
+
+# No ENTRYPOINT and no CMD: see Dockerfile.legacy.

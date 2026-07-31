@@ -1,0 +1,54 @@
+# The IMMUTABLE NO-HANDSHAKE LEGACY image class of the mixed-version matrix.
+#
+# WHAT MAKES THIS LEGACY
+#
+# The launcher binary copied in below is compiled from
+# DJINN_RESIZE_MATRIX_PREPROTOCOL_COMMIT (see pins.env), a revision at which the
+# authority handshake did not exist. It is not a modern launcher with an
+# environment variable withheld. That distinction is the whole reason this class
+# exists, and it is checked rather than asserted:
+# `server/tests/task_run_resize_mixed_version.rs` scans the binary INSIDE the
+# built image for the two wire strings and requires BOTH to be absent. Rebuild
+# this image from the working tree with DJINN_LAUNCHER_AUTHORITY_PROTOCOL unset
+# and that scan goes red, because the modern binary still carries both strings
+# in its rodata whatever its environment says.
+#
+# The base is pinned by digest, never by tag — a `debian:bookworm-slim` that
+# moved underneath this file would change the artifact without changing the
+# fixture, and "immutable" would be a comment rather than a property.
+ARG DJINN_RESIZE_MATRIX_BASE_REPOSITORY=debian
+ARG DJINN_RESIZE_MATRIX_BASE_DIGEST
+FROM ${DJINN_RESIZE_MATRIX_BASE_REPOSITORY}@${DJINN_RESIZE_MATRIX_BASE_DIGEST}
+
+# The pre-protocol launcher, at the path `launcher::LAUNCHER_BIN` names. The
+# renderer puts the sidecar and the worker on the SAME image tag and runs the
+# sidecar from this exact path, so the rendered command is left untouched.
+COPY djinn-cgroup-launcher-preprotocol /opt/djinn/bin/djinn-cgroup-launcher
+
+# The worker half, ALSO pre-protocol. The renderer puts the sidecar and the
+# worker container on the SAME image tag, so a legacy image is a legacy launcher
+# and a legacy worker — pairing this launcher with the current probe is not a
+# combination production can produce, and it is one that cannot work: the READY
+# payload grew a protocol byte, and the pre-protocol
+# `WorkerReadinessAssertion::from_wire` refuses anything that is not exactly 16
+# bytes. Measured on this branch as `ControlRejected(Worker)`.
+#
+# It lands at the same path as the declaring classes' probe so the worker
+# command the matrix renders is identical across all three classes.
+COPY legacy_probe /opt/djinn/bin/djinn-governor-probe
+
+# This image makes NO protocol declaration. There is no /opt/djinn/authority
+# file here and no DJINN_LAUNCHER_AUTHORITY_PROTOCOL ENV, because the artifact
+# genuinely predates both. The matrix reads that absence as the legacy class's
+# defining property.
+
+RUN set -eu; \
+    chmod 0755 /opt/djinn/bin/djinn-cgroup-launcher /opt/djinn/bin/djinn-governor-probe; \
+    head -c 33554432 /dev/urandom > /opt/djinn/workload.bin; \
+    chmod 0644 /opt/djinn/workload.bin; \
+    test -x /usr/bin/sha256sum; \
+    test -x /bin/sh
+
+# No ENTRYPOINT and no CMD: every container in the rendered Job carries an
+# explicit command, and a default here could only mask a render that stopped
+# setting one.

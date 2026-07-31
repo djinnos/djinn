@@ -1,0 +1,170 @@
+name: Mixed-Version Resize Matrix
+
+# OPT-IN, NON-REQUIRED lane for the mixed-version launcher-authority matrix
+# (epic xowm, task omp4, proposal 3i92).
+#
+# DOES THIS RUN ANYWHERE BY DEFAULT? NO — stated here rather than left to be
+# discovered. There is exactly one trigger, `workflow_dispatch`. This lane never
+# runs on a pull request, never runs on a push to main, never runs in the merge
+# queue and is on no schedule. It is not a required check and cannot block a
+# merge. Nothing here runs unless a human presses "Run workflow".
+#
+# WHY IT IS NOT REQUIRED
+# It compiles a launcher from a pre-protocol revision, builds three container
+# images, creates a kind cluster and dispatches Pods it expects to be refused.
+# That is tens of minutes of runner time and a class of infrastructure flake
+# (image pulls, containerd restarts, kubelet actuation) that must never be able
+# to wedge the merge queue.
+#
+# WHAT STILL RUNS ON EVERY PR
+# A gated harness nobody runs decays silently, so everything in
+# `server/tests/task_run_resize_mixed_version.rs` that can be decided without an
+# API server is NOT `#[ignore]`d: the matrix's completeness, every admission
+# decision for all twelve cells against real PostgreSQL, the signed-inventory
+# fences, the resize body's shape, the millicore rule, the confirmation-site
+# source gate and the harness's production-safety refusals. Those run inside the
+# ordinary `djinn-server` test lane. What needs this workflow is only the half
+# that genuinely needs a kubelet.
+#
+# IT CANNOT TOUCH PRODUCTION. The runner's kubeconfig contains exactly one
+# context: the kind cluster the setup script creates. Every kubectl call in the
+# script and in the test binary is `--context`-pinned to a name DERIVED from the
+# cluster this lane creates, and both refuse a context whose API server is not
+# on loopback.
+
+on:
+  workflow_dispatch:
+    inputs:
+      k8s_version:
+        description: "kind node Kubernetes version (>= 1.33: pods/resize actuation and a containerd with cgroup_writable)"
+        required: false
+        default: "1.35.0"
+      keep_on_failure:
+        description: "If 'true', leave the cluster running on failure for debugging"
+        required: false
+        default: "false"
+
+concurrency:
+  group: resize-matrix-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  CARGO_BUILD_BUILD_DIR: target
+  RUSTC_WRAPPER: ""
+  RUSTFLAGS: "-D warnings"
+  SQLX_OFFLINE: "true"
+  DJINN_RESIZE_MATRIX_K8S_VERSION: ${{ github.event.inputs.k8s_version || '1.35.0' }}
+  DJINN_TEST_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5433/postgres
+
+jobs:
+  resize-matrix:
+    name: Three real image classes against four server modes
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    # Belt and braces: the only trigger is workflow_dispatch, and this makes a
+    # future edit that adds `pull_request` fail to turn this into a PR check by
+    # accident.
+    if: github.event_name == 'workflow_dispatch'
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: djinn
+        ports:
+          - "5433:5432"
+        options: >-
+          --health-cmd="pg_isready -U postgres"
+          --health-interval=5s
+          --health-timeout=3s
+          --health-retries=20
+
+    steps:
+      # `fetch-depth: 0`: the legacy image is compiled from a pinned commit in a
+      # detached worktree, and a shallow clone does not contain it. Without this
+      # the build fails with "invalid reference", which reads like a bad pin.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install kind, kubectl and helm
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /usr/local/bin/kind https://kind.sigs.k8s.io/dl/v0.32.0/kind-linux-amd64
+          chmod +x /usr/local/bin/kind
+          curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+          kind version
+          kubectl version --client=true
+          helm version --short
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: server
+          # save-if MUST stay false. rust-cache SAVES by default, and every cache
+          # family in this repository has exactly one writer, declared in
+          # quality-gate.yml (`scripts/ci-cache-policy.test.mjs`). Without this
+          # line an opt-in lane quietly becomes a second writer to a family it
+          # does not own.
+          save-if: false
+          # server-test (codegen), not server-quality: this job builds and RUNS
+          # the djinn-server test binary.
+          shared-key: server-test
+          cache-on-failure: true
+          cache-all-crates: true
+
+      - name: Build the test database template
+        run: |
+          set -euo pipefail
+          psql "$DJINN_TEST_DATABASE_URL" -c 'CREATE DATABASE djinn_test_template'
+          (cd server && cargo test -p djinn-db --test setup_test_template -- --ignored)
+          psql "$DJINN_TEST_DATABASE_URL" \
+            -c "UPDATE pg_database SET datistemplate = TRUE WHERE datname = 'djinn_test_template'"
+        env:
+          PGPASSWORD: postgres
+
+      # The hermetic half needs no cluster and no Docker. Running it first means
+      # a broken production-safety guard or a drifted expectation fails in
+      # seconds instead of after a cluster bring-up and three image builds. This
+      # is also exactly what runs on every PR — if the two ever diverge, that is
+      # the bug.
+      - name: Hermetic half (the part that also runs on every PR)
+        working-directory: server
+        run: cargo test -p djinn-server --test task_run_resize_mixed_version
+
+      - name: Create the disposable matrix cluster
+        run: |
+          scripts/kind/setup-resize-matrix-cluster.sh up \
+            --k8s-version "$DJINN_RESIZE_MATRIX_K8S_VERSION" \
+            ${{ github.event.inputs.keep_on_failure == 'true' && '--keep-on-failure' || '' }}
+
+      - name: Build the three image classes and load them onto the node
+        run: tests/fixtures/resize-matrix/build.sh djinn-resize-omp4
+
+      - name: The live matrix
+        working-directory: server
+        env:
+          DJINN_TEST_RESIZE_MATRIX: "1"
+        # --test-threads=1 because the cells share one node, one sentinel
+        # directory and one server-wide authority mode: concurrent cells would
+        # contend for the very state one of them is measuring.
+        run: cargo test -p djinn-server --test task_run_resize_mixed_version -- --ignored --test-threads=1
+
+      # `if: always()` is the point of this step. The setup script tears its own
+      # cluster down when `up` fails, but a failure in a test step happens after
+      # `up` has already succeeded, and a cancelled run skips everything. Pass or
+      # fail, the cluster AND its registry go — and `selfcheck` PROVES they did,
+      # because a teardown that reported success while the cluster survived is
+      # how a disposable harness becomes a permanent one.
+      - name: Tear down the cluster and its registry
+        if: always() && github.event.inputs.keep_on_failure != 'true'
+        run: |
+          scripts/kind/setup-resize-matrix-cluster.sh down
+          scripts/kind/setup-resize-matrix-cluster.sh selfcheck
